@@ -119,10 +119,11 @@
       <table class="table table-zebra w-full">
         <thead>
           <tr>
-            <th>Name</th>
+            <th class="min-w-[14rem]">Name</th>
+            <th>Kind</th>
+            <th class="min-w-[10rem]">Profile</th>
+            <th>Mode</th>
             <th>Prefix</th>
-            <th>Servers</th>
-            <th>Permissions</th>
             <th>Expires</th>
             <th>Last Used</th>
             <th>Status</th>
@@ -130,37 +131,57 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="token in filteredTokens" :key="token.name">
-            <td class="font-medium">{{ token.name }}</td>
+          <template v-for="token in filteredTokens" :key="token.name">
+          <tr :data-test="`token-row-${token.name}`">
+            <td class="font-medium">
+              <button
+                type="button"
+                class="link link-hover text-left"
+                :aria-expanded="expandedToken === token.name ? 'true' : 'false'"
+                :data-test="`token-expand-${token.name}`"
+                @click="expandedToken = expandedToken === token.name ? '' : token.name"
+              >{{ token.name }}</button>
+              <span v-if="token.legacy_scope" class="badge badge-warning badge-xs ml-2" :data-test="`token-legacy-badge-${token.name}`">Legacy scope</span>
+              <CredentialLifecycle
+                v-if="token.issuer || token.purpose || token.profile_state === 'dangling'"
+                class="mt-1"
+                :id="token.name"
+                :kind="isClientCredential(token) ? 'client' : 'token'"
+                :profile="token.profile_pin"
+                :mode="token.profile_mode"
+                :issuer="token.issuer"
+                :lease="token.lease"
+                :expires-at="token.expires_at"
+                :created-at="token.created_at"
+                :revoked="token.revoked"
+                :revoked-at="token.revoked_at"
+                :purpose="token.purpose"
+                :profile-state="token.profile_state"
+                :hide-lease="true"
+                :now="now"
+              />
+              <!-- Spec 109-l: the Token-row links of the link map (agent rows only;
+                   a client credential is filtered as a client, from Clients). -->
+              <div v-if="tokenLinksAvailable && !isClientCredential(token)" class="mt-1 flex flex-wrap gap-x-3 gap-y-1 text-xs font-normal">
+                <router-link class="link" :data-test="`token-row-link-activity-${token.name}`" :aria-label="`Activity for token ${token.name}`" :to="scopeQuery!.linkTo('activity', { view: 'calls', token: token.name, client: '' })">Activity</router-link>
+                <router-link class="link" :data-test="`token-row-link-usage-${token.name}`" :aria-label="`Usage for token ${token.name}`" :to="scopeQuery!.linkTo('usage', { token: token.name, client: '' })">Usage</router-link>
+              </div>
+            </td>
+            <td :data-test="`token-kind-${token.name}`">{{ isClientCredential(token) ? 'Client' : 'Agent' }}</td>
+            <td>
+              <span v-if="token.profile_pin" class="badge badge-outline badge-sm max-w-[12rem] min-w-0 justify-start overflow-hidden whitespace-nowrap" :title="profilesStore.titleFor(token.profile_pin)" :data-test="`token-profile-${token.name}`"><span class="truncate">{{ profilesStore.titleFor(token.profile_pin) }}</span></span>
+              <span v-else class="text-base-content/40 text-sm">&mdash;</span>
+            </td>
+            <td>
+              <span v-if="isClientCredential(token) && token.profile_mode" class="text-sm">{{ modeLabel(token.profile_mode) }}</span>
+              <span v-else class="text-base-content/40 text-sm">&mdash;</span>
+            </td>
             <td>
               <code class="text-sm bg-base-200 px-2 py-1 rounded">{{ token.token_prefix }}</code>
             </td>
             <td>
-              <div class="flex flex-wrap gap-1">
-                <span
-                  v-for="server in token.allowed_servers"
-                  :key="server"
-                  class="badge badge-outline badge-sm"
-                >
-                  {{ server }}
-                </span>
-              </div>
-            </td>
-            <td>
-              <div class="flex flex-wrap gap-1">
-                <span
-                  v-for="perm in token.permissions"
-                  :key="perm"
-                  class="badge badge-sm"
-                  :class="permissionBadgeClass(perm)"
-                >
-                  {{ perm }}
-                </span>
-              </div>
-            </td>
-            <td>
-              <span :class="{ 'text-warning': isExpiringSoon(token), 'text-error': isExpired(token) }">
-                {{ formatDate(token.expires_at) }}
+              <span :class="{ 'text-warning': isExpiringSoon(token), 'text-error': isExpired(token) && !token.lease }" :data-test="`token-expiry-${token.name}`">
+                {{ expiryText(token) }}
               </span>
             </td>
             <td>
@@ -170,12 +191,22 @@
               <span v-else class="text-base-content/40 text-sm">Never</span>
             </td>
             <td>
-              <span v-if="token.revoked" class="badge badge-error badge-sm">Revoked</span>
+              <span v-if="token.revoked" class="flex flex-col items-start gap-0.5" :data-test="`token-state-${token.name}`">
+                <span class="badge badge-error badge-sm">Revoked</span>
+                <span v-if="token.revoked_at" class="text-xs opacity-70 whitespace-nowrap">{{ formatDate(token.revoked_at) }}</span>
+              </span>
+              <span v-else-if="isExpired(token) && token.lease" class="badge badge-ghost badge-sm" :data-test="`token-state-${token.name}`">Lease ended</span>
               <span v-else-if="isExpired(token)" class="badge badge-warning badge-sm">Expired</span>
               <span v-else class="badge badge-success badge-sm">Active</span>
             </td>
             <td>
-              <div class="flex gap-1">
+              <!-- A client credential is rotated through the staged path on the
+                   Clients page, never regenerated or deleted here (Spec 108-i I20). -->
+              <div v-if="isClientCredential(token)" class="text-xs" :data-test="`token-client-note-${token.name}`">
+                Client credential for {{ token.client_id }} &mdash;
+                <router-link class="link" :to="{ name: 'clients', query: { focus: token.client_id } }">manage from Clients</router-link>
+              </div>
+              <div v-else class="flex gap-1">
                 <button
                   @click="handleRegenerate(token.name)"
                   :disabled="token.revoked"
@@ -198,9 +229,37 @@
                   </svg>
                   Revoke
                 </button>
+                <button
+                  v-if="token.revoked || isExpired(token)"
+                  @click="handleDelete(token.name)"
+                  class="btn btn-xs btn-error"
+                  title="Permanently delete token and free its name for reuse"
+                >
+                  <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                  Delete
+                </button>
               </div>
             </td>
           </tr>
+          <!-- The scope of a token, read only. A legacy token's scope is its own
+               server list and permissions; a profile token's comes from the profile. -->
+          <tr v-if="expandedToken === token.name" :data-test="`token-detail-${token.name}`">
+            <td colspan="9" class="bg-base-200/40 space-y-2">
+              <div class="flex flex-wrap items-center gap-2 text-sm">
+                <span class="opacity-60">Servers</span>
+                <span v-for="server in token.allowed_servers" :key="server" class="badge badge-outline badge-sm">{{ server }}</span>
+                <span class="opacity-60 ml-3">Permissions</span>
+                <span v-for="perm in token.permissions" :key="perm" class="badge badge-sm" :class="permissionBadgeClass(perm)">{{ perm }}</span>
+              </div>
+              <div v-if="token.legacy_scope && !isClientCredential(token)" class="flex flex-wrap items-center gap-2 text-sm" :data-test="`token-migrate-${token.name}`">
+                <span>Migrate: create a new token with a profile.</span>
+                <button type="button" class="btn btn-xs btn-outline" :data-test="`token-migrate-button-${token.name}`" @click="openMigrateDialog(token)">Create with a profile&hellip;</button>
+              </div>
+            </td>
+          </tr>
+          </template>
         </tbody>
       </table>
     </div>
@@ -228,17 +287,18 @@
     </div>
 
     <!-- Create Token Dialog -->
-    <dialog ref="createDialog" class="modal">
+    <dialog ref="createDialog" class="modal" aria-labelledby="create-token-title">
       <div class="modal-box">
-        <h3 class="font-bold text-lg mb-4">Create Agent Token</h3>
+        <h3 id="create-token-title" class="font-bold text-lg mb-4">Create Agent Token</h3>
 
         <div class="space-y-4">
           <!-- Name -->
           <div class="form-control">
-            <label class="label">
+            <label class="label" for="token-name">
               <span class="label-text font-medium">Token Name</span>
             </label>
             <input
+              id="token-name"
               v-model="createForm.name"
               type="text"
               placeholder="e.g., ci-pipeline, dev-agent"
@@ -253,6 +313,48 @@
             </label>
           </div>
 
+          <!-- Profile first (Spec 108-i I20): scope comes from the profile. -->
+          <div class="form-control">
+            <label class="label" for="token-profile">
+              <span class="label-text font-medium">Profile</span>
+            </label>
+            <select
+              id="token-profile"
+              v-model="createForm.profile"
+              class="select select-bordered w-full"
+              :class="{ 'select-error': createFormErrors.profile }"
+              data-test="token-profile-select"
+            >
+              <option value="" disabled>Choose&hellip;</option>
+              <option v-for="profile in profilesStore.profiles" :key="profile.name" :value="profile.name">{{ profile.title || profile.name }}{{ profile.title ? ` (${profile.name})` : '' }}</option>
+              <option :value="LEGACY">None &mdash; legacy scope</option>
+            </select>
+            <label class="label" v-if="createFormErrors.profile">
+              <span class="label-text-alt text-error">{{ createFormErrors.profile }}</span>
+            </label>
+            <label class="label" v-else-if="!profilesStore.hasProfiles">
+              <span class="label-text-alt" data-test="token-no-profiles-hint">Create a profile to scope tokens simply</span>
+            </label>
+          </div>
+
+          <!-- Expiry -->
+          <div class="form-control">
+            <label class="label">
+              <span class="label-text font-medium">Expires In</span>
+            </label>
+            <select v-model="createForm.expiresIn" class="select select-bordered w-full">
+              <option value="168h">7 days</option>
+              <option value="720h">30 days</option>
+              <option value="2160h">90 days</option>
+              <option value="8760h">365 days</option>
+            </select>
+          </div>
+
+          <details class="collapse collapse-arrow border border-base-300 rounded-lg" data-test="token-legacy-scope">
+            <summary class="collapse-title text-sm font-medium">Legacy scope (advanced)</summary>
+            <div class="collapse-content space-y-4">
+              <p v-if="!legacyEnabled" class="text-xs text-base-content/60">Choose &ldquo;None &mdash; legacy scope&rdquo; as the profile to set servers and permissions by hand.</p>
+              <fieldset :disabled="!legacyEnabled" class="space-y-4">
           <!-- Allowed Servers -->
           <div class="form-control">
             <label class="label">
@@ -332,18 +434,10 @@
             </div>
           </div>
 
-          <!-- Expiry -->
-          <div class="form-control">
-            <label class="label">
-              <span class="label-text font-medium">Expires In</span>
-            </label>
-            <select v-model="createForm.expiresIn" class="select select-bordered w-full">
-              <option value="168h">7 days</option>
-              <option value="720h">30 days</option>
-              <option value="2160h">90 days</option>
-              <option value="8760h">365 days</option>
-            </select>
-          </div>
+              </fieldset>
+            </div>
+          </details>
+
         </div>
 
         <div class="modal-action">
@@ -366,14 +460,39 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import apiClient from '@/services/api'
+import { formatDateTimeShort } from '@/utils/datetime'
 import { useSystemStore } from '@/stores/system'
 import { useServersStore } from '@/stores/servers'
-import type { AgentTokenInfo, Server } from '@/types'
+import { useProfilesStore } from '@/stores/profiles'
+import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
+import { describeError, modeLabel } from '@/utils/profiles'
+import { expiringSoon, leaseText } from '@/utils/credentials'
+import { CREDENTIALS_CHANGED_EVENT, CLIENT_BINDING_CHANGED_EVENT } from '@/stores/clients'
+import { PROFILES_CHANGED_EVENT } from '@/stores/profiles'
+import CredentialLifecycle from '@/components/clients/CredentialLifecycle.vue'
+import { useNow } from '@/composables/useNow'
+import type { ApiError } from '@/services/api'
+import type { AgentTokenInfo, CreateAgentTokenRequest, Server } from '@/types'
 
+const route = useRoute()
+const router = useRouter()
 const systemStore = useSystemStore()
 const serversStore = useServersStore()
+const profilesStore = useProfilesStore()
+// Spec 108-f/108-i: the `profile` and `token` filters of the URL contract are
+// sent to GET /tokens, so the Viewing chip narrows this list on the server.
+const scopeQuery = route ? useScopeQuery('tokens') : undefined
+// Spec 109-l: the Token-row Activity / Usage links appear only once the build lists `token`.
+// A link is never dead: both destinations must be registered routes.
+const tokenLinksAvailable = computed(() =>
+  Boolean(scopeQuery) && isScopeParamAvailable('token') && router.hasRoute('activity') && router.hasRoute('usage'))
+// The sentinel option of the profile select: a token with no profile, scoped by
+// its own server list and permissions (the pre-108 shape).
+const LEGACY = '__legacy__'
+const expandedToken = ref('')
 
 const loading = ref(true)
 const error = ref<string | null>(null)
@@ -386,6 +505,7 @@ const createDialog = ref<HTMLDialogElement | null>(null)
 
 const createForm = ref({
   name: '',
+  profile: '',
   allServers: true,
   selectedServers: [] as string[],
   permWrite: false,
@@ -393,7 +513,12 @@ const createForm = ref({
   expiresIn: '720h',
 })
 
-const createFormErrors = ref<{ name?: string; servers?: string }>({})
+const createFormErrors = ref<{ name?: string; servers?: string; profile?: string }>({})
+const legacyEnabled = computed(() => createForm.value.profile === LEGACY)
+
+function isClientCredential(token: AgentTokenInfo): boolean {
+  return token.kind === 'client'
+}
 
 // Available servers for the checkbox list
 const availableServers = computed(() => {
@@ -434,27 +559,25 @@ const filteredTokens = computed(() => {
 })
 
 // Helper functions
+// A reactive clock: an open page advances lease countdowns and expiry states.
+const now = useNow()
+
 function isExpired(token: AgentTokenInfo): boolean {
-  return new Date(token.expires_at) < new Date()
+  return new Date(token.expires_at).getTime() < now.value
 }
 
+// A lease (<= 24 h at issue) running out is the plan, not a warning (UI-005).
 function isExpiringSoon(token: AgentTokenInfo): boolean {
-  if (token.revoked || isExpired(token)) return false
-  const expiresAt = new Date(token.expires_at)
-  const now = new Date()
-  const hoursLeft = (expiresAt.getTime() - now.getTime()) / (1000 * 60 * 60)
-  return hoursLeft < 72
+  if (isExpired(token)) return false
+  return expiringSoon(token, now.value)
+}
+
+function expiryText(token: AgentTokenInfo): string {
+  return token.revoked ? formatDate(token.expires_at) : (leaseText(token, now.value) || formatDate(token.expires_at))
 }
 
 function formatDate(dateStr: string): string {
-  const date = new Date(dateStr)
-  return date.toLocaleDateString(undefined, {
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit',
-  })
+  return formatDateTimeShort(dateStr)
 }
 
 function permissionBadgeClass(perm: string): string {
@@ -467,31 +590,45 @@ function permissionBadgeClass(perm: string): string {
 }
 
 // Data loading
-async function loadTokens() {
-  loading.value = true
+let tokensTicket = 0
+async function loadTokens(silent = false) {
+  const ticket = ++tokensTicket
+  // A live invalidation (credentials.changed and friends) refetches without
+  // the spinner, so an open table updates in place (Spec 115 UI-004).
+  if (!silent) loading.value = true
   error.value = null
 
   try {
-    const response = await apiClient.listAgentTokens()
+    const rest = scopeQuery?.toRest()
+    const response = await apiClient.listAgentTokens({ profile: rest?.profile, token: rest?.token })
+    // A newer load owns the rows and the loading flag.
+    if (ticket !== tokensTicket) return
     if (response.success && response.data) {
       tokens.value = response.data.tokens || []
     } else {
       error.value = response.error || 'Failed to load tokens'
     }
   } catch (err: any) {
+    if (ticket !== tokensTicket) return
     error.value = err.message || 'Failed to load tokens'
     console.error('Failed to load tokens:', err)
   } finally {
-    loading.value = false
+    if (ticket === tokensTicket) loading.value = false
   }
 }
 
-const refreshTokens = loadTokens
+const refreshTokens = () => loadTokens()
+const refreshTokensSilently = () => { void loadTokens(true) }
 
 // Create token
-function openCreateDialog() {
+function openCreateDialog() { openCreateDialogWith({}) }
+
+function openCreateDialogWith(preset: { name?: string; profile?: string }) {
   createForm.value = {
-    name: '',
+    name: preset.name ?? '',
+    // `?profile=` (a profile card's "Create token with this profile") presets
+    // the choice; otherwise the operator must choose one.
+    profile: preset.profile ?? (typeof route?.query.profile === 'string' ? route.query.profile : ''),
     allServers: true,
     selectedServers: [],
     permWrite: false,
@@ -503,6 +640,7 @@ function openCreateDialog() {
   if (serversStore.servers.length === 0) {
     serversStore.fetchServers()
   }
+  if (!profilesStore.loaded) void profilesStore.fetchProfiles()
   createDialog.value?.showModal()
 }
 
@@ -525,8 +663,14 @@ async function handleCreate() {
     return
   }
 
-  // Validate servers
-  if (!createForm.value.allServers && createForm.value.selectedServers.length === 0) {
+  if (!createForm.value.profile) {
+    createFormErrors.value.profile = 'Choose a profile, or "None \u2014 legacy scope"'
+    return
+  }
+
+  const legacy = createForm.value.profile === LEGACY
+  // Validate servers (legacy scope only: a profile supplies its own)
+  if (legacy && !createForm.value.allServers && createForm.value.selectedServers.length === 0) {
     createFormErrors.value.servers = 'Select at least one server or choose "All servers"'
     return
   }
@@ -534,20 +678,22 @@ async function handleCreate() {
   creating.value = true
 
   try {
-    const allowedServers = createForm.value.allServers
-      ? ['*']
-      : [...createForm.value.selectedServers]
+    let request: CreateAgentTokenRequest
+    if (legacy) {
+      const allowedServers = createForm.value.allServers
+        ? ['*']
+        : [...createForm.value.selectedServers]
 
-    const permissions: string[] = ['read']
-    if (createForm.value.permWrite) permissions.push('write')
-    if (createForm.value.permDestructive) permissions.push('destructive')
+      const permissions: string[] = ['read']
+      if (createForm.value.permWrite) permissions.push('write')
+      if (createForm.value.permDestructive) permissions.push('destructive')
+      request = { name, allowed_servers: allowedServers, permissions, expires_in: createForm.value.expiresIn }
+    } else {
+      // With a profile the server defaults the scope from it.
+      request = { name, profile: createForm.value.profile, expires_in: createForm.value.expiresIn }
+    }
 
-    const response = await apiClient.createAgentToken({
-      name,
-      allowed_servers: allowedServers,
-      permissions,
-      expires_in: createForm.value.expiresIn,
-    })
+    const response = await apiClient.createAgentToken(request)
 
     if (response.success && response.data) {
       newTokenSecret.value = response.data.token
@@ -568,10 +714,15 @@ async function handleCreate() {
       })
     }
   } catch (err: any) {
-    systemStore.addToast({
+    // A 400 names the field (the reserved `client-` prefix is on `name`): show
+    // it under the input rather than only as a toast.
+    const refused = err as ApiError
+    if (refused.field === 'name') createFormErrors.value.name = refused.message
+    else if (refused.field === 'profile') createFormErrors.value.profile = refused.message
+    else systemStore.addToast({
       type: 'error',
       title: 'Create Failed',
-      message: err.message || 'Failed to create token',
+      message: describeError(err, 'Failed to create token'),
     })
   } finally {
     creating.value = false
@@ -643,6 +794,38 @@ async function handleRevoke(name: string) {
   }
 }
 
+// Permanently delete a (revoked or expired) token, freeing its name for reuse
+async function handleDelete(name: string) {
+  if (!confirm(`Permanently delete token "${name}"? This removes it completely and frees the name for reuse. This action cannot be undone.`)) {
+    return
+  }
+
+  try {
+    const response = await apiClient.deleteAgentToken(name)
+    if (response.success || !response.error) {
+      await loadTokens()
+
+      systemStore.addToast({
+        type: 'success',
+        title: 'Token Deleted',
+        message: `Token "${name}" has been permanently deleted`,
+      })
+    } else {
+      systemStore.addToast({
+        type: 'error',
+        title: 'Delete Failed',
+        message: response.error || 'Failed to delete token',
+      })
+    }
+  } catch (err: any) {
+    systemStore.addToast({
+      type: 'error',
+      title: 'Delete Failed',
+      message: err.message || 'Failed to delete token',
+    })
+  }
+}
+
 // Clipboard
 async function copyToken() {
   if (!newTokenSecret.value) return
@@ -668,7 +851,36 @@ function dismissTokenSecret() {
   copied.value = false
 }
 
+// Spec 109 FR-052: "+ Add -> Token" arrives as /clients?tab=tokens&create=1.
+// Open the create dialog, then drop `create` (keeping tab and any sticky
+// params, `profile` included: it presets the dialog and stays the list filter)
+// so a reload or Back does not reopen it.
+function openMigrateDialog(token: AgentTokenInfo) {
+  openCreateDialogWith({ name: `${token.name}-profile` })
+}
+
+function consumeCreateParam() {
+  if (route?.query.create !== '1') return
+  openCreateDialog()
+  const { create: _create, ...rest } = route.query
+  void router.replace({ query: rest })
+}
+
+// Spec 115 UI-004: an issue, revoke or binding change made anywhere (MCP
+// included) refreshes the open table.
+const LIVE_EVENTS = [CREDENTIALS_CHANGED_EVENT, CLIENT_BINDING_CHANGED_EVENT, PROFILES_CHANGED_EVENT]
+onBeforeUnmount(() => {
+  for (const name of LIVE_EVENTS) window.removeEventListener(name, refreshTokensSilently)
+})
+
+watch(() => route?.query.create, consumeCreateParam)
+watch(() => [scopeQuery?.state.profile, scopeQuery?.state.token], () => { void loadTokens() })
+
 onMounted(async () => {
+  for (const name of LIVE_EVENTS) window.addEventListener(name, refreshTokensSilently)
+  // The list shows each token's profile by title.
+  if (!profilesStore.loaded) void profilesStore.fetchProfiles()
+  consumeCreateParam()
   await new Promise(resolve => setTimeout(resolve, 100))
   loadTokens()
 })

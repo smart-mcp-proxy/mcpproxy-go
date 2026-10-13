@@ -1,8 +1,11 @@
 package oauthserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -28,6 +31,13 @@ func (s *OAuthTestServer) createMCPServer() *mcpserver.MCPServer {
 				mcp.Required(),
 				mcp.Description("The message to echo"),
 			),
+			// Read-only annotations: without them the MCP-spec default is
+			// destructiveHint=true and mcpproxy's intent validation (Spec 018)
+			// rejects the tool through call_tool_read (Spec 081 gate uses the
+			// read path).
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithOpenWorldHintAnnotation(false),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			args, ok := request.Params.Arguments.(map[string]interface{})
@@ -43,6 +53,9 @@ func (s *OAuthTestServer) createMCPServer() *mcpserver.MCPServer {
 	mcpSrv.AddTool(
 		mcp.NewTool("get_time",
 			mcp.WithDescription("Returns the current server time"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithOpenWorldHintAnnotation(false),
 		),
 		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 			return mcp.NewToolResultText(fmt.Sprintf("Current time: %s", time.Now().Format(time.RFC3339))), nil
@@ -68,6 +81,14 @@ func (s *OAuthTestServer) oauthMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
+		// Per-method authorisation (GH #1271): let the handshake through
+		// anonymously so only tools/call trips the 401, like Google's ESF
+		// frontend does for the Gmail MCP endpoint.
+		if s.options.MCPPerMethodAuth && s.anonymousMCPMethod(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// Check for Bearer token authentication
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
@@ -86,6 +107,39 @@ func (s *OAuthTestServer) oauthMiddleware(next http.Handler) http.Handler {
 		// Token is valid, proceed to MCP handler
 		next.ServeHTTP(w, r)
 	})
+}
+
+// anonymousMCPMethod reports whether the JSON-RPC request in r is one the
+// per-method-auth mode serves without a token. It peeks at the body and puts
+// it back so the MCP handler still sees it. Anything it cannot parse is
+// treated as protected.
+func (s *OAuthTestServer) anonymousMCPMethod(r *http.Request) bool {
+	// The SSE stream itself (GET /sse) is part of the handshake.
+	if r.Method == http.MethodGet {
+		return true
+	}
+	if r.Method != http.MethodPost || r.Body == nil {
+		return false
+	}
+	body, err := io.ReadAll(r.Body)
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if err != nil {
+		return false
+	}
+	var rpc struct {
+		Method string `json:"method"`
+	}
+	if json.Unmarshal(body, &rpc) != nil {
+		return false
+	}
+	switch {
+	case rpc.Method == "initialize", rpc.Method == "ping", rpc.Method == "tools/list":
+		return true
+	case strings.HasPrefix(rpc.Method, "notifications/"):
+		return true
+	}
+	return false
 }
 
 // validateAccessToken validates a JWT access token

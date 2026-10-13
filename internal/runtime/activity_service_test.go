@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"context"
 	"os"
 	"testing"
 	"time"
@@ -327,6 +328,7 @@ func TestEmitSensitiveDataDetected(t *testing.T) {
 		3,
 		"high",
 		detectionTypes,
+		"upstream",
 	)
 
 	// Wait for event
@@ -483,6 +485,77 @@ func setupTestStorage(t *testing.T) (*storage.Manager, func()) {
 		mgr.Close()
 		os.RemoveAll(tmpDir)
 	}
+}
+
+// TestActivityRecordsCarryClientName verifies that the MCP client is stamped onto
+// the activity record at WRITE time.
+//
+// This must not be a read-time lookup: activity is retained for 90 days but only
+// the 100 most recent sessions are, and an IDE reconnecting every few minutes
+// burns through 100 sessions in about a day. A name resolved by joining against
+// the session store therefore decays back to a bare session id — which is exactly
+// the bug this fixes. Persisting it on the record makes it permanent.
+func TestActivityRecordsCarryClientName(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	svc.SetSessionClientResolver(func(sessionID string) (string, string) {
+		if sessionID == "mcp-session-abc" {
+			return "claude-code", "1.0.60"
+		}
+		return "", ""
+	})
+
+	// A retrieve_tools call — an internal tool call, which is the bulk of
+	// session-bearing activity.
+	svc.handleEvent(Event{
+		Type:      EventTypeActivityInternalToolCall,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"internal_tool_name": "retrieve_tools",
+			"session_id":         "mcp-session-abc",
+			"request_id":         "req-1",
+			"status":             "success",
+			"duration_ms":        int64(20),
+		},
+	})
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	assert.Equal(t, "claude-code", records[0].Metadata["client_name"],
+		"the client name must be persisted on the record, not looked up later")
+	assert.Equal(t, "1.0.60", records[0].Metadata["client_version"])
+}
+
+// TestActivityRecordsUnknownSessionHasNoClientName verifies we add nothing when
+// the session cannot be resolved (already closed, or no resolver wired), rather
+// than writing an empty key the UI would have to special-case.
+func TestActivityRecordsUnknownSessionHasNoClientName(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	svc.SetSessionClientResolver(func(string) (string, string) { return "", "" })
+
+	svc.handleEvent(Event{
+		Type:      EventTypeActivityInternalToolCall,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"internal_tool_name": "retrieve_tools",
+			"session_id":         "mcp-session-gone",
+			"status":             "success",
+		},
+	})
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	_, hasName := records[0].Metadata["client_name"]
+	assert.False(t, hasName, "an unresolvable session must not add an empty client_name")
 }
 
 // TestHandleToolCallCompleted_UserIdentityExtraction verifies that handleToolCallCompleted
@@ -918,4 +991,234 @@ func TestHandleToolCallCompleted_ByteCapture(t *testing.T) {
 	record := records[0]
 	assert.Equal(t, 1500, record.RequestBytes, "RequestBytes must reflect pre-truncation request size")
 	assert.Equal(t, 98304, record.ResponseBytes, "ResponseBytes must reflect pre-truncation response size")
+}
+
+// TestActivityServiceStartAfterStopIsNoOp (Spec 080 FR-010, review round 5):
+// production launches Start via `go r.activityService.Start(...)` in
+// lifecycle.go, so a fast shutdown can run Stop BEFORE the Start goroutine is
+// ever scheduled. Stop must leave a terminal stopped state that turns the
+// late Start into a no-op — no retention/usage/persist loops launched, no
+// storage access. Storage and runtime are nil on purpose: any registration
+// step (SubscribeEvents, initUsageFromStorage, the worker loops) would panic,
+// so a regression fails loudly.
+func TestActivityServiceStartAfterStopIsNoOp(t *testing.T) {
+	svc := NewActivityService(nil, zap.NewNop())
+
+	// Fast shutdown wins the race: Stop runs before Start ever does. It must
+	// return immediately (Start never ran, done never closes).
+	svc.Stop()
+
+	// The delayed Start must return immediately without registering anything.
+	// A non-no-op Start would either panic (nil rt/storage) or block forever
+	// in the event loop (ctx is never cancelled) and trip the timeout below.
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		svc.Start(context.Background(), nil)
+	}()
+	select {
+	case <-returned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start after Stop did not return; it must be a no-op")
+	}
+
+	svc.startMu.Lock()
+	started := svc.started
+	svc.startMu.Unlock()
+	assert.False(t, started, "Start after Stop must not mark the service started")
+
+	// Stop stays idempotent after the no-op Start.
+	svc.Stop()
+	svc.Stop()
+}
+
+// =============================================================================
+// Spec 090 (T016): policy decisions carry a request id end to end
+// =============================================================================
+
+// The tray glance renders a blocked call twice — once from the live SSE event
+// and once from the next poll of persisted records — unless the two can be
+// recognised as the same thing. Every other activity record already carries
+// `request_id` and the glance dedupes on it; policy decisions did not, so a
+// block always double-rendered. The id therefore has to survive the whole trip:
+// emitted on the event, copied onto the record, identical in both.
+func TestEmitActivityPolicyDecision_RequestIDReachesSSEAndRecord(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	rt := &Runtime{
+		logger:    logger,
+		eventSubs: make(map[chan Event]struct{}),
+	}
+
+	eventChan := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(eventChan)
+
+	rt.EmitActivityPolicyDecision(
+		"github", "create_issue", "mcp-session-abc", "req-block-42",
+		"blocked", "Server is quarantined for security review",
+	)
+
+	var evt Event
+	select {
+	case evt = <-eventChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive activity.policy_decision event within timeout")
+	}
+
+	require.Equal(t, EventTypeActivityPolicyDecision, evt.Type)
+	emittedID, _ := evt.Payload["request_id"].(string)
+	require.NotEmpty(t, emittedID, "the SSE payload must carry a request id")
+	assert.Equal(t, "req-block-42", emittedID, "the caller's id is used verbatim, not re-minted")
+
+	// The persistence subscriber consumes exactly this payload, so feeding the
+	// captured event through it is the real SSE-vs-record parity check.
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	svc.handleEvent(evt)
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+
+	assert.Equal(t, storage.ActivityTypePolicyDecision, records[0].Type)
+	require.NotEmpty(t, records[0].RequestID, "the persisted record must carry a request id")
+	assert.Equal(t, emittedID, records[0].RequestID,
+		"the SSE event and the persisted record must share one identity")
+}
+
+func TestEmitActivityPolicyDecisionWithBlockReasonPersistsTypedProfileReason(t *testing.T) {
+	logger, err := zap.NewDevelopment()
+	require.NoError(t, err)
+	defer logger.Sync()
+
+	rt := &Runtime{logger: logger, eventSubs: make(map[chan Event]struct{})}
+	eventChan := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(eventChan)
+	rt.EmitActivityPolicyDecisionWithBlockReason(
+		"github", "create_issue", "session-profile", "req-profile-block",
+		"blocked", "blocked by profile: github:create_issue is a write tool; this profile allows read tools only",
+		"profile_tier",
+	)
+
+	var evt Event
+	select {
+	case evt = <-eventChan:
+	case <-time.After(2 * time.Second):
+		t.Fatal("did not receive activity.policy_decision event within timeout")
+	}
+	assert.Equal(t, "profile_tier", evt.Payload["block_reason"])
+
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+	svc := NewActivityService(store, zap.NewNop())
+	svc.handleEvent(evt)
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, "profile_tier", records[0].Metadata[storage.MetadataKeyBlockReason])
+}
+
+// Records written before this change have no request_id, and FR-015 says such
+// rows are never correlated rather than being correlated by an empty key — so
+// the subscriber must leave the field empty rather than inventing an id.
+func TestHandlePolicyDecision_LegacyPayloadWithoutRequestID(t *testing.T) {
+	store, cleanup := setupTestStorage(t)
+	defer cleanup()
+
+	svc := NewActivityService(store, zap.NewNop())
+	svc.handleEvent(Event{
+		Type:      EventTypeActivityPolicyDecision,
+		Timestamp: time.Now().UTC(),
+		Payload: map[string]any{
+			"server_name": "github",
+			"tool_name":   "create_issue",
+			"session_id":  "mcp-session-abc",
+			"decision":    "blocked",
+			"reason":      "Server is quarantined for security review",
+		},
+	})
+
+	records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Empty(t, records[0].RequestID, "a missing id stays missing; nothing is synthesised")
+	assert.Equal(t, "blocked", records[0].Status, "the rest of the record is unaffected")
+}
+
+// TestHandlePromptGet_PersistsActivityRecord verifies an upstream prompts/get
+// produces one activity record with the fields incident response needs (F10):
+// server + prompt name, arguments, status, duration, request-id, session.
+func TestHandlePromptGet_PersistsActivityRecord(t *testing.T) {
+	tests := []struct {
+		name       string
+		payload    map[string]any
+		wantStatus string
+		wantErrMsg string
+		wantPrompt string
+	}{
+		{
+			name: "success",
+			payload: map[string]any{
+				"server_name": "github",
+				"prompt_name": "summarize_pr",
+				"session_id":  "sess-p1",
+				"request_id":  "req-p1",
+				"status":      "success",
+				"duration_ms": int64(42),
+				"arguments":   map[string]interface{}{"pr": "123"},
+				"response":    `{"messages":[]}`,
+			},
+			wantStatus: "success",
+			wantPrompt: "summarize_pr",
+		},
+		{
+			name: "error",
+			payload: map[string]any{
+				"server_name":   "github",
+				"prompt_name":   "summarize_pr",
+				"session_id":    "sess-p2",
+				"request_id":    "req-p2",
+				"status":        "error",
+				"error_message": "server github is quarantined",
+				"duration_ms":   int64(3),
+			},
+			wantStatus: "error",
+			wantErrMsg: "server github is quarantined",
+			wantPrompt: "summarize_pr",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store, cleanup := setupTestStorage(t)
+			defer cleanup()
+
+			svc := NewActivityService(store, zap.NewNop())
+			svc.handleEvent(Event{
+				Type:      EventTypeActivityPromptGet,
+				Timestamp: time.Now().UTC(),
+				Payload:   tt.payload,
+			})
+
+			records, _, err := store.ListActivities(storage.DefaultActivityFilter())
+			require.NoError(t, err)
+			require.Len(t, records, 1)
+
+			rec := records[0]
+			assert.Equal(t, storage.ActivityTypePromptGet, rec.Type)
+			assert.Equal(t, storage.ActivitySourceMCP, rec.Source)
+			assert.Equal(t, "github", rec.ServerName)
+			assert.Equal(t, tt.wantPrompt, rec.ToolName)
+			assert.Equal(t, tt.wantStatus, rec.Status)
+			assert.Equal(t, tt.wantErrMsg, rec.ErrorMessage)
+			assert.Equal(t, tt.payload["request_id"], rec.RequestID)
+			assert.Equal(t, tt.payload["session_id"], rec.SessionID)
+			assert.NotZero(t, rec.DurationMs)
+		})
+	}
 }

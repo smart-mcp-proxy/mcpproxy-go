@@ -57,15 +57,33 @@ mcpproxy activity list [flags]
 | `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` |
 | `--server` | `-s` | | Filter by server name |
 | `--tool` | | | Filter by tool name |
-| `--status` | | | Filter by status: `success`, `error`, `blocked` |
+| `--status` | | | Filter by status: `success`, `error`, `blocked`, `rejected` (shed by a concurrency limit, see [Concurrency Limits](../configuration/config-file.md#concurrency-limits--request-queueing)) |
 | `--intent-type` | | | Filter by intent operation type: `read`, `write`, `destructive` |
 | `--request-id` | | | Filter by HTTP request ID for log correlation |
+| `--parent-id` | | | List child tool calls of a `code_execution` activity (value = the parent record `request_id`) |
+| `--error-class` | | | Filter failed tool calls by class: `network`, `timeout`, `http`, `jsonrpc`, `tool_error`, `session_terminated`, `auth`, `proxy_policy`, `proxy_internal`, `cancelled` |
+| `--fault-domain` | | | Filter failed tool calls by fault domain: `upstream`, `proxy`, `client` |
 | `--no-icons` | | | Disable emoji icons in output (use text instead) |
 | `--session` | | | Filter by MCP session ID |
+| `--profile` | | | Filter by the profile in effect when the call ran; `-` selects records with none |
+| `--client` | | | Filter by client id; `-` selects records with none |
+| `--token` | | | Filter by the token name in effect; `-` selects records with none. `--agent` is a deprecated alias (prints a notice; conflicting values exit `1`) |
+| `--client-name` | | | Filter by the client's self-reported name (advisory, never authoritative) |
+| `--view` | | `all` | Filter by view: `calls` (tool_call, internal_tool_call), `system` (every other type), `all`; overridden by `--type` |
 | `--start-time` | | | Filter records after this time (RFC3339) |
 | `--end-time` | | | Filter records before this time (RFC3339) |
+| `--from` | | | Alias of `--start-time`; also accepts a relative shorthand: `-1h`, `-24h`, `-7d`, `-30d`, or any `-<N>m`/`-<N>h`/`-<N>d` |
+| `--to` | | | Alias of `--end-time`; same relative shorthand as `--from` |
 | `--limit` | `-n` | 50 | Max records to return (1-100) |
 | `--offset` | | 0 | Pagination offset |
+
+A `--tool` value of the form `server:tool` (e.g. `github:create_issue`) is
+split into `--server github --tool create_issue` — the REST filters compare
+bare tool names, so sending `server:tool` verbatim would match nothing. An
+explicit `--server` that disagrees with the prefix is a contradiction: the
+command exits `1` with `--server <a> conflicts with the server in --tool
+<b>:<t>` before making any request, rather than silently keeping one value
+and dropping the other.
 
 ### Examples
 
@@ -87,6 +105,9 @@ mcpproxy activity list --intent-type destructive --limit 100
 
 # Find activity by request ID (useful for error correlation)
 mcpproxy activity list --request-id a1b2c3d4-e5f6-7890-abcd-ef1234567890
+
+# List the sub-calls one code_execution made (value = the parent's request_id)
+mcpproxy activity list --parent-id a1b2c3d4-e5f6-7890-abcd-ef1234567890
 
 # List activity as JSON
 mcpproxy activity list -o json
@@ -113,13 +134,15 @@ mcpproxy activity list --limit 20 --offset 40
 ### Output (Table)
 
 ```
-ID               SRC  TYPE         SERVER      TOOL           INTENT  STATUS   DURATION   TIME
-01JFXYZ123ABC    MCP  tool_call    github      create_issue   write   success  245ms      2 min ago
-01JFXYZ123ABD    CLI  tool_call    filesystem  read_file      read    error    125ms      5 min ago
-01JFXYZ123ABE    MCP  policy       private     get_secret     -       blocked  0ms        10 min ago
+ID               SRC  TYPE         SERVER      TOOL           CLIENT  PROFILE              INTENT  STATUS   DURATION   TIME
+01JFXYZ123ABC    MCP  tool_call    github      create_issue   cursor  work-full (binding)  write   success  245ms      2 min ago
+01JFXYZ123ABD    CLI  tool_call    filesystem  read_file      -       -                    read    error    125ms      5 min ago
+01JFXYZ123ABE    MCP  policy       private     get_secret     ~Zed    -                    -       blocked  0ms        10 min ago
 
 Showing 3 of 150 records (page 1)
 ```
+
+**Client and Profile columns**: `CLIENT` is the client id the call was bound to; when a record carries only the client's self-reported name it is shown as `~<name>` (advisory: a client can claim any name); otherwise `-`. `PROFILE` is the profile in effect with its source in parentheses (`pin`, `binding`, `url`, `session`, `anonymous`, `none`), or `-`. Records written before Profiles v3 show `-`. `activity show` also prints the `Client`, `Profile`, `Token` and `Block reason` of a record.
 
 **Intent Column**: Shows the declared operation type (`read`, `write`, `destructive`) or `-` if no intent was declared.
 
@@ -177,6 +200,10 @@ mcpproxy activity watch [flags]
 |------|-------|---------|-------------|
 | `--type` | `-t` | | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` |
 | `--server` | `-s` | | Filter by server name |
+| `--profile`, `--client`, `--token`, `--client-name` | | | Same scope filters as `activity list`, applied to the `attribution` of each streamed event (`-` selects events with none); `--agent` is a deprecated alias of `--token` |
+| `--view` | | `all` | Filter by view: `calls`, `system`, `all`; overridden by `--type` |
+| `--from` | | | Only print records at/after this time (RFC3339 or relative: `-1h`, `-24h`, `-7d`, `-30d`) |
+| `--to` | | | Stop watching once this time has passed (RFC3339 or relative); `watch` exits cleanly instead of reconnecting once `--to` is in the past |
 
 ### Examples
 
@@ -220,7 +247,7 @@ Source indicators (`[MCP]`, `[CLI]`, `[API]`) show how the tool call was trigger
 - Automatically reconnects on connection loss (exponential backoff)
 - Exits cleanly on SIGINT (Ctrl+C) or SIGTERM
 - Buffers high-volume events to prevent terminal flooding
-- **Filters out successful `call_tool_*` internal tool calls** to avoid duplicates (they have corresponding `tool_call` entries)
+- **Filters out `call_tool_*` internal tool calls** to avoid duplicates (every dispatch — successful, failed, or shed — has a corresponding `tool_call` or rejection record)
 
 ### Exit Codes
 
@@ -294,10 +321,33 @@ Response:
   URL: https://github.com/owner/repo/issues/123
 ```
 
+**Code execution links:** when the record is a `code_execution` parent, the
+detail view prints a hint (`Use 'mcpproxy activity list --parent-id <request_id>'
+to see sub-calls`). When the record is one of those sub-calls, it prints a
+`Parent ID:` line instead. See
+[Drill into a `code_execution`](#drill-into-a-code_execution).
+
 **Source Values:**
 - `MCP (AI agent via MCP protocol)` - Tool called by AI agent
 - `CLI (CLI command)` - Tool called via `mcpproxy call tool` CLI command
 - `API (REST API)` - Tool called via REST API directly
+
+### Failure classification
+
+A failed tool call adds an `Error class` line to the table (for example
+`Error class:  http (fault: upstream, HTTP 502)`), and the same data appears as
+`error_class`, `fault_domain` and `upstream_http_status` in `-o json` and
+`-o yaml`. The fields are absent on successful calls and on older records. See
+[Failure classification](../features/activity-log.md#failure-classification-error_class-and-fault_domain)
+for the class table.
+
+```bash
+# Every call the upstream answered with an HTTP error, as JSON
+mcpproxy activity list --error-class http -o json | jq '.activities[] | {server_name, tool_name, upstream_http_status}'
+
+# Failures that were mcpproxy's own doing, not the upstream's
+mcpproxy activity list --fault-domain proxy
+```
 
 ### Exit Codes
 
@@ -325,6 +375,11 @@ mcpproxy activity summary [flags]
 |------|-------|---------|-------------|
 | `--period` | `-p` | 24h | Time period: `1h`, `24h`, `7d`, `30d` |
 | `--by` | | | Group by: `server`, `tool`, `status` |
+| `--profile`, `--client`, `--token` | | | Count only records made under this profile, client id or token name (`-` selects records with none); `--agent` is a deprecated alias of `--token`. `--client-name` is accepted but always rejected: `client_name is not supported on this endpoint; filter by client` |
+| `--from` | | | Alias of `--period`, as a relative shorthand: `-1h`, `-24h`, `-7d`, `-30d` (any other value is rejected — summary has no arbitrary range) |
+
+`--to` is accepted for symmetry with `list`/`watch`/`export` but always
+rejected on `summary`; use `--period` or `--from`.
 
 ### Examples
 
@@ -350,7 +405,8 @@ Activity Summary (last 24h)
 
 METRIC          VALUE
 ───────         ─────
-Total Calls     150
+Total Events    150
+Calls           128 (3.9% failed)
 Successful      142 (94.7%)
 Errors          5 (3.3%)
 Blocked         3 (2.0%)
@@ -374,9 +430,12 @@ database:query           15 calls
 {
   "period": "24h",
   "total_count": 150,
+  "call_count": 128,
+  "call_error_count": 5,
   "success_count": 142,
   "error_count": 5,
   "blocked_count": 3,
+  "rejected_count": 0,
   "success_rate": 0.947,
   "top_servers": [
     {"name": "github", "count": 75},
@@ -413,10 +472,12 @@ mcpproxy activity export [flags]
 
 | Flag | Short | Default | Description |
 |------|-------|---------|-------------|
-| `--output` | | | Output file path (stdout if not specified) |
-| `--format` | `-f` | json | Export format: `json`, `csv` |
+| `--output` | | | Destination file path (stdout if not specified); not the global `-o/--output` format flag |
+| `--format` | `-f` | json | Export file format: `json` (JSON Lines), `csv` |
 | `--include-bodies` | | false | Include full request/response bodies |
-| *(filter flags)* | | | Same filters as `activity list` |
+| `--parent-id` | | | Export only child tool calls of a `code_execution` activity (value = the parent record `request_id`) |
+| `--error-class`, `--fault-domain` | | | Export only failed tool calls of this class / fault domain (values as for `activity list`) |
+| *(filter flags)* | | | Same filters as `activity list`, including `--profile`, `--client`, `--token` and `--client-name`. CSV output appends `profile`, `profile_source`, `client_id`, `client_name`, `token_name` and `block_reason` after `parent_id` |
 
 ### Examples
 
@@ -447,6 +508,9 @@ mcpproxy activity export --type tool_call,internal_tool_call --output tool-calls
 
 # Export config changes for audit
 mcpproxy activity export --type config_change --output config-audit.jsonl
+
+# Export the sub-calls of one code_execution run
+mcpproxy activity export --parent-id a1b2c3d4-e5f6-7890-abcd-ef1234567890 --output sandbox-run.jsonl
 ```
 
 ### Output (JSON - JSON Lines)
@@ -484,6 +548,39 @@ mcpproxy activity list --status error --limit 5
 
 # 2. Get details for specific error
 mcpproxy activity show <id-from-step-1> --include-response
+```
+
+### Drill into a `code_execution`
+
+A `code_execution` call runs a sandboxed script that may call several upstream
+tools. Each of those sub-calls is recorded as its own `tool_call` activity with
+its own `request_id`, plus a `parent_id` pointing at the `request_id` of the
+`code_execution` record that spawned it. That link is what makes a sandboxed run
+auditable instead of a single opaque row.
+
+```bash
+# 1. Spot the code_execution in the list (type internal_tool_call, tool code_execution)
+mcpproxy activity list --type internal_tool_call --limit 20
+
+# 2. Open it — the detail view prints its Request ID and the drill-in hint
+mcpproxy activity show <id-from-step-1>
+
+# 3. List the sub-calls it made, using the parent's request_id
+mcpproxy activity list --parent-id <request-id-from-step-2>
+
+# 4. From any sub-call, walk back up to the parent
+mcpproxy activity show <child-id>                       # prints "Parent ID: ..."
+mcpproxy activity list --request-id <parent-id-from-step-4>
+```
+
+In table output, sub-calls are indented with `└` in the TOOL column, and
+`activity watch` marks them inline with `[child of <parent_id>]`. In JSON output
+the `parent_id` field is present on every child record, so the whole run can be
+reassembled:
+
+```bash
+# All sub-calls of one run as JSON
+mcpproxy activity list --parent-id <parent-request-id> -o json | jq '.activities[] | {tool_name, status, duration_ms}'
 ```
 
 ### Monitor Agent Behavior
@@ -578,7 +675,7 @@ The activity log captures the following event types:
 | `server_change` | Server enable/disable/restart events |
 
 :::note Duplicate Filtering for call_tool_*
-By default, **successful** `call_tool_*` internal tool calls are filtered out from `activity list`, `activity watch`, and the Web UI because they appear as duplicates alongside their corresponding upstream `tool_call` entries. **Failed** `call_tool_*` calls are always shown since they have no corresponding tool call entry.
+By default, all `call_tool_*` internal records are filtered out from `activity list`, `activity watch`, and the Web UI — every dispatch (successful, failed, or shed) has a corresponding upstream `tool_call` or rejection record carrying the same `request_id`, so showing both would double-count the call.
 
 To include all internal tool calls in API responses, use `include_call_tool=true` query parameter.
 :::

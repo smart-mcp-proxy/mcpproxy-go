@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -287,70 +288,6 @@ func TestOAuthConnector_Deny_StoresNothing(t *testing.T) {
 	}
 }
 
-func TestOAuthConnector_Refresh(t *testing.T) {
-	m := newMockTokenServer(t)
-	m.accessToken = "refreshed-access-token"
-	m.refreshToken = "" // emulate AS that does not rotate the refresh token
-	store := newConnectorTestStore(t)
-	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop(), nil)
-
-	// Seed an existing connect-flow credential with a refresh token.
-	seed := &UpstreamCredential{
-		Type:         "oauth2",
-		AccessToken:  "old-access-token",
-		RefreshToken: "seed-refresh-token",
-		ExpiresAt:    time.Now().Add(-time.Minute), // expired
-		ObtainedVia:  "connect_flow",
-	}
-	if err := store.Put("user-alice", c.ServerKey(), seed); err != nil {
-		t.Fatalf("seed Put: %v", err)
-	}
-
-	cred, err := c.Refresh(context.Background(), "user-alice")
-	if err != nil {
-		t.Fatalf("Refresh: %v", err)
-	}
-	if cred.AccessToken != "refreshed-access-token" {
-		t.Errorf("AccessToken = %q, want refreshed-access-token", cred.AccessToken)
-	}
-	// Refresh token preserved when the AS omits a new one.
-	if cred.RefreshToken != "seed-refresh-token" {
-		t.Errorf("RefreshToken = %q, want preserved seed-refresh-token", cred.RefreshToken)
-	}
-	if cred.ObtainedVia != "connect_flow" {
-		t.Errorf("ObtainedVia = %q", cred.ObtainedVia)
-	}
-	if m.lastForm.Get("grant_type") != "refresh_token" {
-		t.Errorf("grant_type = %q, want refresh_token", m.lastForm.Get("grant_type"))
-	}
-	if m.lastForm.Get("refresh_token") != "seed-refresh-token" {
-		t.Errorf("sent refresh_token = %q", m.lastForm.Get("refresh_token"))
-	}
-
-	// Persisted.
-	stored, err := store.Get("user-alice", c.ServerKey())
-	if err != nil {
-		t.Fatalf("store.Get: %v", err)
-	}
-	if stored.AccessToken != "refreshed-access-token" {
-		t.Errorf("stored AccessToken = %q", stored.AccessToken)
-	}
-}
-
-func TestOAuthConnector_Refresh_NoRefreshToken(t *testing.T) {
-	m := newMockTokenServer(t)
-	store := newConnectorTestStore(t)
-	c, _ := NewOAuthConnector(store, connectorTestConfig(m.srv.URL), zap.NewNop(), nil)
-
-	seed := &UpstreamCredential{AccessToken: "at", ObtainedVia: "connect_flow"} // no refresh token
-	if err := store.Put("user-alice", c.ServerKey(), seed); err != nil {
-		t.Fatalf("seed Put: %v", err)
-	}
-	if _, err := c.Refresh(context.Background(), "user-alice"); err == nil {
-		t.Fatal("expected error refreshing a credential with no refresh token")
-	}
-}
-
 func TestOAuthConnector_Complete_TokenEndpointError(t *testing.T) {
 	m := newMockTokenServer(t)
 	m.status = http.StatusBadRequest
@@ -363,6 +300,53 @@ func TestOAuthConnector_Complete_TokenEndpointError(t *testing.T) {
 	}
 	if _, err := store.Get("user-alice", c.ServerKey()); err == nil {
 		t.Error("nothing should be stored on token-exchange failure")
+	}
+}
+
+// TestOAuthConnector_Complete_TokenEndpointError_NoBodyLeak proves that a
+// non-200 token-endpoint response body — which an upstream AS controls and could
+// stuff with access/refresh tokens or echoed input — never reaches the error
+// returned to (and logged by) callers. Only the HTTP status and an allowlisted
+// OAuth error code may surface (FR-029 / SC-005).
+func TestOAuthConnector_Complete_TokenEndpointError_NoBodyLeak(t *testing.T) {
+	const leak = "super-secret-access-token-AKIAIOSFODNN7EXAMPLE"
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		// A hostile AS reflecting secrets/free-text in both the body and the
+		// error_description field.
+		_, _ = w.Write([]byte(`{"error":"` + leak + `","error_description":"` + leak + `","access_token":"` + leak + `"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	store := newConnectorTestStore(t)
+	c, _ := NewOAuthConnector(store, connectorTestConfig(srv.URL), zap.NewNop(), nil)
+
+	_, state, _ := c.BuildAuthorizationURL("user-alice")
+	_, err := c.Complete(context.Background(), state, "code")
+	if err == nil {
+		t.Fatal("expected error when token endpoint returns 400")
+	}
+	if strings.Contains(err.Error(), leak) {
+		t.Errorf("error leaks upstream response body: %q", err.Error())
+	}
+	// A non-allowlisted error code must be dropped entirely (only the status remains).
+	if !strings.Contains(err.Error(), "400") {
+		t.Errorf("error should name the HTTP status: %q", err.Error())
+	}
+}
+
+// TestOAuthConnector_TokenEndpointError_AllowlistedCode confirms a standard
+// RFC 6749 §5.2 error code does pass through (so operators still get a useful
+// reason), while everything else is dropped.
+func TestOAuthConnector_TokenEndpointError_AllowlistedCode(t *testing.T) {
+	allow := sanitizedTokenEndpointError(http.StatusBadRequest, []byte(`{"error":"invalid_grant"}`))
+	if !strings.Contains(allow.Error(), "invalid_grant") {
+		t.Errorf("allowlisted code should surface: %q", allow.Error())
+	}
+	drop := sanitizedTokenEndpointError(http.StatusBadRequest, []byte(`{"error":"AKIAIOSFODNN7EXAMPLE"}`))
+	if strings.Contains(drop.Error(), "AKIAIOSFODNN7EXAMPLE") {
+		t.Errorf("non-allowlisted code must be dropped: %q", drop.Error())
 	}
 }
 

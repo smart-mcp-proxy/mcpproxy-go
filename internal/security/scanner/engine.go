@@ -1,9 +1,11 @@
 package scanner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -32,9 +34,85 @@ type Engine struct {
 	// docker × AppArmor transition would otherwise deny entrypoint exec.
 	disableNoNewPrivileges bool
 
+	// runScannerContainer runs a scanner container. Nil means
+	// docker.RunScanner; tests replace it to observe the run config and to
+	// act while the container "runs".
+	runScannerContainer func(ctx context.Context, cfg ScannerRunConfig) (stdout, stderr string, exitCode int, err error)
+
+	// isolationMode is the engine-wide DEFAULT isolation mode ("docker",
+	// "sandbox", "none", or "" == docker for back-compat), used only when a
+	// ScanRequest does not carry a per-server IsolationMode. The per-server
+	// resolved mode on the request takes precedence (MCP-34.4) so a server with
+	// an explicit isolation.mode override gets the right scanner behaviour.
+	// Scanner *plugins* are Docker-based (Spec 039); under "sandbox"/"none" the
+	// host runs no Docker for scanners, so Docker-based scanners are cleanly
+	// skipped (prefailed with an honest reason) while in-process scanners still
+	// run — D3 option (b). Set via Service.SetIsolationMode.
+	isolationMode string
+
+	// deepScanEnabled gates the opt-in "deep scan" layer (Spec 077 US3): the
+	// Docker-based scanner plugins plus published-package-source extraction.
+	// Default false (FR-006) — only the deterministic in-process baseline scanner
+	// runs, with zero Docker invoked. When false, resolveScanners drops every
+	// Docker-based (non-in-process) scanner entirely so no container is launched
+	// and no deep-scanner failure can degrade the baseline verdict (FR-007/008).
+	// Set via Service.SetDeepScan from security.deep_scan.enabled.
+	deepScanEnabled bool
+
+	// deepScanScanners optionally restricts which deep scanners may run when
+	// deepScanEnabled is true (security.deep_scan.scanners). Nil/empty ⇒ every
+	// enabled deep scanner is eligible. Ignored when deepScanEnabled is false.
+	deepScanScanners map[string]bool
+
 	// Track active scans (one per server)
 	mu          sync.Mutex
 	activeScans map[string]*ScanJob // keyed by server name
+
+	// registrationCheck, when set, reports whether a job bound to
+	// incarnation inc may still register for serverName (Spec 116 FR-014a,
+	// review round 2). It runs under mu, so it is ordered against
+	// DetachObsoleteJob: the purge observer runs after the removal published,
+	// so a job registered before the observer is detached by it, and one
+	// registering after it sees the new incarnation and is refused. It must
+	// not take a lock that is held while calling into the engine.
+	registrationCheck func(serverName string, inc int64) bool
+}
+
+// deepScanAllowed reports whether a scanner is eligible to run given the
+// deep-scan gate (Spec 077 US3). The in-process baseline scanner is ALWAYS
+// allowed — it is the zero-dependency default. A Docker-based (deep) scanner is
+// allowed only when the deep-scan layer is enabled and, when a per-scanner
+// allow-list is configured, the scanner is on it.
+// setDeepScan replaces the deep-scan switch and allow-list under e.mu. The
+// config hot-reload path (Service.SetDeepScan via ApplySecurityConfig) runs on
+// the routing-mode-refresh goroutine while StartScan reads the same fields
+// under e.mu in resolveScanners, so the writer must take the lock too.
+func (e *Engine) setDeepScan(enabled bool, allow map[string]bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.deepScanEnabled = enabled
+	e.deepScanScanners = allow
+}
+
+// deepScanIsEnabled reads the deep-scan switch under e.mu for callers outside
+// the StartScan critical section.
+func (e *Engine) deepScanIsEnabled() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.deepScanEnabled
+}
+
+func (e *Engine) deepScanAllowed(s *ScannerPlugin) bool {
+	if s.InProcess {
+		return true
+	}
+	if !e.deepScanEnabled {
+		return false
+	}
+	if len(e.deepScanScanners) == 0 {
+		return true
+	}
+	return e.deepScanScanners[s.ID]
 }
 
 // NewEngine creates a new scan orchestration engine
@@ -50,7 +128,10 @@ func NewEngine(docker *DockerRunner, registry *Registry, dataDir string, logger 
 
 // ScanRequest describes a scan to execute
 type ScanRequest struct {
-	ServerName     string
+	ServerName string
+	// Incarnation is the scanned server's incarnation when the scan was
+	// requested (Spec 116 FR-014a); the job carries it.
+	Incarnation    int64
 	SourceDir      string            // Path to server source files (for "source" input)
 	ContainerImage string            // Docker image reference (for "container_image" input)
 	DryRun         bool              // If true, don't affect quarantine state
@@ -58,6 +139,159 @@ type ScanRequest struct {
 	Env            map[string]string // Additional environment variables
 	ScanContext    *ScanContext      // Context metadata (set by service)
 	ScanPass       int               // 1 = security scan (fast), 2 = supply chain audit (background)
+	// IsolationMode is THIS server's resolved isolation mode ("docker",
+	// "sandbox", "none", or "" to fall back to the engine's service-wide
+	// default). Set per-server by the Service so the Docker-scanner skip
+	// (MCP-34.4) follows the scanned server's effective mode — a per-server
+	// isolation.mode override beats the global mode (internal/upstream/core
+	// IsolationManager.ResolveMode). Under "sandbox"/"none" Docker scanner
+	// plugins are skipped; under "docker" they run.
+	IsolationMode string
+	// PeerTools is a cross-server snapshot (other servers' current tool
+	// definitions, keyed by server name) used by the in-process tpa-descriptions
+	// scanner to build a multi-server RegistryView so the deterministic
+	// shadowing.cross_server check can detect impersonation/collisions across
+	// servers. Populated by the Service; nil for callers that don't supply it.
+	PeerTools map[string][]map[string]interface{}
+	// ToolDefinitions is the exact tools.json document the Service exported
+	// for this scan (RT-06, Sol r4 P1): an immutable in-memory snapshot of the
+	// live + ingested contracts. The in-process baseline scanner analyses it
+	// instead of re-reading SourceDir/tools.json, which an upstream that can
+	// write its own source dir could swap for clean metadata between export
+	// and the asynchronous scanner read. Docker scanners still read the file
+	// from the mounted source dir; their result is discarded when the file no
+	// longer matches this snapshot. Nil for callers that export nothing.
+	ToolDefinitions []byte
+	// ToolDefinitionsUnavailable marks a scan whose tool definitions could not
+	// be exported (Pass 2 only, Sol r4 P2): the source dir may hold a
+	// tools.json this pass did not write, so every scanner that may analyse
+	// it is failed, while scanners independent of tool metadata (supply-chain
+	// / CVE analysis) still run.
+	ToolDefinitionsUnavailable bool
+}
+
+// toolMetadataIndependentScanners are the scanners whose analysis never uses
+// the exported tool definitions (tools.json): they audit dependencies and
+// images only, so they may run when the definitions could not be exported.
+var toolMetadataIndependentScanners = map[string]bool{
+	"trivy-mcp": true,
+}
+
+// toolDefinitionsGate decides, before a Docker scanner runs, whether the
+// tools.json it would read may be analysed: not at all when the definitions
+// could not be exported (only metadata-independent scanners run, Sol r4 P2),
+// and only while it still holds the exported snapshot (Sol r4 P1). A scanner
+// independent of tool metadata never reads tools.json, so a later change to
+// the file must not fail or discard its CVE audit (Sol r5 P2).
+func toolDefinitionsGate(s *ScannerPlugin, req ScanRequest) error {
+	_, err := pinToolDefinitions(s, req)
+	return err
+}
+
+// pinToolDefinitions is toolDefinitionsGate that also returns the identity of
+// the tools.json it checked (nil when there is nothing to pin), so a caller
+// can tell whether the file was replaced later (Sol r20 P2).
+func pinToolDefinitions(s *ScannerPlugin, req ScanRequest) (os.FileInfo, error) {
+	if toolMetadataIndependentScanners[s.ID] {
+		return nil, nil
+	}
+	if req.ToolDefinitionsUnavailable {
+		return nil, fmt.Errorf("scanner %s skipped: the tool definitions could not be exported for this scan, and the source dir may hold a tools.json this scan did not write", s.ID)
+	}
+	info, err := checkToolDefinitionsIntact(req)
+	if err != nil {
+		return nil, fmt.Errorf("scanner %s: %w", s.ID, err)
+	}
+	return info, nil
+}
+
+// toolDefinitionsReplaced reports why the tools.json in the source dir is no
+// longer the pinned file (a symlink, another file, or gone), or "" when it
+// still is. The scanner reads a staged copy, so a swap cannot reach it, but a
+// symlink retargeted or another file swapped in (even with the bytes restored
+// before the post-run check) is tampering, and the result is discarded
+// (Sol r20 P2).
+func toolDefinitionsReplaced(req ScanRequest, pinned os.FileInfo) string {
+	if pinned == nil {
+		return ""
+	}
+	cur, err := os.Lstat(filepath.Join(req.SourceDir, "tools.json"))
+	switch {
+	case err != nil:
+		return "tools.json was removed during the scan"
+	case !cur.Mode().IsRegular():
+		return "tools.json became a symlink or special file during the scan"
+	case !os.SameFile(pinned, cur):
+		return "tools.json was replaced by another file during the scan"
+	}
+	return ""
+}
+
+// toolDefinitionsWatchInterval is how often the source dir's tools.json is
+// checked against the pinned file while a Docker scanner runs.
+const toolDefinitionsWatchInterval = 20 * time.Millisecond
+
+// watchToolDefinitions checks, until stop is closed, that tools.json stays the
+// pinned regular file, and returns the first violation seen ("" if none). The
+// post-run check alone cannot see a swap that is undone before the run ends.
+func watchToolDefinitions(req ScanRequest, pinned os.FileInfo, stop <-chan struct{}) <-chan string {
+	out := make(chan string, 1)
+	if pinned == nil {
+		out <- ""
+		return out
+	}
+	go func() {
+		ticker := time.NewTicker(toolDefinitionsWatchInterval)
+		defer ticker.Stop()
+		for {
+			if why := toolDefinitionsReplaced(req, pinned); why != "" {
+				out <- why
+				return
+			}
+			select {
+			case <-stop:
+				out <- toolDefinitionsReplaced(req, pinned)
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return out
+}
+
+// checkToolDefinitionsIntact reports an error when the tools.json in the
+// scanned source dir no longer holds the exported snapshot (RT-06, Sol r4 P1),
+// or is not a regular file (Sol r20 P2): a symlinked tools.json in the
+// upstream's source dir is refused outright. It returns the identity of the checked file (nil when nothing is checked).
+func checkToolDefinitionsIntact(req ScanRequest) (os.FileInfo, error) {
+	if len(req.ToolDefinitions) == 0 || req.SourceDir == "" {
+		return nil, nil
+	}
+	path := filepath.Join(req.SourceDir, "tools.json")
+	linfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("exported tool definitions are no longer readable: %w", err)
+	}
+	if !linfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("exported tool definitions (tools.json) are not a regular file (a symlink or special file); the result is discarded")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("exported tool definitions are no longer readable: %w", err)
+	}
+	defer f.Close()
+	finfo, err := f.Stat()
+	if err != nil || !os.SameFile(linfo, finfo) {
+		return nil, fmt.Errorf("exported tool definitions (tools.json) were replaced while being checked; the result is discarded")
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("exported tool definitions are no longer readable: %w", err)
+	}
+	if !bytes.Equal(data, req.ToolDefinitions) {
+		return nil, fmt.Errorf("exported tool definitions (tools.json) were modified after export; the result is discarded")
+	}
+	return finfo, nil
 }
 
 // ScanCallback receives scan lifecycle events
@@ -89,13 +323,28 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 
 	// Check for existing scan
 	e.mu.Lock()
+	if existing, ok := e.activeScans[req.ServerName]; ok && e.obsoleteLocked(existing) {
+		// The slot is held by a removed server's job whose purge observer
+		// has not detached it yet (review round 4): detach it here, exactly
+		// as DetachObsoleteJob would, so the replacement can register.
+		delete(e.activeScans, req.ServerName)
+	}
 	if existing, ok := e.activeScans[req.ServerName]; ok {
+		// Snapshot: the running scan keeps writing to the live record.
+		snapshot := existing.clone()
 		e.mu.Unlock()
-		return existing, fmt.Errorf("scan already in progress for server %s (job %s)", req.ServerName, existing.ID)
+		return snapshot, fmt.Errorf("scan already in progress for server %s (job %s)", req.ServerName, snapshot.ID)
+	}
+	if check := e.registrationCheck; check != nil && !check(req.ServerName, req.Incarnation) {
+		e.mu.Unlock()
+		return nil, fmt.Errorf("scan for server %s refused: the server was removed or replaced since the scan was prepared", req.ServerName)
 	}
 
-	// Determine which scanners to use
-	resolved, err := e.resolveScanners(req.ScannerIDs)
+	// Determine which scanners to use. The Docker-scanner skip (MCP-34.4)
+	// follows THIS server's resolved isolation mode (per-server override beats
+	// the global default); fall back to the engine-wide default when the
+	// request didn't carry one.
+	resolved, err := e.resolveScanners(req.ScannerIDs, e.effectiveIsolationMode(req.IsolationMode))
 	if err != nil {
 		e.mu.Unlock()
 		return nil, err
@@ -120,6 +369,7 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 		StartedAt:   time.Now(),
 		DryRun:      req.DryRun,
 		ScanContext: req.ScanContext,
+		Incarnation: req.Incarnation,
 	}
 	for i, rs := range resolved {
 		job.Scanners[i] = rs.plugin.ID
@@ -130,24 +380,41 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 	}
 
 	e.activeScans[req.ServerName] = job
+	// Snapshot before releasing the lock: from here on the scan goroutines own
+	// the live record, so neither the callback nor the caller may hold it.
+	started := job.clone()
+	returned := job.clone()
 	e.mu.Unlock()
 
-	callback.OnScanStarted(job)
+	callback.OnScanStarted(started)
 
 	// Run scanners in background with detached context
 	// (the HTTP request context may be cancelled after the response is sent)
 	go e.executeScan(context.Background(), job, resolved, req, callback)
 
-	return job, nil
+	return returned, nil
 }
 
-// CancelScan cancels a running scan for a server
+// CancelScan cancels a running scan for a server.
+//
+// A job stays in activeScans for a short window AFTER executeScan has written
+// its terminal status — the completion callback persists the report and emits
+// the completion event inside that window. Cancelling there must fail rather
+// than succeed: the terminal outcome has already been cloned and is on its way
+// to storage, so flipping Status to cancelled would leave the API reporting a
+// cancellation that the stored job contradicts.
 func (e *Engine) CancelScan(serverName string) error {
 	e.mu.Lock()
 	job, ok := e.activeScans[serverName]
-	if !ok {
+	if !ok || e.obsoleteLocked(job) {
 		e.mu.Unlock()
 		return fmt.Errorf("no active scan for server %s", serverName)
+	}
+	if job.Status == ScanJobStatusCompleted || job.Status == ScanJobStatusFailed ||
+		job.Status == ScanJobStatusCancelled {
+		status := job.Status
+		e.mu.Unlock()
+		return fmt.Errorf("scan for server %s already finished (status: %s)", serverName, status)
 	}
 	job.Status = ScanJobStatusCancelled
 	job.CompletedAt = time.Now()
@@ -156,11 +423,78 @@ func (e *Engine) CancelScan(serverName string) error {
 	return nil
 }
 
-// GetActiveJob returns the active scan job for a server, if any
+// DetachObsoleteJob releases serverName's activeScans slot when obsolete
+// reports that its job belongs to a server identity that no longer exists
+// (Spec 116 FR-014a, review round 1: a removed server's scan must not keep
+// the slot of a same-name replacement). The detached job is NOT cancelled:
+// its goroutine runs to its normal end so its callbacks still release the
+// temporary source directory, and every write it makes is bound to its own
+// (obsolete) incarnation and dropped by storage. Its clearActiveJob then
+// finds the slot not held by it and leaves a replacement's job alone. It
+// reports whether a job was detached.
+func (e *Engine) DetachObsoleteJob(serverName string, obsolete func(*ScanJob) bool) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	job, ok := e.activeScans[serverName]
+	if !ok || !obsolete(job) {
+		return false
+	}
+	delete(e.activeScans, serverName)
+	return true
+}
+
+// clearActiveJob releases the activeScans slot held by `job`, and ONLY if that
+// job still holds it.
+//
+// The identity check is load-bearing. CancelScan drops a job from activeScans
+// while its scanner goroutines are still running, so a replacement scan for the
+// same server can take the slot before the cancelled scan unwinds. Deleting by
+// server name alone would then evict the replacement — leaving a running scan
+// invisible to GetActiveJob and letting StartScan accept a second concurrent
+// scan of the same server.
+func (e *Engine) clearActiveJob(serverName string, job *ScanJob) {
+	e.mu.Lock()
+	if current, ok := e.activeScans[serverName]; ok && current == job {
+		delete(e.activeScans, serverName)
+	}
+	e.mu.Unlock()
+}
+
+// GetActiveJob returns a snapshot of the active scan job for a server, or nil
+// when no scan is running.
+//
+// It MUST be a snapshot: the scan goroutines keep writing Status, CompletedAt
+// and ScannerStatuses on the live record until the job leaves activeScans, so
+// handing the live pointer to a REST reader (GET /api/v1/security/scan/status,
+// which JSON-encodes it) is a data race.
 func (e *Engine) GetActiveJob(serverName string) *ScanJob {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.activeScans[serverName]
+	job, ok := e.activeScans[serverName]
+	if !ok || e.obsoleteLocked(job) {
+		return nil
+	}
+	return job.clone()
+}
+
+// obsoleteLocked reports whether job belongs to an incarnation of its server
+// that is no longer current (Spec 116 FR-014a, review round 4): a removed
+// server's job keeps the name's slot until the purge observer detaches it,
+// and in that window it is neither the active scan of a same-name
+// replacement nor a reason to refuse the replacement's own. Called with mu
+// held.
+func (e *Engine) obsoleteLocked(job *ScanJob) bool {
+	check := e.registrationCheck
+	return check != nil && job != nil && !check(job.ServerName, job.Incarnation)
+}
+
+// snapshotJob copies a job under the engine lock so it can be handed to a scan
+// callback (which persists and JSON-encodes it) while sibling scanner
+// goroutines are still updating the live record.
+func (e *Engine) snapshotJob(job *ScanJob) *ScanJob {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return job.clone()
 }
 
 // resolvedScanner pairs a plugin with a precomputed error that will cause
@@ -180,7 +514,30 @@ type resolvedScanner struct {
 // executeScan loop records it as a failed scanner in the job. That way the
 // aggregated scan report shows "X of Y scanners failed" instead of pretending
 // nothing is wrong.
-func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, error) {
+// effectiveIsolationMode resolves the isolation mode to use for a scan: the
+// per-server mode carried on the ScanRequest when present, otherwise the
+// engine-wide default set via Service.SetIsolationMode. This is what lets the
+// Docker-scanner skip (MCP-34.4) honour a per-server isolation.mode override.
+func (e *Engine) effectiveIsolationMode(requestMode string) string {
+	if requestMode != "" {
+		return requestMode
+	}
+	return e.isolationMode
+}
+
+// resolveScanners determines which scanners to use.
+//
+// Unlike the old behaviour (silently dropping scanners with missing Docker
+// images), this now includes every enabled scanner in the result. When a
+// scanner's image is absent locally it is flagged with prefail so the
+// executeScan loop records it as a failed scanner in the job. That way the
+// aggregated scan report shows "X of Y scanners failed" instead of pretending
+// nothing is wrong.
+//
+// isolationMode is THIS server's resolved isolation mode (per-server override
+// already applied by the caller); under "sandbox"/"none" Docker scanner plugins
+// are skipped (MCP-34.4).
+func (e *Engine) resolveScanners(requestedIDs []string, isolationMode string) ([]resolvedScanner, error) {
 	all := e.registry.List()
 
 	// Helper: check whether a scanner's image is present locally. Returns a
@@ -191,6 +548,22 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, erro
 		// local Docker (MCP-2082).
 		if s.InProcess {
 			return ""
+		}
+		// MCP-34.4 / D3 option (b): under a non-Docker isolation mode the host
+		// runs no Docker for scanner plugins, so Docker-based scanners cannot
+		// run at all. Skip them with an honest, mode-specific reason (pointing
+		// at the snap-docker/AppArmor failure doc) instead of the misleading
+		// "pull the image locally" guidance below — there is nothing to pull.
+		// They stay in the resolved set (recorded as failed) and are surfaced
+		// via the informational deep-scan descriptor (Spec 077 US3); this never
+		// degrades the baseline verdict.
+		// `isolationMode` is per-server resolved, so a server pinned to
+		// isolation.mode:docker still runs Docker scanners under a global
+		// sandbox default, and vice versa.
+		if mode := isolationMode; mode == "sandbox" || mode == "none" {
+			return fmt.Sprintf("Docker-based scanner %s skipped: isolation mode %q runs no Docker containers, so Docker scanner plugins cannot run for this server. "+
+				"In-process scanners still ran. To run Docker scanners, set isolation.mode to \"docker\" for this server on a host with a working Docker daemon. "+
+				"See docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md.", s.ID, mode)
 		}
 		if e.docker == nil {
 			return ""
@@ -219,6 +592,13 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, erro
 			if s.Status != ScannerStatusInstalled && s.Status != ScannerStatusConfigured && s.Status != ScannerStatusError && s.Status != ScannerStatusPulling {
 				return nil, fmt.Errorf("scanner %s is not enabled (status: %s)", id, s.Status)
 			}
+			// Spec 077 US3: drop Docker deep scanners entirely when the
+			// deep-scan layer is off (or the scanner is not on the allow-list)
+			// so no container is invoked and no failure can degrade the
+			// baseline. The in-process baseline is always allowed.
+			if !e.deepScanAllowed(s) {
+				continue
+			}
 			result = append(result, resolvedScanner{plugin: s, prefail: checkImage(s)})
 		}
 		return result, nil
@@ -228,6 +608,11 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, erro
 	// user sees what happened to them in the scan report.
 	var result []resolvedScanner
 	for _, s := range all {
+		// Spec 077 US3 deep-scan gate: skip Docker deep scanners while the
+		// opt-in layer is off. Baseline (in-process) always runs.
+		if !e.deepScanAllowed(s) {
+			continue
+		}
 		switch s.Status {
 		case ScannerStatusInstalled, ScannerStatusConfigured:
 			result = append(result, resolvedScanner{plugin: s, prefail: checkImage(s)})
@@ -254,11 +639,7 @@ func (e *Engine) resolveScanners(requestedIDs []string) ([]resolvedScanner, erro
 // immediately and skipped — this keeps missing-image scanners visible in
 // the aggregated scan report instead of being silently dropped.
 func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resolvedScanner, req ScanRequest, callback ScanCallback) {
-	defer func() {
-		e.mu.Lock()
-		delete(e.activeScans, req.ServerName)
-		e.mu.Unlock()
-	}()
+	defer e.clearActiveJob(req.ServerName, job)
 
 	var (
 		reports []*ScanReport
@@ -272,7 +653,10 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 			defer wg.Done()
 
 			scanner := item.plugin
-			callback.OnScannerStarted(job, scanner.ID)
+			// Every callback gets a snapshot: the adapter persists and
+			// JSON-encodes the job while sibling goroutines are still writing
+			// ScannerStatuses on the live record.
+			callback.OnScannerStarted(e.snapshotJob(job), scanner.ID)
 
 			// Fast-fail for prefailed scanners (e.g. missing Docker image).
 			// We still emit started/failed callbacks so the UI sees the
@@ -284,7 +668,7 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 					zap.String("reason", item.prefail),
 				)
 				e.updateScannerStatus(job, scanner.ID, ScanJobStatusFailed, time.Now(), time.Now(), item.prefail, 0)
-				callback.OnScannerFailed(job, scanner.ID, fmt.Errorf("%s", item.prefail))
+				callback.OnScannerFailed(e.snapshotJob(job), scanner.ID, fmt.Errorf("%s", item.prefail))
 				return
 			}
 
@@ -300,7 +684,7 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 				e.updateScannerStatus(job, scanner.ID, ScanJobStatusFailed, time.Time{}, time.Now(), err.Error(), 0)
 				// Store logs even on failure
 				e.setScannerLogs(job, scanner.ID, scanLogs)
-				callback.OnScannerFailed(job, scanner.ID, err)
+				callback.OnScannerFailed(e.snapshotJob(job), scanner.ID, err)
 				return
 			}
 
@@ -313,19 +697,21 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 
 			e.updateScannerStatus(job, scanner.ID, ScanJobStatusCompleted, time.Time{}, time.Now(), "", len(report.Findings))
 			e.setScannerLogs(job, scanner.ID, scanLogs)
-			callback.OnScannerCompleted(job, scanner.ID, report)
+			callback.OnScannerCompleted(e.snapshotJob(job), scanner.ID, report)
 		}(i, rs)
 	}
 
 	wg.Wait()
 
-	// Check if job was cancelled
+	// Read the cancellation flag, decide the terminal status and write it in a
+	// SINGLE locked section. The job is still in activeScans at this point, so
+	// a concurrent GetActiveJob (REST scan-status) can be snapshotting it while
+	// we write — doing this outside the lock is a data race.
 	e.mu.Lock()
 	if job.Status == ScanJobStatusCancelled {
 		e.mu.Unlock()
 		return
 	}
-	e.mu.Unlock()
 
 	// Determine final status
 	allFailed := true
@@ -335,18 +721,22 @@ func (e *Engine) executeScan(ctx context.Context, job *ScanJob, scanners []resol
 			break
 		}
 	}
-
-	if allFailed && len(scanners) > 0 {
+	failed := allFailed && len(scanners) > 0
+	if failed {
 		job.Status = ScanJobStatusFailed
 		job.Error = "all scanners failed"
-		job.CompletedAt = time.Now()
-		callback.OnScanFailed(job, fmt.Errorf("all scanners failed"))
+	} else {
+		job.Status = ScanJobStatusCompleted
+	}
+	job.CompletedAt = time.Now()
+	final := job.clone()
+	e.mu.Unlock()
+
+	if failed {
+		callback.OnScanFailed(final, fmt.Errorf("all scanners failed"))
 		return
 	}
-
-	job.Status = ScanJobStatusCompleted
-	job.CompletedAt = time.Now()
-	callback.OnScanCompleted(job, reports)
+	callback.OnScanCompleted(final, reports)
 }
 
 // runSingleScanner executes one scanner and returns its report plus execution logs
@@ -382,6 +772,10 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	// req.SourceDir/tools.json (MCP-2082).
 	if s.InProcess {
 		return e.runInProcessScanner(s, req)
+	}
+	pinned, err := pinToolDefinitions(s, req)
+	if err != nil {
+		return nil, scannerLogs{}, err
 	}
 
 	// Parse timeout
@@ -477,6 +871,15 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		}
 	}
 
+	// A scanner that reads tool metadata mounts a proxy-owned copy of the
+	// source dir holding the exported snapshot as tools.json, never a path
+	// inside the upstream-writable source dir (RT-06, Sol r20 P2).
+	sourceDir, cleanupSource, err := e.stageScannerSource(ctx, s, req)
+	if err != nil {
+		return nil, scannerLogs{}, fmt.Errorf("scanner %s: %w", s.ID, err)
+	}
+	defer cleanupSource()
+
 	// Log which env keys are being passed (redact values for security)
 	envKeys := make([]string, 0, len(env))
 	for k := range env {
@@ -494,7 +897,7 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		Image:                  s.EffectiveImage(),
 		Command:                effectiveScannerCommand(s, req),
 		Env:                    env,
-		SourceDir:              req.SourceDir,
+		SourceDir:              sourceDir,
 		ReportDir:              reportDir,
 		CacheDir:               cacheDir,
 		NetworkMode:            networkMode,
@@ -505,10 +908,32 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 		DisableNoNewPrivileges: e.disableNoNewPrivileges,
 	}
 
-	stdout, stderr, exitCode, err := e.docker.RunScanner(ctx, cfg)
+	run := e.runScannerContainer
+	if run == nil {
+		run = e.docker.RunScanner
+	}
+	// The scanner reads the staged snapshot, so the upstream's tools.json
+	// cannot reach it. It must still stay the pinned regular file for the
+	// whole run: a symlink retargeted or a file swapped in mid-run (and
+	// restored before the end) is evidence of tampering, and the result is
+	// discarded (Sol r20 P2).
+	stopWatch := make(chan struct{})
+	watch := watchToolDefinitions(req, pinned, stopWatch)
+	stdout, stderr, exitCode, err := run(ctx, cfg)
+	close(stopWatch)
+	replaced := <-watch
 	logs := scannerLogs{Stdout: stdout, Stderr: stderr, ExitCode: exitCode}
 	if err != nil {
 		return nil, logs, fmt.Errorf("scanner %s execution failed: %w", s.ID, err)
+	}
+	if replaced != "" {
+		return nil, logs, fmt.Errorf("scanner %s: exported tool definitions: %s; the result is discarded", s.ID, replaced)
+	}
+	// The scanner read the proxy-owned snapshot; a tools.json that no longer
+	// holds it is still evidence of tampering, so the result is discarded
+	// (RT-06, Sol r4 P1). Metadata-independent scanners are exempt.
+	if err := toolDefinitionsGate(s, req); err != nil {
+		return nil, logs, fmt.Errorf("scanner %s: %w", s.ID, err)
 	}
 
 	e.logger.Debug("Scanner finished",
@@ -620,6 +1045,17 @@ func (e *Engine) parseResults(data []byte, scannerID string) (*ScanReport, error
 				if report.Findings[i].Scanner == "" {
 					report.Findings[i].Scanner = scannerID
 				}
+				// Text spans are an IN-PROCESS detect concept and are never
+				// accepted off the wire. This decodes a third-party scanner's
+				// own report file, so `spans` here is data that tool chose to
+				// emit — and a span is a claim about WHICH CHARACTERS of an
+				// attacker-authored tool description the Web UI should mark as
+				// dangerous. No bundled external scanner produces them (SARIF
+				// and the Cisco/Ramparts/Snyk parsers all set none), so this
+				// drops nothing real; it stops an offset this proxy did not
+				// compute, against text it cannot check here, from reaching the
+				// renderer. detect.DescriptionSpan remains the only producer.
+				report.Findings[i].Spans = nil
 			}
 			report.RiskScore = CalculateRiskScore(report.Findings)
 			return report, nil
@@ -700,8 +1136,16 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 		agg.Reports = append(agg.Reports, *r)
 	}
 
-	// Classify findings that lack threat_type/threat_level (legacy data)
+	// Classify findings that lack threat_type/threat_level (legacy data). This
+	// must run before MergeFindings so consensus (which keys on threat_type) and
+	// severity backfill see fully-classified findings.
 	ClassifyAllFindings(agg.Findings)
+
+	// Spec 077 (T021, FR-010/FR-011/FR-012): collapse the per-scanner findings
+	// into a single unified list. Findings sharing (rule_id, location) merge into
+	// one entry whose Sources lists every contributing scanner; cross-source
+	// agreement on the same (location, threat_type) raises confidence.
+	agg.Findings = MergeFindings(agg.Findings)
 
 	// Flag findings that belong in the Supply Chain Audit (CVEs) UI section.
 	// Match only real CVE/package vulnerabilities so AI-scanner output from Pass 2
@@ -712,6 +1156,16 @@ func AggregateReports(jobID, serverName string, reports []*ScanReport) *Aggregat
 
 	agg.RiskScore = CalculateRiskScore(agg.Findings)
 	agg.Summary = SummarizeFindings(agg.Findings)
+
+	// Spec 077 FR-014 verdict purity: the report-level verdict uses the SAME
+	// tier-driven, baseline-only derivation as the server-list summary
+	// (GetScanSummary via deriveBaselineVerdict), so the report page can never
+	// disagree with the server verdict — a tierless deep-scan/external
+	// "dangerous" finding never moves it. Summary above keeps the RAW
+	// threat-level counts for transparency; verdict-bearing UI reads these.
+	verdict, counts := deriveBaselineVerdict(agg.Findings)
+	agg.Verdict = verdict
+	agg.FindingCounts = &counts
 
 	// ScannersRun = number of successful reports
 	agg.ScannersRun = len(reports)

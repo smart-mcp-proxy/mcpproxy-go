@@ -53,6 +53,21 @@ type AutostartReader struct {
 // (by design), so the returned reader will simply always yield nil — the
 // heartbeat's AutostartEnabled field stays JSON-null, matching data-model.md.
 func DefaultAutostartReader() *AutostartReader {
+	return AutostartReaderForDataDir("")
+}
+
+// AutostartReaderForDataDir returns the reader for the instance rooted at
+// dataDir, falling back to ~/.mcpproxy when dataDir is empty.
+//
+// The tray writes its sidecar into the SAME root it hands the core as
+// --data-dir, and MCPPROXY_HOME relocates that root (GH #936). A reader that
+// always looked in ~/.mcpproxy therefore reported the real install's login-item
+// state for a QA instance that has nothing to do with it, while the sidecar the
+// QA tray actually wrote was never read by anything.
+func AutostartReaderForDataDir(dataDir string) *AutostartReader {
+	if dataDir != "" {
+		return &AutostartReader{Path: filepath.Join(dataDir, autostartSidecarName)}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
 		// Fall back to a non-existent path — Read will return nil.

@@ -644,6 +644,89 @@ func TestExecuteAuthContext_ServerAccessDenied(t *testing.T) {
 	}
 }
 
+// Spec 105 PR G, FR-010 gap G7 — codex round-1 review MUST-FIX: an
+// administrator (or admin_user) carrying a profile restriction must keep the
+// PRE-fix ErrorCodeServerNotAllowed / "server not allowed: ..." wording, not
+// the agent-token ErrorCodeAccessDenied / "token does not have access ..."
+// body the unified profile∩token check introduced. AuthInfo is populated for
+// EVERY authenticated HTTP caller (mcp_code_execution.go's
+// applyProfileScopeToExecution), administrators included, so `authInfo !=
+// nil` alone is not "this is an agent token" — only Type=="agent" (or
+// "user") is a real token with its own AllowedServers to intersect against
+// the profile map; Type=="admin"/"admin_user" has no such token, and
+// resolveDispatchGates must treat it exactly like the no-AuthInfo
+// stdio/in-process case.
+func TestExecuteAuthContext_ProfileScopedAdmin_KeepsServerNotAllowedWording(t *testing.T) {
+	for _, adminType := range []string{"admin", "admin_user"} {
+		t.Run(adminType, func(t *testing.T) {
+			caller := newMockToolCaller()
+			code := `
+				var res = call_tool("weather", "get_forecast", {});
+				({ ok: res.ok, code: res.error ? res.error.code : null, msg: res.error ? res.error.message : null })
+			`
+			opts := ExecutionOptions{
+				// The profile restricts the sandbox to "github" only —
+				// "weather" is outside the profile, not the (nonexistent)
+				// token scope.
+				RestrictToAllowed: true,
+				AllowedServers:    []string{"github"},
+				AuthContext: &AuthInfo{
+					Type: adminType,
+					// An admin's AuthInfo carries no AllowedServers/
+					// Permissions restriction of its own (CanAccessServer/
+					// HasPermission both short-circuit true for this Type) —
+					// exactly what makes this cell distinguishable from an
+					// agent token's.
+				},
+			}
+
+			result := Execute(context.Background(), caller, code, opts)
+			if !result.Ok {
+				t.Fatalf("expected ok=true (the script itself must run), got error: %v", result.Error)
+			}
+			resultMap := result.Value.(map[string]interface{})
+			if resultMap["ok"] != false {
+				t.Fatalf("expected the nested call to be refused, got ok=%v", resultMap["ok"])
+			}
+			if resultMap["code"] != string(ErrorCodeServerNotAllowed) {
+				t.Errorf("expected %s (unchanged pre-105 wording for a %s), got %v (%v)",
+					ErrorCodeServerNotAllowed, adminType, resultMap["code"], resultMap["msg"])
+			}
+			// codex round-2 review, MUST-FIX: the previous `if msg != ""`
+			// guard made this assertion vacuously pass for an empty,
+			// missing, or non-string "msg" — require the exact wording
+			// unconditionally.
+			msg, ok := resultMap["msg"].(string)
+			if !ok {
+				t.Fatalf("expected msg to be a string, got %T (%v)", resultMap["msg"], resultMap["msg"])
+			}
+			if msg != "server not allowed: weather" {
+				t.Errorf("expected the profile-only wording, got %q", msg)
+			}
+			if len(caller.calls) != 0 {
+				t.Errorf("expected 0 upstream calls, got %d", len(caller.calls))
+			}
+
+			// Control: a server INSIDE the profile still dispatches for this
+			// admin — the profile restriction itself is still enforced, only
+			// its wording (and refusal code) must not shift to the
+			// agent-token body.
+			controlCode := `
+				var res = call_tool("github", "list_repos", {});
+				({ ok: res.ok })
+			`
+			controlResult := Execute(context.Background(), caller, controlCode, opts)
+			if !controlResult.Ok {
+				t.Fatalf("control: expected ok=true, got error: %v", controlResult.Error)
+			}
+			controlMap := controlResult.Value.(map[string]interface{})
+			if controlMap["ok"] != true {
+				t.Fatalf("control: an in-profile server must still dispatch for this %s, got %v", adminType, controlMap)
+			}
+		})
+	}
+}
+
 // TestExecuteAuthContext_PermissionDenied tests auth enforcement blocks insufficient permissions
 func TestExecuteAuthContext_PermissionDenied(t *testing.T) {
 	caller := newMockToolCaller()
@@ -678,6 +761,51 @@ func TestExecuteAuthContext_PermissionDenied(t *testing.T) {
 	}
 	if resultMap["code"] != "PERMISSION_DENIED" {
 		t.Errorf("expected PERMISSION_DENIED, got %v", resultMap["code"])
+	}
+}
+
+// TestExecuteAuthContext_UnresolvedTierRefusesEveryCaller: Spec 105 FR-009
+// (research D4). When the annotation lookup answers PermissionTierUnresolved —
+// the proxy knows the server but cannot resolve the tool's identity — the call
+// is refused with PERMISSION_DENIED before HasPermission runs, so an
+// administrator AuthInfo (which passes every tier check) is refused exactly
+// like a full-tier agent, and the upstream is never called.
+func TestExecuteAuthContext_UnresolvedTierRefusesEveryCaller(t *testing.T) {
+	code := `
+		var ghost = call_tool("github", "ghost", {});
+		var real = call_tool("github", "list_repos", {});
+		({ ghostOk: ghost.ok, ghostCode: ghost.error ? ghost.error.code : null, realOk: real.ok })
+	`
+	lookup := func(_, toolName string) string {
+		if toolName == "ghost" {
+			return PermissionTierUnresolved
+		}
+		return "read"
+	}
+	for name, authInfo := range map[string]*AuthInfo{
+		"full-tier agent": {Type: "agent", AgentName: "full-bot", AllowedServers: []string{"github"}, Permissions: []string{"read", "write", "destructive"}},
+		"administrator":   {Type: "admin", AgentName: "admin"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			caller := newMockToolCaller()
+			result := Execute(context.Background(), caller, code, ExecutionOptions{AuthContext: authInfo, ToolAnnotationFunc: lookup})
+			if !result.Ok {
+				t.Fatalf("expected ok=true, got error: %v", result.Error)
+			}
+			resultMap := result.Value.(map[string]interface{})
+			if resultMap["ghostOk"] != false {
+				t.Errorf("expected the unresolved call to fail, got ok=%v", resultMap["ghostOk"])
+			}
+			if resultMap["ghostCode"] != string(ErrorCodePermissionDenied) {
+				t.Errorf("expected %s, got %v", ErrorCodePermissionDenied, resultMap["ghostCode"])
+			}
+			if resultMap["realOk"] != true {
+				t.Errorf("control: the resolved tool must dispatch, got ok=%v", resultMap["realOk"])
+			}
+			if len(caller.calls) != 1 || caller.calls[0].tool != "list_repos" {
+				t.Errorf("expected exactly the resolved tool to reach the upstream, got %+v", caller.calls)
+			}
+		})
 	}
 }
 
@@ -845,5 +973,42 @@ func TestPermissionLevelTracking(t *testing.T) {
 	ec.updateMaxPermissionLevel("destructive")
 	if ec.GetMaxPermissionLevel() != "destructive" {
 		t.Errorf("expected destructive, got %s", ec.GetMaxPermissionLevel())
+	}
+}
+
+// TestExecuteNoAuthContext_UnresolvedTierStillRefuses: the identity gate
+// (PermissionTierUnresolved) is decided BEFORE the nil-AuthInfo early return
+// in checkDispatchGates, so a stdio / in-process execution with no AuthInfo
+// is held to the same Spec 105 FR-009 rule as every authenticated caller —
+// while, as before, no permission tier is checked or reported for it.
+func TestExecuteNoAuthContext_UnresolvedTierStillRefuses(t *testing.T) {
+	code := `
+		var ghost = call_tool("github", "ghost", {});
+		var real = call_tool("github", "list_repos", {});
+		({ ghostOk: ghost.ok, ghostCode: ghost.error ? ghost.error.code : null, realOk: real.ok })
+	`
+	lookup := func(_, toolName string) string {
+		if toolName == "ghost" {
+			return PermissionTierUnresolved
+		}
+		return "destructive"
+	}
+	caller := newMockToolCaller()
+	result := Execute(context.Background(), caller, code, ExecutionOptions{ToolAnnotationFunc: lookup})
+	if !result.Ok {
+		t.Fatalf("expected ok=true, got error: %v", result.Error)
+	}
+	resultMap := result.Value.(map[string]interface{})
+	if resultMap["ghostOk"] != false {
+		t.Errorf("expected the unresolved call to fail without an AuthInfo, got ok=%v", resultMap["ghostOk"])
+	}
+	if resultMap["ghostCode"] != string(ErrorCodePermissionDenied) {
+		t.Errorf("expected %s, got %v", ErrorCodePermissionDenied, resultMap["ghostCode"])
+	}
+	if resultMap["realOk"] != true {
+		t.Errorf("control: the resolved tool must dispatch with no AuthInfo regardless of tier, got ok=%v", resultMap["realOk"])
+	}
+	if len(caller.calls) != 1 || caller.calls[0].tool != "list_repos" {
+		t.Errorf("expected exactly the resolved tool to reach the upstream, got %+v", caller.calls)
 	}
 }

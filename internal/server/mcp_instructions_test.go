@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -35,4 +36,13 @@ func TestDefaultInstructions_ContainsKeyTerms(t *testing.T) {
 	// code_execution and direct (server__tool) modes (Spec 031).
 	assert.Contains(t, defaultInstructions, "code_execution")
 	assert.Contains(t, defaultInstructions, "server__tool")
+}
+
+// TestServer_DefaultInstructions_CarriesProjectLinks verifies discussion #948:
+// the protocol-level serverInfo instructions carry the homepage/repo/docs so an
+// agent (and anyone reading its logs) can find the project.
+func TestServer_DefaultInstructions_CarriesProjectLinks(t *testing.T) {
+	assert.Contains(t, defaultInstructions, branding.Homepage)
+	assert.Contains(t, defaultInstructions, branding.Repo)
+	assert.Contains(t, defaultInstructions, branding.Docs)
 }

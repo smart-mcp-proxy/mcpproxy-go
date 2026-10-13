@@ -1,3 +1,9 @@
+---
+title: "MCP Server Registries"
+sidebar_label: "Registries"
+description: "The built-in set of MCP server registries used by search_servers and list_registries."
+---
+
 # MCP Server Registries
 
 mcpproxy discovers MCP servers through a built-in set of registries. Discovery is
@@ -74,20 +80,51 @@ The ID is derived from the host when omitted; `--protocol` defaults to
 This requires a running daemon — the registry list is updated copy-on-write on the
 runtime config snapshot and persisted to `mcp_config.json`.
 
+**SSRF guard (CWE-918).** Because the daemon fetches a URL you supply, registry
+fetches are constrained so a malicious or typo'd source cannot turn the daemon
+into a request-forgery vector against internal services:
+
+- The URL must be `http`/`https` (add-source/edit require `https`).
+- A source whose host is a **literal IP in a non-routable range** — loopback
+  (`127.0.0.0/8`, `::1`), RFC1918 private (`10/8`, `172.16/12`, `192.168/16`),
+  IPv6 unique-local (`fc00::/7`), RFC6598 CGNAT (`100.64/10`), or link-local
+  including the cloud metadata endpoint `169.254.169.254` — is **rejected up
+  front** with `invalid_registry_url`.
+- Hostname sources are allowed at add time and re-checked before every fetch by
+  an **application-layer resolution check** (resolve the target host, reject if
+  any resolved IP is non-routable) *and* at **dial time** (validate the actual
+  IP before connect). The dial check alone is bypassable when an
+  `HTTP_PROXY`/`HTTPS_PROXY` is configured — the transport then dials the proxy,
+  not the target — so the application-layer check is what holds in the proxy
+  case; the dial check remains defense-in-depth for the direct path and DNS
+  rebinding. The official protocol's cursor-follow pagination is also pinned to
+  the configured host so a hostile `nextCursor` cannot redirect the request.
+
+The top-level `allow_private_registry_fetch` flag (default `false`) is a **blanket
+opt-out**: setting it `true` disables this guard for **every** non-routable range
+at once — loopback, RFC1918/CGNAT private, link-local **and** the
+`169.254.169.254` cloud-metadata endpoint. It cannot be scoped to loopback only,
+so enabling it for a localhost dev registry also re-opens the cloud-metadata SSRF
+vector; enable it only for trusted local/dev use, ideally on hosts with no
+cloud-metadata exposure. The change takes effect on daemon (re)start / config
+reload. See [Configuration](configuration/config-file.md).
+
 Equivalent surfaces:
 
 - **REST:** `POST /api/v1/registries` with `{ "url": "https://…", "protocol": "…", "id": "…", "name": "…" }`.
 - **CLI:** `mcpproxy registry add-source <https-url>`.
-- **Web UI:** the **Repositories** page has an **Add Registry** button (URL + optional
-  protocol/name) and a **Registries** section listing every configured source as a
+- **Web UI:** Settings → **Catalog Sources** has an **Add Registry** button (URL + optional
+  protocol/name) and lists every configured source as a
   card with a neutral **Official / Custom** badge (official cards also carry a
   **Built-in** tag). There is no warning gate — adding a custom source goes straight
   through. Custom cards expose a **kebab (⋮) menu** with **Edit** (reuses the
   add dialog, pre-filled, id read-only) and **Delete** (destructive confirmation);
-  official cards are read-only.
-- **macOS tray:** the **Registries** sidebar tab lists every configured registry
-  with its provenance/trust badge, offers an **Add Registry** affordance,
-  and shows a one-time third-party warning before the first custom add.
+  official cards are read-only. Server discovery itself lives in the catalog-first
+  **Add Server** page (`/add-server`, Catalog tab), not here.
+- **macOS tray:** Settings → **Catalog Sources** lists every configured registry
+  with its provenance/trust badge and offers an **Add Registry** affordance;
+  server discovery lives in the Add Server sheet's **Catalog** tab (aggregated
+  across every enabled source, same as the Web UI).
 
 Errors share a stable code across surfaces: `invalid_registry_url` (400),
 `registries_locked` (403), `registry_shadows_builtin` / `duplicate_registry` (409).
@@ -181,6 +218,11 @@ for GH #567 / #483):
 Because every add surface (MCP, REST, CLI) funnels through the same keystone, a
 packages-only server is added as stdio and a remotes-only server as http
 identically across all surfaces.
+
+## Catalog popularity signal
+
+Catalog ordering, GitHub stars, Docker pull counts, rate limits, and opt-out
+behavior are described in [Catalog popularity](features/catalog-popularity.md).
 
 ## Adding a discovered server
 

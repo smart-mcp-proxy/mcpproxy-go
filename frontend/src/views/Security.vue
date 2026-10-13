@@ -7,12 +7,16 @@
         <p class="text-base-content/70 mt-1">Configure security scanner plugins and review scan results</p>
       </div>
       <div class="flex gap-2">
-        <div
-          v-if="(overview?.scanners_enabled ?? overview?.scanners_installed ?? 0) > 0"
-          class="tooltip"
-          :data-tip="!overview?.docker_available ? 'Docker is required to run security scanners' : ''"
-        >
-          <button @click="startScanAll" :disabled="loading || scanAllRunning || !overview?.docker_available" class="btn btn-primary">
+        <!-- The offline baseline scanner is built in and always runs, so this
+             action is never gated on Docker or on an installed deep scanner
+             (mirrors the per-server Scan Now button, spec 088 FR-016). -->
+        <div class="tooltip" :data-tip="scanAllTooltip(overview?.docker_available)">
+          <button
+            @click="startScanAll"
+            :disabled="loading || scanAllRunning"
+            class="btn btn-primary"
+            data-test="scan-all-button"
+          >
             <span v-if="scanAllRunning" class="loading loading-spinner loading-sm"></span>
             {{ scanAllRunning ? 'Scanning...' : 'Scan All Servers' }}
           </button>
@@ -21,6 +25,49 @@
           <span v-if="loading" class="loading loading-spinner loading-sm"></span>
           {{ loading ? 'Refreshing...' : 'Refresh' }}
         </button>
+      </div>
+    </div>
+
+    <!-- Deep scan is the master switch for every Docker scanner below (Spec
+         077 US3). It is controllable HERE, not only in Settings: this page is
+         where an operator discovers that an "enabled" scanner never ran, so
+         this page is where the fix has to live. Settings keeps its copy of
+         the same toggle; both write the same deep-scan config field, so the
+         two controls can never disagree for more than one refresh. -->
+    <div class="card bg-base-100 shadow" data-test="deep-scan-card">
+      <div class="card-body py-4">
+        <div class="flex items-start justify-between gap-4 flex-wrap">
+          <div class="min-w-0">
+            <h3 class="font-semibold flex items-center gap-2">
+              Deep scan
+              <span class="badge badge-sm" :class="deepScanEnabled ? 'badge-success' : 'badge-ghost'" data-test="deep-scan-state">
+                {{ deepScanEnabled === null ? '…' : deepScanEnabled ? 'on' : 'off' }}
+              </span>
+            </h3>
+            <p class="text-sm text-base-content/70 mt-1" data-test="deep-scan-summary">
+              {{ deepScanSummary(deepScanEnabled, enabledScannerCount) }}
+            </p>
+            <p class="text-xs text-base-content/50 mt-1">
+              The offline baseline scan is always on and needs no setup. Deep-scan failures are
+              informational and never change the baseline verdict.
+              Also in <router-link to="/settings" class="link" data-test="deep-scan-settings-link">Settings → Security</router-link>.
+            </p>
+            <div v-if="deepScanEnabled && overview && overview.docker_available === false" class="alert alert-warning mt-2 py-2 text-sm" data-test="deep-scan-docker-warning">
+              Docker is not running — deep scanners cannot start until it is.
+            </div>
+          </div>
+          <label class="flex items-center gap-2 shrink-0 cursor-pointer">
+            <span v-if="deepScanBusy" class="loading loading-spinner loading-xs"></span>
+            <input
+              type="checkbox"
+              class="toggle toggle-primary"
+              data-test="deep-scan-toggle"
+              :checked="deepScanEnabled === true"
+              :disabled="deepScanBusy || deepScanEnabled === null"
+              @change="setDeepScan($event)"
+            />
+          </label>
+        </div>
       </div>
     </div>
 
@@ -76,35 +123,60 @@
       </div>
     </div>
 
-    <!-- Overview Stats -->
-    <div class="stats shadow bg-base-100 w-full">
-      <div class="stat">
-        <div class="stat-title">Scanners Installed</div>
-        <div class="stat-value">{{ overview.scanners_installed || 0 }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-title">Total Scans</div>
-        <div class="stat-value">{{ overview.total_scans || 0 }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-title">Active Scans</div>
-        <div class="stat-value" :class="overview.active_scans > 0 ? 'text-warning' : ''">{{ overview.active_scans || 0 }}</div>
-      </div>
-      <div class="stat">
-        <div class="stat-title">Findings</div>
-        <div class="stat-value" :class="totalFindings > 0 ? 'text-error' : 'text-success'">{{ totalFindings }}</div>
-        <div class="stat-desc" v-if="overview.findings_by_severity">
-          {{ overview.findings_by_severity.critical || 0 }} critical, {{ overview.findings_by_severity.high || 0 }} high
+    <!-- Overview Stats.
+         Until the first /security/overview lands, `overview` is {} and every
+         tile used to render a hard `0` — a security page stating "0 findings"
+         before it has looked is worse than one that admits it is still looking
+         (audit F15). Skeletons hold the layout instead. -->
+    <div class="stats shadow bg-base-100 w-full" data-test="security-overview-stats">
+      <template v-if="!overviewLoaded">
+        <div v-for="tile in PENDING_STAT_TILES" :key="tile" class="stat" data-test="overview-stat-skeleton">
+          <div class="stat-title">{{ tile }}</div>
+          <div class="stat-value">
+            <span class="skeleton inline-block h-8 w-12 align-middle" aria-hidden="true"></span>
+            <span class="sr-only">Loading</span>
+          </div>
+        </div>
+      </template>
+      <template v-else>
+        <div class="stat">
+          <div class="stat-title">Scanners Installed</div>
+          <div class="stat-value">{{ overview.scanners_installed || 0 }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-title">Total Scans</div>
+          <div class="stat-value">{{ overview.total_scans || 0 }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-title">Active Scans</div>
+          <div class="stat-value" :class="overview.active_scans > 0 ? 'text-warning' : ''">{{ overview.active_scans || 0 }}</div>
+        </div>
+        <div class="stat">
+          <div class="stat-title">Findings</div>
+          <div class="stat-value" :class="totalFindings > 0 ? 'text-error' : 'text-success'">{{ totalFindings }}</div>
+          <div class="stat-desc" v-if="overview.findings_by_severity">
+            {{ overview.findings_by_severity.critical || 0 }} critical, {{ overview.findings_by_severity.high || 0 }} high
+          </div>
+        </div>
+      </template>
+      <!-- Offline TPA signature corpus (spec 086 FR-019 / #938): which
+           signatures are live, where they came from, and how fresh they are. -->
+      <div v-if="signatureBundle" class="stat" data-test="signature-bundle-stat">
+        <div class="stat-title">{{ signatureBundle.title }}</div>
+        <div class="stat-value" :class="signatureBundle.tone">{{ signatureBundle.value }}</div>
+        <div class="stat-desc truncate" :class="signatureBundle.tone" :title="signatureBundle.tooltip">
+          {{ signatureBundle.detail }}
         </div>
       </div>
     </div>
 
-    <!-- Docker unavailable warning (only after overview has loaded) -->
-    <div v-if="overviewLoaded && overview.docker_available === false" class="alert alert-warning">
+    <!-- Docker unavailable warning (only after overview has loaded). Scanning
+         still works: only the optional deep scanners need Docker. -->
+    <div v-if="overviewLoaded && overview.docker_available === false" class="alert alert-warning" data-test="docker-unavailable-alert">
       <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
       </svg>
-      <span>Docker is not running. Security scanners require Docker to analyze MCP servers.</span>
+      <span>Docker is not running, so the optional deep scanners are skipped. The built-in offline baseline scan still runs.</span>
     </div>
 
     <!-- Docker isolation nudge: show only when Docker is available, global
@@ -217,7 +289,18 @@
                   </td>
                   <td>
                     <div class="flex flex-col gap-1">
-                      <span class="badge badge-sm gap-1" :class="statusBadgeClass(scanner.status)">
+                      <!-- The truth badge: an "enabled" scanner that the off
+                           deep-scan layer will never run must not read as a
+                           green "enabled" — that lie is what this page is for. -->
+                      <span
+                        v-if="scannerWontRun(scanner, deepScanEnabled)"
+                        class="badge badge-sm badge-warning badge-outline whitespace-nowrap tooltip tooltip-right"
+                        data-tip="Selected, but deep scan is off — this scanner will not run. Turn deep scan on above."
+                        data-test="wont-run-badge"
+                      >
+                        won’t run
+                      </span>
+                      <span v-else class="badge badge-sm gap-1" :class="statusBadgeClass(scanner.status)">
                         <span v-if="scanner.status === 'pulling'" class="loading loading-spinner loading-xs"></span>
                         {{ scannerDisplayStatus(scanner.status) }}
                       </span>
@@ -449,6 +532,8 @@ import api from '@/services/api'
 import { refreshSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { useSystemStore } from '@/stores/system'
 import { scanReportPath } from '@/utils/serverRoute'
+import { formatSignatureBundle } from '@/utils/signatureBundle'
+import { deepScanSummary, enabledDockerScanners, scanAllTooltip, scannerWontRun } from './security/deepScanState'
 
 const systemStore = useSystemStore()
 
@@ -474,7 +559,16 @@ const overview = ref<any>({})
 // this to avoid flashing a false warning while the initial request is still
 // in flight (overview.docker_available is undefined before the fetch lands).
 const overviewLoaded = ref(false)
+// Titles rendered above the loading skeletons, so the tiles keep their labels
+// (and their width) while the numbers are still unknown.
+const PENDING_STAT_TILES = ['Scanners Installed', 'Total Scans', 'Active Scans', 'Findings'] as const
 const installing = ref<string | null>(null)
+
+// Deep-scan master state. `null` until the config loads, so the truth badges
+// stay quiet instead of flickering an accusation on every page load.
+const deepScanEnabled = ref<boolean | null>(null)
+const deepScanBusy = ref(false)
+const enabledScannerCount = computed(() => enabledDockerScanners(scanners.value))
 
 // Scan history state
 const scanHistory = ref<any[]>([])
@@ -485,6 +579,12 @@ const historyTotal = ref(0)
 const historyPage = ref(1)
 const HISTORY_PAGE_SIZE = 20
 const historyTotalPages = computed(() => Math.max(1, Math.ceil(historyTotal.value / HISTORY_PAGE_SIZE)))
+
+// The sentinel the core substitutes for a literal scanner env value on every
+// API serialization path (scanner.RedactedEnvValue, #1166 round 10 P3). It is
+// truthy on purpose so "is this variable set?" still answers correctly here;
+// saveConfig must never send it back, or the mask would overwrite the secret.
+const REDACTED_ENV_VALUE = '***'
 
 // Scan All state
 const scanAllRunning = ref(false)
@@ -511,6 +611,11 @@ const customEnvValue = ref('')
 const configDockerImage = ref('')
 
 const totalFindings = computed(() => overview.value?.findings_by_severity?.total || 0)
+
+// Offline TPA signature corpus descriptor (spec 086 FR-019 / GH #938). Null on
+// an older daemon that does not report `signature_bundle`, so the stat is
+// simply absent rather than rendering a misleading zero.
+const signatureBundle = computed(() => formatSignatureBundle(overview.value?.signature_bundle))
 
 // Docker isolation state — populated from /api/v1/config + /api/v1/servers.
 const isolationEnabled = ref(false)
@@ -678,10 +783,14 @@ async function refresh() {
   loading.value = true
   error.value = ''
   try {
-    const [scannersRes, overviewRes] = await Promise.all([
+    const [scannersRes, overviewRes, configRes] = await Promise.all([
       api.listScanners(),
       api.getSecurityOverview(),
+      api.getConfig(),
     ])
+    if (configRes.success) {
+      deepScanEnabled.value = configRes.data?.config?.security?.deep_scan?.enabled === true
+    }
     if (scannersRes.success) {
       const list = (scannersRes.data || []) as any[]
       // Defensive sort: the backend already returns scanners alphabetically
@@ -699,6 +808,51 @@ async function refresh() {
   } finally {
     loading.value = false
     initialized.value = true
+  }
+}
+
+// Flip the deep-scan master layer. Hot-reloaded
+// by the core — the same key Settings writes, so the two controls can never
+// disagree for more than one refresh.
+async function setDeepScan(event: Event) {
+  const input = event.target as HTMLInputElement
+  const on = input.checked
+  deepScanBusy.value = true
+  try {
+    const res = await api.patchConfig({ security: { deep_scan: { enabled: on } } })
+    if (!res.success) {
+      throw new Error(res.error || 'config update rejected')
+    }
+    deepScanEnabled.value = on
+    systemStore.addToast({
+      type: 'success',
+      title: on ? 'Deep scan on' : 'Deep scan off',
+      message: on
+        ? 'Enabled scanners run with every scan.'
+        : 'Scans run only the offline baseline.',
+    })
+  } catch (e: any) {
+    // The browser flipped the checkbox before the PATCH failed, and Vue sees
+    // an unchanged :checked prop — snap the DOM back explicitly so the
+    // toggle, badge and summary cannot disagree.
+    input.checked = deepScanEnabled.value === true
+    systemStore.addToast({ type: 'error', title: 'Could not change deep scan', message: e.message })
+  } finally {
+    deepScanBusy.value = false
+  }
+}
+
+// A Settings tab (or another window) can flip the same config field; refresh
+// the card whenever this tab regains focus so the truth badges cannot go
+// stale for longer than a glance away.
+async function refreshDeepScanOnFocus() {
+  try {
+    const res = await api.getConfig()
+    if (res.success) {
+      deepScanEnabled.value = res.data?.config?.security?.deep_scan?.enabled === true
+    }
+  } catch {
+    // Non-fatal: the next full refresh will catch up.
   }
 }
 
@@ -775,10 +929,12 @@ function addCustomEnv() {
 
 async function saveConfig() {
   if (!configScanner.value) return
-  // Only send non-empty values that aren't keyring references (new values)
+  // Only send non-empty values that aren't keyring references or the core's
+  // redaction sentinel (new values). Sending the sentinel back would store
+  // '***' as the scanner's real API key.
   const toSend: Record<string, string> = {}
   for (const [k, v] of Object.entries(configValues.value)) {
-    if (v && !v.startsWith('${keyring:')) {
+    if (v && v !== REDACTED_ENV_VALUE && !v.startsWith('${keyring:')) {
       toSend[k] = v
     }
   }
@@ -936,9 +1092,12 @@ function handleScannerChanged(e: Event) {
 }
 
 onMounted(async () => {
-  await Promise.all([refresh(), loadHistory(), loadIsolationState()])
-  // Subscribe to live scanner updates.
+  // Listeners first, before any await: an unmount during startup runs the
+  // cleanup in onUnmounted immediately, and a listener added after that
+  // resumption would leak with nothing left to remove it.
   window.addEventListener('mcpproxy:scanner-changed', handleScannerChanged)
+  window.addEventListener('focus', refreshDeepScanOnFocus)
+  await Promise.all([refresh(), loadHistory(), loadIsolationState()])
   // Check if a batch scan is already running
   try {
     const res = await api.getQueueProgress()
@@ -956,5 +1115,6 @@ onUnmounted(() => {
   stopQueuePolling()
   if (scanAllElapsedTimer) { clearInterval(scanAllElapsedTimer); scanAllElapsedTimer = null }
   window.removeEventListener('mcpproxy:scanner-changed', handleScannerChanged)
+  window.removeEventListener('focus', refreshDeepScanOnFocus)
 })
 </script>

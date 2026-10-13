@@ -3,7 +3,10 @@
 package users
 
 import (
+	"context"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -175,6 +178,148 @@ func TestUserStore_ListUsers_Empty(t *testing.T) {
 	users, err := store.ListUsers()
 	require.NoError(t, err)
 	assert.Empty(t, users)
+}
+
+// --- SetUserDisabled --------------------------------------------------------
+
+func TestSetUserDisabled_TogglesFlag(t *testing.T) {
+	store := setupTestStore(t)
+	user := NewUser("erin@example.com", "Erin", "google", "g-sub-erin")
+	require.NoError(t, store.CreateUser(user))
+
+	got, armed, err := store.SetUserDisabled(user.ID, true)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.True(t, got.Disabled)
+	assert.False(t, armed, "disabling never arms the rebind window")
+
+	got, armed, err = store.SetUserDisabled(user.ID, false)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.False(t, got.Disabled)
+	assert.True(t, armed, "a real disabled→enabled transition arms the rebind window")
+	require.NotNil(t, got.SubjectRebindArmedAt)
+
+	// A no-op enable (already enabled) is not a transition: it neither
+	// re-arms nor closes an already-open window.
+	armedAt := *got.SubjectRebindArmedAt
+	got, armed, err = store.SetUserDisabled(user.ID, false)
+	require.NoError(t, err)
+	assert.False(t, armed)
+	require.NotNil(t, got.SubjectRebindArmedAt)
+	assert.True(t, got.SubjectRebindArmedAt.Equal(armedAt))
+}
+
+func TestSetUserDisabled_NotFound(t *testing.T) {
+	store := setupTestStore(t)
+	got, armed, err := store.SetUserDisabled("ghost-id", true)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+	assert.False(t, armed)
+}
+
+// TestSetUserDisabled_DoesNotLoseConcurrentLoginWrite is the regression test
+// for cross-review round 1, chunk 2 P1: SetUserDisabled used to be a blind
+// GetUser (View) + mutate + UpdateUser (Put) in the admin handlers, so a
+// concurrent UpdateUserLogin — writing Groups/Provider/ProviderSubjectID in
+// its own atomic transaction entirely between the admin's read and its write
+// — could be silently reverted by the admin's stale-snapshot overwrite.
+// SetUserDisabled now re-reads the record INSIDE its own db.Update, exactly
+// like UpdateUserLogin, so bbolt's single-writer serialization guarantees
+// neither transaction's write is ever lost, whichever commits second.
+func TestSetUserDisabled_DoesNotLoseConcurrentLoginWrite(t *testing.T) {
+	const iterations = 20
+
+	store := setupTestStore(t)
+	user := NewUser("frank@example.com", "Frank", "google", "sub-A")
+	user.Groups = []string{"old"}
+	require.NoError(t, store.CreateUser(user))
+
+	// SetUserDisabled(id, false) on an already-enabled user is a no-op write
+	// (Disabled was already false, so it never touches the rebind window
+	// either) — it can never fail and never changes what the login writes.
+	// This reproduces the original bug shape exactly (both disable AND
+	// enable used the same blind GetUser+UpdateUser pattern): a same-subject
+	// login updates Groups in its own transaction while a concurrent no-op
+	// admin write races it. With the old blind-write code, an admin write
+	// that read its stale snapshot before the login committed would put that
+	// snapshot back afterwards, silently reverting the login's Groups.
+	for i := 0; i < iterations; i++ {
+		var (
+			wg       sync.WaitGroup
+			barrier  = make(chan struct{})
+			loginErr error
+			noopErr  error
+		)
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-barrier
+			_, loginErr = store.UpdateUserLogin(context.Background(), LoginClaims{
+				Email:       "frank@example.com",
+				Provider:    "google",
+				Subject:     "sub-A",
+				Name:        "Frank",
+				Groups:      []string{fmt.Sprintf("new-%d", i)},
+				GroupsKnown: true,
+			})
+		}()
+		go func() {
+			defer wg.Done()
+			<-barrier
+			_, _, noopErr = store.SetUserDisabled(user.ID, false)
+		}()
+		close(barrier)
+		wg.Wait()
+
+		require.NoError(t, loginErr, "round %d", i)
+		require.NoError(t, noopErr, "round %d", i)
+
+		stored, err := store.GetUser(user.ID)
+		require.NoError(t, err)
+		require.NotNil(t, stored)
+		assert.False(t, stored.Disabled, "round %d", i)
+		assert.Equal(t, []string{fmt.Sprintf("new-%d", i)}, stored.Groups,
+			"round %d: the login's groups write must survive, never silently reverted by a concurrent no-op admin write", i)
+	}
+}
+
+// TestUpdateUserLogin_RefusalOutcomeCarriesTheRecord is a round-2
+// cross-review regression (PR-D): ErrUserDisabled/ErrSubjectMismatch used to
+// discard the LoginOutcome entirely (`return LoginOutcome{}, err`), forcing
+// the caller (oauth_handler.go) to re-look the user up by email in a SEPARATE
+// read after this transaction returned — a window a concurrent DeleteUser
+// could race, silently losing the auth_event line's required `user_id`. The
+// outcome must now carry the exact record the refusal was decided from, from
+// the same transaction, so no second read — and no race — is needed.
+func TestUpdateUserLogin_RefusalOutcomeCarriesTheRecord(t *testing.T) {
+	t.Run("ErrUserDisabled", func(t *testing.T) {
+		store := setupTestStore(t)
+		user := NewUser("disabled@example.com", "Disabled", "google", "sub-disabled")
+		require.NoError(t, store.CreateUser(user))
+		_, _, err := store.SetUserDisabled(user.ID, true)
+		require.NoError(t, err)
+
+		outcome, err := store.UpdateUserLogin(context.Background(), LoginClaims{
+			Email: "disabled@example.com", Provider: "google", Subject: "sub-disabled",
+		})
+		require.ErrorIs(t, err, ErrUserDisabled)
+		require.NotNil(t, outcome.User, "the refused-against record must be returned alongside the error")
+		assert.Equal(t, user.ID, outcome.User.ID)
+	})
+
+	t.Run("ErrSubjectMismatch", func(t *testing.T) {
+		store := setupTestStore(t)
+		user := NewUser("mismatch@example.com", "Mismatch", "google", "sub-original")
+		require.NoError(t, store.CreateUser(user))
+
+		outcome, err := store.UpdateUserLogin(context.Background(), LoginClaims{
+			Email: "mismatch@example.com", Provider: "google", Subject: "sub-DIFFERENT",
+		})
+		require.ErrorIs(t, err, ErrSubjectMismatch)
+		require.NotNil(t, outcome.User, "the refused-against record must be returned alongside the error")
+		assert.Equal(t, user.ID, outcome.User.ID)
+	})
 }
 
 func TestUserStore_DeleteUser_RemovesEmailIndex(t *testing.T) {

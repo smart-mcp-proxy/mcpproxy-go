@@ -18,6 +18,7 @@ of a `*_v1.*` file** (CN-002, FR-012).
 | `retrieval_golden_v1.json` | 47 graded queries → tool(s), relevance 0\|1\|2, ≥8 hard-negatives (FR-001); R-C (queries never name the tool) | no (dataset) | yes |
 | `baseline_v1.json` | Reference Recall@k/MRR/nDCG@10/MAP + Recall@5 tolerance — the CI regression anchor (FR-009). `security` section filled by D2 (CN-004) | no (dataset) | yes |
 | `security_corpus_v1.json` | D2 labeled security regression corpus (per-detector P/R/F1/FPR) | no (dataset) | yes |
+| `detect_corpus_v1.json` | Spec-076 labeled corpus for the offline `detect.Engine` gate (per-category recall/FP; carries server/tool/peer fields the engine needs) | no (dataset) | yes |
 | score reports (`report.json` / `.html`) | Per-run output | no | **no** (CN-003 — stay local) |
 
 ---
@@ -49,6 +50,61 @@ PYTHONPATH=src uv run python -m mcp_eval.cli retrieval \
   --baseline .../baseline_v1.json --tolerance 0.05 \
   --base-url http://127.0.0.1:8092 --api-key eval-corpus-snapshot
 ```
+
+### Upstream version pinning (why the config is fully pinned)
+
+Every server in `snapshot-servers.config.json` pins an **exact** upstream version,
+and each `uvx` server additionally pins the MCP Python SDK via
+`--with mcp==<version>`. This is load-bearing, not cosmetic: the corpus, golden
+set and baseline are frozen, so a floating upstream silently redefines the
+universe the gate scores against, and the gate flakes whenever anyone publishes.
+
+That is exactly how it broke on 2026-07-28: the `mcp` SDK cut **2.0.0**, which
+renamed `McpError` → `MCPError` and removed the low-level `Server.list_tools` /
+`Server.list_resources` decorators. All four `uvx` servers (`fetch`, `git`,
+`time`, `sqlite`) declare only a lower bound (`mcp>=1.x`), so they resolved 2.0.0
+and crashed on import. Only the three `npx` servers connected — 24 tools instead
+of 45 — and D1 failed the catalog-readiness check.
+
+The pins are the **freeze-era versions** — the releases that were current when the
+corpus was frozen (2026-05-31) — not "latest at pin time". Pinning a later version
+reproduces a *different* universe: e.g. `server-filesystem@2026.7.10` drops
+`read_file` (44-tool catalog) and `server-sequential-thinking@2026.7.4` renames
+`sequentialthinking` → `sequential_thinking`, so two golden queries can never
+score and the gate passes only on threshold slack.
+
+Current pins reproduce the frozen 45-tool corpus exactly (verified tool-for-tool
+against a live `GET /api/v1/tools` snapshot):
+
+| Server | Pin |
+|--------|-----|
+| filesystem | `@modelcontextprotocol/server-filesystem@2026.1.14` |
+| memory | `@modelcontextprotocol/server-memory@2026.1.26` |
+| sequential-thinking | `@modelcontextprotocol/server-sequential-thinking@2025.12.18` |
+| git | `mcp-server-git==2026.1.14` + `mcp==1.27.2` |
+| fetch | `mcp-server-fetch==2025.4.7` + `mcp==1.27.2` |
+| time | `mcp-server-time==2026.1.26` + `mcp==1.27.2` |
+| sqlite | `mcp-server-sqlite==2025.4.25` + `mcp==1.27.2` |
+
+**What the pins do and do not freeze.** Published package versions are immutable,
+and a server's tool list is defined by the server package's own code — so the
+corpus itself cannot drift under these pins. What still floats are *transitive*
+dependencies resolved at install time (notably the npm servers' `@modelcontextprotocol/sdk`
+semver ranges; there is no lockfile in an `npx`/`uvx` invocation). A breaking
+transitive publish therefore cannot silently alter the corpus, but it can crash a
+server at startup — and either way the gate fails **loudly**: `eval.yml` waits for
+the full 45-tool catalog and then requires the live canonical ID set to match
+`corpus_v1.tools.json` exactly before scoring, so a crash, a rename, a dropped
+tool, or an extra tool all fail the job rather than silently skewing recall. Full
+hermeticity would need a lockfile-based install or prebuilt images; not worth it
+until this actually bites.
+
+**When bumping a pin**, treat it as a corpus change: re-run the snapshot, diff the
+tool set, and if it moved, cut `corpus_v2` rather than editing `corpus_v1`.
+
+> Note: `mcpproxy serve --config <this file>` **rewrites the file in place**
+> (normalised key order + defaults). Copy it to a scratch path before booting a
+> core against it locally, or `git checkout` it afterwards.
 
 The golden set was seeded by intent and **hand-curated** for graded relevance and
 cross-server hard-negatives (e.g. `filesystem:search_files` vs `memory:search_nodes`;
@@ -107,6 +163,52 @@ text from them is vendored into this repo:
 - **`mcp-injection-experiments`** — LICENSE unconfirmed (research.md R-A); where it
   inspired a pattern, the corresponding entry was rewritten from scratch and
   labeled `self-authored`. The corpus test rejects any entry sourced from these.
+
+### `detect_corpus_v1.json` (Spec 076 — offline detect-engine gate)
+
+A second labeled corpus, distinct from `security_corpus_v1.json`, built for the
+Spec-076 offline `internal/security/detect` engine. Where the D2 corpus is
+description-only (it feeds the `sensitive-data` detector), this corpus carries
+the full `ToolView` fields the structural checks need — `server`, `tool.{name,
+description,input_schema}`, and cross-server `peers` so the `shadowing` check can
+fire deterministically. Validated by `detect_corpus_test.go` in this directory
+and scored by `cmd/scan-eval --gate`.
+
+**Composition (32 entries):**
+
+| Label | Category | Count | Mapped check | Gated today? |
+|-------|----------|-------|--------------|--------------|
+| malicious | `unicode_smuggling` | 6 | `unicode.hidden` | yes (US1) |
+| malicious | `decoded_payload` | 6 | `payload.decoded` | yes (US1) |
+| malicious | `shadowing` | 4 | `shadowing.cross_server` | yes (US1) |
+| malicious | `capability_mismatch` | 2 | `capability.mismatch` | **no** — US2 check; reported, not enforced |
+| benign | `hard_negative` (attack-resembling) | 9 | — | — |
+| benign | `benign` (clean base rate) | 5 | — | — |
+
+A category is only **gated** (counted toward the recall floor) when its check is
+registered in the engine. `capability_mismatch` samples are present so the gate
+begins enforcing them automatically the moment the US2 `capability.mismatch`
+check is registered — no corpus change required. Hard-negative ids are
+`hn_<category>_…` so a false positive maps back to the attack it mimics.
+
+Every entry is `self-authored` (redistributable), so the same license guard in
+`detect_corpus_test.go` keeps this corpus clean of restricted sources.
+
+**Run the gate locally (pure Go, offline, no mcp-eval needed):**
+
+```bash
+go run ./cmd/scan-eval \
+  --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json \
+  --gate --min-recall 0.90 --max-fp 0.05
+```
+
+It prints per-category recall/precision/FP/F1 JSON and exits non-zero on a
+breach. The gated `fp_rate` is measured over the **hard-negative set only** (Spec
+076 SC-002) — clean-benign entries are reported (`benign_total` /
+`benign_false_positives`) for transparency but never dilute the gate, so growing
+the benign corpus can't mask a hard-negative regression. CI runs exactly this as
+a **blocking** step in the `security-d2` job of `.github/workflows/eval.yml`
+(Spec 076 FR-013, SC-006).
 
 ## CI regression gate (Spec 065 / C1)
 

@@ -132,3 +132,99 @@ func TestClient_TriggerOAuthLogin_NotConfigured(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "does not have OAuth configured")
 }
+
+func TestClient_TriggerOAuthLoginWithResult_DecodesBrowserStatus(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/api/v1/servers/oauth-server/login", r.URL.Path)
+		assert.Equal(t, "POST", r.Method)
+
+		// Mirrors handleServerLogin: contracts.OAuthStartResponse wrapped in the success envelope.
+		response := map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"success":        true,
+				"server_name":    "oauth-server",
+				"correlation_id": "corr-123",
+				"auth_url":       "https://auth.example.com/authorize?state=abc",
+				"browser_opened": false,
+				"browser_error":  "HEADLESS mode - browser not opened. Please open the auth_url manually.",
+				"message":        "Could not open browser automatically. Please open this URL manually: https://auth.example.com/authorize?state=abc",
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, zap.NewNop().Sugar())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := client.TriggerOAuthLoginWithResult(ctx, "oauth-server")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "oauth-server", result.ServerName)
+	assert.Equal(t, "corr-123", result.CorrelationID)
+	assert.Equal(t, "https://auth.example.com/authorize?state=abc", result.AuthURL)
+	assert.False(t, result.BrowserOpened)
+	assert.Equal(t, "HEADLESS mode - browser not opened. Please open the auth_url manually.", result.BrowserError)
+	assert.Contains(t, result.Message, "Please open this URL manually")
+}
+
+func TestClient_TriggerOAuthLoginWithResult_BrowserOpened(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		response := map[string]interface{}{
+			"success": true,
+			"data": map[string]interface{}{
+				"success":        true,
+				"server_name":    "oauth-server",
+				"auth_url":       "https://auth.example.com/authorize?state=abc",
+				"browser_opened": true,
+				"message":        "OAuth authentication started",
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, zap.NewNop().Sugar())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := client.TriggerOAuthLoginWithResult(ctx, "oauth-server")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.BrowserOpened)
+	assert.Equal(t, "https://auth.example.com/authorize?state=abc", result.AuthURL)
+	assert.Empty(t, result.BrowserError)
+}
+
+func TestClient_TriggerOAuthLoginWithResult_APIError(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		response := map[string]interface{}{
+			"success":    false,
+			"error":      "Server does not have OAuth configured",
+			"request_id": "req-42",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer ts.Close()
+
+	client := NewClient(ts.URL, zap.NewNop().Sugar())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	result, err := client.TriggerOAuthLoginWithResult(ctx, "oauth-server")
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "does not have OAuth configured")
+}

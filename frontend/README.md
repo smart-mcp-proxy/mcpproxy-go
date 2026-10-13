@@ -19,7 +19,6 @@ frontend/
 ├── public/                 # Static assets
 ├── src/
 │   ├── components/        # Reusable Vue components
-│   │   ├── NavBar.vue    # Navigation bar
 │   │   ├── ServerCard.vue # Server status card
 │   │   └── ToastContainer.vue # Toast notifications
 │   ├── services/         # API service layer
@@ -128,11 +127,10 @@ Global notification system:
 - **Info notifications**: Blue with info icon
 - **Auto-dismiss**: Configurable timeout
 
-### NavBar
-Application navigation:
+### SidebarNav
+Application navigation (Home, Connect, Protect, Monitor groups):
 - **Active route highlighting**
 - **Responsive mobile menu**
-- **Tool search integration**
 
 ## 🗄️ State Management
 

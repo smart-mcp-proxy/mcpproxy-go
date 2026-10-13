@@ -1,0 +1,67 @@
+//go:build server
+
+package config
+
+import (
+	"fmt"
+	"net"
+	"strconv"
+	"strings"
+)
+
+// serverEditionDoctorFindings are the server-only doctor findings of Spec 107:
+// an overridden require_mcp_auth (FR-029), an unset public_url on a
+// non-loopback listener (FR-025) and an explicit session_cookie_secure: false
+// (FR-026), and every `access` entry that names no configured server (FR-007
+// "warn, never fail" — read off the LIVE config, so a hot-reloaded map is
+// re-checked on the next `doctor` run).
+func serverEditionDoctorFindings(cfg *Config) []string {
+	if !ServerEditionEnabled(cfg) {
+		return nil
+	}
+	var out []string
+	if RequireMCPAuthOverridden(cfg) {
+		out = append(out, MsgRequireMCPAuthOverridden)
+	}
+	if cfg.ServerEdition.PublicURL == "" && !ListenIsLoopback(cfg.Listen) {
+		out = append(out, fmt.Sprintf("server_edition.public_url is unset while listening on %s: set it (or MCPPROXY_PUBLIC_URL) to the origin users reach so the OAuth callback URL and Secure cookie decision do not depend on Host or X-Forwarded-* headers", cfg.Listen))
+	}
+	if cfg.ServerEdition.SessionCookieSecure == SessionCookieSecureFalse {
+		out = append(out, "server_edition.session_cookie_secure is explicitly false: the session cookie is sent over plain http; only a loopback or test deployment should run this way")
+	}
+	if unknown := cfg.ServerEdition.Access.UnknownAccessServerNames(cfg.Servers); len(unknown) > 0 {
+		out = append(out, AccessUnknownServerNamesFinding(unknown))
+	}
+	return out
+}
+
+// AccessUnknownServerNamesFinding renders the boot warning / doctor finding
+// for access-map entries that match no configured server. One line, every
+// name quoted, so the operator can find the typo; a name is never an error
+// (the server may be added later).
+func AccessUnknownServerNamesFinding(unknown []string) string {
+	quoted := make([]string, 0, len(unknown))
+	for _, n := range unknown {
+		quoted = append(quoted, strconv.Quote(n))
+	}
+	return fmt.Sprintf("server_edition.access names %d server(s) that match no configured server (%s): those entries grant nothing until a server with that exact name exists", len(unknown), strings.Join(quoted, ", "))
+}
+
+// ListenIsLoopback reports whether a listen address binds a loopback
+// interface only. An empty or port-only address (":8080") and the unspecified
+// addresses (0.0.0.0, [::]) are non-loopback; an unparsable host is treated
+// as non-loopback so the warning errs on the side of being shown.
+func ListenIsLoopback(listen string) bool {
+	host, _, err := net.SplitHostPort(listen)
+	if err != nil {
+		host = listen
+	}
+	if host == "" {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}

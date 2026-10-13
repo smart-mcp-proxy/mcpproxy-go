@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -198,19 +199,86 @@ func Resolve(roots []string, requested string, overwrite bool) (Target, error) {
 
 	cleaned := filepath.Clean(requested)
 
+	// UNC / device / NT-namespace paths (\\host\share\..., \\.\pipe\...,
+	// \\?\..., \??\UNC\host\share\...: any volume but a drive letter) are
+	// refused BEFORE any filesystem call unless a configured root lives on
+	// the same volume: merely Lstat-ing \\attacker\share from the
+	// ancestor-resolution walk below makes Windows open an SMB session and
+	// leak the user's NTLM credentials. filepath.VolumeName is "" on Unix,
+	// so this is a no-op there.
+	if !volumeAllowed(cleaned, roots) {
+		return Target{}, ErrOutsideRoots
+	}
+
 	resolvedTarget, err := resolveTargetPath(cleaned)
 	if err != nil {
 		return Target{}, ErrInvalidPath
 	}
 
+	resolvedRoots := make([]string, len(roots))
+	for i, root := range roots {
+		resolvedRoots[i] = resolveRootPath(root)
+	}
+	// Overlapping roots fail closed. With "/data/out" and "/data/out/sub"
+	// configured, anything able to write inside the outer root can plant a
+	// symlink at the inner root's (possibly not-yet-created) path; the inner
+	// root then RESOLVES to wherever that symlink points and every target
+	// under it would match. Both the literal (configured) and the resolved
+	// forms are compared: the planted symlink makes the resolved roots look
+	// disjoint, while two literally disjoint roots can resolve into each
+	// other. Config validation rejects literal overlap up front as well.
+	// Each root is compared in three forms: literal, fully resolved, and
+	// with only its parent resolved (its final component kept literal). The
+	// parent-resolved form catches aliasing through a symlinked ancestor
+	// ("/d/out" vs "/d/alias/sub" with /d/alias -> /d/out) even when a
+	// symlink planted at the inner path makes the fully resolved forms look
+	// disjoint.
+	rootForms := make([][]string, len(roots))
+	for i, root := range roots {
+		cleanedRoot := filepath.Clean(root)
+		forms := []string{cleanedRoot, resolvedRoots[i]}
+		if parentResolved, perr := resolveDeepestExistingAncestor(cleanedRoot, true); perr == nil {
+			forms = append(forms, parentResolved)
+		}
+		rootForms[i] = forms
+	}
+	for i := range rootForms {
+		for j := i + 1; j < len(rootForms); j++ {
+			if anyPathsOverlap(rootForms[i], rootForms[j]) {
+				return Target{}, fmt.Errorf("%w: configured roots %q and %q overlap", ErrRootUnavailable, roots[i], roots[j])
+			}
+		}
+	}
+	// Close the aliasing class at any depth: the physical trail of each
+	// root's path (every component and every symlink hop, see
+	// physicalPathTrail) must never pass through another root. Otherwise
+	// the two roots alias each other — e.g. "/d/out" and "/d/alias/x/sub"
+	// with /d/alias -> /d/out — and a symlink planted inside the first root
+	// would redirect the second outside every root.
+	for i, root := range roots {
+		for _, prefix := range physicalPathTrail(filepath.Clean(root)) {
+			for j := range rootForms {
+				if j == i {
+					continue
+				}
+				for _, form := range rootForms[j] {
+					if pathWithin(prefix, form) {
+						return Target{}, fmt.Errorf("%w: configured roots %q and %q overlap", ErrRootUnavailable, roots[i], roots[j])
+					}
+				}
+			}
+		}
+	}
+
 	matchedRoot := ""
-	for _, root := range roots {
-		resolvedRoot := resolveRootPath(root)
+	matchedConfigured := ""
+	for i, resolvedRoot := range resolvedRoots {
 		if resolvedTarget == resolvedRoot {
 			return Target{}, fmt.Errorf("%w: target must be a file inside a root, not the root itself", ErrInvalidPath)
 		}
 		if matchedRoot == "" && strings.HasPrefix(resolvedTarget, resolvedRoot+string(os.PathSeparator)) {
 			matchedRoot = resolvedRoot
+			matchedConfigured = roots[i]
 		}
 	}
 	if matchedRoot == "" {
@@ -223,6 +291,15 @@ func Resolve(roots []string, requested string, overwrite bool) (Target, error) {
 	// matchedRoot, before opening it.
 	if err := os.MkdirAll(matchedRoot, 0o700); err != nil {
 		return Target{}, fmt.Errorf("%w: %v", ErrRootUnavailable, err)
+	}
+	// Now that every component exists: the configured root must still
+	// resolve to the directory that was matched (a symlink planted at a
+	// not-yet-created root between resolution and MkdirAll would otherwise
+	// go unnoticed), and on Unix the path to it must not be redirected by a
+	// symlink some other user owns, and the root directory itself must be
+	// ours and not world-writable (see checkRootOwnership).
+	if again := resolveRootPath(matchedConfigured); again != matchedRoot {
+		return Target{}, fmt.Errorf("%w: root %q changed while it was being created", ErrRootUnavailable, matchedConfigured)
 	}
 
 	// Open the root HERE, immediately after it is matched/created, and carry
@@ -250,6 +327,17 @@ func Resolve(roots []string, requested string, overwrite bool) (Target, error) {
 		// (e.g. it is now a symlink, or a different directory) — see the
 		// "Security" note above: this is exactly the identity check that
 		// catches a root swapped-for-a-symlink between resolution and open.
+		_ = handle.Close()
+		return Target{}, ErrRootUnavailable
+	}
+	// Ownership/symlink-owner checks run AFTER the handle is open, and the
+	// configured path must still name the opened directory afterwards, so a
+	// parent swapped for a symlink between the walk and OpenRoot is caught.
+	if err := checkRootOwnership(matchedConfigured, matchedRoot); err != nil {
+		_ = handle.Close()
+		return Target{}, fmt.Errorf("%w: %v", ErrRootUnavailable, err)
+	}
+	if cfgInfo, statErr := os.Stat(matchedConfigured); statErr != nil || !os.SameFile(openedInfo, cfgInfo) {
 		_ = handle.Close()
 		return Target{}, ErrRootUnavailable
 	}
@@ -489,4 +577,134 @@ func randomTempName(dir string) (string, error) {
 		return name, nil
 	}
 	return filepath.Join(dir, name), nil
+}
+
+// pathsOverlap reports whether two cleaned absolute paths are equal or one
+// is a separator-bounded descendant of the other (case-insensitive on
+// Windows and macOS).
+func pathsOverlap(a, b string) bool {
+	// Fold case where the default filesystem is case-insensitive (Windows,
+	// macOS): "/x/out" and "/x/OUT/sub" name nested directories there.
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		a, b = strings.ToLower(a), strings.ToLower(b)
+	}
+	if a == b {
+		return true
+	}
+	sep := string(os.PathSeparator)
+	return strings.HasPrefix(a, strings.TrimSuffix(b, sep)+sep) || strings.HasPrefix(b, strings.TrimSuffix(a, sep)+sep)
+}
+
+// volumeAllowed reports whether a cleaned requested path may be touched on
+// the filesystem at all. Paths whose volume is not a plain drive letter
+// (UNC, device, NT-namespace) are allowed only when some configured root has the same
+// volume name; every other path (including all Unix paths, whose volume
+// name is always "") is allowed and left to the root match.
+func volumeAllowed(cleaned string, roots []string) bool {
+	vol := filepath.VolumeName(cleaned)
+	if !isUNCOrDeviceVolume(vol) {
+		return true
+	}
+	for _, root := range roots {
+		if strings.EqualFold(filepath.VolumeName(filepath.Clean(root)), vol) {
+			return true
+		}
+	}
+	return false
+}
+
+// pathWithin reports whether p equals base or is a separator-bounded
+// descendant of it (case-insensitive on Windows and macOS).
+func pathWithin(p, base string) bool {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		p, base = strings.ToLower(p), strings.ToLower(base)
+	}
+	if p == base {
+		return true
+	}
+	sep := string(os.PathSeparator)
+	return strings.HasPrefix(p, strings.TrimSuffix(base, sep)+sep)
+}
+
+// physicalPathTrail walks the cleaned absolute path one component at a time,
+// following symlinks manually (relative and absolute targets, ".." against
+// the physical parent), and returns every physical location it visits: each
+// existing component's own path (including every symlink's location) and
+// every hop of every symlink target. It stops at the first component that
+// does not exist. A one-shot EvalSymlinks would hide intermediate hops — e.g.
+// an admin link /d/l -> /d/out/x through a planted /d/out/x -> /d/escape
+// resolves straight to /d/escape and never "touches" root /d/out.
+func physicalPathTrail(cleaned string) []string {
+	sep := string(os.PathSeparator)
+	vol := filepath.VolumeName(cleaned)
+	cur := vol + sep
+	pending := strings.Split(strings.TrimPrefix(cleaned[len(vol):], sep), sep)
+	var trail []string
+	hops := 0
+	for len(pending) > 0 {
+		part := pending[0]
+		pending = pending[1:]
+		switch part {
+		case "", ".":
+			continue
+		case "..":
+			cur = filepath.Dir(cur)
+			continue
+		}
+		next := filepath.Join(cur, part)
+		fi, err := os.Lstat(next)
+		if err != nil {
+			break
+		}
+		trail = append(trail, next)
+		if fi.Mode()&os.ModeSymlink == 0 {
+			cur = next
+			continue
+		}
+		hops++
+		if hops > 40 {
+			break
+		}
+		target, err := os.Readlink(next)
+		if err != nil {
+			break
+		}
+		if filepath.IsAbs(target) {
+			tvol := filepath.VolumeName(target)
+			cur = tvol + sep
+			target = target[len(tvol):]
+		} else if tvol := filepath.VolumeName(target); tvol != "" {
+			// Drive-relative target ("C:foo") on Windows: treat as rooted
+			// on that volume; it only widens what is checked.
+			cur = tvol + sep
+			target = target[len(tvol):]
+		}
+		pending = append(strings.Split(target, sep), pending...)
+	}
+	return trail
+}
+
+func anyPathsOverlap(as, bs []string) bool {
+	for _, a := range as {
+		for _, b := range bs {
+			if pathsOverlap(a, b) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isUNCOrDeviceVolume reports whether vol is anything other than empty (Unix)
+// or a plain drive letter ("C:"). That covers \\host\share, \\.\pipe,
+// \\?\..., and NT-namespace forms such as \??\UNC\host\share, all of which
+// can make Windows open a network or device path.
+func isUNCOrDeviceVolume(vol string) bool {
+	if vol == "" {
+		return false
+	}
+	if len(vol) == 2 && vol[1] == ':' {
+		return false
+	}
+	return true
 }

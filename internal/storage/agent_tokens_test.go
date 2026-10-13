@@ -162,16 +162,85 @@ func TestAgentTokenRevoke_NotFound(t *testing.T) {
 	assert.Contains(t, err.Error(), "not found")
 }
 
+func TestAgentTokenDelete(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	token, rawToken := makeTestToken("delete-me")
+	err := mgr.CreateAgentToken(token, rawToken, testHMACKey)
+	require.NoError(t, err)
+
+	// Delete permanently.
+	err = mgr.DeleteAgentToken("delete-me")
+	require.NoError(t, err)
+
+	// Record is gone (both by name and by hash).
+	retrieved, err := mgr.GetAgentTokenByName("delete-me")
+	require.NoError(t, err)
+	assert.Nil(t, retrieved, "deleted token should not be retrievable by name")
+
+	hash := auth.HashToken(rawToken, testHMACKey)
+	byHash, err := mgr.GetAgentTokenByHash(hash)
+	require.NoError(t, err)
+	assert.Nil(t, byHash, "deleted token should not be retrievable by hash")
+
+	// Not listed anymore.
+	tokens, err := mgr.ListAgentTokens()
+	require.NoError(t, err)
+	assert.Empty(t, tokens)
+}
+
+func TestAgentTokenDelete_NotFound(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	err := mgr.DeleteAgentToken("nonexistent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not found")
+}
+
+// TestAgentTokenDelete_FreesNameForReuse is the crux of issue #820: after a
+// token is revoked and deleted, its name must be available for a new token.
+func TestAgentTokenDelete_FreesNameForReuse(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	token1, rawToken1 := makeTestToken("reusable")
+	err := mgr.CreateAgentToken(token1, rawToken1, testHMACKey)
+	require.NoError(t, err)
+
+	// Revoke — name is still reserved (revoke is a soft delete).
+	err = mgr.RevokeAgentToken("reusable")
+	require.NoError(t, err)
+
+	// Creating with the same name still fails while the revoked record exists.
+	token2, rawToken2 := makeTestToken("reusable")
+	err = mgr.CreateAgentToken(token2, rawToken2, testHMACKey)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already exists")
+
+	// Delete the revoked token — this frees the name.
+	err = mgr.DeleteAgentToken("reusable")
+	require.NoError(t, err)
+
+	// Now the same name can be reused.
+	token3, rawToken3 := makeTestToken("reusable")
+	err = mgr.CreateAgentToken(token3, rawToken3, testHMACKey)
+	require.NoError(t, err)
+
+	retrieved, err := mgr.GetAgentTokenByName("reusable")
+	require.NoError(t, err)
+	require.NotNil(t, retrieved)
+	assert.False(t, retrieved.Revoked, "reused name should map to the fresh, non-revoked token")
+	assert.Equal(t, auth.TokenPrefix(rawToken3), retrieved.TokenPrefix)
+}
+
 func TestAgentTokenRegenerate(t *testing.T) {
 	mgr, cleanup := setupTestStorageForAgentTokens(t)
 	defer cleanup()
 
 	token, rawToken := makeTestToken("regen-bot")
 	err := mgr.CreateAgentToken(token, rawToken, testHMACKey)
-	require.NoError(t, err)
-
-	// Revoke the original (to verify regeneration clears revoked status)
-	err = mgr.RevokeAgentToken("regen-bot")
 	require.NoError(t, err)
 
 	// Generate new token
@@ -186,7 +255,7 @@ func TestAgentTokenRegenerate(t *testing.T) {
 	assert.Equal(t, "regen-bot", updated.Name)
 	assert.Equal(t, []string{"github", "gitlab"}, updated.AllowedServers)
 	assert.Equal(t, []string{auth.PermRead, auth.PermWrite}, updated.Permissions)
-	assert.False(t, updated.Revoked, "regeneration should clear revoked status")
+	assert.False(t, updated.Revoked, "a live token stays live across rotation")
 
 	// Verify new hash
 	newHash := auth.HashToken(newRawToken, testHMACKey)

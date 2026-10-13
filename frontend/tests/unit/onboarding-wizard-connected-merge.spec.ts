@@ -99,7 +99,7 @@ describe('OnboardingWizard connected_client_ids merge', () => {
     expect(codexRow.text()).toContain('Connected')
     expect(wrapper.find('[data-test="connect-codex"]').exists()).toBe(false)
 
-    // cursor genuinely not connected -> Connect button still offered.
+    // cursor genuinely not connected -> Review & connect button still offered.
     const cursorRow = wrapper.find('[data-test="client-row-cursor"]')
     expect(cursorRow.exists()).toBe(true)
     expect(wrapper.find('[data-test="connect-cursor"]').exists()).toBe(true)

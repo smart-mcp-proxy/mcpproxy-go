@@ -46,7 +46,7 @@ OAuth authentication is used when connecting to MCP servers that require authori
 |--------|------|-------------|
 | `client_id` | string | OAuth client identifier (uses Dynamic Client Registration if empty) |
 | `client_secret` | string | OAuth client secret (optional, can reference secure storage) |
-| `redirect_uri` | string | OAuth redirect URI (auto-generated if not provided) |
+| `redirect_uri` | string | Pins the loopback callback URL. Must be `http`, a loopback host and an explicit port (e.g. `http://127.0.0.1:54108/oauth/callback`); the path can be anything the provider requires — a pin with no path at all binds `/`, not `/oauth/callback` (that remains the default only when `redirect_uri` is omitted entirely). Register the identical URL with the provider. Omit it to let mcpproxy allocate a port and persist it. See [Pinning the callback port](../configuration/upstream-servers.md#pinning-the-callback-port-with-redirect_uri). |
 | `scopes` | array | Requested OAuth scopes |
 | `pkce_enabled` | boolean | PKCE is always enabled for security; this flag is currently ignored |
 | `extra_params` | object | Additional authorization parameters (e.g., RFC 8707 resource) |
@@ -82,6 +82,38 @@ For OAuth providers that require additional parameters (like RFC 8707 resource i
 5. Exchanges code for access token
 6. Stores tokens securely in system keyring
 
+#### Reused client registrations
+
+When a server has no static `oauth.client_id`, MCPProxy registers a client with
+Dynamic Client Registration on the first sign-in and reuses that `client_id`
+on later sign-ins. Some providers delete these registrations after a while
+(Cloudflare's MCP servers do). The provider then answers the authorization URL
+with HTTP 400 `{"error":"invalid_request","error_description":"Invalid client_id"}`
+and never redirects back to MCPProxy.
+
+Before handing out an authorization URL that uses a **reused** registration,
+MCPProxy sends one request to that URL (no redirects followed, 5 s timeout). If
+the response says the client is unknown (`invalid_client`, or
+`invalid_request` with a description such as "Invalid client_id" or "Client
+not found"), MCPProxy:
+
+1. clears the stored registration, but only if it still holds that same
+   `client_id` (if another sign-in has already replaced it, this sign-in stops
+   and asks you to sign in again rather than registering yet another client);
+2. registers a new client once and stores it, unless another sign-in stored
+   one in the meantime (then this sign-in stops and asks you to sign in
+   again). A rejected registration that had a `client_secret` is removed and
+   you are asked to sign in again, so the new client is registered without
+   the old secret;
+3. builds the authorization URL again with the new `client_id`.
+
+If the provider also rejects the new client, sign-in stops with an error
+instead of registering again; configure a static `oauth.client_id` in that
+case. A static `oauth.client_id`, a client registered during the same sign-in,
+and a `client_id` set through `oauth.extra_params` are never checked or
+cleared. If the check itself fails (network error, timeout, 5xx, a redirect, a
+login page or an unrecognised error), sign-in continues as before.
+
 ### Token Refresh
 
 MCPProxy automatically refreshes tokens before expiration:
@@ -89,6 +121,31 @@ MCPProxy automatically refreshes tokens before expiration:
 1. Checks token expiration before each request
 2. Uses refresh token to get new access token
 3. Falls back to browser re-authentication if refresh fails
+
+Refreshes are **serialized per server**. Whether a refresh is triggered by a
+request that finds the token about to expire or by the background refresh
+schedule, at most one refresh request is sent to the authorization server per
+expiry; every caller waiting at that moment receives the same new token (or
+the same error). This matters for providers that rotate refresh tokens and
+revoke the whole grant when an old refresh token is reused. A scheduled
+refresh that fires within 5 seconds of a token being saved (by another
+refresh or a sign-in) uses that token instead of rotating it again.
+
+Refresh failures are classified from the RFC 6749 §5.2 `error` code and the
+HTTP status of the token endpoint response:
+
+| Response | Behaviour |
+|---|---|
+| `invalid_grant` | Stops retrying; sign in again. |
+| `invalid_client`, dynamically registered client | The stored client registration is cleared; sign in again to register a new client. If the provider rejects the new registration too, configure a static `oauth.client_id`. |
+| `invalid_client`, static `oauth.client_id` | Stops retrying; fix `oauth.client_id` / `oauth.client_secret`. |
+| `unauthorized_client`, `unsupported_grant_type`, `invalid_scope` | Stops retrying; the code is shown in the error. |
+| `server_error`, `temporarily_unavailable`, HTTP 5xx or 429, network errors | Retried with exponential backoff (10 s doubling to 5 min). |
+| Anything else | Retried with backoff, then marked failed after the retry limit. |
+
+The `mcpproxy_oauth_refresh_total` metric labels these as `failed_invalid_grant`,
+`failed_invalid_client`, `failed_server_error`, `failed_network`,
+`failed_server_gone` and `failed_other`.
 
 ### Signing in from the Web UI
 
@@ -108,6 +165,16 @@ actionable **Sign-in** state:
 - A server can be both quarantined and login-required: you may sign in while it
   is quarantined, but its tools stay blocked until you **Approve** the server.
   The panel makes both gates explicit.
+
+### Switching accounts and retrying sign-in
+
+To switch accounts or recover an OAuth error, use **Sign in again** in the
+server card’s **More actions** menu or the detail page’s **Actions** menu.
+For an OAuth-capable upstream this remains available during reconnect attempts
+and generic timeout errors, even when the health panel does not suggest login.
+After logout it is labelled **Sign in**. Select the intended account/workspace
+at the provider; if the provider reuses its own browser session, switch that
+account before starting sign-in again.
 
 ## CLI Commands
 
@@ -227,6 +294,48 @@ mcpproxy upstream logs github-server --tail 50
 ```
 
 ## Troubleshooting
+
+### Signing in through a remote Web UI
+
+When MCPProxy runs on a headless host, the Web UI opens the authorization URL
+in the browser where you clicked **Log in**. A blocked popup leaves a clickable
+sign-in link; the proxy's API key is never placed in that URL.
+
+OAuth's default loopback callback reaches the browser's machine, which may be
+different from the proxy host. To finish sign-in without an SSH port forward,
+serve MCPProxy's HTTP listener through an HTTPS reverse proxy (including
+Tailscale Serve), and set the upstream's `oauth.callback_base_url` to that
+external origin:
+
+```json
+{
+  "name": "linear",
+  "url": "https://mcp.linear.app/mcp",
+  "protocol": "http",
+  "oauth": {
+    "callback_base_url": "https://proxy.example.ts.net:8447"
+  }
+}
+```
+
+The provider receives `https://proxy.example.ts.net:8447/oauth/callback/linear`
+as its redirect URI. Forward that path to the main MCPProxy HTTP listener, just
+like `/ui/` and `/api/`. Static OAuth clients must register this exact callback
+URL with their provider; dynamically registered clients are re-registered when
+their saved redirect URI changes. The provider must permit HTTPS callbacks.
+
+`callback_base_url` accepts an HTTPS origin with no credentials, path, query or
+fragment. It is explicit configuration, never inferred from request headers.
+Only upstreams opting into it accept remote callbacks, validated against their
+existing single-use state and PKCE flow. The callback needs no API key and does
+not start an OAuth flow; missing, expired, reused and cross-server states fail.
+Callback responses disable caching and referrer disclosure.
+
+Leave `HEADLESS=true` on a remote host: the Web UI opens the user's browser;
+turning off headless mode only attempts to open a browser on the proxy host.
+Without `callback_base_url`, loopback callbacks behave as before. A configured
+`redirect_uri` continues to pin the private loopback listener; the external
+callback takes precedence for provider registration and token exchange.
 
 ### Browser Doesn't Open
 

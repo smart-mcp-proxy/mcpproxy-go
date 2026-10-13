@@ -8,9 +8,32 @@ import (
 	"github.com/go-chi/chi/v5"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
+
+// TagRequestMeta is the edition-neutral request-metadata tag (Spec 107 T050):
+// it stores {ClientIP, Mount} on the context for the audit line PR-D writes.
+// ClientIP is config.ForwardedHeaders(r, trusted).ClientIP — the forwarded
+// address only from a trusted proxy (FR-027), read through the LIVE provider
+// per request — and Mount is fixed by the mount point the middleware is
+// installed on, never by a header. A nil provider trusts nobody.
+func TagRequestMeta(mount reqcontext.Mount, trusted config.TrustedProxiesProvider) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var list []string
+			if trusted != nil {
+				list = trusted()
+			}
+			meta := reqcontext.RequestMeta{
+				ClientIP: config.ForwardedHeaders(r, list).ClientIP,
+				Mount:    mount,
+			}
+			next.ServeHTTP(w, r.WithContext(reqcontext.WithRequestMeta(r.Context(), meta)))
+		})
+	}
+}
 
 // XMCPProxyClientHeader is the HTTP header that clients (CLI, web UI, tray)
 // set so the server can attribute requests to a surface for Tier 2 telemetry.

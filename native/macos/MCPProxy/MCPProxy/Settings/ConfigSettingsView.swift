@@ -10,6 +10,7 @@
 
 import SwiftUI
 import AppKit
+import Combine
 
 // MARK: - Store
 
@@ -21,11 +22,45 @@ final class ConfigStore: ObservableObject {
     @Published var loadError: String?
     /// Bumped on every mutation so SwiftUI re-evaluates dirty state.
     @Published var revision = 0
+    /// Spec 108-k: a setting a fix button asked to show ("Require
+    /// authentication…"). The tab scrolls to it and its row is highlighted.
+    @Published var highlightedKey: String?
+    /// The core's built-in MCP `instructions` text (MCP-2176), shown as the
+    /// placeholder of the instructions field so a blank box reads as "the
+    /// default is this" instead of "nothing". Fetched, never hardcoded — the
+    /// Web UI does the same and the two must not drift.
+    @Published var defaultInstructions: String?
+    /// Spec 109 FR-044a / F-10: the listen address the connected core is
+    /// actually bound to (`status.listen_addr`), so Settings can name which core
+    /// is being edited and when the saved address differs (pending restart).
+    @Published var runningListenAddr: String?
+    /// Settings whose effective value is forced from outside the config file
+    /// (an environment telemetry opt-out), keyed by setting key. The value is
+    /// the reason shown under the row. Locked rows are read-only and never dirty.
+    @Published private(set) var locks: [String: String] = [:]
 
     private var original: [String: Any] = [:]
+    /// The API response exactly as the core sent it. `working`/`original` are
+    /// normalized (absent `omitempty` defaults filled in) so blank Pickers show
+    /// their real default, but the Raw tab must keep showing server truth.
+    private var raw: [String: Any] = [:]
     private let appState: AppState
 
-    init(appState: AppState) { self.appState = appState }
+    private var connectionObserver: AnyCancellable?
+
+    init(appState: AppState) {
+        self.appState = appState
+        // The Settings window is reused across core restarts, so the running
+        // address cached from the first load goes stale the moment the core is
+        // replaced. Re-read /status whenever the tray lands on a new connection.
+        connectionObserver = appState.$connectionGeneration
+            .dropFirst()
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.appState.coreState == .connected else { return }
+                Task { await self.refreshStatus() }
+            }
+    }
 
     func load() async {
         guard let api = appState.apiClient else {
@@ -35,23 +70,132 @@ final class ConfigStore: ObservableObject {
         loading = true
         loadError = nil
         do {
-            let cfg = try await api.getConfig()
-            working = cfg
-            original = cfg
-            loaded = true
-            revision += 1
+            hydrate(from: try await api.getConfig())
         } catch {
             loadError = (error as? APIClientError)?.errorDescription ?? error.localizedDescription
         }
+        // Best-effort: an older core without the field just leaves the generic
+        // placeholder in place, so this never fails the settings load.
+        if let status = try? await api.status() {
+            if let text = status.defaultInstructions, !text.isEmpty {
+                defaultInstructions = text
+            }
+            applyStatus(status)
+        }
         loading = false
+    }
+
+    /// Re-read `GET /api/v1/status` for what the connected core says about
+    /// itself (running listen address, effective telemetry state) without
+    /// touching the config the user may be editing. Best effort: a failed read
+    /// keeps what was last known.
+    func refreshStatus() async {
+        guard loaded, let api = appState.apiClient, let status = try? await api.status() else { return }
+        applyStatus(status)
+    }
+
+    /// Adopt what `GET /api/v1/status` says about the connected core: its running
+    /// listen address (F-10) and the effective telemetry state (F-03).
+    func applyStatus(_ status: StatusResponse) {
+        let running = status.listenAddr.flatMap { $0.isEmpty ? nil : $0 }
+        runningListenAddr = running
+        adoptRunningListenIfBlank()
+        if let reason = TelemetryNotice.settingLock(state: status.telemetry) {
+            locks["telemetry.enabled"] = reason
+        } else {
+            locks.removeValue(forKey: "telemetry.enabled")
+        }
+        revision += 1
+    }
+
+    /// A config without `listen` would render the catalogue placeholder, which a
+    /// reader (and an accessibility client) takes for a value. Show the address
+    /// the core is really bound to instead, in both `working` and `original` so
+    /// the field is not dirty and a Save never PATCHes `listen`.
+    ///
+    /// The adopted value is a mirror of the running core, not a saved setting:
+    /// while the config still omits `listen` it follows the running address on
+    /// every status refresh (a restart onto another address must not leave the
+    /// old one in the field), unless the user has typed their own value into it.
+    private func adoptRunningListenIfBlank() {
+        guard loaded, let running = runningListenAddr, isBlankValue(configGet(raw, "listen")),
+              !listenCleared else { return }
+        let unedited = isBlankValue(configGet(working, "listen"))
+            || (configGet(working, "listen") as? String) == adoptedListen
+        // A field the user typed into is theirs: leave it, and leave `original`
+        // alone so a typed value equal to the running address stays an edit.
+        guard unedited else { return }
+        configSet(&working, "listen", running)
+        configSet(&original, "listen", running)
+        adoptedListen = running
+    }
+
+    /// The user emptied the Listen field after it was adopted: stay empty
+    /// (never refill) until the next hydrate.
+    private var listenCleared = false
+
+    /// The value `adoptRunningListenIfBlank` last put in the field, so a refresh
+    /// can tell an untouched field from one the user edited.
+    private var adoptedListen: String?
+
+    func lockReason(_ key: String) -> String? { locks[key] }
+
+    /// The line under the Listen address field: which core this is and where it
+    /// listens, plus a pending-restart note when the saved address differs.
+    var listenNote: String? {
+        guard let running = runningListenAddr else { return nil }
+        let version = appState.version.trimmingCharacters(in: .whitespaces)
+        let core = version.isEmpty ? "Connected core" : "Connected core \(version)"
+        var note = "\(core) is listening on \(running)."
+        // "Saved" is what the config file holds (`raw`), never an adopted mirror
+        // of the running address.
+        if let saved = (configGet(raw, "listen") as? String)?.trimmingCharacters(in: .whitespaces),
+           !saved.isEmpty, saved != running {
+            note += " The saved address \(saved) takes effect after a restart."
+        }
+        return note
+    }
+
+    /// Populate the store from a raw `GET /api/v1/config` response.
+    ///
+    /// Split out of `load()` so the hydration invariant is testable without an
+    /// API client. That invariant: `working` and `original` BOTH get the
+    /// resolved defaults for `omitempty` keys the core omits (the serialization
+    /// modes — absent means "full") so their Picker shows the real default
+    /// instead of blank, while `raw` keeps the untouched response because the
+    /// Raw tab must show server truth. Normalizing only one of the two would
+    /// make an untouched field read as an unsaved change.
+    func hydrate(from cfg: [String: Any]) {
+        raw = cfg
+        adoptedListen = nil
+        listenCleared = false
+        let normalized = SettingsCatalog.normalizeDefaults(cfg)
+        working = normalized
+        original = normalized
+        loaded = true
+        adoptRunningListenIfBlank()
+        revision += 1
+    }
+
+    /// A single key was saved elsewhere (the Anonymous callers section PATCHes
+    /// `anonymous_profile` on its own): adopt just that key as saved, in the
+    /// snapshot, the working copy and the Raw tab, leaving every other unsaved
+    /// edit alone. A full `load()` would reset them all. No-op before the first
+    /// load, which brings the truth itself.
+    func adoptSaved(_ key: String, value: Any?) {
+        guard loaded else { return }
+        configSet(&raw, key, value)
+        configSet(&original, key, value)
+        configSet(&working, key, value)
+        revision += 1
     }
 
     /// The core's current (saved) configuration, pretty-printed for the
     /// read-only Raw tab. Reflects server truth — not unsaved form edits.
     var prettyJSON: String {
-        guard JSONSerialization.isValidJSONObject(original),
+        guard JSONSerialization.isValidJSONObject(raw),
               let data = try? JSONSerialization.data(
-                withJSONObject: original, options: [.prettyPrinted, .sortedKeys]),
+                withJSONObject: raw, options: [.prettyPrinted, .sortedKeys]),
               let str = String(data: data, encoding: .utf8)
         else { return "{}" }
         return str
@@ -62,12 +206,14 @@ final class ConfigStore: ObservableObject {
     func value(_ key: String) -> Any? { configGet(working, key) }
 
     func setValue(_ key: String, _ value: Any?) {
+        if key == "listen" { listenCleared = adoptedListen != nil && isBlankValue(value) }
         configSet(&working, key, value)
         revision += 1
     }
 
     func isDirty(_ key: String) -> Bool {
-        !valuesEqual(configGet(working, key), configGet(original, key))
+        if locks[key] != nil { return false }
+        return !valuesEqual(configGet(working, key), configGet(original, key))
     }
 
     func dirtyKeys(in fields: [ConfigField]) -> [String] {
@@ -76,11 +222,19 @@ final class ConfigStore: ObservableObject {
 
     func revert(_ keys: [String]) {
         for k in keys { configSet(&working, k, configGet(original, k)) }
+        // Discarding the Listen edit ends "the user cleared it": follow the
+        // running core's address again.
+        if keys.contains("listen") {
+            listenCleared = false
+            adoptRunningListenIfBlank()
+        }
         revision += 1
     }
 
     /// Apply the given keys via PATCH. Returns (requiresRestart, restartReason)
     /// on success; throws on failure (incl. validation errors).
+    func navigate(_ route: AppRoute) { appState.navigate(route) }
+
     func save(_ keys: [String]) async throws -> (requiresRestart: Bool, reason: String?) {
         guard let api = appState.apiClient else {
             throw APIClientError.httpError(statusCode: 0, message: "Not connected to the core.")
@@ -95,8 +249,13 @@ final class ConfigStore: ObservableObject {
             }.joined(separator: "; ")
             throw APIClientError.httpError(statusCode: 422, message: msg.isEmpty ? "Validation failed" : msg)
         }
-        // Commit saved keys into the snapshot so they're no longer dirty.
-        for k in keys { configSet(&original, k, configGet(working, k)) }
+        // Commit saved keys into the snapshot so they're no longer dirty. The
+        // Raw tab tracks the same commit, so it keeps reflecting what the core
+        // now holds rather than the config as it was at load time.
+        for k in keys {
+            configSet(&original, k, configGet(working, k))
+            configSet(&raw, k, configGet(working, k))
+        }
         revision += 1
         let requiresRestart = (result["requires_restart"] as? Bool) ?? false
         return (requiresRestart, result["restart_reason"] as? String)
@@ -106,8 +265,12 @@ final class ConfigStore: ObservableObject {
 
     func boolBinding(_ key: String) -> Binding<Bool> {
         Binding(
-            get: { (self.value(key) as? NSNumber)?.boolValue ?? (self.value(key) as? Bool) ?? false },
-            set: { self.setValue(key, $0) }
+            // A locked key shows its forced effective value (off), not the stored one.
+            get: {
+                if self.locks[key] != nil { return false }
+                return (self.value(key) as? NSNumber)?.boolValue ?? (self.value(key) as? Bool) ?? false
+            },
+            set: { if self.locks[key] == nil { self.setValue(key, $0) } }
         )
     }
 
@@ -127,6 +290,27 @@ final class ConfigStore: ObservableObject {
         Binding(
             get: { coerceString(self.value(key)) },
             set: { self.setValue(key, optionalScalarStored($0)) }
+        )
+    }
+
+    /// Binding for a `listLines` textarea (fields.ts `listKind: 'lines'`): the
+    /// JSON value is a []string shown one entry per line. Writing splits on
+    /// newlines AND commas (a pasted "a,b" still yields two entries), trims,
+    /// and drops blank entries, so a cleared box is an empty list — never a
+    /// string the Go side cannot decode into []string. Clearing a key the core
+    /// never sent stores "unset" rather than [], so the row does not read as
+    /// dirty against an absent key (same tri-state as optionalStringBinding).
+    func linesBinding(_ key: String) -> Binding<String> {
+        Binding(
+            get: { linesText(self.value(key)) },
+            set: {
+                let list = parseLines($0)
+                if list.isEmpty, isBlankValue(configGet(self.original, key)) {
+                    self.setValue(key, nil)
+                } else {
+                    self.setValue(key, list)
+                }
+            }
         )
     }
 
@@ -157,6 +341,21 @@ func coerceString(_ v: Any?) -> String {
     default: return ""
     }
 }
+/// Render a []string as one entry per line; a scalar falls back to its string
+/// form so a hand-edited file never shows as blank.
+func linesText(_ v: Any?) -> String {
+    if let arr = v as? [Any] { return arr.map { coerceString($0) }.joined(separator: "\n") }
+    return coerceString(v)
+}
+
+/// Parse textarea text into a trimmed []string (mirrors textToList in
+/// fields.ts): newlines and commas both separate entries; blanks are dropped.
+func parseLines(_ text: String) -> [String] {
+    text.components(separatedBy: CharacterSet(charactersIn: "\n,"))
+        .map { $0.trimmingCharacters(in: .whitespaces) }
+        .filter { !$0.isEmpty }
+}
+
 func coerceDouble(_ v: Any?) -> Double? {
     switch v {
     case let n as NSNumber: return n.doubleValue
@@ -192,6 +391,7 @@ struct ConfigSectionView: View {
     @State private var saving = false
     @State private var savedNote: String?
     @State private var errorNote: String?
+    @State private var guardRefusal: ServiceErrorBody?
     @State private var showConfirm = false
     @State private var confirmMessages: [String] = []
     @State private var confirmInfoOnly = false
@@ -208,9 +408,14 @@ struct ConfigSectionView: View {
         VStack(alignment: .leading, spacing: 0) {
             ForEach(fields) { field in
                 ConfigFieldRow(store: store, field: field)
+                    .id(field.key)
                 Divider()
             }
 
+            if let guardRefusal {
+                GuardRefusalView(body: guardRefusal) { route in store.navigate(route) }
+                    .padding(.top, 10)
+            }
             HStack {
                 Group {
                     if let savedNote { Text(savedNote).foregroundColor(.green) }
@@ -220,7 +425,7 @@ struct ConfigSectionView: View {
                 .font(.callout)
                 Spacer()
                 if !dirty.isEmpty {
-                    Button("Discard") { store.revert(dirty); savedNote = nil; errorNote = nil }
+                    Button("Discard") { store.revert(dirty); savedNote = nil; errorNote = nil; guardRefusal = nil }
                         .buttonStyle(.borderless)
                 }
                 Button {
@@ -275,12 +480,15 @@ struct ConfigSectionView: View {
         saving = true
         savedNote = nil
         errorNote = nil
+        guardRefusal = nil
         let keys = dirty
         do {
             let r = try await store.save(keys)
             savedNote = r.requiresRestart
                 ? "Saved — restart required\(r.reason.map { ": \($0)" } ?? "")"
                 : "Saved"
+        } catch APIClientError.service(_, let body) where body.isGuardRefusal {
+            guardRefusal = body
         } catch {
             errorNote = (error as? APIClientError)?.errorDescription ?? error.localizedDescription
         }
@@ -304,33 +512,67 @@ struct ConfigFieldRow: View {
     private var validationError: String? { dirty ? validateConfigField(field, store.value(field.key)) : nil }
 
     var body: some View {
-        HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text(field.label).fontWeight(.medium)
-                    if dirty { Circle().fill(Color.orange).frame(width: 6, height: 6) }
-                    if field.restart {
-                        Text("restart").font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
-                            .background(Color.orange.opacity(0.25)).cornerRadius(4)
-                    }
-                    if let docs = field.docs, let url = URL(string: SettingsCatalog.docsBase + docs) {
-                        Link("docs ↗", destination: url).font(.caption)
-                    }
+        Group {
+            // A textarea cannot share a row with its label — 240pt of trailing
+            // column is not a place to edit a paragraph. It stacks instead.
+            if field.control == .textarea {
+                VStack(alignment: .leading, spacing: 6) {
+                    labelBlock
+                    control.frame(maxWidth: .infinity, alignment: .leading)
                 }
-                if let help = field.help {
-                    Text(help).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
-                }
-                if let err = validationError {
-                    Text(err).font(.caption).foregroundColor(.red)
+            } else {
+                HStack(alignment: .top) {
+                    labelBlock
+                    Spacer(minLength: 16)
+                    control.frame(maxWidth: 240, alignment: .trailing)
                 }
             }
-            Spacer(minLength: 16)
-            control.frame(maxWidth: 240, alignment: .trailing)
         }
         .padding(.vertical, 8)
+        .background(store.highlightedKey == field.key ? Color.accentColor.opacity(0.15) : Color.clear)
+        .clipShape(RoundedRectangle(cornerRadius: 6))
+        .accessibilityIdentifier("setting-\(field.key)")
+    }
+
+    private var labelBlock: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(field.label).fontWeight(.medium)
+                if dirty { Circle().fill(Color.orange).frame(width: 6, height: 6) }
+                if field.restart {
+                    Text("restart").font(.caption2).padding(.horizontal, 5).padding(.vertical, 1)
+                        .background(Color.orange.opacity(0.25)).cornerRadius(4)
+                }
+                if let docs = field.docs, let url = URL(string: SettingsCatalog.docsBase + docs) {
+                    Link("docs ↗", destination: url).font(.caption)
+                }
+            }
+            if let help = field.help {
+                Text(help).font(.caption).foregroundColor(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+            // Spec 109 FR-044a: forced from outside the config file; say why.
+            if let reason = store.lockReason(field.key) {
+                Text(reason).font(.caption).foregroundColor(.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("setting-locked-\(field.key)")
+            }
+            // F-10: which core this is, and where it really listens.
+            if field.key == "listen", let note = store.listenNote {
+                Text(note).font(.caption).foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("setting-listen-running")
+            }
+            if let err = validationError {
+                Text(err).font(.caption).foregroundColor(.red)
+            }
+        }
     }
 
     @ViewBuilder private var control: some View {
+        controlBody.disabled(store.lockReason(field.key) != nil)
+    }
+
+    @ViewBuilder private var controlBody: some View {
         switch field.control {
         case .toggle:
             Toggle("", isOn: store.boolBinding(field.key)).labelsHidden()
@@ -340,9 +582,39 @@ struct ConfigFieldRow: View {
             }
             .labelsHidden().frame(maxWidth: 220)
         case .number:
-            TextField("", value: store.doubleBinding(field.key), format: .number)
-                .multilineTextAlignment(.trailing).frame(width: 100)
-                .textFieldStyle(.roundedBorder)
+            HStack(spacing: 4) {
+                TextField("", value: store.doubleBinding(field.key), format: .number)
+                    .multilineTextAlignment(.trailing).frame(width: 100)
+                    .textFieldStyle(.roundedBorder)
+                // F13: fields.ts gives entropy_threshold step 0.1 and
+                // oauth_expiry_warning_hours step 0.5; without a stepper the
+                // native form could only be typed into.
+                if let step = field.step {
+                    Stepper("", value: store.doubleBinding(field.key),
+                            in: (field.min ?? -.greatestFiniteMagnitude)...(field.max ?? .greatestFiniteMagnitude),
+                            step: step)
+                        .labelsHidden()
+                }
+            }
+        case .textarea:
+            // The instructions field: multi-line, and its placeholder is the
+            // live built-in default rather than an example. A `listLines`
+            // field (trusted_proxies) binds a []string one entry per line and
+            // keeps its own example placeholder.
+            let text = field.listLines ? store.linesBinding(field.key) : store.optionalStringBinding(field.key)
+            ZStack(alignment: .topLeading) {
+                TextEditor(text: text)
+                    .font(.system(.callout, design: .monospaced))
+                    .frame(minHeight: 120)
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color(nsColor: .separatorColor)))
+                if text.wrappedValue.isEmpty {
+                    Text(field.listLines ? (field.placeholder ?? "") : (store.defaultInstructions ?? field.placeholder ?? ""))
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 10)
+                        .allowsHitTesting(false)
+                }
+            }
         case .text, .duration:
             // Duration fields are tri-state: an optional one stores a blank
             // value as "unset" (reset to default) via optionalStringBinding.
@@ -382,6 +654,8 @@ struct ConfigFieldRow: View {
 
 struct ConfigTabContainer<Content: View>: View {
     @ObservedObject var store: ConfigStore
+    /// A setting key to scroll to once loaded (Spec 108-k fix buttons).
+    var scrollTarget: String? = nil
     @ViewBuilder let content: () -> Content
 
     var body: some View {
@@ -397,18 +671,41 @@ struct ConfigTabContainer<Content: View>: View {
                 ProgressView("Loading configuration…")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
-                ScrollView { content().padding(20) }
+                ScrollViewReader { proxy in
+                    ScrollView { content().padding(20) }
+                        .onAppear { scroll(proxy) }
+                        .onChange(of: scrollTarget) { _ in scroll(proxy) }
+                }
             }
         }
-        .task { if !store.loaded { await store.load() } }
+        .task {
+            if !store.loaded { await store.load() } else { await store.refreshStatus() }
+        }
+    }
+
+    private func scroll(_ proxy: ScrollViewProxy) {
+        guard let scrollTarget else { return }
+        DispatchQueue.main.async { withAnimation { proxy.scrollTo(scrollTarget, anchor: .top) } }
     }
 }
 
 struct SecuritySettingsTab: View {
+    @ObservedObject var appState: AppState
     @ObservedObject var store: ConfigStore
+    /// Setting key to scroll to and highlight (`require_mcp_auth`).
+    var scrollTarget: String? = nil
+    /// Profile to PRESELECT (not save) in the Anonymous callers picker.
+    var anonymousPreselect: String? = nil
+
     var body: some View {
-        ConfigTabContainer(store: store) {
-            ConfigSectionView(store: store, sectionId: "security", fields: SettingsCatalog.security)
+        ConfigTabContainer(store: store, scrollTarget: scrollTarget) {
+            VStack(alignment: .leading, spacing: 0) {
+                ConfigSectionView(store: store, sectionId: "security", fields: SettingsCatalog.security)
+                Divider().padding(.vertical, 8)
+                // Spec 108-k K20: custom (its options are the live profile list).
+                AnonymousProfileSection(appState: appState, store: store, preselect: anonymousPreselect)
+                    .id("anonymous_profile")
+            }
         }
     }
 }

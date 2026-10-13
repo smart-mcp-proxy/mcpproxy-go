@@ -11,6 +11,8 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -204,7 +206,7 @@ type mockControllerEmptyKey struct {
 	baseController
 }
 
-func (m *mockControllerEmptyKey) GetCurrentConfig() any {
+func (m *mockControllerEmptyKey) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: "", // Empty API key
 	}
@@ -215,7 +217,7 @@ type mockControllerWithKey struct {
 	apiKey string
 }
 
-func (m *mockControllerWithKey) GetCurrentConfig() any {
+func (m *mockControllerWithKey) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
@@ -235,6 +237,7 @@ func (m *baseController) StatusChannel() <-chan interface{}        { return nil 
 func (m *baseController) EventsChannel() <-chan runtime.Event      { return nil }
 func (m *baseController) SubscribeEvents() chan runtime.Event      { return nil }
 func (m *baseController) UnsubscribeEvents(chan runtime.Event)     {}
+func (m *baseController) Attention() []contracts.AttentionItem     { return nil }
 func (m *baseController) GetAllServers() ([]map[string]interface{}, error) {
 	return nil, nil
 }
@@ -252,8 +255,11 @@ func (m *baseController) GetQuarantinedServers() ([]map[string]interface{}, erro
 	return nil, nil
 }
 func (m *baseController) UnquarantineServer(serverName string) error { return nil }
-func (m *baseController) GetManagementService() interface{}          { return nil }
+func (m *baseController) GetManagementService() management.Service   { return nil }
 func (m *baseController) GetServerTools(serverName string) ([]map[string]interface{}, error) {
+	return nil, nil
+}
+func (m *baseController) SearchToolsScoped(_ string, _ int, _ func(string) bool) ([]map[string]interface{}, error) {
 	return nil, nil
 }
 func (m *baseController) SearchTools(query string, limit int) ([]map[string]interface{}, error) {
@@ -268,7 +274,7 @@ func (m *baseController) GetLogDir() string                                     
 func (m *baseController) TriggerOAuthLogin(serverName string) error                       { return nil }
 func (m *baseController) GetSecretResolver() *secret.Resolver                             { return nil }
 func (m *baseController) NotifySecretsChanged(ctx context.Context, op, name string) error { return nil }
-func (m *baseController) GetToolCalls(limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
+func (m *baseController) GetToolCalls(limit, offset int, _ storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
 	return nil, 0, nil
 }
 func (m *baseController) GetToolCallByID(id string) (*contracts.ToolCallRecord, error) {
@@ -277,7 +283,7 @@ func (m *baseController) GetToolCallByID(id string) (*contracts.ToolCallRecord, 
 func (m *baseController) GetServerToolCalls(serverName string, limit int) ([]*contracts.ToolCallRecord, error) {
 	return nil, nil
 }
-func (m *baseController) ReplayToolCall(id string, args map[string]interface{}) (*contracts.ToolCallRecord, error) {
+func (m *baseController) ReplayToolCall(_ context.Context, id string, args map[string]interface{}) (*contracts.ToolCallRecord, error) {
 	return nil, nil
 }
 func (m *baseController) ValidateConfig(cfg *config.Config) ([]config.ValidationError, error) {
@@ -313,14 +319,17 @@ func (m *baseController) CallTool(ctx context.Context, toolName string, args map
 func (m *baseController) GetRuntime() *runtime.Runtime                            { return nil }
 func (m *baseController) GetSessions(limit, offset int) (interface{}, int, error) { return nil, 0, nil }
 func (m *baseController) GetSessionByID(id string) (*contracts.MCPSession, error) { return nil, nil }
-func (m *baseController) GetRecentSessions(limit int) ([]*contracts.MCPSession, int, error) {
+func (m *baseController) GetRecentSessions(_ storage.SessionFilter) ([]*contracts.MCPSession, int, error) {
 	return nil, 0, nil
 }
-func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset int) ([]*contracts.ToolCallRecord, int, error) {
+func (m *baseController) GetToolCallsBySession(sessionID string, limit, offset int, _ storage.ToolCallScope) ([]*contracts.ToolCallRecord, int, error) {
 	return nil, 0, nil
 }
 func (m *baseController) GetVersionInfo() *updatecheck.VersionInfo     { return nil }
 func (m *baseController) RefreshVersionInfo() *updatecheck.VersionInfo { return nil }
+func (m *baseController) UpdatePolicy() updatecheck.Policy {
+	return updatecheck.UnavailablePolicy()
+}
 func (m *baseController) DiscoverServerTools(_ context.Context, _ string) error {
 	return nil
 }
@@ -353,6 +362,12 @@ func (m *baseController) ListToolApprovals(_ string) ([]*storage.ToolApprovalRec
 }
 func (m *baseController) ApproveTools(_ string, _ []string, _ string) error { return nil }
 func (m *baseController) ApproveAllTools(_ string, _ string) (int, error)   { return 0, nil }
+func (m *baseController) ApproveToolsReviewed(_ string, _ []string, _ map[string]string, _ string) (int, error) {
+	return 0, nil
+}
+func (m *baseController) ApproveAllToolsReviewed(_ string, _ map[string]string, _ string) (int, error) {
+	return 0, nil
+}
 func (m *baseController) BlockTools(_ string, _ []string, _ string) (int, error) {
 	return 0, nil
 }
@@ -361,11 +376,26 @@ func (m *baseController) GetToolApproval(_, _ string) (*storage.ToolApprovalReco
 	return nil, nil
 }
 func (m *baseController) GetToolApprovalStatus(_, _ string) (string, error) { return "", nil }
+func (m *baseController) RunPreflight(_ context.Context, _ preflight.Params) (preflight.Outcome, error) {
+	return preflight.Outcome{}, nil
+}
+func (m *baseController) RecordPreflight(_ runtime.PreflightActivity) error { return nil }
 func (m *baseController) GetOnboardingState() (*storage.OnboardingState, error) {
 	return &storage.OnboardingState{}, nil
 }
 func (m *baseController) SaveOnboardingState(_ *storage.OnboardingState) error { return nil }
-func (m *baseController) GetActivationFirstMCPClient() (bool, []string)        { return false, nil }
+func (m *baseController) UpdateOnboardingState(fn func(*storage.OnboardingState) error) error {
+	st, err := m.GetOnboardingState()
+	if err != nil {
+		return err
+	}
+	if err := fn(st); err != nil {
+		return err
+	}
+	return m.SaveOnboardingState(st)
+}
+func (m *baseController) GetActivationFirstMCPClient() (bool, []string) { return false, nil }
+func (m *baseController) RecordUpdateFailure(_ string) (bool, error)    { return false, nil }
 func (m *baseController) DefaultInstructions() string {
 	return "test built-in default: use retrieve_tools to discover tools"
 }

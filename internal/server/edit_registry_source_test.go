@@ -26,13 +26,28 @@ func TestEditRegistrySourceInConfig_CustomUpdate(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "Acme Prod", updated.Name)
 	assert.Equal(t, "https://acme.example/api", updated.URL)
-	assert.Equal(t, "https://acme.example/api/v0.1/servers", updated.ServersURL, "servers URL re-derived from the new base")
+	// GH #783: a URL that carries a path is a concrete endpoint — it is used
+	// verbatim, never suffixed with a route MCPProxy invented. EditRegistrySource
+	// probes the live URL on top of this offline derivation.
+	assert.Equal(t, "https://acme.example/api", updated.ServersURL, "a path-carrying URL is used verbatim")
 	assert.Equal(t, config.RegistryProvenanceCustom, updated.Provenance)
 	// The returned slice is a fresh clone with the entry replaced; the original
 	// config slice is untouched (copy-on-write).
 	require.Len(t, remaining, 1)
 	assert.Equal(t, "Acme Prod", remaining[0].Name)
 	assert.Equal(t, "Acme", cfg.Registries[0].Name, "original config snapshot must not be mutated")
+}
+
+// A bare base URL is still pointed at the official v0.1 servers collection.
+func TestEditRegistrySourceInConfig_DerivesFromBaseURL(t *testing.T) {
+	cfg := &config.Config{
+		Registries: []config.RegistryEntry{
+			{ID: "acme", URL: "https://acme.example/", ServersURL: "https://acme.example/v0.1/servers", Provenance: config.RegistryProvenanceCustom},
+		},
+	}
+	updated, _, err := editRegistrySourceInConfig(cfg, &EditRegistrySourceRequest{ID: "acme", URL: "https://acme2.example"})
+	require.NoError(t, err)
+	assert.Equal(t, "https://acme2.example/v0.1/servers", updated.ServersURL, "servers URL re-derived from the new base")
 }
 
 // An explicit servers-url overrides the derived one.

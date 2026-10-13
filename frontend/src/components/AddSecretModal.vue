@@ -1,8 +1,28 @@
 <template>
-  <dialog :open="show" class="modal">
-    <div class="modal-box max-w-2xl">
+  <dialog ref="nativeDialogEl" class="modal" data-test="add-secret-modal">
+    <div
+      ref="dialogRef"
+      class="modal-box max-w-2xl"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="add-secret-modal-title"
+    >
       <form @submit.prevent="handleSubmit">
-        <h3 class="font-bold text-lg mb-4">Add New Secret</h3>
+        <div class="flex items-start justify-between gap-4 mb-4">
+          <h3 id="add-secret-modal-title" class="font-bold text-lg">
+            {{ props.predefinedName ? 'Set Secret Value' : 'Add New Secret' }}
+          </h3>
+          <button
+            type="button"
+            class="btn btn-sm btn-circle btn-ghost"
+            data-modal-close-button
+            data-test="add-secret-modal-close"
+            aria-label="Close"
+            @click="handleClose"
+          >
+            ✕
+          </button>
+        </div>
 
         <!-- Secret Name -->
         <div class="form-control mb-4">
@@ -77,6 +97,8 @@
 import { reactive, ref, watch } from 'vue'
 import apiClient from '@/services/api'
 import { useSystemStore } from '@/stores/system'
+import { useModalA11y } from '@/composables/useModalA11y'
+import { useDialogOpen } from '@/composables/useDialogOpen'
 
 interface Props {
   show: boolean
@@ -90,6 +112,12 @@ interface Emits {
 
 const props = defineProps<Props>()
 const emit = defineEmits<Emits>()
+
+// UX audit F6/F8: Escape closes, focus enters the dialog and is trapped there.
+const { dialogRef } = useModalA11y(() => props.show, () => handleClose())
+// Spec 109 FR-055: the <dialog> itself opens via showModal() (top layer),
+// separate from dialogRef above (the inner .modal-box, used for focus trap).
+const { dialogEl: nativeDialogEl } = useDialogOpen(() => props.show, () => handleClose())
 
 const systemStore = useSystemStore()
 

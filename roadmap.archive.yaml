@@ -1,0 +1,76 @@
+# roadmap.archive.yaml — cold storage for SHIPPED epics.
+#
+# Swept out of roadmap.yaml by `python3 scripts/gen-roadmap.py --archive` once an
+# epic is `done`, all its PRs are merged, and the newest merge has cooled off
+# (default 14 days). roadmap.yaml stays the working set; this file keeps the
+# provenance: PR refs, gotcha notes, and the DAG ids other epics depend on.
+#
+# Schema is identical to roadmap.yaml, plus two generator-stamped fields:
+#   shipped_on:  date of the NEWEST merged PR in the epic subtree
+#   archived_on: date the sweep moved it here
+#
+# A `depends_on:` edge pointing at an id in this file is satisfied by definition.
+# Nothing here is re-serialised: blocks are moved as raw text, so comments and
+# formatting survive. Append-only in practice; edit by hand only to fix a typo.
+
+version: 1
+
+epics:
+  - id: profiles-v2
+    shipped_on: 2026-06-24
+    archived_on: 2026-07-10
+    title: Profiles v2 (per-profile tool views)
+    status: done
+    priority: P1
+    mcp: MCP-33
+    # No epic-level spec link: Profiles v2 shipped via the PRs below, not via a
+    # speckit tasks.md. (specs/057-in-proxy-profiles is a SEPARATE "permanent
+    # URLs" spec — 20/25 after the 2026-07-10 truth-sync, 0/25 before it — so
+    # linking it here would attribute the wrong progress to this epic.
+    # Provenance lives in the per-task PR refs.)
+    depends_on: []
+    note: "Stateful profiles: per-profile Bleve indexes, set_profile, token profile_pin, tray + Web UI switchers. Shipped via #756/#761/#766/#767."
+    tasks:
+      - id: profiles-v2-indexes
+        title: Per-profile Bleve indexes (T1)
+        status: done
+        mcp: MCP-3240
+        pr: "#756"
+        depends_on: []
+      - id: profiles-v2-set-profile
+        title: set_profile tool + session resolver + REST (T2)
+        status: done
+        mcp: MCP-3241
+        pr: "#761"
+        depends_on: [profiles-v2-indexes]
+      - id: profiles-v2-profile-pin
+        title: Per-agent-token profile_pin (T3)
+        status: done
+        mcp: MCP-3242
+        pr: "#766"
+        spec: specs/028-agent-tokens
+        depends_on: [profiles-v2-set-profile]
+      - id: profiles-v2-tray-switcher
+        title: Tray profile switcher Go + Swift (T5)
+        status: done
+        mcp: MCP-3244
+        pr: "#767"
+        depends_on: [profiles-v2-set-profile]
+
+  - id: ts-code-exec-ga
+    shipped_on: 2026-06-24
+    archived_on: 2026-07-10
+    title: TypeScript code-execution GA + cookbook
+    status: done
+    priority: P2
+    mcp: MCP-38
+    spec: specs/033-typescript-code-execution
+    depends_on: []
+    note: "TS runtime graduated from preview (shipped v0.45.0); MCP-38 = docs/spec + cookbook only."
+    tasks:
+      - id: ts-code-exec-cookbook
+        title: Cookbook (10 TS recipes) + GA docs
+        status: done
+        mcp: MCP-38
+        pr: "#753"
+        depends_on: []

@@ -15,41 +15,142 @@
         </button>
       </div>
 
-      <select v-model="status" class="select select-sm select-bordered" data-test="usage-status-filter" @change="reload">
+      <!-- url-filter-contract.md `from`/`to` row, rule 5: a deep-linked range
+           that is not one of the three Usage presets (24h/7d/all) is shown
+           to the request as `window=all` (T113 — never silently omitted,
+           which would ask the backend for its 24h default under a URL that
+           promised something else) but rendered here as a disabled chip so
+           the operator sees it was not actually honoured, rather than
+           quietly getting "all" with no explanation. -->
+      <span
+        v-if="usageRangeNotApplied"
+        class="badge badge-ghost badge-sm gap-1"
+        data-test="usage-range-not-applied-chip"
+        title="This time range is not one of the three Usage presets (24h, 7d, all) — showing all time instead"
+      >
+        not applied on Usage (24h, 7d or all)
+      </span>
+
+      <!--
+        F30 (#1046): both selects carry their purpose only in their option
+        text, so a screen reader announces "combo box" with no idea what it
+        filters. They went unnoticed by the original audit because Usage had
+        no route of its own then; #1044 made it the landing page and brought
+        them onto "/", where the committed a11y sweep now reaches them.
+      -->
+      <select v-model="status" aria-label="Filter calls by status" class="select select-sm select-bordered" data-test="usage-status-filter" @change="reload">
         <option value="">All statuses</option>
         <option value="success">Success</option>
         <option value="error">Errors</option>
         <option value="blocked">Blocked</option>
+        <option value="rejected">Rejected</option>
       </select>
 
-      <select v-model="sort" class="select select-sm select-bordered" data-test="usage-sort" @change="reload">
+      <select v-model="sort" aria-label="Sort tools by" class="select select-sm select-bordered" data-test="usage-sort" @change="reload">
         <option value="resp_bytes">Sort: response size</option>
         <option value="calls">Sort: calls</option>
         <option value="error_rate">Sort: error rate</option>
         <option value="p95">Sort: p95 latency</option>
       </select>
 
-      <span v-if="data" class="text-xs opacity-50 ml-auto" data-test="usage-freshness">
+      <!--
+        F9: `opacity-*` multiplies alpha on base-content and lands under AA
+        (this one measured 3.16:1 on corporate). #1054 replaced the
+        `text-base-content/NN` ramp and `.stat-*` with the AA-checked
+        `--tone-muted`, but the raw opacity utility was never covered — and
+        nothing caught it until #1044 moved this view onto "/", where the
+        committed contrast sweep walks. Same visual intent, measured colour.
+      -->
+      <span v-if="data" class="text-xs text-base-content/60 ml-auto" data-test="usage-freshness">
         Updated {{ freshnessLabel }}
       </span>
     </div>
 
+    <!-- Spec 108-j J4/J5 (FR-031): the profile/client/token this view is
+         narrowed to, as removable chips, with the pickers that write them. -->
+    <div
+      v-if="scopeQuery && (scopeChipsVisible || scopePickersVisible)"
+      class="flex flex-wrap items-end gap-3"
+      data-test="usage-scope-chips"
+    >
+      <ScopeFilterSelects page="usage" :scope-query="scopeQuery" allow-unattributed />
+      <ScopeChips page="usage" :scope-query="scopeQuery" :unavailable="scopeUnavailableNames" />
+    </div>
+
     <!-- Tokens-saved headline (FR-007) -->
     <div v-if="data" class="stats stats-vertical sm:stats-horizontal shadow w-full" data-test="usage-tokens-saved">
-      <div class="stat">
+      <!--
+        Audit finding F23 (#1046): this tile "did not move" after 16 further
+        tool calls. It is not supposed to. It is a STRUCTURAL estimate computed
+        from the current tool catalog — the cost of putting every upstream tool
+        in the agent's context versus what retrieve_tools returns for one query —
+        so it moves when servers or tools change, never per call. The number was
+        right; the label ("Tokens saved", beside per-window call counts) said
+        cumulative-savings-so-far. It now says what it measures, and the tooltip
+        says how it is derived.
+      -->
+      <!-- Spec 108-j J12: the tokens-saved figure is a structural property of the
+           whole catalogue, so the backend zeroes it for a scoped read. Printing
+           that 0 would read as "nothing saved". -->
+      <div v-if="scopeApplied" class="stat" data-test="usage-tokens-saved-scoped">
         <div class="stat-title">Tokens saved</div>
-        <div class="stat-value text-success">{{ formatNumber(data.tokens_saved) }}</div>
-        <div class="stat-desc">{{ data.tokens_saved_percentage.toFixed(1) }}% reduction via BM25 discovery</div>
+        <div class="stat-value text-base font-normal text-base-content/70">not computed for a filtered view</div>
+        <div class="stat-desc">Remove the profile, client or token filter to see it.</div>
       </div>
-      <div class="stat">
-        <div class="stat-title">Tool calls</div>
-        <div class="stat-value">{{ formatNumber(totalCalls) }}</div>
-        <div class="stat-desc">{{ data.tools.length }} active tool{{ data.tools.length === 1 ? '' : 's' }} ({{ windowLabel }})</div>
+      <div v-else class="stat" data-test="usage-tokens-saved-tile">
+        <div class="stat-title flex items-center gap-1">
+          Tokens saved per request
+          <span
+            class="cursor-help opacity-50"
+            aria-hidden="true"
+            :title="tokensSavedExplainer"
+          >ⓘ</span>
+        </div>
+        <div class="stat-value text-success" :title="tokensSavedExplainer">
+          {{ formatNumber(data.tokens_saved) }}
+          <span
+            v-if="data.tokens_saved_estimated"
+            class="badge badge-ghost badge-sm align-middle ml-1"
+            data-test="usage-tokens-saved-estimate-badge"
+            title="No retrieve_tools call has been observed yet — this is a simulated estimate from the current tool catalog, not a measured average"
+          >estimate</span>
+        </div>
+        <div class="stat-desc">
+          {{ data.tokens_saved_percentage.toFixed(1) }}% smaller tool context via BM25 discovery ·
+          <span class="text-base-content/60">tracks your catalog, not your call volume</span>
+        </div>
       </div>
-      <div class="stat">
+      <!--
+        Calls and errors come from the response, which counts the same
+        population as the Activity Log's own header — see usageHeadline for why
+        summing `tools` here was wrong (F1, #1046).
+      -->
+      <div class="stat" data-test="usage-calls-tile">
+        <div class="stat-title">Calls</div>
+        <div class="stat-value">{{ formatNumber(headline.calls) }}</div>
+        <!--
+          "Active tools" counts the same population the charts below chart:
+          names that have completed at least one call (F22, #1046). Counting the
+          whole rollup here would print "6 active tools" over a histogram
+          labelled "3 tools" on the same screen.
+        -->
+        <div class="stat-desc">
+          {{ activeToolCount }} active tool{{ activeToolCount === 1 ? '' : 's' }}
+          <!--
+            The per-tool list is truncated to top-N server-side, so this count
+            is of what is CHARTED, not of everything that ran. Say so rather
+            than print a total that quietly excludes the tail.
+          -->
+          <span v-if="data.other" :title="`${data.other.tools_folded} further tools are folded into “other”`">
+            (+{{ data.other.tools_folded }} folded)
+          </span>
+          ({{ windowLabel }})
+        </div>
+      </div>
+      <div class="stat" data-test="usage-errors-tile">
         <div class="stat-title">Errors</div>
-        <div class="stat-value" :class="totalErrors > 0 ? 'text-error' : ''">{{ formatNumber(totalErrors) }}</div>
-        <div class="stat-desc">{{ overallErrorRate }}% overall error rate</div>
+        <div class="stat-value" :class="headline.errors > 0 ? 'text-error' : ''">{{ formatNumber(headline.errors) }}</div>
+        <div class="stat-desc">{{ headline.errorRate }}% overall error rate</div>
       </div>
     </div>
 
@@ -64,6 +165,25 @@
       <button class="btn btn-sm" @click="reload">Retry</button>
     </div>
 
+    <!-- Contradictory server/tool (rule 8, zcode F1): no REST request can
+         express both, so none is issued — never the unfiltered aggregate. -->
+    <div
+      v-else-if="filterConflict"
+      class="card bg-base-200 border border-warning/40"
+      data-test="usage-conflict-empty-state"
+    >
+      <div class="card-body items-center text-center py-12">
+        <h3 class="font-semibold text-lg mt-2">Server and tool don't match</h3>
+        <p class="text-sm text-base-content/60 max-w-md">
+          <code>server={{ filterServer }}</code> and <code>tool={{ filterTool }}</code>
+          name different servers, so no request can satisfy both. Remove one to continue.
+        </p>
+        <button class="btn btn-sm btn-primary mt-2" data-test="usage-conflict-clear" @click="clearScopeConflict">
+          Clear filter
+        </button>
+      </div>
+    </div>
+
     <!-- Empty / low-data state (FR-009) -->
     <div
       v-else-if="data && isEmpty"
@@ -74,8 +194,11 @@
         <svg class="w-12 h-12 opacity-40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
         </svg>
-        <h3 class="font-semibold text-lg mt-2">No usage data yet</h3>
-        <p class="text-sm opacity-60 max-w-md">
+        <h3 class="font-semibold text-lg mt-2">{{ scopeSummary ? `No calls for ${scopeSummary} in the ${windowLabel}` : 'No usage data yet' }}</h3>
+        <p v-if="scopeSummary" class="text-sm text-base-content/60 max-w-md" data-test="usage-scoped-empty">
+          Remove a filter chip above or widen the window to see more.
+        </p>
+        <p v-else class="text-sm text-base-content/60 max-w-md">
           Once your agents start calling tools through the proxy, you'll see call volume,
           token sinks, error rates and a timeline here. Try widening the window or clearing filters.
         </p>
@@ -89,7 +212,7 @@
     <div v-else-if="data" class="grid grid-cols-1 lg:grid-cols-2 gap-6" data-test="usage-charts">
       <div class="card bg-base-100 shadow">
         <div class="card-body p-4">
-          <CallHistogram :tools="data.tools" />
+          <CallHistogram :tools="data.tools" @select-tool="onSelectTool" />
         </div>
       </div>
       <div class="card bg-base-100 shadow">
@@ -104,12 +227,12 @@
       </div>
       <div class="card bg-base-100 shadow">
         <div class="card-body p-4">
-          <Timeline :buckets="data.timeline" :window="window" />
+          <Timeline :buckets="data.timeline" :window="window" @select-bucket="onSelectBucket" />
         </div>
       </div>
 
       <!-- "other" fold note when the per-tool list was truncated -->
-      <div v-if="data.other" class="lg:col-span-2 text-xs opacity-50 text-center" data-test="usage-other-note">
+      <div v-if="data.other" class="lg:col-span-2 text-xs text-base-content/60 text-center" data-test="usage-other-note">
         + {{ data.other.tools_folded }} more tool{{ data.other.tools_folded === 1 ? '' : 's' }}
         ({{ formatNumber(data.other.calls) }} calls) folded into “other”.
       </div>
@@ -118,10 +241,19 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import api from '@/services/api'
-import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
-import { formatNumber } from '@/utils/usageFormat'
+import { useAuthStore } from '@/stores/auth'
+import { isScopeParamAvailable, useScopeQuery, splitScopeTool, usageWindowFor } from '@/composables/useScopeQuery'
+import { useScopeLabels, type ScopeName } from '@/composables/useScopeLabels'
+import { useSystemStore } from '@/stores/system'
+import { useProfilesStore } from '@/stores/profiles'
+import { pickScopeParams, scopeParamsKey } from '@/utils/scopeParams'
+import ScopeChips from '@/components/scope/ScopeChips.vue'
+import ScopeFilterSelects from '@/components/scope/ScopeFilterSelects.vue'
+import type { UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, UsageToolStat } from '@/types'
+import { formatNumber, partitionUsageTools, usageHeadline } from '@/utils/usageFormat'
 import CallHistogram from '@/components/usage/CallHistogram.vue'
 import ResponseSizeRanking from '@/components/usage/ResponseSizeRanking.vue'
 import ErrorRateChart from '@/components/usage/ErrorRateChart.vue'
@@ -142,6 +274,88 @@ const loading = ref(false)
 const error = ref<string | null>(null)
 let refreshTimer: ReturnType<typeof setInterval> | null = null
 
+const authStore = useAuthStore()
+// Undefined when the view is mounted without a router installed — several
+// unit suites do exactly that (Tools.vue and Servers.vue guard the same way),
+// and useScopeQuery() itself calls useRoute()/useRouter().
+const route = useRoute() as ReturnType<typeof useRoute> | undefined
+const router = useRouter() as ReturnType<typeof useRouter> | undefined
+const scopeQuery = route ? useScopeQuery('usage') : undefined
+const systemStore = useSystemStore()
+const profilesStore = useProfilesStore()
+const { chipLabel } = useScopeLabels()
+
+// ---- Spec 108-j: profile / client / token scope ----------------------------
+const SCOPE_URL_NAMES = ['profile', 'client', 'token'] as const
+/** The three REST names the page applies right now, from useScopeQuery.toRest()
+ * (rule 7: none while the build does not advertise them). */
+const usageScopeParams = computed(() => pickScopeParams(scopeQuery?.toRest()))
+const scopeApplied = computed(() => Object.keys(usageScopeParams.value).length > 0)
+const scopeKey = computed(() => scopeParamsKey(usageScopeParams.value))
+const scopeChipsVisible = computed(() =>
+  Boolean(scopeQuery?.chips.value.some(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name))) ||
+  scopeUnavailableNames.value.length > 0
+)
+// The pickers show whenever the build advertises a filter this page registers.
+const scopePickersVisible = computed(() => SCOPE_URL_NAMES.some(name => isScopeParamAvailable(name)))
+/** "Profile: Work Read-only": for the empty state. */
+const scopeSummary = computed(() =>
+  (scopeQuery?.chips.value ?? [])
+    .filter(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name))
+    .map(chip => chipLabel(chip.name as ScopeName, chip.value))
+    .join(', ')
+)
+const scopeWaitTimedOut = ref(false)
+const scopeUnavailableNames = computed(() => {
+  if (!scopeWaitTimedOut.value || !route) return []
+  return SCOPE_URL_NAMES.filter(name => {
+    const raw = route.query[name]
+    return typeof raw === 'string' && raw !== '' && !isScopeParamAvailable(name)
+  })
+})
+
+// Spec 109-k (activity-scope-filters), T119: Usage had no `server`/`tool`
+// deep-link support at all — a link built with `?server=<n>` (a server
+// card's stats line, a future Clients-row link) landed on the unfiltered
+// aggregate. Read once on mount: this page has no picker of its own for
+// either, they only ever arrive as an incoming filter.
+const filterServer = ref('')
+const filterTool = ref('')
+// T113: the raw `from`/`to` values, kept only to drive the "not applied on
+// Usage" chip below — the actual request always goes through
+// `usageWindowFor`, never these directly.
+const rawFrom = ref('')
+const rawTo = ref('')
+function applyScopeQueryParams(): void {
+  if (!route) return
+  const server = route.query.server
+  if (typeof server === 'string') filterServer.value = server
+  const tool = route.query.tool
+  if (typeof tool === 'string') filterTool.value = tool
+  // url-filter-contract.md `from`/`to` row ("Usage: window"): a deep link
+  // (a server card's "last 24h" stats line, a future Clients-row link, a
+  // shared URL) carries `from`/`to`, not `window` — without this the window
+  // picker ignored it entirely and Usage always opened on the default 24h
+  // no matter what the URL said.
+  const from = route.query.from
+  rawFrom.value = typeof from === 'string' ? from : ''
+  const to = route.query.to
+  rawTo.value = typeof to === 'string' ? to : ''
+  if (rawFrom.value || rawTo.value) {
+    window.value = usageWindowFor(rawFrom.value || undefined, rawTo.value || undefined) as UsageWindow
+  }
+}
+applyScopeQueryParams()
+
+/** Rule 5: a `from`/`to` present in the URL that is not one of the three
+ * named presets still issues `window=all` (T113), but the operator should
+ * see that the exact range they linked to was not actually honoured. */
+const usageRangeNotApplied = computed(() => {
+  if (!rawFrom.value && !rawTo.value) return false
+  if (rawTo.value) return true // an explicit end time is never one of the three presets
+  return rawFrom.value !== '-24h' && rawFrom.value !== '-7d'
+})
+
 const windowLabel = computed(() => {
   switch (window.value) {
     case '24h': return 'last 24h'
@@ -150,12 +364,23 @@ const windowLabel = computed(() => {
   }
 })
 
-const totalCalls = computed(() => data.value?.tools.reduce((s, t) => s + t.calls, 0) ?? 0)
-const totalErrors = computed(() => data.value?.tools.reduce((s, t) => s + t.errors, 0) ?? 0)
-const overallErrorRate = computed(() => {
-  const c = totalCalls.value
-  return c > 0 ? ((totalErrors.value / c) * 100).toFixed(1) : '0.0'
-})
+const headline = computed(() => usageHeadline(data.value))
+
+/** Tools that have completed at least one call — what the charts below chart. */
+const activeToolCount = computed(
+  () => partitionUsageTools(data.value?.tools ?? []).completed.length
+)
+
+/**
+ * How the tokens-saved figure is derived, in one sentence an operator can act
+ * on. F23 (#1046): the chip and this tile carried the product's headline claim
+ * with no explanation of what window it covered or why it never moved.
+ */
+const tokensSavedExplainer =
+  'Estimated per-request saving: the tokens it would take to put every ' +
+  'upstream tool definition in your agent\'s context, minus what retrieve_tools ' +
+  'returns for one query. It is a property of your current tool catalog, so it ' +
+  'changes when you add, remove or reconnect servers — not with each call.'
 
 const isEmpty = computed(() => {
   if (!data.value) return false
@@ -169,24 +394,77 @@ const freshnessLabel = computed(() => {
   return `${Math.round(ms / 60_000)}m ago`
 })
 
+// Requests can overlap — the 30s auto-refresh, a window switch and a filter
+// reset all call reload() and there is no cancellation. Without sequencing, a
+// slower earlier response can land last and repaint the panel with data for a
+// window the user already moved off. Only the newest request may write state.
+let reloadSeq = 0
+
+/** Rule 8: `server`/`tool` disagree on the server — no REST request can
+ * express both. The page must issue no request and show the conflict empty
+ * state instead of silently falling back to the unfiltered aggregate
+ * (zcode review round 1, F1). */
+const filterConflict = computed(
+  () => splitScopeTool(filterTool.value || undefined, filterServer.value || undefined).conflict === true
+)
+
+function clearScopeConflict(): void {
+  filterServer.value = ''
+  filterTool.value = ''
+  if (router) {
+    const query = { ...route?.query }
+    delete query.server
+    delete query.tool
+    router.replace({ query })
+  }
+  reload()
+}
+
 async function reload() {
+  if (!scopeReady) await scopeReadyPromise
+  // Spec 107 FR-041 / cross-review round 2, chunk 4 P1: GET /activity/usage
+  // is an admin-only core door (named must-refuse, rest-endpoints.md §8).
+  // Usage is the tenant dashboard's DEFAULT landing panel, so an unguarded
+  // reload() here drew a 403 on every tenant page load and every 30s
+  // refresh, regardless of entry point (mount, interval, window/filter
+  // change) — guard the fetch itself rather than each caller.
+  if (authStore.principalKind === 'tenant') return
+  // Rule 8 (zcode F1): a conflicting server/tool pair issues no request at
+  // all — never the window's unfiltered aggregate, which would silently
+  // mislead the operator into thinking the URL's filters were honoured.
+  if (filterConflict.value) {
+    data.value = null
+    error.value = null
+    loading.value = false
+    return
+  }
+  const seq = ++reloadSeq
   loading.value = true
   error.value = null
   try {
+    const split = splitScopeTool(filterTool.value || undefined, filterServer.value || undefined)
     const resp = await api.getActivityUsage({
+      ...usageScopeParams.value,
       window: window.value,
       status: status.value || undefined,
       sort: sort.value,
+      server: split.server,
+      tool: split.tool,
     })
+    if (seq !== reloadSeq) return
     if (resp.success && resp.data) {
       data.value = resp.data
     } else {
       error.value = resp.error || 'Failed to load usage data'
     }
   } catch (e) {
+    if (seq !== reloadSeq) return
     error.value = e instanceof Error ? e.message : 'Failed to load usage data'
   } finally {
-    loading.value = false
+    // A superseded request must not clear the spinner the newest one owns.
+    if (seq === reloadSeq) {
+      loading.value = false
+    }
   }
 }
 
@@ -201,8 +479,69 @@ function resetFilters() {
   reload()
 }
 
+/** The active window as the `from`/`to` the link map's targets carry
+ * (url-filter-contract.md `view` -> REST: "the calls behind the bar"). */
+function windowToRange(w: UsageWindow): { from?: string; to?: string } {
+  if (w === '24h') return { from: '-24h' }
+  if (w === '7d') return { from: '-7d' }
+  return {}
+}
+
+/** Link map "Usage chart bar (tool x bucket)": a CallHistogram bar is one
+ * tool, over the whole active window. */
+function onSelectTool(tool: UsageToolStat): void {
+  if (!router || !scopeQuery) return
+  const patch: Record<string, string> = { view: 'calls', tool: `${tool.server}:${tool.tool}` }
+  const range = windowToRange(window.value)
+  if (range.from) patch.from = range.from
+  if (status.value) patch.status = status.value
+  router.push(scopeQuery.linkTo('activity', patch))
+}
+
+/** Same link map row: a Timeline bar is one time bucket, across every tool. */
+function onSelectBucket(range: { start: string; end: string }): void {
+  if (!router || !scopeQuery) return
+  const patch: Record<string, string> = { view: 'calls', from: range.start, to: range.end }
+  if (status.value) patch.status = status.value
+  router.push(scopeQuery.linkTo('activity', patch))
+}
+
+// Spec 108-j J3 (rule 1): a URL that names a profile/client/token waits for
+// /status before the FIRST fetch, so that request carries it instead of
+// flashing the unfiltered aggregate. Not armed before it, so the wait never
+// double-fetches; after it, a changed scope (a chip removed, the header chip,
+// a picker, the feature list arriving late) refetches.
+// Rule-1 ready gate (F2.1/F3.1/F4.1): every loader waits for the startup
+// /status wait to finish, so no control, refresh or SSE event can send an
+// unfiltered request while the first filtered one is still pending.
+let scopeReady = false
+let releaseScopeReady: () => void = () => {}
+const scopeReadyPromise = new Promise<void>(resolve => { releaseScopeReady = resolve })
+let scopeWatchArmed = false
+async function firstLoad() {
+  const urlHasScope = Boolean(route && SCOPE_URL_NAMES.some(name => {
+    const raw = route.query[name]
+    return typeof raw === 'string' && raw !== ''
+  }))
+  if (urlHasScope) {
+    await systemStore.waitForScopeFeatures()
+    // The wait is over: any named param still unavailable gets the disabled
+    // chip, including when /status answered but did not advertise it (F5.2).
+    scopeWaitTimedOut.value = true
+  }
+  scopeReady = true
+  releaseScopeReady()
+  scopeWatchArmed = true
+  await reload()
+}
+
+watch(scopeKey, () => {
+  if (scopeWatchArmed) void reload()
+})
+
 onMounted(() => {
-  reload()
+  void firstLoad()
+  if (!profilesStore.loaded && !profilesStore.loading) void profilesStore.fetchProfiles()
   // Light auto-refresh so the page stays live without hammering the endpoint
   // (the backend already serves from a short-TTL cached snapshot).
   refreshTimer = setInterval(reload, 30_000)

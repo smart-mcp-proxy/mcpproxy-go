@@ -15,8 +15,13 @@ type UserClaims struct {
 	jwt.RegisteredClaims
 	Email       string `json:"email"`
 	DisplayName string `json:"display_name,omitempty"`
-	Role        string `json:"role"`     // "admin" or "user"
-	Provider    string `json:"provider"` // google, github, microsoft
+	// Role is INFORMATIONAL ONLY and is NOT authoritative for authorization.
+	// It is frozen at mint time and is never revoked, so authorization must
+	// always re-derive the role from the current config (admin_emails) — see
+	// ServerEditionAuthMiddleware.buildAuthContext. ValidateBearerToken still
+	// requires the claim to be non-empty as a well-formedness check.
+	Role     string `json:"role"`     // "admin" or "user" (informational)
+	Provider string `json:"provider"` // google, github, microsoft
 }
 
 // GenerateBearerToken creates a signed JWT with team member claims.

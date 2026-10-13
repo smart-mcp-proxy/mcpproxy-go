@@ -26,10 +26,11 @@ func classifyStartupError(err error) string {
 	}
 }
 
-// recordStartupOutcome persists the last startup outcome to the config file.
-// Spec 042 User Story 5. The next heartbeat reads this value into the payload
-// as last_startup_outcome.
-func recordStartupOutcome(cfg *config.Config, configPath, outcome string) {
+// recordStartupOutcome persists the last startup outcome to the config file
+// via save (serveConfigSaver.save in runServer, so CLI flag overrides are not
+// written along with it). Spec 042 User Story 5. The next heartbeat reads this
+// value into the payload as last_startup_outcome.
+func recordStartupOutcome(cfg *config.Config, configPath, outcome string, save func(*config.Config, string) error) {
 	if cfg == nil {
 		return
 	}
@@ -43,7 +44,7 @@ func recordStartupOutcome(cfg *config.Config, configPath, outcome string) {
 	if configPath == "" {
 		return
 	}
-	if err := config.SaveConfig(cfg, configPath); err != nil {
+	if err := save(cfg, configPath); err != nil {
 		// Best-effort; telemetry must never block startup.
 		zap.L().Debug("Failed to persist last_startup_outcome",
 			zap.String("outcome", outcome),

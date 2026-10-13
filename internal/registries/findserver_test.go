@@ -70,7 +70,7 @@ func TestFetchServers_SendsConfiguredAPIKey(t *testing.T) {
 	defer srv.Close()
 
 	reg := &RegistryEntry{ID: "pulse", Protocol: "custom/pulse", ServersURL: srv.URL, RequiresKey: true}
-	_, err := fetchServers(context.Background(), reg, nil, "")
+	_, err := fetchServers(context.Background(), reg, nil, "", 0)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer "+key, gotAuth, "configured registry key must be sent as a Bearer token")
 }
@@ -90,7 +90,7 @@ func TestFetchOfficialServers_SendsConfiguredAPIKey(t *testing.T) {
 	defer srv.Close()
 
 	reg := &RegistryEntry{ID: "smithery", Protocol: protocolOfficial, ServersURL: srv.URL, RequiresKey: true}
-	_, err := fetchOfficialServers(context.Background(), reg, nil, "")
+	_, err := fetchOfficialServers(context.Background(), reg, nil, "", 0)
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer "+key, gotAuth, "configured registry key must be sent as a Bearer token")
 }
@@ -109,7 +109,7 @@ func TestFetchServers_NoKeyNoAuthHeader(t *testing.T) {
 	defer srv.Close()
 
 	reg := &RegistryEntry{ID: "pulse", Protocol: "custom/pulse", ServersURL: srv.URL}
-	_, err := fetchServers(context.Background(), reg, nil, "")
+	_, err := fetchServers(context.Background(), reg, nil, "", 0)
 	require.NoError(t, err)
 	assert.Empty(t, gotAuth, "no Authorization header should be sent without a configured key")
 }

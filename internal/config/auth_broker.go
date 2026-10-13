@@ -4,36 +4,33 @@ package config
 
 import "fmt"
 
-// Auth-broker modes (spec 074, FR-001/FR-003). Each names the upstream
-// credential-acquisition strategy the gateway uses on behalf of the caller.
+// Auth-broker modes (spec 074, FR-001/FR-003).
+//
+// Spec 107 FR-032 reduced the accepted set to the one mode that has a live
+// implementation. `token_exchange` and `entra_obo` were validated but never
+// performed by any code path; a config that still carries one of them loads
+// with the whole auth_broker block of that server dropped and a LoadDiagnostic
+// recorded (see the server-build normaliser), and the write doors refuse it
+// (ValidateRemovedKeys).
 const (
-	// AuthBrokerModeTokenExchange uses RFC 8693 OAuth 2.0 Token Exchange.
-	AuthBrokerModeTokenExchange = "token_exchange"
-	// AuthBrokerModeEntraOBO uses Microsoft Entra On-Behalf-Of flow.
-	AuthBrokerModeEntraOBO = "entra_obo"
 	// AuthBrokerModeOAuthConnect uses a per-user OAuth connect/authorize flow.
 	AuthBrokerModeOAuthConnect = "oauth_connect"
 )
 
-// Default header injection settings (FR-016).
-const (
-	defaultAuthBrokerHeader       = "Authorization"
-	defaultAuthBrokerHeaderFormat = "Bearer {token}"
-)
-
-// AuthBrokerConfig is the per-upstream token-brokering block (server edition).
-// It is opt-in per server (FR-003); upstreams without it behave exactly as
-// today. Brokering applies only to HTTP-family upstreams in this phase
-// (FR-002).
+// AuthBrokerConfig is the per-upstream credential-connect block (server
+// edition). It is opt-in per server (FR-003); upstreams without it behave
+// exactly as today. A user who completes the connect flow gets their
+// credential STORED (encrypted) for that upstream — nothing injects it into a
+// proxied request (Spec 107 FR-034); the `header`/`header_format` injection
+// leaves were removed with the never-wired injector (FR-032).
 type AuthBrokerConfig struct {
-	// Mode selects the credential-acquisition strategy: token_exchange,
-	// entra_obo, or oauth_connect.
+	// Mode selects the credential-acquisition strategy: oauth_connect.
 	Mode string `json:"mode" mapstructure:"mode"`
 	// TokenEndpoint is the IdP token endpoint used to mint the upstream credential.
 	TokenEndpoint string `json:"token_endpoint" mapstructure:"token_endpoint"`
 	// AuthorizationEndpoint is the upstream AS authorize URL the user is
 	// redirected to for consent. Required for the oauth_connect mode (Path B,
-	// spec 074 FR-011); unused by token_exchange/entra_obo.
+	// spec 074 FR-011).
 	AuthorizationEndpoint string `json:"authorization_endpoint,omitempty" mapstructure:"authorization_endpoint"`
 	// Resource is the RFC 8707 audience the resulting token is scoped to.
 	Resource string `json:"resource,omitempty" mapstructure:"resource"`
@@ -42,28 +39,22 @@ type AuthBrokerConfig struct {
 	// ClientID / ClientSecret authenticate the gateway to the token endpoint.
 	ClientID     string `json:"client_id,omitempty" mapstructure:"client_id"`
 	ClientSecret string `json:"client_secret,omitempty" mapstructure:"client_secret"`
-	// Header is the outbound header name the resolved credential is injected
-	// into (FR-016, default "Authorization").
-	Header string `json:"header,omitempty" mapstructure:"header"`
-	// HeaderFormat is the value template; "{token}" is replaced with the
-	// resolved credential (default "Bearer {token}").
-	HeaderFormat string `json:"header_format,omitempty" mapstructure:"header_format"`
 }
 
-// ApplyDefaults fills the optional header-injection fields when unset (FR-016).
-func (a *AuthBrokerConfig) ApplyDefaults() {
+// Clone returns a deep copy of the block (nil-safe). CopyServerConfig uses it
+// so a copied server never shares the Scopes backing array with its source.
+func (a *AuthBrokerConfig) Clone() *AuthBrokerConfig {
 	if a == nil {
-		return
+		return nil
 	}
-	if a.Header == "" {
-		a.Header = defaultAuthBrokerHeader
+	out := *a
+	if a.Scopes != nil {
+		out.Scopes = append([]string(nil), a.Scopes...)
 	}
-	if a.HeaderFormat == "" {
-		a.HeaderFormat = defaultAuthBrokerHeaderFormat
-	}
+	return &out
 }
 
-// Validate checks the broker block's own fields (mode + required endpoint).
+// Validate checks the broker block's own fields (mode + required endpoints).
 // Protocol-family enforcement is handled by validateServerAuthBroker, which has
 // the surrounding ServerConfig context.
 func (a *AuthBrokerConfig) Validate() error {
@@ -71,27 +62,27 @@ func (a *AuthBrokerConfig) Validate() error {
 		return nil
 	}
 	switch a.Mode {
-	case AuthBrokerModeTokenExchange, AuthBrokerModeEntraOBO, AuthBrokerModeOAuthConnect:
+	case AuthBrokerModeOAuthConnect:
 		// ok
 	case "":
-		return fmt.Errorf("auth_broker.mode is required (one of token_exchange, entra_obo, oauth_connect)")
+		return fmt.Errorf("auth_broker.mode is required (must be %s)", AuthBrokerModeOAuthConnect)
 	default:
-		return fmt.Errorf("invalid auth_broker.mode: %q (must be token_exchange, entra_obo, or oauth_connect)", a.Mode)
+		return fmt.Errorf("invalid auth_broker.mode: %q (must be %s)", a.Mode, AuthBrokerModeOAuthConnect)
 	}
 	if a.TokenEndpoint == "" {
 		return fmt.Errorf("auth_broker.token_endpoint is required")
 	}
 	// The connect flow (Path B) additionally needs the upstream authorize URL
 	// to redirect the user to for consent.
-	if a.Mode == AuthBrokerModeOAuthConnect && a.AuthorizationEndpoint == "" {
+	if a.AuthorizationEndpoint == "" {
 		return fmt.Errorf("auth_broker.authorization_endpoint is required for mode %q", AuthBrokerModeOAuthConnect)
 	}
 	return nil
 }
 
 // serverIsHTTPFamily reports whether the server is an HTTP/SSE/streamable-HTTP
-// upstream, the only kinds that support brokering in this phase (FR-002). A
-// server with an explicit stdio protocol, or a bare Command with no URL, is not
+// upstream, the only kinds that support the connect flow (FR-002). A server
+// with an explicit stdio protocol, or a bare Command with no URL, is not
 // HTTP-family.
 func serverIsHTTPFamily(server *ServerConfig) bool {
 	switch server.Protocol {
@@ -107,32 +98,27 @@ func serverIsHTTPFamily(server *ServerConfig) bool {
 	}
 }
 
-// validateServerAuthBroker applies broker defaults and validates the block in
-// the context of its server. It rejects brokering on non-HTTP-family upstreams
-// (FR-002) with a clear "unsupported in this phase" message.
+// validateServerAuthBroker validates the block in the context of its server.
+// It rejects the connect flow on non-HTTP-family upstreams (FR-002) with a
+// clear "unsupported in this phase" message.
 func validateServerAuthBroker(server *ServerConfig, fieldPrefix string) []ValidationError {
 	if server == nil || server.AuthBroker == nil {
 		return nil
 	}
 
-	var errs []ValidationError
 	if !serverIsHTTPFamily(server) {
-		errs = append(errs, ValidationError{
+		// The protocol error is the actionable one; field validation is skipped.
+		return []ValidationError{{
 			Field:   fieldPrefix + ".auth_broker",
 			Message: "auth_broker is only supported on HTTP-family upstreams (http, sse, streamable-http); brokering for stdio/non-HTTP upstreams is unsupported in this phase",
-		})
-		// Still apply defaults so a later edition flip surfaces a complete block,
-		// but skip field validation — the protocol error is the actionable one.
-		server.AuthBroker.ApplyDefaults()
-		return errs
+		}}
 	}
 
-	server.AuthBroker.ApplyDefaults()
 	if err := server.AuthBroker.Validate(); err != nil {
-		errs = append(errs, ValidationError{
+		return []ValidationError{{
 			Field:   fieldPrefix + ".auth_broker",
 			Message: err.Error(),
-		})
+		}}
 	}
-	return errs
+	return nil
 }

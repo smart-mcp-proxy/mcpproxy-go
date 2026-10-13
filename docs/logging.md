@@ -1,3 +1,9 @@
+---
+title: "Logging"
+sidebar_label: "Logging"
+description: "Log file locations per OS, log levels, rotation, and per-server log files."
+---
+
 # Logging System
 
 The mcpproxy-go project includes a comprehensive logging system that follows OS-specific standards for log file storage and provides flexible configuration options.

@@ -3,6 +3,8 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"sort"
 	"strconv"
@@ -10,7 +12,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
@@ -34,6 +39,12 @@ type SecurityController interface {
 
 	GetSecurityOverview(ctx context.Context) (*scanner.SecurityOverview, error)
 	GetScanSummary(ctx context.Context, serverName string) *scanner.ScanSummary
+
+	// DeepScanEnabled reports whether the opt-in deep-scan layer
+	// (security.deep_scan.enabled, Spec 077 US3) is currently on. Used to warn
+	// when a Docker-based scanner is enabled while the layer that would run it
+	// is off (audit FIX 3b).
+	DeepScanEnabled() bool
 
 	// Batch scan operations
 	ScanAll(ctx context.Context, servers []scanner.ServerStatus, scannerIDs []string) (*scanner.QueueProgress, error)
@@ -73,7 +84,9 @@ func (s *Server) handleListScanners(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeSuccess(w, scanners)
+	// #1166 round 10 (P3): ConfiguredEnv holds the vendor API keys an operator
+	// typed into the scanner config dialog. They went out in the clear here.
+	s.writeSuccess(w, scanner.RedactScannersForAPI(scanners))
 }
 
 func (s *Server) handleInstallScanner(w http.ResponseWriter, r *http.Request) {
@@ -102,7 +115,18 @@ func (s *Server) handleInstallScanner(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
-	s.writeSuccess(w, map[string]string{"status": "enabled", "id": id})
+	resp := map[string]string{"status": "enabled", "id": id}
+	// Audit FIX 3b: enabling a Docker-based (deep) scanner while the opt-in
+	// deep-scan layer is off would otherwise be a silent no-op at scan time —
+	// the scanner is enabled but never runs. Surface an explicit hint so both
+	// the API caller and the CLI can tell the user what is still required.
+	if !s.securityController.DeepScanEnabled() {
+		if sc, err := s.securityController.GetScannerStatus(r.Context(), id); err == nil && sc != nil && !sc.InProcess {
+			resp["hint"] = "scanner enabled, but it will not run until security.deep_scan.enabled=true — " +
+				"Docker-based scanners belong to the opt-in deep-scan layer (see docs/features/tool-scanner.md)"
+		}
+	}
+	s.writeSuccess(w, resp)
 }
 
 func (s *Server) handleRemoveScanner(w http.ResponseWriter, r *http.Request) {
@@ -120,6 +144,33 @@ func (s *Server) handleRemoveScanner(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeSuccess(w, map[string]string{"status": "disabled", "id": id})
+}
+
+// stripRedactedScannerEnv removes every entry whose value is the API redaction
+// sentinel, returning a fresh map plus whether anything was dropped. A nil or
+// empty input yields a nil map, so the caller's "nothing to do" check is
+// unchanged.
+//
+// It never mutates the caller's map: the decoded request body is not shared
+// today, but the whole point of this guard is that a future caller must not be
+// able to reintroduce the write by handing us a map it also uses.
+func stripRedactedScannerEnv(env map[string]string) (map[string]string, bool) {
+	if len(env) == 0 {
+		return nil, false
+	}
+	out := make(map[string]string, len(env))
+	dropped := false
+	for k, v := range env {
+		if v == scanner.RedactedEnvValue {
+			dropped = true
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil, dropped
+	}
+	return out, dropped
 }
 
 func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) {
@@ -140,12 +191,28 @@ func (s *Server) handleConfigureScanner(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	if len(req.Env) == 0 && req.DockerImage == "" {
+	// #1166 round 11: the read doors redact every literal env value to
+	// scanner.RedactedEnvValue, so a client that GETs /security/scanners and
+	// posts the document back would store the sentinel OVER the operator's real
+	// API key — a silent credential destruction that leaves the scanner
+	// authenticating as "***". The Web UI was taught to skip the sentinel, but
+	// the server must not depend on a cooperating client; any API caller, CLI
+	// or script can round-trip the redacted document. Drop those entries here.
+	// ConfigureScanner MERGES into ConfiguredEnv, so an omitted key keeps its
+	// stored value — which is exactly the semantics the sentinel means.
+	env, droppedRedacted := stripRedactedScannerEnv(req.Env)
+	if len(env) == 0 && req.DockerImage == "" {
+		if droppedRedacted {
+			s.writeError(w, r, http.StatusBadRequest,
+				"env values must not be the redaction placeholder "+scanner.RedactedEnvValue+
+					" — omit a key to keep its stored value")
+			return
+		}
 		s.writeError(w, r, http.StatusBadRequest, "env map or docker_image is required")
 		return
 	}
 
-	if err := s.securityController.ConfigureScanner(r.Context(), id, req.Env, req.DockerImage); err != nil {
+	if err := s.securityController.ConfigureScanner(r.Context(), id, env, req.DockerImage); err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -167,7 +234,9 @@ func (s *Server) handleGetScannerStatus(w http.ResponseWriter, r *http.Request) 
 		s.writeError(w, r, http.StatusNotFound, err.Error())
 		return
 	}
-	s.writeSuccess(w, sc)
+	// Same redaction as the list door — one scanner is not a lesser disclosure
+	// than all of them (P3).
+	s.writeSuccess(w, sc.RedactedForAPI())
 }
 
 // --- Scan operation handlers ---
@@ -194,6 +263,9 @@ func (s *Server) handleStartScan(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		if strings.Contains(err.Error(), "already in progress") {
 			s.writeError(w, r, http.StatusConflict, err.Error())
+		} else if strings.Contains(err.Error(), "server is not configured") {
+			// Spec 116 FR-014a: the committed view does not know the server.
+			s.writeError(w, r, http.StatusNotFound, err.Error())
 		} else {
 			s.writeError(w, r, http.StatusInternalServerError, err.Error())
 		}
@@ -265,6 +337,43 @@ func (s *Server) handleCancelScan(w http.ResponseWriter, r *http.Request) {
 
 // --- Approval handlers ---
 
+type securityApproveRequest struct {
+	Force bool     `json:"force"`
+	Block []string `json:"block,omitempty"`
+	// ExpectedHashes binds the approval to the reviewed definitions (Spec
+	// 117 PR-2, #1566): tool name -> the review's current_hash. Absent or
+	// null is an unbound (legacy) request; {} binds to the empty snapshot.
+	// Independent of ExpectedIncarnation: a request may carry both, and the
+	// two refusals stay distinct (review_out_of_date vs server_replaced).
+	ExpectedHashes map[string]string `json:"expected_hashes,omitempty" extensions:"x-nullable"`
+	// ExpectedIncarnation binds the approval to the server the client
+	// reviewed (Spec 116 FR-017): a remove and re-add since then is refused
+	// with 409 server_replaced and the replacement stays quarantined.
+	ExpectedIncarnation int64 `json:"expected_incarnation,omitempty"`
+}
+
+// reviewedSecurityApprover is the review-bound server approval of the
+// security controller (scanner.Service implements it). It carries the
+// expected incarnation too (0 = the incarnation current at the call).
+type reviewedSecurityApprover interface {
+	ApproveServerReviewedAt(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string, expectedIncarnation int64) error
+}
+
+// handleSecurityApprove godoc
+// @Summary Approve a server after security review
+// @Description Saves the integrity baseline and optionally blocks selected tools atomically before unquarantining the server. With expected_hashes (tool name -> the review's current_hash; {} for an empty review) the approval is bound to the reviewed definitions: when a tool the approval would make reachable (pending, or approved and enabled, minus block) changed or appeared since the review, or a block target no longer exists, the response is 409 review_out_of_date, nothing is written and the server stays quarantined. Tools listed after the approval wait for review.
+// @Tags security
+// @Accept json
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Param id path string true "Server name"
+// @Param body body securityApproveRequest false "Force approval and tool names to keep disabled"
+// @Success 200 {object} contracts.SuccessResponse "Server approved"
+// @Failure 400 {object} contracts.ErrorResponse "Invalid request or unknown tool block target"
+// @Failure 409 {object} StaleReviewErrorResponse "Dangerous scan verdict requires force, approval failed, the review is out of date (error_code review_out_of_date), or server_replaced (the server was removed or re-added since expected_incarnation)"
+// @Failure 404 {object} contracts.ErrorResponse "Server not configured"
+// @Router /api/v1/servers/{id}/security/approve [post]
 func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
 		return
@@ -275,17 +384,67 @@ func (s *Server) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		Force bool `json:"force"`
+	var req securityApproveRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
+			return
+		}
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
 
 	// Use "api" as the approver since we don't have user context in personal edition
-	if err := s.securityController.ApproveServer(r.Context(), name, req.Force, "api"); err != nil {
-		s.writeError(w, r, http.StatusConflict, err.Error())
+	var approveErr error
+	if req.ExpectedHashes != nil {
+		reviewed, ok := s.securityController.(reviewedSecurityApprover)
+		if !ok {
+			s.writeError(w, r, http.StatusServiceUnavailable, "Review-bound security approval is unavailable")
+			return
+		}
+		approveErr = reviewed.ApproveServerReviewedAt(r.Context(), name, req.Force, "api", req.Block, req.ExpectedHashes, req.ExpectedIncarnation)
+	} else if boundApprover, ok := s.securityController.(interface {
+		ApproveServerAt(context.Context, string, bool, string, []string, int64) error
+	}); ok {
+		approveErr = boundApprover.ApproveServerAt(r.Context(), name, req.Force, "api", req.Block, req.ExpectedIncarnation)
+	} else if len(req.Block) > 0 {
+		blockApprover, ok := s.securityController.(interface {
+			ApproveServerWithBlocks(context.Context, string, bool, string, []string) error
+		})
+		if !ok {
+			s.writeError(w, r, http.StatusServiceUnavailable, "Security approval with tool blocks is unavailable")
+			return
+		}
+		approveErr = blockApprover.ApproveServerWithBlocks(r.Context(), name, req.Force, "api", req.Block)
+	} else {
+		approveErr = s.securityController.ApproveServer(r.Context(), name, req.Force, "api")
+	}
+	if approveErr != nil {
+		if s.writeStaleReview(w, r, approveErr) {
+			return
+		}
+		if errors.Is(approveErr, scanner.ErrToolApprovalBlockNotFound) {
+			s.writeError(w, r, http.StatusBadRequest, approveErr.Error())
+			return
+		}
+		if errors.Is(approveErr, commitview.ErrServerReplaced) || errors.Is(approveErr, internalRuntime.ErrServerNotFound) {
+			// 409 server_replaced; 404 for a server that is not configured
+			// (documented, review round 4).
+			s.writeApprovalWriteError(w, r, approveErr, "Failed to approve server")
+			return
+		}
+		s.writeError(w, r, http.StatusConflict, approveErr.Error())
 		return
 	}
-	s.writeSuccess(w, map[string]string{"status": "approved", "server_name": name})
+	// UX-02: the server approval is done (status stays "approved" for
+	// compatibility); the post-approval tool-approval state is reported
+	// additively so a partial outcome — tools still pending or changed —
+	// cannot masquerade as a complete approval.
+	response := map[string]interface{}{"status": "approved", "server_name": name}
+	if _, outcome, ok := s.toolApprovalOutcomeFor(name); ok {
+		outcome.addTo(response)
+	} else {
+		response["outcome_unavailable"] = true
+	}
+	s.writeSuccess(w, response)
 }
 
 func (s *Server) handleSecurityReject(w http.ResponseWriter, r *http.Request) {
@@ -327,6 +486,17 @@ func (s *Server) handleCheckIntegrity(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSecurityOverview(w http.ResponseWriter, r *http.Request) {
 	if !s.requireSecurity(w, r) {
+		return
+	}
+	// #1166 round 10 (P4): DENIED to a non-admin caller, not filtered. The
+	// overview is nothing but deployment-wide scan and finding counts —
+	// scanned/unscanned server totals and severity tallies computed across the
+	// whole inventory. There is no per-server breakdown to project through
+	// canSeeServer, and the scalars themselves are the count oracle for exactly
+	// what /servers now withholds. Same call as /stats/tokens and
+	// /telemetry/payload; a scoped caller reads its own server's verdict from
+	// /servers/{id}/scan/status, which the subtree gate already scopes.
+	if !s.requireAdminRead(w, r, securityFleetDenialMessage) {
 		return
 	}
 	overview, err := s.securityController.GetSecurityOverview(r.Context())
@@ -558,6 +728,17 @@ func (s *Server) handleGetQueueProgress(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// #1166 round 10 (P4): DENIED to a non-admin caller. QueueProgress.Items
+	// carries a ServerName per queued server — the full inventory, live, on a
+	// route that sits right beside the subtree gate — and the counters around
+	// it (total/pending/running/completed/failed) are fleet-wide scalars that
+	// cannot be re-derived from a filtered item list. Filtering the items alone
+	// would leave those scalars as an exact count of what was hidden, so the
+	// whole document is denied, as /stats/tokens and /security/overview are.
+	if !s.requireAdminRead(w, r, securityFleetDenialMessage) {
+		return
+	}
+
 	progress := s.securityController.GetQueueProgress()
 	if progress == nil {
 		s.writeSuccess(w, map[string]interface{}{
@@ -621,6 +802,20 @@ func (s *Server) handleListScanHistory(w http.ResponseWriter, r *http.Request) {
 		return less
 	})
 
+	// #1166: each summary carries ServerName, so an unfiltered history is a
+	// complete inventory enumeration on a route that is otherwise about scan
+	// results. Rebuild rather than compact — `summaries` comes straight from
+	// the controller.
+	if auth.IsScopedCaller(r.Context()) {
+		scoped := make([]scanner.ScanJobSummary, 0, len(summaries))
+		for _, sum := range summaries {
+			if canSeeServer(r.Context(), sum.ServerName) {
+				scoped = append(scoped, sum)
+			}
+		}
+		summaries = scoped
+	}
+
 	// Status filter
 	if statusFilter := r.URL.Query().Get("status"); statusFilter != "" {
 		filtered := summaries[:0]
@@ -677,6 +872,20 @@ func (s *Server) handleGetScanReportByJobID(w http.ResponseWriter, r *http.Reque
 	report, err := s.securityController.GetScanReportByJobID(r.Context(), jobID)
 	if err != nil {
 		s.writeError(w, r, http.StatusNotFound, err.Error())
+		return
+	}
+
+	// #1166 round 10 (P4): this is the per-server scan report reached by JOB id
+	// instead of by server name, so it walked around the /servers/{id} subtree
+	// gate — a scoped token read another tenant's findings, scanned file paths
+	// and risk score by guessing or reading a job id. Unlike the queue and the
+	// overview this document IS per-server, so it is scoped rather than denied:
+	// a caller entitled to the server still gets its report.
+	//
+	// The 404 is the same status and shape the unknown-job branch above returns,
+	// so "not yours" and "no such job" are indistinguishable to the caller.
+	if report != nil && !canSeeServer(r.Context(), report.ServerName) {
+		s.writeError(w, r, http.StatusNotFound, "scan report not found: "+jobID)
 		return
 	}
 

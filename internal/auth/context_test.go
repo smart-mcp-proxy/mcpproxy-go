@@ -310,3 +310,37 @@ func TestUserContext_NoImplicitAccess(t *testing.T) {
 	assert.False(t, ac.CanAccessServer("github"))
 	assert.False(t, ac.HasPermission(PermRead))
 }
+
+// TestAnonymousContext_CanRevealSecrets pins the distinction issue #1148 turns
+// on: an unauthenticated /mcp caller is still treated as admin for every
+// operation that worked before (that back-compat is deliberate), but it is NOT
+// an identity, so it cannot ask for raw secrets. A nil context — the stdio
+// transport before it installs one, an in-process caller, a test — must fail
+// the same way rather than inheriting admin by absence.
+func TestAnonymousContext_CanRevealSecrets(t *testing.T) {
+	anon := AnonymousContext()
+	if !anon.IsAdmin() {
+		t.Fatal("AnonymousContext must stay admin so existing unauthenticated MCP operations keep working")
+	}
+	if anon.CanRevealSecrets() {
+		t.Error("anonymous caller must not be allowed to reveal secrets")
+	}
+
+	if !AdminContext().CanRevealSecrets() {
+		t.Error("an authenticated admin must still be allowed to reveal secrets")
+	}
+
+	var nilCtx *AuthContext
+	if nilCtx.CanRevealSecrets() {
+		t.Error("a nil auth context must not be treated as a secret-revealing admin")
+	}
+
+	agent := &AuthContext{Type: AuthTypeAgent, AgentName: "bot", AllowedServers: []string{"*"}}
+	if agent.CanRevealSecrets() {
+		t.Error("agent tokens must not be allowed to reveal secrets")
+	}
+
+	if !AdminUserContext("u1", "a@b.c", "A", "google").CanRevealSecrets() {
+		t.Error("an OAuth-authenticated admin user must be allowed to reveal secrets")
+	}
+}

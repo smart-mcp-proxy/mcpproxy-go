@@ -36,9 +36,9 @@ func waitForActivities(t *testing.T, m *storage.Manager, n int) []*storage.Activ
 	}
 }
 
-func findByAction(recs []*storage.ActivityRecord, action string) *storage.ActivityRecord {
+func findByUser(recs []*storage.ActivityRecord, userID string) *storage.ActivityRecord {
 	for _, r := range recs {
-		if r.Metadata != nil && r.Metadata["broker_action"] == action {
+		if r.UserID == userID {
 			return r
 		}
 	}
@@ -57,12 +57,13 @@ func TestActivityAuditSink_PersistsAttributionNoSecret(t *testing.T) {
 		t.Fatal("expected non-nil sink for a real storage manager")
 	}
 
-	// A successful acquisition and a failed connect.
+	// A successful connect and a failed connect (the connect flow is the one
+	// operation the broker performs since Spec 107 FR-031).
 	sink.RecordBrokerEvent(context.Background(), broker.AuditEvent{
 		UserID:     "alice",
 		ServerName: "grafana",
-		Method:     broker.AuditMethodTokenExchange,
-		Action:     broker.AuditActionAcquire,
+		Method:     broker.AuditMethodConnect,
+		Action:     broker.AuditActionConnect,
 		Outcome:    broker.AuditOutcomeSuccess,
 		RequestID:  "req-abc",
 	})
@@ -78,9 +79,9 @@ func TestActivityAuditSink_PersistsAttributionNoSecret(t *testing.T) {
 
 	recs := waitForActivities(t, mgr, 2)
 
-	acq := findByAction(recs, broker.AuditActionAcquire)
+	acq := findByUser(recs, "alice")
 	if acq == nil {
-		t.Fatal("acquire record not found")
+		t.Fatal("alice's connect record not found")
 	}
 	if acq.UserID != "alice" || acq.ServerName != "grafana" {
 		t.Fatalf("missing attribution: user=%q server=%q", acq.UserID, acq.ServerName)
@@ -91,13 +92,13 @@ func TestActivityAuditSink_PersistsAttributionNoSecret(t *testing.T) {
 	if acq.Status != "success" {
 		t.Fatalf("expected success status, got %q", acq.Status)
 	}
-	if acq.Metadata["broker_method"] != broker.AuditMethodTokenExchange {
+	if acq.Metadata["broker_method"] != broker.AuditMethodConnect {
 		t.Fatalf("method metadata missing: %v", acq.Metadata["broker_method"])
 	}
 
-	conn := findByAction(recs, broker.AuditActionConnect)
+	conn := findByUser(recs, "bob")
 	if conn == nil {
-		t.Fatal("connect record not found")
+		t.Fatal("bob's connect record not found")
 	}
 	if conn.Status != "error" {
 		t.Fatalf("expected error status, got %q", conn.Status)

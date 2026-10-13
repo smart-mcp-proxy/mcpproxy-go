@@ -61,14 +61,20 @@ Run `mcpproxy doctor list-codes` for the machine-readable list.
 - [`MCPX_HTTP_401`](MCPX_HTTP_401.md) — Unauthorized
 - [`MCPX_HTTP_403`](MCPX_HTTP_403.md) — Forbidden
 - [`MCPX_HTTP_404`](MCPX_HTTP_404.md) — Not Found
+- [`MCPX_HTTP_4XX`](MCPX_HTTP_4XX.md) — other client-error status (400, 408, 409, 410, 451)
 - [`MCPX_HTTP_5XX`](MCPX_HTTP_5XX.md) — Server error
+- [`MCPX_HTTP_RATE_LIMITED`](MCPX_HTTP_RATE_LIMITED.md) — 429 Too Many Requests
 - [`MCPX_HTTP_CONN_REFUSED`](MCPX_HTTP_CONN_REFUSED.md) — Connection refused
+- [`MCPX_HTTP_CONN_RESET`](MCPX_HTTP_CONN_RESET.md) — connection reset by the peer
+- [`MCPX_HTTP_CANCELED`](MCPX_HTTP_CANCELED.md) — the attempt was canceled by mcpproxy itself
+- [`MCPX_HTTP_LEGACY_SSE`](MCPX_HTTP_LEGACY_SSE.md) — endpoint only speaks the legacy SSE transport
 
 ## Docker
 
 - [`MCPX_DOCKER_DAEMON_DOWN`](MCPX_DOCKER_DAEMON_DOWN.md) — daemon unreachable
 - [`MCPX_DOCKER_IMAGE_PULL_FAILED`](MCPX_DOCKER_IMAGE_PULL_FAILED.md) — pull failed
 - [`MCPX_DOCKER_EXEC_NOT_FOUND`](MCPX_DOCKER_EXEC_NOT_FOUND.md) — image missing the runtime interpreter (e.g. no `uvx`)
+- [`MCPX_DOCKER_MISSING_TOOLCHAIN`](MCPX_DOCKER_MISSING_TOOLCHAIN.md) — image missing a tool the server calls at runtime (e.g. no `git` for a `git+https://…` dependency)
 - [`MCPX_DOCKER_NO_PERMISSION`](MCPX_DOCKER_NO_PERMISSION.md) — socket permission denied
 - [`MCPX_DOCKER_SNAP_APPARMOR`](MCPX_DOCKER_SNAP_APPARMOR.md) — snap Docker AppArmor block
 
@@ -77,6 +83,7 @@ Run `mcpproxy doctor list-codes` for the machine-readable list.
 - [`MCPX_CONFIG_DEPRECATED_FIELD`](MCPX_CONFIG_DEPRECATED_FIELD.md) — deprecated field used
 - [`MCPX_CONFIG_PARSE_ERROR`](MCPX_CONFIG_PARSE_ERROR.md) — invalid JSON
 - [`MCPX_CONFIG_MISSING_SECRET`](MCPX_CONFIG_MISSING_SECRET.md) — secret reference unresolved
+- [`MCPX_CONFIG_INVALID_COMMAND`](MCPX_CONFIG_INVALID_COMMAND.md) — command has nothing to run (e.g. `npx` with no package)
 
 ## Quarantine
 

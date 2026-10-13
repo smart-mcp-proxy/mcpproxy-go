@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"runtime"
 	"strings"
 	"testing"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 
 	"github.com/spf13/cobra"
@@ -13,23 +16,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestShouldUseAuthDaemon(t *testing.T) {
-	// Test with non-existent directory
-	result := shouldUseAuthDaemon("/tmp/nonexistent-mcpproxy-test-dir-auth-88888")
-	assert.False(t, result, "shouldUseAuthDaemon should return false for non-existent directory")
+func TestAuthDaemonDetection_NoDaemon(t *testing.T) {
+	clearDaemonEnv(t)
 
-	// Test with existing directory but no socket
+	// Non-existent directory, no socket, no API key → no daemon
+	_, _, ok := daemonEndpoint(&config.Config{DataDir: "/tmp/nonexistent-mcpproxy-test-dir-auth-88888"})
+	assert.False(t, ok, "daemonEndpoint should report no daemon for non-existent directory")
+
+	// Existing directory but no socket
 	tmpDir := t.TempDir()
-	result = shouldUseAuthDaemon(tmpDir)
-	assert.False(t, result, "shouldUseAuthDaemon should return false when socket doesn't exist")
+	_, _, ok = daemonEndpoint(&config.Config{DataDir: tmpDir})
+	assert.False(t, ok, "daemonEndpoint should report no daemon when socket doesn't exist")
 }
 
 func TestAuthStatus_RequiresDaemon(t *testing.T) {
+	clearDaemonEnv(t)
 	tmpDir := t.TempDir()
 
 	// Test that auth status requires daemon
-	result := shouldUseAuthDaemon(tmpDir)
-	assert.False(t, result, "Should return false when daemon not running")
+	_, _, ok := daemonEndpoint(&config.Config{DataDir: tmpDir})
+	assert.False(t, ok, "Should report no daemon when daemon not running")
 }
 
 func TestDetectSocketPath_Auth(t *testing.T) {
@@ -147,10 +153,11 @@ func TestAuthLogin_SilenceUsageAfterValidation(t *testing.T) {
 }
 
 func TestRunAuthLoginAll_NoDaemon(t *testing.T) {
+	clearDaemonEnv(t)
 	ctx := context.Background()
 	tmpDir := t.TempDir()
 
-	err := runAuthLoginAll(ctx, tmpDir)
+	err := runAuthLoginAll(ctx, &config.Config{DataDir: tmpDir})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "requires running daemon")
 }
@@ -260,4 +267,49 @@ func TestFilterOAuthServers(t *testing.T) {
 			assert.Equal(t, tt.expected, len(result), "filterOAuthServers should return correct number of OAuth servers")
 		})
 	}
+}
+
+func TestPrintDaemonOAuthLoginResult_BrowserNotOpened(t *testing.T) {
+	var out bytes.Buffer
+	printDaemonOAuthLoginResult(&out, "github", &cliclient.OAuthLoginResult{
+		ServerName:    "github",
+		AuthURL:       "https://auth.example.com/authorize?state=abc",
+		BrowserOpened: false,
+		BrowserError:  "HEADLESS mode - browser not opened. Please open the auth_url manually.",
+	})
+
+	got := out.String()
+	assert.Contains(t, got, "OAuth authentication flow initiated successfully for server: github")
+	assert.Contains(t, got, "Could not open a browser automatically")
+	assert.Contains(t, got, "HEADLESS mode - browser not opened")
+	assert.Contains(t, got, "https://auth.example.com/authorize?state=abc")
+	assert.Contains(t, got, "mcpproxy upstream list")
+}
+
+func TestPrintDaemonOAuthLoginResult_BrowserOpened(t *testing.T) {
+	var out bytes.Buffer
+	printDaemonOAuthLoginResult(&out, "github", &cliclient.OAuthLoginResult{
+		ServerName:    "github",
+		AuthURL:       "https://auth.example.com/authorize?state=abc",
+		BrowserOpened: true,
+	})
+
+	got := out.String()
+	assert.Contains(t, got, "OAuth authentication flow initiated successfully for server: github")
+	assert.Contains(t, got, "If the browser did not open, visit:")
+	assert.Contains(t, got, "https://auth.example.com/authorize?state=abc")
+	assert.NotContains(t, got, "Could not open a browser automatically")
+}
+
+func TestPrintDaemonOAuthLoginResult_NoAuthURL(t *testing.T) {
+	var out bytes.Buffer
+	printDaemonOAuthLoginResult(&out, "github", &cliclient.OAuthLoginResult{
+		ServerName:    "github",
+		BrowserOpened: false,
+	})
+
+	got := out.String()
+	assert.Contains(t, got, "OAuth authentication flow initiated successfully for server: github")
+	assert.NotContains(t, got, "visit:")
+	assert.Contains(t, got, "mcpproxy upstream list")
 }

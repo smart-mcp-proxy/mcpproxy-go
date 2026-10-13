@@ -8,8 +8,13 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
-// ConvertServerConfig converts a config.ServerConfig to a contracts.Server
-func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool, toolCount int, authenticated bool) *Server {
+// ConvertServerConfig converts a config.ServerConfig to a contracts.Server.
+//
+// globalIsolation is the global docker_isolation block; it is required to
+// resolve the EFFECTIVE isolation state, which is what `isolation.enabled`
+// reports on the wire (GH #1142). Pass nil only when no global config exists —
+// that resolves to "no isolation", the same answer the spawn path gives.
+func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.DockerIsolationConfig, status string, connected bool, toolCount int, authenticated bool) *Server {
 	server := &Server{
 		ID:             cfg.Name,
 		Name:           cfg.Name,
@@ -36,6 +41,22 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 		// MCP-2940: surface the per-server auto-approve intent (tri-state *bool)
 		// so the Web UI toggle reflects the persisted value.
 		AutoApproveToolChanges: cfg.AutoApproveToolChanges,
+		// Spec 086: surface the per-server trust_mode so callers can read back the
+		// persisted trust tier they set via PATCH/POST.
+		TrustMode: cfg.TrustMode,
+		// MCP-3322: surface the per-server init_timeout override so callers can
+		// read back a configured handshake deadline.
+		InitTimeout: cfg.InitTimeout,
+		// F9: surface the per-server prompt-aggregation override so a caller that
+		// PATCHed it can read it back.
+		ExposePrompts: cfg.ExposePrompts,
+		// Spec 112: allowlist of forwarded client header names (no values).
+		ForwardHeaders: append([]string(nil), cfg.ForwardHeaders...),
+		// Spec 093: surface the per-server concurrency overrides (tri-state) so a
+		// caller that PATCHed a limit can read it back.
+		MaxConcurrentRequests: cfg.MaxConcurrentRequests,
+		QueueSize:             cfg.QueueSize,
+		QueueTimeout:          cfg.QueueTimeout,
 	}
 
 	// Convert OAuth config if present
@@ -49,22 +70,65 @@ func ConvertServerConfig(cfg *config.ServerConfig, status string, connected bool
 		}
 	}
 
-	// Convert isolation config if present. The per-server overrides that
-	// actually live on config.IsolationConfig are Image/NetworkMode/
-	// ExtraArgs/WorkingDir; MemoryLimit/CPULimit/Timeout are still only
-	// available at the global DockerIsolationConfig level, so they stay
-	// empty here until that refactor lands.
-	if cfg.Isolation != nil {
-		server.Isolation = &IsolationConfig{
-			Enabled:     cfg.Isolation.IsEnabled(),
-			Image:       cfg.Isolation.Image,
-			NetworkMode: cfg.Isolation.NetworkMode,
-			ExtraArgs:   append([]string(nil), cfg.Isolation.ExtraArgs...),
-			WorkingDir:  cfg.Isolation.WorkingDir,
-		}
-	}
+	// Convert isolation config. The per-server overrides that actually live on
+	// config.IsolationConfig are Enabled/Mode/Image/NetworkMode/ExtraArgs/
+	// WorkingDir; MemoryLimit/CPULimit/Timeout are still only available at the
+	// global DockerIsolationConfig level, so they stay empty here until that
+	// refactor lands.
+	//
+	// `Enabled` on the wire is the EFFECTIVE state, so it needs the global
+	// config to resolve; the raw tri-state override travels alongside it.
+	server.Isolation, server.IsolationEffective = BuildIsolationView(globalIsolation, cfg)
 
 	return server
+}
+
+// BuildIsolationView projects a server's isolation configuration onto the wire
+// types: the override block (raw tri-state preserved) and the resolved
+// effective state.
+//
+// Both are emitted for every stdio server, even one with no `isolation` block
+// at all — a client that reads `isolation?.enabled` must get a real answer for
+// an inheriting server rather than the absence that used to read as "off"
+// (GH #1142). Servers with no local command carry neither.
+func BuildIsolationView(globalIsolation *config.DockerIsolationConfig, cfg *config.ServerConfig) (*IsolationConfig, *IsolationEffective) {
+	if cfg == nil {
+		return nil, nil
+	}
+	// A server with no local command has no child process to isolate, so the
+	// block is meaningless — unless it carries a stale override the operator
+	// should still be able to see and clear.
+	if cfg.Command == "" && cfg.Isolation == nil {
+		return nil, nil
+	}
+
+	resolved := config.ResolveIsolation(globalIsolation, cfg)
+
+	iso := &IsolationConfig{Enabled: resolved.Isolated}
+	if src := cfg.Isolation; src != nil {
+		if src.Enabled != nil {
+			// Copy the value: the wire type must not alias the config pointer.
+			iso.EnabledOverride = config.BoolPtr(*src.Enabled)
+		}
+		if src.Mode != nil {
+			iso.ModeOverride = string(*src.Mode)
+		}
+		iso.Image = src.Image
+		iso.NetworkMode = src.NetworkMode
+		if len(src.ExtraArgs) > 0 {
+			iso.ExtraArgs = append([]string(nil), src.ExtraArgs...)
+		}
+		iso.WorkingDir = src.WorkingDir
+	}
+
+	eff := &IsolationEffective{
+		Mode:       string(resolved.Mode),
+		Isolated:   resolved.Isolated,
+		GlobalMode: string(resolved.GlobalMode),
+		Inherited:  resolved.Inherited,
+		Source:     resolved.Source,
+	}
+	return iso, eff
 }
 
 // ConvertToolMetadata converts a config.ToolMetadata to a contracts.Tool
@@ -151,6 +215,40 @@ func ConvertUpstreamStatsToServerStats(stats map[string]interface{}) ServerStats
 	return serverStats
 }
 
+// genericInt coerces a value from a generic map into an int. Generic server
+// maps reach this converter both straight from Go structs (int) and from JSON
+// round-trips (float64), so both encodings must be accepted. The bool result
+// distinguishes "key absent or not numeric" from a legitimate 0 — which matters
+// for the tri-state concurrency overrides, where 0 means "disabled" and absent
+// means "inherit" (spec 093 FR-020).
+func genericInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case int:
+		return n, true
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	default:
+		return 0, false
+	}
+}
+
+// genericInt64 is genericInt for int64 values (generations exceed no int
+// range in practice, but they are int64 end to end).
+func genericInt64(v interface{}) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case int:
+		return int64(n), true
+	case float64:
+		return int64(n), true
+	default:
+		return 0, false
+	}
+}
+
 // ConvertGenericServersToTyped converts []map[string]interface{} to []Server
 func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Server {
 	servers := make([]Server, 0, len(genericServers))
@@ -180,12 +278,56 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		if quarantined, ok := generic["quarantined"].(bool); ok {
 			server.Quarantined = quarantined
 		}
+		// Spec 116 FR-017: committed generation and incarnation.
+		if v, ok := genericInt64(generic["generation"]); ok {
+			server.Generation = v
+		}
+		if v, ok := genericInt64(generic["incarnation"]); ok {
+			server.Incarnation = v
+		}
 		// MCP-2940: tri-state *bool — only set the pointer when the key is
 		// present so an unset flag stays nil (the Web UI distinguishes unset
 		// from an explicit false).
 		if autoApprove, ok := generic["auto_approve_tool_changes"].(bool); ok {
 			v := autoApprove
 			server.AutoApproveToolChanges = &v
+		}
+		// F9: prompt-aggregation override is tri-state — only set the pointer when
+		// the key is present so an unset override stays nil.
+		if exposePrompts, ok := generic["expose_prompts"].(bool); ok {
+			v := exposePrompts
+			server.ExposePrompts = &v
+		}
+		// Spec 112: forward_headers is a list of header names. The generic map
+		// carries []string from the runtime projection or []interface{} after a
+		// JSON round-trip.
+		server.ForwardHeaders = stringListFromAny(generic["forward_headers"])
+		// Spec 086: per-server trust tier round-trips as a plain string.
+		if trustMode, ok := generic["trust_mode"].(string); ok {
+			server.TrustMode = trustMode
+		}
+		// MCP-3322: init_timeout serializes as a duration string (e.g. "120s").
+		// Parse it back into a *config.Duration so the GET payload round-trips.
+		if initTimeout, ok := generic["init_timeout"].(string); ok && initTimeout != "" {
+			if d, err := time.ParseDuration(initTimeout); err == nil {
+				v := config.Duration(d)
+				server.InitTimeout = &v
+			}
+		}
+		// Spec 093: per-server concurrency overrides are tri-state, so only set
+		// the pointer when the key is actually present. Generic maps come from
+		// JSON, where every number decodes as float64.
+		if v, ok := genericInt(generic["max_concurrent_requests"]); ok {
+			server.MaxConcurrentRequests = &v
+		}
+		if v, ok := genericInt(generic["queue_size"]); ok {
+			server.QueueSize = &v
+		}
+		if queueTimeout, ok := generic["queue_timeout"].(string); ok && queueTimeout != "" {
+			if d, err := time.ParseDuration(queueTimeout); err == nil {
+				v := config.Duration(d)
+				server.QueueTimeout = &v
+			}
 		}
 		if connected, ok := generic["connected"].(bool); ok {
 			server.Connected = connected
@@ -222,6 +364,15 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			server.RetryCount = rc
 		case float64:
 			server.RetryCount = int(rc)
+		}
+		if retryStopped, ok := generic["retry_stopped"].(bool); ok {
+			server.RetryStopped = retryStopped
+		}
+		if code, ok := generic["retry_stopped_code"].(string); ok {
+			server.RetryStoppedCode = code
+		}
+		if reason, ok := generic["retry_stopped_reason"].(string); ok {
+			server.RetryStoppedReason = reason
 		}
 		switch v := generic["last_retry_time"].(type) {
 		case time.Time:
@@ -296,6 +447,18 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			if pkceEnabled, ok := oauth["pkce_enabled"].(bool); ok {
 				server.OAuth.PKCEEnabled = pkceEnabled
 			}
+			if v, ok := oauth["authorization_endpoint"].(string); ok {
+				server.OAuth.AuthorizationEndpoint = v
+			}
+			if v, ok := oauth["token_endpoint"].(string); ok {
+				server.OAuth.TokenEndpoint = v
+			}
+			if v, ok := oauth["registration_endpoint"].(string); ok {
+				server.OAuth.RegistrationEndpoint = v
+			}
+			if v, ok := oauth["auth_server_metadata_url"].(string); ok {
+				server.OAuth.AuthServerMetadataURL = v
+			}
 			if tokenExpiresAt, ok := oauth["token_expires_at"].(string); ok && tokenExpiresAt != "" {
 				if parsedTime, err := time.Parse(time.RFC3339, tokenExpiresAt); err == nil {
 					server.OAuth.TokenExpiresAt = &parsedTime
@@ -345,6 +508,10 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			server.SourceRegistryProvenance = prov
 		}
 
+		// Unified health object (incl. Spec 109 status/usable/actions). The
+		// runtime emits a *HealthStatus; a JSON-decoded map is also accepted.
+		server.Health = healthFromGeneric(generic["health"])
+
 		servers = append(servers, server)
 	}
 
@@ -374,8 +541,14 @@ func ConvertGenericToolsToTyped(genericTools []map[string]interface{}) []Tool {
 			tool.Usage = usage
 		}
 
-		// Extract schema
-		if schema, ok := generic["schema"].(map[string]interface{}); ok {
+		// Extract schema. Every generic-map producer (runtime.GetServerTools,
+		// server.GetServerTools, mcp.go) emits the upstream input schema under the
+		// "inputSchema" key, so that is the authoritative source; "schema" is kept
+		// as a legacy fallback. Reading only "schema" silently dropped every schema
+		// from the /api/v1/tools response (MCP-3132/MCP-3167).
+		if schema, ok := generic["inputSchema"].(map[string]interface{}); ok {
+			tool.Schema = schema
+		} else if schema, ok := generic["schema"].(map[string]interface{}); ok {
 			tool.Schema = schema
 		}
 
@@ -396,6 +569,9 @@ func ConvertGenericToolsToTyped(genericTools []map[string]interface{}) []Tool {
 				OpenWorldHint:   annotationsPtr.OpenWorldHint,
 			}
 		}
+		// Spec 109 FR-028/X11: computed here, once, for every producer of a
+		// Tool — never left for the Web/macOS/CLI surface to derive locally.
+		tool.Tier = AnnotationTier(toolAnnotationToConfig(tool.Annotations))
 
 		tools = append(tools, tool)
 	}
@@ -589,4 +765,72 @@ func convertMapToToolAnnotation(m map[string]interface{}) *ToolAnnotation {
 	}
 
 	return annotation
+}
+
+// toolAnnotationToConfig adapts the wire-shaped ToolAnnotation to
+// config.ToolAnnotations — the type AnnotationTier takes — so the tier
+// computation stays the single pure function in tier.go rather than being
+// duplicated against this package's own annotation type.
+func toolAnnotationToConfig(a *ToolAnnotation) *config.ToolAnnotations {
+	if a == nil {
+		return nil
+	}
+	return &config.ToolAnnotations{
+		Title:           a.Title,
+		ReadOnlyHint:    a.ReadOnlyHint,
+		DestructiveHint: a.DestructiveHint,
+		IdempotentHint:  a.IdempotentHint,
+		OpenWorldHint:   a.OpenWorldHint,
+	}
+}
+
+// stringListFromAny converts a []string or []interface{} of strings (the two
+// shapes a generic server map takes, depending on whether it crossed a JSON
+// round-trip) into a []string. Anything else, or an empty list, yields nil.
+func stringListFromAny(v interface{}) []string {
+	var out []string
+	switch t := v.(type) {
+	case []string:
+		out = append(out, t...)
+	case []interface{}:
+		for _, e := range t {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// healthFromGeneric projects the "health" entry of a generic server map onto a
+// *HealthStatus. It accepts the runtime's *HealthStatus / HealthStatus and a
+// JSON-decoded map[string]interface{}; anything else (including absent or nil)
+// yields nil. The result never aliases the input and Actions is never nil.
+func healthFromGeneric(raw interface{}) *HealthStatus {
+	var h HealthStatus
+	switch v := raw.(type) {
+	case *HealthStatus:
+		if v == nil {
+			return nil
+		}
+		h = *v
+	case HealthStatus:
+		h = v
+	case map[string]interface{}:
+		if v == nil {
+			return nil
+		}
+		// JSON round-trip: the field set and tags are owned by HealthStatus.
+		b, err := json.Marshal(v)
+		if err != nil || json.Unmarshal(b, &h) != nil {
+			return nil
+		}
+	default:
+		return nil
+	}
+	h.Actions = append([]string{}, h.Actions...)
+	return &h
 }

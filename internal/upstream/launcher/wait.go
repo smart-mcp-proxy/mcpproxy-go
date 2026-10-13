@@ -44,6 +44,13 @@ const defaultDialPollInterval = 200 * time.Millisecond
 // timeouts are coerced to 0 to keep callers from accidentally producing an
 // already-expired deadline.
 func WaitForURL(ctx context.Context, rawURL string, timeout time.Duration) error {
+	return WaitForURLWithDial(ctx, rawURL, timeout, nil)
+}
+
+// WaitForURLWithDial is WaitForURL with the probe dials made through dial
+// (nil: a plain net.Dialer). The upstream core passes its instance's gated
+// dialer (Spec 116 PR4, T4.14), so a retired instance stops probing.
+func WaitForURLWithDial(ctx context.Context, rawURL string, timeout time.Duration, dial func(ctx context.Context, network, addr string) (net.Conn, error)) error {
 	addr, err := addrFromURL(rawURL)
 	if err != nil {
 		return err
@@ -60,7 +67,9 @@ func WaitForURL(ctx context.Context, rawURL string, timeout time.Duration) error
 		defer cancel()
 	}
 
-	dialer := &net.Dialer{Timeout: defaultDialPerAttempt}
+	if dial == nil {
+		dial = (&net.Dialer{Timeout: defaultDialPerAttempt}).DialContext
+	}
 	var lastErr error
 	for {
 		// Honor the deadline / cancel before each attempt so a cancel
@@ -75,7 +84,9 @@ func WaitForURL(ctx context.Context, rawURL string, timeout time.Duration) error
 			return err
 		}
 
-		conn, err := dialer.DialContext(dialCtx, "tcp", addr)
+		attemptCtx, attemptCancel := context.WithTimeout(dialCtx, defaultDialPerAttempt)
+		conn, err := dial(attemptCtx, "tcp", addr)
+		attemptCancel()
 		if err == nil {
 			_ = conn.Close()
 			return nil

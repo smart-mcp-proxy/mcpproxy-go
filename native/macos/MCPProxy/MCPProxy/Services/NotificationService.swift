@@ -95,13 +95,34 @@ actor NotificationService {
     private var settleGate = ConnectionSettleGate()
 
     /// The shared notification center.
-    private let center = UNUserNotificationCenter.current()
+    ///
+    /// Resolved lazily on first use rather than at init: `current()` requires a
+    /// real application bundle and raises `NSInternalInconsistencyException`
+    /// otherwise, which made merely CONSTRUCTING this service — and therefore
+    /// anything that depends on it, such as `CoreProcessManager` — impossible to
+    /// unit-test. Delivery paths are unchanged; nothing in the app touches the
+    /// center before `setup()`.
+    private lazy var center = UNUserNotificationCenter.current()
+
+    /// Whether this service may actually talk to `UNUserNotificationCenter`.
+    ///
+    /// `current()` requires a real application bundle and raises
+    /// `NSInternalInconsistencyException` otherwise, which kills a unit-test
+    /// process outright. Tests construct the service with delivery off so that
+    /// code paths which happen to send a notification (a core-exit handler, say)
+    /// are exercisable. Always on in the app.
+    private let deliveryEnabled: Bool
+
+    init(deliveryEnabled: Bool = true) {
+        self.deliveryEnabled = deliveryEnabled
+    }
 
     // MARK: - Setup
 
     /// Request notification permission and register action categories.
     /// Call this once during app launch.
     func setup() async {
+        guard deliveryEnabled else { return }
         // Request authorization
         do {
             let granted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
@@ -135,6 +156,16 @@ actor NotificationService {
     // MARK: - Notification Senders
 
     /// Notify about sensitive data detected in a tool call.
+    ///
+    /// NO PRODUCTION CALLERS as of the tray glance work, and none before it
+    /// either: the only caller was a `case "activity"` SSE branch, and no Go
+    /// code emits a bare `"activity"` event, so this has never fired on any
+    /// build. The intended trigger is the `sensitive_data.detected` event the
+    /// core does emit (`internal/runtime/events.go`), which the tray's SSE
+    /// switch has no case for. Kept rather than deleted because wiring that
+    /// event is a scoped feature — copy, rate-limiter keying, whether it should
+    /// also drive the tray icon — and this is the reviewed, rate-limited
+    /// plumbing it will want. `NotificationRateLimitTests` covers it meanwhile.
     func sendSensitiveDataAlert(server: String, tool: String, category: String) async {
         // Suppress while the connection is unsettled: a re-init loop replays
         // the full activity list each cycle, which the count-delta heuristic
@@ -273,6 +304,7 @@ actor NotificationService {
 
     /// Schedule a notification for immediate delivery.
     private func deliver(content: UNMutableNotificationContent, identifier: String) async {
+        guard deliveryEnabled else { return }
         let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 0.1, repeats: false)
         let request = UNNotificationRequest(
             identifier: identifier,

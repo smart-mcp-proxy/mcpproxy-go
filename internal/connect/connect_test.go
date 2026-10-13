@@ -116,7 +116,7 @@ func TestConnect_OpenCode_RequiresExistingConfigFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected missing-config error for OpenCode")
 	}
-	if !strings.Contains(strings.ToLower(err.Error()), "does not exist") {
+	if !strings.Contains(strings.ToLower(err.Error()), "no opencode config found") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -283,8 +283,10 @@ func TestConnect_ClaudeCode_NewFile(t *testing.T) {
 	}
 }
 
-func TestConnect_ClaudeCode_WithAPIKey(t *testing.T) {
-	svc, _ := testServiceWithKey(t)
+// Spec 078 security fix: with require_mcp_auth off (default), claude-code gets a
+// clean, keyless entry — the REST-admin key is NOT leaked into the config.
+func TestConnect_ClaudeCode_AuthOff_NoKeyWritten(t *testing.T) {
+	svc, _ := testServiceWithKey(t) // key set but require_mcp_auth off
 
 	result, err := svc.Connect("claude-code", "", false)
 	if err != nil {
@@ -298,18 +300,282 @@ func TestConnect_ClaudeCode_WithAPIKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Read config failed: %v", err)
 	}
+	if strings.Contains(string(raw), "apikey") || strings.Contains(string(raw), "test-key-123") || strings.Contains(string(raw), "headers") {
+		t.Fatalf("auth-off connect must not embed a credential, got: %s", raw)
+	}
 
 	var data map[string]interface{}
 	if err := json.Unmarshal(raw, &data); err != nil {
 		t.Fatalf("Parse config failed: %v", err)
 	}
+	entry := data["mcpServers"].(map[string]interface{})["mcpproxy"].(map[string]interface{})
+	if entry["url"] != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("Expected clean url, got %v", entry["url"])
+	}
+}
 
-	servers := data["mcpServers"].(map[string]interface{})
-	entry := servers["mcpproxy"].(map[string]interface{})
+// With require_mcp_auth on, claude-code carries the credential in an X-API-Key
+// header (its config schema supports one) and the URL stays clean.
+func TestConnect_ClaudeCode_AuthOn_UsesHeader(t *testing.T) {
+	svc, _ := testServiceWithKey(t)
+	svc.WithRequireMCPAuth(true)
+	minter := withFakeMinter(svc)
 
-	expectedURL := "http://127.0.0.1:8080/mcp?apikey=test-key-123"
-	if entry["url"] != expectedURL {
-		t.Errorf("Expected url=%s, got %v", expectedURL, entry["url"])
+	result, err := svc.Connect("claude-code", "", false)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(result.ConfigPath)
+	if err != nil {
+		t.Fatalf("Read config failed: %v", err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("Parse config failed: %v", err)
+	}
+	entry := data["mcpServers"].(map[string]interface{})["mcpproxy"].(map[string]interface{})
+	if entry["url"] != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("Expected clean url with header carrier, got %v", entry["url"])
+	}
+	headers, ok := entry["headers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Expected headers object, got %T", entry["headers"])
+	}
+	if headers["X-API-Key"] != minter.lastSecret() || headers["X-API-Key"] == "test-key-123" {
+		t.Errorf("Expected the minted client credential in X-API-Key (never the admin key), got %v", headers["X-API-Key"])
+	}
+}
+
+// TestConnect_TopLevelJSONNullDoesNotPanic reproduces a config file whose
+// entire content is the 4-byte JSON literal `null` (e.g. a corrupted or
+// half-written file). json.Unmarshal accepts this without error but leaves
+// the destination map nil, and every write path in this package used to
+// assume a non-nil map — `data[serversKey] = serversMap` and the nested
+// setServersMap both panic with "assignment to entry in nil map" on a nil
+// map. This is not client-specific (both the flat-key and nested-key paths
+// route through the same unmarshalLenientJSON), so it's exercised once per
+// path shape.
+func TestConnect_TopLevelJSONNullDoesNotPanic(t *testing.T) {
+	for _, clientID := range []string{"cursor", "zcode"} {
+		t.Run(clientID, func(t *testing.T) {
+			svc, home := testService(t)
+			cfgPath := ConfigPath(clientID, home)
+			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cfgPath, []byte("null"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+
+			res, err := svc.Connect(clientID, "", false)
+			if err != nil {
+				t.Fatalf("Connect panicked or errored on a top-level null config: %v", err)
+			}
+			if !res.Success || res.Action != "created" {
+				t.Fatalf("expected created success, got %+v", res)
+			}
+
+			raw, err := os.ReadFile(cfgPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var data map[string]interface{}
+			if err := json.Unmarshal(raw, &data); err != nil {
+				t.Fatal(err)
+			}
+			if data == nil {
+				t.Fatal("expected a real config object written, got null-equivalent")
+			}
+		})
+	}
+}
+
+func TestConfigPath_ZCode(t *testing.T) {
+	homeDir := t.TempDir()
+	got := ConfigPath("zcode", homeDir)
+	want := filepath.Join(homeDir, ".zcode", "cli", "config.json")
+	if got != want {
+		t.Errorf("ConfigPath(zcode) = %q, want %q", got, want)
+	}
+}
+
+// TestConnect_ZCode_NestedServersKey verifies ZCode's entry is written under
+// the nested {"mcp":{"servers":{...}}} path its own config schema requires
+// (~/.zcode/cli/config.json, per the diagnosing-mcp skill doc) rather than a
+// flat top-level key like every other client, and that an unrelated
+// pre-existing root key survives the write untouched.
+func TestConnect_ZCode_NestedServersKey(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("zcode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"logging":{"level":"info"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.Connect("zcode", "", false)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	if !res.Success || res.Action != "created" {
+		t.Fatalf("expected created success, got %+v", res)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if logging, ok := data["logging"].(map[string]interface{}); !ok || logging["level"] != "info" {
+		t.Fatalf("expected sibling logging key preserved, got %v", data["logging"])
+	}
+	mcp, ok := data["mcp"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected top-level mcp object, got %T", data["mcp"])
+	}
+	servers, ok := mcp["servers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mcp.servers object, got %T", mcp["servers"])
+	}
+	entry, ok := servers["mcpproxy"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected mcp.servers.mcpproxy entry, got %v", servers["mcpproxy"])
+	}
+	if entry["type"] != "http" || entry["url"] != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("unexpected entry shape: %v", entry)
+	}
+}
+
+// TestConnect_ZCode_PreservesSiblingServer verifies an unrelated server
+// already registered under mcp.servers survives a connect alongside the new
+// mcpproxy entry.
+func TestConnect_ZCode_PreservesSiblingServer(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("zcode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"mcp":{"servers":{"other":{"type":"stdio","command":"foo"}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Connect("zcode", "", false); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	servers := data["mcp"].(map[string]interface{})["servers"].(map[string]interface{})
+	if _, ok := servers["other"]; !ok {
+		t.Fatalf("expected sibling server 'other' preserved, got %v", servers)
+	}
+	if _, ok := servers["mcpproxy"]; !ok {
+		t.Fatalf("expected mcpproxy entry added, got %v", servers)
+	}
+}
+
+func TestConnect_ZCode_AuthOn_UsesHeader(t *testing.T) {
+	svc, _ := testServiceWithKey(t)
+	svc.WithRequireMCPAuth(true)
+	minter := withFakeMinter(svc)
+
+	result, err := svc.Connect("zcode", "", false)
+	if err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	raw, err := os.ReadFile(result.ConfigPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	entry := data["mcp"].(map[string]interface{})["servers"].(map[string]interface{})["mcpproxy"].(map[string]interface{})
+	if entry["url"] != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("expected clean url with header carrier, got %v", entry["url"])
+	}
+	headers, ok := entry["headers"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected headers object, got %T", entry["headers"])
+	}
+	if headers["X-API-Key"] != minter.lastSecret() || headers["X-API-Key"] == "test-key-123" {
+		t.Errorf("expected the minted client credential in X-API-Key, got %v", headers["X-API-Key"])
+	}
+}
+
+// TestDisconnect_ZCode_RemovesNestedEntryOnly verifies disconnect removes just
+// the mcpproxy entry from the nested mcp.servers map, leaving the sibling
+// server and unrelated root keys intact, and that GetStatus correctly reports
+// Connected=false afterward (round-tripping through the same nested lookup
+// GetStatus/entryAccess uses).
+func TestDisconnect_ZCode_RemovesNestedEntryOnly(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("zcode", home)
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, []byte(`{"logging":{"level":"info"},"mcp":{"servers":{"other":{"type":"stdio","command":"foo"}}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := svc.Connect("zcode", "", false); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	status, err := svc.GetStatus("zcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !status.Connected {
+		t.Fatalf("expected Connected=true after connect, got %+v", status)
+	}
+
+	res, err := svc.Disconnect("zcode", "")
+	if err != nil {
+		t.Fatalf("Disconnect failed: %v", err)
+	}
+	if !res.Success || res.Action != "removed" {
+		t.Fatalf("expected removed success, got %+v", res)
+	}
+
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	if logging, ok := data["logging"].(map[string]interface{}); !ok || logging["level"] != "info" {
+		t.Fatalf("expected sibling logging key preserved, got %v", data["logging"])
+	}
+	servers := data["mcp"].(map[string]interface{})["servers"].(map[string]interface{})
+	if _, ok := servers["mcpproxy"]; ok {
+		t.Fatalf("expected mcpproxy entry removed, got %v", servers)
+	}
+	if _, ok := servers["other"]; !ok {
+		t.Fatalf("expected sibling server 'other' preserved, got %v", servers)
+	}
+
+	status, err = svc.GetStatus("zcode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status.Connected {
+		t.Fatalf("expected Connected=false after disconnect, got %+v", status)
 	}
 }
 
@@ -743,6 +1009,19 @@ func TestDisconnect_TOML(t *testing.T) {
 // Claude Desktop only speaks stdio, so mcpproxy connects via an mcp-remote
 // stdio bridge instead of a direct HTTP/SSE URL. It must be a supported,
 // one-click client.
+func TestZCode_NoteWarnsAboutAgentsFallbackShadowing(t *testing.T) {
+	client := FindClient("zcode")
+	if client == nil {
+		t.Fatal("expected zcode client definition")
+	}
+	if client.Note == "" {
+		t.Error("zcode should carry a note explaining the .agents/mcp.json shadowing caveat")
+	}
+	if !strings.Contains(client.Note, ".agents/mcp.json") {
+		t.Errorf("zcode note should mention .agents/mcp.json, got: %q", client.Note)
+	}
+}
+
 func TestClaudeDesktop_SupportedWithBridgeNote(t *testing.T) {
 	client := FindClient("claude-desktop")
 	if client == nil {
@@ -766,7 +1045,7 @@ func TestClaudeDesktop_SupportedWithBridgeNote(t *testing.T) {
 }
 
 func TestBuildServerEntry_ClaudeDesktop_StdioBridge(t *testing.T) {
-	entry := buildServerEntry("claude-desktop", "http://127.0.0.1:8080/mcp")
+	entry := buildServerEntry("claude-desktop", serverEntryParams{baseURL: "http://127.0.0.1:8080/mcp"})
 
 	if entry["command"] != "npx" {
 		t.Errorf("expected command=npx, got %v", entry["command"])
@@ -838,29 +1117,56 @@ func TestConnect_ClaudeDesktop_WritesStdioBridge(t *testing.T) {
 	}
 }
 
-func TestConnect_ClaudeDesktop_BridgeIncludesAPIKey(t *testing.T) {
-	svc, homeDir := testServiceWithKey(t)
+// With require_mcp_auth on, the Claude Desktop bridge forwards the credential
+// via an mcp-remote --header arg (no space after the colon), and the URL arg
+// stays clean. With auth off it embeds no credential at all.
+func TestConnect_ClaudeDesktop_BridgeCredentialCarrier(t *testing.T) {
+	for _, authOn := range []bool{false, true} {
+		authOn := authOn
+		t.Run(map[bool]string{true: "auth-on", false: "auth-off"}[authOn], func(t *testing.T) {
+			svc, homeDir := testServiceWithKey(t)
+			svc.WithRequireMCPAuth(authOn)
+			var minter *fakeMinter
+			if authOn {
+				minter = withFakeMinter(svc)
+			}
 
-	cfgPath := ConfigPath("claude-desktop", homeDir)
-	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
-		t.Fatal(err)
-	}
+			cfgPath := ConfigPath("claude-desktop", homeDir)
+			if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
+				t.Fatal(err)
+			}
 
-	result, err := svc.Connect("claude-desktop", "", false)
-	if err != nil {
-		t.Fatalf("Connect failed: %v", err)
-	}
+			result, err := svc.Connect("claude-desktop", "", false)
+			if err != nil {
+				t.Fatalf("Connect failed: %v", err)
+			}
 
-	raw, _ := os.ReadFile(result.ConfigPath)
-	var data map[string]interface{}
-	json.Unmarshal(raw, &data)
-
-	servers := data["mcpServers"].(map[string]interface{})
-	entry := servers["mcpproxy"].(map[string]interface{})
-	args := entry["args"].([]interface{})
-	lastArg, _ := args[len(args)-1].(string)
-	if lastArg != "http://127.0.0.1:8080/mcp?apikey=test-key-123" {
-		t.Errorf("Expected bridge URL with apikey, got %v", lastArg)
+			raw, _ := os.ReadFile(result.ConfigPath)
+			var data map[string]interface{}
+			if err := json.Unmarshal(raw, &data); err != nil {
+				t.Fatal(err)
+			}
+			entry := data["mcpServers"].(map[string]interface{})["mcpproxy"].(map[string]interface{})
+			args := entry["args"].([]interface{})
+			// The mcpproxy URL arg (index 2) is always the clean base URL.
+			if args[2] != "http://127.0.0.1:8080/mcp" {
+				t.Errorf("Expected clean bridge URL arg, got %v", args[2])
+			}
+			if authOn {
+				lastArg, _ := args[len(args)-1].(string)
+				if lastArg != "X-API-Key:"+minter.lastSecret() {
+					t.Errorf("Expected --header X-API-Key:<minted client credential>, got %v", lastArg)
+				}
+				if strings.Contains(string(raw), "test-key-123") {
+					t.Errorf("the admin API key must never be written, got: %s", raw)
+				}
+				if args[len(args)-2] != "--header" {
+					t.Errorf("Expected --header flag before value, got %v", args[len(args)-2])
+				}
+			} else if strings.Contains(string(raw), "test-key-123") || strings.Contains(string(raw), "--header") {
+				t.Errorf("auth-off bridge must embed no credential, got: %s", raw)
+			}
+		})
 	}
 }
 
@@ -1057,7 +1363,7 @@ func TestAtomicWriteFile(t *testing.T) {
 	path := filepath.Join(dir, "subdir", "test.json")
 
 	content := []byte(`{"atomic": true}`)
-	if err := atomicWriteFile(path, content, 0o644); err != nil {
+	if err := atomicWriteFile(path, content, 0o644, nil); err != nil {
 		t.Fatalf("atomicWriteFile failed: %v", err)
 	}
 
@@ -1097,33 +1403,70 @@ func TestConfigPath_UnknownClient(t *testing.T) {
 	}
 }
 
-// ---------- mcpURL tests ----------
+// ---------- baseURL / credential-carrier tests ----------
 
-func TestMcpURL_NoAPIKey(t *testing.T) {
-	svc := NewService("127.0.0.1:8080", "")
-	url := svc.mcpURL()
-	if url != "http://127.0.0.1:8080/mcp" {
-		t.Errorf("Expected http://127.0.0.1:8080/mcp, got %s", url)
-	}
-}
-
-func TestMcpURL_WithAPIKey(t *testing.T) {
+func TestBaseURL_NoQuery(t *testing.T) {
+	// The endpoint anchor is always credential-free, regardless of api key.
 	svc := NewService("127.0.0.1:8080", "my-secret")
-	url := svc.mcpURL()
-	if url != "http://127.0.0.1:8080/mcp?apikey=my-secret" {
-		t.Errorf("Expected url with apikey, got %s", url)
+	if got := svc.baseURL(); got != "http://127.0.0.1:8080/mcp" {
+		t.Errorf("Expected clean base URL, got %s", got)
 	}
 }
 
-func TestMcpURL_APIKeyWithSpecialChars(t *testing.T) {
-	svc := NewService("127.0.0.1:8080", "key with spaces&special=chars")
-	url := svc.mcpURL()
-	if !strings.Contains(url, "apikey=") {
-		t.Errorf("Expected apikey param in URL, got %s", url)
+// Spec 108 FR-024: connect never embeds the admin API key. planCredential
+// decides whether a write mints a client credential at all (plan D9/D10).
+func TestPlanCredential(t *testing.T) {
+	strp := func(s string) *string { return &s }
+	tests := []struct {
+		name    string
+		auth    bool
+		minter  bool
+		intent  CredentialIntent
+		wantErr error
+		wantMnt bool
+	}{
+		{name: "auth off, no minter: legacy keyless entry", auth: false, minter: false},
+		{name: "auth on, no minter: refused, never the admin key", auth: true, minter: false, wantErr: ErrNoCredentialMinter},
+		{name: "auth off with a minter still mints (identity + binding)", auth: false, minter: true, wantMnt: true},
+		{name: "auth on with a minter mints", auth: true, minter: true, wantMnt: true},
+		{name: "keyless with auth on is refused", auth: true, minter: true, intent: CredentialIntent{Keyless: true}, wantErr: ErrKeylessRequiresAuthOff},
+		{name: "keyless with auth off is credential-less", auth: false, minter: true, intent: CredentialIntent{Keyless: true}},
+		{name: "keyless with a profile is refused", auth: false, minter: true, intent: CredentialIntent{Keyless: true, Profile: strp("ro")}, wantErr: ErrKeylessWithProfile},
+		{name: "keyless with a mode is refused", auth: false, minter: true, intent: CredentialIntent{Keyless: true, Mode: strp("locked")}, wantErr: ErrKeylessWithProfile},
+		{name: "keyless with All servers (empty profile) is allowed", auth: false, minter: true, intent: CredentialIntent{Keyless: true, Profile: strp("")}},
 	}
-	// Should be URL-encoded
-	if strings.Contains(url, " ") {
-		t.Error("URL should not contain raw spaces")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := NewService("127.0.0.1:8080", "admin-secret").WithRequireMCPAuth(tt.auth)
+			if tt.minter {
+				withFakeMinter(svc)
+			}
+			mint, err := svc.planCredential(tt.intent)
+			if err != tt.wantErr {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+			if mint != tt.wantMnt {
+				t.Fatalf("mint = %v, want %v", mint, tt.wantMnt)
+			}
+		})
+	}
+}
+
+// The query carrier URL-escapes a real secret but leaves the display mask and
+// the pending placeholder literal.
+func TestCredentialQuery(t *testing.T) {
+	base := "http://127.0.0.1:8080/mcp"
+	if got := credentialQuery(base, ""); got != base {
+		t.Errorf("no credential must leave the URL clean, got %s", got)
+	}
+	if got := credentialQuery(base, "a b&x=1"); strings.Contains(got, " ") || !strings.Contains(got, "apikey=a+b%26x%3D1") {
+		t.Errorf("a real credential must be URL-escaped, got %s", got)
+	}
+	if got := credentialQuery(base, maskClientCredential); got != base+"?apikey="+maskClientCredential {
+		t.Errorf("the mask stays literal, got %s", got)
+	}
+	if got := credentialQuery(base, pendingCredential); got != base+"?apikey="+pendingCredential {
+		t.Errorf("the pending placeholder stays literal, got %s", got)
 	}
 }
 
@@ -1146,8 +1489,8 @@ func TestFindClient(t *testing.T) {
 
 func TestGetAllClients(t *testing.T) {
 	clients := GetAllClients()
-	if len(clients) != 8 {
-		t.Errorf("Expected 8 clients, got %d", len(clients))
+	if len(clients) != 9 {
+		t.Errorf("Expected 9 clients, got %d", len(clients))
 	}
 
 	// Verify all have non-empty IDs and names
@@ -1186,5 +1529,385 @@ func TestConnect_FilePermissionsPreserved(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("Expected permissions 0600, got %o", info.Mode().Perm())
+	}
+}
+
+// --- Spec 091: precondition-token guarded writes (FR-005, contracts §2) ---
+
+// backupCount reports how many timestamped backups exist beside a config, so a
+// refusal can be proven to happen BEFORE the backup step rather than after it.
+func backupCount(t *testing.T, cfgPath string) int {
+	t.Helper()
+	matches, err := filepath.Glob(cfgPath + ".bak.*")
+	if err != nil {
+		t.Fatalf("glob backups: %v", err)
+	}
+	return len(matches)
+}
+
+func readConfigT(t *testing.T, path string) string {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(raw)
+}
+
+// TestConnectWithPrecondition_ValidTokenWrites covers every change kind: a
+// create (absent file), an add (file present, no entry), a replace (same key)
+// and an adopted-entry replace (OpenCode, entry under a different key).
+func TestConnectWithPrecondition_ValidTokenWrites(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		svc, home := testService(t)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("ConnectWithPrecondition: %v", err)
+		}
+		if !res.Success || res.Action != "created" {
+			t.Fatalf("expected a successful create, got %+v", res)
+		}
+		if _, err := os.Stat(ConfigPath("claude-code", home)); err != nil {
+			t.Fatalf("config should have been created: %v", err)
+		}
+	})
+
+	t.Run("add", func(t *testing.T) {
+		svc, home := testService(t)
+		seedClientConfig(t, home, "claude-code")
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("ConnectWithPrecondition: %v", err)
+		}
+		if !res.Success {
+			t.Fatalf("expected success, got %+v", res)
+		}
+	})
+
+	t.Run("replace", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:9999/mcp"}}}`)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if !preview.EntryExists {
+			t.Fatal("fixture should classify as replace")
+		}
+		// A replace sends force=true TOGETHER with the token: the token, not the
+		// absence of force, is the overwrite safety (contracts §2).
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("ConnectWithPrecondition: %v", err)
+		}
+		if !res.Success || res.Action != "updated" {
+			t.Fatalf("expected a successful replace, got %+v", res)
+		}
+		if strings.Contains(readConfigT(t, cfgPath), "9999") {
+			t.Fatal("stale entry should have been overwritten")
+		}
+	})
+
+	t.Run("adopted replace", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("opencode", home)
+		writeFileT(t, cfgPath, `{"mcp":{"proxy-alt":{"type":"remote","url":"http://127.0.0.1:8080/mcp"}}}`)
+		preview, err := svc.Preview("opencode", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		res, err := svc.ConnectWithPrecondition("opencode", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("ConnectWithPrecondition: %v", err)
+		}
+		if !res.Success {
+			t.Fatalf("expected success, got %+v", res)
+		}
+		if strings.Contains(readConfigT(t, cfgPath), "proxy-alt") {
+			t.Fatal("the adopted entry should have been replaced")
+		}
+	})
+}
+
+// TestConnectWithPrecondition_StaleResultCarriesDisplayPathAndReloadHint closes
+// the coverage gap the DisplayPath/ReloadHint deferred fill-in (Connect's
+// named-return + defer, see the comment above its declaration) exists for: a
+// precondition_failed result is a real branch that returns EARLY, before the
+// bottom `return res, ...` a naive reading might assume is the only exit, so
+// this pins that the deferred fill-in still runs on it.
+func TestConnectWithPrecondition_StaleResultCarriesDisplayPathAndReloadHint(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	preview, err := svc.Preview("claude-code", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+
+	// Drift the file after the preview so the write hits precondition_failed.
+	const drifted = `{"mcpServers":{"other":{"type":"http","url":"http://127.0.0.1:7000/mcp"}}}`
+	writeFileT(t, cfgPath, drifted)
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil || res.Success || res.Action != "precondition_failed" {
+		t.Fatalf("expected a precondition refusal, got %+v", res)
+	}
+	assertHintAndPath(t, res, home)
+}
+
+// TestDisconnect_OpenCodeAlternateCandidateCarriesDisplayPathAndReloadHint
+// closes the coverage gap for Disconnect's OpenCode alternate-candidate
+// branch (#922 drift): it returns directly (`return altRes, nil`) instead of
+// falling through to the bottom `return res, ...` the deferred
+// DisplayPath/ReloadHint fill-in sits above — this pins that the deferred
+// fill-in still runs on THIS early return too.
+func TestDisconnect_OpenCodeAlternateCandidateCarriesDisplayPathAndReloadHint(t *testing.T) {
+	svc, home := testService(t)
+
+	// Entry lives in opencode.json, but opencode.jsonc now exists too, so the
+	// resolver targets the .jsonc (higher precedence) while the entry is only
+	// in the .json — the exact drift #922 fixed.
+	candidates := opencodeConfigCandidates(home)
+	jsoncPath, jsonPath := candidates[0], candidates[1]
+	writeFileT(t, jsonPath, `{"mcp":{"mcpproxy":{"type":"remote","url":"http://127.0.0.1:8080/mcp"}}}`)
+	writeFileT(t, jsoncPath, `{"mcp":{}}`)
+
+	res, err := svc.Disconnect("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Disconnect: %v", err)
+	}
+	if res == nil || !res.Success {
+		t.Fatalf("expected the alternate-candidate retry to find and remove the entry, got %+v", res)
+	}
+	assertHintAndPath(t, res, home)
+}
+
+// TestConnectWithPrecondition_StaleTokenRefuses walks every drift class the
+// token exists to catch, and proves each refusal is inert: no write, no backup.
+func TestConnectWithPrecondition_StaleTokenRefuses(t *testing.T) {
+	t.Run("file appeared after an absent-file preview", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		const drifted = `{"mcpServers":{"other":{"type":"http","url":"http://127.0.0.1:7000/mcp"}}}`
+		writeFileT(t, cfgPath, drifted)
+
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, drifted)
+	})
+
+	t.Run("file disappeared after an add preview", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		seedClientConfig(t, home, "claude-code")
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		if err := os.Remove(cfgPath); err != nil {
+			t.Fatal(err)
+		}
+
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if res.Success || res.Action != "precondition_failed" {
+			t.Fatalf("expected a precondition refusal, got %+v", res)
+		}
+		if _, statErr := os.Stat(cfgPath); statErr == nil {
+			t.Fatal("a refused write must not create the config file")
+		}
+	})
+
+	t.Run("existing entry changed in a way the summary hides", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("claude-code", home)
+		writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"first"}}}}`)
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		// Only a header VALUE changes — the sanitized summary is byte-identical,
+		// so nothing but the token can catch this.
+		const drifted = `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"second"}}}}`
+		writeFileT(t, cfgPath, drifted)
+
+		// force=true must NOT rescue a stale token.
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, drifted)
+	})
+
+	t.Run("adopted entry changed under its own key", func(t *testing.T) {
+		svc, home := testService(t)
+		cfgPath := ConfigPath("opencode", home)
+		writeFileT(t, cfgPath, `{"mcp":{"proxy-alt":{"type":"remote","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"first"}}}}`)
+		preview, err := svc.Preview("opencode", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+
+		const drifted = `{"mcp":{"proxy-alt":{"type":"remote","url":"http://127.0.0.1:8080/mcp","headers":{"X-API-Key":"second"}}}}`
+		writeFileT(t, cfgPath, drifted)
+
+		res, err := svc.ConnectWithPrecondition("opencode", "mcpproxy", true, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, drifted)
+	})
+
+	t.Run("proxy-side drift changes what would be written", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+		t.Setenv("APPDATA", filepath.Join(home, "AppData", "Roaming"))
+		cfgPath := ConfigPath("claude-code", home)
+		const unchanged = `{"mcpServers":{}}`
+		writeFileT(t, cfgPath, unchanged)
+
+		apiKey, requireAuth := "key-one", false
+		svc := NewServiceWithHome("127.0.0.1:8080", apiKey, home).
+			WithConfigProvider(func() (string, string, bool) { return "127.0.0.1:8080", apiKey, requireAuth })
+		withFakeMinter(svc)
+
+		preview, err := svc.Preview("claude-code", "mcpproxy")
+		if err != nil {
+			t.Fatalf("Preview: %v", err)
+		}
+		if preview.ContainsAPIKey {
+			t.Fatal("fixture should never preview the admin key")
+		}
+
+		// The user is looking at a preview taken with auth off; auth is toggled
+		// on behind their back. The token binds the auth toggle, so it must
+		// refuse even though the FILE is untouched.
+		requireAuth = true
+
+		res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, preview.PreconditionToken)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		assertPreconditionRefusal(t, res, cfgPath, unchanged)
+	})
+}
+
+// TestConnectWithPrecondition_AbsentTokenIsLegacyBehavior keeps the delta
+// backward compatible: without a token, the Web UI/CLI path behaves exactly as
+// before (contracts §2).
+func TestConnectWithPrecondition_AbsentTokenIsLegacyBehavior(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("claude-code", home)
+	writeFileT(t, cfgPath, `{"mcpServers":{"mcpproxy":{"type":"http","url":"http://127.0.0.1:9999/mcp"}}}`)
+
+	res, err := svc.ConnectWithPrecondition("claude-code", "mcpproxy", false, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res.Success || res.Action != "already_exists" {
+		t.Fatalf("expected the legacy already_exists refusal, got %+v", res)
+	}
+
+	// And Connect() itself is still the tokenless entry point.
+	forced, err := svc.Connect("claude-code", "mcpproxy", true)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if !forced.Success || forced.Action != "updated" {
+		t.Fatalf("expected a forced update, got %+v", forced)
+	}
+}
+
+// assertPreconditionRefusal pins the refusal contract: a discriminated action
+// distinct from already_exists, a byte-identical config, and no backup — the
+// refusal happens BEFORE the backup step.
+func assertPreconditionRefusal(t *testing.T, res *ConnectResult, cfgPath, wantContent string) {
+	t.Helper()
+	if res == nil {
+		t.Fatal("expected a result, got nil")
+	}
+	if res.Success {
+		t.Fatalf("expected refusal, got success: %+v", res)
+	}
+	if res.Action != "precondition_failed" {
+		t.Fatalf("expected action precondition_failed (distinct from already_exists), got %q", res.Action)
+	}
+	if got := readConfigT(t, cfgPath); got != wantContent {
+		t.Fatalf("config must be byte-identical after a refusal:\n got:  %s\n want: %s", got, wantContent)
+	}
+	if n := backupCount(t, cfgPath); n != 0 {
+		t.Fatalf("a refused write must not create a backup, found %d", n)
+	}
+}
+
+// TestConnectWithPrecondition_OpenCodeFileVanished pins the drift contract for
+// the one client that also has a force-proof refusal. Spec 091 FR-005 lists
+// "the file disappearing after an add/replace preview" as a drift class for ALL
+// change kinds: the caller echoed a token that described an existing file, so it
+// must get the discriminated conflict and re-preview — not OpenCode's flat
+// "no config found" refusal, which reads as a permanent "not connectable" and
+// leaves the form in a dead-end failure state.
+func TestConnectWithPrecondition_OpenCodeFileVanished(t *testing.T) {
+	svc, home := testService(t)
+	cfgPath := ConfigPath("opencode", home)
+	writeFileT(t, cfgPath, `{"mcp":{}}`)
+
+	preview, err := svc.Preview("opencode", "mcpproxy")
+	if err != nil {
+		t.Fatalf("Preview: %v", err)
+	}
+	if preview.ConnectRefusal != "" {
+		t.Fatalf("a present OpenCode config is connectable, got refusal %q", preview.ConnectRefusal)
+	}
+	if preview.PreconditionToken == "" {
+		t.Fatal("expected a precondition token")
+	}
+
+	if err := os.Remove(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := svc.ConnectWithPrecondition("opencode", "mcpproxy", false, preview.PreconditionToken)
+	if err != nil {
+		t.Fatalf("a drifted write must be reported as a conflict, not an error: %v", err)
+	}
+	if res == nil || res.Success || res.Action != "precondition_failed" {
+		t.Fatalf("expected action precondition_failed, got %+v", res)
+	}
+	if _, statErr := os.Stat(cfgPath); statErr == nil {
+		t.Fatal("a refused write must not create the config file")
+	}
+}
+
+// Without a token the refusal is the whole answer: nothing described a
+// pre-write state, so there is no drift to report.
+func TestConnect_OpenCodeAbsentConfigStillRefuses(t *testing.T) {
+	svc, _ := testService(t)
+	if _, err := svc.Connect("opencode", "mcpproxy", false); err == nil {
+		t.Fatal("expected the absent-config refusal for a tokenless connect")
+	} else if !strings.Contains(err.Error(), "no OpenCode config found") {
+		t.Fatalf("expected the OpenCode refusal, got %v", err)
 	}
 }

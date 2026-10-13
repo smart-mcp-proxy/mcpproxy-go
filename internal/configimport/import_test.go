@@ -1,6 +1,7 @@
 package configimport
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"testing"
@@ -53,8 +54,14 @@ func TestImport(t *testing.T) {
 		if result.Format != FormatCodex {
 			t.Errorf("Format = %v, want %v", result.Format, FormatCodex)
 		}
-		if result.Summary.Imported != 5 {
-			t.Errorf("Summary.Imported = %d, want 5", result.Summary.Imported)
+		// The fixture's `filesystem` entry has cwd=/home/user, which fails the
+		// same working_dir-exists check config.Load applies when that directory
+		// is absent on the machine running the test, so it may be Failed.
+		if got := result.Summary.Imported + result.Summary.Failed; got != 5 {
+			t.Errorf("Summary.Imported+Failed = %d, want 5", got)
+		}
+		if result.Summary.Imported < 4 {
+			t.Errorf("Summary.Imported = %d, want at least 4", result.Summary.Imported)
 		}
 	})
 
@@ -291,6 +298,12 @@ func TestImport_SkipQuarantine(t *testing.T) {
 			if s.Server.Quarantined {
 				t.Errorf("server %s should NOT be quarantined when SkipQuarantine=true", s.Server.Name)
 			}
+			// RC-UPG-001 follow-up: the stated value must persist as an
+			// operator statement, or the boot gate re-holds the server after
+			// a restart when its tools were never discovered.
+			if !s.Server.QuarantineExplicitlySet() {
+				t.Errorf("server %s: SkipQuarantine must be recorded as an explicit quarantine statement", s.Server.Name)
+			}
 		}
 	})
 }
@@ -316,6 +329,33 @@ func TestImport_DuplicateWithinSameImport(t *testing.T) {
 	// Both should be imported since they have different names
 	if result.Summary.Imported != 2 {
 		t.Errorf("Summary.Imported = %d, want 2", result.Summary.Imported)
+	}
+}
+
+// TestImport_PasteFallbackRequiresOptIn pins review round 4 F-E: a plain
+// one-line, non-JSON/TOML input (a typo, or simply the wrong file) must
+// return ErrUnknownFormat by default — DetectFormat's URL/command-line guess
+// (FR-064) is only for the interactive Paste tab, which previews the guess
+// before Add ever mutates anything. Every other import surface (CLI
+// `upstream import`, a direct REST import call, canonical-path import)
+// leaves AllowPasteFallback unset and must keep getting a clear error
+// instead of silently adding a phantom stdio server.
+func TestImport_PasteFallbackRequiresOptIn(t *testing.T) {
+	content := []byte("hello world")
+
+	if _, err := Import(content, nil); !errors.Is(err, ErrUnknownFormat) {
+		t.Fatalf("Import() with AllowPasteFallback unset: error = %v, want ErrUnknownFormat", err)
+	}
+	if _, err := Import(content, &ImportOptions{AllowPasteFallback: false}); !errors.Is(err, ErrUnknownFormat) {
+		t.Fatalf("Import() with AllowPasteFallback=false: error = %v, want ErrUnknownFormat", err)
+	}
+
+	result, err := Import(content, &ImportOptions{AllowPasteFallback: true, Preview: true})
+	if err != nil {
+		t.Fatalf("Import() with AllowPasteFallback=true: unexpected error = %v", err)
+	}
+	if result.Format != FormatCommand {
+		t.Errorf("Format = %q, want %q", result.Format, FormatCommand)
 	}
 }
 

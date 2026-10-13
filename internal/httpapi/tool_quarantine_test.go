@@ -29,6 +29,8 @@ type mockToolQuarantineController struct {
 	approvals              []*storage.ToolApprovalRecord
 	approveErr             error
 	approveAllErr          error
+	approveSkip            map[string]bool
+	listErr                error
 	approvedCount          int
 	approvedTools          []string
 	approvedServer         string
@@ -44,15 +46,63 @@ type mockToolQuarantineController struct {
 	blockedCount           int
 	blockedTools           []string
 	blockedServer          string
+	// Spec 117 PR-2: the review binding the last reviewed call carried.
+	reviewedExpected map[string]string
+	reviewedTools    []string
+	reviewedAll      bool
+	reviewedErr      error
+	reviewedInc      int64
 }
 
-func (m *mockToolQuarantineController) GetCurrentConfig() any {
+// The incarnation-carrying forms (Spec 116 x Spec 117 PR-2) record the
+// incarnation and delegate to the plain reviewed forms.
+func (m *mockToolQuarantineController) ApproveToolsReviewedAt(serverName string, toolNames []string, expected map[string]string, approvedBy string, inc int64) (int, error) {
+	m.reviewedInc = inc
+	return m.ApproveToolsReviewed(serverName, toolNames, expected, approvedBy)
+}
+
+func (m *mockToolQuarantineController) ApproveAllToolsReviewedAt(serverName string, expected map[string]string, approvedBy string, inc int64) (int, error) {
+	m.reviewedInc = inc
+	return m.ApproveAllToolsReviewed(serverName, expected, approvedBy)
+}
+
+func (m *mockToolQuarantineController) ApproveToolsReviewed(serverName string, toolNames []string, expected map[string]string, approvedBy string) (int, error) {
+	m.reviewedExpected = expected
+	m.reviewedTools = toolNames
+	if m.reviewedErr != nil {
+		return 0, m.reviewedErr
+	}
+	return len(toolNames), m.ApproveTools(serverName, toolNames, approvedBy)
+}
+
+func (m *mockToolQuarantineController) ApproveAllToolsReviewed(serverName string, expected map[string]string, approvedBy string) (int, error) {
+	m.reviewedExpected = expected
+	m.reviewedAll = true
+	if m.reviewedErr != nil {
+		return 0, m.reviewedErr
+	}
+	return m.ApproveAllTools(serverName, approvedBy)
+}
+
+func (m *mockToolQuarantineController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
 }
 
+// GetAllServers must report the server these tests address. The /servers/{id}
+// subtree gate answers 404 to a scoped caller for a server that does not exist
+// (#1166 follow-up), and baseController's default reports none — so without
+// this the agent-token cases below would assert the tool-toggle gate's 403
+// against a request that never reached that gate.
+func (m *mockToolQuarantineController) GetAllServers() ([]map[string]interface{}, error) {
+	return []map[string]interface{}{{"name": "github", "id": "github"}}, nil
+}
+
 func (m *mockToolQuarantineController) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	var result []*storage.ToolApprovalRecord
 	for _, a := range m.approvals {
 		if a.ServerName == serverName {
@@ -65,7 +115,20 @@ func (m *mockToolQuarantineController) ListToolApprovals(serverName string) ([]*
 func (m *mockToolQuarantineController) ApproveTools(serverName string, toolNames []string, approvedBy string) error {
 	m.approvedServer = serverName
 	m.approvedTools = toolNames
-	return m.approveErr
+	if m.approveErr != nil {
+		return m.approveErr
+	}
+	for _, name := range toolNames {
+		if m.approveSkip[name] {
+			continue // simulates a record the runtime could not approve
+		}
+		for _, a := range m.approvals {
+			if a.ServerName == serverName && a.ToolName == name {
+				a.Status = storage.ToolApprovalStatusApproved
+			}
+		}
+	}
+	return nil
 }
 
 func (m *mockToolQuarantineController) ApproveAllTools(serverName string, approvedBy string) (int, error) {
@@ -263,7 +326,10 @@ func TestHandleSetToolEnabled_ControllerError(t *testing.T) {
 }
 
 func TestHandleApproveTools_SpecificTools(t *testing.T) {
-	ctrl := &mockToolQuarantineController{apiKey: "test-key"}
+	ctrl := &mockToolQuarantineController{apiKey: "test-key", approvals: []*storage.ToolApprovalRecord{
+		{ServerName: "github", ToolName: "create_issue", Status: storage.ToolApprovalStatusPending},
+		{ServerName: "github", ToolName: "list_repos", Status: storage.ToolApprovalStatusPending},
+	}}
 	logger := zap.NewNop().Sugar()
 	server := NewServer(ctrl, logger, nil)
 
@@ -283,6 +349,65 @@ func TestHandleApproveTools_SpecificTools(t *testing.T) {
 	require.NoError(t, err)
 	data := resp["data"].(map[string]interface{})
 	assert.Equal(t, float64(2), data["approved"])
+	assert.Equal(t, float64(2), data["approved_count"])
+	assert.Equal(t, float64(0), data["still_pending"])
+	assert.NotContains(t, data, "not_approved")
+}
+
+// UX-02: the response reports what actually applied, not the request length.
+// A requested tool whose record is missing or still pending afterwards is
+// listed, and the server's remaining holds are counted.
+func TestHandleApproveTools_ReportsAppliedCountAndRemainingHolds(t *testing.T) {
+	ctrl := &mockToolQuarantineController{
+		apiKey: "test-key",
+		approvals: []*storage.ToolApprovalRecord{
+			{ServerName: "github", ToolName: "create_issue", Status: storage.ToolApprovalStatusPending},
+			{ServerName: "github", ToolName: "list_repos", Status: storage.ToolApprovalStatusPending},
+			{ServerName: "github", ToolName: "delete_repo", Status: storage.ToolApprovalStatusApproved, Disabled: true},
+			{ServerName: "github", ToolName: "rug", Status: storage.ToolApprovalStatusChanged},
+		},
+		approveSkip: map[string]bool{"list_repos": true},
+	}
+	server := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	body := `{"tools": ["create_issue", "list_repos", "no_such_tool"]}`
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/approve", bytes.NewBufferString(body))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, float64(1), data["approved"])
+	assert.Equal(t, []interface{}{"list_repos", "no_such_tool"}, data["not_approved"])
+	assert.Equal(t, float64(1), data["approved_count"])
+	assert.Equal(t, float64(1), data["blocked_count"])
+	assert.Equal(t, float64(1), data["still_pending"])
+	assert.Equal(t, float64(1), data["still_changed"])
+	assert.Equal(t, []interface{}{"list_repos", "rug"}, data["held_tools"])
+	assert.Contains(t, data["message"], "Approved 1 of 3 requested tools")
+}
+
+// UX-02 review: when the records cannot be read back after the write, the
+// response must not claim the requested tools were approved.
+func TestHandleApproveTools_OutcomeUnreadableDoesNotClaimApproval(t *testing.T) {
+	ctrl := &mockToolQuarantineController{apiKey: "test-key", listErr: fmt.Errorf("decode failure")}
+	server := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/approve", bytes.NewBufferString(`{"tools": ["no_such_tool"]}`))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, float64(0), data["approved"])
+	assert.Equal(t, true, data["outcome_unavailable"])
+	assert.NotContains(t, data["message"], "Approved 1")
 }
 
 func TestHandleApproveTools_ApproveAll(t *testing.T) {
@@ -307,6 +432,26 @@ func TestHandleApproveTools_ApproveAll(t *testing.T) {
 	require.NoError(t, err)
 	data := resp["data"].(map[string]interface{})
 	assert.Equal(t, float64(5), data["approved"])
+}
+
+// UX-02 review: approve_all keeps the actual write count but flags an
+// unreadable read-back instead of implying nothing is left to review.
+func TestHandleApproveTools_ApproveAllOutcomeUnreadable(t *testing.T) {
+	ctrl := &mockToolQuarantineController{apiKey: "test-key", approvedCount: 5, listErr: fmt.Errorf("decode failure")}
+	server := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/github/tools/approve", bytes.NewBufferString(`{"approve_all": true}`))
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	server.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	data := resp["data"].(map[string]interface{})
+	assert.Equal(t, float64(5), data["approved"])
+	assert.Equal(t, true, data["outcome_unavailable"])
+	assert.NotContains(t, data, "still_pending")
 }
 
 func TestHandleApproveTools_EmptyToolsAndNoApproveAll(t *testing.T) {
@@ -693,7 +838,7 @@ type mockUnquarantineController struct {
 	lastQuarantined     bool
 }
 
-func (m *mockUnquarantineController) GetCurrentConfig() any {
+func (m *mockUnquarantineController) GetCurrentConfig() *config.Config {
 	return &config.Config{
 		APIKey: m.apiKey,
 	}
@@ -815,7 +960,7 @@ type mockToolToggleController struct {
 	mockToolQuarantineController
 }
 
-func (m *mockToolToggleController) GetCurrentConfig() any {
+func (m *mockToolToggleController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 

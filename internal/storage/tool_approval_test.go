@@ -7,7 +7,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 func setupTestStorageForToolApproval(t *testing.T) (*Manager, func()) {
@@ -35,15 +38,17 @@ func TestToolApprovalRecord_SaveAndGet(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 
 	record := &ToolApprovalRecord{
-		ServerName:         "github",
-		ToolName:           "create_issue",
-		ApprovedHash:       "abc123",
-		CurrentHash:        "abc123",
-		Status:             ToolApprovalStatusApproved,
-		ApprovedAt:         now,
-		ApprovedBy:         "admin",
-		CurrentDescription: "Creates a new GitHub issue",
-		CurrentSchema:      `{"type":"object","properties":{"title":{"type":"string"}}}`,
+		ServerName:          "github",
+		ToolName:            "create_issue",
+		ApprovedHash:        "abc123",
+		CurrentHash:         "abc123",
+		Status:              ToolApprovalStatusApproved,
+		ApprovedAt:          now,
+		ApprovedBy:          "admin",
+		CurrentDescription:  "Creates a new GitHub issue",
+		CurrentSchema:       `{"type":"object","properties":{"title":{"type":"string"}}}`,
+		CurrentAnnotations:  &config.ToolAnnotations{Title: "Issue creator"},
+		PreviousAnnotations: &config.ToolAnnotations{Title: "Old issue creator"},
 	}
 
 	// Save
@@ -62,6 +67,8 @@ func TestToolApprovalRecord_SaveAndGet(t *testing.T) {
 	assert.Equal(t, "admin", retrieved.ApprovedBy)
 	assert.Equal(t, "Creates a new GitHub issue", retrieved.CurrentDescription)
 	assert.Equal(t, `{"type":"object","properties":{"title":{"type":"string"}}}`, retrieved.CurrentSchema)
+	assert.Equal(t, &config.ToolAnnotations{Title: "Issue creator"}, retrieved.CurrentAnnotations)
+	assert.Equal(t, &config.ToolAnnotations{Title: "Old issue creator"}, retrieved.PreviousAnnotations)
 }
 
 func TestToolApprovalRecord_GetNotFound(t *testing.T) {
@@ -272,4 +279,178 @@ func TestToolApprovalRecord_MarshalUnmarshal(t *testing.T) {
 	assert.Equal(t, record.CurrentDescription, result.CurrentDescription)
 	assert.Equal(t, record.PreviousSchema, result.PreviousSchema)
 	assert.Equal(t, record.CurrentSchema, result.CurrentSchema)
+}
+
+func TestToolApprovalRecord_GetToolApprovals_OneSnapshot(t *testing.T) {
+	manager, cleanup := setupTestStorageForToolApproval(t)
+	defer cleanup()
+
+	for _, r := range []*ToolApprovalRecord{
+		{ServerName: "a", ToolName: "ns:erase", Status: ToolApprovalStatusApproved, Disabled: true},
+		{ServerName: "a", ToolName: "erase", Status: ToolApprovalStatusPending, CurrentHash: "h-pending"},
+		{ServerName: "a", ToolName: "", Status: ToolApprovalStatusChanged},
+		{ServerName: "b", ToolName: "erase", Status: ToolApprovalStatusApproved},
+	} {
+		require.NoError(t, manager.SaveToolApproval(r))
+	}
+
+	t.Run("returns every stored key of the server, keyed by tool name", func(t *testing.T) {
+		records, err := manager.GetToolApprovals("a", "ns:erase", "erase")
+		require.NoError(t, err)
+		require.Len(t, records, 2)
+		require.NotNil(t, records["ns:erase"])
+		assert.True(t, records["ns:erase"].Disabled)
+		assert.Equal(t, ToolApprovalStatusApproved, records["ns:erase"].Status)
+		require.NotNil(t, records["erase"])
+		assert.Equal(t, ToolApprovalStatusPending, records["erase"].Status)
+		assert.Equal(t, "h-pending", records["erase"].CurrentHash)
+	})
+
+	t.Run("a missing key is absent, not an error", func(t *testing.T) {
+		records, err := manager.GetToolApprovals("a", "ns:erase", "nope")
+		require.NoError(t, err)
+		require.Len(t, records, 1)
+		_, found := records["nope"]
+		assert.False(t, found)
+
+		records, err = manager.GetToolApprovals("zzz", "ns:erase")
+		require.NoError(t, err)
+		assert.Empty(t, records, "another server's records never leak in")
+	})
+
+	t.Run("the empty tool name is a readable key", func(t *testing.T) {
+		records, err := manager.GetToolApprovals("a", "ns:", "")
+		require.NoError(t, err)
+		require.Len(t, records, 1)
+		require.NotNil(t, records[""])
+		assert.Equal(t, ToolApprovalStatusChanged, records[""].Status)
+	})
+
+	t.Run("every key is read inside one read transaction", func(t *testing.T) {
+		db := manager.db.db
+		before := db.Stats().TxN
+		records, err := manager.GetToolApprovals("a", "ns:erase", "erase", "")
+		require.NoError(t, err)
+		require.Len(t, records, 3)
+		assert.Equal(t, 1, db.Stats().TxN-before, "three keys, one snapshot")
+
+		before = db.Stats().TxN
+		_, err = manager.GetToolApproval("a", "ns:erase")
+		require.NoError(t, err)
+		_, err = manager.GetToolApproval("a", "erase")
+		require.NoError(t, err)
+		assert.Equal(t, 2, db.Stats().TxN-before, "control: per-key reads are one transaction each, so the oracle bites")
+	})
+
+	t.Run("a corrupt record fails the whole read", func(t *testing.T) {
+		require.NoError(t, manager.db.db.Update(func(tx *bbolt.Tx) error {
+			return tx.Bucket([]byte(ToolApprovalBucket)).Put([]byte(ToolApprovalKey("a", "broken")), []byte("{not json"))
+		}))
+		records, err := manager.GetToolApprovals("a", "ns:erase", "broken")
+		require.Error(t, err)
+		assert.Nil(t, records, "a partial map must not be handed back as if it were a snapshot")
+	})
+}
+
+// Spec 105 FR-009, astra r1 P4: the identity stamp re-reads each record
+// inside its own write transaction and touches ONLY the IdentityKeyed bit of
+// a record that is still unstamped and still unrestricting — a record that
+// restricts at write time (disabled / pending / changed), an already-stamped
+// one and an absent key are all left exactly as they are.
+func TestToolApprovalRecord_StampIdentityKeyed_ReChecksAtWriteTime(t *testing.T) {
+	manager, cleanup := setupTestStorageForToolApproval(t)
+	defer cleanup()
+
+	seed := []*ToolApprovalRecord{
+		{ServerName: "a", ToolName: "plain", Status: ToolApprovalStatusApproved, ApprovedBy: "user", CurrentDescription: "keep me"},
+		{ServerName: "a", ToolName: "disabled", Status: ToolApprovalStatusApproved, ApprovedBy: "user", Disabled: true},
+		{ServerName: "a", ToolName: "pending", Status: ToolApprovalStatusPending},
+		{ServerName: "a", ToolName: "changed", Status: ToolApprovalStatusChanged, PreviousDescription: "before"},
+		{ServerName: "a", ToolName: "stamped", Status: ToolApprovalStatusApproved, IdentityKeyed: true},
+		{ServerName: "b", ToolName: "plain", Status: ToolApprovalStatusApproved},
+	}
+	for _, rec := range seed {
+		require.NoError(t, manager.SaveToolApproval(rec))
+	}
+
+	stamped, err := manager.StampToolApprovalsIdentityKeyed("a", []string{"plain", "disabled", "pending", "changed", "stamped", "absent"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"plain"}, stamped, "only the unstamped, unrestricting record is stamped")
+
+	get := func(server, tool string) *ToolApprovalRecord {
+		t.Helper()
+		rec, err := manager.GetToolApproval(server, tool)
+		require.NoError(t, err)
+		return rec
+	}
+	plain := get("a", "plain")
+	assert.True(t, plain.IdentityKeyed)
+	assert.Equal(t, "keep me", plain.CurrentDescription, "nothing but the stamp changes")
+	assert.Equal(t, "user", plain.ApprovedBy)
+	for _, name := range []string{"disabled", "pending", "changed"} {
+		rec := get("a", name)
+		assert.False(t, rec.IdentityKeyed, "%q restricts at write time and must stay unstamped", name)
+	}
+	assert.True(t, get("a", "disabled").Disabled)
+	assert.Equal(t, "before", get("a", "changed").PreviousDescription)
+	assert.True(t, get("a", "stamped").IdentityKeyed)
+	assert.False(t, get("b", "plain").IdentityKeyed, "another server's record is untouched")
+	_, err = manager.GetToolApproval("a", "absent")
+	require.ErrorIs(t, err, ErrToolApprovalNotFound, "an absent key is never created")
+
+	// Idempotent and empty-safe.
+	again, err := manager.StampToolApprovalsIdentityKeyed("a", []string{"plain"})
+	require.NoError(t, err)
+	assert.Empty(t, again)
+	none, err := manager.StampToolApprovalsIdentityKeyed("a", nil)
+	require.NoError(t, err)
+	assert.Empty(t, none)
+}
+
+// TestListToolApprovals_PrefixFilterRunsBeforeDecode locks in the ordering
+// internal/httpapi's computeUsableServers fault-isolation fallback depends
+// on: BoltDB.ListToolApprovals filters by the "<server>:" key prefix BEFORE
+// it decodes each record, so a corrupt record stored under one server's
+// prefix only fails a ListToolApprovals call scoped to THAT server, never a
+// call scoped to another server. The existing onboarding_usable_test.go
+// coverage only exercises this through a mock with hardcoded errors; this
+// writes an actual undecodable record into a real bbolt bucket so a future
+// refactor that decodes before filtering (or skips-and-continues on a bad
+// record) fails here instead of silently breaking the fallback it backs.
+func TestListToolApprovals_PrefixFilterRunsBeforeDecode(t *testing.T) {
+	manager, cleanup := setupTestStorageForToolApproval(t)
+	defer cleanup()
+
+	healthy := &ToolApprovalRecord{
+		ServerName:   "healthy",
+		ToolName:     "list_issues",
+		ApprovedHash: "abc123",
+		CurrentHash:  "abc123",
+		Status:       ToolApprovalStatusApproved,
+		ApprovedAt:   time.Now().UTC().Truncate(time.Millisecond),
+	}
+	require.NoError(t, manager.SaveToolApproval(healthy))
+
+	// Inject a record that cannot decode, under a DIFFERENT server's prefix.
+	// SaveToolApproval can only ever write a valid record, so this bypasses
+	// it and writes raw bytes directly, exactly as an on-disk corruption
+	// would look.
+	err := manager.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ToolApprovalBucket))
+		return bucket.Put([]byte("corrupt:broken"), []byte("not valid json"))
+	})
+	require.NoError(t, err)
+
+	// A call scoped to "healthy" must not see, and must not fail on, the
+	// corrupt record filed under "corrupt:".
+	records, err := manager.ListToolApprovals("healthy")
+	require.NoError(t, err, "a corrupt record under a different server's prefix must not fail this server's own list")
+	require.Len(t, records, 1)
+	assert.Equal(t, "list_issues", records[0].ToolName)
+
+	// The aggregate ("" = all servers) call DOES reach the corrupt record and
+	// must fail — this is exactly the failure computeUsableServers falls
+	// back from to the per-server calls above.
+	_, err = manager.ListToolApprovals("")
+	assert.Error(t, err, "an aggregate call must surface a corrupt record anywhere in the bucket")
 }

@@ -13,13 +13,19 @@
 
       <!-- Summary Stats Row -->
       <div v-if="summary" class="stats stats-horizontal bg-base-200 mb-4">
+        <!-- Rows in the window; only some of them are calls (F1, #1046). -->
         <div class="stat py-2 px-4">
-          <div class="stat-title text-xs">Today</div>
+          <div class="stat-title text-xs">Events (24h)</div>
           <div class="stat-value text-lg">{{ summary.total_count }}</div>
         </div>
         <div class="stat py-2 px-4">
+          <div class="stat-title text-xs">Calls</div>
+          <div class="stat-value text-lg">{{ summary.call_count }}</div>
+        </div>
+        <div class="stat py-2 px-4">
           <div class="stat-title text-xs">Success</div>
-          <div class="stat-value text-lg text-success">{{ summary.success_count }}</div>
+          <!-- Success is the norm — it gets no colour, so Errors can have it. -->
+          <div class="stat-value text-lg text-base-content/70">{{ summary.success_count }}</div>
         </div>
         <div class="stat py-2 px-4">
           <div class="stat-title text-xs">Errors</div>
@@ -56,16 +62,36 @@
               <div class="text-sm font-medium">
                 <span v-if="activity.server_name">{{ activity.server_name }}</span>
                 <span v-if="activity.tool_name" class="text-base-content/70">:{{ activity.tool_name }}</span>
+                <!-- Spec 098: a preflight has no server/tool — show its verdict instead of a blank row. -->
+                <span
+                  v-if="!activity.server_name && !activity.tool_name && isPreflightActivity(activity)"
+                  class="text-base-content/70"
+                >
+                  {{ formatPreflightSummary(activity.metadata) || 'Preflight' }}
+                </span>
               </div>
-              <div class="text-xs text-base-content/60">{{ formatRelativeTime(activity.timestamp) }}</div>
+              <div class="flex items-center gap-2">
+                <div class="text-xs text-base-content/60">{{ formatRelativeTime(activity.timestamp) }}</div>
+                <!-- Sub-call of a code_execution run (see utils/activity). -->
+                <!-- Context, not an alert: ghost chip, muted text. -->
+                <span
+                  v-if="isChildCall(activity)"
+                  data-test="widget-child-badge"
+                  class="badge badge-xs badge-ghost font-normal text-base-content/60"
+                  title="Sub-call dispatched by a code_execution run"
+                >
+                  ↳ via code_execution
+                </span>
+              </div>
             </div>
           </div>
-          <div
-            class="badge badge-sm"
-            :class="getStatusBadgeClass(activity.status)"
+          <!-- Same quiet-success treatment as the Activity Log table. -->
+          <span
+            data-test="widget-activity-status"
+            :class="statusPresentation(activity.status).className"
           >
-            {{ activity.status }}
-          </div>
+            {{ statusPresentation(activity.status).label }}
+          </span>
         </div>
       </div>
     </div>
@@ -77,6 +103,13 @@ import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import api from '@/services/api'
 import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
+import {
+  formatPreflightSummary,
+  getTypeIcon,
+  isChildCall,
+  isPreflightActivity,
+  statusPresentation,
+} from '@/utils/activity'
 
 const router = useRouter()
 
@@ -127,25 +160,6 @@ const formatRelativeTime = (timestamp: string): string => {
   if (diff < 3600000) return `${Math.floor(diff / 60000)}m ago`
   if (diff < 86400000) return `${Math.floor(diff / 3600000)}h ago`
   return `${Math.floor(diff / 86400000)}d ago`
-}
-
-const getTypeIcon = (type: string): string => {
-  const typeIcons: Record<string, string> = {
-    'tool_call': '🔧',
-    'policy_decision': '🛡️',
-    'quarantine_change': '⚠️',
-    'server_change': '🔄'
-  }
-  return typeIcons[type] || '📋'
-}
-
-const getStatusBadgeClass = (status: string): string => {
-  const statusClasses: Record<string, string> = {
-    'success': 'badge-success',
-    'error': 'badge-error',
-    'blocked': 'badge-warning'
-  }
-  return statusClasses[status] || 'badge-ghost'
 }
 
 // Lifecycle

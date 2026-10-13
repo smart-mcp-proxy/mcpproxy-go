@@ -11,6 +11,12 @@ keywords: [updates, version, upgrade, notifications]
 
 MCPProxy includes built-in update checking to help you stay current with the latest features and security fixes.
 
+:::tip Installing the update
+This page covers how MCPProxy *notices* a new version. For actually applying
+one — the macOS one-click updater, `mcpproxy update`, the per-channel behaviour
+matrix and the kill switches — see [Auto-Update](/features/auto-update).
+:::
+
 ## How It Works
 
 MCPProxy automatically checks for new versions by querying GitHub Releases:
@@ -37,6 +43,12 @@ The sidebar displays the current version at the bottom. When an update is availa
 - A small "update available" badge appears next to the version
 - Click to view the release notes
 
+The dashboard additionally shows a **dismissible update banner** ("Update
+available: vX — you are running vY") with a release-notes link. Dismissal is
+**per version**: dismissing the banner for v1.3.0 keeps it hidden for v1.3.0
+(persisted in the browser), but the banner reappears when a newer release
+becomes available. The banner is non-modal and never blocks the UI.
+
 ### CLI Doctor Command
 
 The `mcpproxy doctor` command shows version information:
@@ -46,7 +58,7 @@ $ mcpproxy doctor
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 🔍 MCPProxy Health Check
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Version: v1.2.3 (update available: v1.3.0)
+Version: v1.2.3 (update available: v1.3.0, 8 releases / ~14 weeks behind)
 Download: https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0
 
 ✅ All systems operational! No issues detected.
@@ -55,6 +67,41 @@ Download: https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0
 
 ## Configuration
 
+### Config File (`update_check`)
+
+Update checking is controlled from `mcp_config.json` via the `update_check`
+block:
+
+```json
+{
+  "update_check": {
+    "enabled": true,
+    "channel": "stable"
+  }
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `enabled` | boolean | `true` | Master switch. When `false`, no network check is performed (background poll and the manual re-check) and no upgrade nudge appears on any surface — the `update` object is omitted from `/api/v1/info`. |
+| `channel` | string | `"stable"` | Release channel: `"stable"` (GitHub `releases/latest`; prereleases never offered) or `"rc"` (prerelease tags such as `v0.47.0-rc.1` included). |
+
+Both keys are **hot-reloadable**: editing the config file or applying it via
+`POST /api/v1/config/apply` takes effect without a restart. Re-enabling (or
+switching channels) triggers a prompt re-check instead of waiting for the next
+4-hour tick.
+
+`enabled: false` also gates the Go tray's built-in daily self-update check, so
+no surface performs a network check while disabled. The tray does **not** read
+`mcp_config.json` itself (it holds no state); instead it asks the core via
+`GET /api/v1/info` before checking — the core omits the `update` object when
+update checking is disabled, and the tray then skips its own network check. If
+the core is unreachable the tray skips that tick and retries, rather than
+falling open to a check the operator may have disabled. The tray's own check
+still selects prereleases via `MCPPROXY_ALLOW_PRERELEASE_UPDATES` only —
+converging it fully onto the shared checker (including `channel`) is a separate
+Spec 079 work item (FR-001a).
+
 ### Environment Variables
 
 | Variable | Description | Default |
@@ -62,13 +109,52 @@ Download: https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0
 | `MCPPROXY_DISABLE_AUTO_UPDATE` | Disable background update checks entirely | `false` |
 | `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Include prerelease/beta versions in update checks | `false` |
 
+### Precedence (env vs config)
+
+The environment switches **win over** the `update_check` config keys — they
+are the operator override:
+
+- `MCPPROXY_DISABLE_AUTO_UPDATE=true` disables checking even when
+  `update_check.enabled` is `true`.
+- `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` selects the prerelease channel — but
+  see the build-identity rule below: it only takes effect on dev/unstamped
+  builds.
+
+The env vars only widen in one direction (disable checks / include
+prereleases). They cannot re-enable checking that the config disabled: with
+`update_check.enabled: false`, no check runs regardless of environment.
+
+### The running build's version decides the channel
+
+For a **released** build the running binary's own version is authoritative and
+overrides both `update_check.channel` and `MCPPROXY_ALLOW_PRERELEASE_UPDATES`:
+
+- a **stable** build (e.g. `v0.56.0`) is **never** offered an RC — a stale `rc`
+  opt-in left over from a previously-installed RC cannot resurrect RC offers;
+- an **RC** build (`-rc.N` / `-next.*`) tracks the **rc** channel automatically
+  (offered the next RC, and its graduating stable) with no opt-in;
+- a **dev / unstamped** build (local `go build`, a `go install @commit`
+  pseudo-version) has no release identity, so the `channel` config key and
+  `MCPPROXY_ALLOW_PRERELEASE_UPDATES` still apply — the only way to exercise the
+  rc channel without a released RC binary.
+
+The macOS tray applies the same rule to itself: a stable tray app never offers
+itself an RC even when attached to a newer RC core. See
+[Prerelease Builds](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/prerelease-builds.md).
+
 ### Examples
 
 ```bash
-# Disable update checking
+# Disable update checking (config file — persistent, hot-reloads)
+#   "update_check": { "enabled": false }
+
+# Disable update checking (environment — wins over config)
 MCPPROXY_DISABLE_AUTO_UPDATE=true mcpproxy serve
 
-# Enable prerelease updates (for beta testers)
+# Opt in to prerelease (RC) updates via config
+#   "update_check": { "channel": "rc" }
+
+# Enable prerelease updates via environment (for beta testers)
 MCPPROXY_ALLOW_PRERELEASE_UPDATES=true mcpproxy serve
 ```
 
@@ -90,9 +176,14 @@ Response includes an `update` field when version information is available:
     "update": {
       "available": true,
       "latest_version": "v1.3.0",
+      "behind_summary": "8 releases / ~14 weeks behind",
+      "releases_behind": 8,
+      "weeks_behind": 14,
       "release_url": "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0",
       "checked_at": "2025-01-15T10:30:00Z",
-      "is_prerelease": false
+      "is_prerelease": false,
+      "install_channel": "homebrew",
+      "update_command": "brew upgrade mcpproxy"
     }
   }
 }
@@ -100,7 +191,137 @@ Response includes an `update` field when version information is available:
 
 See [REST API Documentation](../api/rest-api.md#get-apiv1info) for complete details.
 
+## How the Install Channel Is Detected
+
+MCPProxy identifies how it was installed so it can show the right update
+instruction for your setup (`install_channel` in `/api/v1/info`, plus the
+guided command in `mcpproxy status`, `mcpproxy doctor`, and the Web UI
+banner).
+
+Detection prefers a **build-time channel marker** stamped into
+single-channel artifacts at packaging time (the Docker image, the Windows
+installer, and — since Spec 092 — the release `.tar.gz`/`.zip` archives).
+When no marker is present, runtime heuristics run in decreasing confidence
+order:
+
+1. **Homebrew**: the (symlink-resolved) executable path lives under a
+   Homebrew prefix (`/opt/homebrew/`, a `Cellar/` path, or
+   `/home/linuxbrew/.linuxbrew`).
+2. **Docker**: `/.dockerenv` exists.
+3. **deb / rpm**: on Linux, the executable is exactly `/usr/bin/mcpproxy`,
+   the owning package manager confirms it owns the file
+   (`/var/lib/dpkg/info/mcpproxy.list` for deb; for rpm, an rpm database
+   exists **and** a one-shot `rpm -qf /usr/bin/mcpproxy` query names the
+   `mcpproxy` package), **and** the MCPProxy repository is configured
+   (`/etc/apt/sources.list.d/mcpproxy.list` resp.
+   `/etc/yum.repos.d/mcpproxy.repo`, as written by the documented setup).
+   The repo signal matters because the apt/dnf commands only work against
+   `apt.mcpproxy.app` / `rpm.mcpproxy.app`: a standalone `.deb`/`.rpm`
+   downloaded from a GitHub release is dpkg/rpm-owned but has no upgrade
+   candidate, so it stays `unknown` and gets release-page guidance. A binary
+   merely copied to `/usr/bin` (e.g. an AUR or manual install) also stays
+   `unknown`.
+4. **DMG**: on macOS, the executable runs from an `.app/Contents/MacOS` or
+   `.app/Contents/Resources/bin` bundle path, or is the tray-staged core at
+   `~/Library/Application Support/mcpproxy/bin/mcpproxy` (the process that
+   actually serves the API for DMG installs; only the tray's bundle-staging
+   writes that directory).
+5. **go install**: the Go toolchain stamped a real module version into the
+   binary's build info while no release version was stamped via ldflags.
+   For this channel the checker also adopts that module version as its
+   current version (the ldflags default would read "development" and
+   disable update checks entirely).
+6. Otherwise the channel is **`unknown`**.
+
+Ambiguity always resolves to `unknown`: MCPProxy never guesses a channel,
+because a wrong update command is worse than a generic instruction.
+
+### Why the `tarball` marker is weak
+
+The `tarball` marker is the one exception to "the marker wins". Homebrew
+installs the *same* release `.tar.gz` into its Cellar, so a stamped binary can
+legitimately end up in a Homebrew (or, after a future packaging change, some
+other) install. The detector therefore runs heuristics 1–5 first and only
+applies a `tarball` marker when none of them matched — that is, when the
+binary is an official release archive extracted somewhere no package manager
+owns. Every other marker (docker, windows-installer, …) still short-circuits
+detection.
+
+This is what makes `tarball` a *positive* identification: `mcpproxy update`
+self-replaces the binary only on this channel (Spec 092 FR-020). A plain
+`unknown` install is never self-updated, no matter how writable it is —
+writability is not ownership.
+
+### Update Commands per Channel
+
+| Channel | `update_command` | Guidance shown instead |
+|---------|------------------|------------------------|
+| `homebrew` | `brew upgrade mcpproxy` | — |
+| `deb` | `sudo apt update && sudo apt install --only-upgrade mcpproxy` | — |
+| `rpm` | `sudo dnf upgrade mcpproxy` | — |
+| `go-install` | `go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest` | — |
+| `dmg` | — | Download the latest DMG (release page is deep-linked) |
+| `windows-installer` | — | Download the latest Windows installer |
+| `docker` | — | Pull or rebuild the newer image for your deployment |
+| `tarball` | `mcpproxy update` | — |
+| `unknown` | — | Download the latest release from the releases page |
+
+Every surface always deep-links the release notes for the latest version,
+whether or not a command is available.
+
+**Prerelease targets** (the `rc` channel or
+`MCPPROXY_ALLOW_PRERELEASE_UPDATES=true`) are the exception: prereleases are
+published only to the GitHub pre-release channel, so the package-manager
+commands above would not deliver them (`brew`/`apt`/`dnf` serve stable
+artifacts, and Go's `@latest` resolves to the newest stable). When the offered
+version is a prerelease, only `go-install` (pinned to the exact version,
+`…/cmd/mcpproxy@v0.48.0-rc.1`) and `tarball` (`mcpproxy update`, which resolves
+releases through the same prerelease selection) keep a command — every other
+channel falls back to the release-page guidance.
+
 ## Updating MCPProxy
+
+### `mcpproxy update` (all channels)
+
+`mcpproxy update` branches on the detected install channel (Spec 092 US3) so
+you never have to remember which one you are on:
+
+| Channel | What the command does |
+|---------|----------------------|
+| `homebrew` / `deb` / `rpm` / `go-install` | Prints the exact upgrade command and exits. Nothing is modified — the package manager owns the install. |
+| `docker` / `windows-installer` | Prints channel-appropriate guidance. |
+| `dmg` (macOS app bundle) | Points at the menu bar app (MCPProxy menu → Check for Updates). The app bundle and its staged core copy are never modified. |
+| `tarball` | Performs a verified self-update (see below). |
+| `unknown` | Guidance only. Pass `--self` to assert that you manage the binary yourself; writability alone is not ownership. |
+
+```bash
+mcpproxy update --check                     # current / latest / channel, no side effects
+mcpproxy update                             # do the right thing for this install
+mcpproxy update -o json                     # machine-readable report
+mcpproxy update --self                      # assert a self-managed install on `unknown`
+mcpproxy update --version v0.54.0 --force   # deliberate downgrade (both flags required)
+```
+
+**Self-update safety rules** (FR-021/FR-022):
+
+- The release archive's SHA-256 is always checked against the release's
+  `checksums.txt`, and `checksums.txt` itself is verified against its cosign
+  signature bundle with the signing identity pinned to this repository's
+  release workflow. Verification currently shells out to a locally installed
+  [cosign](https://docs.sigstore.dev/cosign/installation/); if cosign is not on
+  `PATH` the update **aborts** — `--allow-unverified-signature` is the explicit
+  (and loudly warned) opt-out that falls back to checksum-only verification.
+- The swap is a rename inside the target directory, the file mode is
+  preserved, and a symlinked launcher has its destination replaced rather than
+  the symlink.
+- The previous binary is kept as `<binary>.old` until the new one runs and
+  reports the expected version; on any failure it is restored.
+- A non-writable target fails with a message naming the path and its owner.
+  MCPProxy never escalates privileges.
+- A version equal to or older than the running one requires **both**
+  `--version <tag>` and `--force`.
+- An already-running core keeps executing the old binary; the swap takes
+  effect the next time it starts.
 
 ### Homebrew (macOS/Linux)
 
@@ -127,7 +348,7 @@ When running a development build (version shows as "development"), update checki
 ### Update check not working
 
 1. Ensure you have internet connectivity
-2. Check if `MCPPROXY_DISABLE_AUTO_UPDATE` is set
+2. Check if `MCPPROXY_DISABLE_AUTO_UPDATE` is set, or `update_check.enabled` is `false` in `mcp_config.json`
 3. Run `mcpproxy doctor` to see current version status
 4. Check logs for any GitHub API errors:
    ```bash
@@ -136,7 +357,8 @@ When running a development build (version shows as "development"), update checki
 
 ### Prerelease not showing
 
-By default, prerelease versions are excluded. To enable:
+By default, prerelease versions are excluded. To enable, set
+`"update_check": { "channel": "rc" }` in `mcp_config.json`, or:
 
 ```bash
 export MCPPROXY_ALLOW_PRERELEASE_UPDATES=true

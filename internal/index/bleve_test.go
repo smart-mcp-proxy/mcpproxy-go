@@ -1,6 +1,7 @@
 package index
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -212,6 +213,111 @@ func TestBleveIndex_SearchTokenization(t *testing.T) {
 				assert.True(t, foundTools[expectedTool],
 					"Query '%s' should find tool '%s' - %s", tt.query, expectedTool, tt.description)
 			}
+		})
+	}
+}
+
+func TestBleveIndex_SearchUnderscoreSegments(t *testing.T) {
+	idx, err := NewBleveIndex(t.TempDir(), zap.NewNop())
+	require.NoError(t, err)
+	defer idx.Close()
+
+	require.NoError(t, idx.BatchIndex([]*config.ToolMetadata{
+		{
+			Name:        "work_start_task_attachment_upload",
+			ServerName:  "fixture",
+			Description: "Create a signed request for a local file.",
+			ParamsJSON:  `{"type":"object","properties":{}}`,
+			Hash:        "target",
+		},
+		{
+			Name:        "network_upload_attachment",
+			ServerName:  "fixture",
+			Description: "Create a signed request for a remote file.",
+			ParamsJSON:  `{"type":"object","properties":{}}`,
+			Hash:        "substring-decoy",
+		},
+	}))
+
+	t.Run("matches non-contiguous segments in any order", func(t *testing.T) {
+		for _, query := range []string{
+			"work_upload_attachment",
+			"attachment_work_upload",
+			"work_start_task_attachment_upload",
+		} {
+			results, err := idx.SearchTools(query, 10)
+			require.NoError(t, err)
+			require.NotEmpty(t, results, query)
+			assert.Equal(t, "fixture:work_start_task_attachment_upload", results[0].Tool.Name, query)
+		}
+	})
+
+	t.Run("requires segment boundaries and every query segment", func(t *testing.T) {
+		for _, query := range []string{"network_work_upload_attachment", "work_missing_attachment"} {
+			results, err := idx.SearchTools(query, 10)
+			require.NoError(t, err)
+			assert.Empty(t, results, query)
+		}
+	})
+
+	t.Run("preserves a legacy prefix match ahead of an added segment match", func(t *testing.T) {
+		prefixIdx, err := NewBleveIndex(t.TempDir(), zap.NewNop())
+		require.NoError(t, err)
+		defer prefixIdx.Close()
+
+		require.NoError(t, prefixIdx.BatchIndex([]*config.ToolMetadata{
+			{
+				Name:        "work_upload_attachment_preview",
+				ServerName:  "fixture",
+				Description: "Preview an attachment upload for a Work task.",
+				Hash:        "legacy-prefix",
+			},
+			{
+				Name:        "work_start_task_attachment_upload",
+				ServerName:  "fixture",
+				Description: "Create a signed request for a local file.",
+				Hash:        "segment-match",
+			},
+		}))
+
+		results, err := prefixIdx.SearchTools("work_upload_attachment", 10)
+		require.NoError(t, err)
+		require.Len(t, results, 2)
+		assert.Equal(t, "fixture:work_upload_attachment_preview", results[0].Tool.Name)
+		assert.Equal(t, "fixture:work_start_task_attachment_upload", results[1].Tool.Name)
+	})
+}
+
+func TestFieldsContainExactToolName(t *testing.T) {
+	tests := []struct {
+		name   string
+		fields map[string]interface{}
+		query  string
+		want   bool
+	}{
+		{
+			name:   "tool name",
+			fields: map[string]interface{}{"tool_name": "work_upload_attachment", "full_tool_name": "fixture:work_upload_attachment"},
+			query:  "work_upload_attachment",
+			want:   true,
+		},
+		{
+			name:   "full tool name",
+			fields: map[string]interface{}{"tool_name": "work_upload_attachment", "full_tool_name": "fixture:work_upload_attachment"},
+			query:  "fixture:work_upload_attachment",
+			want:   true,
+		},
+		{
+			name:   "no exact name",
+			fields: map[string]interface{}{"tool_name": "work_start_task_attachment_upload", "full_tool_name": "fixture:work_start_task_attachment_upload"},
+			query:  "work_upload_attachment",
+			want:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, fieldsContainExactToolName(tt.fields, tt.query))
 		})
 	}
 }
@@ -505,4 +611,191 @@ func createTestDeFiLlamaTools() []*config.ToolMetadata {
 	}
 
 	return tools
+}
+
+// TestBleveIndex_GetToolsByServer_BeyondPageCap verifies that GetToolsByServer
+// returns every tool of a server even when the server exposes more tools than a
+// single search page can hold. Regression for MCP-3319: the prior single-search
+// implementation hard-capped at 10000 hits, silently dropping the overflow.
+func TestBleveIndex_GetToolsByServer_BeyondPageCap(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bleve_test_*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	logger := zap.NewNop()
+	bleveIndex, err := NewBleveIndex(tmpDir, logger)
+	require.NoError(t, err)
+	defer bleveIndex.Close()
+
+	// Shrink the page size so the test can exercise the pagination loop with a
+	// small, fast corpus instead of indexing >10k docs.
+	bleveIndex.searchPageSize = 3
+
+	// Index 7 tools for one server (spans 3 pages: 3 + 3 + 1) plus an unrelated
+	// server to confirm the term filter is preserved across pages.
+	const total = 7
+	tools := make([]*config.ToolMetadata, 0, total+1)
+	for i := 0; i < total; i++ {
+		tools = append(tools, &config.ToolMetadata{
+			Name:        fmt.Sprintf("paged:tool_%02d", i),
+			ServerName:  "paged",
+			Description: fmt.Sprintf("Paged tool %d", i),
+			Hash:        fmt.Sprintf("hash_%02d", i),
+		})
+	}
+	tools = append(tools, &config.ToolMetadata{
+		Name:        "other:tool_x",
+		ServerName:  "other",
+		Description: "Other tool",
+		Hash:        "hash_other",
+	})
+
+	require.NoError(t, bleveIndex.BatchIndex(tools))
+
+	got, err := bleveIndex.GetToolsByServer("paged")
+	require.NoError(t, err)
+	assert.Len(t, got, total, "all tools across every page must be returned")
+
+	names := make(map[string]bool, len(got))
+	for _, tm := range got {
+		assert.Equal(t, "paged", tm.ServerName)
+		names[tm.Name] = true
+	}
+	for i := 0; i < total; i++ {
+		assert.True(t, names[fmt.Sprintf("paged:tool_%02d", i)],
+			"tool_%02d missing from paginated result", i)
+	}
+}
+
+// TestBleveIndex_DeleteAll_BeyondPageCap verifies that DeleteAll clears every
+// document even when the index holds more docs than a single search page.
+// Regression for MCP-3319: the prior single-search implementation deleted only
+// the first 100000 docs, leaving stale docs beyond the cap.
+func TestBleveIndex_DeleteAll_BeyondPageCap(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bleve_test_*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	logger := zap.NewNop()
+	bleveIndex, err := NewBleveIndex(tmpDir, logger)
+	require.NoError(t, err)
+	defer bleveIndex.Close()
+
+	bleveIndex.searchPageSize = 3
+
+	// Index 10 docs (spans multiple pages of size 3).
+	const total = 10
+	tools := make([]*config.ToolMetadata, 0, total)
+	for i := 0; i < total; i++ {
+		tools = append(tools, &config.ToolMetadata{
+			Name:        fmt.Sprintf("srv:tool_%02d", i),
+			ServerName:  "srv",
+			Description: fmt.Sprintf("Tool %d", i),
+			Hash:        fmt.Sprintf("h_%02d", i),
+		})
+	}
+	require.NoError(t, bleveIndex.BatchIndex(tools))
+
+	count, err := bleveIndex.GetDocumentCount()
+	require.NoError(t, err)
+	require.Equal(t, uint64(total), count)
+
+	require.NoError(t, bleveIndex.DeleteAll())
+
+	count, err = bleveIndex.GetDocumentCount()
+	require.NoError(t, err)
+	assert.Equal(t, uint64(0), count, "DeleteAll must remove every document across all pages")
+}
+
+// TestBleveIndex_CanonicalToolName verifies that both index read seams return a
+// canonical "server:tool" identity even when discovery stored a BARE tool name
+// (the real live path: ToolMetadata{ServerName:"github", Name:"create_issue"}),
+// and that an already-prefixed stored name is not double-prefixed (#871).
+func TestBleveIndex_CanonicalToolName(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bleve_canon_*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	logger := zap.NewNop()
+	bleveIndex, err := NewBleveIndex(tmpDir, logger)
+	require.NoError(t, err)
+	defer bleveIndex.Close()
+
+	tools := []*config.ToolMetadata{
+		// Bare name — how discovery actually stores tools.
+		{Name: "create_issue", ServerName: "github", Description: "Create a GitHub issue", Hash: "h_bare"},
+		// Already prefixed — legacy index data / test fixtures.
+		{Name: "acme:list_widgets", ServerName: "acme", Description: "List widgets", Hash: "h_pref"},
+	}
+	require.NoError(t, bleveIndex.BatchIndex(tools))
+
+	t.Run("SearchTools returns canonical name for bare-stored tool", func(t *testing.T) {
+		results, err := bleveIndex.SearchTools("create_issue", 10)
+		require.NoError(t, err)
+		require.NotEmpty(t, results)
+		assert.Equal(t, "github:create_issue", results[0].Tool.Name)
+		assert.Equal(t, "github", results[0].Tool.ServerName)
+	})
+
+	t.Run("SearchTools does not double-prefix an already-prefixed tool", func(t *testing.T) {
+		results, err := bleveIndex.SearchTools("list_widgets", 10)
+		require.NoError(t, err)
+		require.NotEmpty(t, results)
+		assert.Equal(t, "acme:list_widgets", results[0].Tool.Name)
+	})
+
+	t.Run("GetToolsByServer returns canonical name for bare-stored tool", func(t *testing.T) {
+		tools, err := bleveIndex.GetToolsByServer("github")
+		require.NoError(t, err)
+		require.Len(t, tools, 1)
+		assert.Equal(t, "github:create_issue", tools[0].Name)
+	})
+
+	t.Run("GetToolsByServer does not double-prefix an already-prefixed tool", func(t *testing.T) {
+		tools, err := bleveIndex.GetToolsByServer("acme")
+		require.NoError(t, err)
+		require.Len(t, tools, 1)
+		assert.Equal(t, "acme:list_widgets", tools[0].Name)
+	})
+}
+
+func TestBleveIndex_SearchBareSegment(t *testing.T) {
+	idx, err := NewBleveIndex(t.TempDir(), zap.NewNop())
+	require.NoError(t, err)
+	defer idx.Close()
+
+	require.NoError(t, idx.BatchIndex([]*config.ToolMetadata{
+		{Name: "create_issue", ServerName: "github", Description: "Open a ticket.", Hash: "a"},
+		{Name: "issue_list", ServerName: "github", Description: "Enumerate things.", Hash: "b"},
+		{Name: "get_issue_comments", ServerName: "github", Description: "Fetch notes.", Hash: "c"},
+		{Name: "go", ServerName: "github", Description: "Short.", Hash: "d"},
+		{Name: "tool_ab", ServerName: "github", Description: "Short segment.", Hash: "e"},
+	}))
+
+	t.Run("bare token matches trailing and interior segments", func(t *testing.T) {
+		results, err := idx.SearchTools("issue", 10)
+		require.NoError(t, err)
+		var names []string
+		for _, r := range results {
+			names = append(names, r.Tool.Name)
+		}
+		assert.Contains(t, names, "github:create_issue")
+		assert.Contains(t, names, "github:get_issue_comments")
+		// prefix match outranks segment-only matches
+		require.NotEmpty(t, names)
+		assert.Equal(t, "github:issue_list", names[0])
+	})
+
+	t.Run("two-character token does not add the clause", func(t *testing.T) {
+		assert.Nil(t, bareSegmentQuery("ab"))
+		results, err := idx.SearchTools("ab", 10)
+		require.NoError(t, err)
+		assert.Empty(t, results)
+	})
+
+	t.Run("non-token shapes add no clause", func(t *testing.T) {
+		assert.Nil(t, bareSegmentQuery("create_issue"))
+		assert.Nil(t, bareSegmentQuery("is*ue"))
+		assert.Nil(t, bareSegmentQuery("a b c"))
+	})
 }

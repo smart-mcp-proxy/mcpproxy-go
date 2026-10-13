@@ -30,52 +30,257 @@
       </div>
     </div>
 
-    <!-- Summary Stats — clickable, drive the Status filter (issue #436) -->
-    <div v-if="summary" class="stats shadow bg-base-100 w-full">
+    <!--
+      Activity views (Spec 109-k, FR-070): Tool calls / Sessions / System
+      events / All, in the URL as `?view=`, defaulting to "calls" — a fresh
+      /activity used to render every type mixed together (29 rows of tool
+      calls, policy decisions and 20 separate quarantine rows) instead of
+      just the calls the user made.
+    -->
+    <div class="tabs tabs-boxed w-fit" role="tablist" data-test="activity-view-tabs">
+      <button
+        v-for="tab in activityViewTabs"
+        :key="tab.id"
+        type="button"
+        role="tab"
+        :aria-selected="activeView === tab.id"
+        :class="['tab', activeView === tab.id ? 'tab-active' : '']"
+        :data-test="`activity-view-tab-${tab.id}`"
+        @click="setView(tab.id)"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
+
+    <!-- Spec 108-j J4/J5 (FR-031, rules 5, 7, 8): the profile/client/token
+         filters of the page as removable chips, in every view (the Sessions
+         view is narrowed by the same three). -->
+    <div v-if="scopeChipsVisible" data-test="activity-scope-chips">
+      <ScopeChips page="activity" :scope-query="scopeQuery" :unavailable="scopeUnavailableNames" />
+    </div>
+
+    <SessionsPanel v-if="activeView === 'sessions'" :sessions="sessionsRaw" />
+
+    <!-- Rule 5 (zcode review round 1, F4): from/to/server/tool/status/type/
+         auth_type are "not applicable here" in Sessions — shown as disabled
+         chips rather than silently vanishing (the strip below is v-show
+         hidden for this view). -->
+    <div
+      v-if="activeView === 'sessions' && sessionsDisabledChips.length > 0"
+      data-test="activity-sessions-disabled-filters"
+      class="flex flex-wrap items-center gap-2"
+    >
+      <span class="text-xs text-base-content/50">Not applicable to Sessions:</span>
+      <span
+        v-for="chip in sessionsDisabledChips"
+        :key="chip.key"
+        :data-test="`activity-sessions-disabled-chip-${chip.kind}`"
+        class="badge badge-sm badge-ghost opacity-60"
+        title="This filter does not apply to the Sessions view"
+      >
+        {{ chip.label }}
+      </span>
+    </div>
+
+    <!--
+      Compact header strip (default view). Five stat cards plus a nine-control
+      filter grid pushed the first activity row below the fold; the default is
+      now ONE line — the total, the counts that want attention, and a Filters
+      toggle. Active filters stay visible as dismissable chips even collapsed,
+      so the list is never silently narrowed.
+    -->
+    <div v-show="activeView !== 'sessions'" class="card bg-base-100 shadow-sm">
+      <div class="card-body py-3 gap-3">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+          <!-- Counts: total muted; only non-zero error/blocked/rejected speak up. -->
+          <div
+            v-if="summaryParts.length > 0"
+            data-test="activity-compact-summary"
+            class="flex flex-wrap items-center gap-x-2 gap-y-1"
+          >
+            <template v-for="(part, idx) in summaryParts" :key="part.key">
+              <span v-if="idx > 0" class="text-base-content/25" aria-hidden="true">·</span>
+              <button
+                v-if="part.filterable"
+                type="button"
+                :data-test="`activity-compact-${part.key}`"
+                :class="[
+                  'text-sm hover:underline underline-offset-2 transition-colors',
+                  summaryToneClass(part.tone),
+                  filterStatus === part.status && part.status !== '' ? 'font-semibold underline' : '',
+                ]"
+                :aria-pressed="filterStatus === part.status"
+                :title="part.key === 'blocked' && activeView === 'calls' ? BLOCKED_CALLS_TITLE : undefined"
+                @click="applySummaryFilter(part)"
+              >
+                {{ part.label }}
+              </button>
+              <!-- No status filters to "calls", so this one only reports. -->
+              <span
+                v-else
+                :data-test="`activity-compact-${part.key}`"
+                :class="['text-sm', summaryToneClass(part.tone)]"
+                title="Calls the user made in the last 24h — the same count the Usage tab shows. The rest of the rows are events: security scans, quarantine changes, system start."
+              >
+                {{ part.label }}
+              </span>
+            </template>
+          </div>
+
+          <div class="flex-1"></div>
+
+          <!--
+            Repeat folding (F5, #1046). On by default: the table is scanned, and
+            a hundred identical rows carry one row of information. The toggle is
+            the escape hatch for an operator who wants the raw log, and it turns
+            itself off when the table is sorted by something other than time,
+            where "consecutive" means nothing.
+          -->
+          <button
+            type="button"
+            data-test="activity-group-toggle"
+            class="btn btn-sm btn-ghost gap-2"
+            :disabled="!groupingApplies"
+            :aria-pressed="groupRepeats && groupingApplies"
+            :title="groupingApplies
+              ? 'Fold consecutive identical calls into one expandable row. A run never mixes outcomes.'
+              : 'Repeats fold only in time order — sort by Time to use this.'"
+            @click="groupRepeats = !groupRepeats"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h7" />
+            </svg>
+            <span :class="groupRepeats && groupingApplies ? '' : 'opacity-60'">Group repeats</span>
+            <span
+              v-if="foldedRowCount > 0"
+              data-test="activity-folded-count"
+              class="badge badge-xs badge-neutral"
+              :title="`${foldedRowCount} repeated rows folded into runs`"
+            >
+              −{{ foldedRowCount }}
+            </span>
+          </button>
+
+          <!-- Filters toggle — the expanded cards + controls hang off this. -->
+          <button
+            type="button"
+            data-test="activity-filters-toggle"
+            class="btn btn-sm btn-ghost gap-2"
+            :aria-expanded="showFilterPanel"
+            @click="showFilterPanel = !showFilterPanel"
+          >
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
+            </svg>
+            Filters
+            <span
+              v-if="filterBadgeCount > 0"
+              data-test="activity-filters-count"
+              class="badge badge-xs badge-neutral"
+            >
+              {{ filterBadgeCount }}
+            </span>
+            <svg
+              class="w-3 h-3 transition-transform"
+              :class="showFilterPanel ? 'rotate-180' : ''"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+
+          <!-- Export is not a filter — it belongs on the strip, not inside the grid.
+               Spec 107 FR-041/T088: /activity/export is the core (admin-only)
+               door; a tenant principal has no export target yet. -->
+          <div v-if="authStore.principalKind !== 'tenant'" class="dropdown dropdown-end">
+            <div tabindex="0" role="button" class="btn btn-sm btn-outline">
+              <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+              Export
+            </div>
+            <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow-lg bg-base-200 rounded-box w-40">
+              <li><a @click="exportActivities('json')">Export as JSON</a></li>
+              <li><a @click="exportActivities('csv')">Export as CSV</a></li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Active filters — always shown, collapsed or not. -->
+        <div
+          v-if="activeChips.length > 0"
+          data-test="activity-active-filters"
+          class="flex flex-wrap items-center gap-2 pt-2 border-t border-base-300"
+        >
+          <span class="text-xs text-base-content/50">Filters:</span>
+          <button
+            v-for="chip in activeChips"
+            :key="chip.key"
+            type="button"
+            :data-test="chipTestId(chip)"
+            class="badge badge-sm badge-ghost gap-1 hover:bg-base-300"
+            :title="chip.title || chip.label"
+            @click="clearChip(chip)"
+          >
+            {{ chip.label }}
+            <svg class="w-3 h-3 opacity-60" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+          <button type="button" class="btn btn-xs btn-ghost" @click="clearFilters">Clear all</button>
+        </div>
+      </div>
+    </div>
+
+    <!--
+      Summary Stats — clickable, drive the Status filter (issue #436).
+
+      The tiles are a PARTITION of the denominator they sit under: every row in
+      the window lands in exactly one of them, with "Other / internal" holding
+      the rows whose status is not a tool-call outcome (a quarantine action, a
+      policy verdict). They used to add up to less than the total printed beside
+      them — 15+4+0+0 under a 42 (audit finding F2, #1046) — which is the fastest
+      way to make a dashboard untrustworthy. statusBucketTiles owns the list, and
+      a unit test asserts the sum.
+    -->
+    <div v-if="showFilterPanel && summary" class="stats shadow bg-base-100 w-full">
       <button
         type="button"
         data-test="kpi-card-total"
         :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === '' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
         :aria-pressed="filterStatus === ''"
+        title="Every row in the last 24h. The tiles to the right split this number; the sub-count is how many of these rows are calls the user made — the figure the Usage tab reports."
         @click="filterStatus = ''"
       >
-        <div class="stat-title">Total (24h)</div>
+        <!--
+          Rows in the window, not calls: the status tiles beside it are a split
+          of this, and a security scan or a quarantine auto-approval is one of
+          these and not one of those (F1/F24, #1046).
+        -->
+        <div class="stat-title">Events (24h)</div>
         <div class="stat-value text-2xl">{{ summary.total_count }}</div>
+        <div class="stat-desc">{{ summary.call_count }} {{ summary.call_count === 1 ? 'call' : 'calls' }}</div>
       </button>
       <button
+        v-for="tile in statusTiles"
+        :key="tile.status"
         type="button"
-        data-test="kpi-card-success"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'success' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
-        :aria-pressed="filterStatus === 'success'"
-        @click="filterStatus = filterStatus === 'success' ? '' : 'success'"
+        :data-test="`kpi-card-${tile.status}`"
+        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === tile.status ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
+        :aria-pressed="filterStatus === tile.status"
+        :title="tile.title"
+        @click="filterStatus = filterStatus === tile.status ? '' : tile.status"
       >
-        <div class="stat-title">Success</div>
-        <div class="stat-value text-2xl text-success">{{ summary.success_count }}</div>
-      </button>
-      <button
-        type="button"
-        data-test="kpi-card-errors"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'error' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
-        :aria-pressed="filterStatus === 'error'"
-        @click="filterStatus = filterStatus === 'error' ? '' : 'error'"
-      >
-        <div class="stat-title">Errors</div>
-        <div class="stat-value text-2xl text-error">{{ summary.error_count }}</div>
-      </button>
-      <button
-        type="button"
-        data-test="kpi-card-blocked"
-        :class="['stat text-left transition-colors cursor-pointer hover:bg-base-200/60', filterStatus === 'blocked' ? 'bg-base-200 ring-2 ring-inset ring-primary/40' : '']"
-        :aria-pressed="filterStatus === 'blocked'"
-        @click="filterStatus = filterStatus === 'blocked' ? '' : 'blocked'"
-      >
-        <div class="stat-title">Blocked</div>
-        <div class="stat-value text-2xl text-warning">{{ summary.blocked_count }}</div>
+        <div class="stat-title">{{ tile.label }}</div>
+        <!-- Only error and blocked spend colour; success is the norm. -->
+        <div class="stat-value text-2xl" :class="statTileValueClass(tile.tone)">{{ tile.count }}</div>
       </button>
     </div>
 
-    <!-- Filters -->
-    <div class="card bg-base-100 shadow-md">
+    <!-- Filters — rendered only when the compact strip's toggle asks for them. -->
+    <div v-if="showFilterPanel" data-test="activity-filter-panel" class="card bg-base-100 shadow-md">
       <div class="card-body py-4">
         <div class="flex flex-wrap gap-4 items-end">
           <!-- Type Filter (Multi-select dropdown) -->
@@ -128,7 +333,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Server</span>
             </label>
-            <select v-model="filterServer" class="select select-bordered select-sm">
+            <select v-model="filterServer" class="select select-bordered select-sm" aria-label="Filter by server">
               <option value="">All Servers</option>
               <option v-for="server in availableServers" :key="server" :value="server">
                 {{ server }}
@@ -141,11 +346,18 @@
             <label class="label py-1">
               <span class="label-text text-xs">Status</span>
             </label>
-            <select v-model="filterStatus" class="select select-bordered select-sm">
+            <select v-model="filterStatus" class="select select-bordered select-sm" aria-label="Filter by status">
               <option value="">All</option>
               <option value="success">Success</option>
               <option value="error">Error</option>
               <option value="blocked">Blocked</option>
+              <option value="rejected">Rejected</option>
+              <!--
+                The residual of the status partition (F2): rows whose outcome is
+                not a tool-call status. Selectable, so the "Other / internal"
+                tile behaves like every other tile in the row.
+              -->
+              <option :value="OTHER_STATUS">Other / internal</option>
             </select>
           </div>
 
@@ -154,7 +366,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Auth</span>
             </label>
-            <select v-model="filterAuthType" class="select select-bordered select-sm">
+            <select v-model="filterAuthType" class="select select-bordered select-sm" aria-label="Filter by authentication type">
               <option value="">All</option>
               <option value="admin">🔑 Admin</option>
               <option value="agent">🤖 Agent</option>
@@ -166,7 +378,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Agent</span>
             </label>
-            <select v-model="filterAgentName" class="select select-bordered select-sm">
+            <select v-model="filterAgentName" class="select select-bordered select-sm" aria-label="Filter by agent">
               <option value="">All Agents</option>
               <option v-for="agent in availableAgents" :key="agent" :value="agent">
                 {{ agent }}
@@ -179,7 +391,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Sensitive Data</span>
             </label>
-            <select v-model="filterSensitiveData" class="select select-bordered select-sm">
+            <select v-model="filterSensitiveData" class="select select-bordered select-sm" aria-label="Filter by sensitive data">
               <option value="">All</option>
               <option value="true">⚠️ Detected</option>
               <option value="false">Clean</option>
@@ -191,7 +403,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Severity</span>
             </label>
-            <select v-model="filterSeverity" class="select select-bordered select-sm">
+            <select v-model="filterSeverity" class="select select-bordered select-sm" aria-label="Filter by severity">
               <option value="">All</option>
               <option value="critical">☢️ Critical</option>
               <option value="high">⚠️ High</option>
@@ -205,7 +417,7 @@
             <label class="label py-1">
               <span class="label-text text-xs">Session</span>
             </label>
-            <select v-model="filterSession" class="select select-bordered select-sm">
+            <select v-model="filterSession" class="select select-bordered select-sm" aria-label="Filter by session">
               <option value="">All Sessions</option>
               <option v-for="session in availableSessions" :key="session.id" :value="session.id">
                 {{ session.label }}
@@ -213,25 +425,37 @@
             </select>
           </div>
 
-          <!-- Date Range Filter -->
+          <!-- Spec 108-j J5: Profile / Client / Token (plus "Unattributed"). Each
+               shows only when the page registers it and the build advertises
+               it, and writes the same URL parameter the header chip writes. -->
+          <ScopeFilterSelects page="activity" :scope-query="scopeQuery" allow-unattributed />
+
+          <!-- Date Range Filter. The native control renders in the OS locale,
+               so the hint states the format the table itself prints (F35). -->
           <div class="form-control min-w-[160px]">
-            <label class="label py-1">
+            <label class="label py-1" for="activity-filter-from">
               <span class="label-text text-xs">From</span>
             </label>
             <input
+              id="activity-filter-from"
               type="datetime-local"
               v-model="filterStartDate"
               class="input input-bordered input-sm"
+              :title="dateTimeFormatHint"
+              aria-label="Filter activity from date and time"
             />
           </div>
           <div class="form-control min-w-[160px]">
-            <label class="label py-1">
+            <label class="label py-1" for="activity-filter-to">
               <span class="label-text text-xs">To</span>
             </label>
             <input
+              id="activity-filter-to"
               type="datetime-local"
               v-model="filterEndDate"
               class="input input-bordered input-sm"
+              :title="dateTimeFormatHint"
+              aria-label="Filter activity to date and time"
             />
           </div>
 
@@ -243,59 +467,64 @@
           >
             Clear Filters
           </button>
-
-          <!-- Spacer -->
-          <div class="flex-1"></div>
-
-          <!-- Export Dropdown -->
-          <div class="dropdown dropdown-end">
-            <div tabindex="0" role="button" class="btn btn-sm btn-outline">
-              <svg class="w-4 h-4 mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-              </svg>
-              Export
-            </div>
-            <ul tabindex="0" class="dropdown-content z-[1] menu p-2 shadow-lg bg-base-200 rounded-box w-40">
-              <li><a @click="exportActivities('json')">Export as JSON</a></li>
-              <li><a @click="exportActivities('csv')">Export as CSV</a></li>
-            </ul>
-          </div>
         </div>
 
-        <!-- Active Filters Summary -->
-        <div v-if="hasActiveFilters" class="flex flex-wrap gap-2 mt-2 pt-2 border-t border-base-300">
-          <span class="text-xs text-base-content/60">Active filters:</span>
-          <span
-            v-for="type in selectedTypes"
-            :key="type"
-            class="badge badge-sm badge-outline gap-1 cursor-pointer hover:badge-error"
-            @click="toggleTypeFilter(type)"
-          >
-            {{ getTypeIcon(type) }} {{ formatType(type) }}
-            <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12" />
-            </svg>
-          </span>
-          <span v-if="filterServer" class="badge badge-sm badge-outline">Server: {{ filterServer }}</span>
-          <span v-if="filterStatus" class="badge badge-sm badge-outline">Status: {{ filterStatus }}</span>
-          <span v-if="filterAuthType" class="badge badge-sm badge-outline">Auth: {{ filterAuthType === 'admin' ? '🔑 Admin' : '🤖 Agent' }}</span>
-          <span v-if="filterAgentName" class="badge badge-sm badge-outline">Agent: {{ filterAgentName }}</span>
-          <span v-if="filterSensitiveData" class="badge badge-sm badge-outline">
-            Sensitive: {{ filterSensitiveData === 'true' ? '⚠️ Detected' : 'Clean' }}
-          </span>
-          <span v-if="filterSeverity" class="badge badge-sm badge-outline">Severity: {{ filterSeverity }}</span>
-          <span v-if="filterSession" class="badge badge-sm badge-outline">Session: {{ getSessionLabel(filterSession) }}</span>
-          <span v-if="filterStartDate" class="badge badge-sm badge-outline">From: {{ new Date(filterStartDate).toLocaleString() }}</span>
-          <span v-if="filterEndDate" class="badge badge-sm badge-outline">To: {{ new Date(filterEndDate).toLocaleString() }}</span>
+        <!--
+          Column legend (F26, #1046). The Intent column paints its word beside
+          the glyph, so this is a reference for it; the Sensitive column has no
+          room for a word, and a column of bare ☢️ / ⚠️ badges is decodable only
+          by someone who already knows the scale. Colour and glyph must never be
+          the only encoding (WCAG 1.4.1).
+        -->
+        <div
+          data-test="activity-legend"
+          class="flex flex-wrap gap-x-6 gap-y-2 pt-3 mt-2 border-t border-base-300 text-xs text-base-content/60"
+        >
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span class="font-medium text-base-content/70">Intent:</span>
+            <span v-for="entry in INTENT_LEGEND" :key="entry.term" :title="entry.description">
+              <span aria-hidden="true">{{ entry.icon }}</span> {{ entry.term }}
+            </span>
+          </div>
+          <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+            <span class="font-medium text-base-content/70">Sensitive data:</span>
+            <span v-for="entry in SENSITIVE_LEGEND" :key="entry.term" :title="entry.description">
+              <span aria-hidden="true">{{ entry.icon }}</span> {{ entry.term }}
+            </span>
+            <span class="opacity-70">— the number is how many detections that row carries.</span>
+          </div>
         </div>
       </div>
     </div>
 
     <!-- Activity Table -->
-    <div class="card bg-base-100 shadow-md">
+    <div v-show="activeView !== 'sessions'" class="card bg-base-100 shadow-md">
       <div class="card-body">
+        <!-- UX audit F30: the table auto-refreshes, so a screen reader is told
+             how many rows it now holds. Rendered in every state — including the
+             empty one — so "no records" is announced too. -->
+        <p
+          class="sr-only"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+          data-test="activity-live-region"
+        >
+          Showing {{ displayRows.length }} of {{ sortedActivities.length }} activity records
+        </p>
+
+        <!-- Contradictory server/tool (rule 8, zcode review round 1, F2): no
+             REST request can express both, so none is issued. -->
+        <div v-if="scopeConflict" class="alert alert-warning" data-test="activity-scope-conflict">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>Server and tool filters don't match — <code>server={{ filterServer }}</code> and <code>tool={{ filterTool }}</code> name different servers. Remove one to continue.</span>
+          <button class="btn btn-sm btn-ghost" data-test="activity-scope-conflict-clear" @click="clearFilters">Clear filters</button>
+        </div>
+
         <!-- Loading State -->
-        <div v-if="loading && activities.length === 0" class="flex justify-center py-12">
+        <div v-else-if="loading && activities.length === 0" class="flex justify-center py-12">
           <span class="loading loading-spinner loading-lg"></span>
         </div>
 
@@ -313,121 +542,378 @@
           <svg class="w-16 h-16 mx-auto mb-4 opacity-30" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
           </svg>
-          <p class="text-lg">{{ hasActiveFilters ? 'No matching activities' : 'No activity records found' }}</p>
-          <p class="text-sm mt-1">{{ hasActiveFilters ? 'Try adjusting your filters' : 'Activity will appear here as tools are called and actions are taken' }}</p>
+          <p class="text-lg">{{ hasActiveFilters || scopeApplied ? 'No matching activities' : 'No activity records found' }}</p>
+          <p class="text-sm mt-1">{{ hasActiveFilters || scopeApplied ? 'Try adjusting your filters, or remove a profile, client or token chip above' : 'Activity will appear here as tools are called and actions are taken' }}</p>
+          <!-- T168: a refused attempt is a `policy_decision` row, which the Tool
+               calls view lists only under status=blocked. When the window holds
+               some, say so instead of leaving a bare empty table. -->
+          <div v-if="showBlockedOffer" class="mt-3" data-test="activity-empty-blocked-offer">
+            <p class="text-sm">Refused attempts are not tool calls that ran; they are listed under Blocked.</p>
+            <button
+              type="button"
+              class="btn btn-sm btn-outline mt-2"
+              data-test="activity-empty-show-blocked"
+              @click="showBlockedAttempts"
+            >
+              Show {{ blockedAttemptCount }} blocked attempt{{ blockedAttemptCount === 1 ? '' : 's' }}
+            </button>
+          </div>
         </div>
 
-        <!-- Activity Table -->
-        <div v-else class="overflow-x-auto">
-          <table class="table table-sm">
+        <!-- Activity Table.
+             UX audit F14: below `md` the secondary columns fold away so Status
+             — the column that tells you a call FAILED — stays on screen at
+             390px instead of being clipped off the right edge. -->
+        <div v-else>
+          <div class="overflow-x-auto">
+          <!-- table-fixed below sm: with only Time/Details/Status left, fixed columns
+               guarantee the row fits a 390px viewport instead of letting one long
+               tool name push Status off the edge (F14). -->
+          <table class="table table-sm w-full table-fixed sm:table-auto">
+            <caption class="sr-only">
+              Activity log — one row per proxied call, newest first. Updates automatically.
+            </caption>
             <thead>
               <tr>
                 <th class="cursor-pointer hover:bg-base-200" @click="sortBy('timestamp')">
                   Time {{ getSortIndicator('timestamp') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('type')">
+                <th class="hidden sm:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('type')">
                   Type {{ getSortIndicator('type') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('server_name')">
+                <th class="hidden sm:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('server_name')">
                   Server {{ getSortIndicator('server_name') }}
                 </th>
+                <!-- Spec 108-j J10: who made the call and under which profile.
+                     Folded away below lg (1024px); the detail drawer carries the same
+                     chips in an "Attribution" section. -->
+                <th v-if="hasScopeColumn" class="hidden lg:table-cell" data-test="activity-scope-col">Scope</th>
                 <th>Details</th>
-                <th>Sensitive</th>
-                <th>Intent</th>
-                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('status')">
+                <th v-if="hasSensitiveColumn" class="hidden lg:table-cell">Sensitive</th>
+                <!-- Intent carries the declared reason, not a 52px icon slot. -->
+                <th v-if="hasIntentColumn" class="hidden lg:table-cell min-w-[11rem]">Intent</th>
+                <!--
+                  F14 follow-up: at <640px the table is `table-fixed`, so every
+                  visible column takes an equal share — too narrow for the
+                  status badge, which is `whitespace-nowrap` and so overflowed
+                  its own cell. The committed sweep never caught it because a
+                  `success` row renders an `sr-only` label (zero width), and a
+                  success row is ~90% of traffic: the assertion only became
+                  real once a run put an error row first. Floor the column at
+                  the widest pill, like the Intent column above.
+                -->
+                <th class="cursor-pointer hover:bg-base-200 min-w-[5.5rem]" @click="sortBy('status')">
                   Status {{ getSortIndicator('status') }}
                 </th>
-                <th class="cursor-pointer hover:bg-base-200" @click="sortBy('duration_ms')">
+                <!--
+                  Acceptance scenario 6 (Spec 109-k): a `table-fixed` layout
+                  gives every visible column an equal share, and this one had
+                  no floor — a run's span ("120ms – 4.2s") or "System events"'
+                  longer values wrapped onto two lines and clipped, the same
+                  bug the Status column's min-width above already works
+                  around.
+                -->
+                <th class="hidden md:table-cell cursor-pointer hover:bg-base-200 min-w-[4.5rem] whitespace-nowrap" @click="sortBy('duration_ms')">
                   Duration {{ getSortIndicator('duration_ms') }}
                 </th>
-                <th></th>
+                <!-- Row-open chevron. Kept at every width: it is the actual
+                     named, keyboard-operable control for the row (F30). -->
+                <th class="w-8"></th>
               </tr>
             </thead>
+            <!--
+              One template over DISPLAY ROWS, not over records: a collapsed run
+              and an expanded run's members render through the same cells, so
+              there is exactly one copy of this markup to keep correct.
+            -->
             <tbody>
+              <!-- Clicking the row is a shortcut for the chevron button in the
+                   last cell; that button is what carries the accessible name and
+                   the keyboard path, so the row stays a plain <tr> rather than
+                   a focusable pseudo-control with row semantics (F30). -->
               <tr
-                v-for="activity in paginatedActivities"
-                :key="activity.id"
-                class="hover cursor-pointer"
-                :class="{ 'bg-base-200': selectedActivity?.id === activity.id }"
-                @click="selectActivity(activity)"
+                v-for="row in displayRows"
+                :key="row.key"
+                :data-test="row.member ? 'activity-run-member' : 'activity-row'"
+                class="hover cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-[-2px]"
+                :class="{
+                  'bg-base-200': selectedActivity?.id === row.activity.id,
+                  'bg-base-200/30': row.member,
+                }"
+                @click="selectActivity(row.activity)"
               >
-                <td>
-                  <div class="text-sm">{{ formatTimestamp(activity.timestamp) }}</div>
-                  <div class="text-xs text-base-content/60">{{ formatRelativeTime(activity.timestamp) }}</div>
-                </td>
-                <td>
-                  <div class="flex items-center gap-2">
-                    <span class="text-lg">{{ getTypeIcon(activity.type) }}</span>
-                    <span class="text-sm">{{ formatType(activity.type) }}</span>
+                <td class="whitespace-nowrap" :class="row.member ? 'pl-8' : ''">
+                  <!-- The full stamp needs ~10rem; on a phone that wrapped onto
+                       three lines and squeezed Status off the row (F14), so the
+                       narrow layout keeps the wall-clock time and the relative
+                       age, and the date stays one breakpoint up. -->
+                  <div class="text-sm hidden sm:block">{{ formatTimestamp(row.activity.timestamp) }}</div>
+                  <div class="text-sm sm:hidden">{{ formatTimeOfDay(row.activity.timestamp) }}</div>
+                  <div class="text-xs text-base-content/60">
+                    {{ formatRelativeTime(row.activity.timestamp) }}
+                    <span v-if="row.runSpan" class="opacity-70">· {{ row.runSpan }}</span>
                   </div>
                 </td>
-                <td>
+                <td class="hidden sm:table-cell">
+                  <div class="flex flex-col gap-1">
+                    <div class="flex items-center gap-2">
+                      <span class="text-lg">{{ getTypeIcon(row.activity.type) }}</span>
+                      <span class="text-sm">{{ formatType(row.activity.type) }}</span>
+                    </div>
+                    <!--
+                      code_execution linkage: a sub-call names the run that
+                      dispatched it, a parent advertises that it fans out. Both
+                      markers are the entry point to the drawer's navigation.
+                      The child badge is CONTEXT, not an alert — ghost, not accent.
+                      The parent badge appears here only when the Details column
+                      is not already printing "code_execution"; otherwise the row
+                      carries a single puzzle glyph beside that text instead.
+                    -->
+                    <span
+                      v-if="isChildCall(row.activity)"
+                      data-test="activity-child-badge"
+                      class="badge badge-xs badge-ghost w-fit font-normal text-base-content/60"
+                      title="Sub-call dispatched by a code_execution run"
+                    >
+                      ↳ via code_execution
+                    </span>
+                    <span
+                      v-else-if="showParentBadgeInTypeColumn(row.activity)"
+                      data-test="activity-parent-badge"
+                      class="badge badge-xs badge-ghost w-fit font-normal text-base-content/60"
+                      title="Sandboxed script run — may have dispatched sub-calls"
+                    >
+                      🧩 code_execution
+                    </span>
+                  </div>
+                </td>
+                <td class="hidden sm:table-cell">
                   <router-link
-                    v-if="activity.server_name"
-                    :to="serverDetailPath(activity.server_name)"
+                    v-if="row.activity.server_name"
+                    :to="serverDetailPath(row.activity.server_name)"
                     class="link link-hover font-medium"
                     @click.stop
                   >
-                    {{ activity.server_name }}
+                    {{ row.activity.server_name }}
                   </router-link>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
+                <td v-if="hasScopeColumn" class="hidden lg:table-cell max-w-[11rem]">
+                  <AttributionChips :record="row.activity" :test-id="row.activity.id" stacked />
+                </td>
                 <td>
-                  <div class="max-w-xs truncate">
-                    <code v-if="activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded">
-                      {{ activity.tool_name }}
+                  <div class="max-w-[6rem] sm:max-w-xs truncate flex items-center gap-1.5">
+                    <!-- Below `sm` the Type column folds away (F14), so the row
+                         keeps its type as the glyph in front of the details. -->
+                    <span
+                      class="sm:hidden text-sm shrink-0"
+                      :title="formatType(row.activity.type)"
+                    >{{ getTypeIcon(row.activity.type) }}</span>
+                    <!--
+                      The parent marker, when the Details text already says
+                      "code_execution": a quiet glyph instead of a second copy of
+                      the word one column to the left.
+                    -->
+                    <span
+                      v-if="isCodeExecutionActivity(row.activity) && !showParentBadgeInTypeColumn(row.activity)"
+                      data-test="activity-parent-badge"
+                      class="text-sm opacity-50 shrink-0"
+                      title="Sandboxed script run — may have dispatched sub-calls"
+                    >
+                      🧩
+                    </span>
+                    <!--
+                      Acceptance scenario 6 (Spec 109-k): a folded
+                      tool_quarantine_change run reports the batch — one
+                      member's tool name would silently stand in for the
+                      other thirteen (runIdentity() ignores tool_name for
+                      exactly this type, see BATCH_FOLD_TYPES).
+                    -->
+                    <span
+                      v-if="row.activity.type === 'tool_quarantine_change' && row.runCount > 1"
+                      class="text-sm"
+                      data-test="activity-quarantine-batch-summary"
+                    >
+                      {{ quarantineBatchSummary(row.activity, row.runCount) }}
+                    </span>
+                    <code v-else-if="row.activity.tool_name" class="text-sm bg-base-200 px-2 py-1 rounded truncate">
+                      {{ row.activity.tool_name }}
                     </code>
-                    <span v-else-if="activity.metadata?.action" class="text-sm">
-                      {{ activity.metadata.action }}
+                    <!--
+                      Spec 098: a preflight is set-scoped, so server/tool are
+                      empty by construction — the verdict summary is what makes
+                      the row readable.
+                    -->
+                    <span
+                      v-else-if="isPreflightActivity(row.activity) && formatPreflightSummary(row.activity.metadata)"
+                      class="text-sm"
+                      :title="formatPreflightSummary(row.activity.metadata)"
+                    >
+                      {{ formatPreflightSummary(row.activity.metadata) }}
+                    </span>
+                    <span
+                      v-else-if="row.activity.type === 'profile_change' && credentialLifecycleSummary(row.activity.metadata)"
+                      class="text-sm truncate"
+                      :title="credentialLifecycleSummary(row.activity.metadata)"
+                      data-test="activity-credential-lifecycle"
+                    >
+                      {{ credentialLifecycleSummary(row.activity.metadata) }}
+                    </span>
+                    <span v-else-if="row.activity.metadata?.action" class="text-sm">
+                      {{ row.activity.metadata.action }}
                     </span>
                     <span v-else class="text-base-content/40">-</span>
+                    <!--
+                      The run marker (F5): "×12" is the whole compression, and it
+                      is also the control that undoes it. Ghost, not accent — a
+                      repeat is normal, not an alert.
+                    -->
+                    <button
+                      v-if="row.runCount > 1"
+                      type="button"
+                      data-test="activity-run-count"
+                      class="badge badge-sm badge-ghost shrink-0 gap-1 hover:bg-base-300"
+                      :aria-expanded="isRunExpanded(row.key)"
+                      :title="isRunExpanded(row.key)
+                        ? 'Collapse these repeated calls'
+                        : `${row.runCount} consecutive identical calls — click to expand`"
+                      @click.stop="toggleRun(row.key)"
+                    >
+                      ×{{ row.runCount }}
+                      <span aria-hidden="true">{{ isRunExpanded(row.key) ? '▾' : '▸' }}</span>
+                    </button>
                   </div>
                 </td>
                 <!-- Sensitive Data column (Spec 026) -->
-                <td>
+                <td v-if="hasSensitiveColumn" class="hidden lg:table-cell">
                   <div
-                    v-if="activity.has_sensitive_data"
+                    v-if="row.activity.has_sensitive_data"
                     class="tooltip tooltip-top"
-                    :data-tip="(activity.detection_types || []).join(', ')"
+                    :data-tip="(row.activity.detection_types || []).join(', ')"
                   >
-                    <span class="badge badge-sm gap-1" :class="getSeverityBadgeClass(activity.max_severity)">
-                      {{ getSeverityIcon(activity.max_severity) }}
-                      {{ activity.detection_types?.length || 0 }}
+                    <span class="badge badge-sm gap-1" :class="getSeverityBadgeClass(row.activity.max_severity)">
+                      <span aria-hidden="true">{{ getSeverityIcon(row.activity.max_severity) }}</span>
+                      {{ row.activity.detection_types?.length || 0 }}
+                      <!--
+                        The badge is a glyph and a number; without this the column
+                        is colour+glyph only (F26, #1046 / WCAG 1.4.1). The filter
+                        panel carries the visible legend.
+                      -->
+                      <span class="sr-only">
+                        {{ row.activity.max_severity || 'unknown' }}-severity sensitive data detected
+                      </span>
                     </span>
                   </div>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
-                <!-- Intent column (Spec 024: US5) -->
-                <td>
+                <!--
+                  Intent column (Spec 024: US5). The REASON is what an operator
+                  wants; the operation type is a glyph AND its word in front of
+                  it — the glyph alone was an unlabelled emoji nobody could decode
+                  (F26, #1046). The old coloured `read` pill spent semantic colour
+                  on the most common case and clipped its own icon.
+                -->
+                <td v-if="hasIntentColumn" class="hidden lg:table-cell max-w-[18rem]">
                   <div
-                    v-if="activity.metadata?.intent?.operation_type"
-                    class="tooltip tooltip-top"
-                    :data-tip="activity.metadata?.intent?.reason || 'No reason provided'"
+                    v-if="intentOf(row.activity).present"
+                    data-test="activity-intent"
+                    class="flex items-center gap-1.5 min-w-0"
+                    :title="intentOf(row.activity).title"
                   >
-                    <span class="badge badge-sm gap-1" :class="getIntentBadgeClass(activity.metadata.intent.operation_type)">
-                      {{ getIntentIcon(activity.metadata.intent.operation_type) }}
-                      {{ activity.metadata.intent.operation_type }}
+                    <span class="text-sm leading-none shrink-0" aria-hidden="true">{{ intentOf(row.activity).icon }}</span>
+                    <span data-test="activity-intent-label" class="text-xs font-medium shrink-0">
+                      {{ intentOf(row.activity).label }}
+                    </span>
+                    <span
+                      v-if="intentOf(row.activity).reason"
+                      data-test="activity-intent-reason"
+                      class="text-xs text-base-content/70 truncate"
+                    >
+                      {{ intentOf(row.activity).reason }}
+                    </span>
+                    <!--
+                      A folded run shows the LEAD's reason. When members worded
+                      theirs differently the row has to say so rather than let one
+                      reason speak for twelve calls.
+                    -->
+                    <span
+                      v-if="row.reasonsVary"
+                      data-test="activity-run-reasons-vary"
+                      class="text-xs text-base-content/40 shrink-0"
+                      title="Calls in this run declared different reasons — expand to read them"
+                    >
+                      +…
                     </span>
                   </div>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
-                <td>
-                  <div
-                    class="badge badge-sm"
-                    :class="getStatusBadgeClass(activity.status)"
+                <!--
+                  Status: success is the norm — ~90% of rows — and gets NO mark at
+                  all, so the two rows that need a human are the only marked ones
+                  in the column (F5, #1046). Screen readers still hear it.
+                -->
+                <td class="whitespace-nowrap">
+                  <!--
+                    max-w-full + truncate, because the label is not a closed
+                    set: an unmapped status falls through to a ghost pill
+                    carrying the RAW value (`quarantined` measured 100px in a
+                    93px cell at 390px, where the table is `table-fixed`).
+                    Sizing the column to today's longest known label would only
+                    hold until the next status is added, so let the pill clip
+                    itself and keep the full value in the title.
+                  -->
+                  <span
+                    v-if="statusPresentation(row.activity.status).pill"
+                    data-test="activity-status"
+                    :title="statusPresentation(row.activity.status).label"
+                    :class="[statusPresentation(row.activity.status).className, 'max-w-full truncate']"
                   >
-                    {{ formatStatus(activity.status) }}
-                  </div>
+                    {{ statusPresentation(row.activity.status).label }}
+                  </span>
+                  <svg
+                    v-else
+                    data-test="activity-status-icon"
+                    class="inline-block h-4 w-4 text-success"
+                    viewBox="0 0 20 20"
+                    fill="currentColor"
+                    aria-hidden="true"
+                  >
+                    <title>Success</title>
+                    <path fill-rule="evenodd" d="M16.7 5.3a1 1 0 010 1.4l-7.5 7.5a1 1 0 01-1.4 0L3.3 9.7a1 1 0 111.4-1.4l3.8 3.8 6.8-6.8a1 1 0 011.4 0z" clip-rule="evenodd" />
+                  </svg>
+                  <span v-if="!statusPresentation(row.activity.status).pill" data-test="activity-status" class="sr-only">
+                    {{ statusPresentation(row.activity.status).label }}
+                  </span>
+                  <!-- Inline "Why?" only from xl: with the sidebar open the card is ~700px at 1024px and the
+                       extra button pushed Status and Duration past it (Spec 108-j QA.2). The detail drawer
+                       carries the same entry point at every width. -->
+                  <button
+                    v-if="canExplain(row.activity)"
+                    type="button"
+                    class="btn btn-ghost btn-xs min-h-6 hidden xl:inline-flex ml-1"
+                    :data-test="`activity-row-why-${row.activity.id}`"
+                    :aria-label="`Why was ${row.activity.tool_name} blocked?`"
+                    @click.stop="openExplain(row.activity)"
+                  >Why?</button>
                 </td>
-                <td>
-                  <span v-if="activity.duration_ms !== undefined" class="text-sm">
-                    {{ formatDuration(activity.duration_ms) }}
+                <td class="hidden md:table-cell whitespace-nowrap">
+                  <!-- A run reports the SPAN its members took, not one member's. -->
+                  <span v-if="row.runDuration" class="text-sm whitespace-nowrap" :title="`${row.runCount} calls`">
+                    {{ row.runDuration }}
+                  </span>
+                  <span v-else-if="row.activity.duration_ms !== undefined" class="text-sm whitespace-nowrap">
+                    {{ formatDuration(row.activity.duration_ms) }}
                   </span>
                   <span v-else class="text-base-content/40">-</span>
                 </td>
-                <td>
-                  <button class="btn btn-xs btn-ghost" @click.stop="selectActivity(activity)">
-                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <td class="w-8">
+                  <button
+                    class="btn btn-xs btn-ghost"
+                    :aria-label="`Open details for ${formatType(row.activity.type)} at ${formatTimestamp(row.activity.timestamp)}`"
+                    :data-test="`activity-open-${row.activity.id}`"
+                    @click.stop="selectActivity(row.activity)"
+                  >
+                    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                       <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
                     </svg>
                   </button>
@@ -435,11 +921,20 @@
               </tr>
             </tbody>
           </table>
+          </div>
 
           <!-- Pagination -->
           <div v-if="totalPages > 1" class="flex justify-between items-center mt-4 pt-4 border-t border-base-300">
-            <div class="text-sm text-base-content/60">
-              Showing {{ (currentPage - 1) * pageSize + 1 }}-{{ Math.min(currentPage * pageSize, sortedActivities.length) }} of {{ sortedActivities.length }}
+            <!--
+              The page is a page of RUNS, so the paginator counts runs — and
+              names the rows behind them, because "1-25 of 40" beside a 200-row
+              log would be its own small lie.
+            -->
+            <div class="text-sm text-base-content/60" data-test="activity-pagination-summary">
+              Showing {{ (currentPage - 1) * pageSize + 1 }}-{{ Math.min(currentPage * pageSize, runs.length) }} of {{ runs.length }}
+              <span v-if="foldedRowCount > 0">
+                ({{ sortedActivities.length }} rows, repeats folded)
+              </span>
             </div>
             <div class="join">
               <button
@@ -475,7 +970,11 @@
               </button>
             </div>
             <div class="form-control">
-              <select v-model.number="pageSize" class="select select-bordered select-sm">
+              <select
+                v-model.number="pageSize"
+                class="select select-bordered select-sm"
+                aria-label="Rows per page"
+              >
                 <option :value="10">10 / page</option>
                 <option :value="25">25 / page</option>
                 <option :value="50">50 / page</option>
@@ -488,11 +987,22 @@
     </div>
 
     <!-- Activity Detail Drawer -->
+    <!-- Spec 108-j J8 (FR-046): the access explainer for a blocked row. It
+         evaluates the CURRENT configuration and says so. -->
+    <AccessExplainer
+      :open="explain !== null"
+      :subject="explain?.subject ?? { kind: 'client', name: '' }"
+      :tool="explain?.tool"
+      title="Why is this blocked?"
+      :note="explain?.note"
+      @close="explain = null"
+    />
+
     <div class="drawer drawer-end">
       <input id="activity-detail-drawer" type="checkbox" class="drawer-toggle" v-model="showDetailDrawer" />
       <div class="drawer-side z-50">
         <label for="activity-detail-drawer" aria-label="close sidebar" class="drawer-overlay"></label>
-        <div class="bg-base-100 w-[500px] min-h-full p-6">
+        <div class="bg-base-100 w-full max-w-[500px] min-h-full p-6" data-test="activity-detail-panel">
           <div v-if="selectedActivity" class="space-y-4">
             <!-- Header -->
             <div class="flex justify-between items-start">
@@ -510,12 +1020,15 @@
               </button>
             </div>
 
-            <!-- Status Badge -->
+            <!-- Status — same quiet-success treatment as the table column. -->
             <div class="flex items-center gap-2">
               <span class="text-sm text-base-content/60">Status:</span>
-              <div class="badge" :class="getStatusBadgeClass(selectedActivity.status)">
-                {{ formatStatus(selectedActivity.status) }}
-              </div>
+              <span
+                data-test="activity-detail-status"
+                :class="statusPresentation(selectedActivity.status).className"
+              >
+                {{ statusPresentation(selectedActivity.status).label }}
+              </span>
             </div>
 
             <!-- Metadata -->
@@ -538,14 +1051,100 @@
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Duration:</span>
                 <span class="text-sm">{{ formatDuration(selectedActivity.duration_ms) }}</span>
               </div>
-              <div v-if="selectedActivity.session_id" class="flex gap-2">
+              <!--
+                Sessions links to Activity with "View Activity"; the way back was
+                an id printed as plain text (F25, #1046). Navigation should be
+                bidirectional — the drawer both filters this log to the session
+                and offers the Sessions page that owns it.
+              -->
+              <div v-if="selectedActivity.session_id" class="flex gap-2 items-start">
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Session:</span>
-                <code class="text-xs bg-base-200 px-2 py-1 rounded">{{ selectedActivity.session_id }}</code>
+                <div class="flex flex-wrap items-center gap-2 min-w-0">
+                  <code class="text-xs bg-base-200 px-2 py-1 rounded break-all">{{ selectedActivity.session_id }}</code>
+                  <button
+                    type="button"
+                    data-test="activity-filter-by-session"
+                    class="btn btn-xs btn-outline"
+                    @click="filterBySession(selectedActivity)"
+                  >
+                    Filter this log
+                  </button>
+                  <router-link
+                    data-test="activity-view-session"
+                    class="btn btn-xs btn-outline"
+                    :to="{ name: 'sessions' }"
+                  >
+                    Open Sessions
+                  </router-link>
+                </div>
               </div>
               <div v-if="selectedActivity.source" class="flex gap-2">
                 <span class="text-sm text-base-content/60 w-24 shrink-0">Source:</span>
                 <span class="badge badge-sm badge-outline">{{ selectedActivity.source }}</span>
               </div>
+              <div v-if="selectedActivity.request_id" class="flex gap-2">
+                <span class="text-sm text-base-content/60 w-24 shrink-0">Request ID:</span>
+                <code class="text-xs bg-base-200 px-2 py-1 rounded break-all">{{ selectedActivity.request_id }}</code>
+              </div>
+              <div v-if="selectedActivity.parent_id" class="flex gap-2">
+                <span class="text-sm text-base-content/60 w-24 shrink-0">Parent call:</span>
+                <code class="text-xs bg-base-200 px-2 py-1 rounded break-all">{{ selectedActivity.parent_id }}</code>
+              </div>
+            </div>
+
+            <!-- Spec 108-j J10/J8/J9: who made the call, under which profile, and
+                 for a blocked call the two ways forward. Below md this is the
+                 only place the chips and the actions appear. -->
+            <div v-if="hasAttribution(selectedActivity) || canExplain(selectedActivity)" class="space-y-2" data-test="activity-drawer-attribution">
+              <h4 class="text-sm font-semibold text-base-content/70">Attribution</h4>
+              <AttributionChips :record="selectedActivity" :test-id="`drawer-${selectedActivity.id}`" />
+              <div v-if="canExplain(selectedActivity) || profileAction(selectedActivity)" class="flex flex-wrap items-center gap-2">
+                <router-link
+                  v-if="profileAction(selectedActivity)"
+                  :to="profileAction(selectedActivity)!.to"
+                  class="btn btn-sm btn-outline"
+                  :data-test="`activity-allow-in-profile-${selectedActivity.id}`"
+                >{{ profileAction(selectedActivity)!.label }}</router-link>
+                <span
+                  v-else-if="missingProfileName(selectedActivity)"
+                  class="text-sm text-base-content/60"
+                  data-test="activity-profile-missing"
+                >Profile {{ missingProfileName(selectedActivity) }} no longer exists</span>
+                <button
+                  v-if="canExplain(selectedActivity)"
+                  type="button"
+                  class="btn btn-sm btn-outline"
+                  :data-test="`activity-why-${selectedActivity.id}`"
+                  @click="openExplain(selectedActivity)"
+                >Why?</button>
+              </div>
+            </div>
+
+            <!--
+              code_execution call chain. Parent -> children is a parent_id
+              filter (server-side too, so sub-calls beyond the loaded page are
+              included); child -> parent is an exact request_id lookup.
+            -->
+            <div
+              v-if="isCodeExecutionActivity(selectedActivity) || isChildCall(selectedActivity)"
+              class="flex flex-wrap items-center gap-2"
+            >
+              <button
+                v-if="isCodeExecutionActivity(selectedActivity) && selectedActivity.request_id"
+                data-test="activity-view-subcalls"
+                class="btn btn-sm btn-outline"
+                @click="viewSubCalls(selectedActivity)"
+              >
+                ↳ View sub-calls ({{ subCallCount(selectedActivity) }})
+              </button>
+              <button
+                v-if="isChildCall(selectedActivity)"
+                data-test="activity-view-parent"
+                class="btn btn-sm btn-outline"
+                @click="viewParentCall(selectedActivity)"
+              >
+                ↰ View parent call
+              </button>
             </div>
 
             <!-- Sensitive Data Detection (Spec 026) -->
@@ -591,12 +1190,190 @@
                       </div>
                     </div>
                   </div>
+                  <!-- The payloads below are masked by the SERVER before this
+                       drawer ever sees them (audit F13): a drawer that prints
+                       the credential it just flagged leaks it into every
+                       screenshot and screen-share. Say so, so the mask does not
+                       read as a rendering glitch. -->
+                  <div class="text-xs text-inherit/80" data-test="sensitive-mask-note">
+                    Detected values are masked below (e.g. <code class="font-mono">AKIA…****</code>). Full values are
+                    only available from the explicit export:
+                    <code class="font-mono">mcpproxy activity export --include-bodies</code>.
+                  </div>
                 </div>
               </div>
             </div>
 
-            <!-- Policy Decision Details (for blocked activities) -->
-            <div v-if="selectedActivity.type === 'policy_decision' || selectedActivity.status === 'blocked'">
+            <!--
+              Security scan verdict (F25, #1046). This drawer used to be four
+              fields and 80% whitespace for a scan row — no verdict, no findings,
+              nowhere to go — while the record carried the whole rollup in
+              metadata.findings_summary and a Security page existed to receive
+              the click.
+            -->
+            <div v-if="isSecurityScanActivity(selectedActivity)" data-test="activity-scan-verdict">
+              <h4 class="font-semibold mb-2 flex items-center gap-2">
+                <span aria-hidden="true">🛡️</span>
+                Scan Verdict
+              </h4>
+              <div class="bg-base-200 rounded p-3 space-y-3">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-sm text-base-content/60">Result:</span>
+                  <span
+                    class="badge badge-sm"
+                    :class="selectedActivity.status === 'error' ? 'badge-error' : 'badge-success'"
+                  >
+                    {{ selectedActivity.status === 'error' ? 'scan failed' : 'scan completed' }}
+                  </span>
+                  <span
+                    v-if="selectedActivity.status !== 'error' && hasScanFindingsSummary(selectedActivity.metadata)"
+                    class="text-sm"
+                    :class="scanFindingsTotal(selectedActivity.metadata) > 0 ? 'text-warning' : 'text-base-content/60'"
+                  >
+                    {{ scanFindingsTotal(selectedActivity.metadata) }}
+                    finding{{ scanFindingsTotal(selectedActivity.metadata) === 1 ? '' : 's' }}
+                  </span>
+                </div>
+                <!--
+                  A FAILED scan can still carry findings: the debouncer keeps
+                  the last non-nil rollup (scan_notify.go), so a storm where
+                  some scanners finished and a later one failed settles as
+                  "failed" with real findings attached. Hiding them would be the
+                  worse error in a security view — they are shown, and told
+                  apart from a rollup that describes the whole scan.
+                -->
+                <div
+                  v-if="scanFindingsRollup(selectedActivity.metadata).length > 0"
+                  class="flex items-center gap-1 flex-wrap"
+                >
+                  <span class="text-sm text-base-content/60">
+                    {{ selectedActivity.status === 'error' ? 'Found before the failure:' : 'By severity:' }}
+                  </span>
+                  <span
+                    v-for="entry in scanFindingsRollup(selectedActivity.metadata)"
+                    :key="entry.severity"
+                    class="badge badge-sm"
+                    :class="getSeverityBadgeClass(entry.severity)"
+                  >
+                    {{ entry.severity }} ×{{ entry.count }}
+                  </span>
+                  <span
+                    v-if="selectedActivity.status === 'error'"
+                    class="text-xs text-base-content/50 basis-full"
+                  >
+                    The scan did not complete, so this is not the whole picture.
+                  </span>
+                </div>
+                <!--
+                  "Clean" and "we don't know" must not read the same. Only a
+                  rollup that is actually present can support the first claim;
+                  an absent one (every record written before the producer's
+                  map[string]int stopped being silently dropped) gets the
+                  second, and a link to the page that can answer it.
+                -->
+                <p
+                  v-else-if="selectedActivity.status !== 'error' && hasScanFindingsSummary(selectedActivity.metadata)"
+                  data-test="activity-scan-clean"
+                  class="text-sm text-base-content/60"
+                >
+                  No findings — the scanners had nothing to report for this server.
+                </p>
+                <p
+                  v-else-if="selectedActivity.status !== 'error'"
+                  data-test="activity-scan-no-summary"
+                  class="text-sm text-base-content/60"
+                >
+                  This record carries no findings summary, which is not the same as a clean
+                  result — open the Security page for the current verdict.
+                </p>
+                <div class="flex flex-wrap gap-2 pt-1">
+                  <router-link
+                    v-if="selectedActivity.server_name"
+                    data-test="activity-scan-open-server"
+                    class="btn btn-sm btn-outline"
+                    :to="serverDetailPath(selectedActivity.server_name)"
+                  >
+                    Open {{ selectedActivity.server_name }}
+                  </router-link>
+                  <router-link
+                    data-test="activity-scan-open-security"
+                    class="btn btn-sm btn-outline"
+                    :to="{ name: 'security' }"
+                  >
+                    Security &amp; scan reports
+                  </router-link>
+                </div>
+              </div>
+            </div>
+
+            <!-- Preflight verdict (Spec 098) -->
+            <div v-if="isPreflightActivity(selectedActivity)">
+              <h4 class="font-semibold mb-2 flex items-center gap-2">
+                <span>🛫</span>
+                Preflight Verdict
+              </h4>
+              <div class="bg-base-200 rounded p-3 space-y-3">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-sm text-base-content/60">Verdict:</span>
+                  <span
+                    class="badge badge-sm"
+                    :class="getPreflightVerdictBadgeClass(selectedActivity.metadata?.verdict)"
+                  >
+                    {{ selectedActivity.metadata?.verdict || 'unknown' }}
+                  </span>
+                  <span class="text-sm text-base-content/60">
+                    {{ preflightIdsCount(selectedActivity.metadata) }} tool(s) checked
+                  </span>
+                </div>
+                <div
+                  v-if="preflightReasonRollup(selectedActivity.metadata).length > 0"
+                  class="flex items-center gap-1 flex-wrap"
+                >
+                  <span class="text-sm text-base-content/60">Reasons:</span>
+                  <span
+                    v-for="entry in preflightReasonRollup(selectedActivity.metadata)"
+                    :key="entry.reason"
+                    class="badge badge-sm badge-outline"
+                  >
+                    {{ entry.reason }} x{{ entry.count }}
+                  </span>
+                </div>
+                <div v-if="preflightPerTool(selectedActivity.metadata).length > 0" class="space-y-1">
+                  <span class="text-sm text-base-content/60">Tools:</span>
+                  <div
+                    v-for="(tool, idx) in preflightPerTool(selectedActivity.metadata)"
+                    :key="`${tool.id}-${idx}`"
+                    class="flex items-center gap-2 bg-base-100 rounded px-2 py-1 text-sm"
+                  >
+                    <span
+                      class="badge badge-xs"
+                      :class="tool.status === 'ready' ? 'badge-success' : 'badge-warning'"
+                    >
+                      {{ tool.status }}
+                    </span>
+                    <code class="text-xs break-all">{{ tool.id }}</code>
+                    <span v-if="tool.reason" class="text-xs text-base-content/60">{{ tool.reason }}</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!--
+              Policy Decision Details (for blocked activities). A preflight
+              record is stored with status "blocked" whenever any tool is
+              unavailable, but it is not a policy decision — it renders its own
+              verdict section above.
+            -->
+            <!-- Spec 115 UI-006: a credential issue/revoke record, with the actor and links. -->
+            <div v-if="selectedActivity.type === 'profile_change' && credentialLifecycleSummary(selectedActivity.metadata)" data-test="activity-credential-detail" class="space-y-1">
+              <h4 class="font-semibold">{{ profileChangeLabel(selectedActivity.metadata) }}</h4>
+              <p class="text-sm">{{ credentialLifecycleSummary(selectedActivity.metadata) }}</p>
+              <div class="flex flex-wrap gap-x-3 text-sm">
+                <router-link v-if="credentialLifecycleLinks(selectedActivity.metadata).identity" class="link" data-test="activity-credential-identity-link" :to="credentialLifecycleLinks(selectedActivity.metadata).identity!">Open identity</router-link>
+                <router-link v-if="credentialLifecycleLinks(selectedActivity.metadata).profile" class="link" data-test="activity-credential-profile-link" :to="`/profiles/${encodeURIComponent(credentialLifecycleLinks(selectedActivity.metadata).profile!)}`">Open profile</router-link>
+              </div>
+            </div>
+            <div v-if="!isPreflightActivity(selectedActivity) && (selectedActivity.type === 'policy_decision' || selectedActivity.status === 'blocked')">
               <h4 class="font-semibold mb-2 text-warning flex items-center gap-2">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
@@ -629,6 +1406,14 @@
               <h4 class="font-semibold mb-2 flex items-center gap-2">
                 Request Arguments
                 <span class="badge badge-sm badge-info">JSON</span>
+                <span
+                  v-if="selectedActivity.has_sensitive_data"
+                  class="badge badge-sm badge-warning"
+                  title="Detected secrets are masked by the server before this view receives them"
+                  data-test="arguments-masked-badge"
+                >
+                  Masked
+                </span>
               </h4>
               <JsonViewer :data="selectedActivity.arguments" max-height="12rem" />
             </div>
@@ -639,6 +1424,14 @@
                 Response Body
                 <span class="badge badge-sm badge-info">JSON</span>
                 <span v-if="selectedActivity.response_truncated" class="badge badge-sm badge-warning">Truncated</span>
+                <span
+                  v-if="selectedActivity.has_sensitive_data"
+                  class="badge badge-sm badge-warning"
+                  title="Detected secrets are masked by the server before this view receives them"
+                  data-test="response-masked-badge"
+                >
+                  Masked
+                </span>
               </h4>
               <JsonViewer :data="parseResponseData(selectedActivity.response)" max-height="16rem" />
             </div>
@@ -692,12 +1485,125 @@ import { serverDetailPath } from '@/utils/serverRoute'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { useSystemStore } from '@/stores/system'
+import { useAuthStore } from '@/stores/auth'
 import api from '@/services/api'
-import type { ActivityRecord, ActivitySummaryResponse } from '@/types/api'
+import type { ActivityRecord, ActivitySummaryResponse, MCPSession } from '@/types/api'
+import { buildSessionLabels } from '@/utils/sessionLabel'
+import { splitScopeTool, useScopeQuery, resolveScopeTime, sessionRestParam } from '@/composables/useScopeQuery'
+import SessionsPanel from '@/components/activity/SessionsPanel.vue'
+import AttributionChips from '@/components/activity/AttributionChips.vue'
+import AccessExplainer from '@/components/AccessExplainer.vue'
+import ScopeChips from '@/components/scope/ScopeChips.vue'
+import ScopeFilterSelects from '@/components/scope/ScopeFilterSelects.vue'
+import { useProfilesStore } from '@/stores/profiles'
+import { isScopeParamAvailable } from '@/composables/useScopeQuery'
+import { pickScopeParams, scopeParamsKey } from '@/utils/scopeParams'
+import { profileEditorLink } from '@/utils/profileRoute'
+import { blockedProfileAction, explainSubjectForRecord, type ExplainSubject } from '@/utils/profiles'
+import { DATE_TIME_FORMAT_HINT, formatDateTime, formatTime } from '@/utils/datetime'
+import {
+  buildWorkSessionIndex,
+  groupKeyOf as workSessionKeyOf,
+  matchesSessionFilter,
+  resolveSessionFilter,
+} from '@/utils/sessionGrouping'
+// Spec 098: preflight records carry their verdict in metadata; the renderers
+// are shared (and unit-tested) rather than re-derived in the template.
+import {
+  ACTIVITY_TYPE_LABELS,
+  credentialLifecycleLinks,
+  credentialLifecycleSummary,
+  profileChangeLabel,
+  activeFilterChips,
+  activityViewTypes,
+  compactSummaryParts,
+  formatPreflightSummary,
+  formatRunDuration,
+  formatRunSpan,
+  formatType,
+  getIntentBadgeClass,
+  getIntentIcon,
+  getPreflightVerdictBadgeClass,
+  getTypeIcon,
+  groupActivityRuns,
+  intentPresentation,
+  isChildCall,
+  isCodeExecutionActivity,
+  isOtherStatus,
+  isPreflightActivity,
+  isSecurityScanActivity,
+  preflightIdsCount,
+  preflightPerTool,
+  preflightReasonRollup,
+  quarantineBatchSummary,
+  hasScanFindingsSummary,
+  scanFindingsRollup,
+  scanFindingsTotal,
+  showParentBadgeInTypeColumn,
+  statusBucketTiles,
+  statusPresentation,
+  INTENT_LEGEND,
+  activityAgentNames,
+  matchesAuthFilter,
+  OTHER_STATUS,
+  SENSITIVE_LEGEND,
+  ACTIVITY_VIEW_LABELS,
+  type ActiveFilterChip,
+  type ActivityRun,
+  type CompactSummaryPart,
+  type StatusTone,
+} from '@/utils/activity'
+import type { ActivityView } from '@/types/contracts'
 import JsonViewer from '@/components/JsonViewer.vue'
 
 const route = useRoute()
 const systemStore = useSystemStore()
+const authStore = useAuthStore()
+const scopeQuery = useScopeQuery('activity')
+const profilesStore = useProfilesStore()
+
+// Spec 109-k (activity-scope-filters), FR-070: the four Activity views, in
+// the URL as `?view=calls|sessions|system|all`, defaulting to `calls` when
+// the URL has no `view` at all — a fresh /activity used to render every
+// type mixed together (the audit's 29-row example) instead of "just the
+// calls the user made".
+type ActivityViewId = ActivityView
+const ACTIVITY_VIEW_IDS = Object.keys(ACTIVITY_VIEW_LABELS) as ActivityViewId[]
+const activityViewTabs: { id: ActivityViewId; label: string }[] = ACTIVITY_VIEW_IDS.map(id => ({
+  id,
+  label: ACTIVITY_VIEW_LABELS[id],
+}))
+
+const activeView = computed<ActivityViewId>(() => {
+  const raw = route.query.view
+  const value = typeof raw === 'string' ? raw : ''
+  return (ACTIVITY_VIEW_IDS as string[]).includes(value) ? (value as ActivityViewId) : 'calls'
+})
+
+/** Tab click: `router.replace` (FR-080), never a local-only assignment —
+ * `calls` is the default so it clears the param instead of writing it back,
+ * keeping a bare `/activity` the canonical "Tool calls" URL. Switching views
+ * also drops any explicit `type` override left from the multi-select picker
+ * below (contract "view" row: an explicit `type` overrides `view`, so
+ * leaving a stale one behind would make the tab a no-op) — `selectedTypes`
+ * is cleared directly here too, not only in the URL: the reactive
+ * `route.query` watch above will clear it a tick later regardless, but doing
+ * it synchronously means `effectiveTypes` (and the table it drives) is
+ * correct on the very same render as the click. */
+function setView(id: ActivityViewId): void {
+  // Rule 5 / contract "view" row (zcode review round 1, F4): `type` is
+  // ignored (not cleared) in `sessions` — it stays in the URL and renders as
+  // a disabled "not applicable here" chip there, since `sessions` has no
+  // `type` mapping to override in the first place. Only calls/system/all
+  // clear it, where an explicit override left behind really would make the
+  // tab a no-op.
+  const patch: Record<string, string | undefined> = { view: id === 'calls' ? undefined : id }
+  if (id !== 'sessions') {
+    selectedTypes.value = []
+    patch.type = undefined
+  }
+  scopeQuery.set(patch)
+}
 
 // State
 const activities = ref<ActivityRecord[]>([])
@@ -711,6 +1617,16 @@ const autoRefresh = ref(true)
 // Filters
 const selectedTypes = ref<string[]>([])
 const filterServer = ref('')
+// Spec 109-k: `tool` (url-filter-contract.md "Parameters"). Bare tool name —
+// a "server:tool" URL value is split by applyRouteFilters() below, same rule
+// as the composable's splitScopeTool().
+const filterTool = ref('')
+// Rule 8 (zcode review round 1, F2): the URL's `server`/`tool` disagree on
+// the server — no REST request can express both. Set by applyRouteFilters()
+// below; gates loadActivities() (no request at all) and the table's empty
+// state (a distinct "conflicting filters" message, not a silent partial
+// request under a URL that named both).
+const scopeConflict = ref(false)
 const filterSession = ref('')
 const filterStatus = ref('')
 const filterSensitiveData = ref('') // Spec 026: '' | 'true' | 'false'
@@ -719,18 +1635,165 @@ const filterAuthType = ref('') // Spec 028: '' | 'admin' | 'agent'
 const filterAgentName = ref('') // Spec 028: filter by agent token name
 const filterStartDate = ref('')
 const filterEndDate = ref('')
+// zcode review round 1, F5: the raw `from`/`to` URL value (e.g. "-24h") and
+// what the datetime-local inputs were just hydrated to from it — lets the
+// write-back watch below tell "the user actually edited the date picker"
+// from "some unrelated filter changed", so a sticky rolling window survives
+// a status/server/etc. change instead of freezing into the instant it
+// happened to resolve to at that moment.
+const rawFromParam = ref('')
+const rawToParam = ref('')
+let lastHydratedStartDate = ''
+let lastHydratedEndDate = ''
+// Sub-call view: the request_id of a code_execution parent. Applied BOTH
+// client-side (so the visible list narrows immediately) and as a server-side
+// query param (so sub-calls beyond the 200 loaded rows are included).
+const filterParentId = ref('')
 
-// Activity types configuration (Spec 024: includes new types)
-const activityTypes = [
-  { value: 'tool_call', label: 'Tool Call', icon: '🔧' },
-  { value: 'system_start', label: 'System Start', icon: '🚀' },
-  { value: 'system_stop', label: 'System Stop', icon: '🛑' },
-  { value: 'internal_tool_call', label: 'Internal Tool Call', icon: '⚙️' },
-  { value: 'config_change', label: 'Config Change', icon: '⚡' },
-  { value: 'policy_decision', label: 'Policy Decision', icon: '🛡️' },
-  { value: 'quarantine_change', label: 'Quarantine Change', icon: '⚠️' },
-  { value: 'server_change', label: 'Server Change', icon: '🔄' },
-]
+/** An absolute ISO instant -> the local wall-clock string a `datetime-local`
+ * input accepts ("YYYY-MM-DDTHH:mm"). `resolveScopeTime()` already turns a
+ * relative shorthand ("-24h") into an absolute instant; a native date input
+ * cannot render either form directly (a trailing "Z" or a shorthand string
+ * is simply invalid and the control renders blank), so a Usage/Home deep
+ * link's `from`/`to` needs this conversion to actually show — and filter —
+ * anything. */
+function isoToDateTimeLocal(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+
+/** The inverse, for the REST request: a `datetime-local` value has no
+ * timezone of its own, so the browser's `Date` constructor parses it as
+ * LOCAL wall-clock time — exactly what the input showed — and `toISOString`
+ * converts that to the absolute instant the backend's `start_time`/
+ * `end_time` (RFC 3339) expect. */
+function dateTimeLocalToISO(value: string): string | undefined {
+  if (!value) return undefined
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? undefined : d.toISOString()
+}
+
+// Spec 109-k (activity-scope-filters): hydrate the filters above from the URL
+// — `view`/`type`/`server`/`tool`/`status`/`auth_type`/`session`/`from`/`to`
+// (url-filter-contract.md "Parameters"). Deep links (the Tools row "Calls"
+// link, the Usage chart-bar links, Server card links, a Sessions-view "View
+// Activity" button, ...) used to reach this page with a query string the
+// table never read at all, so the log always rendered fully unfiltered no
+// matter what the URL said.
+//
+// Symmetric by design — every field here is set from its query param when
+// present and CLEARED when absent, not just "set if present": this page has
+// no remount between two deep links to it (Vue Router reuses the component
+// for a same-route navigation), so a "View Activity" button clicked from
+// inside the Sessions view, or a second Tools-row "Calls" link clicked while
+// Activity is already open, used to leave the PREVIOUS filter state in
+// force — the table narrowed to the last real filter it had ever seen, not
+// the one the current URL names (a verified live-QA-style finding). The
+// write-back watch below is exactly the inverse of this function and the two
+// converge rather than loop: re-applying the query re-sets refs to the
+// values they already have as soon as a round trip settles, which triggers
+// nothing further.
+function applyRouteFilters(): void {
+  const q = route.query
+  const str = (v: unknown): string => (typeof v === 'string' ? v : '')
+
+  filterSession.value = str(q.session)
+  filterStatus.value = str(q.status)
+  filterAuthType.value = str(q.auth_type)
+
+  // `tool` splits per the contract's rule 8: a "server:tool" value carries
+  // its own server; an explicit `server` that disagrees is a contradiction —
+  // no REST request can express both, so `scopeConflict` gates loadActivities()
+  // (no request at all) and the table shows the conflict empty state instead
+  // of silently keeping `server` and dropping the mismatched `tool` (zcode
+  // review round 1, F2).
+  const serverParam = str(q.server)
+  const toolParam = str(q.tool)
+  if (toolParam) {
+    const split = splitScopeTool(toolParam, serverParam || undefined)
+    scopeConflict.value = split.conflict === true
+    filterServer.value = split.conflict ? serverParam : (split.server ?? '')
+    filterTool.value = split.conflict ? toolParam : (split.tool ?? '')
+  } else {
+    scopeConflict.value = false
+    filterServer.value = serverParam
+    filterTool.value = ''
+  }
+
+  // An explicit `type` always overrides `view`'s calls/system/all mapping
+  // (url-filter-contract.md "view" row). `selectedTypes` holds ONLY this
+  // explicit override — the view's own types are `effectiveTypes` below,
+  // computed from `activeView` reactively rather than copied in here, so
+  // switching tabs (which never touches `type`) is not a no-op.
+  const typeParam = str(q.type)
+  // Assign only a real change: a fresh array of the same values still re-runs
+  // `effectiveTypes` and the deep refetch watch below, so every unrelated
+  // query-string write (a scope select, a chip) sent the list and the summary
+  // twice.
+  const nextTypes = typeParam ? typeParam.split(',').map(t => t.trim()).filter(Boolean) : []
+  if (nextTypes.length !== selectedTypes.value.length || nextTypes.some((t, i) => t !== selectedTypes.value[i])) {
+    selectedTypes.value = nextTypes
+  }
+
+  const fromParam = str(q.from)
+  rawFromParam.value = fromParam
+  filterStartDate.value = fromParam ? isoToDateTimeLocal(resolveScopeTime(fromParam)) : ''
+  lastHydratedStartDate = filterStartDate.value
+  const toParam = str(q.to)
+  rawToParam.value = toParam
+  filterEndDate.value = toParam ? isoToDateTimeLocal(resolveScopeTime(toParam)) : ''
+  lastHydratedEndDate = filterEndDate.value
+}
+
+applyRouteFilters()
+
+// A second deep link while Activity is already open (SessionsPanel's "View
+// Activity", a Tools-row "Calls" link clicked from the same tab, an Activity
+// row's client/profile/token chip in a future spec, ...) is a route-query
+// change, not a remount — without this watch the controls only ever reflect
+// whichever link opened the page FIRST. Registered after applyRouteFilters()
+// already ran once during setup (immediately above), so the initial values
+// it just set never trigger this watch — only a later, genuine URL change
+// does.
+watch(() => route.query, () => applyRouteFilters(), { deep: true })
+
+// Activity types configuration. Derived from the single label map in
+// utils/activity so the filter dropdown cannot drift from the Type column
+// (#1065 — this list used to be hand-copied and was three types short).
+const activityTypes = Object.keys(ACTIVITY_TYPE_LABELS).map(value => ({
+  value,
+  label: formatType(value),
+  icon: getTypeIcon(value),
+}))
+
+/** The type filter actually in force: the multi-select's explicit override
+ * when present, else whatever the active view implies (`[]` for
+ * `all`/`sessions` — no type filter at all). This is what the table and the
+ * REST request both use, so a tab switch narrows the real fetch too, not
+ * just the 200 rows already loaded.
+ *
+ * `viewTypes` is computed UNCONDITIONALLY, before the override check —
+ * reading `activeView.value` only inside a ternary's untaken branch (i.e.
+ * `selectedTypes.value.length > 0 ? selectedTypes.value : activityViewTypes
+ * (activeView.value)`) never touches it while an override is active, so Vue
+ * never tracks `activeView` as a dependency of this computed at all in that
+ * state — a verified bug: switching tabs while `type=` is set in the URL
+ * silently kept showing (and re-fetching) the OLD tab's rows, because this
+ * computed had nothing telling it to re-run. */
+const effectiveTypes = computed<string[]>(() => {
+  const viewTypes = [...(activityViewTypes(activeView.value) ?? [])]
+  // Spec 108-j: a call a profile refuses is stored as a `policy_decision`
+  // (status `blocked`, with its `block_reason`), not as a `tool_call`, so the
+  // Tool calls view hid exactly the rows "status = blocked" asks for (and the
+  // Home "blocked" link, and the blocked-row actions below, led to an empty
+  // table). A blocked filter on that view therefore includes them. Read
+  // unconditionally, for the same dependency-tracking reason as above.
+  const blockedOnly = filterStatus.value === 'blocked'
+  if (activeView.value === 'calls' && blockedOnly && !viewTypes.includes('policy_decision')) viewTypes.push('policy_decision')
+  return selectedTypes.value.length > 0 ? selectedTypes.value : viewTypes
+})
 
 // Pagination
 const currentPage = ref(1)
@@ -751,43 +1814,234 @@ const availableServers = computed(() => {
   return Array.from(servers).sort()
 })
 
-// Spec 028: Extract unique agent names from activity metadata
-const availableAgents = computed(() => {
-  const agents = new Set<string>()
-  activities.value.forEach(a => {
-    const name = a.metadata?._auth_agent_name
-    if (name) agents.add(name as string)
-  })
-  return Array.from(agents).sort()
-})
+// Spec 028: unique agent names from the rows' caller identity
+const availableAgents = computed(() => activityAgentNames(activities.value))
 
 // Available sessions with client name and session_id suffix (Spec 024)
 interface SessionOption {
   id: string
   label: string
   clientName?: string
+  startTime?: string
+  workspace?: string
 }
+
+// Client identity lives on the session record, not the activity record — an
+// activity row only carries session_id. We join the two here so the filter can
+// show "Claude Code · 14:32" instead of an opaque "...139c9".
+const sessionInfo = ref(new Map<string, { clientName?: string; startTime?: string; workspace?: string }>())
+
+// The raw session records behind that map. Kept because they carry the
+// transport -> work session link that groupKeyOf needs (see workSessionIndex).
+const sessionsRaw = ref<MCPSession[]>([])
+
+// Session ids we have already tried and failed to resolve. The core keeps only
+// the 100 most recent sessions, so an old session's activity rows can outlive
+// its record and never become resolvable. Without this set, every refresh would
+// see them as "unknown" and refetch forever.
+const unresolvableSessions = ref(new Set<string>())
+
+let sessionsInFlight: Promise<void> | null = null
+// Set by onMounted: gates the "scope cleared -> refetch unscoped" branch of the
+// scope watcher, which also fires immediately during setup.
+let sessionsLoadedOnce = false
+
+const loadSessions = async () => {
+  // Spec 107 FR-041 / T088: /sessions is an admin-only core door — a tenant
+  // principal has no session-name resolution available, so the group keys
+  // fall back to raw session ids (still correct, just unlabelled).
+  if (authStore.principalKind === 'tenant') return
+  // Coalesce: a burst of SSE events must not fan out into N parallel fetches.
+  if (sessionsInFlight) return sessionsInFlight
+
+  sessionsInFlight = (async () => {
+    try {
+      const response = await api.getSessions(100)
+      const sessions = response.data?.sessions ?? []
+      // While the Sessions view is narrowed by a scope filter, sessionsRaw
+      // belongs to loadScopedSessionsForView(): this general fetch is
+      // unscoped and would otherwise land last and show every session
+      // (live QA failure 1). The name-resolution map below stays unscoped.
+      if (!sessionsViewScopeActive()) sessionsRaw.value = sessions
+      const next = new Map<string, { clientName?: string; startTime?: string; workspace?: string }>()
+      for (const s of sessions) {
+        const info = {
+          clientName: s.client_name,
+          startTime: s.start_time,
+          workspace: s.workspace_name,
+        }
+        // Key by BOTH ids: the work session (Spec 082 — what we group by) and the
+        // transport session (so pre-082 activity rows still resolve).
+        if (s.work_session_id) {
+          const existing = next.get(s.work_session_id)
+          // A work session spans many connections; keep the EARLIEST start, since
+          // that is when the work began.
+          if (!existing || (s.start_time && existing.startTime && s.start_time < existing.startTime)) {
+            next.set(s.work_session_id, info)
+          }
+        }
+        next.set(s.id, info)
+      }
+      sessionInfo.value = next
+
+      // Anything still unknown after a fresh fetch is gone for good (evicted by
+      // the 100-session cap). Remember it so we stop asking.
+      for (const a of activities.value) {
+        const key = groupKeyOf(a)
+        if (key && !next.has(key)) {
+          unresolvableSessions.value.add(key)
+        }
+      }
+    } catch {
+      // Non-fatal: without session metadata the filter degrades to id suffixes,
+      // which is exactly the previous behaviour. Never block the activity log.
+      // Deliberately NOT marked unresolvable — a transient failure should be
+      // retried the next time an unknown session shows up.
+    } finally {
+      sessionsInFlight = null
+    }
+  })()
+
+  return sessionsInFlight
+}
+
+// The Activity Log is a live page: a client can connect while it is open, and
+// SSE will deliver its rows. Those sessions were not in the map we fetched on
+// mount, so refresh the join whenever a genuinely new session id appears.
+const refreshSessionsIfUnknown = () => {
+  const hasUnknown = activities.value.some(a => {
+    const key = groupKeyOf(a)
+    return key && !sessionInfo.value.has(key) && !unresolvableSessions.value.has(key)
+  })
+  if (hasUnknown) void loadSessions()
+}
+
+/** Rule "sessions" row (Spec 108 FR-031 / url-filter-contract.md): profile,
+ * client and token ARE sent to `GET /sessions`, but only once
+ * `features.scope_filters` lists them — `scopeQuery.chips` already applies
+ * that availability gate (a chip for a hidden param never appears), so
+ * reading the values off it here means this can never send one the backend
+ * has not advertised. macOS's `ScopeFilter.restRequest` does the identical
+ * thing for the same endpoint (`ScopeFilterTests.
+ * testSessionsViewCarriesScopeFiltersOnceAvailable`) — Web had no equivalent
+ * at all (zcode review round 1, F8). */
+const sessionsScopeParams = computed(() => {
+  const chips = scopeQuery.chips.value
+  const get = (name: string) => chips.find(c => c.name === name)?.value
+  return { profile: get('profile'), client: get('client'), token: get('token') }
+})
+
+/** The Sessions VIEW's own request: when it is active and at least one
+ * scope filter is both available and set, `GET /sessions` is narrowed by it
+ * — never the general on-mount `loadSessions()` fetch above, which feeds
+ * session-name resolution for every OTHER view too and must stay unscoped. */
+/** True when the Sessions view is active and at least one available scope
+ * filter is set — the state in which `sessionsRaw` must hold the scoped rows. */
+function sessionsViewScopeActive(): boolean {
+  if (activeView.value !== 'sessions') return false
+  if (authStore.principalKind === 'tenant') return false
+  const { profile, client, token } = sessionsScopeParams.value
+  return Boolean(profile || client || token)
+}
+
+async function loadScopedSessionsForView(): Promise<void> {
+  if (!sessionsViewScopeActive()) return
+  const { profile, client, token } = sessionsScopeParams.value
+  try {
+    const response = await api.getSessions(100, undefined, { profile, client, token })
+    // Drop a response the user has already navigated/re-filtered away from.
+    const now = sessionsScopeParams.value
+    if (!sessionsViewScopeActive() || now.profile !== profile || now.client !== client || now.token !== token) return
+    sessionsRaw.value = response.data?.sessions ?? []
+  } catch {
+    // Non-fatal — the unscoped fetch already in sessionsRaw degrades gracefully.
+  }
+}
+
+watch(
+  () => [activeView.value, sessionsScopeParams.value.profile, sessionsScopeParams.value.client, sessionsScopeParams.value.token] as const,
+  () => {
+    if (sessionsViewScopeActive()) {
+      void loadScopedSessionsForView()
+    } else if (sessionsLoadedOnce) {
+      // Left the scoped state: sessionsRaw still holds the narrowed rows, so
+      // refetch the general unscoped list that every other view relies on.
+      void loadSessions()
+    }
+  },
+  { immediate: true }
+)
+
+// Transport session -> work session, learned from the sessions API and from any
+// sibling row that does carry one. A row with no work session of its own is
+// folded into its connection's, rather than keying on the raw transport id and
+// splitting one client into two entries in the picker.
+const workSessionIndex = computed(() => buildWorkSessionIndex(activities.value, sessionsRaw.value))
+
+// A deep link from the Sessions page arrives with a TRANSPORT session id (see
+// Sessions.vue), while the picker's options are keyed by work session. Rewrite
+// the filter to the work session as soon as the index can tell us what it is —
+// otherwise the filter works but the dropdown shows blank, because no option
+// equals the value it is bound to.
+watch(workSessionIndex, index => {
+  if (!filterSession.value) return
+  const resolved = resolveSessionFilter(filterSession.value, index)
+  if (resolved !== filterSession.value) filterSession.value = resolved
+})
+
+// The key an activity row is grouped and filtered by: its WORK session (Spec
+// 082) — one client, one project, across reconnects. Rows for which no work
+// session is known anywhere still fall back to the transport session.
+const groupKeyOf = (a: ActivityRecord): string => workSessionKeyOf(a, workSessionIndex.value)
+
 const availableSessions = computed((): SessionOption[] => {
-  const sessionsMap = new Map<string, { clientName?: string }>()
+  const seen = new Map<string, { clientName?: string; startTime?: string; workspace?: string }>()
   activities.value.forEach(a => {
-    if (a.session_id && !sessionsMap.has(a.session_id)) {
-      // Try to get client name from metadata or any available source
-      const clientName = a.metadata?.client_name as string | undefined
-      sessionsMap.set(a.session_id, { clientName })
+    const key = groupKeyOf(a)
+    if (key && !seen.has(key)) {
+      const info = sessionInfo.value.get(key) ?? sessionInfo.value.get(a.session_id ?? '')
+      seen.set(key, {
+        // Prefer the name persisted ON the record: it is that row's own truth and
+        // never expires. The /api/v1/sessions lookup is only a fallback for rows
+        // written before the name was persisted — and it decays, because just the
+        // 100 most recent sessions are kept while activity lives for 90 days.
+        clientName: (a.metadata?.client_name as string | undefined) ?? info?.clientName,
+        startTime: info?.startTime ?? a.timestamp,
+        workspace: info?.workspace,
+      })
     }
   })
 
-  return Array.from(sessionsMap.entries())
-    .map(([sessionId, info]) => {
-      // Format: "ClientName ...12345" or "...12345" if no client name
-      const suffix = sessionId.slice(-5)
-      const label = info.clientName
-        ? `${info.clientName} ...${suffix}`
-        : `...${suffix}`
-      return { id: sessionId, label, clientName: info.clientName }
-    })
-    .sort((a, b) => a.label.localeCompare(b.label))
+  const entries = Array.from(seen.entries()).map(([sessionId, info]) => ({
+    sessionId,
+    clientName: info.clientName,
+    startTime: info.startTime,
+    workspace: info.workspace,
+  }))
+  const labels = buildSessionLabels(entries)
+
+  return entries
+    .map(e => ({
+      id: e.sessionId,
+      label: labels.get(e.sessionId) ?? `...${e.sessionId.slice(-5)}`,
+      clientName: e.clientName,
+      startTime: e.startTime,
+      workspace: e.workspace,
+    }))
+    // Most recent session first — in a session picker, recency beats alphabet.
+    // Compare epoch ms, not the ISO strings: those carry a timezone offset
+    // ("...+03:00"), so lexical order is not chronological order across offsets.
+    // A missing or unparseable start time sorts last; id breaks ties so the
+    // order is stable rather than dependent on Map insertion.
+    .sort((a, b) => epochOf(b.startTime) - epochOf(a.startTime) || a.id.localeCompare(b.id))
 })
+
+/** Epoch ms for sorting; -Infinity for missing/unparseable, so it sorts last. */
+const epochOf = (iso?: string): number => {
+  if (!iso) return -Infinity
+  const t = new Date(iso).getTime()
+  return Number.isNaN(t) ? -Infinity : t
+}
 
 // Get session label by ID for display in Active Filters
 const getSessionLabel = (sessionId: string): string => {
@@ -796,24 +2050,230 @@ const getSessionLabel = (sessionId: string): string => {
 }
 
 const hasActiveFilters = computed(() => {
-  return selectedTypes.value.length > 0 || filterServer.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value
+  return selectedTypes.value.length > 0 || filterServer.value || filterTool.value || filterSession.value || filterStatus.value || filterSensitiveData.value || filterSeverity.value || filterAuthType.value || filterAgentName.value || filterStartDate.value || filterEndDate.value || filterParentId.value
+})
+
+// --- compact header ---------------------------------------------------------
+
+/**
+ * Whether the stat cards + full filter grid are shown. Persisted per browser so
+ * an operator who wants the controls open keeps them open, while a first visit
+ * lands on the compact strip. localStorage can throw outright (private windows,
+ * blocked site data), so every touch is guarded and falls back to collapsed.
+ */
+const FILTER_PANEL_STORAGE_KEY = 'mcpproxy.activity.filtersExpanded'
+
+const readFilterPanelPref = (): boolean => {
+  try {
+    return window.localStorage.getItem(FILTER_PANEL_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
+
+const showFilterPanel = ref(readFilterPanelPref())
+
+watch(showFilterPanel, expanded => {
+  try {
+    window.localStorage.setItem(FILTER_PANEL_STORAGE_KEY, expanded ? 'true' : 'false')
+  } catch {
+    // Preference is a convenience; never let a storage failure break the page.
+  }
+})
+
+/** "54 calls · 6 errors · 1 blocked" — zeros omitted. */
+const summaryParts = computed(() => compactSummaryParts(summary.value))
+
+// T168: refused attempts (`policy_decision`, status `blocked`) are listed in the
+// Tool calls view only under status=blocked, so the blocked chip says so there.
+const BLOCKED_CALLS_TITLE =
+  'Blocked call attempts in the last 24 h, including calls a profile or token refused. Click to list them.'
+const blockedAttemptCount = computed(() => summary.value?.blocked_count ?? 0)
+// An explicit `type` filter overrides the view's types, so a filter that excludes
+// `policy_decision` would leave the blocked status filter matching nothing.
+function showBlockedAttempts() {
+  if (selectedTypes.value.length > 0 && !selectedTypes.value.includes('policy_decision')) {
+    // One URL write for both params: two back-to-back router.replace calls each
+    // start from the stale route.query and the second would drop the first.
+    // The route watcher hydrates both refs from the URL.
+    scopeQuery.set({ type: [...selectedTypes.value, 'policy_decision'].join(','), status: 'blocked' })
+    return
+  }
+  filterStatus.value = 'blocked'
+}
+const showBlockedOffer = computed(
+  () => activeView.value === 'calls' && !filterStatus.value && blockedAttemptCount.value > 0
+)
+
+/**
+ * The status tiles, as a partition of the Events total beside them (F2, #1046).
+ * The list — including whether the "Other / internal" tile is warranted — is
+ * decided in one pure function so a unit test can assert that the tiles sum to
+ * the denominator without mounting anything.
+ */
+const statusTiles = computed(() => statusBucketTiles(summary.value))
+
+/** Only failures spend colour in the tile row, as in the table's Status column. */
+const statTileValueClass = (tone: StatusTone): string => {
+  switch (tone) {
+    case 'error':
+      return 'text-error'
+    case 'warning':
+      return 'text-warning'
+    default:
+      return 'text-base-content/70'
+  }
+}
+
+/** Only error/blocked spend colour; the total and oddities stay quiet. */
+const summaryToneClass = (tone: StatusTone): string => {
+  switch (tone) {
+    case 'error':
+      return 'text-error font-medium'
+    case 'warning':
+      return 'text-warning font-medium'
+    case 'neutral':
+      return 'text-base-content/70'
+    default:
+      return 'text-base-content/60'
+  }
+}
+
+/** Clicking a count drives the Status filter (issue #436, kept from the cards). */
+const applySummaryFilter = (part: CompactSummaryPart) => {
+  filterStatus.value = filterStatus.value === part.status ? '' : part.status
+}
+
+/** Active filters as dismissable chips — visible whether or not the grid is. */
+const activeChips = computed(() =>
+  activeFilterChips({
+    types: selectedTypes.value,
+    parentId: filterParentId.value,
+    server: filterServer.value,
+    tool: filterTool.value,
+    status: filterStatus.value,
+    authType: filterAuthType.value,
+    agentName: filterAgentName.value,
+    sensitiveData: filterSensitiveData.value,
+    severity: filterSeverity.value,
+    session: filterSession.value,
+    sessionLabel: filterSession.value ? getSessionLabel(filterSession.value) : undefined,
+    startDate: filterStartDate.value,
+    endDate: filterEndDate.value,
+  })
+)
+
+/** The sub-call chip keeps its own hook — it is the code_execution exit door. */
+const chipTestId = (chip: ActiveFilterChip): string =>
+  chip.kind === 'parent' ? 'activity-parent-filter-chip' : `activity-filter-chip-${chip.kind}`
+
+const clearChip = (chip: ActiveFilterChip) => {
+  switch (chip.kind) {
+    case 'type':
+      if (chip.value) toggleTypeFilter(chip.value)
+      break
+    case 'parent':
+      void clearParentFilter()
+      break
+    case 'server':
+      // Removing either side of a server/tool conflict resolves the
+      // contradiction (contract rule 8). The conflicting `tool` is the raw
+      // "server:tool" value, so split it the way the URL round trip would:
+      // one request for what remains, not a stuck empty state.
+      if (scopeConflict.value) {
+        const split = splitScopeTool(filterTool.value, undefined)
+        filterServer.value = split.server ?? ''
+        filterTool.value = split.tool ?? ''
+        scopeConflict.value = false
+      } else {
+        filterServer.value = ''
+      }
+      break
+    case 'tool':
+      filterTool.value = ''
+      scopeConflict.value = false
+      break
+    case 'status':
+      filterStatus.value = ''
+      break
+    case 'auth':
+      filterAuthType.value = ''
+      break
+    case 'agent':
+      filterAgentName.value = ''
+      break
+    case 'sensitive':
+      filterSensitiveData.value = ''
+      break
+    case 'severity':
+      filterSeverity.value = ''
+      break
+    case 'session':
+      filterSession.value = ''
+      break
+    case 'start':
+      filterStartDate.value = ''
+      break
+    case 'end':
+      filterEndDate.value = ''
+      break
+  }
+}
+
+/** Rule 5 / contract "sessions" row (zcode review round 1, F4): from/to,
+ * server, tool, status, type and auth_type are all "not applicable here" in
+ * Sessions — GET /sessions has no mapping for any of them — so any of these
+ * still active from a deep link or a prior tab render as disabled chips
+ * rather than vanishing with no explanation. */
+const sessionsDisabledChips = computed<ActiveFilterChip[]>(() => {
+  if (activeView.value !== 'sessions') return []
+  const chips: ActiveFilterChip[] = []
+  if (filterStartDate.value) chips.push({ kind: 'start', key: 'start', label: `From: ${filterStartDate.value}` })
+  if (filterEndDate.value) chips.push({ kind: 'end', key: 'end', label: `To: ${filterEndDate.value}` })
+  if (filterServer.value) chips.push({ kind: 'server', key: 'server', label: `Server: ${filterServer.value}` })
+  if (filterTool.value) chips.push({ kind: 'tool', key: 'tool', label: `Tool: ${filterTool.value}` })
+  if (filterStatus.value) chips.push({ kind: 'status', key: 'status', label: `Status: ${filterStatus.value}` })
+  if (selectedTypes.value.length > 0) {
+    chips.push({ kind: 'type', key: 'type', label: `Type: ${selectedTypes.value.map(formatType).join(', ')}` })
+  }
+  if (filterAuthType.value) {
+    chips.push({ kind: 'auth', key: 'auth', label: `Auth: ${filterAuthType.value === 'admin' ? 'Admin' : 'Agent'}` })
+  }
+  return chips
 })
 
 const filteredActivities = computed(() => {
   let result = activities.value
 
-  // Multi-type filter (Spec 024): OR logic - show activities matching ANY selected type
-  if (selectedTypes.value.length > 0) {
-    result = result.filter(a => selectedTypes.value.includes(a.type))
+  // Sub-calls of one code_execution run. Kept client-side as well as on the
+  // request so the list is correct even if a refresh (SSE, poll) races ahead.
+  if (filterParentId.value) {
+    result = result.filter(a => a.parent_id === filterParentId.value)
+  }
+
+  // Multi-type filter (Spec 024) plus the active view's implied types (Spec
+  // 109-k) - OR logic: show activities matching ANY of them.
+  if (effectiveTypes.value.length > 0) {
+    result = result.filter(a => effectiveTypes.value.includes(a.type))
   }
   if (filterServer.value) {
     result = result.filter(a => a.server_name === filterServer.value)
   }
-  // Session filter (Spec 024)
-  if (filterSession.value) {
-    result = result.filter(a => a.session_id === filterSession.value)
+  if (filterTool.value) {
+    result = result.filter(a => a.tool_name === filterTool.value)
   }
-  if (filterStatus.value) {
+  // Session filter — a WORK session (Spec 082), falling back to the transport
+  // session for rows written before it. Accepts either id, so a deep link from
+  // the Sessions page (which knows only transport ids) still finds the rows.
+  if (filterSession.value) {
+    result = result.filter(a => matchesSessionFilter(a, filterSession.value, workSessionIndex.value))
+  }
+  // "Other / internal" is the residual of the status partition (F2), not a
+  // stored value: it selects every row whose status is outside the tool-call
+  // vocabulary. Applied client-side because there is nothing to ask the API for.
+  if (filterStatus.value === OTHER_STATUS) {
+    result = result.filter(a => isOtherStatus(a.status))
+  } else if (filterStatus.value) {
     result = result.filter(a => a.status === filterStatus.value)
   }
   // Spec 026: Sensitive data filter
@@ -826,13 +2286,9 @@ const filteredActivities = computed(() => {
   if (filterSeverity.value && filterSensitiveData.value === 'true') {
     result = result.filter(a => a.max_severity === filterSeverity.value)
   }
-  // Spec 028: Auth type filter
-  if (filterAuthType.value) {
-    result = result.filter(a => a.metadata?._auth_auth_type === filterAuthType.value)
-  }
-  // Spec 028: Agent name filter
-  if (filterAgentName.value) {
-    result = result.filter(a => a.metadata?._auth_agent_name === filterAgentName.value)
+  // Spec 028: Auth type / agent name filters
+  if (filterAuthType.value || filterAgentName.value) {
+    result = result.filter(a => matchesAuthFilter(a, filterAuthType.value, filterAgentName.value))
   }
   if (filterStartDate.value) {
     const startTime = new Date(filterStartDate.value).getTime()
@@ -876,24 +2332,344 @@ const sortedActivities = computed(() => {
   return result
 })
 
-const totalPages = computed(() => Math.ceil(sortedActivities.value.length / pageSize.value))
+// --- run folding (F5, #1046) -------------------------------------------------
+//
+// Twelve consecutive identical calls produced twelve rows repeating the same
+// timestamp, the same reason and the same word "Success". Consecutive rows that
+// agree on everything the collapsed line prints fold into one expandable run;
+// status is part of the run identity, so a run can never hide the one call that
+// failed. The grouping itself lives in @/utils/activity and is unit-tested.
 
-const paginatedActivities = computed(() => {
+const GROUP_REPEATS_STORAGE_KEY = 'mcpproxy.activity.groupRepeats'
+
+const readGroupRepeatsPref = (): boolean => {
+  try {
+    // Default ON: folding is the point. Only an explicit "false" turns it off.
+    return window.localStorage.getItem(GROUP_REPEATS_STORAGE_KEY) !== 'false'
+  } catch {
+    return true
+  }
+}
+
+const groupRepeats = ref(readGroupRepeatsPref())
+
+watch(groupRepeats, on => {
+  try {
+    window.localStorage.setItem(GROUP_REPEATS_STORAGE_KEY, on ? 'true' : 'false')
+  } catch {
+    // A storage failure must never break the table.
+  }
+})
+
+/**
+ * Adjacency only means "repeated" in time order. Sorted by duration or by
+ * server, two neighbouring rows are neighbours by accident, so folding them
+ * would invent a run that never happened.
+ */
+const groupingApplies = computed(() => sortColumn.value === 'timestamp')
+
+/** Run keys the operator has expanded. Cleared whenever the list is refiltered. */
+const expandedRuns = ref(new Set<string>())
+
+const isRunExpanded = (key: string): boolean => expandedRuns.value.has(key)
+
+const toggleRun = (key: string) => {
+  const next = new Set(expandedRuns.value)
+  if (next.has(key)) next.delete(key)
+  else next.add(key)
+  expandedRuns.value = next
+}
+
+const runs = computed(() =>
+  groupActivityRuns(sortedActivities.value, groupRepeats.value && groupingApplies.value)
+)
+
+/** How many rows the folding removed from the table. 0 when nothing repeated. */
+const foldedRowCount = computed(() => sortedActivities.value.length - runs.value.length)
+
+// Empty-column hiding (Spec 109-k, acceptance scenario 6): the "System
+// events" view is exactly the rows that never carry sensitive-data
+// detections or a declared intent (both are call-record concepts), so the
+// two columns rendered nothing but a lone "-" in every row — real estate
+// spent on a column with no information in it. Computed from the CURRENT
+// page's activities (not the whole loaded set), so switching views hides and
+// reveals the columns live rather than freezing whatever the first view saw.
+const hasSensitiveColumn = computed(() => sortedActivities.value.some(a => a.has_sensitive_data))
+const hasIntentColumn = computed(() =>
+  sortedActivities.value.some(a => intentPresentation(a.metadata?.intent as Parameters<typeof intentPresentation>[0]).present)
+)
+
+const totalPages = computed(() => Math.ceil(runs.value.length / pageSize.value))
+
+const paginatedRuns = computed(() => {
   const start = (currentPage.value - 1) * pageSize.value
-  return sortedActivities.value.slice(start, start + pageSize.value)
+  return runs.value.slice(start, start + pageSize.value)
+})
+
+/**
+ * One row rendered by the table. A collapsed run, an ordinary row and an
+ * expanded run's members are all this shape, so the cell markup exists once.
+ */
+interface ActivityDisplayRow {
+  key: string
+  activity: ActivityRecord
+  /** >1 only on the lead line of a folded run. */
+  runCount: number
+  /** True for the 2..n members revealed when a run is expanded. */
+  member: boolean
+  /** Duration range across the run; empty for a single row. */
+  runDuration: string
+  /** "over 4m"; empty for a single row or an instantaneous run. */
+  runSpan: string
+  /** The run's members declared different intent reasons. */
+  reasonsVary: boolean
+}
+
+const displayRows = computed((): ActivityDisplayRow[] => {
+  const rows: ActivityDisplayRow[] = []
+  for (const run of paginatedRuns.value as ActivityRun<ActivityRecord>[]) {
+    const folded = run.count > 1
+    rows.push({
+      key: run.key,
+      activity: run.lead,
+      runCount: run.count,
+      member: false,
+      runDuration: folded ? formatRunDuration(run.rows) : '',
+      runSpan: folded ? formatRunSpan(run.rows) : '',
+      reasonsVary: run.reasonsVary,
+    })
+    if (folded && isRunExpanded(run.key)) {
+      for (const activity of run.rows.slice(1)) {
+        rows.push({
+          key: activity.id,
+          activity,
+          runCount: 1,
+          member: true,
+          runDuration: '',
+          runSpan: '',
+          reasonsVary: false,
+        })
+      }
+    }
+  }
+  return rows
 })
 
 // Load activities
+// ---- Spec 108-j: profile / client / token scope -------------------------------
+
+/** The three REST names the page applies right now (rule 7: none while the build
+ * does not advertise them; a server/tool conflict is null, so none either). */
+// profile/client/token do not depend on the server/tool pair, so read them past
+// a conflict: while the URL still carries one (a chip just removed, the
+// router.replace not settled) the scope must not drop out and back in, which
+// would send a second request (review F1.1). loadActivities() itself still
+// issues nothing while `scopeConflict` is set.
+const activityScopeParams = computed(() => pickScopeParams(scopeQuery.toRest({ ignoreConflict: true })))
+const scopeApplied = computed(() => Object.keys(activityScopeParams.value).length > 0)
+const scopeKey = computed(() => scopeParamsKey(activityScopeParams.value))
+
+const SCOPE_URL_NAMES = ['profile', 'client', 'token'] as const
+const scopeWaitTimedOut = ref(false)
+/** Named in the URL but never advertised (the wait timed out): a disabled
+ * "Filter unavailable on this server" chip instead of silence. */
+const scopeUnavailableNames = computed(() => {
+  if (!scopeWaitTimedOut.value) return []
+  return SCOPE_URL_NAMES.filter(name => {
+    const raw = route.query[name]
+    return typeof raw === 'string' && raw !== '' && !isScopeParamAvailable(name)
+  })
+})
+const urlHasScopeParam = (): boolean => SCOPE_URL_NAMES.some(name => {
+  const raw = route.query[name]
+  return typeof raw === 'string' && raw !== ''
+})
+
+const scopeChipsVisible = computed(() =>
+  scopeQuery.chips.value.some(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name)) ||
+  SCOPE_URL_NAMES.some(name => typeof route.query[name] === 'string' && route.query[name] !== '' && isScopeParamAvailable(name)) ||
+  scopeUnavailableNames.value.length > 0
+)
+const filterBadgeCount = computed(() =>
+  activeChips.value.length + scopeQuery.chips.value.filter(chip => (SCOPE_URL_NAMES as readonly string[]).includes(chip.name)).length
+)
+
+// Rule-1 ready gate (F2.1/F3.1/F4.1): every loader waits for the startup
+// /status wait to finish, so no control, refresh or SSE event can send an
+// unfiltered request while the first filtered one is still pending.
+let scopeReady = false
+let releaseScopeReady: () => void = () => {}
+const scopeReadyPromise = new Promise<void>(resolve => { releaseScopeReady = resolve })
+let scopeWatchArmed = false
+async function firstLoad() {
+  if (urlHasScopeParam()) {
+    await systemStore.waitForScopeFeatures()
+    // The wait is over: any named param still unavailable gets the disabled
+    // chip, including when /status answered but did not advertise it (F5.2).
+    scopeWaitTimedOut.value = true
+  }
+  scopeReady = true
+  releaseScopeReady()
+  scopeWatchArmed = true
+  await loadActivities()
+}
+
+// The applied scope changed: a chip removed, a header chip or select set, or the
+// feature list arriving after the first fetch. Not armed before the first load,
+// so the wait above never double-fetches.
+watch(scopeKey, () => {
+  if (!scopeWatchArmed) return
+  currentPage.value = 1
+  void loadActivities()
+})
+
+const hasScopeColumn = computed(() =>
+  SCOPE_URL_NAMES.some(name => isScopeParamAvailable(name)) || activities.value.some(hasAttribution)
+)
+
+function hasAttribution(record: ActivityRecord): boolean {
+  return Boolean(record.profile || record.client_id || record.client_name || record.token_name)
+}
+
+// ---- "Why?" and "Allow in profile..." on a blocked row (J8, J9) ----
+const isTenantPrincipal = computed(() => authStore.principalKind === 'tenant')
+
+/** Blocked, with a tool to ask about and a subject to ask for. */
+function canExplain(record: ActivityRecord | null): boolean {
+  if (!record || isTenantPrincipal.value) return false
+  if (record.status !== 'blocked' || !record.server_name || !record.tool_name) return false
+  return explainSubjectForRecord(record) !== null
+}
+
+const explain = ref<{ subject: ExplainSubject; tool: string; note: string } | null>(null)
+function openExplain(record: ActivityRecord) {
+  const subject = explainSubjectForRecord(record)
+  if (!subject || !record.server_name || !record.tool_name) return
+  explain.value = {
+    subject,
+    tool: `${record.server_name}:${record.tool_name}`,
+    note: `Evaluated against the current configuration; the call was blocked on ${formatDateTime(record.timestamp)}.`,
+  }
+}
+
+/** The editor link for a profile-blocked record, when its profile still exists. */
+function profileAction(record: ActivityRecord | null): { to: ReturnType<typeof profileEditorLink>; label: string } | null {
+  if (!record || isTenantPrincipal.value || record.status !== 'blocked' || !record.profile) return null
+  if (!profilesStore.byName.has(record.profile)) return null
+  const kind = blockedProfileAction(record.block_reason)
+  if (kind === 'allow' && record.server_name && record.tool_name) {
+    return { to: profileEditorLink(record.profile, `${record.server_name}:${record.tool_name}`), label: 'Allow in profile…' }
+  }
+  if (kind) return { to: profileEditorLink(record.profile), label: 'Open profile…' }
+  return null
+}
+
+/** A blocked record whose profile has been deleted since. */
+function missingProfileName(record: ActivityRecord | null): string {
+  if (!record || isTenantPrincipal.value || record.status !== 'blocked' || !record.profile) return ''
+  if (!blockedProfileAction(record.block_reason) || !profilesStore.loaded) return ''
+  return profilesStore.byName.has(record.profile) ? '' : record.profile
+}
+
+// Every load takes a ticket and only the latest applies, so a slower answer
+// for the previous scope (a chip removed, a header chip set) can never land
+// after, and replace, the current one (Spec 108-j R1).
+let activitiesLoadSeq = 0
+
 const loadActivities = async () => {
+  if (!scopeReady) await scopeReadyPromise
+  const seq = ++activitiesLoadSeq
+  // Contract "view -> REST" (url-filter-contract.md): `sessions` issues no
+  // /activity request at all — `loadSessions()` (its own watch/onMounted
+  // calls) is what feeds that view. Skipping it here is also what SC-009's
+  // network assertion is actually checking: a page never fires an unfiltered
+  // (or, here, simply unnecessary) fetch behind a view it is not showing.
+  if (activeView.value === 'sessions') return
+
+  // Rule 8 (zcode review round 1, F2): a contradictory server/tool pair has
+  // no REST request that could express both — issue none at all, rather
+  // than silently keeping `server` and requesting under a URL that named
+  // both filters.
+  if (scopeConflict.value) {
+    activities.value = []
+    loading.value = false
+    error.value = null
+    return
+  }
+
   loading.value = true
   error.value = null
 
+  // Spec 107 FR-041/FR-043(k), T086/T088: the core `/activity` and
+  // `/activity/summary` doors are admin-only and 403 a session principal
+  // (contracts/rest-endpoints.md). A tenant principal reads their own,
+  // entitled-server-filtered records from GET /user/activity instead — that
+  // door has no parent_id/summary support (T086: `{items,total}`,
+  // `limit`/`offset` only), so the parent/child drill-down and the 24h
+  // summary tiles stay empty for a tenant rather than erroring.
+  if (authStore.principalKind === 'tenant') {
+    try {
+      const response = await api.getUserActivity({ limit: 200 })
+      if (response.success && response.data) {
+        activities.value = response.data.items || []
+      } else {
+        error.value = response.error || 'Failed to load activity'
+      }
+    } catch (err) {
+      error.value = err instanceof Error ? err.message : 'Unknown error'
+    } finally {
+      loading.value = false
+    }
+    return
+  }
+
+  // Spec 108-j J2/J13: the profile/client/token the page applies, from the one
+  // source (useScopeQuery.toRest), sent to the list, the summary and the export
+  // alike so the header counts and a downloaded file match the table.
+  const scope = activityScopeParams.value
+
   try {
     const [activitiesResponse, summaryResponse] = await Promise.all([
-      api.getActivities({ limit: 200 }),
-      api.getActivitySummary('24h')
+      api.getActivities({
+        ...scope,
+        limit: 200,
+        parent_id: filterParentId.value || undefined,
+        // Spec 109-k: url-filter-contract.md sends these to REST on Activity
+        // (unlike Tools/Servers, where the same names stay client-side) — a
+        // URL nav or a filter control must narrow the actual request, not
+        // just the local 200-row window. `effectiveTypes` includes the
+        // active view's implied types, not just an explicit `type=` override.
+        type: effectiveTypes.value.length > 0 ? effectiveTypes.value.join(',') : undefined,
+        server: filterServer.value || undefined,
+        tool: filterTool.value || undefined,
+        // Contract "session" row (url-filter-contract.md): a `ws-` prefix is a
+        // work session id, anything else a raw MCP transport session id — the
+        // CLI's existing sessionQueryParam rule, shared here via
+        // useScopeQuery's sessionRestParam so the two never drift apart. Sent
+        // to REST (unlike Tools/Servers) so filtering isn't limited to the
+        // loaded 200-row window — same trade-off the CLI already accepts: the
+        // backend match is exact on the stored session field, so a legacy row
+        // predating Spec 082 (no work_session_id recorded) can drop out of a
+        // work-session-filtered result here, same as `mcpproxy activity list
+        // --session ws-...` already misses it. matchesSessionFilter's
+        // client-side pass below still runs, but only narrows the page the
+        // server already filtered — it cannot resurrect a row the server
+        // excluded.
+        ...(filterSession.value ? { [sessionRestParam(filterSession.value)]: filterSession.value } : {}),
+        // "Other / internal" is the client-side residual (OTHER_STATUS) —
+        // never sent to REST, same rule as the composable's toRest().
+        status: filterStatus.value && filterStatus.value !== OTHER_STATUS ? filterStatus.value : undefined,
+        // Contract "from"/"to" row: Activity sends these to REST too (a
+        // Usage Timeline-bar click's whole point is narrowing the actual
+        // request, not just the local 200-row window the date pickers used
+        // to only filter client-side).
+        start_time: dateTimeLocalToISO(filterStartDate.value),
+        end_time: dateTimeLocalToISO(filterEndDate.value),
+      }),
+      api.getActivitySummary('24h', scope)
     ])
 
+    if (seq !== activitiesLoadSeq) return
     if (activitiesResponse.success && activitiesResponse.data) {
       activities.value = activitiesResponse.data.activities || []
     } else {
@@ -904,16 +2680,22 @@ const loadActivities = async () => {
       summary.value = summaryResponse.data
     }
   } catch (err) {
+    if (seq !== activitiesLoadSeq) return
     error.value = err instanceof Error ? err.message : 'Unknown error'
   } finally {
-    loading.value = false
+    if (seq === activitiesLoadSeq) loading.value = false
   }
 }
 
 // Clear filters
 const clearFilters = () => {
+  // First, so the conflict banner leaves in the same tick and the refetch
+  // watch (which also tracks scopeConflict) runs loadActivities() once, past
+  // its conflict guard.
+  scopeConflict.value = false
   selectedTypes.value = []
   filterServer.value = ''
+  filterTool.value = ''
   filterSession.value = ''
   filterStatus.value = ''
   filterSensitiveData.value = ''
@@ -923,9 +2705,103 @@ const clearFilters = () => {
   filterStartDate.value = ''
   filterEndDate.value = ''
   currentPage.value = 1
+  // The write-back watch handles server/tool/status/auth_type/session/from/to;
+  // `type` is its own explicit override (see toggleTypeFilter) and is cleared
+  // here too so "Clear Filters" removes it from the URL as well as the table —
+  // `view` is left alone, since clearing filters should not also leave the tab.
+  scopeQuery.set({ type: undefined })
+
+  // The parent filter is the only one narrowed on the SERVER too, so leaving it
+  // needs a refetch — the loaded rows are just this run's sub-calls.
+  const hadParentFilter = Boolean(filterParentId.value)
+  filterParentId.value = ''
+  if (hadParentFilter) void loadActivities()
 }
 
-// Toggle type filter (Spec 024: multi-select support)
+/** Sub-calls of this run among the rows we hold. */
+const subCallCount = (parent: ActivityRecord): number => {
+  if (!parent.request_id) return 0
+  return activities.value.filter(a => a.parent_id === parent.request_id).length
+}
+
+/**
+ * Parent -> children. Narrows the list to this run's sub-calls and refetches
+ * with `parent_id` so children outside the loaded page come along.
+ */
+const viewSubCalls = async (parent: ActivityRecord) => {
+  if (!parent.request_id) return
+  filterParentId.value = parent.request_id
+  currentPage.value = 1
+  closeDetailDrawer()
+  await loadActivities()
+}
+
+/** Leave the sub-call view and restore the normal list. */
+const clearParentFilter = async () => {
+  if (!filterParentId.value) return
+  filterParentId.value = ''
+  currentPage.value = 1
+  await loadActivities()
+}
+
+/**
+ * Child -> parent. The parent is never a child of itself, so it cannot be in a
+ * parent_id-filtered list: drop the filter, then locate the parent by exact
+ * correlation id — from the loaded rows, else straight from the API (the run may
+ * be older than the 200 rows we hold).
+ */
+const viewParentCall = async (child: ActivityRecord) => {
+  const parentId = child.parent_id
+  if (!parentId) return
+
+  const hadParentFilter = Boolean(filterParentId.value)
+  filterParentId.value = ''
+  currentPage.value = 1
+
+  let parent = activities.value.find(a => a.request_id === parentId)
+  if (hadParentFilter || !parent) {
+    await loadActivities()
+    parent = activities.value.find(a => a.request_id === parentId)
+  }
+
+  // Spec 107 FR-041 / cross-review round 2, chunk 4 P2: GET /api/v1/activity
+  // is the core, admin-only door (named must-refuse) — even after
+  // loadActivities() above has already used the tenant-scoped
+  // GET /user/activity, this fallback unconditionally called the forbidden
+  // one when the parent was not among the loaded rows. GET /user/activity
+  // has no request_id filter (T086), so there is nothing scoped to fall
+  // back to for a tenant: skip straight to the "not found" toast below.
+  if (!parent && authStore.principalKind !== 'tenant') {
+    const response = await api.getActivities({ request_id: parentId, limit: 1 })
+    const fetched = response.success ? response.data?.activities?.[0] : undefined
+    if (fetched) {
+      parent = fetched
+      // Splice it in so the row the drawer describes is also in the table.
+      if (!activities.value.some(a => a.id === fetched.id)) {
+        activities.value = [fetched, ...activities.value]
+      }
+    }
+  }
+
+  if (parent) {
+    selectActivity(parent)
+    return
+  }
+
+  // Retention (90 days) can outlive a record's parent; say so instead of
+  // silently doing nothing, but never blank the table over it.
+  systemStore.addToast({
+    type: 'warning',
+    title: 'Parent call not found',
+    message: `No activity record with request id ${parentId} is still available.`,
+  })
+}
+
+// Toggle type filter (Spec 024: multi-select support). An explicit `type`
+// overrides the active view (contract "view" row) and is written straight to
+// the URL — the write-back watch above deliberately skips `selectedTypes`
+// because only this explicit-override path (and clearTypeFilter() below)
+// should ever put a `type=` param next to `view=` (FR-080).
 const toggleTypeFilter = (type: string) => {
   const index = selectedTypes.value.indexOf(type)
   if (index >= 0) {
@@ -933,11 +2809,13 @@ const toggleTypeFilter = (type: string) => {
   } else {
     selectedTypes.value.push(type)
   }
+  scopeQuery.set({ type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined })
 }
 
 // Clear type filter only
 const clearTypeFilter = () => {
   selectedTypes.value = []
+  scopeQuery.set({ type: undefined })
 }
 
 // Sort by column (Spec 024: US6)
@@ -969,14 +2847,45 @@ const closeDetailDrawer = () => {
   selectedActivity.value = null
 }
 
+/**
+ * Session id -> this log, narrowed to that session. The Sessions page has linked
+ * INTO the Activity Log since Spec 082; the drawer printed the id back as plain
+ * text and offered nothing (F25, #1046). Prefer the work session (Spec 082) and
+ * fall back to the transport id, exactly as the filter itself accepts both.
+ */
+const filterBySession = (activity: ActivityRecord) => {
+  const sessionId = activity.work_session_id || activity.session_id
+  if (!sessionId) return
+  filterSession.value = sessionId
+  currentPage.value = 1
+  closeDetailDrawer()
+}
+
 // Export activities
 const exportActivities = (format: 'json' | 'csv') => {
   const url = api.getActivityExportUrl({
+    ...activityScopeParams.value,
     format,
-    // Spec 024: Pass comma-separated types for multi-type filter
-    type: selectedTypes.value.length > 0 ? selectedTypes.value.join(',') : undefined,
+    // Spec 024/109-k: pass comma-separated types for the multi-type filter
+    // or the active view's implied types, whichever is in force.
+    type: effectiveTypes.value.length > 0 ? effectiveTypes.value.join(',') : undefined,
     server: filterServer.value || undefined,
-    status: filterStatus.value || undefined,
+    tool: filterTool.value || undefined,
+    // Same session narrowing as loadActivities() (sessionRestParam), so a
+    // session-filtered table exports only that session's rows.
+    ...(filterSession.value ? { [sessionRestParam(filterSession.value)]: filterSession.value } : {}),
+    // "Other / internal" is a client-side residual, not a stored status: the
+    // export endpoint matches `status` exactly against the closed vocabulary,
+    // so passing it would hand back an empty file. Export unfiltered by status
+    // instead — a wider export is recoverable, an empty one looks like "there
+    // was nothing there".
+    status: filterStatus.value && filterStatus.value !== OTHER_STATUS
+      ? filterStatus.value
+      : undefined,
+    // Exporting from the sub-call view exports that run's sub-calls.
+    parent_id: filterParentId.value || undefined,
+    start_time: dateTimeLocalToISO(filterStartDate.value),
+    end_time: dateTimeLocalToISO(filterEndDate.value),
   })
   window.open(url, '_blank')
 }
@@ -1019,10 +2928,14 @@ const handleActivityCompleted = (event: CustomEvent) => {
   }
 }
 
-// Format helpers
-const formatTimestamp = (timestamp: string): string => {
-  return new Date(timestamp).toLocaleString()
-}
+// Format helpers. Timestamps use the one house format (UX audit F35) so the
+// table no longer prints a US `8/25/2026, 6:51:38 AM` next to `dd/mm/yyyy`
+// native date inputs on the same screen.
+const formatTimestamp = (timestamp: string): string => formatDateTime(timestamp)
+
+const formatTimeOfDay = (timestamp: string): string => formatTime(timestamp)
+
+const dateTimeFormatHint = DATE_TIME_FORMAT_HINT
 
 const formatRelativeTime = (timestamp: string): string => {
   const now = Date.now()
@@ -1036,53 +2949,8 @@ const formatRelativeTime = (timestamp: string): string => {
   return `${Math.floor(diff / 86400000)}d ago`
 }
 
-const formatType = (type: string): string => {
-  // Spec 024: Include new activity types
-  const typeLabels: Record<string, string> = {
-    'tool_call': 'Tool Call',
-    'system_start': 'System Start',
-    'system_stop': 'System Stop',
-    'internal_tool_call': 'Internal Tool Call',
-    'config_change': 'Config Change',
-    'policy_decision': 'Policy Decision',
-    'quarantine_change': 'Quarantine Change',
-    'server_change': 'Server Change'
-  }
-  return typeLabels[type] || type
-}
-
-const getTypeIcon = (type: string): string => {
-  // Spec 024: Include new activity types
-  const typeIcons: Record<string, string> = {
-    'tool_call': '🔧',
-    'system_start': '🚀',
-    'system_stop': '🛑',
-    'internal_tool_call': '⚙️',
-    'config_change': '⚡',
-    'policy_decision': '🛡️',
-    'quarantine_change': '⚠️',
-    'server_change': '🔄'
-  }
-  return typeIcons[type] || '📋'
-}
-
-const formatStatus = (status: string): string => {
-  const statusLabels: Record<string, string> = {
-    'success': 'Success',
-    'error': 'Error',
-    'blocked': 'Blocked'
-  }
-  return statusLabels[status] || status
-}
-
-const getStatusBadgeClass = (status: string): string => {
-  const statusClasses: Record<string, string> = {
-    'success': 'badge-success',
-    'error': 'badge-error',
-    'blocked': 'badge-warning'
-  }
-  return statusClasses[status] || 'badge-ghost'
-}
+// Type / status / intent renderers are imported from @/utils/activity so the
+// table, the dashboard widget and the unit tests share ONE mapping.
 
 const formatDuration = (ms: number): string => {
   if (ms < 1000) return `${Math.round(ms)}ms`
@@ -1120,23 +2988,9 @@ const getSeverityBadgeClass = (severity?: string): string => {
   return classes[severity || ''] || 'badge-warning'
 }
 
-const getIntentIcon = (operationType: string): string => {
-  const icons: Record<string, string> = {
-    'read': '📖',
-    'write': '✏️',
-    'destructive': '⚠️'
-  }
-  return icons[operationType] || '❓'
-}
-
-const getIntentBadgeClass = (operationType: string): string => {
-  const classes: Record<string, string> = {
-    'read': 'badge-info',
-    'write': 'badge-warning',
-    'destructive': 'badge-error'
-  }
-  return classes[operationType] || 'badge-ghost'
-}
+/** Intent as the table renders it: glyph + reason, no coloured pill. */
+const intentOf = (activity: ActivityRecord) =>
+  intentPresentation(activity.metadata?.intent as Parameters<typeof intentPresentation>[0])
 
 // Check if there's additional metadata beyond what we show in dedicated sections
 const hasAdditionalMetadata = (activity: ActivityRecord): boolean => {
@@ -1165,10 +3019,82 @@ const getAdditionalMetadata = (activity: ActivityRecord): Record<string, unknown
   return result
 }
 
-// Reset page when filters change
-watch([selectedTypes, filterServer, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterStartDate, filterEndDate], () => {
+// Reset page when filters change. Expanded runs go with it: run keys are the
+// lead row's id, and after a refilter the row that led a run may not be in the
+// list at all — a stale key would silently expand the wrong run.
+watch([effectiveTypes, filterServer, filterTool, filterStatus, filterSensitiveData, filterSeverity, filterAuthType, filterAgentName, filterSession, filterStartDate, filterEndDate, sortColumn, sortDirection, groupRepeats], () => {
   currentPage.value = 1
+  expandedRuns.value = new Set()
 }, { deep: true })
+
+// Spec 109-k: `type`/`server`/`tool`/`status`/`from`/`to` are sent to REST on
+// this page (loadActivities() above) — refetch whenever one changes, whether
+// it was set by applyRouteFilters() from a URL nav, a filter control, or a
+// view-tab switch (effectiveTypes), so the loaded 200-row window never
+// disagrees with what the request asked for. Registered after
+// applyRouteFilters() already ran during setup (top of this file), so the
+// initial values it wrote never trigger this watch — only a later, genuine
+// change does; the first fetch is onMounted's explicit call below.
+// `scopeConflict` is a source too: a conflict that resolves without any other
+// filter ref changing (a URL edit, or "Clear filters" setting everything in one
+// tick) must refetch, and a callback runs once per flush so it never doubles up.
+watch([effectiveTypes, filterServer, filterTool, filterStatus, filterStartDate, filterEndDate, scopeConflict], () => {
+  void loadActivities()
+}, { deep: true })
+
+// Live QA fix (Spec 109-k, FR-080 "router.replace on change"): every filter
+// control here mutated its own ref (and, for chips, clearChip() below) but
+// none of them wrote back to the URL — clearing the "Tool: read_0" chip
+// cleared the table but left `?tool=` in the address bar (SC-009's URL
+// round-trip). `view`/`type` are excluded: those are written explicitly by
+// setView() and toggleTypeFilter()/clearTypeFilter(), which know whether a
+// change is a tab switch (no `type` write) or a manual override (writes
+// `type`, never `view`) — a blanket watch here could not tell the two apart.
+watch(
+  [filterServer, filterTool, filterStatus, filterAuthType, filterSession, filterStartDate, filterEndDate],
+  () => {
+    scopeQuery.set({
+      server: filterServer.value || undefined,
+      tool: filterTool.value || undefined,
+      status: filterStatus.value || undefined,
+      auth_type: filterAuthType.value || undefined,
+      session: filterSession.value || undefined,
+      // `filterStartDate`/`filterEndDate` are the RAW `datetime-local` control
+      // value ("YYYY-MM-DDTHH:mm", no seconds, no timezone) — writing it to
+      // the URL verbatim put a naive local-clock string in `from`/`to`,
+      // violating the contract's "RFC 3339 or relative" (a URL shared across
+      // timezones, or just re-parsed by a stricter client, would silently
+      // read a different instant). `dateTimeLocalToISO` is the same
+      // conversion loadActivities() already applies before sending
+      // start_time/end_time to REST, so the URL and the request agree.
+      //
+      // F5 (zcode review round 1): this watch fires for ANY tracked filter,
+      // not just a date-picker edit — a status/server/etc. change used to
+      // freeze a sticky relative `from=-24h` into whatever absolute instant
+      // it happened to resolve to at that moment, so a URL bookmarked
+      // afterward stopped rolling. Only write the resolved absolute instant
+      // when the picker's value has actually changed since the last URL
+      // hydration; otherwise keep re-asserting the original raw value
+      // (relative or absolute) the URL already carried.
+      from: filterStartDate.value === lastHydratedStartDate && rawFromParam.value
+        ? rawFromParam.value
+        : dateTimeLocalToISO(filterStartDate.value),
+      to: filterEndDate.value === lastHydratedEndDate && rawToParam.value
+        ? rawToParam.value
+        : dateTimeLocalToISO(filterEndDate.value),
+    })
+  }
+)
+
+// Whatever else moved, the page must exist. Folding on, a wider page size, a
+// filter that matched less than expected — each can shrink the list under a
+// currentPage that was valid a moment ago, and the table then renders nothing
+// at all with no hint why. Clamp on the derived count so every path is covered
+// by one rule rather than by remembering to reset at each call site. (Zero
+// pages means an empty list, which has its own empty state; leave page 1.)
+watch(totalPages, pages => {
+  if (pages > 0 && currentPage.value > pages) currentPage.value = pages
+})
 
 // Clear agent name filter when auth type changes away from "agent"
 watch(filterAuthType, (val) => {
@@ -1177,20 +3103,31 @@ watch(filterAuthType, (val) => {
 
 // Keyboard handler for closing drawer
 const handleKeydown = (event: KeyboardEvent) => {
-  if (event.key === 'Escape' && showDetailDrawer.value) {
+  // The access explainer opened from the drawer owns Escape while it is open:
+  // closing the drawer too would unmount the "Why?" button the dialog returns
+  // focus to and drop focus on <body> (Spec 108-j live QA).
+  if (event.key === 'Escape' && showDetailDrawer.value && explain.value === null) {
     closeDetailDrawer()
   }
 }
 
+// Keep the session join fresh no matter how activities arrived — polling,
+// manual refresh, or an SSE event for a client that connected just now. Watching
+// the list covers every mutation path; refreshSessionsIfUnknown is a no-op
+// unless a genuinely new session id showed up, and coalesces concurrent fetches.
+watch(activities, refreshSessionsIfUnknown)
+
 // Lifecycle
 onMounted(() => {
-  // Check for session filter from URL query params (linked from Dashboard/Sessions pages)
-  const sessionParam = route.query.session as string | undefined
-  if (sessionParam) {
-    filterSession.value = sessionParam
-  }
-
-  loadActivities()
+  // Filters (incl. `session`, linked from Dashboard/Sessions pages) are
+  // already hydrated from the URL by applyRouteFilters() during setup, above
+  // (rule 1: read before the first fetch) — this is that first fetch. A URL
+  // that names a profile/client/token waits for /status first (Spec 108-j J3),
+  // so the first request carries it instead of flashing every row.
+  void firstLoad()
+  loadSessions()
+  sessionsLoadedOnce = true
+  if (!profilesStore.loaded && !profilesStore.loading) void profilesStore.fetchProfiles()
 
   // Listen for SSE activity events
   window.addEventListener('mcpproxy:activity', handleActivityEvent as EventListener)

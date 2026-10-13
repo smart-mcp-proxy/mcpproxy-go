@@ -68,9 +68,9 @@ func TestExemptionExpiry(t *testing.T) {
 	logger, _ := zap.NewDevelopment()
 
 	s := &Supervisor{
-		logger:                logger,
-		inspectionExemptions:  make(map[string]time.Time),
-		inspectionFailures:    make(map[string]*inspectionFailureInfo),
+		logger:               logger,
+		inspectionExemptions: make(map[string]time.Time),
+		inspectionFailures:   make(map[string]*inspectionFailureInfo),
 	}
 
 	serverName := "test-server"

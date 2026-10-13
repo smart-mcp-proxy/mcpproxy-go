@@ -9,7 +9,7 @@ keywords: [activity, logging, audit, observability, compliance]
 
 # Activity Log
 
-MCPProxy provides comprehensive activity logging to track AI agent tool calls, policy decisions, and system events. This enables debugging, auditing, and compliance monitoring.
+MCPProxy records AI agent tool calls, policy decisions, and system events in a local activity log. This supports debugging and after-the-fact inspection. Records are kept subject to configurable retention (age, record count and total size) and a per-record response size cap (see [Configuration](#configuration)), so the log is not a complete or tamper-proof audit trail and is not a regulatory compliance certification.
 
 ## What Gets Logged
 
@@ -25,7 +25,7 @@ The activity log captures:
 | `policy_decision` | Tool calls blocked by policy rules |
 | `quarantine_change` | Server quarantine/unquarantine events |
 | `server_change` | Server enable/disable/restart events |
-| `credential_broker` | Per-user credential brokering events (acquire/refresh/inject/connect) — server edition only |
+| `credential_broker` | Per-user `oauth_connect` consent/callback outcomes (`connect` is the only action ever recorded; the credential is stored, never injected) — server edition only |
 
 ### System Lifecycle Events
 
@@ -71,9 +71,9 @@ Internal tool calls log when internal proxy tools are used:
 ```
 
 :::note Duplicate Filtering
-By default, **successful** `call_tool_*` internal tool calls (`call_tool_read`, `call_tool_write`, `call_tool_destructive`) are excluded from activity listings because they appear as duplicates alongside their corresponding upstream `tool_call` entries. **Failed** `call_tool_*` calls are always shown since they have no corresponding upstream tool call entry.
+By default, all `call_tool_*` internal tool calls (`call_tool_read`, `call_tool_write`, `call_tool_destructive`) are excluded from activity listings — every dispatch (successful, failed, or shed) has a corresponding upstream `tool_call` or rejection record carrying the same `request_id`, so showing both would double-count the call.
 
-To include all internal tool calls including successful `call_tool_*`, use `include_call_tool=true` in the API query parameter.
+To include the `call_tool_*` records anyway, use `include_call_tool=true` in the API query parameter.
 :::
 
 ### Config Change Events
@@ -125,6 +125,56 @@ Each tool call record includes:
 }
 ```
 
+#### Sub-calls made by code_execution
+
+Every upstream tool call a sandboxed `code_execution` script makes is recorded
+as a first-class `tool_call` record with its own `request_id` and a `parent_id`
+equal to the parent `code_execution` record's `request_id` (`source` is
+`internal`; a policy-refused sub-call is recorded with status `blocked`; when
+the refusal comes from the caller's profile it also carries `block_reason`:
+`profile_tier`, `profile_rule` or `profile_unannotated`; a sub-call to a
+server outside the caller's profile carries `profile_server_scope`. The
+refusal text the script sees is unchanged, and a legacy token refused only by
+its own server list carries no `block_reason`).
+Filter with `parent_id=<parent request_id>` to list a script's sub-calls, or
+`request_id=<child's parent_id>` to find the parent — the Web UI drawer, the
+macOS Activity window, and `mcpproxy activity list --parent-id` all expose the
+same navigation (see the "Drill into a code_execution" workflow in the CLI
+activity commands reference).
+
+#### Failure classification: error_class and fault_domain
+
+A failed tool call tells you what failed and whose fault it is. Every
+`tool_call` record with `status: "error"` (and a limiter shed or profile
+refusal) carries three optional fields, in the REST API, the SSE
+`activity.tool_call.completed` payload and `mcpproxy activity list|show -o json|yaml`:
+
+| Field | Meaning |
+|-------|---------|
+| `error_class` | What failed, one of the classes below |
+| `fault_domain` | `upstream` (the server or the network to it), `proxy` (mcpproxy refused or failed) or `client` (the caller sent something invalid or went away) |
+| `upstream_http_status` | The HTTP status of the upstream response, when known (non-2xx only) |
+
+| `error_class` | Typical `fault_domain` | When |
+|---------------|------------------------|------|
+| `tool_error` | `upstream` | The tool answered `isError: true`. The record keeps `status: "error"`; this class tells it apart from a transport failure. |
+| `jsonrpc` | `upstream` | The upstream answered with a JSON-RPC error, including server-specific codes such as `-32001`. |
+| `http` | `upstream` | The upstream answered with a non-2xx HTTP status (for example `502` with an HTML body); `upstream_http_status` is set. |
+| `network` | `upstream` | Connection refused or reset, DNS failure, EOF, closed transport, or the server is not connected. |
+| `timeout` | `upstream` or `proxy` | A deadline passed: `upstream` if the request had been sent, `proxy` if it expired before dispatch. |
+| `session_terminated` | `upstream` | The upstream no longer knows the MCP session (HTTP 404). |
+| `auth` | `upstream` | HTTP 401/403 or an OAuth authorization-required error. |
+| `proxy_policy` | `proxy` or `client` | mcpproxy refused the call: a profile policy, the concurrency limiter, or a stale connection generation (`proxy`); arguments that failed pre-dispatch validation (`client`). |
+| `proxy_internal` | `proxy` | A failure inside mcpproxy that no other class explains. |
+| `cancelled` | `client` | The caller cancelled the request. Not counted as an upstream fault. |
+
+The fields are absent on successful calls and on records written before this
+feature, which decode and display exactly as before. Filter with
+`error_class=<class>` and `fault_domain=<domain>` (REST), or
+`--error-class` and `--fault-domain` (CLI). The Spec 107 audit line keeps its
+own `error_class` vocabulary; it is derived from this classification so the
+two never disagree.
+
 ### Intent Tracking
 
 Every tool call includes intent information for security auditing:
@@ -138,7 +188,7 @@ Every tool call includes intent information for security auditing:
 
 ### Sensitive Data Detection
 
-Activity records automatically include sensitive data detection metadata when MCPProxy detects potentially sensitive information in tool arguments or responses. This helps identify data handling patterns and supports compliance monitoring.
+Activity records automatically include sensitive data detection metadata when MCPProxy detects potentially sensitive information in tool arguments or responses. This helps identify data handling patterns. Detection only flags records; it does not block the call by default (see [what detection does and does not do](/features/sensitive-data-detection#what-detection-does-and-does-not-do)).
 
 ```json
 {
@@ -285,7 +335,7 @@ GET /api/v1/activity
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `type` | string | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` |
+| `type` | string | Filter by type (comma-separated for multiple): `tool_call`, `system_start`, `system_stop`, `internal_tool_call`, `config_change`, `policy_decision`, `quarantine_change`, `server_change`, `credential_broker` (server edition; connect-flow outcomes only) |
 | `server` | string | Filter by server name |
 | `tool` | string | Filter by tool name |
 | `session_id` | string | Filter by MCP session ID |
@@ -294,7 +344,51 @@ GET /api/v1/activity
 | `end_time` | string | Filter before this time (RFC3339) |
 | `limit` | integer | Max records (1-100, default: 50) |
 | `offset` | integer | Pagination offset (default: 0) |
-| `include_call_tool` | boolean | Include successful `call_tool_*` internal tool calls (default: false). By default, successful `call_tool_*` are excluded because they appear as duplicates alongside their upstream `tool_call` entries. Failed `call_tool_*` are always shown. |
+| `include_call_tool` | boolean | Include `call_tool_*` internal tool calls (default: false). Excluded by default because every dispatch has a paired `tool_call` (or rejection) record with the same `request_id`. |
+| `parent_id` | string | Return only the sub-calls one `code_execution` issued (value = the parent record's `request_id`). Child→parent is the reverse lookup: `request_id=<child's parent_id>`. |
+| `error_class` | string | Return only failed calls of this class: `network`, `timeout`, `http`, `jsonrpc`, `tool_error`, `session_terminated`, `auth`, `proxy_policy`, `proxy_internal`, `cancelled`. See [Failure classification](#failure-classification-error_class-and-fault_domain). |
+| `fault_domain` | string | Return only failed calls with this fault domain: `upstream`, `proxy`, `client` |
+| `exclude_payloads` | boolean | Omit the bulky fields — `arguments`, `response` — and narrow `metadata` to a contextual whitelist (default: false). See below. |
+
+#### `exclude_payloads` and the contextual metadata whitelist
+
+`exclude_payloads=true` is a projection, not a filter: it never changes which
+records match, only how much of each record is serialized. It exists for clients
+that poll frequently and render summary fields only (the macOS tray glance polls
+the newest 100 records on every menu open). Measured against a real log those
+100 records are ~848 KB whole and ~30 KB projected.
+
+The projection drops `arguments` and `response` entirely, and keeps only these
+`metadata` keys:
+
+| Kept key | Why |
+|----------|-----|
+| `intent.reason` | The caller's stated reason, rendered as the row subtitle |
+| `intent.operation_type` | `read` / `write` / `destructive` |
+| `decision` | `blocked`, `warned`, … for `policy_decision` records |
+| `reason` | Why a policy decision blocked or warned |
+| `client_name` | Which MCP client made the call |
+| `client_version` | Its version |
+
+Everything else in `metadata` — sensitive-data detection payloads, toon
+renderings, classifier scores, raw intent objects — is dropped. Whitelisted keys
+that a record does not have are simply omitted, and a record whose metadata is
+entirely non-whitelisted serializes with no `metadata` object at all.
+
+Every kept key is kept only when its value is a **string**. A whitelisted key is
+not a promise about its value: a producer that writes a structured error under
+`reason` would otherwise smuggle that whole payload through the projection, so
+non-string values are dropped like any other non-whitelisted content.
+
+Two things survive the projection deliberately:
+
+- `has_sensitive_data` is derived from `metadata` **before** it is narrowed, so
+  the flag outlives its source.
+- `request_id` is a top-level field, not metadata, so correlation still works on
+  projected responses.
+
+Fetch the full record with `GET /api/v1/activity/{id}` when a client needs the
+arguments, the response, or any non-whitelisted metadata.
 
 **Example:**
 
@@ -313,6 +407,9 @@ curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?server=github-s
 
 # Filter by time range
 curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?start_time=2025-01-15T00:00:00Z"
+
+# Summary-only poll: no arguments/response, metadata narrowed to the whitelist
+curl -H "X-API-Key: $KEY" "http://127.0.0.1:8080/api/v1/activity?type=tool_call,internal_tool_call,policy_decision&limit=100&exclude_payloads=true"
 ```
 
 **Response:**
@@ -416,11 +513,31 @@ Activity logging is enabled by default. Configure via `mcp_config.json`:
 |---------|---------|-------------|
 | `activity_retention_days` | 90 | Days to retain activity records |
 | `activity_max_records` | 100000 | Maximum records before pruning oldest |
-| `activity_max_size_mb` | 256 | Maximum total activity-log size in MB before pruning oldest (`0` disables). Runs alongside the age and count caps to bound `config.db` growth when records carry large payloads. |
-| `activity_max_response_size` | 65536 | Max response size stored (bytes) |
+| `activity_max_size_mb` | 256 | Maximum total activity-log size in MB before pruning oldest (`0` disables). Runs alongside the age and count caps to bound `config.db` growth when records carry large payloads. An explicit `0` now survives a config save — before #1175 it was silently deleted on the next write and the 256MB cap came back. |
+| `activity_max_response_size` | 65536 | Max response text stored per record (bytes). Applies to `tool_call`, `internal_tool_call` and `prompt_get`; `0` or absent falls back to 65536 and it cannot be disabled. Read at startup only, like its retention siblings. Truncated text keeps a `...[truncated]` suffix. Already-stored records are not rewritten, and (as with pruning) the BBolt file does not shrink on disk. Sensitive-data detection still scans the untruncated response, under its own `sensitive_data_detection.max_payload_size_kb` cap. |
 | `activity_cleanup_interval_min` | 60 | Background cleanup interval (minutes) |
 
 > **Why the size cap?** The age and count caps alone do not bound disk: with large per-record payloads the log can reach hundreds of MB while still under 100k records / 90 days. `activity_max_size_mb` removes the oldest records (always keeping the newest) until the log is within the byte budget. Note: pruning frees pages for reuse but does not shrink the database file on disk (BBolt does not return freed pages to the OS).
+
+## Tool-call history
+
+The activity log is not the only per-call store. `GET /api/v1/tool-calls` is served from separate per-server buckets (`server_<id>_tool_calls`) that hold a recent debugging window: the full arguments and the upstream result, per server. On one deployment these held ~432MB of a 940MB `config.db` because nothing bounded them at all (#1176).
+
+```json
+{
+  "tool_call_max_response_size": 65536,
+  "tool_call_max_records_per_server": 1000
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `tool_call_max_response_size` | 65536 | Cap on the marshalled response stored per tool-call record, in bytes. Over the cap the stored `response` is replaced by `{"truncated": true, "original_bytes": N, "preview": "…"}` and the record carries `response_truncated: true` with `response_bytes: N`. The caller still received the response whole — only the stored copy is shortened. |
+| `tool_call_max_records_per_server` | 1000 | Calls retained per server. The oldest are evicted in the same transaction as the write, so the bucket can never exceed the cap. |
+
+A non-positive value means "use the default", not "disable" — this store has no off switch. Removing a server now drops its call history with it, and histories belonging to servers that are no longer configured are swept on startup (the synthetic `code_execution` history is never swept).
+
+> **Reclaiming the space.** All of the above bounds *future* growth. BBolt does not return freed pages to the operating system, so an already-large `config.db` stays large. Use `mcpproxy db stats` to see how much is reclaimable and `mcpproxy db compact` — with mcpproxy stopped — to shrink the file. See [docs/cli/db-commands.md](../cli/db-commands.md).
 
 ## Use Cases
 

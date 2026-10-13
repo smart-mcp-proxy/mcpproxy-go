@@ -8,6 +8,26 @@
 
 import SwiftUI
 import Combine
+import os
+
+// MARK: - Tray menu host
+
+/// Whatever owns the tray menu.
+///
+/// In production this is the `NSStatusItem`, and nothing else ever will be. It
+/// is a protocol so the menu paths — `menuWillOpen`, `rebuildMenu`,
+/// `menuDidClose` — can run in a test without putting an icon in the menu bar of
+/// whoever is running the suite. That is not a convenience: the spec-048
+/// invariant ("opening the menu performs zero network requests") is only
+/// meaningful if the REAL open sequence can be driven, and before this it could
+/// not be, so the test that claimed to check it counted a stub nothing was
+/// wired to. See `MenuOpenNetworkTests`.
+@MainActor
+protocol TrayMenuHost: AnyObject {
+    var menu: NSMenu? { get set }
+}
+
+extension NSStatusItem: TrayMenuHost {}
 
 // MARK: - App Delegate
 
@@ -15,14 +35,110 @@ import Combine
 final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     let appState = AppState()
     let notificationService = NotificationService()
-    let updateService = UpdateService()
+    /// Owns everything the tray knows about updates (Spec 092 FR-017). A `var`
+    /// so a test can substitute a service built around a fixture bundle and a
+    /// stub feed updater; production never reassigns it.
+    var updateService = UpdateService()
     var coreManager: CoreProcessManager?
 
-    private var statusItem: NSStatusItem!
+    private var statusItem: NSStatusItem?
+    /// The corner severity dot overlaid on the status item button, when a
+    /// server severity is being badged. Held so `updateStatusIcon()` can reuse
+    /// one view across polls instead of rebuilding the button's subviews.
+    private var badgeDotView: TrayBadgeDotView?
+
+    /// Where the tray menu lives. Assigned to `statusItem` at launch; injected
+    /// by tests that drive the menu paths without a status bar item.
+    @MainActor
+    private var menuHost: TrayMenuHost?
+
+    /// Set only by the testing initializer; production leaves it nil and falls
+    /// back to the live core client.
+    private var injectedGlanceDataSource: GlanceDataSource?
+
+    /// The read surface any tray path is allowed to fetch through.
+    ///
+    /// Nothing in the menu-open sequence may call it — the menu renders from
+    /// state already in memory, fed by SSE and the background poll — and it is a
+    /// property precisely so that claim is falsifiable: a fetch added to
+    /// `menuWillOpen` tomorrow has somewhere to be counted, and
+    /// `MenuOpenNetworkTests` counts it.
+    @MainActor
+    var glanceDataSource: GlanceDataSource? {
+        injectedGlanceDataSource ?? appState.apiClient
+    }
+
     private var mainWindow: NSWindow?
     private var settingsWindow: NSWindow?
+    /// The Connect Client form. Presented as a sheet on the main window when one
+    /// is up, and as its own window otherwise. The lifecycle owns the window and
+    /// its model together so BOTH exits — the form's Close button and the
+    /// titlebar's red button — tear the form down (see the type's header).
+    @MainActor private let connectClientForm = ConnectFormWindowLifecycle()
     private var cancellables = Set<AnyCancellable>()
     private var keyMonitor: Any?
+
+    /// Tray Glance: builds the activity / clients / histogram rows, and keeps
+    /// references to them so a refresh landing while the menu is on screen can
+    /// rewrite them in place instead of restructuring the menu. Rows call back
+    /// into this delegate (see `openActivityForSession`), which opens the
+    /// native main window at the Activity section.
+    ///
+    /// `@MainActor` because `GlanceSection` is an isolated type and this class is
+    /// not, so constructing it from a plain stored-property initializer would not
+    /// compile. See that type's header for why the alternative — a `nonisolated`
+    /// initializer over there — is the wrong trade.
+    @MainActor
+    private lazy var glance = GlanceSection(
+        target: self,
+        action: #selector(openActivityForSession(_:))
+    )
+
+    /// Suppresses structural rebuilds while the menu is on screen.
+    private var rebuildGuard = MenuRebuildGuard()
+
+    /// Scheduler for the debounced `objectWillChange -> rebuildMenu()` sink.
+    ///
+    /// **Must be a dispatch queue, not `RunLoop.main`.** While an `NSMenu` is
+    /// tracking, the main run loop runs in `NSEventTrackingRunLoopMode`, and
+    /// Combine's `RunLoop` scheduler installs its timers in `.default` mode
+    /// only — so a `RunLoop.main`-scheduled `debounce` is never serviced until
+    /// the menu closes. That silently disables the entire open-menu update
+    /// path: `GlanceSection.updateInPlace` and `MenuRebuildGuard`'s
+    /// update-in-place / defer-until-close branches can only run if something
+    /// calls `rebuildMenu()` while the menu is up, and this sink is the only
+    /// caller that does. The glance would then be a snapshot frozen at
+    /// menu-open time, which is precisely what it must not be.
+    ///
+    /// The main dispatch queue is drained in every run-loop mode, so this
+    /// delivers during tracking. It is the same reason the timers below are
+    /// published `in: .common` rather than in the default mode.
+    ///
+    /// Named (rather than written inline at the subscription) so the tests can
+    /// bind to the very scheduler production uses — see
+    /// `MenuRefreshSchedulerTests`.
+    static let menuRefreshScheduler = DispatchQueue.main
+
+    override init() {
+        super.init()
+    }
+
+    /// Construct a controller whose tray menu is hosted outside the menu bar and
+    /// whose reads are countable — the seam `MenuOpenNetworkTests` drives the
+    /// real menu-open sequence through. Production goes through `init()` and
+    /// `applicationDidFinishLaunching`, which installs the status item as the
+    /// host and leaves the data source resolving to the live core client.
+    @MainActor
+    convenience init(
+        glanceDataSource: GlanceDataSource,
+        menuHost: TrayMenuHost,
+        updateService: UpdateService? = nil
+    ) {
+        self.init()
+        self.injectedGlanceDataSource = glanceDataSource
+        self.menuHost = menuHost
+        if let updateService { self.updateService = updateService }
+    }
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Prevent focus steal on launch — no Dock icon, no Cmd+Tab entry
@@ -41,6 +157,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Switch to accessory (menu bar only) now that launch is complete
         NSApp.setActivationPolicy(.accessory)
+
+        // Lifecycle bookkeeping FIRST, so a launch that fails later is still on
+        // the record — and so an unaccounted-for previous exit is reported now,
+        // while somebody is reading the log, rather than never (#862).
+        Self.logInstanceRoot()
+        AppLifecycle.shared.recordLaunch()
+        AppLifecycle.shared.installSignalHandlers {
+            // A caught signal goes through the normal quit path so the core is
+            // shut down properly. The hop to main is made HERE, not by the
+            // signal machinery: reaching this decision must not depend on a
+            // main thread that may never answer, and if it does not answer the
+            // escalation inside AppLifecycle restores the signal's default
+            // action so the process still goes.
+            DispatchQueue.main.async { NSApplication.shared.terminate(nil) }
+        }
+        // Logout, restart and shutdown reach applicationWillTerminate exactly
+        // like a Quit does, so the difference has to be claimed here.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.willPowerOffNotification, object: nil, queue: .main
+        ) { _ in
+            AppLifecycle.shared.note("macOS is logging out, restarting or shutting down")
+        }
 
         // Monitor Cmd+/Cmd-/Cmd+0 globally for text size adjustment.
         // Store the monitor reference to prevent potential deallocation.
@@ -89,9 +227,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             DispatchQueue.main.async { self?.restoreAccessoryIfNoVisibleWindows() }
         }
 
+        // Spec 108-k: a fix button (binding guard, explainer) asks for Settings
+        // through `AppState.navigate(.settings)`; the Settings window itself is
+        // ours, so this is where it opens.
+        NotificationCenter.default.addObserver(
+            forName: .openSettings, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.showSettingsWindow() }
+        }
+
         // Create the status bar item with the MCPProxy monochrome icon
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        if let button = statusItem.button {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        statusItem = item
+        menuHost = item
+        if let button = item.button {
             // Load the bundled icon-mono-44.png from the app bundle
             if let iconPath = Bundle.main.path(forResource: "icon-mono-44", ofType: "png"),
                let icon = NSImage(contentsOfFile: iconPath) {
@@ -115,7 +264,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             appState.objectWillChange.map { _ in () },
             updateService.objectWillChange.map { _ in () }
         )
-            .debounce(for: .milliseconds(500), scheduler: RunLoop.main)
+            .debounce(for: .milliseconds(500), scheduler: Self.menuRefreshScheduler)
             .sink { [weak self] _ in
                 self?.updateStatusIcon()
                 self?.rebuildMenu()
@@ -134,9 +283,86 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
             .store(in: &cancellables)
 
-        // Auto-check GitHub for a newer release as soon as the core reports its version,
-        // and again every hour. This avoids relying solely on the core's 4h cache, which
-        // can lag behind freshly published releases.
+        // Spec 092 FR-012: give the updater a synchronous way to stop the core
+        // it manages. Installed before the feed updater starts, because a
+        // Sparkle session resumed from a previous launch can reach the install
+        // hook almost immediately.
+        // The Bool it returns is not advisory: `false` makes Sparkle postpone
+        // the installation rather than replace the bundle under a live core.
+        updateService.stopManagedCore = { [weak self] in
+            guard let self else { return true }
+            let pid = self.coreManager?.managedProcess?.processIdentifier
+            // Mark stop INTENT for THIS pid before terminating: the core's
+            // resulting clean (status 0) exit must not pop a spurious "MCPProxy
+            // Error" nor race a reconnection against Sparkle's bundle swap.
+            // Scoping to the pid (not a global flag) means a later core with a
+            // different pid is unaffected even if this intent is never consumed.
+            self.appState.stoppedForUpdatePID = pid
+            let outcome = ManagedCoreStop.stop(pid: pid)
+            if !outcome.coreIsDown {
+                // The stop did not bring the core down — Sparkle will postpone
+                // the install and the tray keeps managing the still-live core,
+                // so clear the intent (that pid's future exit is not ours).
+                self.appState.stoppedForUpdatePID = nil
+            }
+            NSLog("[MCPProxy] Pre-update core stop: pid=%d outcome=%@",
+                  pid ?? -1, String(describing: outcome))
+            AppLifecycle.shared.note("pre-update core stop: \(outcome)")
+            return outcome.coreIsDown
+        }
+
+        // Spec 092 FR-015: every tray-side check is governed by the policy the
+        // core publishes. Applied before the first check is scheduled.
+        appState.$coreUpdatePolicy
+            .removeDuplicates()
+            .sink { [weak self] policy in
+                self?.updateService.applyCorePolicy(policy)
+            }
+            .store(in: &cancellables)
+
+        // Spec 095: the recovery dialog's AppKit half. The service owns the
+        // failure itself — stage, candidates, retry ordering — and only borrows
+        // a way to put three buttons on screen and open a browser.
+        updateService.presentFailureDialog = { content, respond in
+            UpdateFailureAlertPresenter.present(content, respond: respond)
+        }
+        updateService.openFailureDownload = { UpdateFailureAlertPresenter.openInBrowser($0) }
+
+        // Spec 095 US2: the update service has no API client of its own, and the
+        // client is resolved per occurrence — a failure can happen before the
+        // core is up, or after it has gone away, and neither is worth a retry.
+        //
+        // The current client is mirrored into a lock rather than read through
+        // MainActor at occurrence time: the recovery dialog runs a modal session
+        // on the main actor, and a `MainActor.run` hop would park the recording
+        // until the user dismisses the dialog (or lose it entirely if the app
+        // quits first) — caught live in the spec-095 rig verification.
+        //
+        // The mirror never goes nil: before the core connects (and between
+        // connections) a socket-pinned fallback client makes the one bounded
+        // attempt FR-010 requires — SocketURLProtocol probes the socket per
+        // request, so a dead core fails fast as a URLError, one log line.
+        let fallbackRecordingClient = APIClient(
+            socketPath: InstancePaths.socketPath, requestTimeout: 10
+        )
+        let recordingClient = OSAllocatedUnfairLock<APIClient>(
+            initialState: fallbackRecordingClient
+        )
+        appState.$apiClient
+            .sink { client in recordingClient.withLock { $0 = client ?? fallbackRecordingClient } }
+            .store(in: &cancellables)
+        updateService.recordUpdateFailure = { stage in
+            await recordingClient.withLock({ $0 }).recordUpdateFailure(stage: stage)
+        }
+
+        // Spec 092 FR-010: start the feed updater. It gates its own scheduled
+        // cycle on the policy above and reports back through UpdateService.
+        updateService.startFeedUpdater()
+
+        // Auto-check for a newer release as soon as the core reports its version,
+        // and again every hour. Both are UNATTENDED checks, so they go through
+        // the policy-gated entry point (FR-015) — unlike the menu's "Check for
+        // Updates", which is always allowed.
         appState.$version
             .removeDuplicates()
             .filter { !$0.isEmpty }
@@ -144,7 +370,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             .sink { [weak self] version in
                 guard let self else { return }
                 self.updateService.currentVersion = version
-                self.updateService.checkForUpdates()
+                self.updateService.checkForUpdatesInBackground()
             }
             .store(in: &cancellables)
 
@@ -153,7 +379,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             .sink { [weak self] _ in
                 guard let self, !self.appState.version.isEmpty else { return }
                 self.updateService.currentVersion = self.appState.version
-                self.updateService.checkForUpdates()
+                self.updateService.checkForUpdatesInBackground()
+            }
+            .store(in: &cancellables)
+
+        // Spec 092 FR-003: has the bundle on disk been replaced under us?
+        // Checked once at launch (a drag-install over a running app that the
+        // user never activates afterwards is still an upgrade that must not
+        // leave the old version serving) and every 5 minutes thereafter, plus
+        // on every activation — see applicationDidBecomeActive.
+        refreshReplacedBundleVersion()
+        Timer.publish(every: 300, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshReplacedBundleVersion() }
             }
             .store(in: &cancellables)
 
@@ -167,6 +406,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NotificationCenter.default.addObserver(
             self, selector: #selector(openWebUI),
             name: .openWebUI, object: nil
+        )
+
+        // Spec 091: the one route into the native Connect Client form. Presented
+        // directly from here — no delayed notification chains, which is what
+        // made the Add Server path fragile.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(presentConnectClientForm),
+            name: ConnectClientPresentation.route, object: nil
         )
 
         // Start core
@@ -190,14 +437,57 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: - NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
+        // Only the status-bar menu drives the rebuild guard. NSMenuDelegate
+        // callbacks are delivered per menu, and this object is the delegate of
+        // more than one: any submenu that ends up sharing it would otherwise run
+        // a full rebuild (removeAllItems) on a menu already on screen and
+        // re-arm/disarm the guard under the parent — exactly the
+        // restructuring-while-open the design forbids.
+        guard menu === menuHost?.menu else { return }
+
         // Spec 048: dropped the per-click `client.servers()` fetch. appState
         // is fed by SSE (spec 047), so it's already current within ~50 ms of
         // the last upstream state change. Rebuild from in-memory state only.
+        //
+        // The guard is armed AFTER this rebuild: AppKit calls menuWillOpen
+        // before the menu is drawn, so restructuring here is safe and hands the
+        // user fresh rows. Every rebuild from this point on happens under the
+        // cursor and must not add or remove items.
         rebuildMenu()
+        rebuildGuard.menuWillOpen()
+    }
+
+    func menuDidClose(_ menu: NSMenu) {
+        guard menu === menuHost?.menu else { return }
+
+        // Run the structural rebuild that was suppressed while the menu was up.
+        // Deferred to the next run-loop turn: AppKit is still tearing the menu
+        // down inside this callback, and mutating it here is not safe.
+        guard rebuildGuard.menuDidClose() else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.rebuildMenu()
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        // Written BEFORE the core is torn down: whatever happens next, the
+        // journal already carries a reason for this exit. The previous
+        // behaviour — terminate the core and say nothing — is what made the
+        // original incident unattributable (#862).
+        AppLifecycle.shared.recordTermination()
+        // Record termination intent BEFORE tearing down the core: the core will
+        // exit cleanly (status 0) while the tray is still `.connected`, and only
+        // this flag tells handleProcessExit that clean exit was intended rather
+        // than an external kill to recover from. Set on MainActor (we are on it)
+        // so it is visible before the SIGTERM is even delivered.
+        appState.isTerminating = true
+        // Spec 095 FR-004: a retry queued behind a terminal signal dies here.
+        updateService.discardPendingFailureRetry()
         if let process = coreManager?.managedProcess {
+            AppLifecycle.shared.recordCoreTerminated(
+                pid: process.processIdentifier,
+                reason: "tray is terminating"
+            )
             process.terminate()
         }
     }
@@ -209,11 +499,20 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     ///
     /// - Parameter tab: Optional sidebar item to select when the window opens.
     func showMainWindow(tab: SidebarItem? = nil) {
-        if let window = mainWindow, window.isVisible {
+        // isVisible is false for a miniaturized window — falling through to
+        // window creation there would leave the original in the Dock and
+        // spawn a duplicate, with both subscribed to the tab notifications.
+        if let window = mainWindow, window.isVisible || window.isMiniaturized {
+            if window.isMiniaturized { window.deminiaturize(nil) }
             NSApp.setActivationPolicy(.regular)
             setupMainMenu() // Reapply our menu when becoming regular app
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
+            // The window is already live, so its `onReceive` observers are
+            // subscribed — a notification is the reliable path to switch tabs.
+            if let tab {
+                NotificationCenter.default.post(name: .switchToSidebarTab, object: tab.rawValue)
+            }
             return
         }
 
@@ -229,7 +528,11 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // MainWindow reads apiClient from appState, so we create it once.
         // When appState.apiClient is set by CoreProcessManager, all views
         // automatically re-render — no need to replace the NSHostingView.
-        let contentView = MainWindow(appState: appState)
+        //
+        // A fresh window gets its tab as initial state rather than a
+        // notification: the `onReceive` observers only subscribe once the view
+        // appears, so a notification posted now would be dropped on the floor.
+        let contentView = MainWindow(appState: appState, initialTab: tab ?? .home)
         let hostingView = NSHostingView(rootView: contentView)
 
         let window = NSWindow(
@@ -305,6 +608,86 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
+    /// Present the native Connect Client form (spec 091).
+    ///
+    /// Direct presentation, on purpose: the Add Server path posts a notification
+    /// and then hopes two `asyncAfter` hops land in the right order, which is a
+    /// race dressed as a workflow (research D5). Here the window is built and
+    /// shown in this call.
+    @MainActor @objc func presentConnectClientForm() {
+        if connectClientForm.makeKeyIfPresenting() {
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        // Resolved per call: the form may be opened before the core is up, and
+        // must populate itself once it answers rather than needing a reopen.
+        let appState = self.appState
+        let source = DeferredConnectSource(
+            transportKind: appState.apiClient?.transportKind ?? .unixSocket,
+            resolve: { await MainActor.run { appState.apiClient } }
+        )
+        let model = ConnectClientModel(source: source)
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 520),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Connect Client"
+        window.isReleasedWhenClosed = false
+        window.contentView = NSHostingView(
+            rootView: ConnectClientView(model: model, onClose: { [weak self] in
+                self?.dismissConnectClientForm()
+            }, onRoute: { [weak self] route in
+                // A guard fix ("Require authentication…") opens Settings.
+                self?.appState.navigate(route)
+            })
+        )
+        // A sheet on the main window when there is one — the form belongs to the
+        // app the user is already looking at; a standalone window otherwise,
+        // because a menu-bar app often has no window at all.
+        if let host = mainWindow, host.isVisible {
+            // The host is recorded so that closing IT tears the form down: a
+            // sheet gets no close notification of its own, and beginSheet's
+            // completion never runs when the parent closes underneath it.
+            connectClientForm.adopt(window, model: model, host: host)
+            host.beginSheet(window) { [weak self] _ in
+                self?.connectClientForm.windowWillClose(window)
+            }
+            return
+        }
+
+        connectClientForm.adopt(window, model: model)
+
+        NSApp.setActivationPolicy(.regular)
+        window.center()
+        // Owning the delegate is what makes the red button reach the teardown.
+        window.delegate = self
+        setupMainMenu()
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// Dismiss the form from its own Close button, whichever way it was shown.
+    @MainActor private func dismissConnectClientForm() {
+        connectClientForm.dismiss()
+    }
+
+    /// The "Add Server..." item, built in one place because it is now rendered
+    /// from two: normally as the first entry of the Servers submenu, and at the
+    /// top level only when there are no servers and therefore no submenu.
+    ///
+    /// `target` is set explicitly — an item in a submenu with a nil target would
+    /// fall back to the responder chain, and the tray has none while the menu is
+    /// open, so the click would silently do nothing.
+    func makeAddServerItem() -> NSMenuItem {
+        let item = NSMenuItem(title: "Add Server...", action: #selector(showAddServer), keyEquivalent: "n")
+        item.target = self
+        return item
+    }
+
     @objc private func showAddServer() {
         showMainWindow()
         // First switch to the Servers tab so ServersView is mounted and
@@ -315,7 +698,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         // Then post the showAddServer notification after the tab switch completes
         // and ServersView has fully registered its notification observer.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
-            NotificationCenter.default.post(name: .showAddServer, object: AddServerTab.manual)
+            // FR-062: this generic tray entry point follows the same
+            // catalog-first default as the Servers and Home add actions.
+            NotificationCenter.default.post(name: .showAddServer, object: AddServerTab.catalog)
         }
     }
 
@@ -325,10 +710,28 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
             self?.setupMainMenu()
         }
+        // Spec 092 FR-003. Activation is the natural moment to look: a
+        // drag-install is normally followed within seconds by the user
+        // returning to the app.
+        MainActor.assumeIsolated { refreshReplacedBundleVersion() }
     }
 
     // NSWindowDelegate — hide from Dock when the last managed window closes.
     func windowWillClose(_ notification: Notification) {
+        // The titlebar's red button lands here and nowhere else: without this,
+        // closing the Connect form that way left its model and its 2 s
+        // reachability poll alive inside a retained, invisible window.
+        MainActor.assumeIsolated {
+            connectClientForm.windowWillClose(notification.object as? NSWindow)
+            // A closed Settings window keeps its SwiftUI tree alive
+            // (isReleasedWhenClosed = false), and that hidden SettingsView
+            // would win the race to consume a guard-fix route meant for the
+            // window about to be built. Drop the tree with the window.
+            if let closing = notification.object as? NSWindow, closing === settingsWindow {
+                SettingsWindowRetirement.retire(closing)
+                settingsWindow = nil
+            }
+        }
         // Defer so the closing window has already left the visible set.
         DispatchQueue.main.async { [weak self] in self?.restoreAccessoryIfNoVisibleWindows() }
     }
@@ -428,10 +831,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Core Startup
 
+    /// Bring up the core on app launch.
+    ///
+    /// GH #410: `maySpawn` is the user's "Start Core when app opens" preference.
+    /// When it is off the manager still ATTACHES to a core that is already
+    /// running — it just will not start one, and idles watching for one instead.
     private func startCore() async {
         await notificationService.setup()
+
+        let policy = CoreLaunchPolicy()
         await MainActor.run {
             appState.autoStartEnabled = AutoStartService.isEnabled
+            // NOTE: do NOT assign appState.startCoreOnLaunch here. AppState already
+            // initializes it from CoreLaunchPolicy, and its didSet WRITES to
+            // UserDefaults — so a redundant sync would materialize the key on
+            // every launch, including for users who only set MCPPROXY_TRAY_SKIP_CORE
+            // and never touched the preference.
         }
 
         if SymlinkService.needsSetup() {
@@ -440,12 +855,51 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             }
         }
 
+        // Spec 092 FR-030: bring the legacy staged core copy up to date if it
+        // is provably older than the bundled one. Detached because it can cost
+        // two subprocesses and a ~30 MB copy, and nothing in the startup path
+        // depends on it — this tray resolves the bundled core first (see
+        // StagedCoreBinary's header for the full path analysis).
+        Task.detached(priority: .utility) {
+            StagedCoreBinary.refreshIfStale()
+        }
+
         let manager = CoreProcessManager(
             appState: appState,
-            notificationService: notificationService
+            notificationService: notificationService,
+            socketPath: Self.socketPathOverride
         )
         coreManager = manager
-        await manager.start()
+        await manager.start(maySpawn: policy.maySpawnCore)
+    }
+
+    /// Dev/QA-only escape hatch: point the app at a non-default core socket
+    /// (e.g. an isolated scratch core) without touching ~/.mcpproxy. The
+    /// CoreProcessManager initializer has always taken an injectable
+    /// socketPath "so a test (or a second app)" can use it; this is the
+    /// second-app case. Unset in normal use, so behavior is unchanged.
+    ///
+    /// Nil now means "whatever the instance root says", not "the real
+    /// ~/.mcpproxy": `MCPPROXY_HOME` moves the socket along with everything
+    /// else (GH #936), and `InstancePaths` is where the two are reconciled.
+    static var socketPathOverride: String? {
+        ProcessInfo.processInfo.environment[InstancePaths.socketPathEnvVar]
+    }
+
+    /// Announce a relocated instance once, at launch, and say so loudly if the
+    /// socket it implies cannot be bound.
+    ///
+    /// Both lines are diagnostics for a human running a second instance on
+    /// purpose. The length check in particular: over 103 bytes the bind fails
+    /// silently and the tray simply never finds a core, which costs an hour to
+    /// work out from the outside.
+    static func logInstanceRoot() {
+        guard InstancePaths.isOverridden else { return }
+        NSLog("[MCPProxy] Instance root overridden by %@: %@ (socket %@)",
+              InstancePaths.rootEnvVar, InstancePaths.root.path, InstancePaths.socketPath)
+        if let problem = InstancePaths.socketPathProblem(InstancePaths.socketPath) {
+            NSLog("[MCPProxy] %@", problem)
+        }
     }
 
     private func resolveBundledCoreBinary() -> String? {
@@ -467,13 +921,26 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     // MARK: - Status Icon
 
     /// Update the status bar icon based on app state.
-    /// Always draws the MCPProxy base icon, with a small colored overlay badge
-    /// in the bottom-right corner for stopped or error states.
-    /// - Running OK: plain MCPProxy icon (no overlay)
-    /// - Stopped: small orange stop badge overlay
-    /// - Error: small red exclamation badge overlay
+    ///
+    /// The icon itself is always the plain MCPProxy template glyph. Core states
+    /// ride beside it as a glyph in the button's attributed title; a server
+    /// severity rides ON it as a small corner dot. See
+    /// `TrayStatusIcon.glyph(for:)` for why the badge cannot be composited into
+    /// the image itself, and `TrayBadgeDotView` for how the dot gets its colour
+    /// without breaking the template.
+    ///
+    /// - Running OK: plain MCPProxy icon, nothing else
+    /// - Stopped: ⏹
+    /// - Core error: ⚠
+    /// - Server warn/error diagnostics: a small amber/red dot in the icon's
+    ///   bottom-right corner (F1 — before the audit the menu bar looked
+    ///   identical to all-healthy with five servers down)
+    ///
+    /// F2: every pass also publishes the state as text — accessibility
+    /// description, accessibility label and tooltip — so a screen-reader user
+    /// hears more than "status menu" and the glyphs have a text alternative.
     private func updateStatusIcon() {
-        guard let button = statusItem.button else { return }
+        guard let button = statusItem?.button else { return }
 
         // Always start with the MCPProxy base icon
         let base: NSImage
@@ -487,20 +954,88 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         let isStopped = appState.isStopped
         let hasError: Bool
         if case .error = appState.coreState { hasError = true } else { hasError = false }
+        let badge = TrayStatusIcon.badge(
+            isStopped: isStopped,
+            hasCoreError: hasError,
+            worstDiagnosticSeverity: appState.worstDiagnosticSeverity
+        )
+        // The count must be of the severity being badged, over the same
+        // (enabled, non-exempt) set `worstDiagnosticSeverity` considers.
+        let badgedCount: Int
+        if case .severity(let severity) = badge {
+            badgedCount = appState.diagnosticCount(severity: severity.rawValue)
+        } else {
+            badgedCount = 0
+        }
+        let label = TrayStatusIcon.accessibilityLabel(
+            for: badge,
+            summary: appState.statusSummary,
+            attentionCount: badgedCount
+        )
 
         // Always use template icon (pure black, adapts to light/dark menu bar)
         base.isTemplate = true
         base.size = NSSize(width: 18, height: 18)
+        base.accessibilityDescription = label
         button.image = base
 
-        // Show state indicator as text next to icon (keeps icon as pure template)
-        if isStopped {
-            button.title = "⏹"
-        } else if hasError {
-            button.title = "⚠"
-        } else {
+        // Core states stay as text next to the icon (keeps icon a pure
+        // template). ⏹/⚠ take the menu bar's own label colour so they stay
+        // legible in both appearances.
+        let glyph = TrayStatusIcon.glyph(for: badge)
+        if glyph.isEmpty {
+            button.attributedTitle = NSAttributedString(string: "")
             button.title = ""
+        } else {
+            button.attributedTitle = NSAttributedString(
+                string: " " + glyph,
+                attributes: [.font: NSFont.systemFont(ofSize: 11)])
         }
+
+        // Server severity rides ON the icon as a corner dot.
+        updateBadgeDot(on: button, severity: TrayStatusIcon.dotSeverity(for: badge))
+
+        button.toolTip = label
+        button.setAccessibilityLabel(label)
+    }
+
+    /// Attach / update / remove the corner badge dot on the status item button.
+    ///
+    /// The dot is a SUBVIEW rather than pixels composited into `button.image`
+    /// because that image must stay `isTemplate` to track the light/dark menu
+    /// bar and to invert correctly while the menu is open — and a template
+    /// image is re-rendered monochrome, so a red dot drawn into it would come
+    /// back black. A sibling view is the only place a colour survives all three
+    /// appearances.
+    ///
+    /// The view is created once and reused: rebuilding it on every state poll
+    /// would thrash the button's subview list several times a second.
+    private func updateBadgeDot(on button: NSStatusBarButton, severity: TrayIconSeverity?) {
+        guard let severity else {
+            badgeDotView?.removeFromSuperview()
+            badgeDotView = nil
+            return
+        }
+
+        let dot: TrayBadgeDotView
+        if let existing = badgeDotView, existing.superview === button {
+            dot = existing
+        } else {
+            badgeDotView?.removeFromSuperview()
+            dot = TrayBadgeDotView(frame: .zero)
+            button.addSubview(dot)
+            badgeDotView = dot
+        }
+
+        // The overlay covers the WHOLE button and works out where the dot goes
+        // at draw time, from its own live bounds. A small subview pinned to the
+        // corner is wrong here on two counts — the button resizes
+        // asynchronously (so `bounds` read now can be stale) and the dot is
+        // anchored to the CENTRED icon, which moves at half the rate of the
+        // button's right edge. See TrayBadgeDotView's type comment.
+        dot.frame = button.bounds
+        dot.autoresizingMask = [.width, .height]
+        dot.fillColor = severity == .error ? .systemRed : .systemOrange
     }
 
     // MARK: - Menu Building (AppKit NSMenu — no SwiftUI)
@@ -508,15 +1043,44 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     /// Rebuild the entire NSMenu from current appState.
     /// Clears and rebuilds in-place to avoid replacing the menu object
     /// (which would close an already-open menu and lose the delegate).
-    private func rebuildMenu() {
+    ///
+    /// `@MainActor` because Tray Glance rewrites menu items that are already on
+    /// screen, which is only safe on the thread AppKit draws them on. Every
+    /// caller was already main-thread — the NSMenuDelegate/NSApplicationDelegate
+    /// callbacks are isolated by the SDK and the objectWillChange sink debounces
+    /// on `menuRefreshScheduler` (the main queue) — so this costs nothing today
+    /// and rejects a future off-main caller at compile time (see the note on
+    /// `MenuRebuildGuard.decide(refreshing:from:now:)` for how far that reaches
+    /// under this package's concurrency checking).
+    ///
+    /// Internal rather than private only so `MenuOpenNetworkTests` can drive the
+    /// real open sequence — `menuWillOpen` → rebuild → in-place update →
+    /// `menuDidClose` — instead of re-implementing it beside the code, which is
+    /// how the previous version of that test came to assert nothing at all.
+    @MainActor
+    func rebuildMenu() {
+        // Tray Glance: while the menu is on screen its structure must not move
+        // under the cursor. The rows are rewritten in place; a structural change
+        // is suppressed here and re-run from menuDidClose. Non-glance sections
+        // are frozen for the same reason, and menuWillOpen rebuilds the whole
+        // menu before it is drawn, so the next open is never stale.
+        switch rebuildGuard.decide(refreshing: glance, from: appState) {
+        case .updateInPlace, .deferUntilClose:
+            return
+        case .rebuild:
+            break
+        }
+
+        guard let menuHost else { return }
+
         let menu: NSMenu
-        if let existing = statusItem.menu {
+        if let existing = menuHost.menu {
             existing.removeAllItems()
             menu = existing
         } else {
             menu = NSMenu()
             menu.delegate = self
-            statusItem.menu = menu
+            menuHost.menu = menu
         }
 
         // Header with colored status dot
@@ -534,7 +1098,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         } else if case .error = appState.coreState {
             statusColor = .systemRed
         } else if appState.coreState == .connected {
-            if appState.serversNeedingAttention.isEmpty {
+            if appState.attention.isEmpty {
                 statusColor = .systemGreen
             } else {
                 statusColor = .systemYellow
@@ -578,118 +1142,169 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
         menu.addItem(.separator())
 
-        // Needs Attention — only auth required, connection errors, quarantine (NOT disabled)
-        let attentionServers = appState.serversNeedingAttention
-        if !attentionServers.isEmpty {
-            let header = NSMenuItem(title: "Needs Attention (\(attentionServers.count))", action: nil, keyEquivalent: "")
-            header.isEnabled = false
-            menu.addItem(header)
+        // Tray Glance — recent tool calls, connected clients, 24h histogram.
+        // Hidden entirely when the core is not connected: `items(for:)` returns
+        // [] and this loop adds nothing. GlanceSection keeps references to the
+        // rows it hands back, so a later in-place update writes to these very
+        // items — which is why they are added, not copied.
+        for row in glance.items(for: appState) {
+            menu.addItem(row)
+        }
 
-            for server in attentionServers {
-                let action = server.health?.action ?? ""
-                let summary = server.health?.summary ?? ""
-                let icon = actionIcon(for: action)
+        // Needs Attention (Spec 109 FR-001/FR-003): the ONE needs-attention
+        // list every surface reads, built from `appState.attention` rather
+        // than a tray-local predicate over `ServerStatus`. One collapsed row:
+        // the count is the glanceable fact, the per-item detail is a hover
+        // away. Absent entirely when nothing needs attention.
+        let attentionItems = appState.attention
+        if !attentionItems.isEmpty {
+            let parent = NSMenuItem(title: "Needs Attention (\(attentionItems.count))",
+                                    action: nil, keyEquivalent: "")
+            parent.image = NSImage(systemSymbolName: "exclamationmark.triangle",
+                                   accessibilityDescription: "needs attention")
+            let submenu = NSMenu(title: "Needs Attention")
 
-                let title = "\(server.name) — \(summary.isEmpty ? actionDisplayName(for: action) : summary)"
-                let item = NSMenuItem(title: title, action: #selector(handleAttentionAction(_:)), keyEquivalent: "")
-                item.target = self
-                item.representedObject = server
-                item.image = NSImage(systemSymbolName: icon, accessibilityDescription: action)
-                menu.addItem(item)
+            for attentionItem in attentionItems {
+                let verb = attentionItem.fix.verb
+                let icon = actionIcon(for: verb)
+
+                let fullTitle = attentionItem.summary
+                // Same width discipline as the glance rows: an untruncated core
+                // error must not stretch the whole menu past the chart block.
+                // The full text stays in the tooltip.
+                let title = GlanceFormatting.tailTruncated(
+                    fullTitle, limit: GlanceFormatting.reasonBudget)
+
+                // F4 / Spec 109 FR-005: a row reads as disclosure and nothing
+                // else. The tray runs only `login`, `restart` and `enable`
+                // itself (`TrayServerAction.fromHealthAction`); every other
+                // verb — including `review`, which is NEVER a one-click
+                // approve — opens the location that performs it.
+                let item = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+                item.toolTip = fullTitle
+                // Truncated on screen, spoken in full — tooltips are not read
+                // by VoiceOver (same FR-025 discipline as the glance rows).
+                item.setAccessibilityLabel(fullTitle)
+                item.image = NSImage(systemSymbolName: icon, accessibilityDescription: verb)
+
+                if let action = TrayServerAction.fromHealthAction(verb) {
+                    let rowMenu = NSMenu(title: attentionItem.subject.name)
+
+                    let act = NSMenuItem(title: action.menuTitle,
+                                         action: #selector(performAttentionAction(_:)),
+                                         keyEquivalent: "")
+                    act.target = self
+                    act.representedObject = attentionItem
+                    act.image = NSImage(systemSymbolName: icon, accessibilityDescription: verb)
+                    rowMenu.addItem(act)
+                    rowMenu.addItem(.separator())
+
+                    let details = NSMenuItem(title: "Open Server Details",
+                                             action: #selector(showServerDetailFromMenu(_:)),
+                                             keyEquivalent: "")
+                    details.target = self
+                    details.representedObject = attentionDetailTarget(for: attentionItem)
+                    rowMenu.addItem(details)
+
+                    item.submenu = rowMenu
+                } else if attentionItem.subject.type == "server" {
+                    // Nothing to run — quarantine review, a missing secret, a
+                    // configuration problem. Review opens its own sheet;
+                    // configuration continues to use server detail.
+                    item.action = attentionItem.fix.verb == "review"
+                        ? #selector(showReviewFromMenu(_:))
+                        : #selector(showServerDetailFromMenu(_:))
+                    item.target = self
+                    item.representedObject = attentionItem.fix.verb == "review"
+                        ? attentionItem.subject.name
+                        : attentionDetailTarget(for: attentionItem)
+                }
+                // Spec 109-l: a Spec 108 warning (a client or the binding-guard
+                // setting) opens the screen that fixes it, through the same
+                // mapper Home uses. It only navigates; the tray never mutates
+                // config or a credential. Other client items (client_never_seen)
+                // stay disclosure rows.
+                if attentionItem.subject.type != "server", AttentionWarningAction.isActionable(attentionItem) {
+                    item.action = #selector(performAttentionWarningFromMenu(_:))
+                    item.target = self
+                    item.representedObject = attentionItem
+                }
+                submenu.addItem(item)
             }
+            parent.submenu = submenu
+            menu.addItem(parent)
             menu.addItem(.separator())
         }
 
-        // Quarantine
-        if appState.quarantinedToolsCount > 0 {
-            let quarantineItem = NSMenuItem(
-                title: "\(appState.quarantinedToolsCount) quarantined server(s)",
-                action: nil, keyEquivalent: "")
-            quarantineItem.isEnabled = false
-            quarantineItem.image = NSImage(systemSymbolName: "shield.lefthalf.filled",
-                                            accessibilityDescription: "quarantine")
-            menu.addItem(quarantineItem)
+        let reviewCount = appState.reviewQueueCount
+        if reviewCount > 0 {
+            let item = NSMenuItem(
+                title: "Review Queue… (\(reviewCount))",
+                action: #selector(showReviewQueueFromMenu(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Review Queue")
+            menu.addItem(item)
             menu.addItem(.separator())
         }
+
+        // No standalone quarantine line: "N quarantined server(s)" was a
+        // disabled, grey, non-actionable row, and the same fact is already
+        // carried — actionably — by the Needs Attention submenu above. The menu
+        // had grown long enough to scroll, and an informational row that cannot
+        // be clicked is the first thing to spend.
 
         // Servers — as a SUBMENU (not flat list)
         if !appState.servers.isEmpty {
             let serversMenuItem = NSMenuItem(title: "Servers (\(appState.servers.count))", action: nil, keyEquivalent: "")
             let serversSubmenu = NSMenu()
 
+            // "Add Server..." lives HERE, not at the top level: adding a server
+            // is a servers-menu action, and hoisting it out cost a permanent
+            // top-level row in a menu that had started to scroll. The Cmd+N key
+            // equivalent still works from a submenu — AppKit walks the whole menu
+            // tree when matching key equivalents — and still displays beside the
+            // title once the submenu is open.
+            serversSubmenu.addItem(makeAddServerItem())
+            serversSubmenu.addItem(.separator())
+
+            // F15: 29 flat alphabetical entries — 13 of them disabled, 3
+            // quarantined, interleaved and told apart only by dot colour —
+            // made a submenu taller than the screen. Attention first, then the
+            // servers that are working, then the disabled tail behind one row.
+            let attentionNames = Set(attentionItems.filter { $0.subject.type == "server" }.map(\.subject.name))
+            var grouped: [TrayServerGroup: [ServerStatus]] = [:]
             for server in appState.servers {
-                let item = NSMenuItem(title: server.name, action: nil, keyEquivalent: "")
+                let group = TrayServerGrouping.group(
+                    enabled: server.enabled,
+                    needsAttention: attentionNames.contains(server.name))
+                grouped[group, default: []].append(server)
+            }
 
-                // Status icon: colored dot. The OAuth login-required state is a
-                // calm, actionable affordance (MCP-1822) — `menuStatusNSColor`
-                // gives it the system accent tint instead of the red error dot +
-                // red lock badge that previously framed sign-in as a hard failure.
-                let needsAuth = server.isOAuthLoginRequired
-                let dotColor = server.menuStatusNSColor
+            for server in (grouped[.needsAttention] ?? []) + (grouped[.active] ?? []) {
+                serversSubmenu.addItem(makeServerMenuItem(server))
+            }
 
-                let iconSize = NSSize(width: 16, height: 16)
-                let icon = NSImage(size: iconSize, flipped: false) { _ in
-                    // Draw health dot
-                    let dotRect = NSRect(x: 2, y: 4, width: 8, height: 8)
-                    dotColor.setFill()
-                    NSBezierPath(ovalIn: dotRect).fill()
-                    return true
-                }
-                item.image = icon
-
-                // Per-server submenu with actions
-                let sub = NSMenu()
-                let statusText = server.health?.summary ?? (server.connected ? "Connected" : server.enabled ? "Disconnected" : "Disabled")
-                let statusLine = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
-                statusLine.isEnabled = false
-                sub.addItem(statusLine)
-
-                // Protocol info
-                let protoLine = NSMenuItem(title: "Protocol: \(server.protocol)", action: nil, keyEquivalent: "")
-                protoLine.isEnabled = false
-                sub.addItem(protoLine)
-
-                sub.addItem(.separator())
-
-                // OAuth sign-in — calm, actionable affordance shown first when
-                // login is required (MCP-1822), not error framing.
-                if needsAuth {
-                    let login = NSMenuItem(title: "Sign in", action: #selector(loginServer(_:)), keyEquivalent: "")
-                    login.target = self
-                    login.representedObject = server.name
-                    login.image = NSImage(systemSymbolName: "person.badge.key", accessibilityDescription: "sign in")
-                    sub.addItem(login)
-                    sub.addItem(.separator())
-                }
-
-                if server.enabled {
-                    let disableLabel = server.protocol == "stdio" ? "Stop" : "Disable"
-                    let disable = NSMenuItem(title: disableLabel, action: #selector(disableServer(_:)), keyEquivalent: "")
-                    disable.target = self
-                    disable.representedObject = server.name
-                    sub.addItem(disable)
+            let disabledServers = grouped[.disabled] ?? []
+            if !disabledServers.isEmpty {
+                if disabledServers.count >= TrayServerGrouping.disabledFoldThreshold {
+                    let fold = NSMenuItem(title: "Disabled (\(disabledServers.count))",
+                                          action: nil, keyEquivalent: "")
+                    let foldMenu = NSMenu(title: "Disabled")
+                    for server in disabledServers {
+                        foldMenu.addItem(makeServerMenuItem(server))
+                    }
+                    fold.submenu = foldMenu
+                    serversSubmenu.addItem(.separator())
+                    serversSubmenu.addItem(fold)
                 } else {
-                    let enableLabel = server.protocol == "stdio" ? "Start" : "Enable"
-                    let enable = NSMenuItem(title: enableLabel, action: #selector(enableServer(_:)), keyEquivalent: "")
-                    enable.target = self
-                    enable.representedObject = server.name
-                    sub.addItem(enable)
+                    // Below the fold threshold the extra click costs more than
+                    // the rows it saves.
+                    for server in disabledServers {
+                        serversSubmenu.addItem(makeServerMenuItem(server))
+                    }
                 }
-
-                let restart = NSMenuItem(title: "Restart", action: #selector(restartServer(_:)), keyEquivalent: "")
-                restart.target = self
-                restart.representedObject = server.name
-                sub.addItem(restart)
-
-                sub.addItem(.separator())
-
-                let logs = NSMenuItem(title: "View Logs", action: #selector(viewServerLogs(_:)), keyEquivalent: "")
-                logs.target = self
-                logs.representedObject = server.name
-                sub.addItem(logs)
-
-                item.submenu = sub
-                serversSubmenu.addItem(item)
             }
 
             serversMenuItem.submenu = serversSubmenu
@@ -697,12 +1312,51 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
             menu.addItem(.separator())
         }
 
-        // Actions
-        let addServer = NSMenuItem(title: "Add Server...", action: #selector(showAddServer), keyEquivalent: "n")
-        addServer.target = self
-        menu.addItem(addServer)
+        // Clients submenu (Spec 108-k FR-048). Replaces the v2 "Profile:"
+        // switcher: a profile is now a property of a CLIENT, not of the whole
+        // instance. One row per client that holds a client credential or is
+        // connected (`name — profile 🔒`); its submenu picks the profile and
+        // locks or unlocks it. A client without a credential offers only the
+        // way to get one. The rows are built by `TrayClientsMenu` (pure).
+        let clientRows = TrayClientsMenu.build(
+            clients: appState.clients, profiles: appState.profiles,
+            knownServers: Set(appState.servers.map(\.name)))
+        if !clientRows.isEmpty {
+            let clientsMenuItem = NSMenuItem(title: TrayClientsMenu.title, action: nil, keyEquivalent: "")
+            let clientsSubmenu = NSMenu()
+            for row in clientRows {
+                let rowItem = NSMenuItem(title: row.title, action: nil, keyEquivalent: "")
+                let rowMenu = TrayClientsMenu.render(
+                    row, target: self,
+                    profileAction: #selector(setClientProfile(_:)),
+                    lockAction: #selector(setClientLock(_:)),
+                    upgradeAction: #selector(upgradeClientCredential(_:)))
+                rowItem.submenu = rowMenu
+                clientsSubmenu.addItem(rowItem)
+            }
+            clientsMenuItem.submenu = clientsSubmenu
+            menu.addItem(clientsMenuItem)
+            menu.addItem(.separator())
+        }
 
-        let openApp = NSMenuItem(title: "Open MCPProxy...", action: #selector(openMainWindow), keyEquivalent: "")
+        // Actions
+        //
+        // "Add Server..." normally lives inside the Servers submenu. The one
+        // exception is a proxy with no servers at all: there is no Servers
+        // submenu to hold it then, and the very user who most needs to add one
+        // would be left without a way to do it from the tray.
+        if appState.servers.isEmpty {
+            menu.addItem(makeAddServerItem())
+        }
+
+        // Spec 091 FR-001: the native connect journey, beside Add Server. The
+        // item is built by its router so the item and its routing are tested
+        // together (a nil target would make it silently do nothing).
+        menu.addItem(ConnectClientMenuRouter.shared.makeMenuItem())
+
+        // F9: "Open MCPProxy..." and "Open Web UI" never said that one is a
+        // native window and the other a browser tab.
+        let openApp = NSMenuItem(title: "Open MCPProxy Window", action: #selector(openMainWindow), keyEquivalent: "")
         openApp.target = self
         menu.addItem(openApp)
 
@@ -710,16 +1364,22 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let webUI = NSMenuItem(title: "Open Web UI", action: #selector(openWebUI), keyEquivalent: "")
+        let webUI = NSMenuItem(title: "Open Web UI in Browser", action: #selector(openWebUI), keyEquivalent: "")
         webUI.target = self
         menu.addItem(webUI)
 
         menu.addItem(.separator())
 
-        // Settings
-        let autoStart = NSMenuItem(title: "Run at Startup", action: #selector(toggleAutoStart(_:)), keyEquivalent: "")
+        // F9: the same AutoStartService setting is called "Launch MCPProxy at
+        // login" in Settings → App. One setting, one name — and a tooltip that
+        // separates it from "Start MCPProxy Core when the app opens", the
+        // genuinely confusable neighbour one row from "Start/Stop MCPProxy
+        // Core" (which means *now*, not at launch).
+        let autoStart = NSMenuItem(title: "Launch at Login", action: #selector(toggleAutoStart(_:)), keyEquivalent: "")
         autoStart.target = self
         autoStart.state = appState.autoStartEnabled ? .on : .off
+        autoStart.toolTip = "Starts the MCPProxy app when you log in. Whether it also starts the core is "
+            + "“Start MCPProxy Core when the app opens” in Settings → App."
         menu.addItem(autoStart)
 
         let checkUpdates = NSMenuItem(title: "Check for Updates", action: #selector(checkForUpdates), keyEquivalent: "")
@@ -727,49 +1387,306 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         checkUpdates.isEnabled = updateService.canCheckForUpdates
         menu.addItem(checkUpdates)
 
-        // Show update from either appState (from core /api/v1/info) or UpdateService (direct
-        // GitHub check). Prefer whichever source advertises the newer version so a stale
-        // core cache never masks a freshly-published release.
-        let updateVersion: String? = {
-            switch (appState.updateAvailable, updateService.latestVersion) {
-            case let (.some(a), .some(b)):
-                return UpdateService.compareSemver(a, b) >= 0 ? a : b
-            case let (.some(a), .none):
-                return a
-            case let (.none, .some(b)):
-                return b
-            case (.none, .none):
-                return nil
+        // Spec 079 FR-002: the core-rendered "N releases / M weeks behind"
+        // clause, prefixed onto whichever update tooltip is built below.
+        //
+        // The delta goes in the TOOLTIP, not the title: Spec 092 FR-010 fixes
+        // the exact title shape, and a menu-bar row that grows to "Update
+        // v0.62.0 — ready to restart? — 8 releases / ~14 weeks behind" stops
+        // being scannable. The string is printed verbatim from the core so
+        // this tray cannot word the delta differently from status, doctor,
+        // the Go tray and the Web UI banner.
+        func behindPrefix() -> String {
+            guard let behind = appState.updateBehindSummary, !behind.isEmpty else { return "" }
+            return "You are \(behind). "
+        }
+
+        // Spec 092 FR-017: exactly one source of truth owns the update item.
+        // The core's cached result (`appState.updateAvailable`) is merged into
+        // the service's legacy version first, so the resolver sees ONE legacy
+        // input and one feed input — the two used to be rendered independently,
+        // which is how a single release produced two competing menu items.
+        updateService.setCoreReportedVersion(appState.updateAvailable)
+        for entry in updateService.menuEntries {
+            switch entry {
+            case .oneClick(let version):
+                // FR-010's exact shape: gentle, and honest about what happens.
+                let item = NSMenuItem(
+                    title: "Update \(version) — ready to restart?",
+                    action: #selector(installFeedUpdate), keyEquivalent: ""
+                )
+                item.target = self
+                item.toolTip = behindPrefix() + "Downloads and verifies the update, stops the core, "
+                    + "replaces MCPProxy and relaunches it."
+                menu.addItem(item)
+
+            case .browserGuidance(let version):
+                let item = NSMenuItem(
+                    title: "Update available: v\(version) — Download",
+                    action: #selector(openDownloadPage), keyEquivalent: ""
+                )
+                item.target = self
+                item.toolTip = behindPrefix() + "Opens the download page. This version cannot be installed "
+                    + "from here."
+                menu.addItem(item)
+
+            case .blocked(let reason):
+                // FR-016: never silent. The title says it, the action explains.
+                let item = NSMenuItem(
+                    title: reason.menuTitle,
+                    action: #selector(showUpdateBlockedReason), keyEquivalent: ""
+                )
+                item.target = self
+                item.toolTip = reason.explanation
+                menu.addItem(item)
             }
-        }()
-        if let available = updateVersion {
-            let updateNote = NSMenuItem(title: "Update available: v\(available)", action: #selector(openDownloadPage), keyEquivalent: "")
-            updateNote.target = self
-            menu.addItem(updateNote)
+        }
+
+        // Spec 092 FR-003: the app on disk is newer than the one running — a
+        // drag-install landed underneath us. Offered, never forced.
+        if let replacement = appState.replacedBundleVersion {
+            let relaunch = NSMenuItem(
+                title: "MCPProxy was updated to v\(replacement) — Relaunch",
+                action: #selector(relaunchIntoReplacedBundle), keyEquivalent: ""
+            )
+            relaunch.target = self
+            relaunch.toolTip = "Stops the core, starts the newly installed app, and quits this one."
+            menu.addItem(relaunch)
+        }
+
+        // Spec 092 FR-002: an older core is running that the tray is not
+        // allowed to stop on its own. Activating this item IS the consent.
+        if let stale = appState.staleCorePrompt {
+            let restart = NSMenuItem(
+                title: stale.menuTitle,
+                action: #selector(restartStaleCore), keyEquivalent: ""
+            )
+            restart.target = self
+            restart.toolTip = stale.pid == nil
+                ? "This core cannot be stopped from here — shows how to stop it by hand."
+                : "Stops the old core (PID \(stale.pid!)) and starts the bundled one."
+            menu.addItem(restart)
         }
 
         menu.addItem(.separator())
 
         // Stop / Start
+        // No icons on the lifecycle commands: every other command in the
+        // bottom half of the menu (Add Server…, Settings…, Run at Startup,
+        // Quit) is a bare title, and a per-item image indents only its own
+        // title — an icon here put "Stop MCPProxy Core" on a different
+        // leading edge from its neighbours.
         if appState.isStopped {
             let start = NSMenuItem(title: "Start MCPProxy Core", action: #selector(startCoreAction), keyEquivalent: "")
             start.target = self
-            start.image = NSImage(systemSymbolName: "play.circle.fill", accessibilityDescription: "start")
-            start.image?.size = NSSize(width: 18, height: 18)
             menu.addItem(start)
         } else if appState.coreState == .connected || appState.coreState.isOperational {
-            let stop = NSMenuItem(title: "Stop MCPProxy Core", action: #selector(stopCore), keyEquivalent: "")
+            // A core we only attached to cannot be stopped by us — we hold no PID
+            // for it and the core has no shutdown endpoint. Say "Disconnect", and
+            // mean it (#410).
+            let ownership = appState.ownership
+            let stop = NSMenuItem(title: ownership.stopActionTitle, action: #selector(stopCore), keyEquivalent: "")
             stop.target = self
-            stop.image = NSImage(systemSymbolName: "stop.circle.fill", accessibilityDescription: "stop")
-            stop.image?.size = NSSize(width: 18, height: 18)
+            if !ownership.shouldTerminateOnShutdown {
+                stop.toolTip = "This core was started outside MCPProxy. Disconnecting leaves it running."
+            }
             menu.addItem(stop)
         }
 
+        // Help / project links (discussion #948): a running-app user must always
+        // have a way back to the homepage, docs, and issue tracker.
+        menu.addItem(.separator())
+
+        let docsItem = NSMenuItem(title: "Documentation", action: #selector(openDocumentation), keyEquivalent: "")
+        docsItem.target = self
+        menu.addItem(docsItem)
+
+        // No "Report an Issue…" item: the menu had grown long enough to scroll
+        // on a normal display, and the tracker is still reachable through the
+        // GitHub link in the About panel's credits block.
+
+        let aboutItem = NSMenuItem(title: "About MCPProxy", action: #selector(showAboutPanel), keyEquivalent: "")
+        aboutItem.target = self
+        menu.addItem(aboutItem)
+
         // Quit
+        menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit MCPProxy", action: #selector(quitApp), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
 
+    }
+
+    /// One row of the Servers submenu: the server's name, a health dot, and a
+    /// submenu of the actions that apply to it.
+    ///
+    /// Internal so the menu tests can build a row without walking the whole
+    /// menu, and because F15's grouping calls it from three places.
+    @MainActor
+    func makeServerMenuItem(_ server: ServerStatus) -> NSMenuItem {
+        let item = NSMenuItem(title: server.name, action: nil, keyEquivalent: "")
+
+        // Status icon: colored dot. The OAuth login-required state is a
+        // calm, actionable affordance (MCP-1822) — `menuStatusNSColor`
+        // gives it the system accent tint instead of the red error dot +
+        // red lock badge that previously framed sign-in as a hard failure.
+        let dotColor = server.menuStatusNSColor
+
+        let iconSize = NSSize(width: 16, height: 16)
+        let icon = NSImage(size: iconSize, flipped: false) { _ in
+            // Draw health dot
+            let dotRect = NSRect(x: 2, y: 4, width: 8, height: 8)
+            dotColor.setFill()
+            NSBezierPath(ovalIn: dotRect).fill()
+            return true
+        }
+        item.image = icon
+
+        // Per-server submenu with actions
+        let sub = NSMenu()
+        // Spec 109 T049: the same status text the Servers row renders.
+        let statusText = ServerStatusLinePresentation.text(for: server)
+        let statusLine = NSMenuItem(title: statusText, action: nil, keyEquivalent: "")
+        statusLine.isEnabled = false
+        sub.addItem(statusLine)
+
+        // Protocol info — display-normalised (F12). `streamable-http` beside
+        // `http` and `sse` is three wire spellings of one transport family.
+        let protoLine = NSMenuItem(title: "Protocol: \(TrayProtocolDisplay.label(for: server.protocol))",
+                                   action: nil, keyEquivalent: "")
+        protoLine.isEnabled = false
+        sub.addItem(protoLine)
+
+        sub.addItem(.separator())
+
+        // Spec 109 FR-014: the ONE primary action, from the same pure mapping
+        // and label table (`TrayPrimaryPresentation.primaryItem`,
+        // `HealthStatus.actionLabels`) the Servers row uses for the exact
+        // same `actions[0]` value — replaces the old ad hoc "needsAuth" /
+        // "quarantined" special cases, which showed Sign-in and Review but
+        // nothing at all for a missing secret, a bad config or a bad URL
+        // (FR-014's "never a missing item"). `login`/`restart`/`enable` run
+        // in place; every other value opens the screen that performs it —
+        // never a one-click approve (FR-005).
+        let primary = TrayPrimaryPresentation.primaryItem(for: server)
+        var primaryOpensReview = false
+        if let primary {
+            let item = NSMenuItem(title: primary.label, action: nil, keyEquivalent: "")
+            item.target = self
+            switch primary.kind {
+            case .execute(let action):
+                item.representedObject = server.name
+                switch action {
+                case .login: item.action = #selector(loginServer(_:))
+                case .restart: item.action = #selector(restartServer(_:))
+                case .enable: item.action = #selector(enableServer(_:))
+                case .disable, .approve: item.action = nil // never produced for this kind
+                }
+                item.image = NSImage(systemSymbolName: primaryExecuteSymbol(action), accessibilityDescription: primary.label)
+            case .open(let destination):
+                item.action = destination == .review
+                    ? #selector(showReviewFromMenu(_:))
+                    : #selector(showServerDetailFromMenu(_:))
+                switch destination {
+                case .review:
+                    item.representedObject = server.name
+                    primaryOpensReview = true
+                case .config:
+                    // FR-014 (review round 3, F-FR014-focus): `primary.focusField`
+                    // is non-nil only for `edit_url` — every other `.config`
+                    // destination (`set_secret`, `configure`) opens with no
+                    // field focused, same as before.
+                    item.representedObject = ServerDetailTarget(serverName: server.name, tab: .config,
+                                                                 focusField: primary.focusField)
+                case .logs:
+                    item.representedObject = ServerDetailTarget(serverName: server.name, tab: .logs)
+                }
+                item.image = NSImage(systemSymbolName: primaryOpenSymbol(destination), accessibilityDescription: primary.label)
+            }
+            sub.addItem(item)
+            sub.addItem(.separator())
+        }
+
+        // Review round 1 (109-e high finding): `actions[0]` alone drives the
+        // primary item above, so a server that is BOTH quarantined AND needs
+        // OAuth sign-in (FR-010: `actions = ["login", "approve"]`) shows only
+        // "Sign in" there — "approve" never surfaces. Gating this row
+        // independently on `server.quarantined`, the same way
+        // ServersView.swift's `contextMenuActions` does for the Servers-row
+        // context menu, restores the one thing a quarantined server needs
+        // (the old unconditional `if server.quarantined { show Review }`
+        // this replaced) without reintroducing a second primary button.
+        if server.quarantined && !primaryOpensReview {
+            let review = NSMenuItem(title: HealthStatus.actionLabels["approve"] ?? "Review",
+                                    action: #selector(showReviewFromMenu(_:)), keyEquivalent: "")
+            review.target = self
+            review.representedObject = server.name
+            review.image = NSImage(systemSymbolName: "checkmark.shield", accessibilityDescription: "Review")
+            sub.addItem(review)
+            sub.addItem(.separator())
+        }
+
+        // F7: one config write, one verb pair. `Stop`/`Start` for stdio and
+        // `Disable`/`Enable` for everything else put two mental models —
+        // transient process control vs. persistent admin state — on the same
+        // `enabled` flag, and left submenus reading "Disabled … Start".
+        //
+        // Review round 2 (109-e medium finding): these three rows used to be
+        // unconditional, so whichever one the primary item above already
+        // performs (Enable/Restart/View logs) rendered TWICE in the same
+        // submenu. `TraySecondaryPresentation.items` drops the one the
+        // primary already covers.
+        let secondaryActions = TraySecondaryPresentation.items(for: server)
+        for secondary in secondaryActions {
+            switch secondary {
+            case .toggleEnabled(let enable):
+                let action: TrayServerAction = enable ? .enable : .disable
+                let item = NSMenuItem(title: action.menuTitle,
+                                      action: enable ? #selector(enableServer(_:)) : #selector(disableServer(_:)),
+                                      keyEquivalent: "")
+                item.target = self
+                item.representedObject = server.name
+                sub.addItem(item)
+            case .restart:
+                let item = NSMenuItem(title: TrayServerAction.restart.menuTitle,
+                                      action: #selector(restartServer(_:)), keyEquivalent: "")
+                item.target = self
+                item.representedObject = server.name
+                sub.addItem(item)
+            case .viewLogs:
+                continue // added below, after the separator
+            }
+        }
+        sub.addItem(.separator())
+        if secondaryActions.contains(.viewLogs) {
+            let logs = NSMenuItem(title: "View Logs", action: #selector(viewServerLogs(_:)), keyEquivalent: "")
+            logs.target = self
+            logs.representedObject = server.name
+            sub.addItem(logs)
+        }
+
+        item.submenu = sub
+        return item
+    }
+
+    /// SF Symbol for a primary item that RUNS in place (Spec 109 FR-014).
+    private func primaryExecuteSymbol(_ action: TrayServerAction) -> String {
+        switch action {
+        case .login: return "person.badge.key"
+        case .restart: return "arrow.clockwise"
+        case .enable: return "play.fill"
+        case .disable: return "stop.fill"
+        case .approve: return "checkmark.shield"
+        }
+    }
+
+    /// SF Symbol for a primary item that OPENS a screen (Spec 109 FR-014).
+    private func primaryOpenSymbol(_ destination: TrayPrimaryDestination) -> String {
+        switch destination {
+        case .review: return "checkmark.shield"
+        case .config: return "gearshape"
+        case .logs: return "doc.text"
+        }
     }
 
     // MARK: - Menu Actions
@@ -779,11 +1696,14 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     }
 
     @objc private func stopCore() {
-        NSLog("[MCPProxy] stopCore: stopping core")
+        // Only a core WE spawned gets signalled. For an attached core this is a
+        // disconnect: tear down our clients and leave the core alone (#410).
+        let ownsCore = appState.ownership.shouldTerminateOnShutdown
+        NSLog("[MCPProxy] stopCore: ownership=%@", ownsCore ? "tray-managed" : "external-attached")
         appState.isStopped = true
 
         // Kill the core process directly — most reliable method
-        let proc = coreManager?.managedProcess
+        let proc = ownsCore ? coreManager?.managedProcess : nil
         NSLog("[MCPProxy] stopCore: managedProcess=%@, isRunning=%@",
               proc != nil ? "exists" : "nil",
               proc?.isRunning == true ? "yes" : "no")
@@ -811,6 +1731,10 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
                 appState.totalServers = 0
                 appState.totalTools = 0
                 appState.serversLoaded = false
+                appState.profiles = []
+                appState.anonymousProfile = ""
+                appState.clients = []
+                appState.clientWarnings = []
                 appState.apiClient = nil
                 updateStatusIcon()
                 rebuildMenu()
@@ -821,12 +1745,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
     @objc private func startCoreAction() {
         Task {
             appState.isStopped = false
+            // Retire the outgoing manager first. In idle mode it is still polling
+            // for a core to attach to, and it would otherwise find the core the
+            // NEW manager is about to spawn and label it "external" (#410).
+            await coreManager?.supersede()
+
             let manager = CoreProcessManager(
                 appState: appState,
-                notificationService: notificationService
+                notificationService: notificationService,
+                socketPath: Self.socketPathOverride
             )
             coreManager = manager
-            await manager.start()
+            // An explicit "Start MCPProxy Core" always spawns, whatever the
+            // autostart preference says — the preference governs app LAUNCH, and
+            // the user is asking for a core right now (#410).
+            await manager.start(maySpawn: true)
             updateStatusIcon()
         }
     }
@@ -836,64 +1769,322 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         startCoreAction()
     }
 
-    @objc private func handleAttentionAction(_ sender: NSMenuItem) {
-        guard let server = sender.representedObject as? ServerStatus else { return }
-        let action = server.health?.action ?? ""
+    // MARK: - Spec 092 Phase 0: superseding stale versions (#957)
 
-        // Perform the API action silently (if any)
-        if !action.isEmpty {
-            Task {
-                switch action {
-                case "login": try? await appState.apiClient?.loginServer(server.id)
-                case "restart": try? await appState.apiClient?.restartServer(server.id)
-                case "enable": try? await appState.apiClient?.enableServer(server.id)
-                default: break
+    /// Re-read the app bundle from disk and publish whether it has been
+    /// replaced by a newer version (FR-003).
+    ///
+    /// Cheap (one small plist read) and idempotent, which is what lets it run
+    /// on both triggers: every activation — the drag-install is usually
+    /// followed immediately by clicking the menu bar — and a slow timer for the
+    /// user who never activates the app at all.
+    @MainActor
+    private func refreshReplacedBundleVersion() {
+        let replacement = BundleUpdateWatcher.replacementVersion()
+        guard appState.replacedBundleVersion != replacement else { return }
+        if let replacement {
+            NSLog("[MCPProxy] The app bundle on disk is v%@ — this process is v%@",
+                  replacement, BundledCore.appVersion() ?? "unknown")
+            AppLifecycle.shared.note("app bundle on disk replaced by v\(replacement)")
+        }
+        appState.replacedBundleVersion = replacement
+    }
+
+    /// FR-003: stop the core we manage, launch the newly installed bundle, and
+    /// get out of its way.
+    ///
+    /// `open -n` rather than `open`: without it macOS activates THIS process —
+    /// the stale one — which is exactly the reported symptom. Terminating comes
+    /// last and only after the core is down, so the new instance does not race
+    /// us for the socket and the BBolt lock.
+    @objc private func relaunchIntoReplacedBundle() {
+        let bundlePath = Bundle.main.bundleURL.path
+        Task { [weak self] in
+            guard let self else { return }
+            AppLifecycle.shared.note("relaunching into the replaced bundle at \(bundlePath)")
+            await self.coreManager?.shutdown()
+
+            await MainActor.run {
+                let launcher = Process()
+                launcher.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                launcher.arguments = ["-n", bundlePath]
+                do {
+                    try launcher.run()
+                } catch {
+                    NSLog("[MCPProxy] Could not launch %@: %@", bundlePath, error.localizedDescription)
+                    self.presentAlert(
+                        title: "Could not start the new version",
+                        message: "Open \(bundlePath) manually to finish the upgrade.\n\n"
+                            + error.localizedDescription
+                    )
+                    return
                 }
+                NSApp.terminate(nil)
             }
         }
+    }
 
-        // Always navigate to the server's detail page
+    /// FR-002: the user consented to stopping a core the tray did not start.
+    ///
+    /// When there is no pid to act on — a core too old to report one — the
+    /// action must still do something honest, so it explains how to stop the
+    /// core by hand rather than failing silently.
+    @objc private func restartStaleCore() {
+        guard let prompt = appState.staleCorePrompt else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            let acted = await self.coreManager?.supersedeWithConsent() ?? false
+            guard !acted else { return }
+            await MainActor.run { self.presentStaleCoreInstructions(prompt) }
+        }
+    }
+
+    @MainActor
+    private func presentStaleCoreInstructions(_ prompt: StaleCorePrompt) {
+        let pidHint = prompt.pid.map { "\n\nIts process id is \($0)." } ?? ""
+        presentAlert(
+            title: "Stop the old core to finish upgrading",
+            message: "MCPProxy v\(prompt.runningVersion) is still running and this app "
+                + "bundles v\(prompt.bundledVersion). MCPProxy could not stop that process "
+                + "automatically — it was started outside the app (a terminal, launchd, or "
+                + "`brew services`), so stopping it is up to whoever started it."
+                + pidHint
+                + "\n\nQuit it there, then choose “Start MCPProxy Core” from this menu."
+        )
+    }
+
+    @MainActor
+    private func presentAlert(title: String, message: String) {
+        let alert = NSAlert()
+        alert.messageText = title
+        alert.informativeText = message
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+
+    /// Spec 109-l: a Spec 108 warning row (a client or the binding-guard
+    /// setting). Navigates to the fix's screen and brings the main window
+    /// forward; a Settings route opens its own window (`navigate` posts
+    /// `openSettings`). Never a mutation.
+    @objc private func performAttentionWarningFromMenu(_ sender: NSMenuItem) {
+        guard let item = sender.representedObject as? AttentionItem,
+              let route = AttentionWarningAction.route(for: item) else { return }
+        appState.navigate(route)
+        if let sidebar = route.sidebarItem {
+            showMainWindow(tab: sidebar)
+        }
+    }
+
+    /// Run the remediation a "Needs Attention" row offers — from the row's own
+    /// submenu, under its own verb, never as a side effect of clicking the row
+    /// (F4).
+    @MainActor
+    @objc private func performAttentionAction(_ sender: NSMenuItem) {
+        guard let item = sender.representedObject as? AttentionItem,
+              let verb = TrayServerAction.fromHealthAction(item.fix.verb) else { return }
+        perform(verb, on: item.subject.name, id: item.subject.id)
+    }
+
+    /// Navigate to a server's detail page. The represented object is the
+    /// server name or a typed target carrying the tab from `fix.target` and
+    /// the endpoint focus required by `edit_url` (Spec 109 FR-014).
+    private func attentionDetailTarget(for item: AttentionItem) -> ServerDetailTarget {
+        let tabName = URLComponents(string: item.fix.target)?.queryItems?
+            .first(where: { $0.name == "tab" })?.value?.lowercased()
+        let tab: ServerDetailTab
+        switch tabName {
+        case "config": tab = .config
+        case "logs": tab = .logs
+        default: tab = .tools
+        }
+        let focusField: TrayConfigFocusField? = item.fix.verb == "edit_url" ? .endpoint : nil
+        return ServerDetailTarget(serverName: item.subject.name, tab: tab, focusField: focusField)
+    }
+
+    @objc private func showServerDetailFromMenu(_ sender: NSMenuItem) {
+        let target: Any
+        if let detailTarget = sender.representedObject as? ServerDetailTarget {
+            target = detailTarget
+        } else if let name = sender.representedObject as? String {
+            // Older menu paths intentionally keep the default Tools tab.
+            target = name
+        } else {
+            return
+        }
         showMainWindow()
         NotificationCenter.default.post(name: .switchToServers, object: nil)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            NotificationCenter.default.post(name: .showServerDetail, object: server.name)
+            NotificationCenter.default.post(name: .showServerDetail, object: target)
         }
     }
 
+    /// Review navigation must always reach the informed-review sheet. Tray
+    /// actions pass only a server name, so there is no approval path here.
+    @objc private func showReviewFromMenu(_ sender: NSMenuItem) {
+        guard let serverName = sender.representedObject as? String else { return }
+        showMainWindow(tab: .review)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NotificationCenter.default.post(name: .showReview, object: serverName)
+        }
+    }
+
+    @objc private func showReviewQueueFromMenu(_ sender: NSMenuItem) {
+        showMainWindow(tab: .review)
+    }
+
+    /// F3: the one place a per-server menu action is dispatched.
+    ///
+    /// Every one of these used to be `try? await …`, so a restart that 500s
+    /// was indistinguishable from one that worked — the menu simply closed.
+    /// The Web UI raises a toast and Server Detail shows an inline error; the
+    /// tray was the only surface that lied by omission. Failures are now
+    /// user-visible, and the alert is presented only on failure so the happy
+    /// path stays silent.
+    @MainActor
+    private func perform(_ action: TrayServerAction, on name: String, id: String) {
+        guard let client = appState.apiClient else {
+            presentServerActionFailure(action, server: name, error: TrayActionError.noCore)
+            return
+        }
+        Task { [weak self] in
+            do {
+                switch action {
+                case .enable: try await client.enableServer(id)
+                case .disable: try await client.disableServer(id)
+                case .restart: try await client.restartServer(id)
+                case .login: try await client.loginServer(id)
+                case .approve: return  // review is a human decision — never dispatched
+                }
+                NSLog("[MCPProxy] %@ %@: ok", action.rawValue, name)
+            } catch {
+                NSLog("[MCPProxy] %@ %@ failed: %@", action.rawValue, name, error.localizedDescription)
+                await MainActor.run {
+                    self?.presentServerActionFailure(action, server: name, error: error)
+                }
+            }
+        }
+    }
+
+    /// A failed menu action, said out loud. Modal because the user just asked
+    /// for this and is still looking at the menu bar — and because a
+    /// UNUserNotification can be silenced by Focus, which would put us back
+    /// where F3 started.
+    @MainActor
+    private func presentServerActionFailure(_ action: TrayServerAction, server: String, error: Error) {
+        let alert = NSAlert()
+        alert.messageText = TrayServerActionFailure.title(action: action, server: server)
+        alert.informativeText = TrayServerActionFailure.message(action: action, server: server, error: error)
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Open Server Details")
+        alert.addButton(withTitle: "Report an Issue")
+        alert.addButton(withTitle: "Dismiss")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            showMainWindow()
+            NotificationCenter.default.post(name: .switchToServers, object: nil)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                NotificationCenter.default.post(name: .showServerDetail, object: server)
+            }
+        case .alertSecondButtonReturn:
+            NSWorkspace.shared.open(ProjectLinks.issues)
+        default:
+            break
+        }
+    }
+
+    /// Failure modes the tray itself knows about, before any request is made.
+    enum TrayActionError: LocalizedError {
+        case noCore
+        var errorDescription: String? {
+            switch self {
+            case .noCore:
+                return "MCPProxy is not connected to a running core."
+            }
+        }
+    }
+
+    @MainActor
     @objc private func enableServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        Task { try? await appState.apiClient?.enableServer(id) }
+        perform(.enable, on: id, id: id)
     }
 
+    @MainActor
     @objc private func disableServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        Task { try? await appState.apiClient?.disableServer(id) }
+        perform(.disable, on: id, id: id)
     }
 
+    @MainActor
     @objc private func restartServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
-        Task { try? await appState.apiClient?.restartServer(id) }
+        perform(.restart, on: id, id: id)
     }
 
+    /// Bind a client to the chosen profile (FR-026). The mode is omitted so the
+    /// credential keeps its own (except All servers, which is switchable).
+    @objc private func setClientProfile(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? TrayClientAction, let profile = action.profile else { return }
+        applyClientBinding(clientId: action.clientId, profile: profile, mode: nil)
+    }
+
+    /// Lock or unlock a client at its current profile.
+    @objc private func setClientLock(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? TrayClientAction, let mode = action.mode else { return }
+        let current = appState.clients.first { $0.id == action.clientId }?.boundProfile ?? ""
+        applyClientBinding(clientId: action.clientId, profile: current, mode: mode)
+    }
+
+    /// A client without a client credential: open the connect sheet on it (the
+    /// upgrade is a connect with a profile).
+    @objc private func upgradeClientCredential(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? TrayClientAction else { return }
+        appState.navigate(.connectSheet(clientId: action.clientId))
+        showMainWindow(tab: .clients)
+    }
+
+    private func applyClientBinding(clientId: String, profile: String, mode: BindingMode?) {
+        Task { @MainActor in
+            guard let apiClient = appState.apiClient else { return }
+            do {
+                _ = try await apiClient.setBinding(clientId, profile: profile, mode: mode)
+                await coreManager?.refreshClients()
+            } catch {
+                presentBindingFailure(error)
+            }
+        }
+    }
+
+    /// A refused binding change is shown, never swallowed: the guard's text
+    /// says why, and "Open Settings…" goes to the setting that fixes it.
+    private func presentBindingFailure(_ error: Error) {
+        let alert = NSAlert()
+        alert.messageText = "Could not change the client’s profile"
+        alert.informativeText = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        alert.alertStyle = .warning
+        var opensSettings = false
+        if case .service(_, let body) = (error as? APIClientError), body.isGuardRefusal {
+            alert.addButton(withTitle: "Open Settings…")
+            opensSettings = true
+        }
+        alert.addButton(withTitle: "Cancel")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn, opensSettings {
+            appState.navigate(.settings(.requireMCPAuth))
+        }
+    }
+
+    @MainActor
     @objc private func loginServer(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else {
             NSLog("[MCPProxy] loginServer: no server ID in representedObject")
             return
         }
         NSLog("[MCPProxy] loginServer: triggering login for %@", id)
-        // Use appState.apiClient directly (already on main thread, no async needed)
-        if let client = appState.apiClient {
-            Task {
-                do {
-                    try await client.loginServer(id)
-                    NSLog("[MCPProxy] loginServer: API call succeeded for %@", id)
-                } catch {
-                    NSLog("[MCPProxy] loginServer: API call failed: %@", error.localizedDescription)
-                }
-            }
-        } else {
-            NSLog("[MCPProxy] loginServer: no apiClient available")
-        }
+        perform(.login, on: id, id: id)
     }
 
     @objc private func viewServerLogs(_ sender: NSMenuItem) {
@@ -920,9 +2111,86 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         }
     }
 
-    @objc private func openConfigFile() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        NSWorkspace.shared.open(home.appendingPathComponent(".mcpproxy/mcp_config.json"))
+    /// Open the native activity log filtered to a glance row's session.
+    ///
+    /// Opens the app's own window at the Activity section — the activity log
+    /// has a native home, and a tray click should not context-switch the user
+    /// into a browser (the Web UI stays reachable via "Open Web UI in
+    /// Browser").
+    ///
+    /// F10: the row's session id (representedObject) used to be thrown away,
+    /// so a click on one client's run opened the whole unfiltered log. The id
+    /// now rides along on `.activityFilter` as a `ScopeFilter` (Spec 109-k)
+    /// and seeds ActivityView's session filter, which is what makes a glance row parent↔child navigable.
+    @objc private func openActivityForSession(_ sender: NSMenuItem) {
+        let sessionId = sender.representedObject as? String
+        // Spec 108-k K14: a client row opens that CLIENT's activity once the
+        // core attributes calls (`features.scope_filters`); otherwise the
+        // session's, exactly as before.
+        let filter = sessionId.flatMap { id -> ScopeFilter? in
+            guard !id.isEmpty else { return nil }
+            return GlanceClientLink.filter(
+                forSession: id, sessions: appState.glanceSessions,
+                scopeFiltersAvailable: appState.scopeFiltersAvailable)
+        }
+        // Published BEFORE the window is built, so a view created by this very
+        // click picks the filter up on appear. A delayed notification would be
+        // a race: too early and nothing is subscribed, too late and the user
+        // has already read an unfiltered log.
+        if let filter {
+            appState.handOffScopeFilter(filter)
+        }
+        showMainWindow(tab: Self.glanceActivityDestination)
+        guard let filter else { return }
+        // Covers the already-open window, whose observers are live now.
+        NotificationCenter.default.post(name: .activityFilter, object: filter)
+    }
+
+    /// Where a glance row click lands. A constant so tests can pin the
+    /// destination without instantiating the app delegate.
+    static let glanceActivityDestination: SidebarItem = .activity
+
+    // `openConfigFile()` used to live here: an @objc selector nothing
+    // referenced, for a file the tray deliberately never reads or writes (all
+    // config goes through REST). Deleted by the 2026-08 UX audit (F14) rather
+    // than wired to a menu row that would contradict the REST-only contract —
+    // the effective configuration is in Settings → Raw.
+
+    // MARK: - Project links (discussion #948)
+
+    @objc private func openDocumentation() {
+        NSWorkspace.shared.open(ProjectLinks.docs)
+    }
+
+    /// Shows the standard About panel (app name + version) with a credits block
+    /// that links back to the homepage, source, and docs — so "About MCPProxy"
+    /// carries the way back to the project, not just a version string.
+    @objc private func showAboutPanel() {
+        NSApp.activate(ignoringOtherApps: true)
+
+        let credits = NSMutableAttributedString()
+        let body: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 11),
+            .foregroundColor: NSColor.secondaryLabelColor,
+        ]
+        credits.append(NSAttributedString(
+            string: "Smart MCP proxy — intelligent tool discovery, token savings, and security quarantine.\n\n",
+            attributes: body))
+        for (index, link) in AboutPanelLinks.all.enumerated() {
+            if index > 0 { credits.append(NSAttributedString(string: "   ", attributes: body)) }
+            appendLink(to: credits, label: link.label, url: link.url)
+        }
+
+        NSApp.orderFrontStandardAboutPanel(options: [
+            .credits: credits
+        ])
+    }
+
+    private func appendLink(to string: NSMutableAttributedString, label: String, url: URL) {
+        string.append(NSAttributedString(string: label, attributes: [
+            .link: url,
+            .font: NSFont.systemFont(ofSize: 11),
+        ]))
     }
 
     @objc private func openLogsDirectory() {
@@ -930,6 +2198,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         NSWorkspace.shared.open(home.appendingPathComponent("Library/Logs/mcpproxy"))
     }
 
+    @MainActor
     @objc private func toggleAutoStart(_ sender: NSMenuItem) {
         do {
             if appState.autoStartEnabled {
@@ -957,7 +2226,25 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
         updateService.openDownloadPage()
     }
 
+    /// Spec 092 FR-010: one click — download, verify, replace, relaunch.
+    @objc private func installFeedUpdate() {
+        updateService.installFeedUpdate()
+    }
+
+    /// Spec 092 FR-016: say why an in-place update is impossible, and what to
+    /// do instead. The alternative — an update item that quietly does nothing —
+    /// is the failure mode the requirement names.
+    @MainActor
+    @objc private func showUpdateBlockedReason() {
+        guard let reason = updateService.blockedReason else { return }
+        presentAlert(title: reason.menuTitle, message: reason.message)
+    }
+
     @objc private func quitApp() {
+        // Claimed before anything else runs: the core teardown below would
+        // otherwise get there first and record its own mechanical description
+        // of what it is doing instead of the fact that the user asked (#862).
+        AppLifecycle.shared.note("user chose Quit in the tray menu")
         Task {
             await coreManager?.shutdown()
             try? await Task.sleep(nanoseconds: 200_000_000)
@@ -967,26 +2254,21 @@ final class AppController: NSObject, NSApplicationDelegate, NSWindowDelegate, NS
 
     // MARK: - Helpers
 
+    /// Icon for a health `action` or an `AttentionFix.verb` — the two
+    /// vocabularies overlap except `review` (attention-only, the Spec 109
+    /// analogue of health's `approve`) and `reload_hint` (109-h, client
+    /// presence).
     private func actionIcon(for action: String) -> String {
         switch action {
         case "login": return "person.badge.key"
         case "restart": return "arrow.clockwise"
         case "enable": return "power"
-        case "approve": return "checkmark.shield"
+        case "approve", "review": return "checkmark.shield"
+        case "set_secret": return "key"
+        case "configure", "edit_url": return "gearshape"
+        case "view_logs": return "doc.text.magnifyingglass"
+        case "reload_hint": return "arrow.triangle.2.circlepath"
         default: return "exclamationmark.circle"
-        }
-    }
-
-    private func actionDisplayName(for action: String) -> String {
-        switch action {
-        case "login": return "Sign in"
-        case "restart": return "Restart Needed"
-        case "enable": return "Disabled"
-        case "approve": return "Approval Needed"
-        case "set_secret": return "Secret Missing"
-        case "configure": return "Configuration Needed"
-        case "view_logs": return "Check Logs"
-        default: return "Action Needed"
         }
     }
 
@@ -1005,10 +2287,23 @@ extension Notification.Name {
     static let openWebUI = Notification.Name("MCPProxy.openWebUI")
     /// Posted by dashboard to switch sidebar to Activity Log view.
     static let switchToActivity = Notification.Name("MCPProxy.switchToActivity")
-    /// Posted by dashboard to switch sidebar to Servers view.
+    /// Posted by Home to switch sidebar to Servers view.
     static let switchToServers = Notification.Name("MCPProxy.switchToServers")
-    /// Posted by tray menu to open the detail view for a specific server (object = server name string).
+    /// Posted by tray menu (and Home's AttentionRow) to open the detail
+    /// view for a specific server. object = server name String (opens the
+    /// Tools tab) or a ServerDetailTarget (opens its named tab).
     static let showServerDetail = Notification.Name("MCPProxy.showServerDetail")
+    static let showReview = Notification.Name("MCPProxy.showReview")
+    static let reviewChanged = Notification.Name("MCPProxy.reviewChanged")
+    static let scanSettled = Notification.Name("MCPProxy.scanSettled")
+    /// Posted by `showMainWindow(tab:)` to select a sidebar section in an
+    /// already-open main window (object = SidebarItem raw value string).
+    static let switchToSidebarTab = Notification.Name("MCPProxy.switchToSidebarTab")
+    /// Posted by a tray glance row to scope the Activity Log to the session it
+    /// came from (object = `ScopeFilter`, Spec 109-k). F10 — a glance row that
+    /// opened the whole unfiltered log was the one place the "parent↔child
+    /// navigable" rule was not honoured.
+    static let activityFilter = Notification.Name("MCPProxy.activityFilter")
 }
 
 @main
@@ -1041,5 +2336,15 @@ private struct SettingsSceneBridge: View {
         Color.clear
             .frame(width: 1, height: 1)
             .onAppear { controller.openSettingsFromScene() }
+    }
+}
+
+/// Tears the SwiftUI content of a closed Settings window down so it cannot
+/// consume `AppState.pendingRoute` (scroll target, anonymous preselect) that
+/// belongs to the next Settings window (Spec 108-k K13/K20).
+enum SettingsWindowRetirement {
+    @MainActor
+    static func retire(_ window: NSWindow) {
+        window.contentView = nil
     }
 }

@@ -1,0 +1,6 @@
+{
+  "description": "Object members must be reordered by sorting on UTF-16 code units of the member name (RFC 8785 §3.2.3); input already out of order.",
+  "variants": [
+    { "c": 3, "a": 1, "b": 2, "aa": 11, "Aa": 12, "A": 13 }
+  ]
+}

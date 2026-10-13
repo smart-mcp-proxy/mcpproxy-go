@@ -2,6 +2,7 @@ package core
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
@@ -217,11 +218,22 @@ func TestIsOAuthPending(t *testing.T) {
 			expected: false,
 		},
 		{
-			name: "wrapped ErrOAuthPending returns false",
+			name: "flattened-to-string ErrOAuthPending returns false",
 			err: errors.New("wrapped: " + (&ErrOAuthPending{
 				ServerName: "slack",
 			}).Error()),
 			expected: false,
+		},
+		{
+			// The production chain: connectHTTP/connectSSE wrap the strategy's
+			// error and Connect wraps that again. A bare type assertion made the
+			// pending check unreachable, so login-blocked servers were re-dialed
+			// forever instead of parked (#1013).
+			name: "%w-wrapped ErrOAuthPending returns true",
+			err: fmt.Errorf("failed to connect: %w",
+				fmt.Errorf("all authentication strategies failed, last error: %w",
+					&ErrOAuthPending{ServerName: "slack", Message: "login available via Web UI"})),
+			expected: true,
 		},
 	}
 

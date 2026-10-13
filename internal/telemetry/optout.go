@@ -79,7 +79,7 @@ func (s *Service) EmitOptOutBeacon(ctx context.Context) bool {
 	if disabled, _ := IsDisabledByEnv(); disabled {
 		return false
 	}
-	if s.config.GetAnonymousID() == "" {
+	if s.liveAnonymousID() == "" {
 		return false
 	}
 	if err := s.SendOptOutBeacon(ctx); err != nil {
@@ -98,7 +98,7 @@ func (s *Service) EmitOptOutBeacon(ctx context.Context) bool {
 // caller-supplied URL, so this never sends to an arbitrary, request-derived
 // host.
 func (s *Service) SendOptOutBeacon(ctx context.Context) error {
-	anonID := s.config.GetAnonymousID()
+	anonID := s.liveAnonymousID()
 	if anonID == "" {
 		// Nothing to dedup on — never send an identity-less beacon.
 		return errors.New("opt-out beacon skipped: no anonymous_id")
@@ -122,7 +122,7 @@ func (s *Service) SendOptOutBeacon(ctx context.Context) error {
 	// require a host, and issue the request against the re-serialized URL. This
 	// mirrors validateRegistryURL and guarantees a malformed/non-http endpoint
 	// can never aim the beacon at, e.g., file:// or a schemeless host.
-	beaconURL, err := validateTelemetryURL(strings.TrimRight(s.endpoint, "/") + "/heartbeat")
+	beaconURL, err := validateTelemetryURL(strings.TrimRight(s.liveEndpoint(), "/") + "/heartbeat")
 	if err != nil {
 		return err
 	}
@@ -132,6 +132,12 @@ func (s *Service) SendOptOutBeacon(ctx context.Context) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 
+	// The beacon is fire-and-forget from NotifyConfigChanged, so a Service
+	// built without a client (test literals do this) must not take the
+	// goroutine — and the test binary — down with a nil dereference.
+	if s.client == nil {
+		return errors.New("send opt-out beacon: no HTTP client configured")
+	}
 	resp, err := s.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("send opt-out beacon: %w", err)
@@ -235,4 +241,15 @@ func (s *Service) NotifyConfigChanged(newCfg *config.Config) {
 		defer cancel()
 		s.EmitOptOutBeacon(ctx)
 	}()
+}
+
+// Active reports whether the service currently resolves telemetry as enabled
+// and has not latched an opt-out. It reads the state NotifyConfigChanged
+// maintains, so callers can check which configuration the service last
+// installed (Spec 116: notifications follow commit order).
+func (s *Service) Active() bool {
+	s.mu.Lock()
+	enabled := s.resolvedEnabled
+	s.mu.Unlock()
+	return enabled && !s.optedOut.Load()
 }

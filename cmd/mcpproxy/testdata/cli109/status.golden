@@ -1,0 +1,15 @@
+
+MCPProxy Status
+  State:       Running
+  Edition:     Personal
+  Listen:      127.0.0.1:18080
+  API Key:     ****
+  Routing:     retrieve_tools
+  Web UI:      http://127.0.0.1:18080/ui/
+
+Endpoint & mode
+  Routing mode:    retrieve_tools
+  /mcp             http://127.0.0.1:18080/mcp  (default, retrieve_tools mode)
+  /mcp/call        http://127.0.0.1:18080/mcp/call  (retrieve + call tools)
+  /mcp/all         http://127.0.0.1:18080/mcp/all  (all tools, direct access)
+  /mcp/code        http://127.0.0.1:18080/mcp/code  (code execution)

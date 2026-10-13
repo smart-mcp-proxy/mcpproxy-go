@@ -1,12 +1,12 @@
 <template>
-  <div class="space-y-6">
+  <div ref="rootEl" class="space-y-6">
     <!-- Header -->
     <div class="flex items-center gap-4">
-      <router-link to="/security" class="btn btn-ghost btn-sm gap-1">
+      <router-link to="/review" class="btn btn-ghost btn-sm gap-1">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7" />
         </svg>
-        Security
+        Review queue
       </router-link>
       <div class="flex-1">
         <h1 class="text-3xl font-bold">Scan Report</h1>
@@ -96,25 +96,25 @@
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Dangerous</div>
-            <div class="stat-value text-lg text-error">{{ report.summary?.dangerous ?? 0 }}</div>
+            <div class="stat-value text-lg text-error">{{ threatCounts.dangerous }}</div>
           </div>
         </div>
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Warnings</div>
-            <div class="stat-value text-lg text-warning">{{ report.summary?.warnings ?? 0 }}</div>
+            <div class="stat-value text-lg text-warning">{{ threatCounts.warnings }}</div>
           </div>
         </div>
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Info</div>
-            <div class="stat-value text-lg text-info">{{ report.summary?.info_level ?? 0 }}</div>
+            <div class="stat-value text-lg text-info">{{ threatCounts.info }}</div>
           </div>
         </div>
         <div class="stats shadow bg-base-100">
           <div class="stat py-3 px-4">
             <div class="stat-title text-xs">Total</div>
-            <div class="stat-value text-lg">{{ report.summary?.total ?? 0 }}</div>
+            <div class="stat-value text-lg">{{ threatCounts.total }}</div>
           </div>
         </div>
       </div>
@@ -128,6 +128,24 @@
           The risk score is an experimental heuristic combining findings from multiple scanners using logarithmic aggregation.
           There is no industry standard for scoring MCP security risks. Treat the score as directional guidance, not a definitive safety assessment.
         </span>
+      </div>
+
+      <!-- Deep scan (opt-in) availability — Spec 077 US3. Informational ONLY:
+           a failed or unavailable deep scanner NEVER changes the baseline
+           verdict above, so it is rendered as info, never an error. -->
+      <div v-if="report.deep_scan && report.deep_scan.enabled" class="alert alert-info">
+        <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+        </svg>
+        <div>
+          <div class="font-semibold">Deep scan (optional)</div>
+          <span v-if="(report.deep_scan.scanners_failed?.length ?? 0) > 0" class="text-sm">
+            {{ report.deep_scan.scanners_failed!.length }} deep scanner(s) were unavailable this run
+            ({{ report.deep_scan.scanners_failed!.map((f: { id: string; reason: string }) => f.id).join(', ') }}).
+            This does not affect the baseline verdict shown above.
+          </span>
+          <span v-else class="text-sm">Deep scan ran. Its findings are merged into the report above.</span>
+        </div>
       </div>
 
       <!-- Scan incomplete warnings -->
@@ -162,7 +180,27 @@
       <div v-else class="space-y-4">
         <h3 class="text-lg font-semibold">Findings</h3>
 
+        <!-- Spec 088 FR-011: rendered ONLY when a passed ?signal= actually
+             matched a finding. With no match we say nothing at all — the link
+             is best effort (hold evidence carries no report/finding id), so a
+             "nothing matched" notice would claim knowledge we don't have. -->
+        <div
+          v-if="highlightedFindingCount > 0"
+          data-test="signal-highlight-note"
+          class="alert alert-info py-2"
+        >
+          <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span class="text-xs">
+            {{ highlightedFindingCount }} finding(s) highlighted below match the signature(s)
+            from the held tool change.
+          </span>
+        </div>
+
         <div v-for="group in groupedFindings" :key="group.type"
+          data-test="finding-group"
+          :data-threat-type="group.type"
           class="collapse collapse-arrow bg-base-100 shadow-md"
           :class="{ 'collapse-open': group.defaultOpen }"
         >
@@ -175,8 +213,10 @@
             <div class="space-y-2">
               <div v-for="(finding, idx) in group.findings" :key="idx"
                 class="collapse collapse-arrow bg-base-200 rounded-lg"
+                :class="isFindingHighlighted(finding) ? 'ring-2 ring-primary ring-offset-2 ring-offset-base-100' : ''"
+                :data-test="isFindingHighlighted(finding) ? 'finding-highlighted' : undefined"
               >
-                <input type="checkbox" />
+                <input type="checkbox" :checked="isFindingHighlighted(finding)" />
                 <div class="collapse-title py-2 px-4 min-h-0 flex items-center gap-3">
                   <span
                     class="badge badge-sm shrink-0"
@@ -188,8 +228,25 @@
                   >
                     {{ finding.threat_level }}
                   </span>
+                  <span v-if="finding.severity" class="badge badge-xs badge-outline shrink-0 uppercase">
+                    {{ finding.severity }}
+                  </span>
                   <span class="font-medium text-sm flex-1">
                     {{ finding.rule_id || finding.title }}
+                  </span>
+                  <span
+                    v-if="isFindingHighlighted(finding)"
+                    class="badge badge-xs badge-primary shrink-0"
+                    title="Matches a signature from the held tool change"
+                  >
+                    matched
+                  </span>
+                  <span
+                    v-if="findingHasConsensus(finding)"
+                    class="badge badge-xs badge-primary badge-outline shrink-0"
+                    :title="`Flagged independently by ${findingSources(finding).length} scanners`"
+                  >
+                    consensus &times;{{ findingSources(finding).length }}
                   </span>
                   <span v-if="finding.package_name" class="font-mono text-xs text-base-content/50">
                     {{ finding.package_name }}
@@ -227,11 +284,23 @@
                       </div>
                       <div v-if="finding.location">
                         <span class="text-base-content/50">Location:</span>
-                        <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
+                        <!-- A `server:tool` location links into the server's Tools
+                             tab, focused on that tool's card, where the flagged
+                             words are marked in the description. Non-tool
+                             locations (file paths, "tool:"-prefixed scanner
+                             names) parse to null and keep today's inert code. -->
+                        <router-link
+                          v-if="toolLocationLink(finding.location)"
+                          :to="toolLocationLink(finding.location)!"
+                          class="ml-1 link link-primary font-mono"
+                          data-test="finding-location-link"
+                          title="Show these words in the tool description"
+                        >{{ finding.location }}</router-link>
+                        <code v-else class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
                       </div>
-                      <div v-if="finding.scanner">
-                        <span class="text-base-content/50">Scanner:</span>
-                        <span class="ml-1">{{ scannerDisplayName(finding.scanner) }}</span>
+                      <div v-if="findingSources(finding).length">
+                        <span class="text-base-content/50">{{ findingSources(finding).length > 1 ? 'Sources:' : 'Source:' }}</span>
+                        <span class="ml-1">{{ findingSourcesLabel(finding) }}</span>
                       </div>
                     </div>
                     <a
@@ -285,8 +354,18 @@
                   >
                     {{ finding.threat_level }}
                   </span>
+                  <span v-if="finding.severity" class="badge badge-xs badge-outline shrink-0 uppercase">
+                    {{ finding.severity }}
+                  </span>
                   <span class="font-medium text-sm flex-1">
                     {{ finding.rule_id || finding.title }}
+                  </span>
+                  <span
+                    v-if="findingHasConsensus(finding)"
+                    class="badge badge-xs badge-primary badge-outline shrink-0"
+                    :title="`Flagged independently by ${findingSources(finding).length} scanners`"
+                  >
+                    consensus &times;{{ findingSources(finding).length }}
                   </span>
                   <span v-if="finding.package_name" class="font-mono text-xs text-base-content/50">
                     {{ finding.package_name }}
@@ -323,11 +402,23 @@
                       </div>
                       <div v-if="finding.location">
                         <span class="text-base-content/50">Location:</span>
-                        <code class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
+                        <!-- A `server:tool` location links into the server's Tools
+                             tab, focused on that tool's card, where the flagged
+                             words are marked in the description. Non-tool
+                             locations (file paths, "tool:"-prefixed scanner
+                             names) parse to null and keep today's inert code. -->
+                        <router-link
+                          v-if="toolLocationLink(finding.location)"
+                          :to="toolLocationLink(finding.location)!"
+                          class="ml-1 link link-primary font-mono"
+                          data-test="finding-location-link"
+                          title="Show these words in the tool description"
+                        >{{ finding.location }}</router-link>
+                        <code v-else class="ml-1 bg-base-300 px-1 rounded">{{ finding.location }}</code>
                       </div>
-                      <div v-if="finding.scanner">
-                        <span class="text-base-content/50">Scanner:</span>
-                        <span class="ml-1">{{ scannerDisplayName(finding.scanner) }}</span>
+                      <div v-if="findingSources(finding).length">
+                        <span class="text-base-content/50">{{ findingSources(finding).length > 1 ? 'Sources:' : 'Source:' }}</span>
+                        <span class="ml-1">{{ findingSourcesLabel(finding) }}</span>
                       </div>
                     </div>
                     <a
@@ -537,7 +628,7 @@
             </div>
             <div class="flex gap-2">
               <button
-                v-if="serverAdminState === 'enabled' && report.summary?.dangerous > 0"
+                v-if="serverAdminState === 'enabled' && reportStatus === 'dangerous'"
                 @click="quarantineServer"
                 :disabled="actionLoading"
                 class="btn btn-error btn-sm"
@@ -550,20 +641,21 @@
                 @click="approveServer"
                 :disabled="actionLoading || hasUnresolvedCritical"
                 class="btn btn-success btn-sm"
-                :title="hasUnresolvedCritical ? 'Unresolved critical findings — use Force Approve' : 'Approve and unquarantine this server'"
+                :title="hasUnresolvedCritical ? 'Unresolved dangerous findings — use Force Approve' : 'Approve and unquarantine this server'"
               >
                 <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                Approve Server
+                Review Server
               </button>
               <button
                 v-if="serverAdminState === 'quarantined' && hasUnresolvedCritical"
                 @click="forceApproveServer"
                 :disabled="actionLoading"
+                data-test="scan-report-force-approve"
                 class="btn btn-error btn-sm"
-                title="Bypass the scanner gate and approve despite critical findings"
+                title="Unquarantine this server despite its dangerous findings"
               >
                 <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                Force Approve
+                Review dangerous findings
               </button>
               <button
                 v-if="serverAdminState === 'quarantined'"
@@ -584,22 +676,39 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import api from '@/services/api'
+import { formatDateTime } from '@/utils/datetime'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
+import { parseToolLocation, toolFocusPath } from '@/utils/toolLocation'
 import type { SecurityScanFinding, ThreatType } from '@/types/api'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
+const route = useRoute()
+const router = useRouter()
 
 const props = defineProps<{
   jobId: string
 }>()
 
+const rootEl = ref<HTMLElement | null>(null)
 const loading = ref(false)
 const error = ref('')
 const report = ref<any>(null)
+
+/**
+ * Route for a finding whose `location` names a tool on this report's server, or
+ * null when it names something else (a file path, or another scanner's
+ * "tool:"/"prompt:"/"resource:" form). `report.server_name` is the strongest
+ * available guard, so the parse is anchored to it rather than to a heuristic.
+ */
+function toolLocationLink(location?: string | null): string | null {
+  const parsed = parseToolLocation(location, { expectedServer: report.value?.server_name })
+  return parsed ? toolFocusPath(parsed.server, parsed.tool) : null
+}
 const actionLoading = ref(false)
 const serverStatus = ref<'loading' | 'loaded'>('loading')
 const serverAdminState = ref('unknown')
@@ -615,20 +724,62 @@ function scannerDisplayName(id: string): string {
   return scannerNames[id] || id
 }
 
+// Spec 077 unified report — a finding's contributing sources. Prefers the
+// merged `sources` list; falls back to the single `scanner` id for legacy
+// findings that predate multi-source attribution.
+function findingSources(finding: SecurityScanFinding): string[] {
+  if (finding.sources && finding.sources.length > 0) return finding.sources
+  if (finding.scanner) return [finding.scanner]
+  return []
+}
+
+// True when ≥2 independent scanners agreed on a finding (consensus).
+function findingHasConsensus(finding: SecurityScanFinding): boolean {
+  return findingSources(finding).length > 1
+}
+
+function findingSourcesLabel(finding: SecurityScanFinding): string {
+  return findingSources(finding).map(scannerDisplayName).join(', ')
+}
+
 // Scan context from the aggregated report (populated from job's ScanContext)
 const scanContext = computed(() => {
   return report.value?.scan_context || null
 })
 
-// Status display
+// Status display. Spec 077 FR-014 verdict purity: the badge shows the
+// tier-driven, baseline-only `verdict` computed server-side with the SAME
+// predicate as the server-list status, so this page can never say "dangerous"
+// while the server list says "clean" (a tierless deep-scan/external finding
+// never moves the verdict). Raw summary counts remain only as a fallback for
+// reports served by a core that predates the verdict field.
 const reportStatus = computed(() => {
   if (!report.value) return 'unknown'
   if (report.value.scan_complete === false) return 'incomplete'
   if (report.value.empty_scan) return 'empty'
   if (!report.value.findings || report.value.findings.length === 0) return 'clean'
+  if (report.value.verdict) return report.value.verdict
   if (report.value.summary?.dangerous > 0) return 'dangerous'
   if (report.value.summary?.warnings > 0) return 'warnings'
   return 'clean'
+})
+
+// Threat tiles use the tier-driven buckets (finding_counts) matching the
+// server list exactly (Spec 077 FR-014): a tierless deep-scan "dangerous"
+// finding counts as a warning on BOTH surfaces. Falls back to the raw
+// threat-level summary for pre-Spec-077 payloads.
+const threatCounts = computed(() => {
+  const r = report.value
+  const fc = r?.finding_counts
+  if (fc) {
+    return { dangerous: fc.dangerous ?? 0, warnings: fc.warning ?? 0, info: fc.info ?? 0, total: fc.total ?? 0 }
+  }
+  return {
+    dangerous: r?.summary?.dangerous ?? 0,
+    warnings: r?.summary?.warnings ?? 0,
+    info: r?.summary?.info_level ?? 0,
+    total: r?.summary?.total ?? 0,
+  }
 })
 
 const statusBadgeClass = computed(() => {
@@ -649,21 +800,77 @@ const riskScoreClass = computed(() => {
   return 'badge-success'
 })
 
+// --- Hold-evidence → finding highlighting (spec 088 T018 / FR-011) ---
+// A held tool change links here with repeatable `?signal=` params carrying the
+// FULL raw deterministic check ids (e.g. "tpa.TPA-2026-0001.hidden_instruction").
+// Display surfaces may shorten a TPA signal to its signature id; the query never
+// does, so the intersection with `findings[].signals` is exact — a shortened
+// label or a prefix must NOT match.
+//
+// The link is best effort by construction: hold evidence carries no report or
+// finding identifier (internal/storage/models.go), and a tool-change hold comes
+// from a synchronous in-process scan that persists no report at all. Zero
+// matches therefore renders the report exactly as it would render without the
+// params — no highlight, no banner, no claim.
+const highlightSignals = computed<Set<string>>(() => {
+  const raw = route.query.signal
+  const values = Array.isArray(raw) ? raw : raw == null ? [] : [raw]
+  const out = new Set<string>()
+  for (const value of values) {
+    if (typeof value !== 'string') continue
+    const signal = value.trim()
+    if (signal) out.add(signal)
+  }
+  return out
+})
+
+function isFindingHighlighted(finding: SecurityScanFinding): boolean {
+  if (highlightSignals.value.size === 0) return false
+  const signals = finding.signals
+  if (!signals || signals.length === 0) return false
+  return signals.some((s) => typeof s === 'string' && highlightSignals.value.has(s.trim()))
+}
+
+const highlightedFindingCount = computed(() => {
+  if (highlightSignals.value.size === 0) return 0
+  const findings: SecurityScanFinding[] = report.value?.findings ?? []
+  return findings.filter((f) => isFindingHighlighted(f)).length
+})
+
+// Bring the first matching finding into view once the report has rendered.
+// Scoped to this component's subtree (never document-wide) and optional-called
+// so environments without scrollIntoView (jsdom) are a no-op.
+async function scrollToFirstHighlight() {
+  if (highlightSignals.value.size === 0) return
+  await nextTick()
+  const target = rootEl.value?.querySelector<HTMLElement>('[data-test="finding-highlighted"]')
+  target?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
+}
+
 // Threat type grouping. Real CVE/package findings are routed to the dedicated
 // Supply Chain Audit section via the `supply_chain_audit` flag instead of the
 // `supply_chain` threat type, so they are filtered out of `groupedFindings`.
 // 'uncategorized' is rendered as "Other Findings" so AI-scanner output that
 // ClassifyThreat can't pattern-match stays visible instead of silently vanishing.
-const threatTypeLabels: Record<Exclude<ThreatType, 'supply_chain'>, string> = {
+// Any threat_type not listed here (a newer backend, a third-party scanner) is
+// folded into 'uncategorized' too — a finding the risk score counts must never
+// be missing from this section.
+type DisplayThreatType = Exclude<ThreatType, 'supply_chain'>
+const threatTypeLabels: Record<DisplayThreatType, string> = {
   tool_poisoning: 'Tool Poisoning',
   prompt_injection: 'Prompt Injection',
+  exfiltration: 'Data Exfiltration',
   rug_pull: 'Rug Pull Detection',
   malicious_code: 'Malicious Code',
   uncategorized: 'Other Findings',
 }
+// Render order — the keys of threatTypeLabels.
+const typeOrder = Object.keys(threatTypeLabels) as DisplayThreatType[]
+const dangerousTypes: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'exfiltration', 'rug_pull', 'malicious_code']
 
-type DisplayThreatType = Exclude<ThreatType, 'supply_chain'>
-const dangerousTypes: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code']
+function displayThreatType(raw: string | undefined): DisplayThreatType {
+  return raw && Object.prototype.hasOwnProperty.call(threatTypeLabels, raw) ? (raw as DisplayThreatType) : 'uncategorized'
+}
 
 interface FindingGroup {
   type: DisplayThreatType
@@ -686,26 +893,25 @@ const groupedFindings = computed<FindingGroup[]>(() => {
 
   const groups = new Map<DisplayThreatType, SecurityScanFinding[]>()
   for (const f of nonCveFindings) {
-    const rawType = (f.threat_type || 'uncategorized') as ThreatType
-    // Legacy data may still carry threat_type === 'supply_chain' on a non-CVE
-    // finding. Fold it into 'uncategorized' so it stays visible instead of
-    // being silently dropped.
-    const type: DisplayThreatType = rawType === 'supply_chain' ? 'uncategorized' : rawType
+    // Unknown types — and legacy threat_type === 'supply_chain' on a non-CVE
+    // finding — fold into 'uncategorized' so they stay visible.
+    const type = displayThreatType(f.threat_type)
     if (!groups.has(type)) groups.set(type, [])
     groups.get(type)!.push(f)
   }
 
   const result: FindingGroup[] = []
-  const typeOrder: DisplayThreatType[] = ['tool_poisoning', 'prompt_injection', 'rug_pull', 'malicious_code', 'uncategorized']
   for (const type of typeOrder) {
     const findings = groups.get(type)
     if (!findings) continue
     const hasDangerous = findings.some(f => f.threat_level === 'dangerous')
     result.push({
       type,
-      label: threatTypeLabels[type] || type,
+      label: threatTypeLabels[type],
       findings,
-      defaultOpen: dangerousTypes.includes(type),
+      // A highlighted finding must not be hidden inside a collapsed group —
+      // scrolling to something invisible helps nobody (spec 088 FR-011).
+      defaultOpen: dangerousTypes.includes(type) || findings.some((f) => isFindingHighlighted(f)),
       badgeClass: hasDangerous ? 'badge-error' : findings.some(f => f.threat_level === 'warning') ? 'badge-warning' : 'badge-info',
     })
   }
@@ -726,9 +932,7 @@ const supplyChainHasWarnings = computed(() => {
 })
 
 function formatDate(dateStr: string): string {
-  if (!dateStr) return '-'
-  const d = new Date(dateStr)
-  return d.toLocaleString()
+  return formatDateTime(dateStr)
 }
 
 async function loadReport() {
@@ -782,55 +986,34 @@ async function quarantineServer() {
 
 // F-04: Go through the security-aware approval path instead of the legacy
 // unquarantine endpoint. hasUnresolvedCritical disables the primary Approve
-// button so the user must use Force Approve explicitly.
-const hasUnresolvedCritical = computed(() => {
-  return (report.value?.summary?.critical ?? 0) > 0
+// button so the user must use Force Approve explicitly. It mirrors the
+// backend approval gate (Spec 077 FR-021: hard-tier BASELINE findings only)
+// via the tier-driven finding_counts — a tierless deep-scan/external finding
+// or a non-blocking soft finding with "critical" severity must not lock the
+// Approve button when the backend would accept. Raw summary.critical is only
+// a fallback for payloads that predate finding_counts.
+//
+// UX audit F09: the Force Approve confirmation used to count raw
+// summary.critical while this predicate counted finding_counts.dangerous, so a
+// server the backend was refusing on two hard-tier findings was offered up as
+// "despite 0 critical finding(s)". One number now, shared, and worded with the
+// backend's own noun ("dangerous (hard-tier)", the 409 text).
+const blockingFindingCount = computed(() => {
+  const fc = report.value?.finding_counts
+  if (fc) return fc.dangerous ?? 0
+  return report.value?.summary?.critical ?? 0
 })
+
+const hasUnresolvedCritical = computed(() => blockingFindingCount.value > 0)
 
 async function approveServer() {
   if (!report.value?.server_name) return
-  if (!confirm(`Approve ${report.value.server_name}? This will unquarantine and re-enable the server.`)) return
-  actionLoading.value = true
-  try {
-    await serversStore.securityApproveServer(report.value.server_name, false)
-    systemStore.addToast({
-      type: 'success',
-      title: 'Server Approved',
-      message: `${report.value.server_name} has been approved and unquarantined`,
-    })
-    await loadServerStatus()
-  } catch (err) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Approve Failed',
-      message: err instanceof Error ? err.message : 'Unknown error',
-    })
-  } finally {
-    actionLoading.value = false
-  }
+  await router.push(`/review/${encodeURIComponent(report.value.server_name)}`)
 }
 
 async function forceApproveServer() {
   if (!report.value?.server_name) return
-  if (!confirm(`Force-approve ${report.value.server_name}? This bypasses the scanner gate despite ${report.value.summary?.critical ?? 0} critical finding(s).`)) return
-  actionLoading.value = true
-  try {
-    await serversStore.securityApproveServer(report.value.server_name, true)
-    systemStore.addToast({
-      type: 'success',
-      title: 'Server Force-Approved',
-      message: `${report.value.server_name} was force-approved despite critical findings`,
-    })
-    await loadServerStatus()
-  } catch (err) {
-    systemStore.addToast({
-      type: 'error',
-      title: 'Force Approve Failed',
-      message: err instanceof Error ? err.message : 'Unknown error',
-    })
-  } finally {
-    actionLoading.value = false
-  }
+  await router.push(`/review/${encodeURIComponent(report.value.server_name)}`)
 }
 
 async function rejectServer() {
@@ -962,6 +1145,7 @@ function formatFileSize(bytes: number): string {
 
 onMounted(async () => {
   await loadReport()
+  await scrollToFirstHighlight()
   await loadServerStatus()
 })
 </script>

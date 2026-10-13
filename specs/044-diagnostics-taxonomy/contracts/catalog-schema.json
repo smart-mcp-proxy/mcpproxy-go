@@ -9,7 +9,7 @@
   "properties": {
     "code": {
       "type": "string",
-      "pattern": "^MCPX_(OAUTH|STDIO|HTTP|DOCKER|CONFIG|QUARANTINE|NETWORK|UNKNOWN)_[A-Z0-9_]+$"
+      "pattern": "^MCPX_(OAUTH|STDIO|HTTP|DOCKER|CONFIG|QUARANTINE|NETWORK|UPDATE|UNKNOWN)_[A-Z0-9_]+$"
     },
     "severity": {
       "type": "string",
@@ -56,6 +56,11 @@
     "docs_url": {
       "type": "string",
       "pattern": "^(docs/errors/MCPX_[A-Z0-9_]+\\.md|https?://.+)$"
+    },
+    "retry": {
+      "description": "Whether an automatic reconnect can ever fix a failure carrying this code. Omitted means transient/retryable, which is the default for every code that has not been explicitly declared otherwise.",
+      "type": "string",
+      "enum": ["permanent"]
     },
     "deprecated": { "type": "boolean" },
     "replaced_by": {

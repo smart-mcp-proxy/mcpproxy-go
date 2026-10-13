@@ -250,15 +250,32 @@ tool call.
   feature described the confinement in unconditional terms ("cannot walk
   the write outside the whitelist," "structurally close the gap, no matter
   what happens"); this section is the precise replacement for those claims.
-- **Saved content is not validated or spotlighted**: the redaction stage
+- **Validation and spotlighting**: the redaction stage
   (`applyOutputSanitisation`) still runs before a response is saved, so a
   saved file never contains a secret redaction would otherwise have
-  stripped. Output-schema validation (Spec 056) and response spotlighting
-  (Spec 054) do not run on the save path at all — a saved file holds the
-  full, un-spotlighted upstream text as redaction left it. An agent that
-  reads a saved file back must treat its contents as untrusted data, the
-  same as it would any other unvalidated tool output; strict-mode
-  output-schema blocking does not apply to a saved response.
+  stripped. Output-schema validation (Spec 056) runs on the result before
+  it is saved, so strict mode blocks a violating result from reaching the
+  file. Spotlighting (Spec 054) applies to the returned envelope, whose
+  `preview` is upstream text; the file on disk holds the full,
+  un-spotlighted upstream text as redaction left it, and an agent that
+  reads it back must treat it as untrusted data.
+- **Pre-flight before dispatch**: the save target is resolved against the
+  whitelist before the upstream tool is called. A request that cannot
+  succeed (feature disabled, invalid or outside-roots path, existing file
+  without `save_overwrite`) is refused without executing the tool and is
+  audited as a blocked policy decision. Resolve+Write still run again
+  after the call, since the filesystem can change in between.
+- **Root hygiene**: `tool_output_roots` entries must not be equal or nested
+  (config validation, plus a fail-closed check on the resolved roots at
+  save time): with nested roots, a symlink planted at the inner root's
+  path would redirect saves outside every root. On Unix every symlink on
+  the path to a root must be owned by `root` or the mcpproxy user, and the
+  root directory must be owned by the mcpproxy user and not
+  world-writable, so another local user cannot pre-create e.g.
+  `/tmp/mcp-out` as a symlink into the user's home directory. On Windows a
+  UNC or device path is refused before any filesystem access unless a
+  configured root is on the same volume (no SMB/NTLM round-trip to an
+  attacker-named host).
 
 ## Success Criteria *(mandatory)*
 
@@ -274,7 +291,7 @@ tool call.
 
 - Go 1.25's `os.Root` API is available in the pinned toolchain and provides the intended confinement semantics (verified against the actual `go.mod` toolchain version used to build this feature).
 - Operators are expected to whitelist directories they control and trust for agent-written output; `save_to_file` is not a general-purpose sandboxed filesystem — it is a whitelist, not a jail against a root-equivalent adversary.
-- Only the secret-redaction pipeline stage (`applyOutputSanitisation`) runs on a response before `save_to_file` diverts it — the response-limit truncator, output-schema validation (Spec 056), and response spotlighting (Spec 054) never run on the save path at all (see Security Considerations for the implications of this).
+- The secret-redaction stage (`applyOutputSanitisation`) and output-schema validation (Spec 056) run on a response before `save_to_file` diverts it; the response-limit truncator and TOON encoding (Spec 084) never run on the save path, and spotlighting (Spec 054) applies only to the returned envelope (see Security Considerations).
 - The response-limit truncator specifically is bypassed entirely for a saved call: there is no truncated text to fall back to, since the point of `save_to_file` is to deliver the full untruncated body to disk instead.
 
 ## Out of Scope
@@ -288,4 +305,3 @@ tool call.
 ## Commit Message Conventions *(mandatory)*
 
 - Conventional-commit style, e.g. `feat(server): save tool output to file`.
-- Do **not** add AI co-authorship trailers (`AGENTS.md`: "avoid AI co-author tags").

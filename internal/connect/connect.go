@@ -6,10 +6,15 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
 // AccessState classifies a per-client config access (Spec 075). It is left as
@@ -24,47 +29,205 @@ const (
 )
 
 // ConnectResult describes the outcome of a connect or disconnect operation.
+// Struct fields below carry matching `yaml` tags alongside their `json`
+// ones: gopkg.in/yaml.v3 ignores json tags entirely and falls back to
+// lowercased, separator-free field names for any field without its own
+// yaml tag, which would make `mcpproxy connect ... -o yaml` disagree with
+// the documented snake_case keys `-o json` and swagger.yaml both use (the
+// same reasoning as output.StructuredError's yaml tags).
 type ConnectResult struct {
-	Success    bool   `json:"success"`
-	Client     string `json:"client"`
-	ConfigPath string `json:"config_path"`
-	BackupPath string `json:"backup_path,omitempty"`
-	ServerName string `json:"server_name"`
-	Action     string `json:"action"` // "created", "updated", "already_exists", "removed", "not_found"
-	Message    string `json:"message"`
+	Success    bool   `json:"success" yaml:"success"`
+	Client     string `json:"client" yaml:"client"`
+	ConfigPath string `json:"config_path" yaml:"config_path"`
+	BackupPath string `json:"backup_path,omitempty" yaml:"backup_path,omitempty"`
+	ServerName string `json:"server_name" yaml:"server_name"`
+	Action     string `json:"action" yaml:"action"` // "created", "updated", "already_exists", "removed", "not_found"
+	Message    string `json:"message" yaml:"message"`
+
+	// DisplayPath is ConfigPath with the home directory shortened to "~"
+	// (FR-037). Populated for every result whose ConfigPath is known.
+	DisplayPath string `json:"display_path,omitempty" yaml:"display_path,omitempty"`
+	// ReloadHint is this client's instruction for making the write take
+	// effect (FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Empty
+	// for an unknown client.
+	ReloadHint string `json:"reload_hint,omitempty" yaml:"reload_hint,omitempty"`
+
+	// Credential is the masked client credential the write embedded
+	// (`mcp_cli_••••`); the real secret is never returned (FR-024). Empty for a
+	// keyless entry, a disconnect and every refusal.
+	Credential string `json:"credential,omitempty" yaml:"credential,omitempty"`
+	// TokenName is the client credential's token name (`client-<id>`).
+	TokenName string `json:"token_name,omitempty" yaml:"token_name,omitempty"`
+	// Profile and Mode are the binding of the credential this write minted or
+	// kept. Profile "" means the built-in All servers scope.
+	Profile string `json:"profile,omitempty" yaml:"profile,omitempty"`
+	Mode    string `json:"mode,omitempty" yaml:"mode,omitempty"`
+	// Keyless is true when the entry was written with no credential.
+	Keyless bool `json:"keyless,omitempty" yaml:"keyless,omitempty"`
+	// Rotation is "finalized" when the write replaced an active credential's
+	// secret (staged rotation, FR-021a), empty otherwise.
+	Rotation string `json:"rotation,omitempty" yaml:"rotation,omitempty"`
+	// CredentialRevoked names the credential that was revoked: by an undo,
+	// because the restored config no longer holds it (plan D16), or by a
+	// disconnect, which cuts the client off (a later undo of that disconnect
+	// does not bring the credential back).
+	CredentialRevoked string `json:"credential_revoked,omitempty" yaml:"credential_revoked,omitempty"`
+	// CredentialRevokeError is set when a disconnect removed the entry but
+	// revoking the client credential failed. The disconnect still succeeded;
+	// the credential is still active and `mcpproxy client forget <id>`
+	// retries the revoke.
+	CredentialRevokeError string `json:"credential_revoke_error,omitempty" yaml:"credential_revoke_error,omitempty"`
 }
 
 // ClientStatus describes the current state of a client's configuration
 // with respect to an MCPProxy entry.
+// See ConnectResult's comment above: fields here also carry matching `yaml`
+// tags so `mcpproxy connect --list`/`--all -o yaml` doesn't fall back to
+// yaml.v3's collapsed default keys.
 type ClientStatus struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	ConfigPath string `json:"config_path"`
-	Exists     bool   `json:"exists"`           // config file exists on disk
-	Connected  bool   `json:"connected"`        // mcpproxy entry present in config
-	Supported  bool   `json:"supported"`        // client can be connected (directly or via a bridge)
-	Reason     string `json:"reason,omitempty"` // why not supported
-	Note       string `json:"note,omitempty"`   // caveat for supported clients (e.g. bridge requirement)
-	Bridge     bool   `json:"bridge,omitempty"` // connects via a stdio bridge; connectable even without an existing config
-	Icon       string `json:"icon"`
-	ServerName string `json:"server_name,omitempty"` // name under which mcpproxy is registered
+	ID         string `json:"id" yaml:"id"`
+	Name       string `json:"name" yaml:"name"`
+	ConfigPath string `json:"config_path" yaml:"config_path"`
+	Exists     bool   `json:"exists" yaml:"exists"`                     // config file exists on disk
+	Connected  bool   `json:"connected" yaml:"connected"`               // mcpproxy entry present in config
+	Supported  bool   `json:"supported" yaml:"supported"`               // client can be connected (directly or via a bridge)
+	Reason     string `json:"reason,omitempty" yaml:"reason,omitempty"` // why not supported
+	Note       string `json:"note,omitempty" yaml:"note,omitempty"`     // caveat for supported clients (e.g. bridge requirement)
+	Bridge     bool   `json:"bridge,omitempty" yaml:"bridge,omitempty"` // connects via a stdio bridge; connectable even without an existing config
+	Icon       string `json:"icon" yaml:"icon"`
+	ServerName string `json:"server_name,omitempty" yaml:"server_name,omitempty"` // name under which mcpproxy is registered
+
+	// CredentialState reports what the client's entry carries (FR-025):
+	// client|admin_key|none|revoked|expired, or "unknown" in the stat-only
+	// listing, which never reads a config (Spec 075). Absent when the client is
+	// not connected. Administrator-only, like the rest of the connect reads.
+	CredentialState string `json:"credential_state,omitempty" yaml:"credential_state,omitempty"`
+
+	// DisplayPath is ConfigPath with the home directory shortened to "~"
+	// (FR-037). Cosmetic only; the full path stays in ConfigPath.
+	DisplayPath string `json:"display_path,omitempty" yaml:"display_path,omitempty"`
+	// ReloadHint is this client's instruction for making a newly-written
+	// config take effect (FR-037/FR-042). Empty for an unsupported client.
+	ReloadHint string `json:"reload_hint,omitempty" yaml:"reload_hint,omitempty"`
 
 	// AccessState classifies the per-client content access (Spec 075, additive).
 	// Empty/"unknown" in the content-read-free overall status; resolved to
 	// "accessible"/"absent"/"malformed" (and "denied" in US2) by on-demand reads.
-	AccessState string `json:"access_state"`
+	AccessState string `json:"access_state" yaml:"access_state"`
+	// CheckedPaths lists every config location the existence check consults,
+	// highest precedence first. For most clients this is just ConfigPath; for
+	// OpenCode it names both opencode.jsonc and opencode.json (#922), so a
+	// "no config found" UI can say exactly which files were looked for.
+	CheckedPaths []string `json:"checked_paths,omitempty" yaml:"checked_paths,omitempty"`
 	// Remediation carries actionable fix text, populated only when access is denied.
-	Remediation string `json:"remediation,omitempty"`
+	Remediation string `json:"remediation,omitempty" yaml:"remediation,omitempty"`
+
+	// ProxyURL is THIS instance's MCP endpoint — the address a client would be
+	// pointed at by a connect. Derived from config only (no file read), so it is
+	// populated by both the stat-only listing and the on-demand read.
+	ProxyURL string `json:"proxy_url,omitempty" yaml:"proxy_url,omitempty"`
+	// RegisteredURL is the endpoint the client's existing entry actually points
+	// at, projected through exactly the same sanitizer as a Spec 091 preview's
+	// entry summary: scheme, host and path only — query (the ?apikey= carrier),
+	// userinfo and fragment are dropped, and a value that is not an absolute URL
+	// is not echoed at all. Note this is scheme+host+PATH, matching the preview:
+	// a credential embedded in a path segment by a third-party config would
+	// survive, exactly as it already does on the preview surface. Deliberately
+	// identical so the two surfaces cannot disagree about what an entry says.
+	// Empty when nothing was read or the entry carries no URL-shaped value.
+	// Resolved only by GetStatus.
+	RegisteredURL string `json:"registered_url,omitempty" yaml:"registered_url,omitempty"`
+	// EndpointMatch says how RegisteredURL relates to ProxyURL. It exists
+	// because Connected only ever meant "an mcpproxy-shaped entry is present":
+	// an entry merely *named* mcpproxy counts, even when it points at another
+	// instance on another port (audit F18). One of:
+	//   "this"    — the entry's endpoint is this instance
+	//   "other"   — the entry points somewhere else (a different instance)
+	//   "unknown" — the entry has no comparable endpoint (e.g. a stdio command)
+	// Empty when Connected is false or nothing was read.
+	EndpointMatch string `json:"endpoint_match,omitempty" yaml:"endpoint_match,omitempty"`
 }
+
+// EndpointMatch values for ClientStatus.EndpointMatch.
+const (
+	EndpointMatchThis    = "this"
+	EndpointMatchOther   = "other"
+	EndpointMatchUnknown = "unknown"
+)
 
 // Service provides connect/disconnect operations for MCP client configurations.
 type Service struct {
 	listenAddr string // e.g. "127.0.0.1:8080"
 	apiKey     string // optional API key
 	homeDir    string // override for testing; empty means use os.UserHomeDir
+	// requireMCPAuth mirrors config.RequireMCPAuth. When false (the default),
+	// the /mcp endpoint accepts unauthenticated requests, so connect writes NO
+	// credential into client configs — embedding the REST-admin API key there
+	// would leak it for no benefit (Spec 078 security fix). When true, the
+	// credential is written via an HTTP header where the client config supports
+	// one, falling back to the ?apikey= query only where it cannot.
+	requireMCPAuth bool
+	// configProvider, when set, supplies the LIVE listen address, API key, and
+	// require_mcp_auth on every call instead of the startup snapshot above. The
+	// /mcp auth middleware already honors require_mcp_auth live (server.go), so
+	// the long-lived HTTP connect service must too — otherwise a runtime toggle
+	// leaves a stale snapshot that re-introduces the API-key leak this fix closes
+	// (auth turned off, but connect still embeds the key) or writes keyless
+	// entries that cannot authenticate (auth turned on). Nil for CLI one-shots,
+	// where the freshly-loaded config is already current (Spec 078).
+	configProvider func() (listenAddr, apiKey string, requireMCPAuth bool)
 	// readFile is the content-read seam (Spec 075 T003). Defaults to os.ReadFile;
 	// tests inject a permission-denied error or a call counter through it.
 	readFile func(string) ([]byte, error)
+	// statFile is the metadata seam alongside readFile. Defaults to os.Stat.
+	// Existence checks route through it so a stat that fails for a reason OTHER
+	// than "not there" can be classified honestly instead of being reported as
+	// an absent config.
+	statFile func(string) (os.FileInfo, error)
+
+	// tokenKey is the per-core-instance HMAC key for connect-preview
+	// precondition tokens (Spec 091 FR-005). Generated lazily by
+	// preconditionKey(), never persisted, never exposed: it keeps a token
+	// unforgeable and non-oracular, and scopes it to this process.
+	tokenKeyOnce sync.Once
+	tokenKey     []byte
+
+	// minter mints the per-client `mcp_cli_` credential every connect write
+	// embeds (Spec 108 FR-024). Nil in unit tests and the management TCC
+	// probe: connect then writes a keyless entry while auth is off and refuses
+	// (ErrNoCredentialMinter) while it is on — it NEVER falls back to the
+	// admin API key, which has no remaining write path (plan D10).
+	minter CredentialMinter
+}
+
+// WithRequireMCPAuth sets whether the /mcp endpoint requires authentication,
+// which decides whether connect embeds a credential in client configs at all.
+// Threaded from config.RequireMCPAuth at the wiring sites, alongside listenAddr
+// and apiKey. Returns the receiver for chaining.
+func (s *Service) WithRequireMCPAuth(v bool) *Service {
+	s.requireMCPAuth = v
+	return s
+}
+
+// WithConfigProvider installs a live-config accessor so the service reflects
+// runtime changes to listen/api_key/require_mcp_auth (hot-reloaded via the file
+// watcher or the wizard's require_mcp_auth toggle) rather than a startup
+// snapshot. Wired only for the long-lived HTTP server; CLI one-shots leave it
+// nil. Returns the receiver for chaining.
+func (s *Service) WithConfigProvider(fn func() (listenAddr, apiKey string, requireMCPAuth bool)) *Service {
+	s.configProvider = fn
+	return s
+}
+
+// resolveConfig returns the effective listen address, API key, and
+// require_mcp_auth: live from the provider when one is installed, otherwise the
+// startup snapshot. All credential/URL construction routes through here so a
+// runtime toggle is honored consistently (Spec 078).
+func (s *Service) resolveConfig() (listenAddr, apiKey string, requireMCPAuth bool) {
+	if s.configProvider != nil {
+		return s.configProvider()
+	}
+	return s.listenAddr, s.apiKey, s.requireMCPAuth
 }
 
 // NewService creates a Service that will inject the given listen address
@@ -101,6 +264,20 @@ func NewServiceWithReader(listenAddr, apiKey, homeDir string, readFile func(stri
 // setReadFile overrides the content-read seam (test helper).
 func (s *Service) setReadFile(fn func(string) ([]byte, error)) { s.readFile = fn }
 
+// setStat overrides the metadata seam (test helper), so a permission-blocked
+// stat can be exercised without depending on OS permission bits (which root
+// ignores and Windows does not model the same way).
+func (s *Service) setStat(fn func(string) (os.FileInfo, error)) { s.statFile = fn }
+
+// stat performs a metadata check through the seam, falling back to os.Stat for
+// a zero-value Service. No config content is read (Spec 075 FR-001).
+func (s *Service) stat(path string) (os.FileInfo, error) {
+	if s.statFile != nil {
+		return s.statFile(path)
+	}
+	return os.Stat(path)
+}
+
 // read performs a config content read through the seam, falling back to
 // os.ReadFile for a zero-value Service.
 func (s *Service) read(path string) ([]byte, error) {
@@ -110,18 +287,82 @@ func (s *Service) read(path string) ([]byte, error) {
 	return os.ReadFile(path)
 }
 
-// mcpURL builds the MCPProxy MCP endpoint URL.
-func (s *Service) mcpURL() string {
-	addr := s.listenAddr
+// baseURL builds the credential-free MCPProxy MCP endpoint URL. This is the
+// anchor used both to construct client entries and to recognize existing ones
+// (with or without a trailing ?apikey= query), so matching works across the
+// pre- and post-Spec-078 entry shapes.
+func (s *Service) baseURL() string {
+	addr, _, _ := s.resolveConfig()
 	// If listen address starts with ":" (no host), default to localhost
 	if strings.HasPrefix(addr, ":") {
 		addr = "127.0.0.1" + addr
 	}
-	base := fmt.Sprintf("http://%s/mcp", addr)
-	if s.apiKey != "" {
-		base += "?apikey=" + url.QueryEscape(s.apiKey)
+	return fmt.Sprintf("http://%s/mcp", addr)
+}
+
+// serverEntryParams carries everything buildServerEntry needs. credential is the
+// value to embed in the entry (as an X-API-Key header, a --header bridge arg, or
+// an ?apikey= query, per client). It is a per-client `mcp_cli_` credential, the
+// masked or placeholder form of one in a preview, or empty for a keyless entry.
+// It is NEVER the instance admin API key.
+type serverEntryParams struct {
+	baseURL    string
+	credential string
+}
+
+// pendingCredential is the fixed placeholder that stands in for the real
+// secret wherever the secret does not exist yet (the precondition token's
+// pending entry): the real secret must never enter the digest, and it is
+// unknown at preview time anyway (plan D17).
+const pendingCredential = "mcp_cli_<pending>"
+
+// entryParams builds the entry parameters for an explicit credential value.
+func (s *Service) entryParams(credential string) serverEntryParams {
+	return serverEntryParams{baseURL: s.baseURL(), credential: credential}
+}
+
+// planCredential decides whether a connect with this intent mints a client
+// credential, and refuses the combinations that cannot work (plan D9/D10):
+//
+//   - keyless is only possible while require_mcp_auth is off, and cannot carry
+//     a profile or mode (an unidentified client has no binding);
+//   - with no minter wired, auth off writes the legacy keyless entry and auth on
+//     is refused — never the admin key.
+//
+// With auth off and a minter, connect still mints (identity + binding, FR-024).
+func (s *Service) planCredential(intent CredentialIntent) (mint bool, err error) {
+	_, _, requireAuth := s.resolveConfig()
+	if intent.Keyless {
+		if requireAuth {
+			return false, ErrKeylessRequiresAuthOff
+		}
+		if (intent.Profile != nil && *intent.Profile != "") || intent.Mode != nil {
+			return false, ErrKeylessWithProfile
+		}
+		return false, nil
 	}
-	return base
+	if s.minter == nil {
+		if requireAuth {
+			return false, ErrNoCredentialMinter
+		}
+		return false, nil
+	}
+	return true, nil
+}
+
+// credentialQuery appends the credential as an ?apikey= query to base, for the
+// clients whose config cannot express an HTTP header. The real secret is
+// URL-escaped; the display mask and the pending placeholder are left literal
+// so a preview renders cleanly.
+func credentialQuery(base, credential string) string {
+	if credential == "" {
+		return base
+	}
+	v := credential
+	if credential != maskClientCredential && credential != pendingCredential {
+		v = url.QueryEscape(credential)
+	}
+	return base + "?apikey=" + v
 }
 
 // defaultServerName is the key used in client config files.
@@ -174,23 +415,43 @@ func (s *Service) GetAllStatus() []ClientStatus {
 	clients := GetAllClients()
 	statuses := make([]ClientStatus, 0, len(clients))
 
+	// Config-derived, so it costs no file read and stays inside the Spec 075
+	// content-read-free contract.
+	proxyURL := s.baseURL()
+
 	for _, c := range clients {
-		cfgPath := ConfigPath(c.ID, s.homeDir)
+		cfgPath := s.configPath(c.ID)
 		status := ClientStatus{
-			ID:          c.ID,
-			Name:        c.Name,
-			ConfigPath:  cfgPath,
-			Supported:   c.Supported,
-			Reason:      c.Reason,
-			Note:        c.Note,
-			Bridge:      c.Bridge,
-			Icon:        c.Icon,
-			AccessState: accessUnknown,
+			ID:           c.ID,
+			Name:         c.Name,
+			ConfigPath:   cfgPath,
+			DisplayPath:  DisplayPath(cfgPath, s.homeDir),
+			CheckedPaths: s.checkedPaths(c.ID),
+			Supported:    c.Supported,
+			Reason:       c.Reason,
+			Note:         c.Note,
+			Bridge:       c.Bridge,
+			Icon:         c.Icon,
+			ReloadHint:   c.ReloadHint,
+			AccessState:  accessUnknown,
+			ProxyURL:     proxyURL,
 		}
 
 		// Metadata-only existence check (no content read).
-		if _, err := os.Stat(cfgPath); err == nil {
+		if _, err := s.stat(cfgPath); err == nil {
 			status.Exists = true
+			if c.Supported {
+				// The listing never reads a config (Spec 075), so it cannot say
+				// what credential an entry carries: "unknown" (plan D6). The
+				// on-demand GET /connect/{client} resolves it.
+				status.CredentialState = string(profile.CredentialStateUnknown)
+			}
+		} else if !os.IsNotExist(err) {
+			// Still no content read — but a stat we were not allowed to make is
+			// not evidence of absence, and leaving the row to say "No config
+			// found" would name the wrong problem. Classifying the stat error
+			// costs nothing extra here.
+			status.AccessState = classifyAccess(err)
 		}
 
 		statuses = append(statuses, status)
@@ -209,21 +470,34 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		return ClientStatus{}, fmt.Errorf("unknown client: %s", clientID)
 	}
 
-	cfgPath := ConfigPath(c.ID, s.homeDir)
+	cfgPath := s.configPath(c.ID)
 	status := ClientStatus{
-		ID:          c.ID,
-		Name:        c.Name,
-		ConfigPath:  cfgPath,
-		Supported:   c.Supported,
-		Reason:      c.Reason,
-		Note:        c.Note,
-		Bridge:      c.Bridge,
-		Icon:        c.Icon,
-		AccessState: accessUnknown,
+		ID:           c.ID,
+		Name:         c.Name,
+		ConfigPath:   cfgPath,
+		DisplayPath:  DisplayPath(cfgPath, s.homeDir),
+		CheckedPaths: s.checkedPaths(c.ID),
+		Supported:    c.Supported,
+		Reason:       c.Reason,
+		Note:         c.Note,
+		Bridge:       c.Bridge,
+		Icon:         c.Icon,
+		ReloadHint:   c.ReloadHint,
+		AccessState:  accessUnknown,
+		ProxyURL:     s.baseURL(),
 	}
 
-	if _, err := os.Stat(cfgPath); err == nil {
+	if _, err := s.stat(cfgPath); err == nil {
 		status.Exists = true
+	} else if !os.IsNotExist(err) {
+		// We could not even look. Claiming "no config found" here would report a
+		// permission block as "not installed" and hide the remediation the user
+		// needs (Spec 075 FR-004).
+		status.AccessState = classifyAccess(err)
+		if status.AccessState == accessDenied {
+			status.Remediation = remediationText(c.Name)
+		}
+		return status, nil
 	}
 	if !status.Exists {
 		status.AccessState = accessAbsent
@@ -233,12 +507,19 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 		return status, nil
 	}
 
-	name, found, outcome := s.entryAccess(*c, cfgPath)
+	loc, found, outcome := s.entryAccess(*c, cfgPath)
 	status.AccessState = outcome
 	switch {
 	case outcome == accessAccessible && found:
 		status.Connected = true
-		status.ServerName = name
+		status.ServerName = loc.Name
+		status.RegisteredURL = loc.Endpoint
+		status.EndpointMatch = classifyEndpointMatch(loc)
+		// What the entry carries, from the same single read. The secret itself
+		// is classified and dropped here; it is never stored on the status.
+		secret, _ := extractEntryCredential(c.ID, loc.Entry)
+		_, apiKey, _ := s.resolveConfig()
+		status.CredentialState = string(s.classifyEntrySecret(c.ID, secret, apiKey))
 	case outcome == accessDenied:
 		// A macOS App-Data block must surface as actionable remediation, not as
 		// a plain "not connected" (Spec 075 FR-004).
@@ -252,23 +533,78 @@ func (s *Service) GetStatus(clientID string) (ClientStatus, error) {
 // access outcome classified strictly from the error class (Spec 075 FR-011):
 // a read error maps to absent/denied/malformed via classifyAccess, and a parse
 // failure on otherwise-readable bytes maps to malformed.
-func (s *Service) entryAccess(client ClientDef, cfgPath string) (name string, found bool, outcome string) {
+func (s *Service) entryAccess(client ClientDef, cfgPath string) (loc entryLocation, found bool, outcome string) {
 	raw, err := s.read(cfgPath)
 	if err != nil {
-		return "", false, classifyAccess(err)
+		return entryLocation{}, false, classifyAccess(err)
 	}
-	name, found, parsedOK := s.findEntryFromBytes(client, raw)
+	loc, found, parsedOK := s.findEntryFromBytes(client, raw)
 	if !parsedOK {
-		return "", false, accessMalformed
+		return entryLocation{}, false, accessMalformed
 	}
-	return name, found, accessAccessible
+	return loc, found, accessAccessible
 }
 
 // Connect registers MCPProxy in the specified client's configuration file.
 // serverName defaults to "mcpproxy" if empty. If force is false and an entry
 // already exists, an error is returned.
+//
+// This is the tokenless entry point kept for the Web UI, the CLI and every
+// existing caller; ConnectWithPrecondition adds the Spec 091 drift guard.
 func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResult, error) {
+	return s.ConnectWithOptions(clientID, serverName, ConnectOptions{Force: force})
+}
+
+// ConnectOptions carries the optional parts of a connect: the overwrite flag,
+// the Spec 091 preview token, and the credential Intent (Spec 108).
+type ConnectOptions struct {
+	Force             bool
+	PreconditionToken string
+	Intent            CredentialIntent
+}
+
+// ConnectWithPrecondition is ConnectWithOptions with the default credential
+// intent (All servers for a fresh credential, the existing binding kept on a
+// reconnect).
+func (s *Service) ConnectWithPrecondition(clientID, serverName string, force bool, preconditionToken string) (res *ConnectResult, err error) {
+	return s.ConnectWithOptions(clientID, serverName, ConnectOptions{Force: force, PreconditionToken: preconditionToken})
+}
+
+// ConnectWithPrecondition is Connect guarded by the opaque token a preview
+// returned (Spec 091 FR-005). When preconditionToken is non-empty, the core
+// re-resolves the raw pre-write state and the entry it would write, recomputes
+// the token, and refuses with the discriminated "precondition_failed" action —
+// writing nothing and taking no backup — if anything drifted since the preview:
+// the file appearing or vanishing, the resolved (possibly adopted) entry
+// changing in any way, or the proxy's own configuration changing what would be
+// written. force=true rides WITH the token for a replace-classified flow and
+// never rescues a stale one.
+//
+// An empty token means exactly today's behavior, so existing consumers are
+// unaffected (contracts §2).
+//
+// Credential (Spec 108 FR-024): the write embeds a per-client `mcp_cli_`
+// credential minted by the injected CredentialMinter, or nothing (--keyless,
+// only while require_mcp_auth is off). It never embeds the admin API key. A
+// fresh credential is minted only once every refusal that does not depend on
+// it has passed, so a refused write mints nothing; a write that then fails
+// aborts the mint (fresh: forgotten; reconnect: the staged rotation rolls
+// back and the old secret keeps working, FR-021a).
+func (s *Service) ConnectWithOptions(clientID, serverName string, opts ConnectOptions) (res *ConnectResult, err error) {
+	force, preconditionToken := opts.Force, opts.PreconditionToken
 	client := FindClient(clientID)
+
+	// FR-037/FR-042: every ConnectResult this call produces — success,
+	// already_exists, precondition_failed, whatever branch below returns it —
+	// carries the client's display path and reload hint, so a caller never has
+	// to special-case which branch to trust for them.
+	defer func() {
+		if res != nil && client != nil {
+			res.DisplayPath = DisplayPath(res.ConfigPath, s.homeDir)
+			res.ReloadHint = client.ReloadHint
+		}
+	}()
+
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
 	}
@@ -280,34 +616,235 @@ func (s *Service) Connect(clientID, serverName string, force bool) (*ConnectResu
 		serverName = defaultServerName
 	}
 
-	cfgPath := ConfigPath(clientID, s.homeDir)
+	cfgPath := s.configPath(clientID)
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
-	if client.ID == "opencode" {
-		if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
-			return nil, fmt.Errorf("OpenCode config file %s does not exist", cfgPath)
+	// Pure input validation (no I/O): keyless with auth on or with a profile,
+	// or auth on with no minter, is refused before anything is read or written.
+	mint, err := s.planCredential(opts.Intent)
+	if err != nil {
+		return nil, err
+	}
+	// Resolve the pre-write state ONCE for the whole operation. The token
+	// check and the write must cover the SAME read — re-resolving per step is
+	// what let a token hash one entry while the write replaced or deleted
+	// another (Spec 091 FR-005), and it is also what let connectJSON/
+	// connectTOML each open the file again independently: if the file changed
+	// between that first read and their own second one, force=true could ride
+	// a token valid against the first read while the write silently committed
+	// whatever the second, unchecked read contained. pre is threaded into the
+	// write below so there is exactly one PRE-WRITE content read for the whole
+	// operation (verifyJSONEntry's post-write re-read, which confirms the
+	// write actually landed, is separate and unaffected).
+	//
+	// This closes the gap BETWEEN the two reads; it cannot close the much
+	// smaller window between this read and the eventual atomicWriteFile call a
+	// few steps below (the precondition check, the refusal guard and the
+	// backup step all run in between). No read-then-write to a plain file can
+	// close that residual window without OS-level locking (e.g. flock), which
+	// this package does not use — an external rewrite landing in that last
+	// instant is a pre-existing, general limitation of the whole write path,
+	// not something this fix introduces or claims to solve.
+	pre, err := s.preWriteState(client, cfgPath, serverName)
+	if err != nil {
+		return nil, s.asAccessError(client, cfgPath, err)
+	}
+
+	// Deliberately NOT refusing here on a malformed accessState: connectJSON/
+	// connectTOML no longer open the file again for their own content parse —
+	// they parse pre.raw, the SAME bytes this resolution already produced (see
+	// parseOrCreateJSON/parseOrCreateTOML) — but refuseIfServersSectionRaced
+	// still performs its own fresh reads later, close to each remaining I/O
+	// step that could let an external rewrite race the write (backupFile,
+	// atomicWriteFile's staging, and its preRename hook right before the
+	// rename). A check here alone would miss drift landing in any of those
+	// later windows, so the write functions re-check repeatedly instead; see
+	// refuseIfServersSectionRaced and its call sites in connectJSON/
+	// connectTOML for where and why. The residual gap immediately before
+	// atomicWriteFile's own rename is documented there.
+	//
+	// Two limitations that cross-model review of PR #1340 flagged as
+	// pre-existing and explicitly deferred — the precondition TOKEN never
+	// being re-validated against the write's own later, independent content
+	// read, and guardJsoncComments reading the file once to detect comments
+	// while connectJSON's old readOrCreateJSON reads it again — are both
+	// closed by pre being threaded through from here: connectJSON/connectTOML
+	// and guardJsoncCommentsBytes now all operate on this single pre-write
+	// read, so there is exactly one PRE-WRITE content read for the whole
+	// operation and nothing downstream of this point re-reads the file for
+	// its own content decisions. A third, disconnect-path instance of the same
+	// comment-guard double-read (Disconnect never goes through this function
+	// or pre) is closed separately in disconnectJSON, which shares its own
+	// single read between the guard and the parse.
+
+	// Precondition check BEFORE any backup or write, so a refusal is completely
+	// inert (Spec 091 FR-005).
+	if preconditionToken != "" {
+		if stale := s.checkPrecondition(client, cfgPath, serverName, preconditionToken, pre.fileExists, pre.existing, opts.Intent); stale != nil {
+			return stale, nil
 		}
 	}
 
-	mcpURL := s.mcpURL()
+	// The refusal guard runs AFTER the drift check. Both orders refuse the
+	// write, but a caller that echoed a token describing a file which has since
+	// vanished is looking at drift, and FR-005 promises drift is reported as the
+	// discriminated conflict for every change kind — a flat refusal instead
+	// reads as a permanent "not connectable" and strands the form.
+	if err := connectRefusal(client, cfgPath); err != nil {
+		return nil, err
+	}
 
-	var res *ConnectResult
-	var err error
+	// res/err are the function's named returns — deliberately NOT re-declared
+	// with `var` here, which would shadow them and leave the deferred
+	// DisplayPath/ReloadHint fill-in above looking at a permanently-nil res.
+	cred := &credentialHandle{svc: s, clientID: clientID, intent: opts.Intent, mint: mint}
 	if client.Format == "toml" {
-		res, err = s.connectTOML(client, cfgPath, serverName, mcpURL, force)
+		res, err = s.connectTOML(client, cfgPath, serverName, force, pre, cred)
 	} else {
-		res, err = s.connectJSON(client, cfgPath, serverName, mcpURL, force)
+		res, err = s.connectJSON(client, cfgPath, serverName, force, pre, cred)
 	}
 	// A permission denial anywhere in the read/backup/write chain (the errors
 	// preserve their OS cause via %w) surfaces as a typed *AccessError with
 	// remediation; other errors keep their existing semantics (Spec 075 FR-004).
-	return res, s.asAccessError(client, cfgPath, err)
+	err = s.asAccessError(client, cfgPath, err)
+	if commitErr := cred.settle(res, err); commitErr != nil {
+		return res, commitErr
+	}
+	if res != nil && res.Success && res.Action != "already_exists" {
+		cred.describe(res, opts.Intent)
+	}
+	return res, err
+}
+
+// credentialHandle defers minting to the last moment before a write (after
+// every refusal that does not depend on the credential), and remembers what
+// was issued so the outcome can be committed or aborted.
+type credentialHandle struct {
+	svc      *Service
+	clientID string
+	intent   CredentialIntent
+	mint     bool
+	issued   *IssuedCredential
+	// wrote is set once the config write itself succeeded. A failure after
+	// that point (a verification re-read) is ambiguous — the file may hold the
+	// new secret — so it must NOT abort the mint: a fresh credential is left
+	// active and a staged rotation stays pending for the reconciler, which
+	// resolves it from what the config actually holds (FR-021a).
+	wrote bool
+}
+
+func (h *credentialHandle) markWritten() { h.wrote = true }
+
+// secret returns the credential to embed: "" for a keyless entry, otherwise
+// the freshly issued `mcp_cli_` secret (minted on first use).
+func (h *credentialHandle) secret() (string, error) {
+	if !h.mint {
+		// A keyless write mints nothing but still rewrites the client's config:
+		// refuse while another connect holds the in-flight claim (FR-021a).
+		if h.intent.Keyless && h.svc.minter != nil {
+			if err := h.svc.minter.CheckIdle(h.clientID); err != nil {
+				return "", err
+			}
+		}
+		return "", nil
+	}
+	if h.issued == nil {
+		issued, err := h.svc.minter.Issue(h.clientID, h.intent)
+		if err != nil {
+			return "", err
+		}
+		h.issued = issued
+	}
+	return h.issued.Secret, nil
+}
+
+// settle commits an issued credential after a successful write and aborts it
+// after any failure or refusal. It returns a commit error only: an abort
+// failure is logged by the minter and must not mask the write error.
+func (h *credentialHandle) settle(res *ConnectResult, writeErr error) error {
+	if h.issued == nil {
+		return nil
+	}
+	if writeErr != nil || res == nil || !res.Success {
+		if h.wrote {
+			// Ambiguous outcome: leave it to the reconciler, which must be free
+			// to resolve it from the file (FR-021a).
+			h.svc.minter.Release(h.clientID, h.issued)
+			return nil
+		}
+		_ = h.svc.minter.Abort(h.clientID, h.intent, h.issued)
+		h.issued = nil
+		return nil
+	}
+	if err := h.svc.minter.Commit(h.clientID, h.intent, h.issued); err != nil {
+		return fmt.Errorf("the client config was written but its credential could not be finalized: %w", err)
+	}
+	return nil
+}
+
+// describe fills the credential fields of a successful result: the masked
+// credential, token name, binding and rotation outcome — never the secret.
+func (h *credentialHandle) describe(res *ConnectResult, intent CredentialIntent) {
+	if h.issued == nil {
+		if !h.mint {
+			res.Keyless = true
+		}
+		return
+	}
+	res.Credential = maskClientCredential
+	res.TokenName = h.issued.TokenName
+	res.Profile = h.issued.Profile
+	res.Mode = h.issued.Mode
+	if h.issued.Rotating {
+		res.Rotation = profile.RotationFinalized
+	}
+}
+
+// connectRefusal reports the reason a connect would refuse for this client
+// regardless of user intent, or nil when the client is connectable.
+//
+// Today the single case is a non-create-capable client whose config is absent:
+// OpenCode owns a config schema mcpproxy will not invent, so connect refuses
+// rather than creating one. It is a package-level function, not a method,
+// precisely so the PREVIEW can run the exact same guard the write runs and
+// surface the reason verbatim before the user ever presses Connect (Spec 091
+// FR-003, research D8) — a divergent copy would let the form promise "a new
+// file will be created; Undo removes it" for a client where that is false.
+func connectRefusal(client *ClientDef, cfgPath string) error {
+	if client.ID != "opencode" {
+		return nil
+	}
+	// configPath already prefers whichever candidate exists; reaching a
+	// nonexistent path here means NO OpenCode global config was found.
+	if _, err := os.Stat(cfgPath); os.IsNotExist(err) {
+		return fmt.Errorf(
+			"no OpenCode config found (looked for opencode.jsonc and opencode.json in %s) — is OpenCode installed?",
+			filepath.Dir(cfgPath))
+	}
+	return nil
 }
 
 // Disconnect removes the MCPProxy entry from the specified client's configuration.
-func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error) {
+func (s *Service) Disconnect(clientID, serverName string) (res *ConnectResult, err error) {
 	client := FindClient(clientID)
+
+	// FR-037/FR-042: fill DisplayPath/ReloadHint on whichever ConnectResult
+	// this call returns, including the OpenCode alternate-candidate branch
+	// below (which returns directly rather than falling through to the
+	// bottom `return`).
+	//
+	// Review round 3 finding: every ClientDef.ReloadHint is worded for a
+	// fresh connect ("...to load MCPProxy"). Disconnect just removed the
+	// entry, so that wording is copied through disconnectReloadHint, which
+	// rephrases it for removal instead of loading.
+	defer func() {
+		if res != nil && client != nil {
+			res.DisplayPath = DisplayPath(res.ConfigPath, s.homeDir)
+			res.ReloadHint = disconnectReloadHint(client.ReloadHint)
+		}
+	}()
+
 	if client == nil {
 		return nil, fmt.Errorf("unknown client: %s", clientID)
 	}
@@ -319,35 +856,195 @@ func (s *Service) Disconnect(clientID, serverName string) (*ConnectResult, error
 		serverName = defaultServerName
 	}
 
-	cfgPath := ConfigPath(clientID, s.homeDir)
+	cfgPath := s.configPath(clientID)
 	if cfgPath == "" {
 		return nil, fmt.Errorf("cannot determine config path for %s", clientID)
 	}
 
-	var res *ConnectResult
-	var err error
 	if client.Format == "toml" {
 		res, err = s.disconnectTOML(client, cfgPath, serverName)
 	} else {
 		res, err = s.disconnectJSON(client, cfgPath, serverName)
+	}
+	// OpenCode candidate drift (#922): if the entry was written to opencode.json
+	// and OpenCode later bootstrapped opencode.jsonc, the resolver now targets
+	// the .jsonc — but the entry still lives in the .json. When the resolved
+	// file has no entry, retry the other existing candidate before giving up.
+	if err == nil && res != nil && !res.Success && res.Action == "not_found" && clientID == "opencode" {
+		for _, alt := range opencodeConfigCandidates(s.homeDir) {
+			if alt == cfgPath {
+				continue
+			}
+			if _, statErr := os.Stat(alt); statErr != nil {
+				continue
+			}
+			altRes, altErr := s.disconnectJSON(client, alt, serverName)
+			if altErr != nil {
+				// An unreadable/malformed/comment-guarded alternate is a real
+				// failure — surfacing "not_found" would wrongly claim the entry
+				// is absent when we could not actually check the file.
+				return altRes, s.asAccessError(client, alt, altErr)
+			}
+			if altRes != nil && altRes.Success {
+				return altRes, nil
+			}
+		}
 	}
 	return res, s.asAccessError(client, cfgPath, err)
 }
 
 // ---------- JSON helpers ----------
 
-// connectJSON adds or updates the mcpproxy entry in a JSON config file.
-func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL string, force bool) (*ConnectResult, error) {
-	// Read existing config or start fresh
-	data, perm, err := s.readOrCreateJSON(cfgPath)
+// guardJsoncComments refuses to rewrite a .jsonc file that actually uses
+// comments: mcpproxy re-serializes plain JSON, which would silently strip them
+// (#922). Comment-free .jsonc (OpenCode's bootstrap stub) rewrites safely.
+// Absent or unreadable files pass — the normal read/write path handles those.
+//
+// It reads the file itself and has NO production callers as of PR #1352:
+// preview.go — the last caller with nothing to write and so nothing to race
+// against — was switched to guardJsoncCommentsBytes(cfgPath, pre.raw) so its
+// read-only path also shares preWriteState's single read rather than opening
+// the file again. It is kept (rather than deleted) because its own test
+// (TestGuardJsoncComments_SkipsReadForNonJsoncPath) exercises it directly,
+// and as a documented trap for any future caller: do NOT call this from a
+// write path.
+// The write paths check guardJsoncCommentsBytes against bytes they already
+// hold instead — connectJSON shares preWriteState's single pre-write read
+// (pre.raw; connectTOML never calls the guard at all, since a .toml path can
+// never match the .jsonc suffix it checks), and disconnectJSON checks the
+// same bytes its own single s.read call goes on to parse. A second,
+// independent read from this function would reopen the TOCTOU those closed: a
+// file that gains comments between this read and the later one would pass the
+// guard on stale bytes and then get silently rewritten as plain JSON,
+// stripping the comments the guard exists to protect.
+func (s *Service) guardJsoncComments(cfgPath string) error {
+	if !strings.HasSuffix(cfgPath, ".jsonc") {
+		return nil
+	}
+	raw, err := s.read(cfgPath)
+	if err != nil {
+		return nil
+	}
+	return guardJsoncCommentsBytes(cfgPath, raw)
+}
+
+// guardJsoncCommentsBytes is the pure, read-free core of guardJsoncComments,
+// operating on bytes the caller already has — connectJSON's shared pre-write
+// read (pre.raw; connectTOML never calls this, a .toml path can't match the
+// .jsonc suffix), or disconnectJSON's own single read — so the check
+// and the parse/write that follows run against one snapshot of the file
+// instead of two independent reads that could race. raw is nil for an absent
+// or unreadable file, which passes exactly as guardJsoncComments' own read
+// failure does — the normal read/write path handles those.
+func guardJsoncCommentsBytes(cfgPath string, raw []byte) error {
+	if !strings.HasSuffix(cfgPath, ".jsonc") || raw == nil {
+		return nil
+	}
+	if jsonHasComments(raw) {
+		return fmt.Errorf(
+			"%s contains comments, which mcpproxy would strip on rewrite — edit the \"mcp\" section manually or remove the comments and retry",
+			cfgPath)
+	}
+	return nil
+}
+
+// refuseIfServersSectionRaced re-reads cfgPath and reports whether client's
+// servers section (following serversMapPath for a nested-schema client like
+// ZCode, or the flat client.ServerKey lookup otherwise — the same resolution
+// resolveServersMapState uses everywhere else) has become present-but-not-
+// an-object since an earlier read. connectJSON/
+// connectTOML each call this TWICE against the same drift class (Spec 091
+// FR-005 gap) — on top of the type assertion the function body's own read
+// already does for its existence/force/adoption decisions — because that
+// first read is not adjacent to the actual write: several real I/O steps
+// happen in between:
+//
+//   - immediately before backupFile: a fast-fail so an already-bad section
+//     (unchanged since the top-of-function read) does not even earn a
+//     backup file, and so a change landing during the EARLIER part of the
+//     function body (existence/adoption decisions, which do no I/O of their
+//     own) is caught.
+//   - as atomicWriteFile's preRename hook (NOT a call made before
+//     atomicWriteFile — round-5 cross-model review found that placement
+//     alone still left atomicWriteFile's own temp-file staging
+//     (MkdirAll/CreateTemp/Write/Close/Chmod) as a real, I/O-bearing window):
+//     backupFile performs its own Stat/Open/copy, genuinely slow enough on a
+//     loaded filesystem to be practically raceable (round-4), and then
+//     atomicWriteFile's staging adds more of the same (round-5) — so a
+//     change landing during EITHER is caught by this call running at the
+//     true last moment before the rename that actually replaces the file.
+//
+// A residual gap remains between this second call (inside atomicWriteFile,
+// immediately before os.Rename) and the rename itself — practically just the
+// single Lstat os.Rename performs internally on Unix before replacing the
+// file, not a copy or anything an external writer could meaningfully race
+// against. Fully eliminating even that needs an OS-level file lock (e.g.
+// flock) held across the whole read-modify-write sequence, which is a larger
+// architectural change deserving its own review, not folded into this fix
+// (tracked alongside the other deferred TOCTOU findings — see the comment
+// block in ConnectWithPrecondition).
+//
+// This is deliberately forgiving about everything except the one thing it
+// exists to catch: a vanished file, a still-absent-or-object-shaped section,
+// or any read/parse failure all return nil — those are not this guard's
+// class of problem, and the imminent backup/write attempt (or its own
+// pre-existing error handling) is what surfaces them. Only "parsed fine AND
+// the key is present AND it is not the right container type" refuses.
+func (s *Service) refuseIfServersSectionRaced(client *ClientDef, cfgPath string) error {
+	raw, err := s.read(cfgPath)
+	if err != nil {
+		return nil
+	}
+	var data map[string]interface{}
+	if client.Format == "toml" {
+		if _, derr := toml.Decode(string(raw), &data); derr != nil {
+			return nil
+		}
+	} else if derr := unmarshalLenientJSON(raw, &data); derr != nil {
+		return nil
+	}
+	_, _, malformed := resolveServersMapState(client, data)
+	if !malformed {
+		return nil
+	}
+	containerWord := "a JSON object"
+	if client.Format == "toml" {
+		containerWord = "a TOML table"
+	}
+	return fmt.Errorf("%s: %q was changed to a non-object value while MCPProxy was about to write it (expected %s); refusing to overwrite it — retry", cfgPath, client.ServerKey, containerWord)
+}
+
+// connectJSON writes the entry, adopting the entry pre.existing names when it
+// differs from serverName. pre is the SAME pre-write read ConnectWithPrecondition
+// already resolved and checked the precondition token against — connectJSON
+// never opens the file again, so the write acts on exactly the bytes the token
+// validated (Spec 091 FR-005) instead of racing a second, independent read.
+func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName string, force bool, pre preWriteResult, cred *credentialHandle) (*ConnectResult, error) {
+	if err := guardJsoncCommentsBytes(cfgPath, pre.raw); err != nil {
+		return nil, err
+	}
+	// Parse the already-read config, or start fresh if it never existed.
+	data, perm, err := parseOrCreateJSON(cfgPath, pre.raw, pre.perm, pre.readErr)
 	if err != nil {
 		return nil, err
 	}
+	resolved := pre.existing
 
-	// Get or create the servers section
-	serversKey := client.ServerKey
-	serversMap, ok := data[serversKey].(map[string]interface{})
-	if !ok {
+	// Get or create the servers section. A key along the path (see
+	// serversMapPath — flat for most clients, nested for ZCode) that is
+	// PRESENT but not an object (a hand-edited string/number/array/bool, or a
+	// non-table intermediate level) must refuse, not silently fall through to
+	// "no entries yet": the code below would otherwise replace it with a
+	// brand-new empty map, discarding whatever was there without ever giving
+	// drift detection a chance to catch it. This is the first of THREE checks
+	// against this drift class — see the second, pre-backup one below and the
+	// third, inside atomicWriteFile's preRename hook, for why this one alone
+	// is not authoritative.
+	serversMap, found, malformed := resolveServersMapState(client, data)
+	if malformed {
+		return nil, fmt.Errorf("%s: %q is not a JSON object; refusing to overwrite it — fix the config manually and retry", cfgPath, client.ServerKey)
+	}
+	if !found {
 		serversMap = make(map[string]interface{})
 	}
 
@@ -366,8 +1063,12 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL str
 		action = "updated"
 	}
 
-	if client.ID == "opencode" {
-		if adoptedName, found := findEquivalentJSONServerName(serversMap, mcpURL, serverName); found && adoptedName != serverName {
+	// Adopt the entry the caller already resolved — never a freshly looked-up
+	// one. A key that has vanished from the file since is not adopted: there is
+	// nothing left to delete.
+	if client.ID == "opencode" && resolved != nil && resolved.name != serverName {
+		if _, present := serversMap[resolved.name]; present {
+			adoptedName := resolved.name
 			if !force {
 				return &ConnectResult{
 					Success:    true,
@@ -383,16 +1084,32 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL str
 		}
 	}
 
+	// SECOND check for the same drift class (Spec 091 FR-005 gap; round-3
+	// cross-model review finding): a fast-fail, before backupFile's own real
+	// I/O, for a change that landed since the top-of-function read.
+	if err := s.refuseIfServersSectionRaced(client, cfgPath); err != nil {
+		return nil, err
+	}
+
+	// Every refusal that does not depend on the credential has passed: mint it
+	// now (guard-checked), before the backup so a refused mint leaves no stray
+	// backup file. A later failure aborts it (see ConnectWithOptions).
+	secret, err := cred.secret()
+	if err != nil {
+		return nil, err
+	}
+
 	// Create backup before modifying
 	backupPath, err := backupFile(cfgPath)
 	if err != nil {
 		return nil, fmt.Errorf("backup failed: %w", err)
 	}
 
-	// Build the entry
-	entry := buildServerEntry(client.ID, mcpURL)
+	// Build the entry with the per-client credential (empty for a keyless
+	// entry). The admin API key is never a credential source.
+	entry := buildServerEntry(client.ID, s.entryParams(secret))
 	serversMap[serverName] = entry
-	data[serversKey] = serversMap
+	setServersMap(client, data, serversMap)
 
 	// Write atomically
 	encoded, err := marshalJSONIndent(data)
@@ -400,12 +1117,27 @@ func (s *Service) connectJSON(client *ClientDef, cfgPath, serverName, mcpURL str
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
 
-	if err := atomicWriteFile(cfgPath, encoded, perm); err != nil {
+	// THIRD check (round-4/round-5 cross-model review findings): backupFile
+	// above just performed real Stat/Open/copy I/O — genuinely slow enough to
+	// race in practice — so the section could have been replaced with a
+	// non-object value DURING that backup, after the second check already
+	// passed. Passing this as atomicWriteFile's preRename hook (rather than
+	// calling it here, before atomicWriteFile) is what actually closes that
+	// window down to a few local syscalls: atomicWriteFile itself stages the
+	// temp file (MkdirAll/CreateTemp/Write/Close/Chmod — also real I/O) before
+	// this runs, so a check called from here would still leave THAT staging
+	// gap open, per round 5. The permission bits also come from currentPerm's
+	// fresh re-stat rather than the mode captured all the way back in
+	// parseOrCreateJSON, for the same reason (see currentPerm's doc comment).
+	if err := atomicWriteFile(cfgPath, encoded, currentPerm(cfgPath, perm), func() error {
+		return s.refuseIfServersSectionRaced(client, cfgPath)
+	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
+	cred.markWritten()
 
 	// Verify by re-reading
-	if err := s.verifyJSONEntry(cfgPath, serversKey, serverName); err != nil {
+	if err := s.verifyJSONEntry(client, cfgPath, serverName); err != nil {
 		return nil, fmt.Errorf("verification failed: %w", err)
 	}
 
@@ -436,14 +1168,19 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	// Guard against the SAME bytes just read, not a second independent read of
+	// the file (see guardJsoncCommentsBytes) — otherwise this reopens the exact
+	// TOCTOU the guard exists to close, just on the disconnect path.
+	if err := guardJsoncCommentsBytes(cfgPath, raw); err != nil {
+		return nil, err
+	}
 
 	var data map[string]interface{}
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	serversKey := client.ServerKey
-	serversMap, ok := data[serversKey].(map[string]interface{})
+	serversMap, ok := getServersMap(client, data)
 	if !ok {
 		return &ConnectResult{
 			Success:    false,
@@ -451,7 +1188,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 			ConfigPath: cfgPath,
 			ServerName: serverName,
 			Action:     "not_found",
-			Message:    fmt.Sprintf("No %s section found in %s", serversKey, client.Name),
+			Message:    fmt.Sprintf("No %s section found in %s", client.ServerKey, client.Name),
 		}, nil
 	}
 
@@ -473,7 +1210,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 	}
 
 	delete(serversMap, serverName)
-	data[serversKey] = serversMap
+	setServersMap(client, data, serversMap)
 
 	info, _ := os.Stat(cfgPath)
 	perm := os.FileMode(0o644)
@@ -486,7 +1223,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
 
-	if err := atomicWriteFile(cfgPath, encoded, perm); err != nil {
+	if err := atomicWriteFile(cfgPath, encoded, perm, nil); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 
@@ -504,19 +1241,26 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 // ---------- TOML helpers (Codex) ----------
 
 // connectTOML adds or updates the mcpproxy entry in a TOML config file (Codex).
-func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName, mcpURL string, force bool) (*ConnectResult, error) {
-	data, perm, err := s.readOrCreateTOML(cfgPath)
+// pre is the SAME pre-write read ConnectWithPrecondition already resolved and
+// checked the precondition token against (see connectJSON's doc comment for
+// why this must not open the file again).
+func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName string, force bool, pre preWriteResult, cred *credentialHandle) (*ConnectResult, error) {
+	data, perm, err := parseOrCreateTOML(cfgPath, pre.raw, pre.perm, pre.readErr)
 	if err != nil {
 		return nil, err
 	}
 
-	// Get or create mcp_servers section
-	serversRaw, ok := data["mcp_servers"]
-	var serversMap map[string]interface{}
-	if ok {
-		serversMap, _ = serversRaw.(map[string]interface{})
+	// Get or create mcp_servers section. See the equivalent comment in
+	// connectJSON: present-but-wrong-type must refuse, not silently fall
+	// through to a fresh empty table that discards the value. This is the
+	// first of three checks against this drift class — see the second,
+	// pre-backup one below and the third, inside atomicWriteFile's preRename
+	// hook.
+	serversMap, found, malformed := resolveServersMapState(client, data)
+	if malformed {
+		return nil, fmt.Errorf("%s: %q is not a TOML table; refusing to overwrite it — fix the config manually and retry", cfgPath, client.ServerKey)
 	}
-	if serversMap == nil {
+	if !found {
 		serversMap = make(map[string]interface{})
 	}
 
@@ -535,18 +1279,31 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName, mcpURL str
 		action = "updated"
 	}
 
+	// Second check — a fast-fail before backupFile's own real I/O. See
+	// refuseIfServersSectionRaced's doc comment for why this alone still
+	// leaves a window, and the third check below that closes it.
+	if err := s.refuseIfServersSectionRaced(client, cfgPath); err != nil {
+		return nil, err
+	}
+
+	// Mint the credential now, after every credential-independent refusal and
+	// before the backup (see connectJSON).
+	secret, err := cred.secret()
+	if err != nil {
+		return nil, err
+	}
+
 	// Backup
 	backupPath, err := backupFile(cfgPath)
 	if err != nil {
 		return nil, fmt.Errorf("backup failed: %w", err)
 	}
 
-	// Build Codex entry
-	entry := map[string]interface{}{
-		"url": mcpURL,
-	}
+	// Build Codex entry via the shared constructor so what connect writes is
+	// exactly what preview renders (Spec 078 FR-002).
+	entry := buildServerEntry(client.ID, s.entryParams(secret))
 	serversMap[serverName] = entry
-	data["mcp_servers"] = serversMap
+	setServersMap(client, data, serversMap)
 
 	// Encode TOML
 	var buf bytes.Buffer
@@ -555,9 +1312,17 @@ func (s *Service) connectTOML(client *ClientDef, cfgPath, serverName, mcpURL str
 		return nil, fmt.Errorf("encode TOML: %w", err)
 	}
 
-	if err := atomicWriteFile(cfgPath, buf.Bytes(), perm); err != nil {
+	// Third check (round-4/round-5 findings) — see connectJSON's equivalent
+	// comment for why this must be atomicWriteFile's preRename hook rather
+	// than a call from here, and why the permission bits come from
+	// currentPerm's fresh re-stat rather than the mode parseOrCreateTOML
+	// captured earlier.
+	if err := atomicWriteFile(cfgPath, buf.Bytes(), currentPerm(cfgPath, perm), func() error {
+		return s.refuseIfServersSectionRaced(client, cfgPath)
+	}); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
+	cred.markWritten()
 
 	return &ConnectResult{
 		Success:    true,
@@ -640,7 +1405,7 @@ func (s *Service) disconnectTOML(client *ClientDef, cfgPath, serverName string) 
 		return nil, fmt.Errorf("encode TOML: %w", err)
 	}
 
-	if err := atomicWriteFile(cfgPath, buf.Bytes(), perm); err != nil {
+	if err := atomicWriteFile(cfgPath, buf.Bytes(), perm, nil); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 
@@ -657,55 +1422,69 @@ func (s *Service) disconnectTOML(client *ClientDef, cfgPath, serverName string) 
 
 // ---------- Internal helpers ----------
 
-// readOrCreateJSON reads a JSON config file, or returns an empty map with default permissions
-// if the file does not exist.
-func (s *Service) readOrCreateJSON(path string) (map[string]interface{}, os.FileMode, error) {
-	perm := os.FileMode(0o644)
-
-	raw, err := s.read(path)
-	if os.IsNotExist(err) {
+// parseOrCreateJSON turns already-read config bytes into a mutable map,
+// mirroring the old read-on-demand helper's semantics without touching the
+// filesystem: raw == nil with readErr == nil means the file does not exist
+// (empty map); a non-nil readErr means preWriteState's read failed for a
+// reason other than "absent" and is surfaced here, unchanged, instead of the
+// caller attempting its own second read. Parsing pre-read bytes twice (here
+// and, earlier, inside preWriteState's own classification) is not a TOCTOU —
+// the bytes cannot change between two parses of the same slice — so no
+// filesystem access happens in this function at all.
+func parseOrCreateJSON(path string, raw []byte, perm os.FileMode, readErr error) (map[string]interface{}, os.FileMode, error) {
+	if readErr != nil {
+		return nil, perm, fmt.Errorf("read %s: %w", path, readErr)
+	}
+	if raw == nil {
 		return make(map[string]interface{}), perm, nil
 	}
-	if err != nil {
-		return nil, perm, fmt.Errorf("read %s: %w", path, err)
-	}
-
-	info, _ := os.Stat(path)
-	if info != nil {
-		perm = info.Mode()
-	}
-
+	// unmarshalLenientJSON normalizes a top-level JSON `null` (which decodes
+	// successfully but would otherwise leave a nil map) back to a non-nil
+	// empty map on success, so no additional nil check is needed here.
 	var data map[string]interface{}
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return nil, perm, fmt.Errorf("parse JSON in %s: %w", path, err)
 	}
-
 	return data, perm, nil
 }
 
-// readOrCreateTOML reads a TOML config file, or returns an empty map with default permissions.
-func (s *Service) readOrCreateTOML(path string) (map[string]interface{}, os.FileMode, error) {
-	perm := os.FileMode(0o644)
-
-	raw, err := s.read(path)
-	if os.IsNotExist(err) {
+// parseOrCreateTOML is parseOrCreateJSON's TOML counterpart.
+func parseOrCreateTOML(path string, raw []byte, perm os.FileMode, readErr error) (map[string]interface{}, os.FileMode, error) {
+	if readErr != nil {
+		return nil, perm, fmt.Errorf("read %s: %w", path, readErr)
+	}
+	if raw == nil {
 		return make(map[string]interface{}), perm, nil
 	}
-	if err != nil {
-		return nil, perm, fmt.Errorf("read %s: %w", path, err)
-	}
-
-	info, _ := os.Stat(path)
-	if info != nil {
-		perm = info.Mode()
-	}
-
 	var data map[string]interface{}
 	if _, err := toml.Decode(string(raw), &data); err != nil {
 		return nil, perm, fmt.Errorf("parse TOML in %s: %w", path, err)
 	}
-
+	if data == nil {
+		// Defensive: BurntSushi/toml initializes the map even for empty input
+		// today, but a nil top-level map here would panic the same way the JSON
+		// path's null-document case did.
+		data = make(map[string]interface{})
+	}
 	return data, perm, nil
+}
+
+// currentPerm re-stats cfgPath for its permission bits right before the write,
+// rather than relying solely on the mode preWriteState captured earlier. The
+// content (fallback) comes from that single earlier read to keep the write
+// free of a second independent read, but a mode captured that far back — before
+// the precondition check, the refusal guard and the backup step — leaves a
+// wide window in which a concurrent chmod (e.g. someone tightening the file to
+// 0600) would otherwise be silently undone by the rewrite. Re-stating just the
+// mode immediately before the write does not reopen the content TOCTOU (it
+// never touches file bytes) while keeping the applied mode as fresh as the
+// pre-refactor code kept it. Falls back to `fallback` when the file cannot be
+// stat'd right now (e.g. it no longer exists, or never did).
+func currentPerm(cfgPath string, fallback os.FileMode) os.FileMode {
+	if info, err := os.Stat(cfgPath); err == nil {
+		return info.Mode()
+	}
+	return fallback
 }
 
 // marshalJSONIndent encodes data as pretty-printed JSON with a trailing newline.
@@ -719,7 +1498,7 @@ func marshalJSONIndent(data interface{}) ([]byte, error) {
 }
 
 // verifyJSONEntry re-reads the config file and checks that the expected entry exists.
-func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
+func (s *Service) verifyJSONEntry(client *ClientDef, path, serverName string) error {
 	raw, err := s.read(path)
 	if err != nil {
 		return fmt.Errorf("re-read %s: %w", path, err)
@@ -728,9 +1507,9 @@ func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
 		return fmt.Errorf("re-parse %s: %w", path, err)
 	}
-	serversMap, ok := data[serversKey].(map[string]interface{})
+	serversMap, ok := getServersMap(client, data)
 	if !ok {
-		return fmt.Errorf("missing %s key after write", serversKey)
+		return fmt.Errorf("missing %s key after write", client.ServerKey)
 	}
 	if _, exists := serversMap[serverName]; !exists {
 		return fmt.Errorf("entry %q missing after write", serverName)
@@ -738,10 +1517,28 @@ func (s *Service) verifyJSONEntry(path, serversKey, serverName string) error {
 	return nil
 }
 
-func findEquivalentJSONServerName(serversMap map[string]interface{}, mcpURL, requestedServerName string) (string, bool) {
-	baseURL := strings.SplitN(mcpURL, "?", 2)[0]
-	for name, rawEntry := range serversMap {
-		entry, ok := rawEntry.(map[string]interface{})
+// findEquivalentJSONServerName resolves the entry a connect would adopt: the
+// requested name when it is already taken, otherwise an entry pointing at our
+// MCP endpoint under some other key (including the legacy ?apikey= shape) so an
+// upgrade updates the existing entry rather than duplicating it.
+//
+// The resolution is DETERMINISTIC by construction — exact name first, then the
+// lowest URL-equivalent name in sorted order. Go randomizes map iteration, and
+// this lookup feeds the preview's summary, the precondition token and the
+// write's delete: an order-dependent answer would let those cover different
+// entries, producing spurious precondition_failed refusals and, under force,
+// silently deleting an entry the user was never shown (Spec 091 FR-005).
+func findEquivalentJSONServerName(serversMap map[string]interface{}, baseURL, requestedServerName string) (string, bool) {
+	if _, taken := serversMap[requestedServerName]; taken {
+		return requestedServerName, true
+	}
+	names := make([]string, 0, len(serversMap))
+	for name := range serversMap {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		entry, ok := serversMap[name].(map[string]interface{})
 		if !ok {
 			continue
 		}
@@ -750,12 +1547,9 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, mcpURL, req
 			if !ok {
 				continue
 			}
-			if entryURL == mcpURL || entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
+			if entryURL == baseURL || strings.HasPrefix(entryURL, baseURL+"?") {
 				return name, true
 			}
-		}
-		if name == requestedServerName {
-			return name, true
 		}
 	}
 	return "", false
@@ -766,28 +1560,56 @@ func findEquivalentJSONServerName(serversMap map[string]interface{}, mcpURL, req
 // whether the bytes parsed successfully (parsedOK=false => malformed). All
 // content reads route through s.read (Spec 075 T010); this function never
 // touches the filesystem.
-func (s *Service) findEntryFromBytes(client ClientDef, raw []byte) (name string, found, parsedOK bool) {
+func (s *Service) findEntryFromBytes(client ClientDef, raw []byte) (loc entryLocation, found, parsedOK bool) {
 	if client.Format == "toml" {
 		return s.findEntryTOMLBytes(raw)
 	}
 	return s.findEntryJSONBytes(client, raw)
 }
 
+// entryLocation describes a matched mcpproxy-like entry in a client config.
+//
+// PointsHere separates the two very different ways an entry matches: its
+// endpoint really is this instance, or it merely carries the well-known
+// "mcpproxy" key and could be pointing anywhere. Endpoint is the sanitized
+// address it points at ("" when the entry carries no URL-shaped value), so the
+// UI can name the other instance instead of claiming a bare "Connected".
+type entryLocation struct {
+	Name       string
+	Endpoint   string
+	PointsHere bool
+	// Entry is the parsed entry itself. It exists only so the on-demand
+	// credential classifier can read the carrier; it is never serialised or
+	// echoed (an entry can hold a secret).
+	Entry map[string]interface{}
+}
+
 // findEntryJSONBytes parses JSON config bytes and looks for an entry that points
 // to our MCP URL.
-func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string, found, parsedOK bool) {
+func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLocation, found, parsedOK bool) {
 	var data map[string]interface{}
 	if err := unmarshalLenientJSON(raw, &data); err != nil {
-		return "", false, false
+		return entryLocation{}, false, false
 	}
 
-	serversMap, ok := data[client.ServerKey].(map[string]interface{})
-	if !ok {
-		return "", false, true
+	serversMap, keyFound, malformed := resolveServersMapState(&client, data)
+	if malformed {
+		// Present but not an object — same malformed classification as
+		// resolveExistingEntry/preWriteState, so GetStatus does not report
+		// "not connected" for a config a connect/preview call would refuse.
+		return entryLocation{}, false, false
+	}
+	if !keyFound {
+		return entryLocation{}, false, true
 	}
 
-	mcpURL := s.mcpURL()
-	baseURL := fmt.Sprintf("http://%s/mcp", s.listenAddr)
+	// Anchor on the credential-free base URL so both new clean entries and
+	// legacy entries carrying a ?apikey= query are recognized (Spec 078).
+	baseURL := s.baseURL()
+
+	// A name-only match is the weakest evidence, so it never short-circuits the
+	// scan: a sibling entry that genuinely points at us wins over it.
+	var nameOnly *entryLocation
 
 	for name, v := range serversMap {
 		entry, ok := v.(map[string]interface{})
@@ -798,8 +1620,8 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string,
 		// Check various URL fields used by different clients
 		for _, field := range []string{"url", "serverUrl", "httpUrl"} {
 			if u, ok := entry[field].(string); ok {
-				if u == mcpURL || u == baseURL || strings.HasPrefix(u, baseURL+"?") {
-					return name, true, true
+				if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
+					return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 				}
 			}
 		}
@@ -807,22 +1629,57 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (name string,
 		// Stdio-bridge clients (e.g. Claude Desktop) have no URL field; the
 		// mcpproxy endpoint lives in the command args. Detect by inspecting
 		// args so a bridge written under a custom server name is still found.
-		if entryPointsToBridge(entry, mcpURL, baseURL) {
-			return name, true, true
+		if entryPointsToBridge(entry, baseURL) {
+			return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 		}
 
-		// Also match by server name
-		if name == defaultServerName {
-			return name, true, true
+		// Also match by server name. This arm is why "connected" has historically
+		// over-reported: the entry is called mcpproxy but may address a different
+		// instance entirely (audit F18). Record where it actually points.
+		if name == defaultServerName && nameOnly == nil {
+			nameOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), Entry: entry}
 		}
 	}
 
-	return "", false, true
+	if nameOnly != nil {
+		return *nameOnly, true, true
+	}
+	return entryLocation{}, false, true
+}
+
+// classifyEndpointMatch turns a matched entry into the EndpointMatch value the
+// UI renders. PointsHere is authoritative — it means the matcher recognized our
+// exact base URL. Otherwise the entry matched on its name alone: if it names an
+// endpoint at all, that endpoint is somewhere else; if it names none (a stdio
+// command entry), we cannot tell.
+func classifyEndpointMatch(loc entryLocation) string {
+	switch {
+	case loc.PointsHere:
+		return EndpointMatchThis
+	case loc.Endpoint != "":
+		return EndpointMatchOther
+	default:
+		return EndpointMatchUnknown
+	}
+}
+
+// entrySummaryEndpoint projects the endpoint an entry addresses, reusing the
+// Spec 091 entry-summary sanitizer so query strings (which may carry ?apikey=),
+// userinfo and fragments never reach the status payload. Reused rather than
+// reimplemented on purpose: the status row and the connect preview must never
+// disagree about what a client's entry points at.
+func entrySummaryEndpoint(name string, entry map[string]interface{}) string {
+	summary := buildEntrySummary(name, entry)
+	if summary == nil {
+		return ""
+	}
+	return summary.Endpoint
 }
 
 // entryPointsToBridge reports whether a JSON config entry is an mcp-remote
-// stdio bridge targeting our MCP endpoint, regardless of the entry key.
-func entryPointsToBridge(entry map[string]interface{}, mcpURL, baseURL string) bool {
+// stdio bridge targeting our MCP endpoint, regardless of the entry key. Matches
+// both the clean base URL (new entries) and a legacy ?apikey= variant.
+func entryPointsToBridge(entry map[string]interface{}, baseURL string) bool {
 	rawArgs, ok := entry["args"].([]interface{})
 	if !ok {
 		return false
@@ -837,7 +1694,7 @@ func entryPointsToBridge(entry map[string]interface{}, mcpURL, baseURL string) b
 		if s == "mcp-remote" {
 			hasBridgePkg = true
 		}
-		if s == mcpURL || s == baseURL || strings.HasPrefix(s, baseURL+"?") {
+		if s == baseURL || strings.HasPrefix(s, baseURL+"?") {
 			pointsToUs = true
 		}
 	}
@@ -848,32 +1705,124 @@ var trailingCommaPattern = regexp.MustCompile(`,\s*([}\]])`)
 
 func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	if err := json.Unmarshal(raw, out); err == nil {
+		normalizeNilConfigMap(out)
 		return nil
 	}
-	cleaned := trailingCommaPattern.ReplaceAll(raw, []byte(`$1`))
-	return json.Unmarshal(cleaned, out)
+	// JSONC tolerance (#922): OpenCode bootstraps opencode.jsonc, which may
+	// carry // and /* */ comments plus trailing commas. Strip comments first —
+	// comment removal can expose new trailing commas — then clean commas.
+	cleaned, cerr := stripJSONComments(raw)
+	if cerr != nil {
+		return cerr
+	}
+	cleaned = trailingCommaPattern.ReplaceAll(cleaned, []byte(`$1`))
+	if err := json.Unmarshal(cleaned, out); err != nil {
+		return err
+	}
+	normalizeNilConfigMap(out)
+	return nil
+}
+
+// normalizeNilConfigMap replaces a nil map[string]interface{} left by
+// unmarshaling a top-level JSON `null` with an empty map. A config file
+// containing exactly `null` parses without error, but every caller that goes
+// on to write into the result (setServersMap, connectJSON's data[serversKey]
+// assignment) would otherwise panic with "assignment to entry in nil map" —
+// and the same nil can flow into undo's replayConnectWrite via a backup file
+// that was itself "null". Callers that only read from the map are unaffected
+// either way (indexing a nil map is safe), so this is a no-op for them.
+func normalizeNilConfigMap(out interface{}) {
+	if p, ok := out.(*map[string]interface{}); ok && *p == nil {
+		*p = make(map[string]interface{})
+	}
+}
+
+// stripJSONComments removes // line and /* */ block comments from JSONC input,
+// string-aware so slashes inside JSON strings survive. Comment bytes are
+// replaced with spaces (newlines kept) to preserve offsets for error messages.
+// An unterminated /* block is an error — silently blanking to EOF would make
+// truncated/malformed files parse as valid.
+func stripJSONComments(raw []byte) ([]byte, error) {
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	inString := false
+	escaped := false
+	for i := 0; i < len(out); i++ {
+		c := out[i]
+		if inString {
+			if escaped {
+				escaped = false
+			} else if c == '\\' {
+				escaped = true
+			} else if c == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch {
+		case c == '"':
+			inString = true
+		case c == '/' && i+1 < len(out) && out[i+1] == '/':
+			for i < len(out) && out[i] != '\n' {
+				out[i] = ' '
+				i++
+			}
+		case c == '/' && i+1 < len(out) && out[i+1] == '*':
+			out[i], out[i+1] = ' ', ' '
+			i += 2
+			closed := false
+			for i < len(out) {
+				if out[i] == '*' && i+1 < len(out) && out[i+1] == '/' {
+					out[i], out[i+1] = ' ', ' '
+					i++
+					closed = true
+					break
+				}
+				if out[i] != '\n' {
+					out[i] = ' '
+				}
+				i++
+			}
+			if !closed {
+				return nil, fmt.Errorf("unterminated /* block comment")
+			}
+		}
+	}
+	return out, nil
+}
+
+// jsonHasComments reports whether stripping comments would change the content —
+// i.e. the file actually uses JSONC comments (not just slashes inside strings).
+// An unterminated block comment counts as commented (the write guard refuses).
+func jsonHasComments(raw []byte) bool {
+	stripped, err := stripJSONComments(raw)
+	return err != nil || !bytes.Equal(stripped, raw)
 }
 
 // findEntryTOMLBytes parses TOML config bytes and looks for an entry that points
 // to our MCP URL.
-func (s *Service) findEntryTOMLBytes(raw []byte) (name string, found, parsedOK bool) {
+func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, parsedOK bool) {
 	var data map[string]interface{}
 	if _, err := toml.Decode(string(raw), &data); err != nil {
-		return "", false, false
+		return entryLocation{}, false, false
 	}
 
 	serversRaw, ok := data["mcp_servers"]
 	if !ok {
-		return "", false, true
+		return entryLocation{}, false, true
 	}
 
 	serversMap, ok := serversRaw.(map[string]interface{})
 	if !ok {
-		return "", false, true
+		// Present but not a table — same malformed classification as
+		// resolveExistingEntry/preWriteState, so GetStatus does not report
+		// "not connected" for a config a connect/preview call would refuse.
+		return entryLocation{}, false, false
 	}
 
-	mcpURL := s.mcpURL()
-	baseURL := fmt.Sprintf("http://%s/mcp", s.listenAddr)
+	baseURL := s.baseURL()
+
+	var nameOnly *entryLocation
 
 	for name, v := range serversMap {
 		entry, ok := v.(map[string]interface{})
@@ -881,14 +1830,17 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (name string, found, parsedOK b
 			continue
 		}
 		if u, ok := entry["url"].(string); ok {
-			if u == mcpURL || u == baseURL || strings.HasPrefix(u, baseURL+"?") {
-				return name, true, true
+			if u == baseURL || strings.HasPrefix(u, baseURL+"?") {
+				return entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), PointsHere: true, Entry: entry}, true, true
 			}
 		}
-		if name == defaultServerName {
-			return name, true, true
+		if name == defaultServerName && nameOnly == nil {
+			nameOnly = &entryLocation{Name: name, Endpoint: entrySummaryEndpoint(name, entry), Entry: entry}
 		}
 	}
 
-	return "", false, true
+	if nameOnly != nil {
+		return *nameOnly, true, true
+	}
+	return entryLocation{}, false, true
 }

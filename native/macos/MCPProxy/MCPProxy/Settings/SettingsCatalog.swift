@@ -9,7 +9,7 @@ import Foundation
 
 // MARK: - Pinned types (view layer depends on these — do not rename)
 
-enum ConfigControl { case toggle, select, number, text, secret, duration, multiselect }
+enum ConfigControl { case toggle, select, number, text, textarea, secret, duration, multiselect }
 enum ConfigValueKind { case hostport, bytesize, cpu, hostname, url, secretkey }
 
 struct ConfigOption: Identifiable { let value: String; let label: String; var id: String { value } }
@@ -20,8 +20,16 @@ struct ConfigField: Identifiable {
     var help: String? = nil
     let control: ConfigControl
     var options: [ConfigOption] = []
+    // Value an absent/blank key actually resolves to on the Go side. Only
+    // needed for `omitempty` fields whose zero value is meaningful (the
+    // serialization modes: "" means "full"). See normalizeDefaults below.
+    var defaultValue: String? = nil
     var min: Double? = nil
     var max: Double? = nil
+    // Increment for a `.number` stepper. Mirrors `step` in fields.ts — without
+    // it a fractional field (entropy 4.5, OAuth warning 1.5h) can only be typed,
+    // never nudged (F13).
+    var step: Double? = nil
     var restart: Bool = false
     var docs: String? = nil         // doc path on docs.mcpproxy.app
     var valueKind: ConfigValueKind? = nil
@@ -30,6 +38,11 @@ struct ConfigField: Identifiable {
     // this is the real default (e.g. "30s"), so a blank field reads as
     // "inherit the default" rather than a generic example.
     var placeholder: String? = nil
+    // Mirrors `listKind: 'lines'` in fields.ts: the JSON value is a []string
+    // that the textarea shows one entry per line (Spec 107 `trusted_proxies`).
+    // The store's linesBinding does the join/split; a plain textarea stays a
+    // string field.
+    var listLines: Bool = false
     // Danger confirm: present a confirm dialog before saving. For toggles,
     // only when the new value == dangerConfirmValue (nil = always confirm).
     var dangerMessage: String? = nil
@@ -66,7 +79,8 @@ enum SettingsCatalog {
             control: .secret,
             restart: true,
             valueKind: .secretkey,
-            optional: true
+            optional: true,
+            placeholder: "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022} (unchanged \u{2014} type to replace)"
         ),
         ConfigField(
             key: "require_mcp_auth",
@@ -83,6 +97,16 @@ enum SettingsCatalog {
             dangerMessage: "Disabling quarantine removes Tool Poisoning Attack protection — new servers and changed tools will run without your approval. Continue?",
             dangerConfirmValue: false
         ),
+        // Spec 088 US4 / FR-018 — the deep-scan layer was reachable only by
+        // hand-editing this key, and the tray's Raw tab is read-only, so it was
+        // unreachable from the tray entirely (F6).
+        ConfigField(
+            key: "security.deep_scan.enabled",
+            label: "Deep scan (Docker scanners)",
+            help: "The deterministic offline baseline scan is always on and needs no setup. Turning this on adds the opt-in Docker-based deep scanners (source-level analysis of the server\u{2019}s published package) on top of it. Requires Docker; a deep-scan failure is informational and never changes the baseline verdict.",
+            control: .toggle,
+            docs: "/features/security-scanner-plugins"
+        ),
         ConfigField(
             key: "docker_isolation.enabled",
             label: "Run stdio servers in Docker",
@@ -93,7 +117,7 @@ enum SettingsCatalog {
         ConfigField(
             key: "enable_code_execution",
             label: "Enable code execution tool",
-            help: "Adds a sandboxed JavaScript tool agents can use to orchestrate several tool calls in one request. Off by default.",
+            help: "Adds a sandboxed JavaScript tool agents can use to orchestrate several tool calls in one request. On by default; the sandbox respects quarantine and server restrictions.",
             control: .toggle,
             docs: "/features/code-execution"
         ),
@@ -125,7 +149,20 @@ enum SettingsCatalog {
             control: .text,
             restart: true,
             valueKind: .hostport,
+            placeholder: "127.0.0.1:8080",
             dangerMessage: "Binding to a non-loopback address (e.g. 0.0.0.0) exposes mcpproxy to your network. Make sure \u{201C}Require API key for MCP clients\u{201D} is enabled. Continue?"
+        ),
+        // Spec 107 FR-027 (edition-neutral, hot-reloaded): forwarded headers
+        // are honoured only when the direct peer is in this list. Mirrors the
+        // fields.ts row so scripts/check-settings-parity.py stays green.
+        ConfigField(
+            key: "trusted_proxies",
+            label: "Trusted reverse proxies",
+            help: "One CIDR or IP address per line (e.g. 10.0.0.0/8). Forwarded headers (X-Forwarded-For, X-Forwarded-Proto, X-Forwarded-Host, X-Real-IP) are honoured only from these peers; leave empty when mcpproxy is not behind a proxy. Applies without a restart.",
+            control: .textarea,
+            optional: true,
+            placeholder: "10.0.0.0/8",
+            listLines: true
         ),
     ]
 
@@ -141,7 +178,43 @@ enum SettingsCatalog {
                 ConfigOption(value: "direct", label: "Direct — list all tools"),
                 ConfigOption(value: "code_execution", label: "Code execution"),
             ],
+            // /mcp binds its routing mode once at startup and cannot rebind, so
+            // this genuinely needs a restart. The tray reads requires_restart
+            // from the apply response too, but the badge is what tells the
+            // operator BEFORE they save.
+            restart: true,
             docs: "/features/routing-modes"
+        ),
+        // Spec 085 / Spec 102 — the two SERIALIZATION axes. Neither is a
+        // routing mode: `routing_mode` picks the tool SURFACE, these two pick
+        // how each entry on that surface is rendered. Both hot-reload (the Go
+        // change detector sets requires_restart for neither), so no restart
+        // badge. Until this landed they were reachable only via the config
+        // file, an env var, a serve flag or the REST API — a tray-only user
+        // could not set them at all.
+        ConfigField(
+            key: "tool_response_mode",
+            label: "Detail in tool-search results",
+            help: "Applies to Retrieve mode. Full = every result carries its complete input schema. Compact = a one-line signature plus a first-sentence description, and the agent fetches a full schema on demand with describe_tool. Saves tokens; never changes which tools are found.",
+            control: .select,
+            options: [
+                ConfigOption(value: "full", label: "Full \u{2014} complete schemas (default)"),
+                ConfigOption(value: "compact", label: "Compact \u{2014} signatures, schema on demand"),
+            ],
+            defaultValue: "full",
+            docs: "/features/search-discovery#tool-response-mode"
+        ),
+        ConfigField(
+            key: "direct_tool_response_mode",
+            label: "Detail in Direct-mode listings",
+            help: "Applies to Direct mode, and to /mcp/all in any mode. Full = every tool is listed with its complete input schema. Deferred = name, description and a compact signature only, with schemas fetched on demand via describe_tool; a call whose arguments do not fit is rejected before it reaches the server, with the schema attached so the agent can correct itself.",
+            control: .select,
+            options: [
+                ConfigOption(value: "full", label: "Full \u{2014} complete schemas (default)"),
+                ConfigOption(value: "deferred", label: "Deferred \u{2014} signatures, schema on demand"),
+            ],
+            defaultValue: "full",
+            docs: "/features/schema-deferred-direct-mode"
         ),
         ConfigField(
             key: "tools_limit",
@@ -175,10 +248,10 @@ enum SettingsCatalog {
         ConfigField(
             key: "telemetry.enabled",
             label: "Anonymous usage telemetry",
-            help: "Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time.",
+            help: "Sends anonymous usage counts (never tool arguments, content, or identities). Opt-out at any time. Disabling sends a single anonymous opt-out signal, then stops all telemetry.",
             control: .toggle,
             docs: "/features/telemetry",
-            dangerMessage: "Anonymous telemetry is how we see which features matter and catch problems — it never includes your tool arguments, content, or any identifying info. Turning it off removes that signal. Turn it off anyway?",
+            dangerMessage: "Anonymous telemetry is how we see which features matter and catch problems — it never includes your tool arguments, content, or any identifying info. Turning it off removes that signal, and sends a single anonymous opt-out signal before all telemetry stops. Turn it off anyway?",
             dangerConfirmValue: false,
             dangerInfoTone: true
         ),
@@ -192,6 +265,27 @@ enum SettingsCatalog {
 
     // ---- Section 3: Advanced (subsystem accordions) ----
     static let advanced: [ConfigSection] = [
+        // The whole accordion was missing from the tray (F6): the one setting
+        // that changes what every connected AI client is told about the proxy
+        // could not be edited outside the Web UI.
+        ConfigSection(
+            id: "mcp",
+            title: "MCP server instructions",
+            help: "Text sent to AI clients in the MCP initialize response, guiding how to use the proxy. Power-user, set-once option.",
+            fields: [
+                ConfigField(
+                    key: "instructions",
+                    label: "Server instructions",
+                    // Empty saves "" — Go maps that back to the built-in
+                    // default, fetched live into the placeholder (see
+                    // ConfigStore.defaultInstructions) so it never drifts.
+                    help: "Leave blank to use the built-in default (shown greyed-out). Applied on the next client connect, not to already-connected sessions.",
+                    control: .textarea,
+                    optional: true,
+                    placeholder: "Loading built-in default…"
+                ),
+            ]
+        ),
         ConfigSection(
             id: "code-execution",
             title: "Code execution",
@@ -200,7 +294,9 @@ enum SettingsCatalog {
             fields: [
                 ConfigField(key: "code_execution_timeout_ms", label: "Max run time per execution (ms)", control: .number, min: 1, max: 600000),
                 ConfigField(key: "code_execution_max_tool_calls", label: "Max tool calls per execution", help: "0 = unlimited.", control: .number, min: 0),
-                ConfigField(key: "code_execution_pool_size", label: "JavaScript runtime pool size", help: "How many sandboxes run concurrently.", control: .number, min: 1, max: 100),
+                ConfigField(key: "code_execution_pool_size", label: "JavaScript runtime pool size", help: "How many sandboxes run concurrently. Takes effect after restart.", control: .number, min: 1, max: 100, restart: true),
+                // Spec 096 field, added web-side only (F6).
+                ConfigField(key: "code_execution_max_parallel", label: "Parallel calls per call_tools() batch", help: "Default concurrency for batched tool calls; a script can override it per call (1-32).", control: .number, min: 1, max: 32),
             ]
         ),
         ConfigSection(
@@ -210,9 +306,9 @@ enum SettingsCatalog {
             docs: "/features/docker-isolation",
             fields: [
                 ConfigField(key: "docker_isolation.network_mode", label: "Container network", help: "none = no network (most secure), bridge = NAT, host = share host network.", control: .select, options: ["bridge", "none", "host"].map { ConfigOption(value: $0, label: $0) }),
-                ConfigField(key: "docker_isolation.memory_limit", label: "Memory limit per container", control: .text, valueKind: .bytesize, optional: true),
-                ConfigField(key: "docker_isolation.cpu_limit", label: "CPU limit per container", control: .text, valueKind: .cpu, optional: true),
-                ConfigField(key: "docker_isolation.registry", label: "Container image registry", control: .text, valueKind: .hostname, optional: true),
+                ConfigField(key: "docker_isolation.memory_limit", label: "Memory limit per container", control: .text, valueKind: .bytesize, optional: true, placeholder: "512m"),
+                ConfigField(key: "docker_isolation.cpu_limit", label: "CPU limit per container", control: .text, valueKind: .cpu, optional: true, placeholder: "1.0"),
+                ConfigField(key: "docker_isolation.registry", label: "Container image registry", control: .text, valueKind: .hostname, optional: true, placeholder: "docker.io"),
                 ConfigField(key: "docker_isolation.enable_cache_volume", label: "Share a package cache volume", help: "Speeds up repeated npm/uvx installs by caching across containers.", control: .toggle),
             ]
         ),
@@ -225,7 +321,7 @@ enum SettingsCatalog {
                 ConfigField(key: "sensitive_data_detection.scan_requests", label: "Scan tool arguments", control: .toggle),
                 ConfigField(key: "sensitive_data_detection.scan_responses", label: "Scan tool responses", control: .toggle),
                 ConfigField(key: "sensitive_data_detection.max_payload_size_kb", label: "Max payload scanned (KB)", help: "Larger payloads are scanned only up to this size.", control: .number, min: 1),
-                ConfigField(key: "sensitive_data_detection.entropy_threshold", label: "Randomness threshold", help: "Higher = fewer false positives when flagging random-looking strings (default 4.5).", control: .number, min: 0, max: 8),
+                ConfigField(key: "sensitive_data_detection.entropy_threshold", label: "Randomness threshold", help: "Higher = fewer false positives when flagging random-looking strings (default 4.5).", control: .number, min: 0, max: 8, step: 0.1),
             ]
         ),
         ConfigSection(
@@ -260,6 +356,21 @@ enum SettingsCatalog {
                 ConfigField(key: "activity_retention_days", label: "Keep records for (days)", help: "0 = keep until the record cap is hit.", control: .number, min: 0),
                 ConfigField(key: "activity_max_records", label: "Maximum records kept", control: .number, min: 0),
                 ConfigField(key: "activity_cleanup_interval_min", label: "Cleanup runs every (minutes)", control: .number, min: 1),
+            ]
+        ),
+        ConfigSection(
+            id: "audit-log",
+            title: "Audit log",
+            help: "Edition-neutral JSONL record of authorization decisions and tool calls. Changes take effect after a restart (the sink is bound at startup).",
+            docs: "/features/audit-log",
+            fields: [
+                ConfigField(key: "audit_log.enabled", label: "Enable audit logging", help: "Writes one JSONL line per authorization decision and tool call. On by default under the server edition; the personal edition defaults to off.", control: .toggle, restart: true),
+                ConfigField(key: "audit_log.stdout", label: "Write to stdout", help: "Server edition default when no path is set — not used under the native stdio transport (stdout carries JSON-RPC there); set a path instead.", control: .toggle, restart: true),
+                ConfigField(key: "audit_log.path", label: "File path", help: "Where to write the rotating audit log file. Leave blank to use stdout instead.", control: .text, restart: true, optional: true, placeholder: "/var/log/mcpproxy/audit.jsonl"),
+                ConfigField(key: "audit_log.max_size_mb", label: "Rotate after (MB)", control: .number, min: 1, restart: true),
+                ConfigField(key: "audit_log.max_backups", label: "Rotated files to keep", control: .number, min: 1, restart: true),
+                ConfigField(key: "audit_log.max_age_days", label: "Delete rotated logs after (days)", control: .number, min: 1, restart: true),
+                ConfigField(key: "audit_log.compress", label: "Compress rotated files", control: .toggle, restart: true),
             ]
         ),
         ConfigSection(
@@ -298,7 +409,7 @@ enum SettingsCatalog {
             title: "Other",
             fields: [
                 ConfigField(key: "max_result_size_chars", label: "Max inline response to the client (characters)", help: "Hard ceiling on a single response sent inline. 0 = no ceiling.", control: .number, min: 0),
-                ConfigField(key: "oauth_expiry_warning_hours", label: "Warn before OAuth token expires (hours)", help: "How early a server is shown as \u{201C}degraded\u{201D} before its OAuth token expires.", control: .number, min: 0),
+                ConfigField(key: "oauth_expiry_warning_hours", label: "Warn before OAuth token expires (hours)", help: "How early a server is shown as \u{201C}degraded\u{201D} before its OAuth token expires.", control: .number, min: 0, step: 0.5),
                 ConfigField(key: "disable_management", label: "Block agents from managing servers", help: "Prevents agents from using the upstream_servers management tool.", control: .toggle, dangerMessage: "This prevents agents from adding or removing servers via the management tool. Continue?", dangerConfirmValue: true),
                 ConfigField(key: "allow_server_add", label: "Let agents add servers", control: .toggle),
                 ConfigField(key: "allow_server_remove", label: "Let agents remove servers", control: .toggle),
@@ -306,6 +417,34 @@ enum SettingsCatalog {
             ]
         ),
     ]
+
+    /// Every field in the catalogue, across all sections.
+    static var allFields: [ConfigField] {
+        security + general + advanced.flatMap(\.fields)
+    }
+
+    /// Fill in the resolved default for every field that declares a
+    /// `defaultValue` and is currently blank in `cfg`.
+    ///
+    /// The serialization-mode keys are `omitempty` on the Go side, where an
+    /// absent value means "full" — so the config the API returns simply omits
+    /// them until someone sets one. A SwiftUI Picker whose selection matches
+    /// no tag renders blank, which would make the default read as "unset"
+    /// rather than as "full". Apply to BOTH the working copy and the
+    /// last-saved snapshot so an untouched field never counts as dirty; keep
+    /// the untouched response for the Raw tab, which must show server truth.
+    static func normalizeDefaults(_ cfg: [String: Any]) -> [String: Any] {
+        var out = cfg
+        for field in allFields {
+            guard let fallback = field.defaultValue else { continue }
+            let current = configGet(out, field.key)
+            let blank = current == nil
+                || current is NSNull
+                || (current as? String)?.isEmpty == true
+            if blank { configSet(&out, field.key, fallback) }
+        }
+        return out
+    }
 }
 
 // MARK: - Path helpers (operate on a JSON-decoded config dictionary)
@@ -349,8 +488,12 @@ func configSet(_ obj: inout [String: Any], _ path: String, _ value: Any?) {
 /// stored verbatim. This keeps a blank optional field from being sent as ""
 /// (which the backend can't parse as a duration) and from reading as dirty
 /// against an absent key.
+/// Whitespace here means newlines too: the textarea (`instructions`) shares
+/// this binding, and a box holding nothing but a stray newline must read as
+/// "unset" — otherwise the user thinks they cleared it back to the default and
+/// silently saved a blank line as their custom instructions.
 func optionalScalarStored(_ s: String) -> Any? {
-    s.trimmingCharacters(in: .whitespaces).isEmpty ? nil : s
+    s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : s
 }
 
 /// Assembles a nested object containing ONLY the given dot-path keys, read from

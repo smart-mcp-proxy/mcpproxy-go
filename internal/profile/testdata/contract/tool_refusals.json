@@ -1,0 +1,27 @@
+{
+  "_comment": "Spec 108 D39 (T148): the agent-facing TOOL refusals of a profile's tool policy, byte-for-byte after substituting <server>, <tool>, <tier> (the tool's tier), <cap> (\"read\" or \"read and write\") and <label>. `disclosed` is what a caller whose effective profile is its OWN gets (source pin, binding, url or session): it names the profile. `undisclosed` is what every other caller gets (source anonymous: naming the operator's anonymous_profile would hand it to any local process; a dangling or out-of-scope shape is non-disclosing and unchanged) and is byte-identical to the pre-D39 text. <label> is `\"<title>\" (<slug>)` with the title rendered by Go %q, or `\"<slug>\"` alone when the title is empty or equals the slug. Readers: TestProfileToolPolicyRefusal_MatchesToolRefusalsGolden and the MCP, REST and CLI tests in internal/server, internal/httpapi and cmd/mcpproxy. The four ADMIN refusals live in refusals.json and are untouched.",
+  "label": {
+    "with_title": "<%q title> (<slug>)",
+    "slug_only": "<%q slug>"
+  },
+  "refusals": [
+    {
+      "name": "tier",
+      "block_reason": "profile_tier",
+      "disclosed": "blocked by profile: <server>:<tool> is a <tier> tool; profile <label> allows <cap> tools only",
+      "undisclosed": "blocked by profile: <server>:<tool> is a <tier> tool; this profile allows <cap> tools only"
+    },
+    {
+      "name": "rule",
+      "block_reason": "profile_rule",
+      "disclosed": "blocked by profile: <server>:<tool> is denied by a rule in profile <label>",
+      "undisclosed": "blocked by profile: <server>:<tool> is denied by a profile rule"
+    },
+    {
+      "name": "unannotated",
+      "block_reason": "profile_unannotated",
+      "disclosed": "blocked by profile: <server>:<tool> has no tier annotation; an operator can classify it in profile <label> to allow it",
+      "undisclosed": "blocked by profile: <server>:<tool> has no tier annotation; an operator can classify it in the profile to allow it"
+    }
+  ]
+}

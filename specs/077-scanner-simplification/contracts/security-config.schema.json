@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/schemas/077/security-config.json",
+  "title": "SecurityConfig (Spec 077 delta)",
+  "description": "The `security` config block after Spec 077. Shows the new deep_scan group, the removed key, and back-compat aliases that migrate on load.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "deep_scan": {
+      "type": "object",
+      "description": "Opt-in heavy-scan layer. Default OFF. When disabled, only the in-process deterministic baseline runs (FR-006).",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean", "default": false, "description": "Master opt-in for Docker scanners + source extraction." },
+        "fetch_package_source": { "type": ["boolean", "null"], "default": true, "description": "Absorbs the deprecated top-level scanner_fetch_package_source." },
+        "disable_no_new_privileges": { "type": "boolean", "default": false, "description": "Absorbs deprecated scanner_disable_no_new_privileges (snap/AppArmor escape hatch)." },
+        "scanners": { "type": "array", "items": { "type": "string" }, "default": [], "description": "Optional per-scanner enable list under the umbrella." }
+      }
+    },
+    "scan_timeout_default": { "type": "string", "description": "Unchanged." },
+    "integrity_check_interval": { "type": "string", "description": "Unchanged." }
+  },
+  "x-migration": {
+    "removed": ["auto_scan_quarantined"],
+    "aliases": {
+      "scanner_fetch_package_source": "deep_scan.fetch_package_source",
+      "scanner_disable_no_new_privileges": "deep_scan.disable_no_new_privileges"
+    },
+    "note": "Old configs load unchanged: aliases map on load with identical effect; auto_scan_quarantined is ignored if present (FR-016/FR-017/SC-007)."
+  },
+  "x-unchanged": {
+    "quarantine_enabled": "global tri-state, default true — out of scope",
+    "auto_approve_tool_changes": "per-server, out of scope"
+  }
+}

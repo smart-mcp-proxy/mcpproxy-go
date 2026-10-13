@@ -1,3 +1,9 @@
+---
+title: "Prerelease Builds"
+sidebar_label: "Prerelease Builds"
+description: "Automated prerelease builds from the next branch with signed and notarized macOS installers."
+---
+
 # Prerelease Builds
 
 MCPProxy supports automated prerelease builds from the `next` branch with signed and notarized macOS installers.
@@ -69,7 +75,18 @@ The GitHub release is created with `prerelease: true`, so it does **not** become
 - Does not deploy docs or trigger marketing automation (`deploy-docs`, `trigger-marketing-update` guarded).
 - Not offered as an update on **stable channels**:
   - The macOS tray uses GitHub `releases/latest`, which excludes prereleases (`native/macos/MCPProxy/MCPProxy/Services/UpdateService.swift`), plus a semver downgrade guard so an `-rc` is never treated as "newer" than the matching stable.
-  - The backend/tray update check is stable-only by default (`internal/tray/tray.go` → `releases/latest`). Set `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` to opt in to RC update offers.
+  - The backend/tray update check is stable-only by default (`internal/tray/tray.go` → `releases/latest`).
+
+### The running build's version decides the channel
+
+For a **released** build the running binary's own version is authoritative and cannot be overridden into offering the wrong channel:
+
+- A **stable** build (e.g. `v0.56.0`) is **never** offered an RC — regardless of `"update_check": { "channel": "rc" }` or `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true`. A stale `rc` opt-in left over from a previously-installed RC therefore can never resurrect RC offers. To test an RC, install one manually (see *Installing an RC* below); the updater then keeps you on the RC track.
+- An **RC** build (e.g. `v0.56.0-rc.1`) automatically tracks the **rc** channel: it is offered the next RC, and — by pure semver comparison — its graduating stable (`v0.56.0-rc.1` → `v0.56.0`). No opt-in needed.
+
+The `update_check.channel` config field and `MCPPROXY_ALLOW_PRERELEASE_UPDATES` env flag now only take effect on **dev / unstamped** builds (local `go build`, `go install` without a release tag), where there is no release identity to honor — they let developers exercise the rc path without a released RC binary.
+
+The Swift macOS tray takes the core's `update_policy.channel` (from `GET /api/v1/info`) as an **input**, then applies its own build-identity clamp on top: it narrows the channel to `stable` when the tray app's **own** bundle (`CFBundleShortVersionString`) is a stable release. This matters for mixed versions — a stable tray app attached to a separately-installed **newer RC core** reports `channel=rc` from that core, but the tray must never update *itself* to an RC, so it clamps to stable regardless. The clamp is narrowing-only (it can only pin to stable, never force `rc`); an RC tray app keeps the core's channel. Its Sparkle `allowedChannels` / feed selection then follow the clamped channel. (Spec 079 FR-013a; converging the Go tray's own self-update resolution fully onto the shared checker is FR-001a.)
 
 ### Installing an RC
 

@@ -1,3 +1,9 @@
+---
+title: "Code Execution Overview"
+sidebar_label: "Overview"
+description: "How the sandboxed JavaScript/TypeScript runtime orchestrates multiple upstream MCP tools in one request."
+---
+
 # Code Execution - Overview
 
 ## What is Code Execution?
@@ -5,6 +11,8 @@
 The `code_execution` tool enables LLM agents to orchestrate multiple upstream MCP tools in a single request using JavaScript or TypeScript. Instead of making multiple round-trips to the model, you can execute complex multi-step workflows with conditional logic, loops, and data transformations—all within a single execution context.
 
 **TypeScript support**: Set `language: "typescript"` to write code with type annotations, interfaces, enums, and generics. Types are automatically stripped before execution with near-zero overhead (<5ms).
+
+**Stored scripts**: Instead of sending the source inline on every call, keep the workflow in `<config-dir>/scripts/<name>.js` and invoke it with `script: "<name>"`. See [Stored Scripts](#stored-scripts).
 
 ## When to Use Code Execution
 
@@ -46,36 +54,42 @@ Model → Agent: code_execution({code: "...", input: {...}})
 Implement conditional branching, loops, and error handling that would require multiple model invocations.
 
 ```javascript
-// Conditional logic
-const user = call_tool('github', 'get_user', {username: input.username});
-if (!user.ok) {
-  return {error: 'User not found'};
-}
-
-// Loop with accumulation
-const results = [];
-for (const repoName of input.repos) {
-  const repo = call_tool('github', 'get_repo', {name: repoName});
-  if (repo.ok) {
-    results.push(repo.result);
+// Wrap the body in an IIFE so early-exit `return`s are legal — a bare
+// top-level `return` is a SyntaxError. The IIFE's value is the result.
+(() => {
+  // Conditional logic
+  const user = call_tool('github', 'get_user', {username: input.username});
+  if (!user.ok) {
+    return {error: 'User not found'};
   }
-}
-return {repos: results, count: results.length};
+
+  // Loop with accumulation
+  const results = [];
+  for (const repoName of input.repos) {
+    const repo = call_tool('github', 'get_repo', {name: repoName});
+    if (repo.ok) {
+      results.push(repo.result);
+    }
+  }
+  return {repos: results, count: results.length};
+})();
 ```
 
 ### 3. Data Transformation
 Transform, filter, and aggregate data from multiple tool calls before returning results.
 
 ```javascript
-const repos = call_tool('github', 'list_repos', {user: input.username});
-if (!repos.ok) return repos;
+(() => {
+  const repos = call_tool('github', 'list_repos', {user: input.username});
+  if (!repos.ok) return repos;
 
-// Filter and transform
-const activeRepos = repos.result
-  .filter(r => !r.archived && r.pushed_at > input.since)
-  .map(r => ({name: r.name, stars: r.stargazers_count, language: r.language}));
+  // Filter and transform
+  const activeRepos = repos.result
+    .filter(r => !r.archived && r.pushed_at > input.since)
+    .map(r => ({name: r.name, stars: r.stargazers_count, language: r.language}));
 
-return {repos: activeRepos, total: activeRepos.length};
+  return {repos: activeRepos, total: activeRepos.length};
+})();
 ```
 
 ## How It Works
@@ -103,7 +117,7 @@ return {repos: activeRepos, total: activeRepos.length};
 │  JavaScript Runtime Pool                     │
 │  - Acquires VM from pool (blocks if full)   │
 │  - Creates isolated sandbox                 │
-│  - Binds input global and call_tool()       │
+│  - Binds input, call_tool(), call_tools()   │
 └────────────┬────────────────────────────────┘
              │
              ▼
@@ -126,14 +140,15 @@ return {repos: activeRepos, total: activeRepos.length};
 
 ### Execution Flow
 
-1. **Request Parsing**: Extract `code`, `input`, and `options` from the request
-2. **Validation**: Verify timeout (1-600000ms) and max_tool_calls (>= 0)
-3. **Pool Acquisition**: Acquire a JavaScript VM from the pool (blocks if all VMs are in use)
-4. **Sandbox Setup**: Create isolated environment with `input` global and `call_tool()` function
-5. **Execution**: Run JavaScript with timeout enforcement and tool call tracking
-6. **Result Extraction**: Validate result is JSON-serializable and return structured response
-7. **Pool Release**: Return VM to pool for reuse
-8. **Response**: Return `{ok: true, value: <result>}` or `{ok: false, error: {...}}`
+1. **Request Parsing**: Extract `code` (or `script`), `input`, and `options` from the request
+2. **Source Resolution**: Enforce exactly-one-of `code` / `script`; for a `script`, read the stored file and derive its language (see [Stored Scripts](#stored-scripts))
+3. **Validation**: Verify timeout (1-600000ms) and max_tool_calls (>= 0)
+4. **Pool Acquisition**: Acquire a JavaScript VM from the pool (blocks if all VMs are in use)
+5. **Sandbox Setup**: Create isolated environment with `input` global and the `call_tool()` / `call_tools()` functions
+6. **Execution**: Run JavaScript with timeout enforcement and tool call tracking
+7. **Result Extraction**: Validate result is JSON-serializable and return structured response
+8. **Pool Release**: Return VM to pool for reuse
+9. **Response**: Return `{ok: true, value: <result>}` or `{ok: false, error: {...}}`
 
 ## Security Model
 
@@ -152,18 +167,22 @@ The JavaScript execution environment is **heavily sandboxed** to prevent securit
 ✅ **Available:**
 - `input` - Global variable with request input data
 - `call_tool(serverName, toolName, args)` - Function to call upstream MCP tools
+- `call_tools(requests, options)` - Function to call independent upstream tools in parallel (see [Pattern 5](#pattern-5-parallel-fan-out-with-call_tools))
 - Modern JavaScript (ES2020+) standard library including Array, Object, String, Math, Date, JSON, Map, Set, Symbol, Promise, Proxy, Reflect
 
 ### Configuration & Limits
 
 ```json
 {
-  "enable_code_execution": false,           // Must be explicitly enabled (default: false)
+  "enable_code_execution": true,            // On by default since v0.66.0; set false to switch off
   "code_execution_timeout_ms": 120000,      // Default: 2 minutes, max: 10 minutes
   "code_execution_max_tool_calls": 0,       // Default: unlimited
-  "code_execution_pool_size": 10            // Default: 10 concurrent VMs
+  "code_execution_pool_size": 10,           // Default: 10 concurrent VMs
+  "code_execution_max_parallel": 8          // Default: 8 concurrent calls per call_tools() batch (1-32)
 }
 ```
+
+`code_execution_max_parallel` is hot-reloaded and applies to executions that start after the change. It is not a request-level option: a script overrides it per batch with `call_tools(requests, {max_parallel})`, so precedence is per-batch override > `code_execution_max_parallel` > built-in 8.
 
 **Per-Request Overrides:**
 ```javascript
@@ -184,6 +203,7 @@ Code execution **respects existing MCPProxy security features**:
 - Quarantined servers cannot be called via `call_tool()`
 - Server enable/disable settings are enforced
 - Authentication requirements are preserved
+- Every upstream tool call a script makes is recorded as a first-class activity record with `parent_id` linking it to the `code_execution` run — drill in with `mcpproxy activity list --parent-id <request_id>`; policy-blocked sub-calls are recorded with status `blocked`
 
 ## Getting Started
 
@@ -232,104 +252,365 @@ The `code_execution` tool will appear in the tools list when an LLM agent connec
 ```json
 {
   "name": "code_execution",
-  "description": "Execute JavaScript code that orchestrates multiple upstream MCP tools...",
+  "description": "Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools...",
   "inputSchema": {
     "type": "object",
     "properties": {
-      "code": {"type": "string", "description": "JavaScript source code..."},
+      "code": {"type": "string", "description": "JavaScript or TypeScript source code..."},
+      "script": {"type": "string", "description": "Name of a STORED script to execute instead of sending code inline (Spec 097)..."},
+      "language": {"type": "string", "enum": ["javascript", "typescript"], "description": "Source language; defaults to javascript. TypeScript types are stripped before execution (GA, Spec 033 FR-001)."},
       "input": {"type": "object", "description": "Input data accessible as global input variable..."},
       "options": {"type": "object", "description": "Execution options..."}
-    },
-    "required": ["code"]
+    }
   }
 }
 ```
+
+Neither `code` nor `script` is schema-`required`: JSON Schema cannot express
+"exactly one of", so the tool enforces it and rejects a call that supplies both
+or neither.
+
+## Stored Scripts
+
+Sending a long workflow inline costs its full token count on every run, retry,
+and parameter tweak. A **stored script** is that workflow kept on the server —
+a `<name>.js` / `<name>.ts` file in the `scripts/` directory next to the active
+configuration file — invoked by name:
+
+```json
+{
+  "name": "code_execution",
+  "arguments": {
+    "script": "fetch-prs",
+    "input": {"owner": "acme", "repo": "api"}
+  }
+}
+```
+
+Everything else is identical to an inline call: same sandbox, same
+`allowed_servers` / `max_tool_calls` / `timeout_ms` handling, same quarantine and
+permission enforcement, same activity and history records (which store the
+executed source exactly as they do for inline code, plus the script name).
+`script` changes only where the source text comes from.
+
+### 1. Author a script
+
+```bash
+mkdir -p ~/.mcpproxy/scripts
+cat > ~/.mcpproxy/scripts/fetch-prs.js <<'JS'
+var rs = call_tools([1, 2, 3].map(function (n) {
+  return {server: "github", tool: "get_pull_request",
+          args: {owner: input.owner, repo: input.repo, pullNumber: n}};
+}));
+({titles: rs.map(function (r) { return r.ok ? JSON.parse(r.result.content[0].text).title : "ERR"; })});
+JS
+```
+
+The directory is derived from the **active config file**, not from `--data-dir`:
+with the default `~/.mcpproxy/mcp_config.json` it is `~/.mcpproxy/scripts/`, and
+with `--config /etc/mcpproxy/mcp_config.json` it is `/etc/mcpproxy/scripts/`.
+mcpproxy never creates the directory itself — an absent one simply means "no
+scripts".
+
+### 2. Run it
+
+```bash
+mcpproxy code scripts list
+mcpproxy code exec --script fetch-prs --input='{"owner":"acme","repo":"api"}'
+```
+
+`--script` is mutually exclusive with `--code` and `--file`. In both daemon and
+standalone mode the CLI sends the **name**; the daemon (or the in-process
+handler) is the only thing that resolves it, so every surface agrees on what a
+name means.
+
+### Naming and file rules
+
+| Rule | Value |
+|------|-------|
+| Name | 1-64 characters of `A-Za-z0-9_-`, case-sensitive |
+| Path | never — a name with a separator, `..`, or a dot is rejected before any filesystem access |
+| Extension | lowercase `.js` or `.ts` only (`.JS`, `.mjs`, `.jsx` are not scripts) |
+| Language | derived from the extension; an explicit `language` that contradicts it is an error |
+| Size | 1 byte to 256 KB — empty and oversized files are rejected |
+| File type | regular files only; a symlink at the script path is rejected |
+| Ambiguity | `name.js` **and** `name.ts` both present → the call fails naming both |
+
+Files that break the name or extension rules are ignored by listings and
+unreachable by invocation — they are not scripts.
+
+> **Confinement**: the name is validated *before* the filesystem is touched, so
+> a valid name cannot traverse out of the scripts directory by construction. On
+> top of that, the file is opened with symlink-following disabled (atomically on
+> Unix via `O_NOFOLLOW`; a checked policy on Windows, where creating symlinks
+> requires elevation). The scripts directory itself may be a symlink — it is
+> operator-controlled.
+
+### Editing without a restart
+
+Each invocation performs exactly one open and one bounded read; there is no
+cache and no file watcher, so there is nothing to invalidate. Edit by **atomic
+replace** — write a temporary file and `rename` it over the script — and the
+next invocation runs the new content:
+
+```bash
+tmp=$(mktemp ~/.mcpproxy/scripts/.fetch-prs.XXXXXX)
+cat > "$tmp" <<'JS'
+({updated: true});
+JS
+mv "$tmp" ~/.mcpproxy/scripts/fetch-prs.js   # atomic within the same filesystem
+```
+
+Adding or deleting a file is reflected on the next invocation or listing
+(for an agent token on Linux, after the next index refresh — see
+[Discovering script names](#discovering-script-names)).
+Editing a script **in place** while it is being invoked is the one unsupported
+case: the run gets whatever the read returned (validated, but unspecified).
+
+### Discovering script names
+
+```bash
+mcpproxy code scripts list          # human-readable, always names the directory it read
+mcpproxy code scripts list -o json  # {"dir": "...", "scripts": [{"name","paths","status"}]}
+```
+
+```bash
+curl -H "X-API-Key: $KEY" http://127.0.0.1:8080/api/v1/code/scripts
+```
+
+Both are administrator views: the REST listing answers only the admin API key
+(or the tray over the local socket) and refuses an agent token with `403`.
+
+MCP clients do not get a listing tool — registrations are static, so an embedded
+list would go stale. For **administrators** (the admin API key, the tray over the
+local socket, an in-process caller — and, under the default
+`require_mcp_auth: false`, an unauthenticated `/mcp` client, which the proxy
+treats as an administrator for backward compatibility) discovery is
+**error-driven** instead:
+invoking a name that does not exist returns an error listing the first 20
+available names alphabetically plus the total, so the current name set is
+recovered from a single failed call.
+
+```text
+Cannot execute stored script: stored script "fetch-pr" not found in
+/Users/me/.mcpproxy/scripts. Available scripts (3): daily-report, fetch-prs, triage
+```
+
+**Enumeration is administrator-only.** An
+[agent token](https://docs.mcpproxy.app/features/agent-tokens/) — whatever its
+server scope, even `--servers "*"` — must already know the script name. Its
+not-found error names neither the other stored scripts, nor how many there are,
+nor the directory, and it is byte-for-byte the same whether the directory is
+empty or full, so a failed call cannot be used to probe what is stored — and
+the proxy does not read the directory on its behalf at all — it probes the
+requested name's two candidate files and nothing else — so the refusal's cost
+does not grow with the number of stored scripts. (On Linux and the BSDs, which
+have no single-entry call reporting how a name is spelled on disk, the scoped
+resolver answers ONLY from an exact-name index of the directory that matches
+its CURRENT state: built when the daemon starts, validated by one stat of
+the directory per request, and refreshed by a background rebuild when that
+stat finds the directory changed. No request lists the directory, cold or
+warm. On Linux/BSD, every step of that per-request check — the stat, the
+candidate probe, the open, and the re-check after the open — is bound to
+the SAME retained directory descriptor rather than resolving the path
+again for each one, so a symlink or bind mount retargeted mid-request
+cannot make different steps see different directories. A call landing while
+that rebuild is merely scheduled or in flight is
+refused exactly like one against a directory the index has never seen —
+never answered from what the index held before the change — so a rename
+under a scoped caller's feet cannot have that caller's own probe fold onto
+whatever now occupies the old name. Beyond that, the index only ever
+*authorizes* from a stamp that is provably SETTLED — old enough (about two
+seconds, the coarsest directory-timestamp granularity MCPProxy has to assume)
+that no filesystem write could still land on it unseen — so a matching
+generation is not, by itself, enough to trust a hit; a directory whose
+timestamp is younger than that refuses every scoped call, hit or miss alike,
+the same fail-closed way. A script added to, or renamed within, the
+directory becomes callable by agent tokens once the index has both
+refreshed AND settled — typically milliseconds for the refresh, up to about
+two seconds to settle; retry a call refused in that window — while
+administrators see the change immediately. Every platform — Linux, the
+BSDs, darwin and Windows alike — answers from this same index, so a name
+that is merely a case-variant of a stored one and a name that is not stored
+at all cost the same: both are plain index misses. macOS/darwin adds one
+extra, belt-and-suspenders check on top: after the winning candidate is
+opened, MCPProxy re-reads its on-disk spelling from the open descriptor
+itself (`F_GETPATH`) and compares it to what was requested, so a
+case-rename racing the open is caught on the descriptor that would actually
+have been read. On Windows every step — probing a candidate, opening it,
+listing the directory to refresh the index — is performed relative to ONE
+directory handle retained for the whole call (`NtCreateFile` with the
+handle as the open's root), so a rename or a reparse point planted on the
+directory itself or an ancestor cannot redirect where a "relative" open
+actually lands; the post-open check then only needs to confirm the opened
+descriptor's own base name (`GetFinalPathNameByHandle`), since the parent
+is already structurally guaranteed by the handle-relative open itself. The
+refusal itself:
+
+```text
+Cannot execute stored script: stored script "fetch-pr" not found (the stored-script
+listing is available to administrators only; an agent-token caller must already
+know the script name)
+```
+
+The same rule covers the other refusals: an ambiguous, empty, oversized or
+unreadable script is reported to an agent token by name and reason only — no
+host path, no raw OS error — while an administrator sees the full path.
+
+Stored scripts are operator-published content: any caller allowed to run
+`code_execution` can run a script it knows the name of and receive whatever the
+script returns without an upstream call, while every `call_tool()` the script
+makes is still checked against the caller's server scope and permission tier.
+Do not put server names, credentials or other secrets in a script's source or
+its constant return values — see the
+[agent-token invariant](https://docs.mcpproxy.app/features/agent-tokens/#what-a-scoped-token-cannot-learn).
+
+### No write path
+
+Nothing in mcpproxy creates, edits, or deletes a stored script: no MCP tool, no
+REST endpoint, no CLI verb. The filesystem is the sole authoring interface, so
+sandboxed code that can *run* a stored workflow can never author one.
 
 ## Common Patterns
 
 ### Pattern 1: Sequential Tool Calls
 
 ```javascript
-// Fetch user, then fetch their repos
-const userRes = call_tool('github', 'get_user', {username: input.username});
-if (!userRes.ok) {
-  return {error: userRes.error.message};
-}
+// Wrap the body in an IIFE so early-exit `return`s are legal — a bare
+// top-level `return` is a SyntaxError. The IIFE's value is the result.
+(() => {
+  // Fetch user, then fetch their repos
+  const userRes = call_tool('github', 'get_user', {username: input.username});
+  if (!userRes.ok) {
+    return {error: userRes.error.message};
+  }
 
-const reposRes = call_tool('github', 'list_repos', {user: input.username});
-if (!reposRes.ok) {
-  return {error: reposRes.error.message};
-}
+  const reposRes = call_tool('github', 'list_repos', {user: input.username});
+  if (!reposRes.ok) {
+    return {error: reposRes.error.message};
+  }
 
-return {
-  user: userRes.result,
-  repos: reposRes.result,
-  repo_count: reposRes.result.length
-};
+  return {
+    user: userRes.result,
+    repos: reposRes.result,
+    repo_count: reposRes.result.length
+  };
+})();
 ```
 
 ### Pattern 2: Conditional Logic
 
 ```javascript
-// Try primary server, fallback to secondary
-let result = call_tool('primary-db', 'query', {sql: input.query});
+(() => {
+  // Try primary server, fallback to secondary
+  let result = call_tool('primary-db', 'query', {sql: input.query});
 
-if (!result.ok) {
-  // Primary failed, try backup
-  result = call_tool('backup-db', 'query', {sql: input.query});
-}
+  if (!result.ok) {
+    // Primary failed, try backup
+    result = call_tool('backup-db', 'query', {sql: input.query});
+  }
 
-return result.ok ? result.result : {error: 'Both databases unavailable'};
+  return result.ok ? result.result : {error: 'Both databases unavailable'};
+})();
 ```
 
 ### Pattern 3: Loop with Aggregation
 
 ```javascript
-// Fetch details for multiple items
-const results = [];
-const errors = [];
+(() => {
+  // Fetch details for multiple items
+  const results = [];
+  const errors = [];
 
-for (const id of input.ids) {
-  const res = call_tool('api-server', 'get_item', {id});
+  for (const id of input.ids) {
+    const res = call_tool('api-server', 'get_item', {id});
 
-  if (res.ok) {
-    results.push(res.result);
-  } else {
-    errors.push({id, error: res.error});
+    if (res.ok) {
+      results.push(res.result);
+    } else {
+      errors.push({id, error: res.error});
+    }
   }
-}
 
-return {
-  success: results,
-  failed: errors,
-  success_count: results.length,
-  error_count: errors.length
-};
+  return {
+    success: results,
+    failed: errors,
+    success_count: results.length,
+    error_count: errors.length
+  };
+})();
 ```
 
 ### Pattern 4: Data Transformation
 
 ```javascript
-// Get repos and compute statistics
-const reposRes = call_tool('github', 'list_repos', {user: input.username});
-if (!reposRes.ok) return reposRes;
+(() => {
+  // Get repos and compute statistics
+  const reposRes = call_tool('github', 'list_repos', {user: input.username});
+  if (!reposRes.ok) return reposRes;
 
-const repos = reposRes.result;
-const totalStars = repos.reduce((sum, r) => sum + (r.stargazers_count ?? 0), 0);
-const languages = {};
+  const repos = reposRes.result;
+  const totalStars = repos.reduce((sum, r) => sum + (r.stargazers_count ?? 0), 0);
+  const languages = {};
 
-for (const repo of repos) {
-  const lang = repo.language ?? 'Unknown';
-  languages[lang] = (languages[lang] ?? 0) + 1;
-}
+  for (const repo of repos) {
+    const lang = repo.language ?? 'Unknown';
+    languages[lang] = (languages[lang] ?? 0) + 1;
+  }
 
-return {
-  total_repos: repos.length,
-  total_stars: totalStars,
-  avg_stars: Math.round(totalStars / repos.length),
-  languages
-};
+  return {
+    total_repos: repos.length,
+    total_stars: totalStars,
+    avg_stars: Math.round(totalStars / repos.length),
+    languages
+  };
+})();
 ```
+
+### Pattern 5: Parallel Fan-out with call_tools
+
+```javascript
+// Independent calls — no element depends on another's result
+var prs = call_tools(
+  [1, 2, 3, 4, 5].map(function (n) {
+    return {server: 'github', tool: 'get_pull_request',
+            args: {owner: 'acme', repo: 'api', pullNumber: n}};
+  }),
+  {max_parallel: 5}
+);
+
+var titles = prs.map(function (r) {
+  if (!r.ok) { return 'ERR: ' + r.error.code; }
+  return JSON.parse(r.result.content[0].text).title;
+});
+({titles: titles});
+```
+
+`call_tools(requests, options)` dispatches up to `max_parallel` elements at a
+time and returns one slot per request, in input order — so the batch takes about
+as long as its slowest element instead of the sum of all of them. Rules:
+
+- `requests`: array of `{server, tool, args?}`, at most 100 elements; `args`
+  defaults to `{}`.
+- `options.max_parallel`: integer 1-32. Defaults to `code_execution_max_parallel`
+  (8). Unknown option keys are ignored.
+- Each slot is the same envelope `call_tool()` returns, so a failing element
+  never poisons its siblings.
+- Malformed arguments (not an array, bad element shape, sparse hole, bad
+  `max_parallel`, more than 100 elements) return a **single**
+  `{ok: false, error: {code: "INVALID_ARGS", ...}}` envelope naming the first
+  offending index, and nothing is dispatched.
+- Every element costs one unit of `max_tool_calls`, checked in input order, and
+  the whole batch runs inside the execution timeout.
+- Use it only for **independent** calls — chained steps still belong in a
+  sequential pipeline (Pattern 1).
+
+> **Per-server limits still apply.** [Concurrency limits](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/configuration.md#concurrency-limits--request-queueing)
+> are enforced inside the call path, never bypassed by batching. A server with
+> `max_concurrent_requests: 1` and `queue_size: 9` serializes a 10-element batch;
+> the same server with **no** `queue_size` sheds the overflow as per-slot
+> `queue_full` errors. Configure `queue_size` headroom (or lower `max_parallel`)
+> before fanning out against a limited server.
 
 ## Error Handling
 
@@ -348,12 +629,14 @@ code_execution({code: "throw new Error('Something went wrong')"})
 ### Tool Call Errors
 
 ```javascript
-// Tool returns error - handled in JavaScript
-var res = call_tool('github', 'get_user', {username: 'nonexistent-user-12345'});
-if (!res.ok) {
-  return {error: 'User not found: ' + res.error.message};
-}
-return res.result;
+(() => {
+  // Tool returns error - handled in JavaScript
+  var res = call_tool('github', 'get_user', {username: 'nonexistent-user-12345'});
+  if (!res.ok) {
+    return {error: 'User not found: ' + res.error.message};
+  }
+  return res.result;
+})();
 ```
 
 ### Timeout Errors
@@ -440,16 +723,20 @@ mcpproxy code exec --language typescript \
 
 ### 2. Handle Errors Gracefully
 ```javascript
-// Bad: Assumes success
-var user = call_tool('github', 'get_user', {username: input.username});
-return user.result.name;  // Crashes if user.ok is false
+// Bad: Assumes success (and a bare top-level `return` is itself a SyntaxError)
+(() => {
+  var user = call_tool('github', 'get_user', {username: input.username});
+  return user.result.name;  // Crashes if user.ok is false
+})();
 
-// Good: Checks response
-var user = call_tool('github', 'get_user', {username: input.username});
-if (!user.ok) {
-  return {error: user.error.message};
-}
-return {name: user.result.name};
+// Good: Checks response, early-exit returns kept legal inside the IIFE
+(() => {
+  var user = call_tool('github', 'get_user', {username: input.username});
+  if (!user.ok) {
+    return {error: user.error.message};
+  }
+  return {name: user.result.name};
+})();
 ```
 
 ### 3. Set Appropriate Timeouts
@@ -484,6 +771,7 @@ return {name: user.result.name};
 
 ## Next Steps
 
+- **Cookbook**: See [cookbook.md](cookbook.md) for 10 TypeScript orchestration recipes (batch, fan-out, retry, pagination, rate-limit) with token/latency benchmarks
 - **Examples**: See [examples.md](examples.md) for 10+ working code samples
 - **API Reference**: See [api-reference.md](api-reference.md) for complete schema documentation
 - **Troubleshooting**: See [troubleshooting.md](troubleshooting.md) for common issues and solutions

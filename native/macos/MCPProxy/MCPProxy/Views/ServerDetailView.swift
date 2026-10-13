@@ -22,6 +22,66 @@ enum ServerDetailTab: String, CaseIterable {
     }
 }
 
+/// Payload for `.showServerDetail` when the caller needs a specific tab open
+/// — e.g. the Dashboard's AttentionRow routing a `set_secret`/`configure`/
+/// `edit_url` action to Config, or `view_logs` to Logs, instead of silently
+/// no-op'ing an action `performAction` can't complete via a single API call.
+/// Older posters (tray menu, ToolsView) still send a bare `String` and land
+/// on the default `.tools` tab.
+struct ServerDetailTarget {
+    let serverName: String
+    let tab: ServerDetailTab
+    /// FR-014's "with the field focused" for `edit_url` — nil for every other
+    /// action (review round 3, F-FR014-focus). See `TrayConfigFocusField`.
+    let focusField: TrayConfigFocusField?
+
+    init(serverName: String, tab: ServerDetailTab, focusField: TrayConfigFocusField? = nil) {
+        self.serverName = serverName
+        self.tab = tab
+        self.focusField = focusField
+    }
+}
+
+// MARK: - Isolation Override (GH #1142)
+
+/// The three states of the per-server `isolation.enabled` override.
+///
+/// A two-state toggle cannot express this: `nil` on the wire means "inherit the
+/// global setting", which is NOT the same as an explicit `false`. Collapsing
+/// them is what let an ordinary image edit silently un-containerise a server.
+enum IsolationOverride: Equatable {
+    case inherit
+    case forceOn
+    case forceOff
+
+    /// Seeded from the RAW override — never from the effective state.
+    init(rawOverride: Bool?) {
+        switch rawOverride {
+        case .none: self = .inherit
+        case .some(true): self = .forceOn
+        case .some(false): self = .forceOff
+        }
+    }
+
+    /// The value to send for `isolation.enabled_override`: a bool, or NSNull to
+    /// clear the override back to inherit (an omitted key means "leave alone").
+    var patchValue: Any {
+        switch self {
+        case .inherit: return NSNull()
+        case .forceOn: return true
+        case .forceOff: return false
+        }
+    }
+}
+
+/// The editable per-server isolation override fields, as text.
+struct IsolationEditState: Equatable {
+    var image: String
+    var networkMode: String
+    var extraArgs: [String]
+    var workingDir: String
+}
+
 // MARK: - Server Detail View
 
 struct ServerDetailView: View {
@@ -36,14 +96,27 @@ struct ServerDetailView: View {
     @State private var logLines: [String] = []
     @State private var isLoadingTools = false
     @State private var isLoadingLogs = false
-    @State private var isApproving = false
     @State private var actionMessage: String?
 
-    init(server: ServerStatus, appState: AppState, onDismiss: @escaping () -> Void) {
+    /// FR-014's "with the field focused" for `edit_url` (review round 3,
+    /// F-FR014-focus) — consumed once by `applyPendingFocusIfNeeded()` so a
+    /// later tab switch or re-render doesn't keep re-stealing focus.
+    @State private var pendingFocusField: TrayConfigFocusField?
+    @FocusState private var focusedConfigField: TrayConfigFocusField?
+
+    init(
+        server: ServerStatus,
+        appState: AppState,
+        initialTab: ServerDetailTab = .tools,
+        initialFocusField: TrayConfigFocusField? = nil,
+        onDismiss: @escaping () -> Void
+    ) {
         self.initialServer = server
         self.appState = appState
         self.onDismiss = onDismiss
         self._server = State(initialValue: server)
+        self._selectedTab = State(initialValue: initialTab)
+        self._pendingFocusField = State(initialValue: initialFocusField)
     }
 
     // Edit mode state for Config tab
@@ -65,7 +138,8 @@ struct ServerDetailView: View {
     @State private var editHeaders = ""
     @State private var editEnabled = true
     @State private var editQuarantined = false
-    @State private var editDockerIsolation = false
+    @State private var editIsolationOverride: IsolationOverride = .inherit
+    @State private var originalIsolationOverride: IsolationOverride = .inherit
     @State private var editSkipQuarantine = false
     // Per-server Docker isolation overrides.
     @State private var editIsolationImage = ""
@@ -106,6 +180,7 @@ struct ServerDetailView: View {
             case .config: configTab
             }
         }
+        .onAppear { applyPendingFocusIfNeeded() }
         .sheet(item: $convertSheet) { ctx in
             convertToSecretSheet(ctx)
         }
@@ -129,12 +204,14 @@ struct ServerDetailView: View {
             Circle()
                 .fill(server.statusColor)
                 .frame(width: 12, height: 12)
-                .accessibilityLabel("Server health: \(server.health?.level ?? "unknown")")
+                // FR-011: no surface may render `level` as text, including
+                // accessibility labels — use the one status label table.
+                .accessibilityLabel("Server health: \(server.health?.statusLabel ?? "unknown")")
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(server.name)
                     .font(.scaled(.title2, scale: fontScale).bold())
-                Text(server.health?.summary ?? statusText)
+                Text(ServerStatusLinePresentation.text(for: server))
                     .font(.scaled(.subheadline, scale: fontScale))
                     .foregroundStyle(.secondary)
             }
@@ -155,18 +232,9 @@ struct ServerDetailView: View {
 
             if server.quarantined {
                 Button {
-                    Task {
-                        do {
-                            try await apiClient?.approveTools(server.id)
-                            try await apiClient?.unquarantineServer(server.id)
-                            actionMessage = "Server approved and activated"
-                            await refreshServer()
-                        } catch {
-                            actionMessage = "Failed to approve: \(error.localizedDescription)"
-                        }
-                    }
+                    openReview()
                 } label: {
-                    Label("Approve Server", systemImage: "checkmark.shield")
+                    Label("Review Server", systemImage: "checkmark.shield")
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
@@ -228,7 +296,14 @@ struct ServerDetailView: View {
         .padding()
     }
 
-    // MARK: - Tab Bar
+    private func openReview() {
+        NotificationCenter.default.post(name: .switchToSidebarTab, object: SidebarItem.review.rawValue)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NotificationCenter.default.post(name: .showReview, object: server.name)
+        }
+    }
+
+// MARK: - Tab Bar
 
     @ViewBuilder
     private var tabBar: some View {
@@ -328,27 +403,12 @@ struct ServerDetailView: View {
             Text("\(pendingApprovalCount) tool(s) need approval")
                 .font(.scaled(.subheadline, scale: fontScale).bold())
             Spacer()
-            if isApproving {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Button("Approve All") {
-                    Task {
-                        isApproving = true
-                        defer { isApproving = false }
-                        do {
-                            try await apiClient?.approveTools(server.id)
-                            actionMessage = "All tools approved for \(server.name)"
-                            await loadTools()
-                        } catch {
-                            actionMessage = "Failed to approve: \(error.localizedDescription)"
-                        }
-                    }
-                }
+            Button("Review tools") {
+                openReview()
+            }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.small)
                 .tint(.orange)
-            }
         }
         .padding()
         .background(Color.orange.opacity(0.1))
@@ -551,13 +611,20 @@ struct ServerDetailView: View {
                                 hint: "When disabled, the server will not connect or be available to AI agents.")
                             configToggleRow(label: "Quarantined", isOn: $editQuarantined,
                                 hint: "New tools must be reviewed and approved before AI agents can use them. Protects against tool poisoning attacks.")
-                            configToggleRow(label: "Docker Isolation", isOn: $editDockerIsolation,
-                                hint: "Runs the server in an isolated Docker container. Prevents access to your filesystem, network, and other system resources. Recommended for untrusted servers.")
+                            // Three-state, because "inherit the global setting"
+                            // is a real state a toggle cannot express (GH #1142).
+                            isolationOverridePicker()
                             configToggleRow(label: "Skip Quarantine", isOn: $editSkipQuarantine)
                         } else {
                             configRow(label: "Enabled", value: server.enabled ? "Yes" : "No")
                             if server.quarantined {
                                 configRow(label: "Quarantined", value: "Yes")
+                            }
+                            // Report the EFFECTIVE isolation state and why —
+                            // the raw flag alone cannot say whether a server is
+                            // inheriting or explicitly opted out.
+                            if let eff = server.isolationEffective {
+                                configRow(label: "Isolation", value: "\(eff.label) — \(eff.explanation)")
                             }
                         }
                     }
@@ -565,7 +632,8 @@ struct ServerDetailView: View {
                     if server.protocol == "http" || server.protocol == "sse" || server.protocol == "streamable-http" {
                         configSection(title: "Connection") {
                             if isEditing {
-                                configEditRow(label: "URL", text: $editURL, placeholder: "https://api.example.com/mcp")
+                                configEditRow(label: "URL", text: $editURL, placeholder: "https://api.example.com/mcp",
+                                              focusValue: .endpoint)
                             } else {
                                 configRow(label: "URL", value: server.url ?? "N/A")
                             }
@@ -622,11 +690,17 @@ struct ServerDetailView: View {
                     }
 
                     // Docker isolation overrides (only relevant for stdio servers).
-                    // The global "Docker Isolation" toggle in the General section
-                    // enables isolation for this server; these fields customize how
-                    // that isolation is provisioned.
+                    // The override picker in the General section decides WHETHER
+                    // this server is isolated; these fields customize how that
+                    // isolation is provisioned.
                     if server.protocol == "stdio" {
                         configSection(title: "Docker Isolation Overrides") {
+                            // Effective state first: the raw override alone
+                            // cannot say whether the server inherits or was
+                            // explicitly opted out (GH #1142).
+                            if let eff = server.isolationEffective {
+                                configRow(label: "Effective", value: "\(eff.label) — \(eff.explanation)")
+                            }
                             if isEditing {
                                 let defaults = server.isolationDefaults
                                 let imagePlaceholder = isolationPlaceholder(
@@ -714,15 +788,26 @@ struct ServerDetailView: View {
                     }
 
                     if let health = server.health {
+                        // Spec 109 FR-011: no surface may render `level` as text — the
+                        // Status row renders `status` through the one label table
+                        // (HealthStatus.statusLabel). `level` still exists as a
+                        // severity signal (badge/tray coloring) elsewhere, just not here.
                         configSection(title: "Health") {
-                            configRow(label: "Level", value: health.level)
+                            configRow(label: "Status", value: health.statusLabel)
                             configRow(label: "Admin State", value: health.adminState)
                             configRow(label: "Summary", value: health.summary)
                             if let detail = health.detail, !detail.isEmpty {
                                 configRow(label: "Detail", value: detail)
                             }
-                            if let action = health.action, !action.isEmpty {
-                                configRow(label: "Action", value: action)
+                            // actionsOrLegacyFallback falls back to the
+                            // legacy singular `action` when `actions` is
+                            // absent (an old-core payload) — without it this
+                            // row silently dropped for that payload shape, a
+                            // regression from before this PR.
+                            let actions = health.actionsOrLegacyFallback
+                            if !actions.isEmpty {
+                                let labels = actions.map { HealthStatus.actionLabels[$0] ?? $0 }
+                                configRow(label: "Suggested Action", value: labels.joined(separator: ", "))
                             }
                         }
                     }
@@ -760,7 +845,13 @@ struct ServerDetailView: View {
     }
 
     @ViewBuilder
-    private func configEditRow(label: String, text: Binding<String>, placeholder: String, multiline: Bool = false) -> some View {
+    private func configEditRow(
+        label: String,
+        text: Binding<String>,
+        placeholder: String,
+        multiline: Bool = false,
+        focusValue: TrayConfigFocusField? = nil
+    ) -> some View {
         HStack(alignment: .top) {
             Text(label)
                 .font(.scaled(.subheadline, scale: fontScale))
@@ -771,6 +862,14 @@ struct ServerDetailView: View {
                     .font(.scaledMonospaced(.subheadline, scale: fontScale))
                     .frame(height: 60)
                     .border(Color(nsColor: .separatorColor), width: 1)
+            } else if let focusValue {
+                // FR-014 (review round 3, F-FR014-focus): only the URL row
+                // passes a non-nil `focusValue` today, so this branch is the
+                // one place `focusedConfigField` actually binds to a control.
+                TextField(placeholder, text: text)
+                    .font(.scaledMonospaced(.subheadline, scale: fontScale))
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedConfigField, equals: focusValue)
             } else {
                 TextField(placeholder, text: text)
                     .font(.scaledMonospaced(.subheadline, scale: fontScale))
@@ -859,6 +958,82 @@ struct ServerDetailView: View {
         }
     }
 
+    /// Builds the `isolation` PATCH body from the edit form, or nil when
+    /// nothing changed.
+    ///
+    /// Pure and static so the rule that matters can be unit-tested without a
+    /// running app: **`enabled_override` is emitted only when the override
+    /// picker actually moved.** The previous code force-added it to every
+    /// isolation patch, so editing an unrelated sub-field on a server that
+    /// merely INHERITED global isolation persisted an explicit opt-out and
+    /// silently un-containerised it (GH #1142). A move back to `.inherit` sends
+    /// JSON null, because an omitted key means "leave the persisted value alone".
+    ///
+    /// The key is `enabled_override`, never `enabled`: on a READ, `enabled` is
+    /// the EFFECTIVE state (global setting + override + structural gates), so
+    /// writing that key back is how a read-modify-write turns "inherits the
+    /// global setting" into a permanent override. The backend rejects it.
+    static func buildIsolationPatch(
+        override: IsolationOverride,
+        originalOverride: IsolationOverride,
+        edited: IsolationEditState,
+        original: IsolationEditState
+    ) -> [String: Any]? {
+        var iso: [String: Any] = [:]
+
+        if override != originalOverride {
+            iso["enabled_override"] = override.patchValue
+        }
+        if edited.image != original.image {
+            iso["image"] = edited.image
+        }
+        if edited.networkMode != original.networkMode {
+            iso["network_mode"] = edited.networkMode
+        }
+        if edited.extraArgs != original.extraArgs {
+            iso["extra_args"] = edited.extraArgs
+        }
+        if edited.workingDir != original.workingDir {
+            iso["working_dir"] = edited.workingDir
+        }
+
+        return iso.isEmpty ? nil : iso
+    }
+
+    /// Three-state override control. The "Inherit" option names what the
+    /// global setting currently resolves to, so the user can see the
+    /// consequence of leaving it alone.
+    @ViewBuilder
+    private func isolationOverridePicker() -> some View {
+        let inheritLabel: String = {
+            if let g = server.isolationEffective?.globalMode, !g.isEmpty {
+                return "Inherit global (\(g))"
+            }
+            return "Inherit global"
+        }()
+
+        VStack(alignment: .leading, spacing: 2) {
+            HStack {
+                Text("Docker Isolation")
+                    .font(.scaled(.subheadline, scale: fontScale))
+                    .foregroundStyle(.secondary)
+                    .frame(width: 140, alignment: .trailing)
+                Picker("", selection: $editIsolationOverride) {
+                    Text(inheritLabel).tag(IsolationOverride.inherit)
+                    Text("Always isolate").tag(IsolationOverride.forceOn)
+                    Text("Never isolate").tag(IsolationOverride.forceOff)
+                }
+                .labelsHidden()
+                .frame(maxWidth: 220, alignment: .leading)
+                Spacer()
+            }
+            Text("Runs the server in an isolated Docker container, preventing access to your filesystem, network, and other system resources. \"Inherit global\" follows the app-wide setting.")
+                .font(.scaled(.caption2, scale: fontScale))
+                .foregroundStyle(.tertiary)
+                .padding(.leading, 148)
+        }
+    }
+
     @ViewBuilder
     private func configToggleRow(label: String, isOn: Binding<Bool>, hint: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -900,11 +1075,6 @@ struct ServerDetailView: View {
 
     // MARK: - Computed
 
-    private var statusText: String {
-        if !server.enabled { return "Disabled" }
-        return server.connected ? "Connected" : "Disconnected"
-    }
-
     private var pendingApprovalCount: Int {
         let fromModel = server.pendingApprovalCount
         if fromModel > 0 { return fromModel }
@@ -937,7 +1107,19 @@ struct ServerDetailView: View {
         isLoadingLogs = true
         defer { isLoadingLogs = false }
         do {
-            logLines = try await client.serverLogs(server.name, tail: 100)
+            let lines = try await client.serverLogs(server.name, tail: 100)
+            if lines.isEmpty {
+                // The core now answers 200 with an empty list when a server has
+                // no process log file, instead of erroring (that error read
+                // "server may not have run yet" and was shown as a red alert on
+                // remote servers that had in fact run fine). This branch used to
+                // be reached only via `catch`, so the empty answer would have
+                // silently skipped the on-disk fallback and dropped historical
+                // local logs from this view.
+                loadLogsFromFile()
+            } else {
+                logLines = lines
+            }
         } catch {
             // Fall back to reading the log file directly
             loadLogsFromFile()
@@ -998,7 +1180,10 @@ struct ServerDetailView: View {
             .joined(separator: "\n")
         editEnabled = server.enabled
         editQuarantined = server.quarantined
-        editDockerIsolation = server.isolation?.enabled ?? false
+        // Seed from the RAW override, NOT from `enabled` (which is now the
+        // effective state, and was always the wrong thing to edit) — GH #1142.
+        editIsolationOverride = IsolationOverride(rawOverride: server.isolation?.enabledOverride)
+        originalIsolationOverride = editIsolationOverride
         editSkipQuarantine = false  // read from config if available
         let iso = server.isolation
         editIsolationImage = iso?.image ?? ""
@@ -1007,6 +1192,26 @@ struct ServerDetailView: View {
         editIsolationWorkingDir = iso?.workingDir ?? ""
         editError = nil
         isEditing = true
+    }
+
+    /// FR-014's "with the field focused" (review round 3, F-FR014-focus):
+    /// `edit_url`'s primary action lands here on `.config` carrying
+    /// `focusField == .endpoint` — enter edit mode (mirrors the Web UI's
+    /// `startEditUrl()`) and focus the URL field once it exists. Consumes
+    /// `pendingFocusField` so a later re-render (e.g. `refreshServer()`)
+    /// cannot re-steal focus away from whatever the user is doing next.
+    private func applyPendingFocusIfNeeded() {
+        guard let field = pendingFocusField else { return }
+        guard selectedTab == .config else { return }
+        pendingFocusField = nil
+        if !isEditing { startEditing() }
+        // The URL TextField materialises only once `isEditing` re-renders the
+        // Config tab body — asyncAfter this run-loop turn (same pattern the
+        // Web UI's `nextTick(() => urlInputRef.value?.focus())` uses) lets
+        // that happen before `focusedConfigField` is set.
+        DispatchQueue.main.async {
+            focusedConfigField = field
+        }
     }
 
     private func saveEdits() async {
@@ -1040,12 +1245,6 @@ struct ServerDetailView: View {
         let wd = editWorkingDir.trimmingCharacters(in: .whitespaces)
         if !wd.isEmpty { updates["working_dir"] = wd }
 
-        // Parse env vars. The textarea is the user's authoritative copy on
-        // save — sending an empty map clears all env vars on the backend
-        // (matches the existing add-server flow). We pass it through
-        // unconditionally so deletes round-trip.
-        updates["env"] = parseKVTextarea(editEnvVars)
-
         // Compute JSON Merge Patch (RFC 7396) diffs for env and headers.
         // The backend treats each value in the map as: non-null → upsert,
         // `null` → delete, omitted key → preserve. So we emit a single
@@ -1053,6 +1252,12 @@ struct ServerDetailView: View {
         // sentinels. JSONSerialization renders NSNull as the literal
         // `null` token — see the SwiftEncoder unit test that pins this
         // invariant in case a future refactor swaps the encoder.
+        //
+        // env MUST be diffed, never sent as a full map: the read path now
+        // returns masked secrets like `••••23 (14 chars)` (see #872), so a
+        // full-map send would upsert the mask over the real on-disk secret
+        // for every key the user left untouched. The diff omits unchanged
+        // (still-masked) keys, mirroring how headers are handled below.
         if let envPatch = diffKVMap(original: server.env ?? [:], next: parseKVTextarea(editEnvVars)) {
             updates["env"] = envPatch
         }
@@ -1066,11 +1271,9 @@ struct ServerDetailView: View {
         if editEnabled != server.enabled { updates["enabled"] = editEnabled }
         if editQuarantined != server.quarantined { updates["quarantined"] = editQuarantined }
 
-        // Docker isolation (stdio only). Send any field that changed —
-        // we always include `enabled` because the handler tracks the
-        // boolean explicitly, and sending just the sub-fields without
-        // it would leave the isolation off on a server that never had
-        // it enabled before.
+        // Docker isolation (stdio only). Only genuinely-changed fields are
+        // sent; `enabled_override` appears ONLY when the user actually moved
+        // the override picker (GH #1142).
         if server.protocol == "stdio" {
             let existing = server.isolation
             let newExtra = editIsolationExtraArgs
@@ -1081,36 +1284,22 @@ struct ServerDetailView: View {
             let newNetwork = editIsolationNetworkMode.trimmingCharacters(in: .whitespaces)
             let newWorkDir = editIsolationWorkingDir.trimmingCharacters(in: .whitespaces)
 
-            var iso: [String: Any] = [:]
-            var isoChanged = false
-
-            if editDockerIsolation != (existing?.enabled ?? false) {
-                iso["enabled"] = editDockerIsolation
-                isoChanged = true
-            }
-            if newImage != (existing?.image ?? "") {
-                iso["image"] = newImage
-                isoChanged = true
-            }
-            if newNetwork != (existing?.networkMode ?? "") {
-                iso["network_mode"] = newNetwork
-                isoChanged = true
-            }
-            if newExtra != (existing?.extraArgs ?? []) {
-                iso["extra_args"] = newExtra
-                isoChanged = true
-            }
-            if newWorkDir != (existing?.workingDir ?? "") {
-                iso["working_dir"] = newWorkDir
-                isoChanged = true
-            }
-
-            if isoChanged {
-                // Always include `enabled` alongside any sub-field change so
-                // the backend applies the full intended isolation state.
-                if iso["enabled"] == nil {
-                    iso["enabled"] = editDockerIsolation
-                }
+            if let iso = Self.buildIsolationPatch(
+                override: editIsolationOverride,
+                originalOverride: originalIsolationOverride,
+                edited: IsolationEditState(
+                    image: newImage,
+                    networkMode: newNetwork,
+                    extraArgs: newExtra,
+                    workingDir: newWorkDir
+                ),
+                original: IsolationEditState(
+                    image: existing?.image ?? "",
+                    networkMode: existing?.networkMode ?? "",
+                    extraArgs: existing?.extraArgs ?? [],
+                    workingDir: existing?.workingDir ?? ""
+                )
+            ) {
                 updates["isolation"] = iso
             }
         }
@@ -1163,23 +1352,17 @@ struct ServerDetailView: View {
         enum Scope: String { case header, env }
     }
 
-    /// Suggest a keyring secret name derived from server.name + key.
-    /// Lowercased, alphanumeric + hyphens, capped at 64 chars — same
-    /// convention as the Web UI / Secrets view.
-    private func suggestedSecretName(for key: String) -> String {
-        let base = "\(server.name)-\(key)"
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz0123456789-")
-        let scrubbed = base.lowercased().unicodeScalars
-            .map { allowed.contains($0) ? Character($0) : "-" }
-        var out = String(scrubbed)
-            .split(separator: "-", omittingEmptySubsequences: true)
-            .joined(separator: "-")
-        if out.count > 64 { out = String(out.prefix(64)) }
-        return out
+    /// Suggest a keyring secret name derived from server.name + key (FR-065):
+    /// the shared SecretRefName helper (also used by the Add Server sheet)
+    /// keeps the field KIND (env vs header) in the name, so a header and an
+    /// env var with the same key never collide on one keyring entry.
+    private func suggestedSecretName(scope: ConvertToSecretContext.Scope, key: String) -> String {
+        let kind: SecretRefName.Kind = scope == .header ? .header : .env
+        return SecretRefName.compute(server: server.name, kind: kind, key: key)
     }
 
     private func openConvertSheet(scope: ConvertToSecretContext.Scope, key: String, value: String) {
-        convertSheetSecretName = suggestedSecretName(for: key)
+        convertSheetSecretName = suggestedSecretName(scope: scope, key: key)
         convertSheetBusy = false
         convertSheetError = nil
         convertSheet = ConvertToSecretContext(scope: scope, key: key, value: value)
@@ -1634,12 +1817,9 @@ struct ToolRow: View {
     }
 
     private func approvalStatusLabel(_ status: String) -> String {
-        switch status {
-        case "approved": return "Approved"
-        case "pending": return "Pending Approval"
-        case "changed": return "Changed (needs re-approval)"
-        default: return status.capitalized
-        }
+        // Spec 109 FR-027: one vocabulary, shared with ToolsView and the Web
+        // UI — see ToolLabels.swift.
+        ToolLabels.approvalStatusLabel(status)
     }
 
     // MARK: - Diff Section
@@ -1821,22 +2001,9 @@ struct ToolRow: View {
     }
 
     private func approveTool() {
-        guard let client = apiClient else { return }
-        isApprovingTool = true
-        Task {
-            do {
-                try await client.approveSpecificTools(serverName, tools: [tool.name])
-                await MainActor.run {
-                    isApprovingTool = false
-                    approveSuccess = true
-                    onApproved?()
-                }
-            } catch {
-                await MainActor.run {
-                    isApprovingTool = false
-                    NSLog("[ToolRow] approveTool FAILED for %@: %@", tool.name, error.localizedDescription)
-                }
-            }
+        NotificationCenter.default.post(name: .switchToSidebarTab, object: SidebarItem.review.rawValue)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+            NotificationCenter.default.post(name: .showReview, object: serverName)
         }
     }
 

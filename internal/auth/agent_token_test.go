@@ -291,3 +291,43 @@ func TestGetOrCreateHMACKey_CreatesDir(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, key, 32)
 }
+
+// Spec 098 T010: AuthContext() is the single agent-tier context constructor —
+// every field, including ProfilePin, must be carried through.
+func TestAgentToken_AuthContext(t *testing.T) {
+	tok := &AgentToken{
+		Name:           "agent-1",
+		TokenPrefix:    "mcp_agt_abcd",
+		AllowedServers: []string{"github"},
+		Permissions:    []string{PermRead},
+		ProfilePin:     "work",
+	}
+
+	ac := tok.AuthContext()
+	if ac == nil {
+		t.Fatal("AuthContext() returned nil for a valid token")
+	}
+	if ac.Type != AuthTypeAgent {
+		t.Errorf("Type = %q, want %q", ac.Type, AuthTypeAgent)
+	}
+	if ac.AgentName != "agent-1" || ac.TokenPrefix != "mcp_agt_abcd" {
+		t.Errorf("identity fields not carried: %+v", ac)
+	}
+	if len(ac.AllowedServers) != 1 || ac.AllowedServers[0] != "github" {
+		t.Errorf("AllowedServers = %v", ac.AllowedServers)
+	}
+	if len(ac.Permissions) != 1 || ac.Permissions[0] != PermRead {
+		t.Errorf("Permissions = %v", ac.Permissions)
+	}
+	if ac.ProfilePin != "work" {
+		t.Errorf("ProfilePin = %q, want %q (the REST path used to drop it)", ac.ProfilePin, "work")
+	}
+	if ac.IsAdmin() {
+		t.Error("an agent token context must never be admin")
+	}
+
+	var nilToken *AgentToken
+	if nilToken.AuthContext() != nil {
+		t.Error("AuthContext() on a nil token must return nil")
+	}
+}

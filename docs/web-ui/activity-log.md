@@ -1,3 +1,9 @@
+---
+title: "Activity Log Page"
+sidebar_label: "Activity Log"
+description: "Real-time monitoring and analysis of MCP server activity in the Web UI."
+---
+
 # Activity Log Web UI
 
 The Activity Log page provides real-time monitoring and analysis of all activity across your MCP servers through a web-based interface.

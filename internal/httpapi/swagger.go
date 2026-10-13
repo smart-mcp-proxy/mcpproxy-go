@@ -8,19 +8,23 @@ import (
 
 	"go.uber.org/zap"
 
-	swag "github.com/swaggo/swag/v2"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	_ "github.com/smart-mcp-proxy/mcpproxy-go/oas" // Import generated docs
+	swag "github.com/swaggo/swag/v2"
 )
 
 // SetupSwaggerHandler returns a handler for Swagger UI
-// This is exported so it can be mounted on the main mux
-func SetupSwaggerHandler(logger *zap.SugaredLogger) http.Handler {
+// This is exported so it can be mounted on the main mux. trusted yields the
+// LIVE trusted_proxies list (Spec 107 FR-027): X-Forwarded-Proto/-Host shape
+// the advertised server URL only from a trusted peer; nil trusts nobody.
+func SetupSwaggerHandler(logger *zap.SugaredLogger, trusted config.TrustedProxiesProvider) http.Handler {
 	logger.Debug("Setting up Swagger UI handler")
-	return &swaggerHandler{logger: logger}
+	return &swaggerHandler{logger: logger, trusted: trusted}
 }
 
 type swaggerHandler struct {
-	logger *zap.SugaredLogger
+	logger  *zap.SugaredLogger
+	trusted config.TrustedProxiesProvider
 }
 
 func (h *swaggerHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -102,23 +106,14 @@ func (h *swaggerHandler) overrideServers(doc string, r *http.Request) (string, e
 }
 
 func (h *swaggerHandler) buildServerURL(r *http.Request) string {
-	scheme := r.Header.Get("X-Forwarded-Proto")
-	if scheme == "" {
-		if r.TLS != nil {
-			scheme = "https"
-		} else {
-			scheme = "http"
-		}
+	var trusted []string
+	if h.trusted != nil {
+		trusted = h.trusted()
 	}
-
-	host := r.Header.Get("X-Forwarded-Host")
-	if host == "" {
-		host = r.Host
-	}
-
-	trimmedHost := strings.TrimSuffix(host, "/")
+	fwd := config.ForwardedHeaders(r, trusted)
+	trimmedHost := strings.TrimSuffix(fwd.Host, "/")
 	// Do NOT append /api/v1 here - it's already in the path definitions
-	return fmt.Sprintf("%s://%s", scheme, trimmedHost)
+	return fmt.Sprintf("%s://%s", fwd.Scheme, trimmedHost)
 }
 
 const swaggerHTML = `<!doctype html>

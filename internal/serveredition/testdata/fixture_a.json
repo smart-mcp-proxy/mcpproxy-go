@@ -1,0 +1,50 @@
+{
+  "_comment": "Two-fixture oracle, fixture A (spec 107 T067, contracts/entitlement-predicate.md). Documents the on-disk shape the Go blueprint in fixture_oracle_test.go (fixtureSharedServers, fixtureAccessBlueprint) mirrors field-for-field. `server_edition.access` is not yet parsed by ServerEditionConfig (lands in T074) — a bare json.Unmarshal ignores it harmlessly until then (internal/config/loader.go:300); nothing in this package loads this file yet. Fixture B (fixture_b.json) is this document with `b` and `a__b` removed from mcpServers and dropped from every access.group_servers list — every other byte is identical.",
+  "listen": "127.0.0.1:8080",
+  "mcpServers": [
+    {
+      "name": "a",
+      "url": "http://127.0.0.1:9/a-sentinel-a-7f3c9e1b2d4a6f80c1",
+      "protocol": "http",
+      "shared": true,
+      "enabled": true
+    },
+    {
+      "name": "b",
+      "url": "http://127.0.0.1:9/b-sentinel-b-9a1d5c7e3f2b60813c",
+      "protocol": "http",
+      "shared": true,
+      "enabled": true
+    },
+    {
+      "name": "a__b",
+      "url": "http://127.0.0.1:9/a__b-sentinel-ab-2c6f8a1e4b9d0357aa",
+      "protocol": "http",
+      "shared": true,
+      "enabled": true
+    }
+  ],
+  "profiles": [
+    {
+      "name": "ops-only",
+      "servers": ["b"]
+    }
+  ],
+  "server_edition": {
+    "enabled": true,
+    "admin_emails": ["admin@example.com", "dana@example.com"],
+    "access": {
+      "group_servers": {
+        "eng": ["a"],
+        "ops": ["a", "b"]
+      },
+      "default_servers": []
+    }
+  },
+  "_users": [
+    {"email": "alice@example.com", "groups": ["eng"]},
+    {"email": "bob@example.com", "groups": []},
+    {"email": "carol@example.com", "groups": ["ops"]},
+    {"email": "dana@example.com", "groups": [], "_note": "administrator via admin_emails, not the group grant"}
+  ]
+}

@@ -108,6 +108,7 @@ func TestE2E_SensitiveData_AWSAccessKey(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("testserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -116,7 +117,7 @@ func TestE2E_SensitiveData_AWSAccessKey(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	// Wait for server to connect
@@ -252,6 +253,7 @@ func TestE2E_SensitiveData_FilePath(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("fileserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -259,7 +261,7 @@ func TestE2E_SensitiveData_FilePath(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	time.Sleep(3 * time.Second)
@@ -354,10 +356,10 @@ func TestE2E_SensitiveData_RESTAPIFilterSensitiveData(t *testing.T) {
 				"detection_count": 1,
 				"detections": []interface{}{
 					map[string]interface{}{
-						"type":            "aws_access_key",
-						"category":        "cloud_credentials",
-						"severity":        "critical",
-						"location":        "arguments",
+						"type":              "aws_access_key",
+						"category":          "cloud_credentials",
+						"severity":          "critical",
+						"location":          "arguments",
 						"is_likely_example": true,
 					},
 				},
@@ -529,10 +531,10 @@ func TestE2E_SensitiveData_DetectionMetadata(t *testing.T) {
 				"detection_count": 3,
 				"detections": []interface{}{
 					map[string]interface{}{
-						"type":            "aws_access_key",
-						"category":        "cloud_credentials",
-						"severity":        "critical",
-						"location":        "arguments",
+						"type":              "aws_access_key",
+						"category":          "cloud_credentials",
+						"severity":          "critical",
+						"location":          "arguments",
 						"is_likely_example": true,
 					},
 					map[string]interface{}{
@@ -644,6 +646,7 @@ func TestE2E_SensitiveData_CreditCard(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("paymentserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -651,7 +654,7 @@ func TestE2E_SensitiveData_CreditCard(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	time.Sleep(3 * time.Second)

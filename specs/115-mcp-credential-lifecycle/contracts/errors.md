@@ -1,0 +1,35 @@
+# Contract: `credentials` error catalog
+
+A refusal is an MCP tool result with `isError: true`. Its single text content is a JSON object:
+
+```json
+{ "code": "<code>", "error": "<human sentence>", "field": "<argument>", "...": "code-specific keys" }
+```
+
+`field` is present when one argument is at fault. Texts never contain secrets, hashes, storage paths or Go error chains (FR-020). Echo rule: a text may quote an argument value only when that value passed the secret-shaped input screen **and** its own syntax or enum check (an id or token name matching its pattern, a known profile-name syntax). Free text (`purpose`, `display_name`) and unparsed values (`expires_in`, an unknown `operation`, a malformed id) are never quoted; the text names the field instead. New codes are constants in `internal/profile/contract.go`, pinned in `internal/profile/testdata/contract/enums.json` (`credential_error_codes`), and mirrored in `frontend/src/types/contracts.ts`.
+
+| Code | Operations | When | Extra keys | Example `error` |
+|---|---|---|---|---|
+| `secret_in_argument` | all | any key or value at any depth of the arguments is secret-shaped (data-model §8); checked first; all hits collected | `field` (known name or `"(unknown argument)"`), `offending_fields`, `unknown_offending_count` | `argument "purpose" looks like a credential or secret; it was not stored. Remove it and retry` |
+| `arguments_too_large` | all | canonical JSON of the whole `arguments` object exceeds `MaxCredentialArgumentsBytes` (16 KiB); checked before the screen; payload not retained (data-model §8) | `size_bytes`, `limit_bytes` | `arguments are too large (limit 16384 bytes); they were not stored` |
+| `unknown_operation` | all | `operation` is not in the enum | `field: operation` | `unknown operation; valid: list, get, create_client, create_token, revoke` |
+| `missing_argument` | all | required argument absent | `field` | `create_token: missing required argument "expires_in"` |
+| `invalid_argument` | all | wrong type, bad syntax, both/neither of client/token, unknown key, length over limit | `field` (an unknown key is reported as `"(unknown argument)"`, never by name) | `invalid argument "client": must be lower-case letters, digits, '-' or '_', at most 56 characters` (the value is not quoted) |
+| `profile_required` | create_* | `profile: ""` (All servers) | `field: profile` | `a worker credential must name a profile; All servers is not allowed here` |
+| `unknown_profile` | create_* | profile does not exist | `field: profile` | `unknown profile "daily-reserch"` |
+| `invalid_expiry` | create_* | unparseable, ≤0, >365d, or a day count whose duration would overflow (checked before multiplying, A16) | `field: expires_in` | `invalid argument "expires_in": use a duration such as 30m, 4h or 7d` / `expiry duration cannot exceed 365 days` |
+| `identity_exists` | create_* | an ownerless record holds the id/name (tenant-owned tokens are a separate namespace, data-model §9) | `field`, `state: active\|expired\|revoked\|conflicting_token` | `client delegated-worker already exists (revoked); choose a new id` |
+| `reserved_identity` | create_* | connect-registry client id; token name `client-…` | `field` | `client id "cursor" is a supported client; connect it from the Web UI or CLI instead` |
+| `identity_not_found` | get, revoke | no ownerless record (a tenant-owned token of that name answers the same) | `field` | `token "research-task-42" not found` |
+| `token_limit_reached` | create_token | 100 stored tokens | — | `maximum number of agent tokens (100) reached` |
+| `read_only_mode` | create_*, revoke | live `read_only_mode: true` | — | `Operation not allowed in read-only mode` (byte-equal to `profiles`) |
+| `management_disabled` | create_*, revoke | live `disable_management: true` | — | `Server management is disabled for security` (byte-equal) |
+| `unsupported_edition` | create_client; client get/revoke | server edition | — | `client credentials are not available in the server edition` |
+| `credentials_unavailable` | all | runtime or store not wired (startup) | — | `credential service not available` |
+| `binding_bypassable_without_auth` *(existing)* | create_* | FR-008a guard delta | `bindings`, `fixes` (existing body of `runtime.BindingGuardError`) | `a client bound to profile daily-research could escape it by omitting its credential while require_mcp_auth is off` |
+
+Hidden-tool refusal: over an MCP transport, callers who are not admin callers get a JSON-RPC "tool not found" error from mcp-go's tool filter, not a tool result (A25). The handler's own defensive refusal, seen only by a caller that reaches it without that filter, is the plain text `unknown tool: credentials`, not a JSON body. Both match `profiles`, so a hidden tool and a nonexistent one look alike.
+
+REST mapping (FR-009, FR-010): the REST token and client routes keep their existing status codes and bodies. They do not adopt these codes in this spec, with one additive exception: a secret-shaped `name`, `id`, `display_name`, `purpose`, `profile`/`profile_pin`, `mode`, `expires_in` or any element of `allowed_servers`/`permissions` is refused by the shared service screen with 400 in the route's existing envelope, naming the field and never the value (data-model §8.2). Malformed-body 400s on these two routes change text only: they use the sanitized §8.3 taxonomy and never quote a caller key or value.
+
+Revoke during an in-flight connect is **not** refused (spec review r3): `connect_in_progress` is not a `credentials` code. The revoke succeeds and the connect fails closed with the existing `credential_superseded`.

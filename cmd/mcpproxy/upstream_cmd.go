@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -23,8 +25,9 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
 
 var (
@@ -93,7 +96,15 @@ For stdio-based servers (use -- to separate command):
   mcpproxy upstream add fs -- npx -y @anthropic/mcp-server-filesystem /path/to/dir
   mcpproxy upstream add sqlite -- uvx mcp-server-sqlite --db mydb.db
 
-New servers are quarantined by default for security. Use the web UI to approve them.`,
+New servers are quarantined by default for security. Review and admit one
+without leaving the CLI:
+  mcpproxy review fetch <name>       # capture its tool definitions (if none yet)
+  mcpproxy review show <name>        # inspect the tools and scan verdicts
+  mcpproxy security scan <name>      # scan it (approval needs a scan result)
+  mcpproxy security report <name>    # read the scan report
+  mcpproxy review approve <name> --yes   # admit it ('mcpproxy security approve <name>' is an alias)
+
+The Web UI and macOS app offer the same review screen.`,
 		RunE: runUpstreamAdd,
 	}
 
@@ -172,7 +183,9 @@ Examples:
 		Use:   "approve <server-name> [tool-names...]",
 		Short: "Approve quarantined tools for a server",
 		Long: `Approve pending or changed tools so they can be used by AI agents.
-Without specific tool names, approves all pending/changed tools.
+Without specific tool names, approves all pending/changed tools. This legacy
+command remains available; use 'mcpproxy review approve <server> --tools ...'
+for the unified review workflow.
 
 Examples:
   mcpproxy upstream approve github                      # Approve all tools
@@ -265,6 +278,10 @@ Examples:
 	upstreamAll        bool
 	upstreamForce      bool
 	upstreamServerName string
+	// upstreamListStatus is FR-015: --status <value> is repeatable, and a
+	// comma-separated value is equivalent to repeating the flag (StringArrayVar
+	// preserves each raw token, so we split on "," ourselves in the filter).
+	upstreamListStatus []string
 
 	// Add command flags
 	upstreamAddHeaders      []string
@@ -273,6 +290,13 @@ Examples:
 	upstreamAddTransport    string
 	upstreamAddIfNotExists  bool
 	upstreamAddNoQuarantine bool
+	upstreamAddTrustMode    string
+	// upstreamAddSecretEnvs/Headers are the Spec 109 FR-065 secret flags:
+	// each value is written to the OS keyring under the FR-065 ref name
+	// (internal/secret.RefName) and the config gets ${keyring:<ref>} instead
+	// of the raw value.
+	upstreamAddSecretEnvs    []string
+	upstreamAddSecretHeaders []string
 
 	// Remove command flags
 	upstreamRemoveYes      bool
@@ -286,6 +310,7 @@ Examples:
 	upstreamPatchHeaderRemove []string
 	upstreamPatchEnvs         []string
 	upstreamPatchEnvRemove    []string
+	upstreamPatchInitTimeout  string
 
 	// Import command flags
 	upstreamImportServer       string
@@ -322,13 +347,17 @@ func init() {
 	upstreamToolsCmd.AddCommand(upstreamToolsDisableAllCmd)
 
 	// Define flags (note: output format handled by global --output/-o flag from root command)
+	upstreamListCmd.Flags().StringVar(&upstreamListProfile, "profile", "", "Show only the servers of this profile's effective server set; TOOLS is the number of tools visible under it (Spec 108)")
 	upstreamListCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
-	upstreamListCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to MCP configuration file")
+	addConfigFlag(upstreamListCmd.Flags(), &upstreamConfigPath, "Path to MCP configuration file")
+	upstreamListCmd.Flags().StringArrayVar(&upstreamListStatus, "status", nil,
+		"Filter by health status (repeatable; a comma-separated value is equivalent to repeating the flag): "+
+			"ready, connecting, sign_in_required, needs_review, needs_secret, needs_config, error, disabled")
 
 	upstreamLogsCmd.Flags().IntVarP(&upstreamLogsTail, "tail", "n", 50, "Number of log lines to show")
 	upstreamLogsCmd.Flags().BoolVarP(&upstreamLogsFollow, "follow", "f", false, "Follow log output (requires daemon)")
 	upstreamLogsCmd.Flags().StringVarP(&upstreamLogLevel, "log-level", "l", "warn", "Log level")
-	upstreamLogsCmd.Flags().StringVarP(&upstreamConfigPath, "config", "c", "", "Path to config file")
+	addConfigFlag(upstreamLogsCmd.Flags(), &upstreamConfigPath, "Path to config file")
 	upstreamLogsCmd.Flags().StringVarP(&upstreamServerName, "server", "s", "", "Name of the upstream server")
 
 	// Add --all and --force flags to enable/disable/restart
@@ -350,6 +379,9 @@ func init() {
 	upstreamAddCmd.Flags().StringVar(&upstreamAddTransport, "transport", "", "Transport type: http or stdio (auto-detected if not specified)")
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddIfNotExists, "if-not-exists", false, "Don't error if server already exists")
 	upstreamAddCmd.Flags().BoolVar(&upstreamAddNoQuarantine, "no-quarantine", false, "Don't quarantine the new server (use with caution)")
+	upstreamAddCmd.Flags().StringVar(&upstreamAddTrustMode, "trust-mode", "", "Per-server trust tier governing admission AND tool-change approval: auto (approve without scanning), scan (auto-approve new tools only when the offline TPA scan is green; changed tools are held for review), manual (human reviews every change). Unset inherits the default (manual)")
+	upstreamAddCmd.Flags().StringArrayVar(&upstreamAddSecretEnvs, "secret-env", nil, "Environment variable to store in the OS keyring instead of the config, in KEY=value format (repeatable, FR-065)")
+	upstreamAddCmd.Flags().StringArrayVar(&upstreamAddSecretHeaders, "secret-header", nil, "HTTP header to store in the OS keyring instead of the config, in 'Name: value' format (repeatable, FR-065)")
 
 	// Remove command flags
 	upstreamRemoveCmd.Flags().BoolVar(&upstreamRemoveYes, "yes", false, "Skip confirmation prompt")
@@ -361,6 +393,7 @@ func init() {
 	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchHeaderRemove, "header-remove", nil, "HTTP header name to delete (repeatable)")
 	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchEnvs, "env", nil, "Environment variable to upsert in KEY=value format (repeatable)")
 	upstreamPatchCmd.Flags().StringArrayVar(&upstreamPatchEnvRemove, "env-remove", nil, "Environment variable name to delete (repeatable)")
+	upstreamPatchCmd.Flags().StringVar(&upstreamPatchInitTimeout, "init-timeout", "", "MCP initialize handshake deadline as a duration (e.g. '120s', '3m'); raise for upstreams that warm up before responding to initialize")
 
 	// Inspect command flags
 	upstreamInspectCmd.Flags().StringVar(&upstreamInspectTool, "tool", "", "Show details for a specific tool")
@@ -373,6 +406,12 @@ func init() {
 }
 
 func runUpstreamList(_ *cobra.Command, _ []string) error {
+	// Refuse a typo'd/miscased --status up front rather than silently
+	// returning an empty table (GH #938-style validation for FR-015).
+	if err := validateStatusFlag(upstreamListStatus); err != nil {
+		return err
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -390,10 +429,16 @@ func runUpstreamList(_ *cobra.Command, _ []string) error {
 		return outputError(err, output.ErrCodeOperationFailed)
 	}
 
-	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		logger.Info("Detected running daemon, using client mode via socket")
-		return runUpstreamListClientMode(ctx, globalConfig.DataDir, logger)
+	// Check if daemon is running (socket first, then TCP fallback)
+	if client, ok := newDaemonClient(globalConfig, logger.Sugar()); ok {
+		logger.Info("Detected running daemon, using client mode")
+		return runUpstreamListClientMode(ctx, client, logger)
+	}
+	if upstreamListProfile != "" {
+		return outputError(output.NewStructuredError(output.ErrCodeConnectionFailed,
+			"--profile needs the running daemon: profile scope and tool visibility are resolved there").
+			WithGuidance("Start the daemon and retry").
+			WithRecoveryCommand("mcpproxy serve"), output.ErrCodeConnectionFailed)
 	}
 
 	// No daemon - load from config file
@@ -401,17 +446,22 @@ func runUpstreamList(_ *cobra.Command, _ []string) error {
 	return runUpstreamListFromConfig(globalConfig)
 }
 
-func shouldUseUpstreamDaemon(dataDir string) bool {
-	socketPath := socket.DetectSocketPath(dataDir)
-	return socket.IsSocketAvailable(socketPath)
+// upstreamListProfile is `upstream list --profile` (Spec 108 FR-032): the REST
+// `profile` filter on GET /api/v1/servers.
+var upstreamListProfile string
+
+// upstreamListQuery is the REST query of the list flags.
+func upstreamListQuery() url.Values {
+	q := url.Values{}
+	if upstreamListProfile != "" {
+		q.Set("profile", upstreamListProfile)
+	}
+	return q
 }
 
-func runUpstreamListClientMode(ctx context.Context, dataDir string, logger *zap.Logger) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+func runUpstreamListClientMode(ctx context.Context, client *cliclient.Client, _ *zap.Logger) error {
 	// Call GET /api/v1/servers
-	servers, err := client.GetServers(ctx)
+	servers, err := client.GetServersWithQuery(ctx, upstreamListQuery())
 	if err != nil {
 		return outputError(output.NewStructuredError(output.ErrCodeConnectionFailed, err.Error()).
 			WithGuidance("Ensure the mcpproxy daemon is running").
@@ -422,6 +472,27 @@ func runUpstreamListClientMode(ctx context.Context, dataDir string, logger *zap.
 }
 
 func runUpstreamListFromConfig(globalConfig *config.Config) error {
+	// Review finding (this round): the daemon-less path can only classify
+	// health.status for a disabled or quarantined server (StateDisabled /
+	// StatusNeedsReview short-circuit CalculateHealth before it ever looks at
+	// the synthetic "disconnected" connection state below); every other
+	// server's status is cleared to "" a few lines down so the STATUS column
+	// keeps the informative "Daemon not running" summary instead of a bogus
+	// "Error" (round-6 finding, see upstream_list_daemonless_test.go). But
+	// filterServersByStatus matches health.status exactly, so `--status
+	// ready|connecting|sign_in_required|needs_secret|needs_config|error`
+	// silently returns an empty (headers-only, exit 0) table for every
+	// enabled server when the daemon is down — indistinguishable from "no
+	// servers in that state", exactly the GH #938 failure mode
+	// validateStatusFlag's doc comment says it exists to prevent. Warn on
+	// stderr instead of fabricating a status this path cannot know; stdout
+	// output (including -o json/yaml) is untouched.
+	if statusFilterNeedsDaemon(upstreamListStatus) {
+		fmt.Fprintln(os.Stderr, "Notice: no mcpproxy daemon running — only 'disabled' and 'needs_review' statuses "+
+			"can be determined from the config file alone, so --status may return no rows for other values "+
+			"even though matching servers exist. Run 'mcpproxy serve' for accurate status.")
+	}
+
 	// Convert config servers to output format
 	servers := make([]map[string]interface{}, len(globalConfig.Servers))
 	for i, srv := range globalConfig.Servers {
@@ -438,8 +509,25 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 
 		// Override summary for config-only mode to indicate daemon status
 		summary := healthStatus.Summary
+		statusValue := healthStatus.Status
 		if healthStatus.AdminState == health.StateEnabled {
 			summary = "Daemon not running"
+			// Round-6 review finding: the synthetic State: "disconnected"
+			// input above always makes CalculateHealth set Status =
+			// StatusError too (a disconnected server with no LastError still
+			// resolves through connectionErrorStatus(ActionRestart) ==
+			// StatusError). upstreamServerRows's STATUS column renders
+			// health.StatusLabel(health.status) INSTEAD OF the free-text
+			// summary whenever health.status is non-empty (Spec 109 FR-015),
+			// so leaving it as "error" silently reverted the STATUS column
+			// from "Daemon not running" back to the generic "Error" for
+			// every enabled server. This daemon-less path cannot know the
+			// server's real connection status at all — clear it so
+			// upstreamServerRows falls back to the summary, matching
+			// pre-Spec-109 behavior. (`--status` filtering on an empty
+			// health.status already excludes these rows by design; see
+			// filterServersByStatus's own doc comment.)
+			statusValue = ""
 		}
 
 		servers[i] = map[string]interface{}{
@@ -455,7 +543,17 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 				"summary":     summary,
 				"detail":      healthStatus.Detail,
 				"action":      healthStatus.Action,
+				"status":      statusValue,
+				"usable":      healthStatus.Usable,
+				"actions":     healthStatus.Actions,
 			},
+		}
+
+		// Spec 086: surface the per-server trust tier in the daemon-less path
+		// too, so `mcpproxy upstream list -o json` reads back the same field
+		// whether or not the daemon is up. Omitted when never configured.
+		if srv.TrustMode != "" {
+			servers[i]["trust_mode"] = srv.TrustMode
 		}
 	}
 
@@ -463,6 +561,11 @@ func runUpstreamListFromConfig(globalConfig *config.Config) error {
 }
 
 func outputServers(servers []map[string]interface{}) error {
+	// FR-015: --status <value> is repeatable, and a comma-separated value is
+	// equivalent to repeating the flag; several values select the UNION of
+	// their statuses. Applies to every output format (table, json, yaml).
+	servers = filterServersByStatus(servers, upstreamListStatus)
+
 	// Sort servers alphabetically by name for consistent output
 	sort.Slice(servers, func(i, j int) bool {
 		nameI := getStringField(servers[i], "name")
@@ -491,6 +594,171 @@ func outputServers(servers []map[string]interface{}) error {
 
 	// For table format, build headers and rows with formatted data
 	headers := []string{"", "NAME", "PROTOCOL", "TOOLS", "STATUS", "ACTION"}
+	rows := upstreamServerRows(servers)
+
+	result, err := formatter.FormatTable(headers, rows)
+	if err != nil {
+		return fmt.Errorf("failed to format table: %w", err)
+	}
+	fmt.Print(result)
+	return nil
+}
+
+// validateTrustModeFlag refuses an unrecognized --trust-mode value up front
+// (GH #938). Empty means "inherit the default"; matching is case-sensitive
+// because the runtime fails closed to manual on anything else, so silently
+// accepting "Scan" would leave the operator believing scanning is on.
+func validateTrustModeFlag(mode string) error {
+	if config.IsValidTrustMode(mode) {
+		return nil
+	}
+	return newFlagValidationError("invalid --trust-mode %q: must be one of: %s (values are case-sensitive)",
+		mode, strings.Join(config.ValidTrustModes(), ", "))
+}
+
+// validateStatusFlag refuses an unrecognized --status value up front,
+// mirroring validateTrustModeFlag (GH #938): without it, a typo'd or
+// wrongly-cased value (e.g. `--status signin_required` or `--status READY`)
+// matched nothing in filterServersByStatus and silently returned an empty
+// result set (exit 0), indistinguishable from "no servers in that state".
+// Accepts the same comma-separated-equals-repeated-flag shape
+// filterServersByStatus does, and matching is case-sensitive because the
+// vocabulary itself is (internal/health.StatusOrder, Spec 109 FR-015).
+func validateStatusFlag(rawFilters []string) error {
+	valid := make(map[string]bool, len(health.StatusOrder))
+	for _, s := range health.StatusOrder {
+		valid[s] = true
+	}
+	for _, raw := range rawFilters {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				// Deliberately accepted, not a gap: an empty segment (from
+				// `--status ""`, a trailing/leading comma, or `--status=$VAR`
+				// with an unset $VAR) contributes nothing to the filter, so
+				// filterServersByStatus falls back to its own "no filter"
+				// default — the same result as omitting --status entirely.
+				// This mirrors --trust-mode's "" = inherit-default contract
+				// (config.IsValidTrustMode); it does not silently narrow the
+				// result set the way an unrecognized status would.
+				continue
+			}
+			if !valid[v] {
+				return newFlagValidationError("invalid --status %q: must be one of: %s (values are case-sensitive)",
+					v, strings.Join(health.StatusOrder, ", "))
+			}
+		}
+	}
+	return nil
+}
+
+// statusFilterNeedsDaemon reports whether a --status filter contains any
+// value the daemon-less config-only path (runUpstreamListFromConfig) cannot
+// resolve on its own. Only "disabled" and health.StatusNeedsReview short-
+// circuit CalculateHealth before the synthetic "disconnected" state comes
+// into play, so those two are safe without a daemon; every other value in the
+// vocabulary depends on a live connection state runUpstreamListFromConfig
+// deliberately clears to "" (see its own comment).
+func statusFilterNeedsDaemon(rawFilters []string) bool {
+	resolvableWithoutDaemon := map[string]bool{
+		health.StatusDisabled:    true,
+		health.StatusNeedsReview: true,
+	}
+	for _, raw := range rawFilters {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			if !resolvableWithoutDaemon[v] {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// serverHealthStatus extracts a server row's `health.status` value (the
+// Spec 109 status vocabulary), or "" when absent (e.g. a payload from an
+// older core that predates FR-010).
+func serverHealthStatus(srv map[string]interface{}) string {
+	healthData, ok := srv["health"].(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	return getStringField(healthData, "status")
+}
+
+// filterServersByStatus is FR-015: `--status <value>` is repeatable, and a
+// comma-separated value is equivalent to repeating the flag — several values
+// select the UNION of their statuses. An empty filter (`--status` omitted)
+// returns every server unchanged. A server with no `health.status` (an older
+// core) never matches a filter, so an operator's `--status` never silently
+// hides it in a mixed-version fleet by exclusion; it just doesn't sort into
+// any bucket.
+func filterServersByStatus(servers []map[string]interface{}, rawFilters []string) []map[string]interface{} {
+	if len(rawFilters) == 0 {
+		return servers
+	}
+
+	wanted := make(map[string]bool)
+	for _, raw := range rawFilters {
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				wanted[v] = true
+			}
+		}
+	}
+	if len(wanted) == 0 {
+		return servers
+	}
+
+	filtered := make([]map[string]interface{}, 0, len(servers))
+	for _, srv := range servers {
+		if wanted[serverHealthStatus(srv)] {
+			filtered = append(filtered, srv)
+		}
+	}
+	return filtered
+}
+
+// serverHoldSummary reports whether any of a server's tools need human review
+// (count > 0 is the trigger — a record can be both blocked and pending, so the
+// number is not an exact tool total) plus a short label naming the breakdown.
+//
+// GH #938 finding 3: the quarantine counts have always been in the
+// GET /api/v1/servers payload (contracts.QuarantineStats) but `upstream list`
+// dropped them, so a server whose only tool was held by the scan gate still
+// rendered a green "✅ Connected (1 tool)". Blocked (disabled) tools are
+// included because they are equally invisible in the connected/tool-count view.
+func serverHoldSummary(srv map[string]interface{}) (count int, label string) {
+	q, ok := srv["quarantine"].(map[string]interface{})
+	if !ok {
+		return 0, ""
+	}
+	pending := getIntField(q, "pending_count")
+	changed := getIntField(q, "changed_count")
+	blocked := getIntField(q, "blocked_count")
+
+	var parts []string
+	if pending > 0 {
+		parts = append(parts, fmt.Sprintf("%d pending", pending))
+	}
+	if changed > 0 {
+		parts = append(parts, fmt.Sprintf("%d changed", changed))
+	}
+	if blocked > 0 {
+		parts = append(parts, fmt.Sprintf("%d blocked", blocked))
+	}
+	if len(parts) == 0 {
+		return 0, ""
+	}
+	return pending + changed + blocked, strings.Join(parts, ", ")
+}
+
+// upstreamServerRows builds the `mcpproxy upstream list` table rows.
+func upstreamServerRows(servers []map[string]interface{}) [][]string {
 	rows := make([][]string, 0, len(servers))
 
 	for _, srv := range servers {
@@ -503,6 +771,7 @@ func outputServers(servers []map[string]interface{}) error {
 		healthLevel := "unknown"
 		healthAdminState := "enabled"
 		healthSummary := getStringField(srv, "status") // fallback to old status
+		healthStatusValue := ""
 		healthAction := ""
 		healthDetail := ""
 
@@ -510,8 +779,44 @@ func outputServers(servers []map[string]interface{}) error {
 			healthLevel = getStringField(healthData, "level")
 			healthAdminState = getStringField(healthData, "admin_state")
 			healthSummary = getStringField(healthData, "summary")
+			healthStatusValue = getStringField(healthData, "status")
 			healthAction = getStringField(healthData, "action")
 			healthDetail = getStringField(healthData, "detail")
+		}
+
+		// FR-015: STATUS is the status label, not the free-text summary (a
+		// declared table-output change — the summary stays available in
+		// `-o json` as health.summary). Falls back to the free-text summary
+		// for an older core's payload that predates `health.status`.
+		healthStatusText := healthSummary
+		if healthStatusValue != "" {
+			healthStatusText = health.StatusLabel(healthStatusValue)
+		}
+
+		// FR-012: ACTION is keyed on actions[0], not the legacy `action` field,
+		// though today the two always agree (action == actions[0] is an
+		// invariant of the health calculator). Falls back to `action` for an
+		// older core's payload that predates `health.actions`.
+		primaryAction := healthAction
+		if healthData != nil {
+			// The client (daemon) path decodes a JSON API response, where
+			// `actions` always comes back as []interface{}; the config-only
+			// (daemon-less) path builds this map directly from
+			// health.CalculateHealth(...).Actions, a native []string, with no
+			// JSON round-trip. Both shapes must be handled or ACTION silently
+			// falls back to the legacy `action` field in config mode.
+			switch rawActions := healthData["actions"].(type) {
+			case []interface{}:
+				if len(rawActions) > 0 {
+					if first, ok := rawActions[0].(string); ok {
+						primaryAction = first
+					}
+				}
+			case []string:
+				if len(rawActions) > 0 {
+					primaryAction = rawActions[0]
+				}
+			}
 		}
 
 		// Status emoji based on health level and admin state
@@ -532,18 +837,18 @@ func outputServers(servers []map[string]interface{}) error {
 			}
 		}
 
-		// Format action as CLI command hint
+		// Format action as CLI command hint (Spec 109 FR-014, internal/health.ActionLabels).
 		actionHint := "-"
-		switch healthAction {
-		case "login":
+		switch primaryAction {
+		case health.ActionLogin:
 			actionHint = fmt.Sprintf("auth login --server=%s", name)
-		case "restart":
+		case health.ActionRestart:
 			actionHint = fmt.Sprintf("upstream restart %s", name)
-		case "enable":
+		case health.ActionEnable:
 			actionHint = fmt.Sprintf("upstream enable %s", name)
-		case "approve":
-			actionHint = "Approve in Web UI"
-		case "view_logs":
+		case health.ActionApprove:
+			actionHint = fmt.Sprintf("review show %s", name)
+		case health.ActionViewLogs:
 			actionHint = fmt.Sprintf("upstream logs %s", name)
 		case health.ActionSetSecret:
 			if healthDetail != "" {
@@ -551,8 +856,22 @@ func outputServers(servers []map[string]interface{}) error {
 			} else {
 				actionHint = "Set secret in config"
 			}
-		case health.ActionConfigure:
+		case health.ActionConfigure, health.ActionEditURL:
 			actionHint = "Edit config"
+		}
+
+		// GH #938 finding 3: a tool held by the scan gate (or awaiting approval,
+		// or blocked) must not hide behind a green "Connected (N tools)". Name
+		// the hold in STATUS, downgrade the all-clear emoji, and point the
+		// operator at the view that carries the hold evidence.
+		if holds, holdLabel := serverHoldSummary(srv); holds > 0 {
+			healthStatusText = fmt.Sprintf("%s · %s held", healthStatusText, holdLabel)
+			if statusEmoji == "✅" {
+				statusEmoji = "⚠️ "
+			}
+			if actionHint == "-" {
+				actionHint = fmt.Sprintf("tools list --server=%s", name)
+			}
 		}
 
 		rows = append(rows, []string{
@@ -560,17 +879,12 @@ func outputServers(servers []map[string]interface{}) error {
 			name,
 			protocol,
 			fmt.Sprintf("%d", toolCount),
-			healthSummary,
+			healthStatusText,
 			actionHint,
 		})
 	}
 
-	result, err := formatter.FormatTable(headers, rows)
-	if err != nil {
-		return fmt.Errorf("failed to format table: %w", err)
-	}
-	fmt.Print(result)
-	return nil
+	return rows
 }
 
 // outputError formats and outputs an error based on the current output format.
@@ -631,27 +945,32 @@ func outputError(err error, code string) error {
 	return err
 }
 
+// upstreamConfigFilePath resolves the config path for every `upstream`
+// subcommand. Config-mode mutations must use this same path as loading so an
+// explicit root --config file is never redirected to DataDir/mcp_config.json.
+func upstreamConfigFilePath(globalConfig *config.Config) string {
+	if p := resolveCLIConfigPath(upstreamConfigPath); p != "" {
+		return p
+	}
+	if globalConfig != nil {
+		return config.GetConfigPath(globalConfig.DataDir)
+	}
+	return ""
+}
+
+// loadUpstreamConfig resolves the config path for every `upstream` subcommand.
+// Only `upstream list`/`upstream logs` register their own local --config flag
+// (bound to upstreamConfigPath); every other upstream subcommand (add,
+// remove, enable, disable, restart, patch, inspect, import, ...) has no local
+// --config flag, so a user's --config=<path> is parsed against the ROOT
+// persistent flag and lands in the package-level configFile variable instead.
+// Falling back to configFile when upstreamConfigPath is unset means those
+// subcommands honor the flag the user actually passed rather than silently
+// defaulting to ~/.mcpproxy/mcp_config.json (found via live QA: this caused
+// `upstream add --config=<scratch>` to write into the real production
+// config). upstreamConfigPath still wins when a command sets it explicitly.
 func loadUpstreamConfig() (*config.Config, error) {
-	if upstreamConfigPath != "" {
-		cfg, err := config.LoadFromFile(upstreamConfigPath)
-		if err != nil {
-			return nil, err
-		}
-		// Respect global --data-dir flag
-		if dataDir != "" {
-			cfg.DataDir = dataDir
-		}
-		return cfg, nil
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	// Respect global --data-dir flag
-	if dataDir != "" {
-		cfg.DataDir = dataDir
-	}
-	return cfg, nil
+	return loadCLIConfig(upstreamConfigFilePath(nil))
 }
 
 func createUpstreamLogger(level string) (*zap.Logger, error) {
@@ -704,9 +1023,12 @@ func runUpstreamLogs(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Detect daemon (socket first, then TCP fallback)
+	client, daemonOK := newDaemonClient(globalConfig, logger.Sugar())
+
 	// Follow mode requires daemon
 	if upstreamLogsFollow {
-		if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+		if !daemonOK {
 			return fmt.Errorf("--follow requires running daemon")
 		}
 		logger.Info("Following logs from daemon")
@@ -729,13 +1051,13 @@ func runUpstreamLogs(cmd *cobra.Command, args []string) error {
 			}
 		}()
 
-		return runUpstreamLogsFollowMode(bgCtx, globalConfig.DataDir, serverName, logger)
+		return runUpstreamLogsFollowMode(bgCtx, client, serverName, logger)
 	}
 
 	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		logger.Info("Detected running daemon, using client mode via socket")
-		return runUpstreamLogsClientMode(ctx, globalConfig.DataDir, serverName, logger)
+	if daemonOK {
+		logger.Info("Detected running daemon, using client mode")
+		return runUpstreamLogsClientMode(ctx, client, serverName)
 	}
 
 	// No daemon - read from log file
@@ -743,10 +1065,7 @@ func runUpstreamLogs(cmd *cobra.Command, args []string) error {
 	return runUpstreamLogsFromFile(globalConfig, serverName)
 }
 
-func runUpstreamLogsClientMode(ctx context.Context, dataDir, serverName string, logger *zap.Logger) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+func runUpstreamLogsClientMode(ctx context.Context, client *cliclient.Client, serverName string) error {
 	// Call GET /api/v1/servers/{name}/logs?tail=N
 	logs, err := client.GetServerLogs(ctx, serverName, upstreamLogsTail)
 	if err != nil {
@@ -798,10 +1117,7 @@ func runUpstreamLogsFromFile(globalConfig *config.Config, serverName string) err
 	return nil
 }
 
-func runUpstreamLogsFollowMode(ctx context.Context, dataDir, serverName string, logger *zap.Logger) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+func runUpstreamLogsFollowMode(ctx context.Context, client *cliclient.Client, serverName string, logger *zap.Logger) error {
 	fmt.Printf("Following logs for server '%s' (Ctrl+C to stop)...\n", serverName)
 
 	ticker := time.NewTicker(1 * time.Second)
@@ -946,12 +1262,10 @@ func runUpstreamAction(serverName, action string) error {
 	}
 
 	// Require daemon for actions
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("server actions require running daemon. Start with: mcpproxy serve")
 	}
-
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	fmt.Printf("Performing action '%s' on server '%s'...\n", action, serverName)
 
@@ -992,12 +1306,10 @@ func runUpstreamToolAction(serverName, toolName string, enabled bool) error {
 		return err
 	}
 
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("tool actions require running daemon. Start with: mcpproxy serve")
 	}
-
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	// "enable" / "disable" are ASCII verbs, so an inline ASCII-only
 	// title-case is fine here and avoids the deprecated strings.Title.
@@ -1036,12 +1348,10 @@ func runUpstreamToolBulkAction(serverName string, enabled bool) error {
 		return err
 	}
 
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("tool actions require running daemon. Start with: mcpproxy serve")
 	}
-
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	fmt.Printf("Running tools %s on server '%s'...\n", verb, serverName)
 	changed, err := client.SetAllToolsEnabled(ctx, serverName, enabled)
@@ -1083,12 +1393,10 @@ func runUpstreamBulkAction(action string, force bool) error {
 	}
 
 	// Require daemon
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("server actions require running daemon. Start with: mcpproxy serve")
 	}
-
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	// Get server count for confirmation
 	servers, err := client.GetServers(ctx)
@@ -1233,6 +1541,41 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 		env[parts[0]] = parts[1]
 	}
 
+	// GH #938: refuse a typo'd tier before anything is written, with the same
+	// vocabulary the REST layer reports in its 400. Checked BEFORE the
+	// secret-write block below: applySecretFlags writes to the OS keyring,
+	// so validating trust-mode first means a typo'd tier can never orphan a
+	// secret that was written only to have the whole add aborted moments
+	// later (review round 1).
+	if err := validateTrustModeFlag(upstreamAddTrustMode); err != nil {
+		return err
+	}
+
+	// FR-065: --secret-env/--secret-header write to the OS keyring instead
+	// of the config, under the shared per-kind ref name, and merge
+	// ${keyring:<ref>} into the same env/headers maps above.
+	resolver := secret.NewResolver()
+	var writtenSecretRefs []string
+	if len(upstreamAddSecretEnvs) > 0 || len(upstreamAddSecretHeaders) > 0 {
+		var err error
+		writtenSecretRefs, err = applySecretFlags(resolver, serverName, upstreamAddSecretEnvs, upstreamAddSecretHeaders, env, headers)
+		if err != nil {
+			return err
+		}
+	}
+	// Every return path below this point that does NOT end with the server
+	// actually being added (a daemon/config-mode failure, or a
+	// --if-not-exists skip telling the user "skipped" while the secret WAS
+	// stored) must not leave an orphaned keyring entry behind — added is set
+	// true only once runUpstreamAddDaemonMode/runUpstreamAddConfigMode
+	// confirms a genuine add (review round 1).
+	added := false
+	defer func() {
+		if !added {
+			rollbackKeyringRefs(resolver, writtenSecretRefs)
+		}
+	}()
+
 	// Build the request
 	req := &cliclient.AddServerRequest{
 		Name:       serverName,
@@ -1241,6 +1584,7 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 		Env:        env,
 		WorkingDir: upstreamAddWorkingDir,
 		Protocol:   transport,
+		TrustMode:  upstreamAddTrustMode,
 	}
 
 	// Set quarantine based on --no-quarantine flag
@@ -1271,26 +1615,55 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return runUpstreamAddDaemonMode(ctx, globalConfig.DataDir, req)
+	if client, ok := newDaemonClient(globalConfig, nil); ok {
+		wasAdded, addErr := runUpstreamAddDaemonMode(ctx, client, req)
+		added = wasAdded
+		return addErr
 	}
 
 	// Direct config file mode
-	return runUpstreamAddConfigMode(req, globalConfig)
+	wasAdded, addErr := runUpstreamAddConfigMode(req, globalConfig)
+	added = wasAdded
+	return addErr
 }
 
-func runUpstreamAddDaemonMode(ctx context.Context, dataDir string, req *cliclient.AddServerRequest) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, nil)
+// outputSkipNotice prints a human skip notice (for --if-not-exists /
+// --if-exists) to stderr and, in machine formats, emits a structured skip
+// object on stdout so `-o json` consumers always receive parseable output.
+func outputSkipNotice(notice string, payload map[string]interface{}) error {
+	fmt.Fprintln(os.Stderr, notice)
+	outputFormat := ResolveOutputFormat()
+	if outputFormat == "json" || outputFormat == "yaml" {
+		formatter, err := GetOutputFormatter()
+		if err != nil {
+			return err
+		}
+		formatted, err := formatter.Format(payload)
+		if err != nil {
+			return err
+		}
+		fmt.Println(formatted)
+	}
+	return nil
+}
 
+// runUpstreamAddDaemonMode returns (added, err): added is true only when the
+// daemon actually created the server. A --if-not-exists skip (nil error,
+// added=false) is deliberately distinguished from a genuine add so the
+// caller (runUpstreamAdd) knows whether to roll back any --secret-env/
+// --secret-header values it already wrote to the keyring for this request
+// (review round 1: a skip must not leave the secret orphaned).
+func runUpstreamAddDaemonMode(ctx context.Context, client *cliclient.Client, req *cliclient.AddServerRequest) (bool, error) {
 	result, err := client.AddServer(ctx, req)
 	if err != nil {
 		// Check if it's "already exists" error and --if-not-exists is set
 		if upstreamAddIfNotExists && strings.Contains(err.Error(), "already exists") {
-			fmt.Printf("Server '%s' already exists (skipped)\n", req.Name)
-			return nil
+			return false, outputSkipNotice(
+				fmt.Sprintf("Server '%s' already exists (skipped)", req.Name),
+				map[string]interface{}{"name": req.Name, "skipped": true},
+			)
 		}
-		return outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
+		return false, outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
 			WithGuidance("Check the server name and configuration"), output.ErrCodeOperationFailed)
 	}
 
@@ -1302,28 +1675,107 @@ func runUpstreamAddDaemonMode(ctx context.Context, dataDir string, req *cliclien
 		fmt.Println(output)
 	} else {
 		fmt.Printf("✅ Added server '%s'\n", req.Name)
-		if result != nil && result.Quarantined {
-			fmt.Println("   ⚠️  New servers are quarantined by default. Approve in the web UI.")
+		switch needs, known := daemonServerNeedsReview(ctx, client, req.Name, result); {
+		case needs:
+			printQuarantineNextSteps(os.Stdout, req.Name, true)
+		case !known:
+			// The state could not be read back; do not claim it is quarantined
+			// or admitted, only say what to run if it is waiting for review.
+			printConditionalNextSteps(os.Stdout, req.Name, true)
 		}
 	}
 
-	return nil
+	return true, nil
 }
 
-func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *config.Config) error {
+// daemonServerNeedsReview reports whether the just-added server is waiting for
+// review. POST /api/v1/servers answers with a ServerActionResponse that carries
+// no quarantine state, so the real state is read back from the server list;
+// the add result's own flag is only the fallback when that read fails.
+func daemonServerNeedsReview(ctx context.Context, client *cliclient.Client, name string, result *cliclient.AddServerResult) (needs, known bool) {
+	servers, err := client.GetServers(ctx)
+	if err == nil {
+		for _, srv := range servers {
+			if n, _ := srv["name"].(string); n != name {
+				continue
+			}
+			if q, _ := srv["quarantined"].(bool); q {
+				return true, true
+			}
+			if h, ok := srv["health"].(map[string]interface{}); ok {
+				if st, _ := h["admin_state"].(string); st == "quarantined" {
+					return true, true
+				}
+				if st, _ := h["status"].(string); st == "needs_review" {
+					return true, true
+				}
+			}
+			return false, true
+		}
+	}
+	// Readback failed or the server is not listed: only the add result's own
+	// flag (normally absent) says anything.
+	if result != nil && result.Quarantined {
+		return true, true
+	}
+	return false, false
+}
+
+// printQuarantineNextSteps tells a terminal user how to review and admit a
+// freshly added (quarantined) server using only CLI commands (ACT-02).
+func printQuarantineNextSteps(w io.Writer, name string, daemonRunning bool) {
+	fmt.Fprintf(w, "   ⚠️  '%s' is quarantined: its tools stay hidden and uncallable until you approve it.\n", name)
+	fmt.Fprintln(w, "   Next steps:")
+	printReviewSteps(w, name, daemonRunning)
+}
+
+// printConditionalNextSteps is the guidance for when the server's admission
+// state could not be read back after the add: it asserts neither quarantine
+// nor admission.
+func printConditionalNextSteps(w io.Writer, name string, daemonRunning bool) {
+	fmt.Fprintf(w, "   Could not confirm whether '%s' needs review. New servers are usually quarantined.\n", name)
+	fmt.Fprintln(w, "   If it is waiting for review:")
+	printReviewSteps(w, name, daemonRunning)
+}
+
+func printReviewSteps(w io.Writer, name string, daemonRunning bool) {
+	step := func(cmd, why string) { fmt.Fprintf(w, "     %-*s # %s\n", 36+len(name), cmd, why) }
+	if !daemonRunning {
+		step("mcpproxy serve", "start the daemon (review commands talk to it)")
+	}
+	step("mcpproxy review fetch "+name, "capture its tool definitions (if none yet)")
+	step("mcpproxy review show "+name, "inspect the tools and scan verdicts")
+	step("mcpproxy security scan "+name, "scan it (approval needs a scan result)")
+	step("mcpproxy security report "+name, "read the scan report")
+	step("mcpproxy review approve "+name+" --yes", "admit it (alias: mcpproxy security approve "+name+")")
+	fmt.Fprintln(w, "   Or review it in the Web UI / macOS app.")
+}
+
+// runUpstreamAddConfigMode returns (added, err) — see runUpstreamAddDaemonMode.
+func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *config.Config) (bool, error) {
 	// Check if server already exists
 	for _, srv := range globalConfig.Servers {
 		if srv.Name == req.Name {
 			if upstreamAddIfNotExists {
-				fmt.Printf("Server '%s' already exists (skipped)\n", req.Name)
-				return nil
+				return false, outputSkipNotice(
+					fmt.Sprintf("Server '%s' already exists (skipped)", req.Name),
+					map[string]interface{}{"name": req.Name, "skipped": true},
+				)
 			}
-			return fmt.Errorf("server '%s' already exists", req.Name)
+			return false, fmt.Errorf("server '%s' already exists", req.Name)
 		}
 	}
 
-	// Determine quarantine status
-	quarantined := true // Default: quarantine new servers
+	// Determine quarantine status. This MUST match the daemon path
+	// (internal/httpapi POST /api/v1/servers), which derives the add-time
+	// default from the trust tier via Config.QuarantineDefaultForServer — auto is
+	// admitted unquarantined, scan|manual are quarantined on add (spec 086
+	// FR-011). Hardcoding true here meant `upstream add --trust-mode auto`
+	// produced a DIFFERENT server depending on whether the daemon happened to be
+	// running. The explicit --no-quarantine/--quarantine flag still wins after.
+	quarantined := globalConfig.QuarantineDefaultForServer(&config.ServerConfig{
+		TrustMode: req.TrustMode,
+	})
 	if req.Quarantined != nil {
 		quarantined = *req.Quarantined
 	}
@@ -1340,24 +1792,31 @@ func runUpstreamAddConfigMode(req *cliclient.AddServerRequest, globalConfig *con
 		Protocol:    req.Protocol,
 		Enabled:     true,
 		Quarantined: quarantined,
+		TrustMode:   req.TrustMode,
+	}
+	if req.Quarantined != nil {
+		// A stated --quarantine/--no-quarantine is written to the file as an
+		// operator statement; otherwise SaveConfig drops quarantined:false
+		// and the admission gate holds the server on the next start.
+		newServer.MarkQuarantineExplicitlySet(true)
 	}
 
 	// Add to config
 	globalConfig.Servers = append(globalConfig.Servers, newServer)
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
-		return fmt.Errorf("failed to save config: %w", err)
+		return false, fmt.Errorf("failed to save config: %w", err)
 	}
 
 	// Output success
 	fmt.Printf("✅ Added server '%s' to config\n", req.Name)
 	if quarantined {
-		fmt.Println("   ⚠️  New servers are quarantined by default. Start the daemon and approve in the web UI.")
+		printQuarantineNextSteps(os.Stdout, req.Name, false)
 	}
 
-	return nil
+	return true, nil
 }
 
 // runUpstreamRemove handles the 'upstream remove' command
@@ -1390,24 +1849,23 @@ func runUpstreamRemove(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return runUpstreamRemoveDaemonMode(ctx, globalConfig.DataDir, serverName)
+	if client, ok := newDaemonClient(globalConfig, nil); ok {
+		return runUpstreamRemoveDaemonMode(ctx, client, serverName)
 	}
 
 	// Direct config file mode
 	return runUpstreamRemoveConfigMode(serverName, globalConfig)
 }
 
-func runUpstreamRemoveDaemonMode(ctx context.Context, dataDir, serverName string) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, nil)
-
+func runUpstreamRemoveDaemonMode(ctx context.Context, client *cliclient.Client, serverName string) error {
 	err := client.RemoveServer(ctx, serverName)
 	if err != nil {
 		// Check if it's "not found" error and --if-exists is set
 		if upstreamRemoveIfExists && strings.Contains(err.Error(), "not found") {
-			fmt.Printf("Server '%s' not found (skipped)\n", serverName)
-			return nil
+			return outputSkipNotice(
+				fmt.Sprintf("Server '%s' not found (skipped)", serverName),
+				map[string]interface{}{"name": serverName, "skipped": true},
+			)
 		}
 		return outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()).
 			WithGuidance("Check the server name"), output.ErrCodeOperationFailed)
@@ -1443,8 +1901,10 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 
 	if !found {
 		if upstreamRemoveIfExists {
-			fmt.Printf("Server '%s' not found (skipped)\n", serverName)
-			return nil
+			return outputSkipNotice(
+				fmt.Sprintf("Server '%s' not found (skipped)", serverName),
+				map[string]interface{}{"name": serverName, "skipped": true},
+			)
 		}
 		return fmt.Errorf("server '%s' not found", serverName)
 	}
@@ -1453,7 +1913,7 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 	globalConfig.Servers = newServers
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -1462,17 +1922,16 @@ func runUpstreamRemoveConfigMode(serverName string, globalConfig *config.Config)
 	return nil
 }
 
-// runUpstreamAddJSON handles the 'upstream add-json' command
-func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
-	serverName := args[0]
-	jsonStr := args[1]
-
-	// Validate server name
-	if err := validateServerName(serverName); err != nil {
-		return err
-	}
-
-	// Parse JSON
+// parseAddJSONRequest decodes the `upstream add-json` payload into an add
+// request.
+//
+// trust_mode is decoded and validated here (GH #938): the previous anonymous
+// struct had no such field, so `upstream add-json srv '{"url":…,
+// "trust_mode":"scan"}'` reported success and persisted the fail-closed default
+// — the operator believed the tier had been applied. A bogus value is refused
+// with the same vocabulary every other write seam uses instead of being
+// silently downgraded.
+func parseAddJSONRequest(serverName, jsonStr string) (*cliclient.AddServerRequest, error) {
 	var jsonConfig struct {
 		URL        string            `json:"url"`
 		Command    string            `json:"command"`
@@ -1481,10 +1940,11 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 		Headers    map[string]string `json:"headers"`
 		WorkingDir string            `json:"working_dir"`
 		Protocol   string            `json:"protocol"`
+		TrustMode  string            `json:"trust_mode"`
 	}
 
 	if err := json.Unmarshal([]byte(jsonStr), &jsonConfig); err != nil {
-		return fmt.Errorf("invalid JSON: %w", err)
+		return nil, fmt.Errorf("invalid JSON: %w", err)
 	}
 
 	// Auto-detect protocol
@@ -1499,11 +1959,13 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 
 	// Validate
 	if jsonConfig.URL == "" && jsonConfig.Command == "" {
-		return fmt.Errorf("JSON must contain either 'url' or 'command'")
+		return nil, fmt.Errorf("JSON must contain either 'url' or 'command'")
+	}
+	if err := validateTrustModeFlag(jsonConfig.TrustMode); err != nil {
+		return nil, err
 	}
 
-	// Build the request
-	req := &cliclient.AddServerRequest{
+	return &cliclient.AddServerRequest{
 		Name:       serverName,
 		URL:        jsonConfig.URL,
 		Command:    jsonConfig.Command,
@@ -1512,6 +1974,23 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 		Env:        jsonConfig.Env,
 		WorkingDir: jsonConfig.WorkingDir,
 		Protocol:   protocol,
+		TrustMode:  jsonConfig.TrustMode,
+	}, nil
+}
+
+// runUpstreamAddJSON handles the 'upstream add-json' command
+func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
+	serverName := args[0]
+	jsonStr := args[1]
+
+	// Validate server name
+	if err := validateServerName(serverName); err != nil {
+		return err
+	}
+
+	req, err := parseAddJSONRequest(serverName, jsonStr)
+	if err != nil {
+		return err
 	}
 
 	// Create context
@@ -1528,12 +2007,14 @@ func runUpstreamAddJSON(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return runUpstreamAddDaemonMode(ctx, globalConfig.DataDir, req)
+	if client, ok := newDaemonClient(globalConfig, nil); ok {
+		_, err := runUpstreamAddDaemonMode(ctx, client, req)
+		return err
 	}
 
 	// Direct config file mode
-	return runUpstreamAddConfigMode(req, globalConfig)
+	_, err = runUpstreamAddConfigMode(req, globalConfig)
+	return err
 }
 
 // validateServerName validates server name format (alphanumeric, hyphens, underscores, 1-64 chars)
@@ -1617,6 +2098,8 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 		existingNames[i] = srv.Name
 	}
 	opts.ExistingServers = existingNames
+	// Never import the entry that points back at this instance's /mcp endpoint.
+	opts.SelfListenAddrs = importSelfListenAddrs(globalConfig)
 
 	// Run import
 	result, err := configimport.Import(content, opts)
@@ -1638,6 +2121,29 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 	}
 
 	return outputImportResultTable(result, upstreamImportDryRun, upstreamImportNoQuarantine, globalConfig)
+}
+
+// importSelfListenAddrs returns the addresses the local mcpproxy answers on,
+// for the import self-reference filter. The configured listen can differ from
+// the running daemon's (`serve --listen` is a process-only override, and the
+// file may have been edited since start), and Connect writes the LIVE address
+// into client configs — so ask the daemon too when one is reachable.
+func importSelfListenAddrs(cfg *config.Config) []string {
+	addrs := []string{cfg.Listen}
+	client, ok := newDaemonClient(cfg, nil)
+	if !ok {
+		return addrs
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	status, err := client.GetStatus(ctx)
+	if err != nil {
+		return addrs
+	}
+	if live, ok := status["listen_addr"].(string); ok && live != "" {
+		addrs = append(addrs, live)
+	}
+	return addrs
 }
 
 // parseImportFormat converts a format string to ConfigFormat
@@ -1687,21 +2193,49 @@ func outputImportResultStructured(result *configimport.ImportResult, format stri
 
 // buildImportedServersOutput builds the output structure for imported servers
 func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[string]interface{} {
+	// Issue #1148, round 8: the import preview echoes the operator's source
+	// file back as CLI JSON — a shape an agent pipes as readily as a human
+	// reads. The shared LIVE rule leaves an ordinary command, path or URL
+	// byte-identical and renders a credential as `••••<last2> (<N> chars)`, so
+	// the operator can still verify that the secret imported and how long it
+	// is without the value itself reaching stdout.
 	result := make([]map[string]interface{}, len(imported))
 	for i, s := range imported {
-		result[i] = map[string]interface{}{
+		view := oauth.RedactedConfigView("", s.Server)
+		m := map[string]interface{}{
 			"name":           s.Server.Name,
 			"protocol":       s.Server.Protocol,
-			"url":            s.Server.URL,
-			"command":        s.Server.Command,
-			"args":           s.Server.Args,
+			"url":            viewOr(view, "url", s.Server.URL),
+			"command":        viewOr(view, "command", s.Server.Command),
+			"args":           oauth.LiveRedaction.Argv(s.Server.Args),
 			"enabled":        s.Server.Enabled,
 			"quarantined":    s.Server.Quarantined,
 			"source_format":  s.SourceFormat,
 			"original_name":  s.OriginalName,
 			"fields_skipped": s.FieldsSkipped,
 			"warnings":       s.Warnings,
+			// Spec 109-b FR-040: same tags the Web UI preview shows, already
+			// redacted by configimport.Import. `summary` follows below.
+			"tags": s.Tags,
 		}
+		// Match the REST DTO's `omitempty` on summary: a malformed stdio
+		// entry with neither command nor URL has an empty summary, which
+		// REST omits, so the CLI must not emit `"summary": ""` either.
+		if s.Summary != "" {
+			m["summary"] = s.Summary
+		}
+		// Match the REST DTO's `omitempty` (internal/httpapi/import.go
+		// ImportedServerResponse.Env/Headers): a server with nothing to
+		// classify omits the key entirely instead of emitting `null`, so a
+		// schema-sensitive consumer of `-o json` sees the same shape on
+		// both surfaces for the same import.
+		if len(s.EnvFields) > 0 {
+			m["env"] = s.EnvFields
+		}
+		if len(s.HeaderFields) > 0 {
+			m["headers"] = s.HeaderFields
+		}
+		result[i] = m
 	}
 	return result
 }
@@ -1765,6 +2299,8 @@ func outputImportResultTable(result *configimport.ImportResult, dryRun bool, noQ
 				reason = "already exists in config"
 			case "filtered_out":
 				reason = "not in --server filter"
+			case configimport.SkipReasonSelfReference:
+				reason = "points at this mcpproxy instance"
 			}
 			fmt.Printf("  ⏭️  %s (%s)\n", s.Name, reason)
 		}
@@ -1813,8 +2349,8 @@ func applyImportedServers(imported []*configimport.ImportedServer, globalConfig 
 	defer cancel()
 
 	// Check if daemon is running
-	if shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return applyImportedServersDaemonMode(ctx, globalConfig.DataDir, imported)
+	if client, ok := newDaemonClient(globalConfig, nil); ok {
+		return applyImportedServersDaemonMode(ctx, client, imported)
 	}
 
 	// Direct config file mode
@@ -1822,10 +2358,7 @@ func applyImportedServers(imported []*configimport.ImportedServer, globalConfig 
 }
 
 // applyImportedServersDaemonMode adds servers via the daemon
-func applyImportedServersDaemonMode(ctx context.Context, dataDir string, imported []*configimport.ImportedServer) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, nil)
-
+func applyImportedServersDaemonMode(ctx context.Context, client *cliclient.Client, imported []*configimport.ImportedServer) error {
 	for _, s := range imported {
 		req := &cliclient.AddServerRequest{
 			Name:       s.Server.Name,
@@ -1866,17 +2399,15 @@ func runUpstreamInspect(_ *cobra.Command, args []string) error {
 			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
 	}
 
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return fmt.Errorf("mcpproxy daemon is not running. Start it with: mcpproxy serve")
-	}
-
 	logger, err := createUpstreamLogger("warn")
 	if err != nil {
 		return outputError(err, output.ErrCodeOperationFailed)
 	}
 
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
+		return fmt.Errorf("mcpproxy daemon is not running. Start it with: mcpproxy serve")
+	}
 
 	// If a specific tool is requested, show the diff
 	if upstreamInspectTool != "" {
@@ -2000,17 +2531,15 @@ func runUpstreamApprove(_ *cobra.Command, args []string) error {
 			WithRecoveryCommand("mcpproxy doctor"), output.ErrCodeConfigNotFound)
 	}
 
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return fmt.Errorf("mcpproxy daemon is not running. Start it with: mcpproxy serve")
-	}
-
 	logger, err := createUpstreamLogger("warn")
 	if err != nil {
 		return outputError(err, output.ErrCodeOperationFailed)
 	}
 
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
+		return fmt.Errorf("mcpproxy daemon is not running. Start it with: mcpproxy serve")
+	}
 
 	approveAll := len(toolNames) == 0
 	count, err := client.ApproveTools(ctx, serverName, toolNames, approveAll)
@@ -2053,7 +2582,7 @@ func applyImportedServersConfigMode(imported []*configimport.ImportedServer, glo
 	}
 
 	// Save config
-	configPath := config.GetConfigPath(globalConfig.DataDir)
+	configPath := upstreamConfigFilePath(globalConfig)
 	if err := config.SaveConfig(globalConfig, configPath); err != nil {
 		return fmt.Errorf("failed to save config: %w", err)
 	}
@@ -2075,9 +2604,18 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("server name is required")
 	}
 
+	initTimeout := strings.TrimSpace(upstreamPatchInitTimeout)
 	if len(upstreamPatchHeaders) == 0 && len(upstreamPatchHeaderRemove) == 0 &&
-		len(upstreamPatchEnvs) == 0 && len(upstreamPatchEnvRemove) == 0 {
-		return fmt.Errorf("at least one of --header / --header-remove / --env / --env-remove must be specified")
+		len(upstreamPatchEnvs) == 0 && len(upstreamPatchEnvRemove) == 0 && initTimeout == "" {
+		return fmt.Errorf("at least one of --header / --header-remove / --env / --env-remove / --init-timeout must be specified")
+	}
+
+	// Validate --init-timeout locally so we fail fast with a clear message
+	// before hitting the daemon (the backend re-validates the bounds).
+	if initTimeout != "" {
+		if _, perr := time.ParseDuration(initTimeout); perr != nil {
+			return fmt.Errorf("invalid --init-timeout %q: %v (expected a duration like '120s' or '3m')", initTimeout, perr)
+		}
 	}
 
 	headers := map[string]*string{}
@@ -2135,6 +2673,9 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 	if len(envs) > 0 {
 		body["env"] = envs
 	}
+	if initTimeout != "" {
+		body["init_timeout"] = initTimeout
+	}
 
 	bodyBytes, err := json.Marshal(body)
 	if err != nil {
@@ -2148,15 +2689,14 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to load config: %w", err)
 	}
-	if !shouldUseUpstreamDaemon(globalConfig.DataDir) {
-		return fmt.Errorf("mcpproxy daemon is not running — start it with `mcpproxy serve` first; the `patch` subcommand requires a live backend so configuration changes are applied with full deep-merge semantics and propagated to running upstream connections immediately. Editing the config file by hand only works while the daemon is offline")
-	}
 	logger, err := createUpstreamLogger("warn")
 	if err != nil {
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
+		return fmt.Errorf("mcpproxy daemon is not running — start it with `mcpproxy serve` first; the `patch` subcommand requires a live backend so configuration changes are applied with full deep-merge semantics and propagated to running upstream connections immediately. Editing the config file by hand only works while the daemon is offline")
+	}
 
 	if err := client.PatchServer(ctx, serverName, bodyBytes); err != nil {
 		return err
@@ -2176,9 +2716,23 @@ func runUpstreamPatch(_ *cobra.Command, args []string) error {
 	if n := len(upstreamPatchEnvRemove); n > 0 {
 		parts = append(parts, fmt.Sprintf("%d env var(s) removed", n))
 	}
+	if initTimeout != "" {
+		parts = append(parts, fmt.Sprintf("init_timeout=%s", initTimeout))
+	}
 	if len(parts) > 0 {
 		fmt.Printf(": %s", strings.Join(parts, ", "))
 	}
 	fmt.Println()
 	return nil
+}
+
+// viewOr reads one string leaf out of a redacted server view (see
+// oauth.RedactedConfigView), falling back to the raw value when the key was
+// omitted — every string field of config.ServerConfig is `omitempty`, and an
+// empty value carries no secret.
+func viewOr(view map[string]interface{}, key, fallback string) string {
+	if v, ok := view[key].(string); ok {
+		return v
+	}
+	return fallback
 }

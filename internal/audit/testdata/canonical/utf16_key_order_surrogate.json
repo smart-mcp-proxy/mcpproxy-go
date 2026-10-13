@@ -1,0 +1,6 @@
+{
+  "description": "RFC 8785 key ordering compares UTF-16 CODE UNITS, not Unicode code points: U+1F600 (surrogate pair D83D DE00) sorts BEFORE U+E000 because 0xD83D < 0xE000, even though 0x1F600 > 0xE000 as a code point.",
+  "variants": [
+    { "": 1, "😀": 2 }
+  ]
+}

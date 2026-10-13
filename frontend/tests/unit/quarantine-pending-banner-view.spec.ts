@@ -97,10 +97,11 @@ describe('ServerDetail — pending-only Tool Quarantine banner (MCP-2917)', () =
     expect(wrapper.find('[data-test="quarantine-hint"]').exists()).toBe(false)
   })
 
-  it('Approve calls api.approveTools with the pending tool name', async () => {
+  it('Approve opens informed review without approving the pending tool directly', async () => {
     const { wrapper, api } = await mountDetail()
     await wrapper.find('[data-test="quarantine-approve-create_issue"]').trigger('click')
     await flushPromises()
-    expect(api.approveTools).toHaveBeenCalledWith('github', ['create_issue'])
+    expect(api.approveTools).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-test="review-screen"]').exists()).toBe(true)
   })
 })

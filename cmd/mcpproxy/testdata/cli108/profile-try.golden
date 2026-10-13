@@ -1,0 +1,7 @@
+SERVER  TOOL          TIER
+github  create_issue  write
+github  list_issues   read
+Hidden by profile: 2
+SERVER  TOOL         REASON
+github  delete_repo  above_tier_cap
+… truncated

@@ -1,29 +1,12 @@
 # CLAUDE.md
 
-Guidance for Claude Code / AI agents working in this repo. **This file is loaded into every session and every Paperclip heartbeat — keep it lean.** It is orientation + behavior only; detailed reference lives in `docs/`.
-
-## Autonomous Operation Constraints
-
-### Must-Do (Defaults & Assumptions)
-- **Zero Interruption Policy**: If a decision is needed and no explicit instruction exists, make an informed, safe assumption based on idiomatic Go best practices and document it in the PR/commit. Do NOT ask for human clarification mid-task.
-- **Test-Driven Progress**: Write a failing Go test (`_test.go`) for every sub-task before implementing the feature.
-- **Graceful Fallbacks**: If an API or dependency lacks documentation, use mock interfaces or a simplified implementation rather than blocking the task.
-
-### Must-Nots
-- **Do NOT ask for plan approval**: Once a plan/spec is generated, begin execution immediately.
-- **Do NOT stop for code style choices**: Run `gofmt`/`goimports` and follow standard Go conventions.
-
-### Escalation Triggers (Stop Conditions)
-Only halt and ask a human IF:
-1. You need destructive data operations or to delete core proxy logic that cannot be mocked.
-2. A required environment variable is missing from `.env` and cannot be mocked for the task's scope.
-3. You are stuck in an error loop for the same `go test` failing after 5 consecutive attempts.
+Guidance for Claude Code / AI agents working in this repo. **This file is loaded into every session — keep it lean.** It is orientation + behavior only; detailed reference lives in `docs/`.
 
 ## Project Overview
 
 MCPProxy is a Go desktop application that acts as a smart proxy for AI agents using the Model Context Protocol (MCP): intelligent tool discovery, massive token savings, and built-in security quarantine against malicious MCP servers.
 
-**Stack**: Go 1.24 (backend) · TypeScript 5.9 / Vue 3.5 (frontend) · Swift 5.9 (macOS tray). Storage: BBolt (`config.db`) + Bleve (search index). Avoid new dependencies without clear need.
+**Stack**: Go 1.26 (backend) · TypeScript 5.9 / Vue 3.5 (frontend) · Swift 5.9 (macOS tray). Storage: BBolt (`config.db`) + Bleve (search index). Avoid new dependencies without clear need.
 
 ## Editions (Personal & Server)
 
@@ -32,7 +15,7 @@ Built in two editions from one codebase via Go build tags:
 | Edition | Build | Binary | Distribution |
 |---------|-------|--------|--------------|
 | **Personal** (default) | `go build ./cmd/mcpproxy` | `mcpproxy` | macOS DMG, Windows installer, Linux tar.gz |
-| **Server** | `go build -tags server ./cmd/mcpproxy` | `mcpproxy-server` | Docker image, .deb, Linux tar.gz |
+| **Server** | `go build -tags server -o mcpproxy-server ./cmd/mcpproxy` | `mcpproxy-server` | Docker image (`ghcr.io`) only — no .deb / tar.gz |
 
 All server code is behind `//go:build server` in `internal/serveredition/`; the personal edition is unaffected. The binary self-identifies (`mcpproxy version`, `/api/v1/status` → `"edition"`). Server multi-user OAuth (Spec 024): see [docs/development/server-edition-multiuser-auth.md](docs/development/server-edition-multiuser-auth.md).
 
@@ -77,15 +60,21 @@ go test -tags server ./internal/serveredition/... -race   # server edition
 
 # Lint — CI uses golangci-lint v2 with .github/.golangci.yml, which is STRICTER
 # than the local scripts/run-linter.sh (v1.x) and catches things it misses.
-# Run the v2 binary before pushing:
+# CI runs it TWICE: bare, and with --build-tags server (server-edition code is
+# invisible to the bare run). Run both before pushing:
 /opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...
+/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml --build-tags server ./...
+# CI also race-tests internal/server, httpapi and storage under -tags server
+# with the unit-tests.yml -skip regex (bare `go test ./internal/server/...`
+# hangs to the timeout on the binary-spawning tests):
+go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...
 
 # Run
 ./mcpproxy serve [--listen :8080] [--log-level=debug]     # core (localhost:8080)
 ./mcpproxy-tray                                           # tray (auto-starts core)
 ```
 
-**CLI management** — `mcpproxy upstream|tools|activity|token|telemetry|feedback|doctor …`. Output: `-o json|yaml`, `MCPPROXY_OUTPUT=json`, `--help-json` (machine-readable for agents). References: [docs/cli-management-commands.md](docs/cli-management-commands.md) · [docs/cli/activity-commands.md](docs/cli/activity-commands.md) · [docs/features/agent-tokens.md](docs/features/agent-tokens.md) · [docs/cli-output-formatting.md](docs/cli-output-formatting.md).
+**CLI management** — `mcpproxy upstream|tools|activity|token|telemetry|feedback|doctor|update …` (`update` is channel-aware: guidance for package-manager installs, verified self-update only on tarball). Output: `-o json|yaml`, `MCPPROXY_OUTPUT=json`, `--help-json` (machine-readable for agents). References: [docs/cli-management-commands.md](docs/cli-management-commands.md) · [docs/cli/activity-commands.md](docs/cli/activity-commands.md) · [docs/features/agent-tokens.md](docs/features/agent-tokens.md) · [docs/cli-output-formatting.md](docs/cli-output-formatting.md).
 
 **Verifying Web-UI changes** (Playwright sweep + HTML report) — required when touching `frontend/src/`: [docs/development/web-ui-verification.md](docs/development/web-ui-verification.md).
 
@@ -111,7 +100,7 @@ Env vars: `MCPPROXY_LISTEN`, `MCPPROXY_API_KEY`, `MCPPROXY_DEBUG`, `MCPPROXY_TEL
 
 ## MCP Protocol
 
-**Built-in tools**: `retrieve_tools` (BM25 search across upstream tools; Spec 049 opt-in `include_disabled`) · `call_tool_read|write|destructive` (Spec 018 intent variants; operation type inferred from the variant) · `code_execution` (sandboxed JS, off by default) · `upstream_servers` (CRUD, Spec 049) · `quarantine_security` (Spec 032). **Tool format**: `<serverName>:<toolName>` (e.g. `github:create_issue`).
+**Built-in tools**: `retrieve_tools` (BM25 search across upstream tools; Spec 049 opt-in `include_disabled`; Spec 085 `detail` override + compact signatures under `tool_response_mode: compact`) · `describe_tool` (Spec 085: batch ≤5 ids → full schemas; Spec 102: also on the direct surface, `server:tool` or `server__tool` ids) · `call_tool_read|write|destructive` (Spec 018 intent variants; operation type inferred from the variant; Spec 085 pre-dispatch arg validation with self-healing `invalid_params` errors) · `code_execution` (sandboxed JS, on by default since v0.66.0) · `upstream_servers` (CRUD, Spec 049) · `quarantine_security` (Spec 032) · `profiles` (Spec 108 admin tool: profile CRUD, client bindings, explain). **Tool format**: `<serverName>:<toolName>` (e.g. `github:create_issue`); the direct surface lists as `<serverName>__<toolName>` and accepts both.
 
 **REST API** base `/api/v1`, auth via `X-API-Key` header or `?apikey=`. MCP endpoints (`/mcp`) stay unprotected for client compatibility; the REST API always requires a key (auto-generated if absent). All responses carry `X-Request-Id` (correlate with `mcpproxy activity list --request-id <id>`). Live updates via SSE at `/events`. Full endpoint list: `oas/swagger.yaml` + [docs/api/rest-api.md](docs/api/rest-api.md).
 
@@ -146,7 +135,7 @@ mcpproxy upstream logs <name> --follow    # per-server logs
 tail -f ~/Library/Logs/mcpproxy/main.log  # main log (macOS; Linux: ~/.mcpproxy/logs/main.log)
 ```
 
-**Exit codes**: 0 success · 1 general · 2 port conflict · 3 DB locked · 4 config · 5 permission.
+**Exit codes**: 0 success · 1 general · 2 port conflict · 3 DB locked · 4 config · 5 permission · 6 shutdown timeout (graceful shutdown exceeded its 60s hard deadline after SIGINT/SIGTERM).
 
 ## Development Guidelines
 
@@ -155,3 +144,14 @@ tail -f ~/Library/Logs/mcpproxy/main.log  # main log (macOS; Linux: ~/.mcpproxy/
 - Config changes: update both storage and file system; the file watcher hot-reloads.
 - **macOS tray dev** (build / replace / verify with `mcpproxy-ui-test`): [docs/development/macos-tray.md](docs/development/macos-tray.md).
 - **Windows installer**: [docs/github-actions-windows-wix-research.md](docs/github-actions-windows-wix-research.md). **Prerelease** (`next` branch + `v*-rc.*` tags, opt-in, off stable channels): [docs/prerelease-builds.md](docs/prerelease-builds.md).
+
+## Recent Changes
+- quarantine-approval-pilot: Go 1.26, tests + CI only — independent policy model `internal/qapilot` (no production imports), deterministic scenario inventory S01–S26 + 896-cell dispatch table + REST authz table + counting-upstream dispatch check, check ledger (`QAPILOT_REPORT_DIR`) gated by `go run ./cmd/qapilot report`, versioned mutation set `tests/qapilot/mutations.json` run by `qapilot mutate` in disposable worktrees; workflow `.github/workflows/quarantine-pilot.yml` (3 PR checks + scheduled rapid exploration). Docs: `docs/development/quarantine-approval-pilot.md`. **No new dependencies.**
+- 117-review-bound-approvals PR-3 (#1565): Go 1.26, backend-only — every upstream `tools/list` carries a `managed.InventoryCapture{Seq, Epoch, Client}` (process-global sequence stamped by the flight leader; `ListToolsCaptured`/`ListToolsFreshCaptured`; `Client.Retire`/`CaptureIsCurrent`; the manager retires replaced/removed clients; `Manager.DiscoverToolsReportCaptured` gives the sweep one capture per server). The runtime admits each inventory under the server's approval lock (`admitInventoryHeld`, per-server `applied`/`definitions` in `toolApprovalServerLock`): an older, retired or reconnected capture writes nothing (records, index, last-good snapshot + its capture, StateView); a lenient empty result is an observation fence; the approval reindex/sweep fallback re-apply the snapshot only while its capture is current, else re-list/skip. Docs: `docs/features/security-quarantine.md` "Tool lists are applied in the order they were captured". **No new dependencies.**
+- 116-config-commit-consistency PR2: Go 1.26 + a small Web UI change — removal purges the whole name-keyed purge set in the commit's bbolt transaction (`internal/storage/purge.go`, exact OAuth key match), in-memory purge, incarnation-bound approval writers (`internal/runtime/approval_incarnation.go`, REST `expected_incarnation` → 409 `server_replaced`), incarnation-conditional scan/identity/history writes. **No new dependencies.**
+- 117-review-bound-approvals PR-2 (#1566): Go 1.26, Vue 3 Web UI — review payload `current_hash` (review fingerprint `rv1-…` over server, tool, definition and the four safety hints; the rug-pull hash is unchanged), `expected_hashes` on `security/approve` and `tools/approve` (409 `review_out_of_date`, nothing written), server approval as one locked step (validate → baseline marker → integrity baseline + blocks → promote the reviewed pending tools → storage/config unquarantine via `Runtime.Commit` + `UnderApprovalLock`), `toolreview.StaleToolReviewError`, Web/CLI (`review approve --from-review`) binding. Both bindings coexist: a server/tool approval carries `expected_incarnation` (server identity, 409 `server_replaced`) AND `expected_hashes` (reviewed definitions, 409 `review_out_of_date`); `Runtime.ApproveToolsReviewedAt` / `ApproveAllToolsReviewedAt` / `CommitServerApprovalAt` check the incarnation first, under the approval lock. **No new dependencies.**
+- 117-review-bound-approvals (PR-1, #1567): Go 1.26, backend + copy — durable per-server tool baseline marker (bbolt bucket `tool_baseline_decisions`, value type in the new leaf package `internal/toolreview`); `serverHasBaseline` = marker OR approved/changed record; trusted discovery, every security approval (`Runtime.CommitServerApproval`, scanner `ServerApprovalCommitter`) set it; removed only with the server's approval records; a marker read/list failure, or a failed back-fill write on a server with approved records, aborts the discovery pass before any write; a failed first-discovery write does not (the pass's approved records establish the baseline and the next pass marks it). Docs: `docs/features/security-quarantine.md` "Durable tool baseline". **No new dependencies.**
+- 116-config-commit-consistency (PR1): Go 1.26, backend-only — one `Runtime.Commit` section (`internal/runtime/commit.go`) for every server writer, per-server generations in `configsvc` (`internal/commitview`), `SaveConfiguration` persists the live config (no rebuild from storage), REST PATCH / MCP update resolved inside the commit, `scripts/check-upstream-write-sites.sh` in CI. Docs: `docs/architecture.md` "Config Commit". **No new dependencies.**
+- 115-mcp-credential-lifecycle: Go 1.26, Vue 3 Web UI — admin MCP tool `credentials` (list/get/create_client/create_token/revoke) over `runtime.CredentialsService`, the one issue/revoke path shared with REST `/tokens` and `/clients` (secret-shaped input screen, `profile_change` issue/revoke, SSE `credentials.changed`); MCP-issued tokens are standing FR-008a bindings (`guard_bound`, `ActiveGuardedBinding`). Docs: `docs/features/mcp-credential-lifecycle.md`. **No new dependencies.**
+- 109-ux-navigation-consistency: Go 1.26, Vue 3 Web UI, Swift macOS app — Home with one needs-attention list, informed Review queue, Clients hub, catalog-first Add, grouped navigation and URL scope filters. Cross-surface parity is mechanical: `internal/contracts/terminology.go` + `internal/contracts/testdata/terminology.json` (enums), `specs/109-ux-navigation-consistency/parity-matrix.json` and `acceptance-index.json`, `internal/runtime/testdata/attention_parity_*` and `internal/registries/testdata/catalog_github_order.json` (order replays), `scripts/check-no-unquarantine-callers.sh`. Docs: `docs/cli/attention-command.md`, `docs/cli/catalog-commands.md`, `docs/web-ui/dashboard.md`. **No new dependencies.**
+- 108-profiles-v3: Go 1.26 (`internal/profile`, `internal/runtime`, `internal/httpapi`, `cmd/mcpproxy`), Vue 3 Web UI, Swift macOS app — profile tool policy (`max_tier`, `unannotated`, tool rules), client and token bindings, `anonymous_profile`, scope attribution/filters and the access explainer on every surface. Parity and enum/label contracts: `specs/108-profiles-v3/parity-matrix.json`, `internal/profile/testdata/contract/{enums,labels,refusals}.json`. Docs: `docs/features/profiles.md`, `docs/cli/profile-commands.md`. **No new dependencies.**

@@ -3,7 +3,9 @@
 package users
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,7 +17,20 @@ import (
 const (
 	BucketUsers        = "users"
 	BucketUsersByEmail = "users_by_email"
-	BucketSessions     = "sessions"
+	// BucketSessions holds USER LOGIN sessions.
+	//
+	// The name stays "sessions" DELIBERATELY. The core used to share this bucket
+	// for MCP session records, and the two swept it believing each owned every
+	// key — core's retention evicted user logins, and the expiry sweep below
+	// deleted MCP records (they carry no expires_at, so a zero time reads as long
+	// expired). The core has moved out to "mcp_sessions"
+	// (internal/storage/sessions_migration.go); this bucket is now exclusively
+	// ours.
+	//
+	// Renaming it here as well would orphan every existing login and log the whole
+	// estate out on upgrade — the exact harm this fix exists to prevent. So it
+	// keeps its name, and the guards below make the sweep safe regardless.
+	BucketSessions = "sessions"
 )
 
 // UserStore provides CRUD operations for User and Session entities in BBolt.
@@ -391,7 +406,14 @@ func (s *UserStore) ListSessions() ([]*Session, error) {
 		return bucket.ForEach(func(_, v []byte) error {
 			var session Session
 			if err := json.Unmarshal(v, &session); err != nil {
-				return fmt.Errorf("failed to unmarshal session: %w", err)
+				return nil // not a login session — skip rather than fail the listing
+			}
+			// Defence in depth: only list records that actually look like login
+			// sessions. JSON unmarshalling happily accepts a foreign shape and
+			// leaves the fields zero, which is how MCP records used to appear here
+			// as phantom sessions with no user and a zero expiry.
+			if !session.isLoginSession() {
+				return nil
 			}
 			sessions = append(sessions, &session)
 			return nil
@@ -419,6 +441,13 @@ func (s *UserStore) CleanupExpiredSessions() (int, error) {
 			if err := json.Unmarshal(v, &session); err != nil {
 				return nil // Skip malformed entries
 			}
+			// NEVER delete a record that is not a login session. A foreign record
+			// unmarshals without error and leaves ExpiresAt at the zero time, which
+			// reads as "long expired" — that is precisely how this sweep used to
+			// destroy every MCP session record sharing the bucket.
+			if !session.isLoginSession() {
+				return nil
+			}
 			if now.After(session.ExpiresAt) {
 				keyCopy := make([]byte, len(k))
 				copy(keyCopy, k)
@@ -440,4 +469,231 @@ func (s *UserStore) CleanupExpiredSessions() (int, error) {
 	})
 
 	return count, err
+}
+
+// Sentinel errors of UpdateUserLogin. The caller maps them to the FR-013
+// closed reasons (subject_mismatch, user_disabled).
+var (
+	// ErrSubjectMismatch: same provider, same email, a different subject and
+	// no administrator-armed rebind window (Spec 107 FR-023).
+	ErrSubjectMismatch = errors.New("provider subject does not match the stored binding")
+	// ErrUserDisabled: the record is disabled; nothing is written.
+	ErrUserDisabled = errors.New("user is disabled")
+)
+
+// UpdateUserLogin applies one successful login to the user record keyed by
+// the claims' normalised email, atomically (Spec 107 FR-008/FR-023).
+//
+// It is transaction-owned: the record is re-read by the email index INSIDE
+// one db.Update, the subject rule is evaluated there, and groups, subject,
+// provider, display name and last-login are written in that same
+// transaction. Two concurrent logins therefore serialise on the store: when
+// the rebind window is armed and both present different subjects, exactly
+// one rebinds (and clears the window) and the other sees the consumed window
+// and is refused with ErrSubjectMismatch. A pre-mutated *User handed to
+// UpdateUser could not provide this — both callers would observe the armed
+// flag.
+//
+// Subject rule on an existing record:
+//   - Disabled → ErrUserDisabled, nothing written.
+//   - stored subject empty, or same (provider, subject) → bind.
+//   - stored provider differs from the presented one → rebind (Rebound).
+//   - same provider, different subject: rebind only while
+//     SubjectRebindArmedAt is set (Rebound + RebindConsumed, the flag is
+//     cleared in the same write); otherwise ErrSubjectMismatch, nothing
+//     written.
+//
+// A successful login while the window is armed always closes it (Rebound +
+// RebindConsumed both set), even when the subject did not change: FR-023
+// carries provider_rebound on "the first successful login" while armed
+// unconditionally, and RebindConsumed alone is never logged anywhere, so a
+// same-subject consumption would otherwise leave no audit trace. A missing
+// record is created bound to the presented (provider, subject) (Created).
+func (s *UserStore) UpdateUserLogin(ctx context.Context, claims LoginClaims) (LoginOutcome, error) {
+	if err := ctx.Err(); err != nil {
+		return LoginOutcome{}, err
+	}
+	email := strings.ToLower(strings.TrimSpace(claims.Email))
+	if email == "" {
+		return LoginOutcome{}, fmt.Errorf("login claims: email is required")
+	}
+	if claims.Subject == "" {
+		return LoginOutcome{}, fmt.Errorf("login claims: subject is required")
+	}
+	now := time.Now().UTC()
+
+	var out LoginOutcome
+	err := s.db.Update(func(tx *bbolt.Tx) error {
+		usersBucket := tx.Bucket([]byte(BucketUsers))
+		if usersBucket == nil {
+			return fmt.Errorf("bucket %s not found", BucketUsers)
+		}
+		emailBucket := tx.Bucket([]byte(BucketUsersByEmail))
+		if emailBucket == nil {
+			return fmt.Errorf("bucket %s not found", BucketUsersByEmail)
+		}
+
+		var user *User
+		if id := emailBucket.Get([]byte(email)); id != nil {
+			if data := usersBucket.Get(id); data != nil {
+				user = &User{}
+				if err := json.Unmarshal(data, user); err != nil {
+					return fmt.Errorf("failed to unmarshal user: %w", err)
+				}
+			}
+		}
+
+		if user == nil {
+			user = NewUser(email, claims.Name, claims.Provider, claims.Subject)
+			user.CreatedAt = now
+			out.Created = true
+		} else {
+			if user.Disabled {
+				// The record this login refused against, from the SAME read
+				// this transaction made — round-2 cross-review finding,
+				// PR-D: the caller used to re-look the user up by email
+				// AFTER this transaction committed/rolled back, which a
+				// concurrent DeleteUser (or a transient read failure) could
+				// race, turning a schema-required `user_id` on the
+				// auth_event line into a silently anonymous one. Capturing
+				// it here is race-free by construction: it is the exact
+				// record the refusal decision was made from.
+				out.User = user
+				return ErrUserDisabled
+			}
+			armed := user.SubjectRebindArmedAt != nil
+			switch {
+			case user.ProviderSubjectID == "":
+				// An upgraded record bound before the IdP exposed a subject: bind.
+			case user.Provider == claims.Provider && user.ProviderSubjectID == claims.Subject:
+				// Plain bind — no identity change, but see below: consuming an
+				// armed window is itself the reportable event (FR-023).
+			case user.Provider != claims.Provider:
+				out.Rebound = true
+			case armed:
+				out.Rebound = true
+			default:
+				out.User = user // see the ErrUserDisabled comment above.
+				return ErrSubjectMismatch
+			}
+			if armed {
+				// FR-023: "the first successful login" while armed "carries
+				// provider_rebound in the line's flags" — unconditionally, not
+				// only when the presented (provider, sub) actually differs from
+				// the stored one. RebindConsumed alone reaches no audit line, so
+				// a same-subject login while armed would otherwise close the
+				// administrator-opened window with no trace at all.
+				user.SubjectRebindArmedAt = nil
+				out.RebindConsumed = true
+				out.Rebound = true
+			}
+			user.Provider = claims.Provider
+			user.ProviderSubjectID = claims.Subject
+			if claims.Name != "" {
+				user.DisplayName = claims.Name
+			}
+		}
+		user.LastLoginAt = now
+		if claims.GroupsKnown {
+			groups := claims.Groups
+			if groups == nil {
+				groups = []string{}
+			}
+			user.Groups = groups
+			user.GroupsUpdatedAt = now
+		}
+
+		if err := user.Validate(); err != nil {
+			return fmt.Errorf("invalid user: %w", err)
+		}
+		data, err := json.Marshal(user)
+		if err != nil {
+			return fmt.Errorf("failed to marshal user: %w", err)
+		}
+		if err := usersBucket.Put([]byte(user.ID), data); err != nil {
+			return fmt.Errorf("failed to store user: %w", err)
+		}
+		if out.Created {
+			if err := emailBucket.Put([]byte(email), []byte(user.ID)); err != nil {
+				return fmt.Errorf("failed to store email index: %w", err)
+			}
+		}
+		out.User = user
+		return nil
+	})
+	if err != nil {
+		// out.User is set only on the two branches that captured it
+		// (ErrUserDisabled, ErrSubjectMismatch) above; every other error
+		// path leaves out at its zero value, so returning out here instead
+		// of LoginOutcome{} changes nothing for those callers and gives the
+		// two refusal callers race-free access to the record the decision
+		// was made from (round-2 cross-review finding, PR-D).
+		return out, err
+	}
+	return out, nil
+}
+
+// SetUserDisabled atomically toggles the Disabled flag (and, for an enable,
+// the FR-023 rebind window) inside ONE db.Update transaction: the record is
+// re-read by id INSIDE the transaction, not handed in pre-mutated.
+//
+// A blind GetUser (View) + mutate + UpdateUser (Put), which is what the admin
+// handlers used before, has a lost-update window: a concurrent successful
+// login can run its own UpdateUserLogin transaction — writing Groups,
+// GroupsUpdatedAt, Provider, ProviderSubjectID, LastLoginAt and clearing
+// SubjectRebindArmedAt — entirely between the admin's read and its write, and
+// the admin's blind Put then overwrites the record back to the stale
+// snapshot, reopening a just-consumed rebind window or discarding a
+// concurrent subject rebind (cross-review round 1, chunk 2 P1).
+//
+// Returns (nil, false, nil) when the user does not exist (GetUser's own
+// not-found convention), and armed reports whether a real disabled→enabled
+// transition opened the FR-023 rebind window (mirrors the enableUser
+// semantics: enabling an already-enabled record is not a transition).
+func (s *UserStore) SetUserDisabled(id string, disabled bool) (user *User, armed bool, err error) {
+	now := time.Now().UTC()
+	txErr := s.db.Update(func(tx *bbolt.Tx) error {
+		usersBucket := tx.Bucket([]byte(BucketUsers))
+		if usersBucket == nil {
+			return fmt.Errorf("bucket %s not found", BucketUsers)
+		}
+		data := usersBucket.Get([]byte(id))
+		if data == nil {
+			return nil // not found; user stays nil
+		}
+		u := &User{}
+		if err := json.Unmarshal(data, u); err != nil {
+			return fmt.Errorf("failed to unmarshal user: %w", err)
+		}
+
+		if disabled {
+			u.Disabled = true
+			// Disabling closes any open rebind window (FR-023); the binding
+			// itself (ProviderSubjectID) is kept.
+			u.SubjectRebindArmedAt = nil
+		} else {
+			if u.Disabled {
+				u.SubjectRebindArmedAt = &now
+				armed = true
+			}
+			u.Disabled = false
+		}
+
+		if err := u.Validate(); err != nil {
+			return fmt.Errorf("invalid user: %w", err)
+		}
+		out, err := json.Marshal(u)
+		if err != nil {
+			return fmt.Errorf("failed to marshal user: %w", err)
+		}
+		if err := usersBucket.Put([]byte(id), out); err != nil {
+			return fmt.Errorf("failed to store user: %w", err)
+		}
+		user = u
+		return nil
+	})
+	if txErr != nil {
+		return nil, false, txErr
+	}
+	return user, armed, nil
 }

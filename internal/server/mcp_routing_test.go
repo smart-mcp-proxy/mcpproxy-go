@@ -3,16 +3,25 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
+	"time"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
+	servertest "github.com/mark3labs/mcp-go/server/servertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 )
 
 func TestParseDirectToolName(t *testing.T) {
@@ -133,6 +142,76 @@ func TestFormatDirectToolName(t *testing.T) {
 	}
 }
 
+func TestFormatDirectPromptName(t *testing.T) {
+	tests := []struct {
+		name       string
+		serverName string
+		promptName string
+		want       string
+	}{
+		{"simple names", "github", "setup-issue", "github__setup-issue"},
+		{"server with hyphens", "my-server", "greeting", "my-server__greeting"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := FormatDirectPromptName(tt.serverName, tt.promptName)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestBuildAggregatedServerPrompts(t *testing.T) {
+	builtin := mcpserver.ServerPrompt{
+		Prompt: mcp.NewPrompt("setup-new-mcp-server"),
+		Handler: func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return &mcp.GetPromptResult{Description: "builtin"}, nil
+		},
+	}
+
+	upstreamPrompts := []mcp.Prompt{
+		{Name: "server-a:greeting", Description: "hi"},
+	}
+
+	var gotCtx context.Context
+	var gotName string
+	var gotArgs map[string]string
+	fakeGetPrompt := func(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error) {
+		gotCtx = ctx
+		gotName = name
+		gotArgs = args
+		return &mcp.GetPromptResult{Description: "from upstream"}, nil
+	}
+
+	all := buildAggregatedServerPrompts([]mcpserver.ServerPrompt{builtin}, upstreamPrompts, fakeGetPrompt, nil, zap.NewNop())
+
+	require.Len(t, all, 2)
+	_, builtinStamped := aggregatedPromptServer(all[0].Prompt)
+	assert.False(t, builtinStamped, "built-ins carry no owner stamp")
+	owner, stamped := aggregatedPromptServer(all[1].Prompt)
+	require.True(t, stamped, "published upstream prompt carries its canonical owner")
+	assert.Equal(t, "server-a", owner)
+	assert.Equal(t, "setup-new-mcp-server", all[0].Prompt.Name)
+	assert.Equal(t, "server-a__greeting", all[1].Prompt.Name)
+	assert.Equal(t, "hi", all[1].Prompt.Description)
+
+	ctx := context.Background()
+	result, err := all[1].Handler(ctx, mcp.GetPromptRequest{
+		Params: mcp.GetPromptParams{Arguments: map[string]string{"k": "v"}},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "from upstream", result.Description)
+	assert.Equal(t, ctx, gotCtx)
+	assert.Equal(t, "server-a:greeting", gotName)
+	assert.Equal(t, map[string]string{"k": "v"}, gotArgs)
+}
+
+func TestBuildAggregatedServerPrompts_SkipsMalformedNames(t *testing.T) {
+	upstreamPrompts := []mcp.Prompt{{Name: "no-colon-here"}}
+	all := buildAggregatedServerPrompts(nil, upstreamPrompts, nil, nil, zap.NewNop())
+	assert.Empty(t, all)
+}
+
 func TestDirectToolNameRoundTrip(t *testing.T) {
 	// Test that formatting and parsing are inverse operations
 	testCases := []struct {
@@ -225,145 +304,184 @@ func TestGetMCPServerForMode_NilFallback(t *testing.T) {
 	assert.Same(t, mainServer, proxy.GetMCPServerForMode("retrieve_tools"))
 }
 
-func TestDirectModeHandler_PermissionDenied(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	proxy := &MCPProxyServer{
-		logger: logger,
-		config: &config.Config{},
+// directRoutingFixture is the real direct-surface fixture for the handler
+// cells below (Spec 105 T017, research D15): a proxy with a runtime, one
+// counting upstream per server (the SC-002 zero-upstream-call oracle) and a
+// direct catalog staged from those upstreams' StateView entries, so every
+// cell is driven through the handler mcp-go actually registered for the
+// display name rather than one the test built over a bare MCPProxyServer.
+// The earlier bare fixtures proved an admitted call only by recovering the
+// nil-upstreamManager panic; here an admission is the upstream's own count
+// and the exact raw name the call arrived under.
+type directRoutingFixture struct {
+	proxy *MCPProxyServer
+	rt    *runtime.Runtime
+	ups   map[string]*countingUpstream
+}
+
+// directServerSpec is one upstream of the fixture: its name and the tools it
+// exposes (every one seeded approved).
+type directServerSpec struct {
+	server string
+	tools  []toolSpec
+}
+
+func newDirectRoutingFixture(t *testing.T, servers ...directServerSpec) *directRoutingFixture {
+	t.Helper()
+	cfgs := make([]*config.ServerConfig, 0, len(servers))
+	for _, s := range servers {
+		cfgs = append(cfgs, &config.ServerConfig{Name: s.server, Enabled: true})
 	}
-
-	// Create a handler for a read-only tool
-	readOnlyHint := true
-	annotations := &config.ToolAnnotations{
-		ReadOnlyHint: &readOnlyHint,
+	proxy, rt := createTestProxyWithRuntime(t, cfgs)
+	f := &directRoutingFixture{proxy: proxy, rt: rt, ups: map[string]*countingUpstream{}}
+	ups := make([]*countingUpstream, 0, len(servers))
+	for _, s := range servers {
+		up := startCountingUpstream(t, proxy, rt, s.server, s.tools...)
+		f.ups[s.server] = up
+		ups = append(ups, up)
 	}
-	handler := proxy.makeDirectModeHandler("github", "list_repos", annotations)
+	stageDirectCatalogFor(t, proxy, ups...)
+	return f
+}
 
-	// Create a context with agent token that only has write permission (no read)
-	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
-		Type:           auth.AuthTypeAgent,
-		AgentName:      "test-agent",
-		AllowedServers: []string{"github"},
-		Permissions:    []string{"write"}, // Only write, no read
-	})
-
-	request := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "github__list_repos",
-		},
-	}
-
-	result, err := handler(agentCtx, request)
-	require.NoError(t, err) // Handler returns errors as tool results, not Go errors
+// call drives one (server, raw tool) through the registered direct handler.
+func (f *directRoutingFixture) call(t *testing.T, ctx context.Context, server, rawName string) *mcp.CallToolResult {
+	t.Helper()
+	display := FormatDirectToolName(server, rawName)
+	st, ok := f.proxy.directServer.ListTools()[display]
+	require.Truef(t, ok, "%q must be registered on the direct server", display)
+	req := mcp.CallToolRequest{}
+	req.Params.Name = display
+	req.Params.Arguments = map[string]interface{}{}
+	result, err := st.Handler(ctx, req)
+	require.NoError(t, err, "the direct handler reports refusals as tool results, never as Go errors")
 	require.NotNil(t, result)
-	assert.True(t, result.IsError)
-	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "Permission denied")
+	require.NotEmpty(t, result.Content)
+	return result
+}
+
+// refused asserts an error result carrying want and that NO upstream saw a call.
+func (f *directRoutingFixture) refused(t *testing.T, result *mcp.CallToolResult, want string) {
+	t.Helper()
+	text := result.Content[0].(mcp.TextContent).Text
+	assert.True(t, result.IsError, "a refused cell must be an error result: %s", text)
+	assert.Contains(t, text, want)
+	for server, up := range f.ups {
+		assert.Equal(t, int64(0), up.count.Load(), "a refused cell must never reach upstream %q (dispatched: %v)", server, up.dispatched())
+	}
+}
+
+// admitted asserts a success result and exactly one upstream call under the
+// exact raw name, on the named server alone.
+func (f *directRoutingFixture) admitted(t *testing.T, result *mcp.CallToolResult, server, rawName string) {
+	t.Helper()
+	require.False(t, result.IsError, "an admitted cell must be dispatched: %s", result.Content[0].(mcp.TextContent).Text)
+	for name, up := range f.ups {
+		if name == server {
+			assert.Equal(t, int64(1), up.count.Load(), "the admitted call must reach upstream %q exactly once", server)
+			assert.Equal(t, []string{rawName}, up.dispatched(), "the upstream must receive the exact raw tool name that was authorized")
+			continue
+		}
+		assert.Equal(t, int64(0), up.count.Load(), "no other upstream (%q) may see the call", name)
+	}
+}
+
+// stageDirectCatalogFor renders and registers a direct catalog for the given
+// counting upstreams exactly as RefreshDirectModeTools does (render → SetTools
+// → publish), with the annotations the StateView carries, so the handler
+// mcp-go would dispatch to closes over the same registration identity.
+// Discovery through the stub cannot be used here: the in-process upstream
+// publishes no annotations, so every entry would render as read tier.
+func stageDirectCatalogFor(t *testing.T, p *MCPProxyServer, ups ...*countingUpstream) {
+	t.Helper()
+	p.config.RoutingMode = config.RoutingModeDirect
+	var metas []*config.ToolMetadata
+	for _, up := range ups {
+		for _, tool := range up.Tools {
+			metas = append(metas, &config.ToolMetadata{
+				Name: tool.Name, ServerName: up.Server, Description: tool.Description,
+				ParamsJSON: `{"type":"object"}`, Hash: "h-" + tool.Name, Annotations: tool.Annotations,
+			})
+		}
+	}
+	warmFixtureSignatures(p, metas)
+	cat := directCatalogFor(p, metas)
+	p.directServer.SetTools(p.withDirectBuiltins(p.renderDirectTools(cat))...)
+	p.publishDirectCatalog(cat)
+}
+
+// The four cells below are the direct-surface agent-token gates, rebuilt on
+// the real fixture (Spec 105 T017): a token lacking the target's tier, a
+// token whose server scope excludes the target, a token holding the tier, and
+// a destructive target against a read+write token. Each refusal is proven by
+// zero upstream calls; the admission by one call under the exact raw name.
+
+func TestDirectModeHandler_PermissionDenied(t *testing.T) {
+	f := newDirectRoutingFixture(t, directServerSpec{server: "github", tools: []toolSpec{readSpec("list_repos")}})
+
+	// An agent token that only holds write (no read) against a read-tier tool.
+	result := f.call(t, agentCtx([]string{"github"}, []string{auth.PermWrite}, ""), "github", "list_repos")
+	f.refused(t, result, "Permission denied: token does not have 'read' permission required for tool 'github:list_repos'")
 }
 
 func TestDirectModeHandler_ServerAccessDenied(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	proxy := &MCPProxyServer{
-		logger: logger,
-		config: &config.Config{},
+	f := newDirectRoutingFixture(t,
+		directServerSpec{server: "github", tools: []toolSpec{readSpec("list_repos")}},
+		directServerSpec{server: "gitlab", tools: []toolSpec{readSpec("list_repos")}},
+	)
+
+	// An agent token restricted to github, targeting gitlab's tool of the
+	// same raw name: the server-scope gate refuses before any tier is read,
+	// and neither upstream sees the call.
+	//
+	// Spec 105 FR-008 gap G5 (D12): the refusal text must not name "gitlab" —
+	// this drives the REGISTERED handler directly, bypassing mcp-go's own
+	// call-time filter re-evaluation (which would answer the unregistered-name
+	// envelope first in real dispatch), so this exercises the handler's own
+	// defense-in-depth check. It is returned as the handler's OWN error (PR
+	// #1326 review round 2, chunk C), not a tool-result, so this scenario
+	// cannot use the shared f.call/f.refused helpers (which assert NO Go
+	// error at all — true for every OTHER refusal in this file, but not this
+	// one).
+	display := FormatDirectToolName("gitlab", "list_repos")
+	st, ok := f.proxy.directServer.ListTools()[display]
+	require.Truef(t, ok, "%q must be registered on the direct server", display)
+	req := mcp.CallToolRequest{}
+	req.Params.Name = display
+	req.Params.Arguments = map[string]interface{}{}
+
+	result, err := st.Handler(agentCtx([]string{"github"}, []string{auth.PermRead}, ""), req)
+	require.Nil(t, result, "the handler's own defense-in-depth refusal must not be a tool-result")
+	require.Error(t, err)
+	assert.Equal(t, "tool 'gitlab__list_repos' not found: tool not found", err.Error())
+	assert.NotContains(t, err.Error(), "does not have access",
+		"the refusal must never disclose that a scope check is what fired")
+	for server, up := range f.ups {
+		assert.Equal(t, int64(0), up.count.Load(), "a refused cell must never reach upstream %q (dispatched: %v)", server, up.dispatched())
 	}
-
-	handler := proxy.makeDirectModeHandler("gitlab", "list_repos", nil)
-
-	// Create a context with agent token that only has access to github
-	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
-		Type:           auth.AuthTypeAgent,
-		AgentName:      "test-agent",
-		AllowedServers: []string{"github"}, // Only github, not gitlab
-		Permissions:    []string{"read"},
-	})
-
-	request := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "gitlab__list_repos",
-		},
-	}
-
-	result, err := handler(agentCtx, request)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.True(t, result.IsError)
-	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "Access denied")
 }
 
 func TestDirectModeHandler_AgentWithCorrectPermissions(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	proxy := &MCPProxyServer{
-		logger: logger,
-		config: &config.Config{},
-	}
+	f := newDirectRoutingFixture(t, directServerSpec{server: "github", tools: []toolSpec{readSpec("list_repos")}})
 
-	// A read-only tool requires "read" permission
-	readOnlyHint := true
-	annotations := &config.ToolAnnotations{
-		ReadOnlyHint: &readOnlyHint,
-	}
-	handler := proxy.makeDirectModeHandler("github", "list_repos", annotations)
-
-	// Agent with read permission and github access should pass auth checks
-	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
-		Type:           auth.AuthTypeAgent,
-		AgentName:      "test-agent",
-		AllowedServers: []string{"github"},
-		Permissions:    []string{"read"},
-	})
-
-	request := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "github__list_repos",
-		},
-	}
-
-	// Will panic due to nil upstreamManager, but we use recover to verify
-	// that auth checks passed (if it had failed at auth, result would be returned cleanly)
-	func() {
-		defer func() {
-			r := recover()
-			// If we reach here, the auth check passed and we hit the upstream call
-			// which panics due to nil manager. This is expected behavior.
-			assert.NotNil(t, r, "should panic at upstream call, proving auth checks passed")
-		}()
-		handler(agentCtx, request)
-	}()
+	// An agent token holding read on github reaches the read-tier tool; the
+	// upstream's own count is the proof the gates admitted it (the bare
+	// fixture this replaces could only recover a nil-manager panic).
+	result := f.call(t, agentCtx([]string{"github"}, []string{auth.PermRead}, ""), "github", "list_repos")
+	f.admitted(t, result, "github", "list_repos")
 }
 
 func TestDirectModeHandler_DestructiveToolNeedsDestructivePermission(t *testing.T) {
-	logger, _ := zap.NewDevelopment()
-	proxy := &MCPProxyServer{
-		logger: logger,
-		config: &config.Config{},
-	}
+	f := newDirectRoutingFixture(t, directServerSpec{server: "github", tools: []toolSpec{destructiveSpec("delete_repo")}})
 
-	destructiveHint := true
-	annotations := &config.ToolAnnotations{
-		DestructiveHint: &destructiveHint,
-	}
-	handler := proxy.makeDirectModeHandler("github", "delete_repo", annotations)
+	// read+write without destructive: refused on the target's tier.
+	result := f.call(t, agentCtx([]string{"github"}, []string{auth.PermRead, auth.PermWrite}, ""), "github", "delete_repo")
+	f.refused(t, result, "Permission denied: token does not have 'destructive' permission required for tool 'github:delete_repo'")
 
-	// Agent with only read+write but no destructive permission
-	agentCtx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
-		Type:           auth.AuthTypeAgent,
-		AgentName:      "test-agent",
-		AllowedServers: []string{"github"},
-		Permissions:    []string{"read", "write"},
-	})
-
-	request := mcp.CallToolRequest{
-		Params: mcp.CallToolParams{
-			Name: "github__delete_repo",
-		},
-	}
-
-	result, err := handler(agentCtx, request)
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	assert.True(t, result.IsError)
-	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "Permission denied")
-	assert.Contains(t, result.Content[0].(mcp.TextContent).Text, "destructive")
+	// Positive control on the same handler: a token holding destructive is
+	// dispatched, under the exact raw name.
+	result = f.call(t, agentCtx([]string{"github"}, []string{auth.PermRead, auth.PermWrite, auth.PermDestructive}, ""), "github", "delete_repo")
+	f.admitted(t, result, "github", "delete_repo")
 }
 
 func TestRequiredPermissionForDirectTool_MapsAnnotationsToAuthPermissions(t *testing.T) {
@@ -425,12 +543,17 @@ func TestSetDirectToolPermissions_DefensivelyCopiesMap(t *testing.T) {
 		toolName: auth.PermRead,
 	}
 
-	proxy.setDirectToolPermissions(perms)
+	publishPermsCatalog(proxy, perms)
+	// Mutating the caller's map after publication must not reach the published
+	// snapshot. The catalog is immutable by construction — the entries are built
+	// from the map, not backed by it — where the retired directToolPermissions
+	// map had to defensively copy to get the same property.
 	perms[toolName] = auth.PermDestructive
 
-	got, ok := proxy.lookupDirectToolPermission(toolName)
-	require.True(t, ok)
-	assert.Equal(t, auth.PermRead, got)
+	entry, decision := proxy.resolveDirectTool(toolName)
+	require.Equal(t, directResolveFound, decision)
+	require.NotNil(t, entry)
+	assert.Equal(t, auth.PermRead, entry.RequiredPermission)
 }
 
 func TestFilterDirectModeToolsForAuth_DoesNotMutateInputSlice(t *testing.T) {
@@ -443,7 +566,7 @@ func TestFilterDirectModeToolsForAuth_DoesNotMutateInputSlice(t *testing.T) {
 	}
 	original := append([]mcp.Tool(nil), tools...)
 
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		allowed: auth.PermRead,
 		denied:  auth.PermRead,
 	})
@@ -469,7 +592,7 @@ func TestFilterDirectModeToolsForAuth_AgentServerAndPermissionScope(t *testing.T
 	githubDestroy := FormatDirectToolName("github", "delete_repo")
 	gitlabRead := FormatDirectToolName("gitlab", "get_issue")
 
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		githubRead:    auth.PermRead,
 		githubWrite:   auth.PermWrite,
 		githubDestroy: auth.PermDestructive,
@@ -513,7 +636,7 @@ func TestFilterDirectModeToolsForAuth_FailsClosedOnMissingPermissionMetadata(t *
 
 	visible := FormatDirectToolName("github", "get_issue")
 	missing := FormatDirectToolName("github", "unknown")
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		visible: auth.PermRead,
 	})
 
@@ -532,28 +655,40 @@ func TestFilterDirectModeToolsForAuth_FailsClosedOnMissingPermissionMetadata(t *
 	assert.Equal(t, []string{visible}, directToolNamesForTest(filtered))
 }
 
-func TestFilterDirectModeToolsForAuth_KeepsNonDirectTools(t *testing.T) {
+// Spec 105 FR-008 (FR008-G2): "retrieve_tools" has no "__" separator, exactly
+// like a genuine direct-surface built-in, but it is a RETRIEVE-surface
+// built-in never registered here — so with a published catalog that does not
+// admit it, it is no longer waved through on the strength of its shape alone.
+// It has no registration identity and is withheld, for a scoped agent and for
+// an administrator alike (the previous version of this test, named for the
+// opposite behaviour, pinned exactly the disclosure FR008-G2 closes).
+func TestFilterDirectModeToolsForAuth_DropsNonBuiltinSeparatorlessNames(t *testing.T) {
 	proxy := &MCPProxyServer{}
 
 	direct := FormatDirectToolName("github", "get_issue")
 	nonDirect := "retrieve_tools"
-	proxy.setDirectToolPermissions(map[string]string{
+	publishPermsCatalog(proxy, map[string]string{
 		direct: auth.PermRead,
 	})
 
-	ctx := auth.WithAuthContext(context.Background(), &auth.AuthContext{
+	scoped := auth.WithAuthContext(context.Background(), &auth.AuthContext{
 		Type:           auth.AuthTypeAgent,
 		AgentName:      "test-agent",
 		AllowedServers: []string{"github"},
 		Permissions:    []string{auth.PermRead},
 	})
 
-	filtered := proxy.filterDirectModeToolsForAuth(ctx, []mcp.Tool{
-		{Name: direct},
-		{Name: nonDirect},
-	})
+	for name, ctx := range map[string]context.Context{
+		"scoped agent":  scoped,
+		"administrator": context.Background(),
+	} {
+		filtered := proxy.filterDirectModeToolsForAuth(ctx, []mcp.Tool{
+			{Name: direct},
+			{Name: nonDirect},
+		})
 
-	assert.Equal(t, []string{direct, nonDirect}, directToolNamesForTest(filtered))
+		assert.Equalf(t, []string{direct}, directToolNamesForTest(filtered), "%s", name)
+	}
 }
 
 func directToolNamesForTest(tools []mcp.Tool) []string {
@@ -571,7 +706,7 @@ func TestDirectModeHandler_NoAuthContext(t *testing.T) {
 		config: &config.Config{},
 	}
 
-	handler := proxy.makeDirectModeHandler("github", "list_repos", nil)
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: nil})
 
 	// No auth context in context - should pass auth checks (backward compatible)
 	request := mcp.CallToolRequest{
@@ -741,4 +876,520 @@ func TestHandleRetrieveToolsForMode_ClosureReturnsDifferentInstructions(t *testi
 	// Code exec should mention code_execution, retrieve should mention call_tool_read
 	assert.Contains(t, codeExecInstructions, "code_execution")
 	assert.Contains(t, retrieveInstructions, "call_tool_read")
+}
+
+func TestSafeTruncateBytes(t *testing.T) {
+	tests := []struct {
+		name  string
+		s     string
+		limit int
+		want  int
+	}{
+		{"ascii cut mid-string", "hello world", 5, 5},
+		{"limit beyond length", "hi", 10, 2},
+		{"limit equals length", "hello", 5, 5},
+		{"zero limit", "hello", 0, 0},
+		{"negative limit", "hello", -1, 0},
+		// "héllo": 'é' is 2 bytes (0xC3 0xA9) at indices 1-2. A raw cut at 2
+		// would split it; safeTruncateBytes backs up to 1.
+		{"cut inside 2-byte rune backs up", "héllo", 2, 1},
+		{"cut at 2-byte rune end is kept", "héllo", 3, 3},
+		// "😀x": emoji is 4 bytes (indices 0-3). Cuts inside it back up to 0.
+		{"cut inside 4-byte rune backs up to 0", "😀x", 2, 0},
+		{"cut at emoji boundary kept", "😀x", 4, 4},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := safeTruncateBytes(tt.s, tt.limit)
+			if got != tt.want {
+				t.Fatalf("safeTruncateBytes(%q, %d) = %d, want %d", tt.s, tt.limit, got, tt.want)
+			}
+			// The truncated prefix must always be valid UTF-8.
+			if !utf8.ValidString(tt.s[:got]) {
+				t.Errorf("prefix %q is not valid UTF-8", tt.s[:got])
+			}
+		})
+	}
+}
+
+// =============================================================================
+// Spec 090 (T016): direct-routing blocks carry a request id
+// =============================================================================
+
+// Direct mode reads its request id from the transport context, which is empty
+// for anything that did not arrive over HTTP with a correlation header. A block
+// emitted with an empty id is indistinguishable from a legacy record, so the
+// handler has to fall back to a minted one.
+func TestDirectModeHandler_CallabilityBlock_CarriesRequestID(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{
+		// Disabled, so directToolCallabilityBlock refuses the call.
+		{Name: "github", Enabled: false},
+	})
+	probe := watchPolicyDecisions(t, rt)
+
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: nil})
+	result, err := handler(context.Background(), mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: "github__list_repos"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.IsError, "a disabled server must not be callable in direct mode")
+
+	payload := probe.awaitOne(t)
+	assert.Equal(t, "blocked", payload["decision"])
+	assert.Equal(t, "github", payload["server_name"])
+	assert.Equal(t, "list_repos", payload["tool_name"])
+	requestIDOf(t, payload)
+}
+
+// When the transport DID supply a correlation id, that id must be used as-is —
+// the fallback is a fallback, not a replacement, or the block would stop
+// correlating with the HTTP access log it belongs to.
+func TestDirectModeHandler_CallabilityBlock_PrefersContextRequestID(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{
+		{Name: "github", Enabled: false},
+	})
+	probe := watchPolicyDecisions(t, rt)
+
+	ctx := reqcontext.WithRequestID(context.Background(), "req-from-transport")
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "github", ToolName: "list_repos", DisplayName: FormatDirectToolName("github", "list_repos"), Annotations: nil})
+	_, err := handler(ctx, mcp.CallToolRequest{
+		Params: mcp.CallToolParams{Name: "github__list_repos"},
+	})
+	require.NoError(t, err)
+
+	payload := probe.awaitOne(t)
+	assert.Equal(t, "req-from-transport", requestIDOf(t, payload))
+}
+
+// =============================================================================
+// RefreshPrompts (prompt aggregation)
+// =============================================================================
+
+// newTestRefreshPromptsUpstream builds a real in-process MCP server that
+// advertises Capabilities.Prompts and serves one "greeting" prompt.
+func newTestRefreshPromptsUpstream(t *testing.T) *mcpserver.MCPServer {
+	t.Helper()
+	srv := mcpserver.NewMCPServer("test-upstream", "0.0.1",
+		mcpserver.WithToolCapabilities(true),
+		mcpserver.WithPromptCapabilities(true),
+	)
+	srv.AddPrompt(
+		mcp.NewPrompt("greeting", mcp.WithPromptDescription("Say hello")),
+		func(_ context.Context, _ mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+			return &mcp.GetPromptResult{
+				Messages: []mcp.PromptMessage{
+					{Role: mcp.RoleAssistant, Content: mcp.TextContent{Type: "text", Text: "hello"}},
+				},
+			}, nil
+		},
+	)
+	return srv
+}
+
+func TestRefreshPrompts_Disabled_NoOp(t *testing.T) {
+	// createTestProxyWithRuntime uses config.DefaultConfig(), which has
+	// EnablePrompts: true, so registerPrompts() already ran at construction.
+	// Clear that baseline so this test can prove RefreshPrompts adds nothing
+	// once prompts are (re-)disabled, rather than merely tolerating leftovers.
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	existing := proxy.server.ListPrompts()
+	names := make([]string, 0, len(existing))
+	for name := range existing {
+		names = append(names, name)
+	}
+	proxy.server.DeletePrompts(names...)
+
+	proxy.config.EnablePrompts = false
+	proxy.RefreshPrompts()
+
+	assert.Empty(t, proxy.server.ListPrompts(), "disabled prompts must not populate the server's prompt set")
+}
+
+func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = true // opt in to upstream aggregation
+	qOff := false
+	proxy.config.QuarantineEnabled = &qOff // spec 100: these tests verify aggregation, not the rug-pull baseline
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	require.Contains(t, prompts, "setup-new-mcp-server", "built-in prompts must still be registered")
+	require.Contains(t, prompts, "server-a__greeting", "aggregated upstream prompt must be registered under its direct name")
+}
+
+// TestRefreshPrompts_RugPullBaseline_WithholdsFirstSeen (spec 100) proves the
+// full RefreshPrompts path withholds a first-seen prompt on a quarantine-
+// enforced server, and that approving it registers it on the next refresh.
+func TestRefreshPrompts_RugPullBaseline_WithholdsFirstSeen(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, []*config.ServerConfig{
+		// Server present in config as manual trust + quarantine on (the default).
+		{Name: "server-a", Protocol: "streamable-http", Enabled: true, TrustMode: string(config.TrustModeManual)},
+	})
+	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = true
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name: "server-a", Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+	prompts := proxy.server.ListPrompts()
+	require.Contains(t, prompts, "setup-new-mcp-server", "built-ins are always registered")
+	require.NotContains(t, prompts, "server-a__greeting", "a first-seen prompt on a manual server is withheld (rug-pull baseline)")
+
+	// Approve it → it registers on the triggered refresh.
+	require.NoError(t, proxy.ApprovePrompt("server-a", "greeting", "tester"))
+	prompts = proxy.server.ListPrompts()
+	require.Contains(t, prompts, "server-a__greeting", "an approved prompt is registered")
+}
+
+// TestRefreshPrompts_AggregationDisabled_BuiltinsOnly verifies the default
+// safe posture (PR #973 review): with EnablePrompts on but the opt-in
+// aggregate_upstream_prompts flag off, RefreshPrompts serves ONLY the built-ins
+// and never touches upstream servers.
+func TestRefreshPrompts_AggregationDisabled_BuiltinsOnly(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = false // the default — safe posture
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	assert.Contains(t, prompts, "setup-new-mcp-server", "built-ins still register when aggregation is off")
+	assert.NotContains(t, prompts, "server-a__greeting", "upstream prompt must NOT be aggregated when the opt-in flag is off")
+	assert.Len(t, prompts, 2, "only the two built-in prompts are present")
+}
+
+// TestRefreshPrompts_ReadsLiveAggregateFlag is the F4 regression: RefreshPrompts
+// must honor the LIVE config snapshot (currentConfig() -> runtime), not the
+// construction-time p.config, so an aggregate_upstream_prompts toggle takes
+// effect on hot-reload without a restart. We deliberately give proxy.config a
+// stale snapshot that DISAGREES with the live one; if RefreshPrompts read the
+// boot snapshot it would skip aggregation and the assertion would fail.
+func TestRefreshPrompts_ReadsLiveAggregateFlag(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, rt := createTestProxyWithRuntime(t, nil)
+
+	// Live snapshot (what currentConfig() -> rt.Config() returns) OPTS IN.
+	live := rt.Config()
+	live.EnablePrompts = true
+	live.AggregateUpstreamPrompts = true
+	qOff := false
+	live.QuarantineEnabled = &qOff // spec 100: verify aggregation, not the rug-pull baseline
+
+	// Construction-time snapshot DISAGREES (aggregation off). If RefreshPrompts
+	// read p.config it would skip aggregation — the assertion below would fail.
+	boot := *live
+	boot.AggregateUpstreamPrompts = false
+	proxy.config = &boot
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), live, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	require.Contains(t, prompts, "server-a__greeting",
+		"RefreshPrompts must honor the LIVE aggregate flag, not the boot snapshot (F4)")
+}
+
+func TestRefreshPrompts_NoUpstreamClients_RegistersOnlyBuiltins(t *testing.T) {
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+	proxy.upstreamManager = upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+
+	proxy.RefreshPrompts()
+
+	prompts := proxy.server.ListPrompts()
+	assert.Contains(t, prompts, "setup-new-mcp-server", "built-ins still register when there are no upstream prompts")
+	assert.Len(t, prompts, 2, "only the two built-in prompts should be present")
+}
+
+// TestRefreshPrompts_PopulatesRoutingModeServers is the regression test for
+// PR #973 review's P1 finding: prompts were only ever set on p.server, but
+// /mcp is served via GetMCPServerForMode(cfg.RoutingMode), which after
+// config.Validate() normalizes routing_mode to retrieve_tools almost never
+// resolves back to p.server — so the aggregated prompts feature was
+// unreachable over Streamable HTTP in every non-default routing mode.
+func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+
+	proxy, _ := createTestProxyWithRuntime(t, nil)
+	proxy.config.EnablePrompts = true
+	proxy.config.AggregateUpstreamPrompts = true // opt in to upstream aggregation
+	qOff := false
+	proxy.config.QuarantineEnabled = &qOff // spec 100: these tests verify aggregation, not the rug-pull baseline
+
+	upstreamSrv := newTestRefreshPromptsUpstream(t)
+	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
+	t.Cleanup(testServer.Close)
+
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	t.Cleanup(func() { um.DisconnectAll() })
+	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
+		Name:     "server-a",
+		Protocol: "streamable-http",
+		URL:      testServer.URL,
+		Enabled:  true,
+	}))
+	client, ok := um.GetClient("srv-a")
+	require.True(t, ok)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, client.Connect(ctx))
+	proxy.upstreamManager = um
+
+	proxy.RefreshPrompts()
+
+	for _, mode := range []string{config.RoutingModeDirect, config.RoutingModeCodeExecution, config.RoutingModeRetrieveTools} {
+		srv := proxy.GetMCPServerForMode(mode)
+		require.NotNil(t, srv, "routing mode %s must have a server instance", mode)
+		prompts := srv.ListPrompts()
+		assert.Contains(t, prompts, "setup-new-mcp-server", "mode %s: built-in prompts must be registered", mode)
+		assert.Contains(t, prompts, "server-a__greeting", "mode %s: aggregated upstream prompt must be registered", mode)
+	}
+}
+
+// TestBuildAggregatedServerPrompts_CollisionKeepsFirst covers Finding F7: two
+// distinct (server,prompt) pairs that flatten to the same "server__prompt"
+// display name must be resolved deterministically (first-writer-wins), not
+// silently overwritten, and the drop must be logged. The winner must be the
+// same whichever order the upstream manager hands the prompts over in —
+// ListPrompts iterates a map — so both input orders are exercised (Spec 105
+// FR-006 "collisions in both input orders").
+func TestBuildAggregatedServerPrompts_CollisionKeepsFirst(t *testing.T) {
+	// "gh" + "issue__create" and "gh__issue" + "create" both flatten to
+	// "gh__issue__create".
+	first := mcp.Prompt{Name: "gh:issue__create", Description: "first"}
+	second := mcp.Prompt{Name: "gh__issue:create", Description: "second (collides)"}
+	fakeGetPrompt := func(_ context.Context, _ string, _ map[string]string) (*mcp.GetPromptResult, error) {
+		return &mcp.GetPromptResult{}, nil
+	}
+
+	for name, upstreamPrompts := range map[string][]mcp.Prompt{
+		"sorted order":   {first, second},
+		"reversed order": {second, first},
+	} {
+		t.Run(name, func(t *testing.T) {
+			core, logs := observer.New(zap.WarnLevel)
+			logger := zap.New(core)
+
+			all := buildAggregatedServerPrompts(nil, upstreamPrompts, fakeGetPrompt, nil, logger)
+			require.Len(t, all, 1)
+			owner, _ := aggregatedPromptServer(all[0].Prompt)
+			assert.Equal(t, "gh", owner, "the lexically-first qualified name owns the display name regardless of input order")
+			assert.Equal(t, "gh__issue__create", all[0].Prompt.Name, "colliding display name must appear once (first kept)")
+			assert.Equal(t, "first", all[0].Prompt.Description)
+
+			entries := logs.FilterMessage("dropping upstream prompt: display-name collision (kept first)").All()
+			require.Len(t, entries, 1, "the dropped collision must be logged exactly once")
+			fields := entries[0].ContextMap()
+			assert.Equal(t, "gh__issue", fields["server"])
+			assert.Equal(t, "create", fields["prompt"])
+			assert.Equal(t, "gh__issue__create", fields["display_name"])
+		})
+	}
+}
+
+// Spec 102 FR-007 / D11 / D16 (T034): the direct server carries instructions on
+// its initialize response, in BOTH serialization modes, and an operator's
+// configured `instructions` value is not lost here.
+
+func directInitializeInstructions(t *testing.T, p *MCPProxyServer) string {
+	t.Helper()
+	raw := []byte(`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{` +
+		`"protocolVersion":"2025-03-26","capabilities":{},` +
+		`"clientInfo":{"name":"spec102-test","version":"0"}}}`)
+
+	msg := p.directServer.HandleMessage(context.Background(), raw)
+	encoded, err := json.Marshal(msg)
+	require.NoError(t, err)
+
+	var envelope struct {
+		Error  *struct{ Message string } `json:"error"`
+		Result struct {
+			Instructions string `json:"instructions"`
+		} `json:"result"`
+	}
+	require.NoError(t, json.Unmarshal(encoded, &envelope))
+	require.Nil(t, envelope.Error, "initialize must succeed: %s", encoded)
+	return envelope.Result.Instructions
+}
+
+func newDirectInstructionsProxy(t *testing.T, custom, mode string) *MCPProxyServer {
+	t.Helper()
+	p := &MCPProxyServer{
+		config: &config.Config{
+			RoutingMode:            config.RoutingModeDirect,
+			Instructions:           custom,
+			DirectToolResponseMode: mode,
+		},
+		logger: zap.NewNop(),
+	}
+	p.initRoutingModeServers()
+	return p
+}
+
+func TestDirectServerInstructions_CustomSurvivesInBothModes(t *testing.T) {
+	const custom = "House rules: ask before writing."
+
+	for _, mode := range []string{config.DirectToolResponseModeFull, config.DirectToolResponseModeDeferred} {
+		t.Run(mode, func(t *testing.T) {
+			got := directInitializeInstructions(t, newDirectInstructionsProxy(t, custom, mode))
+
+			require.NotEmpty(t, got, "the direct server must carry instructions (FR-007)")
+			assert.True(t, strings.HasPrefix(got, custom),
+				"an operator's configured instructions must lead, not be replaced (D11)")
+			assert.Contains(t, got, directDeferralLegend,
+				"the deferral legend is appended in BOTH modes (D4)")
+			assert.NotContains(t, got, defaultDirectInstructions,
+				"a custom value replaces the default, it does not stack with it")
+		})
+	}
+}
+
+func TestDirectServerInstructions_DefaultIsDirectSpecific(t *testing.T) {
+	got := directInitializeInstructions(t, newDirectInstructionsProxy(t, "", ""))
+
+	assert.True(t, strings.HasPrefix(got, defaultDirectInstructions))
+	assert.Contains(t, got, directDeferralLegend)
+
+	// D16: the direct default must name ONLY what this surface exposes.
+	// resolveInstructions' defaultInstructions advertises retrieve_tools,
+	// call_tool_* and upstream_servers, none of which buildDirectModeTools
+	// registers — naming one would be the D16 mistake the helper exists to
+	// avoid.
+	assert.Contains(t, got, "server__tool")
+	assert.Contains(t, got, "describe_tool")
+	for _, absent := range []string{"retrieve_tools", "call_tool_read", "call_tool_write", "call_tool_destructive", "upstream_servers", "search_servers", "code_execution"} {
+		assert.NotContainsf(t, got, absent, "the direct instructions must not advertise %q — this surface does not expose it (D16)", absent)
+	}
+
+	assert.NotEqual(t, resolveInstructions(""), got,
+		"the direct surface must not reuse the retrieve_tools default (D16)")
+}
+
+func TestResolveDirectInstructions_ComposesCustomThenLegend(t *testing.T) {
+	assert.Equal(t, defaultDirectInstructions+"\n\n"+directDeferralLegend, resolveDirectInstructions(""))
+	assert.Equal(t, "custom"+"\n\n"+directDeferralLegend, resolveDirectInstructions("custom"))
+}
+
+// The legend must describe the markers the Spec-085 grammar actually emits, or
+// an agent reading it will mis-read the signatures it is meant to explain.
+func TestDirectDeferralLegend_ExplainsTheMarkers(t *testing.T) {
+	assert.Contains(t, directDeferralLegend, "*")
+	assert.Contains(t, directDeferralLegend, "~")
+	assert.Contains(t, directDeferralLegend, "describe_tool")
+	assert.Contains(t, directDeferralLegend, "placeholder")
+}
+
+// TestBuildAggregatedServerPrompts_HandlerAuthorizesCanonicalServer (Spec 104
+// FR-016g, cross-review P1): every upstream prompt handler must consult the
+// authorize hook with its OWN canonical server before contacting the upstream,
+// so a stale owner record or a mid-refresh window can never turn a filter
+// pass into an unauthorized fetch.
+func TestBuildAggregatedServerPrompts_HandlerAuthorizesCanonicalServer(t *testing.T) {
+	var fetched []string
+	fakeGetPrompt := func(_ context.Context, name string, _ map[string]string) (*mcp.GetPromptResult, error) {
+		fetched = append(fetched, name)
+		return &mcp.GetPromptResult{}, nil
+	}
+	var asked []string
+	authorize := func(_ context.Context, serverName string) error {
+		asked = append(asked, serverName)
+		if serverName == "a__b" {
+			return errPromptNotFound
+		}
+		return nil
+	}
+
+	all := buildAggregatedServerPrompts(nil, []mcp.Prompt{{Name: "a:greeting"}, {Name: "a__b:greeting"}}, fakeGetPrompt, authorize, zap.NewNop())
+	byName := map[string]mcpserver.ServerPrompt{}
+	for _, sp := range all {
+		byName[sp.Prompt.Name] = sp
+	}
+
+	_, err := byName["a__b__greeting"].Handler(context.Background(), mcp.GetPromptRequest{})
+	require.ErrorIs(t, err, errPromptNotFound)
+	_, err = byName["a__greeting"].Handler(context.Background(), mcp.GetPromptRequest{})
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"a__b", "a"}, asked, "each handler asks about its canonical server, not a re-parse of the display name")
+	assert.Equal(t, []string{"a:greeting"}, fetched, "a denied handler never contacts the upstream")
 }

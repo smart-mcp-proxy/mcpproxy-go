@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 )
 
 const (
@@ -232,26 +233,6 @@ func (m *ServerStateManager) QuarantineServer(serverName string, quarantined boo
 	return nil
 }
 
-// UnquarantineServer removes a server from quarantine and ensures all state is synchronized
-func (m *ServerStateManager) UnquarantineServer(serverName string) error {
-	m.logger.Info("UnquarantineServer called", zap.String("server", serverName))
-
-	// Update the server quarantine status
-	if err := m.server.UnquarantineServer(serverName); err != nil {
-		return fmt.Errorf("failed to unquarantine server: %w", err)
-	}
-
-	// Force state refresh immediately after the change
-	if err := m.RefreshState(); err != nil {
-		m.logger.Error("Failed to refresh state after unquarantine change", zap.Error(err))
-		// Don't return error here as the unquarantine operation itself succeeded
-	}
-
-	m.logger.Info("Server unquarantine completed successfully", zap.String("server", serverName))
-
-	return nil
-}
-
 // EnableServer enables/disables a server and ensures all state is synchronized
 func (m *ServerStateManager) EnableServer(serverName string, enabled bool) error {
 	action := actionDisable
@@ -289,6 +270,7 @@ type MenuManager struct {
 	// Menu references
 	upstreamServersMenu *systray.MenuItem
 	quarantineMenu      *systray.MenuItem
+	profileMenu         *systray.MenuItem
 
 	// Menu tracking to prevent duplicates
 	serverMenuItems       map[string]*systray.MenuItem // server name -> menu item
@@ -298,7 +280,13 @@ type MenuManager struct {
 	serverOAuthItems      map[string]*systray.MenuItem // server name -> OAuth login menu item
 	serverRestartItems    map[string]*systray.MenuItem // server name -> restart action menu item
 	quarantineInfoEmpty   *systray.MenuItem            // "No servers" info item
-	quarantineInfoHelp    *systray.MenuItem            // "Click to unquarantine" help item
+	quarantineInfoHelp    *systray.MenuItem            // Review guidance
+
+	// Profile switcher tracking (Profiles v2 T5). profileMenuItems is keyed by
+	// profile slug; the "" key is the synthetic "All servers" entry.
+	profileMenuItems    map[string]*systray.MenuItem
+	latestProfileNames  []string // sorted slugs currently rendered (excludes the "" entry)
+	latestActiveProfile string   // "" means all servers
 
 	// Latest server data snapshots
 	latestServers     []map[string]interface{}
@@ -308,18 +296,24 @@ type MenuManager struct {
 	onServerAction func(serverName string, action string) // callback for server actions
 }
 
+// profileAllServersKey is the map key + display sentinel for the "no profile"
+// (all servers) choice in the profile switcher submenu.
+const profileAllServersKey = ""
+
 // NewMenuManager creates a new menu manager
-func NewMenuManager(upstreamMenu, quarantineMenu *systray.MenuItem, logger *zap.SugaredLogger) *MenuManager {
+func NewMenuManager(upstreamMenu, quarantineMenu, profileMenu *systray.MenuItem, logger *zap.SugaredLogger) *MenuManager {
 	return &MenuManager{
 		logger:                logger,
 		upstreamServersMenu:   upstreamMenu,
 		quarantineMenu:        quarantineMenu,
+		profileMenu:           profileMenu,
 		serverMenuItems:       make(map[string]*systray.MenuItem),
 		quarantineMenuItems:   make(map[string]*systray.MenuItem),
 		serverActionItems:     make(map[string]*systray.MenuItem),
 		serverQuarantineItems: make(map[string]*systray.MenuItem),
 		serverOAuthItems:      make(map[string]*systray.MenuItem),
 		serverRestartItems:    make(map[string]*systray.MenuItem),
+		profileMenuItems:      make(map[string]*systray.MenuItem),
 	}
 }
 
@@ -328,6 +322,114 @@ func (m *MenuManager) SetActionCallback(callback func(serverName string, action 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.onServerAction = callback
+}
+
+// UpdateProfilesMenu refreshes the profile switcher submenu (Profiles v2 T5).
+// It renders an "All servers" entry plus one checkbox per configured profile,
+// checks the active one, and (re)wires click handlers that ask the core to switch
+// the server-level default active profile. systray menu items cannot be removed,
+// only hidden, so the items are rebuilt only when the set of profile slugs
+// changes; otherwise titles and checkmarks are updated in place. Because the
+// active profile is re-read on every sync, a switch made by another client
+// (Web UI, CLI) is reflected here within one sync interval.
+func (m *MenuManager) UpdateProfilesMenu(profiles []ProfileInfo, active string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.profileMenu == nil {
+		return
+	}
+
+	// Build the sorted slug list and a lookup of tool counts.
+	names := make([]string, 0, len(profiles))
+	toolCounts := make(map[string]int, len(profiles))
+	for _, p := range profiles {
+		if p.Name == "" {
+			continue
+		}
+		names = append(names, p.Name)
+		toolCounts[p.Name] = p.ToolCount
+	}
+	sort.Strings(names)
+
+	m.profileMenu.SetTitle(profileMenuTitle(active))
+
+	// Rebuild the items when the configured profile set changed (new/removed
+	// profiles); otherwise reuse existing items and only refresh checkmarks.
+	if m.profileSetChanged(names) {
+		for _, item := range m.profileMenuItems {
+			item.Hide()
+		}
+		m.profileMenuItems = make(map[string]*systray.MenuItem)
+
+		// "All servers" entry (clears the active profile).
+		allItem := m.profileMenu.AddSubMenuItemCheckbox("All servers", "Use all enabled servers (no profile)", active == profileAllServersKey)
+		m.profileMenuItems[profileAllServersKey] = allItem
+		m.wireProfileClick(profileAllServersKey, allItem)
+
+		for _, name := range names {
+			title := fmt.Sprintf("%s (%d tools)", name, toolCounts[name])
+			item := m.profileMenu.AddSubMenuItemCheckbox(title, fmt.Sprintf("Switch the active profile to %s", name), name == active)
+			m.profileMenuItems[name] = item
+			m.wireProfileClick(name, item)
+		}
+		m.latestProfileNames = names
+	} else {
+		// Refresh titles (tool counts may change) and checkmarks in place.
+		for _, name := range names {
+			if item, ok := m.profileMenuItems[name]; ok {
+				item.SetTitle(fmt.Sprintf("%s (%d tools)", name, toolCounts[name]))
+			}
+		}
+	}
+
+	// Reconcile checkmarks against the active profile.
+	for key, item := range m.profileMenuItems {
+		if key == active {
+			item.Check()
+		} else {
+			item.Uncheck()
+		}
+	}
+	m.latestActiveProfile = active
+}
+
+// profileSetChanged reports whether the sorted profile slug list differs from
+// what is currently rendered (excluding the synthetic "All servers" entry).
+func (m *MenuManager) profileSetChanged(names []string) bool {
+	if len(m.profileMenuItems) == 0 {
+		return true
+	}
+	if len(names) != len(m.latestProfileNames) {
+		return true
+	}
+	for i := range names {
+		if names[i] != m.latestProfileNames[i] {
+			return true
+		}
+	}
+	return false
+}
+
+// wireProfileClick starts a goroutine that forwards clicks on a profile entry to
+// the action callback as a "switch_profile" action keyed by the profile slug.
+func (m *MenuManager) wireProfileClick(slug string, item *systray.MenuItem) {
+	go func(name string, it *systray.MenuItem) {
+		for range it.ClickedCh {
+			if m.onServerAction != nil {
+				go m.onServerAction(name, "switch_profile")
+			}
+		}
+	}(slug, item)
+}
+
+// profileMenuTitle renders the top-level profile menu label with the active
+// selection, e.g. "Profile: research" or "Profile: All servers".
+func profileMenuTitle(active string) string {
+	if active == profileAllServersKey {
+		return "Profile: All servers"
+	}
+	return fmt.Sprintf("Profile: %s", active)
 }
 
 // UpdateUpstreamServersMenu updates the upstream servers menu without duplicates
@@ -494,7 +596,7 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 	// --- Create Info Items if Needed ---
 	if m.quarantineInfoEmpty == nil || m.quarantineInfoHelp == nil {
 		m.quarantineInfoEmpty = m.quarantineMenu.AddSubMenuItem("(No servers quarantined)", "No servers are currently quarantined")
-		m.quarantineInfoHelp = m.quarantineMenu.AddSubMenuItem("Click to unquarantine", "Click on a quarantined server to remove it from quarantine")
+		m.quarantineInfoHelp = m.quarantineMenu.AddSubMenuItem("Click a server to review", "Review captured tools before approving a quarantined server")
 		m.quarantineInfoEmpty.Disable()
 		m.quarantineInfoHelp.Disable()
 		// Add empty separator for visual separation
@@ -563,7 +665,7 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 
 			quarantineMenuItem := m.quarantineMenu.AddSubMenuItem(
 				displayText,
-				fmt.Sprintf("Click to unquarantine %s", serverName),
+				fmt.Sprintf("Click to review %s in the Web UI", serverName),
 			)
 
 			if quarantineMenuItem == nil {
@@ -581,15 +683,7 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 
 			m.quarantineMenuItems[serverName] = quarantineMenuItem
 
-			// Set up the one-time click handler
-			go func(name string, item *systray.MenuItem) {
-				for range item.ClickedCh {
-					if m.onServerAction != nil {
-						// Run in a new goroutine to avoid blocking the event channel
-						go m.onServerAction(name, "unquarantine")
-					}
-				}
-			}(serverName, quarantineMenuItem)
+			m.wireQuarantineMenuItemReviewClick(serverName, quarantineMenuItem)
 		}
 	} else {
 		// No new quarantined servers - just update existing items
@@ -607,6 +701,38 @@ func (m *MenuManager) UpdateQuarantineMenu(quarantinedServers []map[string]inter
 				menuItem.Hide()
 			}
 		}
+	}
+}
+
+// wireQuarantineMenuItemReviewClick keeps the native menu event wired to the
+// informed review flow. The callback runs asynchronously so a click cannot
+// block systray's event channel while the Web UI opens.
+func wireQuarantineMenuItemReviewClick(name string, item *systray.MenuItem, onServerAction func(string, string)) {
+	if item == nil {
+		return
+	}
+	go func() {
+		for range item.ClickedCh {
+			if onServerAction != nil {
+				go onServerAction(name, "review")
+			}
+		}
+	}()
+}
+
+// wireQuarantineMenuItemReviewClick resolves the callback at click time. The
+// first synchronization can create native menu items before tray startup has
+// installed its action handler.
+func (m *MenuManager) wireQuarantineMenuItemReviewClick(name string, item *systray.MenuItem) {
+	wireQuarantineMenuItemReviewClick(name, item, m.dispatchServerAction)
+}
+
+func (m *MenuManager) dispatchServerAction(name, action string) {
+	m.mu.RLock()
+	callback := m.onServerAction
+	m.mu.RUnlock()
+	if callback != nil {
+		callback(name, action)
 	}
 }
 
@@ -653,6 +779,8 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 	var statusText string
 	var iconPath string
 
+	connected, _ := server["connected"].(bool)
+
 	// Extract unified health status from server data
 	healthData, hasHealth := server["health"].(map[string]interface{})
 	if hasHealth {
@@ -660,6 +788,7 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 		healthLevel, _ := healthData["level"].(string)
 		healthAdminState, _ := healthData["admin_state"].(string)
 		healthSummary, _ := healthData["summary"].(string)
+		healthStatus, _ := healthData["status"].(string)
 
 		// Determine status icon based on admin_state first, then health level
 		switch healthAdminState {
@@ -687,16 +816,29 @@ func (m *MenuManager) getServerStatusDisplay(server map[string]interface{}) (dis
 			}
 		}
 
-		// Use health.summary for status text
-		if healthSummary != "" {
+		// Use health.summary for status text. No CalculateHealth branch leaves
+		// Summary empty today, but a version-skew payload (an older core
+		// talking to a newer tray, or vice versa) might, so fall back to the
+		// shared status-vocabulary label (Spec 109 FR-014) rather than the raw
+		// severity level — health.level is a badge/tray-coloring signal only
+		// and must never be printed as text, matching the Web UI's own guard
+		// (frontend/src/utils/health.ts healthStatusText). If a payload
+		// somehow leaves BOTH summary and status empty too, fall back one
+		// step further to connected/disconnected text, exactly like that
+		// same Web UI guard — never to the raw level.
+		switch {
+		case healthSummary != "":
 			statusText = healthSummary
-		} else {
-			statusText = healthLevel
+		case healthStatus != "":
+			statusText = health.StatusLabel(healthStatus)
+		case connected:
+			statusText = "Connected"
+		default:
+			statusText = "Disconnected"
 		}
 	} else {
 		// Fallback to legacy logic if health field not present
 		enabled, _ := server["enabled"].(bool)
-		connected, _ := server["connected"].(bool)
 		quarantined, _ := server["quarantined"].(bool)
 		toolCount, _ := server["tool_count"].(int)
 		statusValue, _ := server["status"].(string)
@@ -1139,6 +1281,17 @@ func (m *SynchronizationManager) performSync() error {
 		m.menuManager.UpdateQuarantineMenu(quarantinedServers)
 	}
 
+	// Refresh the profile switcher (Profiles v2 T5). Re-reading the active
+	// profile each sync is how a switch made by another client is reflected in
+	// the tray. Profile errors are non-fatal: keep the rest of the menu fresh.
+	if profiles, profErr := m.server.GetProfiles(); profErr != nil {
+		m.logger.Debug("Failed to get profiles, skipping profile menu update", zap.Error(profErr))
+	} else if active, activeErr := m.server.GetActiveProfile(); activeErr != nil {
+		m.logger.Debug("Failed to get active profile, skipping profile menu update", zap.Error(activeErr))
+	} else {
+		m.menuManager.UpdateProfilesMenu(profiles, active)
+	}
+
 	if m.onSync != nil {
 		m.onSync()
 	}
@@ -1154,19 +1307,6 @@ func (m *SynchronizationManager) HandleServerQuarantine(serverName string, quara
 
 	// Update state
 	if err := m.stateManager.QuarantineServer(serverName, quarantined); err != nil {
-		return err
-	}
-
-	// Force immediate sync
-	return m.SyncNow()
-}
-
-// HandleServerUnquarantine handles server unquarantine with full synchronization
-func (m *SynchronizationManager) HandleServerUnquarantine(serverName string) error {
-	m.logger.Info("Handling server unquarantine", zap.String("server", serverName))
-
-	// Update state
-	if err := m.stateManager.UnquarantineServer(serverName); err != nil {
 		return err
 	}
 
@@ -1257,4 +1397,3 @@ func extractHealthLevel(server map[string]interface{}) string {
 
 	return ""
 }
-

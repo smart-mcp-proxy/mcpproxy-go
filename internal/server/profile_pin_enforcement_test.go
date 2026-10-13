@@ -1,0 +1,192 @@
+package server
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+)
+
+// A profile pin is only a security boundary if EVERY dispatch surface resolves
+// it. These tests cover the three surfaces that read the resolver (or used to
+// skip it) besides retrieve_tools/call_tool: the code_execution sandbox,
+// direct-routing mode, and the set_profile response.
+//
+// Each case is exercised twice — with the pinned profile present (it narrows)
+// and after it has been deleted (it denies) — because a surface that ignores
+// profiles entirely passes the second assertion for the wrong reason.
+
+func pinnedProxy(t *testing.T, profiles []config.ProfileConfig) (*MCPProxyServer, *config.Config) {
+	t.Helper()
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "research-srv", Enabled: true},
+			{Name: "deploy-srv", Enabled: true},
+		},
+		Profiles: profiles,
+	}
+	return &MCPProxyServer{config: cfg, sessionStore: NewSessionStore(zap.NewNop()), logger: zap.NewNop()}, cfg
+}
+
+// pinnedAgentContext is a token scoped to BOTH servers but pinned to one
+// profile — the pin, not the token scope, is what must bound it.
+func pinnedAgentContext(pin string) context.Context {
+	return auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		AgentName:      "pinned-agent",
+		ProfilePin:     pin,
+		AllowedServers: []string{"research-srv", "deploy-srv"},
+		Permissions:    []string{auth.PermRead, auth.PermWrite},
+	})
+}
+
+// The sandbox used to read the URL-injected scope only, so a token pinned on
+// the BASE /mcp endpoint (no URL scope) ran with its full token scope.
+func TestCodeExecutionHonorsTokenProfilePin(t *testing.T) {
+	proxy, cfg := pinnedProxy(t, []config.ProfileConfig{
+		{Name: "research", Servers: []string{"research-srv"}},
+	})
+	ctx := pinnedAgentContext("research")
+
+	opts := jsruntime.ExecutionOptions{}
+	proxy.applyProfileScopeToExecution(ctx, &opts)
+	assert.True(t, opts.RestrictToAllowed, "an active pin must restrict the sandbox")
+	assert.Equal(t, []string{"research-srv"}, opts.AllowedServers,
+		"the sandbox must see the pinned profile's servers, not the token's wider scope")
+
+	// A caller-supplied allow-list can only narrow further, never widen.
+	opts = jsruntime.ExecutionOptions{AllowedServers: []string{"research-srv", "deploy-srv"}}
+	proxy.applyProfileScopeToExecution(ctx, &opts)
+	assert.Equal(t, []string{"research-srv"}, opts.AllowedServers)
+
+	// The operator deletes the pinned profile: deny-all, and RestrictToAllowed
+	// must stay set — the jsruntime reads an empty allow-list as "allow all".
+	cfg.Profiles = nil
+	opts = jsruntime.ExecutionOptions{}
+	proxy.applyProfileScopeToExecution(ctx, &opts)
+	assert.True(t, opts.RestrictToAllowed)
+	assert.Empty(t, opts.AllowedServers, "a stale pin must leave the sandbox with no reachable server")
+
+	// An unpinned, unprofiled request is untouched (allow-all stays allow-all).
+	opts = jsruntime.ExecutionOptions{}
+	proxy.applyProfileScopeToExecution(context.Background(), &opts)
+	assert.False(t, opts.RestrictToAllowed)
+	assert.Nil(t, opts.AllowedServers)
+
+	// nil options is a no-op, not a panic.
+	assert.NotPanics(t, func() { proxy.applyProfileScopeToExecution(ctx, nil) })
+}
+
+// Direct-routing mode registers upstream tools as server__tool and enforced only
+// the token's allowed_servers — no profile at all. A pinned token therefore saw
+// and could call every server in its token scope.
+func TestDirectModeHonorsTokenProfilePin(t *testing.T) {
+	proxy, cfg := pinnedProxy(t, []config.ProfileConfig{
+		{Name: "research", Servers: []string{"research-srv"}},
+	})
+	publishPermsCatalog(proxy, map[string]string{
+		"research-srv__search": auth.PermRead,
+		"deploy-srv__ship":     auth.PermRead,
+	})
+	tools := []mcp.Tool{{Name: "research-srv__search"}, {Name: "deploy-srv__ship"}}
+	ctx := pinnedAgentContext("research")
+
+	names := func(filtered []mcp.Tool) []string {
+		out := make([]string, 0, len(filtered))
+		for _, tool := range filtered {
+			out = append(out, tool.Name)
+		}
+		return out
+	}
+
+	assert.Equal(t, []string{"research-srv__search"}, names(proxy.filterDirectModeToolsForAuth(ctx, tools)),
+		"direct-mode discovery must drop tools outside the pinned profile")
+
+	handler := proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "deploy-srv", ToolName: "ship", DisplayName: FormatDirectToolName("deploy-srv", "ship"), Annotations: nil})
+	result, err := handler(ctx, mcp.CallToolRequest{})
+	// Spec 105 FR-008 gap G5 (D12): the refusal must not name the profile-out
+	// server "deploy-srv" — invoking the registered handler directly, as this
+	// test does, exercises its defense-in-depth check, which now echoes only
+	// the caller-supplied tool name, matching an unregistered name's wording.
+	// Returned as the handler's own error (PR #1326 review round 2, chunk C),
+	// not a NewToolResultError, so the envelope KIND matches too.
+	//
+	// An EXACT match, not Contains: a loose substring check would still pass
+	// a message that echoes the expected prefix AND appends extra
+	// disclosure (e.g. "... not found (server deploy-srv is not in profile
+	// 'research')"). The full string is the only check that rules that out.
+	require.Nil(t, result, "the handler's own defense-in-depth refusal must not be a tool-result")
+	require.Error(t, err, "a call outside the pinned profile must be refused")
+	assert.Equal(t, "tool 'deploy-srv__ship' not found: tool not found", err.Error(),
+		"the refusal must be EXACTLY the unregistered-name wording, with nothing appended that could leak the scope reason")
+
+	// Profile deleted → deny-all on both discovery and dispatch.
+	cfg.Profiles = nil
+	assert.Empty(t, proxy.filterDirectModeToolsForAuth(ctx, tools),
+		"a stale pin must hide every direct-mode tool")
+
+	handler = proxy.makeDirectModeHandler(&directCatalogEntry{ServerName: "research-srv", ToolName: "search", DisplayName: FormatDirectToolName("research-srv", "search"), Annotations: nil})
+	result, err = handler(ctx, mcp.CallToolRequest{})
+	require.Nil(t, result, "the handler's own defense-in-depth refusal must not be a tool-result")
+	require.Error(t, err, "a stale pin must refuse even the formerly pinned server")
+	assert.Equal(t, "tool 'research-srv__search' not found: tool not found", err.Error(),
+		"the refusal must be EXACTLY the unregistered-name wording even for the formerly pinned server")
+
+	// An admin (no auth context, no profile) is unaffected.
+	assert.Len(t, proxy.filterDirectModeToolsForAuth(context.Background(), tools), 2)
+}
+
+// set_profile("") clears the session tier, which a pin outranks anyway. The
+// response must describe the scope that remains, not the full server list —
+// and, since Spec 105 FR-003 (G7), report the STORED selection ("") as
+// `active_profile` rather than echoing the pin (inverted from the pre-105
+// expectation; the pin is a credential restriction, not a session selection).
+// A prior selection is seeded so "cleared" is an observable store change,
+// not the fixture's initial state.
+func TestSetProfileClearReportsPinnedScope(t *testing.T) {
+	proxy, cfg := pinnedProxy(t, []config.ProfileConfig{
+		{Name: "research", Servers: []string{"research-srv"}},
+	})
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	ctx := helper.WithContext(pinnedAgentContext("research"), &fakeClientSession{id: "sess-pin-clear"})
+	proxy.sessionStore.SetActiveProfile("sess-pin-clear", "research")
+
+	request := mcp.CallToolRequest{}
+	request.Params.Arguments = map[string]interface{}{"profile": ""}
+
+	result, err := proxy.handleSetProfile(ctx, request)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	payload := decodeSetProfilePayload(t, result)
+	assert.Equal(t, "", payload["active_profile"], "the pin is not a stored selection")
+	assert.Equal(t, string(profile.SourceNone), payload["profile_source"], "clearing hides the credential's base profile")
+	assert.Equal(t, "", proxy.sessionStore.GetActiveProfile("sess-pin-clear"), "the stored selection must be cleared")
+	assert.Equal(t, []interface{}{"research-srv"}, payload["servers"],
+		"clearing must not advertise servers the pin still denies")
+
+	// With the pinned profile deleted, the honest answer is an empty list.
+	cfg.Profiles = nil
+	result, err = proxy.handleSetProfile(ctx, request)
+	require.NoError(t, err)
+	require.False(t, result.IsError)
+	payload = decodeSetProfilePayload(t, result)
+	assert.Equal(t, "", payload["active_profile"])
+	assert.Empty(t, payload["servers"])
+}
+
+func decodeSetProfilePayload(t *testing.T, result *mcp.CallToolResult) map[string]interface{} {
+	t.Helper()
+	var payload map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(resultText(t, result)), &payload))
+	return payload
+}

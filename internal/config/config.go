@@ -1,15 +1,18 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 )
 
@@ -24,7 +27,34 @@ const (
 	RoutingModeRetrieveTools = "retrieve_tools" // Default: BM25 search via retrieve_tools + call_tool_read/write/destructive
 	RoutingModeDirect        = "direct"         // All upstream tools exposed directly with serverName__toolName naming
 	RoutingModeCodeExecution = "code_execution" // JS orchestration via code_execution tool with tool catalog
+
+	// Tool response mode constants (Spec 085)
+	ToolResponseModeFull    = "full"    // Default: today's schema-bearing retrieve_tools entries
+	ToolResponseModeCompact = "compact" // Compact signatures + first-sentence descriptions
+
+	// Direct-surface serialization constants (Spec 102). A SEPARATE axis from
+	// ToolResponseMode above: that one governs the retrieve_tools surface, this
+	// one governs the direct enumeration surface (/mcp/all, and /mcp plus the
+	// legacy aliases when routing_mode is "direct"). They are orthogonal, and
+	// compact + deferred is a legal combination in which each governs only its
+	// own surface (plan.md D1).
+	DirectToolResponseModeFull     = "full"     // Default: today's schema-bearing direct entries
+	DirectToolResponseModeDeferred = "deferred" // Signature-suffixed descriptions, permissive schema
 )
+
+// ResolveRoutingMode resolves a configured routing mode to the one actually
+// served, mirroring MCPProxyServer.GetMCPServerForMode: unset — and anything
+// unrecognised — falls back to retrieve_tools. Callers that report "the routing
+// mode" to an operator must resolve first, or a config holding "" reads as a
+// mode nobody can act on.
+func ResolveRoutingMode(mode string) string {
+	switch mode {
+	case RoutingModeDirect, RoutingModeCodeExecution, RoutingModeRetrieveTools:
+		return mode
+	default:
+		return RoutingModeRetrieveTools
+	}
+}
 
 // Duration is a wrapper around time.Duration that can be marshaled to/from JSON.
 // When serialized to JSON, it is represented as a string (e.g., "30s", "5m").
@@ -63,7 +93,75 @@ func (d Duration) Duration() time.Duration {
 const (
 	defaultHealthCheckInterval   = 30 * time.Second
 	defaultToolDiscoveryInterval = 5 * time.Minute
+	// defaultInitTimeout is the deadline applied to a stdio/HTTP upstream's MCP
+	// `initialize` handshake when no per-server or global override is set
+	// (MCP-3322 / GH #760). It preserves the historical ~30s behaviour.
+	defaultInitTimeout = 30 * time.Second
+
+	// Built-in defaults for the HTTP server's request deadlines (GH #965).
+	// Like the intervals above they live here (not in DefaultConfig) so an
+	// unset key resolves to the built-in behaviour and existing configs are
+	// unchanged.
+	defaultHTTPReadTimeout = 120 * time.Second
+	// defaultHTTPWriteTimeout stays at 120s (GH #965). A write deadline is a
+	// wall-clock cap on the ENTIRE response counted from the moment the request
+	// headers were read, so it must NOT apply to long tool calls or event
+	// streams — but it is real slow-reader protection for everything else, and
+	// dropping it globally would strip that protection from REST, Web UI and
+	// health endpoints on non-loopback deployments.
+	//
+	// The streaming routes are exempted per-request instead: the MCP endpoints
+	// (/mcp*, plus the legacy /v1/tool_code and /v1/tool-code aliases) and the
+	// SSE /events stream clear their own write deadline via
+	// http.ResponseController, so this default never truncates them. Setting the
+	// key to "0s" still disables the deadline globally.
+	defaultHTTPWriteTimeout = 120 * time.Second
+	defaultHTTPIdleTimeout  = 180 * time.Second
 )
+
+// resolveHTTPTimeout applies the tri-state contract shared by the three HTTP
+// server deadlines (GH #965): nil = the built-in default, a pointer to 0 =
+// DISABLED (net/http's zero value means "no deadline" — except IdleTimeout,
+// where net/http falls back to ReadTimeout; see ResolveHTTPIdleTimeout), a
+// positive value = that
+// value. A negative value falls back to the default — validation rejects those
+// anyway, this only keeps a hand-edited file from producing a nonsense deadline.
+//
+// Note the deliberate asymmetry with ResolveInitTimeout, where 0 maps back to
+// the default: a connect handshake must always have a ceiling, whereas "no
+// response deadline at all" is a legitimate HTTP setting an operator may want.
+func resolveHTTPTimeout(v *Duration, def time.Duration) time.Duration {
+	if v == nil {
+		return def
+	}
+	if d := v.Duration(); d >= 0 {
+		return d
+	}
+	return def
+}
+
+// ResolveHTTPReadTimeout resolves http.Server.ReadTimeout: unset → 120s,
+// 0 → disabled, positive → that value (GH #965).
+func (c *Config) ResolveHTTPReadTimeout() time.Duration {
+	return resolveHTTPTimeout(c.HTTPReadTimeout, defaultHTTPReadTimeout)
+}
+
+// ResolveHTTPWriteTimeout resolves http.Server.WriteTimeout: unset → 120s,
+// 0 → disabled, positive → that value (GH #965). Streaming routes (MCP + SSE
+// /events) clear the resulting deadline per-request, so this value only
+// governs non-streaming endpoints — see defaultHTTPWriteTimeout.
+func (c *Config) ResolveHTTPWriteTimeout() time.Duration {
+	return resolveHTTPTimeout(c.HTTPWriteTimeout, defaultHTTPWriteTimeout)
+}
+
+// ResolveHTTPIdleTimeout resolves http.Server.IdleTimeout: unset → 180s,
+// 0 → no idle deadline of its own, positive → that value (GH #965). NOTE:
+// net/http falls back to ReadTimeout when IdleTimeout is zero, so an explicit
+// "0s" here fully disables the idle deadline only when http_read_timeout is
+// also 0 — otherwise idle connections are reaped after the read timeout.
+func (c *Config) ResolveHTTPIdleTimeout() time.Duration {
+	return resolveHTTPTimeout(c.HTTPIdleTimeout, defaultHTTPIdleTimeout)
+}
 
 // resolveInterval applies the per-server → global → default precedence for an
 // optional *Duration. A non-nil pointer wins at each level, including a pointer
@@ -102,6 +200,52 @@ func (c *Config) ResolveToolDiscoveryInterval(sc *ServerConfig) time.Duration {
 	return resolveInterval(server, c.ToolDiscoveryInterval, defaultToolDiscoveryInterval)
 }
 
+// ResolveInitTimeout resolves the effective MCP `initialize` handshake deadline
+// for a server: per-server override → global → 30s default (MCP-3322 / GH #760).
+// Unlike the discovery intervals, a resolved value <= 0 maps to the default
+// rather than "disabled" — a zero/negative connect deadline would let a stuck
+// upstream hang the connect path forever, so we always keep a real ceiling.
+func (c *Config) ResolveInitTimeout(sc *ServerConfig) time.Duration {
+	var server *Duration
+	if sc != nil {
+		server = sc.InitTimeout
+	}
+	resolved := resolveInterval(server, c.InitTimeout, defaultInitTimeout)
+	if resolved <= 0 {
+		return defaultInitTimeout
+	}
+	return resolved
+}
+
+// isValidToonOutput reports whether s is an acceptable toon_output value
+// (spec 084, FR-001). Empty is valid: it means "off" at the top level and
+// "inherit global" per-server. The enum is duplicated from toonenc.Mode by
+// design — internal/config must not import internal/toonenc (finding 4).
+func isValidToonOutput(s string) bool {
+	switch s {
+	case "", "off", "adaptive", "always":
+		return true
+	default:
+		return false
+	}
+}
+
+// ResolveToonOutput resolves the effective toon_output mode for a server
+// (spec 084, FR-001): per-server non-empty value > global non-empty value >
+// "off". It deliberately returns a raw string, NOT a toonenc.Mode —
+// internal/config is imported almost everywhere and must not depend on
+// internal/toonenc; callers parse the string via toonenc.ParseMode at the
+// server/bench boundary.
+func (c *Config) ResolveToonOutput(sc *ServerConfig) string {
+	if sc != nil && sc.ToonOutput != "" {
+		return sc.ToonOutput
+	}
+	if c.ToonOutput != "" {
+		return c.ToonOutput
+	}
+	return "off"
+}
+
 // Config represents the main configuration structure
 type Config struct {
 	Listen       string `json:"listen" mapstructure:"listen"`
@@ -116,12 +260,60 @@ type Config struct {
 	// (Spec 057). Absent/empty is fully supported — /mcp is unchanged and configs
 	// without this key serialize byte-identically (SC-004).
 	Profiles []ProfileConfig `json:"profiles,omitempty" mapstructure:"profiles"`
+	// AnonymousProfile confines every caller whose request authenticates as
+	// credential kind "anonymous" (no credential, or an unrecognised
+	// non-agent token accepted by the require_mcp_auth:false back-compat
+	// branch) to the named profile (Spec 108 FR-008). Empty (default) means
+	// unconfined, legacy anonymous behaviour. A name that does not match any
+	// configured profile resolves anonymous callers to deny-all and is
+	// reported as a validation warning (data-model.md §1).
+	AnonymousProfile string `json:"anonymous_profile,omitempty" mapstructure:"anonymous-profile"`
 	// Deprecated: TopK is superseded by ToolsLimit and has no runtime effect. Kept for backward compatibility.
-	TopK               int      `json:"top_k,omitempty" mapstructure:"top-k"`
-	ToolsLimit         int      `json:"tools_limit" mapstructure:"tools-limit"`
-	ToolResponseLimit  int      `json:"tool_response_limit" mapstructure:"tool-response-limit"`
-	CallToolTimeout    Duration `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
-	MaxResultSizeChars int      `json:"max_result_size_chars,omitempty" mapstructure:"max-result-size-chars"` // Advertised on every tool as `_meta.anthropic/maxResultSizeChars`; raises Claude Code's inline-response ceiling from 50k to up to 500k chars. Set to 0 to disable.
+	TopK              int      `json:"top_k,omitempty" mapstructure:"top-k"`
+	ToolsLimit        int      `json:"tools_limit" mapstructure:"tools-limit"`
+	ToolResponseLimit int      `json:"tool_response_limit" mapstructure:"tool-response-limit"`
+	CallToolTimeout   Duration `json:"call_tool_timeout" mapstructure:"call-tool-timeout" swaggertype:"string"`
+	// MaxResultSizeChars is advertised on every tool as
+	// `_meta.anthropic/maxResultSizeChars`; it raises Claude Code's
+	// inline-response ceiling from 50k to up to 500k chars. Omit the key for
+	// the 500000 default; set it to 0 to disable the annotation.
+	MaxResultSizeChars *int `json:"max_result_size_chars,omitempty" mapstructure:"max-result-size-chars"`
+
+	// Concurrency limits (spec 093, GH #955). Scope (a) of FR-020: the GLOBAL
+	// AGGREGATE limiter — one proxy-wide cap on concurrently running upstream
+	// tool calls, with its own bounded wait queue. Tri-state pointers: absent =
+	// the limiter does not exist (default, zero behavior change); an explicit 0
+	// max also disables it; positive = that cap. This scope is NEVER a
+	// per-server inheritance source — per-server values come from
+	// ServerConcurrencyDefaults / the per-server overrides — but a server's
+	// effective concurrency is bounded by BOTH its own limiter and this one.
+	// Resolved by ResolveGlobalConcurrency; hot-reloadable; overridable via
+	// MCPPROXY_MAX_CONCURRENT_REQUESTS / _QUEUE_SIZE / _QUEUE_TIMEOUT (FR-022).
+	MaxConcurrentRequests *int      `json:"max_concurrent_requests,omitempty" mapstructure:"max-concurrent-requests"`
+	QueueSize             *int      `json:"queue_size,omitempty" mapstructure:"queue-size"`
+	QueueTimeout          *Duration `json:"queue_timeout,omitempty" mapstructure:"queue-timeout" swaggertype:"string"`
+
+	// ServerConcurrencyDefaults is scope (b) of FR-020: the blanket per-server
+	// default set inherited by every server that does not override a setting.
+	// Absent (the default) = no per-server limiting unless a server configures
+	// it explicitly. File/API-configured only — no env scheme (FR-022).
+	ServerConcurrencyDefaults *ConcurrencyDefaults `json:"server_concurrency_defaults,omitempty" mapstructure:"server-concurrency-defaults"`
+
+	// ToonOutput selects the TOON encoding mode for call_tool_* result text
+	// blocks (spec 084): "off" (default — responses byte-identical to
+	// pre-feature behavior), "adaptive" (encode only tabular-uniform payloads
+	// that beat compact JSON by ToonMinSavingsPct), or "always"
+	// (benchmark/debug only — encodes every JSON-parseable block and can
+	// INCREASE token cost). Per-server override: ServerConfig.ToonOutput.
+	// Resolved by ResolveToonOutput; hot-reloadable.
+	ToonOutput string `json:"toon_output,omitempty" mapstructure:"toon-output"`
+	// ToonMinSavingsPct is the minimum byte-savings percentage (validated
+	// 1-90; 0/unset → 15) the complete TOON emission (marker + hint + body)
+	// must achieve over the exact passthrough emission for adaptive mode to
+	// encode a block. Byte savings approximate token savings for the tabular
+	// payload class; the spec-083 profiler reports true token deltas.
+	// Global-only (no per-server override, FR-001).
+	ToonMinSavingsPct int `json:"toon_min_savings_pct,omitempty" mapstructure:"toon-min-savings-pct"`
 
 	// ToolOutputRoots is the whitelist of absolute directory prefixes the
 	// `save_to_file` parameter on call_tool_read/write/destructive is allowed
@@ -147,6 +339,47 @@ type Config struct {
 	HealthCheckInterval   *Duration `json:"health_check_interval,omitempty" mapstructure:"health-check-interval" swaggertype:"string"`
 	ToolDiscoveryInterval *Duration `json:"tool_discovery_interval,omitempty" mapstructure:"tool-discovery-interval" swaggertype:"string"`
 
+	// InitTimeout is the global default deadline for an upstream's MCP
+	// `initialize` handshake (MCP-3322 / GH #760). *Duration tri-state: nil =
+	// inherit the built-in 30s default; a positive value = that deadline. A
+	// per-server InitTimeout overrides this. Resolved by ResolveInitTimeout;
+	// validated to {0} ∪ [1s, 30m] in Validate(). Servers doing legitimate
+	// first-run warmup (cache/index build) before answering `initialize` can
+	// raise this so they are not killed mid-startup.
+	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init-timeout" swaggertype:"string"`
+
+	// HTTP server request deadlines (GH #965). *Duration tri-state: nil =
+	// inherit the built-in default; a pointer to 0s = DISABLED (no deadline —
+	// with the idle-timeout caveat noted on HTTPIdleTimeout); a positive value
+	// = that deadline. Validated to {0} ∪ [1s, 24h].
+	//
+	// Unlike init_timeout, an explicit 0 here is a SUPPORTED value, not a
+	// synonym for the default: net/http treats a zero deadline as "no timeout".
+	// Long-running tool calls and the SSE /events stream do not need that
+	// escape hatch, though — the MCP endpoints (/mcp*, plus the legacy
+	// /v1/tool_code and /v1/tool-code aliases) and /events clear their own
+	// per-request write deadline via http.ResponseController, so the write
+	// default only governs non-streaming endpoints (REST, Web UI, health).
+	//
+	// These are baked into http.Server at bind time, so changing any of them
+	// REQUIRES A RESTART (DetectConfigChanges reports it as such). Resolved by
+	// ResolveHTTPReadTimeout / ResolveHTTPWriteTimeout / ResolveHTTPIdleTimeout.
+	// Note that call_tool_timeout separately caps tool execution (default 2m):
+	// raise it too when allowing tool calls longer than two minutes.
+
+	// HTTPReadTimeout caps how long reading a whole request (headers + body)
+	// may take. Unset = 120s; "0s" disables it. Requires a restart.
+	HTTPReadTimeout *Duration `json:"http_read_timeout,omitempty" mapstructure:"http-read-timeout" swaggertype:"string"`
+	// HTTPWriteTimeout caps how long producing a whole response may take on
+	// non-streaming endpoints (REST, Web UI, health). Unset = 120s; "0s"
+	// disables it globally. MCP and SSE /events routes are exempt by design.
+	HTTPWriteTimeout *Duration `json:"http_write_timeout,omitempty" mapstructure:"http-write-timeout" swaggertype:"string"`
+	// HTTPIdleTimeout caps how long an idle keep-alive connection is kept open.
+	// Unset = 180s. "0s" removes the dedicated idle deadline, but net/http then
+	// falls back to ReadTimeout — idle is fully unbounded only when
+	// http_read_timeout is also "0s". Requires a restart.
+	HTTPIdleTimeout *Duration `json:"http_idle_timeout,omitempty" mapstructure:"http-idle-timeout" swaggertype:"string"`
+
 	// Environment configuration for secure variable filtering
 	Environment *secureenv.EnvConfig `json:"environment,omitempty" mapstructure:"environment"`
 
@@ -161,12 +394,45 @@ type Config struct {
 	Logging *LogConfig `json:"logging,omitempty" mapstructure:"logging"`
 
 	// Security settings
-	APIKey            string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
-	RequireMCPAuth    bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"` // Require authentication on /mcp endpoint (default: false)
-	ReadOnlyMode      bool   `json:"read_only_mode" mapstructure:"read-only-mode"`
-	DisableManagement bool   `json:"disable_management" mapstructure:"disable-management"`
-	AllowServerAdd    bool   `json:"allow_server_add" mapstructure:"allow-server-add"`
-	AllowServerRemove bool   `json:"allow_server_remove" mapstructure:"allow-server-remove"`
+	APIKey         string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
+	RequireMCPAuth bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"` // Require authentication on /mcp endpoint (default: false)
+	// TrustedHosts lists non-loopback Host header values accepted on loopback
+	// listeners (GH #898). DNS-rebinding protection rejects requests whose Host
+	// header is not a loopback address when mcpproxy listens on loopback; a
+	// reverse proxy (nginx → 127.0.0.1) forwarding the public domain in Host
+	// trips it. Entries are hostnames, case-insensitive; an entry without a
+	// port matches any port, with a port it must match exactly; a leading dot
+	// (".example.com") is a subdomain wildcard. The single entry "*" disables
+	// Host and Origin validation entirely. The same list also validates the
+	// Origin header when present (MCP spec DNS-rebinding defense). Empty
+	// (default) keeps full protection. Env override: MCPPROXY_TRUSTED_HOSTS
+	// (comma-separated).
+	TrustedHosts []string `json:"trusted_hosts,omitempty" mapstructure:"trusted-hosts"`
+	// TrustedProxies lists the CIDRs or IP addresses whose X-Forwarded-For /
+	// X-Real-IP / X-Forwarded-Proto / X-Forwarded-Host headers are believed
+	// (Spec 107 FR-027). Empty (default) trusts nobody. Edition-neutral, live
+	// (hot-reloadable). Env override: MCPPROXY_TRUSTED_PROXIES (comma-separated).
+	// The one reader is ForwardedHeaders; validation is validateTrustedProxies.
+	TrustedProxies []string `json:"trusted_proxies,omitempty" mapstructure:"trusted-proxies"`
+
+	// ForwardClientHeaders is the global switch for client header forwarding
+	// (Spec 112): copying allowlisted headers from the inbound /mcp request into
+	// the upstream tools/call request. nil (absent) means enabled; because every
+	// per-server forward_headers allowlist is empty by default, the default
+	// forwards nothing. false disables forwarding for every server. Read via
+	// IsClientHeaderForwardingEnabled(); MCPPROXY_FORWARD_CLIENT_HEADERS
+	// overrides it for the process. Distinct from ForwardedHeaders/trusted_proxies
+	// (Spec 107), which trusts inbound X-Forwarded-*.
+	ForwardClientHeaders *bool `json:"forward_client_headers,omitempty" mapstructure:"forward-client-headers"`
+	// AuditLog configures the Spec 107 edition-neutral audit sink
+	// (internal/audit). nil means "use the per-edition/per-transport
+	// default" (EffectiveAuditLog); restart-pinned (bound at sink
+	// construction). See audit_log.go.
+	AuditLog          *AuditLogConfig `json:"audit_log,omitempty" mapstructure:"audit-log"`
+	ReadOnlyMode      bool            `json:"read_only_mode" mapstructure:"read-only-mode"`
+	DisableManagement bool            `json:"disable_management" mapstructure:"disable-management"`
+	AllowServerAdd    bool            `json:"allow_server_add" mapstructure:"allow-server-add"`
+	AllowServerRemove bool            `json:"allow_server_remove" mapstructure:"allow-server-remove"`
 
 	// Internal field to track if API key was explicitly set in config
 	apiKeyExplicitlySet bool `json:"-"`
@@ -175,8 +441,22 @@ type Config struct {
 	// empty servers) captured during Validate(), for the boot path to log.
 	profileWarnings []string `json:"-"`
 
+	// loadDiagnostics holds the non-fatal Spec 107 findings the server-build
+	// loader recorded while normalising the raw document (removed keys /
+	// modes dropped, deprecated keys retained), for LogLoadDiagnostics to
+	// emit once a logger exists. See load_diagnostics.go.
+	loadDiagnostics []LoadDiagnostic `json:"-"`
+
 	// Prompts settings
 	EnablePrompts bool `json:"enable_prompts" mapstructure:"enable-prompts"`
+
+	// AggregateUpstreamPrompts, when true, aggregates every connected upstream
+	// server's advertised MCP prompts into mcpproxy's own prompts/list
+	// (exposed as "<server>__<prompt>"). OFF by default: users are safe by
+	// default and opt in deliberately. EnablePrompts still governs the built-in
+	// prompts + the prompts capability; this flag gates ONLY the upstream
+	// aggregation performed by RefreshPrompts. Hot-reloadable.
+	AggregateUpstreamPrompts bool `json:"aggregate_upstream_prompts" mapstructure:"aggregate-upstream-prompts"`
 
 	// Repository detection settings
 	CheckServerRepo bool `json:"check_server_repo" mapstructure:"check-server-repo"`
@@ -197,6 +477,23 @@ type Config struct {
 	// beyond the add-source rejection.
 	RegistriesLocked bool `json:"registries_locked,omitempty" mapstructure:"registries-locked"`
 
+	// AllowPrivateRegistryFetch opts out of the registry SSRF guard (MCP-1076,
+	// CWE-918). By default (false) registry fetches refuse any host that is — or
+	// resolves to — a non-routable address (loopback, RFC1918/CGNAT private,
+	// link-local incl. the 169.254.169.254 cloud-metadata endpoint), so a
+	// malicious or typo'd registry source cannot turn the daemon into a
+	// request-forgery vector against internal services.
+	//
+	// This opt-out is BLANKET (all-or-nothing): setting it true disables the
+	// guard for EVERY non-routable range at once — loopback, RFC1918/CGNAT
+	// private, link-local AND the 169.254.169.254 cloud-metadata endpoint. There
+	// is no way to allow only loopback; enabling it for a localhost dev registry
+	// also re-opens the cloud-metadata SSRF vector. Set true ONLY when you
+	// intentionally run a trusted registry mirror on an internal/private address,
+	// ideally on a host with no cloud-metadata exposure. The change takes effect
+	// only on daemon (re)start or config reload.
+	AllowPrivateRegistryFetch bool `json:"allow_private_registry_fetch,omitempty" mapstructure:"allow-private-registry-fetch"`
+
 	// Deprecated: Features flags are unused and have no runtime effect. Kept for backward compatibility.
 	Features *FeatureFlags `json:"features,omitempty" mapstructure:"features"`
 
@@ -207,10 +504,11 @@ type Config struct {
 	Tokenizer *TokenizerConfig `json:"tokenizer,omitempty" mapstructure:"tokenizer"`
 
 	// Code execution settings
-	EnableCodeExecution       bool `json:"enable_code_execution" mapstructure:"enable-code-execution"`                           // Enable JavaScript code execution tool (default: false)
+	EnableCodeExecution       bool `json:"enable_code_execution" mapstructure:"enable-code-execution"`                           // Enable JavaScript code execution tool (default: true since v0.66.0)
 	CodeExecutionTimeoutMs    int  `json:"code_execution_timeout_ms,omitempty" mapstructure:"code-execution-timeout-ms"`         // Timeout in milliseconds (default: 120000, max: 600000)
 	CodeExecutionMaxToolCalls int  `json:"code_execution_max_tool_calls,omitempty" mapstructure:"code-execution-max-tool-calls"` // Max tool calls per execution (0 = unlimited, default: 0)
 	CodeExecutionPoolSize     int  `json:"code_execution_pool_size,omitempty" mapstructure:"code-execution-pool-size"`           // JavaScript runtime pool size (default: 10)
+	CodeExecutionMaxParallel  int  `json:"code_execution_max_parallel,omitempty" mapstructure:"code-execution-max-parallel"`     // Default concurrency for call_tools() batches (1-32, default: 8)
 
 	// ToolResponseSessionRiskWarning controls whether the prose `warning` field
 	// is included in the `session_risk` object returned by `retrieve_tools`.
@@ -225,11 +523,23 @@ type Config struct {
 	OAuthExpiryWarningHours float64 `json:"oauth_expiry_warning_hours,omitempty" mapstructure:"oauth-expiry-warning-hours"` // Hours before token expiry to show degraded status (default: 1.0)
 
 	// Activity logging settings (RFC-003)
-	ActivityRetentionDays      int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"`             // Max age before pruning (default: 90)
-	ActivityMaxRecords         int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`                   // Max records before pruning (default: 100000)
-	ActivityMaxSizeMB          int `json:"activity_max_size_mb,omitempty" mapstructure:"activity-max-size-mb"`                   // Max total activity-log size in MB before pruning oldest (default: 256, 0=disabled)
-	ActivityMaxResponseSize    int `json:"activity_max_response_size,omitempty" mapstructure:"activity-max-response-size"`       // Response truncation limit in bytes (default: 65536)
-	ActivityCleanupIntervalMin int `json:"activity_cleanup_interval_min,omitempty" mapstructure:"activity-cleanup-interval-min"` // Background cleanup interval in minutes (default: 60)
+	ActivityRetentionDays int `json:"activity_retention_days,omitempty" mapstructure:"activity-retention-days"` // Max age before pruning (default: 90)
+	ActivityMaxRecords    int `json:"activity_max_records,omitempty" mapstructure:"activity-max-records"`       // Max records before pruning (default: 100000)
+	// ActivityMaxSizeMB caps the total activity-log size in MB before the
+	// oldest records are pruned. Omit the key for the 256MB default; set it to
+	// 0 to disable the size cap.
+	ActivityMaxSizeMB          *int `json:"activity_max_size_mb,omitempty" mapstructure:"activity-max-size-mb"`
+	ActivityMaxResponseSize    int  `json:"activity_max_response_size,omitempty" mapstructure:"activity-max-response-size"`       // Response truncation limit in bytes (default: 65536)
+	ActivityCleanupIntervalMin int  `json:"activity_cleanup_interval_min,omitempty" mapstructure:"activity-cleanup-interval-min"` // Background cleanup interval in minutes (default: 60)
+
+	// Bounds for the per-server tool-call history behind GET /api/v1/tool-calls
+	// (#1176). It is a recent-debugging window, not an audit log — the activity
+	// log is the durable record — and it kept every upstream response whole,
+	// per server, forever. A non-positive value means "use the default", not
+	// "disable": this store must never be unbounded again, so there is
+	// deliberately no off switch.
+	ToolCallMaxResponseSize     int `json:"tool_call_max_response_size,omitempty" mapstructure:"tool-call-max-response-size"`           // Cap on a stored response, in bytes (default: 65536)
+	ToolCallMaxRecordsPerServer int `json:"tool_call_max_records_per_server,omitempty" mapstructure:"tool-call-max-records-per-server"` // Calls retained per server (default: 1000)
 
 	// Intent declaration settings (Spec 018)
 	IntentDeclaration *IntentDeclarationConfig `json:"intent_declaration,omitempty" mapstructure:"intent-declaration"`
@@ -249,13 +559,51 @@ type Config struct {
 	// Observability settings (Spec 069): usage aggregate cache/persistence cadence.
 	Observability *ObservabilityConfig `json:"observability,omitempty" mapstructure:"observability"`
 
+	// Update-check settings (Spec 079 FR-012): config-file control of the
+	// background upgrade-awareness checker (internal/updatecheck). nil =
+	// enabled on the stable channel (existing default behavior). The existing
+	// environment switches keep working and WIN over these keys (FR-014):
+	// MCPPROXY_DISABLE_AUTO_UPDATE=true force-disables even when
+	// enabled=true, and MCPPROXY_ALLOW_PRERELEASE_UPDATES=true force-selects
+	// the rc channel even when channel=stable.
+	UpdateCheck *UpdateCheckConfig `json:"update_check,omitempty" mapstructure:"update-check"`
+
 	// Routing mode (Spec 031): how MCP tools are exposed to clients
 	// Valid values: "retrieve_tools" (default), "direct", "code_execution"
 	RoutingMode string `json:"routing_mode,omitempty" mapstructure:"routing-mode"`
 
+	// Tool response mode (Spec 085): how retrieve_tools serializes results.
+	// Valid values: "" (= full), "full" (default: today's schema-bearing
+	// entries), "compact" (signature + first-sentence entries). Orthogonal to
+	// routing_mode — routing_mode selects the tool SURFACE, this selects the
+	// SERIALIZATION within the retrieve_tools surface. Serialization-only: it
+	// never affects the query, ranking, or result set. Hot-reloadable.
+	ToolResponseMode string `json:"tool_response_mode,omitempty" mapstructure:"tool-response-mode"`
+
+	// DirectToolResponseMode selects the serialization of the DIRECT
+	// enumeration surface (Spec 102). Valid values: "" (= full), "full"
+	// (default: today's schema-bearing entries), "deferred" (description +
+	// compact signature, with a minimal permissive input schema; upstream
+	// inputSchema and outputSchema are stripped and recovered on demand via
+	// describe_tool).
+	//
+	// Deliberately NOT an extension of tool_response_mode: reusing that axis
+	// would silently change /mcp/all output for every deployment already
+	// running compact, which FR-015 forbids. Serialization-only — it never
+	// changes WHICH tools are listed, only how (FR-008). Hot-reloadable.
+	DirectToolResponseMode string `json:"direct_tool_response_mode,omitempty" mapstructure:"direct-tool-response-mode"`
+
 	// Instructions text returned in the MCP initialize response to guide AI agents.
 	// When empty, a built-in default is used that explains retrieve_tools workflow.
 	Instructions string `json:"instructions,omitempty" mapstructure:"instructions"`
+
+	// AdvertiseUpstreamServers controls whether MCP clients are told the
+	// names of the upstream servers they can reach — in the initialize
+	// instructions and the retrieve_tools description — so agents use the
+	// proxied tools instead of falling back to shell CLIs. Names are always
+	// filtered to the caller's profile and agent-token scope. Default true;
+	// set false to keep server names out of client context. Read live.
+	AdvertiseUpstreamServers *bool `json:"advertise_upstream_servers,omitempty" mapstructure:"advertise-upstream-servers"`
 
 	// QuarantineEnabled controls whether quarantine is active. It gates two
 	// things together:
@@ -273,14 +621,18 @@ type Config struct {
 	// Security scanner settings (Spec 039)
 	Security *SecurityConfig `json:"security,omitempty" mapstructure:"security"`
 
-	// RevealSecretHeaders, when true, disables the redaction of sensitive
-	// header values (Authorization, X-API-Key, Cookie, …) in responses
-	// from the `upstream_servers` MCP tool, the `/api/v1/servers` REST
-	// API, and the SSE event stream.
+	// RevealSecretHeaders, when true, disables the redaction of the
+	// secret-bearing server fields — sensitive header values (Authorization,
+	// X-API-Key, Cookie, …), env-var secrets, and URL query credentials — in
+	// responses from the `upstream_servers` MCP tool, the `/api/v1/servers`
+	// REST API, and the SSE event stream. It also lets URL secrets echoed
+	// into last_error / health.detail through unscrubbed.
 	//
-	// Default false — sensitive header values are surfaced as
-	// `***REDACTED***` so an MCP agent cannot read Bearer tokens / API
-	// keys out of another upstream's config (PR #425).
+	// Default false — sensitive values are surfaced masked as
+	// `••••<last2> (<N> chars)` (error strings use `***REDACTED***`) so an
+	// MCP agent cannot read Bearer tokens / API keys / URL secrets out of
+	// another upstream's config (PR #425, issue #872). ${env:…}/${keyring:…}
+	// references are labels, not secrets, and pass through unchanged.
 	//
 	// The Web UI / macOS tray edit forms work without seeing the real
 	// values: PATCH /api/v1/servers/{id} deep-merges (omitted keys are
@@ -326,6 +678,25 @@ type LogConfig struct {
 	JSONFormat    bool   `json:"json_format" mapstructure:"json-format"`
 }
 
+// TrustMode is a per-server trust tier that governs how tool changes and
+// additions are approved (spec 086). It supersedes the legacy skip_quarantine
+// and auto_approve_tool_changes flags:
+//
+//   - TrustModeAuto   — auto-approve all changes/additions (today's
+//     skip_quarantine / auto_approve_tool_changes:true behavior).
+//   - TrustModeScan   — auto-approve a change ONLY when a synchronous, offline
+//     TPA scan of the changed tool returns a green (clean) verdict; otherwise
+//     the record is held for human review (fail closed).
+//   - TrustModeManual — never auto-approve; every change/addition is held
+//     (secure by default).
+type TrustMode string
+
+const (
+	TrustModeAuto   TrustMode = "auto"
+	TrustModeScan   TrustMode = "scan"
+	TrustModeManual TrustMode = "manual"
+)
+
 // ServerConfig represents upstream MCP server configuration
 type ServerConfig struct {
 	Name        string            `json:"name,omitempty" mapstructure:"name"`
@@ -339,6 +710,13 @@ type ServerConfig struct {
 	OAuth       *OAuthConfig      `json:"oauth" mapstructure:"oauth"`               // OAuth configuration (keep even when empty to signal OAuth requirement)
 	Enabled     bool              `json:"enabled" mapstructure:"enabled"`
 	Quarantined bool              `json:"quarantined" mapstructure:"quarantined"` // Security quarantine status
+	// quarantineExplicitlySet records whether the decoded JSON actually carried a
+	// "quarantined" key (issue #937). Quarantined is a plain bool, so an ABSENT
+	// key and an explicit `false` are otherwise indistinguishable — which is what
+	// let a hand-written mcp_config.json entry bypass the trust-mode admission
+	// gate that every add path applies. Set only by UnmarshalJSON; read via
+	// QuarantineExplicitlySet().
+	quarantineExplicitlySet bool
 	// SkipQuarantine is DEPRECATED (MCP-2930): use AutoApproveToolChanges instead.
 	// Kept for back-compat parsing; on config load a legacy skip_quarantine:true is
 	// migrated to auto_approve_tool_changes:true only when the new field is unset
@@ -354,12 +732,33 @@ type ServerConfig struct {
 	// from legacy skip_quarantine), explicit true/false = honored as-is so an
 	// explicit auto_approve_tool_changes:false overrides a legacy skip_quarantine:true.
 	// Read via IsAutoApproveToolChanges().
-	AutoApproveToolChanges *bool            `json:"auto_approve_tool_changes,omitempty" mapstructure:"auto-approve-tool-changes"` // Per-server intent to auto-approve tool changes/additions. Accepted/persisted by MCP-2930; runtime enforcement lands in MCP-2931 (until then SkipQuarantine governs behavior)
-	Shared                 bool             `json:"shared,omitempty" mapstructure:"shared"`                                       // Server edition: shared with all users
-	Created                time.Time        `json:"created" mapstructure:"created"`
-	Updated                time.Time        `json:"updated,omitempty" mapstructure:"updated"`
-	Isolation              *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
-	ReconnectOnUse         bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
+	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty" mapstructure:"auto-approve-tool-changes"` // Per-server intent to auto-approve tool changes/additions. Accepted/persisted by MCP-2930; runtime enforcement lands in MCP-2931 (until then SkipQuarantine governs behavior)
+	// TrustMode is the per-server trust tier: auto|scan|manual. Supersedes
+	// auto_approve_tool_changes (spec 086). An empty value is derived from the
+	// legacy fields at load via normalizeServerQuarantineFlags; the single
+	// resolution point is EffectiveTrustMode(), which treats an empty or
+	// unrecognized value as manual (secure by default). Read via
+	// EffectiveTrustMode(), never the raw string.
+	TrustMode      string           `json:"trust_mode,omitempty" mapstructure:"trust-mode"` // Per-server trust tier: auto|scan|manual. Supersedes auto_approve_tool_changes (086)
+	Shared         bool             `json:"shared,omitempty" mapstructure:"shared"`         // Server edition: shared with all users
+	Created        time.Time        `json:"created" mapstructure:"created"`
+	Updated        time.Time        `json:"updated,omitempty" mapstructure:"updated"`
+	Isolation      *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
+	ReconnectOnUse bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
+
+	// ExposePrompts overrides whether this server's advertised MCP prompts are
+	// aggregated into mcpproxy's prompts/list. nil (default) inherits the
+	// default-aggregate behavior (included if the server advertises
+	// Capabilities.Prompts); false excludes it regardless of capability.
+	ExposePrompts *bool `json:"expose_prompts,omitempty" mapstructure:"expose-prompts"`
+
+	// ForwardHeaders lists inbound MCP-client header NAMES (never values) that
+	// are copied into this server's upstream tools/call requests (Spec 112).
+	// Exact names, case-insensitive, at most 32, no wildcards. Empty forwards
+	// nothing. Only HTTP-based transports (http, streamable-http) forward; the
+	// deny list (Authorization, Host, hop-by-hop, ...) is enforced at runtime
+	// regardless of what is configured here.
+	ForwardHeaders []string `json:"forward_headers,omitempty" mapstructure:"forward_headers"`
 
 	// LauncherWaitTimeout caps how long mcpproxy will wait for a locally-launched
 	// HTTP/SSE upstream's URL to become reachable after Spawn(). Only consulted
@@ -378,6 +777,32 @@ type ServerConfig struct {
 	HealthCheckInterval   *Duration `json:"health_check_interval,omitempty" mapstructure:"health_check_interval" swaggertype:"string"`
 	ToolDiscoveryInterval *Duration `json:"tool_discovery_interval,omitempty" mapstructure:"tool_discovery_interval" swaggertype:"string"`
 
+	// InitTimeout overrides the global init_timeout for this server's MCP
+	// `initialize` handshake deadline (MCP-3322 / GH #760). *Duration tri-state:
+	// nil = inherit the global value (or 30s default), positive = that deadline.
+	// Resolved by Config.ResolveInitTimeout; validated to {0} ∪ [1s, 30m]. Raise
+	// this for upstreams that do legitimate first-run warmup (e.g. caching many
+	// channels/users) before responding to `initialize`.
+	InitTimeout *Duration `json:"init_timeout,omitempty" mapstructure:"init_timeout" swaggertype:"string"`
+
+	// Per-server concurrency overrides — scope (c) of FR-020 (spec 093, #955).
+	// Tri-state per setting, exactly like HealthCheckInterval: absent = inherit
+	// the per-server default set (server_concurrency_defaults), explicit 0 =
+	// disable that setting for this server (0 max = no per-server limiter at
+	// all; 0 queue_size = no pending capacity, shed immediately at the cap),
+	// positive = override. The global aggregate limiter is never inherited from
+	// here — it applies on top, so effective concurrency is min(per-server,
+	// global). Resolved by Config.ResolveServerConcurrency.
+	MaxConcurrentRequests *int      `json:"max_concurrent_requests,omitempty" mapstructure:"max_concurrent_requests"`
+	QueueSize             *int      `json:"queue_size,omitempty" mapstructure:"queue_size"`
+	QueueTimeout          *Duration `json:"queue_timeout,omitempty" mapstructure:"queue_timeout" swaggertype:"string"`
+
+	// ToonOutput overrides the global toon_output mode for this server's
+	// tools (spec 084, FR-001). Plain string, not a pointer: ""/absent =
+	// inherit the global value; "off"|"adaptive"|"always" = override ("off"
+	// is the explicit force-off). Resolved by Config.ResolveToonOutput.
+	ToonOutput string `json:"toon_output,omitempty" mapstructure:"toon_output"`
+
 	EnabledTools  []string `json:"enabled_tools,omitempty" mapstructure:"enabled_tools"`   // Allowlist: only these tools are exposed; mutually exclusive with disabled_tools
 	DisabledTools []string `json:"disabled_tools,omitempty" mapstructure:"disabled_tools"` // Denylist: these tools are hidden; mutually exclusive with enabled_tools
 
@@ -391,28 +816,76 @@ type ServerConfig struct {
 	// — and no longer gates quarantine or skip_quarantine.
 	SourceRegistryProvenance string `json:"source_registry_provenance,omitempty" mapstructure:"source_registry_provenance"`
 
-	// AuthBroker holds per-upstream token-brokering configuration (spec 074,
-	// server edition only). When set, the gateway exchanges the caller's IdP
-	// subject token for an upstream-scoped credential and injects it into the
-	// outbound request. The concrete type is build-tagged: a full struct in the
-	// server edition, an empty stub in the personal edition (which ignores it),
-	// so personal-edition behavior is unaffected. swaggerignore mirrors ServerEdition.
+	// AuthBroker holds the per-upstream `oauth_connect` credential-connect
+	// block (spec 074, server edition only). When set, a user can complete a
+	// per-user consent flow and have their credential STORED encrypted for this
+	// upstream — nothing injects it into the outbound request (Spec 107
+	// FR-034); the call path keeps using the server's own headers/oauth
+	// settings. The concrete type is build-tagged: a validated struct in the
+	// server edition, an opaque json.RawMessage carrier in the personal
+	// edition (preserved verbatim through load → save → PATCH, FR-040), so
+	// personal-edition behavior is unaffected. swaggerignore mirrors ServerEdition.
 	AuthBroker *AuthBrokerConfig `json:"auth_broker,omitempty" mapstructure:"auth_broker" swaggerignore:"true"`
 }
 
 // OAuthConfig represents OAuth configuration for a server
 type OAuthConfig struct {
-	ClientID     string            `json:"client_id,omitempty" mapstructure:"client_id"`
-	ClientSecret string            `json:"client_secret,omitempty" mapstructure:"client_secret"`
-	RedirectURI  string            `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
-	Scopes       []string          `json:"scopes,omitempty" mapstructure:"scopes"`
-	PKCEEnabled  bool              `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
-	ExtraParams  map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"` // Additional OAuth parameters (e.g., RFC 8707 resource)
+	ClientID        string            `json:"client_id,omitempty" mapstructure:"client_id"`
+	ClientSecret    string            `json:"client_secret,omitempty" mapstructure:"client_secret"`
+	RedirectURI     string            `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
+	CallbackBaseURL string            `json:"callback_base_url,omitempty" mapstructure:"callback_base_url"`
+	Scopes          []string          `json:"scopes,omitempty" mapstructure:"scopes"`
+	PKCEEnabled     bool              `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
+	ExtraParams     map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"` // Additional OAuth parameters (e.g., RFC 8707 resource)
+
+	// Spec 113-b: optional per-server discovery overrides. Each is an absolute
+	// https URL (http only on a loopback host) with no query, fragment or
+	// userinfo; validated at write time only (ValidateOAuthEndpointOverrides).
+	// The endpoint overrides rewrite the matching fields of the authorization
+	// server metadata mcp-go reads; AuthServerMetadataURL replaces discovery.
+	AuthorizationEndpoint string `json:"authorization_endpoint,omitempty" mapstructure:"authorization_endpoint"`
+	TokenEndpoint         string `json:"token_endpoint,omitempty" mapstructure:"token_endpoint"`
+	RegistrationEndpoint  string `json:"registration_endpoint,omitempty" mapstructure:"registration_endpoint"`
+	AuthServerMetadataURL string `json:"auth_server_metadata_url,omitempty" mapstructure:"auth_server_metadata_url"`
+}
+
+// IsolationMode selects how an stdio MCP server's process is isolated (MCP-34.2).
+//
+//   - "docker"  — run the server inside a Docker container (the original behavior).
+//   - "sandbox" — run under a native OS sandbox (Landlock LSM + rlimits on Linux;
+//     see MCP-34). No daemon required.
+//   - "none"    — no isolation; the server process runs directly on the host.
+//
+// The empty string means "unset": back-compat code falls back to the legacy
+// boolean Enabled flag (enabled:true ⇒ docker, enabled:false ⇒ none).
+type IsolationMode string
+
+const (
+	// IsolationModeDocker runs the server inside a Docker container.
+	IsolationModeDocker IsolationMode = "docker"
+	// IsolationModeSandbox runs the server under a native OS sandbox (Landlock/rlimits).
+	IsolationModeSandbox IsolationMode = "sandbox"
+	// IsolationModeNone disables isolation; the process runs directly.
+	IsolationModeNone IsolationMode = "none"
+)
+
+// IsValid reports whether the mode is a recognized value. The empty string
+// ("unset") is treated as valid because the global config falls back to the
+// legacy Enabled bool; callers that require an explicit mode should check for
+// emptiness separately.
+func (m IsolationMode) IsValid() bool {
+	switch m {
+	case IsolationModeDocker, IsolationModeSandbox, IsolationModeNone, "":
+		return true
+	default:
+		return false
+	}
 }
 
 // DockerIsolationConfig represents global Docker isolation settings
 type DockerIsolationConfig struct {
-	Enabled           bool              `json:"enabled" mapstructure:"enabled"`                                // Global enable/disable for Docker isolation
+	Enabled           bool              `json:"enabled" mapstructure:"enabled"`                                // Global enable/disable for Docker isolation (legacy; superseded by Mode)
+	Mode              IsolationMode     `json:"mode,omitempty" mapstructure:"mode"`                            // Isolation mode: "docker" | "sandbox" | "none". Empty falls back to Enabled (MCP-34.2)
 	EnableCacheVolume bool              `json:"enable_cache_volume" mapstructure:"enable_cache_volume"`        // Mount shared cache volumes for faster restarts (default: true)
 	DefaultImages     map[string]string `json:"default_images" mapstructure:"default_images"`                  // Map of runtime type to Docker image
 	Registry          string            `json:"registry,omitempty" mapstructure:"registry"`                    // Custom registry (defaults to docker.io)
@@ -428,23 +901,65 @@ type DockerIsolationConfig struct {
 
 // IsolationConfig represents per-server isolation settings
 type IsolationConfig struct {
-	Enabled     *bool    `json:"enabled,omitempty" mapstructure:"enabled"`             // Enable Docker isolation for this server (nil = inherit global)
-	Image       string   `json:"image,omitempty" mapstructure:"image"`                 // Custom Docker image (overrides default)
-	NetworkMode string   `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Custom network mode for this server
-	ExtraArgs   []string `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments for this server
-	WorkingDir  string   `json:"working_dir,omitempty" mapstructure:"working_dir"`     // Custom working directory in container
-	LogDriver   string   `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver override for this server
-	LogMaxSize  string   `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files override
-	LogMaxFiles string   `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files override
+	Enabled     *bool          `json:"enabled,omitempty" mapstructure:"enabled"`             // Enable Docker isolation for this server (nil = inherit global; legacy, superseded by Mode)
+	Mode        *IsolationMode `json:"mode,omitempty" mapstructure:"mode"`                   // Isolation mode: "docker" | "sandbox" | "none" (MCP-34.2). Unset per-server inherits the global mode; unset globally falls back to the legacy "enabled" flag (true ⇒ docker, false ⇒ none)
+	Image       string         `json:"image,omitempty" mapstructure:"image"`                 // Custom Docker image (overrides default)
+	NetworkMode string         `json:"network_mode,omitempty" mapstructure:"network_mode"`   // Custom network mode for this server
+	ExtraArgs   []string       `json:"extra_args,omitempty" mapstructure:"extra_args"`       // Additional docker run arguments for this server
+	WorkingDir  string         `json:"working_dir,omitempty" mapstructure:"working_dir"`     // Custom working directory in container
+	LogDriver   string         `json:"log_driver,omitempty" mapstructure:"log_driver"`       // Docker log driver override for this server
+	LogMaxSize  string         `json:"log_max_size,omitempty" mapstructure:"log_max_size"`   // Maximum size of log files override
+	LogMaxFiles string         `json:"log_max_files,omitempty" mapstructure:"log_max_files"` // Maximum number of log files override
 }
 
-// IsEnabled returns true if isolation is explicitly enabled, false otherwise.
-// Returns false if Enabled is nil (not set).
-func (ic *IsolationConfig) IsEnabled() bool {
-	if ic == nil || ic.Enabled == nil {
-		return false
+// ResolvedMode returns the effective global isolation mode, applying back-compat
+// mapping from the legacy Enabled bool (MCP-34.2):
+//
+//   - an explicit Mode always wins;
+//   - otherwise enabled:true ⇒ docker, enabled:false ⇒ none;
+//   - a nil config resolves to none.
+func (dic *DockerIsolationConfig) ResolvedMode() IsolationMode {
+	if dic == nil {
+		return IsolationModeNone
 	}
-	return *ic.Enabled
+	if dic.Mode != "" {
+		return dic.Mode
+	}
+	if dic.Enabled {
+		return IsolationModeDocker
+	}
+	return IsolationModeNone
+}
+
+// HasEnabledOverride reports whether this server sets the legacy `enabled`
+// bool at all. False means "inherit the global isolation setting" (GH #1142).
+func (ic *IsolationConfig) HasEnabledOverride() bool {
+	return ic != nil && ic.Enabled != nil
+}
+
+// HasModeOverride reports whether this server sets a per-server
+// `isolation.mode` override. A nil pointer AND a pointer to the empty string
+// both mean "unset" — the empty string is documented as the unset mode, and
+// treating it as an override resolved servers to a mode the spawn path does not
+// implement while reporting them isolated (GH #1142).
+func (ic *IsolationConfig) HasModeOverride() bool {
+	return ic != nil && ic.Mode != nil && *ic.Mode != ""
+}
+
+// IsExplicitlyEnabled reports whether this server opts IN to isolation via the
+// legacy `enabled` bool. A nil Enabled is "inherit", never an opt-in.
+//
+// This is NOT the answer to "is this server isolated" — that question has
+// exactly one answer, upstream/core.IsolationManager.ResolveIsolation, which
+// also accounts for the global mode and the structural gates.
+func (ic *IsolationConfig) IsExplicitlyEnabled() bool {
+	return ic != nil && ic.Enabled != nil && *ic.Enabled
+}
+
+// IsExplicitlyDisabled reports whether this server opts OUT of isolation via
+// the legacy `enabled` bool. A nil Enabled is "inherit", never an opt-out.
+func (ic *IsolationConfig) IsExplicitlyDisabled() bool {
+	return ic != nil && ic.Enabled != nil && !*ic.Enabled
 }
 
 // BoolPtr returns a pointer to the given bool value.
@@ -841,9 +1356,26 @@ func normalizeServerQuarantineFlags(cfg *Config) {
 		if s == nil {
 			continue
 		}
+		// Pass 1 (MCP-2930): legacy skip_quarantine -> auto_approve_tool_changes,
+		// only when the successor field is unset so an explicit value wins.
 		if s.SkipQuarantine && s.AutoApproveToolChanges == nil {
 			migrated := true
 			s.AutoApproveToolChanges = &migrated
+		}
+		// Pass 2 (spec 086): map auto_approve_tool_changes onto trust_mode when
+		// trust_mode is unset. Layering skip->auto->trust means a legacy
+		// skip_quarantine:true converges to trust_mode auto, while an explicit
+		// auto_approve_tool_changes:false converges to manual. An explicit
+		// trust_mode is never touched (guard on empty). AutoApproveToolChanges is
+		// left UNTOUCHED here — only trust_mode is written — so the explicit-false
+		// invariant is preserved. A nil AutoApproveToolChanges leaves trust_mode
+		// empty; EffectiveTrustMode() resolves empty -> manual.
+		if s.TrustMode == "" && s.AutoApproveToolChanges != nil {
+			if *s.AutoApproveToolChanges {
+				s.TrustMode = string(TrustModeAuto)
+			} else {
+				s.TrustMode = string(TrustModeManual)
+			}
 		}
 	}
 }
@@ -921,8 +1453,17 @@ func ConvertFromCursorFormat(cursorConfig *CursorMCPConfig) []*ServerConfig {
 
 // ToolMetadata represents tool information stored in the index
 type ToolMetadata struct {
-	Name             string           `json:"name"`
-	ServerName       string           `json:"server_name"`
+	// Name is the tool's display/lookup name. Discovery stores the RAW upstream
+	// name here (no server prefix); index reads return the canonical
+	// "<server>:<raw>" id (#871). Consumers that need the exact upstream name
+	// must go through RawToolName, never strip a prefix by hand (Spec 105 FR-009).
+	Name       string `json:"name"`
+	ServerName string `json:"server_name"`
+	// RawName is the exact upstream-reported tool name, stamped at discovery
+	// (Spec 105 FR-009). It is the identity every producer keys on — approval
+	// records, index docIDs — so "ns:erase" never collapses to "erase". Empty
+	// on metadata built outside discovery; RawToolName derives it from Name.
+	RawName          string           `json:"raw_name,omitempty"`
 	Description      string           `json:"description"`
 	ParamsJSON       string           `json:"params_json"`
 	OutputSchemaJSON string           `json:"output_schema_json,omitempty"` // declared output schema, raw JSON bytes (Spec 056)
@@ -964,7 +1505,64 @@ func (c *IntentDeclarationConfig) IsStrictServerValidation() bool {
 	return c.StrictServerValidation
 }
 
-// ObservabilityConfig controls the Spec 069 usage aggregate cadence.
+// Update-check release channels (Spec 079 FR-013). "stable" follows GitHub
+// releases/latest and never offers prereleases; "rc" additionally offers
+// prerelease tags (v*-rc.*, v*-next.*) published to the GitHub pre-release
+// channel — the config-file equivalent of MCPPROXY_ALLOW_PRERELEASE_UPDATES.
+const (
+	UpdateChannelStable = "stable"
+	UpdateChannelRC     = "rc"
+)
+
+// UpdateCheckConfig is the `update_check` config block (Spec 079 FR-012).
+// It gates the background update poll and the manual re-check
+// (/api/v1/info?refresh=true) and selects the release channel. Hot-reloadable:
+// the runtime re-applies it to the running checker on config reload.
+type UpdateCheckConfig struct {
+	// Enabled gates all update checking. Tri-state: nil/absent = enabled
+	// (default true, matching pre-079 behavior). When false, no network
+	// check is performed and no upgrade nudge appears on any surface
+	// (FR-015) — /api/v1/info omits the update object entirely.
+	Enabled *bool `json:"enabled,omitempty" mapstructure:"enabled"`
+
+	// Channel selects which releases are offered as updates: "stable"
+	// (default; prereleases never offered) or "rc" (prereleases included).
+	// Empty resolves to stable. Validated in ValidateDetailed.
+	//
+	// NOTE: for a RELEASED build the running binary's own version is
+	// authoritative and overrides this field — a stable build is never
+	// offered an RC (even with channel=rc), and an RC build always tracks the
+	// rc channel. This field only takes effect on dev/unstamped builds. See
+	// internal/updatecheck.Checker.IncludePrereleases.
+	Channel string `json:"channel,omitempty" mapstructure:"channel"`
+}
+
+// IsEnabled reports whether update checking is enabled by config. Nil-safe:
+// a missing block or missing key defaults to enabled (Spec 079 FR-012).
+func (u *UpdateCheckConfig) IsEnabled() bool {
+	if u == nil || u.Enabled == nil {
+		return true
+	}
+	return *u.Enabled
+}
+
+// ResolvedChannel returns the effective release channel, defaulting empty to
+// stable. Nil-safe.
+func (u *UpdateCheckConfig) ResolvedChannel() string {
+	if u == nil || u.Channel == "" {
+		return UpdateChannelStable
+	}
+	return u.Channel
+}
+
+// IncludePrereleases reports whether the configured channel offers
+// prereleases (channel=rc). Nil-safe.
+func (u *UpdateCheckConfig) IncludePrereleases() bool {
+	return u.ResolvedChannel() == UpdateChannelRC
+}
+
+// ObservabilityConfig controls the Spec 069 usage aggregate cadence plus the
+// MCP-32 metrics/tracing exporters.
 type ObservabilityConfig struct {
 	// UsageCacheTTL bounds the freshness of the usage endpoint's read cache for
 	// wide windows (FR-005). Default 5s.
@@ -972,6 +1570,58 @@ type ObservabilityConfig struct {
 	// UsagePersistInterval is how often the actor-owned usage aggregate snapshot
 	// is flushed to storage. Default 30s.
 	UsagePersistInterval Duration `json:"usage_persist_interval,omitempty" mapstructure:"usage-persist-interval" swaggertype:"string"`
+
+	// Metrics gates the Prometheus /metrics scrape endpoint (MCP-32). Disabled
+	// by default — operators opt in for k8s/enterprise deployments.
+	Metrics *MetricsExporterConfig `json:"metrics,omitempty" mapstructure:"metrics"`
+	// Tracing gates the OpenTelemetry OTLP trace exporter (MCP-32). Disabled by
+	// default.
+	Tracing *TracingExporterConfig `json:"tracing,omitempty" mapstructure:"tracing"`
+}
+
+// MetricsExporterConfig controls the Prometheus /metrics endpoint (MCP-32).
+type MetricsExporterConfig struct {
+	// Enabled exposes /metrics on the existing HTTP listener when true.
+	// The endpoint is admin-authenticated (SEC-07): scrapers must present the
+	// global API key, via X-API-Key or an Authorization: Bearer header.
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+}
+
+// TracingExporterConfig controls the OpenTelemetry OTLP trace exporter (MCP-32).
+type TracingExporterConfig struct {
+	// Enabled turns on OTLP trace export for tool calls and upstream hops.
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+	// Protocol selects the OTLP transport: "http" or "grpc".
+	Protocol string `json:"protocol,omitempty" mapstructure:"protocol"`
+	// Endpoint is the collector address as host:port (no scheme), e.g.
+	// "localhost:4318" for http or "localhost:4317" for grpc.
+	Endpoint string `json:"endpoint,omitempty" mapstructure:"endpoint"`
+	// SampleRate is the head-based trace sampling ratio in [0,1]. Default 0.1.
+	// Omit the key for the 0.1 default; set it to 0 to sample nothing.
+	SampleRate *float64 `json:"sample_rate,omitempty" mapstructure:"sample-rate"`
+}
+
+// Default OTLP transport values shared by defaults and validation repair.
+const (
+	defaultTracingProtocol   = "http"
+	defaultTracingHTTPEnd    = "localhost:4318"
+	defaultTracingGRPCEnd    = "localhost:4317"
+	defaultTracingSampleRate = 0.1
+)
+
+// DefaultMetricsExporterConfig returns the default (disabled) metrics exporter.
+func DefaultMetricsExporterConfig() *MetricsExporterConfig {
+	return &MetricsExporterConfig{Enabled: false}
+}
+
+// DefaultTracingExporterConfig returns the default (disabled) tracing exporter
+// with sane transport defaults pre-filled.
+func DefaultTracingExporterConfig() *TracingExporterConfig {
+	return &TracingExporterConfig{
+		Enabled:  false,
+		Protocol: defaultTracingProtocol,
+		Endpoint: defaultTracingHTTPEnd,
+	}
 }
 
 // DefaultObservabilityConfig returns the default observability configuration.
@@ -979,6 +1629,8 @@ func DefaultObservabilityConfig() *ObservabilityConfig {
 	return &ObservabilityConfig{
 		UsageCacheTTL:        Duration(5 * time.Second),
 		UsagePersistInterval: Duration(30 * time.Second),
+		Metrics:              DefaultMetricsExporterConfig(),
+		Tracing:              DefaultTracingExporterConfig(),
 	}
 }
 
@@ -1021,6 +1673,16 @@ func DefaultDockerIsolationConfig() *DockerIsolationConfig {
 			"uvx":     "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
 			"pip":     "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
 			"pipx":    "ghcr.io/astral-sh/uv:python3.13-bookworm-slim",
+
+			// NOTE: no GitCapableImageKey ("uvx-git") entry. The slim image
+			// above has no git, so a server installed from a git URL
+			// (`uvx --from …git+https://…`) cannot resolve at all, and
+			// mcpproxy substitutes a git-capable image per-server — but that
+			// substitution is decided in code (core.resolveDefaultImage), not
+			// by seeding a value here. Seeding it would write a public ghcr.io
+			// URL into every operator's config file on the next save and make
+			// the key's presence unable to mean "the operator chose this".
+			// See internal/config/isolation_git.go (#1143).
 
 			// Node.js environments - full image for git deps and native modules (LTS until Apr 2028)
 			"node": "node:22",
@@ -1149,15 +1811,19 @@ func PruneDeprecatedRegistries(cfg *Config) int {
 // DefaultConfig returns a default configuration
 func DefaultConfig() *Config {
 	return &Config{
-		Listen:             defaultPort,
-		EnableSocket:       true, // Enable Unix socket/named pipe by default for local IPC
-		DataDir:            "",   // Will be set to ~/.mcpproxy by loader
-		DebugSearch:        false,
-		Servers:            []*ServerConfig{},
-		ToolsLimit:         15,
-		ToolResponseLimit:  20000,                     // Default 20000 characters
-		CallToolTimeout:    Duration(2 * time.Minute), // Default 2 minutes for tool calls
-		MaxResultSizeChars: 500000,                    // Claude Code's inline-response hard max
+		Listen:            defaultPort,
+		EnableSocket:      true, // Enable Unix socket/named pipe by default for local IPC
+		DataDir:           "",   // Will be set to ~/.mcpproxy by loader
+		DebugSearch:       false,
+		Servers:           []*ServerConfig{},
+		ToolsLimit:        15,
+		ToolResponseLimit: 20000,                     // Default 20000 characters
+		CallToolTimeout:   Duration(2 * time.Minute), // Default 2 minutes for tool calls
+
+		// TOON output (spec 084): off by default — responses byte-identical
+		// to pre-feature behavior (FR-002).
+		ToonOutput:        "off",
+		ToonMinSavingsPct: 15,
 
 		// save_to_file (Spec 076): disabled by default (no whitelisted roots);
 		// when enabled via config, writes default-cap at 50 MiB per file.
@@ -1187,8 +1853,11 @@ func DefaultConfig() *Config {
 		AllowServerAdd:    true,
 		AllowServerRemove: true,
 
-		// Prompts enabled by default
+		// Prompts enabled by default (built-in prompts + capability)
 		EnablePrompts: true,
+
+		// Upstream prompt aggregation OFF by default (opt-in) — see field doc.
+		AggregateUpstreamPrompts: false,
 
 		// Repository detection enabled by default
 		CheckServerRepo: true,
@@ -1231,11 +1900,12 @@ func DefaultConfig() *Config {
 			Encoding:     "cl100k_base", // Default encoding (GPT-4, GPT-3.5)
 		},
 
-		// Code execution defaults - disabled by default for security
-		EnableCodeExecution:       false,  // Must be explicitly enabled
+		// Code execution defaults - the sandboxed JS tool ships on (v0.66.0+)
+		EnableCodeExecution:       true,   // On by default since v0.66.0; an explicit false in the config file still wins
 		CodeExecutionTimeoutMs:    120000, // 2 minutes (120,000ms)
 		CodeExecutionMaxToolCalls: 0,      // Unlimited by default (0 = no limit)
 		CodeExecutionPoolSize:     10,     // 10 JavaScript runtime instances
+		CodeExecutionMaxParallel:  8,      // 8 concurrent upstream calls per call_tools() batch
 
 		// Session risk warning prose disabled by default to reduce token overhead
 		// and LLM distraction in trusted setups (issue #406). Structured risk
@@ -1243,11 +1913,14 @@ func DefaultConfig() *Config {
 		ToolResponseSessionRiskWarning: false,
 
 		// Activity logging defaults (RFC-003)
-		ActivityRetentionDays:      90,     // 90 days retention
-		ActivityMaxRecords:         100000, // 100K records max
-		ActivityMaxSizeMB:          256,    // 256MB total activity-log size cap (0 = disabled)
-		ActivityMaxResponseSize:    65536,  // 64KB response truncation
-		ActivityCleanupIntervalMin: 60,     // 1 hour cleanup interval
+		ActivityRetentionDays:   90,     // 90 days retention
+		ActivityMaxRecords:      100000, // 100K records max
+		ActivityMaxResponseSize: 65536,  // 64KB response truncation
+
+		ToolCallMaxResponseSize:     65536, // 64KB per stored tool-call response
+		ToolCallMaxRecordsPerServer: 1000,  // recent-history window per server
+
+		ActivityCleanupIntervalMin: 60, // 1 hour cleanup interval
 
 		// Intent declaration defaults (Spec 018) - strict validation by default for security
 		IntentDeclaration: DefaultIntentDeclarationConfig(),
@@ -1257,13 +1930,17 @@ func DefaultConfig() *Config {
 	}
 }
 
-// generateAPIKey creates a cryptographically secure random API key
+// generateAPIKey creates a cryptographically secure random API key: 32 random
+// bytes (256 bits), hex-encoded to 64 characters.
+//
+// crypto/rand.Read is documented since Go 1.24 as never returning an error and
+// always filling b entirely; on a failure of the system source it terminates
+// the process (runtime fatal, not a recoverable panic). The former
+// time-based fallback branch here was therefore unreachable, and is gone —
+// nothing can observe a predictable key from this function.
 func generateAPIKey() string {
 	bytes := make([]byte, 32) // 32 bytes = 256 bits
-	if _, err := rand.Read(bytes); err != nil {
-		// Fallback to less secure method if crypto/rand fails
-		return fmt.Sprintf("mcpproxy_%d", time.Now().UnixNano())
-	}
+	_, _ = rand.Read(bytes)   // documented never to fail; see above
 	return hex.EncodeToString(bytes)
 }
 
@@ -1309,9 +1986,264 @@ func (c *Config) DefaultQuarantineForNewServer() bool {
 	return c.IsQuarantineEnabled()
 }
 
-// IsQuarantineSkipped returns whether this server should skip tool-level quarantine.
+// UnmarshalJSON decodes a ServerConfig and additionally records whether the
+// "quarantined" key was present at all (issue #937).
+//
+// The presence bit is what distinguishes "the operator opted out" from "the
+// operator never said anything", and it is the only thing the config-load
+// admission gate keys off. It is deliberately unexported: it describes the
+// DOCUMENT that was parsed, not the server. MarshalJSON below round-trips it by
+// OMITTING the key rather than by writing the bit out.
+//
+// A JSON `null` does NOT count as a statement. Everywhere else in mcpproxy null
+// means "unset" (RFC 7396 merge-patch semantics — see the env_json handling in
+// internal/server/mcp.go), and a templating tool or serializer that emits null
+// for an unset field must not be able to silently admit a first-seen server.
+//
+// Note this only fires for JSON decoding. Structs built in Go (REST handlers,
+// the add paths, tests) leave the bit false — i.e. "unstated" — which is the
+// safe default: the gate can only ever ADD quarantine, never remove it.
+//
+// WARNING — do not EMBED ServerConfig (by pointer or value) in another struct
+// that adds JSON fields of its own. Go promotes these methods to the outer
+// type, so encoding/json treats the wrapper as a Marshaler/Unmarshaler and
+// delegates the whole value here: the wrapper's own fields are silently dropped
+// on encode, and decode fails with "json: Unmarshal(nil *config.Alias)" while
+// the embedded pointer is still nil. A wrapper that needs to embed this must
+// declare its own MarshalJSON/UnmarshalJSON — see
+// internal/serveredition/api.ServerResponse.
+func (sc *ServerConfig) UnmarshalJSON(data []byte) error {
+	type Alias ServerConfig
+	if err := json.Unmarshal(data, (*Alias)(sc)); err != nil {
+		return err
+	}
+
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		// A non-object payload cannot carry the key; the decode above would
+		// already have failed on anything we care about.
+		return nil //nolint:nilerr // presence detection is best-effort
+	}
+	raw, present := probe["quarantined"]
+	sc.quarantineExplicitlySet = present && !isJSONNull(raw)
+	return nil
+}
+
+// isJSONNull reports whether a raw JSON value is the literal `null`.
+func isJSONNull(raw json.RawMessage) bool {
+	return string(bytes.TrimSpace(raw)) == "null"
+}
+
+// MarshalJSON writes a ServerConfig, omitting "quarantined" when the value is
+// false AND no configuration document ever stated it (issue #937, review P1).
+//
+// Without this, mcpproxy's own SaveConfig fabricated an operator statement:
+// `Quarantined` is a plain bool with no omitempty, so every save stamped
+// `"quarantined": false` onto servers that had never mentioned the key. Reading
+// that back set the presence bit, and the config-load admission gate then
+// skipped the server permanently — including servers the gate had itself just
+// quarantined, whose config.db record the next start would overwrite with
+// false. One API-triggered save disarmed the gate for good.
+//
+// A true value is ALWAYS written: a gate decision persisted to disk must be
+// readable back, and quarantine is never expressed by absence.
+func (sc *ServerConfig) MarshalJSON() ([]byte, error) {
+	type Alias ServerConfig
+
+	// The shallower field dominates the embedded alias's "quarantined" tag
+	// (encoding/json resolves name conflicts by depth), so a nil pointer here
+	// drops the key entirely instead of emitting it twice.
+	aux := struct {
+		Quarantined *bool `json:"quarantined,omitempty"`
+		*Alias
+	}{Alias: (*Alias)(sc)}
+
+	if sc.Quarantined || sc.quarantineExplicitlySet {
+		v := sc.Quarantined
+		aux.Quarantined = &v
+	}
+
+	return json.Marshal(aux)
+}
+
+// QuarantineExplicitlySet reports whether the parsed configuration document
+// stated a "quarantined" value for this server. False means the key was absent
+// (or the struct was built in Go rather than decoded), which the config-load
+// admission gate treats as "never been through admission".
+func (sc *ServerConfig) QuarantineExplicitlySet() bool {
+	return sc != nil && sc.quarantineExplicitlySet
+}
+
+// MarkQuarantineExplicitlySet stamps the presence bit on a struct that did not
+// come from JSON. Used by copy helpers so the bit survives a config round-trip.
+func (sc *ServerConfig) MarkQuarantineExplicitlySet(explicit bool) {
+	if sc != nil {
+		sc.quarantineExplicitlySet = explicit
+	}
+}
+
+// QuarantineDefaultForServer resolves the add-time Quarantined default for a
+// specific new server from its trust_mode (spec 086 stage 3, FR-011). Secure by
+// default: a server is admitted UNQUARANTINED only under trust_mode auto; scan
+// and manual are quarantined on add (scan is later auto-unquarantined once its
+// baseline scan settles green — see the EventTypeSecurityScanSettled handler).
+//
+// The global quarantine_enabled=false escape hatch (#370) still wins: when
+// quarantine is disabled globally, every new server is admitted unquarantined
+// regardless of its trust_mode, preserving DefaultQuarantineForNewServer's
+// semantics. A nil server config fails closed to quarantine.
+//
+// CN-002: the mode is read from the server's config/registry-derived trust_mode,
+// never from a request-driven admission override.
+func (c *Config) QuarantineDefaultForServer(sc *ServerConfig) bool {
+	if !c.IsQuarantineEnabled() {
+		return false
+	}
+	if sc == nil {
+		return true
+	}
+	return sc.EffectiveTrustMode() != TrustModeAuto
+}
+
+// ValidTrustModes returns the accepted trust_mode values in their canonical
+// order. It is the single source of truth for the operator-facing error text
+// produced by config validation and by the REST layer (GH #938).
+func ValidTrustModes() []string {
+	return []string{string(TrustModeAuto), string(TrustModeScan), string(TrustModeManual)}
+}
+
+// IsValidTrustMode reports whether s is an acceptable trust_mode value. The
+// empty string is valid and means "inherit" (resolved by EffectiveTrustMode to
+// manual, or derived from the legacy fields by the load-time migration).
+//
+// Matching is exact and case-SENSITIVE on purpose: EffectiveTrustMode fails
+// closed to manual on an unrecognized value, so silently accepting "Scan" would
+// leave an operator believing scanning is on while the runtime holds everything
+// for manual review (GH #938 finding 1).
+func IsValidTrustMode(s string) bool {
+	switch TrustMode(s) {
+	case "", TrustModeAuto, TrustModeScan, TrustModeManual:
+		return true
+	default:
+		return false
+	}
+}
+
+// EnvTPABundlePath is the environment override for the offline TPA
+// signature-bundle location (spec 086 FR-019). It outranks
+// security.tpa_bundle_path on EVERY path that resolves the corpus — the loader,
+// /api/v1/config/apply, hot-reload, and stdio startup — because the precedence
+// is enforced in SecurityConfig.EffectiveTPABundlePath rather than only in the
+// loader's env pass.
+const EnvTPABundlePath = "MCPPROXY_TPA_BUNDLE_PATH"
+
+// EnvAutoBaselineScan is the environment kill-switch for the automatic,
+// informational Pass-1 baseline scan (`security.auto_baseline_scan`). Like the
+// bundle path, precedence is enforced in the accessor
+// (SecurityConfig.IsAutoBaselineScanEnabled) rather than only in the loader, so
+// a config posted to /api/v1/config/apply cannot defeat the operator's env
+// setting. Accepts "true"/"1" and "false"/"0"; any other value is ignored.
+const EnvAutoBaselineScan = "MCPPROXY_AUTO_BASELINE_SCAN"
+
+// TrustModeNormalization records one per-server trust_mode value that the load
+// path rewrote because it was not in the accepted vocabulary.
+type TrustModeNormalization struct {
+	// Server is the upstream server whose trust_mode was rewritten.
+	Server string
+	// Original is the unrecognized value that was found in the config.
+	Original string
+}
+
+// NormalizeTrustModes rewrites every unrecognized per-server trust_mode to the
+// fail-closed tier (manual) and reports what it changed.
+//
+// Rejecting a bogus trust_mode is right at the WRITE seams — REST
+// POST/PATCH /api/v1/servers, the upstream_servers tool, `--trust-mode` — where
+// an operator is handed the error immediately and nothing has been persisted.
+// It is WRONG on the LOAD path: a config carrying the bogus value that a
+// previous release persisted through the supported REST API would make
+// LoadFromFile fail, so `mcpproxy serve` refused to start and every subsequent
+// hot-reload was blocked until someone hand-edited the file. GH #938 asked for
+// "reject with 400, OR normalize and warn"; the load path normalizes.
+//
+// The rewrite is to manual, which is exactly the behavior EffectiveTrustMode()
+// already produced for the bad value — so nothing about the RUNTIME decision
+// changes, only the lie the read surfaces used to echo back. Nil-safe and
+// idempotent.
+func NormalizeTrustModes(c *Config) []TrustModeNormalization {
+	if c == nil {
+		return nil
+	}
+	var changed []TrustModeNormalization
+	for _, server := range c.Servers {
+		if server == nil || IsValidTrustMode(server.TrustMode) {
+			continue
+		}
+		changed = append(changed, TrustModeNormalization{Server: server.Name, Original: server.TrustMode})
+		server.TrustMode = string(TrustModeManual)
+	}
+	return changed
+}
+
+// EffectiveTrustMode is the single resolution point for a server's trust tier
+// (spec 086). It returns one of TrustModeAuto/Scan/Manual, defaulting to manual
+// (secure by default) for empty OR unrecognized trust_mode values (FR-009 —
+// fail closed on a typo like "Scan" or "off").
+//
+// Because normalizeServerQuarantineFlags populates TrustMode at config load,
+// the legacy-field fallback here only matters for in-memory structs that
+// bypassed the loader (tests, REST-constructed configs): an explicit
+// auto_approve_tool_changes maps true->auto / false->manual, else a legacy
+// skip_quarantine:true maps to auto, else manual. This keeps the accessor
+// correct even when the migration has not run.
+func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
+	switch TrustMode(sc.TrustMode) {
+	case TrustModeAuto, TrustModeScan, TrustModeManual:
+		return TrustMode(sc.TrustMode)
+	}
+	// A NON-EMPTY but unrecognized trust_mode (e.g. the typo "Scan" or a bogus
+	// "off") must fail closed to manual and must NOT consult the legacy fields —
+	// otherwise a typo'd mode combined with a migrated auto_approve_tool_changes:true
+	// or skip_quarantine:true would silently resolve to auto and disable quarantine
+	// (FR-009, fail closed). Only a genuinely EMPTY mode falls through to the
+	// legacy-field compatibility path below.
+	if sc.TrustMode != "" {
+		return TrustModeManual
+	}
+	if sc.AutoApproveToolChanges != nil {
+		if *sc.AutoApproveToolChanges {
+			return TrustModeAuto
+		}
+		return TrustModeManual
+	}
+	if sc.SkipQuarantine {
+		return TrustModeAuto
+	}
+	return TrustModeManual
+}
+
+// IsQuarantineSkipped returns whether this server should skip tool-level
+// quarantine. Thin wrapper over EffectiveTrustMode(): only trust_mode auto
+// skips quarantine; scan and manual do not (spec 086).
 func (sc *ServerConfig) IsQuarantineSkipped() bool {
-	return sc.SkipQuarantine
+	return sc.EffectiveTrustMode() == TrustModeAuto
+}
+
+// ServerContributesTools reports whether a server's tools count as AVAILABLE to
+// an agent. A quarantined server's tools are refused by every dispatch path
+// (the SECURITY BLOCK in internal/server/mcp.go) and are withheld from the
+// search index (#1061), so it contributes zero — the same answer the index
+// writer's serverEligibleForIndexing and preflight.ClassifyTool already give.
+// Takes plain bools because most callers hold a stateview server status rather
+// than a *ServerConfig. Issue #1064.
+func ServerContributesTools(enabled, quarantined bool) bool {
+	return enabled && !quarantined
+}
+
+// ContributesTools is the *ServerConfig form of ServerContributesTools. A nil
+// receiver contributes nothing.
+func (sc *ServerConfig) ContributesTools() bool {
+	return sc != nil && ServerContributesTools(sc.Enabled, sc.Quarantined)
 }
 
 // IsAutoApproveToolChanges reports the configured per-server intent to auto-approve
@@ -1323,7 +2255,30 @@ func (sc *ServerConfig) IsQuarantineSkipped() bool {
 // (see normalizeServerQuarantineFlags) only when it is unset, so an explicit value
 // always wins. MCP-2930.
 func (sc *ServerConfig) IsAutoApproveToolChanges() bool {
-	return sc.AutoApproveToolChanges != nil && *sc.AutoApproveToolChanges
+	return sc.EffectiveTrustMode() == TrustModeAuto
+}
+
+// HasStaticAuthorizationHeader reports whether the server is configured to
+// authenticate with a static credential in the `Authorization` header (name
+// matched case-insensitively, value non-blank).
+//
+// OAuth and a static Authorization header are mutually exclusive on the wire:
+// the OAuth transport populates that very header, and the headers-auth
+// strategy runs before OAuth is ever attempted. A config that declares one
+// has therefore stopped using the other, which lets the server projection
+// ignore an OAuth token record left behind by a previous OAuth login
+// (GH #1172) without a heuristic on other header names. A nil receiver has no
+// headers.
+func (sc *ServerConfig) HasStaticAuthorizationHeader() bool {
+	if sc == nil {
+		return false
+	}
+	for name, value := range sc.Headers {
+		if strings.EqualFold(name, "Authorization") && strings.TrimSpace(value) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // IsToolAllowedByConfig reports whether toolName passes the server's static
@@ -1352,7 +2307,13 @@ func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKey
 	// Check environment variable for API key first - this overrides config file
 	// Use LookupEnv to distinguish between "not set" and "set to empty string"
 	if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists && envAPIKey != "" {
-		c.APIKey = envAPIKey
+		// A process-only override of whatever the file holds: no save path
+		// may replace the file's key with it (see process_overrides.go).
+		// Already equal means Validate recorded it (or the file literally
+		// holds the env key); re-recording would lose the file value.
+		if c.APIKey != envAPIKey {
+			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envAPIKey)
+		}
 		return c.APIKey, false, APIKeySourceEnvironment
 	}
 
@@ -1378,8 +2339,190 @@ func (v ValidationError) Error() string {
 	return fmt.Sprintf("%s: %s", v.Field, v.Message)
 }
 
-// ValidateDetailed performs detailed validation and returns all errors
+// ValidateDetailed performs detailed validation and returns all errors.
+//
+// It is the shared gate for every *write* surface: the REST config API
+// (POST /api/v1/config/validate, POST /api/v1/config/apply, PATCH /api/v1/config
+// all funnel through Runtime.ValidateConfig / Runtime.ApplyConfig) and the MCP
+// `upstream_servers` tool. Anything appended here is therefore rejected before
+// it is persisted.
+//
+// The boot path is deliberately NOT this function — see Validate(), which runs
+// validateDetailedCore() so that a pre-existing bad value on disk cannot brick
+// a load that has nothing to do with the offending server.
+//
+// Spec 108 FR-007: profiles are validated here (never inside
+// validateDetailedCore, which the boot path also runs) via the SAME
+// ValidateProfiles the boot path calls, so a write surface can never persist
+// a profile the boot path would then refuse to load. It stays out of
+// validateDetailedCore for two reasons: Validate() already calls
+// ValidateProfiles separately (to capture its warnings into
+// c.profileWarnings), so folding it into validateDetailedCore would run it
+// twice on every boot/reload; and wrapping its raw, exact-text error in a
+// ValidationError{Field:"profiles"} would prefix "profiles: " onto a message
+// that already starts with "profiles[%d]: ", changing the boot path's error
+// text for every existing Spec 057 profile validation failure, not only the
+// new v3 ones.
 func (c *Config) ValidateDetailed() []ValidationError {
+	errors := append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
+	errors = append(errors, c.forwardHeadersErrors()...)
+	errors = append(errors, c.oauthEndpointOverrideErrors()...)
+	if _, err := ValidateProfiles(c); err != nil {
+		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
+	}
+	return errors
+}
+
+// ValidateServerForLoad runs the per-server checks config.Load applies at boot
+// (the stdio command-required check, url-required for HTTP protocols, protocol
+// and name validity, ...) against a single server and returns only the errors
+// attributable to it. Write surfaces that persist a server built outside the
+// config loader (e.g. imports) use it so they can never save an entry the next
+// startup would refuse to load.
+func ValidateServerForLoad(server *ServerConfig) []ValidationError {
+	cfg := DefaultConfig()
+	cfg.Servers = []*ServerConfig{server}
+	const prefix = "mcpServers[0]"
+	var out []ValidationError
+	for _, e := range cfg.validateDetailedCore() {
+		if strings.HasPrefix(e.Field, prefix) {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// oauthRedirectURIErrors reports every per-server `oauth.redirect_uri` that the
+// loopback callback listener cannot honor.
+//
+// Kept separate from validateDetailedCore because the two callers want opposite
+// behavior: a write surface must reject the value (it is a permanent connect
+// failure otherwise, with an error that never names redirect_uri), while
+// config.Load must tolerate one already on disk and let it fail loudly at
+// connect time instead.
+func (c *Config) oauthRedirectURIErrors() []ValidationError {
+	var errors []ValidationError
+	for i, server := range c.Servers {
+		if server == nil || server.OAuth == nil {
+			continue
+		}
+		if err := ValidateOAuthCallbackBaseURL(server.OAuth.CallbackBaseURL); err != nil {
+			errors = append(errors, ValidationError{
+				Field: fmt.Sprintf("mcpServers[%d].oauth.callback_base_url", i), Message: err.Error(),
+			})
+		}
+		if strings.TrimSpace(server.OAuth.RedirectURI) == "" {
+			continue
+		}
+		if _, _, _, err := ParseLoopbackRedirectURI(server.OAuth.RedirectURI); err != nil {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("mcpServers[%d].oauth.redirect_uri", i),
+				Message: err.Error(),
+			})
+		}
+	}
+	return errors
+}
+
+// forwardHeadersErrors reports every per-server `forward_headers` problem
+// (Spec 112 FR-005a): an invalid token, wildcard, denied name, duplicate, more
+// than 32 entries, or a collision with the same server's static headers.
+//
+// Write-time only, like oauthRedirectURIErrors: a hand-edited bad entry must
+// not brick boot. Load drops such entries via NormalizeForwardHeaders and the
+// runtime filter in internal/headerfwd stays the authoritative boundary.
+// Messages name headers only, never values.
+func (c *Config) forwardHeadersErrors() []ValidationError {
+	var errors []ValidationError
+	for i, server := range c.Servers {
+		if server == nil {
+			continue
+		}
+		errors = append(errors, ForwardHeadersValidationErrors(fmt.Sprintf("mcpServers[%d].forward_headers", i), server.ForwardHeaders, server.Headers)...)
+	}
+	return errors
+}
+
+// ForwardHeadersValidationErrors validates one server's forward_headers
+// allowlist against its static headers (Spec 112 FR-005a). It is the shared
+// write-time check for ValidateDetailed and the REST/MCP single-server write
+// paths. field is the reported ValidationError.Field.
+func ForwardHeadersValidationErrors(field string, names []string, static map[string]string) []ValidationError {
+	if len(names) == 0 {
+		return nil
+	}
+	var errors []ValidationError
+	for _, err := range headerfwd.ValidateNames(names, static) {
+		errors = append(errors, ValidationError{Field: field, Message: err.Error()})
+	}
+	return errors
+}
+
+// ForwardHeaderNormalization records one dropped forward_headers entry.
+type ForwardHeaderNormalization struct {
+	Server  string
+	Dropped []string
+}
+
+// NormalizeForwardHeaders is the lenient load-time counterpart of
+// forwardHeadersErrors (Spec 112 FR-005b): it rewrites each server's allowlist
+// in place to the usable canonical names, dropping invalid, denied, duplicate
+// and over-cap entries plus names colliding with the server's static headers,
+// and reports what it dropped (names only). It never fails. Idempotent and
+// nil-safe.
+func NormalizeForwardHeaders(cfg *Config) []ForwardHeaderNormalization {
+	if cfg == nil {
+		return nil
+	}
+	var out []ForwardHeaderNormalization
+	for _, s := range cfg.Servers {
+		if s == nil || len(s.ForwardHeaders) == 0 {
+			continue
+		}
+		kept, dropped := headerfwd.NormalizeNames(s.ForwardHeaders)
+		var final []string
+		for _, n := range kept {
+			collides := false
+			for k := range s.Headers {
+				if strings.EqualFold(k, n) {
+					collides = true
+					break
+				}
+			}
+			if collides {
+				dropped = append(dropped, n)
+				continue
+			}
+			final = append(final, n)
+		}
+		if len(dropped) > 0 {
+			out = append(out, ForwardHeaderNormalization{Server: s.Name, Dropped: dropped})
+		}
+		s.ForwardHeaders = final
+	}
+	return out
+}
+
+// EnvForwardClientHeaders is the environment kill switch for client header
+// forwarding (Spec 112 FR-003): false|0|off disables it for the process.
+const EnvForwardClientHeaders = "MCPPROXY_FORWARD_CLIENT_HEADERS"
+
+// IsClientHeaderForwardingEnabled reports the resolved global switch: nil means
+// enabled, an explicit value wins, and MCPPROXY_FORWARD_CLIENT_HEADERS
+// (false|0|off) outranks both on every path (loader, hot reload,
+// /config/apply) because the precedence is resolved here.
+func (c *Config) IsClientHeaderForwardingEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvForwardClientHeaders))) {
+	case "false", "0", "off":
+		return false
+	}
+	if c == nil || c.ForwardClientHeaders == nil {
+		return true
+	}
+	return *c.ForwardClientHeaders
+}
+
+func (c *Config) validateDetailedCore() []ValidationError {
 	var errors []ValidationError
 
 	// Validate listen address format
@@ -1440,6 +2583,29 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			})
 		}
 	}
+	// Roots must not nest or repeat. A nested root ("/data/out" plus
+	// "/data/out/sub") lets anything that can write inside the outer root
+	// plant a symlink at the inner root's path and redirect save_to_file
+	// writes outside every configured root; a duplicate is a no-op that hides
+	// the same overlap. outputfile.Resolve also fails closed on overlapping
+	// roots at call time (after symlink resolution), this check reports the
+	// literal overlap up front.
+	for i, a := range c.ToolOutputRoots {
+		if !filepath.IsAbs(a) {
+			continue
+		}
+		for _, b := range c.ToolOutputRoots[i+1:] {
+			if !filepath.IsAbs(b) {
+				continue
+			}
+			if toolOutputRootsOverlap(filepath.Clean(a), filepath.Clean(b)) {
+				errors = append(errors, ValidationError{
+					Field:   "tool_output_roots",
+					Message: fmt.Sprintf("roots %q and %q overlap — tool_output_roots entries must not be equal or nested inside each other", a, b),
+				})
+			}
+		}
+	}
 
 	// Validate ToolOutputMaxBytes
 	if c.ToolOutputMaxBytes < 0 {
@@ -1458,12 +2624,30 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	}
 
 	// Validate global discovery/health-check intervals (spec 074, FR-008).
+	if e := validateIntervalBound("init_timeout", c.InitTimeout, time.Second, 30*time.Minute); e != nil {
+		errors = append(errors, *e)
+	}
 	if e := validateIntervalBound("health_check_interval", c.HealthCheckInterval, 5*time.Second, time.Hour); e != nil {
 		errors = append(errors, *e)
 	}
 	if e := validateIntervalBound("tool_discovery_interval", c.ToolDiscoveryInterval, 30*time.Second, 24*time.Hour); e != nil {
 		errors = append(errors, *e)
 	}
+
+	// HTTP server request deadlines (GH #965). {0} ∪ [1s, 24h]; 0 means
+	// "no deadline", which validateIntervalBound already accepts.
+	if e := validateIntervalBound("http_read_timeout", c.HTTPReadTimeout, time.Second, 24*time.Hour); e != nil {
+		errors = append(errors, *e)
+	}
+	if e := validateIntervalBound("http_write_timeout", c.HTTPWriteTimeout, time.Second, 24*time.Hour); e != nil {
+		errors = append(errors, *e)
+	}
+	if e := validateIntervalBound("http_idle_timeout", c.HTTPIdleTimeout, time.Second, 24*time.Hour); e != nil {
+		errors = append(errors, *e)
+	}
+
+	// Concurrency limits, all three scopes after resolution (spec 093, FR-023).
+	errors = append(errors, c.validateConcurrency()...)
 
 	// Validate code execution configuration (0 means use default)
 	if c.CodeExecutionTimeoutMs != 0 && (c.CodeExecutionTimeoutMs < 1 || c.CodeExecutionTimeoutMs > 600000) {
@@ -1487,6 +2671,13 @@ func (c *Config) ValidateDetailed() []ValidationError {
 		})
 	}
 
+	if c.CodeExecutionMaxParallel != 0 && (c.CodeExecutionMaxParallel < 1 || c.CodeExecutionMaxParallel > 32) {
+		errors = append(errors, ValidationError{
+			Field:   "code_execution_max_parallel",
+			Message: "must be between 1 and 32 (or 0 for default)",
+		})
+	}
+
 	// Validate routing mode (Spec 031)
 	if c.RoutingMode != "" {
 		validRoutingModes := map[string]bool{
@@ -1495,17 +2686,91 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			RoutingModeCodeExecution: true,
 		}
 		if !validRoutingModes[c.RoutingMode] {
+			msg := fmt.Sprintf("invalid routing mode: %s (must be retrieve_tools, direct, or code_execution)", c.RoutingMode)
+			// Spec 102 FR-002: "schema_deferred" is the config shape proposed in
+			// issue #971. It is not a routing mode here — the same capability is
+			// a composition of an existing mode and the new serialization axis.
+			// Say so, rather than making the user infer it from a list of three.
+			if c.RoutingMode == "schema_deferred" {
+				msg += `; "schema_deferred" is not a routing mode — use routing_mode: "direct" with direct_tool_response_mode: "deferred"`
+			}
 			errors = append(errors, ValidationError{
 				Field:   "routing_mode",
-				Message: fmt.Sprintf("invalid routing mode: %s (must be retrieve_tools, direct, or code_execution)", c.RoutingMode),
+				Message: msg,
 			})
 		}
+	}
+
+	// Validate TOON output mode + threshold (spec 084, FR-001). Empty is
+	// allowed at the top level (treated as "off"); 0/unset threshold resolves
+	// to the default 15.
+	if !isValidToonOutput(c.ToonOutput) {
+		errors = append(errors, ValidationError{
+			Field:   "toon_output",
+			Message: fmt.Sprintf("invalid toon_output: %s (must be off, adaptive, or always)", c.ToonOutput),
+		})
+	}
+	if c.ToonMinSavingsPct != 0 && (c.ToonMinSavingsPct < 1 || c.ToonMinSavingsPct > 90) {
+		errors = append(errors, ValidationError{
+			Field:   "toon_min_savings_pct",
+			Message: "must be between 1 and 90 (or 0 for the default 15)",
+		})
+	}
+
+	// Validate tool response mode (Spec 085). Empty is allowed (= full).
+	if c.ToolResponseMode != "" &&
+		c.ToolResponseMode != ToolResponseModeFull && c.ToolResponseMode != ToolResponseModeCompact {
+		errors = append(errors, ValidationError{
+			Field:   "tool_response_mode",
+			Message: fmt.Sprintf("invalid tool response mode: %s (must be full or compact)", c.ToolResponseMode),
+		})
+	}
+
+	// Validate direct-surface response mode (Spec 102 FR-001). Empty is allowed
+	// (= full). "compact" is called out because it is the likeliest wrong value:
+	// it is legal on the OTHER axis, so an operator who knows tool_response_mode
+	// will reach for it here.
+	if c.DirectToolResponseMode != "" &&
+		c.DirectToolResponseMode != DirectToolResponseModeFull &&
+		c.DirectToolResponseMode != DirectToolResponseModeDeferred {
+		errors = append(errors, ValidationError{
+			Field: "direct_tool_response_mode",
+			Message: fmt.Sprintf("invalid direct tool response mode: %s (must be %q or %q)",
+				c.DirectToolResponseMode, DirectToolResponseModeFull, DirectToolResponseModeDeferred),
+		})
+	}
+
+	// Validate update-check channel (Spec 079 FR-012/FR-013). Empty is allowed
+	// (resolves to stable); only a non-empty unknown value is invalid.
+	if c.UpdateCheck != nil && c.UpdateCheck.Channel != "" &&
+		c.UpdateCheck.Channel != UpdateChannelStable && c.UpdateCheck.Channel != UpdateChannelRC {
+		errors = append(errors, ValidationError{
+			Field:   "update_check.channel",
+			Message: fmt.Sprintf("invalid channel: %s (must be %q or %q)", c.UpdateCheck.Channel, UpdateChannelStable, UpdateChannelRC),
+		})
+	}
+
+	// Validate global isolation mode (MCP-34.2). Empty is allowed (back-compat
+	// fallback to the Enabled bool); only a non-empty unknown value is invalid.
+	if c.DockerIsolation != nil && !c.DockerIsolation.Mode.IsValid() {
+		errors = append(errors, ValidationError{
+			Field:   "docker_isolation.mode",
+			Message: fmt.Sprintf("invalid isolation mode: %s (must be docker, sandbox, or none)", c.DockerIsolation.Mode),
+		})
 	}
 
 	// Validate server configurations
 	serverNames := make(map[string]bool)
 	for i, server := range c.Servers {
 		fieldPrefix := fmt.Sprintf("mcpServers[%d]", i)
+
+		// Validate per-server isolation mode override (MCP-34.2).
+		if server.Isolation != nil && server.Isolation.Mode != nil && !server.Isolation.Mode.IsValid() {
+			errors = append(errors, ValidationError{
+				Field:   fmt.Sprintf("%s.isolation.mode", fieldPrefix),
+				Message: fmt.Sprintf("invalid isolation mode: %s (must be docker, sandbox, or none)", *server.Isolation.Mode),
+			})
+		}
 
 		// Validate server name
 		if server.Name == "" {
@@ -1517,6 +2782,20 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			errors = append(errors, ValidationError{
 				Field:   fieldPrefix + ".name",
 				Message: fmt.Sprintf("duplicate server name: %s", server.Name),
+			})
+		} else if strings.Contains(server.Name, ":") {
+			// F6: ':' is the qualified-name separator for prompt aggregation
+			// ("server:prompt", manager_prompts.go) and tool routing (CallTool's
+			// SplitN ":"). A name containing it makes the first-separator split
+			// route to the wrong server, so such a server's prompts/tools can never
+			// be reached correctly. Reject it — no working config uses ':' since it
+			// has never routed. ('__', the direct-mode display separator, is NOT
+			// hard-rejected here for back-compat: it works in retrieve_tools mode
+			// and any residual display collision is logged + handled deterministically
+			// in buildAggregatedServerPrompts / buildDirectModeTools.)
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".name",
+				Message: fmt.Sprintf("server name %q must not contain ':' (reserved as the server:tool / server:prompt routing separator)", server.Name),
 			})
 		} else {
 			serverNames[server.Name] = true
@@ -1570,6 +2849,27 @@ func (c *Config) ValidateDetailed() []ValidationError {
 				Message: "enabled_tools and disabled_tools are mutually exclusive; use one or the other",
 			})
 		}
+		// Spec 084: per-server toon_output override. Empty = inherit global.
+		if !isValidToonOutput(server.ToonOutput) {
+			errors = append(errors, ValidationError{
+				Field:   fieldPrefix + ".toon_output",
+				Message: fmt.Sprintf("invalid toon_output: %s (must be off, adaptive, or always — or empty to inherit)", server.ToonOutput),
+			})
+		}
+
+		// Spec 086 / GH #938: per-server trust_mode. EffectiveTrustMode() fails
+		// closed to manual on an unrecognized value, so a hand-edited config
+		// carrying a typo ("Scan", "yolo") would otherwise behave as manual while
+		// every read surface echoed the typo back as if it were a real mode.
+		// Surface it as a validation error instead. Empty = inherit (valid).
+		if !IsValidTrustMode(server.TrustMode) {
+			errors = append(errors, ValidationError{
+				Field: fieldPrefix + ".trust_mode",
+				Message: fmt.Sprintf("invalid trust_mode: %q (must be one of: %s — or empty to inherit the default)",
+					server.TrustMode, strings.Join(ValidTrustModes(), ", ")),
+			})
+		}
+
 		// Spec 074: per-upstream auth_broker validation + default application.
 		// No-op in the personal edition (stub); enforced in the server edition.
 		errors = append(errors, validateServerAuthBroker(server, fieldPrefix)...)
@@ -1579,6 +2879,10 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			errors = append(errors, *e)
 		}
 		if e := validateIntervalBound(fieldPrefix+".tool_discovery_interval", server.ToolDiscoveryInterval, 30*time.Second, 24*time.Hour); e != nil {
+			errors = append(errors, *e)
+		}
+		// MCP-3322: per-server MCP `initialize` handshake deadline override.
+		if e := validateIntervalBound(fieldPrefix+".init_timeout", server.InitTimeout, time.Second, 30*time.Minute); e != nil {
 			errors = append(errors, *e)
 		}
 	}
@@ -1617,6 +2921,24 @@ func (c *Config) ValidateDetailed() []ValidationError {
 			})
 		}
 	}
+
+	// Spec 107 FR-027/FR-039: every trusted_proxies entry must parse as a
+	// CIDR or IP on every door (boot, PATCH, /config/apply).
+	errors = append(errors, validateTrustedProxies(c)...)
+
+	// Spec 107 FR-039: the server_edition block is validated (never mutated)
+	// on every door — boot, PATCH and /config/apply. No-op in the personal
+	// edition (stub); enforced in the server edition.
+	errors = append(errors, validateServerEditionConfig(c)...)
+
+	// Spec 107 FR-014/FR-019: audit_log validated (never mutated) on every
+	// door - boot, PATCH and /config/apply.
+	errors = append(errors, validateAuditLog(c)...)
+
+	// NOTE: profiles (Spec 108 FR-007) are deliberately NOT validated here —
+	// see ValidateDetailed's doc comment for why folding it into this
+	// function would run ValidateProfiles twice on every boot/reload and
+	// change the boot path's error text.
 
 	return errors
 }
@@ -1688,6 +3010,9 @@ func (c *Config) Validate() error {
 	if c.CodeExecutionPoolSize <= 0 {
 		c.CodeExecutionPoolSize = 10 // 10 JavaScript runtime instances
 	}
+	if c.CodeExecutionMaxParallel <= 0 {
+		c.CodeExecutionMaxParallel = 8 // 8 concurrent upstream calls per call_tools() batch
+	}
 	// CodeExecutionMaxToolCalls defaults to 0 (unlimited), which is valid
 
 	// Apply routing mode default (Spec 031)
@@ -1695,8 +3020,16 @@ func (c *Config) Validate() error {
 		c.RoutingMode = RoutingModeRetrieveTools
 	}
 
-	// Then perform detailed validation
-	errors := c.ValidateDetailed()
+	// Then perform detailed validation.
+	//
+	// validateDetailedCore(), NOT ValidateDetailed(): a malformed per-server
+	// `oauth.redirect_uri` must not brick the boot. Failing the load would take
+	// every other server down with it over a field only one server uses, and the
+	// value is already surfaced loudly at connect time (internal/oauth returns an
+	// explicit "invalid oauth.redirect_uri for server X" error). The write
+	// surfaces reject it via ValidateDetailed() instead — that is where the
+	// operator is actually typing it.
+	errors := c.validateDetailedCore()
 	if len(errors) > 0 {
 		// Return first error for backward compatibility
 		return fmt.Errorf("%s", errors[0].Error())
@@ -1717,7 +3050,10 @@ func (c *Config) Validate() error {
 		// Check environment variable for API key
 		// Use LookupEnv to distinguish between "not set" and "set to empty string"
 		if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists {
-			c.APIKey = envAPIKey // Allow empty string to explicitly disable authentication
+			// Allow empty string to explicitly disable authentication. A
+			// process-only override: no save path may write it into api_key
+			// (see process_overrides.go).
+			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envAPIKey)
 		}
 	}
 
@@ -1767,6 +3103,32 @@ func (c *Config) Validate() error {
 	if c.Observability.UsagePersistInterval.Duration() <= 0 {
 		c.Observability.UsagePersistInterval = Duration(30 * time.Second)
 	}
+	// MCP-32 exporters: fill missing sub-configs (disabled) and repair invalid
+	// tracing transport so the OTLP exporter can always construct when enabled.
+	if c.Observability.Metrics == nil {
+		c.Observability.Metrics = DefaultMetricsExporterConfig()
+	}
+	if c.Observability.Tracing == nil {
+		c.Observability.Tracing = DefaultTracingExporterConfig()
+	}
+	tr := c.Observability.Tracing
+	if tr.Protocol != defaultTracingProtocol && tr.Protocol != "grpc" {
+		tr.Protocol = defaultTracingProtocol
+	}
+	if tr.Endpoint == "" {
+		if tr.Protocol == "grpc" {
+			tr.Endpoint = defaultTracingGRPCEnd
+		} else {
+			tr.Endpoint = defaultTracingHTTPEnd
+		}
+	}
+	// Only repair a value the operator actually wrote. Leaving it nil keeps
+	// "absent" distinct from "explicitly 0" (#1175); materialising the default
+	// here would write the key into every config that never mentioned it.
+	if tr.SampleRate != nil && (*tr.SampleRate < 0 || *tr.SampleRate > 1) {
+		repaired := defaultTracingSampleRate
+		tr.SampleRate = &repaired
+	}
 
 	return nil
 }
@@ -1805,7 +3167,12 @@ func OAuthConfigChanged(old, new *OAuthConfig) bool {
 	if old.ClientID != new.ClientID ||
 		old.ClientSecret != new.ClientSecret ||
 		old.RedirectURI != new.RedirectURI ||
-		old.PKCEEnabled != new.PKCEEnabled {
+		old.CallbackBaseURL != new.CallbackBaseURL ||
+		old.PKCEEnabled != new.PKCEEnabled ||
+		old.AuthorizationEndpoint != new.AuthorizationEndpoint ||
+		old.TokenEndpoint != new.TokenEndpoint ||
+		old.RegistrationEndpoint != new.RegistrationEndpoint ||
+		old.AuthServerMetadataURL != new.AuthServerMetadataURL {
 		return true
 	}
 
@@ -1879,7 +3246,6 @@ func (c *Config) GetAnonymousID() string {
 
 // SecurityConfig represents security scanner configuration (Spec 039)
 type SecurityConfig struct {
-	AutoScanQuarantined     bool     `json:"auto_scan_quarantined" mapstructure:"auto-scan-quarantined"`
 	ScanTimeoutDefault      Duration `json:"scan_timeout_default,omitempty" mapstructure:"scan-timeout-default" swaggertype:"string"`
 	IntegrityCheckInterval  Duration `json:"integrity_check_interval,omitempty" mapstructure:"integrity-check-interval" swaggertype:"string"`
 	IntegrityCheckOnRestart bool     `json:"integrity_check_on_restart" mapstructure:"integrity-check-on-restart"`
@@ -1887,6 +3253,11 @@ type SecurityConfig struct {
 	RuntimeReadOnly         bool     `json:"runtime_read_only" mapstructure:"runtime-read-only"`
 	RuntimeTmpfsSize        string   `json:"runtime_tmpfs_size,omitempty" mapstructure:"runtime-tmpfs-size"`
 
+	// Deprecated (Spec 077 US3): migrated on load into DeepScan.DisableNoNewPrivileges
+	// (see migrateDeepScanConfig). Retained only so existing configs that still carry
+	// the top-level key parse; consumers MUST read the effective value via
+	// SecurityConfig.IsDisableNoNewPrivileges. Cleared after migration.
+	//
 	// ScannerDisableNoNewPrivileges, when true, omits the
 	// `--security-opt no-new-privileges` flag from scanner container runs.
 	//
@@ -1904,6 +3275,11 @@ type SecurityConfig struct {
 	// distro-packaged docker.
 	ScannerDisableNoNewPrivileges bool `json:"scanner_disable_no_new_privileges,omitempty" mapstructure:"scanner-disable-no-new-privileges"`
 
+	// Deprecated (Spec 077 US3): migrated on load into DeepScan.FetchPackageSource
+	// (see migrateDeepScanConfig). Retained only so existing configs that still carry
+	// the top-level key parse; consumers MUST read the effective value via
+	// SecurityConfig.EffectiveFetchPackageSource. Cleared after migration.
+	//
 	// ScannerFetchPackageSource controls whether the scanner fetches the
 	// PUBLISHED source of package-runner servers (npx/uvx) — without executing
 	// it — when no local source is available (no Docker container, no local
@@ -1925,4 +3301,212 @@ type SecurityConfig struct {
 	// forbid the scanner's network egress; such servers then fall back to the
 	// tool-definitions-only scan with no regression.
 	ScannerFetchPackageSource *bool `json:"scanner_fetch_package_source,omitempty" mapstructure:"scanner-fetch-package-source"`
+
+	// TPABundlePath is the filesystem path to the tpa-db scanner-bundle.json
+	// the offline TPA scanner runs (spec 086 FR-019: the signature-DB location
+	// MUST be configuration-driven, not hardcoded). Empty (the default) runs the
+	// corpus embedded in this build.
+	//
+	// Env override: MCPPROXY_TPA_BUNDLE_PATH. Hot-reloadable — the path is
+	// re-read on every config.reloaded event via
+	// scanner.Service.ApplySecurityConfig, so a corpus refresh needs no restart.
+	// A configured bundle that fails to read/parse/version-check/compile is
+	// REFUSED and the previously active corpus stays live (fail-closed, never
+	// fail-empty); the reason is logged and surfaced in the security overview's
+	// signature_bundle.load_error.
+	TPABundlePath string `json:"tpa_bundle_path,omitempty" mapstructure:"tpa-bundle-path"`
+	// (see EnvTPABundlePath for the env override that outranks this field)
+
+	// DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
+	// deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
+	// keys (migrated on load) and gates the heavy Docker-based scanners + source
+	// extraction. Disabled by default (FR-006): only the deterministic in-process
+	// baseline scanner runs. A deep-scan failure NEVER changes the baseline verdict
+	// (FR-007/FR-008).
+	DeepScan *DeepScanConfig `json:"deep_scan,omitempty" mapstructure:"deep-scan"`
+
+	// AutoBaselineScan is the kill-switch for the AUTOMATIC, informational
+	// Pass-1 baseline scan: the free in-process TPA scan mcpproxy runs for every
+	// newly admitted server (any trust mode) and, once per installation, over
+	// pre-existing servers that have never been scanned.
+	//
+	// Informational ONLY: the resulting verdict populates the security badge and
+	// the scan summary, and NEVER gates quarantine or approval. The
+	// trust_mode:"scan" admission gate is a separate path and is unaffected by
+	// this flag.
+	//
+	// Default (nil) is ENABLED. Set to false to suppress every automatic scan
+	// (manual scans keep working). Env override: MCPPROXY_AUTO_BASELINE_SCAN,
+	// which wins over this field on every path.
+	AutoBaselineScan *bool `json:"auto_baseline_scan,omitempty" mapstructure:"auto-baseline-scan" swaggertype:"boolean"`
+}
+
+// DeepScanConfig configures the opt-in "deep scan" layer (Spec 077 US3):
+// Docker-based scanner plugins plus published-package-source extraction. The
+// whole layer is off by default; when disabled only the deterministic
+// in-process baseline scanner runs and no Docker is invoked. A deep-scan
+// failure is surfaced as an informational note and never degrades the baseline
+// verdict.
+type DeepScanConfig struct {
+	// Enabled is the master opt-in for the heavy layer (FR-006). Default false.
+	Enabled bool `json:"enabled" mapstructure:"enabled"`
+
+	// FetchPackageSource controls whether the scanner fetches the PUBLISHED
+	// source of package-runner servers (npx/uvx) — without executing it — when
+	// no local source is available. Absorbs the deprecated top-level
+	// scanner_fetch_package_source. Default (nil) is ENABLED within deep scan.
+	FetchPackageSource *bool `json:"fetch_package_source,omitempty" mapstructure:"fetch-package-source" swaggertype:"boolean"`
+
+	// DisableNoNewPrivileges, when true, omits the `--security-opt
+	// no-new-privileges` flag from scanner container runs (snap-docker/AppArmor
+	// escape hatch). Absorbs the deprecated top-level
+	// scanner_disable_no_new_privileges. Default false.
+	DisableNoNewPrivileges bool `json:"disable_no_new_privileges,omitempty" mapstructure:"disable-no-new-privileges"`
+
+	// Scanners optionally restricts which deep scanners may run under the
+	// umbrella (by scanner id). Empty ⇒ all enabled deep scanners are eligible.
+	Scanners []string `json:"scanners,omitempty" mapstructure:"scanners"`
+}
+
+// IsDeepScanEnabled reports whether the opt-in deep-scan layer is turned on.
+// Nil-safe: a nil SecurityConfig or nil DeepScan means disabled (the default).
+func (sc *SecurityConfig) IsDeepScanEnabled() bool {
+	return sc != nil && sc.DeepScan != nil && sc.DeepScan.Enabled
+}
+
+// EffectiveTPABundlePath returns the TPA signature-bundle path the scanner must
+// run, or "" to mean "use the corpus embedded in this build" (spec 086 FR-019).
+//
+// Precedence: MCPPROXY_TPA_BUNDLE_PATH wins over the file value. The env check
+// lives HERE, not only in the loader's env-override pass, because config
+// objects reach the scanner without ever passing through config.Load — most
+// visibly POST /api/v1/config/apply, which would otherwise let a posted
+// security.tpa_bundle_path silently defeat the operator's env override on the
+// next scanner reconfigure. Nil-safe: a config with no security block still
+// honours the env var, and runs the embedded corpus without one.
+func (sc *SecurityConfig) EffectiveTPABundlePath() string {
+	if env := os.Getenv(EnvTPABundlePath); env != "" {
+		return env
+	}
+	if sc == nil {
+		return ""
+	}
+	return sc.TPABundlePath
+}
+
+// IsAutoBaselineScanEnabled reports whether mcpproxy may run the automatic,
+// informational Pass-1 baseline scan (new-server admission scan + the one-shot
+// baseline sweep). Default is ENABLED: a nil SecurityConfig, or an unset
+// auto_baseline_scan, means on — the scan is free, in-process, and drives no
+// gating, so an install that never touched the security block still gets its
+// badges populated.
+//
+// MCPPROXY_AUTO_BASELINE_SCAN outranks the file value on every path (loader,
+// hot-reload, /api/v1/config/apply) because the precedence is resolved here
+// rather than only in the loader's env pass.
+func (sc *SecurityConfig) IsAutoBaselineScanEnabled() bool {
+	switch os.Getenv(EnvAutoBaselineScan) {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	}
+	if sc == nil || sc.AutoBaselineScan == nil {
+		return true
+	}
+	return *sc.AutoBaselineScan
+}
+
+// DeepScanScanners returns the optional per-scanner allow-list for the deep-scan
+// layer, or nil when unset (all enabled deep scanners are eligible).
+func (sc *SecurityConfig) DeepScanScanners() []string {
+	if sc != nil && sc.DeepScan != nil {
+		return sc.DeepScan.Scanners
+	}
+	return nil
+}
+
+// EffectiveFetchPackageSource resolves the package-source-fetch setting from the
+// deep_scan block first, falling back to the deprecated top-level key for
+// configs loaded before migration. Nil ⇒ default (enabled).
+func (sc *SecurityConfig) EffectiveFetchPackageSource() *bool {
+	if sc == nil {
+		return nil
+	}
+	if sc.DeepScan != nil && sc.DeepScan.FetchPackageSource != nil {
+		return sc.DeepScan.FetchPackageSource
+	}
+	return sc.ScannerFetchPackageSource
+}
+
+// IsDisableNoNewPrivileges resolves the no-new-privileges escape hatch from the
+// deep_scan block first, falling back to the deprecated top-level key.
+func (sc *SecurityConfig) IsDisableNoNewPrivileges() bool {
+	if sc == nil {
+		return false
+	}
+	if sc.DeepScan != nil && sc.DeepScan.DisableNoNewPrivileges {
+		return true
+	}
+	return sc.ScannerDisableNoNewPrivileges
+}
+
+// MigrateDeepScanConfig runs the Spec 077 US3 deep-scan config migration on an
+// already-parsed config. LoadFromFile applies it automatically (via
+// initializeRegistries); the /api/v1/config/apply path bypasses LoadFromFile, so
+// it calls this explicitly to normalize an API-submitted config identically to a
+// file load before diffing/saving (SC-007). Idempotent + nil-safe.
+func MigrateDeepScanConfig(cfg *Config) {
+	migrateDeepScanConfig(cfg)
+}
+
+// migrateDeepScanConfig folds the deprecated top-level scanner_fetch_package_source
+// and scanner_disable_no_new_privileges keys into the unified security.deep_scan
+// block (Spec 077 FR-017) so existing configs load unchanged and behave
+// identically after migration (SC-007). The removed auto_scan_quarantined key has
+// no struct field, so it is silently ignored on unmarshal (FR-016). Idempotent:
+// only fills deep_scan fields left unset, then clears the legacy keys so a
+// re-serialized config exposes only the new surface. Runs on every load and
+// hot-reload via initializeRegistries.
+func migrateDeepScanConfig(cfg *Config) {
+	if cfg == nil || cfg.Security == nil {
+		return
+	}
+	sc := cfg.Security
+	if sc.ScannerFetchPackageSource == nil && !sc.ScannerDisableNoNewPrivileges {
+		return // nothing legacy to migrate
+	}
+	if sc.DeepScan == nil {
+		sc.DeepScan = &DeepScanConfig{}
+	}
+	if sc.DeepScan.FetchPackageSource == nil && sc.ScannerFetchPackageSource != nil {
+		v := *sc.ScannerFetchPackageSource
+		sc.DeepScan.FetchPackageSource = &v
+	}
+	if !sc.DeepScan.DisableNoNewPrivileges && sc.ScannerDisableNoNewPrivileges {
+		sc.DeepScan.DisableNoNewPrivileges = true
+	}
+	// Clear the legacy keys so the migrated config serializes only deep_scan.*.
+	sc.ScannerFetchPackageSource = nil
+	sc.ScannerDisableNoNewPrivileges = false
+}
+
+// AdvertiseUpstreamServersEnabled reports the effective
+// advertise_upstream_servers value (default true when unset).
+func (c *Config) AdvertiseUpstreamServersEnabled() bool {
+	return c == nil || c.AdvertiseUpstreamServers == nil || *c.AdvertiseUpstreamServers
+}
+
+// toolOutputRootsOverlap reports whether two cleaned absolute roots are equal
+// or one is a separator-bounded descendant of the other. Windows and macOS
+// paths are compared case-insensitively (their default filesystems are).
+func toolOutputRootsOverlap(a, b string) bool {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		a, b = strings.ToLower(a), strings.ToLower(b)
+	}
+	if a == b {
+		return true
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(a, strings.TrimSuffix(b, sep)+sep) || strings.HasPrefix(b, strings.TrimSuffix(a, sep)+sep)
 }

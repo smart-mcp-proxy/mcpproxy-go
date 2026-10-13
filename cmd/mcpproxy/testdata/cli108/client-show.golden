@@ -1,0 +1,11 @@
+Client: Cursor
+State: connected_seen
+Config path: /Users/test/.cursor/mcp.json
+Reload: Restart Cursor
+Credential: client (token client-cursor)
+Profile: Work Read-only (work-ro2), locked, source pin
+Expires: 2027-09-25T06:10:00Z
+Blocked 24h: 3
+Sessions: 1
+SESSION  WORK SESSION  STARTED AT            LAST ACTIVITY         PROFILE   SOURCE
+S1       ws-1          2026-09-25T06:00:00Z  2026-09-25T06:10:00Z  work-ro2  pin

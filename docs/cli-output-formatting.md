@@ -1,3 +1,9 @@
+---
+title: "CLI Output Formatting"
+sidebar_label: "Output Formatting"
+description: "Machine-readable and human-readable output formats for the MCPProxy CLI."
+---
+
 # CLI Output Formatting
 
 MCPProxy CLI supports multiple output formats for machine-readable and human-readable output.
@@ -10,7 +16,7 @@ All commands support the following output format options:
 
 | Flag | Description |
 |------|-------------|
-| `-o, --output <format>` | Output format: `table` (default), `json`, `yaml` |
+| `-o, --output <format>` | Output format: `table` (default), `json`, `yaml` (terminal rendering; `activity export` uses `--format` for its file format) |
 | `--json` | Shorthand for `-o json` |
 
 ### Environment Variable
@@ -118,7 +124,7 @@ mcpproxy --help-json
     {
       "name": "output",
       "shorthand": "o",
-      "description": "Output format: table, json, yaml",
+      "description": "Output format: table, json, yaml (terminal rendering; activity export uses --format for its file format)",
       "type": "string",
       "default": ""
     }
@@ -185,6 +191,30 @@ mcpproxy upstream list -o json | jq -r '.[] | select(.connected) | .name'
 
 # Count total tools
 mcpproxy upstream list -o json | jq '[.[].tool_count] | add'
+```
+
+### Show version information
+
+```bash
+# Human-readable (same output as `mcpproxy --version`)
+mcpproxy version
+# MCPProxy v0.51.0 (personal) darwin/arm64
+
+# JSON for scripting
+mcpproxy version -o json
+```
+
+JSON payload (`commit` and `date` appear only when injected at build time, e.g. `make build`):
+
+```json
+{
+  "version": "v0.51.0",
+  "edition": "personal",
+  "os": "darwin",
+  "arch": "arm64",
+  "commit": "15458bd5",
+  "date": "2026-07-15T00:00:00Z"
+}
 ```
 
 ### Discover commands for AI agents

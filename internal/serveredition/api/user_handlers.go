@@ -3,7 +3,9 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -14,37 +16,158 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	teamsauth "github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
+
+// AdminServersProvider returns the admin configuration's servers — the WHOLE
+// list, shared and private alike — as of NOW.
+//
+// It is a function, not a slice, on purpose. The slice this replaced was
+// captured once, when the handlers were constructed at process start, and the
+// configuration is hot-reloadable: a server the admin added afterwards was
+// invisible to every check built on it. That is not cosmetic. collidesWithAdminConfig
+// is the control that stops a tenant's personal server from lending its name to
+// a token scope (see entitledServerNames); against a boot-time snapshot a tenant
+// could pre-create a personal server named like an admin server that only
+// EXISTS later, and walk through the entitlement check exactly as they did
+// before that control was added. Every collision and entitlement decision must
+// therefore read the live configuration.
+//
+// The returned slice and the ServerConfigs in it are treated as READ-ONLY by
+// every caller here (the shared-server response is a masked copy — see
+// sharedServerResponse). Implementations are expected to hand back the current
+// snapshot rather than a defensive deep copy, so nothing may write through it.
+type AdminServersProvider func() []*config.ServerConfig
+
+// EntitlementSnapshotProvider returns the admin-config servers and the
+// server-edition access block from ONE live-configuration read (Spec 107
+// FR-004 "one predicate, one decision"; FR-039 part 3 hot reload).
+//
+// entitledServerNamesFor reads both values on every decision, and each was
+// originally read through its own independent provider (AdminServersProvider
+// and ServerEditionConfigProvider below): a hot reload landing between those
+// two separate live calls could splice a servers snapshot from one
+// configuration version to an access snapshot from another, entitling a
+// server that was granted in NEITHER version alone (cross-review round 2,
+// chunk 1 P1). This provider closes that window by returning both values
+// from a single underlying read; setup.go installs it from one liveConfig()
+// call, the same closure AdminServersProvider and ServerEditionConfigProvider
+// each independently call today.
+//
+// nil = no combined provider installed (tests, embedders with no config
+// service): entitledServerNamesFor then falls back to the two separate
+// providers, matching the pre-fix behaviour. Production wiring always
+// installs this provider (see setup.go, pinned by
+// TestSetupMultiUserOAuth_WiresEntitlementSnapshotProvider).
+type EntitlementSnapshotProvider func() ([]*config.ServerConfig, *config.ServerEditionAccessConfig)
 
 // UserHandlers provides REST endpoints for user server management.
 type UserHandlers struct {
-	userStore     *users.UserStore
-	logger        *zap.SugaredLogger
-	sharedServers []*config.ServerConfig
-	tokenStore    tokenStore
-	hmacKey       []byte
+	userStore    *users.UserStore
+	logger       *zap.SugaredLogger
+	adminServers AdminServersProvider
+	tokenStore   tokenStore
+	hmacKey      []byte
+
+	// serverEditionConfig is the LIVE server-edition block (Spec 107 FR-007/
+	// FR-009): the `access` group map the entitlement predicate reads on
+	// every decision. nil = no provider installed (tests, embedders with no
+	// config service), which reads as "no access block" — today's
+	// Shared-only semantics — never as an error; an installed provider that
+	// answers nil is a missing configuration and fails closed.
+	serverEditionConfig teamsauth.ServerEditionConfigProvider
+
+	// entitlementSnapshot, when installed, is the single-read source for
+	// BOTH adminConfigServers() and the access block inside the entitlement
+	// predicate — see EntitlementSnapshotProvider. nil falls back to the two
+	// separate providers above.
+	entitlementSnapshot EntitlementSnapshotProvider
 }
 
 // tokenStore defines the interface for agent token storage operations.
 // Implemented by *storage.Manager.
+// Every by-name method here is OWNER-SCOPED. A bare name is ambiguous in the
+// server edition — two tenants can each hold a token called "ci" — and an
+// owner-blind lookup followed by an ownership re-check would answer "exists,
+// but not yours", which is an oracle for other tenants' token names. Scoping
+// the lookup makes "absent" and "not yours" produce the same
+// storage.ErrAgentTokenNotFound.
+//
+// There is deliberately no by-name READ here. The mutators resolve (owner,
+// name) inside their own transaction and report not-found themselves, so a
+// preflight read would only reintroduce the TOCTOU window and the sentinel leak
+// that writeTokenMutationError exists to close.
 type tokenStore interface {
 	CreateAgentToken(token auth.AgentToken, rawToken string, hmacKey []byte) error
 	ListAgentTokens() ([]auth.AgentToken, error)
-	GetAgentTokenByName(name string) (*auth.AgentToken, error)
-	RevokeAgentToken(name string) error
-	RegenerateAgentToken(name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
+	RevokeAgentTokenForOwner(userID, name string) error
+	DeleteAgentTokenForOwner(userID, name string) error
+	// narrowScope re-applies the owner's current server entitlement to the
+	// rotated token; it must only narrow, and must not do I/O (it runs inside
+	// the write transaction). See narrowScopeToEntitled.
+	RegenerateAgentTokenForOwner(userID, name string, newRawToken string, hmacKey []byte, narrowScope func([]string) []string) (*auth.AgentToken, error)
 }
 
 // NewUserHandlers creates a new UserHandlers instance.
-func NewUserHandlers(userStore *users.UserStore, sharedServers []*config.ServerConfig, tokenStore tokenStore, hmacKey []byte, logger *zap.SugaredLogger) *UserHandlers {
+//
+// adminServers must read the LIVE admin configuration on every call; see
+// AdminServersProvider for why a captured slice is a security defect here. A
+// nil provider is tolerated and means "no admin servers", which is the
+// conservative reading: nothing is shared, and no name collides.
+func NewUserHandlers(userStore *users.UserStore, adminServers AdminServersProvider, tokenStore tokenStore, hmacKey []byte, logger *zap.SugaredLogger) *UserHandlers {
 	return &UserHandlers{
-		userStore:     userStore,
-		logger:        logger,
-		sharedServers: sharedServers,
-		tokenStore:    tokenStore,
-		hmacKey:       hmacKey,
+		userStore:    userStore,
+		logger:       logger,
+		adminServers: adminServers,
+		tokenStore:   tokenStore,
+		hmacKey:      hmacKey,
 	}
+}
+
+// SetHMACKey installs the key the token doors hash raw tokens with. setup.go
+// constructs UserHandlers before the HMAC key exists (the entitlement
+// predicate must be installed ahead of every fallible step) and sets it here
+// once derived.
+func (h *UserHandlers) SetHMACKey(key []byte) {
+	h.hmacKey = key
+}
+
+// SetServerEditionConfigProvider installs the live server-edition block the
+// entitlement predicate reads `access` from (Spec 107 FR-007: the group map is
+// hot-reloadable, so it is read through the provider on every decision, never
+// captured). setup.go passes the same provider the auth middleware derives the
+// live admin role from.
+func (h *UserHandlers) SetServerEditionConfigProvider(p teamsauth.ServerEditionConfigProvider) {
+	h.serverEditionConfig = p
+}
+
+// SetEntitlementSnapshotProvider installs the combined single-read source for
+// the entitlement predicate's servers+access snapshot (see
+// EntitlementSnapshotProvider). setup.go installs this alongside (not
+// instead of) SetServerEditionConfigProvider/the AdminServersProvider passed
+// to NewUserHandlers, which stay in use for callers that need only one of
+// the two values (e.g. the createServer collision check).
+func (h *UserHandlers) SetEntitlementSnapshotProvider(p EntitlementSnapshotProvider) {
+	h.entitlementSnapshot = p
+}
+
+// StaticAdminServers adapts a fixed slice to AdminServersProvider. It is for
+// callers that genuinely have no live configuration to read — never for
+// production wiring, which must pass a provider over the current snapshot.
+func StaticAdminServers(servers []*config.ServerConfig) AdminServersProvider {
+	return func() []*config.ServerConfig { return servers }
+}
+
+// adminConfigServers reads the live admin configuration once for the current
+// check. Callers must not hold the result across a request boundary.
+func (h *UserHandlers) adminConfigServers() []*config.ServerConfig {
+	if h.adminServers == nil {
+		return nil
+	}
+	return h.adminServers()
 }
 
 // RegisterRoutes registers all user server management routes on the provided router.
@@ -61,6 +184,7 @@ func (h *UserHandlers) RegisterRoutes(r chi.Router) {
 		r.Get("/", h.listUserTokens)
 		r.Post("/", h.createUserToken)
 		r.Delete("/{name}", h.revokeUserToken)
+		r.Delete("/{name}/permanent", h.deleteUserToken)
 		r.Post("/{name}/regenerate", h.regenerateUserToken)
 	})
 }
@@ -76,6 +200,7 @@ func (h *UserHandlers) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
 	r.Get(prefix+"/user/tokens", h.listUserTokens)
 	r.Post(prefix+"/user/tokens", h.createUserToken)
 	r.Delete(prefix+"/user/tokens/{name}", h.revokeUserToken)
+	r.Delete(prefix+"/user/tokens/{name}/permanent", h.deleteUserToken)
 	r.Post(prefix+"/user/tokens/{name}/regenerate", h.regenerateUserToken)
 }
 
@@ -107,16 +232,143 @@ type EnableServerRequest struct {
 }
 
 // ServerResponse wraps a ServerConfig with ownership information.
+//
+// NOTE (issue #937 fallout): config.ServerConfig carries custom
+// MarshalJSON/UnmarshalJSON methods, and Go PROMOTES those to any struct that
+// embeds it. Without the explicit methods below, encoding/json saw
+// ServerResponse as a json.Marshaler/Unmarshaler and delegated the whole value
+// to the embedded config — silently dropping `ownership` and `user_enabled`
+// from every response, and failing every decode with
+// "json: Unmarshal(nil *config.Alias)" because the embedded pointer is nil
+// before decoding starts. Keep the methods in sync with the fields here;
+// TestServerResponse_JSONRoundTrip pins the behaviour.
 type ServerResponse struct {
 	*config.ServerConfig
 	Ownership   string `json:"ownership"`              // "personal" or "shared"
 	UserEnabled *bool  `json:"user_enabled,omitempty"` // Per-user preference for shared servers (nil = no preference, defaults to enabled)
 }
 
+// serverResponseWrapperFields holds only the fields ServerResponse adds on top
+// of the embedded config, so both JSON methods share one definition.
+type serverResponseWrapperFields struct {
+	Ownership   string `json:"ownership"`
+	UserEnabled *bool  `json:"user_enabled,omitempty"`
+}
+
+// MarshalJSON flattens the embedded *config.ServerConfig and the wrapper fields
+// into a single JSON object.
+//
+// The embedded config is marshaled through its OWN MarshalJSON so the #937
+// "quarantined" presence semantics (omit an unstated false, always write true)
+// are preserved verbatim; the wrapper fields are then spliced on top.
+func (r ServerResponse) MarshalJSON() ([]byte, error) {
+	fields := map[string]json.RawMessage{}
+
+	if r.ServerConfig != nil {
+		raw, err := json.Marshal(r.ServerConfig)
+		if err != nil {
+			return nil, err
+		}
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return nil, err
+		}
+	}
+
+	wrapper, err := json.Marshal(serverResponseWrapperFields{
+		Ownership:   r.Ownership,
+		UserEnabled: r.UserEnabled,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var wrapperFields map[string]json.RawMessage
+	if err := json.Unmarshal(wrapper, &wrapperFields); err != nil {
+		return nil, err
+	}
+	// Wrapper fields win: they are what the endpoint promises.
+	for k, v := range wrapperFields {
+		fields[k] = v
+	}
+
+	return json.Marshal(fields)
+}
+
+// UnmarshalJSON decodes a flattened ServerResponse, allocating the embedded
+// config first so the config's own UnmarshalJSON (and its "quarantined"
+// presence detection) runs against a non-nil target.
+func (r *ServerResponse) UnmarshalJSON(data []byte) error {
+	if string(bytes.TrimSpace(data)) == "null" {
+		return nil
+	}
+
+	sc := &config.ServerConfig{}
+	if err := json.Unmarshal(data, sc); err != nil {
+		return err
+	}
+
+	var wrapper serverResponseWrapperFields
+	if err := json.Unmarshal(data, &wrapper); err != nil {
+		return err
+	}
+
+	r.ServerConfig = sc
+	r.Ownership = wrapper.Ownership
+	r.UserEnabled = wrapper.UserEnabled
+	return nil
+}
+
 // ServerListResponse contains personal and shared servers for a user.
 type ServerListResponse struct {
 	Personal []*ServerResponse `json:"personal"`
 	Shared   []*ServerResponse `json:"shared"`
+}
+
+// sharedServerResponse renders one ADMIN-CONFIGURED shared server for an
+// ordinary user, with every secret-bearing field masked.
+//
+// Issue #1148, applied to the server edition's per-user door. ServerResponse
+// EMBEDS the raw *config.ServerConfig, and for a shared server that config is
+// the ADMIN's: its `headers` (Authorization, X-API-Key), `env`, URL query
+// credentials, `oauth.client_secret` and `auth_broker.client_secret` were
+// handed to every authenticated user of the deployment in the clear, on
+// listServers, getServer and enableServer alike. This is the same defect class
+// the MCP, REST and SSE doors closed; this door that sweep did not reach.
+//
+// The rules are the SAME ones every other door applies, reached through
+// oauth.RedactServerConfigSecrets, which walks the struct rather than
+// enumerating it, so a field added to config.ServerConfig (or to the
+// build-tagged auth_broker block) is masked because the walk reaches it.
+//
+// The POLICY is oauth.AuditRedaction, not the LiveRedaction an owner-facing
+// surface uses. MaskValue's `••••<last2> (<N> chars)` rendering is an
+// affordance for someone editing their OWN credential; here the reader is a
+// different tenant who cannot edit this server at all, so the affordance buys
+// them nothing while publishing the admin credential's exact length and
+// trailing bytes to every user of the deployment — a durable fingerprint, a
+// correlation handle across tenants, and a materially smaller search space for
+// a low-entropy secret.
+//
+// It returns a masked COPY: `h.sharedServers` is the LIVE admin configuration,
+// and writing a mask through it would be the #1142/#1146 read-modify-write
+// corruption with every user of the deployment as the blast radius.
+//
+// Masking is safe here — and ONLY here — because shared servers are READ-ONLY
+// to users: updateServer and deleteServer both answer 403, and enableServer
+// stores a per-user preference without touching the shared config. So there is
+// no write path that could persist an echoed mask over the real credential,
+// which is the hazard every other door on this issue had to guard against.
+// PERSONAL servers are deliberately NOT masked: they are the caller's own
+// credentials (no cross-tenant disclosure to close), and updateServer replaces
+// URL, Args and Headers WHOLESALE from the request body, so masking them
+// without a key-bound unmask mirror (oauth.UnmaskLiveHeaders / UnmaskLiveURL +
+// oauth.CheckArgvMaskEcho) would let a read-modify-write client persist the
+// masks over the user's real secrets.
+func sharedServerResponse(sc *config.ServerConfig, userEnabled *bool) *ServerResponse {
+	return &ServerResponse{
+		ServerConfig: oauth.RedactServerConfigSecrets(sc, oauth.AuditRedaction),
+		Ownership:    "shared",
+		UserEnabled:  userEnabled,
+	}
 }
 
 // --- Handlers ---
@@ -144,6 +396,14 @@ func (h *UserHandlers) listServers(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	// The shared projection: the ONE entitlement predicate for a tenant
+	// (Spec 107 FR-004), the unchanged shared projection for an admin_user.
+	visible, err := h.visibleSharedServers(r, userID)
+	if err != nil {
+		h.writeEntitlementError(w, userID, err)
+		return
+	}
+
 	// Load user's shared server preferences
 	sharedPrefs, err := h.userStore.GetSharedServerPrefs(userID)
 	if err != nil {
@@ -153,18 +413,13 @@ func (h *UserHandlers) listServers(w http.ResponseWriter, r *http.Request) {
 	}
 
 	shared := make([]*ServerResponse, 0)
-	for _, sc := range h.sharedServers {
-		if sc.Shared {
-			resp := &ServerResponse{
-				ServerConfig: sc,
-				Ownership:    "shared",
-			}
-			// Apply user preference if set
-			if pref, ok := sharedPrefs[sc.Name]; ok {
-				resp.UserEnabled = &pref.Enabled
-			}
-			shared = append(shared, resp)
+	for _, sc := range visible {
+		var userEnabled *bool
+		// Apply user preference if set
+		if pref, ok := sharedPrefs[sc.Name]; ok {
+			userEnabled = &pref.Enabled
 		}
+		shared = append(shared, sharedServerResponse(sc, userEnabled))
 	}
 
 	writeJSON(w, http.StatusOK, ServerListResponse{
@@ -193,10 +448,40 @@ func (h *UserHandlers) createServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check conflict with shared servers.
-	for _, shared := range h.sharedServers {
-		if shared.Shared && strings.EqualFold(shared.Name, req.Name) {
-			writeError(w, http.StatusConflict, fmt.Sprintf("Server name %q conflicts with a shared server", req.Name))
+	// Refuse a name already taken by ANY server in the admin configuration,
+	// shared or not — read LIVE, so a server the admin adds after boot is
+	// covered (see AdminServersProvider).
+	//
+	// The `Shared` qualifier that used to be here made the whole entitlement
+	// check on token scope bypassable: a tenant created a personal server named
+	// exactly like one of the admin's PRIVATE upstreams, entitledServerNames
+	// then added that name because they now owned a server called that, and the
+	// token they minted named a server auth.AuthContext.CanAccessServer compares
+	// by bare string — so it reached the admin's server. entitledServerNames
+	// excludes such a collision on its own, so this refusal is defence in depth
+	// rather than the only control; it also keeps a tenant from creating a
+	// personal server they could never scope a token to.
+	//
+	// ONE body, for every reason a name can be unavailable: an admin server
+	// (shared or private), or one the caller already owns. The wording used to
+	// differ between those, and the difference was itself the oracle — "is not
+	// available" versus "already exists" told a tenant, in one request, that a
+	// name they do not own is in the admin's configuration, letting them
+	// enumerate a private inventory they cannot list. Refusing at all
+	// necessarily leaks that the name is taken; nothing beyond that leaks now,
+	// and in particular nothing distinguishes the holder.
+	//
+	// What remains, and cannot be closed here: a tenant who knows their own
+	// inventory can subtract it, so a refusal on a name they do not hold still
+	// resolves to "the admin holds it". Removing that last bit means letting the
+	// create succeed, which requires enforcement (auth.AuthContext.CanAccessServer)
+	// to resolve a server name against an OWNER rather than as a bare string.
+	// That is the real fix and it is a larger change than this door.
+	const nameUnavailable = "Server name %q is not available"
+
+	for _, existing := range h.adminConfigServers() {
+		if existing != nil && strings.EqualFold(existing.Name, req.Name) {
+			writeError(w, http.StatusConflict, fmt.Sprintf(nameUnavailable, req.Name))
 			return
 		}
 	}
@@ -209,7 +494,7 @@ func (h *UserHandlers) createServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if existing != nil {
-		writeError(w, http.StatusConflict, fmt.Sprintf("Server %q already exists", req.Name))
+		writeError(w, http.StatusConflict, fmt.Sprintf(nameUnavailable, req.Name))
 		return
 	}
 
@@ -268,15 +553,32 @@ func (h *UserHandlers) getServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check shared servers.
-	for _, shared := range h.sharedServers {
-		if shared.Shared && strings.EqualFold(shared.Name, name) {
-			writeJSON(w, http.StatusOK, &ServerResponse{
-				ServerConfig: shared,
-				Ownership:    "shared",
-			})
-			return
+	// Check shared servers — through the entitlement predicate, resolved
+	// BEFORE any lookup of the named resource, so a hidden name and an absent
+	// name take the same path to the same 404 (FR-010 status parity).
+	shared, err := h.visibleSharedServer(r, userID, name)
+	if err != nil {
+		h.writeEntitlementError(w, userID, err)
+		return
+	}
+	if shared != nil {
+		// The caller's own preference belongs on the DETAIL read too.
+		// Rendering it as unset made this route disagree with listServers
+		// (which threads it from GetSharedServerPrefs) and with the 200 body
+		// of .../enable: a user who had disabled a shared server saw only
+		// the admin's `enabled` and no `user_enabled` at all.
+		//
+		// Keyed on shared.Name — the canonical name the preference is
+		// stored under.
+		var userEnabled *bool
+		if pref, perr := h.userStore.GetSharedServerPref(userID, shared.Name); perr != nil {
+			// Non-fatal: the server itself is still worth returning.
+			h.logger.Errorw("failed to load shared server pref", "user_id", userID, "name", shared.Name, "error", perr)
+		} else if pref != nil {
+			userEnabled = &pref.Enabled
 		}
+		writeJSON(w, http.StatusOK, sharedServerResponse(shared, userEnabled))
+		return
 	}
 
 	writeError(w, http.StatusNotFound, fmt.Sprintf("Server %q not found", name))
@@ -296,12 +598,17 @@ func (h *UserHandlers) updateServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject updates to shared servers.
-	for _, shared := range h.sharedServers {
-		if shared.Shared && strings.EqualFold(shared.Name, name) {
-			writeError(w, http.StatusForbidden, "Cannot update a shared server")
-			return
-		}
+	// Reject updates to shared servers the caller can SEE; a shared server
+	// outside the caller's entitlement is not "shared" to them and falls
+	// through to the personal lookup's 404, exactly like an absent name.
+	shared, err := h.visibleSharedServer(r, userID, name)
+	if err != nil {
+		h.writeEntitlementError(w, userID, err)
+		return
+	}
+	if shared != nil {
+		writeError(w, http.StatusForbidden, "Cannot update a shared server")
+		return
 	}
 
 	// Get existing personal server.
@@ -370,12 +677,15 @@ func (h *UserHandlers) deleteServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Reject deletion of shared servers.
-	for _, shared := range h.sharedServers {
-		if shared.Shared && strings.EqualFold(shared.Name, name) {
-			writeError(w, http.StatusForbidden, "Cannot delete a shared server")
-			return
-		}
+	// Reject deletion of shared servers the caller can see (see updateServer).
+	shared, err := h.visibleSharedServer(r, userID, name)
+	if err != nil {
+		h.writeEntitlementError(w, userID, err)
+		return
+	}
+	if shared != nil {
+		writeError(w, http.StatusForbidden, "Cannot delete a shared server")
+		return
 	}
 
 	// Verify the personal server exists before deleting.
@@ -421,24 +731,23 @@ func (h *UserHandlers) enableServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if this is a shared server
-	for _, shared := range h.sharedServers {
-		if shared.Shared && strings.EqualFold(shared.Name, name) {
-			// Store per-user preference for the shared server
-			if err := h.userStore.SetSharedServerPref(userID, shared.Name, req.Enabled); err != nil {
-				h.logger.Errorw("failed to set shared server pref", "user_id", userID, "name", name, "error", err)
-				writeError(w, http.StatusInternalServerError, "Failed to update preference")
-				return
-			}
-
-			h.logger.Infow("shared server user preference set", "user_id", userID, "name", name, "enabled", req.Enabled)
-			writeJSON(w, http.StatusOK, &ServerResponse{
-				ServerConfig: shared,
-				Ownership:    "shared",
-				UserEnabled:  &req.Enabled,
-			})
+	// Check if this is a shared server the caller can see.
+	shared, err := h.visibleSharedServer(r, userID, name)
+	if err != nil {
+		h.writeEntitlementError(w, userID, err)
+		return
+	}
+	if shared != nil {
+		// Store per-user preference for the shared server
+		if err := h.userStore.SetSharedServerPref(userID, shared.Name, req.Enabled); err != nil {
+			h.logger.Errorw("failed to set shared server pref", "user_id", userID, "name", name, "error", err)
+			writeError(w, http.StatusInternalServerError, "Failed to update preference")
 			return
 		}
+
+		h.logger.Infow("shared server user preference set", "user_id", userID, "name", name, "enabled", req.Enabled)
+		writeJSON(w, http.StatusOK, sharedServerResponse(shared, &req.Enabled))
+		return
 	}
 
 	// Personal server: update directly
@@ -539,9 +848,647 @@ func (h *UserHandlers) listUserTokens(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{"tokens": userTokens})
 }
 
-// createUserToken creates a new agent token owned by the authenticated user.
-func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
+// errServerScopeLookup marks a server-scope failure that is the SERVER's fault
+// (the per-user store could not be read), so createUserToken can answer 500
+// instead of blaming the caller's request body for it.
+var errServerScopeLookup = errors.New("failed to load server scope")
+
+// errEntitlementConfigUnavailable marks the case where a live server-edition
+// configuration provider is installed but answers nil: the entitlement cannot
+// be decided, so it is not decided in the caller's favour (fail closed).
+var errEntitlementConfigUnavailable = errors.New("server entitlement configuration unavailable")
+
+// errUserRecordMissing marks a per-user door reached by a principal whose
+// record is gone from the store (deleted between authentication and the
+// handler). The predicate never turns that into an empty grant — an absent
+// record is not "a user with no groups".
+var errUserRecordMissing = errors.New("user record not found")
+
+// entitledServerNamesFor is THE entitlement predicate (Spec 107 FR-004,
+// contracts/entitlement-predicate.md §1): the only function that answers "may
+// this user see, use, mint against, connect to or diagnose server N" for a
+// tenant. Every per-user door — /user/servers (list, get, update, delete,
+// enable), /user/diagnostics, /user/credentials*, token mint and rotate — and
+// the per-authentication owner resolution installed by setup.go read it and
+// nothing else; the AST guard (user_handlers_shared_guard_test.go) fails the
+// build's tests if `ServerConfig.Shared` is read anywhere else in this
+// package outside adminSharedProjection and the administrator-only
+// admin_handlers.go.
+//
+//	personal(u)  = names of u's personal records minus collidesWithAdminConfig
+//	shared       = { s ∈ live.Servers : s.Shared }
+//	grant(u)     = ⋃ access.group_servers[g] for g ∈ u.Groups
+//	               ∪ access.default_servers if no g matches any key
+//	               where "*" expands to every s ∈ shared
+//	entitled(u)  = personal(u) ∪ { s ∈ shared : access == nil ∨ s ∈ grant(u) }   # tenants
+//	entitled(admin) = whole configuration (unchanged) — mint/rotate and the literal "*"
+//
+// It takes the ALREADY-LOADED user record so that an agent-token
+// authentication — whose owner resolution has just loaded the same record —
+// stays at one store read; the REST doors go through entitledServerNames,
+// the wrapper that performs exactly one GetUser and calls this. A nil user is
+// an error, never an empty grant: "no record" must not be mistaken for "no
+// groups".
+//
+// `access` is read LIVE through the ServerEditionConfigProvider setup.go
+// installs (FR-039 part 3: the map is hot-reloadable, and un-mapping a group
+// narrows the caller's NEXT request without a restart or a token rotation).
+// Absent block = today's Shared-only semantics. A provider that answers nil
+// is a missing configuration and fails closed. Group values and server names
+// are compared exactly (case-sensitive) on the bare name; a group with no map
+// entry contributes nothing; u.Groups == nil (a pre-upgrade record) matches
+// no key. Non-nil result always — an empty set is deny-all on every consumer
+// (FR-006).
+//
+// h.adminConfigServers() is the live `Config.Servers`: the WHOLE admin
+// configuration, not just the shared subset (see internal/serveredition/
+// setup.go). The `sc.Shared` filter is therefore load-bearing — dropping it
+// would hand every tenant the admin's private inventory, which is the exact
+// leak this function exists to prevent.
+//
+// The configuration is read ONCE here and threaded through the collision
+// check, so every decision in one call is made against a single version of
+// it. Calling the provider per personal server would let a hot reload land
+// mid-loop and produce a set that was never true of any actual configuration.
+//
+// An admin_user administers the deployment, so for them the candidate set is
+// the whole configuration; the check degrades to the personal edition's
+// "is this a known server?" validation (internal/httpapi/tokens.go). That
+// branch feeds mint, rotate and the literal "*" only — the administrator's
+// /user/* LIST doors keep their shared projection through
+// adminSharedProjection (FR-004 "administrator projection unchanged").
+//
+// A tenant's personal server whose name COLLIDES with one in the admin
+// configuration is excluded (for a non-admin), whether or not the admin's copy
+// is Shared. A bare name is the whole of what CanAccessServer compares, so an
+// entitlement derived from "I own a server called X" is indistinguishable, at
+// enforcement time, from "I may reach the admin's X" — which is how a personal
+// server named after an admin-private upstream turned into a grant over it.
+// createServer also refuses to mint such a collision, but this set must not
+// depend on that: a row created before the refusal existed, or an admin who
+// later adds a server whose name a tenant already used, both produce one — and
+// the second of those is only caught at all because the configuration is read
+// live rather than snapshotted at boot. Excluding it costs the tenant only a
+// token scope, never their server.
+func (h *UserHandlers) entitledServerNamesFor(user *users.User, isAdmin bool) ([]string, error) {
+	adminServers, access, err := h.liveEntitlementSnapshot()
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, err)
+	}
+	return h.entitledServerNamesForSnapshot(user, isAdmin, adminServers, access)
+}
+
+// liveEntitlementSnapshot returns the admin-config servers and the access
+// block from ONE live-configuration read via EntitlementSnapshotProvider,
+// when installed (production wiring always installs it — see setup.go).
+// Falling back to the two separate providers is tolerated only for tests and
+// embedders with no config service; it reopens the split-read window
+// EntitlementSnapshotProvider exists to close, so production code must never
+// rely on the fallback.
+func (h *UserHandlers) liveEntitlementSnapshot() ([]*config.ServerConfig, *config.ServerEditionAccessConfig, error) {
+	if h.entitlementSnapshot != nil {
+		servers, access := h.entitlementSnapshot()
+		return servers, access, nil
+	}
+	access, err := h.liveAccessConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	return h.adminConfigServers(), access, nil
+}
+
+// entitledServerNamesForSnapshot is entitledServerNamesFor's core, taking the
+// admin-config servers and the access block as parameters instead of reading
+// them live. It exists so a caller that must also disclose full ServerConfig
+// objects for the names this predicate returns (visibleSharedServers,
+// visibleSharedServer) can fetch liveEntitlementSnapshot() exactly ONCE and
+// use that single snapshot for the entitlement decision, the disclosure AND
+// the access-vs-servers consistency the predicate itself needs: any
+// independent, separate live read of either value between two uses of this
+// function would open a hot-reload race where a decision is made against a
+// servers snapshot from one configuration version and an access snapshot
+// from another, defeating the "one predicate, one decision" contract
+// (FR-004) and contradicting FR-039's live-reload guarantee (cross-review
+// round 2, chunk 1 P1). Every other caller (which only needs the name set)
+// keeps calling entitledServerNamesFor / entitledServerNames.
+func (h *UserHandlers) entitledServerNamesForSnapshot(user *users.User, isAdmin bool, adminServers []*config.ServerConfig, access *config.ServerEditionAccessConfig) ([]string, error) {
+	if user == nil {
+		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, errUserRecordMissing)
+	}
+
+	personal, err := h.userStore.ListUserServers(user.ID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, err)
+	}
+
+	names := make([]string, 0, len(personal)+len(adminServers))
+	seen := make(map[string]struct{}, len(personal)+len(adminServers))
+	add := func(name string) {
+		if name == "" {
+			return
+		}
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+
+	for _, sc := range personal {
+		if sc == nil {
+			continue
+		}
+		if !isAdmin && collidesWithAdminConfig(adminServers, sc.Name) {
+			continue
+		}
+		add(sc.Name)
+	}
+
+	if isAdmin {
+		for _, sc := range adminServers {
+			if sc != nil {
+				add(sc.Name)
+			}
+		}
+		return names, nil
+	}
+
+	// The group term (FR-009): with the map active, a shared server is
+	// entitled only through the caller's stored groups. "*" in the grant
+	// means every shared server. Names are compared exactly.
+	var granted map[string]struct{}
+	grantAll := false
+	if access != nil {
+		granted = make(map[string]struct{})
+		for _, n := range access.GrantFor(user.Groups) {
+			if n == config.AccessWildcard {
+				grantAll = true
+				continue
+			}
+			granted[n] = struct{}{}
+		}
+	}
+	for _, sc := range adminServers {
+		if sc == nil || !sc.Shared {
+			continue
+		}
+		if access == nil || grantAll {
+			add(sc.Name)
+			continue
+		}
+		if _, ok := granted[sc.Name]; ok {
+			add(sc.Name)
+		}
+	}
+
+	return names, nil
+}
+
+// liveAccessConfig reads the `access` block off the live server-edition
+// configuration. No provider installed = no block (tests and embedders with
+// no config service — the previous, Shared-only behaviour). An installed
+// provider answering nil is a missing configuration: an error, so the
+// decision is not made in the caller's favour.
+func (h *UserHandlers) liveAccessConfig() (*config.ServerEditionAccessConfig, error) {
+	if h.serverEditionConfig == nil {
+		return nil, nil
+	}
+	cfg := h.serverEditionConfig()
+	if cfg == nil {
+		return nil, errEntitlementConfigUnavailable
+	}
+	return cfg.Access, nil
+}
+
+// entitledServerNames is the REST-door wrapper of entitledServerNamesFor: it
+// performs exactly ONE GetUser for the request and hands the record to the
+// core. It reads nothing itself. A missing record is an error, not an empty
+// grant (see entitledServerNamesFor).
+func (h *UserHandlers) entitledServerNames(userID string, isAdmin bool) ([]string, error) {
+	user, err := h.userStore.GetUser(userID)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, err)
+	}
+	if user == nil {
+		return nil, fmt.Errorf("%w: %v", errServerScopeLookup, errUserRecordMissing)
+	}
+	return h.entitledServerNamesFor(user, isAdmin)
+}
+
+// tenantEntitledSnapshot is the door handlers' caller: entitlement as a set,
+// whether the caller is an administrator (whose list doors render the
+// unchanged shared projection instead), and the admin-config servers, all
+// from the SAME live-configuration read. It fetches liveEntitlementSnapshot()
+// exactly ONCE and threads that snapshot through entitledServerNamesForSnapshot,
+// so the set the caller checks membership
+// against and the server objects it then reads are guaranteed to come from
+// the same configuration version — closing the hot-reload races
+// entitledServerNamesForSnapshot's doc comment describes.
+func (h *UserHandlers) tenantEntitledSnapshot(r *http.Request, userID string) (set map[string]struct{}, isAdmin bool, adminServers []*config.ServerConfig, err error) {
+	ac := auth.AuthContextFromContext(r.Context())
+	isAdmin = ac != nil && ac.IsAdmin()
+
+	var access *config.ServerEditionAccessConfig
+	adminServers, access, err = h.liveEntitlementSnapshot()
+	if err != nil {
+		return nil, isAdmin, adminServers, fmt.Errorf("%w: %v", errServerScopeLookup, err)
+	}
+
+	user, err := h.userStore.GetUser(userID)
+	if err != nil {
+		return nil, isAdmin, adminServers, fmt.Errorf("%w: %v", errServerScopeLookup, err)
+	}
+	if user == nil {
+		return nil, isAdmin, adminServers, fmt.Errorf("%w: %v", errServerScopeLookup, errUserRecordMissing)
+	}
+
+	names, err := h.entitledServerNamesForSnapshot(user, isAdmin, adminServers, access)
+	if err != nil {
+		return nil, isAdmin, adminServers, err
+	}
+	set = make(map[string]struct{}, len(names))
+	for _, n := range names {
+		set[n] = struct{}{}
+	}
+	return set, isAdmin, adminServers, nil
+}
+
+// adminSharedProjection is the administrator's view of the per-user doors
+// (/user/servers list/get/update/delete/enable, /user/credentials*,
+// /user/diagnostics): the admin-config servers flagged Shared, exactly as
+// those doors rendered them before the group term existed (Spec 107 FR-004
+// "administrator projection unchanged", SC-006). It is the ONE permitted
+// second reader of ServerConfig.Shared in this package; it is never consulted
+// for a tenant.
+func (h *UserHandlers) adminSharedProjection() []*config.ServerConfig {
+	servers := h.adminConfigServers()
+	out := make([]*config.ServerConfig, 0, len(servers))
+	for _, sc := range servers {
+		if sc != nil && sc.Shared {
+			out = append(out, sc)
+		}
+	}
+	return out
+}
+
+// visibleSharedServers is the shared-server projection a per-user LIST door
+// renders for the caller: the administrator projection for an admin_user, the
+// entitlement set for a tenant (FR-004). Order follows the live configuration.
+func (h *UserHandlers) visibleSharedServers(r *http.Request, userID string) ([]*config.ServerConfig, error) {
+	set, isAdmin, servers, err := h.tenantEntitledSnapshot(r, userID)
+	if err != nil {
+		return nil, err
+	}
+	if isAdmin {
+		return h.adminSharedProjection(), nil
+	}
+	// `servers` and `set` come from the same tenantEntitledSnapshot call, so
+	// `set` already reflects exactly this snapshot's Shared flags (the
+	// predicate is the ONE reader of .Shared, contracts/entitlement-predicate
+	// .md §1) — no second Shared check is needed or permitted here.
+	out := make([]*config.ServerConfig, 0, len(servers))
+	for _, sc := range servers {
+		if sc == nil {
+			continue
+		}
+		if _, ok := set[sc.Name]; ok {
+			out = append(out, sc)
+		}
+	}
+	return out, nil
+}
+
+// visibleSharedServer is the by-name form of visibleSharedServers: the
+// admin-config shared server called `name` if the caller may see it, else
+// nil. The entitlement is resolved BEFORE the name is looked up, and the
+// lookup is a map probe on the same set whether the name exists-but-hidden
+// or never existed — the two cases perform the same store reads and reach
+// the same nil (FR-010: a hidden server is indistinguishable from an absent
+// one, in status, body and timing class). Tenant names compare exactly; the
+// administrator projection keeps its historical case-insensitive match.
+func (h *UserHandlers) visibleSharedServer(r *http.Request, userID, name string) (*config.ServerConfig, error) {
+	set, isAdmin, servers, err := h.tenantEntitledSnapshot(r, userID)
+	if err != nil {
+		return nil, err
+	}
+	if isAdmin {
+		for _, sc := range h.adminSharedProjection() {
+			if strings.EqualFold(sc.Name, name) {
+				return sc, nil
+			}
+		}
+		return nil, nil
+	}
+	if _, ok := set[name]; !ok {
+		return nil, nil
+	}
+	// Same snapshot the entitlement was computed from (see
+	// visibleSharedServers): `set` membership already reflects this
+	// snapshot's Shared flags, so the lookup below only needs a name match.
+	for _, sc := range servers {
+		if sc != nil && sc.Name == name {
+			return sc, nil
+		}
+	}
+	return nil, nil
+}
+
+// writeEntitlementError answers a per-user door whose entitlement could not
+// be decided. Fail closed (503): the store or the live configuration could
+// not be read, so nothing is rendered — and the body says nothing about
+// which server, or whether any, was involved.
+func (h *UserHandlers) writeEntitlementError(w http.ResponseWriter, userID string, err error) {
+	h.logger.Errorw("failed to resolve server entitlement", "user_id", userID, "error", err)
+	writeError(w, http.StatusServiceUnavailable, "Server entitlement unavailable")
+}
+
+// collidesWithAdminConfig reports whether name is taken by any server in the
+// given admin configuration, shared or private.
+//
+// It takes the configuration rather than reading it, so a caller that makes
+// several decisions makes them all against the same version of a
+// hot-reloadable file.
+//
+// Case-insensitive, matching createServer's refusal, so a case-variant personal
+// server cannot be used to smuggle the name past this check and then be lined up
+// against a case-variant request. It is deliberately BROADER than the exact
+// comparison the enforcement layer performs.
+func collidesWithAdminConfig(adminServers []*config.ServerConfig, name string) bool {
+	for _, sc := range adminServers {
+		if sc != nil && strings.EqualFold(sc.Name, name) {
+			return true
+		}
+	}
+	return false
+}
+
+// resolveTokenServerScope turns the requested allowed_servers into the list
+// that will actually be persisted, rejecting anything the caller is not
+// entitled to.
+//
+// Rules:
+//
+//   - An OMITTED or empty list is left empty, exactly as before this check
+//     existed. At the agent tier an empty AllowedServers denies every server
+//     (auth.AuthContext.CanAccessServer iterates the list and finds nothing),
+//     so the safe default needs no widening — and note this differs from the
+//     personal edition, where an empty list is rewritten to ["*"] because the
+//     only caller there IS the operator.
+//
+//   - "*" is the only wildcard the enforcement layer understands (both
+//     auth.AuthContext.CanAccessServer and jsruntime.AuthInfo.CanAccessServer
+//     compare `s == "*" || s == name`), so there is no glob to expand: a
+//     pattern like "git*" is just an unentitled name and is rejected below.
+//
+//   - For an ADMIN, "*" keeps its literal meaning: they administer every
+//     server, and freezing the list would silently drop servers added later.
+//
+//   - For a regular tenant, "*" means "every server I can reach", and is
+//     MATERIALISED into that set. Persisting the star itself would leave a
+//     standing grant over the whole deployment that only a downstream filter
+//     stands between; and the enforcement comparison has no notion of an
+//     owner, so the star cannot be re-scoped at use time. The expansion is a
+//     snapshot: a server added to the account afterwards is not in the token
+//     and needs a new one. That is deliberate — a token is a capability, and
+//     the conservative reading of "*" is the set that existed when it was
+//     signed. It is not silent, either: the create response echoes the
+//     effective allowed_servers back to the caller.
+//
+//   - Any other name must be in the entitled set. The rejection message is the
+//     SAME whether the name belongs to another tenant, is one of the admin's
+//     non-shared servers, or does not exist anywhere: distinguishing them would
+//     re-open, on server names, precisely the existence oracle this branch just
+//     closed on token names.
+func (h *UserHandlers) resolveTokenServerScope(r *http.Request, userID string, requested []string) ([]string, error) {
+	if len(requested) == 0 {
+		return requested, nil
+	}
+
+	ac := auth.AuthContextFromContext(r.Context())
+	isAdmin := ac != nil && ac.IsAdmin()
+
+	entitled, err := h.entitledServerNames(userID, isAdmin)
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[string]struct{}, len(entitled))
+	for _, name := range entitled {
+		allowed[name] = struct{}{}
+	}
+
+	resolved := make([]string, 0, len(requested))
+	seen := make(map[string]struct{}, len(requested))
+	appendOnce := func(name string) {
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		resolved = append(resolved, name)
+	}
+
+	for _, raw := range requested {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			return nil, errors.New("allowed_servers entries must not be empty")
+		}
+
+		if name == "*" {
+			if isAdmin {
+				// A literal star already subsumes every other entry.
+				return []string{"*"}, nil
+			}
+			if len(entitled) == 0 {
+				return nil, errors.New("no servers are available to scope this token to")
+			}
+			for _, n := range entitled {
+				appendOnce(n)
+			}
+			continue
+		}
+
+		if _, ok := allowed[name]; !ok {
+			// Uniform for "not yours", "not shared" and "does not exist".
+			return nil, fmt.Errorf("server %q is not available to you", name)
+		}
+		appendOnce(name)
+	}
+
+	return resolved, nil
+}
+
+// narrowScopeToEntitled trims a stored AllowedServers list to the caller's
+// current entitlement. It is the re-check half of resolveTokenServerScope, and
+// the two must agree on what "*" means.
+//
+// It only ever REMOVES a grant (or, for a tenant's star, replaces one unbounded
+// grant with the bounded set it currently stands for). It cannot widen: every
+// name it emits came from the entitled set the caller was just proved to hold,
+// and an empty result denies every server, which is the safe end of the range.
+//
+// Unlike the mint path there is no rejection here. Refusing to rotate a token
+// whose scope has gone stale would leave the over-broad grant in place and
+// working, punishing the one action that repairs it; trimming actually shrinks
+// the credential, and the handler echoes the result back so the change is
+// visible.
+func narrowScopeToEntitled(current, entitled []string, isAdmin bool) []string {
+	if len(current) == 0 {
+		return current
+	}
+
+	allowed := make(map[string]struct{}, len(entitled))
+	for _, name := range entitled {
+		allowed[name] = struct{}{}
+	}
+
+	narrowed := make([]string, 0, len(current))
+	seen := make(map[string]struct{}, len(current))
+	appendOnce := func(name string) {
+		if _, dup := seen[name]; dup {
+			return
+		}
+		seen[name] = struct{}{}
+		narrowed = append(narrowed, name)
+	}
+
+	for _, raw := range current {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if name == "*" {
+			// Same rule as the mint path: an admin administers every server, so
+			// the star stays literal; for a tenant it means "every server I can
+			// reach" and is materialised into that set — which is how a
+			// pre-branch token holding a bare "*" gets its unbounded grant
+			// converted into a bounded one on its first rotation.
+			if isAdmin {
+				return []string{"*"}
+			}
+			for _, n := range entitled {
+				appendOnce(n)
+			}
+			continue
+		}
+		if _, ok := allowed[name]; !ok {
+			continue
+		}
+		appendOnce(name)
+	}
+
+	return narrowed
+}
+
+// ResolveAgentTokenOwner is the single owner resolution an owned agent token
+// receives on EVERY authentication (Spec 107 FR-004, contracts/
+// entitlement-predicate.md §2): one GetUser, then the same entitlement
+// predicate minting and rotation use, evaluated for the owner as they are
+// NOW. setup.go installs it through storage.SetAgentTokenOwnerResolver.
+//
+// isAdminEmail derives the owner's live role (admin_emails is hot-reloadable,
+// #1169). The returned Entitled is the NARROWED grant — narrowScopeToEntitled
+// over the entitlement set — never the raw configuration list: storage's
+// intersectAllowedServers treats a stored "*" as "take every entry of
+// proposed", so handing it the whole configuration would freeze an
+// administrator's literal star into a snapshot (FR-009). A missing or
+// disabled owner is reported as Active: false, not as an error, so storage
+// refuses with ErrAgentTokenOwnerInactive; a store or configuration read
+// failure is an error (ErrAgentTokenScopeUnavailable), with a store failure
+// wrapped in storage.ErrAgentTokenOwnerInactive so "cannot read the owner"
+// refuses the way "owner is gone" does.
+func (h *UserHandlers) ResolveAgentTokenOwner(userID string, granted []string, isAdminEmail func(email string) bool) (storage.OwnerResolution, error) {
+	user, err := h.userStore.GetUser(userID)
+	if err != nil {
+		return storage.OwnerResolution{}, fmt.Errorf("%w: %v", storage.ErrAgentTokenOwnerInactive, err)
+	}
+	if user == nil || user.Disabled {
+		// The owner is gone from the store, or disabled. A token for an
+		// identity that may no longer authenticate must not either.
+		return storage.OwnerResolution{Active: false}, nil
+	}
+	isAdmin := isAdminEmail != nil && isAdminEmail(user.Email)
+	entitled, err := h.entitledServerNamesFor(user, isAdmin)
+	if err != nil {
+		return storage.OwnerResolution{}, err
+	}
+	narrowed := narrowScopeToEntitled(granted, entitled, isAdmin)
+	if narrowed == nil {
+		narrowed = []string{}
+	}
+	role := "user"
+	if isAdmin {
+		role = "admin"
+	}
+	return storage.OwnerResolution{
+		Active:   true,
+		UserID:   user.ID,
+		Email:    user.Email,
+		Provider: user.Provider,
+		Role:     role,
+		Entitled: narrowed,
+	}, nil
+}
+
+// requireSessionCookiePrincipal gates a CREDENTIAL-MINTING door (Spec 107
+// FR-011): POST /user/tokens and POST /user/tokens/{name}/regenerate accept
+// only a session-cookie principal. A bearer JWT is itself a credential
+// derived from the session, and an agent token is one derived from the JWT
+// or cookie — a derived credential never mints another credential, or the
+// freshness bound becomes a serial chain (session TTL + JWT TTL + token TTL)
+// that a JWT renewing itself through /auth/token makes unbounded. The Web UI
+// calls these doors with the cookie. List and revoke are NOT minting doors
+// and keep accepting a JWT. A context whose kind was never recorded (an
+// in-process caller) is refused too: only the cookie is positively admitted.
+func requireSessionCookiePrincipal(r *http.Request) (string, error) {
 	userID, err := getUserID(r)
+	if err != nil {
+		return "", err
+	}
+	ac := auth.AuthContextFromContext(r.Context())
+	if ac == nil || ac.CredentialKind != auth.CredentialKindCookie {
+		return "", fmt.Errorf("session cookie required")
+	}
+	return userID, nil
+}
+
+// writeTokenMutationError classifies an owner-scoped mutator's error into the
+// response, with no preflight read in front of it.
+//
+// The preflight this replaces (GetAgentTokenByOwnerAndName, then a separate
+// mutating transaction) had two defects. It was a TOCTOU window: an owner who
+// concurrently deleted and recreated the name had the in-flight regenerate land
+// on the REPLACEMENT token, and one that vanished between the two calls fell
+// through to the generic 500 branch, whose body interpolated the raw storage
+// error — leaking the ErrAgentTokenNotFound sentinel text into the response.
+// Classifying the mutator's own error closes the window and the leak together:
+// the resolve and the write are one transaction, and 404 is reached by a typed
+// errors.Is rather than by a nil check on an earlier read.
+//
+// The 404 body is byte-identical to an absent token's, because the lookup is
+// owner-scoped and cannot tell "someone else's" from "not there" — that
+// indistinguishability is the whole #1168 fix, and it must survive here.
+func (h *UserHandlers) writeTokenMutationError(w http.ResponseWriter, op, userID, name string, err error) {
+	if errors.Is(err, storage.ErrAgentTokenNotFound) {
+		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
+		return
+	}
+	// A revoked token cannot be rotated back into service. This is NOT an
+	// oracle: the resolve is owner-scoped, so reaching this branch means the
+	// caller owns the record and already sees it, revoked, in their own
+	// GET /api/v1/user/tokens listing.
+	if errors.Is(err, storage.ErrAgentTokenRevoked) {
+		writeError(w, http.StatusConflict,
+			fmt.Sprintf("Token %q is revoked and cannot be regenerated. Delete it and create a new token.", name))
+		return
+	}
+	h.logger.Errorw("failed to "+op+" token", "user_id", userID, "name", name, "error", err)
+	// Never interpolate err: a storage message is not a caller-facing string.
+	writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to %s token", op))
+}
+
+// createUserToken creates a new agent token owned by the authenticated user.
+// Session-cookie-only (Spec 107 FR-011, see requireSessionCookiePrincipal).
+func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
+	userID, err := requireSessionCookiePrincipal(r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
@@ -569,17 +1516,30 @@ func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse expiry duration (default 30 days).
-	var expiresAt time.Time
-	if req.ExpiresIn != "" {
-		duration, err := time.ParseDuration(req.ExpiresIn)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid expires_in duration: %v", err))
+	// Constrain the requested server scope to what this caller may actually
+	// reach. Without this the field was persisted VERBATIM, and AllowedServers
+	// is the sole input to auth.AuthContext.CanAccessServer — so a tenant could
+	// mint themselves a token scoped to `["*"]`, or to a server name they have
+	// never been shown, and read the admin's entire inventory through it. See
+	// resolveTokenServerScope.
+	effectiveServers, scopeErr := h.resolveTokenServerScope(r, userID, req.AllowedServers)
+	if scopeErr != nil {
+		if errors.Is(scopeErr, errServerScopeLookup) {
+			h.logger.Errorw("failed to resolve token server scope", "user_id", userID, "error", scopeErr)
+			writeError(w, http.StatusInternalServerError, "Failed to resolve server scope")
 			return
 		}
-		expiresAt = time.Now().UTC().Add(duration)
-	} else {
-		expiresAt = time.Now().UTC().Add(30 * 24 * time.Hour) // 30 days default
+		writeError(w, http.StatusBadRequest, scopeErr.Error())
+		return
+	}
+
+	// Expiry: the core /api/v1/tokens rule (Spec 107 FR-011) — positive, at
+	// most 365 days, 30 days when omitted. An owned token ALWAYS carries an
+	// expiry; only ownerless operator tokens may hold a zero ExpiresAt.
+	expiresAt, err := auth.ParseTokenExpiry(req.ExpiresIn, time.Now().UTC())
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("Invalid expires_in duration: %v", err))
+		return
 	}
 
 	rawToken, err := auth.GenerateToken()
@@ -591,7 +1551,7 @@ func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 
 	token := auth.AgentToken{
 		Name:           req.Name,
-		AllowedServers: req.AllowedServers,
+		AllowedServers: effectiveServers,
 		Permissions:    req.Permissions,
 		ExpiresAt:      expiresAt,
 		CreatedAt:      time.Now().UTC(),
@@ -600,7 +1560,39 @@ func (h *UserHandlers) createUserToken(w http.ResponseWriter, r *http.Request) {
 
 	if err := h.tokenStore.CreateAgentToken(token, rawToken, h.hmacKey); err != nil {
 		h.logger.Errorw("failed to create agent token", "user_id", userID, "name", req.Name, "error", err)
-		writeError(w, http.StatusConflict, fmt.Sprintf("Failed to create token: %v", err))
+		// Never echo the raw storage error: it used to name the conflicting
+		// token verbatim, which told the caller that SOMEONE owns that name.
+		// Names are per-owner now, so a duplicate can only be the caller's own.
+		switch {
+		case errors.Is(err, storage.ErrAgentTokenNameExists):
+			writeError(w, http.StatusConflict, fmt.Sprintf("You already have a token named %q", req.Name))
+		case errors.Is(err, storage.ErrAgentTokenLimitReached):
+			// 409, matching the personal edition's twin
+			// (internal/httpapi/tokens.go). One storage condition must not
+			// present as two different statuses depending on which door the
+			// caller knocked on. 409 is the honest status: the cap is a
+			// standing conflict with the deployment's state, not a transient
+			// outage a client should sit and retry the way a 503 invites.
+			//
+			// The WORDING, though, cannot be the personal edition's. There, the
+			// caller owns every token and "you have reached the maximum" is
+			// both true and actionable. auth.MaxTokens is a DEPLOYMENT-wide cap
+			// counted across all tenants (internal/storage/agent_tokens.go), so
+			// here the caller may hold none of the tokens filling it, and a
+			// message that reads as their own quota sends them to delete tokens
+			// that will not free a slot — or to look for tokens they are not
+			// allowed to see. Say whose limit it is and who can act on it.
+			// The per-owner quota is handled separately below. Reaching this
+			// branch means the caller is within their quota but the shared
+			// deployment storage bound is full.
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("This deployment has reached its limit of %d agent tokens. The limit is shared by all users, so deleting your own tokens may not free a slot; ask an administrator.", auth.MaxTokens))
+		case errors.Is(err, storage.ErrAgentTokenOwnerLimitReached):
+			writeError(w, http.StatusConflict,
+				fmt.Sprintf("You have reached your limit of %d agent tokens. Permanently delete one you no longer use to free a slot.", auth.MaxTokensPerOwner))
+		default:
+			writeError(w, http.StatusInternalServerError, "Failed to create token")
+		}
 		return
 	}
 
@@ -635,25 +1627,11 @@ func (h *UserHandlers) revokeUserToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify the token belongs to this user.
-	existing, err := h.tokenStore.GetAgentTokenByName(name)
-	if err != nil {
-		h.logger.Errorw("failed to get token for revoke", "user_id", userID, "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to get token")
-		return
-	}
-	if existing == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
-		return
-	}
-	if existing.UserID != userID {
-		writeError(w, http.StatusForbidden, "Cannot revoke another user's token")
-		return
-	}
-
-	if err := h.tokenStore.RevokeAgentToken(name); err != nil {
-		h.logger.Errorw("failed to revoke token", "user_id", userID, "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to revoke token: %v", err))
+	// One owner-scoped transaction, no preflight read. The mutator resolves
+	// (owner, name) itself and reports ErrAgentTokenNotFound for both "absent"
+	// and "someone else's" — see writeTokenMutationError.
+	if err := h.tokenStore.RevokeAgentTokenForOwner(userID, name); err != nil {
+		h.writeTokenMutationError(w, "revoke", userID, name, err)
 		return
 	}
 
@@ -661,8 +1639,9 @@ func (h *UserHandlers) revokeUserToken(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("Token %q revoked", name)})
 }
 
-// regenerateUserToken regenerates an agent token owned by the authenticated user.
-func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Request) {
+// deleteUserToken permanently removes an agent token owned by the authenticated
+// user, freeing its name for reuse (unlike revoke, which is a soft delete).
+func (h *UserHandlers) deleteUserToken(w http.ResponseWriter, r *http.Request) {
 	userID, err := getUserID(r)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "Authentication required")
@@ -680,19 +1659,33 @@ func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Verify the token belongs to this user.
-	existing, err := h.tokenStore.GetAgentTokenByName(name)
+	// One owner-scoped transaction, no preflight read — see revokeUserToken.
+	if err := h.tokenStore.DeleteAgentTokenForOwner(userID, name); err != nil {
+		h.writeTokenMutationError(w, "delete", userID, name, err)
+		return
+	}
+
+	h.logger.Infow("user token deleted", "user_id", userID, "name", name)
+	writeJSON(w, http.StatusOK, map[string]string{"message": fmt.Sprintf("Token %q deleted", name)})
+}
+
+// regenerateUserToken regenerates an agent token owned by the authenticated
+// user. Session-cookie-only (Spec 107 FR-011, see requireSessionCookiePrincipal).
+func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Request) {
+	userID, err := requireSessionCookiePrincipal(r)
 	if err != nil {
-		h.logger.Errorw("failed to get token for regenerate", "user_id", userID, "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to get token")
+		writeError(w, http.StatusUnauthorized, "Authentication required")
 		return
 	}
-	if existing == nil {
-		writeError(w, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
+
+	if h.tokenStore == nil {
+		writeError(w, http.StatusInternalServerError, "Token store not available")
 		return
 	}
-	if existing.UserID != userID {
-		writeError(w, http.StatusForbidden, "Cannot regenerate another user's token")
+
+	name := chi.URLParam(r, "name")
+	if name == "" {
+		writeError(w, http.StatusBadRequest, "Token name is required")
 		return
 	}
 
@@ -703,10 +1696,35 @@ func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	updated, err := h.tokenStore.RegenerateAgentToken(name, newRawToken, h.hmacKey)
+	// Re-check the token's server scope against the owner's CURRENT
+	// entitlement, and persist the re-checked list in the same transaction that
+	// rotates the hash.
+	//
+	// resolveTokenServerScope runs once, at mint time; every AUTHENTICATION
+	// re-narrows the effective grant through ResolveAgentTokenOwner (Spec 106
+	// FR-004) but leaves the STORED grant alone. Rotation is the one moment
+	// the stored record is rewritten with the owner's entitlement in hand, so
+	// it is where the standing grant gets trimmed — including the group term
+	// (Spec 107 FR-009): a token minted under a wider group survives a group
+	// downgrade only until its next rotation or, effectively, its next
+	// request. Narrowing only — see narrowScopeToEntitled — and the response
+	// echoes the resulting list, so nothing is dropped silently.
+	//
+	// The entitlement lookup happens HERE, outside the write transaction: the
+	// hook itself must not do I/O.
+	ac := auth.AuthContextFromContext(r.Context())
+	isAdmin := ac != nil && ac.IsAdmin()
+	entitled, scopeErr := h.entitledServerNames(userID, isAdmin)
+	if scopeErr != nil {
+		h.logger.Errorw("failed to resolve token server scope for regenerate", "user_id", userID, "error", scopeErr)
+		writeError(w, http.StatusInternalServerError, "Failed to resolve server scope")
+		return
+	}
+
+	updated, err := h.tokenStore.RegenerateAgentTokenForOwner(userID, name, newRawToken, h.hmacKey,
+		func(current []string) []string { return narrowScopeToEntitled(current, entitled, isAdmin) })
 	if err != nil {
-		h.logger.Errorw("failed to regenerate token", "user_id", userID, "name", name, "error", err)
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("Failed to regenerate token: %v", err))
+		h.writeTokenMutationError(w, "regenerate", userID, name, err)
 		return
 	}
 
@@ -725,9 +1743,17 @@ func (h *UserHandlers) regenerateUserToken(w http.ResponseWriter, r *http.Reques
 // --- Helpers ---
 
 // getUserID extracts the authenticated user's ID from the request context.
+//
+// The user TIER is required, not merely a non-empty UserID: agent tokens now
+// carry their owner's UserID (so their activity can be attributed and scoped),
+// and a scoped, read-only agent token must never be accepted as its owner's
+// full session on the per-user management surface. Today agent tokens are also
+// rejected upstream by the server-edition auth middleware, but that single
+// branch must not be the whole boundary. IsUser() covers both "user" and
+// "admin_user", so no legitimate server-edition principal is locked out.
 func getUserID(r *http.Request) (string, error) {
 	authCtx := auth.AuthContextFromContext(r.Context())
-	if authCtx == nil || authCtx.GetUserID() == "" {
+	if authCtx == nil || !authCtx.IsUser() || authCtx.GetUserID() == "" {
 		return "", fmt.Errorf("not authenticated")
 	}
 	return authCtx.GetUserID(), nil

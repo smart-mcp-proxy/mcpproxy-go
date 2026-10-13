@@ -16,18 +16,47 @@ import (
 // record with a synthesized approved one.
 var ErrToolApprovalNotFound = errors.New("tool approval not found")
 
+// ErrUpstreamNotFound is returned by GetUpstream/GetUpstreamServer when no
+// record exists for the requested server name. Callers that decide policy from
+// the record MUST use errors.Is to tell it apart from a real read failure
+// (corrupt record, closed DB, mmap remap): "no such server" is a verdict the
+// caller can state, while an unreadable record means the caller knows nothing
+// and must fail closed rather than answer "not configured".
+var ErrUpstreamNotFound = errors.New("upstream not found")
+
 // Bucket names for bbolt database
 const (
 	UpstreamsBucket       = "upstreams"
 	ToolStatsBucket       = "toolstats"
 	ToolHashBucket        = "toolhash"
 	ToolApprovalBucket    = "tool_approvals"
-	OAuthTokenBucket      = "oauth_tokens" //nolint:gosec // bucket name, not a credential
+	PromptApprovalBucket  = "prompt_approvals" // spec 100: per-prompt rug-pull baseline
+	OAuthTokenBucket      = "oauth_tokens"     //nolint:gosec // bucket name, not a credential
 	OAuthCompletionBucket = "oauth_completion"
 	MetaBucket            = "meta"
 	CacheBucket           = "cache"
 	CacheStatsBucket      = "cache_stats"
-	SessionsBucket        = "sessions"
+	// SessionsBucket holds MCP transport/work session records.
+	//
+	// It is NOT "sessions". The server edition stores USER LOGIN sessions in a
+	// bucket of that name, on the same BBolt database, and the two were silently
+	// destroying each other:
+	//
+	//   - enforceSessionRetention (here) keeps the 100 newest keys and deletes the
+	//     rest by raw key order, with no type check — evicting user auth sessions
+	//     and logging people out at random.
+	//   - the server edition's CleanupExpiredSessions unmarshals every value as an
+	//     auth session; an MCP record has no expires_at, so its zero time reads as
+	//     long expired and the record is deleted.
+	//
+	// Namespacing the bucket is what makes each side's sweep safe.
+	SessionsBucket = "mcp_sessions"
+
+	// LegacySessionsBucket is the pre-namespacing bucket. In the personal edition
+	// it holds only MCP records; in the server edition it holds a mix of those and
+	// user login sessions. migrateLegacySessions moves the MCP records out and
+	// leaves the auth sessions where they are, so nobody is logged out.
+	LegacySessionsBucket = "sessions"
 
 	// Security scanner buckets (Spec 039)
 	ScannersBucket           = "security_scanners"
@@ -36,6 +65,12 @@ const (
 	ScanReportsBucket        = "security_reports"
 	IntegrityBaselinesBucket = "integrity_baselines"
 
+	// ToolBaselineDecisionsBucket holds one marker per server stating that the
+	// server's tool baseline has been decided (Spec 117 FR-020, #1567). Created
+	// on first write; removed per server only together with its tool-approval
+	// records.
+	ToolBaselineDecisionsBucket = "tool_baseline_decisions"
+
 	// Onboarding wizard bucket (Spec 046)
 	OnboardingBucket = "onboarding"
 )
@@ -43,6 +78,21 @@ const (
 // Onboarding state keys (Spec 046)
 const (
 	OnboardingStateKey = "wizard_state"
+)
+
+// Onboarding step-status values (Spec 046; enum widened by Spec 080 FR-001).
+const (
+	// StepStatusCompleted means the user completed the step inside the wizard.
+	StepStatusCompleted = "completed"
+	// StepStatusCompletedExternal means the wizard's connect step was never
+	// advanced, but at dismissal time the install showed positive evidence of
+	// a connection made outside the wizard (a supported client currently
+	// connected, or an MCP client has ever handshaked). Connect step only
+	// (Spec 080 FR-002).
+	StepStatusCompletedExternal = "completed_external"
+	// StepStatusSkipped means the wizard was dismissed with the step
+	// untouched and no external-connection evidence was established.
+	StepStatusSkipped = "skipped"
 )
 
 // OnboardingState records whether the user has engaged with the first-run
@@ -61,18 +111,76 @@ type OnboardingState struct {
 	// EngagedAt is the timestamp of completion or explicit skip.
 	EngagedAt *time.Time `json:"engaged_at,omitempty"`
 
-	// ConnectStepStatus is one of: "", "completed", "skipped".
+	// ConnectStepStatus is one of: "", "completed", "completed_external",
+	// "skipped" (Spec 080 FR-001). "completed_external" records a dismissal
+	// where the connect step was untouched but the install was already
+	// connected outside the wizard (CLI, ConnectModal, manual config).
 	ConnectStepStatus string `json:"connect_step_status,omitempty"`
 
 	// ServerStepStatus is one of: "", "completed", "skipped".
 	ServerStepStatus string `json:"server_step_status,omitempty"`
+
+	// ClientConnectedAt records, per client id from the fixed connect client
+	// registry (internal/connect.GetAllClients — never user input), the last
+	// time a connect write succeeded for that client (Spec 109-b FR-042).
+	// Written by the connect success path through UpdateOnboardingState so a
+	// concurrent onboarding/mark write can never drop it. Consumed by the
+	// Verify step / presence layer to tell "connected, never seen" apart from
+	// "connected seconds ago, hasn't reconnected yet".
+	ClientConnectedAt map[string]time.Time `json:"client_connected_at,omitempty"`
+
+	// ClientLastSeen records the latest MCP initialize for a recognised client
+	// alias. It is intentionally kept with onboarding state: presence is a
+	// local UI concern and must still work when telemetry is disabled.
+	ClientLastSeen       map[string]time.Time `json:"client_last_seen,omitempty"`
+	ClientDisconnectedAt map[string]time.Time `json:"client_disconnected_at,omitempty"`
+
+	// ClientCredentialObserved records, per client id, the LAST credential
+	// classification an on-demand read produced (Spec 108-f FR-025, F11): what
+	// the client's config held (client | admin_key | none | revoked | expired)
+	// and when it was read. The stat-only GET /clients listing never reads a
+	// config (Spec 075: no macOS App-Data prompt from a list), so this is how
+	// it still reports a client that holds the admin key across restarts. It is
+	// written only when the classification CHANGES, by every on-demand read
+	// (GET /clients/{id}, GET /connect/{client}, the admin-key upgrade preview,
+	// a connect write) and deleted on disconnect. Additive: an older binary
+	// ignores it, and a record without it reads as "unknown".
+	ClientCredentialObserved map[string]ClientCredentialObservation `json:"client_credential_observed,omitempty"`
+}
+
+// ClientCredentialObservation is one on-demand credential classification of a
+// client's config (see OnboardingState.ClientCredentialObserved).
+type ClientCredentialObservation struct {
+	State string    `json:"state"`
+	At    time.Time `json:"at"`
 }
 
 // Meta keys
 const (
 	SchemaVersionKey       = "schema"
 	DockerRecoveryStateKey = "docker_recovery_state"
+	// BaselineSweepDoneKey marks that the one-shot informational baseline scan
+	// sweep has already run on this installation. Presence of the record — not
+	// its contents — is what suppresses a re-run, so the sweep stays one-shot
+	// across restarts and upgrades.
+	BaselineSweepDoneKey = "baseline_sweep_done"
 )
+
+// BaselineSweepState records the outcome of the one-shot informational baseline
+// scan sweep (the post-upgrade catch-up that scans pre-existing servers which
+// have never been scanned). Stored in MetaBucket under BaselineSweepDoneKey.
+// Absence of the record means "the sweep has never completed here".
+type BaselineSweepState struct {
+	// Version is the mcpproxy build version that completed the sweep. Recorded
+	// for diagnostics; the sweep does not re-run on a version change.
+	Version string `json:"version,omitempty"`
+	// CompletedAt is when the sweep finished.
+	CompletedAt time.Time `json:"completed_at"`
+	// ServersScanned is how many servers the sweep actually scanned.
+	ServersScanned int `json:"servers_scanned"`
+	// Findings is the total number of findings the sweep's scans produced.
+	Findings int `json:"findings"`
+}
 
 // Current schema version
 const CurrentSchemaVersion = 3
@@ -80,6 +188,20 @@ const CurrentSchemaVersion = 3
 // OutputSchemaHashSchemaVersion is the schema version that starts including
 // MCP outputSchema in the tool approval hash baseline.
 const OutputSchemaHashSchemaVersion = 3
+
+// AnnotationHashSchemaVersion is the per-record HashSchemaVersion that starts
+// folding the safety-relevant tool annotation hints (readOnlyHint,
+// destructiveHint, idempotentHint, openWorldHint) into the tool approval hash
+// (red-team RT-03). Tools whose effective hints are the MCP defaults keep a
+// byte-identical hash, so only tools with non-default hints get a new hash;
+// records below this version are migrated by the formula-change path in
+// runtime.checkToolApprovals without re-review when their stored contract
+// still matches.
+const AnnotationHashSchemaVersion = 4
+
+// ToolApprovalHashSchemaVersion is the HashSchemaVersion stamped on every tool
+// approval record whose hashes this binary computes.
+const ToolApprovalHashSchemaVersion = AnnotationHashSchemaVersion
 
 // UpstreamRecord represents an upstream server record in storage
 type UpstreamRecord struct {
@@ -105,10 +227,16 @@ type UpstreamRecord struct {
 	// server list from these records — a field absent here is wiped on the
 	// next mutation, so REST/UI toggling (MCP-2932) and runtime enforcement
 	// (MCP-2931) would not survive a save/restart without it.
-	AutoApproveToolChanges *bool           `json:"auto_approve_tool_changes,omitempty"`
-	LauncherWaitTimeout    config.Duration `json:"launcher_wait_timeout,omitempty"` // Spec 046: max wait for locally-launched HTTP/SSE upstream URL to become reachable
-	EnabledTools           []string        `json:"enabled_tools,omitempty"`         // Allowlist: only these tools are exposed
-	DisabledTools          []string        `json:"disabled_tools,omitempty"`        // Denylist: these tools are hidden
+	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// TrustMode (spec 086) is the per-server trust tier (auto|scan|manual) that
+	// governs new-server admission and tool-change approval. Persisted to BBolt
+	// for the same reason as AutoApproveToolChanges: SaveConfiguration rebuilds
+	// the JSON server list from these records, so a REST/UI/MCP-set trust_mode
+	// would be wiped on the next save without it.
+	TrustMode           string          `json:"trust_mode,omitempty"`
+	LauncherWaitTimeout config.Duration `json:"launcher_wait_timeout,omitempty"` // Spec 046: max wait for locally-launched HTTP/SSE upstream URL to become reachable
+	EnabledTools        []string        `json:"enabled_tools,omitempty"`         // Allowlist: only these tools are exposed
+	DisabledTools       []string        `json:"disabled_tools,omitempty"`        // Denylist: these tools are hidden
 	// MCP-866: persist a server's registry origin + provenance so the
 	// approval/quarantine view and the custom-origin skip_quarantine guard
 	// survive a restart.
@@ -119,6 +247,35 @@ type UpstreamRecord struct {
 	// nil = inherit, pointer-to-0s = disabled, positive = interval.
 	HealthCheckInterval   *config.Duration `json:"health_check_interval,omitempty"`
 	ToolDiscoveryInterval *config.Duration `json:"tool_discovery_interval,omitempty"`
+	// MCP-3322: per-server MCP `initialize` handshake deadline override,
+	// persisted so a REST/UI/CLI-set init_timeout survives a restart.
+	InitTimeout *config.Duration `json:"init_timeout,omitempty"`
+	// Spec 084: per-server toon_output override ("" = inherit global),
+	// persisted so the override survives a restart and a SaveConfiguration
+	// rebuild of the JSON server list.
+	ToonOutput string `json:"toon_output,omitempty"`
+	// Spec 093: per-server concurrency-limit overrides, persisted for the same
+	// reason as the interval overrides above — SaveConfiguration rebuilds the
+	// JSON server list from these records, so a REST/UI-set limit would be
+	// wiped on the next save without them. Tri-state: nil = inherit the
+	// per-server default set, 0 = opt out, positive = override.
+	MaxConcurrentRequests *int             `json:"max_concurrent_requests,omitempty"`
+	QueueSize             *int             `json:"queue_size,omitempty"`
+	QueueTimeout          *config.Duration `json:"queue_timeout,omitempty"`
+	// ExposePrompts is the per-server override for exposing upstream prompts
+	// through mcpproxy's aggregated prompts/list and prompts/get.
+	ExposePrompts *bool `json:"expose_prompts,omitempty"`
+	// ForwardHeaders (Spec 112) is the per-server allowlist of inbound MCP
+	// client header NAMES to forward on tools/call. Names only, never values.
+	// Persisted here because SaveConfiguration rebuilds the JSON server list
+	// from these records: a field absent here is wiped on the next mutation.
+	ForwardHeaders []string `json:"forward_headers,omitempty"`
+
+	// Generation and Incarnation are the committed ServerGen of the config
+	// commit that last wrote this row (Spec 116). A row written before Spec
+	// 116 reads as zero; the next commit that writes it stamps it.
+	Generation  int64 `json:"generation,omitempty"`
+	Incarnation int64 `json:"incarnation,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics
@@ -142,25 +299,233 @@ const (
 	ToolApprovalStatusChanged  = "changed"
 )
 
+// Tool hold reasons (spec 086, FR-018). They explain why the trust_mode: scan
+// gate refused to auto-approve a tool and left it for human review, so the
+// tool-approval surfaces can show WHY a tool is held, not merely THAT it is.
+// Empty on records held for any other reason (manual mode, plain quarantine) and
+// on every record written before this field existed — back-compat by omission.
+const (
+	// ToolHeldReasonScanFindings: the offline TPA scan returned a non-clean
+	// verdict. HeldSignals names the matched check ids.
+	ToolHeldReasonScanFindings = "scan_findings"
+	// ToolHeldReasonScanCoverage: the scan itself could not be trusted (a check
+	// failed, or the signature bundle was unavailable), so the gate failed closed
+	// with no findings to show.
+	ToolHeldReasonScanCoverage = "scan_coverage"
+)
+
+// MaxToolHeldSignals caps how many matched check ids are persisted on an
+// approval record. The evidence is a review hint, not an audit log (the full
+// finding set lives on the scan report), so a small deterministic prefix keeps
+// records compact.
+const MaxToolHeldSignals = 16
+
 // ToolApprovalRecord represents a tool's approval status for tool-level quarantine.
 // When a tool is first discovered, it starts as "pending". Once approved, it becomes "approved".
 // If the tool's description or schema changes after approval, it becomes "changed".
 type ToolApprovalRecord struct {
-	ServerName           string    `json:"server_name"`
-	ToolName             string    `json:"tool_name"`
-	ApprovedHash         string    `json:"approved_hash"`
-	CurrentHash          string    `json:"current_hash"`
-	HashSchemaVersion    uint64    `json:"hash_schema_version,omitempty"`
-	Status               string    `json:"status"` // "approved", "pending", "changed"
-	ApprovedAt           time.Time `json:"approved_at"`
-	ApprovedBy           string    `json:"approved_by"`
-	PreviousDescription  string    `json:"previous_description,omitempty"`
-	CurrentDescription   string    `json:"current_description,omitempty"`
-	PreviousSchema       string    `json:"previous_schema,omitempty"`
-	CurrentSchema        string    `json:"current_schema,omitempty"`
-	PreviousOutputSchema string    `json:"previous_output_schema,omitempty"`
-	CurrentOutputSchema  string    `json:"current_output_schema,omitempty"`
-	Disabled             bool      `json:"disabled,omitempty"`
+	ServerName        string `json:"server_name"`
+	ToolName          string `json:"tool_name"`
+	ApprovedHash      string `json:"approved_hash"`
+	CurrentHash       string `json:"current_hash"`
+	HashSchemaVersion uint64 `json:"hash_schema_version,omitempty"`
+	// CurrentHashSchemaVersion is the hash formula version CurrentHash was
+	// computed with, stamped by every runtime write that recomputes
+	// CurrentHash. Zero means unknown (a record written before this field
+	// existed). ApproveCurrentHash uses it so an approval that copies
+	// CurrentHash into ApprovedHash carries the version of the hash it copied
+	// (red-team RT-03, Sol r4 P1). Additive and omitted when zero.
+	CurrentHashSchemaVersion uint64                  `json:"current_hash_schema_version,omitempty"`
+	Status                   string                  `json:"status"` // "approved", "pending", "changed"
+	ApprovedAt               time.Time               `json:"approved_at"`
+	ApprovedBy               string                  `json:"approved_by"`
+	PreviousDescription      string                  `json:"previous_description,omitempty"`
+	CurrentDescription       string                  `json:"current_description,omitempty"`
+	PreviousAnnotations      *config.ToolAnnotations `json:"previous_annotations,omitempty"`
+	CurrentAnnotations       *config.ToolAnnotations `json:"current_annotations,omitempty"`
+	PreviousSchema           string                  `json:"previous_schema,omitempty"`
+	CurrentSchema            string                  `json:"current_schema,omitempty"`
+	PreviousOutputSchema     string                  `json:"previous_output_schema,omitempty"`
+	CurrentOutputSchema      string                  `json:"current_output_schema,omitempty"`
+	Disabled                 bool                    `json:"disabled,omitempty"`
+
+	// DefinitionChangedAt is when the stored CurrentDescription,
+	// CurrentSchema or CurrentOutputSchema last differed from the prior
+	// record. BoltDB.SaveToolApproval stamps it inside its write transaction
+	// (one seam for every writer) and carries the prior value otherwise. A
+	// brand-new record stays zero: first capture is not a change, so a scan
+	// that preceded capture is not made stale by it. Annotations are
+	// excluded, like the approval hash. It is never part of the hash. The
+	// review composer compares it with the scan start to decide whether a
+	// scan covers the current definition. Additive and omitted when zero.
+	DefinitionChangedAt time.Time `json:"definition_changed_at,omitzero"`
+
+	// PendingSince is when the tool began waiting as pending. BoltDB.
+	// SaveToolApproval stamps it (one seam for every writer): a pending record
+	// with no prior pending record gets now, a prior pending record's value is
+	// carried, and any other status clears it. Records filed before this field
+	// existed stay zero: their age is unknown and the review queue reports
+	// them undated. Additive and omitted when zero.
+	PendingSince time.Time `json:"pending_since,omitzero"`
+
+	// HeldReason, HeldVerdict and HeldSignals carry the scan evidence that made
+	// the trust_mode: scan gate hold this tool for human review (spec 086
+	// FR-018). They are set ONLY on the pass that performs the hold and cleared
+	// whenever the record leaves the held state, so they always describe the
+	// CURRENT hold. All three are additive and omitempty: records written before
+	// this field existed (and every record held for a non-scan reason) decode
+	// with them empty and render as they always did.
+	//
+	// HeldReason is one of the ToolHeldReason* constants.
+	HeldReason string `json:"held_reason,omitempty"`
+	// HeldVerdict is the offline scanner's baseline verdict at hold time
+	// ("dangerous" / "warnings"; "clean" when only coverage failed).
+	HeldVerdict string `json:"held_verdict,omitempty"`
+	// HeldSignals lists the deterministic check ids that matched, e.g.
+	// "tpa.TPA-2026-0001.hidden_instruction" or "phrase.injection". Deduplicated,
+	// order-stable, capped at MaxToolHeldSignals.
+	HeldSignals []string `json:"held_signals,omitempty"`
+
+	// IdentityKeyed marks a record written by a Spec 105 (FR-009) binary,
+	// which keys every record by the tool's exact RAW upstream name. Every
+	// post-105 writer stamps it (internal/runtime/tool_quarantine.go
+	// saveToolApproval: the discovery producer, ApproveTools, BlockTools, the
+	// user toggle). A record WITHOUT the stamp was written by a pre-105
+	// binary, whose discovery producer filed a raw "ns:erase" under the
+	// COLLAPSED key "erase" — so only an unstamped record can be the collapsed
+	// sibling of a namespaced tool, and only unstamped siblings are consulted
+	// by the legacy carry-over in checkToolApprovals and the legacy
+	// re-admission in internal/server/tool_gate.go readToolApprovalRecord.
+	// The stamp bounds that migration logic to the upgrade: once a store has
+	// been rewritten by a post-105 binary, a sibling record is a genuine
+	// sibling and lends nothing to another raw name (FR-009: a record can
+	// neither inherit nor disturb the record of a sibling). Additive and
+	// omitempty: pre-105 records decode with it false.
+	IdentityKeyed bool `json:"identity_keyed,omitempty"`
+}
+
+// Restricts reports whether the record carries a fact that binds the tool
+// beyond a plain approval: a quarantine lock (pending / changed) or the
+// user's Disabled block. It is the shared reader rule for a pre-Spec-105
+// COLLAPSED record — a raw "ns:erase" that an older binary filed under
+// "erase": such a record may approve only the exact raw name it stores, but
+// its lock or block must keep binding the namespaced name it may have been
+// filed for while no exact record exists (internal/server/tool_gate.go
+// readToolApprovalRecord). The discovery producer
+// (internal/runtime/tool_quarantine.go checkToolApprovals) carries the
+// user's Disabled block onto the new exact record and, under an active gate,
+// adopts the lock with its evidence — only from an unstamped sibling
+// (IdentityKeyed) — and its end-of-pass stamping leaves a restricting orphan
+// unstamped so it can be consulted once when its tool reappears.
+func (r *ToolApprovalRecord) Restricts() bool {
+	if r == nil {
+		return false
+	}
+	if r.Disabled {
+		return true
+	}
+	switch r.Status {
+	case ToolApprovalStatusPending, ToolApprovalStatusChanged:
+		return true
+	default:
+		return false
+	}
+}
+
+// SetScanHold records the evidence of a trust_mode: scan hold on the record.
+// Signals are deduplicated in first-seen order and capped at MaxToolHeldSignals.
+func (r *ToolApprovalRecord) SetScanHold(reason, verdict string, signals []string) {
+	seen := make(map[string]bool, len(signals))
+	out := make([]string, 0, len(signals))
+	for _, s := range signals {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+		if len(out) == MaxToolHeldSignals {
+			break
+		}
+	}
+	r.HeldReason = reason
+	r.HeldVerdict = verdict
+	if len(out) == 0 {
+		r.HeldSignals = nil
+		return
+	}
+	r.HeldSignals = out
+}
+
+// ApproveCurrentHash copies CurrentHash into ApprovedHash. HashSchemaVersion
+// follows the copied hash: it takes CurrentHashSchemaVersion when that is known
+// and is kept otherwise. A legacy hint-free CurrentHash must not be stamped as
+// the hint-aware version (Sol r2 P1), and a CurrentHash this binary recomputed
+// must not keep a legacy version whose unknown-hints wildcard would let a later
+// annotation flip match it unchecked (Sol r4 P1).
+func (r *ToolApprovalRecord) ApproveCurrentHash() {
+	r.ApprovedHash = r.CurrentHash
+	if r.CurrentHashSchemaVersion != 0 {
+		r.HashSchemaVersion = r.CurrentHashSchemaVersion
+	}
+}
+
+// ClearScanHold drops any scan-hold evidence. Called on every transition out of
+// the held state so an approved record never renders a stale TPA badge.
+func (r *ToolApprovalRecord) ClearScanHold() {
+	r.HeldReason = ""
+	r.HeldVerdict = ""
+	r.HeldSignals = nil
+}
+
+// ErrPromptApprovalNotFound is returned by GetPromptApproval when no record
+// exists (wrapped so callers can errors.Is it). A real read/decode failure
+// returns a different error and MUST NOT be treated as "missing".
+var ErrPromptApprovalNotFound = errors.New("prompt approval not found")
+
+// PromptApprovalRecord is the per-(server, prompt) rug-pull baseline for
+// aggregated upstream prompts (spec 100). It is the prompt analogue of
+// ToolApprovalRecord, deliberately parallel — NOT a shared bucket — because the
+// server:tool and server:prompt key spaces would collide and the tool record
+// carries schema/scan fields prompts never use.
+//
+// It baselines ADVERTISED LIST METADATA ONLY (name + description + arguments);
+// get-time prompts/get message content is out of scope and not baselineable
+// here (spec 100 Non-Goals). Previous* fields are retained so a metadata revert
+// is detectable (server swaps a description back → auto re-approve).
+type PromptApprovalRecord struct {
+	ServerName          string    `json:"server_name"`
+	PromptName          string    `json:"prompt_name"`
+	ApprovedHash        string    `json:"approved_hash"`
+	CurrentHash         string    `json:"current_hash"`
+	HashSchemaVersion   uint64    `json:"hash_schema_version,omitempty"`
+	Status              string    `json:"status"` // "approved", "pending", "changed"
+	ApprovedAt          time.Time `json:"approved_at"`
+	ApprovedBy          string    `json:"approved_by"`
+	PreviousDescription string    `json:"previous_description,omitempty"`
+	CurrentDescription  string    `json:"current_description,omitempty"`
+	PreviousArguments   string    `json:"previous_arguments,omitempty"`
+	CurrentArguments    string    `json:"current_arguments,omitempty"`
+	Disabled            bool      `json:"disabled,omitempty"`
+}
+
+// PromptApprovalKey returns the storage key for a prompt approval record.
+func PromptApprovalKey(serverName, promptName string) string {
+	return serverName + ":" + promptName
+}
+
+// Key returns the storage key for this prompt approval record.
+func (r *PromptApprovalRecord) Key() string {
+	return PromptApprovalKey(r.ServerName, r.PromptName)
+}
+
+// MarshalBinary implements encoding.BinaryMarshaler
+func (r *PromptApprovalRecord) MarshalBinary() ([]byte, error) {
+	return json.Marshal(r)
+}
+
+// UnmarshalBinary implements encoding.BinaryUnmarshaler
+func (r *PromptApprovalRecord) UnmarshalBinary(data []byte) error {
+	return json.Unmarshal(data, r)
 }
 
 // ToolApprovalKey returns the storage key for a tool approval record.

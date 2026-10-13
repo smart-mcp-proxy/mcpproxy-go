@@ -1,0 +1,12 @@
+{
+  "description": "Nested maps and arrays: member ordering applies recursively at every object level, arrays keep their given element order (RFC 8785 does not reorder arrays), and value types are preserved through the recursion (null, bool, nested object, nested array, string, number).",
+  "variants": [
+    {
+      "zeta": [1, 2, { "y": 2, "x": 1 }, [true, false, null]],
+      "alpha": { "nested": { "deep": { "z": 1, "a": 2 } }, "list": [] },
+      "middle": null,
+      "flag": true,
+      "empty_obj": {}
+    }
+  ]
+}

@@ -64,3 +64,38 @@ func TestClientGetServers_LogsZeroServersOnlyOnStateChange(t *testing.T) {
 	assert.Equal(t, 2, recorded.FilterMessage("API returned zero upstream servers").Len())
 	assert.Equal(t, 1, recorded.FilterMessage("Server state changed").Len())
 }
+
+// TestClientGetServers_DecodesHealthVocabulary is a round-5 review finding:
+// GetServers() manually decoded the health object from the raw JSON map but
+// never extracted the status/usable/actions fields (Spec 109 FR-010-012)
+// into HealthStatus, even though the struct declares json tags for all
+// three. This exercises the real HTTP decode path (not MockClient), which
+// TestServerAdapter_GetAllServers_ForwardsHealthVocabulary bypasses.
+func TestClientGetServers_DecodesHealthVocabulary(t *testing.T) {
+	t.Parallel()
+
+	body := `{"success":true,"data":{"servers":[{"name":"quarantined-oauth-server","connected":false,"enabled":true,"quarantined":true,"health":{"level":"unhealthy","admin_state":"quarantined","summary":"Authentication required","action":"login","status":"sign_in_required","usable":false,"actions":["login","approve"]}}]}}`
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(body))
+		if err != nil {
+			t.Errorf("write response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	client := &Client{
+		baseURL:    server.URL,
+		httpClient: server.Client(),
+	}
+
+	servers, err := client.GetServers()
+	require.NoError(t, err)
+	require.Len(t, servers, 1)
+	require.NotNil(t, servers[0].Health)
+
+	assert.Equal(t, "sign_in_required", servers[0].Health.Status)
+	assert.Equal(t, false, servers[0].Health.Usable)
+	assert.Equal(t, []string{"login", "approve"}, servers[0].Health.Actions)
+}

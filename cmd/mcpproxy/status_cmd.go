@@ -6,17 +6,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
-	"go.uber.org/zap"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 )
 
 // StatusInfo holds the collected status data for display.
@@ -34,7 +35,51 @@ type StatusInfo struct {
 	SocketPath        string                   `json:"socket_path,omitempty"`
 	ConfigPath        string                   `json:"config_path,omitempty"`
 	Version           string                   `json:"version,omitempty"`
+	LaunchedBy        string                   `json:"launched_by,omitempty"` // Spec 092 FR-001a; empty = user-launched/unknown or older daemon
+	Update            *StatusUpdateInfo        `json:"update,omitempty"`
 	ServerEditionInfo *ServerEditionStatusInfo `json:"server_edition,omitempty"`
+	// NeedsAttention is the FR-001 attention count (Spec 109), the same
+	// number `mcpproxy attention` and every other surface reads. nil when the
+	// daemon could not be reached or is too old to serve GET /attention —
+	// contracts/cli.md's first line is then omitted rather than printed as 0.
+	NeedsAttention *int `json:"needs_attention,omitempty"`
+	// TokenSavings is nil when the daemon could not be reached, the caller is
+	// not an administrator (agent token), or the tokenizer is unavailable —
+	// the "Token savings:" summary line (Spec 109-k, contracts/cli.md) is then
+	// omitted rather than printed as zero.
+	TokenSavings *StatusTokenSavings `json:"token_savings,omitempty"`
+}
+
+// StatusTokenSavings mirrors the fields of contracts.ServerTokenMetrics that
+// `mcpproxy status` renders (Spec 109-k).
+type StatusTokenSavings struct {
+	SavedTokens int  `json:"saved_tokens"`
+	Estimated   bool `json:"estimated"`
+}
+
+// StatusUpdateInfo mirrors the `update` object of GET /api/v1/info
+// (internal/updatecheck.InfoResponseUpdate) for status output. The daemon's
+// background checker is the single source of truth; status only renders it.
+type StatusUpdateInfo struct {
+	Available      bool   `json:"available"`
+	LatestVersion  string `json:"latest_version,omitempty"`
+	ReleaseURL     string `json:"release_url,omitempty"`
+	CheckedAt      string `json:"checked_at,omitempty"` // RFC 3339, as serialized by the daemon
+	IsPrerelease   bool   `json:"is_prerelease,omitempty"`
+	CheckError     string `json:"check_error,omitempty"`
+	InstallChannel string `json:"install_channel,omitempty"` // Spec 079 FR-008
+	UpdateCommand  string `json:"update_command,omitempty"`  // Spec 079 FR-009
+
+	// BehindSummary is the daemon-rendered "N releases / M weeks behind"
+	// clause (Spec 079 FR-002). Empty against a daemon too old to send it, or
+	// when the delta could not be resolved — status then prints the same line
+	// it printed before the delta existed.
+	BehindSummary string `json:"behind_summary,omitempty"`
+	// The raw figures behind that clause, for `status -o json` consumers that
+	// would otherwise have to parse prose.
+	ReleasesBehind          *int `json:"releases_behind,omitempty"`
+	ReleasesBehindSaturated bool `json:"releases_behind_saturated,omitempty"`
+	WeeksBehind             *int `json:"weeks_behind,omitempty"`
 }
 
 // ServerEditionStatusInfo holds server-edition-specific status information.
@@ -74,7 +119,7 @@ Examples:
 	}
 
 	cmd.Flags().BoolVar(&statusShowKey, "show-key", false, "Show full unmasked API key")
-	cmd.Flags().BoolVar(&statusWebURL, "web-url", false, "Print only the Web UI URL (for piping to open)")
+	cmd.Flags().BoolVar(&statusWebURL, "web-url", false, "Print the login URL including the unmasked API key (for piping to open)")
 	cmd.Flags().BoolVar(&statusResetKey, "reset-key", false, "Regenerate API key and save to config")
 
 	return cmd
@@ -125,15 +170,13 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Apply key masking based on flags
-	if !statusShowKey {
-		info.APIKey = statusMaskAPIKey(info.APIKey)
-	}
-
 	// Handle --web-url: print only the URL and exit
 	if statusWebURL {
 		fmt.Println(info.WebUIURL)
 		return nil
+	}
+	if !statusShowKey {
+		maskStatusCredentials(info)
 	}
 
 	// Format and print output
@@ -141,21 +184,35 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	return printStatusOutput(info, format)
 }
 
+// Mask both representations before any formatter sees the status. --web-url
+// is an explicit request for a usable login URL and bypasses this function.
+func maskStatusCredentials(info *StatusInfo) {
+	info.APIKey = statusMaskAPIKey(info.APIKey)
+	parsed, err := url.Parse(info.WebUIURL)
+	if err != nil {
+		info.WebUIURL = ""
+		return
+	}
+	query := parsed.Query()
+	if query.Has("apikey") {
+		query.Set("apikey", info.APIKey)
+		parsed.RawQuery = query.Encode()
+		info.WebUIURL = parsed.String()
+	}
+}
+
 func collectStatus(cfg *config.Config, configPath string) (*StatusInfo, error) {
 	socketPath := socket.DetectSocketPath(cfg.DataDir)
 
-	if socket.IsSocketAvailable(socketPath) {
-		return collectStatusFromDaemon(cfg, socketPath, configPath)
+	// Daemon detection: socket first, then TCP fallback (cfg.Listen + API key).
+	if client, ok := newDaemonClient(cfg, nil); ok {
+		return collectStatusFromDaemon(cfg, client, socketPath, configPath)
 	}
 
 	return collectStatusFromConfig(cfg, socketPath, configPath), nil
 }
 
-func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) (*StatusInfo, error) {
-	logger, _ := zap.NewProduction()
-	defer logger.Sync()
-
-	client := cliclient.NewClient(socketPath, logger.Sugar())
+func collectStatusFromDaemon(cfg *config.Config, client *cliclient.Client, socketPath, configPath string) (*StatusInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -189,6 +246,15 @@ func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) 
 		info.ListenAddr = cfg.Listen
 	}
 
+	// Take the routing mode from the RUNNING daemon, not from the config file.
+	// /mcp binds its mode at startup, so a mode saved but not yet adopted (or
+	// hand-edited into the file) is not what the daemon is serving — and
+	// `mcpproxy status` is one of the documented ways to check which surface an
+	// agent will get. Older daemons omit the field; the config value stands in.
+	if mode, ok := statusData["routing_mode"].(string); ok && mode != "" {
+		info.RoutingMode = mode
+	}
+
 	// Extract upstream stats
 	if stats, ok := statusData["upstream_stats"].(map[string]interface{}); ok {
 		info.Servers = extractServerCounts(stats)
@@ -203,6 +269,14 @@ func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) 
 		}
 	}
 
+	// Spec 109 FR-001/FR-003: the same needs-attention count every surface
+	// reads. Non-fatal — an older daemon (or a transient failure) just omits
+	// the first line rather than failing the whole status call.
+	if attResp, attErr := client.GetAttention(ctx); attErr == nil {
+		count := attResp.Count
+		info.NeedsAttention = &count
+	}
+
 	// Get info data (version, web_ui_url)
 	infoData, err := client.GetInfo(ctx)
 	if err == nil {
@@ -212,6 +286,21 @@ func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) 
 		if url, ok := infoData["web_ui_url"].(string); ok {
 			info.WebUIURL = url
 		}
+		// Spec 092 FR-001a: durable launch provenance of the running core.
+		// Older daemons omit the field entirely — rendered as absent, not as
+		// "user-launched", because we cannot tell the two apart.
+		if v, ok := infoData["launched_by"].(string); ok {
+			info.LaunchedBy = v
+		}
+		info.Update = extractStatusUpdate(infoData)
+	}
+
+	// Spec 109-k: token savings summary line. Best-effort — a scoped (agent
+	// token) caller gets 403 from the admin-only endpoint, and a daemon
+	// without a tokenizer configured returns an error; either way the line is
+	// simply omitted rather than failing the whole command.
+	if tokenData, tokenErr := client.GetTokenStats(ctx); tokenErr == nil {
+		info.TokenSavings = extractStatusTokenSavings(tokenData)
 	}
 
 	// Construct Web UI URL if not provided by daemon
@@ -223,6 +312,18 @@ func collectStatusFromDaemon(cfg *config.Config, socketPath, configPath string) 
 	info.Endpoints = statusBuildEndpoints(info.ListenAddr)
 
 	return info, nil
+}
+
+// extractStatusTokenSavings reads the fields 'status' renders from a
+// GET /api/v1/stats/tokens response (contracts.ServerTokenMetrics, Spec 109-k).
+func extractStatusTokenSavings(data map[string]interface{}) *StatusTokenSavings {
+	if data == nil {
+		return nil
+	}
+	return &StatusTokenSavings{
+		SavedTokens: getIntField(data, "saved_tokens"),
+		Estimated:   getBoolField(data, "estimated"),
+	}
 }
 
 func collectStatusFromConfig(cfg *config.Config, socketPath, configPath string) *StatusInfo {
@@ -255,19 +356,133 @@ func collectStatusFromConfig(cfg *config.Config, socketPath, configPath string) 
 func extractServerCounts(stats map[string]interface{}) *ServerCounts {
 	counts := &ServerCounts{}
 
-	if v, ok := stats["connected"].(float64); ok {
-		counts.Connected = int(v)
-	}
-	if v, ok := stats["quarantined"].(float64); ok {
-		counts.Quarantined = int(v)
-	}
-	if v, ok := stats["total"].(float64); ok {
-		counts.Total = int(v)
+	// The daemon emits connected_servers/quarantined_servers/total_servers
+	// (see the GetStats builders in internal/server and internal/upstream);
+	// bare connected/quarantined/total are accepted for older daemons.
+	counts.Connected = statsInt(stats, "connected_servers", "connected")
+	counts.Quarantined = statsInt(stats, "quarantined_servers", "quarantined")
+	if v, ok := statsIntOK(stats, "total_servers", "total"); ok {
+		counts.Total = v
 	} else {
 		counts.Total = counts.Connected + counts.Quarantined
 	}
 
 	return counts
+}
+
+// statsInt returns the first of the given keys present in stats as an int.
+func statsInt(stats map[string]interface{}, keys ...string) int {
+	v, _ := statsIntOK(stats, keys...)
+	return v
+}
+
+func statsIntOK(stats map[string]interface{}, keys ...string) (int, bool) {
+	for _, key := range keys {
+		switch v := stats[key].(type) {
+		case float64:
+			return int(v), true
+		case int:
+			return v, true
+		}
+	}
+	return 0, false
+}
+
+// extractStatusUpdate pulls the `update` object out of the /api/v1/info
+// payload. Returns nil when the daemon did not report update state.
+func extractStatusUpdate(infoData map[string]interface{}) *StatusUpdateInfo {
+	updateData, ok := infoData["update"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	u := &StatusUpdateInfo{}
+	if v, ok := updateData["available"].(bool); ok {
+		u.Available = v
+	}
+	if v, ok := updateData["latest_version"].(string); ok {
+		u.LatestVersion = v
+	}
+	if v, ok := updateData["release_url"].(string); ok {
+		u.ReleaseURL = v
+	}
+	if v, ok := updateData["checked_at"].(string); ok {
+		u.CheckedAt = v
+	}
+	if v, ok := updateData["is_prerelease"].(bool); ok {
+		u.IsPrerelease = v
+	}
+	if v, ok := updateData["check_error"].(string); ok {
+		u.CheckError = v
+	}
+	if v, ok := updateData["install_channel"].(string); ok {
+		u.InstallChannel = v
+	}
+	if v, ok := updateData["update_command"].(string); ok {
+		u.UpdateCommand = v
+	}
+	// Spec 079 FR-002. Absent from an older daemon, which is exactly the
+	// daemon most likely to be running here — treat absence as "no delta",
+	// never as an error.
+	if v, ok := updateData["behind_summary"].(string); ok {
+		u.BehindSummary = v
+	}
+	if v, ok := updateData["releases_behind"].(float64); ok {
+		n := int(v)
+		u.ReleasesBehind = &n
+	}
+	if v, ok := updateData["releases_behind_saturated"].(bool); ok {
+		u.ReleasesBehindSaturated = v
+	}
+	if v, ok := updateData["weeks_behind"].(float64); ok {
+		n := int(v)
+		u.WeeksBehind = &n
+	}
+	return u
+}
+
+// statusVersionSuffix renders the update annotation appended to the Version
+// line, mirroring doctor's presentation. A failed or not-yet-completed check
+// renders nothing (quiet on failure; the error stays in JSON for diagnostics).
+//
+// Spec 079 FR-002/FR-003: the "N releases / M weeks behind" delta is appended
+// here when the daemon reports one. The clause itself is authored by the
+// daemon (updatecheck.FormatBehindSummary) rather than assembled here, so
+// status, doctor, the startup log, the Web UI banner and the tray cannot word
+// it differently. An older daemon omits it and this renders the legacy form.
+func statusVersionSuffix(u *StatusUpdateInfo) string {
+	if u == nil || u.CheckError != "" {
+		return ""
+	}
+	if u.Available && u.LatestVersion != "" {
+		behind := ""
+		if u.BehindSummary != "" {
+			behind = ", " + u.BehindSummary
+		}
+		// Spec 079 US2 (FR-009): append the channel's exact one-line update
+		// command, or the channel-appropriate guidance when no command is
+		// safe. Older daemons omit install_channel — render the legacy form.
+		action := ""
+		switch {
+		case u.UpdateCommand != "":
+			action = " — Run: " + u.UpdateCommand
+		case u.InstallChannel != "":
+			// The release URL already appears in the suffix; pass "" so the
+			// guidance says "the releases page" instead of repeating it.
+			if g := updatecheck.GuidanceLine(u.InstallChannel, ""); g != "" {
+				action = " — " + g
+			}
+		}
+		if u.ReleaseURL != "" {
+			return fmt.Sprintf(" (update available: %s%s — %s%s)", u.LatestVersion, behind, u.ReleaseURL, action)
+		}
+		return fmt.Sprintf(" (update available: %s%s%s)", u.LatestVersion, behind, action)
+	}
+	if u.LatestVersion != "" {
+		// A successful check confirmed we are current.
+		return " (latest)"
+	}
+	return ""
 }
 
 // statusMaskAPIKey returns a masked version of the API key showing first and last 4 chars.
@@ -299,10 +514,17 @@ func statusBuildWebUIURL(listenAddr, apiKey string) string {
 	if strings.HasPrefix(addr, ":") {
 		addr = "127.0.0.1" + addr
 	}
-	if apiKey != "" {
-		return fmt.Sprintf("http://%s/ui/?apikey=%s", addr, apiKey)
+	loginURL := &url.URL{
+		Scheme: "http",
+		Host:   addr,
+		Path:   "/ui/",
 	}
-	return fmt.Sprintf("http://%s/ui/", addr)
+	if apiKey != "" {
+		query := loginURL.Query()
+		query.Set("apikey", apiKey)
+		loginURL.RawQuery = query.Encode()
+	}
+	return loginURL.String()
 }
 
 func statusFormatDuration(d time.Duration) string {
@@ -370,11 +592,29 @@ func printStatusJSON(info *StatusInfo) error {
 func printStatusTable(info *StatusInfo) {
 	fmt.Println("MCPProxy Status")
 
+	// Spec 109 FR-001/FR-003 (contracts/cli.md): fixed first line after the
+	// header, so parallel PRs' own lines land at a stable position.
+	if info.NeedsAttention != nil {
+		if *info.NeedsAttention > 0 {
+			fmt.Printf("Needs attention: %d (run 'mcpproxy attention')\n", *info.NeedsAttention)
+		} else {
+			fmt.Println("Needs attention: none")
+		}
+	}
+
 	fmt.Printf("  %-12s %s\n", "State:", info.State)
 	fmt.Printf("  %-12s %s\n", "Edition:", info.Edition)
 
 	if info.Version != "" {
-		fmt.Printf("  %-12s %s\n", "Version:", info.Version)
+		fmt.Printf("  %-12s %s%s\n", "Version:", info.Version, statusVersionSuffix(info.Update))
+	}
+
+	// Spec 092 FR-001a. Only rendered when the core asserted a marker: an
+	// empty value means user-launched/unknown (or a pre-092 daemon), and
+	// printing "unknown" for the ordinary `mcpproxy serve` case would be
+	// noise on every status call.
+	if info.LaunchedBy != "" {
+		fmt.Printf("  %-12s %s\n", "Launched by:", info.LaunchedBy)
 	}
 
 	fmt.Printf("  %-12s %s\n", "Listen:", info.ListenAddr)
@@ -391,6 +631,17 @@ func printStatusTable(info *StatusInfo) {
 		fmt.Printf("  %-12s %d connected, %d quarantined\n", "Servers:", info.Servers.Connected, info.Servers.Quarantined)
 	}
 
+	// Spec 109-k, contracts/cli.md: directly after Servers:, suffixed
+	// " (estimate)" while the tokenizer has not seen a real retrieve_tools
+	// call yet (contracts.ServerTokenMetrics.Estimated).
+	if info.TokenSavings != nil {
+		suffix := ""
+		if info.TokenSavings.Estimated {
+			suffix = " (estimate)"
+		}
+		fmt.Printf("  %-12s ~%d tokens/request%s\n", "Token savings:", info.TokenSavings.SavedTokens, suffix)
+	}
+
 	if info.SocketPath != "" {
 		fmt.Printf("  %-12s %s\n", "Socket:", info.SocketPath)
 	}
@@ -401,7 +652,8 @@ func printStatusTable(info *StatusInfo) {
 
 	if info.Endpoints != nil {
 		fmt.Println()
-		fmt.Println("MCP Endpoints")
+		fmt.Println("Endpoint & mode")
+		fmt.Printf("  %-16s %s\n", "Routing mode:", info.RoutingMode)
 		if v, ok := info.Endpoints["default"]; ok {
 			fmt.Printf("  %-16s %s  (default, %s mode)\n", "/mcp", v, info.RoutingMode)
 		}
@@ -425,22 +677,5 @@ func printStatusTable(info *StatusInfo) {
 }
 
 func loadStatusConfig() (*config.Config, error) {
-	if configFile != "" {
-		cfg, err := config.LoadFromFile(configFile)
-		if err != nil {
-			return nil, err
-		}
-		if dataDir != "" {
-			cfg.DataDir = dataDir
-		}
-		return cfg, nil
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	if dataDir != "" {
-		cfg.DataDir = dataDir
-	}
-	return cfg, nil
+	return loadCLIConfig(configFile)
 }

@@ -8,7 +8,7 @@
 # arg list at runtime (see registry_bundled.go).
 #
 # Published as: ghcr.io/smart-mcp-proxy/scanner-cisco:latest
-FROM python:3.12-slim
+FROM python:3.14-slim
 
 LABEL org.opencontainers.image.source="https://github.com/smart-mcp-proxy/mcpproxy-go"
 LABEL org.opencontainers.image.description="Cisco MCP Scanner (YARA + readiness) packaged for MCPProxy"

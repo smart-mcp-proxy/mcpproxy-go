@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -9,7 +10,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -20,7 +24,23 @@ const (
 	DefaultDataDir = ".mcpproxy"
 	ConfigFileName = "mcp_config.json"
 	trueValue      = "true"
+	falseValue     = "false"
 )
+
+// DecodeConfigFile decodes the config file over the defaults and applies only
+// the read-time normalizations (legacy key migration, created stamps). Unlike
+// LoadFromFile it applies no env overrides, runs no validation, creates no
+// directories and touches no process-global state, so it is safe as the base
+// of a read-modify-write save while the server is running. (Not "ReadFile":
+// the oauth door scan keys config-returning functions by bare name and would
+// taint every os.ReadFile call in the tree.)
+func DecodeConfigFile(configPath string) (*Config, error) {
+	cfg := DefaultConfig()
+	if err := loadConfigFile(configPath, cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
 
 // LoadFromFile loads configuration from a specific file
 func LoadFromFile(configPath string) (*Config, error) {
@@ -43,6 +63,17 @@ func LoadFromFile(configPath string) (*Config, error) {
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
+	// server_edition.oauth.client_id/client_secret are deliberately NOT
+	// expanded here (cross-review round 6, chunk 3 P2, superseding round 1's
+	// in-place expansion): this cfg is what becomes r.cfg/r.desiredCfg and is
+	// round-tripped back to disk by SaveConfig on every later PATCH
+	// /api/v1/config or /config/apply, so resolving the secret into it here
+	// would persist the plaintext value instead of the operator's
+	// `${env:...}` reference. ServerEditionConfig.Validate() (reached just
+	// below) resolves it itself, read-only, to enforce the "required" check
+	// against the actual value; auth.NewOAuthHandler resolves it again on its
+	// own private, never-persisted config clone to get the live secret for
+	// the token endpoint.
 
 	// Create data directory if it doesn't exist.
 	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —
@@ -55,6 +86,12 @@ func LoadFromFile(configPath string) (*Config, error) {
 
 	// Apply environment variable overrides for TLS configuration
 	applyTLSEnvOverrides(cfg)
+
+	// Migrate an unrecognized per-server trust_mode to the fail-closed tier
+	// BEFORE validating: a bogus value must not brick an existing install.
+	warnNormalizedTrustModes(cfg)
+	warnNormalizedForwardHeaders(cfg)
+	warnNormalizedOAuthEndpointOverrides(cfg)
 
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
@@ -67,8 +104,51 @@ func LoadFromFile(configPath string) (*Config, error) {
 	return cfg, nil
 }
 
+// warnNormalizedTrustModes applies NormalizeTrustModes and reports each rewrite
+// on stderr (the loader has no injected logger; this matches the other
+// load-time WARN lines here). The daemon starts, the runtime behaves exactly as
+// it already did for the unrecognized value (manual), and the operator is told
+// instead of being left with a proxy that refuses to boot (GH #938).
+func warnNormalizedTrustModes(cfg *Config) {
+	for _, n := range NormalizeTrustModes(cfg) {
+		fmt.Fprintf(os.Stderr,
+			"WARN: server %q has an unrecognized trust_mode %q; treating it as %q (valid: %s)\n",
+			n.Server, n.Original, TrustModeManual, strings.Join(ValidTrustModes(), ", "))
+	}
+}
+
+// warnNormalizedForwardHeaders applies NormalizeForwardHeaders and reports each
+// dropped entry on stderr. Names only, never values; boot never fails (Spec 112
+// FR-005b).
+func warnNormalizedForwardHeaders(cfg *Config) {
+	for _, n := range NormalizeForwardHeaders(cfg) {
+		fmt.Fprintf(os.Stderr,
+			"WARN: server %q forward_headers: dropped unusable entries %q (invalid, denied, duplicate, over the 32-entry cap, or colliding with a static header)\n",
+			n.Server, strings.Join(n.Dropped, ", "))
+	}
+}
+
+// warnNormalizedOAuthEndpointOverrides drops unusable per-server OAuth endpoint
+// overrides and reports each by field name only (Spec 113 FR-023: never the
+// value, which may carry credentials). Boot never fails on them.
+func warnNormalizedOAuthEndpointOverrides(cfg *Config) {
+	for _, n := range NormalizeOAuthEndpointOverrides(cfg) {
+		fmt.Fprintf(os.Stderr,
+			"WARN: server %q oauth: dropped invalid endpoint override(s) %q (must be an absolute https URL, or http on a loopback host, without query, fragment or userinfo)\n",
+			n.Server, strings.Join(n.Dropped, ", "))
+	}
+}
+
 // Load loads configuration from file, environment, and defaults
 func Load() (*Config, error) {
+	cfg, _, err := LoadWithPath()
+	return cfg, err
+}
+
+// LoadWithPath is Load that also reports which config file it read (or
+// created), so callers that persist later write to the file they loaded
+// rather than to a path re-derived from data_dir.
+func LoadWithPath() (*Config, string, error) {
 	cfg := DefaultConfig()
 
 	// Set up viper
@@ -79,15 +159,22 @@ func Load() (*Config, error) {
 	configFileAutoLoaded := false
 	if configPath != "" {
 		if err := loadConfigFile(configPath, cfg); err != nil {
-			return nil, fmt.Errorf("failed to load config file %s: %w", configPath, err)
+			return nil, "", fmt.Errorf("failed to load config file %s: %w", configPath, err)
 		}
 	} else {
 		// Try to find config file in common locations
-		configFound, _, err := findAndLoadConfigFile(cfg)
+		configFound, foundPath, err := findAndLoadConfigFile(cfg)
 		if err != nil && configFound {
-			return nil, err // Only return error if config was found but couldn't be loaded
+			return nil, "", err // Only return error if config was found but couldn't be loaded
 		}
 		configFileAutoLoaded = configFound
+		// Discovery returns "mcp_config.json" for the cwd hit; report it
+		// absolute so later saves do not depend on the working directory.
+		if abs, absErr := filepath.Abs(foundPath); configFound && absErr == nil {
+			configPath = abs
+		} else {
+			configPath = foundPath
+		}
 
 		// If no config file was found, create a default one
 		if !configFound {
@@ -95,21 +182,22 @@ func Load() (*Config, error) {
 			if cfg.DataDir == "" {
 				homeDir, err := os.UserHomeDir()
 				if err != nil {
-					return nil, fmt.Errorf("failed to get user home directory: %w", err)
+					return nil, "", fmt.Errorf("failed to get user home directory: %w", err)
 				}
 				cfg.DataDir = filepath.Join(homeDir, DefaultDataDir)
 			}
 
 			// Create data directory if it doesn't exist
 			if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
-				return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
+				return nil, "", fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 			}
 
 			// Create default config file
 			defaultConfigPath := filepath.Join(cfg.DataDir, ConfigFileName)
 			if err := createDefaultConfigFile(defaultConfigPath, cfg); err != nil {
-				return nil, fmt.Errorf("failed to create default config file: %w", err)
+				return nil, "", fmt.Errorf("failed to create default config file: %w", err)
 			}
+			configPath = defaultConfigPath
 
 			fmt.Fprintf(os.Stderr, "INFO: Created default configuration file at %s\n", defaultConfigPath)
 		}
@@ -120,7 +208,7 @@ func Load() (*Config, error) {
 	if !configFileAutoLoaded {
 		// Override with viper (CLI flags and env vars)
 		if err := viper.Unmarshal(cfg); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal config: %w", err)
+			return nil, "", fmt.Errorf("failed to unmarshal config: %w", err)
 		}
 	}
 
@@ -128,20 +216,23 @@ func Load() (*Config, error) {
 	if cfg.DataDir == "" {
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get user home directory: %w", err)
+			return nil, "", fmt.Errorf("failed to get user home directory: %w", err)
 		}
 		cfg.DataDir = filepath.Join(homeDir, DefaultDataDir)
 	}
 
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg)
+	// server_edition.oauth.client_id/client_secret are deliberately NOT
+	// expanded here — see the matching comment in LoadFromFile (cross-review
+	// round 6, chunk 3 P2).
 
 	// Create data directory if it doesn't exist.
 	// Skip if the path still contains unresolved ${...} refs (e.g., missing env var) —
 	// these are invalid path characters on Windows and the directory can't be created anyway.
 	if !strings.Contains(cfg.DataDir, "${") {
 		if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
-			return nil, fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
+			return nil, "", fmt.Errorf("failed to create data directory %s: %w", cfg.DataDir, err)
 		}
 	}
 
@@ -149,22 +240,27 @@ func Load() (*Config, error) {
 	upstreamList := viper.GetStringSlice("upstream")
 	for _, upstream := range upstreamList {
 		if err := parseUpstreamServer(upstream, cfg); err != nil {
-			return nil, fmt.Errorf("failed to parse upstream server %s: %w", upstream, err)
+			return nil, "", fmt.Errorf("failed to parse upstream server %s: %w", upstream, err)
 		}
 	}
 
 	// Apply environment variable overrides for TLS configuration
 	applyTLSEnvOverrides(cfg)
 
+	// Same migration as LoadFromFile: normalize-and-warn, never fail the load.
+	warnNormalizedTrustModes(cfg)
+	warnNormalizedForwardHeaders(cfg)
+	warnNormalizedOAuthEndpointOverrides(cfg)
+
 	// Validate configuration
 	if err := cfg.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid configuration: %w", err)
+		return nil, "", fmt.Errorf("invalid configuration: %w", err)
 	}
 
 	// Initialize registries from config
 	initializeRegistries(cfg)
 
-	return cfg, nil
+	return cfg, configPath, nil
 }
 
 // setupViper configures viper with environment variable handling
@@ -187,6 +283,7 @@ func setupViper() {
 	viper.SetDefault("allow-server-add", true)
 	viper.SetDefault("allow-server-remove", true)
 	viper.SetDefault("enable-prompts", true)
+	viper.SetDefault("aggregate-upstream-prompts", false)
 	viper.SetDefault("check-server-repo", true)
 
 	// TLS defaults
@@ -229,10 +326,28 @@ func loadConfigFile(path string, cfg *Config) error {
 		return nil
 	}
 
+	// Spec 107 FR-032/FR-035: the server build drops the removed
+	// server-edition keys / auth_broker modes from the RAW document before the
+	// typed decode and records one LoadDiagnostic each (the loader has no
+	// logger; LogLoadDiagnostics emits them once one exists). The personal
+	// build returns the bytes untouched and records nothing (opaque carriers).
+	data, diagnostics, err := normalizeLoadedDocument(data)
+	if err != nil {
+		return err
+	}
+	cfg.loadDiagnostics = diagnostics
+
 	// First check if api_key is present in the JSON to distinguish between
-	// "not set" vs "explicitly set to empty"
+	// "not set" vs "explicitly set to empty". Decoded with UseNumber: the
+	// legacy "teams" alias below is re-marshaled FROM this map into the
+	// server-edition block, and in the personal build that block is an opaque
+	// carrier whose numbers must keep their decimal text (Spec 107 FR-040) —
+	// a float64 detour would round 2^53+1 or a long decimal before the
+	// carrier ever saw it. Only key presence is read from the map otherwise.
 	var rawConfig map[string]interface{}
-	if err := json.Unmarshal(data, &rawConfig); err != nil {
+	rawDec := json.NewDecoder(bytes.NewReader(data))
+	rawDec.UseNumber()
+	if err := rawDec.Decode(&rawConfig); err != nil {
 		return fmt.Errorf("failed to parse config file for api_key detection: %w", err)
 	}
 
@@ -249,8 +364,8 @@ func loadConfigFile(path string, cfg *Config) error {
 	// legacy "teams" key to "server_edition". An existing config that still uses
 	// "teams" is normalized onto ServerEdition on read. The new key always wins;
 	// only fall back to the legacy key when "server_edition" is absent. This
-	// compiles in both editions because ServerEditionConfig is a struct{} stub
-	// in the personal build (it simply unmarshals to an empty value there).
+	// compiles in both editions because ServerEditionConfig is a raw-JSON
+	// carrier in the personal build (it stores the block verbatim there).
 	if _, hasNew := rawConfig["server_edition"]; !hasNew {
 		if legacy, hasLegacy := rawConfig["teams"]; hasLegacy {
 			if raw, err := json.Marshal(legacy); err == nil {
@@ -315,6 +430,26 @@ func parseUpstreamServer(upstream string, cfg *Config) error {
 // approach is still much safer than truncate+write (reduces race window from
 // ~50ms to <1ms).
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileMode(path, data, perm, false)
+}
+
+// skipWriteSync drops the fsync from atomicWriteFileMode. Only tests set it,
+// through DisableWriteSyncForTesting; production writes always sync.
+var skipWriteSync atomic.Bool
+
+// DisableWriteSyncForTesting makes config file writes skip the fsync before
+// the atomic rename for the rest of the process. The written bytes are still
+// visible to every reader in the process; only crash durability is lost, which
+// no unit test exercises. Call it from TestMain in packages whose tests write
+// configs heavily: FlushFileBuffers on the Windows CI runner costs tens of
+// milliseconds per write and dominated internal/runtime's test time. Never
+// call it from production code.
+func DisableWriteSyncForTesting() { skipWriteSync.Store(true) }
+
+// atomicWriteFileMode is atomicWriteFile; with exactMode the temp file is
+// chmod-ed to perm before the rename, so the result carries perm itself and
+// not perm filtered by the process umask (which OpenFile applies).
+func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode bool) error {
 	// Generate random suffix for temp file
 	randBytes := make([]byte, 8)
 	if _, err := rand.Read(randBytes); err != nil {
@@ -345,9 +480,17 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
+	if exactMode {
+		if err := tmpFile.Chmod(perm); err != nil {
+			return fmt.Errorf("failed to set temp file mode: %w", err)
+		}
+	}
+
 	// Fsync to ensure data is on disk
-	if err := tmpFile.Sync(); err != nil {
-		return fmt.Errorf("failed to sync temp file: %w", err)
+	if !skipWriteSync.Load() {
+		if err := tmpFile.Sync(); err != nil {
+			return fmt.Errorf("failed to sync temp file: %w", err)
+		}
 	}
 
 	// Close temp file
@@ -367,6 +510,60 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 
 // SaveConfig saves configuration to file
 func SaveConfig(cfg *Config, path string) error {
+	return SaveConfigWithEdits(cfg, nil, path)
+}
+
+// SaveConfigWithEdits is SaveConfig for the save that persists an API edit:
+// the overridden fields that moved between mergeBase (the config the edit was
+// merged onto) and cfg are the caller's edits and are written as they are;
+// every other overridden field is written back from the file as in
+// SaveConfig. See PersistableConfigWithEdits.
+//
+// Never persists a process-only override (serve flag, MCPPROXY_* env, env
+// API key): the file's value is written back for every field still carrying
+// one (see process_overrides.go). That makes every save a read-modify-write
+// of the file, so in-process savers — the runtime, telemetry, serve's own
+// saves — are serialised: a save always reads the file the previous save
+// wrote, and an API edit can never be reverted by a concurrent save that had
+// read the file before it landed. (A stale config saved whole still
+// overwrites unrelated fields with what it holds — the residual window
+// telemetry.persistConfig documents — but a field it merely carries from an
+// override is restored from the file, never from that stale copy.)
+func SaveConfigWithEdits(cfg, mergeBase *Config, path string) error {
+	saveConfigMu.Lock()
+	defer saveConfigMu.Unlock()
+	persisted := PersistableConfigWithEdits(cfg, mergeBase, path)
+	if saveConfigTestHook != nil {
+		saveConfigTestHook()
+	}
+	return writeConfigFile(persisted, path)
+}
+
+// saveConfigMu serialises the read-base-then-write of every in-process save.
+// Leaf-level: nothing under it takes another lock except the override
+// registry's RWMutex (a leaf itself).
+var saveConfigMu sync.Mutex
+
+// saveConfigTestHook, when set, runs between a save's base read and its write
+// (under saveConfigMu). Tests only.
+var saveConfigTestHook func()
+
+// RestoreConfigFileBytes writes raw bytes back to the config file atomically
+// with exactly the given permission bits (the process umask does not apply,
+// and 0000 is a mode like any other), under the same lock as every in-process
+// save (Spec 116 commit compensation: the pre-commit file is restored byte for
+// byte and mode, never rebuilt from memory).
+func RestoreConfigFileBytes(path string, data []byte, perm os.FileMode) error {
+	saveConfigMu.Lock()
+	defer saveConfigMu.Unlock()
+	if err := atomicWriteFileMode(path, data, perm.Perm(), true); err != nil {
+		return fmt.Errorf("failed to restore config file: %w", err)
+	}
+	return nil
+}
+
+// writeConfigFile marshals cfg exactly as given and writes it atomically.
+func writeConfigFile(cfg *Config, path string) error {
 	data, err := json.MarshalIndent(cfg, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal config: %w", err)
@@ -486,6 +683,54 @@ func CreateSampleConfig(path string) error {
 	return SaveConfig(cfg, path)
 }
 
+// EnsureConfigFile seeds a default configuration at an explicitly named path
+// that does not exist yet, and reports whether it created one.
+//
+// It exists for the first run of an instance whose config path is named on the
+// command line rather than discovered — the relocated tray instance of GH #936
+// spawns its core with BOTH `--data-dir <root>` and `--config
+// <root>/mcp_config.json`, and on a fresh root that file has never been
+// written. LoadFromFile refuses a missing explicit path, so without this the
+// core exited on the spot with "no such file or directory" and the instance
+// could never come up.
+//
+// Why here and not inside LoadFromFile: LoadFromFile is also the HOT-RELOAD
+// entry point (internal/runtime/lifecycle.go, internal/runtime/configsvc). A
+// config file that disappears under a running proxy must fail the reload and
+// leave the live config alone; creating a default there would replace every
+// server the user has with nothing. Seeding is a startup decision, so it is
+// made at startup, once.
+//
+// dataDir is the directory the caller will run out of (the `--data-dir` flag
+// when one was given); the seeded file records it, exactly as the implicit path
+// records its own. An empty dataDir leaves the field unset, so the loader's
+// usual default applies.
+func EnsureConfigFile(path, dataDir string) (created bool, err error) {
+	if path == "" {
+		return false, nil
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, nil
+	} else if !os.IsNotExist(statErr) {
+		return false, fmt.Errorf("failed to inspect config file %s: %w", path, statErr)
+	}
+
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			return false, fmt.Errorf("failed to create config directory %s: %w", dir, err)
+		}
+	}
+
+	seed := &Config{DataDir: dataDir}
+	if err := createDefaultConfigFile(path, seed); err != nil {
+		return false, fmt.Errorf("failed to create default config file %s: %w", path, err)
+	}
+	// Same notice the implicit path prints, for the same reason: a typo in
+	// --config would otherwise create a blank instance in silence.
+	fmt.Fprintf(os.Stderr, "INFO: Created default configuration file at %s\n", path)
+	return true, nil
+}
+
 // Helper function to get current time (useful for testing)
 var now = time.Now
 
@@ -518,6 +763,12 @@ func initializeRegistries(cfg *Config) {
 	// field. Runs on initial load and every hot-reload (LoadFromFile path).
 	normalizeServerQuarantineFlags(cfg)
 
+	// One-time migration (Spec 077 US3): fold the deprecated top-level
+	// scanner_fetch_package_source / scanner_disable_no_new_privileges keys into
+	// the unified security.deep_scan block, and drop the removed
+	// auto_scan_quarantined key. Existing configs load unchanged.
+	migrateDeepScanConfig(cfg)
+
 	// This function will be implemented to avoid circular imports
 	// For now, we'll create a callback mechanism
 	if registriesInitCallback != nil {
@@ -548,8 +799,19 @@ func expandDataDir(cfg *Config) {
 	cfg.DataDir = resolved
 }
 
-// applyTLSEnvOverrides applies environment variable overrides for TLS configuration
+// ApplyEnvOverrides applies the MCPPROXY_* environment overlay (listen, TLS,
+// data dir, trusted hosts...) that Load applies, for callers that build a
+// config from DefaultConfig without reading a file.
+func ApplyEnvOverrides(cfg *Config) { applyTLSEnvOverrides(cfg) }
+
+// applyTLSEnvOverrides applies the MCPPROXY_* environment overrides. Each one
+// goes through OverrideForProcess so no save path persists it (see
+// process_overrides.go); the env-sourced set is rebuilt from scratch on every
+// load so a reload reflects the variables set now.
 func applyTLSEnvOverrides(cfg *Config) {
+	b := &envOverrideBatch{}
+	defer b.commit()
+
 	// Ensure TLS config is initialized
 	if cfg.TLS == nil {
 		cfg.TLS = &TLSConfig{
@@ -561,27 +823,193 @@ func applyTLSEnvOverrides(cfg *Config) {
 	}
 
 	// Override listen address from environment
-	if value := os.Getenv("MCPPROXY_LISTEN"); value != "" {
-		cfg.Listen = value
-	}
+	value := os.Getenv("MCPPROXY_LISTEN")
+	envOverride(b, cfg, FieldListen, value != "", value)
 
 	// Override TLS enabled from environment
-	if value := os.Getenv("MCPPROXY_TLS_ENABLED"); value != "" {
-		cfg.TLS.Enabled = (value == trueValue || value == "1")
-	}
+	value = os.Getenv("MCPPROXY_TLS_ENABLED")
+	envOverride(b, cfg, FieldTLSEnabled, value != "", value == trueValue || value == "1")
 
 	// Override TLS client cert requirement from environment
-	if value := os.Getenv("MCPPROXY_TLS_REQUIRE_CLIENT_CERT"); value != "" {
-		cfg.TLS.RequireClientCert = (value == trueValue || value == "1")
-	}
+	value = os.Getenv("MCPPROXY_TLS_REQUIRE_CLIENT_CERT")
+	envOverride(b, cfg, FieldTLSRequireClientCert, value != "", value == trueValue || value == "1")
 
 	// Override TLS certificates directory from environment
-	if value := os.Getenv("MCPPROXY_CERTS_DIR"); value != "" {
-		cfg.TLS.CertsDir = value
-	}
+	value = os.Getenv("MCPPROXY_CERTS_DIR")
+	envOverride(b, cfg, FieldTLSCertsDir, value != "", value)
 
 	// Override data directory from environment (for backward compatibility)
-	if value := os.Getenv("MCPPROXY_DATA"); value != "" {
-		cfg.DataDir = value
+	value = os.Getenv("MCPPROXY_DATA")
+	envOverride(b, cfg, FieldDataDir, value != "", value)
+
+	// Spec 112 FR-003: MCPPROXY_FORWARD_CLIENT_HEADERS=false|0|off disables
+	// client header forwarding for this process. Only the disabling vocabulary
+	// overrides; anything else leaves the file value (fail-open on typos would
+	// silently enable, so an unrecognized value is ignored, not applied).
+	var fwd *bool
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(EnvForwardClientHeaders))) {
+	case falseValue, "0", "off":
+		off := false
+		fwd = &off
 	}
+	envOverride(b, cfg, FieldForwardClientHeaders, fwd != nil, fwd)
+
+	// Override trusted hosts for reverse-proxy deployments (GH #898).
+	// Comma-separated list of Host header values accepted on loopback listeners.
+	var hosts []string
+	value = os.Getenv("MCPPROXY_TRUSTED_HOSTS")
+	for _, h := range strings.Split(value, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			hosts = append(hosts, h)
+		}
+	}
+	envOverride(b, cfg, FieldTrustedHosts, value != "", hosts)
+
+	// Override trusted proxies (Spec 107 FR-027). Comma-separated CIDRs or
+	// IPs; an empty variable leaves the file value. Entries are validated by
+	// validateTrustedProxies exactly like file values (LoadFromFile validates
+	// after the overrides run).
+	if value := os.Getenv("MCPPROXY_TRUSTED_PROXIES"); strings.TrimSpace(value) != "" {
+		cfg.TrustedProxies = parseTrustedProxiesEnv(value)
+	}
+
+	// Spec 107 FR-025: MCPPROXY_PUBLIC_URL, the one nested server_edition.*
+	// key with an env alias. Build-tagged: a no-op on the personal build.
+	applyServerEditionEnvOverrides(cfg)
+
+	// Override trusted proxies (Spec 107 FR-027). Comma-separated CIDRs or
+	// IPs; an empty variable leaves the file value. Entries are validated by
+	// validateTrustedProxies exactly like file values (LoadFromFile validates
+	// after the overrides run).
+	if value := os.Getenv("MCPPROXY_TRUSTED_PROXIES"); strings.TrimSpace(value) != "" {
+		cfg.TrustedProxies = parseTrustedProxiesEnv(value)
+	}
+
+	// Spec 107 FR-025: MCPPROXY_PUBLIC_URL, the one nested server_edition.*
+	// key with an env alias. Build-tagged: a no-op on the personal build.
+	applyServerEditionEnvOverrides(cfg)
+
+	// Spec 107 FR-019: audit_log env overrides. An explicit env value wins
+	// over the file value and materializes the block so a config with no
+	// `audit_log` key can still be steered from the environment.
+	if value, ok := os.LookupEnv("MCPPROXY_AUDIT_LOG_ENABLED"); ok {
+		if cfg.AuditLog == nil {
+			cfg.AuditLog = &AuditLogConfig{}
+		}
+		enabled := value == trueValue || value == "1"
+		cfg.AuditLog.Enabled = &enabled
+	}
+	if value := os.Getenv("MCPPROXY_AUDIT_LOG_PATH"); value != "" {
+		if cfg.AuditLog == nil {
+			cfg.AuditLog = &AuditLogConfig{}
+		}
+		cfg.AuditLog.Path = value
+	}
+	if value, ok := os.LookupEnv("MCPPROXY_AUDIT_LOG_STDOUT"); ok {
+		if cfg.AuditLog == nil {
+			cfg.AuditLog = &AuditLogConfig{}
+		}
+		stdout := value == trueValue || value == "1"
+		cfg.AuditLog.Stdout = &stdout
+	}
+
+	// Override the offline TPA signature-bundle path from environment
+	// (spec 086 FR-019). Explicit MCPPROXY_* alias per the loader convention;
+	// the env value wins over the file value, and materializes the security
+	// block so a config with no `security` key can still point at a corpus.
+	value = os.Getenv(EnvTPABundlePath)
+	envOverride(b, cfg, FieldTPABundlePath, value != "", value)
+
+	// Override the automatic informational baseline-scan kill switch from
+	// environment. Materializes the security block so an install with no
+	// `security` key can still be opted out (or explicitly back in).
+	// IsAutoBaselineScanEnabled re-reads the same variable, so the env value
+	// also wins on paths that never pass through the loader.
+	// Only the documented vocabulary overrides. An unrecognized value (typo,
+	// "yes", "maybe") must be IGNORED, matching IsAutoBaselineScanEnabled — a
+	// bare `value != ""` check would have materialized `false` here and silently
+	// turned automatic scanning off for a config that had explicitly enabled it,
+	// because the accessor then reads the overwritten field rather than the env.
+	var autoScan *bool
+	switch os.Getenv(EnvAutoBaselineScan) {
+	case trueValue, "1":
+		enabled := true
+		autoScan = &enabled
+	case falseValue, "0":
+		enabled := false
+		autoScan = &enabled
+	}
+	envOverride(b, cfg, FieldAutoBaselineScan, autoScan != nil, autoScan)
+
+	// Override retrieve_tools serialization mode from environment (Spec 085).
+	// Explicit MCPPROXY_* alias per the established loader convention; the
+	// value is validated by cfg.Validate() right after these overrides apply.
+	value = os.Getenv("MCPPROXY_TOOL_RESPONSE_MODE")
+	envOverride(b, cfg, FieldToolResponseMode, value != "", value)
+
+	// Override DIRECT-surface serialization mode from environment (Spec 102).
+	// A separate variable from MCPPROXY_TOOL_RESPONSE_MODE above, matching the
+	// separate config axis: that one governs retrieve_tools, this one governs
+	// the direct enumeration surface. Setting one must never move the other.
+	value = os.Getenv("MCPPROXY_DIRECT_TOOL_RESPONSE_MODE")
+	envOverride(b, cfg, FieldDirectToolResponseMode, value != "", value)
+
+	// Override the GLOBAL aggregate concurrency limiter from environment
+	// (spec 093 FR-022, GH #955). Only this scope has an env scheme: the
+	// per-server default set and per-server overrides are file/API-configured.
+	// An explicit 0 is meaningful (it disables the limiter), so the value is
+	// materialized as a pointer; malformed values are warned about and ignored
+	// so a typo cannot silently reshape the proxy's admission behavior.
+	maxReqSet, maxReq := envNonNegativeInt("MCPPROXY_MAX_CONCURRENT_REQUESTS", "want a non-negative integer")
+	envOverride(b, cfg, FieldMaxConcurrentRequests, maxReqSet, maxReq)
+	queueSizeSet, queueSize := envNonNegativeInt("MCPPROXY_QUEUE_SIZE", "want a non-negative integer")
+	envOverride(b, cfg, FieldQueueSize, queueSizeSet, queueSize)
+	queueTimeoutSet, queueTimeout := envNonNegativeDuration("MCPPROXY_QUEUE_TIMEOUT", "want a duration such as \"30s\"")
+	envOverride(b, cfg, FieldQueueTimeout, queueTimeoutSet, queueTimeout)
+
+	// Override the HTTP server's request deadlines from environment (GH #965)
+	// — the escape hatch for operators who cannot edit the config file. An
+	// explicit "0s" is meaningful (it disables the deadline — except idle,
+	// where net/http falls back to the read timeout; see
+	// ResolveHTTPIdleTimeout), so the value is materialized as a pointer;
+	// malformed values are warned about and ignored so a typo cannot silently
+	// reintroduce a response-truncating deadline.
+	readTimeoutSet, readTimeout := envNonNegativeDuration("MCPPROXY_HTTP_READ_TIMEOUT", "want a duration such as \"120s\", or \"0s\" to disable")
+	envOverride(b, cfg, FieldHTTPReadTimeout, readTimeoutSet, readTimeout)
+	writeTimeoutSet, writeTimeout := envNonNegativeDuration("MCPPROXY_HTTP_WRITE_TIMEOUT", "want a duration such as \"300s\", or \"0s\" to disable")
+	envOverride(b, cfg, FieldHTTPWriteTimeout, writeTimeoutSet, writeTimeout)
+	idleTimeoutSet, idleTimeout := envNonNegativeDuration("MCPPROXY_HTTP_IDLE_TIMEOUT", "want a duration such as \"180s\"; \"0s\" falls back to the read timeout")
+	envOverride(b, cfg, FieldHTTPIdleTimeout, idleTimeoutSet, idleTimeout)
+}
+
+// envNonNegativeInt reads a non-negative integer env override; malformed
+// values are warned about and ignored so a typo cannot silently reshape the
+// proxy's behavior.
+func envNonNegativeInt(name, want string) (bool, *int) {
+	value := os.Getenv(name)
+	if value == "" {
+		return false, nil
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil || n < 0 {
+		fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid %s=%q (%s)\n", name, value, want)
+		return false, nil
+	}
+	return true, &n
+}
+
+// envNonNegativeDuration reads a non-negative duration env override; malformed
+// values are warned about and ignored.
+func envNonNegativeDuration(name, want string) (bool, *Duration) {
+	value := os.Getenv(name)
+	if value == "" {
+		return false, nil
+	}
+	d, err := time.ParseDuration(value)
+	if err != nil || d < 0 {
+		fmt.Fprintf(os.Stderr, "WARN: Ignoring invalid %s=%q (%s)\n", name, value, want)
+		return false, nil
+	}
+	dur := Duration(d)
+	return true, &dur
 }

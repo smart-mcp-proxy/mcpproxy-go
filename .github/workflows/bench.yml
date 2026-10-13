@@ -1,0 +1,319 @@
+name: Benchmark Dashboard
+
+# Triggered on stable release tags — runs the live benchmark and publishes the
+# dashboard to Cloudflare Pages (mcpproxy-bench project).
+#
+# Non-blocking: bench failure never gates the release pipeline.
+#
+# Why host binary instead of bench/docker-compose.yml:
+#   The Dockerfile uses a distroless runtime image that lacks npx/uvx. The 7
+#   snapshot-server configs spawn stdio servers via npx/uvx, which need to run
+#   in the same environment as mcpproxy. The eval.yml retrieval-d1 job solves
+#   this by building the binary and running it on the host runner (where Node.js
+#   and uv are installed). We follow the same pattern here.
+#   The docker-compose.yml is kept for local development; a future PR can add a
+#   bench-specific image that includes the runtime tools.
+#
+# Reports are never committed (Spec 065 CN-003) — published as CI artifacts and
+# Cloudflare Pages deployments only.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench-dashboard:
+    name: Run benchmark and publish dashboard
+    runs-on: ubuntu-latest
+    environment: production
+    # Stable releases only — RC/prerelease tags (v*-rc.*, v*-next.*) are handled
+    # by prerelease.yml. workflow_dispatch allows manual runs from any ref.
+    if: "github.event_name == 'workflow_dispatch' || (startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go')"
+    # Non-blocking: bench failure never blocks the release.
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: "1.26"
+          cache: true
+
+      # Node ≥20 is required both for the npx-launched MCP reference servers
+      # and for the Spec 083 TSCG encoding arm (bench/tscg/shim.mjs).
+      - name: Set up Node.js (reference servers + TSCG arm)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: bench/tscg/package-lock.json
+
+      - name: Set up uv (uvx-launched MCP reference servers)
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+
+      # tiktoken (bench/tokens.go) fetches its BPE vocabulary from a remote host
+      # the first time an encoding is loaded, unless TIKTOKEN_CACHE_DIR points at
+      # a directory that already holds it. Naming the directory does not fill it,
+      # so the restore below is the half that actually buys offline reproduction:
+      # on a hit the vocabulary is on disk before the first bench run, on a miss
+      # the run fetches it once and the post-job save publishes it for next time.
+      # Kept under RUNNER_TEMP so the vocabulary never lands in the working tree
+      # that Cloudflare Pages publishes.
+      - name: Configure tiktoken vocabulary cache
+        run: |
+          mkdir -p "$RUNNER_TEMP/tiktoken"
+          echo "TIKTOKEN_CACHE_DIR=$RUNNER_TEMP/tiktoken" >> "$GITHUB_ENV"
+
+      # Keyed on bench/tokens.go because that file pins the encoding name
+      # (DefaultEncoding = cl100k_base); the prefix restore-key still serves an
+      # unrelated edit to that file, at worst re-fetching one vocabulary.
+      - name: Restore tiktoken vocabulary cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tiktoken
+          key: ${{ runner.os }}-tiktoken-${{ hashFiles('bench/tokens.go') }}
+          restore-keys: |
+            ${{ runner.os }}-tiktoken-
+
+      - name: Build mcpproxy (personal edition)
+        run: go build -o mcpproxy ./cmd/mcpproxy
+
+      # Pinned TSCG shim deps for the Spec 083 tscg encoding arm. `make
+      # bench-discovery` runs npm ci itself; doing it as a dedicated step keeps
+      # dependency-install failures separate from benchmark failures in CI logs.
+      - name: Install pinned TSCG shim dependencies
+        run: npm ci --prefix bench/tscg
+
+      # Offline discovery profiler (Spec 083, SC-008): deterministic encoding
+      # arms on the schema-bearing frozen corpus — no live servers, no network.
+      # Writes bench/results/report.json (v2) and bench/results/dashboard.html.
+      - name: Run offline discovery benchmark (encoding arms)
+        run: make bench-discovery
+
+      # The live run below writes report.json/dashboard.html into the same
+      # directory; preserve the offline arm report so both land in the artifact
+      # and on the published dashboard site.
+      - name: Preserve offline arm report
+        run: |
+          mkdir -p bench/results/offline
+          cp bench/results/report.json bench/results/offline/report.json
+          cp bench/results/dashboard.html bench/results/offline/dashboard.html
+
+      # Live benchmark: boot mcpproxy with the 7 no-auth reference servers, wait
+      # for the full tool catalog, then score accuracy + latency + full-schema
+      # tokens plus (Spec 083 US1) the retrieve_tools RESPONSE cost over the
+      # real MCP protocol with break-even analysis — RunLive measures response
+      # cost automatically. Before the bench run, a version-pinned LAP lint
+      # (Spec 083 US4, FR-015) produces an independent verdict against the same
+      # booted proxy; LAP failure is non-fatal (skip with reason) and the
+      # artifact merges into the v2 report via -lap-json.
+      # Writes bench/results/live_report.json + report.json (v2) + dashboard.html.
+      - name: Boot mcpproxy with reference servers and run live benchmark
+        env:
+          DS: ${{ github.workspace }}/specs/065-evaluation-foundation/datasets
+          BASE: http://127.0.0.1:8092
+          KEY: eval-corpus-snapshot
+        run: |
+          set -uo pipefail
+
+          mkdir -p "$RUNNER_TEMP/bench"
+          ./mcpproxy serve \
+            --config "$DS/snapshot-servers.config.json" \
+            --data-dir "$RUNNER_TEMP/bench" \
+            --listen 127.0.0.1:8092 \
+            --log-level info > "$RUNNER_TEMP/mcpproxy-bench.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          # Wait for the full tool catalog before scoring: the retrieval index is
+          # built after all servers connect (~45 tools across 7 reference servers).
+          #
+          # 44 vs 45: the frozen corpus_v2 documents 45 tools (corpus_expected),
+          # but one tool can differ at runtime (a reference server occasionally
+          # registers one fewer tool than the snapshot captured), so the
+          # readiness poll accepts >= ready_min=44 to avoid flaking the whole
+          # run on a single tool. These are DIFFERENT numbers on purpose:
+          # -expected-tools gets the frozen corpus count (45), so a 44-tool
+          # live catalog still runs but is SURFACED as a corpus-drift warning
+          # in the report and dashboard (FR-021) rather than silently matching
+          # the lowered readiness threshold.
+          ready=0
+          ready_min=44
+          corpus_expected=45
+          for i in $(seq 1 60); do
+            if ! kill -0 "$server_pid" 2>/dev/null; then
+              echo "::error::mcpproxy exited during startup"
+              tail -40 "$RUNNER_TEMP/mcpproxy-bench.log" || true
+              exit 1
+            fi
+            t="$(curl -fsS -H "X-API-Key: $KEY" "$BASE/api/v1/tools" \
+                 | python3 -c 'import sys,json;d=json.load(sys.stdin);print(len((d.get("data") or {}).get("tools", [])))' 2>/dev/null || echo 0)"
+            echo "attempt $i: catalog has $t tool(s)"
+            if [ "$t" -ge "$ready_min" ]; then
+              echo "Catalog full ($t tools); settling 8s for index build."
+              sleep 8
+              ready=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$ready" != "1" ]; then
+            echo "::error::mcpproxy catalog did not reach ${ready_min} tools in 5 minutes"
+            tail -80 "$RUNNER_TEMP/mcpproxy-bench.log" || true
+            exit 1
+          fi
+
+          # Independent LAP verdict (pinned lap-score==0.8.0). Non-fatal by
+          # design (FR-015): a broken/missing lap.json becomes a skip-with-
+          # reason row in the v2 report, never a job failure.
+          uvx --from lap-score==0.8.0 lap lint \
+            --mcp-url "$BASE/mcp?apikey=$KEY" \
+            --json > bench/results/lap.json \
+            || echo "LAP skipped (lap lint exited non-zero; verdict row will carry the skip reason)"
+
+          # -corpus-v2: schema SOURCE for the naive full-menu count — the live
+          #   GET /api/v1/tools can serve stub schemas (see
+          #   scripts/gen-corpus-v2-dump), so the FR-004 baseline joins live
+          #   tools with the frozen full definitions by tool id.
+          # -expected-tools: the FROZEN corpus count (not the readiness
+          #   threshold); a differing live catalog becomes a rendered
+          #   corpus-drift warning (FR-021).
+          if ! go run ./bench/cmd/bench \
+            -live \
+            -proxy "$BASE" \
+            -api-key "$KEY" \
+            -corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json \
+            -expected-tools "$corpus_expected" \
+            -lap-json bench/results/lap.json \
+            -out bench/results; then
+            echo "::error::live bench run failed"
+            tail -40 "$RUNNER_TEMP/mcpproxy-bench.log" || true
+            exit 1
+          fi
+
+          kill "$server_pid" 2>/dev/null || true
+
+      # Serve dashboard.html at the root URL for Cloudflare Pages.
+      - name: Prepare dashboard index
+        run: cp bench/results/dashboard.html bench/results/index.html
+
+      # Always upload results as a CI artifact — available even if Pages deploy
+      # fails. Covers report.json (v2), dashboard.html, live_report.json,
+      # lap.json, and the preserved offline arm report. The ToolRet runtime
+      # cache is excluded defensively: its bytes must never leave the runner
+      # as a publishable artifact (FR-013, license unstated upstream).
+      - name: Upload dashboard artifact
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bench-dashboard-${{ github.ref_name }}
+          path: |
+            bench/results/
+            !bench/results/cache/**
+          retention-days: 90
+          if-no-files-found: warn
+
+      # Bootstrap: create the Cloudflare Pages project if it does not yet exist.
+      # Idempotent — fails silently (continue-on-error) when the project already
+      # exists (Cloudflare error 8000007). Requires Pages:Edit scope on the token.
+      # If the token is deploy-only, create the project once manually in the
+      # Cloudflare dashboard (name: mcpproxy-bench, production branch: main) and
+      # this step will harmlessly fail every run thereafter.
+      - name: Create Cloudflare Pages project (if missing)
+        continue-on-error: true
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0  # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages project create mcpproxy-bench --production-branch=main
+
+      # Publish to Cloudflare Pages (mcpproxy-bench project).
+      # --commit-dirty=true: bench results are written into the working tree during
+      # the run and never committed to git, so wrangler would otherwise reject the
+      # dirty-tree check. The Pages URL will be mcpproxy-bench.pages.dev (or a
+      # custom domain such as bench.mcpproxy.app once configured in Cloudflare).
+      - name: Deploy benchmark dashboard to Cloudflare Pages
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0  # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: pages deploy bench/results --project-name=mcpproxy-bench --commit-dirty=true
+
+  # Spec 083 US3 (SC-004/SC-007): retrieval-quality scoring on a seeded subset
+  # of the public ToolRet benchmark (~44k tools). Manual-only — the fetch pulls
+  # ~hundreds of MB from Hugging Face and the 43k-tool index build is the
+  # heaviest bench path, so it never runs on release tags. The ToolRet cache is
+  # runtime-only (license unstated upstream, FR-013): it is never committed and
+  # never uploaded — only the derived report leaves the runner.
+  toolret-subset:
+    name: ToolRet subset scoring (manual)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_dispatch'
+    timeout-minutes: 30
+    # Non-blocking, same as the dashboard job (FR-022).
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Set up uv (ToolRet parquet fetch)
+        uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+
+      # Same tiktoken vocabulary cache as the dashboard job above (this job also
+      # runs the bench binary, so it needs the vocabulary on disk); see there for
+      # why naming the directory is not enough on its own.
+      - name: Configure tiktoken vocabulary cache
+        run: |
+          mkdir -p "$RUNNER_TEMP/tiktoken"
+          echo "TIKTOKEN_CACHE_DIR=$RUNNER_TEMP/tiktoken" >> "$GITHUB_ENV"
+
+      - name: Restore tiktoken vocabulary cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tiktoken
+          key: ${{ runner.os }}-tiktoken-${{ hashFiles('bench/tokens.go') }}
+          restore-keys: |
+            ${{ runner.os }}-tiktoken-
+
+      # Pinned HF revisions live inside the script; bumping a pin is a
+      # reviewed event. Cache lands in bench/results/cache/toolret/<revision>/.
+      - name: Fetch ToolRet at pinned revisions
+        run: ./scripts/fetch-toolret.sh
+
+      # Seeded deterministic subset (FR-014): same revision + seed + size ⇒
+      # same subset. Arms limited to the node-free pair — retrieval quality is
+      # arm-aware only for index-altering arms, and the subset budget is 30 min.
+      - name: Score ToolRet subset
+        run: |
+          go run ./bench/cmd/bench \
+            -toolret bench/results/cache/toolret \
+            -subset 250 \
+            -seed 42 \
+            -arms baseline_json,compact_sig \
+            -out bench/results
+
+      # Report only — never the cache (FR-013).
+      - name: Upload ToolRet subset report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bench-toolret-subset-${{ github.run_id }}
+          path: |
+            bench/results/report.json
+            bench/results/dashboard.html
+          retention-days: 90
+          if-no-files-found: warn

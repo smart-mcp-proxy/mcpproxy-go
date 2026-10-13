@@ -143,6 +143,66 @@ func TestApplyConfig_ObservabilityHotReload(t *testing.T) {
 		"new persist interval must be applied to the running ActivityService")
 }
 
+// TestApplyConfig_DeepScanLegacyMigration (Spec 077 US3 / Codex finding #2): the
+// /api/v1/config/apply path bypasses LoadFromFile, so applying a config that
+// carries the deprecated security.scanner_* keys must still fold them into
+// security.deep_scan before saving — the saved file must expose ONLY the unified
+// deep_scan surface, matching a file load (SC-007).
+func TestApplyConfig_DeepScanLegacyMigration(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "config.json")
+
+	initialCfg := config.DefaultConfig()
+	initialCfg.Listen = "127.0.0.1:8080"
+	initialCfg.DataDir = tmpDir
+	require.NoError(t, config.SaveConfig(initialCfg, cfgPath))
+
+	rt, err := New(initialCfg, cfgPath, zap.NewNop())
+	require.NoError(t, err)
+	defer func() { _ = rt.Close() }()
+
+	// Submit a config carrying ONLY the deprecated top-level keys (as an older
+	// API client / stored config would), no deep_scan block.
+	fetchOff := false
+	newCfg := config.DefaultConfig()
+	newCfg.Listen = "127.0.0.1:8080"
+	newCfg.DataDir = tmpDir
+	newCfg.Security = &config.SecurityConfig{
+		ScannerFetchPackageSource:     &fetchOff,
+		ScannerDisableNoNewPrivileges: true,
+	}
+
+	result, err := rt.ApplyConfig(newCfg, cfgPath)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.False(t, result.RequiresRestart, "security change is hot-reloadable")
+	assert.Contains(t, result.ChangedFields, "security")
+
+	// Read the SAVED file back and assert it normalized identically to a file
+	// load: legacy keys cleared, only deep_scan.* present.
+	saved, err := config.LoadFromFile(cfgPath)
+	require.NoError(t, err)
+	require.NotNil(t, saved.Security)
+	assert.Nil(t, saved.Security.ScannerFetchPackageSource,
+		"deprecated scanner_fetch_package_source must be cleared after apply")
+	assert.False(t, saved.Security.ScannerDisableNoNewPrivileges,
+		"deprecated scanner_disable_no_new_privileges must be cleared after apply")
+	require.NotNil(t, saved.Security.DeepScan, "legacy keys must fold into deep_scan")
+	require.NotNil(t, saved.Security.DeepScan.FetchPackageSource)
+	assert.False(t, *saved.Security.DeepScan.FetchPackageSource,
+		"fetch_package_source=false migrated into deep_scan")
+	assert.True(t, saved.Security.DeepScan.DisableNoNewPrivileges,
+		"disable_no_new_privileges=true migrated into deep_scan")
+
+	// The in-memory runtime config must also be normalized (not just disk).
+	live, err := rt.GetConfig()
+	require.NoError(t, err)
+	require.NotNil(t, live.Security)
+	assert.Nil(t, live.Security.ScannerFetchPackageSource, "runtime config normalized too")
+	require.NotNil(t, live.Security.DeepScan)
+	assert.True(t, live.Security.DeepScan.DisableNoNewPrivileges)
+}
+
 // TestApplyConfig_SaveFailure tests handling of save errors
 func TestApplyConfig_SaveFailure(t *testing.T) {
 	// Skip on Windows: chmod on directories doesn't reliably prevent file creation

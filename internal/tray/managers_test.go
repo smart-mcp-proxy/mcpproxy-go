@@ -6,8 +6,53 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 )
+
+func TestProfileMenuTitle(t *testing.T) {
+	require.Equal(t, "Profile: All servers", profileMenuTitle(""))
+	require.Equal(t, "Profile: research", profileMenuTitle("research"))
+}
+
+func TestProfileSetChanged(t *testing.T) {
+	m := NewMenuManager(nil, nil, nil, zap.NewNop().Sugar())
+
+	// With no rendered items yet, any set is considered changed (forces the
+	// initial build).
+	require.True(t, m.profileSetChanged([]string{"a"}))
+
+	// Mark a rendered set (the map value is irrelevant to the comparison).
+	m.profileMenuItems[""] = nil
+	m.latestProfileNames = []string{"a", "b"}
+
+	require.True(t, m.profileSetChanged([]string{"a"}), "different length must rebuild")
+	require.False(t, m.profileSetChanged([]string{"a", "b"}), "identical set must not rebuild")
+	require.True(t, m.profileSetChanged([]string{"a", "c"}), "different member must rebuild")
+}
+
+// TestPerformSyncRefreshesProfiles verifies the sync loop consults the profile
+// getters (so a switch made by another client is reflected) without erroring
+// when the menu items are not backed by a live systray run loop.
+func TestPerformSyncRefreshesProfiles(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mock := NewMockServer()
+	mock.profiles = []ProfileInfo{{Name: "research", ToolCount: 3}}
+	mock.activeProfile = "research"
+
+	mm := NewMenuManager(nil, nil, nil, logger) // nil profileMenu → UpdateProfilesMenu no-ops safely
+	sm := NewSynchronizationManager(NewServerStateManager(mock, logger), mock, mm, logger)
+	sm.SetConnected(true)
+
+	require.NoError(t, sm.performSync())
+
+	active, err := mock.GetActiveProfile()
+	require.NoError(t, err)
+	require.Equal(t, "research", active)
+}
 
 func TestMenuSorting(t *testing.T) {
 
@@ -754,13 +799,13 @@ func TestConnectedCountHealthLevelOnly(t *testing.T) {
 // TestHealthActionMenuItemSelection tests that correct menu items are shown based on health.action
 func TestHealthActionMenuItemSelection(t *testing.T) {
 	testCases := []struct {
-		name               string
-		healthAction       string
-		expectedMenuItem   string
-		shouldShowLogin    bool
-		shouldShowSecret   bool
+		name                string
+		healthAction        string
+		expectedMenuItem    string
+		shouldShowLogin     bool
+		shouldShowSecret    bool
 		shouldShowConfigure bool
-		shouldShowRestart  bool
+		shouldShowRestart   bool
 	}{
 		{
 			name:             "login action shows Login Required",
@@ -775,9 +820,9 @@ func TestHealthActionMenuItemSelection(t *testing.T) {
 			shouldShowSecret: true,
 		},
 		{
-			name:               "configure action shows Configure",
-			healthAction:       "configure",
-			expectedMenuItem:   "⚠️ Configure",
+			name:                "configure action shows Configure",
+			healthAction:        "configure",
+			expectedMenuItem:    "⚠️ Configure",
 			shouldShowConfigure: true,
 		},
 		{
@@ -817,4 +862,76 @@ func TestHealthActionMenuItemSelection(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestGetServerStatusDisplay_SummaryEmptyFallsBackToStatusLabel is a round-4
+// review finding: the Go cross-platform tray (cmd/mcpproxy-tray, distinct
+// from the native macOS Swift tray) was never updated for Spec 109's health
+// vocabulary. getServerStatusDisplay's `statusText = healthLevel` fallback
+// used the raw severity level ("healthy"/"degraded"/"unhealthy") as display
+// text whenever health.summary is empty — the same latent-fallback shape the
+// Web UI carried before it was fixed to use the shared status label table
+// (contracts.HEALTH_STATUS_LABELS / health.StatusLabel). No current
+// CalculateHealth branch actually leaves Summary empty, so this only guards
+// against future version-skew payloads, matching the Web UI's own guard.
+func TestGetServerStatusDisplay_SummaryEmptyFallsBackToStatusLabel(t *testing.T) {
+	mm := NewMenuManager(nil, nil, nil, zap.NewNop().Sugar())
+
+	server := map[string]interface{}{
+		"name": "test-server",
+		"health": map[string]interface{}{
+			"level":       "healthy",
+			"admin_state": "enabled",
+			"summary":     "", // deliberately empty (version-skew payload)
+			"status":      health.StatusReady,
+		},
+	}
+
+	// getServerStatusDisplay's status TEXT surfaces in the tooltip
+	// ("<name> - <statusText>"), not in displayText (icon + name only on
+	// non-Windows platforms).
+	_, tooltip, _ := mm.getServerStatusDisplay(server)
+
+	require.Contains(t, tooltip, health.StatusLabel(health.StatusReady),
+		"must fall back to the shared status label, not the raw severity level")
+	require.NotContains(t, tooltip, "- healthy",
+		"must never render the raw health.level as status text")
+}
+
+// TestGetServerStatusDisplay_SummaryAndStatusEmptyFallsBackToConnected is a
+// round-6 review finding: the previous test above only covers the case where
+// `status` is present to fall back to. When BOTH `summary` and `status` are
+// empty (a version-skew payload with neither populated), getServerStatusDisplay
+// fell all the way through to `statusText = healthLevel` — printing the raw
+// severity word ("degraded") as status text, directly contradicting this
+// function's own comment ("health.level ... must never be printed as text,
+// matching the Web UI's own guard") and diverging from the Web UI's actual
+// guard (frontend/src/utils/health.ts healthStatusText), which falls back to
+// `connected ? 'Connected' : 'Disconnected'`, never `level`.
+func TestGetServerStatusDisplay_SummaryAndStatusEmptyFallsBackToConnected(t *testing.T) {
+	mm := NewMenuManager(nil, nil, nil, zap.NewNop().Sugar())
+
+	server := map[string]interface{}{
+		"name":      "test-server",
+		"connected": true,
+		"health": map[string]interface{}{
+			"level":       "degraded",
+			"admin_state": "enabled",
+			"summary":     "", // deliberately empty (version-skew payload)
+			"status":      "", // deliberately empty too
+		},
+	}
+
+	_, tooltip, _ := mm.getServerStatusDisplay(server)
+
+	require.Contains(t, tooltip, "Connected",
+		"must fall back to the connected/disconnected text, matching the Web UI's guard")
+	require.NotContains(t, tooltip, "degraded",
+		"must never render the raw health.level as status text")
+
+	server["connected"] = false
+	_, tooltip, _ = mm.getServerStatusDisplay(server)
+	require.Contains(t, tooltip, "Disconnected")
+	require.NotContains(t, tooltip, "degraded",
+		"must never render the raw health.level as status text")
 }

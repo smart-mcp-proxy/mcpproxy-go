@@ -2,27 +2,36 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
-func TestShouldUseToolsDaemon(t *testing.T) {
+func TestToolsDaemonDetection_NoDaemon(t *testing.T) {
+	clearDaemonEnv(t)
+
 	// Test with non-existent directory
-	result := shouldUseToolsDaemon("/tmp/nonexistent-mcpproxy-test-dir-tools-99999")
-	assert.False(t, result, "shouldUseToolsDaemon should return false for non-existent directory")
+	_, ok := newDaemonClient(&config.Config{DataDir: "/tmp/nonexistent-mcpproxy-test-dir-tools-99999"}, nil)
+	assert.False(t, ok, "newDaemonClient should report no daemon for non-existent directory")
 
 	// Test with existing directory but no socket
 	tmpDir := t.TempDir()
-	result = shouldUseToolsDaemon(tmpDir)
-	assert.False(t, result, "shouldUseToolsDaemon should return false when socket doesn't exist")
+	_, ok = newDaemonClient(&config.Config{DataDir: tmpDir}, nil)
+	assert.False(t, ok, "newDaemonClient should report no daemon when socket doesn't exist")
 }
 
 func TestDetectSocketPath_Tools(t *testing.T) {
@@ -131,23 +140,15 @@ func TestApplyGlobalToolFilters_Status(t *testing.T) {
 }
 
 // TestApplyGlobalToolFilters_Risk verifies the risk filter matches annotations.
-func TestApplyGlobalToolFilters_Risk(t *testing.T) {
+// TestApplyGlobalToolFilters_Tier is the corrected form of the filter's
+// former "risk" test — see tools_tier_test.go for the X11 regression this
+// replaces (the field it used to read, annotations.operation_type, does not
+// exist on the real GET /tools payload; `tier` does).
+func TestApplyGlobalToolFilters_Tier(t *testing.T) {
 	tools := []map[string]interface{}{
-		{
-			"name":        "read_file",
-			"server_name": "srv",
-			"annotations": map[string]interface{}{"operation_type": "read"},
-		},
-		{
-			"name":        "write_file",
-			"server_name": "srv",
-			"annotations": map[string]interface{}{"operation_type": "write"},
-		},
-		{
-			"name":        "delete_repo",
-			"server_name": "srv",
-			"annotations": map[string]interface{}{"operation_type": "destructive"},
-		},
+		{"name": "read_file", "server_name": "srv", "tier": "read"},
+		{"name": "write_file", "server_name": "srv", "tier": "write"},
+		{"name": "delete_repo", "server_name": "srv", "tier": "destructive"},
 	}
 
 	got := applyGlobalToolFilters(tools, "", "read", "")
@@ -196,8 +197,7 @@ func TestOutputGlobalTools_JSONShape(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	globalOutputFormat = "json"
-	globalJSONOutput = false
+	setOutputGlobals(t, "json", false)
 	err := outputGlobalTools(tools)
 
 	w.Close()
@@ -234,8 +234,7 @@ func TestOutputGlobalTools_TableColumns(t *testing.T) {
 	os.Stdout = w
 	defer func() { os.Stdout = oldStdout }()
 
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputGlobalTools(tools)
 
 	w.Close()
@@ -303,6 +302,85 @@ func TestToolsEnableCmd_ArgValidation(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// CLI-JSON (v0.51.0-rc.1 QA): standalone mode must keep stdout clean for
+// machine formats — banners/progress go to stderr.
+// ---------------------------------------------------------------------------
+
+// runStandaloneCapture runs runToolsListStandalone against a server whose
+// command does not exist (Connect fails fast, no live MCP server needed) and
+// returns everything written to stdout and stderr. The banner prints before
+// Connect, so it is exercised regardless of the connection failure.
+func runStandaloneCapture(t *testing.T, format string) (stdoutStr, stderrStr string) {
+	t.Helper()
+
+	oldStdout := os.Stdout
+	oldStderr := os.Stderr
+	rOut, wOut, err := os.Pipe()
+	require.NoError(t, err)
+	rErr, wErr, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdout = wOut
+	os.Stderr = wErr
+
+	oldFormat := globalOutputFormat
+	oldJSON := globalJSONOutput
+	globalOutputFormat = format
+	globalJSONOutput = false
+	t.Cleanup(func() {
+		globalOutputFormat = oldFormat
+		globalJSONOutput = oldJSON
+	})
+
+	cfg := &config.Config{Servers: []*config.ServerConfig{{
+		Name:     "everything",
+		Command:  "/nonexistent-mcpproxy-test-cmd",
+		Protocol: "stdio",
+		Enabled:  true,
+	}}} // DataDir empty → bbolt storage is skipped
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	// Connect fails (command does not exist); the returned error is irrelevant
+	// here — we only assert on where the banner/progress text landed.
+	_ = runToolsListStandalone(ctx, "everything", cfg, zap.NewNop())
+
+	wOut.Close()
+	wErr.Close()
+	os.Stdout = oldStdout
+	os.Stderr = oldStderr
+
+	var bufOut, bufErr bytes.Buffer
+	_, _ = bufOut.ReadFrom(rOut)
+	_, _ = bufErr.ReadFrom(rErr)
+	return bufOut.String(), bufErr.String()
+}
+
+// TestRunToolsListStandalone_MachineModeStdoutClean is the QA finding: with
+// -o json, stdout must contain only the JSON payload — no human banner or
+// progress text.
+func TestRunToolsListStandalone_MachineModeStdoutClean(t *testing.T) {
+	stdoutStr, stderrStr := runStandaloneCapture(t, "json")
+
+	assert.NotContains(t, stdoutStr, "MCP Tools List", "banner must not pollute stdout in json mode")
+	assert.NotContains(t, stdoutStr, "Connecting to server", "progress must not pollute stdout in json mode")
+	assert.NotContains(t, stdoutStr, "Disconnecting from server", "progress must not pollute stdout in json mode")
+	assert.Contains(t, stderrStr, "MCP Tools List", "banner should move to stderr")
+}
+
+// TestRunToolsListStandalone_TableModeBannerOnStderr locks the
+// unconditional-stderr convention: banners go to stderr in table mode too, so
+// `-o table | tee file` stays clean.
+func TestRunToolsListStandalone_TableModeBannerOnStderr(t *testing.T) {
+	stdoutStr, stderrStr := runStandaloneCapture(t, "table")
+
+	assert.NotContains(t, stdoutStr, "MCP Tools List", "banner must not pollute stdout in table mode")
+	assert.NotContains(t, stdoutStr, "Connecting to server", "progress must not pollute stdout in table mode")
+	assert.Contains(t, stderrStr, "MCP Tools List", "banner should be on stderr")
+	assert.Contains(t, stderrStr, "Connecting to server", "progress should be on stderr")
+}
+
+// ---------------------------------------------------------------------------
 // helpers
 // ---------------------------------------------------------------------------
 
@@ -314,4 +392,333 @@ func toolNames(tools []map[string]interface{}) []string {
 		}
 	}
 	return names
+}
+
+// TestFormatToolHold_ExtractsTPASignature: the HELD column must name the matched
+// TPA signature id (spec 086 FR-018) so an operator reviewing a held tool change
+// sees WHY it is held, not merely that it is.
+func TestFormatToolHold_ExtractsTPASignature(t *testing.T) {
+	tool := map[string]interface{}{
+		"name":            "create_issue",
+		"approval_status": "changed",
+		"held_reason":     "scan_findings",
+		"held_verdict":    "dangerous",
+		"held_signals":    []interface{}{"tpa.TPA-2026-0001.hidden_instruction"},
+	}
+	assert.Equal(t, "TPA-2026-0001", formatToolHold(tool))
+}
+
+// TestFormatToolHold_NonBundleAndOverflow: non-bundle check ids render verbatim,
+// duplicates collapse, and the list is capped with a "+N" suffix. Matched TPA
+// ids are hoisted ahead of the raw heuristic check ids so truncation keeps them.
+func TestFormatToolHold_NonBundleAndOverflow(t *testing.T) {
+	tool := map[string]interface{}{
+		"held_reason": "scan_findings",
+		"held_signals": []interface{}{
+			"phrase.injection",
+			"tpa.TPA-2026-0001.hidden_instruction",
+			"tpa.TPA-2026-0001.hidden_comment_directive", // same signature → deduped
+			"unicode.hidden",
+		},
+	}
+	assert.Equal(t, "TPA-2026-0001,phrase.injection +1", formatToolHold(tool))
+}
+
+// TestFormatToolHold_TPAPrioritizedOverHeuristics reproduces the RT-SRF-05
+// regression: the real scanner emits its heuristic checks BEFORE the tpa.*
+// checks, so a naive "first two in producer order" truncation would collapse the
+// matched TPA id into the "+N" suffix and never name it. FR-018 requires the
+// operator-facing HELD column to surface the TPA id, so it must win the cap.
+func TestFormatToolHold_TPAPrioritizedOverHeuristics(t *testing.T) {
+	tool := map[string]interface{}{
+		"held_reason": "scan_findings",
+		"held_signals": []interface{}{
+			"directive.imperative",
+			"capability.mismatch",
+			"secret.embedded",
+			"tpa.TPA-2026-0001.hidden_instruction",
+			"tpa.TPA-2026-0003.hidden_tag",
+		},
+	}
+	got := formatToolHold(tool)
+	assert.Equal(t, "TPA-2026-0001,TPA-2026-0003 +3", got)
+	assert.Contains(t, got, "TPA-2026-0001")
+}
+
+// TestFormatToolHold_BackCompat: tools with no hold evidence (every record
+// written before the field existed, and every non-scan hold) render as "-";
+// an evidence-free coverage hold still names its reason.
+func TestFormatToolHold_BackCompat(t *testing.T) {
+	assert.Equal(t, "-", formatToolHold(map[string]interface{}{"name": "create_issue", "approval_status": "changed"}))
+	assert.Equal(t, "-", formatToolHold(map[string]interface{}{"held_signals": []interface{}{}}))
+	assert.Equal(t, "scan_coverage", formatToolHold(map[string]interface{}{"held_reason": "scan_coverage"}))
+}
+
+// TestOutputGlobalTools_HeldColumn verifies the global table renders the HELD
+// column and the matched TPA id for a scan-held tool.
+func TestOutputGlobalTools_HeldColumn(t *testing.T) {
+	tools := []map[string]interface{}{
+		{
+			"name":            "create_issue",
+			"server_name":     "github",
+			"description":     "Create a new issue",
+			"approval_status": "changed",
+			"held_reason":     "scan_findings",
+			"held_verdict":    "dangerous",
+			"held_signals":    []interface{}{"tpa.TPA-2026-0001.hidden_instruction"},
+			"usage":           float64(7),
+		},
+	}
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	defer func() { os.Stdout = oldStdout }()
+
+	setOutputGlobals(t, "table", false)
+	err := outputGlobalTools(tools)
+
+	w.Close()
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	outStr := buf.String()
+
+	require.NoError(t, err)
+	assert.Contains(t, outStr, "HELD", "table must contain the HELD column")
+	assert.Contains(t, outStr, "TPA-2026-0001", "held tool must surface its matched TPA signature")
+}
+
+// TestRunToolsListStandalone_RejectsStatusAndApprovalFilters is a regression
+// test for review round 6, finding 4: `--server` bypassed `--status`/
+// `--tier`/`--risk`/`--approval` filtering entirely (they were only ever
+// applied in the global, no-`--server` path), so `mcpproxy tools list
+// --server=x --tier destructive` silently printed every tool on that server
+// unfiltered — an operator auditing one server for destructive tools could
+// wrongly conclude there were none.
+//
+// The standalone (no-daemon) path has no access to the daemon-persisted
+// disabled/config-denied/approval state --status and --approval need, so
+// rather than silently ignoring them (the exact bug this finding reports),
+// it must fail fast with a clear, actionable error instead.
+func TestRunToolsListStandalone_RejectsStatusAndApprovalFilters(t *testing.T) {
+	origStatus, origApproval := toolsStatusFilter, toolsApprovalFilter
+	defer func() { toolsStatusFilter, toolsApprovalFilter = origStatus, origApproval }()
+
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "demo", Command: "true"},
+		},
+	}
+	logger := zap.NewNop()
+
+	toolsStatusFilter = "disabled"
+	toolsApprovalFilter = ""
+	err := runToolsListStandalone(context.Background(), "demo", cfg, logger)
+	require.Error(t, err, "--status must be rejected, not silently ignored, without a daemon")
+	assert.Contains(t, err.Error(), "--status and --approval require the daemon")
+
+	toolsStatusFilter = ""
+	toolsApprovalFilter = "pending"
+	err = runToolsListStandalone(context.Background(), "demo", cfg, logger)
+	require.Error(t, err, "--approval must be rejected, not silently ignored, without a daemon")
+	assert.Contains(t, err.Error(), "--status and --approval require the daemon")
+}
+
+// TestFilterToolMetadataByTier_ReviewRound6Finding4 covers the standalone
+// (no-daemon) half of the fix: --tier/--risk needs only the tool's own
+// annotations, computed locally via the same contracts.AnnotationTier the
+// daemon uses, so it is honored even without a daemon.
+func TestFilterToolMetadataByTier_ReviewRound6Finding4(t *testing.T) {
+	destructive := true
+	readOnly := true
+	tools := []*config.ToolMetadata{
+		{Name: "delete_repo", Annotations: &config.ToolAnnotations{DestructiveHint: &destructive}},
+		{Name: "list_repos", Annotations: &config.ToolAnnotations{ReadOnlyHint: &readOnly}},
+		{Name: "mystery_tool"},
+	}
+
+	assert.Equal(t, tools, filterToolMetadataByTier(tools, ""), "empty filter must return the list unchanged")
+
+	destructiveOnly := filterToolMetadataByTier(tools, "destructive")
+	require.Len(t, destructiveOnly, 1)
+	assert.Equal(t, "delete_repo", destructiveOnly[0].Name)
+
+	readOnlyOnly := filterToolMetadataByTier(tools, "read")
+	require.Len(t, readOnlyOnly, 1)
+	assert.Equal(t, "list_repos", readOnlyOnly[0].Name)
+
+	unannotatedOnly := filterToolMetadataByTier(tools, "unannotated")
+	require.Len(t, unannotatedOnly, 1)
+	assert.Equal(t, "mystery_tool", unannotatedOnly[0].Name)
+
+	assert.Empty(t, filterToolMetadataByTier(tools, "write"), "no tool is tier=write in this fixture")
+}
+
+// TestRunToolsListClientMode_AppliesTierFilter is the daemon-mode half of the
+// review round 6, finding 4 regression: `mcpproxy tools list --server=x
+// --tier destructive` against a running daemon used to print every tool on
+// that server, ignoring --tier entirely (only the global, no-`--server` path
+// ever called applyGlobalToolFilters). GET /api/v1/servers/{id}/tools shares
+// enrichServerTools with the global endpoint (spec 050), so its maps already
+// carry the same "tier" field — the fix is applying the identical filter,
+// not adding new data.
+func TestRunToolsListClientMode_AppliesTierFilter(t *testing.T) {
+	origTier, origRisk, origStatus, origApproval := toolsTierFilter, toolsRiskFilter, toolsStatusFilter, toolsApprovalFilter
+	defer func() {
+		toolsTierFilter, toolsRiskFilter, toolsStatusFilter, toolsApprovalFilter = origTier, origRisk, origStatus, origApproval
+	}()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/api/v1/status":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true})
+		case "/api/v1/servers/demo/tools":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{
+				"success": true,
+				"data": map[string]interface{}{
+					"tools": []map[string]interface{}{
+						{"name": "delete_repo", "server_name": "demo", "tier": "destructive"},
+						{"name": "list_repos", "server_name": "demo", "tier": "read"},
+					},
+				},
+			})
+		default:
+			t.Errorf("unexpected request path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer ts.Close()
+
+	client := cliclient.NewClientWithAPIKey(ts.URL, "", nil)
+
+	setOutputGlobals(t, "json", false)
+	toolsTierFilter, toolsRiskFilter, toolsStatusFilter, toolsApprovalFilter = "destructive", "", "", ""
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	defer func() { os.Stdout = oldStdout }()
+
+	err := runToolsListClientMode(context.Background(), client, "demo", zap.NewNop())
+
+	w.Close()
+	var buf bytes.Buffer
+	_, _ = buf.ReadFrom(r)
+	outStr := buf.String()
+
+	require.NoError(t, err)
+	assert.Contains(t, outStr, "delete_repo", "the destructive tool must survive --tier destructive")
+	assert.NotContains(t, outStr, "list_repos", "--server must filter out the non-matching tier just like the global list does")
+}
+
+// TestStandaloneNoToolsMessage_TierFilteredResult is a regression test for a
+// defect zcode's review round 6 found in the finding-4 fix itself: emptying
+// the standalone tool list via --tier/--risk fell into the same "no tools
+// found" branch as a server that genuinely has none, printing three false
+// diagnostic guesses ("doesn't support tools", "not properly configured",
+// "connection issues") for a server that has tools, just none in that tier.
+func TestStandaloneNoToolsMessage_TierFilteredResult(t *testing.T) {
+	msg := standaloneNoToolsMessage("demo", "destructive", 5)
+	assert.Contains(t, msg, "No tools on server 'demo' match --tier/--risk=destructive")
+	assert.Contains(t, msg, "5 tool(s) discovered")
+	assert.NotContains(t, msg, "doesn't support tools", "a tier-filtered empty result must not claim the server lacks tool support")
+	assert.NotContains(t, msg, "not properly configured")
+}
+
+// TestStandaloneNoToolsMessage_GenuinelyNoTools proves the original
+// diagnostic still appears when the server truly exposed zero tools (no
+// filter involved, or a filter with nothing to filter).
+func TestStandaloneNoToolsMessage_GenuinelyNoTools(t *testing.T) {
+	msg := standaloneNoToolsMessage("demo", "", 0)
+	assert.Contains(t, msg, "No tools found on server 'demo'")
+	assert.Contains(t, msg, "doesn't support tools")
+
+	// A tier filter with nothing discovered at all: still the generic
+	// message, since there is nothing to attribute to filtering.
+	msg = standaloneNoToolsMessage("demo", "destructive", 0)
+	assert.Contains(t, msg, "No tools found on server 'demo'")
+}
+
+// Ordinary whitespace in an upstream description must collapse to one clean
+// line in table cells, while every other control/format rune stays escaped
+// (GH #938 finding 3).
+func TestSanitizeDescriptionCell(t *testing.T) {
+	t.Run("cloudflare-like newlines and tabs collapse", func(t *testing.T) {
+		got := sanitizeDescriptionCell("Search the Cloudflare documentation.\n\n\tUse this tool.", 60)
+		assert.Equal(t, "Search the Cloudflare documentation. Use this tool.", got)
+	})
+	t.Run("CRLF, vtab, formfeed, space runs", func(t *testing.T) {
+		got := sanitizeDescriptionCell("  a\r\nb\vc\fd   e\t\tf  ", 60)
+		assert.Equal(t, "a b c d e f", got)
+	})
+	t.Run("ESC sequence still escaped", func(t *testing.T) {
+		got := sanitizeDescriptionCell("hi\x1b[2J there\nnext", 60)
+		assert.NotContains(t, got, "\x1b")
+		assert.NotContains(t, got, "\n")
+		assert.Contains(t, strings.ToLower(got), "\\u001b")
+		assert.Contains(t, got, "there next")
+	})
+	t.Run("bidi override still escaped", func(t *testing.T) {
+		got := sanitizeDescriptionCell("safe\u202etxt\n\tmore", 60)
+		assert.NotContains(t, got, "\u202e")
+		assert.Contains(t, strings.ToLower(got), "\\u202e")
+		assert.Contains(t, got, "more")
+	})
+	t.Run("NUL and zero-width still escaped", func(t *testing.T) {
+		got := sanitizeDescriptionCell("a\x00b\u200bc", 60)
+		assert.NotContains(t, got, "\x00")
+		assert.NotContains(t, got, "\u200b")
+	})
+	t.Run("truncation counts collapsed text", func(t *testing.T) {
+		in := "word\n\n\t\t" + strings.Repeat("x", 100)
+		got := sanitizeDescriptionCell(in, 60)
+		assert.Equal(t, 60, len([]rune(got)))
+		assert.True(t, strings.HasPrefix(got, "word xxx"))
+		assert.True(t, strings.HasSuffix(got, "..."))
+	})
+	t.Run("names stay strict", func(t *testing.T) {
+		assert.Contains(t, strings.ToLower(sanitizeName("a\nb")), "\\u000a")
+	})
+}
+
+func TestToolRowsCollapseDescriptionWhitespace(t *testing.T) {
+	_, rows := serverToolRows([]map[string]interface{}{
+		{"name": "search", "description": "Search docs.\n\n\tDetails here."},
+	})
+	require.NotEmpty(t, rows)
+	assert.Equal(t, "Search docs. Details here.", rows[0][len(rows[0])-1])
+
+	_, rows = standaloneToolRows([]*config.ToolMetadata{{Name: "s", Description: "A.\r\n\tB."}})
+	require.NotEmpty(t, rows)
+	assert.Equal(t, "A. B.", rows[0][1])
+}
+
+func TestViewAsCountsSummary(t *testing.T) {
+	admin := viewAsCountsSummary(map[string]interface{}{"visible": float64(294), "hidden": float64(27), "callable": float64(290)}, "qa-read")
+	require.Contains(t, admin, "294 allowed by profile qa-read, 27 hidden, 290 callable now, 4 held")
+	require.Contains(t, admin, "mcpproxy access explain --profile qa-read --tool <server:tool>")
+
+	clean := viewAsCountsSummary(map[string]interface{}{"visible": float64(3), "hidden": float64(0), "callable": float64(3)}, "p")
+	require.Contains(t, clean, "3 callable now, 0 held")
+	require.NotContains(t, clean, "access explain")
+
+	other := viewAsCountsSummary(map[string]interface{}{"visible": float64(3), "hidden": float64(2)}, "p")
+	require.Equal(t, "3 allowed by profile p, 2 hidden (hidden tools are administrator-only)\n", other)
+	require.Equal(t, "held", viewAsAccessCell(map[string]interface{}{"access": map[string]interface{}{"visible": true, "callable": false}}, false))
+}
+
+func TestViewAsRowCountsFromAdministratorRows(t *testing.T) {
+	acc := func(v, c bool) map[string]interface{} {
+		return map[string]interface{}{"access": map[string]interface{}{"visible": v, "callable": c}}
+	}
+	// The shape GET /tools?profile= gives an administrator: rows with verdicts, no counts.
+	rows := []map[string]interface{}{acc(true, true), acc(true, true), acc(true, false), acc(false, false)}
+	counts := viewAsRowCounts(rows)
+	require.NotNil(t, counts)
+	out := viewAsCountsSummary(counts, "qa-read")
+	require.Contains(t, out, "3 allowed by profile qa-read, 1 hidden, 2 callable now, 1 held")
+	require.Contains(t, out, "mcpproxy access explain --profile qa-read")
+
+	require.Nil(t, viewAsRowCounts([]map[string]interface{}{{"name": "x"}}))
 }

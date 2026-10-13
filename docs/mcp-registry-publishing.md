@@ -98,9 +98,9 @@ mcp-publisher status --status deleted \
 ## Registry Schema Notes
 
 - `version` must be a plain semantic version string (`0.33.1`) — no `v` prefix, no ranges.
-- `packages[]` is empty because none of the supported `registryType` values (`npm`, `pypi`, `oci`, `nuget`, `mcpb`) match MCPProxy's distribution channels (Homebrew tap, GitHub release tarballs, `.deb`/`.rpm`, `go install`). The Docker server-edition image at `ghcr.io/smart-mcp-proxy/mcpproxy-server` is not yet published to releases (gated behind `if: false` in the release workflow).
+- `packages[]` is empty because none of the supported `registryType` values (`npm`, `pypi`, `oci`, `nuget`, `mcpb`) match MCPProxy's distribution channels (Homebrew tap, GitHub release tarballs, `.deb`/`.rpm`, `go install`). The Docker server-edition image at `ghcr.io/smart-mcp-proxy/mcpproxy-server` *is* published on every stable tag, but the server edition speaks Streamable HTTP rather than stdio, so it is not a drop-in `oci` package entry either.
 - `remotes[]` is intentionally **omitted**. mcpproxy runs locally (`mcpproxy serve` exposes Streamable HTTP at `http://localhost:8080/mcp`), but the registry's semantic validation **rejects localhost/private remote URLs** (`invalid-remote-url`) — `remotes[]` is reserved for publicly reachable hosted endpoints. With no public remote and no installable package type, the entry is **discovery-only**: it lists the server, description, and repository link so clients can find it and follow the repo's install instructions.
-- If a Docker image for the server edition is published in a future release, add an `oci` entry to `packages[]` pointing at `ghcr.io/smart-mcp-proxy/mcpproxy-server:{version}` with `"transport": {"type": "stdio"}` and the appropriate `runtimeArguments` for `docker run`. That would upgrade the entry from discovery-only to one-click installable.
+- Adding an `oci` entry to `packages[]` for `ghcr.io/smart-mcp-proxy/mcpproxy-server:{version}` would upgrade the entry from discovery-only to one-click installable, but it needs a transport the registry accepts for a container that serves HTTP on a published port — not `"transport": {"type": "stdio"}`. Revisit once the registry's remote/container transport story covers it.
 
 ## References
 

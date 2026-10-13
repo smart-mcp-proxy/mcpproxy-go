@@ -30,7 +30,8 @@ func TestDefaultConfig(t *testing.T) {
 	assert.True(t, config.AllowServerRemove)
 
 	// Test prompts default
-	assert.True(t, config.EnablePrompts)
+	assert.True(t, config.EnablePrompts, "built-in prompts stay on by default")
+	assert.False(t, config.AggregateUpstreamPrompts, "upstream aggregation is opt-in (off by default)")
 
 	// Test empty servers list
 	assert.Empty(t, config.Servers)
@@ -90,20 +91,21 @@ func TestConfigValidation(t *testing.T) {
 
 func TestConfigJSONSerialization(t *testing.T) {
 	original := &Config{
-		Listen:            ":9090",
-		DataDir:           "/tmp/test",
-		EnableTray:        false,
-		DebugSearch:       true,
-		TopK:              10,
-		ToolsLimit:        20,
-		ToolResponseLimit: 50000,
-		CallToolTimeout:   Duration(5 * time.Minute),
-		RequireMCPAuth:    true,
-		ReadOnlyMode:      true,
-		DisableManagement: true,
-		AllowServerAdd:    false,
-		AllowServerRemove: false,
-		EnablePrompts:     false,
+		Listen:                   ":9090",
+		DataDir:                  "/tmp/test",
+		EnableTray:               false,
+		DebugSearch:              true,
+		TopK:                     10,
+		ToolsLimit:               20,
+		ToolResponseLimit:        50000,
+		CallToolTimeout:          Duration(5 * time.Minute),
+		RequireMCPAuth:           true,
+		ReadOnlyMode:             true,
+		DisableManagement:        true,
+		AllowServerAdd:           false,
+		AllowServerRemove:        false,
+		EnablePrompts:            false,
+		AggregateUpstreamPrompts: true,
 		Servers: []*ServerConfig{
 			{
 				Name:     "test-server",
@@ -139,6 +141,7 @@ func TestConfigJSONSerialization(t *testing.T) {
 	assert.Equal(t, original.AllowServerAdd, restored.AllowServerAdd)
 	assert.Equal(t, original.AllowServerRemove, restored.AllowServerRemove)
 	assert.Equal(t, original.EnablePrompts, restored.EnablePrompts)
+	assert.Equal(t, original.AggregateUpstreamPrompts, restored.AggregateUpstreamPrompts)
 	assert.Len(t, restored.Servers, 1)
 	assert.Equal(t, original.Servers[0].Name, restored.Servers[0].Name)
 }
@@ -1012,6 +1015,76 @@ func TestConfig_DefaultQuarantineForNewServer(t *testing.T) {
 	}
 }
 
+func TestConfig_QuarantineDefaultForServer(t *testing.T) {
+	tests := []struct {
+		name     string
+		config   Config
+		sc       *ServerConfig
+		expected bool
+	}{
+		{
+			name:     "quarantine disabled globally: never quarantine (escape hatch preserved)",
+			config:   Config{QuarantineEnabled: boolPtr(false)},
+			sc:       &ServerConfig{TrustMode: string(TrustModeManual)},
+			expected: false,
+		},
+		{
+			name:     "quarantine disabled globally: even scan mode is admitted unquarantined",
+			config:   Config{QuarantineEnabled: boolPtr(false)},
+			sc:       &ServerConfig{TrustMode: string(TrustModeScan)},
+			expected: false,
+		},
+		{
+			name:     "nil server config: quarantine (fail closed)",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       nil,
+			expected: true,
+		},
+		{
+			name:     "auto mode: admit unquarantined",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{TrustMode: string(TrustModeAuto)},
+			expected: false,
+		},
+		{
+			name:     "scan mode: quarantine on add",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{TrustMode: string(TrustModeScan)},
+			expected: true,
+		},
+		{
+			name:     "manual mode: quarantine on add",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{TrustMode: string(TrustModeManual)},
+			expected: true,
+		},
+		{
+			name:     "empty trust mode resolves to manual: quarantine",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{},
+			expected: true,
+		},
+		{
+			name:     "unrecognized trust mode fails closed to manual: quarantine",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{TrustMode: "Scan"},
+			expected: true,
+		},
+		{
+			name:     "legacy auto_approve_tool_changes=true resolves to auto: admit unquarantined",
+			config:   Config{QuarantineEnabled: nil},
+			sc:       &ServerConfig{AutoApproveToolChanges: boolPtr(true)},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.config.QuarantineDefaultForServer(tt.sc))
+		})
+	}
+}
+
 func TestServerConfig_IsQuarantineSkipped(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1357,6 +1430,36 @@ func TestServerConfig_ReconnectOnUse(t *testing.T) {
 	})
 }
 
+func TestServerConfig_ExposePrompts_RoundTrip(t *testing.T) {
+	tests := []struct {
+		name string
+		val  *bool
+	}{
+		{"unset", nil},
+		{"true", BoolPtr(true)},
+		{"false", BoolPtr(false)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := ServerConfig{Name: "test", ExposePrompts: tt.val}
+
+			data, err := json.Marshal(original)
+			require.NoError(t, err)
+
+			var decoded ServerConfig
+			require.NoError(t, json.Unmarshal(data, &decoded))
+
+			if tt.val == nil {
+				assert.Nil(t, decoded.ExposePrompts)
+			} else {
+				require.NotNil(t, decoded.ExposePrompts)
+				assert.Equal(t, *tt.val, *decoded.ExposePrompts)
+			}
+		})
+	}
+}
+
 func TestServerConfig_IsToolAllowedByConfig(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1609,4 +1712,256 @@ func TestToolMetadata_OutputSchemaJSON(t *testing.T) {
 	data2, err := json.Marshal(metaNoSchema)
 	require.NoError(t, err)
 	assert.NotContains(t, string(data2), "output_schema_json", "empty OutputSchemaJSON should be omitted")
+}
+
+// TestMigrateDeepScanConfig verifies the Spec 077 US3 config migration:
+// the deprecated top-level scanner_fetch_package_source /
+// scanner_disable_no_new_privileges keys are folded into the unified
+// security.deep_scan block on load, the removed auto_scan_quarantined key is
+// ignored, and a round-trip through JSON preserves the migrated shape.
+func TestMigrateDeepScanConfig(t *testing.T) {
+	fetch := false
+	original := &Config{
+		Security: &SecurityConfig{
+			ScannerFetchPackageSource:     &fetch,
+			ScannerDisableNoNewPrivileges: true,
+		},
+	}
+
+	migrateDeepScanConfig(original)
+
+	require.NotNil(t, original.Security.DeepScan, "deep_scan block must be created by migration")
+	require.NotNil(t, original.Security.DeepScan.FetchPackageSource, "fetch_package_source must migrate into deep_scan")
+	assert.False(t, *original.Security.DeepScan.FetchPackageSource, "fetch_package_source value must be preserved")
+	assert.True(t, original.Security.DeepScan.DisableNoNewPrivileges, "disable_no_new_privileges must migrate into deep_scan")
+
+	// Legacy top-level keys must be cleared so the migrated config serializes
+	// only the new deep_scan.* surface (no duplicate/stale keys).
+	assert.Nil(t, original.Security.ScannerFetchPackageSource, "legacy scanner_fetch_package_source must be cleared after migration")
+	assert.False(t, original.Security.ScannerDisableNoNewPrivileges, "legacy scanner_disable_no_new_privileges must be cleared after migration")
+
+	// Effective accessors must read the migrated values.
+	assert.True(t, original.Security.IsDisableNoNewPrivileges(), "effective disable-no-new-privileges must reflect migrated value")
+	if got := original.Security.EffectiveFetchPackageSource(); assert.NotNil(t, got) {
+		assert.False(t, *got, "effective fetch-package-source must reflect migrated value")
+	}
+
+	// Round-trip: marshal then unmarshal, migrate again (idempotent), and
+	// confirm the deep_scan values survive and legacy keys do not reappear.
+	data, err := json.Marshal(original)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "scanner_fetch_package_source", "migrated config must not serialize the legacy key")
+	assert.NotContains(t, string(data), "scanner_disable_no_new_privileges", "migrated config must not serialize the legacy key")
+	assert.Contains(t, string(data), "deep_scan", "migrated config must serialize the deep_scan block")
+
+	var restored Config
+	require.NoError(t, json.Unmarshal(data, &restored))
+	migrateDeepScanConfig(&restored)
+	require.NotNil(t, restored.Security.DeepScan)
+	require.NotNil(t, restored.Security.DeepScan.FetchPackageSource)
+	assert.False(t, *restored.Security.DeepScan.FetchPackageSource)
+	assert.True(t, restored.Security.DeepScan.DisableNoNewPrivileges)
+}
+
+// TestMigrateDeepScanConfigIgnoresAutoScanQuarantined proves that a config file
+// carrying the removed auto_scan_quarantined key loads without error and the
+// key is simply dropped (Spec 077 FR-016).
+func TestMigrateDeepScanConfigIgnoresAutoScanQuarantined(t *testing.T) {
+	jsonData := `{"security":{"auto_scan_quarantined":true,"scanner_disable_no_new_privileges":true}}`
+	var cfg Config
+	require.NoError(t, json.Unmarshal([]byte(jsonData), &cfg), "config with removed key must still unmarshal")
+	migrateDeepScanConfig(&cfg)
+	require.NotNil(t, cfg.Security)
+	require.NotNil(t, cfg.Security.DeepScan)
+	assert.True(t, cfg.Security.DeepScan.DisableNoNewPrivileges)
+
+	// The removed key must not round-trip back out (no struct field to hold it).
+	data, err := json.Marshal(&cfg)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "auto_scan_quarantined", "removed key must not serialize")
+}
+
+// Tests for tool_response_mode (Spec 085 T013 — FR-001/FR-015)
+
+func TestToolResponseModeValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		mode    string
+		wantErr bool
+	}{
+		{name: "empty means full (default)", mode: "", wantErr: false},
+		{name: "full is valid", mode: ToolResponseModeFull, wantErr: false},
+		{name: "compact is valid", mode: ToolResponseModeCompact, wantErr: false},
+		{name: "bogus value is rejected", mode: "bogus", wantErr: true},
+		{name: "case-sensitive: Compact is rejected", mode: "Compact", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{ToolResponseMode: tt.mode}
+			errs := cfg.ValidateDetailed()
+
+			var found *ValidationError
+			for i := range errs {
+				if errs[i].Field == "tool_response_mode" {
+					found = &errs[i]
+					break
+				}
+			}
+			if tt.wantErr {
+				require.NotNil(t, found, "ValidateDetailed must reject %q with Field:\"tool_response_mode\"", tt.mode)
+				assert.Contains(t, found.Message, "full")
+				assert.Contains(t, found.Message, "compact")
+			} else {
+				assert.Nil(t, found, "ValidateDetailed must accept %q", tt.mode)
+			}
+		})
+	}
+}
+
+// The default (unset) survives Validate() untouched — Phase 1 ships full
+// behavior with no field written (FR-016).
+func TestToolResponseModeDefaultUnset(t *testing.T) {
+	cfg := &Config{}
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "", cfg.ToolResponseMode, "unset stays unset; resolution to full happens at read time")
+}
+
+// Spec 085 T017: MCPPROXY_TOOL_RESPONSE_MODE explicit env alias overrides the
+// file value on the standard load path, and an invalid env value fails
+// validation with a clear message.
+func TestToolResponseModeEnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "mcp_config.json")
+	raw, err := json.Marshal(map[string]any{
+		"listen":             "127.0.0.1:0",
+		"data_dir":           tmp,
+		"tool_response_mode": ToolResponseModeFull,
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, raw, 0o600))
+
+	t.Run("env wins over file", func(t *testing.T) {
+		t.Setenv("MCPPROXY_TOOL_RESPONSE_MODE", ToolResponseModeCompact)
+		cfg, err := LoadFromFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, ToolResponseModeCompact, cfg.ToolResponseMode)
+	})
+
+	t.Run("no env keeps file value", func(t *testing.T) {
+		cfg, err := LoadFromFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, ToolResponseModeFull, cfg.ToolResponseMode)
+	})
+
+	t.Run("invalid env value fails validation", func(t *testing.T) {
+		t.Setenv("MCPPROXY_TOOL_RESPONSE_MODE", "bogus")
+		_, err := LoadFromFile(cfgPath)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "tool_response_mode")
+	})
+}
+
+// GH #898: trusted_hosts loads from the config file and the
+// MCPPROXY_TRUSTED_HOSTS env var (comma-separated) overrides it.
+func TestTrustedHostsLoadAndEnvOverride(t *testing.T) {
+	tmp := t.TempDir()
+	cfgPath := filepath.Join(tmp, "mcp_config.json")
+	raw, err := json.Marshal(map[string]any{
+		"listen":        "127.0.0.1:0",
+		"data_dir":      tmp,
+		"trusted_hosts": []string{"mcp.example.com"},
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(cfgPath, raw, 0o600))
+
+	t.Run("file value loads", func(t *testing.T) {
+		cfg, err := LoadFromFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"mcp.example.com"}, cfg.TrustedHosts)
+	})
+
+	t.Run("env wins over file", func(t *testing.T) {
+		t.Setenv("MCPPROXY_TRUSTED_HOSTS", "a.example.com, b.example.com:8443 ,")
+		cfg, err := LoadFromFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a.example.com", "b.example.com:8443"}, cfg.TrustedHosts)
+	})
+
+	t.Run("unset by default", func(t *testing.T) {
+		cfg := &Config{}
+		require.NoError(t, cfg.Validate())
+		assert.Empty(t, cfg.TrustedHosts)
+	})
+}
+
+// TestCodeExecutionMaxParallel covers the Spec 096 config field end to end:
+// the built-in default, an operator value surviving load, the accepted range,
+// and the absent/zero → default resolution the sandbox relies on (a zero would
+// otherwise mean "no workers" and stall every batch).
+func TestCodeExecutionMaxParallel(t *testing.T) {
+	t.Run("default is 8", func(t *testing.T) {
+		assert.Equal(t, 8, DefaultConfig().CodeExecutionMaxParallel)
+	})
+
+	t.Run("absent value resolves to the default", func(t *testing.T) {
+		cfg := &Config{}
+		require.NoError(t, cfg.Validate())
+		assert.Equal(t, 8, cfg.CodeExecutionMaxParallel)
+	})
+
+	t.Run("zero resolves to the default", func(t *testing.T) {
+		cfg := &Config{CodeExecutionMaxParallel: 0}
+		require.NoError(t, cfg.Validate())
+		assert.Equal(t, 8, cfg.CodeExecutionMaxParallel)
+	})
+
+	t.Run("explicit value survives", func(t *testing.T) {
+		cfg := &Config{CodeExecutionMaxParallel: 16}
+		require.NoError(t, cfg.Validate())
+		assert.Equal(t, 16, cfg.CodeExecutionMaxParallel)
+	})
+
+	t.Run("range validation", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			value   int
+			wantErr bool
+		}{
+			{name: "zero means default", value: 0},
+			{name: "lower bound", value: 1},
+			{name: "upper bound", value: 32},
+			{name: "below range", value: -1, wantErr: true},
+			{name: "above range", value: 33, wantErr: true},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				cfg := &Config{Listen: "127.0.0.1:8080", CodeExecutionMaxParallel: tc.value}
+				errs := cfg.ValidateDetailed()
+				var found bool
+				for _, e := range errs {
+					if e.Field == "code_execution_max_parallel" {
+						found = true
+					}
+				}
+				assert.Equal(t, tc.wantErr, found, "validation errors: %v", errs)
+			})
+		}
+	})
+
+	t.Run("value loads from the config file", func(t *testing.T) {
+		tmp := t.TempDir()
+		cfgPath := filepath.Join(tmp, "mcp_config.json")
+		raw, err := json.Marshal(map[string]any{
+			"listen":                      "127.0.0.1:0",
+			"data_dir":                    tmp,
+			"code_execution_max_parallel": 4,
+		})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(cfgPath, raw, 0o600))
+
+		cfg, err := LoadFromFile(cfgPath)
+		require.NoError(t, err)
+		assert.Equal(t, 4, cfg.CodeExecutionMaxParallel)
+	})
 }

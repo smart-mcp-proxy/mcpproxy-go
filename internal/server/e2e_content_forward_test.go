@@ -119,6 +119,7 @@ func TestE2E_ImageContentPreservation(t *testing.T) {
 	serverConfig, err := env.proxyServer.runtime.StorageManager().GetUpstreamServer("imgserver")
 	require.NoError(t, err)
 	serverConfig.Quarantined = false
+	serverConfig.MarkQuarantineExplicitlySet(true) // explicit decision; SaveUpstreamServer refuses to lower quarantine otherwise
 	err = env.proxyServer.runtime.StorageManager().SaveUpstreamServer(serverConfig)
 	require.NoError(t, err)
 
@@ -126,7 +127,7 @@ func TestE2E_ImageContentPreservation(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	time.Sleep(3 * time.Second)

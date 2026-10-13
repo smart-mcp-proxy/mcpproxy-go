@@ -46,6 +46,26 @@ type ServerEntry struct {
 	// ${VAR} / $VAR placeholders (see DetectRequiredInputs). Empty for most
 	// servers in this spec — no rich per-registry schema yet (decision O1).
 	RequiredInputs []RequiredInput `json:"required_inputs,omitempty"`
+
+	// Popularity carries a source-NATIVE popularity signal discovered while
+	// parsing this entry (Spec 110 FR-001) — currently only parseDocker's
+	// pull_count → Installs. Deliberately `json:"-"`: it must never appear in
+	// ServerEntry's own JSON (GET /registries/{id}/servers, search_servers),
+	// which stays unchanged. BuildCatalogHit copies it into CatalogHit and
+	// layers in GitHub stars from the popularity provider's cache.
+	Popularity *Popularity `json:"-"`
+
+	// Title is the source's own display title (server.json "title" for the
+	// official protocol), and Version the entry's published version. Both are
+	// `json:"-"` like Popularity: ServerEntry's wire JSON is unchanged. The
+	// catalog reads Title for display and matching (Spec 109 D37.10) and
+	// collapseOfficialVersions reads Version.
+	Title   string `json:"-"`
+	Version string `json:"-"`
+
+	// isLatest records an explicit isLatest:true from the official registry's
+	// publication metadata, so collapseOfficialVersions can prefer it.
+	isLatest bool
 }
 
 // RequiredInput declares a single env var / key a server needs before it will

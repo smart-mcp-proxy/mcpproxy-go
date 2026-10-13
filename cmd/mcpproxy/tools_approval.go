@@ -26,7 +26,8 @@ quarantine, clearing them for use without the Web UI or MCP.
 
 Targets may be given as <server>:<tool> pairs, or as bare tool names when
 scoped with --server. Use --server <name> --all to approve every pending or
-changed tool for a server.
+changed tool for a server. For the unified review workflow, use
+'mcpproxy review approve <server> --tools ...'.
 
 Examples:
   mcpproxy tools approve github:create_issue
@@ -52,7 +53,8 @@ never left in the approved+enabled state. Mirrors the Web UI "Block" button.
 
 Targets may be given as <server>:<tool> pairs, or as bare tool names when
 scoped with --server. Use --server <name> --all to reject every pending or
-changed tool for a server.
+changed tool for a server. For the unified review workflow, use
+'mcpproxy review reject <server> --tools ...'.
 
 Examples:
   mcpproxy tools reject github:delete_repo

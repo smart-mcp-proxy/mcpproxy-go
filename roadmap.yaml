@@ -1,0 +1,893 @@
+# roadmap.yaml — git-native roadmap for mcpproxy-go
+#
+# This file is the SOURCE OF TRUTH for the cross-spec roadmap: epics, their
+# child tasks, the dependency DAG between them, and execution state that a
+# tasks.md checkbox cannot express (status beyond done/not-done, priority,
+# blocked-by edges, external tracker ids, PR links).
+#
+# `tasks.md` answers "how much of spec NNN is checked off?". This file answers
+# "what are we building next, what blocks what, and who owns it?".
+#
+# THIS FILE IS THE WORKING SET: todo / in_progress / in_review / blocked / parked,
+# plus recently-shipped `done` epics. Cold `done` epics are swept into
+# roadmap.archive.yaml so this file does not grow without bound:
+#     python3 scripts/gen-roadmap.py --archive --dry-run   # preview the sweep
+#     python3 scripts/gen-roadmap.py --archive             # move + regenerate
+# An epic is swept when it is `done`, every child task is `done`, every PR it
+# references is MERGED, and the newest of those merges is >= 14 days old
+# (tune with --min-age-days). Set `keep: true` to pin an epic here forever.
+# A depends_on: edge pointing into the archive is satisfied by definition.
+#
+# Regenerate the human-readable view after editing:
+#     python3 scripts/gen-roadmap.py        # writes ROADMAP.md
+#     # or: scripts/gen-roadmap              # same thing (wrapper)
+#
+# Validate this file against ground truth (does not write ROADMAP.md):
+#     python3 scripts/gen-roadmap.py --check-github   # PR state vs status,
+#         # dangling spec: links, dangling depends_on ids (resolved against the
+#         # archive too), status sanity. Add --strict to fail on warnings.
+#         # Needs an authenticated `gh`; exits 2 if gh is missing.
+#
+# ── Schema ──────────────────────────────────────────────────────────────────
+# version:  schema version (int).
+# epics:    list of epic objects. Each epic:
+#   id:          REQUIRED. Stable slug, unique across epics AND tasks. Used as
+#                the DAG node id and as a depends_on target.
+#   title:       REQUIRED. Human label.
+#   status:      REQUIRED. one of: todo | in_progress | in_review | blocked | done
+#   priority:    optional. P0 (highest) .. P3.
+#   spec:        optional. Path to a specs/<NNN> folder (drives progress badge).
+#   pr:          optional. PR ref, e.g. "#761" or a list of refs.
+#   mcp:         optional. External tracker id mirroring MCP-xxxx vocabulary.
+#   depends_on:  optional. List of epic/task ids that must land first (DAG edge).
+#   parked:      optional bool. true = intentionally on hold (still status: todo).
+#   keep:        optional bool. true = never sweep into roadmap.archive.yaml.
+#   note:        optional. One-line context.
+#   tasks:       optional. List of child task objects. Each task has the same
+#                fields as an epic except `tasks`. A task's depends_on may point
+#                at sibling tasks or at other epics.
+#
+# Conventions:
+#  - depends_on edges flow PREREQUISITE -> DEPENDENT (drawn A --> B = "A unblocks B").
+#  - Keep ids slug-cased and stable; renaming an id breaks inbound depends_on.
+#  - `done` epics keep their PR refs as provenance (in this file until swept,
+#    then in roadmap.archive.yaml).
+# ─────────────────────────────────────────────────────────────────────────────
+
+version: 1
+
+epics:
+  # ── DONE ────────────────────────────────────────────────────────────────
+  - id: sandbox-isolation
+    title: Non-Docker sandbox isolation (Landlock)
+    status: done
+    priority: P1
+    mcp: MCP-34
+    depends_on: []
+    note: "Landlock LSM + setrlimit native sandbox for stdio upstreams; no userns (Ubuntu 24.04 safe). Originated from roadmap item #11 (no dedicated spec — 054 is the unrelated security-gateway spec). Code in internal/sandbox/; PRs #754/#759/#768/#781/#782."
+    tasks:
+      - id: sandbox-spike
+        title: Landlock sandbox spike (MCP-34.1)
+        status: done
+        mcp: MCP-3232
+        pr: "#754"
+        depends_on: []
+      - id: sandbox-mode-config
+        title: isolation.mode enum + resolver (MCP-34.2)
+        status: done
+        mcp: MCP-3233
+        pr: "#759"
+        depends_on: [sandbox-spike]
+      - id: sandbox-launcher
+        title: Native sandbox launcher Landlock+rlimits (MCP-34.3)
+        status: done
+        mcp: MCP-3234
+        pr: "#768"
+        depends_on: [sandbox-mode-config]
+      - id: sandbox-scanner-parity
+        title: Scanner-flow parity under sandbox (MCP-34.4)
+        status: done
+        mcp: MCP-3235
+        pr: "#781"
+        depends_on: [sandbox-launcher, scanner-v2]
+      - id: sandbox-snap-docker-it
+        title: snap-docker integration tests + CI (MCP-34.5)
+        status: done
+        mcp: MCP-3236
+        pr: "#782"
+        depends_on: [sandbox-scanner-parity]
+
+  - id: scanner-v2
+    title: Spec 076 deterministic offline tool-scanner
+    status: done
+    priority: P1
+    mcp: MCP-3574
+    spec: specs/076-deterministic-tool-scanner
+    depends_on: []
+    note: "Deterministic offline signal pipeline replaces ~10%-recall scanner; scan-eval --gate (recall>=0.90 / FP<=5%) in CI."
+    tasks:
+      - id: scanner-v2-foundation
+        title: detect-engine foundation (T1)
+        status: done
+        mcp: MCP-3575
+        pr: "#769"
+        depends_on: []
+      - id: scanner-v2-hard-checks
+        title: 3 hard checks + scanner wiring (US1 MVP)
+        status: done
+        mcp: MCP-3576
+        pr: "#770"
+        depends_on: [scanner-v2-foundation]
+      - id: scanner-v2-soft-checks
+        title: 3 soft checks + patterns confidence (US2)
+        status: done
+        mcp: MCP-3577
+        pr: "#775"
+        depends_on: [scanner-v2-foundation]
+      - id: scanner-v2-consensus
+        title: Consensus risk-score + report transparency (US4)
+        status: done
+        mcp: MCP-3578
+        pr: "#776"
+        depends_on: [scanner-v2-hard-checks, scanner-v2-soft-checks]
+      - id: scanner-v2-eval-gate
+        title: Eval corpus + CI recall/FP gate (US3)
+        status: done
+        mcp: MCP-3579
+        pr: "#777"
+        depends_on: [scanner-v2-hard-checks]
+      - id: scanner-v2-docs
+        title: Tool-scanner detect-engine docs (T22)
+        status: done
+        mcp: MCP-3683
+        pr: "#780"
+        depends_on: [scanner-v2-eval-gate]
+
+  # ── BLOCKED ON DISCOVERY (was IN REVIEW; nothing is in review as of 2026-08-31) ──
+  - id: windows-tray
+    title: Windows native tray app
+    status: todo
+    priority: P2
+    mcp: MCP-43
+    depends_on: []
+    note: "No spec: link — this epic is the native TRAY app; specs/002-windows-installer is the unrelated INSTALLER spec (35/60) and its badge said nothing about tray progress (wrong link removed 2026-07-10). Option C: WebView2 window reusing shipped Web UI. Most exit criteria already ship; gaps = native window, toasts, profile submenu, Win11 smoke. Telemetry: Windows = ~23% of GitHub downloads but only ~4% of active installs (downloads→actives ~12:1 vs macOS ~4:1) — gate WebView2 work on finding the funnel break first. 2026-08-31 audit: reset from in_review to todo. Scoped precisely: Windows tray support DID ship in 2025 via the cross-platform Go/systray build (#74, merged 2025-10-23, cmd/mcpproxy-tray/ + internal/tray under GOOS=windows) — what this epic tracks is the NATIVE WebView2 replacement, and for that no PR is open or merged and native/windows/ holds only a README placeholder with no WebView2 code anywhere in the tree. So 'in review' had no PR to point at."
+    tasks:
+      - id: windows-tray-funnel-qa
+        title: "Windows first-run QA pass (downloads→actives 12:1 vs macOS 4:1 — find the funnel break before WebView2 work)"
+        status: todo
+        priority: P2
+        depends_on: []
+      - id: windows-tray-window
+        title: WebView2 native window + profile submenu
+        status: todo
+        mcp: MCP-43
+        depends_on: [windows-tray-funnel-qa]
+
+  # ── BACKLOG: personal-edition polish (NEW priorities) ─────────────────────
+  - id: ux-audit
+    title: Web UI + macOS app UX audit
+    status: in_progress
+    priority: P0
+    depends_on: []
+    note: "End-to-end UX pass across Web UI and the macOS tray app; the umbrella for the polish push. (No spec yet — 064 is the unrelated agent-fleet glass-cockpit spec.) 2026-08-29 truth-sync: both sweeps and every finding they raised SHIPPED in August (this file had them at todo). Audits: docs/qa/ux-audit-webui-2026-08.md (36 findings) and docs/qa/ux-audit-macos-tray-2026-08.md (16 findings); both carry a Resolution section mapping finding -> PR. What is left is regression-proofing, not findings."
+    tasks:
+      - id: ux-audit-webui-sweep
+        title: Web UI heuristic + Playwright UX sweep
+        status: done
+        pr: "#1046"
+        note: "36 findings ranked P0-P3; every routed view in light/dark, first-run and populated, at 1440/820/390px on two isolated cores, with real /mcp traffic. Two findings were self-corrected in the doc: F23 mis-diagnosed a window-independent structural estimate as a stale aggregation, and F31's Manual half was already tooltipped."
+        depends_on: []
+      - id: ux-audit-macos-sweep
+        title: macOS tray app UX sweep (settings parity, flows)
+        status: done
+        pr: "#1043"
+        spec: specs/037-macos-swift-tray
+        note: "16 findings, no P0, plus a settings-parity matrix (SettingsCatalog.swift vs frontend/src/views/settings/fields.ts). Tooling note that outlived the audit: screenshot_status_bar_menu returns an all-black PNG under TCC — list_menu_items is the authoritative tray check."
+        depends_on: []
+      - id: ux-audit-webui-fixes
+        title: "Close the 36 Web UI findings"
+        status: done
+        pr: ["#1044", "#1048", "#1049", "#1050", "#1051", "#1052", "#1053", "#1054"]
+        note: "Eight PRs merged 2026-08-25. #1053's body text mis-pastes the tray audit's F-numbering; its diff and test names carry the Web UI findings F7/F10/F11/F12/F17/F18/F28."
+        depends_on: [ux-audit-webui-sweep]
+      - id: ux-audit-macos-fixes
+        title: "Close the 16 macOS tray findings"
+        status: done
+        pr: ["#1055", "#1056"]
+        note: "F1's severity dot is an attributed-title glyph, not a composite image — the status image must stay isTemplate or the menu bar re-renders it monochrome and erases the badge. F6 added the three missing settings keys AND scripts/check-settings-parity.py so the next Web-UI-first field cannot drift in silently."
+        depends_on: [ux-audit-macos-sweep]
+      - id: ux-audit-recheck-defects
+        title: "Five new defects found while re-checking the Web UI audit on v0.61.0"
+        status: done
+        pr: ["#1062", "#1072", "#1077"]
+        note: "Not regressions of the 36 — found by the re-check pass and filed as #1061 (config-path quarantine left tools in the search index, defeating quarantine on the file path), #1064 (tool counts advertised quarantined/disabled servers as available) and #1065 (contradictory card states, raw snake_case enum label, stale auth error surviving sign-in). All closed."
+        depends_on: [ux-audit-webui-fixes]
+      - id: ux-audit-sweep-regressions
+        title: "Fold the audit's regression assertions into the committed sweep (e2e/web-ui-sweep)"
+        status: done
+        note: "The audit's own closing ask. F9 contrast, F29 theme, F14 responsive and F30 accessible-name/aria-live/keyboard were already committed; added the F6 modal Escape+focus check and the F1 cross-view total-consistency check. F6 is asserted with an IN-PAGE dispatch — a synthetic key press never reaches the document keydown listener and silently tests the automation layer instead of the app. F1 encodes the real invariant, not naive equality: Usage folds `blocked` into errors while Activity splits them, and /activity/usage is served from a short read cache so the two converge rather than agree instantly. Running the completed sweep found three defects already on main — see ux-audit-sweep-found-defects. Feeds release-qa-gate T2, which runs this sweep on tags."
+        depends_on: [ux-audit-webui-fixes]
+      - id: ux-audit-sweep-found-defects
+        title: "Three defects the completed sweep found on main"
+        status: done
+        note: "None are regressions of the 36, and each was invisible before: (1) the LANDING PAGE failed AA in both themes and two of its controls had no accessible name — Usage.vue uses the raw `opacity-*` utility, which #1054's --tone-muted work never covered, and the audit walked / before #1044 made Usage the landing page; (2) the Activity status pill clips at 390px for any status outside the known four (`tool_auto_approved` measured 145px in a 93px table-fixed cell) — the existing F14 phone check was vacuous because it measures rows.first() and a success row renders an sr-only zero-width label. Method note: both surfaced because a new assertion changed what an EXISTING assertion saw (the sweep shares one instance, so one check's traffic is the next one's data). Sweep went 25-pass/3-fail on clean HEAD to 30-pass/0-fail."
+        depends_on: [ux-audit-sweep-regressions]
+      - id: ux-audit-tray-live-verify
+        title: "Verify the 16 tray fixes on a running tray"
+        status: todo
+        note: "#1055/#1056 are merged but were never observed running: the 2026-08-26 re-walk found the installed tray still on v0.60.0 with 0.61.0 downloaded-but-not-restarted, so it reproduced the pre-fix audit almost verbatim. Needs the pending restart or the dev bundle-swap procedure (docs/development/macos-tray.md) — deliberately skipped then because restarting the tray kills the core it manages. Overlaps release-qa-gate T3 (macOS app smoke)."
+        depends_on: [ux-audit-macos-fixes]
+
+  - id: action-log-transparency
+    title: Action log / transparency — info at a glance
+    status: in_progress
+    priority: P1
+    depends_on: [ux-audit]
+    note: "Surface the most important activity/security/connection signals at a glance; reduce digging. Vision pillar 'feel control → transparency' — the activity log is a headline feature, polish it and bring it to the tray menu. Builds on the shipped activity-log backend + retention (spec 024, 95% shipped — this epic is the at-a-glance UX on top, not the backend, so 024 is not the progress driver)."
+    tasks:
+      - id: sessions-web-ui
+        title: "Sessions in the Web UI: meaningful session names in the Activity Log filter + the existing /sessions page linked in the sidebar"
+        status: done
+        priority: P1
+        note: "DONE 2026-07-11. Two-sided miss: Activity.vue already read a.metadata?.client_name, but the backend never wrote that field, so the Session filter always fell back to the id suffix ('...139c9'). Meanwhile the client name (MCP initialize clientInfo) has always existed on the session record and is already served by GET /api/v1/sessions. Fixed by joining the two at read time (activity rows already carry session_id as a foreign key) rather than denormalizing the name into the tool-call hot path. Also: a full Sessions.vue page + /sessions route already existed and were simply never linked in the personal-edition sidebar (only the Teams admin menu) — the fix was to unhide a page, not build one. New frontend/src/utils/sessionLabel.ts (+9 tests) handles display names and collision suffixes."
+        depends_on: []
+      - id: action-log-glance-view
+        title: At-a-glance action log view (top signals, health)
+        status: todo
+        note: "No spec: link on purpose — 019-activity-webui is the SHIPPED backend+table (72/73 after the 2026-07-10 truth-sync) and would paint this unbuilt UX task ~99% green."
+        depends_on: []
+      - id: action-log-tray-menu
+        title: Activity in the tray menu (recent tool calls + security events, jump to full log)
+        status: todo
+        priority: P1
+        note: "Both trays (Go/systray + Swift) via core REST/SSE only — tray holds no state (see tray-api-purity)."
+        depends_on: [action-log-glance-view]
+      - id: tray-menu-open-telemetry
+        title: "tray_menu_opened counter: Swift menuWillOpen (MCPProxyApp.swift:192) -> lightweight POST /api/v1/telemetry/tray-menu-opened -> registry counter -> heartbeat tray_menu_opened_24h"
+        status: todo
+        priority: P2
+        note: "Menu opens are invisible today: since Spec 048 menuWillOpen rebuilds from SSE state with zero REST calls, and surface_requests['tray'] counts header-stamped REST calls, not opens. Go tray excluded (fyne systray has no open event). Pure counter — passes payload_privacy_test rules. Gives the open-rate baseline for judging action-log-tray-menu."
+        depends_on: []
+      - id: action-log-retention-tie-in
+        title: Tie activity retention/size into the glance view
+        status: todo
+        note: "No spec: link on purpose — 073-activity-size-retention is the SHIPPED retention backend (13/14); this task is the glance-view tie-in on top of it."
+        depends_on: [action-log-glance-view]
+      - id: activity-storage-bounds
+        title: "Bound every activity-adjacent store: response truncation on the write path (#1173/#1174), per-server tool_calls buckets (#1176), omitempty zero-erasure (#1175)"
+        status: done
+        priority: P1
+        pr: ["#1174", "#1214"]
+        note: "User report 2026-09-02 (#1173): config.db reached 940MB; activity_max_response_size existed but was never read, and server_<id>_tool_calls buckets have no size, count or age bound at all (the other ~432MB). #1174 (external contributor) wired the 64KB cap on the write path; #1214 bounded the per-server tool_calls buckets, stopped omitempty erasing configured zeros and added `mcpproxy db compact` (closed #1175/#1176, 2026-09-05). Retention backend (073) prunes activity records only, not the per-server buckets."
+        depends_on: []
+
+  - id: analytics-dashboard
+    title: Analytics dashboard as default page
+    status: done
+    priority: P1
+    spec: specs/069-observability-usage-graphs
+    depends_on: [ux-audit]
+    note: "Per-server / per-tool token-drain graphs; make the dashboard the default landing page. 2026-07-10 truth-sync: spec 069 is SHIPPED (25/26 — the only open task is a Playwright verification sweep), so the graphs half is done. 2026-08-31 audit: the default-landing half shipped too - frontend/src/router/index.ts routes path '/' to the Dashboard component, guarded by frontend/tests/unit/dashboard-default-landing.spec.ts. Spec 069's one remaining task (T023) is a local Playwright verification sweep that leaves no committed artifact: a human can run it and tick the box, but no code evidence can ever confirm it, so it cannot gate the epic. The epic is complete."
+    tasks:
+      - id: analytics-token-drain-graphs
+        title: Per-server / per-tool token-drain graphs
+        status: done
+        spec: specs/069-observability-usage-graphs
+        note: "Shipped (spec 069 25/26; remaining task is a Playwright sweep, not a feature). Status corrected by the 2026-07-10 spec-vs-code truth-sync."
+        depends_on: []
+      - id: analytics-default-landing
+        title: Make dashboard the default landing page
+        status: done
+        pr: "#1044"
+        spec: specs/039-connect-and-dashboard
+        depends_on: [analytics-token-drain-graphs]
+        note: "Merged 2026-08-25; also closes F4 of the Web UI UX audit. `/` now opens the Dashboard on its Usage (analytics) panel; `/usage` + `/overview` added as deep-linkable routes rendering the same component (tab clicks rewrite the URL, no remount). Zero-servers first run shows an 'add your first server' CTA in place of empty charts instead of conditional routing."
+
+  - id: registries-search-add
+    title: Registries — easier search + add-server
+    status: done
+    priority: P1
+    spec: specs/070-registry-easy-upstream-add
+    depends_on: []
+    note: "Lower the friction of finding a server in a registry and adding it; lean on the official registry protocol work. 2026-07-10 truth-sync: both children shipped — spec 070 is 21/24 (the 3 open tasks are pre-PR chores: worktree baseline, run gates, apply gate decisions) and 071 is 12/12. depends_on [ux-audit] dropped: a done epic cannot depend on a todo one."
+    tasks:
+      - id: registries-search-ux
+        title: Improved registry search UX
+        status: done
+        spec: specs/070-registry-easy-upstream-add
+        note: "Shipped (spec 070 21/24; remaining tasks are process chores, not features). Status corrected by the 2026-07-10 spec-vs-code truth-sync."
+        depends_on: []
+      - id: registries-official-protocol
+        title: Official registry protocol integration
+        status: done
+        spec: specs/071-official-registry-protocol
+        note: "Spec 071 shipped 12/12 (official MCP registry v0.1 protocol adopted, #572)."
+        depends_on: []
+
+  - id: scanner-simplification
+    title: Scanner simplification (deterministic default, opt-in deep scan)
+    status: done
+    priority: P1
+    spec: specs/077-scanner-simplification
+    depends_on: [scanner-v2]
+    note: "Make the Spec 076 detect engine the always-on offline default; demote Docker scanners + source extraction to opt-in deep scan that never blocks/degrades the baseline; single unified report. COMPLETE: US1 #786, US2 #792, US4 #794, US3 + deep-scan trust fixes + docs truth sweep (T037-T039) #793 — all merged; shipped in v0.47.0-rc.2. Remaining 4 unchecked tasks in tasks.md are documented scope-outs. First of the 5 personal-edition polish verticals."
+    tasks:
+      - id: scanner-simpl-baseline
+        title: "US1: deterministic offline baseline default + curated hard phrase_injection check (delete duplicate legacy rules)"
+        status: done
+        pr: "#786"
+        depends_on: []
+      - id: scanner-simpl-unified-report
+        title: "US2: single merged report + cross-scanner consensus confidence"
+        status: done
+        pr: "#792"
+        depends_on: [scanner-simpl-baseline]
+      - id: scanner-simpl-deep-optin
+        title: "US3: opt-in deep scan (off by default), never blocks/degrades baseline; config migration"
+        status: done
+        pr: "#793"
+        depends_on: [scanner-simpl-baseline, scanner-simpl-unified-report]
+      - id: scanner-simpl-notifications
+        title: "US4: collapse scan-notification storm into one debounced settled event (MCP-2207)"
+        status: done
+        pr: "#794"
+        depends_on: [scanner-simpl-unified-report]
+      - id: scanner-simpl-deepscan-fixes
+        title: "Deep-scan trust fixes: nil-Security gating bug (source fetch runs with deep scan off on default configs), FR-014 verdict inversion (Dangerous deep finding < Warning), surface silently-skipped Docker scanners (non-nil deep_scan descriptor + CLI hint on security enable)"
+        status: done
+        pr: "#793"
+        priority: P1
+        depends_on: [scanner-simpl-deep-optin]
+
+  - id: tpa-db
+    title: "tpa-db: versioned TPA signature database for the offline scanner"
+    status: todo
+    priority: P1
+    spec: specs/101-tpa-db
+    depends_on: [scanner-simplification]
+    note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); no implementation has started, so the epic and every child task stay todo (the pr: link is the spec, not the build)."
+    tasks:
+      - id: tpa-db-format
+        title: "Signature DB format + loader (versioned, signed, bundled default)"
+        status: todo
+        depends_on: []
+      - id: tpa-db-corpus
+        title: "Seed corpus: catalog known public TPA campaigns/patterns into the DB"
+        status: todo
+        depends_on: [tpa-db-format]
+      - id: tpa-db-refresh
+        title: "Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated"
+        status: todo
+        depends_on: [tpa-db-format]
+
+  - id: remote-access-tunnel
+    title: Remote access tunnel (feature-flagged MVP, spec 089)
+    status: todo
+    priority: P2
+    spec: specs/089-remote-access-tunnel
+    depends_on: [tpa-db, ux-audit, analytics-dashboard]
+    note: "One-button Web UI exposure of /mcp via external tunnel binary (cloudflared quick tunnel first) so Claude custom connectors (all tiers incl. Free, syncs to iOS/Android) can reach local MCP servers (e.g. Obsidian) — behind a feature flag, off by default, mandatory OAuth 2.1+PKCE+DCR gate, per-server exposure allowlist, remote-origin activity logging. Research: docs/research/remote-access-tunnel-research-2026-07-29.html (25/25 claims verified; niche unoccupied — Docker MCP Gateway lacks it). Sequenced after tpa-db (+ shipped scanner work 086-088), macOS tray redesign (ux-audit) and analytics-dashboard per owner decision 2026-07-29. No hosted relay/payments in MVP."
+    tasks:
+      - id: tunnel-oauth-gate
+        title: "OAuth 2.1 authorization-server gate for tunnel-origin traffic (PKCE, DCR, Anthropic callback allowlist, token lifecycle/revocation)"
+        status: todo
+        depends_on: []
+      - id: tunnel-orchestration
+        title: "cloudflared quick-tunnel orchestration (detect/launch/supervise/parse URL) + feature flag + never-auto-start"
+        status: todo
+        depends_on: []
+      - id: tunnel-exposure-allowlist
+        title: "Per-server exposure allowlist (default none; quarantined non-exposable; hot-reload)"
+        status: todo
+        depends_on: [tunnel-oauth-gate]
+      - id: tunnel-webui-tray
+        title: "Web UI open/close button + URL/QR/instructions + warning banner; tray active-state indicator; remote-origin activity marker"
+        status: todo
+        depends_on: [tunnel-orchestration, tunnel-exposure-allowlist]
+
+  - id: schema-deferred
+    title: "Deferred-schema serialization for the direct tools/list surface (spec 102)"
+    status: done
+    priority: P1
+    spec: specs/102-schema-deferred
+    pr: "#1063"
+    depends_on: []
+    note: "Direct mode enumerates every upstream tool but always ships full inputSchema (~30K tokens for a 100-tool fleet; Spec 083 profiling put ~77% of the payload in schemas agents rarely read). Deferred serialization keeps every tool name, description and annotation and appends the Spec 085 compact signature instead of the schema, with describe_tool on the direct surface to recover it and the shipped pre-dispatch validation turning a wrong guess into one self-healing retry. Not a new routing_mode — a serialization mode of the direct surface, on the same tool_response_mode axis that already governs retrieve_tools. Spec merged in #1035 (issue #971, maintainer-accepted direction). COMPLETE: all 89 tasks shipped in #1063; the settings UI for both serialization axes followed in #1082; #1083/#1084 fixed in #1086. MEASURED SAVINGS FELL WELL SHORT OF THE ~88% ORIGINALLY PROJECTED: 29.7% on the frozen 45-tool reference corpus and 34.8% on a 527-tool snapshot, with 38.9% the arithmetic ceiling even if both the schema and the signature were deleted. The projection assumed schemas dominate the payload; names, descriptions and annotations turn out to carry most of it. SC-001 was RESTATED per corpus shape (maintainer decision 2026-08-29): now >=25% on the 45-tool corpus and >=30% at fleet scale, both asserted in internal/server/mcp_routing_deferred_tokens_test.go, with the original 70% kept as an upper tripwire. Unblocks token-bench — and that measured shortfall is the first thing token-bench has to explain."
+
+  - id: agent-scope-hardening
+    title: "Agent-token scope hardening: every MCP request authorized by its own scope (spec 105)"
+    status: done
+    priority: P1
+    spec: specs/105-agent-scope-hardening
+    depends_on: [schema-deferred]
+    note: "The Spec 104 cross-model review verified 'an agent token sees and uses only its granted servers, profile and tiers' against the code one surface at a time and found eight places where a legitimately narrow token could learn about or act on servers outside its grant: cached responses, set_profile and profile-URL responses, retrieve_tools metadata, direct-publication filtering, target-tier execution, aggregated prompts, per-server management ops, and refusal shapes. Spec 105 is the acceptance contract (19 astra rounds, ready-for-plan 2026-09-07). Five fix sessions ran in parallel from the review and MERGED 2026-09-08 (#1223 target tier, #1224 tail_log, #1225 set_profile, #1226 read_cache provenance, #1227 prompt owner + deleted-pin enumeration), each live-verified against a baseline binary and astra-reviewed to CLEAN. Each of those PR bodies carries a 'Follow-ups / Spec 105 gaps' checklist — the todo tasks below are those lists grouped by FR. Prerequisite for auto-routing-mode: Spec 104 FR-016 states the invariant these corrections make true."
+    tasks:
+      - id: scope-fix-target-tier
+        title: "FR-009 (dispatch half): call_tool_* requires the TARGET tool's tier, fail closed on unresolved tiers; approval records keep exact ns:name identity"
+        status: done
+        pr: "#1223"
+        depends_on: []
+      - id: scope-fix-tail-log
+        title: "FR-007 (name half): upstream_servers tail_log authorizes the server against effective scope before lookup, non-disclosing"
+        status: done
+        pr: "#1224"
+        depends_on: []
+      - id: scope-fix-set-profile
+        title: "FR-003: set_profile reports token ∩ profile, selectable-profile predicate, non-selectable == nonexistent"
+        status: done
+        pr: "#1225"
+        depends_on: []
+      - id: scope-fix-read-cache
+        title: "FR-001: cached responses carry the producer's authorization snapshot; read_cache and the REST cache branch refuse narrower readers"
+        status: done
+        pr: "#1226"
+        depends_on: []
+      - id: scope-fix-prompts-profile-url
+        title: "FR-006 + FR-004 (deleted pin): aggregated prompts authorized by canonical registration owner; profile URL / set_profile stop enumerating on a deleted pin"
+        status: done
+        pr: "#1227"
+        depends_on: []
+      - id: scope-retrieve-tools
+        title: "FR-005: retrieve_tools filters by scope BEFORE limiting; indexed counts, usage ranking, debug output and session risk computed over the authorized population only"
+        status: done
+        priority: P1
+        pr: "#1325"
+        depends_on: []
+      - id: scope-direct-publication
+        title: "FR-008: direct-surface definitions take owner and tier from their own registration identity at every publication seam, both skew directions, full and deferred"
+        status: done
+        priority: P1
+        pr: "#1326"
+        depends_on: []
+      - id: scope-refusal-shapes
+        title: "FR-010: scope-first refusal precedence; dispatch denials and 'available servers' never name hidden servers; describe_tool not-found and alias resolution computed over the authorized corpus"
+        status: done
+        priority: P1
+        pr: "#1328"
+        depends_on: [scope-retrieve-tools]
+      - id: scope-selectable-profile-predicate
+        title: "FR-003/FR-004 remainder: selectable-profile predicate for UNPINNED tokens on /mcp/p/<slug>, /mcp/p, /mcp/p/ and set_profile; identical status+body across missing / deleted / not-selectable / pin-mismatch / no-profiles (#1225 + #1227 follow-up lists)"
+        status: done
+        priority: P1
+        pr: "#1283"
+        depends_on: [scope-fix-set-profile, scope-fix-prompts-profile-url]
+      - id: scope-cache-legacy-invalidation
+        title: "FR-002 + FR-001 remainder: legacy/unstamped and internal (registry, guesser) cache entries refused for every caller and durably invalidated; monotone recursive provenance; existence-non-disclosing refusal on MCP and REST (#1226 follow-up list)"
+        status: done
+        priority: P2
+        pr: "#1282"
+        depends_on: [scope-fix-read-cache]
+      - id: scope-log-attribution
+        title: "FR-007 remainder: per-record canonical log ownership (a/b vs a_b share one file), filter-before-limit + authorized lines_returned, subject-bound OAuth-callback logging, canonical container ownership in Docker cleanup (#1224 follow-up list)"
+        status: done
+        priority: P2
+        pr: "#1284"
+        depends_on: [scope-fix-tail-log]
+      - id: scope-target-identity-producers
+        title: "FR-009 remainder: producer-side exact-name identity (checkToolApprovals / differential index collapse ns:erase to erase), direct-name dispatch + preflight share lookupToolApproval, unresolved/stale identity refuses scoped callers, full 54-cell acceptance tables (#1223 follow-up list)"
+        status: done
+        priority: P2
+        pr: "#1279"
+        depends_on: [scope-fix-target-tier]
+      - id: scope-fix-stored-script-admin
+        title: "FR-012: stored-script enumeration is administrator-only (PR H0)"
+        status: done
+        priority: P2
+        pr: "#1285"
+        depends_on: []
+      - id: scope-regression-suite
+        title: "FR-011/FR-013/FR-014: two-fixture differential oracle with sentinels across the applicability matrix, credential-authenticated HTTP matrix over every /mcp surface, admin p95 perf gate on the frozen 527-tool snapshot"
+        status: done
+        priority: P2
+        pr: "#1332"
+        depends_on: [scope-retrieve-tools, scope-direct-publication, scope-refusal-shapes]
+
+  - id: auto-routing-mode
+    title: "Auto routing mode: budget-fitted tool surface per session (spec 104)"
+    status: todo
+    priority: P1
+    spec: specs/104-auto-routing-mode
+    depends_on: [agent-scope-hardening, schema-deferred, token-bench]
+    note: "routing_mode: auto measures, per session and on the catalog that session will actually see, the three candidate surfaces (direct full, direct deferred, retrieve compact — the Spec 103 bench cell names) with the real tokenizer and serves the richest rung under a 12,000-token budget, so the small-fleet developer gets the whole menu with schemas and the 1,000-tool fleet stays on search — the current default is strictly worse than no proxy for the first population. Decision record (rung, three measurements, budget, counts, scope label, reason, time) surfaces in the routing API, doctor, tray, Web UI and telemetry; hysteresis so a 1% catalog change never flips a live session. Spec: 14 astra rounds, ready-for-plan 2026-09-07; its fixed-surface corrections were split out as Spec 105 (FR-016 states the invariant 105 makes true), hence the hard dependency. P1 = US1-4 (rung selection, session stability, scoped measurement, routing API + doctor); P2 = US5-6 (hysteresis reporting, tray/Web UI rendering, telemetry)."
+    tasks:
+      - id: auto-routing-p1
+        title: "P1 (US1-4): per-session measurement of the three candidates on the scoped catalog, rung selection under the budget, stable sessions, decision record in routing API + doctor"
+        status: todo
+        priority: P1
+        depends_on: []
+      - id: auto-routing-p2
+        title: "P2 (US5-6): hysteresis reporting on catalog change, tray + Web UI rendering of the decision, telemetry counters"
+        status: todo
+        priority: P2
+        depends_on: [auto-routing-p1]
+
+  - id: token-bench
+    title: "Token-efficiency benchmark: measured savings, published results"
+    status: in_progress
+    priority: P1
+    spec: specs/103-token-bench
+    depends_on: [schema-deferred]
+    note: "Measure the real token cost of every routing/savings mode combination — baseline, compact signatures (spec 085), deferred schemas (spec 102), optimistic calling via self-healing pre-dispatch validation, code_execution (spec 096) and stored scripts (spec 097) — on replayed real sessions and on public benchmarks, then publish the results on mcpproxy.app/blog. Every savings number we quote today is an estimate; this turns them into reproducible measurements. Sequenced after schema-deferred so the newest mode is in the matrix. Spec 103 landed 2026-08-31 (#1137 spec+plan, #1139 tasks) after 13 cross-model review rounds; three of its findings changed the design rather than the wording: a recording carries no prompt/conversation/completion oracle so replay CANNOT show agent behaviour (US1 deterministic cost vs US2 live loop are now separate stories); replay needs a FLEET INPUT because the export has no fleet snapshot; and bodies-off yields menu costs plus one cross-mode delta, never an absolute workload cost. The matrix is 5 distinct behaviours, not a 3x2x2 product."
+    tasks:
+      - id: token-bench-harness
+        title: "Replay harness: activity-log sessions re-run under each mode combo; tokens per completed task + first-call success + retries"
+        status: done
+        pr: ["#1141", "#1147", "#1151", "#1153", "#1160"]
+        note: "Shipped 2026-08-31..09-01: #1141 replay MVP, #1147 payload decomposition (US4), #1151 tools/list primitive + live fleet source, #1153 live agent loop + reproducibility + publication, #1160 code-execution response-side saving. Epic stays in_progress: public suites, blog post and heartbeat-v10 counters remain todo."
+        depends_on: []
+        note: "BUILDS ON the existing bench/ harness - do NOT rebuild token counting, encoding arms, break-even or recall. Already shipped there (PRs #747/#748 MCP-42, #851 spec 083): six encoding arms including direct_deferred (spec 102), cl100k_base counting, live response cost, break-even, RecallAtK/NDCGAtK, the v2 report + dashboard, `make bench-discovery` and CI wiring in bench.yml/eval.yml. 2026-08-31 audit correction: the old note claimed this task absorbs discovery-eval-harness because it would measure retrieval recall - recall is ALREADY measured (eval.yml retrieval-d1 + bench/armindex.go), so that is not this task's contribution. GENUINELY OPEN and unique here: (a) activity-log session REPLAY (nothing in bench/ reads the activity log; internal/contracts/activity.go already carries WorkSessionID, ToolName and Response - watch ResponseTruncated, which would undercount tokens); (b) MEASURED first-call success and retry rate — today they are assumed, not observed: bench/session.go defines per-arm literature-derived defaults (armRetryRates, research D8) and bench/report.go only renders and labels them as estimates; (c) tokens-per-SUCCESSFUL-task, which needs a task-completion signal the static harness has no concept of."
+      - id: token-bench-public
+        title: "Run public suites locally (τ-bench / BFCL / MCP-specific — final list verified by a research pass) and record reproducible results"
+        status: todo
+        depends_on: [token-bench-harness]
+        note: "PARTIALLY SHIPPED via spec 083 - public CORPUS/LINTER groundwork is integrated and reproducible, but NO public agent-loop task suite is, and that is what this task ultimately owes. Do not call any of the following MCP-specific: ToolRet is a general tool-retrieval corpus whose docs are heterogeneous JSON/text and explicitly not MCP input schemas (bench/corpusio/toolret.go). What exists: ToolRet (runtime fetch, never committed; seeded subset via -subset/-seed; run by the toolret-subset job in bench.yml), the 527-tool Apache-2.0 LiveMCPBench snapshot, and the pinned external lap-score linter as an independent verdict. Scope precisely: the LiveMCPBench snapshot is load-bearing for spec 102 SC-001 at fleet scale and is runnable via -livemcptool, but bench.yml does NOT run it (the regular job passes only -corpus-v2), and its loader carries no retrieval golden set — so it measures token/scale, not recall. REMAINING: the agent-loop suites, which need a pinned-LLM budget decision. Re-confirm the shortlist against the completed research pass before building - the τ-bench/BFCL naming here predates it."
+      - id: token-bench-blog
+        title: "Publish results + methodology on mcpproxy.app/blog"
+        status: todo
+        depends_on: [token-bench-public]
+      - id: token-bench-telemetry
+        title: "Heartbeat v10: per-tool_response_mode token counters for real-world cohort validation"
+        status: todo
+        depends_on: []
+
+  - id: tool-graph
+    title: "Tool co-occurrence graph (experimental, feature-flagged)"
+    status: todo
+    priority: P2
+    depends_on: []
+    note: "Local-only co-occurrence graph mined from the activity log: suggests likely-next tools to agents and surfaces usage-chain analytics. Everything sits behind experimental.tool_graph, off by default — nothing leaves the machine."
+    tasks:
+      - id: tool-graph-core
+        title: "Co-occurrence graph from the activity log + related_tools hint in call_tool responses (flag-gated)"
+        status: todo
+        depends_on: []
+      - id: tool-graph-ranking
+        title: "Session-aware rank boost in retrieve_tools"
+        status: todo
+        depends_on: [tool-graph-core]
+      - id: tool-graph-mining
+        title: "Workflow mining: frequent chains → suggested stored scripts (spec 097 synergy)"
+        status: todo
+        depends_on: [tool-graph-core]
+      - id: tool-graph-analytics
+        title: "Usage-chain analytics on the dashboard/stats page"
+        status: todo
+        depends_on: [tool-graph-core, analytics-default-landing]
+
+  # ── TELEMETRY-DRIVEN REPLAN (2026-07-02) ──────────────────────────────────
+  - id: upgrade-nudge
+    title: Upgrade awareness & guided update
+    status: done
+    priority: P0
+    spec: specs/079-upgrade-nudge
+    depends_on: []
+    note: "Corrected CI-filtered telemetry (2026-07-02): ~60% of last-14d active installs run pre-v0.40; latest stable v0.46.0 only 18.7%. Turn the existing internal/updatecheck background poll into a universal, non-intrusive, channel-aware upgrade nudge across every surface. Never blocks/modals; silent offline/CI. 2026-08-29 truth-sync: this epic was marked done, but FR-002's release/age delta was never built — the four shipped tasks are US-slices and the FR belonged to none of them. Spec 079 has only spec.md (no plan.md/tasks.md), so no checkbox surface could catch it; the deferral survived only as TODO(spec-079/FR-002) code comments, which is how an outside contributor found it (#1081). RESOLVED 2026-08-29 in #1085; all five tasks are now done and the epic is complete."
+    tasks:
+      - id: upgrade-nudge-status-log
+        title: "US1 slice: update availability in mcpproxy status + deduped startup log"
+        status: done
+        pr: "#798"
+        depends_on: []
+      - id: upgrade-nudge-surfacing
+        title: "US1 remainder: dismissible Web UI banner + update_check config block"
+        status: done
+        pr: "#805"
+        depends_on: [upgrade-nudge-status-log]
+      - id: upgrade-nudge-channel
+        title: "US2: channel-aware guided update command (brew/dmg/deb/rpm/docker/go-install detection, build-time channel marker)"
+        status: done
+        pr: "#818"
+        note: "Install-channel detector (build marker + conservative heuristics; ambiguity->unknown), guided command only for brew/deb/rpm/go-install (generic fallback elsewhere, zero wrong-command risk), additive API fields (FR-021), status/doctor/banner surfaces; markers stamped in Docker + Windows-installer build paths only (single-binary matrix intentionally unstamped)."
+        depends_on: [upgrade-nudge-surfacing]
+      - id: upgrade-nudge-quiet
+        title: "US3: operator control + CI/offline quiet + no prerelease downgrade nudges"
+        status: done
+        pr: "#911"
+        depends_on: [upgrade-nudge-surfacing]
+      - id: upgrade-nudge-delta
+        title: "FR-002 remainder: human-readable \"N releases / M weeks behind\" delta on status, doctor, startup log, Web UI and the tray"
+        status: done
+        pr: "#1085"
+        note: "SHIPPED in #1085 (2026-08-29), closing #1081. The data blocker is resolved: internal/updatecheck/delta.go (ComputeReleaseDelta/FormatBehindSummary) counts the delta by semver over one ETag-conditional /releases page, with a by-tag lookup for builds older than that page; github.go gained ListReleases + GetReleaseByTagContext. The clause is formatted once in Go and rendered verbatim on all six surfaces: status_cmd.go, doctor_cmd.go, the deduped startup log (checker.go), UpdateBanner.vue, the Go tray and the Swift tray. Fields additive per FR-021 (behind_summary, releases_behind, releases_behind_saturated, weeks_behind); FR-016/FR-017 guarded in resolveDelta; a delta miss never sets CheckError nor touches the FR-018 backoff. The TODO(spec-079/FR-002) markers are gone (2026-08-31 audit: grep -rn \"spec-079\" --include=*.go internal cmd -> no hits)."
+        issue: "#1081"
+        depends_on: [upgrade-nudge-channel]
+
+  - id: connect-trust
+    title: "Connect step trust: preview, visible backup, one-click undo"
+    status: done
+    priority: P0
+    spec: specs/078-connect-trust-preview
+    depends_on: []
+    note: "Legacy wizard telemetry APPEARED to show 72.4% of engaged users skipping the connect step - debunked 2026-07-06: an instrumentation artifact, genuine never-connected skip = 0% (the wizard stamped skipped on users who connected via ConnectModal/CLI/manual config); real cliff is one-and-done installs ~48% (day-1 return 31%, identity-deduped 2026-07-10), see specs/080. Completers retain ~50% at two weeks vs 6% for non-engaged (correlation with engagement, not causation by the connect step). Backups already exist (internal/connect/backup.go) but are invisible in the Web UI. Close the trust gap: preview the exact config diff, surface the backup, offer one-click undo, explain the macOS TCC prompt."
+    tasks:
+      - id: connect-trust-preview
+        title: "US1: preview API + wizard diff UI (exact entry, API-key masking)"
+        status: done
+        pr: "#802"
+        depends_on: []
+      - id: connect-trust-backup-visibility
+        title: "US1: surface backup_path in Web UI + retention policy"
+        status: done
+        pr: "#799"
+        depends_on: []
+      - id: connect-trust-undo
+        title: "US2: one-click undo/disconnect in wizard"
+        status: done
+        pr: "#804"
+        depends_on: []
+      - id: connect-trust-tcc-copy
+        title: "US2: pre-emptive macOS TCC explanation in wizard"
+        status: done
+        pr: "#910"
+        depends_on: []
+
+  - id: telemetry-identity
+    title: "Telemetry identity & data quality (machine_id + CI-filter hardening)"
+    status: in_progress
+    priority: P1
+    depends_on: []
+    note: "2026-07-11 source audit: the CLIENT half is DONE and RELEASED — the old framing ('add a hashed machine_id (schema v6)') is stale. machine_id (HMAC-SHA256 of the OS machine id, internal/telemetry/machine_id.go) is emitted unconditionally in every heartbeat (telemetry.go:789; telemetry is opt-out) and shipped in v0.47.0; the client schema is already v7, a version past the v6 this note described; CI is filtered client-side by disabling telemetry outright (env_overrides.go). Worker verified live in prod 2026-07-07 (machine_id 100% populated). The audit also found that the 79%-unknown launch_source was a CLIENT bug misfiled to mcpproxy-dash — a dashboard cannot display a value the client is incapable of sending. That is now fixed (see telemetry-launchsource-tray). Remaining: dashboard consumption (mcpproxy-dash) + snapshot-cron alerting."
+    tasks:
+      - id: telemetry-machineid-client
+        title: "Hashed machine_id in heartbeat (schema v6)"
+        status: done
+        pr: "https://github.com/smart-mcp-proxy/mcpproxy-go/pull/796"
+        depends_on: []
+      - id: telemetry-machineid-worker
+        title: "Worker migration: machine_id column + extraction (repo mcpproxy-telemetry)"
+        status: done
+        pr: "mcpproxy-telemetry#3"
+        note: "Verified LIVE in prod 2026-07-07: remote D1 migration 0006 applied, worker deployed 2026-07-03 (right after 53811ed), v7 heartbeats populating machine_id 100% (64-char HMAC hex, distinct installs), vitest 129/129. No further worker work needed; dashboard consumption is the remaining child."
+        depends_on: [telemetry-machineid-client]
+      - id: telemetry-launchsource-tray
+        title: "Emit launch_source=tray — the 'tray' value was UNREACHABLE in the client, and that (not the dashboard) was the 79%-unknown root cause"
+        status: done
+        priority: P1
+        note: "FIXED 2026-07-11. Was: defaultHandshakeChecker.LaunchedViaTray() hardcoded `return false` and neither tray told the core it had spawned it, so a tray-spawned core (parent = the tray app, not launchd -> not login_item; no TTY -> not cli) fell through to 'unknown'. Now both trays (Swift CoreProcessManager.swift + Go buildCoreEnvironment) stamp MCPPROXY_LAUNCHED_BY=tray on the core they spawn, and DetectLaunchSource honours it. MCPPROXY_LAUNCHED_BY=installer still outranks it, so first-run attribution is unchanged; unrecognised values are ignored. NOTE for the dash: 'unknown' counts before/after this fix are NOT comparable — segment by version."
+        depends_on: []
+      - id: telemetry-machineid-dash
+        title: "Dashboard identityExpr prefers machine_id; exclude %-dev versions from human cohort (repo mcpproxy-dash)"
+        status: todo
+        note: "'fix launch_source 79% unknown' was REMOVED from this task on 2026-07-11 and moved to telemetry-launchsource-tray — it was a mcpproxy-go client bug, not a dashboard one."
+        depends_on: [telemetry-machineid-worker, telemetry-launchsource-tray]
+      - id: telemetry-snapshot-alerting
+        title: "Alerting on external-downloads snapshot cron (34-day outage went unnoticed)"
+        status: todo
+        depends_on: []
+
+  - id: release-qa-gate
+    title: "Release qualification gate (auto-QA matrix blocks the tag)"
+    status: in_progress
+    priority: P0
+    spec: specs/081-release-qa-gate
+    depends_on: []
+    note: "Attacks the return cliff (48% of installs are one-and-done; day-1 return 31% — corrected 2026-07-10, identity-deduped; the earlier '17.7% day-2' figure was un-deduped anonymous_id churn) and the one conceded competitor advantage: stability. No release tag until the surface x server-type matrix (MCP/REST/CLI/Web UI x stdio/http/sse/docker/oauth) plus invariants (activity-log/token counters move, quarantine flow, reconnect survival, in-place upgrade) pass automatically; macOS app smoke is advisory until promoted (3 consecutive passes, spec 081 US4). Assembles existing assets: test-api-e2e.sh, Playwright sweep, scan-eval gate, mcpproxy-ui-test."
+    tasks:
+      - id: release-qa-gate-matrix
+        title: "T1: tag-blocking release-gate workflow: server-type matrix (stdio/http/sse/docker/oauth) + invariants (activity-log/request-id, token+telemetry counters, quarantine flow, reconnect, upgrade-in-place), publish jobs gated on the verdict, scan-eval unconditional on tags"
+        status: done
+        pr: "#819"
+        priority: P0
+        note: "release-qa-gate.yml (reusable) gates all publish jobs in release.yml + prerelease.yml; cmd/mcpfixture (stdio/http/sse) + docker fixture image, cmd/release-gate driver (matrix+invariants+upgrade-in-place), internal/gatereport merger (no silent skips, reserved T2/T3/T4 not-run slots). Gate ran green end-to-end in CI. Found+fixed a real bug: POST /api/v1/servers dropped per-server isolation override. Deviations documented: FR-003 suite-race uses -short+-skip variant; FR-011 caller X-Request-Id not persisted on tool_call activity (driver correlates via nonce+core id)."
+        depends_on: []
+      - id: release-qa-gate-playwright
+        title: "T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only)"
+        status: done
+        pr: "#1030"
+        priority: P2
+        note: "Landed ADVISORY, not blocking (FR-016 wants blocking eventually). The sweep itself is now committed (e2e/web-ui-sweep: servers list, server detail + security tab, tools page + search, activity log, settings; uncaught page exceptions fail it) and scripts/run-web-smoke.sh — previously dead, it pointed at a spec file that lives in a gitignored dir — is its single launcher for both `./scripts/run-web-smoke.sh` by hand and the gate's `web-ui-sweep` job. Advisory is enforced twice: continue-on-error on the job (a failing job inside a reusable workflow would otherwise become the workflow_call conclusion the publishers gate on) and a non-blocking manifest entry advisory/web-ui-sweep (renamed from reserved/web-ui-sweep) whose failures land in advisory_failures via the new `release-gate run-suite --advisory` flag. Promotion to blocking = Blocking:true + drop continue-on-error, after 3 consecutive clean tags."
+        depends_on: [release-qa-gate-matrix]
+      - id: release-qa-gate-macos
+        title: "T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app)"
+        status: todo
+        priority: P3
+        depends_on: [release-qa-gate-matrix]
+      - id: release-qa-gate-consistency
+        title: "T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states)"
+        status: todo
+        priority: P3
+        depends_on: [release-qa-gate-matrix]
+
+  - id: telemetry-v7-churn
+    title: "Telemetry v7: honest funnel + churn instrumentation"
+    status: in_progress
+    priority: P1
+    spec: specs/080-telemetry-v7-churn
+    depends_on: []
+    note: "2026-07-06 recheck DEBUNKED the 72.4% connect-skip story: genuine never-connected skip = 0% (wizard dismiss stamped 'skipped' on users who connected via ConnectModal/CLI/manual config). 2026-07-10 recheck debunked the OTHER two spec-080 headline metrics as well: 'day-2 return 17.7%' was un-deduped anonymous_id churn (true, identity-deduped: one-and-done 48%, day-1 return 31%, day-7 16.6% — matches dashboard); '42% retrieve_tools -> 16% real call' was lifetime-flag vs windowed-counter asymmetry (true conversion ~90%; missing piece is a first_real_tool_call_ever activation flag). Real cliff = 48% one-and-done. 2026-07-11 source audit + fix: ALL of spec 080 is shipped and released in v0.47.0 (#813) — T1 wizard completed_external, T2 funnel fields, T3 pre-churn snapshot, US4 schema v7. The previous note claimed 'only cross-repo churn analytics (T4) remains'; that was WRONG — first_real_tool_call_ever had ZERO occurrences in Go code and was in-repo CLIENT work. It is now implemented, so the retrieve->call funnel is finally measurable lifetime-vs-lifetime. P0->P1: only cross-repo T4 now remains."
+    tasks:
+      - id: telemetry-v7-wizard-fix
+        title: "T1: wizard metric fix - on dismiss record connect step as completed_external (not skipped) when the user already connected via another path"
+        status: done
+        pr: "#813"
+        depends_on: []
+      - id: telemetry-v7-funnel-fields
+        title: "T2: funnel observability fields (wizard_shown, web_ui_opened counter, days_since_install, active_days_30d)"
+        status: done
+        pr: "#813"
+        depends_on: []
+      - id: telemetry-v7-prechurn-snapshot
+        title: "T3: pre-churn snapshot (previous_shutdown clean|crash via BBolt flag, last_error_code) so the final heartbeat doubles as cause-of-death"
+        status: done
+        pr: "#813"
+        depends_on: []
+      - id: telemetry-v7-realcall-flag
+        title: "first_real_tool_call_ever activation flag (symmetric to first_retrieve_tools_call_ever) so the retrieve->call funnel step is measurable lifetime-vs-lifetime"
+        status: done
+        priority: P1
+        note: "Root cause of the debunked 42%->16% cliff: retrieve step had a lifetime BBolt flag, real-call step only windowed per-day counters. DONE 2026-07-11: activationKeyFirstRealToolCallEver + ActivationState.FirstRealToolCallEver + MarkFirstRealToolCall (internal/telemetry/activation.go), stamped from recordUpstreamTool (internal/server/mcp.go) — the shared entry point every call_tool_* variant already runs. Additive boolean in the activation bucket, no schema bump. Tested that retrieve_tools does NOT set it (builtin, not an upstream call)."
+        depends_on: []
+      - id: telemetry-v7-churn-events
+        title: "T4: cross-repo churn_events materialization + dash Churn page with H1-H4 hypothesis signatures (repos mcpproxy-telemetry / mcpproxy-dash; tracked here for DAG visibility, out of scope of spec 080)"
+        status: todo
+        depends_on: [telemetry-v7-wizard-fix, telemetry-v7-funnel-fields, telemetry-v7-prechurn-snapshot, telemetry-machineid-worker]
+
+  - id: tray-api-purity
+    title: "Tray↔core decoupling: socket/REST API only, no config-file reads"
+    status: done
+    priority: P2
+    depends_on: []
+    note: "Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-11 source-of-truth re-audit + fix: Swift tray was already clean (MCPProxyApp.swift opens the config in an external editor, never parses it); the Go tray's update-check gate was already reworked to core-API gating (#805). The last violation — config.LoadFromFile in the Go tray's OAuth login path, live since ff03db92 (2026-05-18, #477) — turned out to be FUNCTIONALLY DEAD: the loaded config fed only two debug log lines, while the actual trigger was already the core-API TriggerOAuthLogin. Deleted rather than ported to REST. Bootstrap reads (socket path, config PATH without parsing, CA cert) are allowed and remain. Now enforced by a test so the rule cannot silently rot."
+    tasks:
+      - id: tray-oauth-config-read
+        title: "Delete the dead config read in the Go tray OAuth path (config.LoadFromFile) + drop the now-unused internal/config import. GetConfigPath stays on the interface — openConfigDir still needs the path to reveal the dir in the file manager."
+        status: done
+        priority: P2
+        depends_on: []
+      - id: tray-config-import-guard
+        title: "Test guard (internal/tray/config_import_guard_test.go) failing any tray-side call to config.LoadFromFile/Load/SaveConfig/... Parses source on disk, so a violation cannot hide behind an inactive build tag. Bans config FILE I/O, not the config package — cmd/mcpproxy-tray legitimately references the config.LogConfig type for its own logger."
+        status: done
+        priority: P2
+        depends_on: [tray-oauth-config-read]
+
+  - id: planning-hygiene
+    title: Planning/docs truth automation
+    status: in_progress
+    priority: P2
+    depends_on: []
+    note: "Automate the consistency checks this very audit had to do by hand: roadmap vs GitHub PR state, tasks.md updates on implementation PRs, volatile CLAUDE.md/README facts, and quickstart contract tests."
+    tasks:
+      - id: hygiene-roadmap-github-check
+        title: "gen-roadmap --check-github: cross-check roadmap.yaml statuses vs gh PR state + dangling spec links"
+        status: done
+        pr: "#800"
+        depends_on: []
+      - id: hygiene-tasks-reconcile
+        title: "CI rule: PR touching specs/<id> implementation paths must update tasks.md"
+        status: todo
+        depends_on: []
+      - id: hygiene-spec-evidence-check
+        title: "scripts/check-spec-evidence.py: deterministic check that every TICKED task cites code that exists"
+        status: done
+        priority: P1
+        note: "Report-only by design. A bare path-existence gate would be ~98% noise: of the 51 missing paths cited by ticked tasks, 50 NEVER existed in git history (speckit cites planned paths; code lands elsewhere). Classifies RELOCATED (stale path, high/medium confidence) vs REMOVED vs UNRESOLVED, and demotes path complaints when a distinctive cited symbol is found. Also surfaces `possibly_built` (unticked, evidence present). --json feeds hygiene-spec-gardener."
+        depends_on: []
+      - id: hygiene-spec-gardener
+        title: "Weekly cloud routine: LLM judges only the residue the evidence-check cannot decide, opens/updates one propose-only PR"
+        status: done
+        priority: P2
+        pr: ["#824", "#870", "#999", "#842"]
+        note: "SHIPPED and operating: three gardener runs merged (#824 2026-07-13, #870 2026-07-29, #999 2026-08-17). Auto-approval is NOT retroactive and did not carry all three — only #999 has a github-actions APPROVED review; #824 carries none and in fact merged ~24 min BEFORE the auto-approve workflow itself (#842, .github/workflows/spec-gardener-auto-approve.yml, merged 2026-07-13 04:40), and #870 records no approving review either. The blocker recorded below is cleared - scripts/check-spec-evidence.py is on main. Claude cloud routine 'spec-roadmap gardener' (trig_014GkHno4XSTobu8ViJV7Sno), Mondays 05:07 UTC. Branch claude/spec-gardener (the `claude/` prefix is what the cloud git-proxy allows to push without unrestricted-branch-push). Guardrails: never pushes main; never auto-applies un-ticks (they go in the PR body for a human); evidence required per tick; adversarial refutation pass; 40-tick cap per run."
+        depends_on: [hygiene-spec-evidence-check]
+      - id: hygiene-docs-facts
+        title: "Generate volatile CLAUDE.md/README facts (Go version, built-in tool list, sample config) from code with --check"
+        status: todo
+        depends_on: []
+      - id: hygiene-quickstart-contract
+        title: "Run top quickstart.md scenario per spec as contract test in test-api-e2e.sh"
+        status: todo
+        depends_on: []
+
+  # ── PARKED epics (intentionally on hold) ──────────────────────────────────
+  - id: marketplace
+    title: Server marketplace
+    status: todo
+    parked: true
+    priority: P3
+    mcp: MCP-37
+    depends_on: []
+    note: "PARKED. ~60% already ships (browse/search/one-click add). No spec yet; gaps tracked as MCP-3246..3250 (tray entries, metadata, telemetry). (070 is the registries-search-add spec, not a marketplace spec.)"
+
+  - id: siem
+    title: Audit SIEM integration
+    status: todo
+    parked: true
+    priority: P3
+    mcp: MCP-39
+    depends_on: []
+    note: "PARKED. Splunk HEC / Elastic _bulk / syslog shippers reusing JSONL export pipeline."
+
+  - id: paid-tier
+    title: Paid-tier MVP (billing / seats / license)
+    status: todo
+    parked: true
+    priority: P3
+    mcp: MCP-40
+    depends_on: []
+    note: "PARKED. Server-edition revenue motion: Ed25519 license tokens, seats, Stripe checkout. Behind //go:build server."
+
+  - id: sdk-v1-migration
+    title: SDK v1 migration
+    status: todo
+    parked: true
+    priority: P3
+    depends_on: []
+    note: "PARKED. Migrate to the v1 MCP Go SDK surface."
+
+  - id: sso
+    title: Spec 107 server edition SSO front door hardened for real IdPs
+    status: done
+    priority: P2
+    spec: specs/107-server-edition-sso-hardening
+    depends_on: []
+    note: "Generic OIDC, IdP-group -> server allowlist, attributable JSONL audit line; freeze the latent multiuser/credential-injection code. Research: docs/research/server-edition-2026-09-14 (#1281)."
+    tasks:
+      - id: sso-pr-a-freeze-cut
+        title: PR-A freeze/cut latent code + config normaliser + per-owner token cap (US5, US6)
+        status: done
+        depends_on: []
+        pr: "#1287"
+      - id: sso-pr-b-oidc-front-door
+        title: PR-B generic OIDC provider + front door behind ingress + telemetry v13 (US2, US7)
+        status: done
+        depends_on: [sso-pr-a-freeze-cut]
+        pr: "#1292"
+      - id: sso-pr-c-group-allowlist
+        title: PR-C one entitlement predicate, group grants, tenant Web UI session principal (US1, US4)
+        status: done
+        depends_on: [sso-pr-b-oidc-front-door]
+        pr: "#1293"
+      - id: sso-pr-d-audit-line
+        title: PR-D attributable JSONL audit line + auth_event + config/doctor/metrics (US3)
+        status: done
+        depends_on: [sso-pr-c-group-allowlist]
+        pr: "#1296"
+
+  # ── MERGED-BUT-UNIMPLEMENTED specs (cross-spec audit 2026-07-01) ───────────
+  # These specs are checked into specs/ but materially absent from code. Most
+  # "drafted/0%" specs are actually SHIPPED (stale tasks.md checkboxes) — these
+  # are the genuinely-unbuilt ones. See docs/personal-edition-polish.md audit.
+  - id: mcp-2026-upgrade
+    title: MCP protocol upgrade to 2026-07-28 revision
+    status: in_progress
+    priority: P1
+    spec: specs/058-mcp-2026-upgrade
+    depends_on: []
+    note: 'STABLE GATE CLEARED 2026-09-02: mark3labs/mcp-go v1.0.0 (stable) released; go.mod still pins v0.57.0. Raised P3->P1 on the 2026-09-02 issue-prioritization
+      pass — PLAN LANDED 2026-09-03 (research.md, plan.md, data-model.md, contracts/, quickstart.md) from a verified probe of mcp-go v1.0.0 STABLE. Production
+      code compiles unchanged on both editions (only test symbol NewTestStreamableHTTPServer moved to server/servertest, 32 sites); the FULL internal/server
+      suite under v1.0.0 fails on exactly the 2 known profile tests and nothing else. The bump ALONE flips the UPSTREAM-facing default to 2026-07-28 (connection_lifecycle.go:19
+      uses LATEST_PROTOCOL_VERSION), so the plan pins BOTH directions in the bump PR. Spec-057 conflict DECIDED: Option A (URL path = request-carried identity)
+      plus 2 mandatory grafts (era-gate resolver tier 3, because stdio SessionID is the constant "stdio"; list-only resolver, which also fixes a PRE-EXISTING
+      FR-012 violation on prompts/list). MRTR FR-015/016 cannot be met through the v1.0.0 public client API (CallTool hard-wires the round-trip loop; single-shot
+      entries unexported) -> plan proposes detect-and-frame + a spec amendment, NEEDS MAINTAINER RATIFICATION before implementation. FR-018/SC-005 vacuous
+      (no resource proxying). New security item R1: mcp-go inflightKey is ":<id>" for every modern request, so one client can cancel another''s call; masked
+      by the FR-028 pin. Spec-032 hash drift measured: real mechanism, 0 of 1096 real tools affected, fix is a NormalizeJSON ref canonicalisation + guard
+      test. Next step is speckit.tasks after ratification (tracker #532). Earlier: UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951)
+      ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision MERGED as PR #1033
+      on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that): final error-code renumbering
+      (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks &
+      Watch Items. The cross-spec conflict named there (FR-012 vs shipped Spec 057) is the one RESOLVED above as Option A. 028 agent-token scoping is already
+      compatible (header-carried). Tracker: #532.'
+
+  - id: security-gateway-cd
+    title: Security gateway Tracks C/D (per-arg least-privilege + signature provenance)
+    status: todo
+    priority: P3
+    spec: specs/054-mcp-security-gateway
+    depends_on: []
+    note: "Track A→Spec 056, Track B→Spec 059 (both shipped). UNBUILT: Track C per-ARGUMENT allow-listing (per-tool scope exists in mcp_direct_scope.go); Track D provenance + human-readable signature diff (SHA-256 pinning exists via Spec 032). Build ON 032/028, don't re-implement; honor the rug-pull re-quarantine interaction rule vs 032 auto-approve."
+  - id: discovery-eval-harness
+    title: Discovery-quality eval harness (Spec 065 second half)
+    status: in_progress
+    priority: P3
+    spec: specs/065-evaluation-foundation
+    depends_on: []
+    tasks:
+      - id: discovery-eval-pr-blocking
+        title: "Promote retrieval-D1 from report-only to PR-blocking (spec 065 FR-009/SC-005), and adjudicate the CN-002 frozen-corpus question"
+        status: todo
+        mcp: MCP-742
+        depends_on: []
+        note: "The only thing standing between this epic and done. eval.yml sets continue-on-error for pull_request on the retrieval-D1 job because D1 depends on npx/uvx package fetches (a known flake source); the workflow's own comment plans the promotion after a green soak. Until then CI does not fail on a discovery regression on the PR path, which is exactly what FR-009 and SC-005 require."
+    note: "IN PROGRESS — 2026-08-31 audit, corrected on cross-model review: both halves of the HARNESS shipped INDEPENDENTLY (not via token-bench-harness), but spec 065 is NOT fully met, so this is not done. FR-009 and SC-005 require CI to FAIL on a discovery regression beyond tolerance; the retrieval-D1 job is continue-on-error on pull requests, so on the PR path it does not fail — eval.yml itself records the promotion to PR-blocking as still open (MCP-742). A second, weaker tension to adjudicate rather than assume: CN-002 asks that scoring never run against a live drifting corpus, and D1 does boot a live mcpproxy serving 7 reference servers — but #931 pinned all seven upstreams to freeze-era versions and the job gates on the exact corpus ID set, so the corpus is reproducible in practice. Decide whether that satisfies CN-002 or whether a committed snapshot is required. Remaining work is therefore the gating promotion, not the harness. The earlier 'superseded / folded into token-bench-harness' framing was wrong on its own terms: token-bench-harness is still unbuilt, so nothing could have been folded into it. Security recall/FP half: cmd/scan-eval, backing the Spec 076/077 gate in eval.yml. Discovery-quality half: the eval.yml retrieval-d1 job boots mcpproxy and scores retrieval_golden_v1.json against a committed baseline at --tolerance 0.05 via the pinned external mcp-eval repo — note continue-on-error is scoped to github.event_name == 'pull_request', so the job is REPORT-ONLY on PRs (npx/uvx fetch flake) and BLOCKING on both the nightly schedule and manual workflow_dispatch runs. Promoting it to PR-blocking after a green soak is still open (MCP-742). NB the workflow's own inline comment says 'blocking on the nightly schedule' and omits workflow_dispatch. A second in-repo implementation lives in bench/: metrics.go defines RecallAtK/NDCGAtK, and the SC-003 recall@5 = 0.68 +/- 0.05 parity gate through the production Bleve index is asserted in bench/armindex_test.go (armindex.go supplies the production index wiring, not the assertion). Kept as a stable depends_on target; do not build a standalone harness."

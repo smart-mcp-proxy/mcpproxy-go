@@ -7,6 +7,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
@@ -16,13 +17,44 @@ import (
 	"go.uber.org/zap"
 )
 
+// OTLP transport protocols.
+const (
+	ProtocolHTTP = "http"
+	ProtocolGRPC = "grpc"
+)
+
 // TracingConfig holds configuration for OpenTelemetry tracing
 type TracingConfig struct {
-	Enabled        bool    `json:"enabled"`
-	ServiceName    string  `json:"service_name"`
-	ServiceVersion string  `json:"service_version"`
-	OTLPEndpoint   string  `json:"otlp_endpoint"`
-	SampleRate     float64 `json:"sample_rate"`
+	Enabled        bool   `json:"enabled"`
+	ServiceName    string `json:"service_name"`
+	ServiceVersion string `json:"service_version"`
+	// Protocol selects the OTLP transport: "http" (default) or "grpc".
+	Protocol     string  `json:"protocol"`
+	OTLPEndpoint string  `json:"otlp_endpoint"`
+	SampleRate   float64 `json:"sample_rate"`
+	// ResourceAttributes are extra resource-level attributes attached to every
+	// span (e.g. server-edition tenant/profile labels). Optional.
+	ResourceAttributes []attribute.KeyValue `json:"-"`
+}
+
+// buildOTLPExporter constructs an OTLP span exporter for the configured
+// transport. An empty protocol defaults to HTTP; an unsupported protocol is an
+// error. Exporters are lazy — construction does not require a live collector.
+func buildOTLPExporter(ctx context.Context, config TracingConfig) (trace.SpanExporter, error) {
+	switch config.Protocol {
+	case ProtocolGRPC:
+		return otlptracegrpc.New(ctx,
+			otlptracegrpc.WithEndpoint(config.OTLPEndpoint),
+			otlptracegrpc.WithInsecure(),
+		)
+	case ProtocolHTTP, "":
+		return otlptracehttp.New(ctx,
+			otlptracehttp.WithEndpoint(config.OTLPEndpoint),
+			otlptracehttp.WithInsecure(),
+		)
+	default:
+		return nil, fmt.Errorf("unsupported OTLP protocol %q (want %q or %q)", config.Protocol, ProtocolHTTP, ProtocolGRPC)
+	}
 }
 
 // TracingManager manages OpenTelemetry tracing
@@ -61,21 +93,20 @@ func NewTracingManager(logger *zap.SugaredLogger, config TracingConfig) (*Tracin
 
 // initTracing initializes OpenTelemetry tracing
 func (tm *TracingManager) initTracing() error {
-	// Create OTLP exporter
-	exporter, err := otlptracehttp.New(context.Background(),
-		otlptracehttp.WithEndpoint(tm.config.OTLPEndpoint),
-		otlptracehttp.WithInsecure(), // Use HTTP instead of HTTPS for local development
-	)
+	// Create OTLP exporter for the configured transport (http or grpc)
+	exporter, err := buildOTLPExporter(context.Background(), tm.config)
 	if err != nil {
 		return fmt.Errorf("failed to create OTLP exporter: %w", err)
 	}
 
-	// Create resource
+	// Create resource, including any edition-specific attributes (e.g. server
+	// edition tenant/profile labels).
+	resAttrs := append([]attribute.KeyValue{
+		semconv.ServiceNameKey.String(tm.config.ServiceName),
+		semconv.ServiceVersionKey.String(tm.config.ServiceVersion),
+	}, tm.config.ResourceAttributes...)
 	res, err := resource.New(context.Background(),
-		resource.WithAttributes(
-			semconv.ServiceNameKey.String(tm.config.ServiceName),
-			semconv.ServiceVersionKey.String(tm.config.ServiceVersion),
-		),
+		resource.WithAttributes(resAttrs...),
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create resource: %w", err)

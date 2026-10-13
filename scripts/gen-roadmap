@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Convenience wrapper around scripts/gen-roadmap.py.
+# Generates ROADMAP.md at the repo root from roadmap.yaml.
+set -euo pipefail
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "${DIR}/gen-roadmap.py" "$@"

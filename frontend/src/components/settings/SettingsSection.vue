@@ -6,6 +6,7 @@
       :field="f"
       :model-value="getPath(working, f.key)"
       :dirty="isFieldDirty(f.key)"
+      :lock="locks[f.key] ?? null"
       @update:model-value="onChange(f, $event)"
     />
     <p v-if="!fields.length" class="text-sm text-base-content/50 py-4">No settings match your search.</p>
@@ -41,7 +42,7 @@
           @click="attemptSave"
         >
           <span v-if="saving" class="loading loading-spinner loading-xs"></span>
-          Save changes
+          {{ SAVE_CHANGES_LABEL }}
         </button>
       </div>
     </div>
@@ -77,16 +78,22 @@
 <script setup lang="ts">
 import { ref, computed, getCurrentInstance } from 'vue'
 import SettingField from './SettingField.vue'
-import { getPath, setPath, buildPartial, validateField, type SettingField as Field } from '@/views/settings/fields'
+import { getPath, setPath, buildPartial, validateField, SAVE_CHANGES_LABEL, type SettingField as Field } from '@/views/settings/fields'
 import { useSystemStore } from '@/stores/system'
 import api from '@/services/api'
 
-const props = defineProps<{
-  sectionId: string
-  fields: Field[]
-  working: any // reactive working copy of the full config
-  original: any // snapshot of last-saved values
-}>()
+const props = withDefaults(
+  defineProps<{
+    sectionId: string
+    fields: Field[]
+    working: any // reactive working copy of the full config
+    original: any // snapshot of last-saved values
+    // Spec 109 FR-044a: keys whose effective value is forced from outside the
+    // config file. A locked field is read-only and never counts as dirty.
+    locks?: Record<string, { reason: string; value?: unknown }>
+  }>(),
+  { locks: () => ({}) }
+)
 const emit = defineEmits<{ (e: 'saved', changed: string[]): void }>()
 
 const systemStore = useSystemStore()
@@ -109,10 +116,11 @@ const dirtyKeys = computed(() => {
   for (const f of props.fields) {
     if (!eq(getPath(props.working, f.key), getPath(props.original, f.key))) keys.add(f.key)
   }
-  return [...keys]
+  return [...keys].filter((k) => !(k in props.locks))
 })
 
 function isFieldDirty(key: string): boolean {
+  if (key in props.locks) return false
   if (key in dirty.value) return true
   const f = props.fields.find((x) => x.key === key)
   return f != null && !eq(getPath(props.working, key), getPath(props.original, key))

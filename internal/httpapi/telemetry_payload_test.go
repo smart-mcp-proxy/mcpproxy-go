@@ -4,10 +4,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -21,7 +24,7 @@ type telemetryPayloadController struct {
 	apiKey string
 }
 
-func (m *telemetryPayloadController) GetCurrentConfig() any {
+func (m *telemetryPayloadController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 
@@ -33,6 +36,8 @@ func (fakeRuntimeStats) GetServerCount() int               { return 7 }
 func (fakeRuntimeStats) GetConnectedServerCount() int      { return 5 }
 func (fakeRuntimeStats) GetToolCount() int                 { return 42 }
 func (fakeRuntimeStats) GetRoutingMode() string            { return "retrieve_tools" }
+func (fakeRuntimeStats) GetToolResponseMode() string       { return "full" }
+func (fakeRuntimeStats) GetDirectToolResponseMode() string { return "full" }
 func (fakeRuntimeStats) IsQuarantineEnabled() bool         { return true }
 func (fakeRuntimeStats) IsDockerAvailable() bool           { return false }
 func (fakeRuntimeStats) GetDockerIsolatedServerCount() int { return 0 }
@@ -73,6 +78,68 @@ func TestHandleGetTelemetryPayload_OK(t *testing.T) {
 	assert.Equal(t, true, resp.Data["quarantine_enabled"])
 	assert.Equal(t, "personal", resp.Data["edition"])
 	assert.Equal(t, "v0.0.0-test", resp.Data["version"])
+}
+
+// TestHandleGetTelemetryPayload_RendersV7Fields (Spec 080 FR-019) asserts
+// the payload endpoint — the data source for `mcpproxy telemetry
+// show-payload`, which prints this JSON verbatim — renders every v7 field
+// when populated, so users can inspect exactly what would be sent.
+func TestHandleGetTelemetryPayload_RendersV7Fields(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	ctrl := &telemetryPayloadController{apiKey: "test-key"}
+	srv := NewServer(ctrl, logger, nil)
+
+	cfg := &config.Config{APIKey: "test-key"}
+	svc := telemetry.New(cfg, "", "v0.0.0-test", "personal", zap.NewNop())
+	svc.SetRuntimeStats(fakeRuntimeStats{})
+
+	db, err := bbolt.Open(filepath.Join(t.TempDir(), "v7.db"), 0o600, &bbolt.Options{Timeout: time.Second})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	funnel := telemetry.NewFunnelStore()
+	require.NoError(t, funnel.IncrementWebUIOpened(db))
+	svc.SetFunnelStore(funnel, db)
+
+	prechurn := telemetry.NewPreChurnStore()
+	require.NoError(t, prechurn.RecordLastErrorCode(db, "MCPX_DOCKER_CLI_NOT_FOUND"))
+	svc.SetPreChurn(telemetry.PreviousShutdownClean, prechurn, db)
+
+	svc.SetOnboardingProvider(func() *telemetry.OnboardingSnapshot {
+		return &telemetry.OnboardingSnapshot{
+			WizardShown:       true,
+			WizardConnectStep: "completed_external",
+		}
+	})
+
+	srv.SetTelemetryPayloadProvider(func() *telemetry.Service { return svc })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/telemetry/payload", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+
+	var resp struct {
+		Success bool                   `json:"success"`
+		Data    map[string]interface{} `json:"data"`
+	}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	require.True(t, resp.Success)
+	require.NotNil(t, resp.Data)
+
+	// Tracks telemetry.SchemaVersion — v8 added the tpa_scanner block and v9
+	// the TPA funnel counters + trust_mode_distribution; the v7 fields below
+	// must keep rendering regardless (FR-014: additive only).
+	assert.Equal(t, float64(telemetry.SchemaVersion), resp.Data["schema_version"])
+	assert.Equal(t, true, resp.Data["wizard_shown"])
+	assert.Equal(t, "completed_external", resp.Data["wizard_connect_step"])
+	assert.Equal(t, float64(1), resp.Data["web_ui_opened"])
+	assert.Equal(t, float64(0), resp.Data["days_since_install"])
+	assert.Equal(t, float64(1), resp.Data["active_days_30d"])
+	assert.Equal(t, "clean", resp.Data["previous_shutdown"])
+	assert.Equal(t, "MCPX_DOCKER_CLI_NOT_FOUND", resp.Data["last_error_code"])
 }
 
 func TestHandleGetTelemetryPayload_NoProvider(t *testing.T) {

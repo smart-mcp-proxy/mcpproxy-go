@@ -46,8 +46,11 @@ func newAddFromRegistryTestServer(t *testing.T) *MCPProxyServer {
 
 // startTestRegistry registers an in-memory registry (id="testreg") whose server
 // list is served by a local httptest server, so add_from_registry can resolve a
-// registry reference without touching the network. SetRegistriesFromConfig
-// replaces the global catalog; tests run sequentially so the last writer wins.
+// registry reference without touching the network.
+//
+// SetRegistriesFromConfig writes process-global state: the registry catalog and,
+// through AllowPrivateRegistryFetch, the SSRF allow-policy. Both are restored on
+// cleanup so later tests that read the policy without setting it are unaffected.
 func startTestRegistry(t *testing.T, servers []map[string]interface{}) {
 	t.Helper()
 
@@ -58,7 +61,14 @@ func startTestRegistry(t *testing.T, servers []map[string]interface{}) {
 	}))
 	t.Cleanup(srv.Close)
 
+	// Restore the default catalog and SSRF allow-policy (MCP-1076). Registered
+	// before the write so LIFO cleanup runs it while srv is still serving.
+	t.Cleanup(func() { registries.SetRegistriesFromConfig(nil) })
+
 	registries.SetRegistriesFromConfig(&config.Config{
+		// The registry is served on loopback (httptest); opt past the SSRF guard
+		// (MCP-1076) the same way an operator would for a trusted internal mirror.
+		AllowPrivateRegistryFetch: true,
 		Registries: []config.RegistryEntry{
 			{ID: "testreg", Name: "testreg", ServersURL: srv.URL, Protocol: "modelcontextprotocol/registry"},
 		},

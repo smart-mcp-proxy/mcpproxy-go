@@ -16,7 +16,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 // Registry command flags (spec 070).
@@ -68,7 +67,7 @@ daemon. 'list' and 'search' use the daemon when available and otherwise read the
 registries directly.`,
 	}
 
-	cmd.PersistentFlags().StringVarP(&registryConfigPath, "config", "c", "", "Path to MCP configuration file")
+	addConfigFlag(cmd.PersistentFlags(), &registryConfigPath, "Path to MCP configuration file")
 	cmd.AddCommand(newRegistryListCmd(), newRegistrySearchCmd(), newRegistryAddCmd(), newRegistryAddSourceCmd(), newRegistryEditCmd(), newRegistryRemoveCmd())
 	return cmd
 }
@@ -97,7 +96,8 @@ from it.`,
 
 			// remove MUST go through the daemon: the registry list lives on the
 			// runtime config snapshot and is updated copy-on-write via UpdateConfig.
-			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+			client, ok := newDaemonClient(cfg, nil)
+			if !ok {
 				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
 					"removing a registry source requires a running mcpproxy daemon").
 					WithGuidance("Start the daemon, then retry").
@@ -106,8 +106,6 @@ from it.`,
 
 			ctx, cancel := registryContext()
 			defer cancel()
-
-			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
 			reg, err := client.RemoveRegistrySource(ctx, registryID)
 			if err != nil {
 				return registryRemoveErrorOutput(err)
@@ -159,6 +157,12 @@ func newRegistryAddSourceCmd() *cobra.Command {
 official modelcontextprotocol/registry v0.1 protocol (the same protocol shipped
 by Copilot/VS Code/Azure).
 
+That protocol is the ONLY one MCPProxy speaks. The URL is fetched when you add
+it and rejected right away if it turns out not to be a v0.1 registry — a static
+JSON catalog or an HTML page cannot be browsed, and you hear about it now rather
+than on your first search. Paste either the base URL or the full servers
+endpoint; whatever you paste is used as-is.
+
 The added source is tagged "custom" (informational). Servers you discover and
 add through it follow the global quarantine default like any other server, so
 with quarantine enabled (the default) they land quarantined for review:
@@ -177,7 +181,8 @@ with quarantine enabled (the default) they land quarantined for review:
 
 			// add-source MUST go through the daemon: the registry list lives on the
 			// runtime config snapshot and is updated copy-on-write via UpdateConfig.
-			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+			client, ok := newDaemonClient(cfg, nil)
+			if !ok {
 				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
 					"adding a registry source requires a running mcpproxy daemon").
 					WithGuidance("Start the daemon, then retry").
@@ -186,8 +191,6 @@ with quarantine enabled (the default) they land quarantined for review:
 
 			ctx, cancel := registryContext()
 			defer cancel()
-
-			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
 			reg, err := client.AddRegistrySource(ctx, sourceURL, registryAddSourceProto, registryAddSourceID, registryAddSourceName)
 			if err != nil {
 				return registryAddErrorOutput(err)
@@ -239,7 +242,8 @@ also given.
 
 			// edit MUST go through the daemon: the registry list lives on the
 			// runtime config snapshot and is updated copy-on-write via UpdateConfig.
-			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+			client, ok := newDaemonClient(cfg, nil)
+			if !ok {
 				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
 					"editing a registry source requires a running mcpproxy daemon").
 					WithGuidance("Start the daemon, then retry").
@@ -248,8 +252,6 @@ also given.
 
 			ctx, cancel := registryContext()
 			defer cancel()
-
-			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
 			reg, err := client.EditRegistrySource(ctx, registryID, registryEditName, registryEditURL, registryEditServersURL)
 			if err != nil {
 				return registryEditErrorOutput(err)
@@ -318,8 +320,7 @@ func newRegistryListCmd() *cobra.Command {
 			}
 
 			// Daemon-first.
-			if shouldUseUpstreamDaemon(cfg.DataDir) {
-				client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
+			if client, ok := newDaemonClient(cfg, nil); ok {
 				if regs, derr := client.ListRegistries(ctx); derr == nil {
 					return renderRegistries(formatter, regs)
 				}
@@ -360,6 +361,7 @@ The printed ID column is what you pass to 'registry add'.`,
 			if registryID == "" {
 				return fmt.Errorf("--registry is required (use 'mcpproxy registry list' to see available ids)")
 			}
+			printCatalogDeprecationNotice("registry search", fmt.Sprintf("catalog search %s --source %s", query, registryID))
 
 			ctx, cancel := registryContext()
 			defer cancel()
@@ -375,8 +377,7 @@ The printed ID column is what you pass to 'registry add'.`,
 			}
 
 			// Daemon-first.
-			if shouldUseUpstreamDaemon(cfg.DataDir) {
-				client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
+			if client, ok := newDaemonClient(cfg, nil); ok {
 				if servers, derr := client.SearchRegistry(ctx, registryID, registrySearchTag, query, registryLimit); derr == nil {
 					return renderRegistryServers(formatter, servers)
 				}
@@ -431,6 +432,7 @@ inputs, supply them with --env KEY=VALUE.`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(_ *cobra.Command, args []string) error {
 			registryID, serverID := args[0], args[1]
+			printCatalogDeprecationNotice("registry add", fmt.Sprintf("catalog add %s/%s", registryID, serverID))
 
 			env, err := parseRegistryEnv(registryAddEnv)
 			if err != nil {
@@ -444,7 +446,8 @@ inputs, supply them with --env KEY=VALUE.`,
 			}
 
 			// add MUST go through the daemon (keystone op is server-side).
-			if !shouldUseUpstreamDaemon(cfg.DataDir) {
+			client, ok := newDaemonClient(cfg, nil)
+			if !ok {
 				return outputError(clioutput.NewStructuredError(clioutput.ErrCodeConnectionFailed,
 					"adding from a registry requires a running mcpproxy daemon").
 					WithGuidance("Start the daemon, then retry").
@@ -453,8 +456,6 @@ inputs, supply them with --env KEY=VALUE.`,
 
 			ctx, cancel := registryContext()
 			defer cancel()
-
-			client := cliclient.NewClient(socket.DetectSocketPath(cfg.DataDir), nil)
 			enabled := registryAddEnabled
 			result, err := client.AddFromRegistry(ctx, registryID, serverID, registryAddName, env, &enabled)
 			if err != nil {
@@ -469,11 +470,7 @@ inputs, supply them with --env KEY=VALUE.`,
 				return nil
 			}
 
-			fmt.Printf("✅ Added '%s'", result.Name)
-			if result.Quarantined {
-				fmt.Printf(" (quarantined — approve with: mcpproxy upstream approve %s)", result.Name)
-			}
-			fmt.Println()
+			fmt.Println(registryAddMessage(result.Name, result.Quarantined))
 			return nil
 		},
 	}
@@ -481,6 +478,18 @@ inputs, supply them with --env KEY=VALUE.`,
 	cmd.Flags().StringArrayVar(&registryAddEnv, "env", nil, "Set an environment variable (KEY=VALUE); repeatable")
 	cmd.Flags().BoolVar(&registryAddEnabled, "enabled", true, "Whether the added server is enabled")
 	return cmd
+}
+
+// registryAddMessage formats the CLI's success confirmation after adding a
+// server from a registry (Spec 109 FR-063): "Added <name> to MCPProxy
+// (quarantined for review)" — the same wording the Web/macOS "Add to
+// MCPProxy" action uses after a successful add.
+func registryAddMessage(name string, quarantined bool) string {
+	msg := fmt.Sprintf("✅ Added %s to MCPProxy", name)
+	if quarantined {
+		msg += fmt.Sprintf(" (quarantined for review — approve with: mcpproxy upstream approve %s)", name)
+	}
+	return msg
 }
 
 // registryAddErrorOutput maps a *cliclient.RegistryAddError to a structured CLI
@@ -510,6 +519,12 @@ func registryAddErrorOutput(err error) error {
 	case "invalid_registry_url":
 		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
 			WithGuidance("Provide an https URL, e.g. https://registry.example.com"), clioutput.ErrCodeInvalidInput)
+	case "unsupported_registry_protocol":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
+			WithGuidance("MCPProxy speaks only modelcontextprotocol/registry v0.1 — omit --protocol"), clioutput.ErrCodeInvalidInput)
+	case "registry_source_unusable":
+		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeInvalidInput, addErr.Message).
+			WithGuidance("That URL does not serve a modelcontextprotocol/registry v0.1 server list"), clioutput.ErrCodeInvalidInput)
 	case "registries_locked":
 		return outputError(clioutput.NewStructuredError(clioutput.ErrCodeOperationFailed, addErr.Message).
 			WithGuidance("Registry additions are disabled by policy (registries_locked)"), clioutput.ErrCodeOperationFailed)
@@ -607,24 +622,30 @@ func truncateStr(s string, max int) string {
 // command's --config flag and the global --data-dir, falling back to defaults
 // so 'list'/'search' still work without a config file.
 func loadRegistryConfig() (*config.Config, error) {
-	var cfg *config.Config
-	var err error
-	if registryConfigPath != "" {
-		cfg, err = config.LoadFromFile(registryConfigPath)
-	} else {
-		cfg, err = config.Load()
-	}
+	// Go through loadCLIConfig so a --data-dir with no config file anywhere
+	// uses defaults rooted at that directory instead of creating
+	// $HOME/.mcpproxy/mcp_config.json.
+	cfg, err := loadCLIConfig(registryConfigPath)
 	if err != nil {
+		// An explicitly named config that cannot be loaded is an error, not a
+		// reason to silently use defaults.
+		if resolveCLIConfigPath(registryConfigPath) != "" {
+			return nil, err
+		}
 		// Discovery should still work with defaults if no config is present.
 		cfg = config.DefaultConfig()
-	}
-	if dataDir != "" {
-		cfg.DataDir = dataDir
+		if dataDir != "" {
+			cfg.DataDir = dataDir
+		}
 	}
 	return cfg, nil
 }
 
 func registryContext() (context.Context, context.CancelFunc) {
 	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
-	return context.WithTimeout(ctx, 30*time.Second)
+	// Registry ops talk to live registries: add-source probes the URL, and a
+	// search may page through a registry that takes ~20s per page (the official
+	// one currently does). This must stay comfortably above the server-side
+	// budgets, or the CLI reports a timeout for work the daemon actually finished.
+	return context.WithTimeout(ctx, 120*time.Second)
 }

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -288,7 +289,7 @@ func TestWrite_HappyPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o600 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o600 {
 		t.Errorf("file mode = %v, want 0600", fi.Mode().Perm())
 	}
 }
@@ -367,7 +368,7 @@ func TestWrite_MissingIntermediateDirsCreated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o700 {
 		t.Errorf("dir mode = %v, want 0700", fi.Mode().Perm())
 	}
 }
@@ -597,7 +598,7 @@ func TestWrite_RootCreatedWhenMissing(t *testing.T) {
 	if !fi.IsDir() {
 		t.Fatal("root path exists but is not a directory")
 	}
-	if fi.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o700 {
 		t.Errorf("root dir mode = %v, want 0700", fi.Mode().Perm())
 	}
 
@@ -650,7 +651,7 @@ func TestWrite_RootCreatedWhenMissingUnderSymlinkedAncestor(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fi.Mode().Perm() != 0o700 {
+	if runtime.GOOS != "windows" && fi.Mode().Perm() != 0o700 {
 		t.Errorf("created root dir mode = %v, want 0700", fi.Mode().Perm())
 	}
 }

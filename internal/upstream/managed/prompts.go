@@ -1,0 +1,59 @@
+package managed
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	"go.uber.org/zap"
+)
+
+// ListPrompts returns the prompts advertised by the upstream server.
+func (mc *Client) ListPrompts(ctx context.Context) ([]mcp.Prompt, error) {
+	if !mc.IsConnected() {
+		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+	}
+
+	var prompts []mcp.Prompt
+	err := mc.withSession(ctx, string(mcp.MethodPromptsList), func() (e error) {
+		prompts, e = mc.coreClient.ListPrompts(ctx)
+		return e
+	})
+	if err != nil {
+		mc.logger.Error("Failed to list prompts",
+			zap.String("server", mc.GetConfig().Name),
+			zap.Error(err))
+		return nil, err
+	}
+
+	return prompts, nil
+}
+
+// GetPrompt resolves a single prompt by its unqualified name on the
+// upstream server.
+func (mc *Client) GetPrompt(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error) {
+	if !mc.IsConnected() {
+		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+	}
+
+	promptEpoch := mc.connectionEpoch.Load()
+	var result *mcp.GetPromptResult
+	err := mc.withSession(ctx, string(mcp.MethodPromptsGet), func() (e error) {
+		result, e = mc.coreClient.GetPrompt(ctx, name, args)
+		return e
+	})
+	if err != nil {
+		if mc.isConnectionError(err) {
+			// Guarded: concurrent failures on one dead transport mark it
+			// once, and never a connection Disconnect already replaced.
+			mc.setErrorIfCurrentConnection(err, promptEpoch)
+		}
+		mc.logger.Error("GetPrompt failed",
+			zap.String("server", mc.GetConfig().Name),
+			zap.String("prompt", name),
+			zap.Error(err))
+		return nil, err
+	}
+
+	return result, nil
+}

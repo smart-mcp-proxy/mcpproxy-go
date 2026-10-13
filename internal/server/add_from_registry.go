@@ -9,6 +9,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwords"
 )
 
 // Keystone of spec 070: a single backend op that turns a registry *reference*
@@ -116,6 +117,17 @@ func (s *Server) AddServerFromRegistry(ctx context.Context, req *AddFromRegistry
 	serverCfg, err := buildServerConfigFromEntry(entry, req, quarantineDefault)
 	if err != nil {
 		return nil, err
+	}
+
+	// Spec 086 stage 3 (FR-011): re-resolve the quarantine default per-server from
+	// the derived server's trust_mode now that the ServerConfig exists. The
+	// registry path never carries a client-supplied trust_mode (CN-002), so
+	// serverCfg.TrustMode is empty and this resolves to manual -> quarantine,
+	// identical to the global default computed above. Routing through the helper
+	// keeps a single admission seam and lets a future registry entry that carries
+	// a trust_mode admit auto servers unquarantined without touching this site.
+	if cfg := s.runtime.Config(); cfg != nil {
+		serverCfg.Quarantined = cfg.QuarantineDefaultForServer(serverCfg)
 	}
 
 	// Persist via the shared add path (duplicate check + storage + runtime sync).
@@ -247,10 +259,20 @@ func resolveInstallCmd(entry *registries.ServerEntry) string {
 	return ""
 }
 
-// parseInstallCommand splits an install command into command + args. Whitespace
-// split matches the historical client-side behavior but now runs server-side so
-// every surface derives identical command/args (CN-001/CN-004).
+// parseInstallCommand splits an install command into command + args,
+// quote-aware (matches internal/registries/catalog.go's toCatalogInstall) so
+// a quoted argument survives identically on both the configured-server side
+// (here) and the catalog side: CatalogInstallTarget joins the two by
+// re-splitting each with the same rule, and a naive whitespace split (the
+// original client-side behavior) breaks that join for any install command
+// with a quoted arg (review round 4 F-B). Falls back to a naive whitespace
+// split only when shellwords can't parse the command at all (e.g.
+// unbalanced quotes), so a malformed-but-historically-working command still
+// adds instead of failing outright.
 func parseInstallCommand(installCmd string) (command string, args []string) {
+	if parts, err := shellwords.Split(installCmd); err == nil && len(parts) > 0 {
+		return parts[0], parts[1:]
+	}
 	fields := strings.Fields(installCmd)
 	if len(fields) == 0 {
 		return "", nil

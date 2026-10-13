@@ -91,6 +91,34 @@ final class ServerBrowseModelsTests: XCTestCase {
         XCTAssertEqual(f.missingInputs, ["A"])
     }
 
+    // MARK: - addedKey (review round 6, finding 2: cross-registry id collision)
+
+    func testAddedKeyDisambiguatesSameIDAcrossRegistries() {
+        let a = server()
+        // Same bare `id` ("x", from the `server()` helper), different registry.
+        let b = RepositoryServer(id: "x", name: "x", description: nil, url: nil, sourceCodeURL: nil,
+                                  installCmd: nil, connectURL: nil, registry: "other", requiredInputs: nil)
+        XCTAssertNotEqual(a.addedKey, b.addedKey,
+                           "two catalog entries sharing an id across registries (MCP-866) must not collide")
+    }
+
+    func testAddedKeyStableForSameServer() {
+        let a = server()
+        let b = server()
+        XCTAssertEqual(a.addedKey, b.addedKey)
+    }
+
+    // zcode review round 6: pins the literal "registry::id" format so a future
+    // edit to addedKey or to search()'s own `seen` dedupe key in
+    // ServerBrowseView.swift can't drift the two apart without a test noticing
+    // — the two are required to match (see addedKey's doc comment).
+    func testAddedKeyMatchesSearchDedupeKeyFormat() {
+        let s = RepositoryServer(id: "io.github.x/y", name: "y", description: nil, url: nil,
+                                  sourceCodeURL: nil, installCmd: nil, connectURL: nil,
+                                  registry: "Reference Servers", requiredInputs: nil)
+        XCTAssertEqual(s.addedKey, "Reference Servers::io.github.x/y")
+    }
+
     // MARK: - encodeURIComponent-equivalent path encoder
 
     func testURIComponentEncodingEscapesSlashesAndSpaces() {

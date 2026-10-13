@@ -2,7 +2,10 @@ package scanner
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
 
 // Scanner status constants
@@ -77,13 +80,98 @@ type ScannerPlugin struct {
 	// source/Docker (MCP-2082).
 	InProcess bool `json:"in_process,omitempty"`
 	// Runtime state (not in registry)
-	Status        string            `json:"status"` // available, installed, configured, error
-	InstalledAt   time.Time         `json:"installed_at,omitempty"`
-	ConfiguredEnv map[string]string `json:"configured_env,omitempty"` // Set env values (secrets redacted in API)
+	Status      string    `json:"status"` // available, installed, configured, error
+	InstalledAt time.Time `json:"installed_at,omitempty"`
+	// ConfiguredEnv holds the env values an operator set for this scanner —
+	// vendor API keys, in practice. RedactedForAPI() is what makes the "secrets
+	// redacted in API" promise true; call it on every serialization path.
+	ConfiguredEnv map[string]string `json:"configured_env,omitempty"` // Set env values (secrets redacted in API — see RedactedForAPI)
 	ImageOverride string            `json:"image_override,omitempty"` // User override for DockerImage
 	LastUsedAt    time.Time         `json:"last_used_at,omitempty"`
 	ErrorMsg      string            `json:"error_message,omitempty"`
 	Custom        bool              `json:"custom,omitempty"` // User-added (not from registry)
+}
+
+// clone returns a deep copy of the plugin.
+//
+// The registry hands clones (never the records it keeps) to Get/List callers so
+// that reading — or freely mutating — a returned plugin can never race a
+// concurrent install/pull writing Status under the registry lock. Nil slices
+// and maps stay nil so the JSON shape (omitempty) is byte-identical to the
+// original.
+func (s *ScannerPlugin) clone() *ScannerPlugin {
+	if s == nil {
+		return nil
+	}
+	cp := *s
+	cp.Inputs = append([]string(nil), s.Inputs...)
+	cp.Outputs = append([]string(nil), s.Outputs...)
+	cp.Command = append([]string(nil), s.Command...)
+	cp.ImageCommand = append([]string(nil), s.ImageCommand...)
+	cp.RequiredEnv = append([]EnvRequirement(nil), s.RequiredEnv...)
+	cp.OptionalEnv = append([]EnvRequirement(nil), s.OptionalEnv...)
+	cp.ConfiguredEnv = copyEnv(s.ConfiguredEnv)
+	return &cp
+}
+
+// copyEnv duplicates a scanner env map, preserving nil.
+func copyEnv(env map[string]string) map[string]string {
+	if env == nil {
+		return nil
+	}
+	out := make(map[string]string, len(env))
+	for k, v := range env {
+		out[k] = v
+	}
+	return out
+}
+
+// RedactedEnvValue replaces a literal scanner env value on every API
+// serialization path. It is a fixed sentinel rather than a partial mask so it
+// carries no information about the secret's length or shape, and it is TRUTHY
+// so a client can still tell that the variable is set — which is all the Web UI
+// ever needed from the value (it renders "(configured)" and gates the "needs an
+// API key" badge on presence).
+const RedactedEnvValue = "***"
+
+// RedactedForAPI returns a copy of the plugin safe to serialize to an API
+// client: every literal ConfiguredEnv value is replaced by RedactedEnvValue.
+//
+// #1166 round 10, P3. GET /api/v1/security/scanners and
+// /security/scanners/{id}/status marshalled this struct straight out, so the
+// vendor API keys an operator had typed into the scanner config dialog came
+// back down the wire in the clear — while the field's own comment claimed they
+// were "redacted in API". Redacting HERE, at the type, rather than at each
+// handler is what keeps that comment true for a serialization path added later.
+//
+// A `${keyring:...}` value is preserved verbatim: it is a REFERENCE to a
+// secret, not the secret, and the UI reads it to distinguish "stored in your
+// keychain" from "stored in the config file". Preserving it also keeps the
+// save path honest — the dialog re-submits only values that are neither a
+// keyring reference nor the redaction sentinel, so a round-trip through this
+// function can never overwrite a real secret with its own mask.
+func (s *ScannerPlugin) RedactedForAPI() *ScannerPlugin {
+	if s == nil {
+		return nil
+	}
+	cp := s.clone()
+	for k, v := range cp.ConfiguredEnv {
+		if v == "" || strings.HasPrefix(v, "${keyring:") {
+			continue
+		}
+		cp.ConfiguredEnv[k] = RedactedEnvValue
+	}
+	return cp
+}
+
+// RedactScannersForAPI applies RedactedForAPI to a whole list, allocating a new
+// slice so the registry's own records are never touched.
+func RedactScannersForAPI(list []*ScannerPlugin) []*ScannerPlugin {
+	out := make([]*ScannerPlugin, 0, len(list))
+	for _, sc := range list {
+		out = append(out, sc.RedactedForAPI())
+	}
+	return out
 }
 
 // EffectiveImage returns ImageOverride if set, otherwise DockerImage.
@@ -123,6 +211,30 @@ type ScanJob struct {
 	ScannerStatuses []ScannerJobStatus `json:"scanner_statuses"`
 	// Scan context — what was scanned and how
 	ScanContext *ScanContext `json:"scan_context,omitempty"`
+	// Incarnation is the incarnation of the server this job scans (Spec 116
+	// FR-014a): its saves are conditional on the server still having it, so
+	// a scan that outlives a remove and re-add leaves nothing for the
+	// replacement. 0 for a job started without a committed view.
+	Incarnation int64 `json:"incarnation,omitempty"`
+}
+
+// clone returns a snapshot copy of the job.
+//
+// The engine owns the live *ScanJob for as long as the scan runs and mutates it
+// (Status, CompletedAt, ScannerStatuses) under Engine.mu; everything handed
+// outside — GetActiveJob results, scan callbacks, the job returned by StartScan
+// — is a clone, so a reader can never observe a torn write.
+//
+// ScanContext is shared by pointer on purpose: it is fully populated by the
+// caller before the job is created and is never written again.
+func (j *ScanJob) clone() *ScanJob {
+	if j == nil {
+		return nil
+	}
+	cp := *j
+	cp.Scanners = append([]string(nil), j.Scanners...)
+	cp.ScannerStatuses = append([]ScannerJobStatus(nil), j.ScannerStatuses...)
+	return &cp
 }
 
 // ScanJobMeta is a lightweight projection of a scan job, persisted in a
@@ -155,17 +267,28 @@ type ScanJobSummary struct {
 // ScanContext describes what was scanned and how the source was resolved.
 // This gives users full transparency into what the scanners actually checked.
 type ScanContext struct {
-	SourceMethod    string   `json:"source_method"`             // "docker_extract", "working_dir", "local_path", "url", "none"
-	SourcePath      string   `json:"source_path"`               // Actual path/URL that was scanned
-	DockerIsolation bool     `json:"docker_isolation"`          // Whether server runs in Docker
-	ContainerID     string   `json:"container_id,omitempty"`    // Docker container ID (if applicable)
-	ContainerImage  string   `json:"container_image,omitempty"` // Docker image used
-	ServerProtocol  string   `json:"server_protocol"`           // stdio, http, sse
-	ServerCommand   string   `json:"server_command,omitempty"`  // Command used to start server
-	ToolsExported   int      `json:"tools_exported,omitempty"`  // Number of tool definitions exported for scanning
-	ScannedFiles    []string `json:"scanned_files,omitempty"`   // List of files that were scanned (capped at MaxScannedFiles)
-	TotalFiles      int      `json:"total_files"`               // Total file count (may be > len(ScannedFiles) if capped)
-	TotalSizeBytes  int64    `json:"total_size_bytes"`          // Total size of scanned source
+	SourceMethod    string            `json:"source_method"`              // "docker_extract", "working_dir", "local_path", "url", "none"
+	SourcePath      string            `json:"source_path"`                // Actual path/URL that was scanned
+	DockerIsolation bool              `json:"docker_isolation"`           // Whether server runs in Docker
+	ContainerID     string            `json:"container_id,omitempty"`     // Docker container ID (if applicable)
+	ContainerOwner  string            `json:"container_owner,omitempty"`  // Server name that owns ContainerID (verified via com.mcpproxy.server label)
+	ContainerImage  string            `json:"container_image,omitempty"`  // Docker image used
+	ServerProtocol  string            `json:"server_protocol"`            // stdio, http, sse
+	ServerCommand   string            `json:"server_command,omitempty"`   // Command used to start server
+	ToolsExported   int               `json:"tools_exported,omitempty"`   // Number of tool definitions exported for scanning
+	ToolsExportedAt time.Time         `json:"tools_exported_at,omitzero"` // When the exported definitions were read; a definition changed after this was not analysed
+	ToolNames       []string          `json:"tool_names,omitempty"`       // Sorted, de-duplicated names of the exported tool definitions (Pass 1)
+	ToolHashes      map[string]string `json:"tool_hashes,omitempty"`      // Exported tool name -> hash.ToolDefinitionDigest of the definition analysed; absent on legacy scans
+	// ToolContractDigests maps each analysed tool name to the
+	// hash.ToolContractDigest (description, input AND output schema) of EVERY
+	// contract the scan analysed under that name — the live export and each
+	// divergent ingested contract (RT-06). Absent on scans recorded before
+	// output schemas were exported; review then treats ToolHashes as
+	// output-unaware.
+	ToolContractDigests map[string][]string `json:"tool_contract_digests,omitempty"`
+	ScannedFiles        []string            `json:"scanned_files,omitempty"` // List of files that were scanned (capped at MaxScannedFiles)
+	TotalFiles          int                 `json:"total_files"`             // Total file count (may be > len(ScannedFiles) if capped)
+	TotalSizeBytes      int64               `json:"total_size_bytes"`        // Total size of scanned source
 }
 
 // ScannerJobStatus tracks a single scanner's execution within a scan job
@@ -210,6 +333,18 @@ const (
 	ThreatLevelInfo      = "info"      // Low CVEs, informational
 )
 
+// Finding tiers (Spec 077). A hard-tier baseline finding gates approval
+// (auto-quarantine / dangerous verdict); a soft-tier finding is review-only.
+// The tier mirrors detect.TierHard/TierSoft and is set from detect output when
+// a finding comes from the deterministic baseline engine (see
+// detectFindingToScanFinding). Empty for findings that predate the two-tier
+// model (legacy/external scanners) — those keep their existing threat_level
+// semantics.
+const (
+	TierHard = "hard"
+	TierSoft = "soft"
+)
+
 // ScanFinding represents an individual security finding
 type ScanFinding struct {
 	RuleID           string  `json:"rule_id"`
@@ -234,6 +369,34 @@ type ScanFinding struct {
 	// other non-package findings stay false so the UI can route them to their proper
 	// threat_type group instead of the CVE section.
 	SupplyChainAudit bool `json:"supply_chain_audit,omitempty"`
+	// Confidence is the combined 0.0–1.0 confidence of the deterministic
+	// tool-scanner (Spec 076). Independent signals on a tool add (capped at
+	// 1.0), so agreement raises it. Zero/omitted for findings produced by
+	// scanners that do not emit confidence. Additive — see detect.Engine.
+	Confidence float64 `json:"confidence,omitempty"`
+	// Signals lists the deterministic check IDs that contributed to this
+	// finding (e.g. "unicode.hidden", "directive.imperative"), giving operators
+	// transparency into why a tool was flagged (Spec 076, FR-010). Additive.
+	Signals []string `json:"signals,omitempty"`
+	// Tier is "hard" or "soft" (Spec 077). A hard baseline finding gates
+	// approval and drives a "dangerous" verdict; a soft finding is review-only.
+	// Set from detect output for baseline findings; empty for legacy/external
+	// findings that predate the two-tier model. Additive, back-compat.
+	Tier string `json:"tier,omitempty"`
+	// Sources lists the contributing scanner ids for this finding (e.g.
+	// "tpa-descriptions", "cisco-mcp-scanner"). When two scanners agree on the
+	// same issue the merged finding lists both (Spec 077 FR-013). ≥1 for
+	// findings produced under Spec 077; empty for legacy findings. Additive.
+	Sources []string `json:"sources,omitempty"`
+	// Spans locate the exact words in the tool's raw text that tripped each
+	// contributing check, so the Web UI can highlight them inline in the tool
+	// list instead of stranding the operator on a scan-report page with a prose
+	// sentence. Offsets are UTF-16 code units (JavaScript string indices) —
+	// see detect.Span. Omitted entirely for findings whose checks match
+	// normalized text, and for external scanners (Docker/SARIF), which report
+	// no offsets at all; a missing key means "no highlight", never "clean".
+	// Additive, back-compat.
+	Spans []detect.Span `json:"spans,omitempty"`
 }
 
 // ScanReport represents aggregated scan results for a server
@@ -246,22 +409,39 @@ type ScanReport struct {
 	RiskScore  int             `json:"risk_score"` // 0-100
 	SarifRaw   json.RawMessage `json:"sarif_raw,omitempty"`
 	ScannedAt  time.Time       `json:"scanned_at"`
+	// Incarnation is the incarnation of the scanned server (Spec 116
+	// FR-014a), copied from the job.
+	Incarnation int64 `json:"incarnation,omitempty"`
 }
 
 // AggregatedReport combines results from all scanners for a single scan job
 type AggregatedReport struct {
-	JobID          string        `json:"job_id"`
-	ServerName     string        `json:"server_name"`
-	Findings       []ScanFinding `json:"findings"`
-	RiskScore      int           `json:"risk_score"`
-	Summary        ReportSummary `json:"summary"`
-	ScannedAt      time.Time     `json:"scanned_at"`
-	Reports        []ScanReport  `json:"reports"`
-	ScannersRun    int           `json:"scanners_run"`    // How many scanners actually produced results
-	ScannersFailed int           `json:"scanners_failed"` // How many scanners failed
-	ScannersTotal  int           `json:"scanners_total"`  // Total scanners attempted
-	ScanComplete   bool          `json:"scan_complete"`   // True only if at least one scanner succeeded
-	EmptyScan      bool          `json:"empty_scan"`      // True when scanners ran but had no files to analyze
+	JobID      string        `json:"job_id"`
+	ServerName string        `json:"server_name"`
+	Findings   []ScanFinding `json:"findings"`
+	RiskScore  int           `json:"risk_score"`
+	// Summary carries the RAW threat-level / severity counts across ALL
+	// findings (baseline + deep-scan/external) for transparency. It is NOT a
+	// verdict — verdict-bearing UI must read Verdict/FindingCounts below.
+	Summary ReportSummary `json:"summary"`
+	// Verdict is the tier-driven, baseline-only verdict for this report
+	// (Spec 077 FR-014): "dangerous" (≥1 hard-tier baseline finding),
+	// "warnings" (≥1 soft-tier baseline finding), else "clean". It is derived
+	// by the SAME predicate as the server-list summary (GetScanSummary), so
+	// the report page can never disagree with the server verdict — a tierless
+	// deep-scan/external finding never moves it, regardless of threat_level.
+	Verdict string `json:"verdict"`
+	// FindingCounts buckets findings identically to ScanSummary.FindingCounts
+	// (hard-tier → dangerous; tierless "dangerous" → warning: informs, never
+	// gates), keeping the report page consistent with the server list.
+	FindingCounts  *FindingCounts `json:"finding_counts,omitempty"`
+	ScannedAt      time.Time      `json:"scanned_at"`
+	Reports        []ScanReport   `json:"reports"`
+	ScannersRun    int            `json:"scanners_run"`    // How many scanners actually produced results
+	ScannersFailed int            `json:"scanners_failed"` // How many scanners failed
+	ScannersTotal  int            `json:"scanners_total"`  // Total scanners attempted
+	ScanComplete   bool           `json:"scan_complete"`   // True only if at least one scanner succeeded
+	EmptyScan      bool           `json:"empty_scan"`      // True when scanners ran but had no files to analyze
 	// Two-pass scan tracking
 	Pass1Complete bool `json:"pass1_complete"` // Security scan (fast) done
 	Pass2Complete bool `json:"pass2_complete"` // Supply chain audit done
@@ -269,6 +449,11 @@ type AggregatedReport struct {
 	// Scan context from the primary job (for report page display)
 	ScanContext     *ScanContext       `json:"scan_context,omitempty"`
 	ScannerStatuses []ScannerJobStatus `json:"scanner_statuses,omitempty"` // Per-scanner execution logs
+	// DeepScan is the opt-in heavy-layer availability descriptor (Spec 077 US3),
+	// mirrored from ScanSummary so the report page can render the informational
+	// deep-scan banner. Informational only — a failed or unavailable deep scanner
+	// never changes the baseline verdict. nil/omitted when deep scan is disabled.
+	DeepScan *DeepScanDescriptor `json:"deep_scan,omitempty"`
 }
 
 // ReportSummary provides counts by severity and threat level
@@ -297,6 +482,14 @@ type IntegrityBaseline struct {
 	ApprovedBy    string            `json:"approved_by"`
 }
 
+// ToolApprovalBlock describes the approval fields needed to persist a block
+// alongside the server integrity baseline in one storage transaction.
+type ToolApprovalBlock struct {
+	ToolName   string
+	ApprovedAt time.Time
+	ApprovedBy string
+}
+
 // SecurityOverview provides dashboard aggregate stats
 type SecurityOverview struct {
 	TotalScans         int           `json:"total_scans"`
@@ -307,6 +500,12 @@ type SecurityOverview struct {
 	ServersScanned     int           `json:"servers_scanned"`
 	LastScanAt         time.Time     `json:"last_scan_at,omitempty"`
 	DockerAvailable    bool          `json:"docker_available"`
+	// SignatureBundle describes the offline TPA signature corpus the scanner is
+	// actually running: source (embedded vs a configured file), version,
+	// freshness stamp, fingerprint, and the runnable/skipped rule split
+	// (spec 086 FR-019, GH #938 finding 2). Before this, a years-stale corpus
+	// was indistinguishable from a fresh export on every operator surface.
+	SignatureBundle *BundleInfo `json:"signature_bundle,omitempty"`
 }
 
 // MarshalBinary implements encoding.BinaryMarshaler

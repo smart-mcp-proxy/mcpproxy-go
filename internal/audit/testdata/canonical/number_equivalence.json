@@ -1,0 +1,10 @@
+{
+  "description": "1, 1.0 and 1e0 are the same float64 and MUST canonicalize to an identical byte sequence (ES6 Number::toString, RFC 8785 §3.2.2.3).",
+  "variants": [
+    { "a": 1 },
+    { "a": 1.0 },
+    { "a": 1e0 },
+    { "a": 1E0 },
+    { "a": 0.1e1 }
+  ]
+}

@@ -1,0 +1,419 @@
+import XCTest
+@testable import MCPProxy
+
+/// Tray Glance — SSE activity adapter.
+///
+/// The core emits `activity.tool_call.completed` /
+/// `activity.internal_tool_call.completed`, never `activity`, and the payload is
+/// an envelope `{payload, timestamp}` whose timestamp is Unix SECONDS while
+/// `ActivityEntry.timestamp` is an ISO-8601 string. These tests pin the mapping,
+/// and assert it against the real consumers (`GlanceSelection`,
+/// `GlanceFormatting`) rather than a locally rebuilt copy of their logic.
+@MainActor
+final class GlanceEventTests: XCTestCase {
+
+    /// Upstream calls carry `server_name` / `tool_name` (event_bus.go
+    /// EmitActivityToolCallCompleted, payload literal at :444-454).
+    func testUpstreamCompletedPayloadBecomesToolCallEntry() throws {
+        let json = """
+        {"payload":{"server_name":"github","tool_name":"create_issue",
+        "session_id":"sess-1","request_id":"req-1","source":"mcp","status":"success",
+        "error_message":"","duration_ms":142},"timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.type, "tool_call")
+        XCTAssertEqual(entry.serverName, "github")
+        XCTAssertEqual(entry.toolName, "create_issue")
+        XCTAssertEqual(entry.status, "success")
+        XCTAssertEqual(entry.durationMs, 142)
+        XCTAssertEqual(entry.sessionId, "sess-1")
+        XCTAssertEqual(entry.requestId, "req-1")
+        XCTAssertNil(entry.errorMessage, "empty error_message must not become a failure detail")
+        XCTAssertNil(entry.parentId, "a top-level call has no parent")
+    }
+
+    /// A sub-call made from inside a `code_execution` script carries its own
+    /// request id plus the script's, and the live row must keep the link — the
+    /// reconciling poll is 30 seconds away, and a child that arrives without a
+    /// parent is a row that cannot be navigated back to the script that ran it.
+    func testASubCallPayloadCarriesItsParentID() throws {
+        let json = """
+        {"payload":{"server_name":"github","tool_name":"create_issue",
+        "session_id":"sess-1","request_id":"child-7",
+        "parent_id":"1753800000-sess-1-code_execution","status":"success",
+        "duration_ms":12},"timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.requestId, "child-7")
+        XCTAssertEqual(entry.parentId, "1753800000-sess-1-code_execution")
+        XCTAssertNotEqual(entry.requestId, entry.parentId,
+                          "a child's own id is fresh, which is what keeps rule 4 from "
+                          + "collapsing a whole script into one row")
+        XCTAssertTrue(GlanceSelection.qualifies(entry),
+                      "sub-calls are ordinary tool calls and get ordinary rows")
+    }
+
+    /// Internal calls carry `internal_tool_name`, and `target_server` only when
+    /// non-empty (event_bus.go EmitActivityInternalToolCall, :552-565). Reading
+    /// `tool_name` here would produce a row with no tool at all — and the row
+    /// must survive the selection rules and the relative-time formatter, not
+    /// merely hold the right field values.
+    func testInternalCompletedPayloadUsesInternalToolNameAndTargetServer() throws {
+        let json = """
+        {"payload":{"internal_tool_name":"call_tool_read","target_server":"jira",
+        "target_tool":"get_issue","session_id":"sess-2","request_id":"req-2",
+        "status":"error","error_message":"auth failed","duration_ms":9},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.internal_tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.type, "internal_tool_call")
+        XCTAssertEqual(entry.toolName, "call_tool_read")
+        XCTAssertEqual(entry.serverName, "jira")
+        XCTAssertEqual(entry.status, "error")
+        XCTAssertTrue(GlanceSelection.qualifies(entry),
+                      "a failed wrapper qualifies under rule 3")
+        XCTAssertEqual(GlanceFormatting.relativeTime(
+            entry.timestamp,
+            now: Date(timeIntervalSince1970: 1_753_800_012)
+        ), "12s", "the tray's own parser must accept the timestamp we emit")
+    }
+
+    /// `target_server` is omitted for discovery built-ins such as
+    /// retrieve_tools, so the row must tolerate its absence.
+    func testInternalPayloadWithoutTargetServerHasNilServerName() throws {
+        let json = """
+        {"payload":{"internal_tool_name":"retrieve_tools","session_id":"sess-3",
+        "request_id":"req-3","status":"success","duration_ms":4},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.internal_tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.toolName, "retrieve_tools")
+        XCTAssertNil(entry.serverName)
+    }
+
+    /// The core does not persist started events (activity_service.go), so a row
+    /// built from one would never be reconciled by the poll.
+    func testStartedEventIsIgnored() {
+        let json = """
+        {"payload":{"server_name":"github","tool_name":"create_issue",
+        "request_id":"req-4"},"timestamp":1753800000}
+        """
+        XCTAssertNil(GlanceEvent.adapt(
+            eventName: "activity.tool_call.started",
+            data: Data(json.utf8)
+        ))
+    }
+
+    /// A failed upstream call emits BOTH events under ONE request id, and
+    /// `ActivityEntry` derives identity and equality from `id` alone — so a bare
+    /// request id would make the two records collide before rule 4 could pick
+    /// the `tool_call` one. The last assertion is the point of the composite id.
+    func testPairedEventsUnderOneRequestIdGetDistinctIds() throws {
+        let upstream = """
+        {"payload":{"server_name":"jira","tool_name":"get_issue",
+        "request_id":"req-5","status":"error","error_message":"auth failed"},
+        "timestamp":1753800000}
+        """
+        let wrapper = """
+        {"payload":{"internal_tool_name":"call_tool_read","target_server":"jira",
+        "request_id":"req-5","status":"error","error_message":"auth failed"},
+        "timestamp":1753800000}
+        """
+        let a = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed", data: Data(upstream.utf8)))
+        let b = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.internal_tool_call.completed", data: Data(wrapper.utf8)))
+
+        XCTAssertEqual(a.id, "req-5:tool_call")
+        XCTAssertEqual(b.id, "req-5:internal_tool_call")
+        XCTAssertNotEqual(a, b)
+        XCTAssertEqual(a.requestId, b.requestId, "the shared request id is what rule 4 collapses on")
+        XCTAssertEqual(GlanceSelection.activityRows(from: [a, b]).map(\.newest.id),
+                       ["req-5:tool_call"],
+                       "rule 4 keeps the record that names the real server:tool")
+    }
+
+    /// The payload key is `error_message`, matching `ActivityEntry` — a read
+    /// keyed on `error` would render a failed call as if it had no detail.
+    func testFailureDetailComesFromErrorMessageKey() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"get_issue","request_id":"req-6",
+        "status":"error","error_message":"auth failed: token expired"},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.errorMessage, "auth failed: token expired")
+    }
+
+    /// The envelope timestamp is Unix seconds; the entry must carry a string the
+    /// tray's OWN parser accepts. Rebuilding an ISO8601DateFormatter here would
+    /// let the test pass while GlanceFormatting rejected the string.
+    func testEnvelopeUnixSecondsBecomeParsableISO8601() throws {
+        let json = """
+        {"payload":{"server_name":"github","tool_name":"create_issue",
+        "request_id":"req-7","status":"success"},"timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        let parsed = try XCTUnwrap(GlanceFormatting.parseTimestamp(entry.timestamp))
+        XCTAssertEqual(parsed.timeIntervalSince1970, 1_753_800_000, accuracy: 0.001)
+    }
+
+    // MARK: - Intent (spec 090 US2, FR-008)
+
+    /// The completed events already carry the caller's `intent` map
+    /// (event_bus.go `EmitActivityToolCallCompleted`, payload["intent"]), and
+    /// the adapter used to throw it away (`metadata: nil`). A live row must
+    /// expose the same reason the reconciling poll will bring, or the reason
+    /// would blink into existence 30 seconds late.
+    func testUpstreamCompletedPayloadCarriesTheIntentReason() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"transition_issue",
+        "request_id":"req-i1","status":"success",
+        "intent":{"reason":"Handoff: move ticket to review per user request",
+        "operation_type":"write","data_sensitivity":"internal"}},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.intentReason, "Handoff: move ticket to review per user request")
+        XCTAssertEqual(entry.reason, entry.intentReason,
+                       "a call row's reason IS its caller-declared intent")
+        XCTAssertEqual(entry.intentOperationType, "write")
+    }
+
+    /// Internal calls carry the same map, and the wrapper is where a failing
+    /// pre-dispatch call gets its only row — so it must carry the reason too.
+    func testInternalCompletedPayloadCarriesTheIntentReason() throws {
+        let json = """
+        {"payload":{"internal_tool_name":"call_tool_read","target_server":"jira",
+        "request_id":"req-i2","status":"error","error_message":"auth failed",
+        "intent":{"reason":"Verify the failed transition did not change the ticket",
+        "operation_type":"read"}},"timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.internal_tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.reason, "Verify the failed transition did not change the ticket")
+        XCTAssertEqual(entry.intentOperationType, "read")
+    }
+
+    /// Only the contextual whitelist rides the event — the same fields the
+    /// polled projection keeps (contracts/api-deltas.md §1). Copying the whole
+    /// payload into metadata would put arguments and responses into a menu row's
+    /// backing model, which is exactly what `exclude_payloads` exists to avoid.
+    func testOnlyTheContextualWhitelistIsCarriedIntoMetadata() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"get_issue",
+        "request_id":"req-i3","status":"success",
+        "arguments":{"issue":"MCP-1"},"response":"{\\"fields\\":{}}",
+        "tool_variant":"call_tool_read","content_trust":"untrusted",
+        "intent":{"reason":"Read the ticket","operation_type":"read"}},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.reason, "Read the ticket")
+        XCTAssertNil(entry.arguments, "arguments must never reach a menu row's model")
+        XCTAssertNil(entry.response)
+        XCTAssertEqual(Set(try XCTUnwrap(entry.metadata).keys), ["intent"])
+        let intent = try XCTUnwrap(entry.intent)
+        XCTAssertEqual(Set(intent.keys), ["reason", "operation_type"],
+                       "data_sensitivity and friends are not part of the glance whitelist")
+    }
+
+    /// A discovery built-in makes no intent claim, and an empty reason is not a
+    /// reason: both must leave the row single-line (FR-007).
+    func testAPayloadWithoutAnIntentHasNoReason() throws {
+        let bare = """
+        {"payload":{"internal_tool_name":"retrieve_tools","request_id":"req-i4",
+        "status":"success"},"timestamp":1753800000}
+        """
+        let empty = """
+        {"payload":{"server_name":"jira","tool_name":"get_issue","request_id":"req-i5",
+        "status":"success","intent":{"reason":"","operation_type":""}},
+        "timestamp":1753800000}
+        """
+        let noIntent = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.internal_tool_call.completed", data: Data(bare.utf8)))
+        let emptyIntent = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed", data: Data(empty.utf8)))
+
+        XCTAssertNil(noIntent.reason)
+        XCTAssertNil(noIntent.metadata, "no context means no metadata at all, not an empty map")
+        XCTAssertNil(emptyIntent.reason)
+        XCTAssertNil(emptyIntent.metadata)
+    }
+
+    // MARK: - Policy decisions (spec 090 US3, research D9)
+
+    /// `activity.policy_decision` (internal/runtime/events.go) is the only
+    /// notice a blocked call ever produces — it never dispatches, so no
+    /// tool_call event follows it. The adapted entry must land in the same
+    /// shape the poll will later bring: type `policy_decision`, the decision as
+    /// the status (activity_service.go writes `Status: decision`), and the
+    /// policy's own reason in the metadata slot the row reads.
+    func testPolicyDecisionEventBecomesABlockedEntry() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"transition_issue",
+        "session_id":"sess-p","request_id":"req-p1","decision":"blocked",
+        "reason":"Intent rejected: tool variant conflicts with server annotations"},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.policy_decision",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.type, "policy_decision")
+        XCTAssertEqual(entry.status, "blocked")
+        XCTAssertEqual(entry.serverName, "jira")
+        XCTAssertEqual(entry.toolName, "transition_issue")
+        XCTAssertEqual(entry.requestId, "req-p1")
+        XCTAssertEqual(entry.id, "req-p1:policy_decision",
+                       "the provisional id must be composite, as for the completion events")
+        XCTAssertEqual(entry.blockReason,
+                       "Intent rejected: tool variant conflicts with server annotations")
+        XCTAssertEqual(entry.reason, entry.blockReason,
+                       "a blocked row's reason is the policy's, not the caller's")
+        XCTAssertEqual(entry.outcomeClass, .blocked)
+        XCTAssertEqual(entry.sessionId, "sess-p")
+    }
+
+    /// A blocked record CAN carry the caller's intent too — the plan and the
+    /// refusal — and the row must show the refusal (data-model, FR-005).
+    func testABlockedEntryPrefersThePolicyReasonOverTheCallersIntent() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"delete_issue",
+        "request_id":"req-p2","decision":"blocked","reason":"Destructive operation blocked",
+        "intent":{"reason":"Clean up the duplicate ticket","operation_type":"destructive"}},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.policy_decision",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.reason, "Destructive operation blocked")
+        XCTAssertEqual(entry.intentReason, "Clean up the duplicate ticket",
+                       "the caller's plan is still carried — it is just not what the row shows")
+    }
+
+    /// Warnings and redactions let the call through, so they are not blocks.
+    /// The adapter still produces the entry; rejecting them is the row
+    /// pipeline's job, and it decides on `outcomeClass` (FR-012).
+    func testANonBlockingDecisionIsAdaptedButIsNotABlock() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"get_issue","request_id":"req-p3",
+        "decision":"warn","reason":"Response contained a credential-shaped string"},
+        "timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.policy_decision",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertEqual(entry.status, "warn")
+        XCTAssertEqual(entry.outcomeClass, .call)
+        XCTAssertFalse(GlanceSelection.qualifies(entry),
+                       "a warning is not a block and must not take one of the five rows")
+    }
+
+    /// Legacy cores emit the event without a request id (spec 090 FR-015 adds
+    /// it). The row must still render — it simply never collapses, because its
+    /// identity is its own.
+    func testAPolicyEventWithoutARequestIdStillAdapts() throws {
+        let json = """
+        {"payload":{"server_name":"jira","tool_name":"get_issue",
+        "decision":"blocked","reason":"Quarantined server"},"timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.policy_decision",
+            data: Data(json.utf8)
+        ))
+
+        XCTAssertNil(entry.requestId)
+        XCTAssertTrue(entry.id.hasSuffix(":policy_decision"))
+        XCTAssertEqual(GlanceSelection.recordKey(for: entry), entry.id,
+                       "with no request id the record's own id is its identity")
+    }
+
+    /// SSE rows go in newest-first and the feed is bounded, so a busy agent
+    /// cannot grow `glanceActivity` without limit between reconciling polls.
+    func testPrependPutsNewestFirstAndCapsTheFeed() throws {
+        let state = AppState()
+        state.coreState = .connected
+
+        for index in 0..<(AppState.glanceActivityCap + 5) {
+            let json = """
+            {"payload":{"server_name":"github","tool_name":"create_issue",
+            "request_id":"req-\(index)","status":"success"},"timestamp":1753800000}
+            """
+            let entry = try XCTUnwrap(GlanceEvent.adapt(
+                eventName: "activity.tool_call.completed",
+                data: Data(json.utf8)
+            ))
+            state.prependGlanceActivity(entry, generation: state.connectionGeneration)
+        }
+
+        XCTAssertEqual(state.glanceActivity.count, AppState.glanceActivityCap)
+        XCTAssertEqual(state.glanceActivity.first?.requestId, "req-\(AppState.glanceActivityCap + 4)")
+        XCTAssertTrue(state.recentActivity.isEmpty, "the shared Dashboard feed must not be touched")
+    }
+
+    /// The three Task-3 `update*` helpers all ignore writes unless the core is
+    /// connected, because a late-resolving write would put a dead core's data
+    /// back over just-cleared state. SSE teardown is asynchronous, so an event
+    /// already in flight when the core drops reaches this path the same way.
+    func testPrependIsIgnoredWhenCoreIsNotConnected() throws {
+        let state = AppState()
+        state.coreState = .connected
+        let json = """
+        {"payload":{"server_name":"github","tool_name":"create_issue",
+        "request_id":"req-late","status":"success"},"timestamp":1753800000}
+        """
+        let entry = try XCTUnwrap(GlanceEvent.adapt(
+            eventName: "activity.tool_call.completed",
+            data: Data(json.utf8)
+        ))
+
+        // `CoreProcessManager.shutdown()` transitions here before it cancels
+        // `refreshTask`, so this is the state a late event actually lands in.
+        state.coreState = .shuttingDown
+        state.prependGlanceActivity(entry, generation: state.connectionGeneration)
+
+        XCTAssertTrue(state.glanceActivity.isEmpty,
+                      "a row arriving after the core dropped must not repopulate the cleared feed")
+    }
+}

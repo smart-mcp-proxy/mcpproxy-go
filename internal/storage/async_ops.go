@@ -30,6 +30,7 @@ type AsyncManager struct {
 	opQueue chan Operation
 	ctx     context.Context
 	cancel  context.CancelFunc
+	stateMu sync.Mutex // guards started; makes Start/Stop idempotent
 	started bool
 	wg      sync.WaitGroup
 }
@@ -48,6 +49,9 @@ func NewAsyncManager(db *BoltDB, logger *zap.SugaredLogger) *AsyncManager {
 
 // Start begins processing storage operations in a dedicated goroutine
 func (am *AsyncManager) Start() {
+	am.stateMu.Lock()
+	defer am.stateMu.Unlock()
+
 	if am.started {
 		return
 	}
@@ -56,13 +60,18 @@ func (am *AsyncManager) Start() {
 	go am.processOperations()
 }
 
-// Stop gracefully shuts down the async manager
+// Stop gracefully shuts down the async manager, draining any queued
+// operations. Idempotent: subsequent calls are no-ops (no double-cancel,
+// no DB work), so Manager.StopAsync followed by Manager.Close is safe.
 func (am *AsyncManager) Stop() {
+	am.stateMu.Lock()
+	defer am.stateMu.Unlock()
+
 	if !am.started {
 		return
 	}
 	am.cancel()
-	am.wg.Wait() // Wait for the goroutine to finish
+	am.wg.Wait() // Wait for the goroutine to finish (drains the queue)
 	am.started = false
 }
 
@@ -189,14 +198,29 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		OAuth:                  serverConfig.OAuth,
 		EnabledTools:           serverConfig.EnabledTools,
 		DisabledTools:          serverConfig.DisabledTools,
+		ForwardHeaders:         serverConfig.ForwardHeaders,
 		AutoApproveToolChanges: serverConfig.AutoApproveToolChanges, // MCP-2940: persist so REST/UI toggle survives save/restart
+		TrustMode:              serverConfig.TrustMode,              // spec 086: persist trust tier so REST/UI/MCP-set trust_mode survives save/restart
 
 		SourceRegistryID:         serverConfig.SourceRegistryID,
 		SourceRegistryProvenance: serverConfig.SourceRegistryProvenance,
 		HealthCheckInterval:      serverConfig.HealthCheckInterval,
 		ToolDiscoveryInterval:    serverConfig.ToolDiscoveryInterval,
+		InitTimeout:              serverConfig.InitTimeout,
+		ToonOutput:               serverConfig.ToonOutput,
+		MaxConcurrentRequests:    serverConfig.MaxConcurrentRequests,
+		QueueSize:                serverConfig.QueueSize,
+		QueueTimeout:             serverConfig.QueueTimeout,
+		ExposePrompts:            serverConfig.ExposePrompts,
 	}
-	return am.db.SaveUpstream(record)
+	// Same invariant as Manager.SaveUpstreamServer: never lower a recorded
+	// quarantine without an explicit decision (only quarantineServerSync may).
+	kept, err := am.db.SaveUpstreamKeepingQuarantine(record, serverConfig.QuarantineExplicitlySet())
+	if kept {
+		am.logger.Warnw("Refusing to lower a recorded quarantine without an explicit decision",
+			"server", serverConfig.Name)
+	}
+	return err
 }
 
 func (am *AsyncManager) deleteServerSync(name string) error {

@@ -371,10 +371,13 @@ func TestMaybeTruncateAndCacheText_HappyPathStores(t *testing.T) {
 // single-huge-record edge case. When read_cache returns one record bigger than
 // the truncator limit, recursively caching it would produce a new key that
 // resolves to the exact same oversized payload — an infinite loop the agent
-// can never escape. paginableUnits=1 must short-circuit that.
+// can never escape. paginableUnits=1 must short-circuit that, but the response
+// limit still applies: the payload is cut plainly, with the notice that says so
+// and no cache handle to chase.
 func TestMaybeTruncateAndCacheText_NoRecurseOnSingleRecord(t *testing.T) {
 	// A response shaped like a single huge record (e.g. one CodeRabbit review
 	// body of ~70 KB) wrapped in a 1-element records array.
+	const limit = 500
 	body := `{"records":[{"body":"` + strings.Repeat("z", 5000) + `"}],"meta":{"total":1}}`
 	store := &captureStore{}
 
@@ -383,12 +386,14 @@ func TestMaybeTruncateAndCacheText_NoRecurseOnSingleRecord(t *testing.T) {
 		"read_cache",
 		map[string]interface{}{"key": "AAA", "offset": 0, "limit": 1},
 		1, // single record — no further pagination axis available
-		truncate.NewTruncator(500),
+		truncate.NewTruncator(limit),
 		store,
 		nil,
 	)
-	assert.False(t, wasTruncated, "single-record path must NOT recurse")
-	assert.Equal(t, body, out, "single-record body must pass through unchanged")
+	assert.True(t, wasTruncated, "an oversize single record is still truncated")
+	assert.LessOrEqual(t, len(out), limit, "the response limit holds with or without a pagination axis")
+	assert.Contains(t, out, "[truncated by mcpproxy, cache not available]")
+	assert.NotContains(t, out, `key="`, "a key here would resolve to the same payload")
 
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -716,4 +721,136 @@ func TestForwardContentResult_FallbackPathStoresCache(t *testing.T) {
 	assert.NotEmpty(t, store.calls[0].key)
 	assert.Equal(t, "fallback:tool", store.calls[0].toolName)
 	assert.Contains(t, store.calls[0].content, `"rows"`, "fallback path should persist the JSON-serialized full result")
+}
+
+// Spec 058 FR-016b. mcp.CallToolResult embeds mcp.Result, which carries
+// ResultType — a field that only came into existence with the 2026-07-28
+// revision, and which the protocol defines as instructing the CLIENT how to
+// interpret the response.
+//
+// forwardContentResult used to copy that envelope wholesale (`Result: ctr.Result`).
+// The embedded MultiRoundTripResult was never copied, so an upstream returning
+// input_required produced the worst possible pairing downstream: mcpproxy told
+// the client "I need more input" while stripping the inputRequests and the
+// requestState that would let it answer. The client cannot proceed and cannot
+// know why.
+//
+// mcpproxy is not the upstream. It must speak for itself, and let the library
+// stamp the result type appropriate to the era it is answering on.
+func TestForwardContentResult_DoesNotForwardUpstreamResultType(t *testing.T) {
+	upstream := &mcp.CallToolResult{
+		Result: mcp.Result{ResultType: mcp.ResultTypeInputRequired},
+		MultiRoundTripResult: mcp.MultiRoundTripResult{
+			InputRequests: mcp.InputRequests{},
+			RequestState:  "upstream-opaque-token",
+		},
+		Content: []mcp.Content{mcp.TextContent{Type: "text", Text: "needs input"}},
+	}
+
+	forwarded, _, _ := forwardContentResult(upstream, nil, nil, zap.NewNop(), "some_tool", nil)
+
+	require.NotNil(t, forwarded)
+	assert.Empty(t, string(forwarded.ResultType),
+		"an upstream's resultType must not be replayed as mcpproxy's own; "+
+			"claiming input_required while dropping inputRequests leaves the client unable to answer or to diagnose")
+	assert.Empty(t, forwarded.RequestState,
+		"an upstream requestState must never reach the client verbatim (it is upstream-scoped and would let a continuation be redirected)")
+	assert.Empty(t, forwarded.InputRequests,
+		"input requests are reported through the FR-015 notice, not smuggled through the forwarded envelope")
+}
+
+// The rest of the envelope is legitimate passthrough: _meta carries trace
+// context and similar per-response metadata that a proxy should preserve.
+func TestForwardContentResult_PreservesResultMeta(t *testing.T) {
+	upstream := &mcp.CallToolResult{
+		Result: mcp.Result{
+			Meta: &mcp.Meta{AdditionalFields: map[string]any{"trace-id": "abc123"}},
+		},
+		Content: []mcp.Content{mcp.TextContent{Type: "text", Text: "ok"}},
+	}
+
+	forwarded, _, _ := forwardContentResult(upstream, nil, nil, zap.NewNop(), "some_tool", nil)
+
+	require.NotNil(t, forwarded)
+	require.NotNil(t, forwarded.Meta, "response _meta must survive the proxy hop so trace context is not lost")
+	assert.Equal(t, "abc123", forwarded.Meta.AdditionalFields["trace-id"])
+}
+
+// proxyResultEnvelope is the single decision point both forwarding paths are
+// written to share.
+//
+// Note what these tests do NOT establish: nothing here asserts that the
+// direct-mode handler (internal/server/mcp_routing.go) actually calls the
+// helper. Reaching that handler needs a fully wired proxy with a live upstream
+// manager, so the /mcp/all surface's FR-016b guarantee currently rests on the
+// call site staying as written. Covering it for real belongs with the direct-
+// surface work in spec 058 US3, which builds the harness that can drive it.
+func TestProxyResultEnvelope(t *testing.T) {
+	t.Run("drops the upstream result type", func(t *testing.T) {
+		envelope := proxyResultEnvelope(&mcp.CallToolResult{
+			Result: mcp.Result{ResultType: mcp.ResultTypeInputRequired},
+		})
+
+		assert.Empty(t, string(envelope.ResultType),
+			"mcpproxy answers for itself; the era-appropriate result type is stamped by the library")
+	})
+
+	t.Run("relays response meta", func(t *testing.T) {
+		meta := &mcp.Meta{AdditionalFields: map[string]any{"trace-id": "abc123"}}
+
+		envelope := proxyResultEnvelope(&mcp.CallToolResult{Result: mcp.Result{Meta: meta}})
+
+		require.NotNil(t, envelope.Meta, "_meta carries trace context and must survive the hop")
+		assert.Equal(t, "abc123", envelope.Meta.AdditionalFields["trace-id"])
+		assert.NotSame(t, meta, envelope.Meta,
+			"the relayed _meta must be a copy: hop-scoped keys are filtered out of it, and mutating the upstream's map would corrupt the record the activity log holds")
+	})
+
+	t.Run("tolerates a nil result", func(t *testing.T) {
+		assert.Equal(t, mcp.Result{}, proxyResultEnvelope(nil))
+	})
+}
+
+// The cross-review of this change caught a real defect here. mcp-go stamps
+// mcpproxy's own identity into an outgoing modern result ONLY when the field is
+// still absent (server/response.go decorateResult: `if meta.ServerInfo() == nil`).
+// Relaying an upstream's serverInfo therefore suppresses mcpproxy's identity and
+// makes its own response claim to be the upstream server — a misattribution a
+// client has no way to detect.
+func TestProxyResultEnvelope_StripsHopScopedMeta(t *testing.T) {
+	upstream := &mcp.CallToolResult{
+		Result: mcp.Result{Meta: &mcp.Meta{AdditionalFields: map[string]any{
+			mcp.MetaKeyServerInfo:      map[string]any{"name": "some-upstream", "version": "9.9.9"},
+			mcp.MetaKeyProtocolVersion: "2026-07-28",
+			"traceparent":              "00-abc-def-01",
+			"vendor.example/custom":    "keep me",
+		}}},
+	}
+
+	envelope := proxyResultEnvelope(upstream)
+
+	require.NotNil(t, envelope.Meta)
+	assert.NotContains(t, envelope.Meta.AdditionalFields, mcp.MetaKeyServerInfo,
+		"relaying the upstream's serverInfo suppresses mcpproxy's own identity, so its response would claim to be the upstream")
+	assert.NotContains(t, envelope.Meta.AdditionalFields, mcp.MetaKeyProtocolVersion,
+		"the era negotiated upstream is not the era mcpproxy is answering on")
+	assert.Equal(t, "00-abc-def-01", envelope.Meta.AdditionalFields["traceparent"],
+		"trace context describes the call, not the hop, and must survive")
+	assert.Equal(t, "keep me", envelope.Meta.AdditionalFields["vendor.example/custom"],
+		"upstream-specific metadata is not ours to drop")
+}
+
+// A _meta carrying nothing but hop-scoped keys must not leave an empty object
+// behind: an empty _meta still reads as "present" to mcp-go's ServerInfo check.
+func TestProxyResultEnvelope_DropsMetaThatBecomesEmpty(t *testing.T) {
+	upstream := &mcp.CallToolResult{
+		Result: mcp.Result{Meta: &mcp.Meta{AdditionalFields: map[string]any{
+			mcp.MetaKeyServerInfo: map[string]any{"name": "some-upstream"},
+		}}},
+	}
+
+	envelope := proxyResultEnvelope(upstream)
+
+	assert.Nil(t, envelope.Meta,
+		"nothing relay-safe survived, so no _meta should be emitted at all")
 }

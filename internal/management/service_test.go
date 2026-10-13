@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -163,6 +164,28 @@ func TestListServers(t *testing.T) {
 		assert.Empty(t, byName["manual"].SourceRegistryProvenance)
 	})
 
+	// Spec 116 FR-017: the committed generation and incarnation are projected
+	// onto contracts.Server, so GET /api/v1/servers and the SSE embed carry
+	// the identity a client echoes back as expected_incarnation.
+	t.Run("generation and incarnation projected", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{"id": "acme", "name": "acme", "enabled": true, "generation": int64(42), "incarnation": int64(17)},
+			{"id": "legacy", "name": "legacy", "enabled": true},
+		}
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+		require.NoError(t, err)
+		byName := map[string]*contracts.Server{}
+		for _, s := range servers {
+			byName[s.Name] = s
+		}
+		require.Contains(t, byName, "acme")
+		assert.Equal(t, int64(42), byName["acme"].Generation)
+		assert.Equal(t, int64(17), byName["acme"].Incarnation)
+		assert.Zero(t, byName["legacy"].Incarnation)
+	})
+
 	// MCP-2940: auto_approve_tool_changes must be projected onto contracts.Server
 	// so the Web UI toggle (MCP-2932) can reflect the persisted per-server value.
 	t.Run("auto_approve_tool_changes projected", func(t *testing.T) {
@@ -207,6 +230,65 @@ func TestListServers(t *testing.T) {
 		require.Contains(t, byName, "unset")
 		assert.Nil(t, byName["unset"].AutoApproveToolChanges,
 			"a server that never set the flag must omit it (nil), not coerce to false")
+	})
+
+	// MCP-3322: init_timeout must project from the runtime serverMap (a duration
+	// string) onto contracts.Server so a configured override round-trips through
+	// GET /api/v1/servers and `mcpproxy upstream list -o json`.
+	t.Run("init_timeout projected", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{"id": "warmup", "name": "warmup", "enabled": true, "init_timeout": "2m0s"},
+			{"id": "unset", "name": "unset", "enabled": true},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+		require.NoError(t, err)
+		require.Len(t, servers, 2)
+
+		byName := map[string]*contracts.Server{}
+		for _, s := range servers {
+			byName[s.Name] = s
+		}
+		require.Contains(t, byName, "warmup")
+		require.NotNil(t, byName["warmup"].InitTimeout)
+		assert.Equal(t, 2*time.Minute, byName["warmup"].InitTimeout.Duration())
+
+		require.Contains(t, byName, "unset")
+		assert.Nil(t, byName["unset"].InitTimeout, "a server that never set init_timeout must omit it (nil)")
+	})
+
+	// Spec 086 (QA #919 CFG-06/SRF-07): trust_mode must project from the runtime
+	// serverMap onto contracts.Server so the per-server trust tier is readable
+	// back through GET /api/v1/servers, `mcpproxy upstream list -o json` and the
+	// SSE servers.changed embed — all of which share this projection.
+	t.Run("trust_mode projected", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{"id": "scanner", "name": "scanner", "enabled": true, "trust_mode": "scan"},
+			{"id": "trusted", "name": "trusted", "enabled": true, "trust_mode": "auto"},
+			{"id": "unset", "name": "unset", "enabled": true},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, _, err := svc.ListServers(context.Background())
+		require.NoError(t, err)
+		require.Len(t, servers, 3)
+
+		byName := map[string]*contracts.Server{}
+		for _, s := range servers {
+			byName[s.Name] = s
+		}
+		require.Contains(t, byName, "scanner")
+		assert.Equal(t, "scan", byName["scanner"].TrustMode)
+
+		require.Contains(t, byName, "trusted")
+		assert.Equal(t, "auto", byName["trusted"].TrustMode)
+
+		require.Contains(t, byName, "unset")
+		assert.Empty(t, byName["unset"].TrustMode,
+			"a server that never set trust_mode must keep it empty (omitted), not synthesized")
 	})
 
 	// T094: Test that TotalTools only counts enabled servers' tools (Issue #285 fix)
@@ -262,6 +344,59 @@ func TestListServers(t *testing.T) {
 				assert.Equal(t, 10, srv.ToolCount)
 			}
 		}
+	})
+
+	// Issue #1064: a quarantined server stays connected and status ready -- that
+	// is deliberate, the tray and Web UI must inspect it for review -- so the
+	// enabled-only guard above never fired for it and its tools were still
+	// summed as "Available across all servers" while every call to them was
+	// refused.
+	t.Run("TotalTools excludes quarantined servers", func(t *testing.T) {
+		runtime := newMockRuntime()
+		runtime.servers = []map[string]interface{}{
+			{
+				"id":          "server1",
+				"name":        "clean-server",
+				"enabled":     true,
+				"connected":   true,
+				"quarantined": false,
+				"tool_count":  5,
+			},
+			{
+				"id":          "server2",
+				"name":        "quarantined-server",
+				"enabled":     true,
+				"connected":   true, // still dialed, for security inspection
+				"quarantined": true,
+				"tool_count":  7, // must NOT be counted
+			},
+			{
+				"id":          "server3",
+				"name":        "disabled-server",
+				"enabled":     false,
+				"connected":   false,
+				"quarantined": false,
+				"tool_count":  3, // must NOT be counted (issue #285)
+			},
+		}
+
+		svc := NewService(runtime, cfg, "", emitter, nil, logger)
+		servers, stats, err := svc.ListServers(context.Background())
+
+		require.NoError(t, err)
+		assert.Len(t, servers, 3)
+		assert.Equal(t, 5, stats.TotalTools,
+			"TotalTools must exclude both quarantined and disabled servers")
+
+		// The quarantined server is still listed and still flagged: the review
+		// surface must not go dark just because the count went to zero.
+		byName := map[string]*contracts.Server{}
+		for i := range servers {
+			byName[servers[i].Name] = servers[i]
+		}
+		require.Contains(t, byName, "quarantined-server")
+		assert.True(t, byName["quarantined-server"].Quarantined)
+		assert.Equal(t, 1, stats.QuarantinedServers)
 	})
 
 	t.Run("runtime error", func(t *testing.T) {

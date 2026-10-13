@@ -44,8 +44,9 @@ mcpproxy status
 
 ```
 MCPProxy Status
+Needs attention: 3 (run 'mcpproxy attention')
   State:       Running
-  Version:     v1.2.0
+  Version:     v1.2.0 (update available: v1.3.0 — https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0)
   Listen:      127.0.0.1:8080
   Uptime:      2h 15m
   API Key:     a1b2****gh78
@@ -54,7 +55,16 @@ MCPProxy Status
   Servers:     12 connected, 2 quarantined
   Socket:      /Users/you/.mcpproxy/mcpproxy.sock
   Config:      /Users/you/.mcpproxy/mcp_config.json
+
+Endpoint & mode
+  Routing mode:    retrieve_tools
+  /mcp             http://127.0.0.1:8080/mcp  (default, retrieve_tools mode)
+  /mcp/call        http://127.0.0.1:8080/mcp/call  (retrieve + call tools)
 ```
+
+The first line after the header is the **needs-attention count**, the same number the Web UI header pill and Home badge and the macOS tray show; it reads `Needs attention: none` when nothing needs you. An older daemon without the endpoint omits the line. See [Attention Command](/cli/attention-command).
+
+The **Endpoint & mode** section (it was named "MCP Endpoints" before) lists the routing mode and the MCP endpoints to point a client at, the same facts the Clients page shows on its **Endpoint & mode** tab. JSON output is unchanged.
 
 **When daemon is not running:**
 
@@ -134,9 +144,27 @@ mcpproxy status -o json
   },
   "socket_path": "/Users/you/.mcpproxy/mcpproxy.sock",
   "config_path": "/Users/you/.mcpproxy/mcp_config.json",
-  "version": "v1.2.0"
+  "version": "v1.2.0",
+  "update": {
+    "available": true,
+    "latest_version": "v1.3.0",
+    "release_url": "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/tag/v1.3.0",
+    "checked_at": "2026-07-02T10:00:00Z"
+  }
 }
 ```
+
+## Update Availability
+
+When the daemon is running, `status` surfaces the result of the background update check (the same `update` object as `GET /api/v1/info` and `mcpproxy doctor`):
+
+- **Update available**: `Version: v1.2.0 (update available: v1.3.0, 8 releases / ~14 weeks behind — <release URL>)`
+  - The `N releases / M weeks behind` clause (Spec 079 FR-002) appears only when the daemon resolved a delta. Resolving it needs a second GitHub request for the release list and publish dates, so it is absent when that request fails or is rate-limited, when the running build has no release record, and against a daemon older than the feature — the line then reads exactly as it did before, without the clause. A build too old for the scanned window reports a lower bound (`59+ releases`).
+- **Up to date**: `Version: v1.3.0 (latest)`
+- **Check failed or not yet completed** (offline, rate-limited): the version is shown without any annotation. In JSON output the `update.check_error` field retains the failure reason for diagnostics.
+- **Update checking disabled** (`update_check.enabled: false` in the config, or `MCPPROXY_DISABLE_AUTO_UPDATE=true`): the daemon performs no check and omits the `update` object entirely, so the version is shown without any annotation.
+
+In machine-readable output (`-o json`/`-o yaml`) the `update` object also carries `checked_at` (when the last successful check ran, so consumers can judge staleness) and `is_prerelease` (whether the offered version is a prerelease), matching the `/api/v1/info` contract.
 
 ## API Key Masking
 

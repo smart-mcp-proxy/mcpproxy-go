@@ -1,0 +1,40 @@
+name: Bench Results Untracked
+
+# SC-011 / Spec 065 CN-003: benchmark reports are published as CI artifacts and
+# Cloudflare Pages deployments, never committed. bench/results/ is gitignored,
+# but .gitignore does not protect a file that is ALREADY tracked (a `git add -f`,
+# a rename into the directory, or an ignore rule added after the fact), so the
+# rule needs a check that runs on every pull request.
+#
+# It deliberately does not live in bench.yml: that workflow triggers only on v*
+# tags and workflow_dispatch, so it can never block the PR that adds a report.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  no-tracked-reports:
+    name: No benchmark report is tracked
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      # `git ls-files`, NOT `git status --porcelain`: porcelain omits ignored
+      # files, so it would stay silent about exactly the failure this guards —
+      # a report that is tracked in the index while bench/results/ is ignored.
+      - name: Assert no report is tracked under bench/results
+        run: |
+          tracked="$(git ls-files bench/results)"
+          if [ -n "$tracked" ]; then
+            echo "::error::Benchmark reports must never be committed (SC-011, Spec 065 CN-003)."
+            echo "The following files are tracked under bench/results/:"
+            echo "$tracked"
+            echo ""
+            echo "To fix: git rm --cached <file> and keep bench/results/ gitignored."
+            echo "Reports are published as CI artifacts and Cloudflare Pages deployments instead."
+          fi
+          test -z "$(git ls-files bench/results)"

@@ -8,7 +8,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"go.uber.org/zap"
 )
 
@@ -40,7 +39,7 @@ func createProcessGroupCommandFunc(client *Client, workingDir string, logger *za
 
 		logger.Debug("Process group configuration applied",
 			zap.String("command", command),
-			zap.Strings("args", shellwrap.RedactDockerArgs(args)),
+			zap.Strings("args", logSafeArgs(args)),
 			zap.String("working_dir", workingDir))
 
 		if client != nil {
@@ -58,8 +57,10 @@ func createProcessGroupCommandFunc(client *Client, workingDir string, logger *za
 }
 
 // killProcessGroup terminates an entire process group on Unix systems
-// This is the proper way to clean up child processes and prevent zombies
-func killProcessGroup(pgid int, logger *zap.Logger, serverName string) error {
+// This is the proper way to clean up child processes and prevent zombies.
+// The cmd argument is the owning process's exec.Cmd; it only matters on
+// Windows (PID-reuse identity check) and is ignored here.
+func killProcessGroup(pgid int, _ *exec.Cmd, logger *zap.Logger, serverName string) error {
 	if pgid <= 0 {
 		return nil
 	}
@@ -155,4 +156,54 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 		zap.Int("pgid", pgid))
 
 	return pgid
+}
+
+// releaseProcessGroup is the platform hook DisconnectWithContext calls after
+// the graceful MCP close on every non-Docker stdio disconnect. On Unix there
+// is nothing to release: process groups are a kernel-side identifier, not a
+// handle we hold, so this is a no-op. See process_windows.go for the
+// platform that needs it (the Job Object handle + registry entry, keyed by
+// PID and disambiguated by the owning cmd).
+func releaseProcessGroup(_ int, _ *exec.Cmd, _ *zap.Logger, _ string) {}
+
+// killProcessTreeNow is the retirement kill (Spec 116 PR4, FR-023a): SIGKILL
+// to the whole process group, at once and without waiting, so a retired
+// instance's child executes nothing further. Falls back to the immediate
+// process when no group was recorded. Safe to call more than once; it does
+// not reap (the transport's Close owns the child's exit status).
+func killProcessTreeNow(pgid int, cmd *exec.Cmd) {
+	if pgid > 0 {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		return
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+// startedProcessGroupID is the process group a child started with
+// Setpgid (and Pgid 0) leads: its own pid. It stands in when
+// extractProcessGroupID cannot read the group because the child already
+// died, e.g. retirement cancelled the gate context, and so killed the
+// immediate child, while its launch section was still open (Spec 116 PR4,
+// T4.11). The pid is not reused before the child is reaped, so signalling
+// the group still reaches the descendants it left behind. 0 when the child
+// was not started as a group leader.
+func startedProcessGroupID(cmd *exec.Cmd) int {
+	if cmd == nil || cmd.Process == nil || cmd.SysProcAttr == nil {
+		return 0
+	}
+	if cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
+		return cmd.Process.Pid
+	}
+	return 0
+}
+
+// assignProcessTree is the stdio launch section's containment step. On Unix
+// the child already leads its own process group (Setpgid at start), so this
+// only reads the group and cannot fail: 0 means the group could not be read
+// (the child already died) and the caller falls back to
+// startedProcessGroupID.
+func assignProcessTree(cmd *exec.Cmd, logger *zap.Logger, serverName string) (int, error) {
+	return extractProcessGroupID(cmd, logger, serverName), nil
 }

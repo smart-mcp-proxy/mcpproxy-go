@@ -1,0 +1,8 @@
+{
+  "description": "security.StripInternalArgs removes every _auth_*-prefixed key before canonicalisation (FR-015): a call carrying injected _auth_user_id/_auth_user_email/_auth_auth_type must canonicalize byte-identically to the same call without them, and the canonical output must never contain the substring \"_auth_\".",
+  "strip_internal_args": true,
+  "variants": [
+    { "repo": "mcpproxy-go", "issue": 1107, "_auth_user_id": "u-1", "_auth_user_email": "alice@example.com", "_auth_auth_type": "session_user" },
+    { "repo": "mcpproxy-go", "issue": 1107 }
+  ]
+}

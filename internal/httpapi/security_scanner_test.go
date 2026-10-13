@@ -15,7 +15,9 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // --- Mock SecurityController ---
@@ -39,6 +41,24 @@ type mockSecurityController struct {
 	scanAllErr   error
 	cancelAllErr error
 	queueRunning bool
+
+	deepScanEnabled bool
+	approvedBy      string
+	approvedForce   bool
+	approvedBlocks  []string
+	// Spec 117 PR-2: the last ApproveServerReviewed call.
+	reviewedCalls    int
+	reviewedExpected map[string]string
+	reviewedInc      int64
+
+	// What the last ConfigureScanner call carried.
+	configuredEnv   map[string]string
+	configuredImage string
+	configureCalls  int
+}
+
+func (m *mockSecurityController) DeepScanEnabled() bool {
+	return m.deepScanEnabled
 }
 
 func (m *mockSecurityController) ListScanners(_ context.Context) ([]*scanner.ScannerPlugin, error) {
@@ -54,6 +74,13 @@ func (m *mockSecurityController) RemoveScanner(_ context.Context, id string) err
 }
 
 func (m *mockSecurityController) ConfigureScanner(_ context.Context, id string, env map[string]string, dockerImage string) error {
+	// Captured so a test can assert what the handler actually forwarded to the
+	// service, not merely that the request returned 200. The real service
+	// MERGES env into ConfiguredEnv, so "the sentinel never arrives" and "the
+	// stored secret survives" are the same assertion.
+	m.configuredEnv = env
+	m.configuredImage = dockerImage
+	m.configureCalls++
 	return m.configureErr
 }
 
@@ -109,6 +136,25 @@ func (m *mockSecurityController) CancelScan(_ context.Context, serverName string
 }
 
 func (m *mockSecurityController) ApproveServer(_ context.Context, serverName string, force bool, approvedBy string) error {
+	m.approvedBy = approvedBy
+	m.approvedForce = force
+	return m.approveErr
+}
+
+func (m *mockSecurityController) ApproveServerWithBlocks(_ context.Context, _ string, force bool, approvedBy string, blocks []string) error {
+	m.approvedBy = approvedBy
+	m.approvedForce = force
+	m.approvedBlocks = append([]string(nil), blocks...)
+	return m.approveErr
+}
+
+func (m *mockSecurityController) ApproveServerReviewedAt(_ context.Context, _ string, force bool, approvedBy string, blocks []string, expected map[string]string, inc int64) error {
+	m.reviewedCalls++
+	m.reviewedInc = inc
+	m.reviewedExpected = expected
+	m.approvedBy = approvedBy
+	m.approvedForce = force
+	m.approvedBlocks = append([]string(nil), blocks...)
 	return m.approveErr
 }
 
@@ -179,15 +225,32 @@ func (m *mockSecurityController) GetScanReportByJobID(_ context.Context, jobID s
 	return nil, fmt.Errorf("no report found for job: %s", jobID)
 }
 
-// secTestController embeds baseController and adds GetCurrentConfig
-// returning nil to bypass auth middleware in tests.
+// secTestController embeds baseController and supplies a real configuration
+// with a real API key. It used to return nil to bypass the auth middleware
+// entirely; since SEC-02 that path refuses the request instead of forwarding
+// it, so these tests authenticate the way a real caller does.
 type secTestController struct {
 	baseController
-	servers []map[string]interface{}
+	servers   []map[string]interface{}
+	approvals []*storage.ToolApprovalRecord
+	listErr   error
 }
 
-func (m *secTestController) GetCurrentConfig() interface{} {
-	return nil // nil config = testing scenario, bypasses auth
+func (m *secTestController) ListToolApprovals(serverName string) ([]*storage.ToolApprovalRecord, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	var out []*storage.ToolApprovalRecord
+	for _, a := range m.approvals {
+		if a.ServerName == serverName {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
+func (m *secTestController) GetCurrentConfig() *config.Config {
+	return &config.Config{APIKey: mockControllerAPIKey}
 }
 
 func (m *secTestController) GetAllServers() ([]map[string]interface{}, error) {
@@ -236,6 +299,7 @@ func TestSecurityHandlerListScanners(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/security/scanners", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -253,6 +317,7 @@ func TestSecurityHandlerInstallScanner(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"id": "mcp-scan"}`)
 	req := httptest.NewRequest("POST", "/api/v1/security/scanners/install", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -265,6 +330,63 @@ func TestSecurityHandlerInstallScanner(t *testing.T) {
 	assert.Equal(t, "mcp-scan", resp["id"])
 }
 
+// TestSecurityHandlerEnableScannerDeepScanOffHint locks audit FIX 3b: enabling
+// a Docker-based scanner while security.deep_scan.enabled=false must return an
+// explicit hint (the scanner will not run until the layer is enabled) instead
+// of silently succeeding. No hint when deep scan is on, and none for the
+// in-process baseline scanner (it always runs).
+func TestSecurityHandlerEnableScannerDeepScanOffHint(t *testing.T) {
+	dockerScanner := &scanner.ScannerPlugin{
+		ID: "mcp-scan", Name: "MCP Scan", DockerImage: "test/mcp-scan:latest",
+		Status: scanner.ScannerStatusAvailable,
+	}
+	inprocScanner := &scanner.ScannerPlugin{
+		ID: "tpa-descriptions", Name: "TPA", InProcess: true,
+		Status: scanner.ScannerStatusInstalled,
+	}
+
+	enable := func(t *testing.T, srv *Server, id string) map[string]string {
+		t.Helper()
+		req := httptest.NewRequest("POST", "/api/v1/security/scanners/"+id+"/enable", nil)
+		req.Header.Set("X-API-Key", mockControllerAPIKey)
+		w := httptest.NewRecorder()
+		srv.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code)
+		var resp map[string]string
+		secParseData(t, w.Body, &resp)
+		return resp
+	}
+
+	t.Run("docker scanner with deep scan off gets hint", func(t *testing.T) {
+		secCtrl := &mockSecurityController{
+			scanners:        []*scanner.ScannerPlugin{dockerScanner},
+			deepScanEnabled: false,
+		}
+		resp := enable(t, newTestServerWithSecurity(t, secCtrl), "mcp-scan")
+		assert.Equal(t, "enabled", resp["status"])
+		require.NotEmpty(t, resp["hint"], "enabling a Docker scanner with deep scan off must not be silent")
+		assert.Contains(t, resp["hint"], "security.deep_scan.enabled=true")
+	})
+
+	t.Run("docker scanner with deep scan on gets no hint", func(t *testing.T) {
+		secCtrl := &mockSecurityController{
+			scanners:        []*scanner.ScannerPlugin{dockerScanner},
+			deepScanEnabled: true,
+		}
+		resp := enable(t, newTestServerWithSecurity(t, secCtrl), "mcp-scan")
+		assert.Empty(t, resp["hint"])
+	})
+
+	t.Run("in-process scanner gets no hint even with deep scan off", func(t *testing.T) {
+		secCtrl := &mockSecurityController{
+			scanners:        []*scanner.ScannerPlugin{inprocScanner},
+			deepScanEnabled: false,
+		}
+		resp := enable(t, newTestServerWithSecurity(t, secCtrl), "tpa-descriptions")
+		assert.Empty(t, resp["hint"])
+	})
+}
+
 func TestSecurityHandlerInstallScannerError(t *testing.T) {
 	secCtrl := &mockSecurityController{
 		installErr: fmt.Errorf("Docker is not available"),
@@ -273,6 +395,7 @@ func TestSecurityHandlerInstallScannerError(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"id": "mcp-scan"}`)
 	req := httptest.NewRequest("POST", "/api/v1/security/scanners/install", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -286,6 +409,7 @@ func TestSecurityHandlerInstallScannerMissingID(t *testing.T) {
 
 	body := bytes.NewBufferString(`{}`)
 	req := httptest.NewRequest("POST", "/api/v1/security/scanners/install", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -298,6 +422,7 @@ func TestSecurityHandlerRemoveScanner(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("DELETE", "/api/v1/security/scanners/mcp-scan", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -314,6 +439,7 @@ func TestSecurityHandlerConfigureScanner(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"env": {"API_KEY": "test-key"}}`)
 	req := httptest.NewRequest("PUT", "/api/v1/security/scanners/mcp-scan/config", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -331,6 +457,7 @@ func TestSecurityHandlerConfigureScannerEmptyEnv(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"env": {}}`)
 	req := httptest.NewRequest("PUT", "/api/v1/security/scanners/mcp-scan/config", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -347,6 +474,7 @@ func TestSecurityHandlerGetScannerStatus(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/security/scanners/mcp-scan/status", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -365,6 +493,7 @@ func TestSecurityHandlerGetScannerStatusNotFound(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/security/scanners/nonexistent/status", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -377,6 +506,7 @@ func TestSecurityHandlerStartScan(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"dry_run": true, "scanner_ids": ["mcp-scan"]}`)
 	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/scan", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -396,6 +526,7 @@ func TestSecurityHandlerStartScanError(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/scan", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -415,6 +546,7 @@ func TestSecurityHandlerGetScanStatus(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/servers/my-server/scan/status", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -431,6 +563,7 @@ func TestSecurityHandlerGetScanStatusNotFound(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/servers/no-such-server/scan/status", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -451,6 +584,7 @@ func TestSecurityHandlerGetScanReport(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/servers/my-server/scan/report", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -468,6 +602,7 @@ func TestSecurityHandlerCancelScan(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/scan/cancel", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -481,6 +616,7 @@ func TestSecurityHandlerCancelScanError(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/scan/cancel", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -493,15 +629,102 @@ func TestSecurityHandlerApproveServer(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"force": false}`)
 	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	var resp map[string]string
+	var resp map[string]interface{}
 	secParseData(t, w.Body, &resp)
 	assert.Equal(t, "approved", resp["status"])
+	assert.Equal(t, "my-server", resp["server_name"])
+}
+
+func TestSecurityHandlerApproveServerWithBlocks(t *testing.T) {
+	secCtrl := &mockSecurityController{}
+	srv := newTestServerWithSecurity(t, secCtrl)
+
+	body := bytes.NewBufferString(`{"force":true,"block":["delete_issue","remove_user"]}`)
+	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.True(t, secCtrl.approvedForce)
+	require.Equal(t, []string{"delete_issue", "remove_user"}, secCtrl.approvedBlocks)
+}
+
+// UX-02: a successful approval reports the post-approval tool state, so tools
+// left pending or changed are visible instead of hidden behind "approved".
+func TestSecurityHandlerApproveServerReportsRemainingHolds(t *testing.T) {
+	secCtrl := &mockSecurityController{}
+	logger := zap.NewNop().Sugar()
+	ctrl := &secTestController{approvals: []*storage.ToolApprovalRecord{
+		{ServerName: "my-server", ToolName: "read_a", Status: storage.ToolApprovalStatusApproved},
+		{ServerName: "my-server", ToolName: "read_b", Status: storage.ToolApprovalStatusApproved},
+		{ServerName: "my-server", ToolName: "delete_a", Status: storage.ToolApprovalStatusApproved, Disabled: true},
+		{ServerName: "my-server", ToolName: "read_c", Status: storage.ToolApprovalStatusPending},
+		{ServerName: "other", ToolName: "x", Status: storage.ToolApprovalStatusPending},
+	}}
+	srv := NewServer(ctrl, logger, nil)
+	srv.SetSecurityController(secCtrl)
+	srv.router = chi.NewRouter()
+	srv.setupRoutes()
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", bytes.NewBufferString(`{"block":["delete_a"]}`))
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	secParseData(t, w.Body, &resp)
+	assert.Equal(t, "approved", resp["status"])
+	assert.Equal(t, float64(2), resp["approved_count"])
+	assert.Equal(t, float64(1), resp["blocked_count"])
+	assert.Equal(t, float64(1), resp["still_pending"])
+	assert.Equal(t, float64(0), resp["still_changed"])
+	assert.Equal(t, []interface{}{"read_c"}, resp["held_tools"])
+}
+
+// UX-02 review: when the post-approval state cannot be read back, the
+// response says so instead of looking like a complete (legacy) approval.
+func TestSecurityHandlerApproveServerFlagsUnreadableOutcome(t *testing.T) {
+	ctrl := &secTestController{listErr: fmt.Errorf("decode failure")}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	srv.SetSecurityController(&mockSecurityController{})
+	srv.router = chi.NewRouter()
+	srv.setupRoutes()
+
+	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", bytes.NewBufferString(`{}`))
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	secParseData(t, w.Body, &resp)
+	assert.Equal(t, "approved", resp["status"])
+	assert.Equal(t, true, resp["outcome_unavailable"])
+	assert.NotContains(t, resp, "approved_count")
+}
+
+func TestSecurityHandlerApproveServerWithUnknownBlockIsBadRequest(t *testing.T) {
+	secCtrl := &mockSecurityController{approveErr: fmt.Errorf("%w: missing", scanner.ErrToolApprovalBlockNotFound)}
+	srv := newTestServerWithSecurity(t, secCtrl)
+
+	body := bytes.NewBufferString(`{"block":["missing"]}`)
+	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestSecurityHandlerApproveServerBlocked(t *testing.T) {
@@ -511,6 +734,7 @@ func TestSecurityHandlerApproveServerBlocked(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/approve", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -522,6 +746,7 @@ func TestSecurityHandlerRejectServer(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("POST", "/api/v1/servers/my-server/security/reject", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -543,6 +768,7 @@ func TestSecurityHandlerCheckIntegrity(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/servers/my-server/integrity", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -560,6 +786,7 @@ func TestSecurityHandlerCheckIntegrityNoBaseline(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/servers/my-server/integrity", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -584,6 +811,7 @@ func TestSecurityHandlerOverview(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/security/overview", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -604,6 +832,7 @@ func TestSecurityRoutesReturnNotImplementedWithoutController(t *testing.T) {
 	// Do NOT set security controller
 
 	req := httptest.NewRequest("GET", "/api/v1/security/scanners", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -633,6 +862,7 @@ func TestSecurityHandlerScanAll(t *testing.T) {
 
 	body := bytes.NewBufferString(`{"scanner_ids": ["mcp-scan"]}`)
 	req := httptest.NewRequest("POST", "/api/v1/security/scan-all", body)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
@@ -653,6 +883,7 @@ func TestSecurityHandlerScanAllAlreadyRunning(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("POST", "/api/v1/security/scan-all", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -680,6 +911,7 @@ func TestSecurityHandlerGetQueueProgress(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/security/queue", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -698,6 +930,7 @@ func TestSecurityHandlerGetQueueProgressEmpty(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("GET", "/api/v1/security/queue", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -713,6 +946,7 @@ func TestSecurityHandlerCancelAll(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("POST", "/api/v1/security/cancel-all", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 
@@ -730,6 +964,7 @@ func TestSecurityHandlerCancelAllNoScan(t *testing.T) {
 	srv := newTestServerWithSecurity(t, secCtrl)
 
 	req := httptest.NewRequest("POST", "/api/v1/security/cancel-all", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	w := httptest.NewRecorder()
 	srv.ServeHTTP(w, req)
 

@@ -79,7 +79,7 @@
 
 **Purpose**: Extend GitHub Actions release workflow to build teams assets alongside personal
 
-- [x] T020 Add teams Linux matrix entries (amd64, arm64) to `.github/workflows/release.yml` build job — uses `-tags server` flag, produces `mcpproxy-teams-*` archives
+- [ ] T020 Add teams Linux matrix entries (amd64, arm64) to `.github/workflows/release.yml` build job — uses `-tags server` flag, produces `mcpproxy-teams-*` archives
 - [x] T021 Add `build-docker` job to `.github/workflows/release.yml` — builds and pushes `ghcr.io/smart-mcp-proxy/mcpproxy-teams:$VERSION` on tag push
 - [x] T022 Update release notes prompt in `.github/workflows/release.yml` to mention both editions
 - [x] T023 Update release asset upload to include teams archives with `mcpproxy-teams-` prefix

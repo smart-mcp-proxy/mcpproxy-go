@@ -20,11 +20,95 @@ final class SocketURLProtocol: URLProtocol {
         NSHomeDirectory() + "/.mcpproxy/mcpproxy.sock"
     }()
 
-    /// Allow override for testing.
-    static var overrideSocketPath: String?
+    /// Header carrying an opaque route token identifying the socket a
+    /// particular session must use.
+    ///
+    /// The route travels PER SESSION, not in a global mutable path. It used to
+    /// live in a mutable static, which meant creating any second client —
+    /// another `CoreProcessManager`, a probe, a concurrent test — silently
+    /// redirected every existing client to the newest path. That is a
+    /// liveness-detector hazard, not just a test smell: a client could report a
+    /// different core's health as its own.
+    ///
+    /// The value is a TOKEN, not the path. `URLSessionConfiguration`
+    /// `httpAdditionalHeaders` are attached to every request the session makes,
+    /// including ones this protocol declines to intercept and ones following a
+    /// redirect — so whatever goes in here must be safe to disclose. A UUID is;
+    /// `/Users/<name>/.mcpproxy/mcpproxy.sock` is not.
+    static let routeHeader = "X-MCPProxy-Route"
 
-    private static var effectiveSocketPath: String {
-        overrideSocketPath ?? socketPath
+    /// Header marking a request that must NEVER leave over TCP.
+    ///
+    /// The unrouted fallback below ("intercept only if the default socket
+    /// exists, otherwise let it go out over TCP") is right for reads and wrong
+    /// for administrative writes: if the socket disappears mid-session, a
+    /// connect/undo/disconnect would silently ride 127.0.0.1:8080 instead, which
+    /// is exactly the non-socket case the spec forbids (research D6). A strict
+    /// request is intercepted regardless, so it fails loudly instead.
+    ///
+    /// Like the route header it is a transport hint and never goes on the wire.
+    static let strictSocketHeader = "X-MCPProxy-Strict-Socket"
+
+    /// Whether this request refuses a TCP fallback.
+    static func isStrictSocket(_ request: URLRequest) -> Bool {
+        request.value(forHTTPHeaderField: strictSocketHeader) != nil
+    }
+
+    /// The interception rule, as a pure function of the request and whether the
+    /// default socket file exists — so it can be tested without a socket.
+    static func shouldIntercept(request: URLRequest, defaultSocketExists: Bool) -> Bool {
+        // A request that carries a route is PINNED to that socket (see canInit).
+        if routedSocketPath(for: request) != nil { return true }
+        // A strict request may not fall back to TCP, ever.
+        if isStrictSocket(request) { return true }
+        return defaultSocketExists
+    }
+
+    /// token -> socket path. Written once per session at creation and read on
+    /// every request. Not an alias for "the current path": each entry belongs to
+    /// exactly one session, which is the whole point.
+    private static let routes = RouteTable()
+
+    /// Register a socket path and return the token that routes to it.
+    static func makeRoute(to socketPath: String) -> String {
+        routes.add(socketPath)
+    }
+
+    /// Resolve a route token back to its socket path.
+    static func routes(for token: String) -> String? {
+        routes.path(for: token)
+    }
+
+    /// Socket path this request must be routed over, or nil when the request
+    /// carries no route (a client constructed without an explicit path).
+    static func routedSocketPath(for request: URLRequest) -> String? {
+        guard let token = request.value(forHTTPHeaderField: routeHeader) else { return nil }
+        return routes.path(for: token)
+    }
+
+    /// Socket path this request must use, falling back to the default.
+    static func effectiveSocketPath(for request: URLRequest) -> String {
+        routedSocketPath(for: request) ?? socketPath
+    }
+
+    /// Thread-safe token table.
+    final class RouteTable: @unchecked Sendable {
+        private let lock = NSLock()
+        private var paths: [String: String] = [:]
+
+        func add(_ path: String) -> String {
+            let token = UUID().uuidString
+            lock.lock()
+            paths[token] = path
+            lock.unlock()
+            return token
+        }
+
+        func path(for token: String) -> String? {
+            lock.lock()
+            defer { lock.unlock() }
+            return paths[token]
+        }
     }
 
     /// Active read task, retained for cancellation.
@@ -43,8 +127,18 @@ final class SocketURLProtocol: URLProtocol {
               (host == "localhost" || host == "127.0.0.1") else {
             return false
         }
-        // Only intercept if the socket exists.
-        return FileManager.default.fileExists(atPath: effectiveSocketPath)
+        // A request that carries a route is PINNED to that socket: intercept it
+        // even when the socket is missing, and let it fail. Falling back to TCP
+        // there would silently send a client that was told "talk to this core"
+        // to whatever happens to be listening on 127.0.0.1:8080 — a different
+        // core's health reported as this one's, which is precisely the failure
+        // the routing exists to prevent. A strict request refuses the fallback
+        // for the same reason. Everything else keeps the legacy behaviour:
+        // intercept only if the default socket exists.
+        return shouldIntercept(
+            request: request,
+            defaultSocketExists: FileManager.default.fileExists(atPath: socketPath)
+        )
     }
 
     override class func canonicalRequest(for request: URLRequest) -> URLRequest {
@@ -61,10 +155,15 @@ final class SocketURLProtocol: URLProtocol {
         }
         socketFD = fd
 
+        // A peer that closes before we finish writing must surface as EPIPE
+        // (handled below), not a process-killing SIGPIPE.
+        var noSigPipe: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size))
+
         // Build sockaddr_un
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
-        let path = Self.effectiveSocketPath
+        let path = Self.effectiveSocketPath(for: request)
         let pathBytes = path.utf8CString
         guard pathBytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
             Darwin.close(fd)
@@ -183,6 +282,9 @@ final class SocketURLProtocol: URLProtocol {
             for (key, value) in allHeaders {
                 let lowerKey = key.lowercased()
                 if lowerKey == "host" { continue } // already added
+                // Transport routing hints — never go on the wire.
+                if lowerKey == Self.routeHeader.lowercased() { continue }
+                if lowerKey == Self.strictSocketHeader.lowercased() { continue }
                 if lowerKey == "content-length" { hasContentLength = true }
                 lines.append("\(key): \(value)")
             }
@@ -480,14 +582,22 @@ enum SocketTransport {
 
     /// Create a `URLSession` configured to route traffic through the mcpproxy Unix socket.
     /// Falls back to standard networking if the socket is not available.
-    static func makeURLSession(socketPath: String? = nil) -> URLSession {
-        if let path = socketPath {
-            SocketURLProtocol.overrideSocketPath = path
-        }
-
+    ///
+    /// - Parameters:
+    ///   - socketPath: socket this session must use. Carried per-request in a
+    ///     header rather than a process-global, so two clients can talk to two
+    ///     different cores without redirecting each other.
+    ///   - timeout: per-request timeout. The default is generous because the
+    ///     core can be slow under load; liveness probes pass something short.
+    static func makeURLSession(socketPath: String? = nil, timeout: TimeInterval = 30) -> URLSession {
         let config = URLSessionConfiguration.default
         config.protocolClasses = [SocketURLProtocol.self]
-        config.timeoutIntervalForRequest = 30
+        if let socketPath {
+            config.httpAdditionalHeaders = [
+                SocketURLProtocol.routeHeader: SocketURLProtocol.makeRoute(to: socketPath)
+            ]
+        }
+        config.timeoutIntervalForRequest = timeout
         config.timeoutIntervalForResource = 300
         config.httpShouldSetCookies = false
         config.httpCookieAcceptPolicy = .never
@@ -495,27 +605,49 @@ enum SocketTransport {
         return URLSession(configuration: config)
     }
 
-    /// Create a standard TCP-based `URLSession` (no socket override).
-    static func makeTCPSession() -> URLSession {
+    /// Create a standard TCP-based `URLSession` (never routed over the socket).
+    static func makeTCPSession(timeout: TimeInterval = 30) -> URLSession {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 30
+        config.timeoutIntervalForRequest = timeout
         config.timeoutIntervalForResource = 300
         config.httpShouldSetCookies = false
         config.httpCookieAcceptPolicy = .never
         return URLSession(configuration: config)
+    }
+
+    /// Why a socket probe failed. "Not connectable" is NOT the same as "the core
+    /// is dead", and the difference decides whether the tray may act on it.
+    enum SocketProbe: Equatable {
+        /// A listener accepted (or is accepting) the connection.
+        case connectable
+        /// No socket file at all. A running core always owns its socket file,
+        /// so this one is unambiguous.
+        case absent
+        /// The file is there but the connection was refused. Ambiguous: a dead
+        /// process leaves a stale file behind, AND a live core with a full
+        /// listen backlog refuses connections in exactly the same way.
+        case refused
+        /// The failure was on OUR side — descriptor exhaustion, out of memory,
+        /// permissions. Says nothing whatsoever about the core.
+        case localFailure(Int32)
     }
 
     /// Check whether the mcpproxy Unix socket file exists and is connectable.
     static func isSocketAvailable(path: String? = nil) -> Bool {
+        probeSocket(path: path) == .connectable
+    }
+
+    /// Probe the socket and classify the outcome.
+    static func probeSocket(path: String? = nil) -> SocketProbe {
         let socketPath = path ?? SocketURLProtocol.socketPath
 
         guard FileManager.default.fileExists(atPath: socketPath) else {
-            return false
+            return .absent
         }
 
         // Attempt a quick connect to verify the socket is alive
         let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return false }
+        guard fd >= 0 else { return .localFailure(errno) }
         defer { Darwin.close(fd) }
 
         // Set non-blocking for a quick probe
@@ -540,6 +672,22 @@ enum SocketTransport {
         }
 
         // Non-blocking connect returns 0 on immediate success or EINPROGRESS
-        return result == 0 || errno == EINPROGRESS
+        if result == 0 { return .connectable }
+        let connectErrno = errno
+        if connectErrno == EINPROGRESS { return .connectable }
+
+        switch connectErrno {
+        case ENOENT:
+            // Unlinked between the stat above and the connect.
+            return .absent
+        case EMFILE, ENFILE, ENOMEM, ENOBUFS, EACCES, EPERM:
+            // Our process ran out of something, or cannot reach the socket.
+            // Not evidence about the core.
+            return .localFailure(connectErrno)
+        default:
+            // ECONNREFUSED and friends: a dead process's stale socket looks
+            // exactly like a live core whose listen queue is full.
+            return .refused
+        }
     }
 }

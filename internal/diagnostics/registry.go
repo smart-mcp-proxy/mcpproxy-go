@@ -12,6 +12,7 @@ func init() {
 	seedCONFIG()
 	seedQUARANTINE()
 	seedNETWORK()
+	seedUPDATE()
 	seedUNKNOWN()
 }
 
@@ -32,6 +33,7 @@ func register(e CatalogEntry) {
 func seedSTDIO() {
 	register(CatalogEntry{
 		Code:        STDIOSpawnENOENT,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "The configured command for this stdio server was not found on PATH.",
 		FixSteps: []FixStep{
@@ -43,6 +45,7 @@ func seedSTDIO() {
 	})
 	register(CatalogEntry{
 		Code:        STDIOSpawnEACCES,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "Permission denied executing the configured command.",
 		FixSteps: []FixStep{
@@ -53,6 +56,7 @@ func seedSTDIO() {
 	})
 	register(CatalogEntry{
 		Code:        STDIOSpawnExecFormat,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "The configured command is the wrong CPU architecture or not an executable (exec format error). Install a build that matches this machine.",
 		FixSteps: []FixStep{
@@ -257,6 +261,69 @@ func seedHTTP() {
 		},
 		DocsURL: docsURL(HTTPTimeout),
 	})
+	// The four codes below are deliberately NOT RetryPermanent. A rate limit
+	// clears, a reset connection re-dials, a cancellation was ours, and even the
+	// generic 4xx bucket holds 408 (request timeout). Omitting Retry leaves them
+	// on the zero RetryClass — exactly what MCPX_UNKNOWN_UNCLASSIFIED carried
+	// before this change, so naming these failures changes the message a user
+	// reads and nothing about whether mcpproxy keeps retrying them (GH #1145).
+	register(CatalogEntry{
+		Code:        HTTPConnReset,
+		Severity:    SeverityWarn,
+		UserMessage: "The connection to the server was reset before a reply arrived. This is usually transient.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Retry the request and watch the connection", Command: "curl -v --max-time 30 <server-url>"},
+			{Type: FixStepCommand, Label: "Check for an intercepting proxy", Command: "env | grep -i proxy"},
+			{Type: FixStepLink, Label: "Connectivity checklist", URL: docsURL(HTTPConnReset)},
+		},
+		DocsURL: docsURL(HTTPConnReset),
+	})
+	register(CatalogEntry{
+		Code:        HTTPRateLimited,
+		Severity:    SeverityWarn,
+		UserMessage: "The server is rate-limiting mcpproxy (429 Too Many Requests). mcpproxy backs off before retrying, and waits out the server's Retry-After header when it sends one.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Read the server's Retry-After header", Command: "curl -sS -o /dev/null -D - <server-url>"},
+			{Type: FixStepLink, Label: "Rate limits and back-off", URL: docsURL(HTTPRateLimited)},
+		},
+		DocsURL: docsURL(HTTPRateLimited),
+	})
+	register(CatalogEntry{
+		Code:        HTTPClientErr,
+		Severity:    SeverityError,
+		UserMessage: "The server rejected the request with a 4xx status. The exact status is in the error detail below.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Reproduce the request and read the status and body", Command: "curl -v <server-url>"},
+			{Type: FixStepCommand, Label: "Check the configured URL", Command: "mcpproxy upstream list -o json"},
+			{Type: FixStepLink, Label: "HTTP status troubleshooting", URL: docsURL(HTTPClientErr)},
+		},
+		DocsURL: docsURL(HTTPClientErr),
+	})
+	register(CatalogEntry{
+		Code:        HTTPCanceled,
+		Severity:    SeverityInfo,
+		UserMessage: "The connection attempt was canceled — usually a shutdown, a config reload, or a manual disconnect. No action needed unless it repeats.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Check the server's current state", Command: "mcpproxy upstream list"},
+			{Type: FixStepLink, Label: "Connection lifecycle", URL: docsURL(HTTPCanceled)},
+		},
+		DocsURL: docsURL(HTTPCanceled),
+	})
+	// NOT RetryPermanent, however deterministic the name sounds: mcp-go returns
+	// its ErrLegacySSEServer sentinel for ANY 4xx on the initialize POST except
+	// 401 (client/transport/streamable_http.go). A 429 from a rate-limited
+	// upstream — or a 403/404/408 during a deploy — arrives as this exact code,
+	// and parking on it would strand a server that is merely busy (GH #1145
+	// review).
+	register(CatalogEntry{
+		Code:        HTTPLegacySSE,
+		Severity:    SeverityError,
+		UserMessage: "This endpoint rejected the streamable-HTTP handshake; it looks like a legacy SSE server.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Choosing the right transport", URL: docsURL(HTTPLegacySSE)},
+		},
+		DocsURL: docsURL(HTTPLegacySSE),
+	})
 }
 
 // --- DOCKER --------------------------------------------------------------
@@ -304,6 +371,7 @@ func seedDOCKER() {
 	})
 	register(CatalogEntry{
 		Code:        DockerCLINotFound,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "Docker isolation is enabled but the `docker` command could not be found. Install Docker, or add its CLI to your PATH.",
 		FixSteps: []FixStep{
@@ -314,6 +382,7 @@ func seedDOCKER() {
 	})
 	register(CatalogEntry{
 		Code:        DockerExecNotFound,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "The Docker image is missing the interpreter this server needs (e.g. the image has no `uvx`/`node`). Pick an image that includes it.",
 		FixSteps: []FixStep{
@@ -322,7 +391,19 @@ func seedDOCKER() {
 		DocsURL: docsURL(DockerExecNotFound),
 	})
 	register(CatalogEntry{
+		Code:     DockerMissingToolchain,
+		Severity: SeverityError,
+		UserMessage: "The Docker image is missing a tool this server needs at runtime (e.g. no `git` for a `git+https://…` dependency). " +
+			"Use an image that ships it, or drop a per-server `isolation.image` override so mcpproxy can pick one.",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Check whether the image has the tool", Command: "docker run --rm --entrypoint sh <image> -c 'git --version'"},
+			{Type: FixStepLink, Label: "Choosing a Docker isolation image", URL: docsURL(DockerMissingToolchain)},
+		},
+		DocsURL: docsURL(DockerMissingToolchain),
+	})
+	register(CatalogEntry{
 		Code:        DockerOCIRuntime,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "The Docker container failed to start (OCI runtime error). This is often an image/CPU architecture mismatch.",
 		FixSteps: []FixStep{
@@ -347,6 +428,7 @@ func seedCONFIG() {
 	})
 	register(CatalogEntry{
 		Code:        ConfigParseError,
+		Retry:       RetryPermanent,
 		Severity:    SeverityError,
 		UserMessage: "mcpproxy could not parse the configuration file.",
 		FixSteps: []FixStep{
@@ -354,6 +436,17 @@ func seedCONFIG() {
 			{Type: FixStepLink, Label: "Config reference", URL: docsURL(ConfigParseError)},
 		},
 		DocsURL: docsURL(ConfigParseError),
+	})
+	register(CatalogEntry{
+		Code:        ConfigInvalidCommand,
+		Retry:       RetryPermanent,
+		Severity:    SeverityError,
+		UserMessage: "This server's command has nothing to run — a package runner like npx or uvx needs the package name in \"args\".",
+		FixSteps: []FixStep{
+			{Type: FixStepCommand, Label: "Show this server's config", Command: "mcpproxy upstream get <server> -o json"},
+			{Type: FixStepLink, Label: "Server configuration reference", URL: docsURL(ConfigInvalidCommand)},
+		},
+		DocsURL: docsURL(ConfigInvalidCommand),
 	})
 	register(CatalogEntry{
 		Code:        ConfigMissingSecret,
@@ -412,6 +505,57 @@ func seedNETWORK() {
 			{Type: FixStepLink, Label: "Offline troubleshooting", URL: docsURL(NetworkOffline)},
 		},
 		DocsURL: docsURL(NetworkOffline),
+	})
+}
+
+// --- UPDATE --------------------------------------------------------------
+
+// seedUPDATE registers the tray auto-update failure stages (spec 095). The
+// entries exist so the codes are catalog-members — the gate the anonymity
+// scanner and prechurn filter apply before a code may be transmitted. The
+// messages/fix steps are written for the docs page and the CLI catalog listing;
+// the failure dialog itself is rendered by the tray, not from these entries.
+func seedUPDATE() {
+	const releasesURL = "https://github.com/smart-mcp-proxy/mcpproxy-go/releases"
+	register(CatalogEntry{
+		Code:        UpdateAppcastFailed,
+		Severity:    SeverityWarn,
+		UserMessage: "The app could not check for updates: the update feed was unreachable or unreadable.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Update troubleshooting", URL: docsURL(UpdateAppcastFailed)},
+			{Type: FixStepLink, Label: "Download the latest release manually", URL: releasesURL},
+		},
+		DocsURL: docsURL(UpdateAppcastFailed),
+	})
+	register(CatalogEntry{
+		Code:        UpdateDownloadFailed,
+		Severity:    SeverityWarn,
+		UserMessage: "The app found an update but could not download it.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Update troubleshooting", URL: docsURL(UpdateDownloadFailed)},
+			{Type: FixStepLink, Label: "Download the latest release manually", URL: releasesURL},
+		},
+		DocsURL: docsURL(UpdateDownloadFailed),
+	})
+	register(CatalogEntry{
+		Code:        UpdateInstallFailed,
+		Severity:    SeverityWarn,
+		UserMessage: "The update downloaded but could not be verified or installed.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Update troubleshooting", URL: docsURL(UpdateInstallFailed)},
+			{Type: FixStepLink, Label: "Download the latest release manually", URL: releasesURL},
+		},
+		DocsURL: docsURL(UpdateInstallFailed),
+	})
+	register(CatalogEntry{
+		Code:        UpdateOtherFailed,
+		Severity:    SeverityWarn,
+		UserMessage: "The update attempt failed for an unrecognized reason.",
+		FixSteps: []FixStep{
+			{Type: FixStepLink, Label: "Update troubleshooting", URL: docsURL(UpdateOtherFailed)},
+			{Type: FixStepLink, Label: "Download the latest release manually", URL: releasesURL},
+		},
+		DocsURL: docsURL(UpdateOtherFailed),
 	})
 }
 

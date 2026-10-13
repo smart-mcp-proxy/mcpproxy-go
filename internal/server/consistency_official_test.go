@@ -57,7 +57,12 @@ func startOfficialTestRegistry(t *testing.T) {
 	}))
 	t.Cleanup(srv.Close)
 
+	// Restore the default catalog and SSRF allow-policy (MCP-1076).
+	t.Cleanup(func() { registries.SetRegistriesFromConfig(nil) })
+
 	registries.SetRegistriesFromConfig(&config.Config{
+		// Loopback httptest registry; opt past the SSRF guard (MCP-1076).
+		AllowPrivateRegistryFetch: true,
 		Registries: []config.RegistryEntry{
 			{ID: "officialreg", Name: "officialreg", ServersURL: srv.URL, Protocol: "modelcontextprotocol/registry"},
 		},

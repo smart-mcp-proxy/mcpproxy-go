@@ -164,7 +164,8 @@ func TestAuthToken_GeneratesJWT(t *testing.T) {
 	}
 	require.NoError(t, store.CreateUser(user))
 
-	userCtx := auth.UserContext(testUserID, "test@example.com", "Test User", "google")
+	// Session-cookie-only door (Spec 107 FR-011, T078).
+	userCtx := withCookieKind(auth.UserContext(testUserID, "test@example.com", "Test User", "google"))
 	router := authTestRouter(endpoints, userCtx)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/token", nil)
@@ -206,7 +207,7 @@ func TestAuthToken_Unauthenticated(t *testing.T) {
 func TestAuthToken_UserNotInStore(t *testing.T) {
 	endpoints, _ := authTestSetup(t)
 
-	userCtx := auth.UserContext("nonexistent-user", "ghost@example.com", "Ghost", "google")
+	userCtx := withCookieKind(auth.UserContext("nonexistent-user", "ghost@example.com", "Ghost", "google"))
 	router := authTestRouter(endpoints, userCtx)
 
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/token", nil)

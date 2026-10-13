@@ -1,0 +1,487 @@
+{
+  "_comment": "Spec 109 SC-001 acceptance index (T148c): every one of the 45 acceptance scenarios (US1-1 to US7-8, in spec.md order) and SC-002 to SC-012 maps to automated tests. Refs: go:<repo path>[#<Test>], vitest:<path>, xctest:<path>[#<method>], pw:<path>, sh:<path>, golden:<path>. TestSpec109Traceability resolves every ref (a #name must be a func in the file) and fails on a scenario without a ref. live_only is allowed only with a reason.",
+  "scenarios": {
+    "US1-1": {
+      "summary": "Home shows the needs-attention list ordered by rank",
+      "tests": [
+        "vitest:frontend/tests/unit/home-attention.spec.ts",
+        "go:internal/runtime/attention_test.go#TestAttentionComputeOrderedItems"
+      ]
+    },
+    "US1-2": {
+      "summary": "Header pill, sidebar badge, tray group and status line agree",
+      "tests": [
+        "vitest:frontend/tests/unit/header-attention-pill.spec.ts",
+        "vitest:frontend/tests/unit/sidebar-home-badge.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/AttentionTests.swift#testNeedsAttentionMenuRowForReviewOpensQueueNeverApprove",
+        "go:cmd/mcpproxy/attention_cmd_test.go#TestStatusTable_NeedsAttentionFirstLine",
+        "go:cmd/mcpproxy/attention_parity_test.go#TestAttentionParityCLI"
+      ]
+    },
+    "US1-3": {
+      "summary": "Fixing an item drops it everywhere via attention.changed",
+      "tests": [
+        "go:internal/runtime/attention_subscriber_test.go#TestAttentionSubscriberRecomputesOnlyOnIDSetChange",
+        "vitest:frontend/tests/unit/sse-reconnect-attention-resync.spec.ts",
+        "vitest:frontend/tests/unit/attention-store-sequencing.spec.ts"
+      ]
+    },
+    "US1-4": {
+      "summary": "All clear on Home, pill and badge hidden, CLI prints All clear",
+      "tests": [
+        "vitest:frontend/tests/unit/home-attention.spec.ts",
+        "vitest:frontend/tests/unit/home-getting-started.spec.ts",
+        "go:cmd/mcpproxy/attention_cmd_test.go#TestAttentionCmd_AllClear"
+      ]
+    },
+    "US1-5": {
+      "summary": "doctor leads with the attention list and names diagnostics as such",
+      "tests": [
+        "go:cmd/mcpproxy/attention_cmd_test.go#TestDoctorAttentionSection_FirstAndDiagnosticsWording"
+      ]
+    },
+    "US2-1": {
+      "summary": "Review screen lists every tool read-only with tier, annotations and scan verdict",
+      "tests": [
+        "vitest:frontend/tests/unit/review-screen.spec.ts",
+        "vitest:frontend/tests/unit/review-inert-text.spec.ts",
+        "go:internal/runtime/review_test.go#TestReviewPayload_ClassifiesCapturedAndLegacyAnnotations",
+        "go:internal/httpapi/review_test.go#TestReviewRoutesReturnQueueAndServerShapes",
+        "go:internal/runtime/review_scan_coverage_test.go#TestReviewScanCoverage",
+        "vitest:frontend/tests/unit/review-screen-scan-coverage.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ReviewPresentationTests.swift#testScanBannerForEveryCoverage"
+      ]
+    },
+    "US2-2": {
+      "summary": "Approve server with unchecked tools runs the scan-gated approval and blocks the rest",
+      "tests": [
+        "vitest:frontend/tests/unit/review-screen.spec.ts",
+        "go:internal/runtime/review_default_allowed_test.go#TestReviewDefaultAllowed",
+        "vitest:frontend/tests/unit/review-screen-default-selection.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ReviewPresentationTests.swift#testApproveLabels",
+        "go:cmd/mcpproxy/review_cmd_default_selection_test.go#TestReviewApproveQuarantinedUsesDefaultSelection",
+        "go:internal/httpapi/security_scanner_test.go#TestSecurityHandlerApproveServerWithBlocks",
+        "go:internal/storage/scanner_test.go#TestSaveIntegrityBaselineWithBlocksIsAtomic",
+        "go:internal/security/scanner/service_test.go#TestServiceApproveServerWithBlocksPersistsBeforeUnquarantine"
+      ]
+    },
+    "US2-3": {
+      "summary": "macOS Approve Server uses security/approve with the same confirmation",
+      "tests": [
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ApproveServerPathTests.swift#testSecurityApprovalUsesScanGateAndForcePayload",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ApproveServerPathTests.swift#testReviewSheetOffersForceConfirmationAfterTheScanGate"
+      ]
+    },
+    "US2-4": {
+      "summary": "A changed tool shows the previous to current diff with Approve and Reject",
+      "tests": [
+        "vitest:frontend/tests/unit/tool-diff-sections.spec.ts",
+        "vitest:frontend/tests/unit/quarantine-block-api.spec.ts",
+        "go:internal/runtime/review_test.go#TestReviewUnifiedDiffUsesReadableSingleLineHunk",
+        "vitest:frontend/tests/unit/review-screen-approved-state.spec.ts",
+        "go:cmd/mcpproxy/review_cmd_test.go#TestFormatReviewShowPrintsScanCoverage"
+      ]
+    },
+    "US2-5": {
+      "summary": "Uncaptured definitions say so and offer Fetch tool definitions",
+      "tests": [
+        "vitest:frontend/tests/unit/review-screen.spec.ts",
+        "vitest:frontend/tests/unit/review-screen-default-selection.spec.ts",
+        "go:internal/runtime/review_test.go#TestReviewPayload_QueueAndUncapturedDefinitions",
+        "go:internal/server/mcp_quarantine_discovery_test.go",
+        "go:internal/runtime/review_capture_test.go#TestShouldCaptureReviewDefinitionsAfterScan",
+        "go:internal/server/review_capture_after_scan_test.go#TestReviewCaptureAfterScanSettled"
+      ]
+    },
+    "US2-6": {
+      "summary": "The approval filter and labels are the same on Web, CLI and macOS",
+      "tests": [
+        "vitest:frontend/tests/unit/tools-approval-filter.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ToolLabelsTests.swift",
+        "go:cmd/mcpproxy/tools_approval_help_test.go",
+        "go:internal/httpapi/spec109_parity_test.go#TestSpec109TerminologyGolden"
+      ]
+    },
+    "US3-1": {
+      "summary": "The Clients page shows presence rows with state, last seen and sessions",
+      "tests": [
+        "vitest:frontend/tests/unit/clients-page.spec.ts",
+        "go:internal/httpapi/clients_presence_test.go",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ClientsPresenceTests.swift",
+        "go:cmd/mcpproxy/client_cmd_test.go"
+      ]
+    },
+    "US3-2": {
+      "summary": "Wizard, Clients page and Add Client dialog are one component with a diff preview",
+      "tests": [
+        "vitest:frontend/tests/unit/client-connect-list.spec.ts"
+      ]
+    },
+    "US3-3": {
+      "summary": "Endpoint and mode and Agent tokens live under Clients",
+      "tests": [
+        "vitest:frontend/tests/unit/clients-page.spec.ts",
+        "vitest:frontend/tests/unit/connect-endpoint-truth.spec.ts",
+        "vitest:frontend/tests/unit/tokens-redirect.spec.ts"
+      ]
+    },
+    "US3-4": {
+      "summary": "A connect result shows the reload hint and a short config path on every surface",
+      "tests": [
+        "go:cmd/mcpproxy/connect_hint_test.go",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ConnectResultHintTests.swift",
+        "go:internal/connect/reload_hint_test.go",
+        "vitest:frontend/tests/unit/connect-modal-display-path-reload.spec.ts"
+      ]
+    },
+    "US3-5": {
+      "summary": "macOS has a Clients item with the same rows and Agent Tokens as a tab",
+      "tests": [
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ClientsPresenceTests.swift",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/NavigationStructureTests.swift",
+        "go:cmd/mcpproxy/client_cmd_test.go"
+      ]
+    },
+    "US4-1": {
+      "summary": "A quarantined server needing sign-in has actions [login, approve] and one Sign in button",
+      "tests": [
+        "go:internal/health/status_test.go",
+        "vitest:frontend/tests/unit/server-card-quarantined-oauth-login.spec.ts",
+        "vitest:frontend/tests/unit/server-card-next-action.spec.ts"
+      ]
+    },
+    "US4-2": {
+      "summary": "A healthy card reads Online with a stats line linking to Activity",
+      "tests": [
+        "vitest:frontend/tests/unit/server-card-next-action.spec.ts",
+        "vitest:frontend/tests/unit/server-card-review-and-error.spec.ts"
+      ]
+    },
+    "US4-3": {
+      "summary": "No surface renders healthy for a disabled or quarantined server",
+      "tests": [
+        "vitest:frontend/tests/unit/health-status-labels.spec.ts",
+        "vitest:frontend/tests/unit/sc003-forbidden-renderings.spec.ts",
+        "vitest:frontend/tests/unit/server-detail-health-admin-state.spec.ts",
+        "vitest:frontend/tests/unit/server-detail-health-status-colour.spec.ts",
+        "go:cmd/mcpproxy/upstream_list_forbidden_words_test.go#TestUpstreamListForbiddenWords",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/CrossSurfaceRenderedLabelParityTests.swift#testTrayFirstLineNeverReadsHealthyForUnusableStatuses"
+      ]
+    },
+    "US4-4": {
+      "summary": "Delete lives in the overflow menu behind a naming confirmation; trust mode is a shield",
+      "tests": [
+        "vitest:frontend/tests/unit/server-card-next-action.spec.ts",
+        "vitest:frontend/tests/unit/trust-mode-selector.spec.ts"
+      ]
+    },
+    "US4-5": {
+      "summary": "Switching a server tab rewrites the URL with replace and keeps other parameters",
+      "tests": [
+        "vitest:frontend/tests/unit/server-detail-tab-url.spec.ts"
+      ]
+    },
+    "US4-6": {
+      "summary": "Every card in the grid has the same height",
+      "tests": [
+        "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts"
+      ]
+    },
+    "US5-1": {
+      "summary": "The empty-query Catalog shows Official and Popular sections",
+      "tests": [
+        "vitest:frontend/tests/unit/add-server-catalog.spec.ts",
+        "go:internal/registries/search_empty_test.go"
+      ]
+    },
+    "US5-2": {
+      "summary": "A search merges every source and ranks official, verified, popular, relevant",
+      "tests": [
+        "go:internal/registries/rank_test.go",
+        "vitest:frontend/tests/unit/catalog-order-parity.spec.ts",
+        "go:internal/httpapi/spec109_catalog_order_test.go#TestCatalogOrderParity_RESTWritesTheGolden",
+        "go:internal/server/spec109_catalog_order_test.go#TestSearchServers_CatalogOrderMatchesTheRESTGolden",
+        "go:cmd/mcpproxy/catalog_order_parity_test.go#TestCatalogOrderParityCLI",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/CatalogOrderParityTests.swift"
+      ]
+    },
+    "US5-3": {
+      "summary": "The add button reads Add to MCPProxy then Added and the server lands quarantined",
+      "tests": [
+        "vitest:frontend/tests/unit/add-server-catalog.spec.ts",
+        "go:cmd/mcpproxy/catalog_cmd_test.go",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/CatalogViewOpenFeedbackTests.swift"
+      ]
+    },
+    "US5-4": {
+      "summary": "Pasting a URL, command or snippet fills a preview and adds nothing until Add",
+      "tests": [
+        "vitest:frontend/tests/unit/add-server-paste.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/PasteServerFieldsTests.swift"
+      ]
+    },
+    "US5-5": {
+      "summary": "Secret-named env vars default to Secret and land in the keyring",
+      "tests": [
+        "vitest:frontend/tests/unit/secret-toggle.spec.ts",
+        "vitest:frontend/tests/unit/secret-toggle-masking.spec.ts",
+        "vitest:frontend/tests/unit/use-secret-fields.spec.ts",
+        "vitest:frontend/tests/unit/secret-ref.spec.ts",
+        "golden:internal/secret/testdata/ref_names.json",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/CatalogTests.swift#testRefNameMatchesSharedFixture"
+      ]
+    },
+    "US5-6": {
+      "summary": "No Repositories item; the old route redirects; sources are managed in Settings",
+      "tests": [
+        "vitest:frontend/tests/unit/repositories-redirect.spec.ts",
+        "vitest:frontend/tests/unit/sidebar-structure.spec.ts",
+        "vitest:frontend/tests/unit/settings-catalog-sources.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/NavigationStructureTests.swift"
+      ]
+    },
+    "US6-1": {
+      "summary": "The sidebar reads Home, Connect, Protect, Monitor with the counts",
+      "tests": [
+        "vitest:frontend/tests/unit/sidebar-structure.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/NavigationStructureTests.swift"
+      ]
+    },
+    "US6-2": {
+      "summary": "The header shows every control without clipping and the Add menu lists its targets",
+      "tests": [
+        "vitest:frontend/tests/unit/header-layout.spec.ts",
+        "vitest:frontend/tests/unit/add-menu.spec.ts",
+        "vitest:frontend/tests/unit/status-pill-awaiting-review.spec.ts",
+        "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts",
+        "pw:e2e/web-ui-sweep/usertest-web-fixes.spec.ts"
+      ]
+    },
+    "US6-3": {
+      "summary": "The command palette searches pages, servers, tools, settings and actions",
+      "tests": [
+        "vitest:frontend/tests/unit/command-palette.spec.ts",
+        "vitest:frontend/tests/unit/search-consolidation.spec.ts"
+      ]
+    },
+    "US6-4": {
+      "summary": "The sidebar version row sits under an open modal backdrop",
+      "tests": [
+        "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts",
+        "vitest:frontend/tests/unit/modal-a11y.spec.ts",
+        "vitest:frontend/tests/unit/z-index-scale.spec.ts"
+      ]
+    },
+    "US6-5": {
+      "summary": "Settings is named Settings everywhere with line icons and no Server Edition tab",
+      "tests": [
+        "vitest:frontend/tests/unit/settings-naming.spec.ts",
+        "vitest:frontend/tests/unit/settings-server-edition-wording.spec.ts"
+      ]
+    },
+    "US6-6": {
+      "summary": "Activity defaults to Tool calls; System events fold into one expandable row",
+      "tests": [
+        "vitest:frontend/tests/unit/activity-views.spec.ts",
+        "vitest:frontend/tests/unit/activity-system-folding.spec.ts",
+        "vitest:frontend/tests/unit/activity-empty-columns.spec.ts",
+        "vitest:frontend/tests/unit/activity-blocked-in-calls-view.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ActivityFoldingTests.swift"
+      ]
+    },
+    "US6-7": {
+      "summary": "Usage shows an indexed-tools savings estimate and integer ticks",
+      "tests": [
+        "vitest:frontend/tests/unit/usage-tokens-saved-estimate.spec.ts",
+        "vitest:frontend/tests/unit/usage-chart-ticks.spec.ts",
+        "vitest:frontend/tests/unit/home-token-savings-estimate.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/HomeTokenSavingsBadgeTests.swift"
+      ]
+    },
+    "US6-8": {
+      "summary": "Scope-aware pages apply URL parameters before the first fetch and write changes back",
+      "tests": [
+        "vitest:frontend/tests/unit/scope-query.spec.ts",
+        "vitest:frontend/tests/unit/scope-chips.spec.ts",
+        "vitest:frontend/tests/unit/scope-filters-url-writeback.spec.ts",
+        "vitest:frontend/tests/unit/activity-scope-conflict-clear.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ScopeFilterTests.swift",
+        "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts"
+      ]
+    },
+    "US6-9": {
+      "summary": "Unsupported scope filters answer 400 until the build lists scope_filters",
+      "tests": [
+        "go:internal/httpapi/activity_scope_params_test.go",
+        "vitest:frontend/tests/unit/scope-query-108e-availability.spec.ts"
+      ]
+    },
+    "US7-1": {
+      "summary": "Import rows show the command or URL and tags",
+      "tests": [
+        "vitest:frontend/tests/unit/onboarding-wizard-import-rows.spec.ts"
+      ]
+    },
+    "US7-2": {
+      "summary": "Client paths render ~-short with a tooltip",
+      "tests": [
+        "vitest:frontend/tests/unit/onboarding-wizard-client-paths.spec.ts"
+      ]
+    },
+    "US7-3": {
+      "summary": "The import footer has one primary button and a settings summary line",
+      "tests": [
+        "vitest:frontend/tests/unit/onboarding-wizard-import-footer.spec.ts"
+      ]
+    },
+    "US7-4": {
+      "summary": "The Servers step completes only with a usable server and shows the inline review list",
+      "tests": [
+        "vitest:frontend/tests/unit/onboarding-wizard-usable-completion.spec.ts",
+        "vitest:frontend/tests/unit/onboarding-wizard-inline-review.spec.ts",
+        "vitest:frontend/tests/unit/onboarding-wizard-import-completion.spec.ts",
+        "vitest:frontend/tests/unit/import-servers-completion.spec.ts",
+        "go:internal/httpapi/import_test.go#TestImportFromPath_PreviewEmptyClientConfigIsEmptyNot400"
+      ]
+    },
+    "US7-5": {
+      "summary": "The Verify step shows reload hints and prompts for a usable server",
+      "tests": [
+        "vitest:frontend/tests/unit/onboarding-wizard-verify-hints.spec.ts"
+      ]
+    },
+    "US7-6": {
+      "summary": "The telemetry notice is not rendered behind the wizard backdrop",
+      "tests": [
+        "vitest:frontend/tests/unit/telemetry-banner-wizard.spec.ts"
+      ]
+    },
+    "US7-7": {
+      "summary": "An environment telemetry opt-out is stated, not disclosed, on the wizard, Home and macOS welcome, and locks the Settings toggle; status reports the effective state",
+      "tests": [
+        "go:internal/telemetry/effective_state_test.go#TestResolveEffectiveState_Cases",
+        "go:internal/telemetry/env_gate_send_test.go#TestEnvOptOut_SendsNothing",
+        "go:internal/httpapi/status_telemetry_test.go#TestStatusTelemetry_EnvOptOutOverridesConfig",
+        "vitest:frontend/tests/unit/telemetry-state.spec.ts",
+        "vitest:frontend/tests/unit/telemetry-banner-wizard.spec.ts",
+        "vitest:frontend/tests/unit/settings-telemetry-env-lock.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/TelemetryNoticeTests.swift",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift#testTelemetryLockedByEnv"
+      ]
+    },
+    "US7-8": {
+      "summary": "macOS Settings names the connected core, adopts its running listen address and notes a pending restart",
+      "tests": [
+        "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift#testLoadShowsTheConnectedCoresListenAddress",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift#testBlankListenAdoptsTheRunningAddressWithoutDirtying",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/SettingsEffectiveStateTests.swift#testListenNoteNamesTheConnectedCore"
+      ]
+    }
+  },
+  "success_criteria": {
+    "SC-002": {
+      "summary": "Attention count and order identical on REST, Web, macOS and CLI",
+      "tests": [
+        "go:internal/runtime/attention_parity_test.go#TestAttentionParity_ComputeGivesTheExpectedIDsInOrder",
+        "go:internal/httpapi/spec109_attention_parity_test.go#TestAttentionParity_RESTServesTheFixtureAndWritesTheGolden",
+        "go:internal/httpapi/spec109_attention_parity_test.go#TestAttentionParity_SSECarriesTheSameIDs",
+        "go:cmd/mcpproxy/attention_parity_test.go#TestAttentionParityCLI",
+        "vitest:frontend/tests/unit/attention-parity.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/AttentionParityTests.swift",
+        "golden:internal/runtime/testdata/attention_parity_rest.json"
+      ]
+    },
+    "SC-003": {
+      "summary": "No renderer shows healthy, online or connected for usable=false",
+      "tests": [
+        "go:cmd/mcpproxy/upstream_list_forbidden_words_test.go#TestUpstreamListForbiddenWords",
+        "vitest:frontend/tests/unit/sc003-forbidden-renderings.spec.ts",
+        "vitest:frontend/tests/unit/health-status-labels.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/HealthVocabularyTests.swift#testForbiddenWordsForUnusableRows",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/CrossSurfaceRenderedLabelParityTests.swift#testTrayFirstLineNeverReadsHealthyForUnusableStatuses"
+      ]
+    },
+    "SC-004": {
+      "summary": "A quarantined server shows 100% of tools with identical tier, annotations and scan verdict",
+      "tests": [
+        "go:internal/server/quarantine_inspect_review_parity_test.go#TestInspectToolsIncludesCanonicalReviewFields",
+        "go:internal/server/spec109_mcp_rest_names_test.go#TestSpec109MCPRESTNames_ReviewTools",
+        "go:internal/httpapi/review_test.go#TestReviewRoutesReturnQueueAndServerShapes",
+        "go:cmd/mcpproxy/review_cmd_test.go",
+        "vitest:frontend/tests/unit/review-screen.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ReviewPayloadTests.swift"
+      ]
+    },
+    "SC-005": {
+      "summary": "No first-party surface calls /unquarantine",
+      "tests": [
+        "sh:scripts/check-no-unquarantine-callers.test.sh",
+        "sh:scripts/check-no-unquarantine-callers.sh",
+        "go:internal/tray/quarantine_menu_review_test.go"
+      ]
+    },
+    "SC-006": {
+      "summary": "Connect a new client in at most two clicks from any page",
+      "tests": [
+        "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts",
+        "vitest:frontend/tests/unit/add-menu.spec.ts"
+      ]
+    },
+    "SC-007": {
+      "summary": "No header clipping or horizontal scroll at 1440, 1100, 900 and 390 px",
+      "tests": [
+        "pw:e2e/web-ui-sweep/visual-a11y-sweep.spec.ts",
+        "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts",
+        "vitest:frontend/tests/unit/header-layout.spec.ts"
+      ]
+    },
+    "SC-008": {
+      "summary": "Catalog search github on a fixture recorded from the live official registry ranks the official GitHub server first, same order everywhere",
+      "tests": [
+        "golden:internal/registries/testdata/catalog_github_order.json",
+        "go:internal/httpapi/spec109_catalog_order_test.go#TestCatalogOrderParity_RESTWritesTheGolden",
+        "go:internal/server/spec109_catalog_order_test.go#TestSearchServers_CatalogOrderMatchesTheRESTGolden",
+        "go:cmd/mcpproxy/catalog_order_parity_test.go#TestCatalogOrderParityCLI",
+        "vitest:frontend/tests/unit/catalog-order-parity.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/CatalogOrderParityTests.swift",
+        "go:internal/registries/catalog_typed_test.go#TestSearchAll_RecordedRegistry_GitHubFirst",
+        "go:internal/registries/recorded_registry_test.go#TestCatalogGithubFixture_MainPageLacksGitHubServer"
+      ]
+    },
+    "SC-009": {
+      "summary": "Every scope-aware page round-trips its URL and loads filtered",
+      "tests": [
+        "vitest:frontend/tests/unit/scope-query.spec.ts",
+        "vitest:frontend/tests/unit/scope-filters-url-writeback.spec.ts",
+        "pw:e2e/web-ui-sweep/navigation-consistency.spec.ts"
+      ]
+    },
+    "SC-010": {
+      "summary": "The A1 fixture shows exactly the calls by default and one folded system row",
+      "tests": [
+        "vitest:frontend/tests/unit/activity-system-folding.spec.ts",
+        "vitest:frontend/tests/unit/activity-views.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/ActivityFoldingTests.swift",
+        "go:cmd/mcpproxy/activity_view_test.go"
+      ]
+    },
+    "SC-011": {
+      "summary": "GET /attention p95 within 20 ms at 100 servers and 1,000 tools; catalog p95 with a timing-out source",
+      "tests": [
+        "go:internal/runtime/attention_bench_test.go",
+        "go:internal/httpapi/attention_bench_test.go",
+        "go:internal/registries/catalog_test.go#TestSearchAll_SourceTimeoutMarkedUnavailable"
+      ]
+    },
+    "SC-012": {
+      "summary": "The register has no undisposed item and the terminology parity tests pass",
+      "tests": [
+        "go:internal/httpapi/spec109_register_test.go#TestSpec109RegisterDispositions",
+        "go:internal/httpapi/spec109_parity_test.go#TestSpec109TerminologyGolden",
+        "go:internal/httpapi/spec109_parity_test.go#TestSpec109ContractsTSExactLines",
+        "vitest:frontend/tests/unit/spec109-terminology.spec.ts",
+        "xctest:native/macos/MCPProxy/MCPProxyTests/Spec109TerminologyTests.swift"
+      ]
+    }
+  }
+}

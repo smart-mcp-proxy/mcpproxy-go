@@ -42,6 +42,13 @@ func ShowDockerRecoverySuccess(serverCount int) error {
 	return nil
 }
 
+// ShowPortConflictPinned shows a notification when the core cannot start on the
+// user's pinned listen address (stub)
+func ShowPortConflictPinned(listenAddr string) error {
+	// No-op for headless/linux builds
+	return nil
+}
+
 // ShowDockerRecoveryFailed shows a notification when Docker recovery fails (stub)
 func ShowDockerRecoveryFailed(reason string) error {
 	// No-op for headless/linux builds

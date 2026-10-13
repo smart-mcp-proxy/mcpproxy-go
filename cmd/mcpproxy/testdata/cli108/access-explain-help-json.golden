@@ -1,0 +1,46 @@
+{
+  "name": "explain",
+  "description": "Walk the access chain for one tool and one subject",
+  "usage": "mcpproxy access explain [flags]",
+  "flags": [
+    {
+      "name": "anonymous",
+      "description": "Explain a caller that sends no credential",
+      "type": "bool",
+      "default": "false"
+    },
+    {
+      "name": "client",
+      "description": "Explain a client's credential",
+      "type": "string"
+    },
+    {
+      "name": "help",
+      "shorthand": "h",
+      "description": "help for explain",
+      "type": "bool",
+      "default": "false"
+    },
+    {
+      "name": "profile",
+      "description": "Explain a profile",
+      "type": "string"
+    },
+    {
+      "name": "token",
+      "description": "Explain a regular agent token",
+      "type": "string"
+    },
+    {
+      "name": "tool",
+      "description": "Upstream tool as server:tool (required)",
+      "type": "string"
+    },
+    {
+      "name": "help-json",
+      "description": "Output help information as JSON",
+      "type": "bool",
+      "default": "false"
+    }
+  ]
+}

@@ -74,7 +74,7 @@ func (p *GeminiParser) Parse(content []byte) ([]*ParsedServer, error) {
 
 	if len(cfg.MCPServers) == 0 {
 		return nil, &ImportError{
-			Type:    "no_servers",
+			Type:    ErrTypeNoServers,
 			Message: "no MCP servers found in Gemini config",
 		}
 	}

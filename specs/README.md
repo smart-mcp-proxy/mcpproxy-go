@@ -1,6 +1,12 @@
 # Specs Index
 
-Every numbered directory under `specs/` is a feature specification produced with [GitHub spec-kit](https://github.com/github/spec-kit). This page is the canonical list; badges reflect `tasks.md` checklist progress and are a quick heuristic — not a guarantee. When ambiguous, cross-check `git log --grep='<spec-number>'` and the spec's `plan.md`.
+Every numbered directory under `specs/` is a feature specification produced with [GitHub spec-kit](https://github.com/github/spec-kit).
+
+> **Authoritative status lives in [`../roadmap.yaml`](../roadmap.yaml)** (rendered to [`../ROADMAP.md`](../ROADMAP.md)), **not in the badges below.** The badges on this page are derived purely from `tasks.md` checkbox counts.
+>
+> **Truth-sync (2026-07-10).** Every `tasks.md` was audited against the code it claims to describe and re-ticked from the evidence; repo-wide checkbox coverage went from 55% to 81%, and eight specs left a false `drafted`/`0%` badge (`001-code-execution`, `009`, `016`, `017`, `028`, `040`, `042`, `044-*`, `050`, `055`, `057`, `073`, `074`). Badges are therefore broadly trustworthy again — but they are still a *lagging* signal: a task ticks when someone ticks it, and an unchecked task can be a documented scope-out (see each spec's own notes) rather than missing work. `roadmap.yaml` carries an explicit `status` field per epic that does not depend on checkbox hygiene.
+>
+> Treat the table below as a spec *directory*, and `roadmap.yaml`/`ROADMAP.md` as the source of truth for **what is actually built**. When a badge and `roadmap.yaml` disagree, `roadmap.yaml` wins; confirm against code (`git log --grep='<spec-number>'`, or grep for the spec's key symbols) rather than the badge.
 
 **Status legend**
 
@@ -74,6 +80,9 @@ Brainstormed design docs that feed future specs live under [`docs/superpowers/sp
 | [041-quarantine-invariants](./041-quarantine-invariants/) | Quarantine State Machine Invariants & Property Tests | — | — |
 | [042-telemetry-tier2](./042-telemetry-tier2/) | Telemetry Tier 2 — Privacy-Respecting Usage Signals | `drafted` | 0/91 (0%) |
 | [043-linux-package-repos](./043-linux-package-repos/) | Linux Package Repositories (apt/yum) | `shipped` | 39/41 (95%) |
+| [104-auto-routing-mode](./104-auto-routing-mode/) | Auto Routing Mode — Budget-Fitted Tool Surface Per Session | `drafted` | — |
+| [105-agent-scope-hardening](./105-agent-scope-hardening/) | Agent-Token Scope Hardening — Every MCP Request Authorized by Its Own Scope | `drafted` | — |
+| [107-server-edition-sso-hardening](./107-server-edition-sso-hardening/) | Server Edition SSO Front Door Hardened for Real IdPs — Generic OIDC, Group Allowlist, JSONL Audit, Freeze | `drafted` | 4/126 (3%) |
 
 ## Updating this index
 

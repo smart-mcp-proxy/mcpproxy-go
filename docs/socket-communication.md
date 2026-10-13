@@ -1,3 +1,9 @@
+---
+title: "Tray-Core Socket Communication"
+sidebar_label: "Socket Communication"
+description: "Platform-specific local IPC between the tray application and the core server."
+---
+
 # Tray-Core Socket Communication
 
 MCPProxy uses platform-specific local IPC for secure, low-latency communication between the tray application and core server.

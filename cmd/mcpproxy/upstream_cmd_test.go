@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,7 +12,10 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/configimport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // jsonEscapePath escapes a path for embedding in JSON strings.
@@ -46,8 +51,7 @@ func TestOutputServers_TableFormat(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format (default is "table")
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -104,8 +108,7 @@ func TestOutputServers_JSONFormat(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format for JSON
-	globalOutputFormat = "json"
-	globalJSONOutput = false
+	setOutputGlobals(t, "json", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -138,8 +141,7 @@ func TestOutputServers_InvalidFormat(t *testing.T) {
 	}
 
 	// Use global output format for invalid format test
-	globalOutputFormat = "invalid-format"
-	globalJSONOutput = false
+	setOutputGlobals(t, "invalid-format", false)
 	err := outputServers(servers)
 
 	if err == nil {
@@ -164,8 +166,7 @@ func TestOutputServers_Sorting(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format for JSON
-	globalOutputFormat = "json"
-	globalJSONOutput = false
+	setOutputGlobals(t, "json", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -208,8 +209,7 @@ func TestOutputServers_EmptyList(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format (default is "table")
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -227,18 +227,18 @@ func TestOutputServers_EmptyList(t *testing.T) {
 	}
 }
 
-func TestShouldUseUpstreamDaemon(t *testing.T) {
+func TestUpstreamDaemonDetection_NoDaemon(t *testing.T) {
+	clearDaemonEnv(t)
+
 	// Test with non-existent directory
-	result := shouldUseUpstreamDaemon("/tmp/nonexistent-mcpproxy-test-dir-12345")
-	if result {
-		t.Error("shouldUseUpstreamDaemon should return false for non-existent directory")
+	if _, ok := newDaemonClient(&config.Config{DataDir: "/tmp/nonexistent-mcpproxy-test-dir-12345"}, nil); ok {
+		t.Error("newDaemonClient should report no daemon for non-existent directory")
 	}
 
 	// Test with existing directory but no socket
 	tmpDir := t.TempDir()
-	result = shouldUseUpstreamDaemon(tmpDir)
-	if result {
-		t.Error("shouldUseUpstreamDaemon should return false when socket doesn't exist")
+	if _, ok := newDaemonClient(&config.Config{DataDir: tmpDir}, nil); ok {
+		t.Error("newDaemonClient should report no daemon when socket doesn't exist")
 	}
 }
 
@@ -317,6 +317,114 @@ func TestLoadUpstreamConfig(t *testing.T) {
 	})
 }
 
+// TestLoadUpstreamConfig_FallsBackToGlobalConfigFlag pins a real bug found
+// during live QA: `upstream add` (and every other upstream subcommand except
+// `list`/`logs`, which register their own local --config flag bound to
+// upstreamConfigPath) has no local --config flag of its own, so a user's
+// `--config=<path>` is parsed against the ROOT persistent flag and lands in
+// the package-level `configFile` variable, never in `upstreamConfigPath`.
+// loadUpstreamConfig previously read upstreamConfigPath ONLY, silently
+// ignoring the value the user actually passed and falling through to the
+// default `~/.mcpproxy/mcp_config.json` — on a real machine this meant
+// `upstream add --config=<scratch>` wrote test servers into the operator's
+// real production config. loadUpstreamConfig must fall back to the global
+// configFile when upstreamConfigPath was never set for this command.
+func TestLoadUpstreamConfig_FallsBackToGlobalConfigFlag(t *testing.T) {
+	oldConfigPath := upstreamConfigPath
+	oldConfigFile := configFile
+	defer func() {
+		upstreamConfigPath = oldConfigPath
+		configFile = oldConfigFile
+	}()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "scratch_config.json")
+	configJSON := `{
+		"listen": "127.0.0.1:19999",
+		"data_dir": "` + jsonEscapePath(tmpDir) + `",
+		"mcpServers": []
+	}`
+	if err := os.WriteFile(configPath, []byte(configJSON), 0644); err != nil {
+		t.Fatalf("Failed to write test config: %v", err)
+	}
+
+	// Simulate `mcpproxy upstream add ... --config=<scratch>`: only the root
+	// persistent flag var is populated, exactly as cobra would bind it for a
+	// subcommand with no local --config flag of its own.
+	upstreamConfigPath = ""
+	configFile = configPath
+
+	cfg, err := loadUpstreamConfig()
+	if err != nil {
+		t.Fatalf("loadUpstreamConfig() with only the global --config set: %v", err)
+	}
+	if cfg.Listen != "127.0.0.1:19999" {
+		t.Errorf("expected loadUpstreamConfig to honor the global --config flag path %q, got listen=%q (likely fell back to the default config)", configPath, cfg.Listen)
+	}
+}
+
+// TestUpstreamConfigModeWritesUseSelectedConfigFile protects config-mode
+// mutations from re-deriving mcp_config.json from DataDir after the caller has
+// explicitly selected a differently named file with the root --config flag.
+// The default-config sentinel models the operator's existing configuration;
+// it must remain byte-for-byte unchanged for add, remove, and import.
+func TestUpstreamConfigModeWritesUseSelectedConfigFile(t *testing.T) {
+	oldConfigPath, oldConfigFile := upstreamConfigPath, configFile
+	t.Cleanup(func() {
+		upstreamConfigPath, configFile = oldConfigPath, oldConfigFile
+	})
+
+	home := sandboxHome(t)
+	tmpDir := t.TempDir()
+	defaultDir := filepath.Join(home, ".mcpproxy")
+	require.NoError(t, os.MkdirAll(defaultDir, 0755))
+	defaultPath := filepath.Join(defaultDir, config.ConfigFileName)
+	sentinel := []byte(`{"sentinel":true}\n`)
+	require.NoError(t, os.WriteFile(defaultPath, sentinel, 0600))
+
+	selectedPath := filepath.Join(tmpDir, "selected", "scratch_config.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(selectedPath), 0755))
+	initial := `{"listen":"127.0.0.1:18991","mcpServers":[{"name":"remove-me","url":"https://example.invalid/remove"}]}`
+	require.NoError(t, os.WriteFile(selectedPath, []byte(initial), 0600))
+
+	upstreamConfigPath = ""
+	configFile = selectedPath
+	cfg, err := loadUpstreamConfig()
+	require.NoError(t, err)
+	assert.Equal(t, defaultDir, cfg.DataDir, "the explicit config deliberately omits data_dir and therefore uses only the scratch HOME default")
+
+	_, err = runUpstreamAddConfigMode(&cliclient.AddServerRequest{
+		Name: "added", URL: "https://example.invalid/add", Protocol: "http",
+	}, cfg)
+	require.NoError(t, err)
+	require.NoError(t, runUpstreamRemoveConfigMode("remove-me", cfg))
+	require.NoError(t, applyImportedServersConfigMode([]*configimport.ImportedServer{{
+		Server: &config.ServerConfig{Name: "imported", URL: "https://example.invalid/import", Protocol: "http", Enabled: true},
+	}}, cfg))
+
+	updated, err := config.LoadFromFile(selectedPath)
+	require.NoError(t, err)
+	assert.Len(t, updated.Servers, 2)
+	assert.Equal(t, "added", updated.Servers[0].Name)
+	assert.Equal(t, "imported", updated.Servers[1].Name)
+	actualSentinel, err := os.ReadFile(defaultPath)
+	require.NoError(t, err)
+	assert.Equal(t, sentinel, actualSentinel)
+}
+
+func TestUpstreamConfigFilePathPrecedence(t *testing.T) {
+	oldConfigPath, oldConfigFile := upstreamConfigPath, configFile
+	t.Cleanup(func() { upstreamConfigPath, configFile = oldConfigPath, oldConfigFile })
+
+	cfg := &config.Config{DataDir: "/fallback-data"}
+	upstreamConfigPath, configFile = "/local.json", "/global.json"
+	assert.Equal(t, "/local.json", upstreamConfigFilePath(cfg))
+	upstreamConfigPath = ""
+	assert.Equal(t, "/global.json", upstreamConfigFilePath(cfg))
+	configFile = ""
+	assert.Equal(t, config.GetConfigPath(cfg.DataDir), upstreamConfigFilePath(cfg))
+}
+
 func TestCreateUpstreamLogger(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -377,10 +485,10 @@ func TestCreateUpstreamLogger(t *testing.T) {
 func TestOutputServers_BooleanFields(t *testing.T) {
 	// Test that unified health status is displayed correctly based on server state
 	tests := []struct {
-		name           string
-		healthLevel    string
-		adminState     string
-		expectedEmoji  string
+		name          string
+		healthLevel   string
+		adminState    string
+		expectedEmoji string
 	}{
 		{"healthy enabled", "healthy", "enabled", "✅"},
 		{"disabled", "healthy", "disabled", "⏸️"},
@@ -411,8 +519,7 @@ func TestOutputServers_BooleanFields(t *testing.T) {
 			defer func() { os.Stdout = oldStdout }()
 
 			// Use global output format for table
-			globalOutputFormat = "table"
-			globalJSONOutput = false
+			setOutputGlobals(t, "table", false)
 			err := outputServers(servers)
 
 			w.Close()
@@ -459,8 +566,7 @@ func TestOutputServers_IntegerFields(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format (default is "table")
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -508,8 +614,7 @@ func TestOutputServers_StatusMessages(t *testing.T) {
 	defer func() { os.Stdout = oldStdout }()
 
 	// Use global output format (default is "table")
-	globalOutputFormat = "table"
-	globalJSONOutput = false
+	setOutputGlobals(t, "table", false)
 	err := outputServers(servers)
 
 	w.Close()
@@ -650,7 +755,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -725,7 +830,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		_, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -777,7 +882,7 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		}
 		cfg.DataDir = tmpDir
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		if err == nil {
 			t.Error("Expected error for duplicate server")
@@ -819,24 +924,50 @@ func TestAddHTTPServerConfigMode(t *testing.T) {
 		upstreamAddIfNotExists = true
 		defer func() { upstreamAddIfNotExists = oldIfNotExists }()
 
-		// Capture output
+		// Pin table format so the structured skip payload is not emitted.
+		oldFormat := globalOutputFormat
+		oldJSON := globalJSONOutput
+		globalOutputFormat = "table"
+		globalJSONOutput = false
+		defer func() {
+			globalOutputFormat = oldFormat
+			globalJSONOutput = oldJSON
+		}()
+
+		// Capture output. Since the CLI-JSON fix, the human skip notice goes
+		// to stderr so machine formats keep stdout parseable.
 		oldStdout := os.Stdout
-		r, w, _ := os.Pipe()
-		os.Stdout = w
+		oldStderr := os.Stderr
+		rOut, wOut, _ := os.Pipe()
+		rErr, wErr, _ := os.Pipe()
+		os.Stdout = wOut
+		os.Stderr = wErr
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		added, err := runUpstreamAddConfigMode(req, cfg)
 
-		w.Close()
+		wOut.Close()
+		wErr.Close()
 		os.Stdout = oldStdout
-		var buf bytes.Buffer
-		buf.ReadFrom(r)
-		output := buf.String()
+		os.Stderr = oldStderr
+		var bufOut, bufErr bytes.Buffer
+		bufOut.ReadFrom(rOut)
+		bufErr.ReadFrom(rErr)
 
 		if err != nil {
 			t.Errorf("Expected no error with --if-not-exists, got: %v", err)
 		}
-		if !strings.Contains(output, "already exists") || !strings.Contains(output, "skipped") {
-			t.Error("Expected skip message for existing server")
+		// review round 1: added must be false on a skip, distinct from a
+		// genuine add with a nil error — runUpstreamAdd uses this to decide
+		// whether to roll back any --secret-env/--secret-header values
+		// already written to the keyring for this request.
+		if added {
+			t.Error("expected added=false for an --if-not-exists skip")
+		}
+		if !strings.Contains(bufErr.String(), "already exists") || !strings.Contains(bufErr.String(), "skipped") {
+			t.Error("Expected skip message on stderr for existing server")
+		}
+		if bufOut.String() != "" {
+			t.Errorf("Expected empty stdout in table mode, got %q", bufOut.String())
 		}
 	})
 }
@@ -879,7 +1010,7 @@ func TestAddStdioServerConfigMode(t *testing.T) {
 		_, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -956,7 +1087,7 @@ func TestAddStdioServerConfigMode(t *testing.T) {
 		_, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -1110,24 +1241,43 @@ func TestRemoveServerConfigMode(t *testing.T) {
 		upstreamRemoveIfExists = true
 		defer func() { upstreamRemoveIfExists = oldIfExists }()
 
-		// Capture output
+		// Pin table format so the structured skip payload is not emitted.
+		oldFormat := globalOutputFormat
+		oldJSON := globalJSONOutput
+		globalOutputFormat = "table"
+		globalJSONOutput = false
+		defer func() {
+			globalOutputFormat = oldFormat
+			globalJSONOutput = oldJSON
+		}()
+
+		// Capture output. Since the CLI-JSON fix, the human skip notice goes
+		// to stderr so machine formats keep stdout parseable.
 		oldStdout := os.Stdout
-		r, w, _ := os.Pipe()
-		os.Stdout = w
+		oldStderr := os.Stderr
+		rOut, wOut, _ := os.Pipe()
+		rErr, wErr, _ := os.Pipe()
+		os.Stdout = wOut
+		os.Stderr = wErr
 
 		err = runUpstreamRemoveConfigMode("nonexistent", cfg)
 
-		w.Close()
+		wOut.Close()
+		wErr.Close()
 		os.Stdout = oldStdout
-		var buf bytes.Buffer
-		buf.ReadFrom(r)
-		output := buf.String()
+		os.Stderr = oldStderr
+		var bufOut, bufErr bytes.Buffer
+		bufOut.ReadFrom(rOut)
+		bufErr.ReadFrom(rErr)
 
 		if err != nil {
 			t.Errorf("Expected no error with --if-exists, got: %v", err)
 		}
-		if !strings.Contains(output, "not found") || !strings.Contains(output, "skipped") {
-			t.Error("Expected skip message for non-existent server")
+		if !strings.Contains(bufErr.String(), "not found") || !strings.Contains(bufErr.String(), "skipped") {
+			t.Error("Expected skip message on stderr for non-existent server")
+		}
+		if bufOut.String() != "" {
+			t.Errorf("Expected empty stdout in table mode, got %q", bufOut.String())
 		}
 	})
 }
@@ -1340,7 +1490,7 @@ func TestNewServerQuarantineDefault(t *testing.T) {
 		r, w, _ := os.Pipe()
 		os.Stdout = w
 
-		err = runUpstreamAddConfigMode(req, cfg)
+		_, err = runUpstreamAddConfigMode(req, cfg)
 
 		w.Close()
 		os.Stdout = oldStdout
@@ -1381,8 +1531,7 @@ func TestOutputError_WithRequestID(t *testing.T) {
 		defer func() { os.Stderr = oldStderr }()
 
 		// Set table format (human-readable output)
-		globalOutputFormat = "table"
-		globalJSONOutput = false
+		setOutputGlobals(t, "table", false)
 
 		// Create an APIError with request_id
 		apiErr := &cliclient.APIError{
@@ -1417,8 +1566,7 @@ func TestOutputError_WithRequestID(t *testing.T) {
 		defer func() { os.Stdout = oldStdout }()
 
 		// Set JSON format
-		globalOutputFormat = "json"
-		globalJSONOutput = true
+		setOutputGlobals(t, "json", true)
 
 		// Create an APIError with request_id
 		apiErr := &cliclient.APIError{
@@ -1460,8 +1608,7 @@ func TestOutputError_WithoutRequestID(t *testing.T) {
 		defer func() { os.Stderr = oldStderr }()
 
 		// Set table format
-		globalOutputFormat = "table"
-		globalJSONOutput = false
+		setOutputGlobals(t, "table", false)
 
 		// Create an APIError without request_id
 		apiErr := &cliclient.APIError{
@@ -1496,8 +1643,7 @@ func TestOutputError_WithoutRequestID(t *testing.T) {
 		defer func() { os.Stderr = oldStderr }()
 
 		// Set table format
-		globalOutputFormat = "table"
-		globalJSONOutput = false
+		setOutputGlobals(t, "table", false)
 
 		// Create a regular error (not APIError)
 		regularErr := os.ErrNotExist
@@ -1515,4 +1661,160 @@ func TestOutputError_WithoutRequestID(t *testing.T) {
 			t.Errorf("Expected output to NOT contain 'Request ID:' for regular errors, got: %s", output)
 		}
 	})
+}
+
+// TestOutputSkipNotice verifies the CLI-JSON contract for --if-not-exists /
+// --if-exists skip paths: the human notice goes to stderr, and in json mode
+// stdout carries a structured skip object (parseable by jq); in table mode
+// stdout stays empty.
+func TestOutputSkipNotice(t *testing.T) {
+	capture := func(t *testing.T, format string) (stdoutStr, stderrStr string) {
+		t.Helper()
+		oldStdout := os.Stdout
+		oldStderr := os.Stderr
+		rOut, wOut, _ := os.Pipe()
+		rErr, wErr, _ := os.Pipe()
+		os.Stdout = wOut
+		os.Stderr = wErr
+
+		oldFormat := globalOutputFormat
+		oldJSON := globalJSONOutput
+		globalOutputFormat = format
+		globalJSONOutput = false
+		t.Cleanup(func() {
+			globalOutputFormat = oldFormat
+			globalJSONOutput = oldJSON
+		})
+
+		err := outputSkipNotice("Server 'foo' already exists (skipped)", map[string]interface{}{
+			"name":    "foo",
+			"skipped": true,
+		})
+
+		wOut.Close()
+		wErr.Close()
+		os.Stdout = oldStdout
+		os.Stderr = oldStderr
+
+		if err != nil {
+			t.Fatalf("outputSkipNotice returned error: %v", err)
+		}
+
+		var bufOut, bufErr bytes.Buffer
+		bufOut.ReadFrom(rOut)
+		bufErr.ReadFrom(rErr)
+		return bufOut.String(), bufErr.String()
+	}
+
+	t.Run("json mode emits structured object on stdout, notice on stderr", func(t *testing.T) {
+		stdoutStr, stderrStr := capture(t, "json")
+
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(stdoutStr), &parsed); err != nil {
+			t.Fatalf("stdout must be valid JSON, got %q: %v", stdoutStr, err)
+		}
+		if parsed["name"] != "foo" || parsed["skipped"] != true {
+			t.Errorf("unexpected skip payload: %v", parsed)
+		}
+		if !strings.Contains(stderrStr, "already exists (skipped)") {
+			t.Errorf("human notice must be on stderr, got %q", stderrStr)
+		}
+	})
+
+	t.Run("table mode keeps stdout empty, notice on stderr", func(t *testing.T) {
+		stdoutStr, stderrStr := capture(t, "table")
+
+		if stdoutStr != "" {
+			t.Errorf("table-mode skip must not write to stdout, got %q", stdoutStr)
+		}
+		if !strings.Contains(stderrStr, "already exists (skipped)") {
+			t.Errorf("human notice must be on stderr, got %q", stderrStr)
+		}
+	})
+}
+
+// newDaemonStatusServer returns an httptest server serving GET /api/v1/status
+// with the given raw JSON body, requiring the expected X-API-Key. This is the
+// daemon-query branch importSelfListenAddrs uses to pick up a listen address
+// that differs from the config file (a process-only `serve --listen`
+// override, or a file edited since the daemon started) — the same live
+// address Connect writes into client configs.
+func newDaemonStatusServer(t *testing.T, key, body string) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-API-Key") != key {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	}))
+}
+
+// TestImportSelfListenAddrs_NoDaemon covers the common CLI case: nothing is
+// listening on the configured address, so only the config's own listen
+// address is used for the self-reference filter.
+func TestImportSelfListenAddrs_NoDaemon(t *testing.T) {
+	clearDaemonEnv(t)
+
+	cfg := &config.Config{
+		DataDir: t.TempDir(),
+		Listen:  "127.0.0.1:1", // nothing listens here
+		APIKey:  "secret",
+	}
+
+	got := importSelfListenAddrs(cfg)
+	want := []string{"127.0.0.1:1"}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("importSelfListenAddrs() = %v, want %v", got, want)
+	}
+}
+
+// TestImportSelfListenAddrs_DaemonLiveAddrAppended is the regression this
+// finding calls for: it pins the "listen_addr" key GetStatus's envelope must
+// carry (internal/httpapi/server.go handleGetStatus) and the daemon-query
+// fallback (`serve --listen` overriding the file, or the file edited since
+// start) that reads it. A rename of that JSON key, or a change to the
+// envelope shape, fails this test instead of silently dropping self-reference
+// detection for every CLI import.
+func TestImportSelfListenAddrs_DaemonLiveAddrAppended(t *testing.T) {
+	clearDaemonEnv(t)
+
+	ts := newDaemonStatusServer(t, "secret", `{"success":true,"data":{"listen_addr":"127.0.0.1:19999"}}`)
+	defer ts.Close()
+
+	cfg := &config.Config{
+		DataDir: t.TempDir(), // no socket file here -> TCP fallback probes ts.URL
+		Listen:  strings.TrimPrefix(ts.URL, "http://"),
+		APIKey:  "secret",
+	}
+
+	got := importSelfListenAddrs(cfg)
+	want := []string{cfg.Listen, "127.0.0.1:19999"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("importSelfListenAddrs() = %v, want %v", got, want)
+	}
+}
+
+// TestImportSelfListenAddrs_StatusWithoutListenAddr covers a reachable daemon
+// whose status response has no (or an empty) "listen_addr" field: the
+// function must fall back to just the config's own listen address rather
+// than appending an empty string.
+func TestImportSelfListenAddrs_StatusWithoutListenAddr(t *testing.T) {
+	clearDaemonEnv(t)
+
+	ts := newDaemonStatusServer(t, "secret", `{"success":true,"data":{"running":true}}`)
+	defer ts.Close()
+
+	cfg := &config.Config{
+		DataDir: t.TempDir(),
+		Listen:  strings.TrimPrefix(ts.URL, "http://"),
+		APIKey:  "secret",
+	}
+
+	got := importSelfListenAddrs(cfg)
+	want := []string{cfg.Listen}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("importSelfListenAddrs() = %v, want %v", got, want)
+	}
 }

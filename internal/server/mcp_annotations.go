@@ -1,8 +1,12 @@
 package server
 
 import (
+	"sort"
+	"strings"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolannotations"
 )
 
 // SessionRisk holds the result of analyzing all connected servers' tool annotations
@@ -22,11 +26,26 @@ type SessionRisk struct {
 //   - openWorldHint nil → true (assumes open world)
 //   - destructiveHint nil → true (assumes destructive)
 //   - readOnlyHint nil → false (assumes not read-only, i.e., can write)
+//
+// Unrestricted: every connected server contributes (analyzeSessionRiskScoped
+// with an always-true discoverable predicate).
 func analyzeSessionRisk(snapshot *stateview.ServerStatusSnapshot) SessionRisk {
+	return analyzeSessionRiskScoped(snapshot, func(string) bool { return true })
+}
+
+// analyzeSessionRiskScoped is analyzeSessionRisk restricted to servers
+// discoverable admits (Spec 105 FR-005 G3): a scoped caller's session_risk
+// MUST be computed over its own authorized servers only, under the existing
+// availability rules (connected, tier-blind) — otherwise the level (and the
+// lethal-trifecta verdict) leaks the existence and annotation shape of a
+// server outside the caller's scope, even though no tool name is named.
+// Administrators are not a named SC-005 exception here and keep calling
+// analyzeSessionRisk (discoverable admits everything) unchanged.
+func analyzeSessionRiskScoped(snapshot *stateview.ServerStatusSnapshot, discoverable func(serverName string) bool) SessionRisk {
 	var hasOpenWorld, hasDestructive, hasWrite bool
 
 	for _, server := range snapshot.Servers {
-		if !server.Connected {
+		if !server.Connected || !discoverable(server.Name) {
 			continue
 		}
 
@@ -149,33 +168,123 @@ func filterByAnnotations(tools []annotatedSearchResult, readOnlyOnly, excludeDes
 	return filtered
 }
 
+// reasonCounts splits one filter's omissions by remediation class (Spec 094
+// FR-004): missing annotations mean "fix the upstream server", an explicitly
+// unsafe hint means "the filter is doing its job". Neither field is omitempty
+// — a zero is information, not noise.
+type reasonCounts struct {
+	MissingAnnotation int `json:"missing_annotation"`
+	Explicit          int `json:"explicit"`
+}
+
+// filterDiagnostics is the normative FR-003 block. The handler attaches it to
+// a retrieve_tools response only when at least one annotation filter was
+// active AND omitted at least one tool, so the happy path stays byte-identical
+// to the pre-feature response.
+//
+// Counts and one suggestion string, never identities (FR-005): the block is
+// therefore leak-proof even for a quarantined tool lingering in a stale index,
+// and has a bounded serialized size.
+type filterDiagnostics struct {
+	MatchedBeforeFilters int                     `json:"matched_before_filters"`
+	OmittedTotal         int                     `json:"omitted_total"`
+	OmittedByFilter      map[string]reasonCounts `json:"omitted_by_filter"`
+	Suggestion           string                  `json:"suggestion"`
+}
+
+// Suggestion templates (FR-006). Compile-time constants over the JSON-safe
+// ASCII subset [a-zA-Z0-9 .,:;()'_-] — no quotes, backslashes or
+// HTML-significant characters — so JSON encoding never expands them and the
+// SC-003 size bound is exact arithmetic rather than an estimate.
+const (
+	suggestMissingPrefix  = "Tools matched but lack upstream annotations required by "
+	suggestMissingSuffix  = "; publish annotations or retry without these filters."
+	suggestExplicitPrefix = "Omitted tools are explicitly marked unsafe for "
+	suggestExplicitSuffix = "; retry without these filters to inspect them."
+)
+
+// filterSuggestion renders the single actionable line. anyMissing selects by
+// cause precedence: one unannotated omission anywhere is worth reporting as a
+// fixable upstream gap, because that is the remediation the operator can act
+// on. responsible must already be sorted; each name appears exactly once.
+func filterSuggestion(responsible []string, anyMissing bool) string {
+	names := strings.Join(responsible, ", ")
+	if anyMissing {
+		return suggestMissingPrefix + names + suggestMissingSuffix
+	}
+	return suggestExplicitPrefix + names + suggestExplicitSuffix
+}
+
+// filterByAnnotationsWithDiagnostics filters exactly like filterByAnnotations
+// and additionally reports what it withheld (Spec 094). Diagnostics are
+// derived from the candidate window this call already produced — no extra
+// index queries, no upstream calls (FR-008).
+//
+// diag is always non-nil; the handler decides whether to attach it.
+func filterByAnnotationsWithDiagnostics(tools []annotatedSearchResult, readOnlyOnly, excludeDestructive, excludeOpenWorld bool) (kept []annotatedSearchResult, diag *filterDiagnostics) {
+	diag = &filterDiagnostics{
+		MatchedBeforeFilters: len(tools),
+		OmittedByFilter:      map[string]reasonCounts{},
+	}
+
+	for _, tool := range tools {
+		filterKey, explicit, excluded := excludeReason(tool.annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld)
+		if !excluded {
+			kept = append(kept, tool)
+			continue
+		}
+		// An entry appears only once a filter has actually omitted something,
+		// which is what keeps active-but-idle filters out of the map (FR-003).
+		counts := diag.OmittedByFilter[filterKey]
+		if explicit {
+			counts.Explicit++
+		} else {
+			counts.MissingAnnotation++
+		}
+		diag.OmittedByFilter[filterKey] = counts
+		diag.OmittedTotal++
+	}
+
+	responsible := make([]string, 0, len(diag.OmittedByFilter))
+	anyMissing := false
+	for key, counts := range diag.OmittedByFilter {
+		responsible = append(responsible, key)
+		if counts.MissingAnnotation > 0 {
+			anyMissing = true
+		}
+	}
+	sort.Strings(responsible)
+	if len(responsible) > 0 {
+		diag.Suggestion = filterSuggestion(responsible, anyMissing)
+	}
+
+	return kept, diag
+}
+
 // shouldExclude returns true if a tool should be excluded based on its annotations and active filters.
 func shouldExclude(annotations *config.ToolAnnotations, readOnlyOnly, excludeDestructive, excludeOpenWorld bool) bool {
-	if readOnlyOnly {
-		// Must have explicit readOnlyHint=true to pass
-		if annotations == nil || annotations.ReadOnlyHint == nil || !*annotations.ReadOnlyHint {
-			return true
-		}
-	}
+	return toolannotations.ShouldExclude(annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld)
+}
 
-	if excludeDestructive {
-		// Exclude if destructiveHint is true or nil (default is true per spec).
-		// However, a tool with readOnlyHint=true is inherently non-destructive,
-		// so treat destructiveHint as false when readOnlyHint is explicitly true.
-		isReadOnly := annotations != nil && annotations.ReadOnlyHint != nil && *annotations.ReadOnlyHint
-		if !isReadOnly {
-			if annotations == nil || annotations.DestructiveHint == nil || *annotations.DestructiveHint {
-				return true
-			}
-		}
-	}
+// The filter parameter names — used as the diagnostics map keys (Spec 094
+// FR-003) and interpolated literally into the suggestion string (FR-006) — now
+// live in internal/toolannotations (FilterKeyReadOnlyOnly and friends) and
+// arrive here as the filterKey returned by excludeReason, so the server-side
+// wording cannot diverge from the classifier's attribution keys. These aliases
+// keep the server-local spelling for call sites that name a filter directly
+// (the Spec-094 engagement counters in preflight_telemetry.go); they are
+// definitionally the classifier's keys, so the two cannot drift.
+const (
+	filterKeyReadOnlyOnly     = toolannotations.FilterKeyReadOnlyOnly
+	filterKeyExcludeDestruct  = toolannotations.FilterKeyExcludeDestruct
+	filterKeyExcludeOpenWorld = toolannotations.FilterKeyExcludeOpenWorld
+)
 
-	if excludeOpenWorld {
-		// Exclude if openWorldHint is true or nil (default is true per spec)
-		if annotations == nil || annotations.OpenWorldHint == nil || *annotations.OpenWorldHint {
-			return true
-		}
-	}
-
-	return false
+// excludeReason delegates to the shared classifier in internal/toolannotations
+// (Spec 098 T005). The semantics — first-failing filter owns the omission,
+// evaluated read-only → destructive → open-world, `explicit` distinguishing an
+// unsafe hint from a missing one — are frozen by Spec 094 FR-004 and now live in
+// one place so the preflight evaluator and retrieve_tools cannot drift apart.
+func excludeReason(annotations *config.ToolAnnotations, readOnlyOnly, excludeDestructive, excludeOpenWorld bool) (filterKey string, explicit, excluded bool) {
+	return toolannotations.ExcludeReason(annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld)
 }

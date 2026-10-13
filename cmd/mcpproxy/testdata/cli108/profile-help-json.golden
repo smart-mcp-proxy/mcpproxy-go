@@ -1,0 +1,67 @@
+{
+  "name": "profile",
+  "description": "Manage profiles: named views over your servers with a tool policy",
+  "usage": "mcpproxy profile [flags]",
+  "flags": [
+    {
+      "name": "help",
+      "shorthand": "h",
+      "description": "help for profile",
+      "type": "bool",
+      "default": "false"
+    },
+    {
+      "name": "help-json",
+      "description": "Output help information as JSON",
+      "type": "bool",
+      "default": "false"
+    }
+  ],
+  "commands": [
+    {
+      "name": "anonymous",
+      "description": "Show or set the profile anonymous callers are confined to",
+      "usage": "mcpproxy profile anonymous [\u003cname\u003e] [flags]"
+    },
+    {
+      "name": "classify",
+      "description": "Give an unannotated tool a tier in a profile",
+      "usage": "mcpproxy profile classify \u003cname\u003e \u003cserver:tool\u003e [read|write|destructive] [flags]"
+    },
+    {
+      "name": "create",
+      "description": "Create a profile",
+      "usage": "mcpproxy profile create \u003cname\u003e [flags]"
+    },
+    {
+      "name": "delete",
+      "description": "Delete a profile",
+      "usage": "mcpproxy profile delete \u003cname\u003e [flags]"
+    },
+    {
+      "name": "list",
+      "description": "List profiles",
+      "usage": "mcpproxy profile list"
+    },
+    {
+      "name": "rename",
+      "description": "Rename a profile and move every client and token that uses it",
+      "usage": "mcpproxy profile rename \u003cold\u003e \u003cnew\u003e"
+    },
+    {
+      "name": "show",
+      "description": "Show one profile, or its effective tools",
+      "usage": "mcpproxy profile show \u003cname\u003e [flags]"
+    },
+    {
+      "name": "try",
+      "description": "Preview what a draft profile would show for a query (nothing is saved)",
+      "usage": "mcpproxy profile try \u003cname\u003e [flags]"
+    },
+    {
+      "name": "update",
+      "description": "Change a profile (read-modify-write)",
+      "usage": "mcpproxy profile update \u003cname\u003e [flags]"
+    }
+  ]
+}

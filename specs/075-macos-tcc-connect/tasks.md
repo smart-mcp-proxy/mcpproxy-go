@@ -12,8 +12,8 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-- [ ] T001 Confirm working on branch `075-macos-tcc-connect` and that `go build ./cmd/mcpproxy` + `go test ./internal/connect/...` are green as a baseline (capture current `GetAllStatus` behavior).
-- [ ] T002 [P] Record the canonical remediation string and bundle IDs (`com.smartmcpproxy.mcpproxy`, `com.smartmcpproxy.mcpproxy.dev`) from `native/macos/MCPProxy/MCPProxy/Info.plist` for reuse in code + tests.
+- [x] T001 Confirm working on branch `075-macos-tcc-connect` and that `go build ./cmd/mcpproxy` + `go test ./internal/connect/...` are green as a baseline (capture current `GetAllStatus` behavior).
+- [x] T002 [P] Record the canonical remediation string and bundle IDs (`com.smartmcpproxy.mcpproxy`, `com.smartmcpproxy.mcpproxy.dev`) from `native/macos/MCPProxy/MCPProxy/Info.plist` for reuse in code + tests.
 
 ---
 
@@ -21,7 +21,7 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 
 **Purpose**: The access-classification primitive every story depends on. MUST complete before US1–US3.
 
-- [ ] T003 [P] Add a content-read seam to `internal/connect`: a `Service`-held `readFile func(string) ([]byte, error)` (default `os.ReadFile`) and a `NewServiceWithReader`/test setter, mirroring the existing `homeDir` override, so tests can inject a permission-denied error. File: `internal/connect/connect.go`.
+- [x] T003 [P] Add a content-read seam to `internal/connect`: a `Service`-held `readFile func(string) ([]byte, error)` (default `os.ReadFile`) and a `NewServiceWithReader`/test setter, mirroring the existing `homeDir` override, so tests can inject a permission-denied error. File: `internal/connect/connect.go`.
 - [x] T004 Pin the diagnostics package/registration point for the doctor check. **Decision:** the runtime doctor is `internal/management` `service.Doctor()` (`diagnostics.go`), which builds `contracts.Diagnostics`; the macOS App-Data check appends an actionable warning string to its `RuntimeWarnings []string` (rendered by `mcpproxy doctor` as the "⚠️ Runtime Warnings" section and counted in `TotalIssues`). The static `internal/diagnostics` registry is an error-CODE catalog (classification metadata), not a runtime-check registry, so it is NOT used. The build-tagged check lives in `internal/management/tcc_appdata_{darwin,other}.go` with a pure, cross-platform translator in `tcc_appdata.go`.
 
 ---
@@ -32,14 +32,14 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 
 **Independent Test**: With several client configs present, `GetAllStatus` reads no file contents (injected reader asserts 0 calls); `GetStatus(id)` reads exactly one.
 
-- [ ] T005 [P] [US1] Write failing test `TestGetAllStatus_NoContentReads` in `internal/connect/connect_test.go`: inject a `readFile` that fails the test if called; create temp client configs via `NewServiceWithHome`; assert `GetAllStatus` sets `Exists` correctly and never invokes the reader.
-- [ ] T006 [P] [US1] Write failing test `TestGetStatus_ReadsSingleClientOnDemand` in `internal/connect/connect_test.go`: assert `GetStatus(id)` triggers exactly one content read for that client and resolves `Connected`/`AccessState`.
-- [ ] T007 [US1] Add `AccessState` (`json:"access_state"`) and `Remediation` (`json:"remediation,omitempty"`) fields to `ClientStatus` in `internal/connect/connect.go` (additive only; preserve all existing fields per FR-006).
-- [ ] T008 [US1] Refactor `GetAllStatus` (`internal/connect/connect.go:112`) to set `Exists` via `os.Stat` and leave `AccessState="unknown"` / `Connected=false` for installed clients — REMOVE the eager `findEntry` call at line ~135.
-- [ ] T009 [US1] Add `func (s *Service) GetStatus(clientID string) (ClientStatus, error)` that does the single-client content read via the seam, calls `findEntry`, and sets `Connected` + `AccessState=accessible|absent|malformed`. File: `internal/connect/connect.go`.
-- [ ] T010 [US1] Route `findEntry`/`findEntryJSON`/`findEntryTOML` (and `readOrCreate*`) through `s.readFile` instead of calling `os.ReadFile` directly, so the seam covers all content reads. File: `internal/connect/connect.go`.
-- [ ] T011 [US1] Update `GetConnectedCount`/`GetConnectedIDs` (connect.go:87/100) which currently rely on `GetAllStatus().Connected`: re-implement them to use per-client on-demand `GetStatus` (they legitimately need the connected truth for the wizard predicate) — document that this is the one internal caller allowed to content-read, and it does so lazily per client.
-- [ ] T012 [US1] Run `go test ./internal/connect/ -run 'Status' -race` → green. Verify T005/T006 pass.
+- [x] T005 [P] [US1] Write failing test `TestGetAllStatus_NoContentReads` in `internal/connect/connect_test.go`: inject a `readFile` that fails the test if called; create temp client configs via `NewServiceWithHome`; assert `GetAllStatus` sets `Exists` correctly and never invokes the reader.
+- [x] T006 [P] [US1] Write failing test `TestGetStatus_ReadsSingleClientOnDemand` in `internal/connect/connect_test.go`: assert `GetStatus(id)` triggers exactly one content read for that client and resolves `Connected`/`AccessState`.
+- [x] T007 [US1] Add `AccessState` (`json:"access_state"`) and `Remediation` (`json:"remediation,omitempty"`) fields to `ClientStatus` in `internal/connect/connect.go` (additive only; preserve all existing fields per FR-006).
+- [x] T008 [US1] Refactor `GetAllStatus` (`internal/connect/connect.go:112`) to set `Exists` via `os.Stat` and leave `AccessState="unknown"` / `Connected=false` for installed clients — REMOVE the eager `findEntry` call at line ~135.
+- [x] T009 [US1] Add `func (s *Service) GetStatus(clientID string) (ClientStatus, error)` that does the single-client content read via the seam, calls `findEntry`, and sets `Connected` + `AccessState=accessible|absent|malformed`. File: `internal/connect/connect.go`.
+- [x] T010 [US1] Route `findEntry`/`findEntryJSON`/`findEntryTOML` (and `readOrCreate*`) through `s.readFile` instead of calling `os.ReadFile` directly, so the seam covers all content reads. File: `internal/connect/connect.go`.
+- [x] T011 [US1] Update `GetConnectedCount`/`GetConnectedIDs` (connect.go:87/100) which currently rely on `GetAllStatus().Connected`: re-implement them to use per-client on-demand `GetStatus` (they legitimately need the connected truth for the wizard predicate) — document that this is the one internal caller allowed to content-read, and it does so lazily per client.
+- [x] T012 [US1] Run `go test ./internal/connect/ -run 'Status' -race` → green. Verify T005/T006 pass.
 
 **Checkpoint**: Overall status is content-read-free; connected detection is on-demand. SC-001/SC-002 satisfied.
 
@@ -51,13 +51,13 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 
 **Independent Test**: Injected `fs.ErrPermission` on a config access yields `AccessState=denied` + remediation; absent → `absent`; bad JSON → `malformed`; each distinct.
 
-- [ ] T013 [P] [US2] Write failing tests in new `internal/connect/access_test.go` for `classifyAccess(err)`: nil→accessible, `fs.ErrNotExist`→absent, `fs.ErrPermission`(wrap `syscall.EPERM` and `EACCES`)→denied, parse-error→malformed. Use `&fs.PathError{Err: syscall.EPERM}`.
-- [ ] T014 [P] [US2] Write failing test `TestGetStatus_DeniedSurfacesRemediation` in `internal/connect/connect_test.go`: inject reader returning EPERM; assert `GetStatus` returns `AccessState=denied`, non-empty `Remediation` containing `tccutil reset SystemPolicyAppData` and the bundle id, and that `Connected` stays false (not reported as plain "not connected").
-- [ ] T015 [P] [US2] Write failing test `TestConnectDenied_ReturnsAccessError` in `internal/connect/connect_test.go`: inject EPERM on the connect read/write path; assert a typed `*AccessError` (errors.As) carrying remediation is returned (distinct from unknown-client / already-exists errors).
-- [ ] T016 [US2] Implement `internal/connect/access.go`: `AccessOutcome` enum, `classifyAccess(err) AccessOutcome` (via `errors.Is(err, fs.ErrPermission)` / `fs.ErrNotExist`), `AccessError` type (Client/Path/Outcome/Remediation, `Error()` + `Unwrap`), and `remediationText(client)` building the canonical message from data-model.md.
-- [ ] T017 [US2] Wire `classifyAccess` into `GetStatus` (T009) so denied/malformed/absent set `AccessState` + `Remediation`.
-- [ ] T018 [US2] Wire `classifyAccess` into `Connect`/`Disconnect` (connect.go) and `backupFile` (`internal/connect/backup.go`): on `denied`, return an `*AccessError` with remediation; preserve existing error semantics otherwise.
-- [ ] T019 [US2] Run `go test ./internal/connect/ -run 'Access|Denied|Connect' -race` → green (T013/T014/T015).
+- [x] T013 [P] [US2] Write failing tests in new `internal/connect/access_test.go` for `classifyAccess(err)`: nil→accessible, `fs.ErrNotExist`→absent, `fs.ErrPermission`(wrap `syscall.EPERM` and `EACCES`)→denied, parse-error→malformed. Use `&fs.PathError{Err: syscall.EPERM}`.
+- [x] T014 [P] [US2] Write failing test `TestGetStatus_DeniedSurfacesRemediation` in `internal/connect/connect_test.go`: inject reader returning EPERM; assert `GetStatus` returns `AccessState=denied`, non-empty `Remediation` containing `tccutil reset SystemPolicyAppData` and the bundle id, and that `Connected` stays false (not reported as plain "not connected").
+- [x] T015 [P] [US2] Write failing test `TestConnectDenied_ReturnsAccessError` in `internal/connect/connect_test.go`: inject EPERM on the connect read/write path; assert a typed `*AccessError` (errors.As) carrying remediation is returned (distinct from unknown-client / already-exists errors).
+- [x] T016 [US2] Implement `internal/connect/access.go`: `AccessOutcome` enum, `classifyAccess(err) AccessOutcome` (via `errors.Is(err, fs.ErrPermission)` / `fs.ErrNotExist`), `AccessError` type (Client/Path/Outcome/Remediation, `Error()` + `Unwrap`), and `remediationText(client)` building the canonical message from data-model.md.
+- [x] T017 [US2] Wire `classifyAccess` into `GetStatus` (T009) so denied/malformed/absent set `AccessState` + `Remediation`.
+- [x] T018 [US2] Wire `classifyAccess` into `Connect`/`Disconnect` (connect.go) and `backupFile` (`internal/connect/backup.go`): on `denied`, return an `*AccessError` with remediation; preserve existing error semantics otherwise.
+- [x] T019 [US2] Run `go test ./internal/connect/ -run 'Access|Denied|Connect' -race` → green (T013/T014/T015).
 
 **Checkpoint**: All four access outcomes are distinct and surfaced; denials are actionable. SC-003/SC-004 satisfied.
 
@@ -86,7 +86,7 @@ Single Go module. Connect logic in `internal/connect/`; doctor check in the diag
 - [x] T027 [P] Run CI linter locally: `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml internal/connect/... internal/httpapi/...` → 0 issues (Constitution V; CI uses v2). DONE: 0 issues. (diagnostics-pkg doctor check is separate issue MCP-2831, not yet on main.)
 - [x] T028 [P] Docs: add a short macOS "App Data privacy & Connect" note (cause + `tccutil reset` remediation) to the Connect/troubleshooting docs and update CLAUDE.md REST-payload notes for the new fields (Constitution VI). DONE: `docs/api/rest-api.md` Connect section + CLAUDE.md REST note.
 - [x] T029 Full verification: `go build ./cmd/mcpproxy && go build -tags server ./cmd/mcpproxy && go test -race ./internal/connect/... ./internal/httpapi/...`. DONE: both editions build; race tests green; `make swagger` regenerated `oas/`.
-- [ ] T030 [P] (Optional, separable) Frontend: render the `unknown`/`denied` tri-state + remediation banner in the Connect view (`frontend/src/`), verified via the Playwright sweep in CLAUDE.md. Not required for backend MVP.
+- [x] T030 [P] (Optional, separable) Frontend: render the `unknown`/`denied` tri-state + remediation banner in the Connect view (`frontend/src/`), verified via the Playwright sweep in CLAUDE.md. Not required for backend MVP.
 
 ---
 

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"time"
 
 	"go.etcd.io/bbolt"
 )
@@ -81,6 +82,55 @@ func (m *Manager) ScanAllActivities(visit func(*ActivityRecord)) error {
 			if err := record.UnmarshalBinary(v); err != nil {
 				m.logger.Warnw("Failed to unmarshal activity record during usage rebuild",
 					"key", string(k), "error", err)
+				continue
+			}
+			visit(&record)
+		}
+		return nil
+	})
+}
+
+// ScanActivitiesAfter visits every activity record STRICTLY newer than `since`,
+// oldest first. It is the catch-up replay behind a persisted usage snapshot: a
+// snapshot is flushed every 30s, so an unclean shutdown always leaves a tail of
+// records that were saved but never folded in, and loading the snapshot alone
+// left that tail permanently missing from the aggregate while the activity list
+// showed it.
+//
+// The bound is real work avoided, not a convenience: activity keys are
+// "<20-digit unix nanos>_<id>", so seeking to the nanosecond after `since`
+// skips the entire history in one cursor move instead of unmarshalling it.
+//
+// Strictly-greater is what makes the replay safe to run every start: records
+// are persisted BEFORE they are folded into the aggregate, so anything at or
+// before the snapshot's stamp is already counted and re-applying it would
+// double it.
+//
+// A zero `since` is rejected rather than treated as "everything": the caller
+// that cannot date its snapshot must rebuild from a full scan, not replay a
+// history it may already contain.
+func (m *Manager) ScanActivitiesAfter(since time.Time, visit func(*ActivityRecord)) error {
+	if since.IsZero() {
+		return fmt.Errorf("ScanActivitiesAfter requires a non-zero lower bound")
+	}
+	seek := []byte(fmt.Sprintf("%020d_", since.UnixNano()+1))
+
+	return m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(ActivityRecordsBucket))
+		if bucket == nil {
+			return nil
+		}
+		cursor := bucket.Cursor()
+		for k, v := cursor.Seek(seek); k != nil; k, v = cursor.Next() {
+			var record ActivityRecord
+			if err := record.UnmarshalBinary(v); err != nil {
+				m.logger.Warnw("Failed to unmarshal activity record during usage catch-up",
+					"key", string(k), "error", err)
+				continue
+			}
+			// Belt and braces: the key encodes record.Timestamp, but a record
+			// written with a mismatched key must never be applied twice.
+			if !record.Timestamp.After(since) {
 				continue
 			}
 			visit(&record)

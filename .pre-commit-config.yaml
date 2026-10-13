@@ -7,11 +7,29 @@ repos:
     rev: v5.0.0
     hooks:
       - id: trailing-whitespace
+        # A unified diff encodes meaning in leading whitespace: an unchanged
+        # context line begins with a single space, and a blank context line IS
+        # that lone space. Stripping it turns valid patches into ones git apply
+        # rejects — observed on bench/mcpmark/mcpproxy_arm.patch, where the hook
+        # silently rewrote 4 context lines.
+        exclude: '\.(patch|diff)$'
       - id: end-of-file-fixer
       - id: check-merge-conflict
+      - id: check-added-large-files
+        # A 43 MB `warmtiktoken` Mach-O binary was committed at the repo root
+        # in #1153 (go build in the wrong cwd). Screenshots and verification
+        # reports are legitimately 1-6 MB, so cap well above them.
+        args: ['--maxkb=8192']
 
   - repo: local
     hooks:
+      - id: no-native-binaries
+        name: Reject compiled executables (Mach-O/ELF/PE)
+        entry: scripts/check-no-native-binaries.sh
+        language: script
+        # Uses `file(1)`; images are excluded to keep the hook fast.
+        exclude: '^(docs|website|assets|specs)/.*\.(png|jpe?g|gif|ico|webp|svg|pdf)$'
+
       - id: gofmt
         name: gofmt
         entry: gofmt -w
@@ -24,6 +42,13 @@ repos:
         language: system
         stages: [pre-push]
         pass_filenames: false
+
+      - id: roadmap-verify
+        name: Verify ROADMAP.md is up to date
+        entry: python3 scripts/gen-roadmap.py --check
+        language: system
+        pass_filenames: false
+        files: '^(roadmap\.yaml|ROADMAP\.md|scripts/gen-roadmap\.py|specs/.*/tasks\.md)$'
 
       - id: go-build
         name: go build

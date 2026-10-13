@@ -37,13 +37,148 @@ import (
 // three new diagnostics codes surfaced via error_code_counts_24h
 // (MCPX_DOCKER_CLI_NOT_FOUND / MCPX_DOCKER_EXEC_NOT_FOUND /
 // MCPX_DOCKER_OCI_RUNTIME). Additive only — v3/v4 consumers ignore them.
-const SchemaVersion = 5
+//
+// v6 (schema bump from 5): adds machine_id — a stable, non-reversible hash of
+// the OS machine id (HMAC-SHA256 keyed by the OS machine id, scoped by an
+// app-specific key). It lets the dashboard dedup installs whose anonymous_id
+// churns every run (ephemeral Docker layers, throwaway HOMEs, CI). Additive
+// and forward-compatible: v3/v4/v5 consumers ignore it, and the ingest worker
+// stores payload_json wholesale without rejecting unknown fields or higher
+// schema versions.
+//
+// v7 (schema bump from 6): Spec 080 — honest activation funnel + churn
+// instrumentation. Additive only; v6-and-earlier consumers ignore every
+// addition:
+//   - wizard_connect_step enum widened with "completed_external" (connected
+//     outside the wizard — CLI/ConnectModal/manual config — detected at
+//     dismissal). Consumers switching on completed|skipped must treat
+//     unknown values as "other/engaged".
+//   - wizard_shown (bool): wizard rendered at least once, making "shown but
+//     ignored" observable alongside wizard_engaged.
+//   - web_ui_opened (int64): lifetime count of embedded Web UI index-document
+//     serves, independent of surface_requests.webui.
+//   - days_since_install (*int): whole-day UTC install age from a persisted
+//     first-install day stamp; 0 is transmitted, nil (store not wired) omits.
+//   - active_days_30d (int): count of distinct active UTC days in the
+//     trailing 30-day window; the per-day set never leaves the machine.
+//   - previous_shutdown (enum "clean"|"crash", absent = unknown/first run):
+//     how the PREVIOUS process instance ended, from a persisted marker.
+//   - last_error_code (enum MCPX_*): most recent stable diagnostic code,
+//     persisted across restarts; never message text, names, or paths.
+//
+// All v7 fields are omitempty (zero-valued payloads stay shape-compatible
+// with v6), fixed-enum/boolean/non-negative-integer only (enforced by
+// ScanForPII), and ride the existing opt-out gate.
+//
+// v8 (schema bump from 7): anonymous TPA / security-scanner stats. Additive
+// only; v7-and-earlier consumers ignore both additions:
+//   - tpa_scanner (object, omitted entirely when every counter is zero — the
+//     same posture as diagnostics): scans_completed, scans_failed,
+//     scans_with_findings (non-negative integer counts over the reporting
+//     window, reset only after an accepted heartbeat) and findings, a sparse
+//     map from the FIXED severity enum (critical|high|medium|low|info) to a
+//     non-negative count.
+//   - feature_flags.deep_scan_enabled (bool): the opt-in deep-scan master
+//     switch (security.deep_scan.enabled), so scan volume can be read against
+//     the population that actually enabled the layer.
+//
+// The unit of every tpa_scanner counter is ONE NON-DEEP-SCAN (PASS 1) SCAN JOB:
+// the Pass-2 deep supply-chain audit that deep scan auto-starts after Pass 1 is
+// NOT counted (counting it would double the apparent scan volume of exactly the
+// deep-scan cohort deep_scan_enabled exists to compare), dry-run jobs are NOT
+// counted, and a job with several failing scanners is still one scan —
+// scans_failed counts failed jobs, not failed scanners. The producer is
+// scanCallbackAdapter.countsForTelemetry in internal/security/scanner.
+//
+// Anonymity properties: counts and fixed enum keys ONLY. Scanned server
+// names, scanner ids, rule ids, finding titles, file paths, and error
+// messages are never accepted by the counter API, and ScanForPII re-asserts
+// the shape on the wire form (rule "v8_field_invalid"): tpa_scanner must be
+// an object whose keys are whitelisted, whose scalar values are non-negative
+// integers, and whose findings keys are members of the severity enum.
+// Schema v9 makes the TPA funnel measurable. Two additions:
+//
+//   - tpa_scanner.tool_change_gate_scans / tpa_scanner.prompt_scans: delta
+//     counters for the two SYNCHRONOUS detection paths that run for ordinary
+//     users — the trust_mode:scan tool-change gate
+//     (internal/runtime.scanChangeIsClean) and the aggregated-prompt poisoning
+//     filter (internal/server.scanAggregatedPrompts). Neither emitted anything
+//     before v9, so the v8 job counters alone made the fleet look like it never
+//     scanned. Same window and reset semantics as every other registry counter
+//     (zeroed only after an accepted send), and the whole tpa_scanner
+//     sub-object is still omitted when every counter — v8 and v9 — is zero.
+//   - trust_mode_distribution: a STATE field (not a delta), the count of
+//     configured servers per config.ServerConfig.EffectiveTrustMode(), keyed by
+//     the fixed auto|scan|manual enum and computed fresh at heartbeat build
+//     time. It is the denominator the gate counter needs: gate scans are only
+//     possible on servers in "scan" mode.
+//
+// Anonymity posture is unchanged: non-negative integer counts and fixed enum
+// keys only. ScanForPII re-asserts both shapes on the wire form (rules
+// "v8_field_invalid" for the widened tpa_scanner whitelist and
+// "trust_mode_field_invalid" for the histogram).
+//
+// v11 (MCP-2967) adds diagnostics.current_error_codes and, more importantly,
+// changes the MEANING of diagnostics.error_code_counts_24h: it is now
+// edge-triggered (one count per new failure or new failed attempt) where v10
+// and earlier re-counted every standing failure on the supervisor's 30s
+// reconcile ticker. v10-and-earlier error-code volumes are therefore NOT
+// comparable with v11 ones and must not be graphed on a single series —
+// v10 counted roughly failing-servers x uptime/30s, not user-visible events.
+// current_error_codes carries the standing-state signal that edge-triggering
+// would otherwise have removed. Anonymity posture unchanged: fixed MCPX_ enum
+// keys, non-negative integer counts.
+//
+// v12 adds heartbeat_id, a random UUID that identifies one reset-on-accept
+// counter window. It stays stable across retries and rotates only after the
+// sender observes a 2xx response. Receivers can therefore INSERT counter
+// events idempotently even when a response is lost after the endpoint has
+// committed the heartbeat. The id is random, contains no machine data, and is
+// scoped to one reporting window.
+//
+// v13 (Spec 107): feature_flags.server_edition_enabled (bool), feature_flags.idp_provider
+// (closed enum google|github|microsoft|oidc|none — never an issuer), member_count_bucket
+// (closed enum 0|1-10|11-100|101-1000|1000+; "0" when no user counter is installed — the personal
+// edition — and omitted only when the installed counter errors).
+// env_markers.is_container unchanged. No worker migration: fields ride in payload_json.
+//
+// The wire key is member_count_bucket, not the user_count_bucket the Spec 107
+// contract first named: ScanForPII rule 2 substring-matches the home-dir
+// basename against the WHOLE wire form, keys included, and "user" is the
+// username of every `USER user` container image (the server edition's own
+// topology). A key containing "user" would have had every heartbeat from such
+// an install refused before it left the machine. See
+// TestPayloadV13_PassesScanWithCommonUsernameBlocked.
+//
+// v14 changes the MEANING of two existing instruments, with no new fields:
+// activation.first_real_tool_call_ever and upstream_tool_call_count_bucket now
+// share one definition across call_tool_*, direct routing and every
+// code_execution JS sub-call. The flag is stamped only for a usable upstream
+// result (not transport errors, not upstream isError:true, not policy or
+// output-policy refusals); the bucket counts one attempt per actual upstream
+// dispatch (previously: every call_tool_* invocation including ones refused
+// before dispatch, and nothing for direct routing or JS sub-calls). v13-and-
+// earlier values are not comparable with v14 ones; do not graph them as one
+// series, and do not reinterpret historical flags.
+const SchemaVersion = 14
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
 type HeartbeatPayload struct {
 	// v1 fields (preserved unchanged)
-	AnonymousID          string `json:"anonymous_id"`
+	AnonymousID string `json:"anonymous_id"`
+	// MachineID (schema v6) is a stable, non-reversible hash of the OS machine
+	// id — HMAC-SHA256 keyed by the OS machine id, scoped by an app-specific key
+	// (see machine_id.go). Unlike anonymous_id (a UUID persisted in the config
+	// file, which is regenerated on every run in ephemeral environments —
+	// throwaway HOMEs, Docker layers, CI), this value is stable per physical
+	// machine, letting the dashboard dedup ephemeral installs. Empty/omitted
+	// when the OS machine id cannot be read (containers without /etc/machine-id,
+	// permission errors, exotic platforms); the backend treats empty as
+	// "unknown". The raw machine id is NEVER transmitted — only the salted hash.
+	// It rides the same opt-out gate as every other field (the whole heartbeat
+	// is suppressed when telemetry is disabled).
+	MachineID            string `json:"machine_id,omitempty"`
 	Version              string `json:"version"`
 	Edition              string `json:"edition"`
 	OS                   string `json:"os"`
@@ -55,7 +190,29 @@ type HeartbeatPayload struct {
 	UptimeHours          int    `json:"uptime_hours"`
 	RoutingMode          string `json:"routing_mode"`
 	QuarantineEnabled    bool   `json:"quarantine_enabled"`
-	Timestamp            string `json:"timestamp"`
+	// ToolResponseMode and DirectToolResponseMode are the two SERIALIZATION
+	// axes, distinct from RoutingMode above (schema v10, Spec 102).
+	//
+	// routing_mode alone cannot answer the question these features exist to
+	// answer. It says which tool SURFACE an install serves; it says nothing
+	// about whether the operator ever turned on the compact or deferred
+	// rendering that the whole token-reduction effort is about. Without these
+	// two, adoption of Spec 085 and Spec 102 is unmeasurable — the same
+	// structural blind spot that made TPA adoption look like rejection when it
+	// was really "never switched on".
+	//
+	// Both are closed low-cardinality enums, never free text: "full"|"compact"
+	// and "full"|"deferred". The empty configured value is normalized to the
+	// mode it means, so "unset" and "explicitly full" are one bucket rather
+	// than two — the distinction is not interesting and splitting it would
+	// halve the signal.
+	ToolResponseMode       string `json:"tool_response_mode,omitempty"`
+	DirectToolResponseMode string `json:"direct_tool_response_mode,omitempty"`
+	Timestamp              string `json:"timestamp"`
+	// HeartbeatID is the idempotency key for the current reset-on-accept
+	// counter window. It is stable across failed/retried sends and rotates only
+	// after a 2xx response resets the registry counters (schema v12).
+	HeartbeatID string `json:"heartbeat_id"`
 
 	// Spec 042 (Tier 2) additions
 	SchemaVersion               int                         `json:"schema_version,omitempty"`
@@ -135,17 +292,108 @@ type HeartbeatPayload struct {
 	WizardEngaged bool `json:"wizard_engaged,omitempty"`
 
 	// WizardConnectStep is the per-step status for "Connect an AI client":
-	// one of "" (not shown to this install), "completed", or "skipped".
+	// one of "" (not shown to this install), "completed",
+	// "completed_external" (Spec 080: connected outside the wizard —
+	// CLI/ConnectModal/manual config — detected at dismissal), or "skipped".
+	// Consumers switching on completed|skipped must treat unknown values as
+	// "other/engaged".
 	WizardConnectStep string `json:"wizard_connect_step,omitempty"`
 
 	// WizardServerStep is the per-step status for "Add an MCP server":
 	// one of "" (not shown to this install), "completed", or "skipped".
 	WizardServerStep string `json:"wizard_server_step,omitempty"`
 
+	// Spec 080 (US2) — funnel observability fields. All additive and
+	// omitempty so zero-valued payloads stay shape-compatible with v6.
+	// Privacy posture: booleans and non-negative integers only — no
+	// timestamps, no per-day breakdown, no per-server identity.
+
+	// WizardShown is true once the onboarding wizard has rendered at least
+	// once for this install (OnboardingState.FirstShownAt set). Combined
+	// with WizardEngaged it makes "shown but ignored" observable:
+	// wizard_shown=true with wizard_engaged absent/false.
+	WizardShown bool `json:"wizard_shown,omitempty"`
+
+	// WebUIOpened is the lifetime count of embedded Web UI index-document
+	// serves (the UI entrypoint), persisted in BBolt. Independent of the
+	// X-MCPProxy-Client-header-based surface_requests.webui counter: it
+	// counts opening the UI, not SPA API traffic. Asset and API requests
+	// never increment it. Coarse by design (health checkers fetching /
+	// count too); documented as "index serves".
+	WebUIOpened int64 `json:"web_ui_opened,omitempty"`
+
+	// DaysSinceInstall is the whole-day UTC age of the install, from a
+	// persisted first-install day stamp independent of anonymous_id.
+	// Non-negative (clamped at 0 on clock skew). Pointer so day 0 (install
+	// day) is transmitted while "store not wired" is omitted — the same
+	// nil-safety as Activation. No install timestamp is ever transmitted.
+	DaysSinceInstall *int `json:"days_since_install,omitempty"`
+
+	// ActiveDays30d is the number of distinct active UTC days in the
+	// trailing 30-day window (1..30 once any activity is recorded). Only
+	// this cardinality leaves the machine; the per-day set stays local.
+	ActiveDays30d int `json:"active_days_30d,omitempty"`
+
+	// Spec 080 (US3) — pre-churn snapshot fields. Additive and omitempty so
+	// zero-valued payloads stay shape-compatible with v6. When the churn
+	// pipeline later identifies a churned install, its final heartbeat
+	// already distinguishes "crashed and never came back" from "exited
+	// cleanly and never returned".
+
+	// PreviousShutdown reports how the PREVIOUS process instance ended:
+	// "clean" (graceful-shutdown path resolved the persisted marker) or
+	// "crash" (marker armed at startup but never resolved — SIGKILL, panic,
+	// power loss). Absent on a first-ever run (no prior marker) or when the
+	// store is not wired — a fresh install is never misreported as a crash
+	// (FR-010/FR-013). Computed once at startup and stable across all
+	// heartbeats of the instance (FR-011).
+	PreviousShutdown string `json:"previous_shutdown,omitempty"`
+
+	// LastErrorCode is the most recently observed stable MCPX_* diagnostic
+	// code (same fixed code set as diagnostics.error_code_counts_24h),
+	// persisted across restarts so the post-crash heartbeat carries the
+	// pre-crash code. Enum code only — never message text, stack traces,
+	// server names, or paths. Absent when no error was ever recorded
+	// (FR-012).
+	LastErrorCode string `json:"last_error_code,omitempty"`
+
 	// Spec 044 Phase H: diagnostics counter snapshot. Omitted entirely when
 	// all counters are zero (omitempty on the pointer). No PII: only stable
 	// MCPX_* enum strings, non-negative int counts.
 	Diagnostics *DiagnosticsCounters `json:"diagnostics,omitempty"`
+
+	// Issue #969 (Phase 0): required-tools-preflight BASELINE counters —
+	// filter-diagnostics engagement + availability/discovery-omission classes.
+	// Omitted entirely when all counters are zero (omitempty on the pointer),
+	// so an install that never trips one is shape-identical to a payload from
+	// before this field existed. No PII: non-negative counts, plus a reason map
+	// keyed exclusively by the closed availabilityBlockReasonKeys enum.
+	Preflight *PreflightCounters `json:"preflight,omitempty"`
+
+	// Schema v8: anonymous TPA / security-scanner outcome counters. Omitted
+	// entirely when all counters are zero (omitempty on the pointer) — an
+	// install that never scans is shape-identical to a v7 payload. No PII:
+	// non-negative counts keyed by the fixed severity enum only; never a
+	// scanned server name, scanner id, rule id, or finding title.
+	TPAScanner *TPAScannerStats `json:"tpa_scanner,omitempty"`
+
+	// Schema v9: count of configured servers per effective trust tier, keyed
+	// exclusively by the fixed auto|scan|manual enum (all three keys always
+	// present, even at zero — the protocol-counts convention). A STATE field,
+	// recomputed from the live config on every heartbeat and never reset. It
+	// gives the tpa_scanner gate counter its denominator: only servers in
+	// "scan" mode can produce a tool-change gate scan at all. No PII: counts
+	// only, no server names, no raw config strings.
+	TrustModeDistribution map[string]int `json:"trust_mode_distribution,omitempty"`
+
+	// Schema v13 (Spec 107 US7): UserCountBucket is the number of server-
+	// edition user records (team members), bucketed into the bucketUpstream
+	// vocabulary (0|1-10|11-100|101-1000|1000+). "0" when no user counter is
+	// installed (the personal edition, short-lived CLI commands); omitted ONLY
+	// when the installed counter errors. A count only — never a user id,
+	// email, group or IdP subject. The wire key deliberately avoids the
+	// substring "user" (see the SchemaVersion comment).
+	UserCountBucket string `json:"member_count_bucket,omitempty"`
 }
 
 // OnboardingSnapshot is the data the telemetry service needs to populate
@@ -157,6 +405,9 @@ type OnboardingSnapshot struct {
 	WizardEngaged        bool
 	WizardConnectStep    string
 	WizardServerStep     string
+	// WizardShown (Spec 080 US2): the wizard rendered at least once for
+	// this install — derived from OnboardingState.FirstShownAt != nil.
+	WizardShown bool
 }
 
 // RuntimeStats is an interface to decouple from the runtime package.
@@ -165,6 +416,11 @@ type RuntimeStats interface {
 	GetConnectedServerCount() int
 	GetToolCount() int
 	GetRoutingMode() string
+	// GetToolResponseMode and GetDirectToolResponseMode return the two
+	// serialization axes as closed enums, with the empty configured value
+	// normalized to "full" (schema v10, Spec 102).
+	GetToolResponseMode() string
+	GetDirectToolResponseMode() string
 	IsQuarantineEnabled() bool
 	// Schema v3 additions.
 	// IsDockerAvailable reports whether the host has a reachable Docker
@@ -214,6 +470,29 @@ type Service struct {
 	diagCounterStore DiagnosticsCounterStore
 	diagCounterDB    *bbolt.DB
 
+	// Issue #969 (Phase 0): preflight baseline counter store + DB handle.
+	// Optional — same nil-safety guarantee as activationStore. When nil, the
+	// preflight sub-object is omitted and every Record* below is a no-op.
+	preflightStore PreflightCounterStore
+	preflightDB    *bbolt.DB
+
+	// Spec 080 (US2): funnel observability store + DB handle. Optional —
+	// same nil-safety guarantee as activationStore. When nil, web_ui_opened,
+	// days_since_install, and active_days_30d are omitted (short-lived CLI
+	// commands).
+	funnelStore FunnelStore
+	funnelDB    *bbolt.DB
+
+	// Spec 080 (US3): pre-churn snapshot state. previousShutdown is derived
+	// exactly once at startup by the runtime (ArmShutdownMarker) and copied
+	// here before the heartbeat loop starts, so it is stable across every
+	// heartbeat of this instance (FR-011). The store/DB pair follows the
+	// same nil-safety contract as activationStore: when unset (short-lived
+	// CLI commands), previous_shutdown and last_error_code are omitted.
+	previousShutdown string
+	prechurnStore    PreChurnStore
+	prechurnDB       *bbolt.DB
+
 	// Spec 044: optional provider for configured IDE count. Populated by the
 	// runtime from internal/connect at wire-up time. nil-safe.
 	configuredIDECountProvider func() int
@@ -229,6 +508,21 @@ type Service struct {
 	// onboarding fields are simply omitted from the heartbeat.
 	onboardingProvider func() *OnboardingSnapshot
 
+	// MCP-2967: optional provider for the STANDING diagnostic state —
+	// classified MCPX_* code -> number of configured servers currently in
+	// that state. Wired by the runtime with a closure over the supervisor's
+	// stateview. nil-safe: when unset, diagnostics.current_error_codes is
+	// simply omitted (short-lived CLI commands have no supervisor).
+	currentErrorCodesProvider func() map[string]int
+
+	// Spec 107 (US7, schema v13): optional counter of server-edition user
+	// records, installed by the server-edition wiring
+	// (internal/server/serveredition_wire.go) with a closure over the user
+	// store. nil-safe: when unset — the personal edition, short-lived CLI
+	// commands — member_count_bucket reports "0"; when the installed counter
+	// errors, the field is omitted for that heartbeat.
+	userCounter func() (int, error)
+
 	// For testing: override initial delay and heartbeat interval
 	initialDelay      time.Duration
 	heartbeatInterval time.Duration
@@ -241,14 +535,67 @@ type Service struct {
 	// (IsTelemetryEnabled — nil means enabled). Used to detect the
 	// enabled->disabled flip that fires the opt-out beacon.
 	resolvedEnabled bool
+	// heartbeatWindowID identifies the current reset-on-accept counter window.
+	// Guarded by mu because BuildPayload may inspect it while the heartbeat
+	// sender rotates it after an accepted response.
+	heartbeatWindowID string
+
+	// deliveryMu serializes heartbeat delivery and protects the immutable
+	// drained counter snapshot retried under heartbeatWindowID. New events keep
+	// accumulating in registry while a request is in flight and belong to the
+	// next window.
+	deliveryMu             sync.Mutex
+	pendingCounterSnapshot *RegistrySnapshot
 	// optedOut latches true once the opt-out beacon has fired; it gates all
 	// further heartbeat emission so no telemetry leaves after the user opts out.
 	optedOut atomic.Bool
+
+	// Shutdown coordination (Spec 080 FR-010, review round 6): the heartbeat
+	// loop is a BBolt writer — buildHeartbeat records funnel activity
+	// (funnelStore.RecordActivity) and the first tick clears the
+	// installer-pending activation flag — so Runtime.Close must be able to
+	// JOIN the loop, not merely context-cancel it, before the clean-shutdown
+	// marker resolves and the DB closes. done closes when the Start body
+	// exits on ANY path (including the disabled-by-env/config/semver early
+	// returns). startMu/started/stopped mirror ActivityService: production
+	// launches Start via `go` (lifecycle.go), so a fast shutdown can run
+	// Stop BEFORE the Start goroutine is scheduled — Stop marks stopped
+	// terminally under startMu and a later Start becomes a no-op instead of
+	// a heartbeat loop writing BBolt after the shutdown-marker path began.
+	// started also refuses a second Start (done is single-shot).
+	done    chan struct{}
+	startMu sync.Mutex
+	started bool
+	stopped bool
+
+	// Graceful-shutdown flush. Counters live in memory and are only reset after
+	// an ACCEPTED send, so everything recorded after the last accepted heartbeat
+	// (in practice: everything after the 5-minute first heartbeat, for any
+	// process that does not survive to the 24h tick) was previously dropped on
+	// exit. Stop now performs ONE final send after joining the loop.
+	//
+	// flushEligible is set by Start once it has passed every emission gate
+	// (env / config / semver) and ensured the anonymous id — i.e. exactly when a
+	// heartbeat from this process would have been legitimate. Stop consults it
+	// so a disabled or dev build never sends on shutdown.
+	//
+	// flushOnce keeps the flush single-shot across the idempotent Stop.
+	// flushTimeout is overridable in tests; see shutdownFlushTimeout.
+	flushEligible atomic.Bool
+	flushOnce     sync.Once
+	flushTimeout  time.Duration
 }
 
 // optOutBeaconTimeout bounds the best-effort opt-out beacon send so a slow or
 // unreachable endpoint never delays the config save that triggered it.
 const optOutBeaconTimeout = 5 * time.Second
+
+// shutdownFlushTimeout hard-bounds the final heartbeat sent on graceful
+// shutdown. It is deliberately much shorter than the HTTP client's own 10s
+// timeout: a dead or blackholed endpoint must never turn a user's quit into a
+// visible hang. The send is best-effort — on timeout the counters are simply
+// retained (no 2xx ⇒ no Reset) and the next run reports them.
+const shutdownFlushTimeout = 4 * time.Second
 
 // New creates a new telemetry service.
 func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logger) *Service {
@@ -259,6 +606,7 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 		version:           normalizeVersion(version),
 		edition:           edition,
 		endpoint:          cfg.GetTelemetryEndpoint(),
+		heartbeatWindowID: uuid.New().String(),
 		logger:            logger,
 		startTime:         time.Now(),
 		client:            &http.Client{Timeout: 10 * time.Second},
@@ -267,7 +615,9 @@ func New(cfg *config.Config, cfgPath, version, edition string, logger *zap.Logge
 		envDisabledReason: envReason,
 		initialDelay:      5 * time.Minute,
 		heartbeatInterval: 24 * time.Hour,
+		flushTimeout:      shutdownFlushTimeout,
 		resolvedEnabled:   EffectiveTelemetryEnabled(cfg),
+		done:              make(chan struct{}),
 	}
 }
 
@@ -308,6 +658,49 @@ func (s *Service) ActivationDB() *bbolt.DB {
 	return s.activationDB
 }
 
+// SetFunnelStore wires the BBolt-backed funnel observability store (Spec 080
+// US2). Optional; when unset, heartbeat payloads omit web_ui_opened,
+// days_since_install, and active_days_30d. Safe to call once during startup.
+func (s *Service) SetFunnelStore(store FunnelStore, db *bbolt.DB) {
+	s.funnelStore = store
+	s.funnelDB = db
+}
+
+// FunnelStore returns the wired funnel store (or nil).
+func (s *Service) FunnelStore() FunnelStore {
+	return s.funnelStore
+}
+
+// FunnelDB returns the BBolt DB handle associated with the funnel store
+// (or nil).
+func (s *Service) FunnelDB() *bbolt.DB {
+	return s.funnelDB
+}
+
+// RecordWebUIOpen increments the lifetime web_ui_opened counter (Spec 080
+// FR-006). Called by the embedded Web UI handler whenever the index document
+// is served. nil-safe: a no-op when the funnel store is not wired, and a
+// persistence error never propagates to the HTTP path (logged at debug).
+func (s *Service) RecordWebUIOpen() {
+	if s.funnelStore == nil || s.funnelDB == nil {
+		return
+	}
+	if err := s.funnelStore.IncrementWebUIOpened(s.funnelDB); err != nil {
+		s.logger.Debug("Failed to increment web_ui_opened counter", zap.Error(err))
+	}
+}
+
+// SetPreChurn wires the Spec 080 US3 pre-churn snapshot: the startup-derived
+// previous_shutdown value (stable for the life of this instance, FR-011) and
+// the BBolt-backed store used to read last_error_code at heartbeat build
+// time. Optional; when unset, both fields are omitted from the payload.
+// Safe to call once during startup, before the heartbeat loop begins.
+func (s *Service) SetPreChurn(previousShutdown string, store PreChurnStore, db *bbolt.DB) {
+	s.previousShutdown = previousShutdown
+	s.prechurnStore = store
+	s.prechurnDB = db
+}
+
 // SetDiagnosticsCounterStore wires the BBolt-backed diagnostics counter store
 // (Spec 044 Phase H). Optional; when unset, heartbeat payloads omit the
 // diagnostics object. Safe to call once during startup.
@@ -325,6 +718,121 @@ func (s *Service) DiagnosticsCounterStore() DiagnosticsCounterStore {
 // diagnostics counter store (or nil).
 func (s *Service) DiagnosticsCounterDB() *bbolt.DB {
 	return s.diagCounterDB
+}
+
+// SetPreflightCounterStore wires the BBolt-backed preflight baseline counter
+// store (issue #969, Phase 0). Optional; when unset, heartbeat payloads omit
+// the preflight object and every Record* below is a no-op. Safe to call once
+// during startup.
+func (s *Service) SetPreflightCounterStore(store PreflightCounterStore, db *bbolt.DB) {
+	s.preflightStore = store
+	s.preflightDB = db
+}
+
+// PreflightCounterStore returns the wired preflight counter store (or nil).
+func (s *Service) PreflightCounterStore() PreflightCounterStore {
+	return s.preflightStore
+}
+
+// PreflightCounterDB returns the BBolt DB handle associated with the preflight
+// counter store (or nil).
+func (s *Service) PreflightCounterDB() *bbolt.DB {
+	return s.preflightDB
+}
+
+// preflightSink returns the store/DB pair to write to, or (nil, nil) when
+// nothing may be recorded.
+//
+// The opt-out is evaluated at EVENT time, not only at heartbeat time — the
+// strictest of the existing postures (recordUpdateFailure, spec 095 FR-013).
+// An occurrence observed while telemetry is off is never persisted, so it can
+// never become transmissible if the user turns telemetry back on later.
+func (s *Service) preflightSink() (PreflightCounterStore, *bbolt.DB) {
+	if s == nil || s.preflightStore == nil || s.preflightDB == nil {
+		return nil, nil
+	}
+	if s.optedOut.Load() {
+		return nil, nil
+	}
+	if !s.telemetryEnabledLive() {
+		return nil, nil
+	}
+	return s.preflightStore, s.preflightDB
+}
+
+// telemetryEnabledLive resolves EffectiveTelemetryEnabled against the live
+// config with s.mu held for the WHOLE evaluation.
+//
+// Snapshotting the pointer and then dereferencing it after unlocking is NOT
+// enough: config.IsTelemetryEnabled reads cfg.Telemetry, and both
+// ensureAnonymousIDOnce and advanceUpgradeFunnelOnce install that pointer on a
+// config that arrived without a telemetry block (`cfg.Telemetry =
+// &config.TelemetryConfig{}`) while holding s.mu. A locked write paired with an
+// unlocked read is still a data race — the request path (Record*) and the
+// heartbeat loop hit exactly that pair on a fresh install. Proven under -race
+// by TestPreflightSinkTelemetryPointerRace.
+//
+// EffectiveTelemetryEnabled only reads env vars and config fields, so calling
+// it under the lock cannot re-enter the Service.
+func (s *Service) telemetryEnabledLive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return EffectiveTelemetryEnabled(s.config)
+}
+
+// preflightDebug logs a counter-persistence failure without ever propagating it
+// — a telemetry counter must never break the request path that produced it.
+func (s *Service) preflightDebug(msg string, err error) {
+	if err == nil || s.logger == nil {
+		return
+	}
+	s.logger.Debug(msg, zap.Error(err))
+}
+
+// RecordFilterDiagnosticsEmitted counts one retrieve_tools response that
+// carried a spec-094 filter_diagnostics block, plus that block's per-reason
+// class totals. Counts only — the filter keys and tool identities stay in the
+// response and never reach telemetry.
+func (s *Service) RecordFilterDiagnosticsEmitted(missingAnnotation, explicit int) {
+	store, db := s.preflightSink()
+	if store == nil {
+		return
+	}
+	s.preflightDebug("Failed to record filter_diagnostics emission",
+		store.RecordFilterDiagnosticsEmitted(db, missingAnnotation, explicit))
+}
+
+// RecordFilterDiagnosticsFollowed counts one diagnostics block the agent acted
+// on (a later same-session retrieve_tools relaxed a blamed filter).
+func (s *Service) RecordFilterDiagnosticsFollowed() {
+	store, db := s.preflightSink()
+	if store == nil {
+		return
+	}
+	s.preflightDebug("Failed to record filter_diagnostics follow-up",
+		store.RecordFilterDiagnosticsFollowed(db))
+}
+
+// RecordAvailabilityBlock counts one policy block by its structured reason key.
+// Reasons outside the closed enum are folded into "other" by the store.
+func (s *Service) RecordAvailabilityBlock(reason string) {
+	store, db := s.preflightSink()
+	if store == nil {
+		return
+	}
+	s.preflightDebug("Failed to record availability block",
+		store.RecordAvailabilityBlock(db, reason))
+}
+
+// RecordDiscoveryOmission counts one retrieve_tools response that withheld
+// locked/quarantined matches from the caller.
+func (s *Service) RecordDiscoveryOmission() {
+	store, db := s.preflightSink()
+	if store == nil {
+		return
+	}
+	s.preflightDebug("Failed to record discovery omission",
+		store.RecordDiscoveryOmission(db))
 }
 
 // SetConfiguredIDECountProvider wires a function that returns the number of
@@ -348,6 +856,45 @@ func (s *Service) SetOnboardingProvider(fn func() *OnboardingSnapshot) {
 	s.onboardingProvider = fn
 }
 
+// SetCurrentErrorCodesProvider wires a function that returns the standing
+// diagnostic state for the next heartbeat (MCP-2967): stable MCPX_* code ->
+// number of configured servers currently in that state. Typically supplied by
+// supervisor.Supervisor.CurrentErrorCodes. Each call must return fresh data —
+// the whole point of the field is that it reflects RIGHT NOW rather than a
+// decaying window. Returning nil omits diagnostics.current_error_codes.
+func (s *Service) SetCurrentErrorCodesProvider(fn func() map[string]int) {
+	s.currentErrorCodesProvider = fn
+}
+
+// SetUserCounter installs the server-edition user counter behind
+// member_count_bucket (schema v13, Spec 107 US7). Only the count crosses this
+// seam; the closure must never expose user records. nil-safe: passing nil (or
+// never calling this) reports "0", the personal-edition value.
+//
+// Guarded by s.mu (cross-review round 4, chunk 4 P2): Start() launches the
+// heartbeat loop on its own goroutine (runtime/lifecycle.go
+// "go r.telemetryService.Start(...)") from StartBackgroundInitialization,
+// while SetUserCounter is called later, from a different call chain
+// (server.startCustomHTTPServer -> serveredition_wire.go), with no ordering
+// guarantee between the two relative to each other. An unsynchronized write
+// here racing the unsynchronized read in BuildPayload is a real data race
+// under the Go memory model, not merely a theoretical one — the same class
+// the file's own s.mu already protects for resolvedEnabled/config/endpoint
+// and the anonymous-id/funnel fields.
+func (s *Service) SetUserCounter(fn func() (int, error)) {
+	s.mu.Lock()
+	s.userCounter = fn
+	s.mu.Unlock()
+}
+
+// userCounterFunc returns the currently installed user counter (or nil)
+// under s.mu, so BuildPayload never reads s.userCounter directly.
+func (s *Service) userCounterFunc() func() (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.userCounter
+}
+
 // resolveLaunchSource returns the LaunchSource to emit in the current
 // heartbeat. Precedence:
 //  1. If the activation bucket's installer_heartbeat_pending flag is true,
@@ -360,8 +907,18 @@ func (s *Service) SetOnboardingProvider(fn func() *OnboardingSnapshot) {
 // falls through to the runtime detector — this preserves liveness of the
 // heartbeat pipeline at the cost of losing the "installer" classification
 // for this one cycle.
-func (s *Service) resolveLaunchSource() LaunchSource {
-	if s.activationStore != nil && s.activationDB != nil {
+//
+// consumeInstallerPending is false ONLY on the graceful-shutdown flush. Clearing
+// the flag happens at BUILD time, before the send is known to have been
+// accepted, which is a deliberate trade-off for the long-running loop (a crash
+// mid-send must not re-emit "installer" forever). On the shutdown flush that
+// trade-off inverts: the process is about to exit, so a flush that fails —
+// offline machine, 4s timeout — would destroy an attribution that previously
+// survived intact into the next run. The flush therefore leaves the flag ALONE
+// and reports the runtime-detected source; the next run's first heartbeat still
+// claims "installer" exactly once.
+func (s *Service) resolveLaunchSource(consumeInstallerPending bool) LaunchSource {
+	if consumeInstallerPending && s.activationStore != nil && s.activationDB != nil {
 		pending, err := s.activationStore.IsInstallerPending(s.activationDB)
 		if err == nil && pending {
 			// Clear the flag synchronously so a crash before the HTTP POST
@@ -380,7 +937,32 @@ func (s *Service) resolveLaunchSource() LaunchSource {
 }
 
 // Start begins the telemetry heartbeat loop. This is a blocking call; run in a goroutine.
+// Single-shot: a second Start is refused, and a Start that lost the race
+// against Stop (fast shutdown) is a no-op. See Stop.
 func (s *Service) Start(ctx context.Context) {
+	// Registration under startMu (Spec 080 FR-010, review round 6). If Stop
+	// already ran — production launches Start via `go` (lifecycle.go), so a
+	// fast shutdown can beat this goroutine — the service is terminally
+	// stopped: return without entering a loop that could write BBolt after
+	// Runtime.Close began the shutdown-marker path. Refuse a second Start:
+	// the done bookkeeping is single-shot.
+	s.startMu.Lock()
+	if s.stopped {
+		s.startMu.Unlock()
+		s.logger.Debug("Telemetry service Start called after Stop; not starting")
+		return
+	}
+	if s.started {
+		s.startMu.Unlock()
+		s.logger.Warn("Telemetry service Start called twice; ignoring")
+		return
+	}
+	s.started = true
+	s.startMu.Unlock()
+	// Every exit below — including the disabled early returns — must release
+	// a waiting Stop.
+	defer close(s.done)
+
 	// Spec 042: env vars override config. DO_NOT_TRACK / CI / MCPPROXY_TELEMETRY=false
 	if s.envDisabledReason != EnvDisabledNone {
 		s.logger.Info("Telemetry disabled by environment variable",
@@ -388,8 +970,10 @@ func (s *Service) Start(ctx context.Context) {
 		return
 	}
 
-	// Skip if telemetry is disabled
-	if !s.config.IsTelemetryEnabled() {
+	// Skip if telemetry is disabled. Resolved under s.mu (telemetryEnabledLive):
+	// Start runs on its own goroutine, so both the s.config pointer read and the
+	// cfg.Telemetry dereference behind it race the config-reload path.
+	if !s.telemetryEnabledLive() {
 		s.logger.Info("Telemetry disabled by configuration")
 		return
 	}
@@ -409,8 +993,15 @@ func (s *Service) Start(ctx context.Context) {
 	// leaks before they leave the machine. Idempotent.
 	PopulateBlockedValues()
 
+	// Every emission gate above has passed and the anonymous id exists, so a
+	// heartbeat from this process is legitimate from here on. Arm the
+	// graceful-shutdown flush (see flushFinalHeartbeat): even if the process
+	// exits before the initial delay elapses, whatever it recorded is worth one
+	// bounded final send.
+	s.flushEligible.Store(true)
+
 	s.logger.Info("Telemetry service starting",
-		zap.String("endpoint", s.endpoint),
+		zap.String("endpoint", s.liveEndpoint()),
 		zap.Duration("initial_delay", s.initialDelay),
 		zap.Duration("interval", s.heartbeatInterval))
 
@@ -440,14 +1031,128 @@ func (s *Service) Start(ctx context.Context) {
 	}
 }
 
+// Stop terminally stops the heartbeat loop and waits for it to exit,
+// including any in-flight tick — buildHeartbeat's BBolt writes and
+// sendHeartbeat's HTTP send. The send carries the loop context, so the
+// runtime's appCancel aborts it promptly and the wait is bounded by the HTTP
+// client's timeout; the BBolt writes are never interrupted mid-transaction,
+// only awaited. Callers must cancel the context passed to Start before (or
+// concurrently with) Stop, or Stop blocks until the loop exits on its own.
+// Stop returns immediately when Start never ran, is idempotent, and makes a
+// Start goroutine that has not yet been scheduled a permanent no-op —
+// Runtime.Close relies on this so no telemetry BBolt write can land after
+// the clean-shutdown marker resolves or after the DB closes (Spec 080
+// FR-010, review round 6).
+//
+// After the loop has been joined, Stop performs ONE bounded final heartbeat
+// (flushFinalHeartbeat) so counters recorded since the last accepted send are
+// not lost on exit. Doing it AFTER the join — not from a second goroutine
+// racing the loop — is what keeps the "the loop owns sends" invariant intact:
+// at that point there is provably no other sender, so the send+reset path
+// cannot interleave with a tick. Runtime.Close calls Stop while the BBolt
+// handle is still open and before the clean-shutdown marker resolves, so the
+// flush's buildHeartbeat writes are still legal there.
+func (s *Service) Stop() {
+	s.startMu.Lock()
+	s.stopped = true
+	started := s.started
+	s.startMu.Unlock()
+	if !started {
+		return
+	}
+	// Start ran (or is running): its defer guarantees done closes on every
+	// exit path, including the disabled-by-env/config early returns.
+	<-s.done
+
+	s.flushFinalHeartbeat()
+}
+
+// flushFinalHeartbeat sends at most one final heartbeat on the graceful
+// shutdown path. Called by Stop AFTER the heartbeat loop has exited, so it is
+// never concurrent with a tick.
+//
+// It reuses sendHeartbeat's send+reset path verbatim, which is what preserves
+// the counter contract: counters are zeroed ONLY on a 2xx, so a failed or
+// timed-out flush drops nothing (the next run reports the same counts) and an
+// accepted flush cannot double-count with a later start.
+//
+// Delivery is AT-LEAST-ONCE, exactly as it already is between ticks. When a send
+// is aborted after the endpoint accepted it but before the client observed the
+// 2xx — the app context is cancelled a moment into an in-flight tick, say — the
+// counters stay pending and this flush re-sends them, so the endpoint can see
+// the same window twice. That is undecidable client-side (a lost response is
+// indistinguishable from a lost request) and is the pre-existing retry semantic
+// of Reset-on-2xx; the alternative is dropping the window entirely, which is the
+// bug this flush exists to fix. Schema-v12 receivers treat the immutable
+// counter window as idempotent by its globally unique heartbeat_id; timestamp
+// is only observation time and may change on a rebuilt retry.
+//
+// Skipped when: Start never armed it (telemetry disabled by env/config, dev
+// build), the user opted out, telemetry was turned off mid-run, or nothing has
+// been recorded since the last accepted send.
+//
+// The send runs on a FRESH context, not the loop's: Runtime.Close cancels the
+// app context before calling Stop, so a derived context would abort the flush
+// instantly. It is hard-bounded by flushTimeout so a dead endpoint cannot hang
+// shutdown.
+//
+// Build-time one-shot side effects are suppressed here (consumeOneShots=false):
+// the 365-day anonymous-id rotation, which rewrites the whole config file at the
+// worst possible moment (the daemon's other config writers are winding down),
+// and the installer_heartbeat_pending flag, which is cleared at build time and
+// would be destroyed by a flush that never lands. Both fire on the next run's
+// first heartbeat instead. See buildHeartbeatWithOneShots.
+func (s *Service) flushFinalHeartbeat() {
+	s.flushOnce.Do(func() {
+		if !s.flushEligible.Load() {
+			return
+		}
+		if s.optedOut.Load() {
+			return
+		}
+		if !s.telemetryEnabledLive() {
+			return
+		}
+		if !s.hasPendingCounterDelivery() && !s.registry.HasPendingCounters() {
+			s.logger.Debug("Skipping telemetry shutdown flush: no counters recorded since the last accepted heartbeat")
+			return
+		}
+
+		timeout := s.flushTimeout
+		if timeout <= 0 {
+			timeout = shutdownFlushTimeout
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		s.logger.Debug("Flushing final telemetry heartbeat on shutdown",
+			zap.Duration("timeout", timeout))
+		s.sendHeartbeatWithOneShots(ctx, false)
+	})
+}
+
 func (s *Service) sendHeartbeat(ctx context.Context) {
+	s.sendHeartbeatWithOneShots(ctx, true)
+}
+
+// sendHeartbeatWithOneShots is sendHeartbeat's body. consumeOneShots is false
+// only on the shutdown-flush path; see flushFinalHeartbeat.
+func (s *Service) sendHeartbeatWithOneShots(ctx context.Context, consumeOneShots bool) {
 	// MCP-2482: once the user has opted out, no further telemetry is emitted —
 	// even if the long-running heartbeat loop is still ticking.
 	if s.optedOut.Load() {
 		return
 	}
 
-	payload := s.buildHeartbeat()
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	if s.pendingCounterSnapshot == nil {
+		snap := s.registry.Drain()
+		s.pendingCounterSnapshot = &snap
+	}
+
+	payload := s.buildHeartbeatWithOneShots(consumeOneShots)
+	applyRegistrySnapshot(&payload, *s.pendingCounterSnapshot)
 
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -476,7 +1181,7 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 		return
 	}
 
-	url := s.endpoint + "/heartbeat"
+	url := s.liveEndpoint() + "/heartbeat"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		s.logger.Debug("Failed to create heartbeat request", zap.Error(err))
@@ -502,44 +1207,220 @@ func (s *Service) sendHeartbeat(ctx context.Context) {
 
 	s.logger.Debug("Heartbeat sent", zap.Int("status", resp.StatusCode))
 
-	// Spec 042: only on a successful 2xx send do we (a) reset counters and
-	// (b) advance the upgrade funnel cursor. Failures preserve state for retry.
+	// Spec 042: only on a successful 2xx send do we (a) discard the frozen
+	// counter window and rotate its id, and (b) advance the upgrade funnel
+	// cursor. Failures preserve the detached snapshot for retry.
 	if resp.StatusCode/100 == 2 {
-		s.registry.Reset()
+		s.pendingCounterSnapshot = nil
+		s.rotateHeartbeatWindowID()
 		s.advanceUpgradeFunnel()
 	}
 }
 
 // advanceUpgradeFunnel persists the current version as last_reported_version.
-// Called only on successful heartbeat send.
+// Called only on successful heartbeat send. Reads the live config through
+// liveConfig for the same reason buildHeartbeat does: this runs on the
+// heartbeat loop, concurrently with the NotifyConfigChanged pointer swap.
+//
+// The cursor is NOT self-healing on a skipped write: leaving it unadvanced
+// makes the next heartbeat report the same previous_version again, so one
+// upgrade is counted twice. If the config was swapped between the read and the
+// guarded write, redo the advance against the new live config. Two attempts is
+// enough — a second swap in the same window leaves the cursor for the next
+// heartbeat, which is the pre-existing (rare, bounded) double-report.
 func (s *Service) advanceUpgradeFunnel() {
-	if s.config.Telemetry == nil {
-		s.config.Telemetry = &config.TelemetryConfig{}
-	}
-	if s.config.Telemetry.LastReportedVersion == s.version {
-		return
-	}
-	s.config.Telemetry.LastReportedVersion = s.version
-	if s.cfgPath != "" {
-		if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
-			s.logger.Debug("Failed to persist last_reported_version", zap.Error(err))
+	for attempt := 0; attempt < 2; attempt++ {
+		if s.advanceUpgradeFunnelOnce() {
+			return
 		}
 	}
+}
+
+// advanceUpgradeFunnelOnce runs ONE resolve -> check -> mutate -> persist pass
+// and reports whether the cursor is settled (nothing to do, or the advance was
+// written). It holds s.mu across the whole pass for two reasons:
+//
+//   - the mutation writes cfg.Telemetry, which buildHeartbeat reads (via
+//     telemetryCursor) and maybeRotateAnonymousID writes. Mutating it outside
+//     the mutex is a genuine data race with a concurrent BuildPayload — that
+//     path is exported and served from an HTTP handler (internal/httpapi), so a
+//     `telemetry show-payload` request lands on the heartbeat loop's post-send
+//     advance. Proven under -race by TestAdvanceUpgradeFunnelConfigRace.
+//   - the liveness check inside persistConfigLocked has to be atomic with the
+//     mutation it is guarding, exactly as in maybeRotateAnonymousID.
+func (s *Service) advanceUpgradeFunnelOnce() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg := s.config
+	if cfg == nil {
+		return true
+	}
+	if cfg.Telemetry == nil {
+		cfg.Telemetry = &config.TelemetryConfig{}
+	}
+	if cfg.Telemetry.LastReportedVersion == s.version {
+		return true
+	}
+	cfg.Telemetry.LastReportedVersion = s.version
+	return s.persistConfigLocked(cfg, "Advanced last_reported_version")
 }
 
 // BuildPayload renders the heartbeat payload at the current point in time.
 // It is exported so the `mcpproxy telemetry show-payload` command can render
 // the same payload that would next be sent, without making a network call.
 func (s *Service) BuildPayload() HeartbeatPayload {
-	return s.buildHeartbeat()
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	payload := s.buildHeartbeat()
+	if s.pendingCounterSnapshot != nil {
+		applyRegistrySnapshot(&payload, *s.pendingCounterSnapshot)
+	}
+	return payload
+}
+
+func (s *Service) hasPendingCounterDelivery() bool {
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	return s.pendingCounterSnapshot != nil
+}
+
+// liveConfig returns the service's current *config.Config, read under s.mu.
+// NotifyConfigChanged replaces the pointer wholesale when the live config is
+// reloaded, so every read outside that critical section must go through here:
+// an unsynchronized read of the field is a data race with the swap.
+//
+// Callers get the pointer, not a deep copy — the pointed-to config is still
+// shared with the rest of the daemon and must be treated as read-only.
+func (s *Service) liveConfig() *config.Config {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.config
+}
+
+// liveEndpoint returns the service's current telemetry endpoint, read under
+// s.mu. NotifyConfigChanged rewrites s.endpoint on a live config reload, so
+// every read must take the same lock the write does — an unlocked read is a
+// data race, not merely a stale value. The shutdown flush made this reachable in
+// practice (it sends after the loop has been joined, i.e. from whichever
+// goroutine called Stop), and it is equally reachable from the feedback and
+// opt-out-beacon paths.
+func (s *Service) liveEndpoint() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.endpoint
+}
+
+// liveAnonymousID returns the anonymous install id from the service's current
+// config, read under s.mu — the same lock NotifyConfigChanged takes to swap
+// s.config, and the same one ensureAnonymousIDOnce / advanceUpgradeFunnelOnce
+// take to install cfg.Telemetry on a config that arrived without one.
+//
+// Snapshotting the pointer and dereferencing it after unlocking would NOT be
+// enough, for exactly the reason telemetryEnabledLive documents:
+// GetAnonymousID reads cfg.Telemetry, so the whole read has to happen inside
+// the critical section. The opt-out beacon read it unlocked in both of its
+// eligibility gates — two lines above the endpoint read this PR moved under the
+// lock — which the race detector confirms (see
+// TestOptOutBeaconReadsAnonymousIDUnderLock).
+//
+// config.GetAnonymousID only reads config fields, so calling it under the lock
+// cannot re-enter the Service.
+func (s *Service) liveAnonymousID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.config == nil {
+		return ""
+	}
+	return s.config.GetAnonymousID()
+}
+
+// currentHeartbeatWindowID returns the idempotency key for the current
+// reset-on-accept counter window. It is deliberately independent of Timestamp:
+// a retry rebuilds the payload (and therefore gets a fresh timestamp) while
+// still carrying the same counters.
+func (s *Service) currentHeartbeatWindowID() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.heartbeatWindowID
+}
+
+// rotateHeartbeatWindowID advances the idempotency key only after the sender
+// observes a 2xx response and resets the counters. A failed or ambiguous send
+// keeps the old key so the receiver can ignore an already-committed retry.
+func (s *Service) rotateHeartbeatWindowID() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.heartbeatWindowID = uuid.New().String()
+}
+
+// telemetryCursor reads the four cfg.Telemetry scalars the heartbeat reports,
+// in one hold of s.mu. Every writer of these fields — maybeRotateAnonymousID
+// and advanceUpgradeFunnelOnce — mutates them under the same mutex, so the read
+// side must take it too: a locked write paired with an unlocked read is still a
+// data race. Taking all four in one pass also means the reported id and its
+// created_at can never straddle a rotation.
+//
+// cfg is the caller's snapshot (see liveConfig); a nil cfg or nil cfg.Telemetry
+// yields empty strings, which is what a fresh install reports anyway.
+func (s *Service) telemetryCursor(cfg *config.Config) (anonID, createdAt, previousVersion, lastStartupOutcome string) {
+	if cfg == nil {
+		return "", "", "", ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cfg.Telemetry == nil {
+		return "", "", "", ""
+	}
+	return cfg.Telemetry.AnonymousID,
+		cfg.Telemetry.AnonymousIDCreatedAt,
+		cfg.Telemetry.LastReportedVersion,
+		cfg.Telemetry.LastStartupOutcome
 }
 
 func (s *Service) buildHeartbeat() HeartbeatPayload {
-	// Spec 042: rotate the anonymous ID if it's older than 365 days.
-	s.maybeRotateAnonymousID(time.Now().UTC())
+	return s.buildHeartbeatWithOneShots(true)
+}
+
+// buildHeartbeatWithOneShots is buildHeartbeat's body.
+//
+// consumeOneShots gates every side effect this build performs on state that
+// only fires ONCE and is consumed at build time rather than on a 2xx:
+//   - the 365-day anonymous-id rotation (rewrites the config FILE), and
+//   - the installer_heartbeat_pending flag (BBolt one-shot, see
+//     resolveLaunchSource).
+//
+// It is false only on the shutdown-flush path. Both effects are irreversible
+// the moment they run, so performing them for a send that may never be accepted
+// — the flush runs while the daemon tears down, on a 4s budget, possibly
+// offline — would destroy state that previously survived intact into the next
+// run. The next run's first heartbeat performs both instead. Everything else in
+// this build (BBolt reads, funnel activity marking, counter snapshots) is
+// idempotent or reset-on-2xx and is therefore unconditional.
+func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayload {
+	// Take ONE snapshot of the live config pointer under s.mu and read only that
+	// below. NotifyConfigChanged swaps s.config wholesale on a reload, so an
+	// unsynchronized read of the field races that swap; snapshotting also means a
+	// reload landing mid-build cannot splice fields from two different configs
+	// into one payload. The lock is released immediately — nothing below may hold
+	// it, because preflightSink() takes the same non-reentrant mutex.
+	cfg := s.liveConfig()
+
+	// Spec 042: rotate the anonymous ID if it's older than 365 days. Runs on the
+	// snapshot, so the rotated ID is the one this payload reports.
+	if consumeOneShots {
+		s.maybeRotateAnonymousID(cfg, time.Now().UTC())
+	}
+
+	// Read every cfg.Telemetry-derived scalar in ONE locked pass. These four
+	// fields are written under s.mu by maybeRotateAnonymousID (anonymous id +
+	// created_at) and advanceUpgradeFunnelOnce (last_reported_version), both of
+	// which can run on another goroutine while this payload is being built —
+	// reading them unlocked is a data race, not merely a torn view.
+	anonID, anonCreatedAt, prevVersion, lastStartupOutcome := s.telemetryCursor(cfg)
 
 	payload := HeartbeatPayload{
-		AnonymousID:    s.config.GetAnonymousID(),
+		AnonymousID:    anonID,
 		Version:        s.version,
 		Edition:        s.edition,
 		OS:             runtime.GOOS,
@@ -547,21 +1428,26 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		GoVersion:      runtime.Version(),
 		UptimeHours:    int(time.Since(s.startTime).Hours()),
 		Timestamp:      time.Now().UTC().Format(time.RFC3339),
+		HeartbeatID:    s.currentHeartbeatWindowID(),
 		SchemaVersion:  SchemaVersion,
 		CurrentVersion: s.version,
+		// Schema v6: stable, non-reversible machine-id hash. Cached after the
+		// first call so repeated heartbeats do not re-probe the OS. Empty when
+		// the OS machine id is unreadable — never blocks the heartbeat.
+		MachineID: resolveMachineID(),
 	}
 
-	if s.config.Telemetry != nil {
-		payload.AnonymousIDCreatedAt = s.config.Telemetry.AnonymousIDCreatedAt
-		payload.PreviousVersion = s.config.Telemetry.LastReportedVersion
-		payload.LastStartupOutcome = s.config.Telemetry.LastStartupOutcome
-	}
+	payload.AnonymousIDCreatedAt = anonCreatedAt
+	payload.PreviousVersion = prevVersion
+	payload.LastStartupOutcome = lastStartupOutcome
 
 	if s.stats != nil {
 		payload.ServerCount = s.stats.GetServerCount()
 		payload.ConnectedServerCount = s.stats.GetConnectedServerCount()
 		payload.ToolCount = s.stats.GetToolCount()
 		payload.RoutingMode = s.stats.GetRoutingMode()
+		payload.ToolResponseMode = s.stats.GetToolResponseMode()
+		payload.DirectToolResponseMode = s.stats.GetDirectToolResponseMode()
 		payload.QuarantineEnabled = s.stats.IsQuarantineEnabled()
 		// Schema v3 additions — forwarded from runtime wiring.
 		payload.ServerDockerIsolatedCount = s.stats.GetDockerIsolatedServerCount()
@@ -570,7 +1456,7 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// Spec 042: feature-flag snapshot. Schema v3: BuildFeatureFlagSnapshot
 	// does not probe Docker — we splice the runtime probe result in here
 	// so the snapshot helper stays cheap and side-effect-free.
-	payload.FeatureFlags = BuildFeatureFlagSnapshot(s.config)
+	payload.FeatureFlags = BuildFeatureFlagSnapshot(cfg)
 	if s.stats != nil && payload.FeatureFlags != nil {
 		payload.FeatureFlags.DockerAvailable = s.stats.IsDockerAvailable()
 		// Schema v5 (MCP-2745): coarse docker-CLI resolution branch (the #696
@@ -579,11 +1465,33 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		payload.FeatureFlags.DockerCLISource = s.stats.GetDockerCLISource()
 	}
 
+	// Schema v13 (Spec 107 US7): bucketed server-edition user count. The
+	// counter is a runtime concern (a BBolt read through the user store), so
+	// it is spliced in here rather than in the side-effect-free snapshot
+	// helper. No counter installed → "0"; counter error → field omitted for
+	// this heartbeat (the error text never reaches the payload).
+	payload.UserCountBucket = bucketUpstream(0)
+	if counter := s.userCounterFunc(); counter != nil {
+		if n, err := counter(); err != nil {
+			if s.logger != nil {
+				s.logger.Debug("telemetry: user counter failed; omitting member_count_bucket", zap.Error(err))
+			}
+			payload.UserCountBucket = ""
+		} else {
+			payload.UserCountBucket = bucketUpstream(int64(n))
+		}
+	}
+
 	// Schema v3: fixed-key per-protocol counter over cfg.Servers. Logs
 	// unknown values at debug level via the service logger (bucketed into
 	// "auto") so operators can spot mis-typed config without polluting the
 	// telemetry cardinality.
-	payload.ServerProtocolCounts = buildServerProtocolCountsWithLogger(s.config, s.logger)
+	payload.ServerProtocolCounts = buildServerProtocolCountsWithLogger(cfg, s.logger)
+
+	// Schema v9: fixed-key histogram over cfg.Servers by EffectiveTrustMode.
+	// Computed fresh each heartbeat so a mid-window trust-tier change is
+	// reflected on the next send (state, not a delta counter).
+	payload.TrustModeDistribution = buildTrustModeDistribution(cfg)
 
 	// Spec 044: ground-truth environment classification. Cached after first
 	// call so repeated heartbeats do not re-probe the filesystem.
@@ -618,7 +1526,7 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 	// the installer_heartbeat_pending flag set at process startup when
 	// MCPPROXY_LAUNCHED_BY=installer was observed. Otherwise the runtime
 	// detector result (tray/login_item/cli/unknown) is emitted.
-	payload.LaunchSource = string(s.resolveLaunchSource())
+	payload.LaunchSource = string(s.resolveLaunchSource(consumeOneShots))
 
 	// Spec 044 (T051): AutostartEnabled. Tri-state; nil when the tray sidecar
 	// is absent/unreachable/malformed (Linux always falls here).
@@ -626,20 +1534,22 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 		payload.AutostartEnabled = s.autostartReader.Read()
 	} else {
 		// Lazy-init the default reader on first heartbeat. The reader is
-		// safe to reuse across heartbeats (1h TTL cache inside).
-		s.autostartReader = DefaultAutostartReader()
+		// safe to reuse across heartbeats (1h TTL cache inside). It reads the
+		// sidecar inside THIS instance's data directory: the tray writes it
+		// into the same root it hands the core, and MCPPROXY_HOME moves both
+		// (GH #936).
+		dataDir := ""
+		if cfg != nil {
+			dataDir = cfg.DataDir
+		}
+		s.autostartReader = AutostartReaderForDataDir(dataDir)
 		payload.AutostartEnabled = s.autostartReader.Read()
 	}
 
 	// Spec 042: counter snapshot.
 	if s.registry != nil {
 		snap := s.registry.Snapshot()
-		payload.SurfaceRequests = snap.SurfaceCounts
-		payload.BuiltinToolCalls = snap.BuiltinToolCalls
-		payload.UpstreamToolCallCountBucket = snap.UpstreamToolCallCountBucket
-		payload.RESTEndpointCalls = snap.RESTEndpointCalls
-		payload.ErrorCategoryCounts = snap.ErrorCategoryCounts
-		payload.DoctorChecks = snap.DoctorChecks
+		applyRegistrySnapshot(&payload, snap)
 	}
 
 	// Spec 046: onboarding funnel snapshot. Provider closes over connect.Service
@@ -652,76 +1562,215 @@ func (s *Service) buildHeartbeat() HeartbeatPayload {
 			payload.WizardEngaged = snap.WizardEngaged
 			payload.WizardConnectStep = snap.WizardConnectStep
 			payload.WizardServerStep = snap.WizardServerStep
+			// Spec 080 (FR-005): shown-vs-engaged independence — true once
+			// the wizard rendered, regardless of engagement.
+			payload.WizardShown = snap.WizardShown
+		}
+	}
+
+	// Spec 080 (US2): funnel observability. Mark the current UTC day active
+	// (a heartbeat is proof of process activity), then surface the reduced
+	// integers. On any store error the fields are simply omitted — the
+	// heartbeat is never blocked (same posture as Activation).
+	if s.funnelStore != nil && s.funnelDB != nil {
+		now := time.Now().UTC()
+		if err := s.funnelStore.RecordActivity(s.funnelDB, now); err != nil {
+			s.logger.Debug("Failed to record funnel activity day", zap.Error(err))
+		}
+		if st, err := s.funnelStore.Snapshot(s.funnelDB, now); err == nil {
+			payload.WebUIOpened = st.WebUIOpened
+			if st.HasInstallDay {
+				days := st.DaysSinceInstall
+				payload.DaysSinceInstall = &days
+			}
+			payload.ActiveDays30d = st.ActiveDays30d
+		} else {
+			s.logger.Debug("Failed to load funnel state for heartbeat", zap.Error(err))
+		}
+	}
+
+	// Spec 080 (US3): pre-churn snapshot. previous_shutdown was derived once
+	// at startup and never changes for this instance (FR-011); the empty
+	// (unknown / store-not-wired) value is dropped by omitempty (FR-013).
+	// last_error_code is re-read each heartbeat so the field always carries
+	// the MOST RECENT stable MCPX_* code (FR-012); on any store error the
+	// field is simply omitted — the heartbeat is never blocked.
+	payload.PreviousShutdown = s.previousShutdown
+	if s.prechurnStore != nil && s.prechurnDB != nil {
+		if code, err := s.prechurnStore.LastErrorCode(s.prechurnDB); err == nil {
+			payload.LastErrorCode = code
+		} else {
+			s.logger.Debug("Failed to load last_error_code for heartbeat", zap.Error(err))
 		}
 	}
 
 	// Spec 044 Phase H: diagnostics counter snapshot. Load from BBolt (decay
 	// applied at read time); omit entirely when counters are all zero or the
 	// store is not wired (short-lived CLI commands).
+	//
+	// MCP-2967: the persisted counters are joined with the STANDING state from
+	// the supervisor before the isZero() check, so an install whose only
+	// signal is "N servers are broken right now" still emits a diagnostics
+	// object. Without that ordering, edge-triggering error_code_counts_24h
+	// would make a permanently parked install vanish from the payload once its
+	// 24h window decayed — absent, which downstream reads as zero.
+	var diagSnap DiagnosticsCounters
 	if s.diagCounterStore != nil && s.diagCounterDB != nil {
 		if snap, err := s.diagCounterStore.Snapshot(s.diagCounterDB); err == nil {
-			if !snap.isZero() {
-				payload.Diagnostics = &snap
-			}
+			diagSnap = snap
 		} else {
 			s.logger.Debug("Failed to load diagnostics counters for heartbeat", zap.Error(err))
+		}
+	}
+	if s.currentErrorCodesProvider != nil {
+		diagSnap.CurrentErrorCodes = sanitizeMCPXCodeMap(s.currentErrorCodesProvider())
+	}
+	if !diagSnap.isZero() {
+		payload.Diagnostics = &diagSnap
+	}
+
+	// Issue #969 (Phase 0): preflight baseline counters. Same flush shape as
+	// the Phase H diagnostics block above — load from BBolt (decay applied at
+	// read time), omit entirely when all counters are zero or the store is not
+	// wired (short-lived CLI commands).
+	if s.preflightStore != nil && s.preflightDB != nil {
+		if snap, err := s.preflightStore.Snapshot(s.preflightDB); err == nil {
+			if !snap.isZero() {
+				payload.Preflight = &snap
+			}
+		} else {
+			s.logger.Debug("Failed to load preflight counters for heartbeat", zap.Error(err))
 		}
 	}
 
 	return payload
 }
 
+func applyRegistrySnapshot(payload *HeartbeatPayload, snap RegistrySnapshot) {
+	payload.SurfaceRequests = snap.SurfaceCounts
+	payload.BuiltinToolCalls = snap.BuiltinToolCalls
+	payload.UpstreamToolCallCountBucket = snap.UpstreamToolCallCountBucket
+	payload.RESTEndpointCalls = snap.RESTEndpointCalls
+	payload.ErrorCategoryCounts = snap.ErrorCategoryCounts
+	payload.DoctorChecks = snap.DoctorChecks
+	// Schema v8: security-scanner counters. nil (and therefore omitted) when
+	// the install never completed or failed a scan in the window.
+	payload.TPAScanner = snap.TPAScannerStats()
+}
+
+// ensureAnonymousID gives the install an anonymous id, generating and
+// persisting one on first run. Start() launches on its own goroutine
+// (runtime/lifecycle.go `go r.telemetryService.Start(...)`), so this runs
+// concurrently with the daemon's config-reload path: reading s.config unlocked
+// races NotifyConfigChanged's pointer swap, and saving it directly would write
+// a whole config file that may already be stale. Both hazards are handled the
+// same way as maybeRotateAnonymousID — one locked pass, persisted only while
+// the snapshot is still live — retried once if the pointer moved underneath.
 func (s *Service) ensureAnonymousID() {
-	if s.config.GetAnonymousID() != "" {
+	for attempt := 0; attempt < 2; attempt++ {
+		if s.ensureAnonymousIDOnce() {
+			return
+		}
+	}
+}
+
+// ensureAnonymousIDOnce runs ONE locked resolve -> check -> mutate -> persist
+// pass and reports whether the id is settled (already present, or written).
+// It returns false only when the live config was swapped out from under the
+// snapshot, which is the caller's cue to redo the work against the new one.
+func (s *Service) ensureAnonymousIDOnce() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	cfg := s.config
+	if cfg == nil {
+		return true
+	}
+	if cfg.Telemetry == nil {
+		cfg.Telemetry = &config.TelemetryConfig{}
+	}
+
+	if cfg.Telemetry.AnonymousID != "" {
 		// Spec 042: legacy installs need created_at initialized for rotation.
-		if s.config.Telemetry != nil && s.config.Telemetry.AnonymousIDCreatedAt == "" {
-			s.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
-			s.persistConfig("Initialized anonymous_id_created_at for legacy install")
+		if cfg.Telemetry.AnonymousIDCreatedAt != "" {
+			return true
 		}
-		return
+		cfg.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
+		if !s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at for legacy install") && s.config != cfg {
+			cfg.Telemetry.AnonymousIDCreatedAt = ""
+			return false
+		}
+		return true
 	}
 
-	// Generate a new UUIDv4
 	newID := uuid.New().String()
+	cfg.Telemetry.AnonymousID = newID
+	cfg.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	// Persist to config
-	if s.config.Telemetry == nil {
-		s.config.Telemetry = &config.TelemetryConfig{}
+	if s.persistConfigLocked(cfg, "Generated anonymous telemetry ID") {
+		s.logger.Info("Generated and persisted anonymous telemetry ID",
+			zap.String("id", newID))
+		return true
 	}
-	s.config.Telemetry.AnonymousID = newID
-	s.config.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
-
-	// Save config to disk
-	if s.cfgPath != "" {
-		if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
-			s.logger.Warn("Failed to persist anonymous telemetry ID",
-				zap.Error(err))
-		} else {
-			s.logger.Info("Generated and persisted anonymous telemetry ID",
-				zap.String("id", newID))
-		}
+	if s.config != cfg {
+		// The live config moved on: this id is neither on disk nor in the
+		// config the daemon now reads. Undo it so the snapshot cannot hand out
+		// an identity nothing else will ever agree with, and retry against the
+		// new live config.
+		cfg.Telemetry.AnonymousID = ""
+		cfg.Telemetry.AnonymousIDCreatedAt = ""
+		return false
 	}
+	// A genuine write failure on the still-live config. Keep the in-memory id
+	// (pre-existing behaviour) so this process at least reports one stable
+	// identity for its lifetime.
+	s.logger.Warn("Failed to persist anonymous telemetry ID; continuing with in-memory id",
+		zap.String("id", newID))
+	return true
 }
 
 // maybeRotateAnonymousID rotates the anonymous ID once it's older than 365
 // days. Spec 042 (User Story 8). Clock skew (created_at in the future) is
 // treated as "not yet expired".
-func (s *Service) maybeRotateAnonymousID(now time.Time) {
-	if s.config.Telemetry == nil || s.config.Telemetry.AnonymousID == "" {
+//
+// cfg is passed in rather than read off s.config so the caller's snapshot is
+// the one mutated and persisted: buildHeartbeat resolves the live config once
+// (liveConfig) and everything downstream — this rotation included — must act on
+// that same pointer, or a config swap landing mid-heartbeat would rotate the ID
+// on a config the payload never read.
+//
+// The ENTIRE check -> generate -> mutate -> persist-or-rollback sequence runs
+// under s.mu, so it is atomic against both the NotifyConfigChanged pointer swap
+// and a second rotation racing on the same snapshot. That second racer is real,
+// not theoretical: BuildPayload is exported and served from an HTTP handler
+// (internal/httpapi), so a request can build a heartbeat alongside the loop.
+// With two rotations interleaving, one could capture the OTHER's freshly
+// generated id as its "previous" value and restore that on rollback, leaving a
+// never-persisted id in the config the payload then transmits — exactly the
+// identity fragmentation the rollback exists to prevent. Serializing makes the
+// loser observe the winner's refreshed created_at and do nothing.
+func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
+	if cfg == nil {
 		return
 	}
-	createdAtStr := s.config.Telemetry.AnonymousIDCreatedAt
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if cfg.Telemetry == nil || cfg.Telemetry.AnonymousID == "" {
+		return
+	}
+	createdAtStr := cfg.Telemetry.AnonymousIDCreatedAt
 	if createdAtStr == "" {
 		// Legacy install — initialize without rotating.
-		s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfig("Initialized anonymous_id_created_at")
+		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+		s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at")
 		return
 	}
 	createdAt, err := time.Parse(time.RFC3339, createdAtStr)
 	if err != nil {
 		// Corrupt timestamp: reset to now without rotating.
-		s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfig("Reset corrupt anonymous_id_created_at")
+		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+		s.persistConfigLocked(cfg, "Reset corrupt anonymous_id_created_at")
 		return
 	}
 	if !createdAt.Before(now) {
@@ -732,22 +1781,85 @@ func (s *Service) maybeRotateAnonymousID(now time.Time) {
 		return
 	}
 
-	// Rotate.
-	newID := uuid.New().String()
-	s.config.Telemetry.AnonymousID = newID
-	s.config.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-	s.persistConfig("Rotated anonymous_id (annual)")
+	// Rotate. The caller reports cfg's anonymous_id in the payload it is
+	// building, so the rotation must be all-or-nothing: an id that was never
+	// written to disk must never be transmitted, or one annual rotation would
+	// show up as TWO identities (this heartbeat's unpersisted id, then the id
+	// the next heartbeat rotates the live config to) and fragment the install's
+	// telemetry continuity.
+	prevID := cfg.Telemetry.AnonymousID
+	prevCreatedAt := cfg.Telemetry.AnonymousIDCreatedAt
+	cfg.Telemetry.AnonymousID = uuid.New().String()
+	cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+	if !s.persistConfigLocked(cfg, "Rotated anonymous_id (annual)") {
+		// The live config was swapped out from under this snapshot, so the new
+		// id is not on disk. Put the snapshot back the way we found it and let
+		// the next heartbeat rotate the live config instead.
+		cfg.Telemetry.AnonymousID = prevID
+		cfg.Telemetry.AnonymousIDCreatedAt = prevCreatedAt
+	}
 }
 
-func (s *Service) persistConfig(reason string) {
-	if s.cfgPath == "" {
-		return
+// persistConfig writes cfg to disk, but ONLY while cfg is still the service's
+// live config. It reports whether the write actually happened, so callers can
+// undo or retry a mutation that was never persisted.
+//
+// This writes the WHOLE config file, so a write must never be issued against a
+// pointer the daemon has already swapped out: the heartbeat path works from a
+// snapshot (liveConfig), and if NotifyConfigChanged installs a newer config
+// while that heartbeat is in flight, saving the snapshot would silently roll
+// the user's change back on disk. The liveness check and the write share one
+// s.mu hold so the swap cannot slip between them.
+//
+// KNOWN RESIDUAL WINDOW (pre-existing, not closed here): the daemon's config
+// writers save the new file BEFORE calling NotifyConfigChanged, so between
+// those two steps s.config still points at the old config and a write issued
+// here would pass the liveness check and land on top of the just-saved file.
+// Closing that needs single-writer ownership of the config file (or a
+// mtime/CAS check), which is a config-layer change, not a telemetry one. The
+// guard narrows the exposure to that gap; it does not eliminate it.
+func (s *Service) persistConfig(cfg *config.Config, reason string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.persistConfigLocked(cfg, reason)
+}
+
+// persistConfigLocked is persistConfig's body. The caller MUST already hold
+// s.mu. It exists so a caller whose whole check-mutate-persist sequence has to
+// be atomic — maybeRotateAnonymousID, which must not interleave with another
+// rotation — can hold the lock across all of it instead of reacquiring here
+// (s.mu is not reentrant).
+func (s *Service) persistConfigLocked(cfg *config.Config, reason string) bool {
+	if cfg == nil {
+		return false
 	}
-	if err := config.SaveConfig(s.config, s.cfgPath); err != nil {
+	if s.cfgPath == "" {
+		// No config FILE backs this service (in-memory/CLI use). There is no
+		// on-disk state for the in-memory mutation to be inconsistent with, so
+		// report success: this is "nothing to persist", not a failed write, and
+		// callers must not roll their mutation back.
+		return true
+	}
+	if s.config != cfg {
+		s.logger.Debug("Skipped telemetry config persist: live config was swapped",
+			zap.String("reason", reason))
+		return false
+	}
+	if err := config.SaveConfig(cfg, s.cfgPath); err != nil {
 		s.logger.Debug("Failed to persist telemetry config", zap.String("reason", reason), zap.Error(err))
-		return
+		return false
 	}
 	s.logger.Debug("Persisted telemetry config", zap.String("reason", reason))
+	return true
+}
+
+// IsValidSemverVersion reports whether a build version is a released (semver)
+// build rather than a dev build. It is the EXACT check the heartbeat and
+// opt-out beacon gates apply, exported so callers outside this package
+// (e.g. the update-failure recording seam, spec 095) evaluate the dev-build
+// gate identically instead of reimplementing it.
+func IsValidSemverVersion(v string) bool {
+	return isValidSemver(v)
 }
 
 // isValidSemver checks if the version string is a valid semantic version.

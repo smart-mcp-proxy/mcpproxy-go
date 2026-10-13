@@ -280,4 +280,3 @@ func TestEventBus_ConcurrentPublish(t *testing.T) {
 		t.Fatalf("Only received %d of 10 events", receivedCount)
 	}
 }
-

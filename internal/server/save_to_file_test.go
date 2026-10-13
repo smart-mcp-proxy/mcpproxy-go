@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -85,13 +86,8 @@ func TestMaybeSaveToFile_TextFormat_WritesFullContent(t *testing.T) {
 // blocks (including a non-text block) — for TextContent and ImageContent,
 // which round-trip to their original concrete types via mcp-go's
 // CallToolResult.UnmarshalJSON/UnmarshalContent dispatch.
-//
-// Renamed from the original TestMaybeSaveToFile_JSONFormat_RoundTrips: "round
-// trips" is only true for content types mcp-go's UnmarshalContent switch maps
-// to a concrete struct by their "type" field (text/image/audio/resource_link)
-// — it is NOT true for EmbeddedResource, see
-// TestMaybeSaveToFile_JSONFormat_EmbeddedResourceDoesNotUnmarshalBackIntoMcpGoTypes
-// below.
+// EmbeddedResource is covered separately by
+// TestMaybeSaveToFile_JSONFormat_EmbeddedResourceRoundTrips below.
 func TestMaybeSaveToFile_JSONFormat_RoundTripsTextAndImage(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "out.json")
@@ -128,27 +124,12 @@ func TestMaybeSaveToFile_JSONFormat_RoundTripsTextAndImage(t *testing.T) {
 	assert.False(t, env.TruncatedPreview)
 }
 
-// (c, EmbeddedResource) save_format:json with an EmbeddedResource block: the FILE on disk
-// is a faithful json.Marshal of the original CallToolResult (bytes-correct —
-// this is what an agent, or any JSON-aware tool, re-reading the file sees).
-// But unmarshaling it back into a fresh mcp.CallToolResult with encoding/json
-// (the way the sibling TestMaybeSaveToFile_JSONFormat_RoundTripsTextAndImage
-// test does for text/image) does NOT work for EmbeddedResource in mcp-go
-// v0.55.0: EmbeddedResource.Resource is the ResourceContents INTERFACE, and
-// neither EmbeddedResource nor TextResourceContents/BlobResourceContents
-// implement a custom UnmarshalJSON — so when UnmarshalContent's
-// "type":"resource" case does a plain `json.Unmarshal(data, &EmbeddedResource{})`,
-// encoding/json has no concrete type to target for the interface-typed
-// "resource" field and returns
-// "json: cannot unmarshal object into Go struct field EmbeddedResource.resource
-// of type mcp.ResourceContents" — which fails the ENTIRE CallToolResult
-// unmarshal (Content ends up nil), not just that one block. This is the real
-// "non-round-tripping" behavior the brief warned about: save_to_file's json
-// format still writes complete, correct bytes (verified below), but Go code
-// that reads an EmbeddedResource-containing file back into mcp-go's own
-// types via encoding/json cannot do so directly — it must decode into
-// map[string]interface{} (or a caller-defined shape) instead.
-func TestMaybeSaveToFile_JSONFormat_EmbeddedResourceDoesNotUnmarshalBackIntoMcpGoTypes(t *testing.T) {
+// (c, EmbeddedResource) save_format:json with an EmbeddedResource block: the
+// FILE on disk is a faithful json.Marshal of the original CallToolResult.
+// mcp-go v0.55.0 could not unmarshal it back (EmbeddedResource.Resource is an
+// interface); since the upstream bump to mcp-go v1.0.0 it round-trips, and a
+// generic map decode keeps working either way.
+func TestMaybeSaveToFile_JSONFormat_EmbeddedResourceRoundTrips(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "out.json")
 
@@ -175,15 +156,12 @@ func TestMaybeSaveToFile_JSONFormat_EmbeddedResourceDoesNotUnmarshalBackIntoMcpG
 	assert.Contains(t, string(raw), "embedded body")
 	assert.Contains(t, string(raw), "file:///example.txt")
 
-	// Unmarshaling those same bytes back into mcp.CallToolResult, however,
-	// fails outright — this is mcp-go v0.55.0 behavior, not a save_to_file bug.
+	// The bytes unmarshal back into mcp.CallToolResult (mcp-go v1.0.0+).
 	var restored mcp.CallToolResult
-	unmarshalErr := json.Unmarshal(raw, &restored)
-	require.Error(t, unmarshalErr, "mcp-go v0.55.0 cannot unmarshal an EmbeddedResource's interface-typed Resource field back into a concrete type")
-	assert.Contains(t, unmarshalErr.Error(), "ResourceContents")
+	require.NoError(t, json.Unmarshal(raw, &restored))
+	require.Len(t, restored.Content, 1)
 
-	// A generic map decode, by contrast, recovers everything losslessly —
-	// this is the fallback callers need for EmbeddedResource-bearing files.
+	// A generic map decode recovers everything losslessly as well.
 	var generic map[string]interface{}
 	require.NoError(t, json.Unmarshal(raw, &generic))
 	content, _ := generic["content"].([]interface{})
@@ -692,13 +670,13 @@ func (f fakeTokenizer) CountTokensInJSONForModel(interface{}, string) (int, erro
 }
 
 func TestRecountSaveOrTruncateTokenMetrics_NilMetrics_NoPanic(t *testing.T) {
-	mutated := recountSaveOrTruncateTokenMetrics(nil, true, true, "x", fakeTokenizer{tokens: 5})
+	mutated := recountSaveOrTruncateTokenMetrics(nil, true, false, true, "x", fakeTokenizer{tokens: 5})
 	assert.False(t, mutated)
 }
 
 func TestRecountSaveOrTruncateTokenMetrics_NeitherFlag_OnlySetsSavedToFileFalse(t *testing.T) {
 	tm := &storage.TokenMetrics{InputTokens: 10, OutputTokens: 9000, TotalTokens: 9010}
-	mutated := recountSaveOrTruncateTokenMetrics(tm, false, false, "unused", fakeTokenizer{tokens: 5})
+	mutated := recountSaveOrTruncateTokenMetrics(tm, false, false, false, "unused", fakeTokenizer{tokens: 5})
 	assert.False(t, mutated)
 	assert.False(t, tm.SavedToFile)
 	// Untouched — this function must not correct the plain-truncation-free,
@@ -708,7 +686,7 @@ func TestRecountSaveOrTruncateTokenMetrics_NeitherFlag_OnlySetsSavedToFileFalse(
 
 func TestRecountSaveOrTruncateTokenMetrics_SavedToFile_TokenizerSucceeds(t *testing.T) {
 	tm := &storage.TokenMetrics{InputTokens: 10, OutputTokens: 90000, TotalTokens: 90010, Model: "gpt-4"}
-	mutated := recountSaveOrTruncateTokenMetrics(tm, false, true, "the short envelope", fakeTokenizer{tokens: 7})
+	mutated := recountSaveOrTruncateTokenMetrics(tm, false, false, true, "the short envelope", fakeTokenizer{tokens: 7})
 	require.True(t, mutated)
 	assert.True(t, tm.SavedToFile)
 	assert.False(t, tm.WasTruncated)
@@ -718,7 +696,7 @@ func TestRecountSaveOrTruncateTokenMetrics_SavedToFile_TokenizerSucceeds(t *test
 
 func TestRecountSaveOrTruncateTokenMetrics_SavedToFile_NilTokenizer_ZerosOutputTokens(t *testing.T) {
 	tm := &storage.TokenMetrics{InputTokens: 10, OutputTokens: 90000, TotalTokens: 90010}
-	mutated := recountSaveOrTruncateTokenMetrics(tm, false, true, "the short envelope", nil)
+	mutated := recountSaveOrTruncateTokenMetrics(tm, false, false, true, "the short envelope", nil)
 	require.True(t, mutated)
 	assert.True(t, tm.SavedToFile)
 	assert.Equal(t, 0, tm.OutputTokens, "no tokenizer available — must still correct away from the full upstream-body count, not leave it")
@@ -727,7 +705,7 @@ func TestRecountSaveOrTruncateTokenMetrics_SavedToFile_NilTokenizer_ZerosOutputT
 
 func TestRecountSaveOrTruncateTokenMetrics_SavedToFile_TokenizerErrors_ZerosOutputTokens(t *testing.T) {
 	tm := &storage.TokenMetrics{InputTokens: 10, OutputTokens: 90000, TotalTokens: 90010}
-	mutated := recountSaveOrTruncateTokenMetrics(tm, false, true, "x", fakeTokenizer{err: errors.New("boom")})
+	mutated := recountSaveOrTruncateTokenMetrics(tm, false, false, true, "x", fakeTokenizer{err: errors.New("boom")})
 	require.True(t, mutated)
 	assert.Equal(t, 0, tm.OutputTokens)
 	assert.Equal(t, tm.InputTokens, tm.TotalTokens)
@@ -735,7 +713,7 @@ func TestRecountSaveOrTruncateTokenMetrics_SavedToFile_TokenizerErrors_ZerosOutp
 
 func TestRecountSaveOrTruncateTokenMetrics_TruncatedWithoutSave_TokenizerSucceeds(t *testing.T) {
 	tm := &storage.TokenMetrics{InputTokens: 10, OutputTokens: 90000, TotalTokens: 90010, Model: "gpt-4"}
-	mutated := recountSaveOrTruncateTokenMetrics(tm, true, false, "truncated text", fakeTokenizer{tokens: 3})
+	mutated := recountSaveOrTruncateTokenMetrics(tm, true, false, false, "truncated text", fakeTokenizer{tokens: 3})
 	require.True(t, mutated)
 	assert.False(t, tm.SavedToFile)
 	assert.True(t, tm.WasTruncated)
@@ -749,7 +727,7 @@ func TestRecountSaveOrTruncateTokenMetrics_TruncatedWithoutSave_NilTokenizer_Lea
 	// its original full-body count rather than being zeroed — only the
 	// save_to_file case gets the zero-fallback correction.
 	tm := &storage.TokenMetrics{InputTokens: 10, OutputTokens: 90000, TotalTokens: 90010}
-	mutated := recountSaveOrTruncateTokenMetrics(tm, true, false, "truncated text", nil)
+	mutated := recountSaveOrTruncateTokenMetrics(tm, true, false, false, "truncated text", nil)
 	assert.False(t, mutated)
 	assert.Equal(t, 90000, tm.OutputTokens)
 	assert.Equal(t, 90010, tm.TotalTokens)
@@ -773,4 +751,141 @@ func toolErrorText(t *testing.T, result *mcp.CallToolResult) string {
 	tc, ok := result.Content[0].(mcp.TextContent)
 	require.True(t, ok)
 	return tc.Text
+}
+
+// TestFlattenedCallToolArgs_SaveKeysNotForwarded guards the interaction with
+// #1317's flattened-args recovery: save_to_file/save_format/save_overwrite are
+// proxy-side options and must never be forwarded to the upstream tool as
+// arguments (that would leak a local filesystem path upstream).
+func TestFlattenedCallToolArgs_SaveKeysNotForwarded(t *testing.T) {
+	assert.Nil(t, flattenedCallToolArgs(map[string]interface{}{
+		"name":           "s:t",
+		"save_to_file":   "/tmp/out.txt",
+		"save_format":    "json",
+		"save_overwrite": true,
+	}))
+	got := flattenedCallToolArgs(map[string]interface{}{
+		"name":         "s:t",
+		"save_to_file": "/tmp/out.txt",
+		"url":          "u",
+	})
+	assert.Equal(t, map[string]interface{}{"url": "u"}, got)
+}
+
+// TestRecountSaveOrTruncateTokenMetrics_ReencodedRecounts covers the Spec 084
+// TOON path: a re-encoded (but untruncated, unsaved) response is recounted.
+func TestRecountSaveOrTruncateTokenMetrics_ReencodedRecounts(t *testing.T) {
+	tm := &storage.TokenMetrics{InputTokens: 10, OutputTokens: 100, TotalTokens: 110}
+	mutated := recountSaveOrTruncateTokenMetrics(tm, false, true, false, "toon text", fakeTokenizer{tokens: 4})
+	assert.True(t, mutated)
+	assert.False(t, tm.WasTruncated)
+	assert.False(t, tm.SavedToFile)
+	assert.Equal(t, 4, tm.OutputTokens)
+	assert.Equal(t, 14, tm.TotalTokens)
+}
+
+// newSaveToFileDispatchProxy builds a proxy wired to a real counting stub
+// upstream ("stub:echo"), whose live config carries the given
+// tool_output_roots, so the save_to_file pre-flight can be driven through the
+// real handleCallToolVariant and the upstream call count observed.
+func newSaveToFileDispatchProxy(t *testing.T, roots []string) (*MCPProxyServer, *atomic.Int64) {
+	t.Helper()
+	proxy := createTestMCPProxyServer(t)
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.ToolOutputRoots = roots
+	srv, err := NewServer(cfg, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	proxy.mainServer = srv
+	calls := startCountingStubUpstream(t, proxy, map[string]mcp.ToolInputSchema{
+		"echo": {Type: "object", Properties: map[string]interface{}{}},
+	})
+	indexStubTool(t, proxy, "echo", `{"type":"object","properties":{}}`)
+	return proxy, calls
+}
+
+func callStubWithSave(t *testing.T, proxy *MCPProxyServer, path string) *mcp.CallToolResult {
+	t.Helper()
+	req := mcp.CallToolRequest{}
+	req.Params.Name = contracts.ToolVariantDestructive
+	req.Params.Arguments = map[string]interface{}{
+		"name":         "stub:echo",
+		"args":         map[string]interface{}{},
+		"save_to_file": path,
+	}
+	result, err := proxy.handleCallToolVariant(context.Background(), req, contracts.ToolVariantDestructive)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	return result
+}
+
+// TestHandleCallToolVariant_SaveToFilePreflight_UpstreamNotCalled pins the
+// pre-flight added after the Spec 076 security review: a save that can never
+// succeed is refused BEFORE the upstream call, so a destructive tool never
+// runs only for its result to be discarded. The control case proves the
+// same harness does reach (and count) the upstream when the save is valid.
+func TestHandleCallToolVariant_SaveToFilePreflight_UpstreamNotCalled(t *testing.T) {
+	t.Run("disabled (no roots)", func(t *testing.T) {
+		proxy, calls := newSaveToFileDispatchProxy(t, nil)
+		res := callStubWithSave(t, proxy, filepath.Join(t.TempDir(), "out.txt"))
+		require.True(t, res.IsError)
+		assert.Contains(t, toolErrorText(t, res), "save_to_file is disabled")
+		assert.Zero(t, calls.Load(), "upstream must not be called")
+	})
+	t.Run("outside roots", func(t *testing.T) {
+		root := t.TempDir()
+		outside := filepath.Join(t.TempDir(), "out.txt")
+		proxy, calls := newSaveToFileDispatchProxy(t, []string{root})
+		res := callStubWithSave(t, proxy, outside)
+		require.True(t, res.IsError)
+		assert.Contains(t, toolErrorText(t, res), "outside configured tool_output_roots")
+		assert.Zero(t, calls.Load(), "upstream must not be called")
+		_, statErr := os.Stat(outside)
+		assert.True(t, os.IsNotExist(statErr))
+	})
+	t.Run("existing file without save_overwrite", func(t *testing.T) {
+		root := t.TempDir()
+		existing := filepath.Join(root, "exists.txt")
+		require.NoError(t, os.WriteFile(existing, []byte("keep"), 0o600))
+		proxy, calls := newSaveToFileDispatchProxy(t, []string{root})
+		res := callStubWithSave(t, proxy, existing)
+		require.True(t, res.IsError)
+		assert.Contains(t, toolErrorText(t, res), "already exists")
+		assert.Zero(t, calls.Load(), "upstream must not be called")
+		got, err := os.ReadFile(existing)
+		require.NoError(t, err)
+		assert.Equal(t, "keep", string(got))
+	})
+	t.Run("control: valid save dispatches and writes", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(root, "out.txt")
+		proxy, calls := newSaveToFileDispatchProxy(t, []string{root})
+		res := callStubWithSave(t, proxy, target)
+		require.False(t, res.IsError, "valid save must succeed: %v", res.Content)
+		assert.EqualValues(t, 1, calls.Load())
+		got, err := os.ReadFile(target)
+		require.NoError(t, err)
+		assert.Contains(t, string(got), `"ok":true`)
+	})
+}
+
+func TestPreflightSaveToFile(t *testing.T) {
+	root := t.TempDir()
+	cfg := saveToFileConfig{Roots: []string{root}}
+
+	assert.Nil(t, preflightSaveToFile(saveToFileParams{}, saveToFileConfig{}), "no save requested -> no pre-flight")
+	assert.Nil(t, preflightSaveToFile(saveToFileParams{Path: filepath.Join(root, "a.txt")}, cfg))
+
+	existing := filepath.Join(root, "exists.txt")
+	require.NoError(t, os.WriteFile(existing, []byte("x"), 0o600))
+	res := preflightSaveToFile(saveToFileParams{Path: existing}, cfg)
+	require.NotNil(t, res)
+	assert.Contains(t, toolErrorText(t, res), "exists")
+	assert.Nil(t, preflightSaveToFile(saveToFileParams{Path: existing, Overwrite: true}, cfg))
+
+	res = preflightSaveToFile(saveToFileParams{Path: "relative.txt"}, cfg)
+	require.NotNil(t, res)
+	assert.True(t, res.IsError)
 }

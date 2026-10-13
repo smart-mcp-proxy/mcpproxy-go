@@ -67,6 +67,7 @@
             <tr>
               <th>User</th>
               <th>Provider</th>
+              <th>Groups</th>
               <th>Last Login</th>
               <th>Status</th>
               <th>Actions</th>
@@ -82,6 +83,19 @@
               </td>
               <td>
                 <span class="badge badge-sm badge-outline">{{ user.provider }}</span>
+              </td>
+              <td>
+                <div v-if="user.groups && user.groups.length" class="flex flex-wrap gap-1">
+                  <span
+                    v-for="group in user.groups"
+                    :key="group"
+                    class="badge badge-sm badge-ghost"
+                    :title="`Group grant: ${group}`"
+                  >{{ group }}</span>
+                </div>
+                <span v-else class="text-sm text-base-content/40" title="No stored group — the default grant applies">
+                  none
+                </span>
               </td>
               <td>
                 <span v-if="user.last_login_at" class="text-sm" :title="user.last_login_at">
@@ -143,6 +157,9 @@ interface TeamUser {
   created_at: string
   last_login_at: string
   disabled: boolean
+  // Spec 107 FR-008/FR-023: always an array (never null) — empty means "no
+  // stored group matches any access.group_servers key", not "unknown".
+  groups: string[]
 }
 
 const loading = ref(false)

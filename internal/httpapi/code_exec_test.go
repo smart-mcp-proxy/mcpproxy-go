@@ -11,6 +11,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,6 +57,9 @@ func (m *mockController) UnquarantineServer(serverName string) error { return ni
 func (m *mockController) GetServerTools(serverName string) ([]map[string]interface{}, error) {
 	return nil, nil
 }
+func (m *mockController) SearchToolsScoped(_ string, _ int, _ func(string) bool) ([]map[string]interface{}, error) {
+	return nil, nil
+}
 func (m *mockController) SearchTools(query string, limit int) ([]map[string]interface{}, error) {
 	return nil, nil
 }
@@ -67,7 +71,7 @@ func (m *mockController) GetConfigPath() string                     { return "" 
 func (m *mockController) GetLogDir() string                         { return "" }
 func (m *mockController) TriggerOAuthLogin(serverName string) error { return nil }
 func (m *mockController) GetSecretResolver() interface{}            { return nil }
-func (m *mockController) GetCurrentConfig() interface{}             { return nil }
+func (m *mockController) GetCurrentConfig() *config.Config          { return nil }
 func (m *mockController) NotifySecretsChanged(ctx context.Context, operation, secretName string) error {
 	return nil
 }
@@ -106,7 +110,7 @@ func (m *mockController) RemoveRegistrySourceRef(_ string) (*config.RegistryEntr
 func (m *mockController) EditRegistrySourceRef(_, _, _, _ string) (*config.RegistryEntry, *contracts.RegistryAddError, error) {
 	return nil, nil, nil
 }
-func (m *mockController) GetManagementService() interface{}                       { return nil }
+func (m *mockController) GetManagementService() management.Service                { return nil }
 func (m *mockController) GetRuntime() interface{}                                 { return nil }
 func (m *mockController) GetSessions(limit, offset int) (interface{}, int, error) { return nil, 0, nil }
 func (m *mockController) GetSessionByID(id string) (interface{}, error)           { return nil, nil }
@@ -382,4 +386,91 @@ func TestCodeExecHandler_ExecutionError(t *testing.T) {
 	assert.False(t, response["ok"].(bool))
 	errorMap := response["error"].(map[string]interface{})
 	assert.Equal(t, "SYNTAX_ERROR", errorMap["code"])
+}
+
+// postCodeExec runs one request through the handler and returns the recorder.
+func postCodeExec(t *testing.T, ctrl httpapi.ToolCaller, body map[string]interface{}) *httptest.ResponseRecorder {
+	t.Helper()
+
+	bodyBytes, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/code/exec", bytes.NewReader(bodyBytes))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	httpapi.NewCodeExecHandler(ctrl, zap.NewNop().Sugar()).ServeHTTP(recorder, req)
+	return recorder
+}
+
+// TestCodeExecHandler_ScriptXORCode (Spec 097, T008) pins the REST half of the
+// exactly-one-of rule: a request that names both sources, or neither, is a
+// malformed request and is answered as one — with this endpoint's own
+// {ok:false, error:{code}} envelope — instead of reaching the tool.
+func TestCodeExecHandler_ScriptXORCode(t *testing.T) {
+	tests := []struct {
+		name string
+		body map[string]interface{}
+	}{
+		{
+			name: "both code and script",
+			body: map[string]interface{}{"code": "({ result: 1 })", "script": "daily-report"},
+		},
+		{
+			name: "neither code nor script",
+			body: map[string]interface{}{"input": map[string]interface{}{}},
+		},
+		{
+			name: "empty strings count as absent",
+			body: map[string]interface{}{"code": "", "script": ""},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dispatched := false
+			ctrl := &mockController{
+				callToolFunc: func(context.Context, string, map[string]interface{}) (interface{}, error) {
+					dispatched = true
+					return nil, nil
+				},
+			}
+
+			recorder := postCodeExec(t, ctrl, tc.body)
+			assert.Equal(t, http.StatusBadRequest, recorder.Code, "body: %s", recorder.Body.String())
+			assert.False(t, dispatched, "a malformed request must not reach the code_execution tool")
+
+			var response map[string]interface{}
+			require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+			assert.False(t, response["ok"].(bool))
+			errorMap, ok := response["error"].(map[string]interface{})
+			require.True(t, ok, "response carries no error object: %s", recorder.Body.String())
+			assert.Equal(t, "INVALID_REQUEST", errorMap["code"])
+			assert.Contains(t, errorMap["message"], "exactly one")
+		})
+	}
+}
+
+// TestCodeExecHandler_ScriptForwardedAsName: over REST too, only the NAME
+// travels — the daemon's code_execution handler is the single execution-time
+// resolver, so REST cannot smuggle in source of its own.
+func TestCodeExecHandler_ScriptForwardedAsName(t *testing.T) {
+	var dispatched map[string]interface{}
+	ctrl := &mockController{
+		callToolFunc: func(_ context.Context, toolName string, args map[string]interface{}) (interface{}, error) {
+			assert.Equal(t, "code_execution", toolName)
+			dispatched = args
+			resultJSON, err := json.Marshal(map[string]interface{}{"ok": true, "value": 42})
+			require.NoError(t, err)
+			return []interface{}{map[string]interface{}{"type": "text", "text": string(resultJSON)}}, nil
+		},
+	}
+
+	recorder := postCodeExec(t, ctrl, map[string]interface{}{
+		"script": "daily-report",
+		"input":  map[string]interface{}{"value": 21},
+	})
+	require.Equal(t, http.StatusOK, recorder.Code, "body: %s", recorder.Body.String())
+
+	require.NotNil(t, dispatched, "the request never reached the tool")
+	assert.Equal(t, "daily-report", dispatched["script"])
+	assert.NotContains(t, dispatched, "code", "a stored-script request carries no inline code")
 }

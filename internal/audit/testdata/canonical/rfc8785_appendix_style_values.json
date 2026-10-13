@@ -1,0 +1,20 @@
+{
+  "description": "Combined vector in the spirit of the RFC 8785 Appendix B 'values.json' sample: mixed literals, small/large-magnitude numbers requiring exponential form, and a string needing the full escape set, exercised together in one object.",
+  "variants": [
+    {
+      "numbers": [
+        333333333.3333333,
+        1e+30,
+        4.5,
+        0.002,
+        1e-27
+      ],
+      "string": "€$\u000f\nA'B\"\\\\\"/",
+      "literals": [
+        null,
+        true,
+        false
+      ]
+    }
+  ]
+}

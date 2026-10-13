@@ -1,0 +1,80 @@
+# Hands-free approval for the spec-gardener agent's PRs.
+#
+# WHY THIS EXISTS
+#   The spec-gardener runs as a Claude Code remote agent using the repo owner's
+#   GitHub credentials, so its PRs are authored by a *human* account. GitHub
+#   forbids approving your own PR, and `main` requires 1 approving review — so
+#   every gardener PR is structurally unapprovable and sits blocked until someone
+#   reaches for `gh pr merge --admin`. That is a bypass, and it trains us to
+#   bypass on a recurring schedule.
+#
+#   Instead, github-actions[bot] posts the approving review. It is a *different*
+#   identity than the PR author and its approval counts toward
+#   `required_approving_review_count` — the same mechanism dependabot-auto-merge
+#   and arm-auto-merge (Model B) already rely on. No PAT, no `--admin`.
+#
+# INVARIANTS (this ARMS a merge; it never bypasses a check)
+#   - Same-repo branches only. `github.head_ref` is attacker-controlled on fork
+#     PRs (anyone can name their fork branch `claude/spec-gardener`), so the
+#     head repo must be this repo — which already implies write access.
+#   - The diff must touch ONLY `specs/**` and `ROADMAP.md`. A gardener PR that
+#     reaches into code fails this job loudly instead of being waved through.
+#   - Auto-merge is armed, not forced: GitHub merges only once ALL required
+#     checks are green (`qa-gate` included — auto-passed for these by
+#     qa-gate-trivial.yml, since specs/docs are not code-bearing paths).
+#
+# See docs/qa-merge-gate.md ("Merging without --admin").
+name: Spec gardener auto-approve
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  approve:
+    name: spec-gardener-auto-approve
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.head_ref == 'claude/spec-gardener' &&
+      github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Verify the diff is spec/roadmap-only
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          FILES="$(gh pr diff "$PR" --repo "$REPO" --name-only)"
+          if [[ -z "$FILES" ]]; then
+            echo "::error::PR #$PR has an empty diff — refusing to auto-approve."
+            exit 1
+          fi
+          echo "Changed files:"
+          printf '%s\n' "$FILES"
+
+          OFFENDING="$(printf '%s\n' "$FILES" | grep -vE '^(specs/|ROADMAP\.md$)' || true)"
+          if [[ -n "$OFFENDING" ]]; then
+            echo "::error::Gardener PR touches paths outside specs/ and ROADMAP.md — refusing to auto-approve. A human must review:"
+            printf '%s\n' "$OFFENDING"
+            exit 1
+          fi
+
+      - name: Approve and arm auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr review --approve "$PR" --repo "$REPO" \
+            --body "Auto-approved by spec-gardener-auto-approve: diff is confined to specs/ and ROADMAP.md. Merge fires only when all required checks are green."
+          gh pr merge --auto --squash "$PR" --repo "$REPO"
+          echo "armed auto-merge for PR #$PR (merges when all required checks are green)"

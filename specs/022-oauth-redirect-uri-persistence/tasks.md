@@ -155,7 +155,7 @@
   - Fresh auth with DCR server (e.g., Sentry, Cloudflare)
   - Re-auth after clearing token (verify port reuse)
   - Port conflict scenario (verify re-DCR)
-- [x] T025 Update spec.md status from Draft to Implemented
+- [ ] T025 Update spec.md status from Draft to Implemented
 
 ---
 

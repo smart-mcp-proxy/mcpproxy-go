@@ -1,0 +1,94 @@
+# OpenAPI fragment: POST /api/v1/preflight (folded into oas/swagger.yaml via make swagger)
+paths:
+  /api/v1/preflight:
+    post:
+      summary: Deterministic availability check for a list of tool IDs
+      description: >
+        Side-effect-free (no upstream I/O, no runtime mutation; writes a local activity record).
+        Verdicts are computed from local proxy state only. HTTP 200 whenever the check executed;
+        the availability verdict is in the body, never the HTTP status.
+      security:
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [tools]
+              properties:
+                tools:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    type: object
+                    required: [id]
+                    properties:
+                      id: { type: string, example: "github:create_issue" }
+                      pin_hash: { type: string, example: "sha256/v2:9f2c41ab..." }
+                profile: { type: string }
+                policy:
+                  type: object
+                  properties:
+                    read_only_only: { type: boolean }
+                    exclude_destructive: { type: boolean }
+                    exclude_open_world: { type: boolean }
+                wait_ms: { type: integer, minimum: 0, maximum: 10000 }
+      responses:
+        "200":
+          description: Preflight executed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [verdict, checked_at, tools]
+                properties:
+                  verdict:
+                    type: string
+                    enum: [ready, degraded_retryable, blocked, unknown_ids]
+                  checked_at: { type: string, format: date-time }
+                  waited_ms: { type: integer }
+                  tools:
+                    type: array
+                    items:
+                      type: object
+                      required: [id, status]
+                      properties:
+                        id: { type: string }
+                        status: { type: string, enum: [ready, unavailable] }
+                        reason:
+                          type: string
+                          enum:
+                            - server_initializing
+                            - server_unhealthy
+                            - server_disabled
+                            - server_quarantined
+                            - tool_pending_approval
+                            - tool_changed
+                            - tool_blocked_by_user
+                            - oauth_required
+                            - hash_mismatch
+                            - server_not_in_scope
+                            - tool_denied_by_config
+                            - missing_annotation
+                            - policy_filtered
+                            - not_found
+                            - server_not_configured
+                        retryable: { type: boolean }
+                        action:
+                          type: string
+                          enum: [login, restart, enable, approve, view_logs, set_secret, configure, none]
+                        detail: { type: string }
+                        remediation: { type: string }
+                        hash: { type: string, description: "operator tier, ready results only" }
+                        did_you_mean:
+                          type: array
+                          maxItems: 3
+                          items: { type: string }
+        "400":
+          description: Validation error (empty/oversized list, conflicting duplicate pins, unknown profile, wait_ms out of range). No preflight record written.
+        "401":
+          description: Missing/invalid API key or agent token
+        "503":
+          description: Runtime unavailable; preflight refused rather than degraded. No preflight record written.

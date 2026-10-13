@@ -24,13 +24,18 @@ type mockPatchConfigController struct {
 	live         *config.Config
 	captured     *config.Config
 	changedField string
+	// detectChanges routes ApplyConfig through the real
+	// runtime.DetectConfigChanges(live, merged) so tests can assert the
+	// changed_fields the real change detector would compute for the
+	// handler's deep-merge output.
+	detectChanges bool
 	// validationErrs, when non-empty, is returned from ApplyConfig so a test
 	// can assert that invalid values surface as validation errors rather than
 	// corrupting config.
 	validationErrs []config.ValidationError
 }
 
-func (m *mockPatchConfigController) GetCurrentConfig() any {
+func (m *mockPatchConfigController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: m.apiKey}
 }
 
@@ -43,6 +48,9 @@ func (m *mockPatchConfigController) GetConfigPath() string { return "/tmp/mcp_co
 func (m *mockPatchConfigController) ApplyConfig(cfg *config.Config, _ string) (*runtime.ConfigApplyResult, error) {
 	clone := *cfg
 	m.captured = &clone
+	if m.detectChanges {
+		return runtime.DetectConfigChanges(m.live, cfg), nil
+	}
 	if len(m.validationErrs) > 0 {
 		return &runtime.ConfigApplyResult{
 			Success:          false,
@@ -169,6 +177,35 @@ func TestHandlePatchConfig_ChangedFields(t *testing.T) {
 	assert.Contains(t, changed, "quarantine_enabled")
 }
 
+// TestHandlePatchConfig_NoSpuriousDockerIsolation (QA API-PATCH): patching only
+// the toon fields must not report docker_isolation in changed_fields. The
+// handler's JSON round-trip drops DockerIsolation.ExtraArgs []string{} via
+// omitempty; change detection must treat that as unchanged.
+func TestHandlePatchConfig_NoSpuriousDockerIsolation(t *testing.T) {
+	logger := zap.NewNop().Sugar()
+	mockCtrl := &mockPatchConfigController{
+		apiKey:        "test-key",
+		live:          &config.Config{DockerIsolation: config.DefaultDockerIsolationConfig()},
+		detectChanges: true, // route through real runtime.DetectConfigChanges
+	}
+	srv := NewServer(mockCtrl, logger, nil)
+
+	body := []byte(`{"toon_output":"always","toon_min_savings_pct":1}`)
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/config", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	result := decodePatchResult(t, w.Body.Bytes())
+	changed, _ := result["changed_fields"].([]interface{})
+	assert.Contains(t, changed, "toon_output")
+	assert.Contains(t, changed, "toon_min_savings_pct")
+	assert.NotContains(t, changed, "docker_isolation",
+		"docker_isolation was not in the PATCH body and its effective value did not change")
+}
+
 // TestHandlePatchConfig_EmptyBody rejects an empty object with 400.
 func TestHandlePatchConfig_EmptyBody(t *testing.T) {
 	logger := zap.NewNop().Sugar()
@@ -262,4 +299,89 @@ func TestDeepMergeJSON(t *testing.T) {
 	assert.Equal(t, 2, base["scalar"])
 	// New key added.
 	assert.Equal(t, "x", base["new_key"])
+}
+
+// desiredBaseController serves a live config whose routing_mode the process is
+// still serving, and a desired config carrying a restart-pending one — the exact
+// state ApplyConfig leaves behind after a routing-mode change.
+type desiredBaseController struct {
+	mockPatchConfigController
+	desired *config.Config
+}
+
+func (m *desiredBaseController) GetDesiredConfig() (*config.Config, error) {
+	clone := *m.desired
+	return &clone, nil
+}
+
+// TestHandlePatchConfig_MergesOntoDesiredConfig: a PATCH edits the configuration
+// that will be in force, not the one currently running. Merging onto the live
+// config silently reverted any restart-pending field the client did not send —
+// switch the header mode switcher to Direct, then toggle deferred schemas, and
+// the routing switch vanished from disk with a success toast.
+func TestHandlePatchConfig_MergesOntoDesiredConfig(t *testing.T) {
+	live := &config.Config{
+		APIKey:      "secret-key",
+		RoutingMode: config.RoutingModeRetrieveTools, // what /mcp is serving
+	}
+	desired := &config.Config{
+		APIKey:      "secret-key",
+		RoutingMode: config.RoutingModeDirect, // saved, waiting for a restart
+	}
+	ctrl := &desiredBaseController{
+		mockPatchConfigController: mockPatchConfigController{apiKey: "secret-key", live: live},
+		desired:                   desired,
+	}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	body, err := json.Marshal(map[string]interface{}{
+		"direct_tool_response_mode": config.DirectToolResponseModeDeferred,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/config", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", "secret-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	require.NotNil(t, ctrl.captured)
+	assert.Equal(t, config.DirectToolResponseModeDeferred, ctrl.captured.DirectToolResponseMode,
+		"the patched field must reach the apply pipeline")
+	assert.Equal(t, config.RoutingModeDirect, ctrl.captured.RoutingMode,
+		"a restart-pending routing mode the client never mentioned must survive the patch")
+	assert.Equal(t, "secret-key", ctrl.captured.APIKey, "secrets still preserved verbatim")
+}
+
+func TestHandlePatchConfig_RequireMCPAuthChangeDetected(t *testing.T) {
+	live := &config.Config{
+		APIKey:         "secret-key",
+		RequireMCPAuth: false,
+	}
+	ctrl := &mockPatchConfigController{
+		apiKey:        "secret-key",
+		live:          live,
+		detectChanges: true,
+	}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+
+	body, err := json.Marshal(map[string]interface{}{
+		"require_mcp_auth": true,
+	})
+	require.NoError(t, err)
+
+	req := httptest.NewRequest(http.MethodPatch, "/api/v1/config", bytes.NewReader(body))
+	req.Header.Set("X-API-Key", "secret-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	res := decodePatchResult(t, w.Body.Bytes())
+	assert.Equal(t, true, res["success"])
+	assert.Equal(t, true, res["applied_immediately"])
+	changed, ok := res["changed_fields"].([]interface{})
+	require.True(t, ok)
+	assert.ElementsMatch(t, []interface{}{"require_mcp_auth"}, changed)
 }

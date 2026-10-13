@@ -33,7 +33,7 @@ MCPProxy uses single Go project structure with backend HTTP API:
 **Purpose**: Create OAS coverage verification infrastructure
 
 - [X] T001 Create OAS coverage verification script at `scripts/verify-oas-coverage.sh`
-- [X] T002 [P] Create OAS coverage documentation at `docs/oas-coverage-report.md`
+- [ ] T002 [P] Create OAS coverage documentation at `docs/oas-coverage-report.md`
 
 ---
 
@@ -44,12 +44,12 @@ MCPProxy uses single Go project structure with backend HTTP API:
 **⚠️ CRITICAL**: No endpoint annotation work can begin until all contract types are defined
 
 - [X] T003 [P] Create configuration management contracts in `internal/contracts/config.go` (GetConfigResponse, ValidateConfigResponse, ConfigApplyResult)
-- [X] T004 [P] Create secrets management contracts in `internal/contracts/secrets.go` (SecretReference, GetSecretReferencesResponse, ConfigSecret, GetConfigSecretsResponse, MigrateSecretsRequest, MigrateSecretsResponse, SetSecretRequest)
+- [ ] T004 [P] Create secrets management contracts in `internal/contracts/secrets.go` (SecretReference, GetSecretReferencesResponse, ConfigSecret, GetConfigSecretsResponse, MigrateSecretsRequest, MigrateSecretsResponse, SetSecretRequest)
 - [X] T005 [P] Create tool call history contracts in `internal/contracts/tool_calls.go` (ToolCallRecord, GetToolCallsResponse, ReplayToolCallRequest)
 - [X] T006 [P] Create session management contracts in `internal/contracts/sessions.go` (MCPSession, GetSessionsResponse)
 - [X] T007 [P] Create registry browsing contracts in `internal/contracts/registries.go` (Registry, RegistryServer, GetRegistriesResponse, SearchRegistryServersResponse)
 - [X] T008 [P] Create code execution contracts in `internal/contracts/code_exec.go` (CodeExecRequest, CodeExecResponse)
-- [X] T009 [P] Create SSE events contract in `internal/contracts/events.go` (SSEEvent)
+- [ ] T009 [P] Create SSE events contract in `internal/contracts/events.go` (SSEEvent)
 
 **Checkpoint**: Foundation ready - endpoint annotation can now begin in parallel
 
@@ -69,9 +69,9 @@ MCPProxy uses single Go project structure with backend HTTP API:
 - [X] T012 [P] [US1] Add swag annotations for POST /api/v1/config/apply handler in `internal/httpapi/server.go:2097-2138`
 
 **Secrets Management Endpoints (5)**:
-- [X] T013 [P] [US1] Add swag annotations for GET /api/v1/secrets/refs handler in `internal/httpapi/server.go:1474-1497`
-- [X] T014 [P] [US1] Add swag annotations for GET /api/v1/secrets/config handler in `internal/httpapi/server.go:1499-1543`
-- [X] T015 [P] [US1] Add swag annotations for POST /api/v1/secrets/migrate handler in `internal/httpapi/server.go:1545-1610`
+- [ ] T013 [P] [US1] Add swag annotations for GET /api/v1/secrets/refs handler in `internal/httpapi/server.go:1474-1497`
+- [ ] T014 [P] [US1] Add swag annotations for GET /api/v1/secrets/config handler in `internal/httpapi/server.go:1499-1543`
+- [ ] T015 [P] [US1] Add swag annotations for POST /api/v1/secrets/migrate handler in `internal/httpapi/server.go:1545-1610`
 - [X] T016 [P] [US1] Add swag annotations for POST /api/v1/secrets handler in `internal/httpapi/server.go:1612-1635`
 - [X] T017 [P] [US1] Add swag annotations for DELETE /api/v1/secrets/{name} handler in `internal/httpapi/server.go:1637-1658`
 
@@ -89,11 +89,11 @@ MCPProxy uses single Go project structure with backend HTTP API:
 - [X] T024 [P] [US1] Add swag annotations for GET /api/v1/registries/{id}/servers handler in `internal/httpapi/server.go:2267-2350`
 
 **Code Execution Endpoint (1)**:
-- [X] T025 [P] [US1] Add swag annotations for POST /api/v1/code/exec handler in `internal/httpapi/code_exec.go`
+- [ ] T025 [P] [US1] Add swag annotations for POST /api/v1/code/exec handler in `internal/httpapi/code_exec.go`
 
 **SSE Events Endpoints (2)**:
-- [X] T026 [P] [US1] Add swag annotations for GET /events SSE handler in `internal/httpapi/server.go` (located handleSSEEvents at line 1310)
-- [X] T027 [P] [US1] Add swag annotations for HEAD /events health check handler in `internal/httpapi/server.go` (same handler as T026)
+- [ ] T026 [P] [US1] Add swag annotations for GET /events SSE handler in `internal/httpapi/server.go` (located handleSSEEvents at line 1310)
+- [ ] T027 [P] [US1] Add swag annotations for HEAD /events health check handler in `internal/httpapi/server.go` (same handler as T026)
 
 **Per-Server Tool Calls Endpoint (1)**:
 - [X] T028 [P] [US1] Add swag annotations for GET /api/v1/servers/{id}/tool-calls handler in `internal/httpapi/server.go` (handleGetServerToolCalls at line 2063)
@@ -155,15 +155,15 @@ MCPProxy uses single Go project structure with backend HTTP API:
 - [X] T048 [US3] Add success/failure reporting with exit codes (0 for success, 1 for missing endpoints) - **COMPLETE in T001 (lines 60-91 with color-coded reporting)**
 
 **CI Integration**:
-- [X] T049 [US3] Create or extend GitHub Actions workflow at `.github/workflows/verify-oas.yml` to run OAS coverage check - **COMPLETE: Extended existing verify-oas job in pr-build.yml (lines 45-64)**
+- [ ] T049 [US3] Create or extend GitHub Actions workflow at `.github/workflows/verify-oas.yml` to run OAS coverage check - **COMPLETE: Extended existing verify-oas job in pr-build.yml (lines 45-64)**
 - [X] T050 [US3] Add `make swagger-verify` step to CI workflow (regenerates OAS and fails if dirty) - **COMPLETE: Already implemented via scripts/verify-oas.sh (line 61)**
-- [X] T051 [US3] Add `./scripts/verify-oas-coverage.sh` step to CI workflow (fails if missing endpoints detected) - **COMPLETE: Added at line 64**
+- [ ] T051 [US3] Add `./scripts/verify-oas-coverage.sh` step to CI workflow (fails if missing endpoints detected) - **COMPLETE: Added at line 64**
 - [X] T052 [US3] Configure CI job to run on all pull requests targeting main branch - **COMPLETE: pr-build.yml runs on pull_request for all branches (line 4-6)**
 
 **Documentation**:
-- [X] T053 [P] [US3] Document OAS verification process in `docs/oas-coverage-report.md` (usage, how to fix failures, exclusion rules) - **COMPLETE in T002, updated CI references**
+- [ ] T053 [P] [US3] Document OAS verification process in `docs/oas-coverage-report.md` (usage, how to fix failures, exclusion rules) - **COMPLETE in T002, updated CI references**
 - [X] T054 [P] [US3] Update `CLAUDE.md` to include OAS coverage verification in pre-commit checklist - **COMPLETE: Added at line 97-98**
-- [X] T055 [P] [US3] Update `README.md` to mention automated OAS coverage enforcement in CI - **COMPLETE: Added to Contributing section (line 762)**
+- [ ] T055 [P] [US3] Update `README.md` to mention automated OAS coverage enforcement in CI - **COMPLETE: Added to Contributing section (line 762)**
 
 **Testing and Verification**:
 - [ ] T056 [US3] Run `./scripts/verify-oas-coverage.sh` locally and verify it reports zero missing endpoints

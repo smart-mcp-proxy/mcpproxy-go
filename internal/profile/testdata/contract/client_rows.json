@@ -1,0 +1,34 @@
+[
+  {
+    "id": "cursor",
+    "display_name": "Cursor",
+    "kind": "supported",
+    "credential_state": "client",
+    "token_name": "client-cursor",
+    "profile": "work-readonly",
+    "profile_title": "Work · Read-only",
+    "profile_mode": "locked",
+    "profile_source": "pin",
+    "profile_missing": false,
+    "expires_at": "2027-09-25T00:00:00Z",
+    "rotation_pending": false,
+    "blocked_24h": 1,
+    "warnings": []
+  },
+  {
+    "id": "codex",
+    "display_name": "Codex",
+    "kind": "supported",
+    "credential_state": "admin_key",
+    "token_name": "",
+    "profile": "",
+    "profile_title": "",
+    "profile_mode": "",
+    "profile_source": "",
+    "profile_missing": false,
+    "expires_at": "",
+    "rotation_pending": false,
+    "blocked_24h": 0,
+    "warnings": ["client_holds_admin_key"]
+  }
+]

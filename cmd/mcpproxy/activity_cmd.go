@@ -11,6 +11,9 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +26,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Activity command flags
@@ -39,11 +43,38 @@ var (
 	activityOffset        int
 	activityIntentType    string // Spec 018: Filter by operation type (read, write, destructive)
 	activityRequestID     string // Spec 021: Filter by HTTP request ID for correlation
+	activityParentID      string // Activity transparency: filter to sub-calls of a code_execution parent
 	activityNoIcons       bool   // Disable emoji icons in output
 	activityDetectionType string // Spec 026: Filter by detection type (e.g., "aws_access_key")
 	activitySeverity      string // Spec 026: Filter by severity level (critical, high, medium, low)
-	activityAgent         string // Spec 028: Filter by agent token name
+	activityAgent         string // Spec 028: deprecated alias of --token
 	activityAuthType      string // Spec 028: Filter by auth type (admin, agent)
+	activityErrorClass    string // Spec 113-c: Filter by call-error class
+	activityFaultDomain   string // Spec 113-c: Filter by fault domain
+
+	// Spec 108 FR-031 scope filters: the profile, client and token in effect
+	// when a call ran ("-" selects records with none). --client-name is the
+	// client's self-reported name (advisory); --agent is the old spelling of
+	// --token.
+	activityProfile    string
+	activityClient     string
+	activityToken      string
+	activityClientName string
+
+	// Spec 109-k (activity-scope-filters, url-filter-contract.md): the `view`
+	// segmented filter and the `--from`/`--to` aliases of `--start-time`/
+	// `--end-time` (accepting the same relative shorthand as the Web
+	// composable: "-1h", "-24h", "-7d", "-30d"). This PR is the sole owner of
+	// --from/--to on activity list|watch|summary|export.
+	activityView string
+	activityFrom string
+	activityTo   string
+
+	// activityWatchFromTime/activityWatchToTime are the resolved (absolute)
+	// bounds `activity watch` applies to each streamed event, set once from
+	// --from/--to at startup (Spec 109-k FR-075). Zero means unbounded.
+	activityWatchFromTime time.Time
+	activityWatchToTime   time.Time
 
 	// Show command flags
 	activityIncludeResponse bool
@@ -71,21 +102,47 @@ type ActivityFilter struct {
 	Offset        int
 	IntentType    string // Spec 018: Filter by operation type (read, write, destructive)
 	RequestID     string // Spec 021: Filter by HTTP request ID for correlation
+	ParentID      string // Activity transparency: filter to sub-calls of a code_execution parent
 	SensitiveData *bool  // Spec 026: Filter by sensitive data detection
 	DetectionType string // Spec 026: Filter by detection type
 	Severity      string // Spec 026: Filter by severity level
-	AgentName     string // Spec 028: Filter by agent token name
 	AuthType      string // Spec 028: Filter by auth type (admin, agent)
+	ErrorClass    string // Spec 113-c: Filter by call-error class
+	FaultDomain   string // Spec 113-c: Filter by fault domain
+
+	// Spec 108 FR-031 scope filters ("-" = unattributed).
+	Profile    string
+	Client     string
+	Token      string // REST also accepts `agent` as an alias
+	ClientName string // advisory; list, export and watch only
+}
+
+// The closed call-error taxonomy vocabularies (Spec 113-c FR-040).
+var (
+	validErrorClasses = []string{"network", "timeout", "http", "jsonrpc", "tool_error", "session_terminated", "auth", "proxy_policy", "proxy_internal", "cancelled"}
+	validFaultDomains = []string{"upstream", "proxy", "client"}
+)
+
+func containsString(list []string, v string) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
 }
 
 // Validate validates the filter options
 func (f *ActivityFilter) Validate() error {
 	// Validate type(s) - supports comma-separated values (Spec 024)
 	if f.Type != "" {
-		validTypes := []string{
-			"tool_call", "policy_decision", "quarantine_change", "server_change",
-			"system_start", "system_stop", "internal_tool_call", "config_change", // Spec 024: new types
-		}
+		// Sourced from storage.ValidActivityTypes rather than hand-copied: a
+		// second hardcoded list here had the exact same drift
+		// activitySystemTypes was fixed for (live QA,
+		// 109-k-activity-scope-filters) — missing tool_quarantine_change,
+		// security_scan and credential_broker — which made `--view system`
+		// compute a type filter this Validate() then rejected outright.
+		validTypes := storage.ValidActivityTypes
 		// Split by comma for multi-type support
 		types := strings.Split(f.Type, ",")
 		for _, t := range types {
@@ -105,7 +162,9 @@ func (f *ActivityFilter) Validate() error {
 
 	// Validate status
 	if f.Status != "" {
-		validStatuses := []string{"success", "error", "blocked"}
+		// Spec 093 added "rejected" (shed by a concurrency limit) to the closed
+		// activity status vocabulary; the CLI filter must accept it.
+		validStatuses := []string{"success", "error", "blocked", "rejected"}
 		valid := false
 		for _, s := range validStatuses {
 			if f.Status == s {
@@ -163,6 +222,14 @@ func (f *ActivityFilter) Validate() error {
 		}
 	}
 
+	// Validate the call-error taxonomy filters (Spec 113-c FR-046)
+	if f.ErrorClass != "" && !containsString(validErrorClasses, f.ErrorClass) {
+		return fmt.Errorf("invalid error-class '%s': must be one of %v", f.ErrorClass, validErrorClasses)
+	}
+	if f.FaultDomain != "" && !containsString(validFaultDomains, f.FaultDomain) {
+		return fmt.Errorf("invalid fault-domain '%s': must be one of %v", f.FaultDomain, validFaultDomains)
+	}
+
 	// Validate time formats
 	if f.StartTime != "" {
 		if _, err := time.Parse(time.RFC3339, f.StartTime); err != nil {
@@ -201,7 +268,7 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 		q.Set("status", f.Status)
 	}
 	if f.SessionID != "" {
-		q.Set("session_id", f.SessionID)
+		q.Set(sessionQueryParam(f.SessionID), f.SessionID)
 	}
 	if f.StartTime != "" {
 		q.Set("start_time", f.StartTime)
@@ -222,6 +289,18 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	if f.RequestID != "" {
 		q.Set("request_id", f.RequestID)
 	}
+	// Activity transparency: parent_id joins a code_execution record to the
+	// sandboxed sub-calls it made (child.parent_id == parent.request_id).
+	if f.ParentID != "" {
+		q.Set("parent_id", f.ParentID)
+	}
+	// Spec 113-c FR-046: call-error taxonomy filters
+	if f.ErrorClass != "" {
+		q.Set("error_class", f.ErrorClass)
+	}
+	if f.FaultDomain != "" {
+		q.Set("fault_domain", f.FaultDomain)
+	}
 	// Spec 026: Add sensitive data filters
 	if f.SensitiveData != nil {
 		q.Set("sensitive_data", fmt.Sprintf("%t", *f.SensitiveData))
@@ -232,14 +311,251 @@ func (f *ActivityFilter) ToQueryParams() url.Values {
 	if f.Severity != "" {
 		q.Set("severity", f.Severity)
 	}
-	// Spec 028: Agent token identity filters
-	if f.AgentName != "" {
-		q.Set("agent", f.AgentName)
-	}
+	// Spec 028: auth type; Spec 108: the token filter (the old --agent is an
+	// alias resolved before this point) and the profile/client filters.
 	if f.AuthType != "" {
 		q.Set("auth_type", f.AuthType)
 	}
+	if f.Token != "" {
+		q.Set("token", f.Token)
+	}
+	if f.Profile != "" {
+		q.Set("profile", f.Profile)
+	}
+	if f.Client != "" {
+		q.Set("client", f.Client)
+	}
+	if f.ClientName != "" {
+		q.Set("client_name", f.ClientName)
+	}
 	return q
+}
+
+// errActivityClientNameUnsupported is the REST text for `client_name` on an
+// endpoint that does not filter on the advisory name (summary, usage,
+// sessions); `activity summary --client-name` is registered and always
+// rejected with it, like --to there.
+const errActivityClientNameUnsupported = "client_name is not supported on this endpoint; filter by client"
+
+// activityScope is the resolved Spec 108 scope filter set of one invocation.
+type activityScope struct {
+	Profile    string
+	Client     string
+	Token      string
+	ClientName string
+	// Deprecation is a notice to print to stderr (the old --agent spelling).
+	Deprecation string
+}
+
+// resolveActivityScope reads the scope flags. --agent is a deprecated alias of
+// --token: it works, prints a notice, and a conflicting pair is an error.
+func resolveActivityScope() (activityScope, error) {
+	sc := activityScope{
+		Profile:    activityProfile,
+		Client:     activityClient,
+		Token:      activityToken,
+		ClientName: activityClientName,
+	}
+	if activityAgent != "" {
+		sc.Deprecation = "--agent is deprecated; use --token"
+		if sc.Token != "" && sc.Token != activityAgent {
+			return sc, errors.New("--token and --agent must name the same token (--agent is an alias of --token)")
+		}
+		sc.Token = activityAgent
+	}
+	return sc, nil
+}
+
+// registerActivityScopeFlags adds the Spec 108 scope filter flags to a command.
+// clientName is false only where the flag is registered to be rejected.
+func registerActivityScopeFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&activityProfile, "profile", "", "Filter by the profile in effect for the call; - selects records with no profile")
+	cmd.Flags().StringVar(&activityClient, "client", "", "Filter by client id (the client's binding); - selects records with no client")
+	cmd.Flags().StringVar(&activityToken, "token", "", "Filter by the agent or client token name; - selects records with no token")
+	cmd.Flags().StringVar(&activityClientName, "client-name", "", "Filter by the client's self-reported name (advisory, not authoritative)")
+	cmd.Flags().StringVar(&activityAgent, "agent", "", "Deprecated alias of --token")
+	_ = cmd.Flags().MarkHidden("agent")
+}
+
+// Spec 109-k (activity-scope-filters): the `view` segmented filter
+// (url-filter-contract.md `view` → REST `type` mapping). "calls" is tool
+// activity, "system" is every other known activity type, "all" (the CLI
+// default) sends no type filter. An explicit --type overrides --view, exactly
+// like the Web composable's `type` overriding `view`.
+const (
+	activityViewCalls  = "calls"
+	activityViewSystem = "system"
+	activityViewAll    = "all"
+)
+
+// activityCallTypes are the activity types the "calls" view selects.
+var activityCallTypes = []string{"tool_call", "internal_tool_call"}
+
+// activitySystemTypes are every other known activity type — the "system"
+// view. Derived from storage.ValidActivityTypes (minus activityCallTypes) at
+// init, rather than hand-copied, so it can never silently drift the way it
+// once did: a hand-maintained literal here was missing
+// tool_quarantine_change, security_scan and credential_broker (live QA,
+// 109-k-activity-scope-filters) despite this comment's claim to cover "every
+// other known activity type".
+var activitySystemTypes = func() []string {
+	isCallType := make(map[string]bool, len(activityCallTypes))
+	for _, typ := range activityCallTypes {
+		isCallType[typ] = true
+	}
+	var systemTypes []string
+	for _, typ := range storage.ValidActivityTypes {
+		if !isCallType[typ] {
+			systemTypes = append(systemTypes, typ)
+		}
+	}
+	return systemTypes
+}()
+
+// activityViewTypeFilter resolves a --view value to the `type` filter value
+// to send (comma-joined, or "" for no filter / "all"). Returns an error for
+// an unknown view.
+func activityViewTypeFilter(view string) (string, error) {
+	switch view {
+	case "", activityViewAll:
+		return "", nil
+	case activityViewCalls:
+		return strings.Join(activityCallTypes, ","), nil
+	case activityViewSystem:
+		return strings.Join(activitySystemTypes, ","), nil
+	default:
+		return "", fmt.Errorf("invalid view '%s': must be one of calls, system, all", view)
+	}
+}
+
+// activityRelativeTimePattern matches a relative time shorthand such as
+// "-24h", "-7d", "-30m" (url-filter-contract.md `from`/`to`).
+var activityRelativeTimePattern = regexp.MustCompile(`^-([0-9]+)(m|h|d)$`)
+
+// resolveActivityTime resolves a --from/--to value to an absolute RFC3339
+// timestamp: an already-absolute RFC3339 value passes through unchanged, a
+// relative shorthand ("-24h", "-7d", ...) is resolved against now. Spec
+// 109-k FR-075.
+func resolveActivityTime(value string, now time.Time) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	if _, err := time.Parse(time.RFC3339, value); err == nil {
+		return value, nil
+	}
+	m := activityRelativeTimePattern.FindStringSubmatch(value)
+	if m == nil {
+		return "", fmt.Errorf("invalid time '%s': must be RFC3339 or a relative shorthand like -24h, -7d", value)
+	}
+	n, err := strconv.Atoi(m[1])
+	if err != nil {
+		return "", fmt.Errorf("invalid time '%s'", value)
+	}
+	// zcode round 1 (F4): an unbounded count lets `time.Duration(n) * 24 *
+	// time.Hour` overflow int64 silently (Go does not panic or error on
+	// signed overflow), wrapping to a negative duration and resolving to a
+	// bogus FUTURE timestamp instead of failing loudly. 100000 of the
+	// largest unit (days) is ~274 years — far more range than any real
+	// query needs and nowhere near the ~292-year int64-nanosecond ceiling.
+	const maxRelativeAmount = 100000
+	if n <= 0 || n > maxRelativeAmount {
+		return "", fmt.Errorf("invalid time '%s': the amount must be between 1 and %d", value, maxRelativeAmount)
+	}
+	var d time.Duration
+	switch m[2] {
+	case "m":
+		d = time.Duration(n) * time.Minute
+	case "h":
+		d = time.Duration(n) * time.Hour
+	case "d":
+		d = time.Duration(n) * 24 * time.Hour
+	}
+	return now.Add(-d).UTC().Format(time.RFC3339), nil
+}
+
+// activityPeriodFromRelative maps a --from relative shorthand to an
+// 'activity summary' `--period` value (FR-075): the summary REST endpoint
+// only accepts the fixed windows 1h/24h/7d/30d, so an arbitrary --from range
+// is rejected rather than silently rounded or ignored.
+func activityPeriodFromRelative(from string) (string, error) {
+	switch from {
+	case "-1h":
+		return "1h", nil
+	case "-24h":
+		return "24h", nil
+	case "-7d":
+		return "7d", nil
+	case "-30d":
+		return "30d", nil
+	default:
+		return "", errors.New("summary supports --from -1h|-24h|-7d|-30d only")
+	}
+}
+
+// splitActivityTool implements the url-filter-contract.md --tool rule: a
+// "server:tool" value splits into server + bare tool name (the REST
+// server/tool filters compare bare names, so sending "server:tool" verbatim
+// would match nothing). An explicit --server that disagrees with the --tool
+// prefix is a contradiction — their intersection is empty and REST has one
+// "server" parameter, so no request could express both — so rule 8 requires
+// exiting 1 with a conflict error before any request, rather than silently
+// keeping one value and dropping the other.
+func splitActivityTool(server, tool string) (string, string, error) {
+	idx := strings.Index(tool, ":")
+	if idx < 0 {
+		return server, tool, nil
+	}
+	toolServer, toolName := tool[:idx], tool[idx+1:]
+	if server == "" {
+		return toolServer, toolName, nil
+	}
+	if server != toolServer {
+		return "", "", fmt.Errorf("--server %s conflicts with the server in --tool %s", server, tool)
+	}
+	return server, toolName, nil
+}
+
+// activityWatchInRange reports whether an event timestamp falls within the
+// optional [from, to] bounds (Spec 109-k FR-075 on `activity watch`). A
+// malformed or missing timestamp is never silently dropped.
+func activityWatchInRange(eventTime time.Time, from, to time.Time) bool {
+	if from.IsZero() && to.IsZero() {
+		return true
+	}
+	if eventTime.IsZero() {
+		// Unknown/unparseable event timestamp — never silently dropped.
+		return true
+	}
+	if !from.IsZero() && eventTime.Before(from) {
+		return false
+	}
+	if !to.IsZero() && eventTime.After(to) {
+		return false
+	}
+	return true
+}
+
+// eventTimestampFromWrapper reads the SSE envelope's own "timestamp" field
+// (set by the server as Unix seconds, e.g. time.Now().Unix() — see
+// internal/httpapi/server.go), NOT a field inside the payload. Returns the
+// zero Time when absent or not a number (zcode round 1, F1: the wrapper
+// timestamp is a JSON number, not an RFC3339 string).
+func eventTimestampFromWrapper(wrapper map[string]interface{}) time.Time {
+	v, ok := wrapper["timestamp"].(float64)
+	if !ok || v <= 0 {
+		return time.Time{}
+	}
+	return time.Unix(int64(v), 0).UTC()
+}
+
+// activityWatchShouldExit reports whether 'activity watch' should stop
+// because --to has passed: once now is after the --to cutoff, no future
+// record could still be in range (Spec 109-k FR-075).
+func activityWatchShouldExit(to, now time.Time) bool {
+	if to.IsZero() {
+		return false
+	}
+	return now.After(to)
 }
 
 // formatRelativeTime formats a timestamp as relative time for recent events
@@ -554,6 +870,219 @@ func displaySensitiveDataSection(activity map[string]interface{}) {
 	}
 }
 
+// --- Spec 098: preflight activity records ------------------------------------
+//
+// A preflight record is set-scoped, not server-scoped: server_name and
+// tool_name are empty and everything an operator wants to see lives in
+// Metadata ({verdict, ids_count, reasons{code:count}, per_tool[{id,status,
+// reason?}]}, written by runtime.ActivityService.RecordPreflight). Without the
+// renderers below, `activity list` shows a bare row with three empty columns
+// and `activity show` shows nothing at all — the FR-014 transparency promise
+// only holds if the record is actually readable.
+//
+// The metadata arrives here as decoded JSON, so counts are float64 and the
+// nested payloads are []interface{} / map[string]interface{}; every accessor
+// below tolerates both that and the native Go shape used in tests.
+
+// maxPreflightSummaryReasons caps how many distinct reason codes the one-line
+// summary names before it collapses the tail into "+N more". A preflight may
+// carry up to 100 ids across 15 reason codes; an uncapped rollup would push
+// every other column of `activity list` off screen.
+const maxPreflightSummaryReasons = 3
+
+// maxPreflightSummaryCell bounds the summary in the `activity list` TOOL
+// column, matching the cap the tool tables already use for their widest cell.
+const maxPreflightSummaryCell = 60
+
+// isPreflightActivity reports whether a record is a Spec 098 preflight.
+func isPreflightActivity(activity map[string]interface{}) bool {
+	return getStringField(activity, "type") == string(storage.ActivityTypePreflight)
+}
+
+// preflightReasonCount is one {reason code, count} pair of the metadata rollup.
+type preflightReasonCount struct {
+	Reason string
+	Count  int
+}
+
+// preflightReasonRollup reads metadata["reasons"] into a DETERMINISTIC order:
+// most frequent first, ties broken alphabetically. Map iteration order would
+// otherwise make the same record render differently on every invocation, which
+// breaks both diffing two runs and any test that asserts the line.
+func preflightReasonRollup(metadata map[string]interface{}) []preflightReasonCount {
+	counts := map[string]int{}
+	for reason, raw := range getMapField(metadata, storage.MetadataKeyPreflightReasons) {
+		if count, ok := numericMetadataValue(raw); ok {
+			counts[reason] = count
+		}
+	}
+
+	// Fallback for a record whose rollup is missing: recount from the per-tool
+	// detail, which carries the same codes.
+	if len(counts) == 0 {
+		for _, entry := range getArrayField(metadata, storage.MetadataKeyPreflightPerTool) {
+			tool, ok := entry.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if reason := getStringField(tool, storage.PreflightPerToolKeyReason); reason != "" {
+				counts[reason]++
+			}
+		}
+	}
+	if len(counts) == 0 {
+		return nil
+	}
+
+	rollup := make([]preflightReasonCount, 0, len(counts))
+	for reason, count := range counts {
+		rollup = append(rollup, preflightReasonCount{Reason: reason, Count: count})
+	}
+	sort.Slice(rollup, func(i, j int) bool {
+		if rollup[i].Count != rollup[j].Count {
+			return rollup[i].Count > rollup[j].Count
+		}
+		return rollup[i].Reason < rollup[j].Reason
+	})
+	return rollup
+}
+
+// formatPreflightReasons renders a rollup as "code xN, code xN". limit <= 0
+// means "name them all"; a positive limit collapses the tail into "+N more".
+func formatPreflightReasons(rollup []preflightReasonCount, limit int) string {
+	if len(rollup) == 0 {
+		return ""
+	}
+
+	shown := rollup
+	remaining := 0
+	if limit > 0 && len(rollup) > limit {
+		shown = rollup[:limit]
+		remaining = len(rollup) - limit
+	}
+
+	parts := make([]string, 0, len(shown)+1)
+	for _, entry := range shown {
+		parts = append(parts, fmt.Sprintf("%s x%d", entry.Reason, entry.Count))
+	}
+	if remaining > 0 {
+		parts = append(parts, fmt.Sprintf("+%d more", remaining))
+	}
+	return strings.Join(parts, ", ")
+}
+
+// numericMetadataValue reads a metadata count that may have arrived as JSON
+// (float64) or as the native int the writer used.
+func numericMetadataValue(raw interface{}) (int, bool) {
+	switch v := raw.(type) {
+	case float64:
+		return int(v), true
+	case int:
+		return v, true
+	default:
+		return 0, false
+	}
+}
+
+// preflightIDsCount is how many unique tool ids the run evaluated. ids_count is
+// authoritative (the writer sets it); per_tool length is the fallback for a
+// record written by an older/partial writer.
+func preflightIDsCount(metadata map[string]interface{}) int {
+	if count := getIntField(metadata, storage.MetadataKeyPreflightIDsCount); count > 0 {
+		return count
+	}
+	return len(getArrayField(metadata, storage.MetadataKeyPreflightPerTool))
+}
+
+// preflightActivitySummary renders the one-line verdict summary shown in the
+// `activity list` table, e.g. "blocked (4 tools): server_disabled x2,
+// tool_changed x1". Empty string for anything that is not a readable preflight
+// record, so the caller falls back to its usual "-" placeholder.
+func preflightActivitySummary(activity map[string]interface{}) string {
+	if !isPreflightActivity(activity) {
+		return ""
+	}
+	metadata := getMapField(activity, "metadata")
+	if metadata == nil {
+		return ""
+	}
+	verdict := getStringField(metadata, storage.MetadataKeyPreflightVerdict)
+	if verdict == "" {
+		return ""
+	}
+
+	count := preflightIDsCount(metadata)
+	unit := "tools"
+	if count == 1 {
+		unit = "tool"
+	}
+	summary := fmt.Sprintf("%s (%d %s)", verdict, count, unit)
+
+	if reasons := formatPreflightReasons(preflightReasonRollup(metadata), maxPreflightSummaryReasons); reasons != "" {
+		summary += ": " + reasons
+	}
+	return summary
+}
+
+// preflightDetailLines builds the `activity show` section for a preflight
+// record. It returns lines instead of printing so the rendering is unit-tested
+// without capturing stdout. Empty slice ⇒ nothing to render.
+func preflightDetailLines(activity map[string]interface{}) []string {
+	if !isPreflightActivity(activity) {
+		return nil
+	}
+	metadata := getMapField(activity, "metadata")
+	if metadata == nil {
+		return nil
+	}
+	verdict := getStringField(metadata, storage.MetadataKeyPreflightVerdict)
+	if verdict == "" {
+		return nil
+	}
+
+	lines := []string{
+		"",
+		"Preflight:",
+		fmt.Sprintf("  Verdict:           %s", verdict),
+		fmt.Sprintf("  Tools Checked:     %d", preflightIDsCount(metadata)),
+	}
+	// The full rollup here — the detail view has the room the table row lacks.
+	if reasons := formatPreflightReasons(preflightReasonRollup(metadata), 0); reasons != "" {
+		lines = append(lines, fmt.Sprintf("  Reasons:           %s", reasons))
+	}
+
+	perTool := getArrayField(metadata, storage.MetadataKeyPreflightPerTool)
+	if len(perTool) == 0 {
+		return lines
+	}
+
+	lines = append(lines, "", "  Tools:")
+	for i, entry := range perTool {
+		tool, ok := entry.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		// Tool ids are caller-supplied strings that round-trip through the
+		// activity log; escape them before they reach a tty (same trust
+		// boundary as `tools list`).
+		id := sanitizeName(getStringField(tool, storage.PreflightPerToolKeyID))
+		status := getStringField(tool, storage.PreflightPerToolKeyStatus)
+		line := fmt.Sprintf("    [%d] %-40s %s", i+1, id, status)
+		if reason := getStringField(tool, storage.PreflightPerToolKeyReason); reason != "" {
+			line += "  " + reason
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// displayPreflightSection prints the preflight detail for `activity show`.
+func displayPreflightSection(activity map[string]interface{}) {
+	for _, line := range preflightDetailLines(activity) {
+		fmt.Println(line)
+	}
+}
+
 // formatSeverityWithColor returns a severity string with visual indicator
 func formatSeverityWithColor(severity string) string {
 	if activityNoIcons {
@@ -637,6 +1166,9 @@ Examples:
   # List activity by request ID (for error correlation)
   mcpproxy activity list --request-id abc123-def456
 
+  # List the sub-calls a code_execution made (value = the parent's request_id)
+  mcpproxy activity list --parent-id abc123-def456
+
   # List only activities with sensitive data detected
   mcpproxy activity list --sensitive-data
 
@@ -705,6 +1237,10 @@ Examples:
 		Short: "Export activity records",
 		Long: `Export activity records for compliance and auditing.
 
+--format is the export file format (json = JSON Lines, csv). On this command
+--output is the destination file path; the global -o/--output (terminal rendering:
+table, json, yaml) does not apply to 'activity export'.
+
 Examples:
   # Export all activity as JSON Lines to file
   mcpproxy activity export --output activity.jsonl
@@ -713,7 +1249,10 @@ Examples:
   mcpproxy activity export --format csv --output activity.csv
 
   # Export to stdout for piping
-  mcpproxy activity export --format csv | gzip > activity.csv.gz`,
+  mcpproxy activity export --format csv | gzip > activity.csv.gz
+
+  # Export just the sub-calls of one code_execution
+  mcpproxy activity export --parent-id abc123-def456`,
 		RunE: runActivityExport,
 	}
 )
@@ -732,29 +1271,41 @@ func init() {
 	activityCmd.AddCommand(activityExportCmd)
 
 	// List command flags
-	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
+	activityListCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated for multiple): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change")
 	activityListCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityListCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
-	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked")
-	activityListCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by MCP session ID")
+	activityListCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked, rejected")
+	activityListCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session — a work session id (ws-...) or a raw MCP transport session id")
 	activityListCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter records after this time (RFC3339)")
 	activityListCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter records before this time (RFC3339)")
 	activityListCmd.Flags().IntVarP(&activityLimit, "limit", "n", 50, "Max records to return (1-100)")
 	activityListCmd.Flags().IntVar(&activityOffset, "offset", 0, "Pagination offset")
 	activityListCmd.Flags().StringVar(&activityIntentType, "intent-type", "", "Filter by intent operation type: read, write, destructive")
 	activityListCmd.Flags().StringVar(&activityRequestID, "request-id", "", "Filter by HTTP request ID for log correlation")
+	activityListCmd.Flags().StringVar(&activityParentID, "parent-id", "", "List child tool calls of a code_execution activity (value = the parent record request_id)")
+	activityListCmd.Flags().StringVar(&activityErrorClass, "error-class", "", "Filter failed tool calls by error class: network, timeout, http, jsonrpc, tool_error, session_terminated, auth, proxy_policy, proxy_internal, cancelled")
+	activityListCmd.Flags().StringVar(&activityFaultDomain, "fault-domain", "", "Filter failed tool calls by fault domain: upstream, proxy, client")
 	activityListCmd.Flags().BoolVar(&activityNoIcons, "no-icons", false, "Disable emoji icons in output (use text instead)")
 	// Spec 026: Sensitive data detection filters
 	activityListCmd.Flags().Bool("sensitive-data", false, "Filter to show only activities with sensitive data detected")
 	activityListCmd.Flags().StringVar(&activityDetectionType, "detection-type", "", "Filter by detection type (e.g., aws_access_key, stripe_key)")
 	activityListCmd.Flags().StringVar(&activitySeverity, "severity", "", "Filter by severity level: critical, high, medium, low")
 	// Spec 028: Agent token identity filters
-	activityListCmd.Flags().StringVar(&activityAgent, "agent", "", "Filter by agent token name")
 	activityListCmd.Flags().StringVar(&activityAuthType, "auth-type", "", "Filter by auth type: admin, agent")
+	registerActivityScopeFlags(activityListCmd)
+	// Spec 109-k: view + --from/--to aliases (url-filter-contract.md)
+	activityListCmd.Flags().StringVar(&activityView, "view", "", "Filter by view: calls, system, all (default all); overridden by --type")
+	activityListCmd.Flags().StringVar(&activityFrom, "from", "", "Filter records after this time (RFC3339 or relative: -1h, -24h, -7d, -30d); alias of --start-time")
+	activityListCmd.Flags().StringVar(&activityTo, "to", "", "Filter records before this time (RFC3339 or relative); alias of --end-time")
 
 	// Watch command flags
-	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
+	activityWatchCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change")
 	activityWatchCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
+	// Spec 109-k: view + --from/--to
+	registerActivityScopeFlags(activityWatchCmd)
+	activityWatchCmd.Flags().StringVar(&activityView, "view", "", "Filter by view: calls, system, all (default all); overridden by --type")
+	activityWatchCmd.Flags().StringVar(&activityFrom, "from", "", "Only print records at/after this time (RFC3339 or relative: -1h, -24h, -7d, -30d)")
+	activityWatchCmd.Flags().StringVar(&activityTo, "to", "", "Stop watching once this time has passed — must be an absolute RFC3339 timestamp still ahead of now (a relative shorthand like -30m always resolves to the past and is rejected)")
 
 	// Show command flags
 	activityShowCmd.Flags().BoolVar(&activityIncludeResponse, "include-response", false, "Show full response (may be large)")
@@ -763,50 +1314,48 @@ func init() {
 	// Summary command flags
 	activitySummaryCmd.Flags().StringVarP(&activityPeriod, "period", "p", "24h", "Time period: 1h, 24h, 7d, 30d")
 	activitySummaryCmd.Flags().StringVar(&activityGroupBy, "by", "", "Group by: server, tool, status")
+	// Spec 108 FR-031: summary honours profile, client and token. --client-name
+	// is registered so the refusal is the REST text, and always rejected.
+	registerActivityScopeFlags(activitySummaryCmd)
+	// Spec 109-k FR-075: --from is an alias of --period (accepts only -1h/-24h/-7d/-30d); no --view on summary.
+	activitySummaryCmd.Flags().StringVar(&activityFrom, "from", "", "Alias of --period, as a relative shorthand: -1h, -24h, -7d, -30d")
+	activitySummaryCmd.Flags().StringVar(&activityTo, "to", "", "Not supported on 'activity summary' (present for contract symmetry; always rejected)")
 
 	// Export command flags
-	activityExportCmd.Flags().StringVar(&activityExportOutput, "output", "", "Output file path (stdout if not specified)")
-	activityExportCmd.Flags().StringVarP(&activityExportFormat, "format", "f", "json", "Export format: json, csv")
+	activityExportCmd.Flags().StringVar(&activityExportOutput, "output", "", "Destination file path (stdout if not specified); not the global -o/--output format flag")
+	activityExportCmd.Flags().StringVarP(&activityExportFormat, "format", "f", "json", "Export file format: json (JSON Lines), csv")
 	activityExportCmd.Flags().BoolVar(&activityIncludeBodies, "include-bodies", false, "Include full request/response bodies")
 	// Reuse list filter flags for export
-	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change")
+	activityExportCmd.Flags().StringVarP(&activityType, "type", "t", "", "Filter by type (comma-separated): tool_call, system_start, system_stop, internal_tool_call, config_change, policy_decision, quarantine_change, server_change, preflight, profile_change")
 	activityExportCmd.Flags().StringVarP(&activityServer, "server", "s", "", "Filter by server name")
 	activityExportCmd.Flags().StringVar(&activityTool, "tool", "", "Filter by tool name")
-	activityExportCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status")
-	activityExportCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session ID")
+	activityExportCmd.Flags().StringVar(&activityStatus, "status", "", "Filter by status: success, error, blocked, rejected")
+	activityExportCmd.Flags().StringVar(&activitySessionID, "session", "", "Filter by session — a work session id (ws-...) or a raw MCP transport session id")
 	activityExportCmd.Flags().StringVar(&activityStartTime, "start-time", "", "Filter after this time (RFC3339)")
 	activityExportCmd.Flags().StringVar(&activityEndTime, "end-time", "", "Filter before this time (RFC3339)")
+	activityExportCmd.Flags().StringVar(&activityErrorClass, "error-class", "", "Export only failed tool calls of this error class")
+	activityExportCmd.Flags().StringVar(&activityFaultDomain, "fault-domain", "", "Export only failed tool calls of this fault domain: upstream, proxy, client")
+	activityExportCmd.Flags().StringVar(&activityParentID, "parent-id", "", "Export only child tool calls of a code_execution activity (value = the parent record request_id)")
+	registerActivityScopeFlags(activityExportCmd)
+	// Spec 109-k: view + --from/--to (url-filter-contract.md)
+	activityExportCmd.Flags().StringVar(&activityView, "view", "", "Filter by view: calls, system, all (default all); overridden by --type")
+	activityExportCmd.Flags().StringVar(&activityFrom, "from", "", "Filter records after this time (RFC3339 or relative: -1h, -24h, -7d, -30d); alias of --start-time")
+	activityExportCmd.Flags().StringVar(&activityTo, "to", "", "Filter records before this time (RFC3339 or relative); alias of --end-time")
 }
 
 // getActivityClient creates an HTTP client for the daemon
 func getActivityClient(logger *zap.SugaredLogger) (*cliclient.Client, error) {
-	// Load config - use explicit config file if provided via -c flag
-	var cfg *config.Config
-	var err error
-	if configFile != "" {
-		cfg, err = config.LoadFromFile(configFile)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadActivityConfig()
 	if err != nil {
 		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
-	// Try socket first, then HTTP
-	endpoint := socket.GetDefaultSocketPath(cfg.DataDir)
-	if cfg.Listen != "" {
-		// Check if socket exists (use IsSocketAvailable which handles unix:// prefix)
-		if !socket.IsSocketAvailable(endpoint) {
-			// Handle listen addresses like ":8080" (no host)
-			listen := cfg.Listen
-			if strings.HasPrefix(listen, ":") {
-				listen = "127.0.0.1" + listen
-			}
-			endpoint = "http://" + listen
-		}
+	// Try socket first, then TCP fallback (cfg.Listen + API key)
+	client, ok := newDaemonClient(cfg, logger)
+	if !ok {
+		return nil, fmt.Errorf("mcpproxy daemon is not reachable. Start with: mcpproxy serve")
 	}
-
-	return cliclient.NewClientWithAPIKey(endpoint, cfg.APIKey, logger), nil
+	return client, nil
 }
 
 // runActivityList implements the activity list command
@@ -829,24 +1378,68 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		sensitiveDataPtr = &sensitiveDataVal
 	}
 
+	// Spec 109-k: --view (overridden by an explicit --type), and --from/--to
+	// as aliases of --start-time/--end-time (url-filter-contract.md).
+	typeFilter := activityType
+	if typeFilter == "" {
+		viewType, err := activityViewTypeFilter(activityView)
+		if err != nil {
+			return outputActivityError(err, "INVALID_FILTER")
+		}
+		typeFilter = viewType
+	}
+	startTime := activityStartTime
+	if activityFrom != "" {
+		resolved, err := resolveActivityTime(activityFrom, time.Now())
+		if err != nil {
+			return outputActivityError(err, "INVALID_FILTER")
+		}
+		startTime = resolved
+	}
+	endTime := activityEndTime
+	if activityTo != "" {
+		resolved, err := resolveActivityTime(activityTo, time.Now())
+		if err != nil {
+			return outputActivityError(err, "INVALID_FILTER")
+		}
+		endTime = resolved
+	}
+	server, tool, err := splitActivityTool(activityServer, activityTool)
+	if err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+	scope, err := resolveActivityScope()
+	if err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+	if scope.Deprecation != "" {
+		fmt.Fprintln(os.Stderr, scope.Deprecation)
+	}
+
 	// Build filter
 	filter := &ActivityFilter{
-		Type:          activityType,
-		Server:        activityServer,
-		Tool:          activityTool,
+		Type:          typeFilter,
+		Server:        server,
+		Tool:          tool,
 		Status:        activityStatus,
 		SessionID:     activitySessionID,
-		StartTime:     activityStartTime,
-		EndTime:       activityEndTime,
+		StartTime:     startTime,
+		EndTime:       endTime,
 		Limit:         activityLimit,
 		Offset:        activityOffset,
 		IntentType:    activityIntentType,
 		RequestID:     activityRequestID,
+		ParentID:      activityParentID,
 		SensitiveData: sensitiveDataPtr,
 		DetectionType: activityDetectionType,
 		Severity:      activitySeverity,
-		AgentName:     activityAgent,
 		AuthType:      activityAuthType,
+		ErrorClass:    activityErrorClass,
+		FaultDomain:   activityFaultDomain,
+		Profile:       scope.Profile,
+		Client:        scope.Client,
+		Token:         scope.Token,
+		ClientName:    scope.ClientName,
 	}
 
 	if err := filter.Validate(); err != nil {
@@ -896,9 +1489,58 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		return nil
 	}
 
-	// Spec 026: Add SENSITIVE column to indicate activities with sensitive data detected
-	headers := []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "INTENT", "SENSITIVE", "STATUS", "DURATION", "TIME"}
-	rows := make([][]string, 0, len(activities))
+	headers, rows := activityListRows(activities)
+
+	result, err := formatter.FormatTable(headers, rows)
+	if err != nil {
+		return err
+	}
+	fmt.Print(result)
+
+	// Show pagination info
+	fmt.Printf("\nShowing %d of %d records", len(activities), total)
+	if filter.Offset > 0 || total > filter.Limit {
+		page := (filter.Offset / filter.Limit) + 1
+		fmt.Printf(" (page %d)", page)
+	}
+	fmt.Println()
+
+	return nil
+}
+
+// activityListHeaders is the `activity list` table header row. CLIENT and
+// PROFILE (Spec 108 FR-029) sit between TOOL and INTENT.
+var activityListHeaders = []string{"ID", "SRC", "TYPE", "SERVER", "TOOL", "CLIENT", "PROFILE", "INTENT", "SENSITIVE", "STATUS", "DURATION", "TIME"}
+
+// activityClientCell renders the CLIENT column: the client id when the record
+// carries a binding, else the client's self-reported name marked with "~"
+// (advisory: a client can claim any name), else "-".
+func activityClientCell(act map[string]interface{}) string {
+	if id := getStringField(act, "client_id"); id != "" {
+		return sanitizeCell(id, 24)
+	}
+	if name := getStringField(act, "client_name"); name != "" {
+		return "~" + sanitizeCell(name, 23)
+	}
+	return "-"
+}
+
+// activityProfileCell renders the PROFILE column: "name (source)", or "-".
+func activityProfileCell(act map[string]interface{}) string {
+	name := getStringField(act, "profile")
+	if name == "" {
+		return "-"
+	}
+	if src := getStringField(act, "profile_source"); src != "" {
+		return sanitizeCell(name, 32) + " (" + src + ")"
+	}
+	return sanitizeCell(name, 32)
+}
+
+// activityListRows builds the `activity list` table rows.
+func activityListRows(activities []map[string]interface{}) (headers []string, rows [][]string) {
+	headers = activityListHeaders
+	rows = make([][]string, 0, len(activities))
 
 	for _, act := range activities {
 		id := getStringField(act, "id")
@@ -909,6 +1551,15 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 		status := getStringField(act, "status")
 		durationMs := getIntField(act, "duration_ms")
 		timestamp := getStringField(act, "timestamp")
+
+		// Spec 098: a preflight is set-scoped — server_name/tool_name are empty
+		// by construction, so the TOOL cell carries the verdict summary instead
+		// of rendering an empty row the operator cannot interpret.
+		if tool == "" {
+			if summary := preflightActivitySummary(act); summary != "" {
+				tool = sanitizeCell(summary, maxPreflightSummaryCell)
+			}
+		}
 
 		// Extract intent from metadata (Spec 018)
 		intentStr := formatIntentIndicator(act)
@@ -935,7 +1586,11 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 			sourceIcon,
 			actType,
 			server,
-			tool,
+			// Activity transparency: a sub-call of a code_execution parent is
+			// indented so a mixed list reads as a tree, not a flat run of rows.
+			activityChildToolCell(act, tool),
+			activityClientCell(act),
+			activityProfileCell(act),
 			intentStr,
 			sensitiveStr, // Spec 026: Show sensitive data indicator
 			status,
@@ -943,26 +1598,39 @@ func runActivityList(cmd *cobra.Command, _ []string) error {
 			timeStr,
 		})
 	}
-
-	result, err := formatter.FormatTable(headers, rows)
-	if err != nil {
-		return err
-	}
-	fmt.Print(result)
-
-	// Show pagination info
-	fmt.Printf("\nShowing %d of %d records", len(activities), total)
-	if filter.Offset > 0 || total > filter.Limit {
-		page := (filter.Offset / filter.Limit) + 1
-		fmt.Printf(" (page %d)", page)
-	}
-	fmt.Println()
-
-	return nil
+	return headers, rows
 }
 
 // runActivityWatch implements the activity watch command
+// validateActivityWatchView rejects an invalid --view up front, exactly the
+// same rule 'activity list'/'export' already apply via activityViewTypeFilter
+// (an explicit --type overrides --view, so a simultaneously-bogus --view is
+// never actually used and must not block the command). Spec 109-k / zcode
+// review round 1, F6: 'activity watch' validated nothing at all — a typo
+// (`--view call`) silently streamed every event unfiltered instead of
+// erroring like its siblings do for the identical input. A standalone
+// function (rather than inlined in runActivityWatch) so a test can call it
+// without also starting the SSE connection.
+func validateActivityWatchView() error {
+	if activityType != "" {
+		return nil
+	}
+	_, err := activityViewTypeFilter(activityView)
+	return err
+}
+
 func runActivityWatch(cmd *cobra.Command, _ []string) error {
+	// Checked before the daemon connection so an invalid --view fails the
+	// same way regardless of whether a daemon is reachable.
+	if err := validateActivityWatchView(); err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+	// Conflicting scope flags (--token A --agent B) would otherwise make
+	// activityWatchScopeMatches reject every event and stream nothing forever.
+	if _, err := resolveActivityScope(); err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+
 	// Setup logger
 	cmdLogLevel, _ := cmd.Flags().GetString("log-level")
 	cmdLogToFile, _ := cmd.Flags().GetBool("log-to-file")
@@ -975,50 +1643,54 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = logger.Sync() }()
 
 	// Load config to get endpoint - use same logic as getActivityClient
-	var cfg *config.Config
-	if configFile != "" {
-		cfg, err = config.LoadFromFile(configFile)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadActivityConfig()
 	if err != nil {
 		return outputActivityError(err, "CONFIG_ERROR")
 	}
 
-	// Try socket first, then HTTP (same as getActivityClient)
-	endpoint := socket.GetDefaultSocketPath(cfg.DataDir)
-	if cfg.Listen != "" {
-		// Check if socket exists (use IsSocketAvailable which handles unix:// prefix)
-		if !socket.IsSocketAvailable(endpoint) {
-			// Handle listen addresses like ":8080" (no host)
-			listen := cfg.Listen
-			if strings.HasPrefix(listen, ":") {
-				listen = "127.0.0.1" + listen
-			}
-			endpoint = "http://" + listen
+	// Resolve the SSE target via the shared daemon detection: socket first,
+	// then probed TCP fallback with the env>config API key (QA finding
+	// CLI-SOCKET — same semantics as getActivityClient).
+	sseURL, apiKey, transport, ok := activityWatchTarget(cfg, logger.Sugar())
+	if !ok {
+		return outputActivityError(fmt.Errorf("mcpproxy daemon is not reachable. Start with: mcpproxy serve"), "CONNECTION_ERROR")
+	}
+
+	// Spec 109-k: resolve --from/--to (RFC3339 or relative shorthand) once, up
+	// front, into the package-level bounds displayActivityEvent applies.
+	//
+	// zcode round 1 (F7): reset to zero when the flag is absent, not just set
+	// when present — these are package-level vars shared across cobra
+	// commands (and, in tests, across in-process RunE calls), so a stale
+	// value from an earlier invocation must not leak into one that passed no
+	// --from/--to at all.
+	activityWatchFromTime = time.Time{}
+	activityWatchToTime = time.Time{}
+	if activityFrom != "" {
+		resolved, resolveErr := resolveActivityTime(activityFrom, time.Now())
+		if resolveErr != nil {
+			return outputActivityError(resolveErr, "INVALID_FILTER")
+		}
+		if activityWatchFromTime, err = time.Parse(time.RFC3339, resolved); err != nil {
+			return outputActivityError(err, "INVALID_FILTER")
 		}
 	}
-
-	// Create HTTP client with socket support
-	transport := &http.Transport{}
-	dialer, baseURL, dialErr := socket.CreateDialer(endpoint)
-	if dialErr != nil {
-		logger.Sugar().Warnw("Failed to create socket dialer, using TCP",
-			"endpoint", endpoint,
-			"error", dialErr)
-		baseURL = endpoint
-	}
-	if dialer != nil {
-		transport.DialContext = dialer
-		logger.Sugar().Debugw("Using socket/pipe connection for SSE", "endpoint", endpoint)
-	} else {
-		baseURL = endpoint
-	}
-
-	// Build SSE URL
-	sseURL := baseURL + "/events"
-	if cfg.APIKey != "" {
-		sseURL += "?apikey=" + cfg.APIKey
+	if activityTo != "" {
+		resolved, resolveErr := resolveActivityTime(activityTo, time.Now())
+		if resolveErr != nil {
+			return outputActivityError(resolveErr, "INVALID_FILTER")
+		}
+		if activityWatchToTime, err = time.Parse(time.RFC3339, resolved); err != nil {
+			return outputActivityError(err, "INVALID_FILTER")
+		}
+		// zcode round 1 (F5): a relative shorthand ("-30m") always resolves to
+		// the PAST, so "stop watching once --to has passed" would be true
+		// before the first frame ever arrives — a silent, immediate, empty
+		// exit despite the flag help advertising relative values. --to only
+		// means something for watch as a point still ahead of it.
+		if !activityWatchToTime.After(time.Now()) {
+			return outputActivityError(fmt.Errorf("--to must be in the future on 'activity watch' (got %s); a relative value like -30m always resolves to the past", activityTo), "INVALID_FILTER")
+		}
 	}
 
 	// Setup context with signal handling
@@ -1042,21 +1714,74 @@ func runActivityWatch(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Watch with reconnection
-	return watchWithReconnect(ctx, sseURL, outputFormat, logger.Sugar(), httpClient)
+	return watchWithReconnect(ctx, sseURL, apiKey, outputFormat, logger.Sugar(), httpClient)
+}
+
+// activityWatchTarget resolves the SSE URL, API key, and HTTP transport for
+// `activity watch` using the shared daemon detection (daemonEndpoint):
+// socket first (no API key needed), then probed TCP fallback with the
+// env>config API key. ok=false when no daemon is reachable.
+func activityWatchTarget(cfg *config.Config, logger *zap.SugaredLogger) (sseURL, apiKey string, transport *http.Transport, ok bool) {
+	endpoint, apiKey, ok := daemonEndpoint(cfg)
+	if !ok {
+		return "", "", nil, false
+	}
+	transport, baseURL := activityTransport(endpoint, logger)
+	return baseURL + "/events", apiKey, transport, true
+}
+
+// activityTransport builds an HTTP transport + base URL for a daemonEndpoint
+// result: unix://|npipe:// endpoints get a socket dialer, http(s) endpoints
+// are used as-is.
+func activityTransport(endpoint string, logger *zap.SugaredLogger) (*http.Transport, string) {
+	transport := &http.Transport{}
+	dialer, baseURL, err := socket.CreateDialer(endpoint)
+	if err != nil {
+		if logger != nil {
+			logger.Warnw("Failed to create socket dialer, using endpoint directly",
+				"endpoint", endpoint,
+				"error", err)
+		}
+		return transport, endpoint
+	}
+	if dialer == nil {
+		return transport, endpoint
+	}
+	transport.DialContext = dialer
+	if logger != nil {
+		logger.Debugw("Using socket/pipe connection", "endpoint", endpoint)
+	}
+	return transport, baseURL
 }
 
 // watchWithReconnect watches the SSE stream with automatic reconnection
-func watchWithReconnect(ctx context.Context, sseURL string, outputFormat string, logger *zap.SugaredLogger, httpClient *http.Client) error {
+func watchWithReconnect(ctx context.Context, sseURL, apiKey string, outputFormat string, logger *zap.SugaredLogger, httpClient *http.Client) error {
 	backoff := 1 * time.Second
 	maxBackoff := 30 * time.Second
 
 	for {
-		err := watchActivityStream(ctx, sseURL, outputFormat, logger, httpClient)
+		err := watchActivityStream(ctx, sseURL, apiKey, outputFormat, logger, httpClient)
 
 		select {
 		case <-ctx.Done():
 			return nil
 		default:
+		}
+
+		if errors.Is(err, errWatchToPastCutoff) {
+			// Spec 109-k FR-075: --to has passed; this is a clean stop, not a
+			// connection failure that should trigger a reconnect.
+			return nil
+		}
+
+		// zcode round 1 (F6): the cutoff was previously checked only inside
+		// watchActivityStream, which requires a successful connection to run
+		// at all — a daemon that is unreachable (or drops every connection
+		// attempt) made watch reconnect forever at the backoff ceiling,
+		// ignoring an elapsed --to entirely. Check it here too, on every
+		// connection failure, so a daemon-down watch still exits on time.
+		if err != nil && activityWatchShouldExit(activityWatchToTime, time.Now()) {
+			return nil
 		}
 
 		if err != nil {
@@ -1071,12 +1796,17 @@ func watchWithReconnect(ctx context.Context, sseURL string, outputFormat string,
 }
 
 // watchActivityStream connects to SSE and streams events
-func watchActivityStream(ctx context.Context, sseURL string, outputFormat string, _ *zap.SugaredLogger, httpClient *http.Client) error {
+func watchActivityStream(ctx context.Context, sseURL, apiKey string, outputFormat string, _ *zap.SugaredLogger, httpClient *http.Client) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sseURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Accept", "text/event-stream")
+	if apiKey != "" {
+		// TCP fallback: /events sits behind apiKeyAuthMiddleware. Header, not
+		// ?apikey= query param, so the key never lands in URLs/logs.
+		req.Header.Set("X-API-Key", apiKey)
+	}
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
@@ -1093,6 +1823,12 @@ func watchActivityStream(ctx context.Context, sseURL string, outputFormat string
 	var eventType, eventData string
 
 	for scanner.Scan() {
+		// Spec 109-k FR-075: once --to has passed, no further record could be
+		// in range — stop watching instead of reconnecting forever.
+		if activityWatchShouldExit(activityWatchToTime, time.Now()) {
+			return errWatchToPastCutoff
+		}
+
 		line := scanner.Text()
 
 		switch {
@@ -1111,17 +1847,20 @@ func watchActivityStream(ctx context.Context, sseURL string, outputFormat string
 		}
 	}
 
+	if activityWatchShouldExit(activityWatchToTime, time.Now()) {
+		return errWatchToPastCutoff
+	}
+
 	return scanner.Err()
 }
 
+// errWatchToPastCutoff signals that 'activity watch' stopped because --to has
+// passed (Spec 109-k FR-075) — a clean exit, not a connection failure, so
+// watchWithReconnect must not retry it.
+var errWatchToPastCutoff = errors.New("activity watch: --to cutoff reached")
+
 // displayActivityEvent formats and displays an SSE activity event
 func displayActivityEvent(eventType, eventData, outputFormat string) {
-	if outputFormat == "json" {
-		// NDJSON output
-		fmt.Println(eventData)
-		return
-	}
-
 	// Parse event data - SSE wraps the actual payload in {"payload": ..., "timestamp": ...}
 	var wrapper map[string]interface{}
 	if err := json.Unmarshal([]byte(eventData), &wrapper); err != nil {
@@ -1161,6 +1900,50 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 		if eventCategory != activityType {
 			return
 		}
+	} else if activityView != "" {
+		// Spec 109-k: --view is overridden by an explicit --type (checked above).
+		viewTypes, err := activityViewTypeFilter(activityView)
+		if err == nil && viewTypes != "" {
+			matched := false
+			for _, vt := range strings.Split(viewTypes, ",") {
+				if eventCategory == vt {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return
+			}
+		}
+	}
+
+	// Spec 108 FR-031: --profile/--client/--token/--client-name filter on the
+	// event's `attribution` object ("-" = none).
+	if !activityWatchScopeMatches(event) {
+		return
+	}
+
+	// Spec 109-k FR-075: --from/--to bound which streamed records print.
+	//
+	// zcode round 1 (F1): the SSE wrapper's "timestamp" is a Unix integer
+	// (server.go emits time.Now().Unix()/evt.Timestamp.Unix()), not an
+	// RFC3339 string — reading it with getStringField always got "", which
+	// activityWatchInRange's original string-based signature treated as
+	// "malformed, pass through", making the whole filter a silent no-op
+	// against a real daemon. eventTimestampFromWrapper reads it as a number.
+	if !activityWatchFromTime.IsZero() || !activityWatchToTime.IsZero() {
+		if !activityWatchInRange(eventTimestampFromWrapper(wrapper), activityWatchFromTime, activityWatchToTime) {
+			return
+		}
+	}
+
+	if outputFormat == "json" {
+		// NDJSON output — emitted only after the --server/--type/--view/
+		// --from/--to filters above have run, so `activity watch -o json`
+		// honors the same filter surface as the human-readable table output
+		// instead of silently streaming every event unfiltered.
+		fmt.Println(eventData)
+		return
 	}
 
 	// Skip successful call_tool_* internal tool calls to avoid duplicates
@@ -1199,6 +1982,32 @@ func displayActivityEvent(eventType, eventData, outputFormat string) {
 	fmt.Println(line)
 }
 
+// activityWatchScopeMatches applies the Spec 108 scope filters to one streamed
+// event. The values are read from the event's nested `attribution` object (an
+// event with none has an empty value for each), and "-" selects the empty
+// value, exactly as on the REST filters. --agent is the --token alias.
+func activityWatchScopeMatches(event map[string]interface{}) bool {
+	scope, err := resolveActivityScope()
+	if err != nil {
+		return false
+	}
+	attr, _ := event["attribution"].(map[string]interface{})
+	matches := func(want, key string) bool {
+		if want == "" {
+			return true
+		}
+		have := getStringField(attr, key)
+		if want == "-" {
+			return have == ""
+		}
+		return have == want
+	}
+	return matches(scope.Profile, "profile") &&
+		matches(scope.Client, "client_id") &&
+		matches(scope.Token, "token_name") &&
+		matches(scope.ClientName, "client_name")
+}
+
 // formatToolCallEvent formats a tool_call event for display
 func formatToolCallEvent(event map[string]interface{}, timestamp string) string {
 	source := getStringField(event, "source")
@@ -1212,11 +2021,16 @@ func formatToolCallEvent(event map[string]interface{}, timestamp string) string 
 	statusIcon := formatStatusIcon(status)
 
 	line := fmt.Sprintf("[%s] [%s] %s:%s %s %s", timestamp, sourceIcon, server, tool, statusIcon, formatActivityDuration(int64(durationMs)))
+	// Activity transparency: mark sub-calls made from inside a code_execution.
+	line += formatParentMarker(event)
 	if errMsg != "" {
 		line += " " + errMsg
 	}
-	if status == "blocked" {
+	switch status {
+	case "blocked":
 		line += " BLOCKED"
+	case "rejected":
+		line += " REJECTED (concurrency limit)"
 	}
 	return line
 }
@@ -1241,6 +2055,7 @@ func formatInternalToolCallEvent(event map[string]interface{}, timestamp string)
 	}
 
 	line := fmt.Sprintf("[%s] [INT] %s%s %s %s", timestamp, internalTool, target, statusIcon, formatActivityDuration(int64(durationMs)))
+	line += formatParentMarker(event)
 	if errMsg != "" {
 		line += " " + errMsg
 	}
@@ -1315,9 +2130,47 @@ func formatStatusIcon(status string) string {
 		return "\u2717" // X
 	case "blocked":
 		return "\u2298" // circle with slash
+	case "rejected":
+		// Spec 093: shed by a concurrency limit — backpressure, not a failure.
+		return "\u23f8" // pause
 	default:
 		return "?"
 	}
+}
+
+// activityChildToolCell renders the TOOL cell for a list row, marking records
+// that are sub-calls of a code_execution parent (ParentID == parent request_id).
+func activityChildToolCell(act map[string]interface{}, tool string) string {
+	if getStringField(act, "parent_id") == "" {
+		return tool
+	}
+	return "└ " + tool
+}
+
+// formatParentMarker renders the short "[child of <parent_id>]" suffix used by
+// `activity watch`, so a sub-call is recognisable in the live stream.
+func formatParentMarker(event map[string]interface{}) string {
+	parentID := getStringField(event, "parent_id")
+	if parentID == "" {
+		return ""
+	}
+	return fmt.Sprintf(" [child of %s]", parentID)
+}
+
+// isCodeExecutionParent reports whether a record is the code_execution activity
+// that sandboxed sub-calls hang off. Only the internal_tool_call record spawns
+// children; a same-named upstream tool_call does not.
+func isCodeExecutionParent(activity map[string]interface{}) bool {
+	if getStringField(activity, "type") != string(storage.ActivityTypeInternalToolCall) {
+		return false
+	}
+	if getStringField(activity, "tool_name") == "code_execution" {
+		return true
+	}
+	if metadata := getMapField(activity, "metadata"); metadata != nil {
+		return getStringField(metadata, "internal_tool_name") == "code_execution"
+	}
+	return false
 }
 
 // runActivityShow implements the activity show command
@@ -1391,15 +2244,41 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Session ID:   %s\n", sessionID)
 	}
 
+	// Spec 098 (SC-005): the request id is how a preflight record is joined to
+	// the tool calls of the same workflow (`activity list --request-id <id>`),
+	// so the detail view has to show it, not just accept it as a filter.
+	requestID := getStringField(activity, "request_id")
+	if requestID != "" {
+		fmt.Printf("Request ID:   %s\n", requestID)
+	}
+
+	// Activity transparency: both directions of the code_execution ↔ sub-call
+	// link are navigable from the detail view.
+	//   child  → parent:   the Parent ID line below
+	//   parent → children: the hint below it
+	if parentID := getStringField(activity, "parent_id"); parentID != "" {
+		fmt.Printf("Parent ID:    %s\n", parentID)
+		fmt.Printf("              (sub-call of a code_execution — 'mcpproxy activity list --request-id %s' shows the parent)\n", parentID)
+	} else if isCodeExecutionParent(activity) && requestID != "" {
+		fmt.Printf("\nUse 'mcpproxy activity list --parent-id %s' to see sub-calls.\n", requestID)
+	}
+
 	if errMsg := getStringField(activity, "error_message"); errMsg != "" {
 		fmt.Printf("Error:        %s\n", errMsg)
 	}
+	displayErrorClassLine(activity)
+
+	// Spec 108 FR-029: the profile, client and token in effect for the call.
+	displayScopeAttribution(activity)
 
 	// Intent information (Spec 018)
 	displayIntentSection(activity)
 
 	// Sensitive Data Detection (Spec 026)
 	displaySensitiveDataSection(activity)
+
+	// Preflight verdict + per-tool reasons (Spec 098)
+	displayPreflightSection(activity)
 
 	// Arguments
 	if args, ok := activity["arguments"].(map[string]interface{}); ok && len(args) > 0 {
@@ -1425,6 +2304,33 @@ func runActivityShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// displayScopeAttribution prints the Spec 108 attribution lines of one record:
+// Client, Profile, Token and Block reason, each only when present.
+func displayScopeAttribution(activity map[string]interface{}) {
+	if id := getStringField(activity, "client_id"); id != "" {
+		line := id
+		if name := getStringField(activity, "client_name"); name != "" {
+			line += " (reports itself as " + sanitizeCell(name, 40) + ")"
+		}
+		fmt.Printf("Client:       %s\n", line)
+	} else if name := getStringField(activity, "client_name"); name != "" {
+		fmt.Printf("Client:       ~%s (self-reported, no client binding)\n", sanitizeCell(name, 40))
+	}
+	if name := getStringField(activity, "profile"); name != "" {
+		line := name
+		if src := getStringField(activity, "profile_source"); src != "" {
+			line += " (" + src + ")"
+		}
+		fmt.Printf("Profile:      %s\n", line)
+	}
+	if token := getStringField(activity, "token_name"); token != "" {
+		fmt.Printf("Token:        %s\n", token)
+	}
+	if reason := getStringField(activity, "block_reason"); reason != "" {
+		fmt.Printf("Block reason: %s\n", reason)
+	}
+}
+
 // runActivitySummary implements the activity summary command
 func runActivitySummary(cmd *cobra.Command, _ []string) error {
 	// Setup logger
@@ -1437,6 +2343,32 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to setup logger: %w", err)
 	}
 	defer func() { _ = logger.Sync() }()
+
+	// Spec 109-k FR-075: --from is an alias of --period, accepting only the
+	// relative shorthand -1h/-24h/-7d/-30d; --to is not supported here.
+	if cmd.Flags().Changed("to") {
+		return outputActivityError(errors.New("--to is not supported on 'activity summary'; use --period or --from"), "INVALID_PERIOD")
+	}
+	if cmd.Flags().Changed("from") {
+		period, err := activityPeriodFromRelative(activityFrom)
+		if err != nil {
+			return outputActivityError(err, "INVALID_PERIOD")
+		}
+		activityPeriod = period
+	}
+
+	// Spec 108 FR-031: the summary filters on profile, client and token; the
+	// advisory --client-name is rejected with the REST text.
+	if cmd.Flags().Changed("client-name") {
+		return outputActivityError(errors.New(errActivityClientNameUnsupported), "INVALID_FILTER")
+	}
+	scope, err := resolveActivityScope()
+	if err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
+	}
+	if scope.Deprecation != "" {
+		fmt.Fprintln(os.Stderr, scope.Deprecation)
+	}
 
 	// Validate period
 	validPeriods := []string{"1h", "24h", "7d", "30d"}
@@ -1461,7 +2393,7 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	summary, err := client.GetActivitySummary(ctx, activityPeriod, activityGroupBy)
+	summary, err := client.GetActivitySummary(ctx, activityPeriod, activityGroupBy, activityScopeQuery(scope))
 	if err != nil {
 		return outputActivityError(err, "FETCH_ERROR")
 	}
@@ -1485,6 +2417,8 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 	// Table output
 	period := getStringField(summary, "period")
 	totalCount := getIntField(summary, "total_count")
+	callCount := getIntField(summary, "call_count")
+	callErrorCount := getIntField(summary, "call_error_count")
 	successCount := getIntField(summary, "success_count")
 	errorCount := getIntField(summary, "error_count")
 	blockedCount := getIntField(summary, "blocked_count")
@@ -1503,9 +2437,20 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 		blockedPct = float64(blockedCount) / float64(totalCount) * 100
 	}
 
+	// "Total Calls" used to print total_count, which counts every activity
+	// record — security scans, quarantine auto-approvals, system starts — so the
+	// CLI, the Web UI's Usage tab and the tray all reported different totals for
+	// the same window (audit finding F1, #1046). Events and calls are separate
+	// rows now, and the call row is the number every other surface shows.
+	callErrorPct := float64(0)
+	if callCount > 0 {
+		callErrorPct = float64(callErrorCount) / float64(callCount) * 100
+	}
+
 	fmt.Printf("%-15s %s\n", "METRIC", "VALUE")
 	fmt.Printf("%-15s %s\n", strings.Repeat("-", 15), strings.Repeat("-", 20))
-	fmt.Printf("%-15s %d\n", "Total Calls", totalCount)
+	fmt.Printf("%-15s %d\n", "Total Events", totalCount)
+	fmt.Printf("%-15s %d (%.1f%% failed)\n", "Calls", callCount, callErrorPct)
 	fmt.Printf("%-15s %d (%.1f%%)\n", "Successful", successCount, successPct)
 	fmt.Printf("%-15s %d (%.1f%%)\n", "Errors", errorCount, errorPct)
 	fmt.Printf("%-15s %d (%.1f%%)\n", "Blocked", blockedCount, blockedPct)
@@ -1542,6 +2487,116 @@ func runActivitySummary(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+// activityScopeQuery is the REST query for the summary's scope filters
+// (profile, client, token; never client_name).
+func activityScopeQuery(scope activityScope) url.Values {
+	q := url.Values{}
+	if scope.Profile != "" {
+		q.Set("profile", scope.Profile)
+	}
+	if scope.Client != "" {
+		q.Set("client", scope.Client)
+	}
+	if scope.Token != "" {
+		q.Set("token", scope.Token)
+	}
+	return q
+}
+
+// activityExportQueryParams builds the export query string from the export
+// flags. Export does NOT go through ActivityFilter.ToQueryParams, so every
+// filter flag has to be wired here as well or it is a silent no-op.
+func activityExportQueryParams() (url.Values, error) {
+	q := url.Values{}
+	q.Set("format", activityExportFormat)
+
+	// Spec 109-k: --view (overridden by an explicit --type).
+	typeFilter := activityType
+	if typeFilter == "" {
+		viewType, err := activityViewTypeFilter(activityView)
+		if err != nil {
+			return nil, err
+		}
+		typeFilter = viewType
+	}
+	if typeFilter != "" {
+		q.Set("type", typeFilter)
+	}
+
+	server, tool, err := splitActivityTool(activityServer, activityTool)
+	if err != nil {
+		return nil, err
+	}
+	if server != "" {
+		q.Set("server", server)
+	}
+	if tool != "" {
+		q.Set("tool", tool)
+	}
+	if activityStatus != "" {
+		q.Set("status", activityStatus)
+	}
+	if activitySessionID != "" {
+		q.Set(sessionQueryParam(activitySessionID), activitySessionID)
+	}
+
+	// Spec 109-k: --from/--to are aliases of --start-time/--end-time.
+	startTime := activityStartTime
+	if activityFrom != "" {
+		resolved, err := resolveActivityTime(activityFrom, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		startTime = resolved
+	}
+	if startTime != "" {
+		q.Set("start_time", startTime)
+	}
+	endTime := activityEndTime
+	if activityTo != "" {
+		resolved, err := resolveActivityTime(activityTo, time.Now())
+		if err != nil {
+			return nil, err
+		}
+		endTime = resolved
+	}
+	if endTime != "" {
+		q.Set("end_time", endTime)
+	}
+
+	// Activity transparency: export the sub-calls of one code_execution.
+	if activityParentID != "" {
+		q.Set("parent_id", activityParentID)
+	}
+	// Spec 113-c FR-046: call-error taxonomy filters.
+	if activityErrorClass != "" {
+		if !containsString(validErrorClasses, activityErrorClass) {
+			return nil, fmt.Errorf("invalid error-class '%s': must be one of %v", activityErrorClass, validErrorClasses)
+		}
+		q.Set("error_class", activityErrorClass)
+	}
+	if activityFaultDomain != "" {
+		if !containsString(validFaultDomains, activityFaultDomain) {
+			return nil, fmt.Errorf("invalid fault-domain '%s': must be one of %v", activityFaultDomain, validFaultDomains)
+		}
+		q.Set("fault_domain", activityFaultDomain)
+	}
+	// Spec 108 FR-031: scope filters (the advisory client name included).
+	scope, err := resolveActivityScope()
+	if err != nil {
+		return nil, err
+	}
+	for k, v := range map[string]string{"profile": scope.Profile, "client": scope.Client, "token": scope.Token, "client_name": scope.ClientName} {
+		if v != "" {
+			q.Set(k, v)
+		}
+	}
+	if activityIncludeBodies {
+		q.Set("include_bodies", "true")
+	}
+	return q, nil
+}
+
 // runActivityExport implements the activity export command
 func runActivityExport(cmd *cobra.Command, _ []string) error {
 	// Setup logger
@@ -1561,52 +2616,25 @@ func runActivityExport(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Load config - use explicit config file if provided via -c flag
-	var cfg *config.Config
-	if configFile != "" {
-		cfg, err = config.LoadFromFile(configFile)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadActivityConfig()
 	if err != nil {
 		return outputActivityError(err, "CONFIG_ERROR")
 	}
 
-	// Build export URL
-	listen := cfg.Listen
-	if strings.HasPrefix(listen, ":") {
-		listen = "127.0.0.1" + listen
+	// Resolve the daemon via the shared detection: socket first, then probed
+	// TCP fallback with the env>config API key (QA finding CLI-SOCKET).
+	endpoint, apiKey, ok := daemonEndpoint(cfg)
+	if !ok {
+		return outputActivityError(fmt.Errorf("mcpproxy daemon is not reachable. Start with: mcpproxy serve"), "CONNECTION_ERROR")
 	}
-	baseURL := "http://" + listen
+	transport, baseURL := activityTransport(endpoint, logger.Sugar())
 	exportURL := baseURL + "/api/v1/activity/export"
 
-	q := url.Values{}
-	q.Set("format", activityExportFormat)
-	if activityType != "" {
-		q.Set("type", activityType)
+	exportParams, err := activityExportQueryParams()
+	if err != nil {
+		return outputActivityError(err, "INVALID_FILTER")
 	}
-	if activityServer != "" {
-		q.Set("server", activityServer)
-	}
-	if activityTool != "" {
-		q.Set("tool", activityTool)
-	}
-	if activityStatus != "" {
-		q.Set("status", activityStatus)
-	}
-	if activitySessionID != "" {
-		q.Set("session_id", activitySessionID)
-	}
-	if activityStartTime != "" {
-		q.Set("start_time", activityStartTime)
-	}
-	if activityEndTime != "" {
-		q.Set("end_time", activityEndTime)
-	}
-	if activityIncludeBodies {
-		q.Set("include_bodies", "true")
-	}
-
-	exportURL += "?" + q.Encode()
+	exportURL += "?" + exportParams.Encode()
 
 	// Create HTTP request
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
@@ -1617,12 +2645,12 @@ func runActivityExport(cmd *cobra.Command, _ []string) error {
 		return outputActivityError(err, "REQUEST_ERROR")
 	}
 
-	// Add API key header
-	if cfg.APIKey != "" {
-		req.Header.Set("X-API-Key", cfg.APIKey)
+	// Add API key header (empty over socket — OS-level auth)
+	if apiKey != "" {
+		req.Header.Set("X-API-Key", apiKey)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Transport: transport}
 	resp, err := client.Do(req)
 	if err != nil {
 		return outputActivityError(err, "CONNECTION_ERROR")
@@ -1657,4 +2685,42 @@ func runActivityExport(cmd *cobra.Command, _ []string) error {
 	}
 
 	return nil
+}
+
+// sessionQueryParam picks the right filter for a --session value.
+//
+// Spec 082: the user-facing "session" is a WORK session (one client, one
+// project, across reconnects) and its ids are prefixed "ws-". Raw MCP transport
+// session ids are still accepted, so existing scripts keep working.
+func sessionQueryParam(v string) string {
+	if strings.HasPrefix(v, "ws-") {
+		return "work_session_id"
+	}
+	return "session_id"
+}
+
+// displayErrorClassLine prints the Spec 113-c call-error taxonomy of a failed
+// tool call as one "Error class" line: "<class> (fault: <domain>[, HTTP <n>])".
+// Prints nothing for a record that carries no class (a success, or a record
+// written before Spec 113).
+func displayErrorClassLine(activity map[string]interface{}) {
+	class := getStringField(activity, "error_class")
+	if class == "" {
+		return
+	}
+	detail := ""
+	if domain := getStringField(activity, "fault_domain"); domain != "" {
+		detail = "fault: " + domain
+	}
+	if status := getIntField(activity, "upstream_http_status"); status > 0 {
+		if detail != "" {
+			detail += ", "
+		}
+		detail += fmt.Sprintf("HTTP %d", status)
+	}
+	if detail == "" {
+		fmt.Printf("Error class:  %s\n", class)
+		return
+	}
+	fmt.Printf("Error class:  %s (%s)\n", class, detail)
 }

@@ -6,7 +6,11 @@ import (
 	"os"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 
 	"go.uber.org/zap"
 )
@@ -51,6 +55,160 @@ const (
 // parseOAuthError extracts structured error information from OAuth provider responses
 
 // Connect establishes connection to the upstream server
+// logSafeURL renders the configured upstream URL for a LOG FIELD, with its
+// query credentials masked (issue #1148).
+//
+// Connect() logs the URL on every attempt, to main.log and to the per-server
+// server-<name>.log — and `upstream_servers tail_log` hands the latter to any
+// MCP caller. A URL is one of the commonest places an MCP credential lives
+// (`?token=…`, an Azure SAS `sig=`, an AWS `X-Amz-Signature=`), so the value is
+// masked at the point it is written rather than only where it is read back:
+// the file outlives the process and is readable by anything with disk access.
+//
+// The host and path survive, which is what makes the line diagnostic.
+//
+// #1158 (review round 2, finding B6): this delegates to oauth.LogSafeURL — the
+// DEEP audit renderer — rather than the name-rule-only RedactURLQueryParams it
+// used before. logSafeAuthURL below already argued that case for the authorize
+// URL; the same argument applies verbatim to the configured URL this renders,
+// and this value is served to REST callers inside OAuthErrorDetails.ServerURL.
+func (c *Client) logSafeURL() string {
+	if c.config == nil {
+		return ""
+	}
+	return oauth.LogSafeURL(c.config.URL)
+}
+
+// logSafeAuthURL renders an OAuth AUTHORIZATION URL for a LOG FIELD or for
+// stdout (issue #1158).
+//
+// The authorize URL is the highest-frequency credential leak in the tree and
+// needs no debug flag to reach main.log: oauth.autoDetectResource returns
+// serverConfig.URL verbatim on every fallback branch (no resource_metadata in
+// WWW-Authenticate, metadata without a `resource` field, a failed fetch, any
+// 4xx/5xx), that value becomes extraParams["resource"], and every authorize-URL
+// builder splices each extra param into the query. The result was logged at
+// INFO and printed with fmt.Printf on every login attempt, so a configured
+// `https://host/mcp?token=SECRET` landed on disk and on the terminal.
+//
+// URLValueDeep rather than RedactURLQueryParams because the credential arrives
+// percent-encoded one level down (`resource=https%3A%2F%2Fhost%2Fmcp%3Ftoken%3D...`),
+// where neither the sensitive-parameter name rule nor secretPattern can see it.
+//
+// The authorize endpoint's scheme, host, path and its own non-secret parameters
+// survive, which is what lets an operator still diagnose the flow.
+func logSafeAuthURL(authURL string) string {
+	return oauth.AuditRedaction.URLValueDeep(authURL)
+}
+
+// logSafeArgs renders a child process's argument vector for a LOG FIELD
+// (issue #1158).
+//
+// Every spawn log line in this package previously used
+// shellwrap.RedactDockerArgs alone, which is a STRUCTURAL rule: it masks the
+// value half of every `-e KEY=VALUE` docker env injection but is blind to
+// `--api-key sk-live-...` and to a vendor-formatted credential sitting in a
+// positional argument. oauth.Redaction.SpawnArgv composes that rule with the
+// flag-name + value-shape rule, and also reaches inside the single
+// `-c "<whole command line>"` element the login-shell wrap produces - the form
+// every non-docker stdio server on macOS actually spawns as.
+//
+// AuditRedaction rather than LiveRedaction because these lines land in
+// ~/.mcpproxy/logs/main.log and server-<name>.log, which outlive the process
+// and are exported through `upstream_servers tail_log`: the `••••` marker
+// carries neither the secret's length nor its trailing bytes, unlike the
+// interactive `sk-****89` rendering the previous helper emitted.
+func logSafeArgs(args []string) []string {
+	return oauth.AuditRedaction.SpawnArgv(args)
+}
+
+// logSafeCommand renders a whole child command LINE for a LOG FIELD. See
+// logSafeArgs.
+func logSafeCommand(cmd string) string {
+	return oauth.AuditRedaction.SpawnCommandString(cmd)
+}
+
+// redactURLCredentialsInError strips URL-embedded credentials from an error's
+// TEXT while keeping the error itself intact for errors.Is/As and for the
+// substring classification the connect paths do (isAuthError, isConfigError,
+// "connection refused"): only the sensitive query values and userinfo
+// passwords are rewritten.
+//
+// Issue #1148, round 3: masking the `url` LOG FIELDS is not enough, because the
+// transport error carries the same URL inside its message —
+// `Post "http://host/mcp?token=…": dial tcp: connection refused` — and that
+// message is logged at Error level by the manager on every failed attempt, is
+// written to the per-server log, and is stored as the client's last error.
+// Redacting once, where the transport error enters mcpproxy, is what keeps a
+// future log site from re-leaking it.
+func redactURLCredentialsInError(err error) error {
+	if err == nil {
+		return nil
+	}
+	// #1158 (review round 2, live check): upgraded from RedactSensitiveData to
+	// ScrubUpstreamText, for the reason logSafeErrorField and its twin in
+	// internal/transport were upgraded — the NAME rule cannot see a credential
+	// under an unrecognised query-parameter name. A live run with
+	// `?opaque=ghp_…` in the configured URL still put the token in main.log 15
+	// times, because this ONE seam is what every downstream log site inherits:
+	// managed.Client, upstream.Manager, the supervisor and the runtime all
+	// zap.Error this value, and none of them can be fixed from here except
+	// through the string they are handed.
+	msg := oauth.ScrubUpstreamText(err.Error())
+	if msg == err.Error() {
+		return err
+	}
+	return &urlRedactedError{msg: msg, cause: err}
+}
+
+// urlRedactedError re-renders an error's message with credentials removed and
+// keeps the original reachable through Unwrap.
+type urlRedactedError struct {
+	msg   string
+	cause error
+}
+
+func (e *urlRedactedError) Error() string { return e.msg }
+func (e *urlRedactedError) Unwrap() error { return e.cause }
+
+// logSafeErrorField renders an error as a log field with any URL-embedded
+// credential removed. Use it instead of zap.Error on the connection paths.
+//
+// #1158: upgraded from RedactSensitiveData to ScrubUpstreamText. The name rule
+// alone cannot see a credential under an unrecognised parameter name
+// (`?opaque=ghp_…`), and a transport error is exactly the free-form,
+// originated-outside-mcpproxy text ScrubUpstreamText is documented for.
+func logSafeErrorField(err error) zap.Field {
+	if err == nil {
+		return zap.Skip()
+	}
+	return zap.String("error", oauth.ScrubUpstreamText(err.Error()))
+}
+
+// recordConnectionFailure writes the "Connection failed" record to the
+// per-server log. A connect error that re-emits the child's stderr
+// (childOutputError: the initialize-timeout and premature-exit enrichments
+// splice the recent-stderr buffer into their text) makes this record a
+// child-output record, and it is stamped as one (logs.ChildOutputField) so
+// the attributed reader applies the same container-subject rule it applies
+// to the direct stderr record: on a `docker run` name collision the buffer
+// names another server's container, and this record repeated it without the
+// provenance (Spec 105 FR-007, codex round 3). Ordinary connect errors are
+// recorded exactly as before.
+func (c *Client) recordConnectionFailure(err error) {
+	if c.upstreamLogger == nil {
+		return
+	}
+	fields := []zap.Field{
+		zap.String("transport", c.transportType),
+		zap.Error(err),
+	}
+	if embedsChildOutput(err) {
+		fields = append(fields, logs.ChildOutputField())
+	}
+	c.upstreamLogger.Error("Connection failed", fields...)
+}
+
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -76,20 +234,52 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.connecting = false
 	}()
 
+	// Spec 116 PR4: live-QA park point (quickstart L4, -tags qa_hooks only).
+	// It sits after the caller's last registry lookup and before anything is
+	// launched or dialed, the window #1564 describes.
+	if qahooks.ParkDial != nil {
+		qahooks.ParkDial(c.config.Name)
+	}
+	// A retired instance never starts a connection. This is only the early
+	// exit: every launch, dial and write below is refused by the gate itself.
+	if c.Gate().Retired() {
+		return fmt.Errorf("connect refused: %w", dialgate.ErrRetired)
+	}
+
 	// Reset connection state for fresh connection attempt
 	if c.connected {
 		c.logger.Info("🔄 Reconnecting after OAuth completion",
 			zap.String("server", c.config.Name))
 		c.connected = false
+		// Release the old stdio child from the gate before the close
+		// reaps it (Spec 116 PR4, review round 2): its process-group ID
+		// must not stay registered for a retirement to signal.
+		if c.stdioProc != nil {
+			c.stdioProc.Untrack()
+			c.stdioProc = nil
+		}
 		if c.client != nil {
 			c.client.Close()
 			c.client = nil
 		}
 	}
 
+	// Start each attempt with an empty rate-limit slate (#1040). Without this a
+	// hint recorded during an earlier attempt outlives it: a manual reconnect
+	// that then fails for an unrelated reason (connection refused, DNS) would be
+	// re-parked for the remainder of a window the upstream never repeated.
+	// Whatever this attempt observes is recorded again, on its own merits.
+	// A swap, not a Clear: a request still in flight on the superseded client
+	// keeps the recorder it was built with instead of writing into this attempt.
+	c.beginRetryAfterGeneration()
+
+	// The strategy that wins THIS attempt is recorded by runAuthStrategies;
+	// until then nothing is known about how (or whether) we are connected.
+	c.authStrategy.Store("")
+
 	c.logger.Info("Connecting to upstream MCP server",
 		zap.String("server", c.config.Name),
-		zap.String("url", c.config.URL),
+		zap.String("url", c.logSafeURL()),
 		zap.String("command", c.config.Command),
 		zap.String("protocol", c.config.Protocol))
 
@@ -100,7 +290,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	if c.upstreamLogger != nil {
 		c.upstreamLogger.Info("Starting connection attempt",
 			zap.String("transport", c.transportType),
-			zap.String("url", c.config.URL),
+			zap.String("url", c.logSafeURL()),
 			zap.String("command", c.config.Command),
 			zap.String("protocol", c.config.Protocol))
 	}
@@ -109,7 +299,7 @@ func (c *Client) Connect(ctx context.Context) error {
 	c.logger.Debug("🔍 Transport Type Determination",
 		zap.String("server", c.config.Name),
 		zap.String("command", c.config.Command),
-		zap.String("url", c.config.URL),
+		zap.String("url", c.logSafeURL()),
 		zap.String("protocol", c.config.Protocol),
 		zap.String("determined_transport", c.transportType))
 
@@ -145,22 +335,28 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 
 	if err != nil {
+		// #1148: the transport error text embeds the configured URL, credentials
+		// and all. Redact it HERE, before it is logged, returned, or stored as
+		// the client's last error — every consumer downstream inherits the safe
+		// rendering, and the original is still reachable through Unwrap.
+		err = redactURLCredentialsInError(err)
+
 		// Log connection failure to server-specific log
-		if c.upstreamLogger != nil {
-			c.upstreamLogger.Error("Connection failed",
-				zap.String("transport", c.transportType),
-				zap.Error(err))
-		}
+		c.recordConnectionFailure(err)
 
 		// CRITICAL FIX: Cleanup Docker containers when any connection type fails
 		// This prevents container accumulation when connections fail after Docker setup
 		if c.isDockerCommand {
-			c.logger.Warn("Connection failed for Docker command - cleaning up container",
+			// Spec 105 D8: name a container here only with evidence — see
+			// dockerContainerLogFields. c.containerName alone can be a
+			// generated name never observed from Docker.
+			fields := []zap.Field{
 				zap.String("server", c.config.Name),
 				zap.String("transport", c.transportType),
-				zap.String("container_name", c.containerName),
-				zap.String("container_id", c.containerID),
-				zap.Error(err))
+			}
+			fields = append(fields, dockerContainerLogFields(c.containerID, c.containerName, c.containerOwner)...)
+			fields = append(fields, zap.Error(err))
+			c.logger.Warn("Connection failed for Docker command - cleaning up container", fields...)
 
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), dockerCleanupTimeout)
 			defer cleanupCancel()
@@ -186,13 +382,17 @@ func (c *Client) Connect(ctx context.Context) error {
 				zap.String("server", c.config.Name),
 				zap.Int("pgid", c.processGroupID))
 
-			if err := killProcessGroup(c.processGroupID, c.logger, c.config.Name); err != nil {
+			if err := killProcessGroup(c.processGroupID, c.processCmd, c.logger, c.config.Name); err != nil {
 				c.logger.Error("Failed to clean up process group after connection failure",
 					zap.String("server", c.config.Name),
 					zap.Int("pgid", c.processGroupID),
 					zap.Error(err))
 			}
 			c.processGroupID = 0
+		}
+		if c.stdioProc != nil {
+			c.stdioProc.Untrack()
+			c.stdioProc = nil
 		}
 
 		// Stop any locally-launched upstream child the HTTP/SSE path
@@ -209,9 +409,17 @@ func (c *Client) Connect(ctx context.Context) error {
 		if c.launcherHandle != nil {
 			handle := c.launcherHandle
 			cidFile := c.launcherCIDFile
+			// The child stays tracked by the gate until Stop has reaped
+			// it, so a retirement during the grace period kills it at
+			// once (Spec 116 PR4).
+			proc := c.launcherProc
 			c.launcherHandle = nil
 			c.launcherCIDFile = ""
+			c.launcherProc = nil
 			c.mu.Unlock()
+			if hook := launcherBeforeStopHook; hook != nil {
+				hook()
+			}
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if stopErr := handle.Stop(stopCtx); stopErr != nil {
 				c.logger.Warn("error stopping launcher during connect-failure cleanup",
@@ -219,6 +427,7 @@ func (c *Client) Connect(ctx context.Context) error {
 					zap.Error(stopErr))
 			}
 			stopCancel()
+			proc.Untrack()
 			if cidFile != "" {
 				_ = os.Remove(cidFile)
 			}
@@ -235,6 +444,10 @@ func (c *Client) Connect(ctx context.Context) error {
 	// both client.Start() AND c.initialize() to ensure OAuth errors are properly detected
 
 	c.connected = true
+
+	// The upstream answered, so any rate-limit window we were holding is spent.
+	// Dropping it here keeps a stale hint from parking a future reconnect (#1040).
+	c.ClearRetryAfter()
 
 	// If we had an OAuth flow in progress and connection succeeded, mark OAuth as complete
 	if c.isOAuthInProgress() {

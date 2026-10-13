@@ -6,8 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tray"
 )
 
 // ClientInterface defines the methods required by ServerAdapter from the API client.
@@ -17,9 +19,11 @@ type ClientInterface interface {
 	GetInfo() (map[string]interface{}, error)
 	EnableServer(serverName string, enabled bool) error
 	QuarantineServer(serverName string) error
-	UnquarantineServer(serverName string) error
 	TriggerOAuthLogin(serverName string) error
 	StatusChannel() <-chan StatusUpdate
+	GetProfiles() ([]tray.ProfileInfo, error)
+	GetActiveProfile() (string, error)
+	SetActiveProfile(name string) error
 }
 
 // isServerHealthy returns true if the server is considered healthy.
@@ -122,7 +126,7 @@ func (a *ServerAdapter) GetStatus() interface{} {
 
 	// Fallback to empty if we couldn't get it
 	if listenAddr == "" {
-		listenAddr = ""  // Empty means tray will show "Status: Running" without address
+		listenAddr = "" // Empty means tray will show "Status: Running" without address
 	}
 
 	servers, serverErr := a.client.GetServers()
@@ -186,6 +190,21 @@ func (a *ServerAdapter) EventsChannel() <-chan internalRuntime.Event {
 	return nil
 }
 
+// GetProfiles returns the configured profiles for the tray switcher (Profiles v2 T5).
+func (a *ServerAdapter) GetProfiles() ([]tray.ProfileInfo, error) {
+	return a.client.GetProfiles()
+}
+
+// GetActiveProfile returns the server-level default active profile (empty = all servers).
+func (a *ServerAdapter) GetActiveProfile() (string, error) {
+	return a.client.GetActiveProfile()
+}
+
+// SetActiveProfile sets the server-level default active profile (empty clears it).
+func (a *ServerAdapter) SetActiveProfile(name string) error {
+	return a.client.SetActiveProfile(name)
+}
+
 // GetQuarantinedServers returns quarantined servers
 func (a *ServerAdapter) GetQuarantinedServers() ([]map[string]interface{}, error) {
 	servers, err := a.client.GetServers()
@@ -210,11 +229,6 @@ func (a *ServerAdapter) GetQuarantinedServers() ([]map[string]interface{}, error
 	return quarantined, nil
 }
 
-// UnquarantineServer removes a server from quarantine
-func (a *ServerAdapter) UnquarantineServer(serverName string) error {
-	return a.client.UnquarantineServer(serverName)
-}
-
 // EnableServer enables or disables a server
 func (a *ServerAdapter) EnableServer(serverName string, enabled bool) error {
 	return a.client.EnableServer(serverName, enabled)
@@ -225,7 +239,7 @@ func (a *ServerAdapter) QuarantineServer(serverName string, quarantined bool) er
 	if quarantined {
 		return a.client.QuarantineServer(serverName)
 	}
-	return a.client.UnquarantineServer(serverName)
+	return fmt.Errorf("removing quarantine requires review approval")
 }
 
 // GetAllServers returns all servers
@@ -262,6 +276,9 @@ func (a *ServerAdapter) GetAllServers() ([]map[string]interface{}, error) {
 				"summary":     server.Health.Summary,
 				"detail":      server.Health.Detail,
 				"action":      server.Health.Action,
+				"status":      server.Health.Status,
+				"usable":      server.Health.Usable,
+				"actions":     server.Health.Actions,
 			}
 		}
 
@@ -288,8 +305,20 @@ func (a *ServerAdapter) ReloadConfiguration() error {
 	return fmt.Errorf("ReloadConfiguration not yet supported via API")
 }
 
-// GetConfigPath returns the configuration file path
+// GetConfigPath returns the configuration file path core is running with.
+// The tray passes MCPPROXY_TRAY_CONFIG_PATH to core as --config (see
+// buildCoreArgs in main.go), so a tray-side consumer of this path must resolve
+// to that same override, not a hardcoded default. Falls back to the default
+// ~/.mcpproxy path when unset.
+//
+// This returns a PATH ONLY — the tray never parses the config file. Its sole
+// consumer is openConfigDir (internal/tray/tray.go), which reveals the
+// directory in the file manager. See TestTrayDoesNotReadConfigFile for the
+// enforced rule.
 func (a *ServerAdapter) GetConfigPath() string {
+	if cfg := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_CONFIG_PATH")); cfg != "" {
+		return cfg
+	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "~/.mcpproxy/mcp_config.json" // fallback

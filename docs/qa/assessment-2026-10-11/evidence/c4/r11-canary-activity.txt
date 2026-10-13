@@ -1,0 +1,111 @@
+######## def: call leak_read (error/result tail)
+      "text": "[map[text:config dump\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\naws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\nend type:text]]",
+  "isError": false
+## activity list tool_call
+ID                          SRC  TYPE       SERVER  TOOL       CLIENT  PROFILE  INTENT  SENSITIVE  STATUS   DURATION  TIME
+01M4Q796775TSP6HMYM2E0XX33  CLI  tool_call  fx      leak_read  -       -        📖       ⚠️         success  5ms       just now
+01M4Q7876K7F27YEAA5CCRYZX5  CLI  tool_call  fx      leak_read  -       -        📖       ⚠️         success  7ms       just now
+
+Showing 2 of 2 records
+## activity show 01M4Q796775TSP6HMYM2E0XX33
+Activity Details
+================
+
+ID:           01M4Q796775TSP6HMYM2E0XX33
+Type:         tool_call
+Source:       CLI (CLI command)
+Server:       fx
+Tool:         leak_read
+Status:       success
+Duration:     5ms
+Timestamp:    2026-10-12T04:52:35.687247Z
+Request ID:   1791780755649690000-fx-leak_read-4
+
+Intent Declaration:
+  Tool Variant:      call_tool_read
+  Operation Type:    📖 read
+
+Sensitive Data Detection:
+  Status:            ⚠ DETECTED
+  Scan Duration:     22ms
+
+  Detections:
+    [1] Type:        aws_access_key
+        Category:    cloud_credentials
+        Severity:    ☢ critical
+        Location:    response
+        Note:        Likely an example/test value
+
+    [2] Type:        aws_secret_key
+        Category:    cloud_credentials
+        Severity:    ☢ critical
+        Location:    response
+
+    [3] Type:        high_entropy_string
+        Category:    high_entropy
+        Severity:    ⚡ medium
+        Location:    response
+
+######## redact: call leak_read (error/result tail)
+      "text": "[map[text:config dump\naws_access_key_id = AKIAIOSFODNN7EXAMPLE\n[REDACTED:cloud_credentials]\nend type:text]]",
+  "isError": false
+## activity list tool_call
+ID                          SRC  TYPE       SERVER  TOOL       CLIENT  PROFILE  INTENT  SENSITIVE  STATUS   DURATION  TIME
+01M4Q796EMGFBJA9Y23AGM5VP5  CLI  tool_call  fx      leak_read  -       -        📖       ⚠️         success  0ms       just now
+01M4Q78FSRDDA1K3JZ79SYYW8N  CLI  tool_call  fx      leak_read  -       -        📖       ⚠️         success  6ms       just now
+
+Showing 2 of 2 records
+## activity show 01M4Q796EMGFBJA9Y23AGM5VP5
+Activity Details
+================
+
+ID:           01M4Q796EMGFBJA9Y23AGM5VP5
+Type:         tool_call
+Source:       CLI (CLI command)
+Server:       fx
+Tool:         leak_read
+Status:       success
+Duration:     0ms
+Timestamp:    2026-10-12T04:52:35.910846Z
+Request ID:   1791780755887800000-fx-leak_read-4
+
+Intent Declaration:
+  Tool Variant:      call_tool_read
+  Operation Type:    📖 read
+
+Sensitive Data Detection:
+  Status:            ⚠ DETECTED
+  Scan Duration:     13ms
+
+  Detections:
+    [1] Type:        aws_access_key
+        Category:    cloud_credentials
+        Severity:    ☢ critical
+        Location:    response
+        Note:        Likely an example/test value
+
+######## block: call leak_read (error/result tail)
+  -l, --log-level string     Log level (trace, debug, info, warn, error) (default "info")
+Error: failed to call tool via daemon: Failed to call tool: tool call failed: tool output blocked by sanitisation policy: critical sensitive data detected in tool output
+## activity list tool_call
+No activities found
+## activity show
+Usage:
+  mcpproxy activity show <id> [flags]
+
+Flags:
+  -h, --help               help for show
+      --include-response   Show full response (may be large)
+      --no-icons           Disable emoji icons in output (use text instead)
+
+Global Flags:
+  -c, --config string      Configuration file path
+  -d, --data-dir string    Data directory path (default: ~/.mcpproxy)
+      --help-json          Output help information as JSON
+      --json               Shorthand for -o json
+      --log-dir string     Custom log directory path (overrides standard OS location)
+      --log-level string   Log level (trace, debug, info, warn, error) - defaults: server=info, other commands=warn
+      --log-to-file        Enable logging to file in standard OS location (default: console only)
+  -o, --output string      Output format: table, json, yaml (terminal rendering; activity export uses --format for its file format)
+
+Error: accepts 1 arg(s), received 0

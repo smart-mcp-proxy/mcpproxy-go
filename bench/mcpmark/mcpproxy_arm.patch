@@ -1,0 +1,196 @@
+mcpproxy benchmark arm for MCPMark — spec 103 US2 (T047)
+
+Applies to: https://github.com/eval-sys/mcpmark
+Pinned commit: cd45b7f57923b9b3985467f5139927575f83141c
+Apply with:   git -C <mcpmark-clone> apply /path/to/mcpproxy_arm.patch
+
+WHAT THIS CHANGES
+  One seam, mirrored in the two places MCPMark defines it: the MCP server
+  factory. An env-gated branch returns an HTTP MCP server pointed at
+  mcpproxy instead of spawning the service's own stdio/HTTP server.
+
+WHY IT IS A GATE, NOT A REPLACEMENT
+  With MCPPROXY_MCP_URL unset the patched files behave exactly as upstream.
+  That is deliberate: FR-020's baseline arm is the same agent running the
+  same tasks with all tools loaded directly, so it must run the SAME code,
+  differing only in environment. A patch that could only be applied for the
+  proxy arms would make itself a variable in its own comparison.
+
+WHAT IT DOES NOT CHANGE
+  Nothing in the agent loop, the task set, the state managers or the
+  verification scripts. list_tools() and call_tool() are the only calls the
+  loop makes against the server object, and both are satisfied by
+  MCPHttpServer unchanged. See bench/mcpmark/README.md for the per-task
+  service-state seam this patch deliberately does NOT close.
+
+diff --git a/src/agents/base_agent.py b/src/agents/base_agent.py
+index dcf7fcd..6c0aa58 100644
+--- a/src/agents/base_agent.py
++++ b/src/agents/base_agent.py
+@@ -5,6 +5,7 @@ from __future__ import annotations
+ import asyncio
+ import copy
+ import json
++import os
+ import uuid
+ from abc import ABC, abstractmethod
+ from typing import Any, Dict, List, Optional, Callable
+@@ -162,7 +163,72 @@ class BaseMCPAgent(ABC):
+     # MCP server management
+     # ------------------------------------------------------------------
+ 
++    # ------------------------------------------------------------------
++    # mcpproxy benchmark arm (external: mcpproxy-go spec 103, bench/mcpmark/)
++    # ------------------------------------------------------------------
++
++    def _mcpproxy_arm_server(self):
++        """Return an MCP server pointed at mcpproxy, or None when the arm is off.
++
++        WHY THIS IS A GATE AND NOT A REPLACEMENT: the benchmark's denominator
++        (spec 103 FR-020) is the same agent running the same tasks with every
++        upstream tool loaded directly. If the baseline ran unpatched code and
++        the proxy arms ran patched code, the patch itself would be a variable
++        in the comparison. With MCPPROXY_MCP_URL unset this returns None and
++        the stock factory below runs byte-for-byte as upstream, so both arms
++        execute the same file and only the environment differs.
++
++        The gate is the URL rather than a boolean because the URL is also the
++        cell selector: mcpproxy mounts one endpoint per routing mode
++        (/mcp/call, /mcp/all, /mcp/code), all of them permanently, so a matrix
++        cell is chosen by pointing this variable at a different path on the
++        same long-lived instance.
++
++        Env:
++          MCPPROXY_MCP_URL      e.g. http://127.0.0.1:18080/mcp/call  (the gate)
++          MCPPROXY_API_KEY      mcpproxy REST/MCP API key (optional)
++          MCPPROXY_MCP_TIMEOUT  seconds; defaults to the suite's own timeout
++        """
++        url = os.environ.get("MCPPROXY_MCP_URL", "").strip()
++        if not url:
++            return None
++
++        headers = {"User-Agent": "MCPMark/1.0 (mcpproxy-bench)"}
++        api_key = os.environ.get("MCPPROXY_API_KEY", "").strip()
++        if api_key:
++            # Header, never ?apikey=. The query parameter is a Web-UI-only
++            # convenience on mcpproxy and would write the key into every
++            # access log and every recorded activity URL.
++            headers["X-API-Key"] = api_key
++
++        # MCPHttpServer's own default is 30 s, and that one value covers
++        # initialize, list_tools AND every call_tool. Behind a proxy the first
++        # contact also brings up N upstream servers (npx/pipx/docker cold
++        # starts), which routinely exceeds 30 s and would fail the run as a
++        # transport error rather than a task failure -- an infrastructure
++        # retry misread as a corrective one biases the very rates this
++        # benchmark measures. Default to the suite's own DEFAULT_TIMEOUT.
++        try:
++            timeout = int(os.environ.get("MCPPROXY_MCP_TIMEOUT", self.DEFAULT_TIMEOUT))
++        except ValueError:
++            timeout = self.DEFAULT_TIMEOUT
++
++        logger.info(
++            "| Using mcpproxy arm: %s (service=%s, auth=%s, timeout=%ss)",
++            url,
++            self.mcp_service,
++            "x-api-key" if api_key else "none",
++            timeout,
++        )
++        return MCPHttpServer(url=url, headers=headers, timeout=timeout)
++
+     async def _create_mcp_server(self) -> Any:
++        # mcpproxy benchmark arm: on when MCPPROXY_MCP_URL is set, otherwise
++        # this is a no-op and the stock dispatch below runs untouched.
++        proxied = self._mcpproxy_arm_server()
++        if proxied is not None:
++            return proxied
++
+         if self.mcp_service in self.STDIO_SERVICES:
+             return self._create_stdio_server()
+         if self.mcp_service in self.HTTP_SERVICES:
+diff --git a/src/agents/mcpmark_agent.py b/src/agents/mcpmark_agent.py
+index ef9b5df..baac56f 100644
+--- a/src/agents/mcpmark_agent.py
++++ b/src/agents/mcpmark_agent.py
+@@ -7,6 +7,7 @@ Unified agent using LiteLLM for all model interactions with minimal MCP support.
+ 
+ import asyncio
+ import json
++import os
+ import time
+ from typing import Any, Dict, List, Optional, Callable
+ from pydantic import AnyUrl
+@@ -1099,8 +1100,73 @@ class MCPMarkAgent(BaseMCPAgent):
+ 
+     # ==================== MCP Server Management ====================
+ 
++    # ------------------------------------------------------------------
++    # mcpproxy benchmark arm (external: mcpproxy-go spec 103, bench/mcpmark/)
++    # ------------------------------------------------------------------
++
++    def _mcpproxy_arm_server(self):
++        """Return an MCP server pointed at mcpproxy, or None when the arm is off.
++
++        WHY THIS IS A GATE AND NOT A REPLACEMENT: the benchmark's denominator
++        (spec 103 FR-020) is the same agent running the same tasks with every
++        upstream tool loaded directly. If the baseline ran unpatched code and
++        the proxy arms ran patched code, the patch itself would be a variable
++        in the comparison. With MCPPROXY_MCP_URL unset this returns None and
++        the stock factory below runs byte-for-byte as upstream, so both arms
++        execute the same file and only the environment differs.
++
++        The gate is the URL rather than a boolean because the URL is also the
++        cell selector: mcpproxy mounts one endpoint per routing mode
++        (/mcp/call, /mcp/all, /mcp/code), all of them permanently, so a matrix
++        cell is chosen by pointing this variable at a different path on the
++        same long-lived instance.
++
++        Env:
++          MCPPROXY_MCP_URL      e.g. http://127.0.0.1:18080/mcp/call  (the gate)
++          MCPPROXY_API_KEY      mcpproxy REST/MCP API key (optional)
++          MCPPROXY_MCP_TIMEOUT  seconds; defaults to the suite's own timeout
++        """
++        url = os.environ.get("MCPPROXY_MCP_URL", "").strip()
++        if not url:
++            return None
++
++        headers = {"User-Agent": "MCPMark/1.0 (mcpproxy-bench)"}
++        api_key = os.environ.get("MCPPROXY_API_KEY", "").strip()
++        if api_key:
++            # Header, never ?apikey=. The query parameter is a Web-UI-only
++            # convenience on mcpproxy and would write the key into every
++            # access log and every recorded activity URL.
++            headers["X-API-Key"] = api_key
++
++        # MCPHttpServer's own default is 30 s, and that one value covers
++        # initialize, list_tools AND every call_tool. Behind a proxy the first
++        # contact also brings up N upstream servers (npx/pipx/docker cold
++        # starts), which routinely exceeds 30 s and would fail the run as a
++        # transport error rather than a task failure -- an infrastructure
++        # retry misread as a corrective one biases the very rates this
++        # benchmark measures. Default to the suite's own DEFAULT_TIMEOUT.
++        try:
++            timeout = int(os.environ.get("MCPPROXY_MCP_TIMEOUT", self.DEFAULT_TIMEOUT))
++        except ValueError:
++            timeout = self.DEFAULT_TIMEOUT
++
++        logger.info(
++            "| Using mcpproxy arm: %s (service=%s, auth=%s, timeout=%ss)",
++            url,
++            self.mcp_service,
++            "x-api-key" if api_key else "none",
++            timeout,
++        )
++        return MCPHttpServer(url=url, headers=headers, timeout=timeout)
++
+     async def _create_mcp_server(self) -> Any:
+         """Create and return an MCP server instance."""
++        # mcpproxy benchmark arm: on when MCPPROXY_MCP_URL is set, otherwise
++        # this is a no-op and the stock dispatch below runs untouched.
++        proxied = self._mcpproxy_arm_server()
++        if proxied is not None:
++            return proxied
++
+         if self.mcp_service in self.STDIO_SERVICES:
+             return self._create_stdio_server()
+         elif self.mcp_service in self.HTTP_SERVICES:

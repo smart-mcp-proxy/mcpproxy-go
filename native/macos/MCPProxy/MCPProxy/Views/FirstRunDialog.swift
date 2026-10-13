@@ -41,7 +41,21 @@ func markFirstRunCompleted() {
 ///   • Continue button persists the choice and dismisses.
 struct FirstRunDialog: View {
     @Binding var launchAtLogin: Bool
+    /// Spec 109 FR-044a: `.offEnv` when the app's environment disables
+    /// telemetry, so the welcome says it is off and why.
+    var telemetryNotice: FirstRunTelemetryNotice = .notice
     let onContinue: () -> Void
+
+    /// The telemetry sentence for the current notice mode.
+    var telemetryText: String {
+        switch telemetryNotice {
+        case .notice:
+            return "MCPProxy sends anonymous usage statistics to help improve the product. No personal data is collected — you can turn this off anytime in Settings."
+        case .offEnv(let reason):
+            return TelemetryNotice.offLine(
+                state: TelemetryStateDTO(enabled: false, source: "env", disabledBy: reason))
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -69,6 +83,16 @@ struct FirstRunDialog: View {
             .toggleStyle(.checkbox)
             .accessibilityIdentifier("firstrun-launch-at-login")
 
+            // Spec 109-b FR-044: the telemetry notice must appear in-flow
+            // somewhere in first-run/onboarding, not only after the fact in
+            // Settings — this is the macOS app's first-run surface, the
+            // direct counterpart of the Web UI wizard's own one-liner.
+            Text(telemetryText)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("firstrun-telemetry-notice")
+
             HStack {
                 Spacer()
                 Button("Continue") {
@@ -80,8 +104,25 @@ struct FirstRunDialog: View {
             .padding(.top, 8)
         }
         .padding(20)
-        .frame(width: 460)
+        .frame(width: firstRunDialogWidth)
     }
+}
+
+// MARK: - Sizing
+
+/// Fixed content width of the first-run dialog.
+let firstRunDialogWidth: CGFloat = 460
+
+/// Height the dialog never shrinks below.
+let firstRunDialogMinHeight: CGFloat = 300
+
+/// Window content size for the dialog given the SwiftUI content's fitting
+/// height. The height used to be a hard-coded 300, which clips the copy (the
+/// telemetry notice in particular) when the user's text size or a longer
+/// localisation makes the content taller; now the window grows to fit, and
+/// never drops below the original 300.
+func firstRunDialogContentSize(fittingHeight: CGFloat) -> NSSize {
+    NSSize(width: firstRunDialogWidth, height: max(firstRunDialogMinHeight, ceil(fittingHeight)))
 }
 
 // MARK: - Presentation Helper
@@ -112,9 +153,13 @@ func presentFirstRunDialogIfNeeded() {
     // Build the dialog inside an NSHostingController so we can drive the
     // window imperatively (modal NSApp.runModal → block-free dismissal).
     let host = NSHostingController(
-        rootView: FirstRunDialogBinding(choice: choice)
+        rootView: FirstRunDialogBinding(
+            choice: choice, telemetryNotice: FirstRunTelemetryNotice.resolve())
     )
-    host.view.frame = NSRect(x: 0, y: 0, width: 460, height: 260)
+    host.view.layoutSubtreeIfNeeded()
+    host.view.frame = NSRect(
+        origin: .zero,
+        size: firstRunDialogContentSize(fittingHeight: host.view.fittingSize.height))
 
     let window = NSWindow(contentViewController: host)
     window.title = "Welcome to MCPProxy"
@@ -148,11 +193,13 @@ func presentFirstRunDialogIfNeeded() {
 /// Choice, and wires the Continue button to `NSApp.stopModal`.
 private struct FirstRunDialogBinding: View {
     let choice: FirstRunDialogChoice
+    let telemetryNotice: FirstRunTelemetryNotice
     @State private var launchAtLogin: Bool = true
 
     var body: some View {
         FirstRunDialog(
             launchAtLogin: $launchAtLogin,
+            telemetryNotice: telemetryNotice,
             onContinue: {
                 choice.launchAtLogin = launchAtLogin
                 NSApp.stopModal()

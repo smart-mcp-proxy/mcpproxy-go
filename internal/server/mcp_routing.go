@@ -3,25 +3,66 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/audit"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/branding"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/callerr"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 const (
 	// DirectModeToolSeparator is the separator between server name and tool name in direct mode.
 	// Using double underscore to avoid conflicts with single underscores in tool names.
 	DirectModeToolSeparator = "__"
+
+	// deferredDirectInputSchema is the minimal permissive input schema every
+	// deferred direct entry advertises (Spec 102 FR-004). The BYTES are
+	// normative: never literal "{}" (which some strict clients reject as a
+	// schema), never absent, and never carrying the upstream properties or
+	// required list.
+	deferredDirectInputSchema = `{"type":"object"}`
 )
+
+// safeTruncateBytes returns the largest cut length <= limit at which s can be
+// sliced without splitting a multi-byte UTF-8 rune. Direct-mode truncation uses
+// a raw byte budget (ToolResponseLimit); cutting at the raw offset can land in
+// the middle of a multi-byte character and emit invalid UTF-8 in the forwarded
+// TextContent, which downstream JSON encoders/clients reject or render as a
+// replacement char. Callers must ensure limit < len(s) (i.e. truncation is
+// actually needed) before calling.
+func safeTruncateBytes(s string, limit int) int {
+	if limit <= 0 {
+		return 0
+	}
+	if limit >= len(s) {
+		return len(s)
+	}
+	// Back up to the start of the rune that straddles the cut point.
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return cut
+}
 
 // ParseDirectToolName parses a direct mode tool name (serverName__toolName) into server and tool components.
 // Splits on the FIRST occurrence of "__" only, so tool names containing "__" are preserved.
@@ -39,104 +80,512 @@ func FormatDirectToolName(serverName, toolName string) string {
 	return serverName + DirectModeToolSeparator + toolName
 }
 
+// FormatDirectPromptName formats a server name and prompt name using the
+// same "__" separator convention as FormatDirectToolName.
+func FormatDirectPromptName(serverName, promptName string) string {
+	return FormatDirectToolName(serverName, promptName)
+}
+
 // buildDirectModeTools builds MCP tool definitions for direct mode.
 // Each upstream tool is exposed directly with serverName__toolName naming.
 // Only tools from connected, enabled, non-quarantined servers are included.
-func (p *MCPProxyServer) buildDirectModeTools() []mcpserver.ServerTool {
+func (p *MCPProxyServer) buildDirectModeTools() ([]mcpserver.ServerTool, *directCatalog) {
 	ctx := context.Background()
 
-	// Use DiscoverTools which already filters for connected, enabled, non-quarantined servers
-	tools, err := p.upstreamManager.DiscoverTools(ctx)
-	if err != nil {
-		p.setDirectToolPermissions(nil)
-		p.logger.Error("failed to discover tools for direct mode", zap.Error(err))
-		return nil
+	// Resolved ONCE for this rebuild and stamped on whichever catalog we end up
+	// publishing, including the failure paths: T069 requires a flip made while
+	// discovery is failing to still record the new mode, or the guarded reload
+	// would see no drift afterwards and the operator's change would be lost
+	// until something unrelated happened to rebuild.
+	//
+	// The consequence, accepted rather than hidden: after such a failure the
+	// stamp says "deferred" although nothing was ever RENDERED deferred, so a
+	// later config reload sees no drift and will not retry. Recovery does not
+	// depend on the reload path — the empty listing is itself the problem, and
+	// the servers.changed that fixes discovery rebuilds unconditionally, in
+	// whatever mode is then configured. Making the guard retry instead would
+	// mean rebuilding on every reload for as long as discovery stayed down.
+	mode := p.effectiveDirectToolResponseMode()
+
+	// DiscoverTools already filters to connected, enabled, non-quarantined
+	// servers — server-LEVEL filtering only. Tool-level state (pending/changed
+	// approval) is applied later by the callability filter.
+	// The initial rebuild (D15) runs during construction, so this can be reached
+	// before the upstream manager is wired. Treat it exactly like a discovery
+	// failure rather than panicking: built-ins still register, the catalog is
+	// still published, and the next servers.changed fills in the upstreams.
+	if p.upstreamManager == nil {
+		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger)
 	}
 
-	serverTools := make([]mcpserver.ServerTool, 0, len(tools))
-	directToolPerms := make(map[string]string, len(tools))
-	for _, tool := range tools {
-		directName := FormatDirectToolName(tool.ServerName, tool.Name)
-		directToolPerms[directName] = requiredPermissionForDirectTool(tool.Annotations)
+	tools, err := p.upstreamManager.DiscoverTools(ctx)
+	if err != nil {
+		p.logger.Error("failed to discover tools for direct mode", zap.Error(err))
+		// A NON-NIL empty catalog, not nil (D13 rule 2). Returning nil here — as
+		// this path used to, via setDirectToolPermissions(nil) — would tell the
+		// discovery filters "no catalog yet, do not deny" at exactly the moment
+		// upstream discovery is failing, flipping them from deny-on-miss to
+		// allow-everything.
+		return p.withDirectBuiltins(nil), emptyDirectCatalog(mode, p.logger)
+	}
 
-		// Build MCP tool options
-		opts := []mcp.ToolOption{
-			mcp.WithDescription(fmt.Sprintf("[%s] %s", tool.ServerName, tool.Description)),
+	cat := buildDirectCatalog(tools, p.logger)
+	cat.mode = mode
+	return p.withDirectBuiltins(p.renderDirectTools(cat)), cat
+}
+
+// builtinDirectToolNames is the explicit, POSITIVE set of tool names this
+// proxy serves on the direct surface itself, as opposed to an upstream
+// projection. Populated directly from the same constructors withDirectBuiltins
+// registers (buildDescribeToolTool, …) so the two can never drift apart.
+//
+// Spec 105 FR-008 (FR008-G2): a name is a built-in ONLY when it is in this
+// set. Earlier code inferred "built-in" from a display name that failed to
+// PARSE as server__tool — but a catalog-admitted upstream tool with an empty
+// raw name renders as "server__", which also fails to parse, and would have
+// been misclassified as a built-in by that inference alone (see
+// TestResolveDirectTool_EmptyToolNameIsNotABuiltin's history). Structural
+// inference is gone; only this explicit set — and a successful catalog
+// lookup — identify a name.
+var builtinDirectToolNames = map[string]struct{}{
+	buildDescribeToolTool().Name: {},
+}
+
+// withDirectBuiltins appends the tools mcpproxy serves itself on the direct
+// surface (FR-009/FR-018).
+//
+// It is applied on EVERY return path of buildDirectModeTools, including the
+// failure paths, because SetTools REPLACES the whole registry: a rebuild that
+// omitted the built-ins would delete describe_tool from the live surface until
+// some later successful rebuild happened to restore it. A built-in that
+// disappears on the first upstream hiccup is not a built-in.
+//
+// The DEFINITION is the shared one — the schemas and response shape must not
+// drift between surfaces — but the HANDLER is the direct-surface variant, which
+// resolves ids through the published catalog rather than the search index
+// (FR-011). Which corpus an id resolves against is a property of the
+// registration, not of the request, so it is bound here rather than sniffed
+// from the context.
+func (p *MCPProxyServer) withDirectBuiltins(tools []mcpserver.ServerTool) []mcpserver.ServerTool {
+	return append(tools, mcpserver.ServerTool{
+		Tool:    buildDescribeToolTool(),
+		Handler: p.describeToolHandler(describeSurfaceDirect),
+	})
+}
+
+// renderDirectTools turns a catalog into the registrable tool set.
+//
+// It renders FROM the catalog rather than from the raw projection, so the
+// listing and the catalog cannot disagree by construction: a display-name
+// collision withheld by the catalog is absent from the listing for free, rather
+// than needing the same rule implemented twice.
+func (p *MCPProxyServer) renderDirectTools(cat *directCatalog) []mcpserver.ServerTool {
+	names := cat.DisplayNames()
+	serverTools := make([]mcpserver.ServerTool, 0, len(names))
+
+	// Read from the SNAPSHOT, not from config. Every entry of a published
+	// generation must share one serialization — resolving per entry would let a
+	// reload landing mid-loop publish a listing that straddles both, which no
+	// consumer (or test) can describe — and the same stamp is what the FR-014
+	// reload guard later compares against, so the render and the guard cannot
+	// disagree about what was published.
+	deferred := cat.Mode() == config.DirectToolResponseModeDeferred
+
+	// Counted and logged because a signature miss is INVISIBLE in the payload —
+	// a deferred entry without a suffix looks exactly like a tool whose schema
+	// happens to be empty. Without this, "deferral is on but nothing has
+	// signatures" (the rebuild ran before the index warmed it) is indistinguishable
+	// from "the signatures are all empty", and the first is a real, recoverable
+	// operational state (FR-005).
+	signatureMisses := 0
+
+	for _, name := range names {
+		entry, ok := cat.Lookup(name)
+		if !ok {
+			continue
 		}
 
-		// Apply annotations from upstream tool
-		if tool.Annotations != nil {
-			if tool.Annotations.Title != "" {
-				opts = append(opts, mcp.WithTitleAnnotation(tool.Annotations.Title))
+		rendered := fmt.Sprintf("[%s] %s", entry.ServerName, entry.Description)
+
+		var mcpTool mcp.Tool
+		if deferred {
+			suffix := p.directSignatureSuffix(entry)
+			if suffix == "" {
+				signatureMisses++
 			}
-			if tool.Annotations.ReadOnlyHint != nil {
-				opts = append(opts, mcp.WithReadOnlyHintAnnotation(*tool.Annotations.ReadOnlyHint))
-			}
-			if tool.Annotations.DestructiveHint != nil {
-				opts = append(opts, mcp.WithDestructiveHintAnnotation(*tool.Annotations.DestructiveHint))
-			}
-			if tool.Annotations.IdempotentHint != nil {
-				opts = append(opts, mcp.WithIdempotentHintAnnotation(*tool.Annotations.IdempotentHint))
-			}
-			if tool.Annotations.OpenWorldHint != nil {
-				opts = append(opts, mcp.WithOpenWorldHintAnnotation(*tool.Annotations.OpenWorldHint))
-			}
+			rendered += suffix
+			mcpTool = renderDeferredDirectTool(entry, rendered)
+		} else {
+			mcpTool = renderFullDirectTool(entry, rendered)
 		}
 
-		mcpTool := mcp.NewTool(directName, opts...)
+		// Captured at render time and never recomputed: the signature cache
+		// mutates independently of rebuilds, so re-rendering later to compare
+		// would report a cache warm/evict as a catalog change (D13 rule 5).
+		// In deferred mode this is the description WITH its signature suffix —
+		// what was actually registered, which is the only thing a later
+		// comparison can honestly be against.
+		entry.RenderedDescription = rendered
 
-		// Apply input schema from upstream tool
-		if tool.ParamsJSON != "" {
-			var schema map[string]interface{}
-			if err := json.Unmarshal([]byte(tool.ParamsJSON), &schema); err == nil {
-				mcpTool.InputSchema = mcp.ToolInputSchema{
-					Type: "object",
-				}
-				if props, ok := schema["properties"].(map[string]interface{}); ok {
-					mcpTool.InputSchema.Properties = props
-				}
-				if req, ok := schema["required"].([]interface{}); ok {
-					reqStrings := make([]string, 0, len(req))
-					for _, r := range req {
-						if s, ok := r.(string); ok {
-							reqStrings = append(reqStrings, s)
-						}
-					}
-					mcpTool.InputSchema.Required = reqStrings
-				}
-			}
-		}
-
-		// Apply output schema from upstream tool so direct-mode tools/list preserves
-		// the full MCP tool contract exposed by the upstream server.
-		applyToolOutputSchemaJSON(&mcpTool, tool.OutputSchemaJSON)
+		// Spec 105 FR-008: stamp the identity of THIS entry — the same one the
+		// handler below closes over — onto the tool object itself, so the
+		// scope and callability filters can authorize a tools/list or
+		// call-time re-evaluation against the exact publication that produced
+		// this tool, never against whatever catalog happens to be live when
+		// the filter runs (see directToolStamp's doc comment). The terminal
+		// stripDirectToolStampFilter removes it before any response reaches a
+		// client.
+		mcpTool = stampDirectTool(mcpTool, entry)
 
 		serverTools = append(serverTools, mcpserver.ServerTool{
 			Tool:    mcpTool,
-			Handler: p.makeDirectModeHandler(tool.ServerName, tool.Name, tool.Annotations),
+			Handler: p.makeDirectModeHandler(entry),
 		})
 	}
 
-	p.setDirectToolPermissions(directToolPerms)
-
 	p.logger.Info("built direct mode tools",
-		zap.Int("tool_count", len(serverTools)))
+		zap.Int("tool_count", len(serverTools)),
+		zap.Bool("schema_deferred", deferred),
+		zap.Int("signature_misses", signatureMisses))
 
 	return serverTools
 }
 
+// emptyDirectCatalog is the non-nil empty snapshot the failure paths publish,
+// carrying the mode this rebuild resolved. Non-nil matters (D13 rule 2): a nil
+// catalog tells the discovery filters "not built yet, do not deny" at exactly
+// the moment discovery is failing.
+func emptyDirectCatalog(mode string, logger *zap.Logger) *directCatalog {
+	cat := buildDirectCatalog(nil, logger)
+	cat.mode = mode
+	return cat
+}
+
+// renderFullDirectTool is the pre-Spec-102 rendering, moved out of the loop
+// (FR-015): with deferral off, direct-surface tools/list payloads must stay
+// byte-identical to pre-feature behavior. The one deliberate delta is carrying
+// a top-level additionalProperties/$defs through, which only changes bytes for
+// upstream schemas that declare them.
+func renderFullDirectTool(entry *directCatalogEntry, description string) mcp.Tool {
+	opts := []mcp.ToolOption{mcp.WithDescription(description)}
+
+	if entry.Annotations != nil {
+		if entry.Annotations.Title != "" {
+			opts = append(opts, mcp.WithTitleAnnotation(entry.Annotations.Title))
+		}
+		if entry.Annotations.ReadOnlyHint != nil {
+			opts = append(opts, mcp.WithReadOnlyHintAnnotation(*entry.Annotations.ReadOnlyHint))
+		}
+		if entry.Annotations.DestructiveHint != nil {
+			opts = append(opts, mcp.WithDestructiveHintAnnotation(*entry.Annotations.DestructiveHint))
+		}
+		if entry.Annotations.IdempotentHint != nil {
+			opts = append(opts, mcp.WithIdempotentHintAnnotation(*entry.Annotations.IdempotentHint))
+		}
+		if entry.Annotations.OpenWorldHint != nil {
+			opts = append(opts, mcp.WithOpenWorldHintAnnotation(*entry.Annotations.OpenWorldHint))
+		}
+	}
+
+	mcpTool := mcp.NewTool(entry.DisplayName, opts...)
+
+	if entry.ParamsJSON != "" {
+		var schema map[string]interface{}
+		if err := json.Unmarshal([]byte(entry.ParamsJSON), &schema); err == nil {
+			mcpTool.InputSchema = mcp.ToolInputSchema{Type: "object"}
+			if props, ok := schema["properties"].(map[string]interface{}); ok {
+				mcpTool.InputSchema.Properties = props
+			}
+			if req, ok := schema["required"].([]interface{}); ok {
+				reqStrings := make([]string, 0, len(req))
+				for _, r := range req {
+					if str, ok := r.(string); ok {
+						reqStrings = append(reqStrings, str)
+					}
+				}
+				mcpTool.InputSchema.Required = reqStrings
+			}
+			// Keep the object open when upstream declared it open: dropping
+			// additionalProperties advertises {"properties":{}}, which
+			// grammar-constrained clients compile to "no keys allowed" (#1364
+			// failure class). Carried only when present, so schemas without
+			// these keys keep their pre-feature bytes (FR-015).
+			if ap, ok := schema["additionalProperties"]; ok {
+				mcpTool.InputSchema.AdditionalProperties = ap
+			}
+			if defs, ok := schema["$defs"].(map[string]interface{}); ok {
+				mcpTool.InputSchema.Defs = defs
+			}
+		}
+	}
+
+	applyToolOutputSchemaJSON(&mcpTool, entry.OutputSchemaJSON)
+
+	return mcpTool
+}
+
+// renderDeferredDirectTool builds one FR-004 deferred entry.
+//
+// mcp.NewTool CANNOT produce this wire shape: its marshaller always emits
+// "properties":{} and "required":[], which re-opens the arg-pruning hazard the
+// placeholder exists to close. So the schema goes in raw — and because
+// NewToolWithRawSchema accepts no ToolOptions and leaves InputSchema zero,
+// nothing here may touch mcpTool.InputSchema either: Tool.MarshalJSON returns
+// errToolSchemaConflict the moment RawInputSchema and a typed InputSchema.Type
+// are both set.
+//
+// outputSchema is deliberately not applied (FR-006/R2): a deferred entry
+// advertises no schema in either direction.
+func renderDeferredDirectTool(entry *directCatalogEntry, description string) mcp.Tool {
+	mcpTool := mcp.NewToolWithRawSchema(entry.DisplayName, description, json.RawMessage(deferredDirectInputSchema))
+	mcpTool.Annotations = directToolAnnotations(entry.Annotations)
+	return mcpTool
+}
+
+// directToolAnnotations reproduces, as a struct, exactly what the full-mode
+// mcp.NewTool + WithXAnnotation chain in renderFullDirectTool produces.
+//
+// This exists because NewToolWithRawSchema seeds NOTHING while NewTool seeds
+// readOnly=false, destructive=true, idempotent=false, openWorld=true before any
+// option runs — and mcp.Tool.MarshalJSON emits "annotations" unconditionally
+// (the field carries no omitempty). Copying only the upstream hints would
+// therefore marshal a different, usually near-empty, annotations object for the
+// same tool in deferred mode, breaking FR-004's "unchanged annotations" and
+// FR-008's cross-mode identity (D9).
+//
+// It is NOT used by the full path: FR-015 keeps that path byte-for-byte as it
+// was, and the two are pinned together by the cross-mode annotations test
+// rather than by sharing code.
+func directToolAnnotations(annotations *config.ToolAnnotations) mcp.ToolAnnotation {
+	out := mcp.ToolAnnotation{
+		Title:           "",
+		ReadOnlyHint:    mcp.ToBoolPtr(false),
+		DestructiveHint: mcp.ToBoolPtr(true),
+		IdempotentHint:  mcp.ToBoolPtr(false),
+		OpenWorldHint:   mcp.ToBoolPtr(true),
+	}
+
+	if annotations == nil {
+		return out
+	}
+
+	// Only a SET upstream hint overrides its default, mirroring the option
+	// chain, which appends an option only for a non-nil pointer.
+	if annotations.Title != "" {
+		out.Title = annotations.Title
+	}
+	if annotations.ReadOnlyHint != nil {
+		out.ReadOnlyHint = mcp.ToBoolPtr(*annotations.ReadOnlyHint)
+	}
+	if annotations.DestructiveHint != nil {
+		out.DestructiveHint = mcp.ToBoolPtr(*annotations.DestructiveHint)
+	}
+	if annotations.IdempotentHint != nil {
+		out.IdempotentHint = mcp.ToBoolPtr(*annotations.IdempotentHint)
+	}
+	if annotations.OpenWorldHint != nil {
+		out.OpenWorldHint = mcp.ToBoolPtr(*annotations.OpenWorldHint)
+	}
+
+	return out
+}
+
+// directSignatureSuffix returns the newline + bare tool name + Spec-085 compact
+// signature appended to a deferred description, or "" when no signature is
+// available.
+//
+// The lookup is Peek, never Get: Get compiles and memoizes on a miss, which
+// would put per-request compilation on the listing path FR-005 exists to keep
+// it off, and — worse — would hide the miss, since a caller that always gets a
+// Signature back cannot tell "warmed at index time" from "compiled just now".
+// On a miss the whole suffix is absent and the entry is otherwise unchanged:
+// never dropped, never delayed.
+//
+// The tool-name prefix is this renderer's job. toolsig.Signature.Sig is the
+// parenthesized parameter list alone and carries no name, so appending Sig by
+// itself would emit a bare "(owner*:str, …)" with nothing to attach it to.
+func (p *MCPProxyServer) directSignatureSuffix(entry *directCatalogEntry) string {
+	// A hashless entry cannot be looked up: the cache is keyed by the Spec-032
+	// per-tool hash, and "" is not a key any Warm ever wrote.
+	if p.sigCache == nil || entry.Hash == "" {
+		return ""
+	}
+
+	sig, ok := p.sigCache.Peek(entry.Hash)
+	if !ok || sig.Sig == "" {
+		return ""
+	}
+
+	return "\n" + entry.ToolName + sig.Sig
+}
+
+// errDirectToolNotFound mirrors mcp-go's own ErrToolNotFound sentinel (the
+// tool-surface counterpart of errPromptNotFound in mcp_direct_scope.go).
+// Wrapping it below reproduces the exact text mcp-go emits when its own
+// tools/call dispatch cannot find the requested name at all
+// (server.go handleToolCall: `fmt.Errorf("tool '%s' not found: %w", name,
+// ErrToolNotFound)`).
+var errDirectToolNotFound = mcpserver.ErrToolNotFound
+
+// directScopeRefusalError builds the non-disclosing error makeDirectModeHandler's
+// OWN profile/server-scope checks return (Spec 105 FR-008 gap G5, D12): it
+// echoes only the caller-supplied display name, wrapping errDirectToolNotFound
+// so the TEXT is byte-identical to what mcp-go's own call-time tool filter
+// re-evaluation emits for a name it does not admit at all — never the
+// canonical owner the handler's entry closed over.
+//
+// It is returned as the HANDLER'S OWN error (the function's second return
+// value), not built with mcp.NewToolResultError, so the JSON-RPC envelope
+// KIND also converges on the filter's: both become a protocol-level error
+// response, never a successful call result with isError:true. (PR #1326
+// review round 2, chunk C: the previous NewToolResultError version was a
+// different envelope KIND — a successful result — from mcp-go's own
+// -32602 protocol error for the identical logical case, not merely
+// different wording.)
+//
+// One residual this cannot close, same as authorizeAggregatedPromptServer's
+// prompt-side twin below: mcp-go always maps a handler-returned error to
+// mcp.INTERNAL_ERROR (-32603), a code this function cannot override, while
+// mcp-go's OWN filter path answers mcp.INVALID_PARAMS (-32602) for the
+// identical text. A probe timed inside the narrow profile/config race this
+// branch exists for (see the call sites' doc comments) could still tell the
+// two apart by that numeric code alone, even though the message and the
+// result KIND can no longer distinguish "authorized-but-blocked" from
+// "genuinely doesn't exist". A ToolHandlerFunc has no way to emit an
+// arbitrary top-level JSON-RPC error code — only mcp-go's own dispatch can —
+// so full byte-for-byte envelope equality is not achievable from here without
+// forking mcp-go's dispatch loop, which this fix does not do. This is
+// documented, not silently accepted: see the PR description for the exact
+// parity this branch provides.
+func directScopeRefusalError(displayName string) error {
+	return fmt.Errorf("tool '%s' not found: %w", displayName, errDirectToolNotFound)
+}
+
 // makeDirectModeHandler creates a handler function for a direct mode tool.
 // It handles auth checks, permission enforcement, and upstream calls.
-func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, annotations *config.ToolAnnotations) mcpserver.ToolHandlerFunc {
+//
+// The handler closes over its OWN catalog entry (research.md R9). That is what
+// makes "a dispatch can never validate against a definition other than the one
+// its own registration advertised" literally true rather than a hope: the entry
+// is immutable after publication, and a rebuild produces new entries with new
+// handlers, so a request already in flight keeps the definition it was
+// dispatched under even as the catalog is swapped underneath it.
+//
+// Passing (serverName, toolName, annotations) instead — as this did before —
+// would have left US3's validator reading the schema of whatever the catalog
+// happens to hold when the call lands, which is precisely the skew D13 exists
+// to bound.
+func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpserver.ToolHandlerFunc {
+	serverName, toolName := entry.ServerName, entry.ToolName
+	annotations := entry.Annotations
+
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		startTime := time.Now()
+
+		// Get session ID for activity logging
+		var sessionID string
+		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
+			sessionID = sess.SessionID()
+		}
+
+		// Get request ID from context. Direct-mode calls that did not arrive
+		// over an HTTP transport carry none, and every activity this handler
+		// emits — including the agent-token and callability blocks below, which
+		// fire before anything else — needs an id a consumer can correlate on.
+		// Mint one rather than emit anonymously; a transport-supplied id always
+		// wins so the records still line up with the access log.
+		//
+		// Both ids are resolved BEFORE the agent-token gates so those denials
+		// can emit a correlatable policy decision like every other block.
+		requestID := reqcontext.GetRequestID(ctx)
+		if requestID == "" {
+			requestID = mintActivityRequestID(serverName, toolName)
+		}
+
+		// Get arguments from the request (pure; read here so the audit
+		// attempt below can hash them before the first gate).
+		args := request.GetArguments()
+
+		// Spec 107 T103: the audit attempt, installed BEFORE the first gate.
+		// The operation is the tier this catalog entry's annotations derive
+		// (the same tier the permission gate below authorizes against).
+		profileIndex := p.profileIndexCurrent(ctx)
+		ctx, profileResolution := p.resolveForDispatch(ctx, profileIndex)
+		profileSlug, profileScope := profileResolution.Name, profileResolution.Scope
+		{
+			var auditClientName, auditClientVersion string
+			if sessionID != "" {
+				if sessInfo := p.sessionStore.GetSession(sessionID); sessInfo != nil {
+					auditClientName, auditClientVersion = sessInfo.ClientName, sessInfo.ClientVersion
+				}
+			}
+			ctx = p.installAuditAttempt(ctx, auditAttemptSpec{
+				RequestID:     requestID,
+				SessionID:     sessionID,
+				Server:        serverName,
+				Tool:          toolName,
+				Operation:     contracts.ToolVariantToOperationType[contracts.DeriveCallWith(annotations)],
+				Surface:       auditSurfaceDirect,
+				ClientName:    auditClientName,
+				ClientVersion: auditClientVersion,
+				Profile:       profileSlug,
+				Args:          args,
+			})
+		}
+
+		// Spec 057 / Profiles v2: the active profile (token pin > URL > session
+		// set_profile) gates direct-mode dispatch exactly as it gates
+		// call_tool_* (mcp.go handleCallToolVariant). It runs independently of
+		// the agent-token gates below so an unauthenticated /mcp/p/<slug>
+		// connection is filtered too, and it runs FIRST so a profile-pinned
+		// token cannot reach a server outside its pin through this routing mode.
+		if profileScope != nil && !profileScope.Allows(serverName) {
+			refusalErr := directScopeRefusalError(entry.DisplayName)
+			p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", refusalErr.Error(), telemetry.BlockReasonProfileScope)
+			return nil, refusalErr
+		}
+		if policy := profileResolution.Policy; policy != nil {
+			// Direct routing resolves an existing catalog entry above. Nil
+			// annotations therefore mean a known but unannotated tool, which
+			// must follow the profile's fail-closed unannotated policy.
+			intrinsic := profile.IntrinsicTier(annotations, true)
+			if admitted, reason, tier := policy.Decide(serverName, toolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
+				errMsg, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, serverName, toolName, profileRefusalSubject(profileResolution, profileIndex))
+				p.emitActivityPolicyDecisionWithBlockReason(ctx, serverName, toolName, sessionID, requestID,
+					"blocked", errMsg, telemetry.BlockReasonOther, string(blockReason))
+				return mcp.NewToolResultError(errMsg), nil
+			}
+		}
 
 		// Check auth context for server access and permissions
 		authCtx := auth.AuthContextFromContext(ctx)
 		if authCtx != nil {
 			// Check server access
 			if !authCtx.CanAccessServer(serverName) {
-				return mcp.NewToolResultError(fmt.Sprintf("Access denied: token does not have access to server '%s'", serverName)), nil
+				// Spec 105 FR-008 gap G5 (D12): never name the server this
+				// handler's OWN entry closed over. In normal operation this
+				// branch is unreachable — mcp-go's WithToolFilter chain
+				// re-evaluates the SAME stamp-based scope decision at call
+				// time and answers the registered-name-not-found envelope
+				// before this handler ever runs (Spec 105 T087/T088), OR for
+				// the narrow live profile/config race PR #1326 review round 2
+				// (chunk C) found: the filter's stamp-based check and this
+				// handler's own profileScope/authCtx re-resolution can read a
+				// DIFFERENT active profile when a session's pin changes
+				// between the two evaluations, so the filter can pass a call
+				// this handler then refuses. Its wording must therefore
+				// match what an unregistered name gets: no owner, no scope
+				// reason, just the caller-supplied name echoed back — see
+				// directScopeRefusalError for how far that parity extends
+				// (text and envelope KIND, not the numeric JSON-RPC error
+				// code).
+				refusalErr := directScopeRefusalError(entry.DisplayName)
+				// Direct mode denied these silently: no activity record and,
+				// since issue #969, no availability counter either. Emit the
+				// same policy decision the call_tool_* variants emit at the
+				// equivalent gate so the funnel has no blind spot.
+				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", refusalErr.Error(), telemetry.BlockReasonTokenScope)
+				return nil, refusalErr
 			}
 
 			// Determine required permission from annotations
@@ -147,37 +596,110 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			}
 
 			if !authCtx.HasPermission(requiredPerm) {
-				return mcp.NewToolResultError(fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", requiredPerm, serverName, toolName)), nil
+				errMsg := fmt.Sprintf("Permission denied: token does not have '%s' permission required for tool '%s:%s'", requiredPerm, serverName, toolName)
+				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonTokenPermission)
+				return mcp.NewToolResultError(errMsg), nil
 			}
 		}
 
-		// Get session ID for activity logging
-		var sessionID string
-		if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
-			sessionID = sess.SessionID()
-		}
-
-		// Get request ID from context
-		requestID := reqcontext.GetRequestID(ctx)
-
-		// Get arguments from the request
-		args := request.GetArguments()
 		enrichedArgs := injectAuthMetadata(ctx, args)
 
 		// Enforce direct-mode callability before emitting a tool-started event or
 		// invoking upstream. Direct mode must not bypass disabled, quarantine, or
 		// approval controls enforced by call_tool_* variants.
-		if blocked := p.directToolCallabilityBlock(ctx, serverName, toolName, enrichedArgs); blocked != nil {
-			p.emitActivityPolicyDecision(serverName, toolName, sessionID, "blocked", "direct tool is not callable")
+		// The reason key comes from the gate that actually fired (quarantine,
+		// pending/changed approval, or plain not-callable) rather than from
+		// this one funnel site — see directBlockReasonKey.
+		if blocked, reasonKey := p.directToolCallabilityBlockWithReason(ctx, serverName, toolName, enrichedArgs); blocked != nil {
+			p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable", reasonKey)
 			return blocked, nil
 		}
 
-		// Emit activity event
-		p.emitActivityToolCallStarted(serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
+		// Spec 102 US3 (FR-013): pre-dispatch argument validation, against the
+		// schema of THIS handler's own catalog entry.
+		//
+		// This is what bounds the cost of deferral. A deferred listing
+		// advertises `{"type":"object"}`, so an agent guesses its arguments from
+		// a compact signature; when the signature was lossy the guess can be
+		// wrong, and without this the agent learns that from an opaque upstream
+		// error and starts an unbounded debugging loop. Rejecting here, with the
+		// FULL stored schema attached, costs exactly one retry.
+		//
+		// The schema source is entry.ParamsJSON — the STORED upstream schema,
+		// never the placeholder the listing advertised, which would accept
+		// everything and validate nothing. It is also mode-INDEPENDENT: a
+		// full-mode client that guessed wrong gets the same help, because the
+		// validator never consults the serialization mode (US3 scenario 3).
+		//
+		// Validating `args` rather than `enrichedArgs`: injectAuthMetadata adds
+		// properties the upstream schema never declared, which a schema with
+		// additionalProperties:false would reject — turning our own bookkeeping
+		// into the agent's bug. Matches the call_tool_* path (mcp.go).
+		//
+		// Fail-open is inherited from the validator (FR-013b): an uncompilable
+		// or absent schema dispatches exactly as a schemaless proxy would.
+		if ok, verr, _ := p.inputValidator.validateArgs(entry.DisplayName, entry.Hash, entry.ParamsJSON, args); !ok {
+			detail := oneLineValidationDetail(verr)
+			errMsg := fmt.Sprintf("invalid arguments for %s: %s", entry.DisplayName, detail)
+			p.logger.Debug("direct mode: pre-dispatch argument validation failed",
+				zap.String("server_name", serverName),
+				zap.String("tool_name", toolName),
+				zap.String("detail", detail))
+			auditNoteErrorClass(ctx, audit.ErrorClassValidation)
+			callerr.NoteOutcome(ctx, callerr.ValidationOutcome())
 
-		// Call upstream
+			// The started/completed-error PAIR, not a bare rejection. A call
+			// rejected here never reaches the unconditional
+			// emitActivityToolCallStarted below, so without this the funnel
+			// would show the call never happening at all — precisely the
+			// observability blind spot issue #969 established this handler must
+			// not have. Shapes match the sibling upstream-error emission a few
+			// lines down, so the two are one series to a consumer.
+			p.emitActivityToolCallStarted(ctx, serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
+			p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", errMsg,
+				time.Since(startTime).Milliseconds(), enrichedArgs, "", false, "", nil,
+				contracts.ContentTrustForTool(annotations), "", 0, 0, "", nil, "")
+
+			return invalidParamsErrorResult(entry.DisplayName, entry.ParamsJSON, detail), nil
+		}
+
+		// Spec 082: a direct tool call is real work — it earns the session a
+		// durable record, and does so BEFORE any activity is emitted so the
+		// records carry the right work session.
+		//
+		// Deliberately AFTER validation: a call rejected for bad arguments did
+		// no work upstream, so it does not earn a durable work session, exactly
+		// like the policy blocks above it.
+		p.markSessionWorked(ctx, sessionID)
+
+		// Emit activity event
+		p.emitActivityToolCallStarted(ctx, serverName, toolName, sessionID, requestID, "mcp", enrichedArgs)
+
+		// Call upstream. Spec 105 FR-009 "stale generation" (codex r3 D2):
+		// the callability gate above ran against the server's LIVE client;
+		// when that client is connected the dispatch is pinned to the
+		// generation observed now, so a disconnect + reconnect that completes
+		// while the call waits behind admission control cannot carry it onto
+		// a fresh generation whose tool set nothing certified (the catalog is
+		// rebuilt on servers.changed). A client found NOT connected here keeps
+		// the pre-105 unpinned path — the not-connected verdict and
+		// reconnect_on_use, which own a dropped server (research D4).
 		qualifiedName := serverName + ":" + toolName
-		result, err := p.upstreamManager.CallTool(ctx, qualifiedName, args)
+		var (
+			result interface{}
+			err    error
+		)
+		// Spec 112 FR-016.3: per-call sink for the recording scrub below.
+		dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
+		dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
+		if epoch, ok := p.liveConnectionEpoch(serverName); ok {
+			result, err = p.upstreamManager.CallToolOnEpoch(dispatchCtx, qualifiedName, args, epoch)
+		} else {
+			result, err = p.upstreamManager.CallTool(dispatchCtx, qualifiedName, args)
+		}
+		p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
+		callerr.Observe(ctx, result, err)
+		fwdOut := fwdSink.Outbound()
 
 		durationMs := time.Since(startTime).Milliseconds()
 
@@ -185,13 +707,42 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 		directContentTrust := contracts.ContentTrustForTool(annotations)
 
 		if err != nil {
+			// Spec 093 FR-010: direct-routing mode sheds like every other
+			// dispatch path — retry-friendly isError result, typed identity kept
+			// for the REST 429 mapping, and no duplicate activity record (the
+			// limiter seam already wrote the "rejected" one).
+			if limitErr, isShed := asShed(err); isShed {
+				recordShed(ctx, limitErr)
+				// Spec 107: the shed is this attempt's tool_call
+				// (outcome rejected), never a second authz.
+				p.auditToolCallShed(ctx, limitErr, durationMs)
+				return shedToolResult(limitErr), nil
+			}
+			// The generation moved before the transport: nothing reached
+			// the upstream. Same discovery-window body and telemetry bucket
+			// as the call_tool_* refusal, with the started record closed.
+			if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+				errMsg := unresolvedToolIdentityMessage(serverName, toolName, false)
+				auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
+				p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", errMsg, durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
+				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
+				return mcp.NewToolResultError(errMsg), nil
+			}
 			// Emit error activity
-			p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0)
+			auditNoteError(ctx, err)
+			p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
 		}
 
 		// Determine tool variant for activity logging
 		toolVariant := contracts.DeriveCallWith(annotations)
+
+		// Issue #935: direct mode reaches the same upstreams as call_tool_*, so
+		// it must classify an isError:true answer as a failure too. Read from
+		// the raw result, before the truncation loop below rewrites it.
+		//
+		// Spec 112: the activity classification reads the scrubbed copy.
+		activityStatus, activityErrMsg := activityStatusForResult(scrubResultForRecord(result, fwdOut))
 
 		// Forward content blocks (preserving ImageContent, AudioContent, etc.)
 		// while applying truncation only to TextContent. See issue #368.
@@ -210,7 +761,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 				case mcp.TextContent:
 					txt := tc.Text
 					if limit > 0 && len(txt) > limit {
-						txt = txt[:limit]
+						txt = txt[:safeTruncateBytes(txt, limit)]
 						truncated = true
 					}
 					tc.Text = txt
@@ -230,7 +781,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 				}
 			}
 			forwarded = &mcp.CallToolResult{
-				Result:            ctr.Result,
+				Result:            proxyResultEnvelope(ctr),
 				Content:           newContent,
 				StructuredContent: ctr.StructuredContent,
 				IsError:           ctr.IsError,
@@ -256,11 +807,17 @@ func (p *MCPProxyServer) makeDirectModeHandler(serverName, toolName string, anno
 			forwarded = mcp.NewToolResultText(responseText)
 		}
 
-		// Emit success activity
+		// Emit completion activity (success, or error when the upstream itself
+		// reported one — issue #935).
 		// Spec 069 A1: pre-truncation sizes; result was measured before the truncation loop above.
 		routingResponseBytes := rawByteSize(result)
 		routingRequestBytes := rawByteSize(enrichedArgs)
-		p.emitActivityToolCallCompleted(serverName, toolName, sessionID, requestID, "mcp", "success", "", durationMs, enrichedArgs, responseText, truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes)
+		p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", activityStatus, activityErrMsg, durationMs, enrichedArgs, scrubForRecord(responseText, fwdOut), truncated, toolVariant, nil, directContentTrust, "", routingRequestBytes, routingResponseBytes, "", nil, "")
+
+		// Activation: same success contract as call_tool_* (usable result only).
+		if activityStatus == "success" {
+			p.recordRealToolCallSuccess()
+		}
 
 		return forwarded, nil
 	}
@@ -276,12 +833,13 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 	tools = append(tools, p.buildCodeExecutionTool()...)
 
 	// retrieve_tools for discovery — instructs to use code_execution (NOT call_tool_*)
-	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. "+
-			"Use this to find tools, then use the `code_execution` tool to call them via `call_tool(serverName, toolName, args)` in JavaScript. "+
-			"Do NOT use call_tool_read/write/destructive — they are not available in this mode. "+
-			"Use natural language to describe what you want to accomplish. "+
-			"Response includes a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools)."),
+	codeExecRetrieveOpts := []mcp.ToolOption{
+		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. " +
+			"Use this to find tools, then use the `code_execution` tool to call them via `call_tool(serverName, toolName, args)` in JavaScript. " +
+			"Do NOT use call_tool_read/write/destructive — they are not available in this mode. " +
+			"Use natural language to describe what you want to accomplish. " +
+			"Response includes a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools)." +
+			retrieveToolsReachNote + retrieveToolsDiagnosticsNote),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -293,19 +851,20 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		mcp.WithNumber("limit",
 			mcp.Description("Maximum number of tools to return (default: configured tools_limit, max: 100)"),
 		),
-		mcp.WithBoolean("read_only_only",
-			mcp.Description("Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations."),
-		),
-		mcp.WithBoolean("exclude_destructive",
-			mcp.Description("Exclude tools with destructiveHint=true or unset (MCP default is destructive). Use to avoid destructive operations."),
-		),
-		mcp.WithBoolean("exclude_open_world",
-			mcp.Description("Exclude tools with openWorldHint=true or unset (MCP default is open-world). Use to restrict to local/sandboxed tools."),
-		),
 		mcp.WithBoolean("include_session_risk_warning",
 			mcp.Description("Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag."),
 		),
-	)
+		// Spec 085 FR-011 / spec §Out-of-scope: NO retrieveToolsDetailOption()
+		// here. describe_tool is absent from the code-execution surface in v1,
+		// so a compact response would reference an unavailable second stage;
+		// this mode's retrieve_tools always serializes FULL (enforced in
+		// handleRetrieveToolsWithMode) and does not expose the detail param.
+	}
+	codeExecRetrieveOpts = append(codeExecRetrieveOpts, retrieveToolsAnnotationFilterOptions()...)
+	retrieveToolsTool := mcp.NewTool("retrieve_tools", codeExecRetrieveOpts...)
+	tools = append(tools, p.setProfileServerTool())
+	tools = append(tools, p.buildProfilesServerTool())    // Spec 108-h admin tool
+	tools = append(tools, p.buildCredentialsServerTool()) // Spec 115 admin tool
 	tools = append(tools, mcpserver.ServerTool{
 		Tool:    retrieveToolsTool,
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeCodeExecution),
@@ -326,14 +885,15 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 	tools := make([]mcpserver.ServerTool, 0, 8)
 
 	// retrieve_tools — instructs to use call_tool_read/write/destructive
-	retrieveToolsTool := mcp.NewTool("retrieve_tools",
-		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. "+
-			"WORKFLOW: 1) Call this tool first to find relevant tools, 2) Check the 'call_with' field in results "+
-			"to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. "+
-			"Results include 'annotations' (tool behavior hints like destructiveHint), 'call_with' recommendation, "+
-			"and a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). "+
-			"Use annotation filters to self-restrict discovery scope. "+
-			"Use natural language to describe what you want to accomplish."),
+	callToolRetrieveOpts := []mcp.ToolOption{
+		mcp.WithDescription("Search and discover available upstream tools using BM25 full-text search. " +
+			"WORKFLOW: 1) Call this tool first to find relevant tools, 2) Check the 'call_with' field in results " +
+			"to determine which variant to use, 3) Call the tool using call_tool_read, call_tool_write, or call_tool_destructive. " +
+			"Results include 'annotations' (tool behavior hints like destructiveHint), 'call_with' recommendation, " +
+			"and a structured `session_risk` object (level, lethal_trifecta, has_open_world_tools, has_destructive_tools, has_write_tools). " +
+			"Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. " +
+			"Use natural language to describe what you want to accomplish." +
+			retrieveToolsReachNote + retrieveToolsDiagnosticsNote),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -354,23 +914,30 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 		mcp.WithString("explain_tool",
 			mcp.Description("When debug=true, explain why a specific tool was ranked low (format: 'server:tool')"),
 		),
-		mcp.WithBoolean("read_only_only",
-			mcp.Description("Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations."),
-		),
-		mcp.WithBoolean("exclude_destructive",
-			mcp.Description("Exclude tools with destructiveHint=true or unset (MCP default is destructive). Use to avoid destructive operations."),
-		),
-		mcp.WithBoolean("exclude_open_world",
-			mcp.Description("Exclude tools with openWorldHint=true or unset (MCP default is open-world). Use to restrict to local/sandboxed tools."),
-		),
 		mcp.WithBoolean("include_session_risk_warning",
 			mcp.Description("Include the prose 'warning' string in session_risk when the lethal trifecta is detected (default: false; structured fields are always returned). Server-side default can be flipped via the 'tool_response_session_risk_warning' config flag."),
 		),
-	)
+		retrieveToolsDetailOption(),
+	}
+	callToolRetrieveOpts = append(callToolRetrieveOpts, retrieveToolsAnnotationFilterOptions()...)
 	tools = append(tools, mcpserver.ServerTool{
-		Tool:    retrieveToolsTool,
+		Tool:    mcp.NewTool("retrieve_tools", callToolRetrieveOpts...),
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeRetrieveTools),
 	})
+
+	// describe_tool — Spec 085 (US2, FR-011): second-stage full definitions,
+	// beside retrieve_tools. Retrieve_tools routing mode only in v1: not added
+	// to buildCodeExecModeTools or direct mode.
+	tools = append(tools, mcpserver.ServerTool{
+		Tool:    buildDescribeToolTool(),
+		Handler: p.handleDescribeTool,
+	})
+
+	// set_profile — Profiles v2 (T2): also available in call-tool mode (/mcp/call,
+	// and /mcp/p/<slug> which is served by this same server instance).
+	tools = append(tools, p.setProfileServerTool())
+	tools = append(tools, p.buildProfilesServerTool())    // Spec 108-h admin tool
+	tools = append(tools, p.buildCredentialsServerTool()) // Spec 115 admin tool
 
 	// call_tool_read / call_tool_write / call_tool_destructive — all three
 	// built from the shared helper in mcp.go so schema stays in sync across
@@ -423,70 +990,55 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 	return tools
 }
 
-// buildCodeExecutionTool builds the code_execution tool for routing mode servers.
-// Returns a slice (either 1 tool or 1 disabled stub) for easy appending.
+// buildCodeExecutionTool builds the code_execution tool for every surface that
+// carries it. Returns a slice (the live tool, or NOTHING) for easy appending.
+//
+// Issue #1236: a disabled feature is not advertised. This used to return a
+// "disabled" stub whose handler refused every call, on the theory that a
+// descriptive refusal beats an unknown-tool error. In practice clients select
+// tools from tools/list, not from descriptions (which harnesses routinely
+// truncate), so the stub was indistinguishable from an available tool and cost
+// a wasted round trip per session before the agent fell back. The handler-level
+// gate in mcp_code_execution.go still refuses a call that arrives by name
+// through a non-listing path (REST, CallToolDirect), and an MCP tools/call for
+// the unregistered name is refused by mcp-go as an unknown tool — so dropping
+// the stub removes an advertisement, never a defence.
+//
+// UX audit F16: this reads the LIVE snapshot, never the construction-time
+// p.config. Settings advertises enable_code_execution as an instantly-applied
+// field, so every surface is re-derived from this builder on config.reloaded
+// (RefreshCodeExecutionAvailability) — a flip adds or withdraws the tool and
+// emits notifications/tools/list_changed without a restart.
 func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
-	if p.config != nil && !p.config.EnableCodeExecution {
-		// Disabled stub
-		codeExecutionTool := mcp.NewTool("code_execution",
-			mcp.WithDescription("Code execution is currently disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy config."),
-			mcp.WithTitleAnnotation("Code Execution (Disabled)"),
-			mcp.WithReadOnlyHintAnnotation(true),
-			mcp.WithDestructiveHintAnnotation(false),
-			mcp.WithOpenWorldHintAnnotation(false),
-			mcp.WithString("code",
-				mcp.Required(),
-				mcp.Description("JavaScript source code to execute."),
-			),
-		)
-		return []mcpserver.ServerTool{{
-			Tool: codeExecutionTool,
-			Handler: func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-				return mcp.NewToolResultError("Code execution is disabled. Enable it by setting \"enable_code_execution\": true in your mcpproxy configuration file."), nil
-			},
-		}}
+	if cfg := p.currentConfig(); cfg != nil && !cfg.EnableCodeExecution {
+		return nil
 	}
 
 	codeExecutionTool := mcp.NewTool("code_execution",
-		mcp.WithDescription("Execute JavaScript or TypeScript code that orchestrates multiple upstream MCP tools in a single request. "+
-			"Use this when you need to combine results from 2+ tools, implement conditional logic, loops, or data transformations "+
-			"that would require multiple round-trips otherwise.\n\n"+
-			"**When to use**: Multi-step workflows with data transformation, conditional logic, error handling, or iterating over results.\n"+
-			"**When NOT to use**: Single tool calls (use call_tool directly), long-running operations (>2 minutes).\n\n"+
-			"**Available in code**:\n"+
-			"- `input` global: Your input data passed via the 'input' parameter\n"+
-			"- `call_tool(serverName, toolName, args)`: Call upstream tools (returns {ok, result} or {ok, error})\n"+
-			"- Modern JavaScript (ES2020+): arrow functions, const/let, template literals, destructuring, classes, for-of, "+
-			"optional chaining (?.), nullish coalescing (??), spread/rest, Promises, Symbols, Map/Set, Proxy/Reflect "+
-			"(no require(), filesystem, or network access)\n\n"+
-			"**TypeScript support**: Set `language: \"typescript\"` to write TypeScript code with type annotations, interfaces, enums, and generics. "+
-			"Types are automatically stripped before execution.\n\n"+
-			"**Important runtime rules**:\n"+
-			"- `call_tool` is strictly SYNCHRONOUS. Do not use `await`.\n"+
-			"- Upstream tools usually return an MCP content array. To parse JSON results: `const data = JSON.parse(res.result.content[0].text);`\n"+
-			"- The last evaluated expression in your script is automatically returned as the final output.\n\n"+
-			"**Security**: Sandboxed execution with timeout enforcement. Respects existing quarantine and server restrictions."),
+		mcp.WithDescription(codeExecutionToolDescription),
 		mcp.WithTitleAnnotation("Code Execution"),
 		mcp.WithDestructiveHintAnnotation(true),
 		mcp.WithReadOnlyHintAnnotation(false),
 		mcp.WithOpenWorldHintAnnotation(true),
+		// Spec 097: optional `code` + optional `script`; the handler enforces
+		// the exactly-one-of rule (see mcp.go for the same shape).
 		mcp.WithString("code",
-			mcp.Required(),
-			mcp.Description("JavaScript or TypeScript source code (ES2020+) to execute. Supports modern syntax: arrow functions, const/let, template literals, destructuring, "+
-				"optional chaining, nullish coalescing. Use `input` to access input data and `call_tool(serverName, toolName, args)` to invoke upstream tools. "+
-				"call_tool is SYNCHRONOUS — do not use await. Return value is the last evaluated expression and must be JSON-serializable. "+
-				"Example: `const res = call_tool('github', 'get_user', {username: input.username}); const data = JSON.parse(res.result.content[0].text); ({user: data, timestamp: Date.now()})`"),
+			mcp.Description(codeExecutionCodeDescription),
+		),
+		mcp.WithString("script",
+			mcp.Description(codeExecutionScriptDescription),
 		),
 		mcp.WithString("language",
-			mcp.Description("Source code language. When set to 'typescript', the code is automatically transpiled to JavaScript before execution. "+
-				"Type annotations are stripped, enums and namespaces are converted to JavaScript equivalents. Default: 'javascript'."),
+			mcp.Description(codeExecutionLanguageDescription),
 			mcp.Enum("javascript", "typescript"),
 		),
 		mcp.WithObject("input",
-			mcp.Description("Input data accessible as global `input` variable in code (default: {})"),
+			openObject(),
+			mcp.Description(codeExecutionInputDescription),
 		),
 		mcp.WithObject("options",
-			mcp.Description("Execution options: timeout_ms (1-600000, default: 120000), max_tool_calls (>= 0, 0=unlimited), allowed_servers (array of server names, empty=all allowed)"),
+			openObject(),
+			mcp.Description(codeExecutionOptionsDescription),
 		),
 	)
 	return []mcpserver.ServerTool{{
@@ -495,18 +1047,212 @@ func (p *MCPProxyServer) buildCodeExecutionTool() []mcpserver.ServerTool {
 	}}
 }
 
+// filterProfileV3Tools applies profile-controlled built-in visibility to
+// every request-scoped tools/list response. Handler gates remain mandatory:
+// tool filters are discovery controls, not an execution boundary.
+func (p *MCPProxyServer) filterProfileV3Tools(ctx context.Context, tools []mcp.Tool) []mcp.Tool {
+	// The `profiles` admin tool (Spec 108-h, FR-017) is visible to an
+	// administrator credential under no profile or a management_tools: true
+	// profile only; nothing below may let it through.
+	tools = p.filterProfilesTool(ctx, tools)
+	// Spec 115: `credentials` follows the identical predicate (FR-011).
+	tools = p.filterCredentialsTool(ctx, tools)
+	idx, ok := profileRequestIndexFromContext(ctx)
+	if !ok {
+		idx = p.profileIndexCurrent(ctx)
+	}
+	if idx == nil {
+		resolution := p.ResolveProfileV3(ctx, nil)
+		if resolution.Scope == nil && resolution.Policy == nil {
+			return tools
+		}
+		filtered := make([]mcp.Tool, 0, len(tools))
+		for _, tool := range tools {
+			if tool.Name == "code_execution" || tool.Name == "upstream_servers" || tool.Name == "quarantine_security" {
+				continue
+			}
+			filtered = append(filtered, tool)
+		}
+		return filtered
+	}
+	resolution := p.ResolveProfileV3(ctx, idx)
+	// A dangling pinned/bound/anonymous profile is authoritative deny-all.
+	// Do not advertise code execution just because the resolution no longer
+	// has a compiled policy to consult.
+	danglingProfile := resolution.Base != "" && idx.position(resolution.Base) < 0
+	filtered := make([]mcp.Tool, 0, len(tools))
+	for _, tool := range tools {
+		switch tool.Name {
+		case "code_execution":
+			if resolution.BindingGuarded || danglingProfile || (resolution.Policy != nil && !resolution.Policy.CodeExecution) {
+				continue
+			}
+		case "upstream_servers", "quarantine_security":
+			if p.profileManagementToolHidden(ctx, tool.Name) {
+				continue
+			}
+		}
+		filtered = append(filtered, tool)
+	}
+	return filtered
+}
+
+// profileManagementToolHidden keeps the execution boundary aligned with the
+// request-scoped tool filter. Legacy profiles (unset management_tools) retain
+// their existing behavior; an explicit false hides and refuses the tools.
+func (p *MCPProxyServer) profileManagementToolHidden(ctx context.Context, toolName string) bool {
+	idx, ok := profileRequestIndexFromContext(ctx)
+	if !ok {
+		idx = p.profileIndexCurrent(ctx)
+	}
+	ac := auth.AuthContextFromContext(ctx)
+	if idx == nil {
+		resolution := p.ResolveProfileV3(ctx, nil)
+		return resolution.Scope != nil || resolution.Policy != nil
+	}
+	resolution := p.ResolveProfileV3(ctx, idx)
+	if resolution.BindingGuarded {
+		return true
+	}
+	confinedAnonymous := (ac == nil || ac.Anonymous) && resolution.anonymousConfinementActive()
+	managementEnabled := resolution.Policy != nil && resolution.Policy.ManagementTools != nil && *resolution.Policy.ManagementTools
+	if resolution.Policy != nil && resolution.Policy.ManagementTools != nil && !*resolution.Policy.ManagementTools {
+		return true
+	}
+	if ac.IsClientCredential() || confinedAnonymous {
+		if !managementEnabled {
+			return true
+		}
+		return toolName == "quarantine_security"
+	}
+	if toolName == "quarantine_security" && managementEnabled && (ac == nil || !ac.IsAdmin() || ac.Anonymous) {
+		return true
+	}
+	return false
+}
+
 // initRoutingModeServers creates separate MCP server instances for each routing mode.
 // Each server instance has its own set of tools registered appropriate for that mode.
 // The main "server" field remains the retrieve_tools mode server (default).
+// defaultDirectInstructions is the direct surface's own initialize
+// instructions, used when the operator configured none (Spec 102 FR-007/D16).
+//
+// It is deliberately NOT resolveInstructions' defaultInstructions. That text
+// tells agents to "Use 'retrieve_tools'", to call 'call_tool_read/write/
+// destructive', and to reach for 'upstream_servers' — none of which
+// buildDirectModeTools registers. Advertising a workflow this surface cannot
+// serve is worse than saying nothing: the agent's first move fails with an
+// unknown tool. So this names only what is actually here: 'server__tool'
+// calling and 'describe_tool'.
+//
+// Naming 'describe_tool' is safe only because it IS registered on this surface
+// (withDirectBuiltins, on every rebuild path). If that ever stops being true,
+// this string is the second place to fix.
+const defaultDirectInstructions = "This is mcpproxy-go, an MCP aggregator proxy that connects multiple upstream MCP servers. " +
+	"This endpoint lists every tool of every connected server directly. " +
+	"CALLING: each upstream tool appears under its own 'server__tool' name — call it by that name. " +
+	"SCHEMAS: call 'describe_tool' with a listed tool name to get its full input schema. " +
+	// Discussion #948: carry the project links at the protocol level, matching
+	// the default server's instructions.
+	"ABOUT: MCPProxy homepage " + branding.Homepage + ", source " + branding.Repo + ", docs " + branding.Docs + "."
+
+// directDeferralLegend explains the compact-signature convention in-band
+// (FR-007). It is static across both serialization modes and phrased
+// conditionally ("Some tool descriptions…") so it stays true in full mode,
+// where no entry carries a signature — the alternative, emitting it only under
+// deferral, would make the initialize response depend on a serialization
+// setting and give clients two shapes to cache instead of one.
+const directDeferralLegend = "Some tool descriptions end with a compact signature `(param*:type, ...)`: " +
+	"`*` marks a required parameter and `~` marks collapsed/lossy details. " +
+	"When a signature is present the listed inputSchema is a placeholder, not the real schema — " +
+	"flat signatures are directly callable, and for `~`-marked tools call 'describe_tool' " +
+	"with the listed tool name to get the full schema."
+
+// resolveDirectInstructions composes the direct server's initialize
+// instructions: the operator's configured value when non-empty, otherwise the
+// direct-specific default, then a blank line and the deferral legend.
+//
+// The custom branch matters (D11): without it, attaching instructions to this
+// server would make the operator-configurable `instructions` key silently
+// unreachable on the direct surface — a regression dressed up as a feature.
+//
+// Resolved at server-CONSTRUCTION time, not per request: mcp-go fixes
+// WithInstructions on the server instance. That matches the default server
+// (mcp.go's NewMCPProxyServer), so editing `instructions` needs a restart on
+// both surfaces — deliberately unlike the serialization mode, which is read
+// live per rebuild because FR-001 requires it to be hot-reloadable.
+func resolveDirectInstructions(custom string) string {
+	base := custom
+	if base == "" {
+		base = defaultDirectInstructions
+	}
+	return base + "\n\n" + directDeferralLegend
+}
+
+// directCustomInstructions reads the operator's configured instructions,
+// tolerating a nil config the way the rest of initRoutingModeServers' callers
+// do not have to (unit tests construct bare proxies).
+func directCustomInstructions(cfg *config.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Instructions
+}
+
 func (p *MCPProxyServer) initRoutingModeServers() {
 	// All routing mode servers share the same hooks for session tracking
 	opts := []mcpserver.ServerOption{
 		mcpserver.WithToolCapabilities(true),
 		mcpserver.WithRecovery(),
 	}
+	// Spec 058 FR-019: private short-lived cache hints on every routing-mode
+	// server (shared opts, so directOpts inherits them too).
+	opts = append(opts, cacheHintServerOptions()...)
 	if p.hooks != nil {
+		// Spec 105 FR-010 D13/gap G6: mark which real JSON-RPC method
+		// produced this request — mcp-go calls these with the SAME ctx it
+		// then hands to handleListTools/handleToolCall, synchronously, so the
+		// direct-mode discovery filters (mcp_direct_scope.go,
+		// mcp_direct_callability.go) can tell a tools/list enumeration from
+		// the call-time re-evaluation of one tool, which the filter API
+		// itself does not distinguish. See
+		// directRequestKindFromContext's doc comment for the full mechanism
+		// and why every routing-mode server (not just directServer) safely
+		// shares this hook.
+		p.hooks.AddBeforeListTools(func(ctx context.Context, _ any, _ *mcp.ListToolsRequest) {
+			setDirectRequestKind(ctx, directRequestKindList)
+		})
+		p.hooks.AddBeforeCallTool(func(ctx context.Context, _ any, _ *mcp.CallToolRequest) {
+			setDirectRequestKind(ctx, directRequestKindCall)
+		})
 		opts = append(opts, mcpserver.WithHooks(p.hooks))
 	}
+	// Advertise prompts on every routing-mode server, not just the default
+	// retrieve_tools server: /mcp is served via GetMCPServerForMode, which
+	// after config.Validate() normalizes routing_mode almost never returns
+	// p.server, so without this the aggregated prompts feature is
+	// unreachable over Streamable HTTP (PR #973 review, P1).
+	if p.config.EnablePrompts {
+		opts = append(opts, mcpserver.WithPromptCapabilities(true))
+	}
+	// Enforce agent-token + profile scope on aggregated prompts across every
+	// routing-mode server. mcp-go applies this on BOTH prompts/list and
+	// prompts/get (passesPromptFilters), closing the F1 get-time auth bypass.
+	// Added to the shared opts (before directOpts copies it) so directServer,
+	// codeExecServer and callToolServer all inherit it; p.server gets the
+	// same filter in NewMCPProxyServer, where proxy exists.
+	//
+	// Bound regardless of EnablePrompts: RefreshPrompts publishes from the LIVE
+	// snapshot, so a server built with prompts off can still receive upstream
+	// prompts after a runtime enable, and mcp-go then serves prompts/list from
+	// the implicitly-registered capability. Only the filter makes that listing
+	// scoped and stamp-free (Spec 105 FR-006, cross-review round 2). It is a
+	// no-op while no prompts are registered.
+	opts = append(opts, mcpserver.WithPromptFilter(p.filterAggregatedPromptsForAuth))
+	opts = append(opts, mcpserver.WithToolFilter(p.filterProfileV3Tools))
+	// Name the caller's reachable servers in retrieve_tools' description
+	// (no-op on the direct surface, which has no retrieve_tools).
+	opts = append(opts, mcpserver.WithToolFilter(p.filterAdvertiseServersInRetrieveTools))
 
 	// Create direct mode server. Both direct-mode tool filters are agent-scoped
 	// discovery filters and belong only on the direct server (not the shared
@@ -517,6 +1263,17 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	directOpts = append(directOpts,
 		mcpserver.WithToolFilter(p.filterDirectModeToolsForAuth),
 		mcpserver.WithToolFilter(p.filterDirectToolsForAgentCallability),
+		// Spec 105 FR-008: TERMINAL filter, registered last so it runs after
+		// the two above — mcp-go feeds each filter's output to the next, both
+		// for tools/list and for the call-time re-evaluation of one tool — and
+		// removes the internal identity stamp those two authorize against, for
+		// EVERY caller including administrators, before any tool reaches the
+		// wire.
+		mcpserver.WithToolFilter(stripDirectToolStampFilter),
+		// FR-007: the in-band convention channel. The direct server gets its
+		// own text (plus the deferral legend); the code-execution and
+		// call-tool servers below share p.server's.
+		mcpserver.WithInstructions(resolveDirectInstructions(directCustomInstructions(p.config))),
 	)
 	p.directServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
@@ -524,18 +1281,27 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		directOpts...,
 	)
 
+	// The code-execution and call-tool servers carry the same initialize
+	// instructions as p.server. /mcp is served through GetMCPServerForMode,
+	// which returns callToolServer (retrieve_tools mode) or codeExecServer —
+	// almost never p.server — so without this a client on the default
+	// endpoint got no instructions at all, and agents never learned that
+	// upstream tools sit behind retrieve_tools (they fell back to shell CLIs).
+	// defaultInstructions is already routing-mode-aware.
+	sharedInstructions := mcpserver.WithInstructions(resolveInstructions(directCustomInstructions(p.config)))
+
 	// Create code execution mode server
 	p.codeExecServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		mcpServerVersion(),
-		opts...,
+		append(append([]mcpserver.ServerOption{}, opts...), sharedInstructions)...,
 	)
 
 	// Create call tool mode server (/mcp/call)
 	p.callToolServer = mcpserver.NewMCPServer(
 		"mcpproxy-go",
 		mcpServerVersion(),
-		opts...,
+		append(append([]mcpserver.ServerOption{}, opts...), sharedInstructions)...,
 	)
 
 	// Register tools for code execution mode (static tools that don't change)
@@ -543,19 +1309,86 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 	for _, st := range codeExecTools {
 		p.codeExecServer.AddTool(st.Tool, st.Handler)
 	}
+	// Seed the content guard with what was just registered, so the first
+	// config.reloaded does not re-register (and notify every client about) an
+	// identical surface merely because the fingerprint started out empty.
+	p.codeExecSurfaceFP = toolSetFingerprint(codeExecTools)
 
 	// Register tools for call tool mode
 	callToolModeTools := p.buildCallToolModeTools()
 	for _, st := range callToolModeTools {
 		p.callToolServer.AddTool(st.Tool, st.Handler)
 	}
+	p.callToolSurfaceFP = toolSetFingerprint(callToolModeTools)
 
-	// Note: Direct mode tools are built lazily/on-demand via RefreshDirectModeTools
-	// because upstream servers may not be connected yet during initialization.
-	// The servers.changed event will trigger a refresh.
+	// Initial direct rebuild (D15). Done by CALLING RefreshDirectModeTools so
+	// there is exactly ONE publisher and one copy of the SetTools-then-publish
+	// ordering — a second inline copy here would be the obvious way to introduce
+	// the mismatch that ordering exists to prevent.
+	//
+	// Upstreams are typically not connected yet, so this registers the built-ins
+	// and publishes an EMPTY catalog. Both matter: FR-009 needs describe_tool on
+	// the surface from the first request rather than from the first upstream
+	// reconcile, and a published (non-nil) catalog puts the discovery filters in
+	// deny-on-miss immediately instead of leaving them permissive until then.
+	p.RefreshDirectModeTools()
 
 	p.logger.Info("routing mode servers initialized",
 		zap.String("default_mode", p.config.RoutingMode))
+}
+
+// directSerializationDrifted reports whether the live effective direct
+// serialization differs from the one the PUBLISHED catalog was rendered with
+// (Spec 102 FR-014 / T068).
+//
+// The comparison is against the snapshot, not against a remembered config
+// value, because only the snapshot knows what connected clients were actually
+// served. Reading the live side through currentConfig() — never
+// construction-time p.config — is what makes a hot reload visible here at all.
+//
+// A nil catalog is deliberately NOT drift. Nothing is published, so there is no
+// "what we served" to compare against, and answering true would rebuild the
+// whole surface on every unrelated config reload — the churn FR-014 forbids. In
+// production the window does not exist: the constructor publishes a catalog
+// before serving its first request (D15/T025), and a nil one would still be
+// filled by the next servers.changed.
+func (p *MCPProxyServer) directSerializationDrifted() bool {
+	cat := p.loadDirectCatalog()
+	if cat == nil {
+		return false
+	}
+	return cat.Mode() != p.effectiveDirectToolResponseMode()
+}
+
+// RefreshDirectModeToolsOnSerializationChange rebuilds the direct surface iff
+// the operator's serialization choice has actually moved.
+//
+// Exported for the config.reloaded listener, which must not simply call
+// RefreshDirectModeTools: that would re-register every tool and push a
+// notifications/tools/list_changed to every connected client on any config edit
+// at all — a "no changes for you" reload that looks, to a client, exactly like
+// the tool set having changed.
+func (p *MCPProxyServer) RefreshDirectModeToolsOnSerializationChange() {
+	if p.directServer == nil {
+		return
+	}
+
+	// The drift check and the rebuild it authorizes must be ONE critical
+	// section. Checking outside the lock lets two concurrent reloads both
+	// observe drift, then serialize inside RefreshDirectModeTools and publish
+	// two generations — the second no longer justified by any flip, and pushing
+	// a second notifications/tools/list_changed to every client. That is the
+	// churn the guard exists to prevent, reintroduced by the guard's own
+	// racy read.
+	p.directRefreshMu.Lock()
+	defer p.directRefreshMu.Unlock()
+
+	if !p.directSerializationDrifted() {
+		return
+	}
+	p.logger.Info("direct serialization mode changed; rebuilding the direct tool surface",
+		zap.String("mode", p.effectiveDirectToolResponseMode()))
+	p.refreshDirectModeToolsLocked()
 }
 
 // RefreshDirectModeTools rebuilds the direct mode server's tool set.
@@ -565,17 +1398,85 @@ func (p *MCPProxyServer) RefreshDirectModeTools() {
 		return
 	}
 
-	directTools := p.buildDirectModeTools()
+	// Serialize rebuilds. Today there is exactly one caller — the single serial
+	// event loop in listenForRoutingModeRefresh — so this lock is uncontended.
+	// It is here because this feature's own roadmap adds two more callers: the
+	// initial rebuild in initRoutingModeServers (on the CONSTRUCTOR goroutine,
+	// not the listener's) and the config.reloaded branch. Without it, two
+	// concurrent rebuilds can interleave as SetTools(A), SetTools(B),
+	// publish(A) — leaving catalog A paired with tool map B, which is exactly
+	// the mismatch the SetTools-then-publish ordering exists to prevent.
+	p.directRefreshMu.Lock()
+	defer p.directRefreshMu.Unlock()
 
-	// Convert to the format needed by SetTools
+	p.refreshDirectModeToolsLocked()
+}
+
+// refreshDirectModeToolsLocked is the rebuild body. The caller MUST hold
+// directRefreshMu — split out so the reload guard can hold the lock across its
+// drift check and the rebuild that check authorizes.
+func (p *MCPProxyServer) refreshDirectModeToolsLocked() {
+	directTools, cat := p.buildDirectModeTools()
+
 	serverTools := make([]mcpserver.ServerTool, len(directTools))
 	copy(serverTools, directTools)
 
-	// Replace all tools atomically
+	// ORDER IS LOAD-BEARING (D13 rule 1). SetTools lands the registry first, the
+	// catalog is published immediately after. The two are separate publications
+	// and cannot be made one transaction — mcp-go owns its registry read — so the
+	// guarantee is directional rather than atomic.
+	//
+	// What the window actually exposes, measured in mcp_direct_skew_test.go
+	// rather than assumed:
+	//
+	//   - Spec 105 FR-008: renderDirectTools stamps each rendered tool with the
+	//     identity of the SAME build that produced its handler (Spec 105
+	//     FR-008), and the LISTING filters read that stamp first, never a fresh
+	//     catalog lookup — so an ADDED, REMOVED, reverse-flipped or tier-changed
+	//     name is authorized correctly for every caller, scoped or not, as soon
+	//     as SetTools lands it, with no window at all.
+	//   - describe_tool is UNCHANGED by that fix and still resolves against
+	//     whichever catalog generation `p.loadDirectCatalog()` currently
+	//     returns, so it can lag the listing for the width of this window —
+	//     two OPPOSITE, both accepted, transient cross-generation residuals
+	//     that close at the publish: an added name is listed but not yet
+	//     describable (the direction Spec 102's SC-007 forbids in steady
+	//     state, tolerated here only for this one-rebuild window), and a
+	//     removed name is still describable from the previous snapshot after
+	//     it drops off the listing (stale, not a disclosure — the same
+	//     session could have described it one request earlier).
+	//
+	// Both close at the publish. The three accepted residuals (T002/T003) are
+	// the schema- and annotations-only changes, which are invisible in the
+	// listing by construction.
+	// Skip a rebuild that would change nothing. SetTools notifies every client
+	// unconditionally (see mcp_surface_fingerprint.go), and servers.changed fires
+	// on ordinary connection churn, so an unguarded rebuild re-notified everyone
+	// on every reconnect attempt.
+	//
+	// BOTH fingerprints must match. The listing alone is not enough: registry and
+	// catalog are published as a pair because a handler closes over its catalog
+	// entry, and routing can move — a collision resolving to a different upstream,
+	// a changed RequiredPermission — while the listing stays byte-identical.
+	toolsFP := toolSetFingerprint(serverTools)
+	routingFP := cat.routingFingerprint()
+	if directSurfaceUnchanged(p.directSurfaceToolsFP, p.directSurfaceRoutingFP, toolsFP, routingFP) {
+		p.logger.Debug("direct mode tools unchanged; skipping rebuild",
+			zap.Int("tool_count", len(directTools)))
+		return
+	}
+
 	p.directServer.SetTools(serverTools...)
+	if p.directRebuildPause != nil {
+		p.directRebuildPause()
+	}
+	p.publishDirectCatalog(cat)
+	p.directSurfaceToolsFP = toolsFP
+	p.directSurfaceRoutingFP = routingFP
 
 	p.logger.Info("refreshed direct mode tools",
-		zap.Int("tool_count", len(directTools)))
+		zap.Int("tool_count", len(directTools)),
+		zap.Uint64("catalog_generation", cat.Generation()))
 }
 
 // RefreshCodeExecModeTools rebuilds the code execution mode server's tool catalog description.
@@ -589,10 +1490,419 @@ func (p *MCPProxyServer) RefreshCodeExecModeTools() {
 	serverTools := make([]mcpserver.ServerTool, len(codeExecTools))
 	copy(serverTools, codeExecTools)
 
+	// This surface carries BUILT-INS ONLY — buildCodeExecModeTools never
+	// iterates upstreams — yet it was rebuilt on every servers.changed, which
+	// made every reconnect tell every client its tool list had changed. Measured
+	// 9 of 9 spurious on one ordinary 4-server startup.
+	//
+	// Guarded on content rather than by dropping the servers.changed call, so
+	// this stays correct if the surface ever does gain fleet-dependent content.
+	fp := toolSetFingerprint(serverTools)
+	p.codeExecRefreshMu.Lock()
+	defer p.codeExecRefreshMu.Unlock()
+	if p.codeExecSurfaceFP == fp {
+		p.logger.Debug("code execution mode tools unchanged; skipping rebuild",
+			zap.Int("tool_count", len(codeExecTools)))
+		return
+	}
+
 	p.codeExecServer.SetTools(serverTools...)
+	p.codeExecSurfaceFP = fp
+	p.codeExecPublishes.Add(1)
 
 	p.logger.Info("refreshed code execution mode tools",
 		zap.Int("tool_count", len(codeExecTools)))
+}
+
+// RefreshCallToolModeTools rebuilds the call-tool mode server's tool set.
+//
+// UX audit F16: callToolServer is the surface behind /mcp in the DEFAULT
+// routing mode (retrieve_tools), and its tools were registered exactly once in
+// initRoutingModeServers. Its code_execution entry is therefore the one a
+// client sees, and a hot enable_code_execution toggle had no way to replace it.
+// buildCallToolModeTools reads the live config snapshot, so re-running it on
+// config.reloaded swaps the disabled stub for the live tool (and back).
+func (p *MCPProxyServer) RefreshCallToolModeTools() {
+	if p.callToolServer == nil {
+		return
+	}
+
+	callToolTools := p.buildCallToolModeTools()
+	serverTools := make([]mcpserver.ServerTool, len(callToolTools))
+	copy(serverTools, callToolTools)
+
+	// Guarded on content, like the code-exec surface: this refresh runs on
+	// EVERY config.reloaded, and SetTools pushes notifications/tools/list_changed
+	// to every initialized session whether or not anything moved. Without the
+	// guard an unrelated config edit looks, to a client, exactly like the tool
+	// set changing. Issue #1236 asks for list_changed on a toggle — not on
+	// every reload.
+	fp := toolSetFingerprint(serverTools)
+	p.callToolRefreshMu.Lock()
+	defer p.callToolRefreshMu.Unlock()
+	if p.callToolSurfaceFP == fp {
+		p.logger.Debug("call tool mode tools unchanged; skipping rebuild",
+			zap.Int("tool_count", len(callToolTools)))
+		return
+	}
+
+	p.callToolServer.SetTools(serverTools...)
+	p.callToolSurfaceFP = fp
+	p.callToolPublishes.Add(1)
+
+	p.logger.Info("refreshed call tool mode tools",
+		zap.Int("tool_count", len(callToolTools)))
+}
+
+// RefreshCodeExecutionAvailability re-advertises code_execution on every tool
+// surface that carries it, so an enable_code_execution flip applies without a
+// restart (UX audit F16, issue #1236). directServer is deliberately absent —
+// direct mode does not expose code_execution at all.
+//
+// The routing-mode surfaces are rebuilt through their content-guarded
+// refreshers, so only a real flip re-registers and notifies. The default/stdio
+// surface (p.server) is updated IN PLACE: its tool set is assembled once by
+// registerTools and SetTools would drop everything else. A flip on adds the
+// live tool with AddTools; a flip off withdraws it with DeleteTools. Both push
+// notifications/tools/list_changed, and neither runs when the surface already
+// matches the flag — mcp-go's AddTools notifies even for an empty batch, so an
+// unguarded call would announce a change on every unrelated reload.
+func (p *MCPProxyServer) RefreshCodeExecutionAvailability() {
+	p.RefreshCallToolModeTools()
+	p.RefreshCodeExecModeTools()
+	if p.server == nil {
+		return
+	}
+	live := p.buildCodeExecutionTool()
+	advertised := p.server.GetTool("code_execution") != nil
+	switch {
+	case len(live) > 0 && !advertised:
+		p.server.AddTools(live...)
+		p.logger.Info("code_execution enabled at runtime; advertised on the default surface")
+	case len(live) == 0 && advertised:
+		p.server.DeleteTools("code_execution")
+		p.logger.Info("code_execution disabled at runtime; withdrawn from the default surface")
+	}
+}
+
+// buildAggregatedServerPrompts combines built-in prompts with upstream
+// prompts (colon-qualified "serverName:promptName", as returned by
+// Manager.ListPrompts) into the full ServerPrompt set for SetPrompts.
+// getPrompt is invoked with the original colon-qualified name whenever a
+// client requests one of the aggregated prompts — no reverse-parsing of the
+// client-facing "__" name is needed since the handler closure already knows
+// which server it came from. Upstream prompts with a malformed (unqualified)
+// name are skipped.
+//
+// Each published upstream prompt carries its canonical owning server — the
+// server its handler dispatches to — in the registered Prompt's _meta under
+// aggregatedPromptServerMetaKey (see stampAggregatedPromptServer).
+// filterAggregatedPromptsForAuth authorizes against THAT stamp, never against
+// a re-parse of the display name: "a__b__c" re-parsed on the first "__" claims
+// owner "a", while its handler dispatches to "a__b" (Spec 104 FR-016g).
+// Riding inside the registered mcp.Prompt binds the owner PER PROMPT rather
+// than in a side table: mcp-go's SetPrompts is not atomic as a whole (it
+// clears the maps, unlocks, then AddPrompts re-locks per batch, so a
+// concurrent list can observe an empty or partially repopulated set, and
+// overlapping refreshes can interleave), but every prompt a list does observe
+// carries the owner its own handler dispatches to, so a refresh that changes
+// a collision winner can never pair an old prompt with a new owner. The stamp
+// is stripped from client-visible output by the filter.
+//
+// authorize, when non-nil, is invoked by every upstream prompt handler with the
+// prompt's canonical server BEFORE getPrompt; a non-nil error is returned to
+// the caller and the upstream is never contacted. It is the handler-side half
+// of the FR-016g gate (see authorizeAggregatedPromptServer) and must not be
+// nil in production.
+func buildAggregatedServerPrompts(
+	builtins []mcpserver.ServerPrompt,
+	upstreamPrompts []mcp.Prompt,
+	getPrompt func(ctx context.Context, name string, args map[string]string) (*mcp.GetPromptResult, error),
+	authorize func(ctx context.Context, serverName string) error,
+	logger *zap.Logger,
+) []mcpserver.ServerPrompt {
+	all := make([]mcpserver.ServerPrompt, 0, len(builtins)+len(upstreamPrompts))
+	all = append(all, builtins...)
+
+	// Upstream ListPrompts iterates a map, so its order — and therefore the
+	// collision winner below — would otherwise change from refresh to refresh.
+	// Sort by qualified name so the same (server,prompt) wins every time.
+	upstreamPrompts = slices.Clone(upstreamPrompts)
+	slices.SortStableFunc(upstreamPrompts, func(x, y mcp.Prompt) int {
+		return strings.Compare(x.Name, y.Name)
+	})
+
+	// F7: two distinct (server,prompt) pairs can flatten to the same "__" display
+	// name (server "a__b"+prompt "c" and "a"+prompt "b__c" both -> "a__b__c").
+	// mcp-go's SetPrompts is last-writer-wins by map order, so without this the
+	// loser is dropped silently. Config validation rejects ':' in names but keeps
+	// '__' for back-compat, so a residual collision can still occur — keep a
+	// deterministic first-writer-wins guard here so it is LOGGED, never silent.
+	// Built-in names are seeded into the seen-set so an upstream cannot shadow
+	// "setup-new-mcp-server"/"troubleshoot-mcp-server".
+	seen := make(map[string]struct{}, len(all)+len(upstreamPrompts))
+	for i := range all {
+		seen[all[i].Prompt.Name] = struct{}{}
+	}
+
+	for _, qualified := range upstreamPrompts {
+		serverName, promptName, ok := strings.Cut(qualified.Name, ":")
+		if !ok {
+			continue
+		}
+		if promptName == "" {
+			// Spec 105 FR-008 (FR008-G7), the FR-006 prompt analogue: an
+			// upstream prompt with an empty raw name (a qualified name of
+			// "server:") has no registration identity to authorize it
+			// against — the same rule buildDirectCatalog now applies to an
+			// empty raw TOOL name. Withheld from every caller, administrators
+			// included, by never registering it at all.
+			if logger != nil {
+				logger.Warn("dropping aggregated prompt with an empty raw name: no registration identity to authorize it against",
+					zap.String("server", serverName))
+			}
+			continue
+		}
+
+		displayName := FormatDirectPromptName(serverName, promptName)
+		if _, dup := seen[displayName]; dup {
+			if logger != nil {
+				logger.Warn("dropping upstream prompt: display-name collision (kept first)",
+					zap.String("server", serverName),
+					zap.String("prompt", promptName),
+					zap.String("display_name", displayName),
+					zap.String("qualified_name", qualified.Name))
+			}
+			continue
+		}
+		seen[displayName] = struct{}{}
+
+		qualifiedName := qualified.Name
+		display := qualified
+		display.Name = displayName
+		display.Meta = stampAggregatedPromptServer(display.Meta, serverName)
+
+		all = append(all, mcpserver.ServerPrompt{
+			Prompt: display,
+			Handler: func(ctx context.Context, request mcp.GetPromptRequest) (*mcp.GetPromptResult, error) {
+				if authorize != nil {
+					if err := authorize(ctx, serverName); err != nil {
+						// Same wording mcp-go emits for an unregistered name.
+						return nil, fmt.Errorf("prompt '%s' not found: %w", request.Params.Name, err)
+					}
+				}
+				return getPrompt(ctx, qualifiedName, request.Params.Arguments)
+			},
+		})
+	}
+
+	return all
+}
+
+// aggregatedPromptServerMetaKey is the _meta key under which a published
+// upstream prompt records its canonical owning server. Namespaced per the MCP
+// _meta convention (reverse-DNS prefix) so it cannot collide with protocol or
+// upstream keys. It is internal: the auth filter strips it before the prompt
+// reaches a client.
+const aggregatedPromptServerMetaKey = "app.mcpproxy/server"
+
+// aggregatedPromptStamp is the value stored under aggregatedPromptServerMetaKey.
+// It is a private struct rather than a bare string so an upstream that itself
+// sends our key (a string) can never be mistaken for a stamp, and so the
+// upstream's own _meta — nil, `{}`, a progress token, or even its own value
+// for our key — travels with the registered prompt and is handed back
+// verbatim by stripAggregatedPromptServer. Marshalling it (which only an
+// unfiltered path could do) yields `{}`: the fields are unexported.
+type aggregatedPromptStamp struct {
+	server   string
+	upstream *mcp.Meta
+}
+
+// stampAggregatedPromptServer returns a fresh Meta carrying serverName under
+// aggregatedPromptServerMetaKey. Upstream-supplied fields are mirrored into it
+// (so an unfiltered reader still sees them), while the upstream Meta itself is
+// kept inside the stamp so the strip can restore exactly what the upstream
+// sent. An upstream value under our key never wins — the owner is what
+// mcpproxy dispatches to, never what the upstream claims — but it is restored
+// on the client-visible copy along with the rest of the upstream _meta.
+func stampAggregatedPromptServer(upstream *mcp.Meta, serverName string) *mcp.Meta {
+	meta := &mcp.Meta{AdditionalFields: map[string]any{}}
+	if upstream != nil {
+		meta.ProgressToken = upstream.ProgressToken
+		maps.Copy(meta.AdditionalFields, upstream.AdditionalFields)
+	}
+	meta.AdditionalFields[aggregatedPromptServerMetaKey] = aggregatedPromptStamp{server: serverName, upstream: upstream}
+	return meta
+}
+
+// aggregatedPromptServer reads the canonical owner stamped by
+// stampAggregatedPromptServer. ok is false for a prompt that carries no stamp
+// (a built-in, anything not published by buildAggregatedServerPrompts, or an
+// upstream-supplied string under our key).
+func aggregatedPromptServer(prompt mcp.Prompt) (serverName string, ok bool) {
+	stamp, ok := aggregatedPromptStampOf(prompt)
+	return stamp.server, ok && stamp.server != ""
+}
+
+func aggregatedPromptStampOf(prompt mcp.Prompt) (aggregatedPromptStamp, bool) {
+	if prompt.Meta == nil {
+		return aggregatedPromptStamp{}, false
+	}
+	stamp, ok := prompt.Meta.AdditionalFields[aggregatedPromptServerMetaKey].(aggregatedPromptStamp)
+	return stamp, ok
+}
+
+// stripAggregatedPromptServer returns prompt with the internal owner stamp
+// removed and its _meta restored to exactly the value the upstream sent —
+// nil stays nil, an empty `{}` stays `{}` — so administrator-visible output is
+// byte-identical to the pre-stamp wire format (Spec 105 SC-005). The
+// registered prompt is never mutated: mcp-go hands filters the stored value
+// and a shared Meta pointer, and only the copy's Meta pointer is replaced.
+func stripAggregatedPromptServer(prompt mcp.Prompt) mcp.Prompt {
+	stamp, ok := aggregatedPromptStampOf(prompt)
+	if !ok {
+		return prompt
+	}
+	prompt.Meta = stamp.upstream
+	return prompt
+}
+
+// RefreshPrompts rebuilds every routing-mode server's prompt set: the built-in
+// prompts, plus (only when aggregate_upstream_prompts is enabled) every prompt
+// aggregated from connected upstream servers. Should be called when upstream
+// servers change (connect/disconnect) or on config hot-reload. A no-op when
+// prompts are disabled entirely.
+func (p *MCPProxyServer) RefreshPrompts() {
+	// Read the LIVE config snapshot (currentConfig()), never the construction-
+	// time p.config: p.config is never reassigned on hot-reload, so a boot-
+	// snapshot read would make the aggregate_upstream_prompts toggle restart-only
+	// (PR #973 review, finding F4).
+	cfg := p.currentConfig()
+	if cfg == nil || !cfg.EnablePrompts {
+		return
+	}
+
+	builtins := []mcpserver.ServerPrompt{
+		{Prompt: setupServerPrompt(), Handler: p.handleSetupServerPrompt},
+		{Prompt: troubleshootServerPrompt(), Handler: p.handleTroubleshootPrompt},
+	}
+
+	// Upstream aggregation is opt-in (AggregateUpstreamPrompts, default false):
+	// users are safe by default and enable it deliberately. When it is off we
+	// still (re-)set the built-ins on every routing-mode server, which also
+	// clears any previously-aggregated upstream prompts if the flag was flipped
+	// off at runtime.
+	var all []mcpserver.ServerPrompt
+	if cfg.AggregateUpstreamPrompts {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		// Spec 116 FR-014: bind the approval pass to the incarnations current
+		// BEFORE the listing, so prompts listed from a server that is removed
+		// and re-added meanwhile are never recorded for the replacement.
+		incs := p.capturePromptIncarnations()
+		upstreamPrompts, err := p.upstreamManager.ListPrompts(ctx)
+		if err != nil {
+			p.logger.Error("failed to list upstream prompts for refresh", zap.Error(err))
+			return
+		}
+		// F2 layer 2: drop prompts whose name/description/args trip the TPA
+		// scanner before they are ever registered (parity with tool-description
+		// poisoning detection).
+		upstreamPrompts = p.scanAggregatedPrompts(upstreamPrompts)
+		// Spec 100: rug-pull baseline. Detect pending/changed metadata vs the
+		// approved baseline and WITHHOLD those prompts from registration (compose
+		// in series after the TPA scan — scan detects poison, baseline detects
+		// change). A withheld prompt is absent from prompts/list and fails
+		// prompts/get natively; there is no runtime get-time gate.
+		approval := p.checkPromptApprovalsAt(upstreamPrompts, incs)
+		upstreamPrompts = filterBlockedPrompts(upstreamPrompts, approval.blocked)
+		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.getPromptAggregated, p.authorizeAggregatedPromptServer, p.logger)
+		p.logger.Info("refreshed prompts",
+			zap.Int("upstream_prompt_count", len(upstreamPrompts)),
+			zap.Int("total_prompt_count", len(all)),
+			zap.Int("withheld_pending", approval.pending),
+			zap.Int("withheld_changed", approval.changed))
+	} else {
+		// nil upstreamPrompts: the aggregation loop never runs, so the nil
+		// getPrompt is never invoked.
+		all = buildAggregatedServerPrompts(builtins, nil, nil, nil, p.logger)
+		p.logger.Debug("refreshed prompts (upstream aggregation disabled, built-ins only)",
+			zap.Int("total_prompt_count", len(all)))
+	}
+
+	// Set on every routing-mode server (Spec 031), not just the default
+	// retrieve_tools server: /mcp is served via GetMCPServerForMode, which
+	// returns a routing-mode server in every non-default mode (PR #973
+	// review, P1) — those need the same aggregated prompt set.
+	for _, srv := range []*mcpserver.MCPServer{p.server, p.directServer, p.codeExecServer, p.callToolServer} {
+		if srv != nil {
+			srv.SetPrompts(all...)
+		}
+	}
+}
+
+// promptScanText projects a prompt's client-visible metadata (description + every
+// argument name/desc) into one string so a TPA payload hidden in a prompt
+// description OR an argument description is scanned the same way a poisoned tool
+// description is.
+func promptScanText(pr mcp.Prompt) string {
+	var b strings.Builder
+	b.WriteString(pr.Description)
+	for _, a := range pr.Arguments {
+		b.WriteByte('\n')
+		b.WriteString(a.Name)
+		if a.Description != "" {
+			b.WriteByte(' ')
+			b.WriteString(a.Description)
+		}
+	}
+	return b.String()
+}
+
+// scanAggregatedPrompts runs the deterministic, offline TPA scanner over each
+// aggregated upstream prompt's name+description+arguments and DROPS any prompt
+// whose baseline verdict is "dangerous" (hard-tier: hidden-unicode, decoded
+// payload, curated injection/exfiltration phrases). This is the prompt analogue
+// of the tool-description TPA scan. A "warnings"/"clean" verdict is kept
+// (dropping on soft signals would blackhole legitimate prompts). Per-prompt
+// scanning is cheap (offline, cached bundle) and RefreshPrompts is off the
+// request hot path (Finding F2, layer 2).
+func (p *MCPProxyServer) scanAggregatedPrompts(prompts []mcp.Prompt) []mcp.Prompt {
+	if len(prompts) == 0 {
+		return prompts
+	}
+	kept := make([]mcp.Prompt, 0, len(prompts))
+	for _, pr := range prompts {
+		serverName, promptName, ok := strings.Cut(pr.Name, ":")
+		if !ok {
+			kept = append(kept, pr) // malformed name — dropped later by buildAggregatedServerPrompts
+			continue
+		}
+		meta := &config.ToolMetadata{
+			ServerName:  serverName,
+			Name:        promptName,
+			Description: promptScanText(pr),
+		}
+		// Schema v9: one counter increment per PROMPT actually put through the
+		// scanner (malformed names short-circuit above and are not counted).
+		// Invocation count only — never the prompt, the server, or the verdict.
+		telemetry.RecordTPAPromptScanOn(p.telemetryRegistry())
+		verdict, findings, _ := scanner.ScanToolMetadataVerdict(serverName, []*config.ToolMetadata{meta}, nil)
+		if verdict == "dangerous" {
+			signals := make([]string, 0, len(findings))
+			for _, f := range findings {
+				signals = append(signals, f.RuleID)
+			}
+			p.logger.Warn("Dropping upstream prompt: poisoned description (TPA scan)",
+				zap.String("server", serverName),
+				zap.String("prompt", promptName),
+				zap.String("verdict", verdict),
+				zap.Strings("tpa_signals", signals))
+			continue
+		}
+		kept = append(kept, pr)
+	}
+	return kept
 }
 
 // GetMCPServerForMode returns the MCP server instance for the given routing mode.

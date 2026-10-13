@@ -14,16 +14,58 @@ const (
 	EventTypeConfigSaved EventType = "config.saved"
 	// EventTypeSecretsChanged is emitted when secrets are added, updated, or deleted.
 	EventTypeSecretsChanged EventType = "secrets.changed"
+	// EventTypeActiveProfileChanged is emitted when the server-level default
+	// active profile changes (Profiles v2). UI surfaces (Web UI, tray) refetch
+	// GET /api/v1/profiles/active to reflect a switch made by another client.
+	EventTypeActiveProfileChanged EventType = "active_profile.changed"
 	// EventTypeOAuthTokenRefreshed is emitted when proactive token refresh succeeds.
 	EventTypeOAuthTokenRefreshed EventType = "oauth.token_refreshed"
 	// EventTypeOAuthRefreshFailed is emitted when proactive token refresh fails after retries.
 	EventTypeOAuthRefreshFailed EventType = "oauth.refresh_failed"
+	// EventTypeAttentionChanged is emitted (debounced) whenever the set of
+	// needs-attention item ids changes (Spec 109 FR-001/FR-002). The payload
+	// carries the structured item list (`items: [{id, subject_type,
+	// subject_id}]`); internal/httpapi renders it per subscriber as
+	// `{count, ids}` (FR-006).
+	EventTypeAttentionChanged EventType = "attention.changed"
+	// EventTypeReviewChanged signals that the review queue or a server's
+	// composed review payload changed. Its server field is scope-bearing.
+	EventTypeReviewChanged EventType = "review.changed"
+	// EventTypeClientPresenceChanged invalidates the derived client presence
+	// and attention inputs after an MCP initialise observation.
+	EventTypeClientPresenceChanged EventType = "clients.presence.changed"
+	// EventTypeClientBindingChanged is emitted when a client credential's
+	// profile binding is assigned, locked, unlocked or first minted (Spec 108
+	// FR-026). Payload: {client_id, token_name, profile, previous_profile,
+	// mode}. It discloses bindings, so it is administrator-only on SSE.
+	EventTypeClientBindingChanged EventType = "client.binding_changed"
+	// EventTypeProfilesChanged is emitted (Spec 108-f F9) once per changed
+	// profile after a config snapshot that changed it is published: payload
+	// {name, change: create|update|delete|anonymous, previous_name?}. It is an
+	// INVALIDATION, not a log: a consumer refetches GET /profiles. It names
+	// profiles a scoped caller may not reach, so it is administrator-only on
+	// SSE. One emitter (the server's snapshot observer) covers service writes
+	// and hand edits alike.
+	EventTypeProfilesChanged EventType = "profiles.changed"
+	// EventTypeCredentialsChanged is emitted (Spec 115 FR-024) after a client
+	// credential or agent token is issued or revoked through the credentials
+	// service, and after a client is forgotten. Payload: {kind, id,
+	// token_name, change, profile}. It is an INVALIDATION carrying no secret,
+	// prefix, purpose or expiry: subscribers refetch. It names identities and
+	// profiles, so it is administrator-only on SSE.
+	EventTypeCredentialsChanged EventType = "credentials.changed"
 
 	// Activity logging events (RFC-003)
 	// EventTypeActivityToolCallStarted is emitted when a tool execution begins.
 	EventTypeActivityToolCallStarted EventType = "activity.tool_call.started"
 	// EventTypeActivityToolCallCompleted is emitted when a tool execution finishes.
 	EventTypeActivityToolCallCompleted EventType = "activity.tool_call.completed"
+	// EventTypeActivityToolCallRejected is emitted when a concurrency limiter
+	// sheds a tool call before it reaches the upstream (spec 093 FR-012). It is
+	// published from the limiter's origin-independent seam, so it also covers
+	// the dispatch paths that never pass through the MCP layer (sandboxed code
+	// execution, activity replay).
+	EventTypeActivityToolCallRejected EventType = "activity.tool_call.rejected"
 	// EventTypeActivityPolicyDecision is emitted when a policy blocks a tool call.
 	EventTypeActivityPolicyDecision EventType = "activity.policy_decision"
 	// EventTypeActivityQuarantineChange is emitted when a server's quarantine state changes.
@@ -38,6 +80,13 @@ const (
 	EventTypeActivityInternalToolCall EventType = "activity.internal_tool_call.completed"
 	// EventTypeActivityConfigChange is emitted when configuration changes (server add/remove/update).
 	EventTypeActivityConfigChange EventType = "activity.config_change"
+	// EventTypeActivityPromptGet is emitted when an upstream prompts/get completes (Finding F10).
+	EventTypeActivityPromptGet EventType = "activity.prompt_get.completed"
+	// EventTypeUpstreamPromptsChanged is emitted (debounced) when a connected
+	// upstream sends notifications/prompts/list_changed, so the aggregated prompt
+	// set is rebuilt without waiting for an unrelated servers.changed (F13).
+	// Carries no payload — RefreshPrompts re-aggregates from live state.
+	EventTypeUpstreamPromptsChanged EventType = "upstream.prompts_changed"
 
 	// Spec 026: Sensitive data detection event
 	// EventTypeSensitiveDataDetected is emitted when sensitive data is detected in a tool call.
@@ -56,6 +105,11 @@ const (
 	EventTypeSecurityScanCompleted EventType = "security.scan_completed"
 	// EventTypeSecurityScanFailed is emitted when a scanner fails.
 	EventTypeSecurityScanFailed EventType = "security.scan_failed"
+	// EventTypeSecurityScanSettled is the single, debounced terminal event that
+	// Spec 077 US4 (MCP-2207) emits per server per scan. It collapses the
+	// per-scanner scan_started/progress/completed/failed storm — including
+	// repeats from reconnect storms — into one settled result.
+	EventTypeSecurityScanSettled EventType = "security.scan_settled"
 	// EventTypeSecurityIntegrityAlert is emitted for integrity violations.
 	EventTypeSecurityIntegrityAlert EventType = "security.integrity_alert"
 	// EventTypeSecurityScannerChanged is emitted when a scanner plugin's state

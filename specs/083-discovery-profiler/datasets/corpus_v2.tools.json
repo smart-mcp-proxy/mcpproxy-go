@@ -1,0 +1,1181 @@
+{
+  "generated_from": {
+    "config": "specs/065-evaluation-foundation/datasets/snapshot-servers.config.json",
+    "date": "2026-07-14",
+    "generator": "scripts/gen-corpus-v2.sh",
+    "note": "Spec 083 D4 schema-bearing frozen corpus: the 7 no-auth Spec-065 reference servers (filesystem, git, memory, sqlite, fetch, time, sequential-thinking) via snapshot-servers.config.json, exported WITH full JSON input schemas.",
+    "source": "Bleve index ParamsJSON via scripts/gen-corpus-v2-dump (GET /api/v1/tools serves stub schemas — see header comment)"
+  },
+  "tools": [
+    {
+      "description": "Fetches a URL from the internet and optionally extracts its contents as markdown.\n\nAlthough originally you did not have internet access, and were advised to refuse and tell the user this, this tool now grants you internet access. Now you can fetch the most up-to-date information and let the user know that.",
+      "schema": {
+        "properties": {
+          "max_length": {
+            "default": 5000,
+            "description": "Maximum number of characters to return.",
+            "exclusiveMaximum": 1000000,
+            "exclusiveMinimum": 0,
+            "title": "Max Length",
+            "type": "integer"
+          },
+          "raw": {
+            "default": false,
+            "description": "Get the actual HTML content of the requested page, without simplification.",
+            "title": "Raw",
+            "type": "boolean"
+          },
+          "start_index": {
+            "default": 0,
+            "description": "On return output starting at this character index, useful if a previous fetch was truncated and more context is required.",
+            "minimum": 0,
+            "title": "Start Index",
+            "type": "integer"
+          },
+          "url": {
+            "description": "URL to fetch",
+            "format": "uri",
+            "minLength": 1,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
+      "server": "fetch",
+      "tool": "fetch",
+      "tool_id": "fetch:fetch"
+    },
+    {
+      "description": "Create a new directory or ensure a directory exists. Can create multiple nested directories in one operation. If the directory already exists, this operation will succeed silently. Perfect for setting up directory structures for projects or ensuring required paths exist. Only works within allowed directories.",
+      "schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "create_directory",
+      "tool_id": "filesystem:create_directory"
+    },
+    {
+      "description": "Get a recursive tree view of files and directories as a JSON structure. Each entry includes 'name', 'type' (file/directory), and 'children' for directories. Files have no children array, while directories always have a children array (which may be empty). The output is formatted with 2-space indentation for readability. Only works within allowed directories.",
+      "schema": {
+        "properties": {
+          "excludePatterns": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "directory_tree",
+      "tool_id": "filesystem:directory_tree"
+    },
+    {
+      "description": "Make line-based edits to a text file. Each edit replaces exact line sequences with new content. Returns a git-style diff showing the changes made. Only works within allowed directories.",
+      "schema": {
+        "properties": {
+          "dryRun": {
+            "default": false,
+            "description": "Preview changes using git-style diff format",
+            "type": "boolean"
+          },
+          "edits": {
+            "items": {
+              "properties": {
+                "newText": {
+                  "description": "Text to replace with",
+                  "type": "string"
+                },
+                "oldText": {
+                  "description": "Text to search for - must match exactly",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "oldText",
+                "newText"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "edits"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "edit_file",
+      "tool_id": "filesystem:edit_file"
+    },
+    {
+      "description": "Retrieve detailed metadata about a file or directory. Returns comprehensive information including size, creation time, last modified time, permissions, and type. This tool is perfect for understanding file characteristics without reading the actual content. Only works within allowed directories.",
+      "schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "get_file_info",
+      "tool_id": "filesystem:get_file_info"
+    },
+    {
+      "description": "Returns the list of directories that this server is allowed to access. Subdirectories within these allowed directories are also accessible. Use this to understand which directories and their nested paths are available before trying to access files.",
+      "schema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "list_allowed_directories",
+      "tool_id": "filesystem:list_allowed_directories"
+    },
+    {
+      "description": "Get a detailed listing of all files and directories in a specified path. Results clearly distinguish between files and directories with [FILE] and [DIR] prefixes. This tool is essential for understanding directory structure and finding specific files within a directory. Only works within allowed directories.",
+      "schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "list_directory",
+      "tool_id": "filesystem:list_directory"
+    },
+    {
+      "description": "Get a detailed listing of all files and directories in a specified path, including sizes. Results clearly distinguish between files and directories with [FILE] and [DIR] prefixes. This tool is useful for understanding directory structure and finding specific files within a directory. Only works within allowed directories.",
+      "schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "sortBy": {
+            "default": "name",
+            "description": "Sort entries by name or size",
+            "enum": [
+              "name",
+              "size"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "list_directory_with_sizes",
+      "tool_id": "filesystem:list_directory_with_sizes"
+    },
+    {
+      "description": "Move or rename files and directories. Can move files between directories and rename them in a single operation. If the destination exists, the operation will fail. Works across different directories and can be used for simple renaming within the same directory. Both source and destination must be within allowed directories.",
+      "schema": {
+        "properties": {
+          "destination": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "destination"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "move_file",
+      "tool_id": "filesystem:move_file"
+    },
+    {
+      "description": "Read the complete contents of a file as text. DEPRECATED: Use read_text_file instead.",
+      "schema": {
+        "properties": {
+          "head": {
+            "description": "If provided, returns only the first N lines of the file",
+            "type": "number"
+          },
+          "path": {
+            "type": "string"
+          },
+          "tail": {
+            "description": "If provided, returns only the last N lines of the file",
+            "type": "number"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "read_file",
+      "tool_id": "filesystem:read_file"
+    },
+    {
+      "description": "Read a file and return it as a base64-encoded content block with its MIME type. Image and audio files are returned as image/audio content; any other file type is returned as an embedded resource. Only works within allowed directories.",
+      "schema": {
+        "properties": {
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "read_media_file",
+      "tool_id": "filesystem:read_media_file"
+    },
+    {
+      "description": "Read the contents of multiple files simultaneously. This is more efficient than reading files one by one when you need to analyze or compare multiple files. Each file's content is returned with its path as a reference. Failed reads for individual files won't stop the entire operation. Only works within allowed directories.",
+      "schema": {
+        "properties": {
+          "paths": {
+            "description": "Array of file paths to read. Each path must be a string pointing to a valid file within allowed directories.",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "paths"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "read_multiple_files",
+      "tool_id": "filesystem:read_multiple_files"
+    },
+    {
+      "description": "Read the complete contents of a file from the file system as text. Handles various text encodings and provides detailed error messages if the file cannot be read. Use this tool when you need to examine the contents of a single file. Use the 'head' parameter to read only the first N lines of a file, or the 'tail' parameter to read only the last N lines of a file. Operates on the file as text regardless of extension. Only works within allowed directories.",
+      "schema": {
+        "properties": {
+          "head": {
+            "description": "If provided, returns only the first N lines of the file",
+            "type": "number"
+          },
+          "path": {
+            "type": "string"
+          },
+          "tail": {
+            "description": "If provided, returns only the last N lines of the file",
+            "type": "number"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "read_text_file",
+      "tool_id": "filesystem:read_text_file"
+    },
+    {
+      "description": "Recursively search for files and directories matching a pattern. The patterns should be glob-style patterns that match paths relative to the working directory. Use pattern like '*.ext' to match files in current directory, and '**/*.ext' to match files in all subdirectories. Returns full paths to all matching items. Great for finding files when you don't know their exact location. Only searches within allowed directories.",
+      "schema": {
+        "properties": {
+          "excludePatterns": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "path": {
+            "type": "string"
+          },
+          "pattern": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "pattern"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "search_files",
+      "tool_id": "filesystem:search_files"
+    },
+    {
+      "description": "Create a new file or completely overwrite an existing file with new content. Use with caution as it will overwrite existing files without warning. Handles text content with proper encoding. Only works within allowed directories.",
+      "schema": {
+        "properties": {
+          "content": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "type": "object"
+      },
+      "server": "filesystem",
+      "tool": "write_file",
+      "tool_id": "filesystem:write_file"
+    },
+    {
+      "description": "Adds file contents to the staging area",
+      "schema": {
+        "properties": {
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path",
+          "files"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_add",
+      "tool_id": "git:git_add"
+    },
+    {
+      "description": "List Git branches",
+      "schema": {
+        "properties": {
+          "branch_type": {
+            "description": "Whether to list local branches ('local'), remote branches ('remote') or all branches('all').",
+            "title": "Branch Type",
+            "type": "string"
+          },
+          "contains": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The commit sha that branch should contain. Do not pass anything to this param if no commit sha is specified",
+            "title": "Contains"
+          },
+          "not_contains": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The commit sha that branch should NOT contain. Do not pass anything to this param if no commit sha is specified",
+            "title": "Not Contains"
+          },
+          "repo_path": {
+            "description": "The path to the Git repository.",
+            "title": "Repo Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path",
+          "branch_type"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_branch",
+      "tool_id": "git:git_branch"
+    },
+    {
+      "description": "Switches branches",
+      "schema": {
+        "properties": {
+          "branch_name": {
+            "title": "Branch Name",
+            "type": "string"
+          },
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path",
+          "branch_name"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_checkout",
+      "tool_id": "git:git_checkout"
+    },
+    {
+      "description": "Records changes to the repository",
+      "schema": {
+        "properties": {
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path",
+          "message"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_commit",
+      "tool_id": "git:git_commit"
+    },
+    {
+      "description": "Creates a new branch from an optional base branch",
+      "schema": {
+        "properties": {
+          "base_branch": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Base Branch"
+          },
+          "branch_name": {
+            "title": "Branch Name",
+            "type": "string"
+          },
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path",
+          "branch_name"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_create_branch",
+      "tool_id": "git:git_create_branch"
+    },
+    {
+      "description": "Shows differences between branches or commits",
+      "schema": {
+        "properties": {
+          "context_lines": {
+            "default": 3,
+            "title": "Context Lines",
+            "type": "integer"
+          },
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          },
+          "target": {
+            "title": "Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path",
+          "target"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_diff",
+      "tool_id": "git:git_diff"
+    },
+    {
+      "description": "Shows changes that are staged for commit",
+      "schema": {
+        "properties": {
+          "context_lines": {
+            "default": 3,
+            "title": "Context Lines",
+            "type": "integer"
+          },
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_diff_staged",
+      "tool_id": "git:git_diff_staged"
+    },
+    {
+      "description": "Shows changes in the working directory that are not yet staged",
+      "schema": {
+        "properties": {
+          "context_lines": {
+            "default": 3,
+            "title": "Context Lines",
+            "type": "integer"
+          },
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_diff_unstaged",
+      "tool_id": "git:git_diff_unstaged"
+    },
+    {
+      "description": "Shows the commit logs",
+      "schema": {
+        "properties": {
+          "end_timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "End timestamp for filtering commits. Accepts: ISO 8601 format (e.g., '2024-01-15T14:30:25'), relative dates (e.g., '2 weeks ago', 'yesterday'), or absolute dates (e.g., '2024-01-15', 'Jan 15 2024')",
+            "title": "End Timestamp"
+          },
+          "max_count": {
+            "default": 10,
+            "title": "Max Count",
+            "type": "integer"
+          },
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          },
+          "start_timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Start timestamp for filtering commits. Accepts: ISO 8601 format (e.g., '2024-01-15T14:30:25'), relative dates (e.g., '2 weeks ago', 'yesterday'), or absolute dates (e.g., '2024-01-15', 'Jan 15 2024')",
+            "title": "Start Timestamp"
+          }
+        },
+        "required": [
+          "repo_path"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_log",
+      "tool_id": "git:git_log"
+    },
+    {
+      "description": "Unstages all staged changes",
+      "schema": {
+        "properties": {
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_reset",
+      "tool_id": "git:git_reset"
+    },
+    {
+      "description": "Shows the contents of a commit",
+      "schema": {
+        "properties": {
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path",
+          "revision"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_show",
+      "tool_id": "git:git_show"
+    },
+    {
+      "description": "Shows the working tree status",
+      "schema": {
+        "properties": {
+          "repo_path": {
+            "title": "Repo Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo_path"
+        ],
+        "type": "object"
+      },
+      "server": "git",
+      "tool": "git_status",
+      "tool_id": "git:git_status"
+    },
+    {
+      "description": "Add new observations to existing entities in the knowledge graph",
+      "schema": {
+        "properties": {
+          "observations": {
+            "items": {
+              "properties": {
+                "contents": {
+                  "description": "An array of observation contents to add",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "entityName": {
+                  "description": "The name of the entity to add the observations to",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "entityName",
+                "contents"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "observations"
+        ],
+        "type": "object"
+      },
+      "server": "memory",
+      "tool": "add_observations",
+      "tool_id": "memory:add_observations"
+    },
+    {
+      "description": "Create multiple new entities in the knowledge graph",
+      "schema": {
+        "properties": {
+          "entities": {
+            "items": {
+              "properties": {
+                "entityType": {
+                  "description": "The type of the entity",
+                  "type": "string"
+                },
+                "name": {
+                  "description": "The name of the entity",
+                  "type": "string"
+                },
+                "observations": {
+                  "description": "An array of observation contents associated with the entity",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "name",
+                "entityType",
+                "observations"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "entities"
+        ],
+        "type": "object"
+      },
+      "server": "memory",
+      "tool": "create_entities",
+      "tool_id": "memory:create_entities"
+    },
+    {
+      "description": "Create multiple new relations between entities in the knowledge graph. Relations should be in active voice",
+      "schema": {
+        "properties": {
+          "relations": {
+            "items": {
+              "properties": {
+                "from": {
+                  "description": "The name of the entity where the relation starts",
+                  "type": "string"
+                },
+                "relationType": {
+                  "description": "The type of the relation",
+                  "type": "string"
+                },
+                "to": {
+                  "description": "The name of the entity where the relation ends",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "from",
+                "to",
+                "relationType"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "relations"
+        ],
+        "type": "object"
+      },
+      "server": "memory",
+      "tool": "create_relations",
+      "tool_id": "memory:create_relations"
+    },
+    {
+      "description": "Delete multiple entities and their associated relations from the knowledge graph",
+      "schema": {
+        "properties": {
+          "entityNames": {
+            "description": "An array of entity names to delete",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "entityNames"
+        ],
+        "type": "object"
+      },
+      "server": "memory",
+      "tool": "delete_entities",
+      "tool_id": "memory:delete_entities"
+    },
+    {
+      "description": "Delete specific observations from entities in the knowledge graph",
+      "schema": {
+        "properties": {
+          "deletions": {
+            "items": {
+              "properties": {
+                "entityName": {
+                  "description": "The name of the entity containing the observations",
+                  "type": "string"
+                },
+                "observations": {
+                  "description": "An array of observations to delete",
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "entityName",
+                "observations"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "deletions"
+        ],
+        "type": "object"
+      },
+      "server": "memory",
+      "tool": "delete_observations",
+      "tool_id": "memory:delete_observations"
+    },
+    {
+      "description": "Delete multiple relations from the knowledge graph",
+      "schema": {
+        "properties": {
+          "relations": {
+            "description": "An array of relations to delete",
+            "items": {
+              "properties": {
+                "from": {
+                  "description": "The name of the entity where the relation starts",
+                  "type": "string"
+                },
+                "relationType": {
+                  "description": "The type of the relation",
+                  "type": "string"
+                },
+                "to": {
+                  "description": "The name of the entity where the relation ends",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "from",
+                "to",
+                "relationType"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "relations"
+        ],
+        "type": "object"
+      },
+      "server": "memory",
+      "tool": "delete_relations",
+      "tool_id": "memory:delete_relations"
+    },
+    {
+      "description": "Open specific nodes in the knowledge graph by their names",
+      "schema": {
+        "properties": {
+          "names": {
+            "description": "An array of entity names to retrieve",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "names"
+        ],
+        "type": "object"
+      },
+      "server": "memory",
+      "tool": "open_nodes",
+      "tool_id": "memory:open_nodes"
+    },
+    {
+      "description": "Read the entire knowledge graph",
+      "schema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "server": "memory",
+      "tool": "read_graph",
+      "tool_id": "memory:read_graph"
+    },
+    {
+      "description": "Search for nodes in the knowledge graph based on a query",
+      "schema": {
+        "properties": {
+          "query": {
+            "description": "The search query to match against entity names, types, and observation content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "server": "memory",
+      "tool": "search_nodes",
+      "tool_id": "memory:search_nodes"
+    },
+    {
+      "description": "A detailed tool for dynamic and reflective problem-solving through thoughts.\nThis tool helps analyze problems through a flexible thinking process that can adapt and evolve.\nEach thought can build on, question, or revise previous insights as understanding deepens.\n\nWhen to use this tool:\n- Breaking down complex problems into steps\n- Planning and design with room for revision\n- Analysis that might need course correction\n- Problems where the full scope might not be clear initially\n- Problems that require a multi-step solution\n- Tasks that need to maintain context over multiple steps\n- Situations where irrelevant information needs to be filtered out\n\nKey features:\n- You can adjust total_thoughts up or down as you progress\n- You can question or revise previous thoughts\n- You can add more thoughts even after reaching what seemed like the end\n- You can express uncertainty and explore alternative approaches\n- Not every thought needs to build linearly - you can branch or backtrack\n- Generates a solution hypothesis\n- Verifies the hypothesis based on the Chain of Thought steps\n- Repeats the process until satisfied\n- Provides a correct answer\n\nParameters explained:\n- thought: Your current thinking step, which can include:\n  * Regular analytical steps\n  * Revisions of previous thoughts\n  * Questions about previous decisions\n  * Realizations about needing more analysis\n  * Changes in approach\n  * Hypothesis generation\n  * Hypothesis verification\n- nextThoughtNeeded: True if you need more thinking, even if at what seemed like the end\n- thoughtNumber: Current number in sequence (can go beyond initial total if needed)\n- totalThoughts: Current estimate of thoughts needed (can be adjusted up/down)\n- isRevision: A boolean indicating if this thought revises previous thinking\n- revisesThought: If is_revision is true, which thought number is being reconsidered\n- branchFromThought: If branching, which thought number is the branching point\n- branchId: Identifier for the current branch (if any)\n- needsMoreThoughts: If reaching end but realizing more thoughts needed\n\nYou should:\n1. Start with an initial estimate of needed thoughts, but be ready to adjust\n2. Feel free to question or revise previous thoughts\n3. Don't hesitate to add more thoughts if needed, even at the \"end\"\n4. Express uncertainty when present\n5. Mark thoughts that revise previous thinking or branch into new paths\n6. Ignore information that is irrelevant to the current step\n7. Generate a solution hypothesis when appropriate\n8. Verify the hypothesis based on the Chain of Thought steps\n9. Repeat the process until satisfied with the solution\n10. Provide a single, ideally correct answer as the final output\n11. Only set nextThoughtNeeded to false when truly done and a satisfactory answer is reached",
+      "schema": {
+        "properties": {
+          "branchFromThought": {
+            "description": "Branching point thought number",
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "branchId": {
+            "description": "Branch identifier",
+            "type": "string"
+          },
+          "isRevision": {
+            "description": "Whether this revises previous thinking",
+            "type": "boolean"
+          },
+          "needsMoreThoughts": {
+            "description": "If more thoughts are needed",
+            "type": "boolean"
+          },
+          "nextThoughtNeeded": {
+            "description": "Whether another thought step is needed",
+            "type": "boolean"
+          },
+          "revisesThought": {
+            "description": "Which thought is being reconsidered",
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "thought": {
+            "description": "Your current thinking step",
+            "type": "string"
+          },
+          "thoughtNumber": {
+            "description": "Current thought number (numeric value, e.g., 1, 2, 3)",
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "totalThoughts": {
+            "description": "Estimated total thoughts needed (numeric value, e.g., 5, 10)",
+            "maximum": 9007199254740991,
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "thought",
+          "thoughtNumber",
+          "totalThoughts"
+        ],
+        "type": "object"
+      },
+      "server": "sequential-thinking",
+      "tool": "sequentialthinking",
+      "tool_id": "sequential-thinking:sequentialthinking"
+    },
+    {
+      "description": "Add a business insight to the memo",
+      "schema": {
+        "properties": {
+          "insight": {
+            "description": "Business insight discovered from data analysis",
+            "type": "string"
+          }
+        },
+        "required": [
+          "insight"
+        ],
+        "type": "object"
+      },
+      "server": "sqlite",
+      "tool": "append_insight",
+      "tool_id": "sqlite:append_insight"
+    },
+    {
+      "description": "Create a new table in the SQLite database",
+      "schema": {
+        "properties": {
+          "query": {
+            "description": "CREATE TABLE SQL statement",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "server": "sqlite",
+      "tool": "create_table",
+      "tool_id": "sqlite:create_table"
+    },
+    {
+      "description": "Get the schema information for a specific table",
+      "schema": {
+        "properties": {
+          "table_name": {
+            "description": "Name of the table to describe",
+            "type": "string"
+          }
+        },
+        "required": [
+          "table_name"
+        ],
+        "type": "object"
+      },
+      "server": "sqlite",
+      "tool": "describe_table",
+      "tool_id": "sqlite:describe_table"
+    },
+    {
+      "description": "List all tables in the SQLite database",
+      "schema": {
+        "properties": {},
+        "required": [],
+        "type": "object"
+      },
+      "server": "sqlite",
+      "tool": "list_tables",
+      "tool_id": "sqlite:list_tables"
+    },
+    {
+      "description": "Execute a SELECT query on the SQLite database",
+      "schema": {
+        "properties": {
+          "query": {
+            "description": "SELECT SQL query to execute",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "server": "sqlite",
+      "tool": "read_query",
+      "tool_id": "sqlite:read_query"
+    },
+    {
+      "description": "Execute an INSERT, UPDATE, or DELETE query on the SQLite database",
+      "schema": {
+        "properties": {
+          "query": {
+            "description": "SQL query to execute",
+            "type": "string"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "server": "sqlite",
+      "tool": "write_query",
+      "tool_id": "sqlite:write_query"
+    },
+    {
+      "description": "Convert time between timezones",
+      "schema": {
+        "properties": {
+          "source_timezone": {
+            "description": "Source IANA timezone name (e.g., 'America/New_York', 'Europe/London'). Use 'Europe/Vilnius' as local timezone if no source timezone provided by the user.",
+            "type": "string"
+          },
+          "target_timezone": {
+            "description": "Target IANA timezone name (e.g., 'Asia/Tokyo', 'America/San_Francisco'). Use 'Europe/Vilnius' as local timezone if no target timezone provided by the user.",
+            "type": "string"
+          },
+          "time": {
+            "description": "Time to convert in 24-hour format (HH:MM)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_timezone",
+          "time",
+          "target_timezone"
+        ],
+        "type": "object"
+      },
+      "server": "time",
+      "tool": "convert_time",
+      "tool_id": "time:convert_time"
+    },
+    {
+      "description": "Get current time in a specific timezone",
+      "schema": {
+        "properties": {
+          "timezone": {
+            "description": "IANA timezone name (e.g., 'America/New_York', 'Europe/London'). Use 'Europe/Vilnius' as local timezone if no timezone provided by the user.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "timezone"
+        ],
+        "type": "object"
+      },
+      "server": "time",
+      "tool": "get_current_time",
+      "tool_id": "time:get_current_time"
+    }
+  ],
+  "version": "corpus_v2@2026-07-14"
+}

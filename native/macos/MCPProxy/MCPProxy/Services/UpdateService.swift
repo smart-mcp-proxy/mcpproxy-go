@@ -1,10 +1,21 @@
 // UpdateService.swift
 // MCPProxy
 //
-// Update checking service. Uses GitHub Releases API as a lightweight
-// alternative to Sparkle when Sparkle SPM dependency is not available.
-// When Sparkle IS linked, it takes precedence for the full update UX
-// (download, verify, replace, relaunch).
+// Spec 092 Phase 1 (FR-010 / FR-015 / FR-016 / FR-017) — the single owner of
+// everything the tray knows about updates.
+//
+// Two update brains exist and both are legitimate:
+//
+//   · the FEED (Sparkle appcast) — can download, verify and install; the only
+//     one that can deliver FR-010's one click;
+//   · the LEGACY check (the core's `/api/v1/info` + a direct GitHub call) —
+//     always reachable, but can only open a browser.
+//
+// Before Phase 1 they were rendered independently by the menu, which is what
+// FR-017 forbids. This service now resolves them into ONE ordered list of menu
+// entries (`UpdateMenuState`), gates every unattended check on the effective
+// policy (`UpdatePolicyResolver`), and stops the managed core before Sparkle
+// replaces the bundle (`ManagedCoreStop`).
 
 import Foundation
 import AppKit
@@ -12,21 +23,23 @@ import Darwin
 
 // MARK: - Update Service
 
-/// Manages software update checks.
-///
-/// Strategy:
-/// 1. If Sparkle framework is linked → use SPUStandardUpdaterController
-/// 2. Otherwise → check GitHub Releases API directly (notify only, no auto-install)
+/// Manages software update checks and owns the update section of the menu.
 final class UpdateService: ObservableObject {
 
-    /// Whether an update check can be performed.
+    /// Whether an update check can be performed. A user-initiated check is
+    /// always allowed (FR-015) — including when the policy has disabled the
+    /// automatic ones.
     var canCheckForUpdates: Bool { true }
 
     /// Whether an update check is currently in progress.
     @Published private(set) var isChecking: Bool = false
 
-    /// Latest available version (nil if current or unknown).
+    /// Latest version the LEGACY check knows about (nil if current or unknown).
     @Published private(set) var latestVersion: String?
+
+    /// Latest version the FEED offers (nil when Sparkle has nothing, or is
+    /// unavailable).
+    @Published private(set) var feedVersion: String?
 
     /// URL to download the latest release.
     @Published private(set) var downloadURL: String?
@@ -34,8 +47,54 @@ final class UpdateService: ObservableObject {
     /// Release notes for the latest version.
     @Published private(set) var releaseNotes: String?
 
-    /// Whether Sparkle framework is linked.
-    private let sparkleAvailable: Bool
+    /// FR-016: why an in-place update cannot work here, when it cannot.
+    @Published private(set) var blockedReason: UpdateBlockedReason?
+
+    /// Last error worth telling the user about (feed check/install failures).
+    @Published private(set) var lastErrorMessage: String?
+
+    /// The effective policy in force (FR-015).
+    @Published private(set) var policy: EffectiveUpdatePolicy = .permissive
+
+    /// Spec 095: identity of the current check cycle.
+    ///
+    /// One `runCheck` drives BOTH brains, and the GitHub result outlives the
+    /// cycle that produced it. Without a cycle stamp there is no way to tell an
+    /// installer URL that belongs to the session that just failed from one left
+    /// over from an earlier check — and offering the wrong one is a downgrade
+    /// dressed as a recovery (FR-005).
+    private(set) var checkCycleID: Int = 0
+
+    /// Spec 095 FR-005 candidate 1: the signed installer from the GitHub check,
+    /// captured ONLY on a true `-installer.dmg` match. Deliberately separate
+    /// from `downloadURL`, which is a best-effort link with no identity.
+    private(set) var latestGitHubInstaller: GitHubInstallerCapture?
+
+    /// Spec 095: puts the recovery dialog on screen. Wired at the composition
+    /// root; nil in tests that do not exercise the dialog (and therefore in any
+    /// suite that must not open a modal).
+    var presentFailureDialog: UpdateFailureDialogController.Presenter?
+
+    /// Spec 095: opens a recovery download URL, reporting whether it worked so
+    /// the next candidate can be tried. Defaults to the browser.
+    var openFailureDownload: ((URL) -> Bool)?
+
+    /// Spec 095 US2: records one occurrence with the core. Injected at the
+    /// composition root (this service has no API client of its own).
+    var recordUpdateFailure: UpdateFailureRecorder?
+
+    /// The dialog for the most recent occurrence, held so a queued retry can be
+    /// dropped when the app goes away (FR-004).
+    private var failureDialog: UpdateFailureDialogController?
+
+    /// The feed updater, when one could be built. Injected in tests.
+    private var feedUpdater: (any FeedUpdating)?
+
+    /// Stops the tray-managed core synchronously before the bundle is replaced
+    /// (FR-012), returning whether it is CONFIRMED down. Set by the app
+    /// delegate, which is the only thing that knows the managed process. Nil in
+    /// tests and before the core starts.
+    var stopManagedCore: (() -> Bool)?
 
     /// GitHub API endpoint for latest release.
     private let githubReleaseURL = "https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest"
@@ -43,21 +102,181 @@ final class UpdateService: ObservableObject {
     /// Current version from the core (set by AppController).
     var currentVersion: String = ""
 
+    /// Environment used for policy resolution; injected in tests.
+    private let environment: [String: String]
+
+    /// Bundle whose in-place updatability is evaluated; injected in tests.
+    private let hostBundleURL: URL
+
+    /// The tray app's own release version for the build-identity channel clamp
+    /// (a stable app never offers itself an RC). Resolved once at init from the
+    /// injected override or the host bundle's CFBundleShortVersionString, so
+    /// the clamp is deterministic in tests instead of depending on whatever
+    /// bundle the hostBundleURL happens to resolve to on the test machine.
+    private let hostVersion: String?
+
+    /// The legacy GitHub check. Injected in tests so the suite issues no
+    /// network requests — nil means "use the real one".
+    private let legacyCheck: (() -> Void)?
+
     // MARK: - Initialization
 
-    init() {
-        self.sparkleAvailable = NSClassFromString("SPUStandardUpdaterController") != nil
+    init(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        hostBundleURL: URL = Bundle.main.bundleURL,
+        hostVersion: String? = nil,
+        feedUpdater: (any FeedUpdating)? = nil,
+        legacyCheck: (() -> Void)? = nil
+    ) {
+        self.environment = environment
+        self.hostBundleURL = hostBundleURL
+        self.hostVersion = hostVersion ?? Self.hostBundleVersion(hostBundleURL)
+        self.feedUpdater = feedUpdater
+        self.legacyCheck = legacyCheck
+        self.policy = UpdatePolicyResolver.resolve(
+            core: nil, environment: environment, hostVersion: self.hostVersion)
+        self.blockedReason = UpdateInstallability.evaluate(bundleURL: hostBundleURL)
+    }
+
+    /// The tray app's own `CFBundleShortVersionString`, read from the host
+    /// bundle (injected in tests). Feeds the build-identity channel clamp in
+    /// UpdatePolicyResolver.resolve — nil (unreadable/dev bundle) means "don't
+    /// clamp", deferring to the core policy.
+    static func hostBundleVersion(_ bundleURL: URL) -> String? {
+        Bundle(url: bundleURL)?.infoDictionary?["CFBundleShortVersionString"] as? String
+    }
+
+    // MARK: - Wiring
+
+    /// Build and start the real Sparkle updater. Called once at launch by the
+    /// app delegate; a no-op when Sparkle is not compiled in, and harmless when
+    /// the bundle is not one Sparkle can work with (it reports why).
+    func startFeedUpdater() {
+        guard feedUpdater == nil else { return }
+        #if canImport(Sparkle)
+        let sparkle = SparkleFeedUpdater(observer: self)
+        sparkle.start(policy: policy)
+        feedUpdater = sparkle
+        if !sparkle.isAvailable, let reason = sparkle.unavailableReason {
+            NSLog("[MCPProxy] One-click updates unavailable: %@", reason)
+        }
+        #endif
+    }
+
+    /// Inject a feed updater (tests, and the fallback build).
+    func installFeedUpdater(_ updater: any FeedUpdating) {
+        feedUpdater = updater
+        updater.apply(policy: policy)
+    }
+
+    /// Whether the feed updater can actually install (FR-017: only then may the
+    /// menu offer a one-click item).
+    var feedUpdaterAvailable: Bool { feedUpdater?.isAvailable ?? false }
+
+    /// FR-015: apply the policy the core reports. Idempotent; safe to call on
+    /// every connect and on every config hot-reload.
+    func applyCorePolicy(_ corePolicy: CoreUpdatePolicy?) {
+        let resolved = UpdatePolicyResolver.resolve(
+            core: corePolicy, environment: environment, hostVersion: hostVersion)
+        guard resolved != policy else { return }
+        policy = resolved
+        feedUpdater?.apply(policy: resolved)
+        if !resolved.automaticChecksAllowed {
+            NSLog("[MCPProxy] Automatic update checks are off: %@", resolved.disabledReason)
+            // Anything already advertised was advertised under the old policy.
+            // Retract it rather than leave a nudge the operator just disabled.
+            feedVersion = nil
+            latestVersion = nil
+        }
     }
 
     // MARK: - Public API
 
-    /// Check for updates. Uses Sparkle if available, otherwise GitHub API.
+    /// A check nobody asked for: the launch check and the periodic one. Gated
+    /// on the effective policy (FR-015).
+    func checkForUpdatesInBackground() {
+        guard policy.automaticChecksAllowed else {
+            AppLifecycle.shared.recordUpdateCheck("skipped — \(policy.disabledReason)")
+            return
+        }
+        runCheck(userInitiated: false)
+    }
+
+    /// The menu's "Check for Updates". Always allowed (FR-015).
     func checkForUpdates() {
-        if sparkleAvailable {
-            checkWithSparkle()
+        runCheck(userInitiated: true)
+    }
+
+    private func runCheck(userInitiated: Bool) {
+        lastErrorMessage = nil
+        checkCycleID += 1
+        // Re-evaluate: the app may have been moved into /Applications since
+        // launch, which is exactly the fallback FR-016's message asks for.
+        blockedReason = UpdateInstallability.evaluate(bundleURL: hostBundleURL)
+
+        if let feedUpdater, feedUpdater.isAvailable {
+            feedUpdater.check(userInitiated: userInitiated)
+            // The legacy check still runs: it is the FR-017 fallback for a
+            // version the feed does not carry, and the only source of the
+            // browser-download URL.
+        }
+        if let legacyCheck {
+            legacyCheck()
         } else {
             checkWithGitHub()
         }
+    }
+
+    /// FR-010: activating the one-click item.
+    ///
+    /// `check(userInitiated:)` RESUMES the session Sparkle already has open for
+    /// the update it found during the gentle-reminder check, and drives
+    /// download → verify → replace → relaunch from wherever that session got to.
+    ///
+    /// Click count, honestly: one here, plus one on Sparkle's own confirmation.
+    /// `SPUUpdater`'s public surface has no "install the update you are already
+    /// holding" method (only the three check entry points), so the standard
+    /// user driver's prompt cannot be skipped without writing a bespoke
+    /// `SPUUserDriver` — a replacement for every piece of update UI Sparkle
+    /// ships. What the pre-download in `SparkleFeedUpdater.apply(policy:)` buys
+    /// is that the second click installs immediately instead of starting a
+    /// download: see `updateIsReadyToInstall`.
+    func installFeedUpdate() {
+        guard let feedUpdater, feedUpdater.isAvailable else {
+            openDownloadPage()
+            return
+        }
+        AppLifecycle.shared.note(
+            feedUpdater.updateIsReadyToInstall
+                ? "installing the pre-downloaded update"
+                : "resuming the update session (nothing downloaded yet)"
+        )
+        feedUpdater.check(userInitiated: true)
+    }
+
+    /// The update section of the tray menu, resolved from both sources
+    /// (FR-017).
+    var menuEntries: [UpdateMenuEntry] {
+        UpdateMenuState.entries(
+            feedVersion: feedUpdaterAvailable ? feedVersion : nil,
+            legacyVersion: latestVersion,
+            blocked: blockedReason,
+            nudgesSuppressed: policy.nudgesSuppressed
+        )
+    }
+
+    /// Merge the legacy version reported by the core (`/api/v1/info` →
+    /// `update.latest_version`). Kept behind a setter so the FR-017 resolution
+    /// has exactly one input path per source.
+    func setCoreReportedVersion(_ version: String?) {
+        guard !policy.nudgesSuppressed else { return }
+        guard let version, !version.isEmpty else { return }
+        let normalized = UpdateMenuState.normalized(version)
+        if let existing = latestVersion,
+           let order = SemanticVersion.compare(existing, normalized), order >= 0 {
+            return
+        }
+        latestVersion = normalized
     }
 
     /// Returns the release-asset architecture token for the host machine
@@ -87,36 +306,23 @@ final class UpdateService: ObservableObject {
         return "amd64"
     }
 
-    /// Compare two semver-ish version strings (no leading "v"). Returns:
+    /// Compare two semver version strings. Returns:
     /// - positive if `a` > `b`
     /// - negative if `a` < `b`
     /// - zero if equal or unparseable
     ///
-    /// Pre-release identifiers (e.g. `1.2.3-rc.1`) sort *before* the matching
-    /// release per semver §11. Anything we can't parse is treated as equal so
-    /// the caller falls back to its existing behaviour.
+    /// A thin adapter over `SemanticVersion.compare` (Spec 092 FR-006). The
+    /// hand-rolled comparison that used to live here compared prerelease
+    /// identifiers as whole strings, which ordered `rc.10` *below* `rc.2` — so
+    /// an RC user was offered a downgrade as an "update". The shared type
+    /// compares numeric identifiers numerically; see its header.
+    ///
+    /// Unparseable input keeps mapping to `0` HERE, and only here: the update
+    /// nudge treats "not greater" as "no update", so an unknown version can
+    /// only ever suppress a nudge. Decisions that can stop a process must use
+    /// `SemanticVersion.compare(_:_:) -> Int?` and handle nil explicitly.
     static func compareSemver(_ a: String, _ b: String) -> Int {
-        func parse(_ s: String) -> (core: [Int], pre: String)? {
-            let parts = s.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false)
-            let coreParts = parts[0].split(separator: ".")
-            var core: [Int] = []
-            for p in coreParts {
-                guard let n = Int(p) else { return nil }
-                core.append(n)
-            }
-            while core.count < 3 { core.append(0) }
-            let pre = parts.count > 1 ? String(parts[1]) : ""
-            return (core, pre)
-        }
-        guard let pa = parse(a), let pb = parse(b) else { return 0 }
-        for i in 0..<min(pa.core.count, pb.core.count) {
-            if pa.core[i] != pb.core[i] { return pa.core[i] - pb.core[i] }
-        }
-        // Equal core: a release outranks any pre-release.
-        if pa.pre.isEmpty && !pb.pre.isEmpty { return 1 }
-        if !pa.pre.isEmpty && pb.pre.isEmpty { return -1 }
-        if pa.pre == pb.pre { return 0 }
-        return pa.pre < pb.pre ? -1 : 1
+        SemanticVersion.compare(a, b) ?? 0
     }
 
     /// Open the download page in the browser.
@@ -127,22 +333,76 @@ final class UpdateService: ObservableObject {
         }
     }
 
-    // MARK: - Sparkle
+    // MARK: - GitHub Releases API
 
-    private func checkWithSparkle() {
-        // When Sparkle is linked:
-        // import Sparkle
-        // let controller = SPUStandardUpdaterController(startingUpdater: true, ...)
-        // controller.checkForUpdates(nil)
-        // For now, fall through to GitHub check
-        checkWithGitHub()
+    /// What one GitHub release offers this machine.
+    ///
+    /// Two fields because they answer two different questions: `downloadURL` is
+    /// "somewhere the user can download from" (installer, else any matching DMG,
+    /// else the release page), while `installerURL` is the much narrower "the
+    /// signed, notarized installer for this architecture" that Spec 095 FR-005
+    /// is allowed to offer as a recovery.
+    struct GitHubReleaseSelection: Equatable {
+        let downloadURL: String
+        let installerURL: URL?
     }
 
-    // MARK: - GitHub Releases API
+    /// Resolve a release's assets. Pure, so the preference order is testable
+    /// without a network call.
+    ///
+    /// Release assets are published as:
+    ///   mcpproxy-<ver>-darwin-arm64.dmg / -amd64.dmg                     (unsigned)
+    ///   mcpproxy-<ver>-darwin-arm64-installer.dmg / -amd64-installer.dmg (signed + notarized)
+    static func selectDownloadTargets(
+        assets: [[String: Any]],
+        arch: String,
+        htmlURL: String
+    ) -> GitHubReleaseSelection {
+        let matches: [(name: String, url: String)] = assets.compactMap { asset in
+            guard let name = asset["name"] as? String,
+                  let url = asset["browser_download_url"] as? String,
+                  name.contains("darwin"),
+                  name.contains(arch),
+                  name.hasSuffix(".dmg") else { return nil }
+            return (name, url)
+        }
+        // Prefer signed & notarized installer DMG when available.
+        let installer = matches.first { $0.name.contains("-installer.dmg") }
+        let downloadURL = installer?.url ?? matches.first?.url ?? htmlURL
+        return GitHubReleaseSelection(
+            downloadURL: downloadURL,
+            installerURL: installer.flatMap { URL(string: $0.url) }
+        )
+    }
+
+    /// Publish one GitHub-check result, stamping the installer with the cycle
+    /// that asked for it. Separate from the request so both can be tested.
+    func applyGitHubResult(
+        cycleID: Int,
+        version: String,
+        selection: GitHubReleaseSelection,
+        releaseNotes: String?
+    ) {
+        latestVersion = version
+        downloadURL = selection.downloadURL
+        self.releaseNotes = releaseNotes
+        if let installerURL = selection.installerURL {
+            latestGitHubInstaller = GitHubInstallerCapture(
+                cycleID: cycleID, version: version, url: installerURL
+            )
+        }
+    }
 
     private func checkWithGitHub() {
         guard !isChecking else { return }
         isChecking = true
+        let cycleID = checkCycleID
+        // One line per check, on the record (#862 ask 3). The updater could
+        // neither be confirmed nor excluded during the original investigation
+        // because its hourly work logged nothing whatsoever.
+        AppLifecycle.shared.recordUpdateCheck(
+            "checking GitHub releases (running \(currentVersion.isEmpty ? "unknown" : currentVersion))"
+        )
 
         Task {
             defer { DispatchQueue.main.async { self.isChecking = false } }
@@ -172,38 +432,140 @@ final class UpdateService: ObservableObject {
                 // happens to lag behind a freshly published version.
                 if !remoteVersion.isEmpty && !localVersion.isEmpty &&
                    Self.compareSemver(remoteVersion, localVersion) > 0 {
-                    // Find macOS DMG asset matching the host CPU architecture.
-                    // Release assets are published as:
-                    //   mcpproxy-<ver>-darwin-arm64.dmg / -amd64.dmg            (unsigned)
-                    //   mcpproxy-<ver>-darwin-arm64-installer.dmg / -amd64-installer.dmg  (signed + notarized)
-                    let arch = Self.hostArchToken()
-                    var dmgURL = htmlURL
-                    if let assets = json["assets"] as? [[String: Any]] {
-                        let matches: [(name: String, url: String)] = assets.compactMap { asset in
-                            guard let name = asset["name"] as? String,
-                                  let url = asset["browser_download_url"] as? String,
-                                  name.contains("darwin"),
-                                  name.contains(arch),
-                                  name.hasSuffix(".dmg") else { return nil }
-                            return (name, url)
-                        }
-                        // Prefer signed & notarized installer DMG when available.
-                        if let installer = matches.first(where: { $0.name.contains("-installer.dmg") }) {
-                            dmgURL = installer.url
-                        } else if let first = matches.first {
-                            dmgURL = first.url
-                        }
-                    }
+                    let selection = Self.selectDownloadTargets(
+                        assets: json["assets"] as? [[String: Any]] ?? [],
+                        arch: Self.hostArchToken(),
+                        htmlURL: htmlURL
+                    )
 
                     DispatchQueue.main.async {
-                        self.latestVersion = remoteVersion
-                        self.downloadURL = dmgURL
-                        self.releaseNotes = body
+                        self.applyGitHubResult(
+                            cycleID: cycleID,
+                            version: remoteVersion,
+                            selection: selection,
+                            releaseNotes: body
+                        )
                     }
                 }
             } catch {
                 // Silently fail — update checks are non-critical
             }
         }
+    }
+}
+
+// MARK: - FeedUpdaterObserver
+
+extension UpdateService: FeedUpdaterObserver {
+
+    func feedUpdater(didFindVersion version: String) {
+        let normalized = UpdateMenuState.normalized(version)
+        onMain {
+            self.feedVersion = normalized
+            AppLifecycle.shared.recordUpdateCheck("feed offers v\(normalized)")
+        }
+    }
+
+    func feedUpdaterDidNotFindUpdate() {
+        onMain { self.feedVersion = nil }
+    }
+
+    func feedUpdater(didFailWith message: String) {
+        onMain {
+            self.lastErrorMessage = message
+            AppLifecycle.shared.recordUpdateCheck("feed check failed: \(message)")
+        }
+    }
+
+    /// Spec 095: one terminal failure of one update session.
+    func feedUpdater(didFailSession failure: FeedUpdateFailure) {
+        onMain { self.handleUpdateSessionFailure(failure) }
+    }
+
+    /// Spec 095 US1 + US2: count the occurrence, and offer a way forward when
+    /// the updater asked for the failure to be shown.
+    ///
+    /// The recording happens for EVERY occurrence, including the silent ones —
+    /// a failure nobody sees is exactly the failure the counters exist for.
+    private func handleUpdateSessionFailure(_ failure: FeedUpdateFailure) {
+        lastErrorMessage = failure.errorDescription
+        AppLifecycle.shared.recordUpdateCheck("update session failed (\(failure.stage.rawValue))")
+        if let recordUpdateFailure {
+            // Detached: the dialog below must go up now, whatever the core is
+            // doing (FR-010 — off the UI path, one attempt, no retry).
+            let stage = failure.stage
+            Task.detached { await recordUpdateFailure(stage) }
+        }
+
+        guard failure.dialogRequested, let presentFailureDialog else { return }
+        // The occurrence arrives FROM the terminal-completion callback, so the
+        // failed session is already torn down and a retry may start at once.
+        let dialog = UpdateFailureDialogController(
+            content: .make(stage: failure.stage, detail: failure.errorDescription),
+            candidates: failureDownloadCandidates(
+                offeredVersion: failure.offeredVersion, feedInfoURL: failure.feedInfoURL
+            ),
+            sessionIsTerminal: true,
+            opener: { [weak self] url in
+                guard let self else { return false }
+                return (self.openFailureDownload ?? { NSWorkspace.shared.open($0) })(url)
+            },
+            retry: { [weak self] in self?.checkForUpdates() },
+            present: presentFailureDialog
+        )
+        failureDialog?.teardown()
+        failureDialog = dialog
+        dialog.present()
+    }
+
+    /// FR-005: the ordered recovery candidates for one failed session.
+    func failureDownloadCandidates(
+        offeredVersion: String?,
+        feedInfoURL: URL?
+    ) -> [UpdateFailureCandidate] {
+        UpdateFailureDownload.candidates(
+            installer: latestGitHubInstaller,
+            currentCycleID: checkCycleID,
+            offeredVersion: offeredVersion,
+            feedInfoURL: feedInfoURL
+        )
+    }
+
+    /// The app is quitting: a retry queued behind a terminal signal that will
+    /// never arrive must not be left armed (FR-004).
+    func discardPendingFailureRetry() {
+        failureDialog?.teardown()
+        failureDialog = nil
+    }
+
+    /// Publish on the main thread — synchronously when already there.
+    ///
+    /// The synchronous branch is not an optimization: Sparkle's callbacks
+    /// arrive on the main thread, and an unconditional `async` hop would leave
+    /// the menu one run-loop turn behind the state that produced it (and make
+    /// every test of this path a waiting game).
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread {
+            work()
+        } else {
+            DispatchQueue.main.async(execute: work)
+        }
+    }
+
+    /// FR-012. Synchronous by contract: Sparkle proceeds with the install the
+    /// moment this returns, so the core has to already be down.
+    ///
+    /// No core to stop is a stopped core: the tray runs without one, and an
+    /// update must not be blocked by the absence of the thing it was going to
+    /// shut down.
+    @discardableResult
+    func feedUpdaterWillInstallUpdate() -> Bool {
+        AppLifecycle.shared.note("stopping the managed core before the update is installed")
+        guard let stopManagedCore else { return true }
+        let stopped = stopManagedCore()
+        if !stopped {
+            AppLifecycle.shared.note("the managed core could not be stopped — update postponed")
+        }
+        return stopped
     }
 }

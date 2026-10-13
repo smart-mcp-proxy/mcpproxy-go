@@ -115,8 +115,7 @@ Execute destructive or irreversible operations.
 ```json
 {
   "name": "github:delete_repo",
-  "args_json": "{\"repo\": \"test-repo\"}",
-  "intent": {
+  "args": {"repo": "test-repo"},
   "intent_data_sensitivity": "private",
   "intent_reason": "User confirmed deletion of test repository"
 }

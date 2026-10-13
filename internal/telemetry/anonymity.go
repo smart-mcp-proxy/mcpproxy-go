@@ -71,12 +71,466 @@ func (v *AnonymityViolation) Is(target error) bool {
 
 // anonymityScanEnvelope extracts env_markers into a strict bool-typed struct
 // so we can catch any widening of EnvMarkers fields to non-bool types in the
-// serialized payload.
+// serialized payload, plus the Spec 080 v7 fields so their boolean /
+// non-negative-integer / fixed-enum contracts are enforced on the wire form.
 type anonymityScanEnvelope struct {
 	EnvMarkers *json.RawMessage `json:"env_markers"`
+
+	// Spec 080 (schema v7) structural checks. RawMessage so each field is
+	// validated individually with a precise violation pattern.
+	WizardShown       *json.RawMessage `json:"wizard_shown"`
+	WizardConnectStep *json.RawMessage `json:"wizard_connect_step"`
+	WebUIOpened       *json.RawMessage `json:"web_ui_opened"`
+	DaysSinceInstall  *json.RawMessage `json:"days_since_install"`
+	ActiveDays30d     *json.RawMessage `json:"active_days_30d"`
+	PreviousShutdown  *json.RawMessage `json:"previous_shutdown"`
+	LastErrorCode     *json.RawMessage `json:"last_error_code"`
+
+	// Schema v8 structural check: the security-scanner sub-object must be
+	// counts-and-fixed-enum-keys only. Deliberately NOT a pointer: JSON null
+	// sets a *RawMessage pointer to nil, which is indistinguishable from an
+	// absent field — as a plain RawMessage, absent stays empty while null
+	// arrives as the literal bytes "null" and fails the object-shape check.
+	TPAScanner json.RawMessage `json:"tpa_scanner"`
+
+	// Spec 095 structural check: the diagnostics counter sub-object, whose
+	// error_code_counts_24h map — and, since schema v11 (MCP-2967), whose
+	// current_error_codes map — must be cataloged codes → non-negative counts.
+	// Same not-a-pointer reasoning as TPAScanner.
+	Diagnostics json.RawMessage `json:"diagnostics"`
+
+	// Issue #969 structural check: the preflight baseline counter sub-object,
+	// whose availability_block_reasons_24h map must be closed-enum reason keys
+	// → non-negative counts. Same not-a-pointer reasoning as TPAScanner.
+	Preflight json.RawMessage `json:"preflight"`
+
+	// Schema v9 structural check: the trust-tier histogram must be keyed
+	// exclusively by the fixed auto|scan|manual enum with non-negative integer
+	// counts — a producer-side regression that let a server name in as a map
+	// key must not reach the wire. Same not-a-pointer reasoning as TPAScanner.
+	TrustModeDistribution json.RawMessage `json:"trust_mode_distribution"`
 }
 
-// ScanForPII scans a serialized v3 telemetry payload for PII leaks and
+// v7FieldViolation builds the violation for a Spec 080 field that broke its
+// documented shape (boolean, non-negative integer, or fixed enum).
+func v7FieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "v7_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("v7 field %s %s", field, reason),
+	}
+}
+
+// scanV7Bool asserts raw (if present) is a JSON boolean.
+func scanV7Bool(raw *json.RawMessage, field string) *AnonymityViolation {
+	if raw == nil {
+		return nil
+	}
+	var b bool
+	if err := json.Unmarshal(*raw, &b); err != nil {
+		return v7FieldViolation(field, "must be a boolean")
+	}
+	return nil
+}
+
+// scanV7NonNegativeInt asserts raw (if present) is a non-negative JSON
+// integer — no fractions, no strings, no null.
+func scanV7NonNegativeInt(raw *json.RawMessage, field string) *AnonymityViolation {
+	return scanNonNegativeInt(raw, field, v7FieldViolation)
+}
+
+// scanNonNegativeInt is the shared non-negative-integer assertion. mkViolation
+// tags the failure with the schema-version rule of the calling scan pass.
+func scanNonNegativeInt(raw *json.RawMessage, field string, mkViolation func(field, reason string) *AnonymityViolation) *AnonymityViolation {
+	if raw == nil {
+		return nil
+	}
+	// json.Number accepts quoted number strings ("3"); require a bare JSON
+	// number token so strings never masquerade as counters.
+	trimmed := bytes.TrimSpace(*raw)
+	if len(trimmed) == 0 || trimmed[0] == '"' {
+		return mkViolation(field, "must be a number")
+	}
+	var n json.Number
+	if err := json.Unmarshal(trimmed, &n); err != nil {
+		return mkViolation(field, "must be a number")
+	}
+	i, err := n.Int64()
+	if err != nil {
+		return mkViolation(field, "must be a whole integer")
+	}
+	if i < 0 {
+		return mkViolation(field, "must be non-negative")
+	}
+	return nil
+}
+
+// scanV7Enum asserts raw (if present) is a JSON string drawn from allowed.
+func scanV7Enum(raw *json.RawMessage, field string, allowed ...string) *AnonymityViolation {
+	if raw == nil {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(*raw, &s); err != nil {
+		return v7FieldViolation(field, "must be a string enum")
+	}
+	for _, a := range allowed {
+		if s == a {
+			return nil
+		}
+	}
+	return v7FieldViolation(field, "carries a value outside its documented fixed enum")
+}
+
+// scanV7Fields runs the Spec 080 structural checks (FR-016): every v7 field
+// present in the serialized payload must be a boolean, a non-negative
+// integer, or a member of its documented fixed enum. last_error_code is the
+// tightest gate — only diagnostics-catalog MCPX_* codes — so free text,
+// messages, or paths can never ride that field even if a producer-side
+// check regresses.
+func scanV7Fields(env *anonymityScanEnvelope) *AnonymityViolation {
+	if v := scanV7Bool(env.WizardShown, "wizard_shown"); v != nil {
+		return v
+	}
+	if v := scanV7NonNegativeInt(env.WebUIOpened, "web_ui_opened"); v != nil {
+		return v
+	}
+	if v := scanV7NonNegativeInt(env.DaysSinceInstall, "days_since_install"); v != nil {
+		return v
+	}
+	if v := scanV7NonNegativeInt(env.ActiveDays30d, "active_days_30d"); v != nil {
+		return v
+	}
+	// The widened Spec 080 connect-step enum ("" only appears in synthetic
+	// payloads; omitempty drops it in production).
+	if v := scanV7Enum(env.WizardConnectStep, "wizard_connect_step",
+		"", "completed", "completed_external", "skipped"); v != nil {
+		return v
+	}
+	// "unknown" is spec-allowed on the wire (FR-010) even though the current
+	// producer omits it (PreviousShutdownUnknown == "").
+	if v := scanV7Enum(env.PreviousShutdown, "previous_shutdown",
+		PreviousShutdownClean, PreviousShutdownCrash, "unknown"); v != nil {
+		return v
+	}
+	if env.LastErrorCode != nil {
+		var code string
+		if err := json.Unmarshal(*env.LastErrorCode, &code); err != nil {
+			return v7FieldViolation("last_error_code", "must be a string enum")
+		}
+		// FR-012: same fixed code set as diagnostics.error_code_counts_24h —
+		// the shape check alone would admit any MCPX_-looking string.
+		if !isValidMCPXCode(code) {
+			return v7FieldViolation("last_error_code", "must be a cataloged MCPX_* diagnostic code")
+		}
+	}
+	return nil
+}
+
+// v8FieldViolation builds the violation for a schema-v8 field that broke its
+// documented shape (whitelisted keys, non-negative counts, fixed severity
+// enum).
+func v8FieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "v8_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("v8 field %s %s", field, reason),
+	}
+}
+
+// tpaScannerScalarKeys is the fixed set of non-negative-integer keys allowed
+// in the tpa_scanner sub-object. The last two are the schema-v9 funnel
+// counters; adding a key here is the deliberate act that widens the whitelist.
+var tpaScannerScalarKeys = []string{
+	"scans_completed", "scans_failed", "scans_with_findings",
+	"tool_change_gate_scans", "prompt_scans",
+}
+
+// scanV8TPAScanner asserts the schema-v8 tpa_scanner sub-object (if present)
+// carries counts and fixed enum keys ONLY: an object whose keys are
+// whitelisted, whose scalars are non-negative integers, and whose findings map
+// is keyed exclusively by the severity enum with non-negative integer values.
+// This is the wire-form backstop for the producer-side filtering in
+// CounterRegistry.RecordTPAScanCompleted — a regression there (e.g. a server
+// name or rule id leaking in as a map key) is caught before transmit.
+func scanV8TPAScanner(raw json.RawMessage) *AnonymityViolation {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	// json.Unmarshal accepts `null` into a nil map, so nil-ness must be
+	// rejected explicitly — the field, when present, is required to be a
+	// real object.
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return v8FieldViolation("tpa_scanner", "must be an object")
+	}
+
+	allowed := make(map[string]struct{}, len(tpaScannerScalarKeys)+1)
+	for _, k := range tpaScannerScalarKeys {
+		allowed[k] = struct{}{}
+	}
+	allowed["findings"] = struct{}{}
+	for k := range obj {
+		if _, ok := allowed[k]; !ok {
+			// The violation is logged on send failure — echoing the
+			// rejected key there would itself be the leak this rule
+			// exists to stop, so the pattern stays constant.
+			return v8FieldViolation("tpa_scanner", "carries a key outside the whitelist")
+		}
+	}
+
+	for _, k := range tpaScannerScalarKeys {
+		v, ok := obj[k]
+		if !ok {
+			continue
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "tpa_scanner."+k, v8FieldViolation); viol != nil {
+			return viol
+		}
+	}
+
+	rawFindings, ok := obj["findings"]
+	if !ok {
+		return nil
+	}
+	var findings map[string]json.RawMessage
+	// Same nil-map guard as the parent object: `findings: null` is not an
+	// object either.
+	if err := json.Unmarshal(rawFindings, &findings); err != nil || findings == nil {
+		return v8FieldViolation("tpa_scanner.findings", "must be an object")
+	}
+	for sev, v := range findings {
+		if !IsTPASeverity(sev) {
+			return v8FieldViolation("tpa_scanner.findings",
+				"carries a key outside the fixed severity enum")
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "tpa_scanner.findings."+sev, v8FieldViolation); viol != nil {
+			return viol
+		}
+	}
+	return nil
+}
+
+// trustModeFieldViolation builds the violation for a schema-v9
+// trust_mode_distribution field that broke its documented shape (fixed enum
+// keys, non-negative integer counts).
+func trustModeFieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "trust_mode_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("trust mode field %s %s", field, reason),
+	}
+}
+
+// scanTrustModeDistribution asserts the schema-v9 trust_mode_distribution
+// sub-object (if present) is an object keyed EXCLUSIVELY by the fixed
+// auto|scan|manual enum with non-negative integer counts. This is the wire-form
+// backstop for buildTrustModeDistribution: the histogram is derived from
+// per-server config, so a regression there is exactly the kind that would leak
+// a server name as a map key.
+func scanTrustModeDistribution(raw json.RawMessage) *AnonymityViolation {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	// Same nil-map guard as tpa_scanner: `null` unmarshals into a nil map, and
+	// the field — when present — is required to be a real object.
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return trustModeFieldViolation("trust_mode_distribution", "must be an object")
+	}
+	for key, v := range obj {
+		if !IsTrustModeKey(key) {
+			// The rejected key is deliberately NOT echoed into the violation —
+			// it is the very thing this rule exists to keep out of the logs.
+			return trustModeFieldViolation("trust_mode_distribution",
+				"carries a key outside the fixed trust-tier enum")
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "trust_mode_distribution."+key, trustModeFieldViolation); viol != nil {
+			return viol
+		}
+	}
+	return nil
+}
+
+// diagFieldViolation builds the violation for a diagnostics counter field that
+// broke its documented shape (cataloged code keys, non-negative counts).
+func diagFieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "diagnostics_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("diagnostics field %s %s", field, reason),
+	}
+}
+
+// scanDiagnosticsCounters asserts the diagnostics sub-object (if present)
+// carries an error_code_counts_24h map keyed EXCLUSIVELY by catalog-registered
+// MCPX_ codes with non-negative integer values (spec 095 FR-014). Until now
+// the scanner never inspected that map, and its producer-side guard
+// (RecordErrorCode) filters on the MCPX_ prefix alone — so a regression that
+// let a server name, URL, or an uncataloged code through would have reached
+// the wire unchecked. Keys are where identifying strings would leak, so the
+// violation deliberately never echoes the offending key.
+func scanDiagnosticsCounters(raw json.RawMessage) *AnonymityViolation {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	// json.Unmarshal accepts `null` into a nil map; the field, when present,
+	// must be a real object.
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return diagFieldViolation("diagnostics", "must be an object")
+	}
+
+	// Both code-keyed maps carry the same contract. current_error_codes
+	// (schema v11, MCP-2967) is the standing-state companion to the now
+	// edge-triggered 24h counter; it is filled from a provider OUTSIDE this
+	// package (a closure over the supervisor's stateview), so the wire-form
+	// backstop matters at least as much for it as for the BBolt-backed map.
+	for _, field := range []string{"error_code_counts_24h", "current_error_codes"} {
+		if viol := scanDiagCodeMap(obj, field); viol != nil {
+			return viol
+		}
+	}
+	return nil
+}
+
+// scanDiagCodeMap asserts obj[field], if present, is a map of
+// catalog-registered MCPX_* codes to non-negative integers.
+func scanDiagCodeMap(obj map[string]json.RawMessage, field string) *AnonymityViolation {
+	rawCounts, ok := obj[field]
+	if !ok {
+		return nil
+	}
+	label := "diagnostics." + field
+	var counts map[string]json.RawMessage
+	if err := json.Unmarshal(rawCounts, &counts); err != nil || counts == nil {
+		return diagFieldViolation(label, "must be an object")
+	}
+	for code, v := range counts {
+		if !isValidMCPXCode(code) {
+			return diagFieldViolation(label,
+				"carries a key that is not a cataloged MCPX_* diagnostic code")
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, label, diagFieldViolation); viol != nil {
+			return viol
+		}
+	}
+	return nil
+}
+
+// preflightFieldViolation builds the violation for a preflight counter field
+// that broke its documented shape (closed-enum reason keys, non-negative
+// counts).
+func preflightFieldViolation(field, reason string) *AnonymityViolation {
+	return &AnonymityViolation{
+		Rule:    "preflight_field_invalid",
+		Pattern: field,
+		Reason:  fmt.Sprintf("preflight field %s %s", field, reason),
+	}
+}
+
+// scanPreflightCounters asserts the preflight sub-object (if present) is a
+// CLOSED object of non-negative integer counts whose
+// availability_block_reasons_24h map is keyed EXCLUSIVELY by the closed
+// availability-block reason enum (issue #969).
+// The producer folds unknown reasons into "other" and MarshalJSON filters again;
+// this is the wire-form backstop, so a regression that let a reason STRING
+// (which embeds server and tool names) become a key is caught before transmit.
+// Keys are where identifying strings would leak, so the violation deliberately
+// never echoes the offending key.
+func scanPreflightCounters(raw json.RawMessage) *AnonymityViolation {
+	if len(raw) == 0 {
+		return nil
+	}
+	var obj map[string]json.RawMessage
+	// json.Unmarshal accepts `null` into a nil map; the field, when present,
+	// must be a real object.
+	if err := json.Unmarshal(raw, &obj); err != nil || obj == nil {
+		return preflightFieldViolation("preflight", "must be an object")
+	}
+
+	// The sub-object is CLOSED: only the documented count keys plus the reason
+	// map may appear. Validating the known scalars alone would let a future
+	// field that carries free text (a server name, a query, an error message)
+	// ride along unchecked — exactly the leak this rule exists to stop. A new
+	// counter must be added to preflightAllowedKeys deliberately, which is the
+	// point at which its shape gets reviewed.
+	for key := range obj {
+		if !isPreflightAllowedKey(key) {
+			return preflightFieldViolation("preflight",
+				"carries a key outside the fixed preflight counter set")
+		}
+	}
+
+	// Every scalar the sub-object carries is a non-negative count.
+	for _, key := range preflightScalarKeys {
+		v, ok := obj[key]
+		if !ok {
+			continue
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "preflight."+key, preflightFieldViolation); viol != nil {
+			return viol
+		}
+	}
+
+	rawCounts, ok := obj[preflightReasonsKey]
+	if !ok {
+		return nil
+	}
+	var counts map[string]json.RawMessage
+	if err := json.Unmarshal(rawCounts, &counts); err != nil || counts == nil {
+		return preflightFieldViolation("preflight.availability_block_reasons_24h", "must be an object")
+	}
+	for reason, v := range counts {
+		if !IsAvailabilityBlockReason(reason) {
+			return preflightFieldViolation("preflight.availability_block_reasons_24h",
+				"carries a key outside the fixed availability-block reason enum")
+		}
+		msg := json.RawMessage(v)
+		if viol := scanNonNegativeInt(&msg, "preflight.availability_block_reasons_24h", preflightFieldViolation); viol != nil {
+			return viol
+		}
+	}
+	return nil
+}
+
+// preflightScalarKeys is the fixed set of non-negative-integer keys allowed in
+// the preflight sub-object.
+var preflightScalarKeys = []string{
+	"filter_diag_emitted_24h",
+	"filter_diag_missing_annotation_24h",
+	"filter_diag_explicit_24h",
+	"filter_diag_followed_24h",
+	"availability_block_24h",
+	"discovery_omission_24h",
+}
+
+// preflightReasonsKey is the one non-scalar key the preflight sub-object may
+// carry (a closed-enum map, validated separately).
+const preflightReasonsKey = "availability_block_reasons_24h"
+
+// preflightAllowedKeys is the CLOSED key set of the preflight sub-object:
+// preflightScalarKeys plus the reason map. Anything else is a violation.
+var preflightAllowedKeys = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(preflightScalarKeys)+1)
+	for _, k := range preflightScalarKeys {
+		m[k] = struct{}{}
+	}
+	m[preflightReasonsKey] = struct{}{}
+	return m
+}()
+
+func isPreflightAllowedKey(key string) bool {
+	_, ok := preflightAllowedKeys[key]
+	return ok
+}
+
+// ScanForPII scans a serialized telemetry payload (v3+) for PII leaks and
 // structural violations. Returns nil when the payload is clean; otherwise
 // returns an *AnonymityViolation. The returned error satisfies
 // errors.Is(err, ErrAnonymityViolation).
@@ -86,6 +540,23 @@ type anonymityScanEnvelope struct {
 //  2. Any substring from BlockedValues appears in the payload.
 //  3. env_markers, if present, fails to unmarshal into a strict all-bool
 //     struct — meaning a field widened to a string/number/null.
+//  4. Any Spec 080 v7 field present breaks its documented shape: booleans
+//     (wizard_shown), non-negative integers (web_ui_opened,
+//     days_since_install, active_days_30d), or fixed enums
+//     (wizard_connect_step, previous_shutdown, last_error_code = MCPX_*).
+//  5. tpa_scanner (schema v8), if present, is not an object of whitelisted
+//     keys holding non-negative integer counts, with a findings map keyed
+//     exclusively by the fixed severity enum.
+//  6. diagnostics.error_code_counts_24h or diagnostics.current_error_codes
+//     (schema v11), if present, is not a map of catalog-registered MCPX_*
+//     codes to non-negative integer counts.
+//  7. preflight (issue #969), if present, is not a CLOSED object of
+//     non-negative integer counts (keys drawn from preflightAllowedKeys) whose
+//     availability_block_reasons_24h map is keyed exclusively by the closed
+//     availability-block reason enum.
+//  8. trust_mode_distribution (schema v9), if present, is not an object keyed
+//     exclusively by the fixed auto|scan|manual trust-tier enum with
+//     non-negative integer counts.
 //
 // The implementation never logs the payload — it only reports which rule
 // tripped and the offending pattern (a small literal). Callers should log at
@@ -138,6 +609,34 @@ func ScanForPII(payloadJSON []byte) error {
 				Reason:  fmt.Sprintf("env_markers has a non-bool or unknown field: %v", err),
 			}
 		}
+	}
+
+	// Rule 4: Spec 080 v7 fields must keep their boolean / non-negative
+	// integer / fixed-enum shapes.
+	if v := scanV7Fields(&env); v != nil {
+		return v
+	}
+
+	// Rule 5: schema-v8 tpa_scanner must be counts + fixed severity keys only.
+	if v := scanV8TPAScanner(env.TPAScanner); v != nil {
+		return v
+	}
+
+	// Rule 6: diagnostics counters must be cataloged codes → non-negative ints.
+	if v := scanDiagnosticsCounters(env.Diagnostics); v != nil {
+		return v
+	}
+
+	// Rule 7: preflight counters must be closed-enum reason keys → non-negative
+	// ints, and every scalar a non-negative count.
+	if v := scanPreflightCounters(env.Preflight); v != nil {
+		return v
+	}
+
+	// Rule 8: trust_mode_distribution (schema v9) must be fixed-enum trust-tier
+	// keys → non-negative integer counts.
+	if v := scanTrustModeDistribution(env.TrustModeDistribution); v != nil {
+		return v
 	}
 
 	return nil

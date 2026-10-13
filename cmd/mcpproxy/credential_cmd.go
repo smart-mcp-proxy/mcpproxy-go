@@ -14,7 +14,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // Server-edition flags for the credential command group. The credential broker
@@ -25,14 +24,27 @@ var (
 	credToken     string
 )
 
+// credentialStoredNotInjectedBanner is the honesty line of Spec 107 FR-034
+// (contracts/rest-endpoints.md §12). The oauth_connect chain stores a
+// per-user credential for a future broker, but nothing reads it on the
+// upstream call path, so every human-readable `credential list|status`
+// output begins with this line. Keep it byte-identical to the contract.
+const credentialStoredNotInjectedBanner = "Stored credentials are kept for a future broker and are NOT injected into upstream calls in this release."
+
 // newCredentialCommand builds the `mcpproxy credential` command tree (server
-// edition only). It manages per-user brokered upstream credentials via the
-// T8 REST surfaces and never prints secret values (FR-026).
+// edition only). It manages per-user stored upstream credentials via the
+// T8 REST surfaces and never prints secret values (FR-026). The credentials
+// are stored, not injected (FR-034): upstream calls keep using the server's
+// shared identity in this release.
 func newCredentialCommand() *cobra.Command {
 	credentialCmd := &cobra.Command{
 		Use:   "credential",
-		Short: "Manage per-user brokered upstream credentials (server edition)",
-		Long: `Inspect and manage your brokered credentials for shared upstream servers.
+		Short: "Manage per-user stored upstream credentials — stored, NOT injected (server edition)",
+		Long: `Inspect and manage your stored credentials for shared upstream servers.
+
+` + credentialStoredNotInjectedBanner + `
+Connecting an upstream records a credential tied to your user; upstream tool
+calls still go out with the server's shared identity.
 
 These commands talk to a running server-edition mcpproxy and require a user
 token (a JWT obtained from the Web UI or POST /api/v1/auth/token). Provide it
@@ -62,8 +74,10 @@ Examples:
 func newCredentialListCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "list",
-		Short: "List brokered upstreams with connection status (no secrets)",
-		Long: `List every brokered upstream and your connection status for it.
+		Short: "List brokered upstreams with stored-credential status (no secrets)",
+		Long: `List every brokered upstream and whether a credential is stored for it.
+
+` + credentialStoredNotInjectedBanner + `
 
 Examples:
   mcpproxy credential list
@@ -76,8 +90,10 @@ Examples:
 func newCredentialStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status <server>",
-		Short: "Show one upstream's connection detail (no secrets)",
-		Long: `Show the connection detail for a single brokered upstream.
+		Short: "Show one upstream's stored-credential detail (no secrets)",
+		Long: `Show the stored-credential detail for a single brokered upstream.
+
+` + credentialStoredNotInjectedBanner + `
 
 Examples:
   mcpproxy credential status github
@@ -119,22 +135,29 @@ Examples:
 // --- client wiring ---
 
 // resolveCredentialBaseURL determines the server base URL from the --url flag,
-// the MCPPROXY_SERVER_URL env var, or the local listen address in config.
-func resolveCredentialBaseURL() string {
+// the MCPPROXY_SERVER_URL env var, or the local listen address in config. An
+// explicitly passed --config must fail loudly; only the implicit default-path
+// load falls back to the default URL.
+func resolveCredentialBaseURL() (string, error) {
 	if credServerURL != "" {
-		return strings.TrimRight(credServerURL, "/")
+		return strings.TrimRight(credServerURL, "/"), nil
 	}
 	if env := os.Getenv("MCPPROXY_SERVER_URL"); env != "" {
-		return strings.TrimRight(env, "/")
+		return strings.TrimRight(env, "/"), nil
 	}
-	if cfg, err := config.Load(); err == nil && cfg.Listen != "" {
+	cfg, err := loadCredentialConfig()
+	if err != nil {
+		if configFile != "" {
+			return "", fmt.Errorf("failed to load config: %w", err)
+		}
+	} else if cfg.Listen != "" {
 		listen := cfg.Listen
 		if strings.HasPrefix(listen, ":") {
 			listen = "127.0.0.1" + listen
 		}
-		return "http://" + listen
+		return "http://" + listen, nil
 	}
-	return "http://127.0.0.1:8080"
+	return "http://127.0.0.1:8080", nil
 }
 
 // resolveCredentialToken returns the user JWT from --token or MCPPROXY_TOKEN.
@@ -145,16 +168,22 @@ func resolveCredentialToken() string {
 	return os.Getenv("MCPPROXY_TOKEN")
 }
 
-func newCredentialClient() (*cliclient.Client, string) {
-	baseURL := resolveCredentialBaseURL()
+func newCredentialClient() (*cliclient.Client, string, error) {
+	baseURL, err := resolveCredentialBaseURL()
+	if err != nil {
+		return nil, "", err
+	}
 	logger, _ := zap.NewProduction()
-	return cliclient.NewClientWithBearer(baseURL, resolveCredentialToken(), logger.Sugar()), baseURL
+	return cliclient.NewClientWithBearer(baseURL, resolveCredentialToken(), logger.Sugar()), baseURL, nil
 }
 
 // --- run functions ---
 
 func runCredentialList(_ *cobra.Command, _ []string) error {
-	client, _ := newCredentialClient()
+	client, _, err := newCredentialClient()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -166,7 +195,10 @@ func runCredentialList(_ *cobra.Command, _ []string) error {
 }
 
 func runCredentialStatus(_ *cobra.Command, args []string) error {
-	client, _ := newCredentialClient()
+	client, _, err := newCredentialClient()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -182,7 +214,10 @@ func runCredentialStatus(_ *cobra.Command, args []string) error {
 }
 
 func runCredentialConnect(_ *cobra.Command, args []string) error {
-	baseURL := resolveCredentialBaseURL()
+	baseURL, err := resolveCredentialBaseURL()
+	if err != nil {
+		return err
+	}
 	connectURL := credentialConnectURL(baseURL, args[0])
 
 	format := ResolveOutputFormat()
@@ -192,11 +227,15 @@ func runCredentialConnect(_ *cobra.Command, args []string) error {
 
 	fmt.Printf("Open this URL in a browser where you are signed in to mcpproxy:\n\n  %s\n\n", connectURL)
 	fmt.Println("After authorizing, the credential is stored server-side and tied to your user.")
+	fmt.Println(credentialStoredNotInjectedBanner)
 	return nil
 }
 
 func runCredentialRemove(_ *cobra.Command, args []string) error {
-	client, _ := newCredentialClient()
+	client, _, err := newCredentialClient()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -304,22 +343,40 @@ func truncateCell(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
-// emitCredentials prints the list in the resolved output format.
+// printCredentialBanner emits the FR-034 honesty line. Human-readable output
+// begins with it on stdout (contracts/rest-endpoints.md §12); structured
+// json/yaml output must stay machine-parseable, so there it goes to stderr.
+func printCredentialBanner(structured bool) {
+	if structured {
+		fmt.Fprintln(os.Stderr, credentialStoredNotInjectedBanner)
+		return
+	}
+	fmt.Println(credentialStoredNotInjectedBanner)
+}
+
+// emitCredentials prints the list in the resolved output format, preceded by
+// the "stored, not injected" banner (FR-034).
 func emitCredentials(creds []cliclient.CredentialStatus) error {
 	switch ResolveOutputFormat() {
 	case "json", "yaml":
+		printCredentialBanner(true)
 		return emitFormatted(creds)
 	default:
+		printCredentialBanner(false)
 		fmt.Println(renderCredentialsTable(creds))
 		return nil
 	}
 }
 
+// emitCredentialDetail prints one upstream's detail in the resolved output
+// format, preceded by the "stored, not injected" banner (FR-034).
 func emitCredentialDetail(c cliclient.CredentialStatus) error {
 	switch ResolveOutputFormat() {
 	case "json", "yaml":
+		printCredentialBanner(true)
 		return emitFormatted(c)
 	default:
+		printCredentialBanner(false)
 		fmt.Println(renderCredentialDetail(c))
 		return nil
 	}

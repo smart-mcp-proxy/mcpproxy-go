@@ -222,8 +222,10 @@ OpenCode can be connected through MCPProxy's Connect Clients flow.
 
 - Client ID: `opencode`
 - Config section: `mcp`
-- macOS/Linux global config path: `~/.config/opencode/opencode.json`
-- Windows global config path: `%LOCALAPPDATA%\opencode\opencode.json`
+- macOS/Linux global config: `~/.config/opencode/opencode.jsonc` or `opencode.json`
+- Windows global config: `%LOCALAPPDATA%\opencode\opencode.jsonc` or `opencode.json`
+- MCPProxy targets whichever file exists, preferring `opencode.jsonc` (recent OpenCode versions bootstrap it, and it shadows `opencode.json` for the same keys).
+- A `.jsonc` file that contains comments is not rewritten (comments would be lost) — MCPProxy asks you to edit the `mcp` section manually in that case.
 - OpenCode config must already exist; MCPProxy does not create it for you.
 - On connect, MCPProxy writes or updates only the OpenCode `mcp` subtree and preserves unrelated root config.
 - MCPProxy treats endpoint-equivalent existing entries as already connected, even if they use a non-canonical server name.
@@ -254,7 +256,7 @@ Add mcpproxy as a remote MCP server via Settings → Connectors → Add Custom C
 
 #### Option A: Free Plan — JSON Configuration
 
-> **💡 One-click:** mcpproxy's built-in **Connect** wizard (Web UI / tray) can write this bridge configuration for you automatically — pick **Claude Desktop** and click **Connect**. It registers the `npx -y mcp-remote` bridge shown below (Node.js required). The manual steps remain available if you prefer to edit the file yourself.
+> **💡 Built-in wizard:** mcpproxy's **Connect** wizard (Web UI / tray) can write this bridge configuration for you — pick **Claude Desktop**, click **Review & connect** to see the exact entry that will be written (a timestamped backup is created first), then confirm with **Connect**. It registers the `npx -y mcp-remote` bridge shown below (Node.js required). The manual steps remain available if you prefer to edit the file yourself. Changed your mind? The wizard offers a one-click **Undo** right next to the backup path it just showed: it reverts the connect by restoring the config byte-for-byte from that backup (or removing the file if the connect created it), and it refuses — rather than clobbering your edits — if the file changed in the meantime. Backups are never overwritten: two operations in the same second get distinct names (`.bak.<timestamp>-1`, `-2`, …), and none are deleted automatically.
 
 1. Create the config file if it doesn't exist:
 
@@ -754,6 +756,10 @@ Get-Content -Path "$env:LOCALAPPDATA\mcpproxy\logs\main.log" -Wait
 # Filter logs for specific server debugging
 tail -f ~/Library/Logs/mcpproxy/main.log | grep -E "(github-server|oauth|error)"
 ```
+
+**Upstream session lost (HTTP 404):**
+
+A remote Streamable HTTP server that restarts or expires its session answers HTTP 404 to the session id MCPProxy holds. MCPProxy re-initializes the MCP session on the same connection instead of marking the server as errored. List, prompt and health-ping requests are retried once. A `tools/call` is retried once only for read-only tools (`readOnlyHint: true`) whose description and schema did not change; any other tool returns an error saying the session was re-established and the call was not repeated, and the next call uses the new session. Each re-initialization is logged at info level (`Upstream session terminated (HTTP 404); re-initialized in place`) and counted as `session_reinit_count` in the server's connection status. If the re-initialization or the retry also fails, the normal reconnect path applies.
 
 ## Advanced Configuration
 

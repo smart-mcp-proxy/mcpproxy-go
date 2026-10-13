@@ -123,15 +123,74 @@ final class AppStateOAuthSignInTests: XCTestCase {
         )
     }
 
-    // MARK: - serversNeedingAttention (calm Sign in path)
+    // MARK: - attention (calm Sign in path, Spec 109 FR-001)
 
+    /// `AppState.attention` no longer derives from `servers` locally (the
+    /// retired `serversNeedingAttention` predicate) — it is populated from
+    /// `GET /api/v1/attention` / SSE `attention.changed`, the same seam
+    /// `updateAttention` exercises here.
+    @MainActor
     func testLoginRequiredServerStillNeedsAttention() throws {
         let state = AppState()
-        state.servers = [try loginRequiredServer()]
+        state.coreState = .connected
+        let server = try loginRequiredServer(name: "linear")
+        state.servers = [server]
+        state.updateAttention([Self.signInAttentionItem(for: server)])
         XCTAssertEqual(
-            state.serversNeedingAttention.map(\.name), ["github"],
+            state.attention.map(\.subject.name), [server.name],
             "A sign-in-required server must remain in the calm 'Needs Attention' group"
         )
+        XCTAssertEqual(state.attention.first?.fix.verb, server.health?.action)
+    }
+
+    /// Builds the attention row the core would emit for `server`, from the
+    /// decoded fixture's own name and health fields, so changing the fixture
+    /// changes what this test exercises.
+    private static func signInAttentionItem(for server: ServerStatus) -> AttentionItem {
+        AttentionItem(
+            id: "sign_in_required:server:\(server.name)",
+            kind: "sign_in_required",
+            rank: 10,
+            subject: AttentionSubject(type: "server", id: server.id, name: server.name),
+            summary: "\(server.name): \(server.health?.summary ?? "")",
+            fix: AttentionFix(verb: server.health?.action ?? "", label: "Sign in", target: "/servers/\(server.name)"),
+            since: Date()
+        )
+    }
+
+    /// Two overlapping refreshes on one connection can complete out of order;
+    /// the older response must not overwrite the newer one (#1405).
+    @MainActor
+    func testStaleAttentionResponseIsIgnoredAfterNewerOne() throws {
+        let state = AppState()
+        state.coreState = .connected
+        let generation = state.connectionGeneration
+        let stale = Self.signInAttentionItem(for: try loginRequiredServer(name: "old"))
+        let fresh = Self.signInAttentionItem(for: try loginRequiredServer(name: "new"))
+
+        let first = state.nextAttentionRequest()
+        let second = state.nextAttentionRequest()
+        // The newer request (second) answers first, then the older one lands.
+        state.updateAttention([fresh], connectionGeneration: generation, requestSequence: second)
+        state.updateAttention([stale], connectionGeneration: generation, requestSequence: first)
+
+        XCTAssertEqual(state.attention.map(\.subject.name), ["new"],
+                       "an out-of-order older response must not restore stale rows")
+    }
+
+    @MainActor
+    func testInOrderAttentionResponsesStillApply() throws {
+        let state = AppState()
+        state.coreState = .connected
+        let generation = state.connectionGeneration
+        let a = Self.signInAttentionItem(for: try loginRequiredServer(name: "a"))
+        let b = Self.signInAttentionItem(for: try loginRequiredServer(name: "b"))
+
+        let first = state.nextAttentionRequest()
+        state.updateAttention([a], connectionGeneration: generation, requestSequence: first)
+        let second = state.nextAttentionRequest()
+        state.updateAttention([b], connectionGeneration: generation, requestSequence: second)
+        XCTAssertEqual(state.attention.map(\.subject.name), ["b"])
     }
 
     // MARK: - menuStatusNSColor (active AppKit tray dot, MCP-1856)

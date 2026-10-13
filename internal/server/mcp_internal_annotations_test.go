@@ -191,11 +191,10 @@ func TestBuildCallToolModeToolsAnnotations(t *testing.T) {
 	}
 }
 
-// TestDisabledCodeExecutionAnnotations verifies the disabled stub
-// (buildCodeExecutionTool with EnableCodeExecution=false) still has explicit
-// annotation hints — preventing it from inheriting the permissive default of
-// destructive=true / openWorld=true.
-func TestDisabledCodeExecutionAnnotations(t *testing.T) {
+// TestDisabledCodeExecutionNotRegistered: with EnableCodeExecution=false the
+// builder registers nothing (issue #1236) — there is no disabled stub whose
+// annotations could drift, and no entry for a client to pick from tools/list.
+func TestDisabledCodeExecutionNotRegistered(t *testing.T) {
 	cfg := config.DefaultConfig()
 	cfg.EnableCodeExecution = false
 
@@ -204,9 +203,6 @@ func TestDisabledCodeExecutionAnnotations(t *testing.T) {
 		config: cfg,
 	}
 
-	serverTools := p.buildCodeExecutionTool()
-	require.Len(t, serverTools, 1)
-	tool := serverTools[0].Tool
-	assert.Equal(t, "code_execution", tool.Name)
-	assertExplicitHints(t, tool, expectedHints{readOnly: true, destructive: false, openWorld: false})
+	require.Empty(t, p.buildCodeExecutionTool(),
+		"a disabled code_execution must not be advertised on any surface")
 }

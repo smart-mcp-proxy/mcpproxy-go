@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -32,6 +33,10 @@ type OAuthServerMetadata struct {
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported,omitempty"`
 	RevocationEndpoint                string   `json:"revocation_endpoint,omitempty"`
 	RegistrationEndpoint              string   `json:"registration_endpoint,omitempty"`
+
+	// grantTypesPresent records that the document carried grant_types_supported,
+	// even as an empty list (an empty list is not the same as an absent field).
+	grantTypesPresent bool
 }
 
 // BuildRFC8414MetadataURLs constructs OAuth Authorization Server Metadata URLs per RFC 8414.
@@ -104,15 +109,15 @@ func FindWorkingMetadataURL(serverURL string, timeout time.Duration) (string, er
 
 	for _, metadataURL := range urls {
 		logger.Debug("Validating OAuth metadata URL",
-			zap.String("server_url", serverURL),
-			zap.String("metadata_url", metadataURL))
+			zap.String("server_url", logSafeURL(serverURL)),
+			zap.String("metadata_url", logSafeURL(metadataURL)))
 
-		metadata, err := fetchAuthorizationServerMetadata(metadataURL, timeout)
+		metadata, err := fetchAuthorizationServerMetadata(defaultEnv(), metadataURL, timeout)
 		if err != nil {
 			lastErr = err
 			logger.Debug("Metadata URL validation failed",
-				zap.String("metadata_url", metadataURL),
-				zap.Error(err))
+				zap.String("metadata_url", logSafeURL(metadataURL)),
+				logSafeErrorField(err))
 			continue
 		}
 
@@ -120,18 +125,24 @@ func FindWorkingMetadataURL(serverURL string, timeout time.Duration) (string, er
 		if metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" {
 			lastErr = fmt.Errorf("metadata missing required fields")
 			logger.Debug("Metadata incomplete",
-				zap.String("metadata_url", metadataURL))
+				zap.String("metadata_url", logSafeURL(metadataURL)))
 			continue
 		}
 
 		logger.Info("Found working OAuth metadata URL",
-			zap.String("server_url", serverURL),
-			zap.String("metadata_url", metadataURL),
+			zap.String("server_url", logSafeURL(serverURL)),
+			zap.String("metadata_url", logSafeURL(metadataURL)),
 			zap.String("issuer", metadata.Issuer))
 		return metadataURL, nil
 	}
 
-	return "", fmt.Errorf("no working metadata URL found for %s: %w", serverURL, lastErr)
+	// Issue #1158 (review round 2, finding B2): this error is logged and
+	// returned to REST callers, and `serverURL` is the CONFIGURED upstream URL
+	// — the one that routinely carries `?token=`. The wrapped `lastErr` is left
+	// wrapped so errors.Is/As still work; its own quoted URL is scrubbed at the
+	// log sinks by logSafeErrorField and at the REST boundary by
+	// createMetadataError.
+	return "", fmt.Errorf("no working metadata URL found for %s: %w", logSafeURL(serverURL), lastErr)
 }
 
 // discoverAuthServerMetadataWithFallback attempts to discover OAuth Authorization Server Metadata
@@ -141,7 +152,7 @@ func FindWorkingMetadataURL(serverURL string, timeout time.Duration) (string, er
 // then falls back to the legacy URL (well-known appended after path).
 //
 // Returns the first successfully discovered metadata and the URL that worked.
-func discoverAuthServerMetadataWithFallback(authServerURL string, timeout time.Duration) (*OAuthServerMetadata, string, error) {
+func discoverAuthServerMetadataWithFallback(env Env, authServerURL string, timeout time.Duration) (*OAuthServerMetadata, string, error) {
 	logger := zap.L().Named("oauth.discovery")
 
 	urls := BuildRFC8414MetadataURLs(authServerURL)
@@ -151,34 +162,34 @@ func discoverAuthServerMetadataWithFallback(authServerURL string, timeout time.D
 	for _, metadataURL := range urls {
 		urlsChecked = append(urlsChecked, metadataURL)
 		logger.Debug("Trying OAuth metadata URL",
-			zap.String("auth_server", authServerURL),
-			zap.String("metadata_url", metadataURL))
+			zap.String("auth_server", logSafeURL(authServerURL)),
+			zap.String("metadata_url", logSafeURL(metadataURL)))
 
-		metadata, err := fetchAuthorizationServerMetadata(metadataURL, timeout)
+		metadata, err := fetchAuthorizationServerMetadata(env, metadataURL, timeout)
 		if err == nil {
 			// Validate required fields
 			if metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" {
 				lastErr = fmt.Errorf("metadata missing required fields: authorization_endpoint=%q, token_endpoint=%q",
 					metadata.AuthorizationEndpoint, metadata.TokenEndpoint)
 				logger.Debug("OAuth metadata incomplete, trying next URL",
-					zap.String("metadata_url", metadataURL),
-					zap.Error(lastErr))
+					zap.String("metadata_url", logSafeURL(metadataURL)),
+					logSafeErrorField(lastErr))
 				continue
 			}
 
 			logger.Info("✅ OAuth metadata discovered",
-				zap.String("auth_server", authServerURL),
-				zap.String("metadata_url", metadataURL),
+				zap.String("auth_server", logSafeURL(authServerURL)),
+				zap.String("metadata_url", logSafeURL(metadataURL)),
 				zap.String("issuer", metadata.Issuer),
-				zap.String("authorization_endpoint", metadata.AuthorizationEndpoint),
-				zap.String("token_endpoint", metadata.TokenEndpoint))
+				zap.String("authorization_endpoint", logSafeURL(metadata.AuthorizationEndpoint)),
+				zap.String("token_endpoint", logSafeURL(metadata.TokenEndpoint)))
 			return metadata, metadataURL, nil
 		}
 
 		lastErr = err
 		logger.Debug("OAuth metadata fetch failed, trying next URL",
-			zap.String("metadata_url", metadataURL),
-			zap.Error(err))
+			zap.String("metadata_url", logSafeURL(metadataURL)),
+			logSafeErrorField(err))
 	}
 
 	return nil, "", fmt.Errorf("failed to discover OAuth metadata from %v: %w", urlsChecked, lastErr)
@@ -192,22 +203,31 @@ func discoverAuthServerMetadataWithFallback(authServerURL string, timeout time.D
 //   - MCP Server: server.smithery.ai/googledrive
 //   - Auth Server: auth.smithery.ai/googledrive
 func DiscoverAuthServerURL(serverURL string, timeout time.Duration) string {
+	env := defaultEnv()
+	return discoverAuthServerURL(env, serverURL, timeout, func(prmURL string) (*ProtectedResourceMetadata, error) {
+		return discoverProtectedResourceMetadata(env, prmURL, timeout)
+	})
+}
+
+// discoverAuthServerURL is DiscoverAuthServerURL with an injectable Protected
+// Resource Metadata fetcher, so the preflight can read PRM through the discovery cache.
+func discoverAuthServerURL(env Env, serverURL string, timeout time.Duration, fetchPRM func(prmURL string) (*ProtectedResourceMetadata, error)) string {
 	logger := zap.L().Named("oauth.discovery")
 
 	// First, make a preflight request to get the WWW-Authenticate header with resource_metadata
-	client := &http.Client{Timeout: timeout}
+	client := env.client(timeout)
 	resp, err := client.Post(serverURL, "application/json", strings.NewReader("{}"))
 	if err != nil {
 		logger.Debug("Preflight request failed for auth server discovery",
-			zap.String("server_url", serverURL),
-			zap.Error(err))
+			zap.String("server_url", logSafeURL(serverURL)),
+			logSafeErrorField(err))
 		return ""
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusUnauthorized {
 		logger.Debug("Server did not return 401, cannot discover auth server",
-			zap.String("server_url", serverURL),
+			zap.String("server_url", logSafeURL(serverURL)),
 			zap.Int("status_code", resp.StatusCode))
 		return ""
 	}
@@ -229,16 +249,16 @@ func DiscoverAuthServerURL(serverURL string, timeout time.Duration) string {
 			metadataURL = baseURL + "/.well-known/oauth-protected-resource"
 		}
 		logger.Debug("Constructed PRM URL from server URL",
-			zap.String("server_url", serverURL),
-			zap.String("prm_url", metadataURL))
+			zap.String("server_url", logSafeURL(serverURL)),
+			zap.String("prm_url", logSafeURL(metadataURL)))
 	}
 
 	// Fetch Protected Resource Metadata
-	metadata, err := DiscoverProtectedResourceMetadata(metadataURL, timeout)
+	metadata, err := fetchPRM(metadataURL)
 	if err != nil {
 		logger.Debug("Failed to fetch Protected Resource Metadata",
-			zap.String("metadata_url", metadataURL),
-			zap.Error(err))
+			zap.String("metadata_url", logSafeURL(metadataURL)),
+			logSafeErrorField(err))
 		return ""
 	}
 
@@ -246,13 +266,13 @@ func DiscoverAuthServerURL(serverURL string, timeout time.Duration) string {
 	if len(metadata.AuthorizationServers) > 0 {
 		authServer := metadata.AuthorizationServers[0]
 		logger.Info("Discovered OAuth authorization server from PRM",
-			zap.String("server_url", serverURL),
-			zap.String("auth_server", authServer))
+			zap.String("server_url", logSafeURL(serverURL)),
+			zap.String("auth_server", logSafeURL(authServer)))
 		return authServer
 	}
 
 	logger.Debug("PRM has no authorization_servers",
-		zap.String("server_url", serverURL))
+		zap.String("server_url", logSafeURL(serverURL)))
 	return ""
 }
 
@@ -283,6 +303,12 @@ func ExtractResourceMetadataURL(wwwAuthHeader string) string {
 // and returns the full metadata structure including the resource parameter.
 // This is the primary function for RFC 8707 resource auto-detection.
 func DiscoverProtectedResourceMetadata(metadataURL string, timeout time.Duration) (*ProtectedResourceMetadata, error) {
+	return discoverProtectedResourceMetadata(defaultEnv(), metadataURL, timeout)
+}
+
+// discoverProtectedResourceMetadata is DiscoverProtectedResourceMetadata on
+// env's transport (Spec 116 PR4, FR-024a).
+func discoverProtectedResourceMetadata(env Env, metadataURL string, timeout time.Duration) (*ProtectedResourceMetadata, error) {
 	logger := zap.L().Named("oauth.discovery")
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -299,14 +325,14 @@ func DiscoverProtectedResourceMetadata(metadataURL string, timeout time.Duration
 	LogOAuthRequest(logger, req.Method, metadataURL, req.Header)
 
 	startTime := time.Now()
-	client := &http.Client{Timeout: timeout}
+	client := env.client(timeout)
 	resp, err := client.Do(req)
 	elapsed := time.Since(startTime)
 
 	if err != nil {
 		logger.Debug("❌ HTTP Request failed",
-			zap.String("url", metadataURL),
-			zap.Error(err),
+			zap.String("url", logSafeURL(metadataURL)),
+			logSafeErrorField(err),
 			zap.Duration("elapsed", elapsed))
 		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
 	}
@@ -317,7 +343,7 @@ func DiscoverProtectedResourceMetadata(metadataURL string, timeout time.Duration
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Debug("⚠️ Non-200 status code from metadata endpoint",
-			zap.String("url", metadataURL),
+			zap.String("url", logSafeURL(metadataURL)),
 			zap.Int("status_code", resp.StatusCode))
 		return nil, fmt.Errorf("metadata endpoint returned %d", resp.StatusCode)
 	}
@@ -325,26 +351,26 @@ func DiscoverProtectedResourceMetadata(metadataURL string, timeout time.Duration
 	var metadata ProtectedResourceMetadata
 	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
 		logger.Debug("❌ Failed to parse JSON response",
-			zap.String("url", metadataURL),
-			zap.Error(err))
+			zap.String("url", logSafeURL(metadataURL)),
+			logSafeErrorField(err))
 		return nil, fmt.Errorf("failed to parse metadata: %w", err)
 	}
 
 	// TRACE: Log parsed metadata
 	logger.Debug("✅ Successfully parsed Protected Resource Metadata",
-		zap.String("url", metadataURL),
-		zap.String("resource", metadata.Resource),
+		zap.String("url", logSafeURL(metadataURL)),
+		zap.String("resource", logSafeURL(metadata.Resource)),
 		zap.String("resource_name", metadata.ResourceName),
 		zap.Strings("scopes_supported", metadata.ScopesSupported),
-		zap.Strings("authorization_servers", metadata.AuthorizationServers),
+		zap.Strings("authorization_servers", logSafeURLs(metadata.AuthorizationServers)),
 		zap.Strings("bearer_methods_supported", metadata.BearerMethodsSupported))
 
 	// Log resource discovery for RFC 8707 auto-detection
 	if metadata.Resource != "" {
 		logger.Info("Protected Resource Metadata discovered",
-			zap.String("resource", metadata.Resource),
+			zap.String("resource", logSafeURL(metadata.Resource)),
 			zap.Strings("scopes", metadata.ScopesSupported),
-			zap.Strings("auth_servers", metadata.AuthorizationServers))
+			zap.Strings("auth_servers", logSafeURLs(metadata.AuthorizationServers)))
 	}
 
 	return &metadata, nil
@@ -361,7 +387,7 @@ func DiscoverScopesFromProtectedResource(metadataURL string, timeout time.Durati
 	if len(metadata.ScopesSupported) == 0 {
 		logger := zap.L().Named("oauth.discovery")
 		logger.Debug("Protected Resource Metadata returned empty scopes_supported",
-			zap.String("metadata_url", metadataURL))
+			zap.String("metadata_url", logSafeURL(metadataURL)))
 		return []string{}, nil
 	}
 
@@ -370,6 +396,12 @@ func DiscoverScopesFromProtectedResource(metadataURL string, timeout time.Durati
 
 // DiscoverScopesFromAuthorizationServer attempts to discover scopes from OAuth Server Metadata (RFC 8414)
 func DiscoverScopesFromAuthorizationServer(baseURL string, timeout time.Duration) ([]string, error) {
+	return discoverScopesFromAuthorizationServer(defaultEnv(), baseURL, timeout)
+}
+
+// discoverScopesFromAuthorizationServer is DiscoverScopesFromAuthorizationServer
+// on env's transport (Spec 116 PR4, FR-024a).
+func discoverScopesFromAuthorizationServer(env Env, baseURL string, timeout time.Duration) ([]string, error) {
 	logger := zap.L().Named("oauth.discovery")
 
 	// Construct the well-known metadata URL
@@ -389,14 +421,14 @@ func DiscoverScopesFromAuthorizationServer(baseURL string, timeout time.Duration
 	LogOAuthRequest(logger, req.Method, metadataURL, req.Header)
 
 	startTime := time.Now()
-	client := &http.Client{Timeout: timeout}
+	client := env.client(timeout)
 	resp, err := client.Do(req)
 	elapsed := time.Since(startTime)
 
 	if err != nil {
 		logger.Debug("❌ HTTP Request failed",
-			zap.String("url", metadataURL),
-			zap.Error(err),
+			zap.String("url", logSafeURL(metadataURL)),
+			logSafeErrorField(err),
 			zap.Duration("elapsed", elapsed))
 		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
 	}
@@ -407,7 +439,7 @@ func DiscoverScopesFromAuthorizationServer(baseURL string, timeout time.Duration
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Debug("⚠️ Non-200 status code from metadata endpoint",
-			zap.String("url", metadataURL),
+			zap.String("url", logSafeURL(metadataURL)),
 			zap.Int("status_code", resp.StatusCode))
 		return nil, fmt.Errorf("metadata endpoint returned %d", resp.StatusCode)
 	}
@@ -415,26 +447,26 @@ func DiscoverScopesFromAuthorizationServer(baseURL string, timeout time.Duration
 	var metadata OAuthServerMetadata
 	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
 		logger.Debug("❌ Failed to parse JSON response",
-			zap.String("url", metadataURL),
-			zap.Error(err))
+			zap.String("url", logSafeURL(metadataURL)),
+			logSafeErrorField(err))
 		return nil, fmt.Errorf("failed to parse metadata: %w", err)
 	}
 
 	// TRACE: Log parsed metadata
 	logger.Debug("✅ Successfully parsed Authorization Server Metadata",
-		zap.String("url", metadataURL),
+		zap.String("url", logSafeURL(metadataURL)),
 		zap.String("issuer", metadata.Issuer),
-		zap.String("authorization_endpoint", metadata.AuthorizationEndpoint),
-		zap.String("token_endpoint", metadata.TokenEndpoint),
+		zap.String("authorization_endpoint", logSafeURL(metadata.AuthorizationEndpoint)),
+		zap.String("token_endpoint", logSafeURL(metadata.TokenEndpoint)),
 		zap.Strings("scopes_supported", metadata.ScopesSupported),
 		zap.Strings("response_types_supported", metadata.ResponseTypesSupported),
 		zap.Strings("grant_types_supported", metadata.GrantTypesSupported))
 
 	logger.Debug("Authorization Server Metadata fetched",
 		zap.String("issuer", metadata.Issuer),
-		zap.String("authorization_endpoint", metadata.AuthorizationEndpoint),
-		zap.String("token_endpoint", metadata.TokenEndpoint),
-		zap.String("registration_endpoint", metadata.RegistrationEndpoint),
+		zap.String("authorization_endpoint", logSafeURL(metadata.AuthorizationEndpoint)),
+		zap.String("token_endpoint", logSafeURL(metadata.TokenEndpoint)),
+		zap.String("registration_endpoint", logSafeURL(metadata.RegistrationEndpoint)),
 		zap.Strings("scopes_supported", metadata.ScopesSupported))
 
 	if metadata.RegistrationEndpoint == "" {
@@ -445,7 +477,7 @@ func DiscoverScopesFromAuthorizationServer(baseURL string, timeout time.Duration
 
 	if len(metadata.ScopesSupported) == 0 {
 		logger.Debug("Authorization Server Metadata returned empty scopes_supported",
-			zap.String("metadata_url", metadataURL))
+			zap.String("metadata_url", logSafeURL(metadataURL)))
 		return []string{}, nil
 	}
 
@@ -469,19 +501,19 @@ func DetectOAuthAvailability(baseURL string, timeout time.Duration) bool {
 
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: timeout}
+	client := defaultEnv().client(timeout)
 	resp, err := client.Do(req)
 	if err != nil {
 		logger.Debug("OAuth detection failed - endpoint unreachable",
-			zap.String("url", metadataURL),
-			zap.Error(err))
+			zap.String("url", logSafeURL(metadataURL)),
+			logSafeErrorField(err))
 		return false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		logger.Debug("OAuth detection failed - non-200 status",
-			zap.String("url", metadataURL),
+			zap.String("url", logSafeURL(metadataURL)),
 			zap.Int("status_code", resp.StatusCode))
 		return false
 	}
@@ -489,39 +521,39 @@ func DetectOAuthAvailability(baseURL string, timeout time.Duration) bool {
 	var metadata OAuthServerMetadata
 	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
 		logger.Debug("OAuth detection failed - invalid JSON",
-			zap.String("url", metadataURL),
-			zap.Error(err))
+			zap.String("url", logSafeURL(metadataURL)),
+			logSafeErrorField(err))
 		return false
 	}
 
 	// Verify it's valid OAuth metadata
 	if metadata.AuthorizationEndpoint == "" || metadata.TokenEndpoint == "" {
 		logger.Debug("OAuth detection failed - incomplete metadata",
-			zap.String("url", metadataURL),
-			zap.String("authorization_endpoint", metadata.AuthorizationEndpoint),
-			zap.String("token_endpoint", metadata.TokenEndpoint))
+			zap.String("url", logSafeURL(metadataURL)),
+			zap.String("authorization_endpoint", logSafeURL(metadata.AuthorizationEndpoint)),
+			zap.String("token_endpoint", logSafeURL(metadata.TokenEndpoint)))
 		return false
 	}
 
 	logger.Info("✅ OAuth detected automatically",
-		zap.String("server_url", baseURL),
+		zap.String("server_url", logSafeURL(baseURL)),
 		zap.String("issuer", metadata.Issuer),
-		zap.String("authorization_endpoint", metadata.AuthorizationEndpoint),
-		zap.String("token_endpoint", metadata.TokenEndpoint))
+		zap.String("authorization_endpoint", logSafeURL(metadata.AuthorizationEndpoint)),
+		zap.String("token_endpoint", logSafeURL(metadata.TokenEndpoint)))
 
 	return true
 }
 
 // OAuthMetadataValidationResult contains the result of OAuth metadata validation
 type OAuthMetadataValidationResult struct {
-	Valid                              bool
-	ProtectedResourceMetadata          *ProtectedResourceMetadata
-	AuthorizationServerMetadata        *OAuthServerMetadata
-	ProtectedResourceMetadataURL       string
-	AuthorizationServerMetadataURL     string
+	Valid                                bool
+	ProtectedResourceMetadata            *ProtectedResourceMetadata
+	AuthorizationServerMetadata          *OAuthServerMetadata
+	ProtectedResourceMetadataURL         string
+	AuthorizationServerMetadataURL       string
 	AuthorizationServerMetadataURLsTried []string // All URLs tried (RFC 8414 fallback)
-	ProtectedResourceError             error
-	AuthorizationServerError           error
+	ProtectedResourceError               error
+	AuthorizationServerError             error
 }
 
 // ValidateOAuthMetadata performs pre-flight validation of OAuth metadata.
@@ -538,20 +570,26 @@ type OAuthMetadataValidationResult struct {
 //   - *OAuthMetadataValidationResult: Validation result with metadata if successful
 //   - error: Structured OAuthFlowError if validation fails
 func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) (*OAuthMetadataValidationResult, error) {
+	return ValidateOAuthMetadataWithEnv(defaultEnv(), serverURL, serverName, timeout)
+}
+
+// ValidateOAuthMetadataWithEnv is ValidateOAuthMetadata on an upstream
+// instance's transport (Spec 116 PR4, FR-024a).
+func ValidateOAuthMetadataWithEnv(env Env, serverURL, serverName string, timeout time.Duration) (*OAuthMetadataValidationResult, error) {
 	logger := zap.L().Named("oauth.validation")
 	result := &OAuthMetadataValidationResult{}
 
 	logger.Info("🔍 Starting OAuth metadata pre-flight validation",
 		zap.String("server", serverName),
-		zap.String("url", serverURL))
+		zap.String("url", logSafeURL(serverURL)))
 
 	// Step 1: Make preflight request to get WWW-Authenticate header
-	client := &http.Client{Timeout: timeout}
+	client := env.client(timeout)
 	resp, err := client.Post(serverURL, "application/json", strings.NewReader("{}"))
 	if err != nil {
 		logger.Debug("Preflight request failed",
 			zap.String("server", serverName),
-			zap.Error(err))
+			logSafeErrorField(err))
 		// This is a connection error, not a metadata error - return nil to let OAuth flow proceed
 		// The actual OAuth flow will handle connection errors appropriately
 		return nil, nil
@@ -577,7 +615,7 @@ func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) 
 
 		// Try direct authorization server metadata discovery using RFC 8414 compliant paths
 		// Use the full server URL to properly construct RFC 8414 paths that include the path component
-		authMetadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(serverURL, timeout)
+		authMetadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(env, serverURL, timeout)
 		result.AuthorizationServerMetadataURL = discoveredURL
 
 		if err != nil {
@@ -600,13 +638,13 @@ func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) 
 	result.ProtectedResourceMetadataURL = metadataURL
 
 	// Step 3: Fetch protected resource metadata
-	protectedMetadata, err := DiscoverProtectedResourceMetadata(metadataURL, timeout)
+	protectedMetadata, err := discoverProtectedResourceMetadata(env, metadataURL, timeout)
 	if err != nil {
 		result.ProtectedResourceError = err
 		logger.Debug("Failed to fetch protected resource metadata",
 			zap.String("server", serverName),
-			zap.String("metadata_url", metadataURL),
-			zap.Error(err))
+			zap.String("metadata_url", logSafeURL(metadataURL)),
+			logSafeErrorField(err))
 		// Don't return error yet - try to get auth server metadata for better error info
 	} else {
 		result.ProtectedResourceMetadata = protectedMetadata
@@ -630,7 +668,7 @@ func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) 
 
 	// Use RFC 8414 compliant discovery with fallback for servers like Smithery
 	// that use non-standard well-known paths
-	authMetadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(authServerBaseURL, timeout)
+	authMetadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(env, authServerBaseURL, timeout)
 	result.AuthorizationServerMetadataURL = discoveredURL // Store the URL that worked
 
 	if err != nil {
@@ -643,9 +681,9 @@ func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) 
 		}
 		logger.Debug("Failed to fetch authorization server metadata",
 			zap.String("server", serverName),
-			zap.String("auth_server_base", authServerBaseURL),
-			zap.Strings("urls_tried", urls),
-			zap.Error(err))
+			zap.String("auth_server_base", logSafeURL(authServerBaseURL)),
+			zap.Strings("urls_tried", logSafeURLs(urls)),
+			logSafeErrorField(err))
 		return result, createMetadataError(serverName, serverURL, result)
 	}
 
@@ -656,14 +694,14 @@ func ValidateOAuthMetadata(serverURL, serverName string, timeout time.Duration) 
 	result.Valid = true
 	logger.Info("✅ OAuth metadata validation successful",
 		zap.String("server", serverName),
-		zap.String("authorization_endpoint", authMetadata.AuthorizationEndpoint),
-		zap.String("token_endpoint", authMetadata.TokenEndpoint))
+		zap.String("authorization_endpoint", logSafeURL(authMetadata.AuthorizationEndpoint)),
+		zap.String("token_endpoint", logSafeURL(authMetadata.TokenEndpoint)))
 
 	return result, nil
 }
 
 // fetchAuthorizationServerMetadata fetches RFC 8414 OAuth Authorization Server Metadata
-func fetchAuthorizationServerMetadata(metadataURL string, timeout time.Duration) (*OAuthServerMetadata, error) {
+func fetchAuthorizationServerMetadata(env Env, metadataURL string, timeout time.Duration) (*OAuthServerMetadata, error) {
 	logger := zap.L().Named("oauth.validation")
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
@@ -676,7 +714,7 @@ func fetchAuthorizationServerMetadata(metadataURL string, timeout time.Duration)
 
 	req.Header.Set("Accept", "application/json")
 
-	client := &http.Client{Timeout: timeout}
+	client := env.client(timeout)
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
@@ -690,15 +728,28 @@ func fetchAuthorizationServerMetadata(metadataURL string, timeout time.Duration)
 	var metadata OAuthServerMetadata
 	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
 		logger.Debug("Failed to parse authorization server metadata",
-			zap.String("url", metadataURL),
-			zap.Error(err))
+			zap.String("url", logSafeURL(metadataURL)),
+			logSafeErrorField(err))
 		return nil, fmt.Errorf("failed to parse metadata: %w", err)
 	}
 
 	return &metadata, nil
 }
 
-// createMetadataError creates a structured OAuthFlowError from validation result
+// createMetadataError creates a structured OAuthFlowError from validation result.
+//
+// Issue #1158: every URL leaf below is derived from the CONFIGURED server URL,
+// so each one carries whatever credential that URL's query string holds — and
+// this struct is JSON-encoded straight to the API client by
+// handleServerLogin, as well as rendered by `mcpproxy auth status`. The scrub
+// belongs HERE, at the build site, not at the encoder: the encoder sees an
+// opaque struct and cannot know which leaves are URLs, and fixing it here means
+// every present and future consumer of OAuthMetadataError inherits the safe
+// rendering.
+//
+// The URL leaves keep their scheme, host and path — the Web UI's OAuth-failure
+// panel exists to tell the operator WHICH endpoint failed discovery, so
+// blanking the field would be a different bug. Only the credentials go.
 func createMetadataError(serverName, serverURL string, result *OAuthMetadataValidationResult) error {
 	// Import contracts for error types - using string literals to avoid import cycle
 	// These match the constants in internal/contracts/types.go
@@ -720,7 +771,7 @@ func createMetadataError(serverName, serverURL string, result *OAuthMetadataVali
 			"MCPProxy tried the following OAuth metadata URLs but none responded: %v. "+
 				"Verify the authorization server supports OAuth 2.0 discovery (RFC 8414). "+
 				"If using a custom OAuth server, ensure it exposes /.well-known/oauth-authorization-server.",
-			result.AuthorizationServerMetadataURLsTried)
+			logSafeURLs(result.AuthorizationServerMetadataURLsTried))
 	} else {
 		suggestion = "The OAuth authorization server is not properly configured. Contact the server administrator."
 	}
@@ -735,30 +786,35 @@ func createMetadataError(serverName, serverURL string, result *OAuthMetadataVali
 
 	// Build details structure
 	details := &metadataErrorDetails{
-		ServerURL: serverURL,
+		ServerURL: logSafeURL(serverURL),
 	}
 
 	if result.ProtectedResourceMetadataURL != "" {
 		details.ProtectedResourceMetadata = &metadataStatus{
 			Found:      result.ProtectedResourceMetadata != nil,
-			URLChecked: result.ProtectedResourceMetadataURL,
+			URLChecked: logSafeURL(result.ProtectedResourceMetadataURL),
 		}
 		if result.ProtectedResourceError != nil {
-			details.ProtectedResourceMetadata.Error = result.ProtectedResourceError.Error()
+			details.ProtectedResourceMetadata.Error = ScrubUpstreamText(result.ProtectedResourceError.Error())
 		}
 		if result.ProtectedResourceMetadata != nil {
-			details.ProtectedResourceMetadata.AuthorizationServers = result.ProtectedResourceMetadata.AuthorizationServers
+			// The PRM's own authorization_servers list is upstream-authored and
+			// leaves this struct over REST alongside every sibling URL leaf,
+			// each of which is scrubbed. Review round 2 flagged the
+			// inconsistency; scheme/host/path survive, so the panel still says
+			// WHICH authorization server was advertised.
+			details.ProtectedResourceMetadata.AuthorizationServers = logSafeURLs(result.ProtectedResourceMetadata.AuthorizationServers)
 		}
 	}
 
 	if result.AuthorizationServerMetadataURL != "" || len(result.AuthorizationServerMetadataURLsTried) > 0 {
 		details.AuthorizationServerMetadata = &metadataStatus{
 			Found:       result.AuthorizationServerMetadata != nil,
-			URLChecked:  result.AuthorizationServerMetadataURL,
-			URLsChecked: result.AuthorizationServerMetadataURLsTried,
+			URLChecked:  logSafeURL(result.AuthorizationServerMetadataURL),
+			URLsChecked: logSafeURLs(result.AuthorizationServerMetadataURLsTried),
 		}
 		if result.AuthorizationServerError != nil {
-			details.AuthorizationServerMetadata.Error = result.AuthorizationServerError.Error()
+			details.AuthorizationServerMetadata.Error = ScrubUpstreamText(result.AuthorizationServerError.Error())
 		}
 	}
 
@@ -804,3 +860,69 @@ type metadataStatus struct {
 }
 
 // Note: parseBaseURL is defined in config.go and shared within the oauth package
+
+// cachedPRM fetches Protected Resource Metadata through the discovery cache
+// (Spec 113 FR-026): the scope preflight, the auth-server discovery and the
+// resource auto-detection all read the same document.
+func cachedPRM(env Env, serverURL string, ov discoveryOverrides, prmURL string, timeout time.Duration) (*ProtectedResourceMetadata, error) {
+	return cachedDiscover(globalDiscoveryCache, makeDiscoveryKey("prm", serverURL, ov, prmURL), serverURL,
+		func() (*ProtectedResourceMetadata, error) {
+			return discoverProtectedResourceMetadata(env, prmURL, timeout)
+		})
+}
+
+// findWorkingMetadataDoc is FindWorkingMetadataURL that also returns the parsed
+// document it validated, so callers need no second fetch.
+func findWorkingMetadataDoc(env Env, serverURL string, timeout time.Duration) (string, *asMetadataDoc, error) {
+	logger := zap.L().Named("oauth.discovery")
+	var lastErr error
+	for _, metadataURL := range BuildRFC8414MetadataURLs(serverURL) {
+		raw, err := httpFetchRaw(env, metadataURL, timeout)
+		if err != nil {
+			lastErr = err
+			logger.Debug("Metadata URL validation failed",
+				zap.String("metadata_url", logSafeURL(metadataURL)),
+				logSafeErrorField(err))
+			continue
+		}
+		doc, err := parseASMetadataDoc(raw)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if doc.meta.AuthorizationEndpoint == "" || doc.meta.TokenEndpoint == "" {
+			lastErr = fmt.Errorf("metadata missing required fields")
+			continue
+		}
+		logger.Info("Found working OAuth metadata URL",
+			zap.String("server_url", logSafeURL(serverURL)),
+			zap.String("metadata_url", logSafeURL(metadataURL)),
+			zap.String("issuer", doc.meta.Issuer))
+		return metadataURL, doc, nil
+	}
+	return "", nil, fmt.Errorf("no working metadata URL found for %s: %w", logSafeURL(serverURL), lastErr)
+}
+
+// refreshGrantWarned records the servers already warned about (Spec 113 FR-021).
+var refreshGrantWarned sync.Map
+
+// warnIfNoRefreshGrant logs one Warn per server per process when the AS metadata
+// publishes grant_types_supported without refresh_token. An absent field is not
+// a warning: RFC 8414 says the default is authorization_code + implicit and many
+// servers simply omit it.
+func warnIfNoRefreshGrant(logger *zap.Logger, serverName string, meta *OAuthServerMetadata) {
+	if meta == nil || (len(meta.GrantTypesSupported) == 0 && !meta.grantTypesPresent) {
+		return
+	}
+	for _, g := range meta.GrantTypesSupported {
+		if g == "refresh_token" {
+			return
+		}
+	}
+	if _, loaded := refreshGrantWarned.LoadOrStore(serverName, struct{}{}); loaded {
+		return
+	}
+	logger.Warn("Authorization server does not list refresh_token in grant_types_supported; access tokens cannot be refreshed and logins will expire",
+		zap.String("server", serverName),
+		zap.Strings("grant_types_supported", meta.GrantTypesSupported))
+}

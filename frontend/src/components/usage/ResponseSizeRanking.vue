@@ -31,16 +31,19 @@ import {
 } from 'chart.js'
 import type { ChartOptions } from 'chart.js'
 import type { UsageToolStat } from '@/types'
-import { formatBytes, toolLabel, paletteColor } from '@/utils/usageFormat'
+import { formatBytes, partitionUsageTools, toolLabel, paletteColor } from '@/utils/usageFormat'
 
 ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip, Legend)
 
 const props = defineProps<{ tools: UsageToolStat[] }>()
 
-// Rank by total response bytes descending; drop tools with no sized output.
+// Rank by total response bytes descending; drop tools with no sized output, and
+// tools that never completed a call. An error message is a response with bytes,
+// so without the second filter a name that only ever failed — an agent's typo,
+// an unreachable server — ranked as a "token sink" (audit finding F22, #1046).
 const ranked = computed(() =>
-  [...props.tools]
-    .filter(t => t.total_resp_bytes > 0)
+  partitionUsageTools(props.tools)
+    .completed.filter(t => t.total_resp_bytes > 0)
     .sort((a, b) => b.total_resp_bytes - a.total_resp_bytes)
 )
 
@@ -77,7 +80,11 @@ const chartOptions = computed<ChartOptions<'bar'>>(() => ({
     },
   },
   scales: {
-    x: { beginAtZero: true, ticks: { callback: (v) => formatBytes(Number(v)) } },
+    x: {
+      beginAtZero: true,
+      title: { display: true, text: 'Total response bytes' },
+      ticks: { callback: (v) => formatBytes(Number(v)) },
+    },
     y: { ticks: { autoSkip: false, font: { size: 11 } } },
   },
 }))

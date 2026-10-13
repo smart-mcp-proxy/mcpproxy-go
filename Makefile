@@ -1,6 +1,6 @@
 # MCPProxy Makefile
 
-.PHONY: help build build-server build-docker build-deb swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth lint dev-setup docs-setup docs-dev docs-build docs-clean
+.PHONY: help build build-server build-docker build-deb swagger swagger-verify frontend-build frontend-dev backend-dev clean test test-coverage test-e2e test-e2e-oauth test-descendant-pids test-e2e-cleanup-check lint dev-setup docs-setup docs-dev docs-build docs-clean bench-discovery
 
 SWAGGER_BIN ?= $(HOME)/go/bin/swag
 SWAGGER_OUT ?= oas
@@ -20,6 +20,8 @@ help:
 	@echo "  make test-coverage   - Run tests with coverage"
 	@echo "  make test-e2e        - Run all E2E tests"
 	@echo "  make test-e2e-oauth  - Run OAuth E2E tests with Playwright"
+	@echo "  make test-descendant-pids    - Unit test for the E2E cleanup trap's process-tree walk"
+	@echo "  make test-e2e-cleanup-check  - Integration test: E2E cleanup trap reaps only its own processes"
 	@echo "  make lint            - Run linter"
 	@echo "  make dev-setup       - Install development dependencies (swag, frontend, Playwright)"
 	@echo ""
@@ -33,6 +35,9 @@ help:
 	@echo "  make docs-dev        - Start docs dev server (http://localhost:3000)"
 	@echo "  make docs-build      - Build documentation site locally"
 	@echo "  make docs-clean      - Clean documentation build artifacts"
+	@echo ""
+	@echo "Benchmarks:"
+	@echo "  make bench-discovery - Run the discovery-effectiveness profiler (spec 083, offline arms)"
 
 # Generate OpenAPI specification
 swagger:
@@ -40,6 +45,7 @@ swagger:
 	@[ -x "$(SWAGGER_BIN)" ] || { echo "⚠️  swag binary not found at $(SWAGGER_BIN). Run 'go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4'"; exit 1; }
 	@mkdir -p $(SWAGGER_OUT)
 	$(SWAGGER_BIN) init -g $(SWAGGER_ENTRY) --output $(SWAGGER_OUT) --outputTypes go,yaml --v3.1 --exclude specs
+	go run ./cmd/oas-nullable $(SWAGGER_OUT)/swagger.yaml $(SWAGGER_OUT)/docs.go
 	@echo "✅ OpenAPI 3.1 spec generated: $(SWAGGER_OUT)/swagger.yaml and $(SWAGGER_OUT)/docs.go"
 
 swagger-verify: swagger
@@ -173,6 +179,22 @@ test-e2e: test-e2e-oauth
 	@echo "🧪 Running E2E tests..."
 	./scripts/test-api-e2e.sh
 
+# Unit test for descendant_pids (scripts/descendant-pids.sh), the process-tree
+# walk the E2E cleanup trap uses to reap only what a run itself spawned.
+# Hermetic — no built binary required.
+test-descendant-pids:
+	@echo "🧪 Running descendant_pids unit test..."
+	./scripts/descendant-pids.test.sh
+
+# Integration test: proves the E2E cleanup trap reaps only what its own run
+# started (a decoy mcpproxy on another port survives) and that it actually
+# reaps a real orphan of the run (the launcher-test fixture). Requires a
+# built ./mcpproxy binary; not part of `test-e2e` since it re-runs the whole
+# E2E suite as a subprocess.
+test-e2e-cleanup-check:
+	@echo "🧪 Running E2E cleanup-trap safety check..."
+	./scripts/test-api-e2e-cleanup-check.sh
+
 # Documentation site commands
 docs-setup:
 	@echo "📦 Installing documentation dependencies..."
@@ -195,3 +217,15 @@ docs-clean:
 	@echo "🧹 Cleaning documentation artifacts..."
 	rm -rf website/build website/.docusaurus website/node_modules website/docs
 	@echo "✅ Documentation cleanup complete"
+
+# Discovery-effectiveness profiler (spec 083, SC-008): pinned TSCG shim deps +
+# offline arm run on the schema-bearing frozen corpus. CI calls this target.
+bench-discovery:
+	@echo "📦 Installing pinned TSCG shim dependencies (bench/tscg)..."
+	npm ci --prefix bench/tscg
+	@echo "📊 Running discovery-effectiveness benchmark (offline, all arms)..."
+	go run ./bench/cmd/bench \
+		-corpus-v2 specs/083-discovery-profiler/datasets/corpus_v2.tools.json \
+		-arms all \
+		-out bench/results
+	@echo "✅ Reports written to bench/results/ (report.json + dashboard.html)"

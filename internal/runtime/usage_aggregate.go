@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,7 +29,16 @@ const usageMaxBuckets = 24 * 90
 // latencyBucketBoundsMs are the inclusive upper bounds (in ms) of the fixed
 // latency histogram buckets. A final overflow bucket captures anything slower
 // than the last bound, so there are len(bounds)+1 buckets total.
-var latencyBucketBoundsMs = []int64{10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
+//
+// The low end is fine-grained on purpose. A percentile read off a histogram is
+// the upper bound of the bucket it falls in, so the FIRST bound is the floor of
+// everything the table can ever print: with 10ms as the first bound, an
+// in-process stdio server answering in 3ms reported "p50 10 ms", "p95 10 ms" —
+// every row of the latency table read exactly 10 ms while the Activity Log
+// showed 3/4/5 ms for those same calls (audit finding F22, #1046). Local MCP
+// servers live almost entirely under 10ms, which is precisely where the old
+// layout had no resolution at all.
+var latencyBucketBoundsMs = []int64{1, 2, 5, 10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10000}
 
 func numLatencyBuckets() int { return len(latencyBucketBoundsMs) + 1 }
 
@@ -55,6 +65,7 @@ type ToolUsage struct {
 	Calls          int64     `json:"calls"`
 	Errors         int64     `json:"errors"`
 	Blocked        int64     `json:"blocked"`
+	Rejected       int64     `json:"rejected"` // spec 093: shed by a concurrency limit, never executed
 	ReqBytesSum    int64     `json:"req_bytes_sum"`
 	RespBytesSum   int64     `json:"resp_bytes_sum"`
 	SizedReqCalls  int64     `json:"sized_req_calls"`  // calls with RequestBytes>0
@@ -90,31 +101,40 @@ func (t *ToolUsage) ErrorRate() float64 {
 }
 
 // Percentile returns an approximate latency percentile (in ms) derived from the
-// fixed latency histogram. p is in [0,1]. The returned value is the upper bound
-// of the bucket in which the percentile falls (overflow bucket -> last bound).
-func (t *ToolUsage) Percentile(p float64) int64 {
+// fixed latency histogram. p is in [0,1].
+//
+// ms is the upper BOUND of the bucket the percentile falls in, never a measured
+// duration — the true value is somewhere at or below it. exceeds reports the one
+// case where that reading inverts: the overflow bucket has no upper bound, so
+// its ms is the last bound and the true value is ABOVE it. Callers must render
+// the two differently ("≤ 5 ms" vs "> 10 s"); printing the number bare is how a
+// bucketed estimate came to be read as a measurement (F22, #1046).
+//
+// An empty histogram returns (0, false): no calls, nothing to bound.
+func (t *ToolUsage) Percentile(p float64) (ms int64, exceeds bool) {
 	total := int64(0)
 	for _, c := range t.LatencyBuckets {
 		total += c
 	}
 	if total == 0 {
-		return 0
+		return 0, false
 	}
 	target := int64(float64(total) * p)
 	if target < 1 {
 		target = 1
 	}
+	last := latencyBucketBoundsMs[len(latencyBucketBoundsMs)-1]
 	cum := int64(0)
 	for i, c := range t.LatencyBuckets {
 		cum += c
 		if cum >= target {
 			if i < len(latencyBucketBoundsMs) {
-				return latencyBucketBoundsMs[i]
+				return latencyBucketBoundsMs[i], false
 			}
-			return latencyBucketBoundsMs[len(latencyBucketBoundsMs)-1]
+			return last, true
 		}
 	}
-	return latencyBucketBoundsMs[len(latencyBucketBoundsMs)-1]
+	return last, true
 }
 
 func (t *ToolUsage) clone() *ToolUsage {
@@ -138,12 +158,61 @@ type UsageAggregate struct {
 	Tools     map[string]*ToolUsage `json:"tools"`
 	Buckets   map[int64]*TimeBucket `json:"buckets"` // key = bucket start unix seconds
 	UpdatedAt time.Time             `json:"updated_at"`
+	// RetrieveToolsRespBytesSum/RetrieveToolsSizedCalls (Spec 109-k, the
+	// ServerTokenMetrics.Estimated flip): retrieve_tools calls are internal
+	// built-ins and deliberately excluded from the per-tool rollup above
+	// (applyToolRollup's default case — admitting them would invent a tool row
+	// no upstream owns), so CalculateTokenSavings has nowhere to read a REAL
+	// observed retrieve_tools response size from. This dedicated, non-per-tool
+	// counter is that source: a zero value (no sized call yet) is exactly the
+	// "no real data" state the estimate flag needs. A persisted snapshot from
+	// before this field existed loads it as zero, which is correct (no
+	// AdmissionVersion bump needed — it does not change what Tools/Buckets
+	// admit, only adds a value alongside them).
+	RetrieveToolsRespBytesSum int64 `json:"retrieve_tools_resp_bytes_sum,omitempty"`
+	RetrieveToolsSizedCalls   int64 `json:"retrieve_tools_sized_calls,omitempty"`
+	// RetrieveToolsObservedCalls counts every successful retrieve_tools call,
+	// truncated or not — unlike RetrieveToolsSizedCalls, which only counts the
+	// non-truncated ones whose ResponseBytes can be trusted as a real
+	// (undistorted) delivered size. A deployment whose retrieve_tools
+	// responses routinely exceed tool_response_limit would otherwise leave
+	// RetrieveToolsSizedCalls at zero forever, contradicting
+	// contracts.ServerTokenMetrics.Estimated's documented promise ("false
+	// once at least one real retrieve_tools call has ... completed") even
+	// though real calls plainly have. This counter is what lets the Estimated
+	// flip answer that question correctly while AvgRetrieveToolsRespBytes
+	// keeps answering a different one (the real average SIZE, which truncated
+	// calls cannot honestly contribute to — see truncatedBuiltinOverstatesDelivery).
+	RetrieveToolsObservedCalls int64 `json:"retrieve_tools_observed_calls,omitempty"`
+	// ClientCalls is a bounded hourly rolling counter keyed by the persisted
+	// activity client_name. It avoids an activity-log scan on /clients while
+	// retaining enough resolution to answer the 24-hour presence row.
+	ClientCalls map[string]map[int64]int64 `json:"client_calls,omitempty"`
+	// AdmissionVersion stamps which population rule built this aggregate. A
+	// persisted snapshot whose stamp differs from usageAdmissionVersion was
+	// counted under a different rule and cannot be patched incrementally —
+	// the loader discards it and rebuilds from a full activity scan instead.
+	AdmissionVersion int `json:"admission_version,omitempty"`
 }
+
+// usageAdmissionVersion identifies the CURRENT admission rule AND bucket layout
+// for the aggregate. Bump it whenever Apply changes which records are counted,
+// or whenever a persisted counter changes meaning (2: internal tool calls and
+// blocked policy decisions joined the timeline; 3: management built-ins excluded
+// again per GlanceSelection rule 1; 4: successful code_execution wrappers
+// excluded — their sub-calls are tool_call records that count on their own; 5:
+// latencyBucketBoundsMs gained sub-10ms resolution, so every persisted
+// LatencyBuckets index now means a different span), so pre-change snapshots are
+// rebuilt instead of carried forward with hours counted — or milliseconds
+// bucketed — under the old rule.
+const usageAdmissionVersion = 6
 
 func newUsageAggregate() *UsageAggregate {
 	return &UsageAggregate{
-		Tools:   make(map[string]*ToolUsage),
-		Buckets: make(map[int64]*TimeBucket),
+		Tools:            make(map[string]*ToolUsage),
+		Buckets:          make(map[int64]*TimeBucket),
+		ClientCalls:      make(map[string]map[int64]int64),
+		AdmissionVersion: usageAdmissionVersion,
 	}
 }
 
@@ -168,22 +237,169 @@ func (a *UsageAggregate) tool(server, toolName string) *ToolUsage {
 	return tu
 }
 
-// Apply folds a single activity record into the aggregate. It accepts executed
-// tool_calls and blocked policy_decisions (the form a policy-prevented tool
-// attempt is persisted as — MCP-835); all other records, and records without a
-// tool name, are ignored. Apply is not safe for concurrent use; it is called
-// only by the owning goroutine (see UsageStore).
+// Apply folds a single activity record into the aggregate. Apply is not safe
+// for concurrent use; it is called only by the owning goroutine (see
+// UsageStore).
+//
+// Two populations live in here and they are NOT the same:
+//
+//   - the per-tool rollup (ToolUsage) describes UPSTREAM TOOLS: calls, latency
+//     percentiles, byte averages, blocked and shed attempts. Only records that
+//     name an upstream tool belong in it.
+//   - the timeline (TimeBucket) describes WHAT THE USER SAW. It must match the
+//     glance row-for-row, or the bars under the list disagree with the list
+//     above them — the single most confusing thing a dashboard can do.
+//
+// Which records reach the timeline is NOT decided here: it is
+// storage.CountsAsCall, the one definition of "a call the user made", shared
+// with the Activity Log's own counters so the two surfaces cannot drift apart
+// (audit finding F1, #1046). Apply only decides what each admitted record does
+// to the PER-TOOL rollup, which is a narrower population — upstream tools only.
 func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 	if rec == nil || rec.ToolName == "" {
 		return
 	}
+
+	a.applyToolRollup(rec)
+	a.applyRetrieveToolsSizing(rec)
+	a.applyClientCalls(rec)
+
+	if counted, isError := storage.CountsAsCall(rec); counted {
+		a.countInTimeBucket(rec, isError)
+	}
+}
+
+func (a *UsageAggregate) applyClientCalls(rec *storage.ActivityRecord) {
+	if counted, _ := storage.CountsAsCall(rec); !counted || rec.Metadata == nil {
+		return
+	}
+	raw, _ := rec.Metadata["client_name"].(string)
+	client := strings.ToLower(strings.TrimSpace(raw))
+	if client == "" {
+		return
+	}
+	if a.ClientCalls == nil {
+		a.ClientCalls = make(map[string]map[int64]int64)
+	}
+	if _, ok := a.ClientCalls[client]; !ok && len(a.ClientCalls) >= 32 {
+		var oldest string
+		var oldestBucket int64
+		protected := knownClientAliases()
+		for key, buckets := range a.ClientCalls {
+			if protected[key] {
+				continue
+			}
+			for bucket := range buckets {
+				if oldest == "" || bucket < oldestBucket {
+					oldest, oldestBucket = key, bucket
+				}
+			}
+		}
+		if oldest != "" {
+			delete(a.ClientCalls, oldest)
+		}
+	}
+	bucket := rec.Timestamp.UTC().Truncate(time.Hour).Unix()
+	if a.ClientCalls[client] == nil {
+		a.ClientCalls[client] = make(map[int64]int64)
+	}
+	a.ClientCalls[client][bucket]++
+}
+
+// ClientCallsSince returns calls observed under any known client alias in the
+// requested interval. Activity records persist the client name at write time.
+func (a *UsageAggregate) ClientCallsSince(aliases []string, since time.Time) int {
+	if a == nil {
+		return 0
+	}
+	minimum := since.UTC().Truncate(time.Hour).Unix()
+	seen := make(map[string]bool)
+	total := int64(0)
+	for _, alias := range aliases {
+		key := strings.ToLower(strings.TrimSpace(alias))
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		for bucket, calls := range a.ClientCalls[key] {
+			if bucket >= minimum {
+				total += calls
+			}
+		}
+	}
+	return int(total)
+}
+
+// applyRetrieveToolsSizing folds a successful retrieve_tools call's response
+// size into the dedicated (not per-tool) counter CalculateTokenSavings reads
+// (Spec 109-k). Mirrors the timeline's own truncatedBuiltinOverstatesDelivery
+// exclusion below: retrieve_tools' logged ResponseBytes is the FULL
+// pre-truncation size, larger than what the agent actually received when the
+// response was cut, so a truncated record must not skew the average toward a
+// size nobody was ever billed for.
+func (a *UsageAggregate) applyRetrieveToolsSizing(rec *storage.ActivityRecord) {
+	if rec.Type != storage.ActivityTypeInternalToolCall || rec.ToolName != "retrieve_tools" {
+		return
+	}
+	if rec.Status != storage.ActivityStatusSuccess {
+		return
+	}
+	// Counted regardless of truncation/size — this is "a real retrieve_tools
+	// call completed", the question HasObservedRetrieveToolsCall answers.
+	a.RetrieveToolsObservedCalls++
+
+	if rec.ResponseBytes <= 0 || truncatedBuiltinOverstatesDelivery(rec) {
+		return
+	}
+	a.RetrieveToolsRespBytesSum += int64(rec.ResponseBytes)
+	a.RetrieveToolsSizedCalls++
+}
+
+// HasObservedRetrieveToolsCall reports whether at least one successful
+// retrieve_tools call has completed, truncated or not. See
+// RetrieveToolsObservedCalls for why this is a different question from
+// AvgRetrieveToolsRespBytes's ok.
+func (a *UsageAggregate) HasObservedRetrieveToolsCall() bool {
+	return a.RetrieveToolsObservedCalls > 0
+}
+
+// AvgRetrieveToolsRespBytes returns the average real retrieve_tools response
+// size over sized, non-truncated calls. ok is false before any such call.
+func (a *UsageAggregate) AvgRetrieveToolsRespBytes() (avg int64, ok bool) {
+	if a.RetrieveToolsSizedCalls == 0 {
+		return 0, false
+	}
+	return a.RetrieveToolsRespBytesSum / a.RetrieveToolsSizedCalls, true
+}
+
+// applyToolRollup folds a record into the per-(server,tool) rollup — the
+// population behind the Calls-per-tool, token-sink and latency charts. Records
+// that name no upstream tool (mcpproxy's own built-ins) contribute nothing:
+// admitting them would invent tool rows no upstream owns and mix mcpproxy's own
+// latency into upstream percentiles.
+func (a *UsageAggregate) applyToolRollup(rec *storage.ActivityRecord) {
 	switch {
+	case rec.Type == storage.ActivityTypeToolCall && rec.Status == storage.ActivityStatusRejected:
+		// Spec 093: shed by a concurrency limit. Like a policy block it never
+		// executed, so it must not inflate Calls, latency percentiles or byte
+		// averages.
+		a.applyRejected(rec)
+		return
+	case rec.Type == storage.ActivityTypeToolCall && rec.Status == storage.ActivityStatusBlocked:
+		// A policy gate refused the dispatch (today: a code_execution sub-call,
+		// emitSubCallRefused). Same shape as a blocked policy_decision: the
+		// upstream never ran it, so it takes the Blocked counter, not the
+		// executed-call statistics.
+		a.applyBlocked(rec)
+		return
 	case rec.Type == storage.ActivityTypeToolCall:
 		// folded below
-	case rec.Type == storage.ActivityTypePolicyDecision && rec.Status == "blocked":
+	case rec.Type == storage.ActivityTypePolicyDecision &&
+		(rec.Status == storage.ActivityStatusBlocked || rec.Status == storage.ActivityStatusRejected):
 		a.applyBlocked(rec)
 		return
 	default:
+		// internal_tool_call and every non-call event: timeline-only or nothing.
 		return
 	}
 
@@ -208,16 +424,19 @@ func (a *UsageAggregate) Apply(rec *storage.ActivityRecord) {
 	if rec.Timestamp.After(tu.LastUsed) {
 		tu.LastUsed = rec.Timestamp
 	}
-
-	a.applyTimeBucket(rec)
 }
 
 // applyBlocked folds a policy-blocked attempt into the per-tool Blocked counter.
 // A blocked attempt never executed the tool, so it contributes no Calls,
-// latency, or bytes, and does not enter the executed-call timeline — it only
-// bumps Blocked and LastUsed. This keeps the contract's per-tool `blocked`
-// count non-zero (the field was previously dead) without polluting latency
-// percentiles or byte averages with non-executed attempts.
+// latency, or bytes to the PER-TOOL rollup — it only bumps Blocked and
+// LastUsed, which keeps latency percentiles and byte averages free of attempts
+// that never ran.
+//
+// It does enter the TIMELINE (storage.CountsAsCall admits it as a failed call).
+// The timeline mirrors the glance, and in the glance a blocked attempt is a red
+// row the user made and did not get: leaving it out made a run that policy
+// refused wholesale render as a flat, empty histogram under a list full of
+// failures.
 func (a *UsageAggregate) applyBlocked(rec *storage.ActivityRecord) {
 	tu := a.tool(rec.ServerName, rec.ToolName)
 	tu.Blocked++
@@ -226,7 +445,24 @@ func (a *UsageAggregate) applyBlocked(rec *storage.ActivityRecord) {
 	}
 }
 
-func (a *UsageAggregate) applyTimeBucket(rec *storage.ActivityRecord) {
+// applyRejected folds a concurrency-limiter shed into the per-tool Rejected
+// counter (spec 093 FR-012). Same shape as applyBlocked: the tool never ran, so
+// nothing but Rejected and LastUsed moves.
+func (a *UsageAggregate) applyRejected(rec *storage.ActivityRecord) {
+	tu := a.tool(rec.ServerName, rec.ToolName)
+	tu.Rejected++
+	if rec.Timestamp.After(tu.LastUsed) {
+		tu.LastUsed = rec.Timestamp
+	}
+}
+
+// countInTimeBucket adds one admitted call to its hour bucket. Admission and
+// the failure classification both come from storage.CountsAsCall — the
+// populations that reach the timeline disagree about what counts as a failure
+// (a policy block is one, a built-in that answered "blocked" is one, an upstream
+// tool_call is only one when its status is "error"), so the decision belongs to
+// the shared contract, not here.
+func (a *UsageAggregate) countInTimeBucket(rec *storage.ActivityRecord, isError bool) {
 	start := rec.Timestamp.UTC().Truncate(usageBucketWidth)
 	k := start.Unix()
 	b := a.Buckets[k]
@@ -235,10 +471,10 @@ func (a *UsageAggregate) applyTimeBucket(rec *storage.ActivityRecord) {
 		a.Buckets[k] = b
 	}
 	b.Calls++
-	if rec.Status == "error" {
+	if isError {
 		b.Errors++
 	}
-	if rec.ResponseBytes > 0 {
+	if rec.ResponseBytes > 0 && !truncatedBuiltinOverstatesDelivery(rec) {
 		b.RespBytesSum += int64(rec.ResponseBytes)
 	}
 	a.evictOldBuckets()
@@ -273,9 +509,14 @@ func (a *UsageAggregate) Timeline() []TimeBucket {
 // clone returns a deep copy safe to publish to readers.
 func (a *UsageAggregate) clone() *UsageAggregate {
 	c := &UsageAggregate{
-		Tools:     make(map[string]*ToolUsage, len(a.Tools)),
-		Buckets:   make(map[int64]*TimeBucket, len(a.Buckets)),
-		UpdatedAt: a.UpdatedAt,
+		Tools:                      make(map[string]*ToolUsage, len(a.Tools)),
+		Buckets:                    make(map[int64]*TimeBucket, len(a.Buckets)),
+		ClientCalls:                make(map[string]map[int64]int64, len(a.ClientCalls)),
+		UpdatedAt:                  a.UpdatedAt,
+		AdmissionVersion:           a.AdmissionVersion,
+		RetrieveToolsRespBytesSum:  a.RetrieveToolsRespBytesSum,
+		RetrieveToolsSizedCalls:    a.RetrieveToolsSizedCalls,
+		RetrieveToolsObservedCalls: a.RetrieveToolsObservedCalls,
 	}
 	for k, tu := range a.Tools {
 		c.Tools[k] = tu.clone()
@@ -283,6 +524,13 @@ func (a *UsageAggregate) clone() *UsageAggregate {
 	for k, b := range a.Buckets {
 		bc := *b
 		c.Buckets[k] = &bc
+	}
+	for client, buckets := range a.ClientCalls {
+		copyBuckets := make(map[int64]int64, len(buckets))
+		for bucket, calls := range buckets {
+			copyBuckets[bucket] = calls
+		}
+		c.ClientCalls[client] = copyBuckets
 	}
 	return c
 }
@@ -370,4 +618,24 @@ func (s *UsageStore) Snapshot() *UsageAggregate {
 	snap := s.snap.Load()
 	s.mu.Unlock()
 	return snap
+}
+
+// truncatedBuiltinOverstatesDelivery reports whether a record's ResponseBytes
+// describes MORE than the agent actually consumed, and so must not be added to
+// delivered traffic.
+//
+// The direction differs by record type, and that is the whole point:
+//
+//   - an upstream tool_call is truncated on the way into the LOG while the agent
+//     received the whole response, so the pre-truncation length is honest;
+//   - an internal built-in — retrieve_tools above all — is the reverse: the log
+//     keeps the FULL response and the agent consumed the CUT text, so the
+//     pre-truncation length describes something larger than was delivered.
+//
+// Counting the second case inflates the usage timeline in the flattering
+// direction, which is the one error a cost surface must not make. It became
+// reachable only when internal calls began carrying byte counts at all (spec
+// 103); before that they contributed zero and the question could not arise.
+func truncatedBuiltinOverstatesDelivery(rec *storage.ActivityRecord) bool {
+	return rec.ResponseTruncated && rec.Type == storage.ActivityTypeInternalToolCall
 }

@@ -1,3 +1,9 @@
+---
+title: "CLI Client Mode"
+sidebar_label: "Client Mode"
+description: "Use the mcpproxy CLI as an MCP client to call tools against a running proxy."
+---
+
 # CLI Client Mode
 
 ## Overview

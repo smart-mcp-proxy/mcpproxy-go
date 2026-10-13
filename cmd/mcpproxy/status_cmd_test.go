@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"io"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +53,46 @@ func TestStatusMaskAPIKey(t *testing.T) {
 				t.Errorf("statusMaskAPIKey(%q) = %q, want %q", tt.input, result, tt.expected)
 			}
 		})
+	}
+}
+
+func TestPrintStatusTableEndpointModeGolden(t *testing.T) {
+	read, write, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout := os.Stdout
+	os.Stdout = write
+	printStatusTable(&StatusInfo{
+		State: "Running", Edition: "Personal", ListenAddr: "127.0.0.1:18080",
+		APIKey: "****", WebUIURL: "http://127.0.0.1:18080/ui/", RoutingMode: "retrieve_tools",
+		Endpoints: map[string]string{
+			"default": "http://127.0.0.1:18080/mcp", "retrieve_tools": "http://127.0.0.1:18080/mcp/call",
+			"direct": "http://127.0.0.1:18080/mcp/all", "code_execution": "http://127.0.0.1:18080/mcp/code",
+		},
+	})
+	if err := write.Close(); err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = stdout
+	got, err := io.ReadAll(read)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := read.Close(); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile(filepath.Join("testdata", "cli109", "status.golden"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Windows checkouts can convert the golden file to CRLF while the Go
+	// formatter still writes LF to stdout. Compare the rendered lines rather
+	// than the checkout's line-ending convention.
+	gotOutput := strings.ReplaceAll(string(got), "\r\n", "\n")
+	wantOutput := strings.ReplaceAll(string(want), "\r\n", "\n")
+	if strings.TrimSpace(gotOutput) != strings.TrimSpace(wantOutput) {
+		t.Fatalf("status output mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
 	}
 }
 
@@ -374,6 +416,29 @@ func TestFormatDuration(t *testing.T) {
 }
 
 func TestExtractServerCounts(t *testing.T) {
+	// Real /api/v1/status upstream_stats shape (see internal/server/server.go
+	// and internal/upstream/manager.go GetStats builders).
+	stats := map[string]interface{}{
+		"connected_servers":   float64(14),
+		"quarantined_servers": float64(2),
+		"total_servers":       float64(28),
+	}
+
+	counts := extractServerCounts(stats)
+
+	if counts.Connected != 14 {
+		t.Errorf("expected Connected=14, got %d", counts.Connected)
+	}
+	if counts.Quarantined != 2 {
+		t.Errorf("expected Quarantined=2, got %d", counts.Quarantined)
+	}
+	if counts.Total != 28 {
+		t.Errorf("expected Total=28, got %d", counts.Total)
+	}
+}
+
+func TestExtractServerCountsLegacyKeys(t *testing.T) {
+	// Older daemons emitted bare connected/quarantined/total keys.
 	stats := map[string]interface{}{
 		"connected":   float64(5),
 		"quarantined": float64(2),
@@ -395,8 +460,8 @@ func TestExtractServerCounts(t *testing.T) {
 
 func TestExtractServerCountsNoTotal(t *testing.T) {
 	stats := map[string]interface{}{
-		"connected":   float64(3),
-		"quarantined": float64(1),
+		"connected_servers":   float64(3),
+		"quarantined_servers": float64(1),
 	}
 
 	counts := extractServerCounts(stats)
@@ -575,4 +640,49 @@ func TestCollectStatusFromConfigRoutingMode(t *testing.T) {
 // parseTestDuration is a helper to parse duration strings for tests.
 func parseTestDuration(s string) (time.Duration, error) {
 	return time.ParseDuration(s)
+}
+
+func TestStatusMasksKeyInURL(t *testing.T) {
+	const key = "synthetic-status-key-1234567890"
+	info := &StatusInfo{APIKey: key, WebUIURL: "http://127.0.0.1:8080/ui/?apikey=" + key + "&other=retained"}
+	maskStatusCredentials(info)
+	if strings.Contains(info.WebUIURL, key) || info.APIKey == key {
+		t.Fatal("status leaked the full credential")
+	}
+	if !strings.Contains(info.WebUIURL, "other=retained") {
+		t.Fatal("unrelated URL query lost")
+	}
+}
+
+func TestStatusMalformedURLFailsClosed(t *testing.T) {
+	info := &StatusInfo{APIKey: "synthetic-status-key-1234567890", WebUIURL: "http://[invalid/?apikey=secret"}
+	maskStatusCredentials(info)
+	if info.WebUIURL != "" {
+		t.Fatal("malformed URL must not reach output")
+	}
+}
+
+func TestStatusWebUIURLReservedCharactersAreEscapedAndMasked(t *testing.T) {
+	const key = "abcd#fragment?query&percent% space/秘密-wxyz"
+	loginURL := statusBuildWebUIURL("127.0.0.1:8080", key)
+	parsed, err := url.Parse(loginURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Fragment != "" || parsed.Query().Get("apikey") != key {
+		t.Fatalf("credential was not encoded as one query value: %q", loginURL)
+	}
+
+	info := &StatusInfo{APIKey: key, WebUIURL: loginURL}
+	maskStatusCredentials(info)
+	masked, err := url.Parse(info.WebUIURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if masked.Fragment != "" || masked.Query().Get("apikey") != statusMaskAPIKey(key) {
+		t.Fatalf("masked URL contains an unexpected credential representation: %q", info.WebUIURL)
+	}
+	if strings.Contains(info.WebUIURL, "fragment") || strings.Contains(info.WebUIURL, "秘密") {
+		t.Fatalf("masked URL leaked reserved-character credential content: %q", info.WebUIURL)
+	}
 }

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -13,12 +14,19 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
 // fakeServersLister is a minimal implementation of the serversLister interface
 // used by emitServersChanged. It's stored on Runtime.managementService so the
 // emit path can type-assert and call ListServers.
 type fakeServersLister struct {
+	// Embedded so the fake satisfies the whole typed seam (the runtime now
+	// holds a management.Service, not an interface{}) while implementing only
+	// ListServers. The embedded interface is nil: an unexpected call panics
+	// loudly instead of silently returning a zero value.
+	management.Service
 	servers []*contracts.Server
 	stats   *contracts.ServerStats
 	err     error
@@ -156,11 +164,53 @@ func TestEmitServersChanged_RedactsSensitiveHeaders(t *testing.T) {
 	assert.Equal(t, "application/json", contentVal, "Content-Type is not sensitive; must not be redacted")
 }
 
+// Issue #872: the SSE servers.changed payload must mask env-var secrets and
+// URL query credentials with the same trust boundary it already applies to
+// headers, while leaving non-sensitive env, references, and the path visible.
+func TestEmitServersChanged_RedactsEnvAndURLSecrets(t *testing.T) {
+	servers := []*contracts.Server{
+		{
+			Name: "alpha",
+			URL:  "https://api.example.com/mcp?apikey=supersecretkey123&region=eu",
+			Env: map[string]string{
+				"GITHUB_TOKEN": "ghp_fake_secret_value_1234",
+				"LOG_LEVEL":    "debug",
+				"API_KEY":      "${env:REAL_KEY}",
+			},
+		},
+	}
+	stats := &contracts.ServerStats{TotalServers: 1}
+
+	rt := newPayloadTestRuntime(t, &fakeServersLister{servers: servers, stats: stats})
+	rt.cfg = &config.Config{}
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+
+	rt.emitServersChanged("redact-env-url", nil)
+
+	evt := receiveServersChanged(t, ch)
+	gotServers, ok := evt.Payload["servers"].([]contracts.Server)
+	require.True(t, ok)
+	require.Len(t, gotServers, 1)
+
+	gotURL := gotServers[0].URL
+	assert.NotContains(t, gotURL, "supersecretkey123", "URL query secret must not survive")
+	assert.Contains(t, gotURL, "region=eu", "non-sensitive query param stays readable")
+
+	gotEnv := gotServers[0].Env
+	assert.NotContains(t, gotEnv["GITHUB_TOKEN"], "ghp_fake_secret_value_1234", "env secret must be masked")
+	assert.Contains(t, gotEnv["GITHUB_TOKEN"], "••••", "env secret uses the masked-display format")
+	assert.Equal(t, "debug", gotEnv["LOG_LEVEL"], "non-sensitive env stays readable")
+	assert.Equal(t, "${env:REAL_KEY}", gotEnv["API_KEY"], "config references pass through unchanged")
+}
+
 // ctxAwareLister is a serversLister that blocks ListServers until the
 // caller-supplied ctx fires Done. Used to verify the parent ctx is threaded
 // through buildServersChangedPayload — without that threading the call sits
 // on a detached 2-second timer regardless of app-shutdown cancellation.
 type ctxAwareLister struct {
+	// See fakeServersLister: embedded to satisfy the typed seam.
+	management.Service
 	servers []*contracts.Server
 	stats   *contracts.ServerStats
 }
@@ -254,4 +304,61 @@ func TestBuildServersChangedPayload_HonoursCancelledParentCtx(t *testing.T) {
 	assert.Equal(t, "shutdown", evt.Payload["reason"])
 	_, hasServers := evt.Payload["servers"]
 	assert.False(t, hasServers, "no servers key when ListServers errors")
+}
+
+// TestEmitServersChanged_MasksEvenWhenRevealSet pins the Class-B rule of issue
+// #1167: this producer has NO caller to gate against.
+//
+// publishEvent fans one Event value out to every subscriber channel — one SSE
+// connection per HTTP client, each with its own privilege level, plus three
+// in-process consumers — so there is no request context at build time and the
+// payload map and its []contracts.Server are shared. A payload produced once
+// for a mixed-privilege audience is masked for the LEAST-privileged member of
+// that audience, always. Honouring reveal_secret_headers here is what let a
+// scoped read-only agent token subscribe to /events and receive every server's
+// raw Authorization header, URL credential, argv secret and env secret.
+//
+// The parity cost for an operator who set the flag is paid at the
+// per-subscriber seam instead (httpapi.renderEventPayloadForCaller degrades
+// the embed to notify-only for a caller who may see raw values), not here.
+func TestEmitServersChanged_MasksEvenWhenRevealSet(t *testing.T) {
+	servers := []*contracts.Server{
+		{
+			Name:    "alpha",
+			URL:     "https://api.example.com/mcp?apikey=supersecretkey123",
+			Headers: map[string]string{"Authorization": "Bearer secret-token-value"},
+			Env:     map[string]string{"GITHUB_TOKEN": "ghp_fake_secret_value_1234"},
+		},
+	}
+	stats := &contracts.ServerStats{TotalServers: 1}
+
+	rt := newPayloadTestRuntime(t, &fakeServersLister{servers: servers, stats: stats})
+	rt.cfg = &config.Config{RevealSecretHeaders: true}
+	ch := rt.SubscribeEvents()
+	defer rt.UnsubscribeEvents(ch)
+
+	rt.emitServersChanged("reveal-has-no-effect-here", nil)
+
+	evt := receiveServersChanged(t, ch)
+	gotServers, ok := evt.Payload["servers"].([]contracts.Server)
+	require.True(t, ok)
+	require.Len(t, gotServers, 1)
+	require.Equal(t, "alpha", gotServers[0].Name, "precondition: the fixture reached the payload")
+
+	// Equality against the shared rule, not substring absence, so a dropped
+	// field cannot pass vacuously.
+	expected := contracts.Server{
+		Name:    "alpha",
+		URL:     "https://api.example.com/mcp?apikey=supersecretkey123",
+		Headers: map[string]string{"Authorization": "Bearer secret-token-value"},
+		Env:     map[string]string{"GITHUB_TOKEN": "ghp_fake_secret_value_1234"},
+	}
+	oauth.RedactServerSecretFields(&expected)
+
+	assert.Equal(t, expected.Headers, gotServers[0].Headers,
+		"reveal_secret_headers must have no effect on the fan-out payload")
+	assert.Equal(t, expected.URL, gotServers[0].URL)
+	assert.Equal(t, expected.Env, gotServers[0].Env)
+	assert.NotContains(t, fmt.Sprint(evt.Payload), "supersecretkey123")
+	assert.NotContains(t, fmt.Sprint(evt.Payload), "secret-token-value")
 }

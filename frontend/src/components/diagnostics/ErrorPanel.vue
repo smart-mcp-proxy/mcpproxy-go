@@ -136,7 +136,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, onBeforeUnmount, ref } from 'vue'
 import type { Diagnostic, DiagnosticFixStep } from '@/types'
 import api from '@/services/api'
 import { useSystemStore } from '@/stores/system'
@@ -156,6 +156,30 @@ const systemStore = useSystemStore()
 
 const expanded = ref(true)
 const runningFixers = ref<Set<string>>(new Set())
+// Id of the last long-lived (multi-line) fix preview this panel raised, so the
+// next one can supersede it instead of stacking on top of it.
+const lastPreviewToastId = ref<string | null>(null)
+
+// The superseding id above lives in this component, but the 60s toast it
+// names lives in the global store. ServerDetail unmounts this panel on every
+// navigation between servers, which would drop the id and leave the toast
+// behind — so a preview opened on each of several servers still stacked past
+// the top of the viewport. Dispose of the preview with the panel that raised
+// it: a tail belongs to the server it was read from.
+//
+// `disposed` covers the other ordering: a click whose request is still in
+// flight when the panel unmounts. The hook then has no id to remove, and the
+// resumed runFixer would raise a 60s toast that nothing owns any more — the
+// same accumulation, one navigation later. A result that arrives after
+// disposal is dropped instead of delivered.
+let disposed = false
+onBeforeUnmount(() => {
+  disposed = true
+  if (lastPreviewToastId.value) {
+    systemStore.removeToast(lastPreviewToastId.value)
+    lastPreviewToastId.value = null
+  }
+})
 
 const severityAlertClass = computed(() => {
   const sev = props.diagnostic?.severity
@@ -236,15 +260,42 @@ async function runFixer(step: DiagnosticFixStep, mode: 'dry_run' | 'execute') {
     if (response.success && response.data) {
       const outcome = response.data.outcome
       const titleMode = mode === 'dry_run' ? 'Dry-run' : 'Executed'
-      systemStore.addToast({
+      const message =
+        response.data.preview ||
+        response.data.failure_msg ||
+        `Outcome: ${outcome} (${response.data.duration_ms}ms)`
+      // The panel that asked is gone. The one thing that must not be raised
+      // now is a long-lived PREVIEW — a successful multi-line payload whose
+      // 60s toast would outlive the server view it belongs to, with nothing
+      // left to supersede or dispose of it (see onBeforeUnmount). Everything
+      // else the user submitted is still reported at the default dwell: a
+      // failure (api.ts folds transport errors into resolved {success:false}
+      // responses too, so this branch and the one below are the only places
+      // a failure can surface) and a one-line success such as "Sign-in
+      // started".
+      if (disposed && outcome === 'success' && message.includes('\n')) return
+      // A fixer whose whole product is text to READ — stdio_show_last_logs
+      // returns a 50-line log tail — cannot be delivered in the default 5s
+      // toast. Give a multi-line payload long enough to actually read. Never
+      // after disposal: nothing would remove it.
+      const multiLine = message.includes('\n') && !disposed
+      // A long-lived toast must not accumulate. The toast stack is anchored to
+      // the bottom of the viewport and grows upward with no height bound, so a
+      // few tall 60s previews would push the earlier ones — and their close
+      // buttons — off the top of the screen. Keep at most one long-lived
+      // preview alive per panel: a new tail supersedes the one it replaces.
+      if (lastPreviewToastId.value) {
+        systemStore.removeToast(lastPreviewToastId.value)
+        lastPreviewToastId.value = null
+      }
+      const toastId = systemStore.addToast({
         type: outcome === 'success' ? 'success' : outcome === 'failed' ? 'error' : 'warning',
         title: `${titleMode}: ${step.label}`,
-        message:
-          response.data.preview ||
-          response.data.failure_msg ||
-          `Outcome: ${outcome} (${response.data.duration_ms}ms)`,
+        message,
+        ...(multiLine ? { duration: 60000 } : {}),
       })
-      emit('fixed', { fixerKey: key, mode })
+      if (multiLine) lastPreviewToastId.value = toastId
+      if (!disposed) emit('fixed', { fixerKey: key, mode })
     } else {
       systemStore.addToast({
         type: 'error',

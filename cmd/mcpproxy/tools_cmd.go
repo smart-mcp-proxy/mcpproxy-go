@@ -2,18 +2,23 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/url"
 	"os"
-	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
@@ -41,7 +46,7 @@ Examples:
   mcpproxy tools list -o json                    # JSON output
   mcpproxy tools list --status disabled          # only disabled/config-denied
   mcpproxy tools list --risk read                # read-only tools
-  mcpproxy tools list --approval pending         # tools pending approval
+  mcpproxy tools list --approval pending         # tools that are new and need review
   mcpproxy tools list --server=github-server     # server-scoped (debug mode)
   mcpproxy tools list --server=github-server --log-level=trace`,
 		RunE: runToolsList,
@@ -89,8 +94,19 @@ Examples:
 	traceTransport bool // Enable HTTP/SSE frame-by-frame tracing
 
 	// Global list filter flags (T019)
-	toolsStatusFilter   string // enabled | disabled | config-denied
-	toolsRiskFilter     string // read | write | destructive
+	toolsStatusFilter string // enabled | disabled | config-denied
+
+	// Spec 108 FR-032 view-as: what a client or a profile would see and be able
+	// to call. Global list only; mutually exclusive.
+	toolsClientView  string
+	toolsProfileView string
+	// toolsTierFilter / toolsRiskFilter (Spec 109 FR-028, X11): --risk is kept
+	// as an alias of --tier for old scripts/muscle-memory; whichever is
+	// non-empty wins (tier preferred if both are set). Both filter on the
+	// backend-computed `tier` field (contracts.AnnotationTier) — never a
+	// locally-derived value.
+	toolsTierFilter     string // read | write | destructive | unannotated
+	toolsRiskFilter     string // alias of --tier
 	toolsApprovalFilter string // approved | pending | changed
 )
 
@@ -132,10 +148,16 @@ func groupByServer(targets []serverToolTarget) map[string][]string {
 
 // applyGlobalToolFilters applies client-side filters to the global tool list.
 // statusFilter: "enabled" | "disabled" | "config-denied" | ""
-// riskFilter:   "read" | "write" | "destructive" | ""
+// tierFilter:   "read" | "write" | "destructive" | "unannotated" | ""
 // approvalFilter: "approved" | "pending" | "changed" | ""
-func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, riskFilter, approvalFilter string) []map[string]interface{} {
-	if statusFilter == "" && riskFilter == "" && approvalFilter == "" {
+//
+// Spec 109 FR-028 / X11: tierFilter matches the backend-computed `tier` field
+// verbatim. It used to read `annotations.operation_type` — a field that does
+// not exist on an MCP tool's annotations (operation_type is an intent-
+// declaration concept) — so `--risk read` matched nothing over a fixture of
+// read-annotated tools. `tier` is what `GET /tools` actually sends.
+func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, tierFilter, approvalFilter string) []map[string]interface{} {
+	if statusFilter == "" && tierFilter == "" && approvalFilter == "" {
 		return tools
 	}
 
@@ -161,12 +183,9 @@ func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, riskFi
 			}
 		}
 
-		if riskFilter != "" {
-			opType := ""
-			if ann, ok := t["annotations"].(map[string]interface{}); ok {
-				opType, _ = ann["operation_type"].(string)
-			}
-			if !strings.EqualFold(opType, riskFilter) {
+		if tierFilter != "" {
+			tier := getStringField(t, "tier")
+			if !strings.EqualFold(tier, tierFilter) {
 				continue
 			}
 		}
@@ -183,6 +202,98 @@ func applyGlobalToolFilters(tools []map[string]interface{}, statusFilter, riskFi
 	return out
 }
 
+// filterToolMetadataByTier applies --tier/--risk to the standalone-mode
+// (no-daemon) tool list, computing each tool's tier locally via
+// contracts.AnnotationTier — the same function the daemon's
+// enrichServerTools uses to populate the "tier" field applyGlobalToolFilters
+// reads. Unlike --status/--approval (rejected outright for standalone mode,
+// since those need daemon-persisted state this path never touches), tier
+// needs nothing but the tool's own annotations (review round 6, finding 4).
+// An empty tierFilter returns tools unchanged.
+func filterToolMetadataByTier(tools []*config.ToolMetadata, tierFilter string) []*config.ToolMetadata {
+	if tierFilter == "" {
+		return tools
+	}
+	filtered := make([]*config.ToolMetadata, 0, len(tools))
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		if strings.EqualFold(string(contracts.AnnotationTier(tool.Annotations)), tierFilter) {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
+}
+
+// standaloneNoToolsMessage is the table-mode diagnostic runToolsListStandalone
+// prints when the final tool list is empty.
+//
+// zcode review round 6 (backend fix for finding 4): before
+// filterToolMetadataByTier existed, this branch was reachable only when the
+// server genuinely exposed zero tools, so guessing "doesn't support tools /
+// not properly configured / connection issues" was reasonable. Once a
+// --tier/--risk filter can ALSO empty a non-empty discovery result, those
+// three guesses are all false for that case — telling an operator who ran
+// `--tier destructive` against a server that has tools, just none of that
+// tier, that the server "doesn't support tools" is the same misleading
+// signal finding 4 was originally about, one step further down the same
+// code path. discoveredCount is the count BEFORE tierFilter was applied.
+func standaloneNoToolsMessage(serverName, tierFilter string, discoveredCount int) string {
+	if tierFilter != "" && discoveredCount > 0 {
+		return fmt.Sprintf("No tools on server '%s' match --tier/--risk=%s (%d tool(s) discovered, none in that tier)\n",
+			serverName, tierFilter, discoveredCount)
+	}
+	return fmt.Sprintf("No tools found on server '%s'\n"+
+		"This could indicate:\n"+
+		"   Server doesn't support tools\n"+
+		"   Server is not properly configured\n"+
+		"   Connection issues during tool discovery\n", serverName)
+}
+
+// resolvedTierFilter returns the effective tier filter from --tier / --risk
+// (an alias of --tier, Spec 109 FR-028). --tier wins when both are set.
+func resolvedTierFilter() string {
+	if toolsTierFilter != "" {
+		return toolsTierFilter
+	}
+	return toolsRiskFilter
+}
+
+// validTierFilterValues lists the tier strings --tier/--risk accepts,
+// mirrored from contracts.Tier — excluding contracts.TierUnknown, which
+// AnnotationTier never returns (see internal/contracts/tier.go's own doc
+// comment) and so can never legitimately appear in a --tier/--risk match.
+var validTierFilterValues = []string{
+	string(contracts.TierRead),
+	string(contracts.TierWrite),
+	string(contracts.TierDestructive),
+	string(contracts.TierUnannotated),
+}
+
+// validateTierFilter rejects an unrecognized --tier/--risk value up front.
+// Without this, applyGlobalToolFilters/filterToolMetadataByTier's
+// strings.EqualFold match against every known tier simply fails on a typo
+// like `--tier destrutive`, silently returning an empty table and exiting 0
+// — a CI or audit script grepping for e.g. destructive tools reads that as
+// "the host has none", a false all-clear on exactly the safety-relevant
+// query this flag exists to answer (review round 8, finding 6).
+// flagName is only used to name the offending flag in the error, since
+// resolvedTierFilter merges --tier and --risk into one string that no
+// longer remembers which flag the caller actually set.
+func validateTierFilter(flagName, value string) error {
+	if value == "" {
+		return nil
+	}
+	for _, v := range validTierFilterValues {
+		if strings.EqualFold(value, v) {
+			return nil
+		}
+	}
+	return fmt.Errorf("invalid --%s %q: must be one of: %s (or empty for no filter)",
+		flagName, value, strings.Join(validTierFilterValues, ", "))
+}
+
 // GetToolsCommand returns the tools command for adding to the root command
 func GetToolsCommand() *cobra.Command {
 	return toolsCmd
@@ -195,6 +306,7 @@ func init() {
 	toolsCmd.AddCommand(toolsDisableCmd)
 	toolsCmd.AddCommand(newToolsApproveCmd())
 	toolsCmd.AddCommand(newToolsRejectCmd())
+	toolsCmd.AddCommand(newToolsPreflightCmd())
 
 	initToolsFlags()
 }
@@ -208,14 +320,19 @@ func initToolsFlags() {
 
 	toolsListCmd.Flags().StringVarP(&serverName, "server", "s", "", "Name of the upstream server to query (optional; omit for global list)")
 	toolsListCmd.Flags().StringVarP(&toolsLogLevel, "log-level", "l", "info", "Log level (trace, debug, info, warn, error)")
-	toolsListCmd.Flags().StringVarP(&configPath, "config", "c", "", "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
+	addConfigFlag(toolsListCmd.Flags(), &configPath, "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	toolsListCmd.Flags().DurationVarP(&timeout, "timeout", "t", 30*time.Second, "Connection timeout")
 	toolsListCmd.Flags().BoolVar(&traceTransport, "trace-transport", false, "Enable detailed HTTP/SSE frame-by-frame tracing")
 
 	// Global-list filter flags (T019)
 	toolsListCmd.Flags().StringVar(&toolsStatusFilter, "status", "", "Filter by state: enabled, disabled, config-denied")
-	toolsListCmd.Flags().StringVar(&toolsRiskFilter, "risk", "", "Filter by risk: read, write, destructive")
-	toolsListCmd.Flags().StringVar(&toolsApprovalFilter, "approval", "", "Filter by approval: approved, pending, changed")
+	// Spec 109 FR-028/X11: --tier is canonical; --risk is kept as an alias
+	// (risk stays the scan-score term elsewhere in the CLI).
+	toolsListCmd.Flags().StringVar(&toolsTierFilter, "tier", "", "Filter by tier: read, write, destructive, unannotated")
+	toolsListCmd.Flags().StringVar(&toolsRiskFilter, "risk", "", "Alias of --tier")
+	toolsListCmd.Flags().StringVar(&toolsClientView, "client", "", "View as a client (administrator only): adds ACCESS and REASON columns, the verdict of each tool for that client")
+	toolsListCmd.Flags().StringVar(&toolsProfileView, "profile", "", "View as a profile: adds ACCESS and REASON columns; a non-administrator sees only the visible tools and a count of the rest")
+	toolsListCmd.Flags().StringVar(&toolsApprovalFilter, "approval", "", "Filter by approval: approved (Approved), pending (New, needs review), changed (Changed, needs review)")
 
 	// Note: -o/--output flag is inherited from root command via globalOutputFormat
 	// Note: --server is NOT marked required — global list works without it.
@@ -236,15 +353,28 @@ func initToolsFlags() {
 }
 
 func runToolsList(_ *cobra.Command, _ []string) error {
+	if err := validateTierFilter("tier", toolsTierFilter); err != nil {
+		return err
+	}
+	if err := validateTierFilter("risk", toolsRiskFilter); err != nil {
+		return err
+	}
+	if _, err := toolsViewAsQuery(); err != nil {
+		return err
+	}
+	if (toolsClientView != "" || toolsProfileView != "") && serverName != "" {
+		return errors.New("--client and --profile view-as apply to the global list; omit --server")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	// Enable transport tracing if requested
 	if traceTransport {
-		transport.GlobalTraceEnabled = true
-		fmt.Println("HTTP/SSE TRANSPORT TRACING ENABLED")
-		fmt.Println("   All HTTP requests/responses and SSE frames will be logged")
-		fmt.Println()
+		transport.SetGlobalTraceEnabled(true)
+		fmt.Fprintln(os.Stderr, "HTTP/SSE TRANSPORT TRACING ENABLED")
+		fmt.Fprintln(os.Stderr, "   All HTTP requests/responses and SSE frames will be logged")
+		fmt.Fprintln(os.Stderr)
 	}
 
 	// Load configuration
@@ -262,14 +392,14 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 
 	// If no --server given → global list (requires daemon)
 	if serverName == "" {
-		return runToolsListGlobal(ctx, globalConfig.DataDir, logger)
+		return runToolsListGlobal(ctx, globalConfig, logger)
 	}
 
 	// --server given → server-scoped path (daemon or standalone)
-	if shouldUseToolsDaemon(globalConfig.DataDir) {
-		logger.Info("Detected running daemon, using client mode via socket",
+	if client, ok := newDaemonClient(globalConfig, logger.Sugar()); ok {
+		logger.Info("Detected running daemon, using client mode",
 			zap.String("server", serverName))
-		return runToolsListClientMode(ctx, globalConfig.DataDir, serverName, logger)
+		return runToolsListClientMode(ctx, client, serverName, logger)
 	}
 
 	// No daemon detected, use standalone mode
@@ -279,14 +409,12 @@ func runToolsList(_ *cobra.Command, _ []string) error {
 }
 
 // runToolsListGlobal fetches all tools from the global endpoint via the daemon.
-func runToolsListGlobal(ctx context.Context, dataDir string, logger *zap.Logger) error {
-	if !shouldUseToolsDaemon(dataDir) {
+func runToolsListGlobal(ctx context.Context, globalConfig *config.Config, logger *zap.Logger) error {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("global tool list requires the daemon to be running.\n" +
 			"Start mcpproxy (mcpproxy serve) and try again, or use --server=<name> for a single-server debug listing")
 	}
-
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer pingCancel()
@@ -295,21 +423,364 @@ func runToolsListGlobal(ctx context.Context, dataDir string, logger *zap.Logger)
 			"Start mcpproxy (mcpproxy serve) and try again", err)
 	}
 
-	fmt.Fprintf(os.Stderr, "Using daemon mode (via socket)\n\n")
+	fmt.Fprintf(os.Stderr, "Using daemon mode\n\n")
 
-	tools, err := client.GetGlobalTools(ctx)
+	query, err := toolsViewAsQuery()
+	if err != nil {
+		return err
+	}
+	tools, counts, err := client.GetGlobalToolsView(ctx, query)
 	if err != nil {
 		return cliError("failed to get global tools from daemon", err)
 	}
 
-	// Apply client-side filters
-	tools = applyGlobalToolFilters(tools, toolsStatusFilter, toolsRiskFilter, toolsApprovalFilter)
+	// An administrator's response carries every row with its verdict and no
+	// counts (only restricted callers get counts, which must not grow); derive
+	// the summary from the rows, before the client-side filters narrow them.
+	if counts == nil && toolsProfileView != "" {
+		counts = viewAsRowCounts(tools)
+	}
 
-	return outputGlobalTools(tools)
+	// Apply client-side filters
+	tools = applyGlobalToolFilters(tools, toolsStatusFilter, resolvedTierFilter(), toolsApprovalFilter)
+
+	if err := outputGlobalToolsView(tools, viewAsPolicyOnly(counts)); err != nil {
+		return err
+	}
+	if counts != nil && ResolveOutputFormat() == "table" {
+		fmt.Fprint(os.Stderr, "\n"+viewAsCountsSummary(counts, toolsProfileView))
+	}
+	return nil
+}
+
+// viewAsRowCounts derives {visible, hidden, callable} from the per-row `access`
+// verdicts an administrator's view-as response carries. It returns nil when no
+// row has a verdict (nothing to summarize).
+func viewAsRowCounts(tools []map[string]interface{}) map[string]interface{} {
+	visible, hidden, callable, seen := 0, 0, 0, false
+	for _, t := range tools {
+		access, ok := t["access"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		seen = true
+		if v, _ := access["visible"].(bool); v {
+			visible++
+		} else {
+			hidden++
+		}
+		if c, _ := access["callable"].(bool); c {
+			callable++
+		}
+	}
+	if !seen {
+		return nil
+	}
+	return map[string]interface{}{"visible": float64(visible), "hidden": float64(hidden), "callable": float64(callable)}
+}
+
+// viewAsCountsSummary is the footer of `tools --profile`: tools allowed by the
+// profile are kept apart from the ones callable right now. The callable and
+// held counts, and the explain hint, appear only when the daemon sent
+// counts.callable (administrator callers); `access` rows carry the verdict.
+func viewAsCountsSummary(counts map[string]interface{}, profile string) string {
+	line := fmt.Sprintf("%d allowed by profile %s, %d hidden", getIntField(counts, "visible"), profile, getIntField(counts, "hidden"))
+	if _, admin := counts["callable"]; !admin {
+		return line + " (hidden tools are administrator-only)\n"
+	}
+	callable := getIntField(counts, "callable")
+	held := getIntField(counts, "visible") - callable
+	if held < 0 {
+		held = 0
+	}
+	line += fmt.Sprintf(", %d callable now, %d held\n", callable, held)
+	if held > 0 {
+		line += "Held tools are allowed by the profile but not callable yet (for example awaiting approval). Run: mcpproxy access explain --profile " + profile + " --tool <server:tool>\n"
+	}
+	return line
+}
+
+// toolsViewAsQuery is the REST query of the view-as flags (Spec 108 FR-032):
+// `client` (administrator only) or `profile`, never both.
+func toolsViewAsQuery() (url.Values, error) {
+	if toolsClientView != "" && toolsProfileView != "" {
+		return nil, errors.New("use either --client or --profile, not both")
+	}
+	q := url.Values{}
+	if toolsClientView != "" {
+		q.Set("client", toolsClientView)
+	}
+	if toolsProfileView != "" {
+		q.Set("profile", toolsProfileView)
+	}
+	return q, nil
+}
+
+// viewAsPolicyOnly reports whether a view-as response is policy-only: the
+// daemon sent counts without counts.callable (non-administrator callers), so
+// rows must not claim a callable or held verdict beyond the profile policy.
+func viewAsPolicyOnly(counts map[string]interface{}) bool {
+	if counts == nil {
+		return false
+	}
+	_, admin := counts["callable"]
+	return !admin
+}
+
+// viewAsAccessCell renders the ACCESS column of a view-as row: callable (a real
+// call would succeed), held (allowed by the profile but a later gate refuses it
+// or it awaits approval), hidden (not visible at all). For policy-only
+// responses a visible row is just "allowed" (by the profile).
+func viewAsAccessCell(t map[string]interface{}, policyOnly bool) string {
+	access, ok := t["access"].(map[string]interface{})
+	if !ok {
+		return "-"
+	}
+	if policyOnly {
+		if getBoolField(access, "visible") {
+			return "allowed"
+		}
+		return "hidden"
+	}
+	switch {
+	case getBoolField(access, "callable"):
+		return "callable"
+	case getBoolField(access, "visible"):
+		return "held"
+	default:
+		return "hidden"
+	}
+}
+
+// tpaSignatureRe matches a TPA signature id embedded in a deterministic check id
+// (e.g. "tpa.TPA-2026-0001.hidden_instruction" → "TPA-2026-0001").
+var tpaSignatureRe = regexp.MustCompile(`TPA-\d{4}-\d{4}`)
+
+// maxHeldSignalsShown is how many hold signals the HELD column renders before
+// collapsing the rest into a "+N" suffix.
+const maxHeldSignalsShown = 2
+
+// formatToolHold renders the scan-gate hold evidence for the HELD column
+// (spec 086 FR-018): the matched TPA signature ids when the bundle fired,
+// otherwise the raw check ids (e.g. "phrase.injection"). Returns "-" for tools
+// that are not held by the scan gate, so records predating the field render
+// exactly as before.
+func formatToolHold(t map[string]interface{}) string {
+	// Collect matched TPA signature ids and the remaining raw check ids
+	// separately, preserving producer order within each group. TPA ids are
+	// rendered first so the "+N" truncation never hides them — the scanner
+	// emits its heuristic checks (directive.imperative, capability.mismatch, …)
+	// ahead of the tpa.* checks, and FR-018 requires the operator-facing view
+	// to name the matched TPA-YYYY-NNNN id(s).
+	var tpaLabels, otherLabels []string
+	seen := make(map[string]bool)
+	for _, raw := range getArrayField(t, "held_signals") {
+		signal, ok := raw.(string)
+		if !ok || signal == "" {
+			continue
+		}
+		label := signal
+		isTPA := false
+		if m := tpaSignatureRe.FindString(signal); m != "" {
+			label = m
+			isTPA = true
+		}
+		if seen[label] {
+			continue
+		}
+		seen[label] = true
+		if isTPA {
+			tpaLabels = append(tpaLabels, label)
+		} else {
+			otherLabels = append(otherLabels, label)
+		}
+	}
+	labels := append(tpaLabels, otherLabels...)
+
+	if len(labels) == 0 {
+		// A hold with no signals means the scan itself could not be trusted
+		// (degraded coverage / missing bundle) — still worth naming.
+		if reason := getStringField(t, "held_reason"); reason != "" {
+			return reason
+		}
+		return "-"
+	}
+
+	shown := labels
+	suffix := ""
+	if len(labels) > maxHeldSignalsShown {
+		shown = labels[:maxHeldSignalsShown]
+		suffix = fmt.Sprintf(" +%d", len(labels)-maxHeldSignalsShown)
+	}
+	return strings.Join(shown, ",") + suffix
+}
+
+// sanitizeCell makes an upstream-controlled string safe to print in a terminal
+// table and truncates it to maxRunes (GH #938 finding 3).
+//
+// Two bugs it fixes: the server-scoped tool list printed a poisoned description
+// verbatim — ANSI escapes, bidi overrides and zero-width runes reached the tty
+// unfiltered — and the global list truncated with a BYTE slice, which can split
+// a multi-byte rune. detect.CapEvidence is the project-wide render-safe
+// contract: it ESCAPES (never drops) control/format runes so smuggled content
+// is revealed rather than hidden.
+func sanitizeCell(s string, maxRunes int) string {
+	escaped := detect.CapEvidence(s)
+	runes := []rune(escaped)
+	if maxRunes > 3 && len(runes) > maxRunes {
+		return string(runes[:maxRunes-3]) + "..."
+	}
+	return escaped
+}
+
+// sanitizeDescriptionCell is sanitizeCell for free-text, one-line table cells
+// (tool descriptions, held-tool detail). Multi-line upstream prose is full of
+// ordinary \n/\t that CapEvidence would render as literal "\u000a" noise and
+// that eats the rune budget, so runs of exactly those ASCII whitespace runes
+// (\n \r \t \v \f and space) collapse to one space and the result is trimmed
+// BEFORE escaping and truncation. Every other control/format rune (ESC, bidi
+// overrides, zero-width, NUL, U+0085, U+2028, ...) is untouched and therefore
+// still escaped by CapEvidence. Names and ids keep the strict sanitizeCell: a
+// newline inside an identifier is suspicious and should stay visible.
+func sanitizeDescriptionCell(s string, maxRunes int) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	pendingSpace := false
+	for _, r := range s {
+		switch r {
+		case ' ', '\n', '\r', '\t', '\v', '\f':
+			pendingSpace = b.Len() > 0
+			continue
+		}
+		if pendingSpace {
+			b.WriteByte(' ')
+			pendingSpace = false
+		}
+		b.WriteRune(r)
+	}
+	return sanitizeCell(b.String(), maxRunes)
+}
+
+// maxToolDescriptionCell is the description column width shared by the global
+// and server-scoped tool tables.
+const maxToolDescriptionCell = 60
+
+// maxToolNameCell bounds the NAME column. Tool names are upstream-controlled
+// just like descriptions — an unbounded one can push every other column off
+// screen — so the same cap applies.
+const maxToolNameCell = 60
+
+// sanitizeName escapes an upstream-controlled tool name for terminal output.
+//
+// The description fix alone was bypassable: a server declaring a tool named
+// "\x1b[2J\x1b[1;1Happroved" writes ANSI straight to the operator's tty on
+// `mcpproxy tools list`, `tools list --server=<name>` and the no-daemon path —
+// the same trust boundary, the same attack. Names are upstream-controlled, so
+// they get the same render-safe treatment.
+func sanitizeName(s string) string {
+	return sanitizeCell(s, maxToolNameCell)
+}
+
+// serverToolRows builds the table for `mcpproxy tools list --server <name>`.
+//
+// GH #938 finding 3: the server-scoped view used to render only NAME and
+// DESCRIPTION, so a tool held by the trust_mode:scan gate was indistinguishable
+// from an approved one — the exact view an operator debugging ONE server opens.
+// It now carries the same APPROVAL/HELD state as the global view (the
+// per-server REST payload has always included those fields; only the renderer
+// dropped them) and escapes the description.
+func serverToolRows(tools []map[string]interface{}) (headers []string, rows [][]string) {
+	headers = []string{"NAME", "APPROVAL", "HELD", "DESCRIPTION"}
+	for _, t := range tools {
+		approval := getStringField(t, "approval_status")
+		if approval == "" {
+			approval = "-"
+		}
+		rows = append(rows, []string{
+			sanitizeName(getStringField(t, "name")),
+			approval,
+			formatToolHold(t),
+			sanitizeDescriptionCell(getStringField(t, "description"), maxToolDescriptionCell),
+		})
+	}
+	return headers, rows
+}
+
+// globalToolRows builds the table for `mcpproxy tools list` (all servers).
+// Split out of outputGlobalTools so the rendering — in particular the escaping
+// of the two upstream-controlled columns, NAME and DESCRIPTION — is directly
+// testable.
+func globalToolRows(tools []map[string]interface{}) (headers []string, rows [][]string) {
+	return globalToolRowsView(tools, false)
+}
+
+// globalToolRowsView is globalToolRows with the view-as policyOnly mode: rows
+// of a non-administrator response show "allowed" and no gate reason.
+func globalToolRowsView(tools []map[string]interface{}, policyOnly bool) (headers []string, rows [][]string) {
+	headers = []string{"NAME", "SERVER", "STATE", "TIER", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
+	// Spec 108 FR-032: a view-as listing adds ACCESS and REASON after TIER
+	// (the intrinsic tier stays the TIER column).
+	viewAs := len(tools) > 0 && tools[0]["access"] != nil
+	if viewAs {
+		headers = []string{"NAME", "SERVER", "STATE", "TIER", "ACCESS", "REASON", "APPROVAL", "HELD", "USAGE", "LAST USED", "DESCRIPTION"}
+	}
+	for _, t := range tools {
+		name := sanitizeName(getStringField(t, "name"))
+		srv := getStringField(t, "server_name")
+		disabled := getBoolField(t, "disabled")
+		configDenied := getBoolField(t, "config_denied")
+
+		state := "enabled"
+		if configDenied {
+			state = "config-denied"
+		} else if disabled {
+			state = "disabled"
+		}
+
+		// Spec 109 FR-028/X11: rendered verbatim from the backend-computed
+		// `tier` field — never derived here.
+		tier := getStringField(t, "tier")
+		if tier == "" {
+			tier = "-"
+		}
+
+		approval := getStringField(t, "approval_status")
+		if approval == "" {
+			approval = "-"
+		}
+
+		usage := fmt.Sprintf("%d", getIntField(t, "usage"))
+
+		lastUsed := "-"
+		if lu := getStringField(t, "last_used"); lu != "" {
+			lastUsed = lu
+		}
+
+		desc := sanitizeDescriptionCell(getStringField(t, "description"), maxToolDescriptionCell)
+
+		if viewAs {
+			reason := "-"
+			if access, ok := t["access"].(map[string]interface{}); ok {
+				if r := getStringField(access, "reason"); r != "" && (!policyOnly || !getBoolField(access, "visible")) {
+					reason = r
+				}
+			}
+			rows = append(rows, []string{name, srv, state, tier, viewAsAccessCell(t, policyOnly), reason, approval, formatToolHold(t), usage, lastUsed, desc})
+			continue
+		}
+		rows = append(rows, []string{name, srv, state, tier, approval, formatToolHold(t), usage, lastUsed, desc})
+	}
+	return headers, rows
 }
 
 // outputGlobalTools renders the global tool list with extended columns.
 func outputGlobalTools(tools []map[string]interface{}) error {
+	return outputGlobalToolsView(tools, false)
+}
+
+// outputGlobalToolsView renders the list; policyOnly marks a non-administrator
+// view-as response whose rows carry no callable/held claim.
+func outputGlobalToolsView(tools []map[string]interface{}, policyOnly bool) error {
 	outputFormat := ResolveOutputFormat()
 	formatter, err := GetOutputFormatter()
 	if err != nil {
@@ -327,42 +798,7 @@ func outputGlobalTools(tools []map[string]interface{}) error {
 		return nil
 	}
 
-	// Table format with extended columns for global view
-	headers := []string{"NAME", "SERVER", "STATE", "APPROVAL", "USAGE", "LAST USED", "DESCRIPTION"}
-	var rows [][]string
-	for _, t := range tools {
-		name := getStringField(t, "name")
-		srv := getStringField(t, "server_name")
-		disabled := getBoolField(t, "disabled")
-		configDenied := getBoolField(t, "config_denied")
-
-		state := "enabled"
-		if configDenied {
-			state = "config-denied"
-		} else if disabled {
-			state = "disabled"
-		}
-
-		approval := getStringField(t, "approval_status")
-		if approval == "" {
-			approval = "-"
-		}
-
-		usageVal := getIntField(t, "usage")
-		usage := fmt.Sprintf("%d", usageVal)
-
-		lastUsed := "-"
-		if lu := getStringField(t, "last_used"); lu != "" {
-			lastUsed = lu
-		}
-
-		desc := getStringField(t, "description")
-		if len(desc) > 60 {
-			desc = desc[:57] + "..."
-		}
-
-		rows = append(rows, []string{name, srv, state, approval, usage, lastUsed, desc})
-	}
+	headers, rows := globalToolRowsView(tools, policyOnly)
 
 	result, fmtErr := formatter.FormatTable(headers, rows)
 	if fmtErr != nil {
@@ -391,13 +827,11 @@ func runToolsSetEnabled(args []string, enabled bool) error {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	if !shouldUseToolsDaemon(globalConfig.DataDir) {
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("enable/disable requires the daemon to be running.\n" +
 			"Start mcpproxy (mcpproxy serve) and try again")
 	}
-
-	socketPath := socket.DetectSocketPath(globalConfig.DataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
 
 	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer pingCancel()
@@ -452,17 +886,12 @@ func runToolsSetEnabled(args []string, enabled bool) error {
 
 // loadToolsConfig loads the MCP configuration file for tools command
 func loadToolsConfig() (*config.Config, error) {
-	var configFilePath string
-
-	if configPath != "" {
-		configFilePath = configPath
-	} else {
-		// Use default path
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			return nil, fmt.Errorf("failed to get user home directory: %w", err)
+	configFilePath := resolveCLIConfigPath(configPath)
+	if configFilePath == "" {
+		var err error
+		if configFilePath, err = defaultHomeConfigPath(); err != nil {
+			return nil, err
 		}
-		configFilePath = filepath.Join(homeDir, ".mcpproxy", "mcp_config.json")
 	}
 
 	// Check if config file exists
@@ -476,6 +905,11 @@ func loadToolsConfig() (*config.Config, error) {
 		return nil, fmt.Errorf("failed to load config from %s: %w", configFilePath, err)
 	}
 
+	// Respect global --data-dir flag
+	if dataDir != "" {
+		globalConfig.DataDir = dataDir
+	}
+
 	return globalConfig, nil
 }
 
@@ -486,6 +920,24 @@ func getAvailableServerNames(globalConfig *config.Config) []string {
 		names = append(names, server.Name)
 	}
 	return names
+}
+
+// standaloneToolRows builds the no-daemon table. That path has no approval
+// records, so it keeps the two-column shape — but BOTH upstream-controlled
+// columns are sanitized (#938): a poisoned name or description must never reach
+// the terminal raw on ANY path.
+func standaloneToolRows(tools []*config.ToolMetadata) (headers []string, rows [][]string) {
+	headers = []string{"NAME", "DESCRIPTION"}
+	for _, tool := range tools {
+		if tool == nil {
+			continue
+		}
+		rows = append(rows, []string{
+			sanitizeName(tool.Name),
+			sanitizeDescriptionCell(tool.Description, maxToolDescriptionCell),
+		})
+	}
+	return headers, rows
 }
 
 // outputToolsFromMetadata formats and displays tools from ToolMetadata (standalone mode) using unified formatters.
@@ -522,12 +974,7 @@ func outputToolsFromMetadata(tools []*config.ToolMetadata, serverName string) er
 		return nil
 	}
 
-	// Table format: show name and description
-	headers := []string{"NAME", "DESCRIPTION"}
-	var rows [][]string
-	for _, tool := range tools {
-		rows = append(rows, []string{tool.Name, tool.Description})
-	}
+	headers, rows := standaloneToolRows(tools)
 
 	result, fmtErr := formatter.FormatTable(headers, rows)
 	if fmtErr != nil {
@@ -537,24 +984,14 @@ func outputToolsFromMetadata(tools []*config.ToolMetadata, serverName string) er
 	return nil
 }
 
-// shouldUseToolsDaemon checks if daemon is running by detecting socket file.
-func shouldUseToolsDaemon(dataDir string) bool {
-	socketPath := socket.DetectSocketPath(dataDir)
-	return socket.IsSocketAvailable(socketPath)
-}
-
-// runToolsListClientMode executes tools list via daemon HTTP API over socket.
-func runToolsListClientMode(ctx context.Context, dataDir, serverName string, logger *zap.Logger) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+// runToolsListClientMode executes tools list via the daemon HTTP API.
+func runToolsListClientMode(ctx context.Context, client *cliclient.Client, serverName string, logger *zap.Logger) error {
 	// Ping daemon to verify connectivity
 	pingCtx, pingCancel := context.WithTimeout(ctx, 2*time.Second)
 	defer pingCancel()
 	if err := client.Ping(pingCtx); err != nil {
 		logger.Warn("Failed to ping daemon, falling back to standalone mode",
-			zap.Error(err),
-			zap.String("socket_path", socketPath))
+			zap.Error(err))
 		// Fall back to standalone mode
 		cfg, err := loadToolsConfig()
 		if err != nil {
@@ -563,7 +1000,7 @@ func runToolsListClientMode(ctx context.Context, dataDir, serverName string, log
 		return runToolsListStandalone(ctx, serverName, cfg, logger)
 	}
 
-	fmt.Fprintf(os.Stderr, "Using daemon mode (via socket) - fast execution\n\n")
+	fmt.Fprintf(os.Stderr, "Using daemon mode - fast execution\n\n")
 
 	// Fetch tools from daemon
 	tools, err := client.GetServerTools(ctx, serverName)
@@ -571,6 +1008,17 @@ func runToolsListClientMode(ctx context.Context, dataDir, serverName string, log
 		// T027: Use cliError to include request_id in error output
 		return cliError("failed to get server tools from daemon", err)
 	}
+
+	// Apply the same --status/--tier(--risk)/--approval client-side filters as
+	// the global list. GET /api/v1/servers/{id}/tools shares enrichServerTools
+	// with the global endpoint (spec 050), so its maps carry the identical
+	// "tier"/"disabled"/"config_denied"/"approval_status" fields
+	// applyGlobalToolFilters reads — before this fix, `--server` bypassed
+	// filtering entirely and always printed every tool unfiltered (review
+	// round 6, finding 4: an operator auditing one server for destructive
+	// tools with `--server=x --tier destructive` saw the full unfiltered
+	// list and could wrongly conclude there were none).
+	tools = applyGlobalToolFilters(tools, toolsStatusFilter, resolvedTierFilter(), toolsApprovalFilter)
 
 	// Output results
 	return outputTools(tools, logger)
@@ -595,14 +1043,8 @@ func outputTools(tools []map[string]interface{}, _ *zap.Logger) error {
 		return nil
 	}
 
-	// Table format: show name and description
-	headers := []string{"NAME", "DESCRIPTION"}
-	var rows [][]string
-	for _, tool := range tools {
-		name, _ := tool["name"].(string)
-		desc, _ := tool["description"].(string)
-		rows = append(rows, []string{name, desc})
-	}
+	// Table format: name + approval/hold state + escaped description (#938).
+	headers, rows := serverToolRows(tools)
 
 	result, fmtErr := formatter.FormatTable(headers, rows)
 	if fmtErr != nil {
@@ -627,10 +1069,24 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 			serverName, getAvailableServerNames(globalConfig))
 	}
 
-	fmt.Printf("MCP Tools List - Server: %s\n", serverName)
-	fmt.Printf("Log Level: %s\n", toolsLogLevel)
-	fmt.Printf("Timeout: %v\n", timeout)
-	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
+	// --status and --approval read daemon-persisted state (per-tool disabled
+	// state, config-denied checks, approval records) that this standalone path
+	// has no access to — it connects directly to the upstream server and never
+	// touches the daemon's storage. Silently ignoring the flag would print
+	// every tool unfiltered with no indication the filter never ran (review
+	// round 6, finding 4); fail fast and say so instead. --tier/--risk is
+	// still honored below since it needs only the tool's own annotations.
+	if toolsStatusFilter != "" || toolsApprovalFilter != "" {
+		return fmt.Errorf("--status and --approval require the daemon (no running daemon detected for standalone server '%s'): "+
+			"start mcpproxy (mcpproxy serve) and retry, or drop these flags — --tier/--risk still works standalone", serverName)
+	}
+
+	// Human banner/progress goes to stderr so machine formats (-o json|yaml)
+	// keep stdout parseable (see docs/cli-output-formatting.md).
+	fmt.Fprintf(os.Stderr, "MCP Tools List - Server: %s\n", serverName)
+	fmt.Fprintf(os.Stderr, "Log Level: %s\n", toolsLogLevel)
+	fmt.Fprintf(os.Stderr, "Timeout: %v\n", timeout)
+	fmt.Fprintf(os.Stderr, "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
 	// Create storage (optional, for OAuth persistence)
 	var db *storage.BoltDB
@@ -662,14 +1118,14 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 	}
 
 	// Connect to server
-	fmt.Printf("Connecting to server '%s'...\n", serverName)
+	fmt.Fprintf(os.Stderr, "Connecting to server '%s'...\n", serverName)
 	if err := managedClient.Connect(ctx); err != nil {
 		return fmt.Errorf("failed to connect to server '%s': %w", serverName, err)
 	}
 
 	// Ensure cleanup on exit
 	defer func() {
-		fmt.Printf("Disconnecting from server...\n")
+		fmt.Fprintf(os.Stderr, "Disconnecting from server...\n")
 		if disconnectErr := managedClient.Disconnect(); disconnectErr != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to disconnect cleanly: %v\n", disconnectErr)
 		}
@@ -681,19 +1137,388 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 		return fmt.Errorf("failed to list tools: %w", err)
 	}
 
+	// Apply --tier/--risk (review round 6, finding 4). Unlike --status/
+	// --approval (rejected above), tier needs only the tool's own
+	// annotations — no daemon round trip — so it works standalone too, via
+	// the same AnnotationTier the daemon's enrichServerTools uses.
+	discoveredCount := len(tools)
+	tierFilter := resolvedTierFilter()
+	tools = filterToolMetadataByTier(tools, tierFilter)
+
 	// Output results using unified formatter
 	if len(tools) == 0 {
 		outputFormat := ResolveOutputFormat()
 		if outputFormat == "table" {
-			fmt.Printf("No tools found on server '%s'\n", serverName)
-			fmt.Printf("This could indicate:\n")
-			fmt.Printf("   Server doesn't support tools\n")
-			fmt.Printf("   Server is not properly configured\n")
-			fmt.Printf("   Connection issues during tool discovery\n")
+			fmt.Print(standaloneNoToolsMessage(serverName, tierFilter, discoveredCount))
 			return nil
 		}
 		// For JSON/YAML, output empty array
 	}
 
 	return outputToolsFromMetadata(tools, serverName)
+}
+
+// --- Spec 098: tools preflight ----------------------------------------------
+
+// newToolsPreflightCmd builds `mcpproxy tools preflight`, the cron/CI gate: one
+// deterministic, side-effect-free check that answers "are these tools usable
+// right now?" before a job spends model tokens finding out the hard way.
+//
+// The exit code is the product: 0 all ready, 10 retryable (back off), 11 an
+// operator has to act, 12 an id does not exist. A wrapper can branch on it
+// without parsing any JSON.
+func newToolsPreflightCmd() *cobra.Command {
+	var (
+		profile            string
+		pins               []string
+		readOnlyOnly       bool
+		excludeDestructive bool
+		excludeOpenWorld   bool
+		wait               time.Duration
+	)
+
+	cmd := &cobra.Command{
+		Use:   "preflight <server:tool> [<server:tool>...]",
+		Short: "Check that required tools are ready, without calling any upstream server",
+		Long: `Check a list of required tools against local proxy state and report, per tool,
+whether it is ready or exactly why it is not.
+
+The check performs zero upstream calls and changes nothing: it reads the tool
+index, approval records, connection state and configuration policy only.
+
+Exit codes (worst class present wins):
+  0   every tool is ready
+  10  degraded but retryable (a server is starting up or unhealthy) — back off and retry
+  11  blocked: an operator action is needed (approve, enable, log in, re-pin)
+  12  at least one requested id is unknown in your view (typo, or removed server)
+  1   the command itself failed (daemon unreachable, invalid arguments)
+
+Examples:
+  mcpproxy tools preflight gh-ops:sync_issues slack:post_message
+  mcpproxy tools preflight ctl:echo -o json
+  mcpproxy tools preflight ctl:echo --pin ctl:echo=sha256/v1:9f86d0...
+  mcpproxy tools preflight ctl:echo --profile work --wait 5s
+  mcpproxy tools preflight ctl:echo --read-only-only`,
+		// Tool ids are required — except under --help-json, which is a
+		// discovery call an agent makes before it knows what to pass. Cobra
+		// validates Args before the --help-json hook runs, so a plain
+		// MinimumNArgs(1) would make the command's own metadata unreachable.
+		Args: preflightArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			request, err := buildPreflightRequest(args, pins, profile, wait,
+				contracts.PreflightPolicy{
+					ReadOnlyOnly:       readOnlyOnly,
+					ExcludeDestructive: excludeDestructive,
+					ExcludeOpenWorld:   excludeOpenWorld,
+				})
+			if err != nil {
+				// Argument errors keep the usage block: the operator mistyped
+				// the invocation and the syntax is the answer. They are still
+				// exit 1, not a verdict code.
+				return newPreflightGeneralError(err)
+			}
+			cmd.SilenceUsage = true
+			// From here the command's return value is a VERDICT, not a usage
+			// problem. Cobra would print it a second time on top of the central
+			// handler's "Error: …" line, and a cron log with the same verdict
+			// twice reads like two failures.
+			cmd.SilenceErrors = true
+			return runToolsPreflight(request)
+		},
+	}
+
+	cmd.Flags().StringVar(&profile, "profile", "", "Evaluate under a named profile's server scope and tool policy")
+	cmd.Flags().StringArrayVar(&pins, "pin", nil, "Pin a tool to a schema hash: --pin <server:tool>=sha256/v<N>:<hex> (repeatable)")
+	cmd.Flags().BoolVar(&readOnlyOnly, "read-only-only", false, "Require tools to be annotated read-only")
+	cmd.Flags().BoolVar(&excludeDestructive, "exclude-destructive", false, "Require tools to be annotated non-destructive")
+	cmd.Flags().BoolVar(&excludeOpenWorld, "exclude-open-world", false, "Require tools to be annotated closed-world")
+	cmd.Flags().DurationVar(&wait, "wait", 0, "Poll local state for up to this long while every failure is retryable (max 10s)")
+
+	return cmd
+}
+
+// preflightArgs requires at least one tool id, but lets `--help-json` through
+// with none: that flag is answered by a PersistentPreRunE hook, which cobra
+// runs AFTER argument validation, so a bare MinimumNArgs(1) would hide the
+// command's machine-readable help from the agents it exists for.
+func preflightArgs(cmd *cobra.Command, args []string) error {
+	if helpJSON, err := cmd.Flags().GetBool("help-json"); err == nil && helpJSON {
+		return nil
+	}
+	return cobra.MinimumNArgs(1)(cmd, args)
+}
+
+// buildPreflightRequest turns CLI arguments into the REST request body.
+//
+// It validates only what is genuinely local (pin syntax, pins naming an id that
+// was not requested, and the wait range — see below). Everything else — the
+// 100-id cap, unknown profiles — is the daemon's rule, and duplicating it here
+// would give the two surfaces two chances to disagree.
+//
+// --wait is the exception, and only because the wire field is milliseconds: the
+// conversion is LOSSY, so `--wait -1ns` would reach the daemon as 0 and
+// `--wait 10.0000001s` as an in-range 10000. Both would be accepted as
+// something the operator did not ask for. The range is checked on the exact
+// duration, against the same cap the daemon enforces (preflight.MaxWaitMS).
+func buildPreflightRequest(ids, pins []string, profile string, wait time.Duration, policy contracts.PreflightPolicy) (*contracts.PreflightRequest, error) {
+	pinByID, err := parsePreflightPins(pins)
+	if err != nil {
+		return nil, err
+	}
+	if err := validatePreflightWaitFlag(wait); err != nil {
+		return nil, err
+	}
+
+	request := &contracts.PreflightRequest{
+		Tools:   make([]contracts.PreflightToolRef, 0, len(ids)),
+		Profile: strings.TrimSpace(profile),
+		WaitMS:  int(wait.Milliseconds()),
+	}
+	if policy.ReadOnlyOnly || policy.ExcludeDestructive || policy.ExcludeOpenWorld {
+		policyCopy := policy
+		request.Policy = &policyCopy
+	}
+
+	requested := make(map[string]bool, len(ids))
+	for _, raw := range ids {
+		id := strings.TrimSpace(raw)
+		if id == "" {
+			return nil, fmt.Errorf("empty tool id in arguments (expected <server>:<tool>)")
+		}
+		requested[id] = true
+		request.Tools = append(request.Tools, contracts.PreflightToolRef{ID: id, PinHash: pinByID[id]})
+	}
+
+	for id := range pinByID {
+		if !requested[id] {
+			return nil, fmt.Errorf("--pin names %q, which is not in the requested tool list", id)
+		}
+	}
+
+	return request, nil
+}
+
+// maxPreflightWait is the --wait cap as a duration, derived from the wire cap
+// so the two can never drift apart.
+const maxPreflightWait = preflight.MaxWaitMS * time.Millisecond
+
+// validatePreflightWaitFlag rejects a wait outside [0, 10s] on the EXACT
+// duration, before it is truncated to milliseconds.
+func validatePreflightWaitFlag(wait time.Duration) error {
+	if wait < 0 {
+		return fmt.Errorf("--wait must not be negative (got %s)", wait)
+	}
+	if wait > maxPreflightWait {
+		return fmt.Errorf("--wait is %s, which exceeds the cap of %s", wait, maxPreflightWait)
+	}
+	return nil
+}
+
+// parsePreflightPins parses repeatable `--pin <id>=<hash>` flags. The split is
+// on the FIRST '=' because a pin value is "sha256/v1:<hex>" — it carries ':'
+// and '/', but never '=' — while the id carries ':'.
+func parsePreflightPins(pins []string) (map[string]string, error) {
+	out := make(map[string]string, len(pins))
+	for _, pin := range pins {
+		idx := strings.Index(pin, "=")
+		if idx <= 0 {
+			return nil, fmt.Errorf("invalid --pin %q: expected <server>:<tool>=<hash>", pin)
+		}
+		id := strings.TrimSpace(pin[:idx])
+		hash := strings.TrimSpace(pin[idx+1:])
+		if id == "" || hash == "" {
+			return nil, fmt.Errorf("invalid --pin %q: expected <server>:<tool>=<hash>", pin)
+		}
+		if existing, ok := out[id]; ok && existing != hash {
+			return nil, fmt.Errorf("conflicting --pin values for %q: %q and %q", id, existing, hash)
+		}
+		out[id] = hash
+	}
+	return out, nil
+}
+
+// runToolsPreflight calls the daemon, renders the result, and converts a
+// non-ready verdict into the typed exit-code error.
+func runToolsPreflight(request *contracts.PreflightRequest) error {
+	client, _, err := newSecurityCLIClient()
+	if err != nil {
+		return newPreflightGeneralError(err)
+	}
+
+	// The request's own wait budget is capped at 10s daemon-side; the transport
+	// deadline just has to outlive it.
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	response, err := client.Preflight(ctx, request)
+	if err != nil {
+		return newPreflightGeneralError(cliError("preflight failed", err))
+	}
+
+	rendered, err := renderPreflight(ResolveOutputFormat(), response)
+	if err != nil {
+		return newPreflightGeneralError(err)
+	}
+	fmt.Print(rendered)
+
+	// The verdict is not a command failure — it is the answer. It travels as a
+	// typed error purely so the CENTRAL classifier assigns 10/11/12.
+	return newPreflightVerdictError(preflightExitVerdict(response), preflightSummary(response))
+}
+
+// preflightExitVerdict is the verdict the exit code comes from: the worse of
+// what the daemon reported and what the per-tool results imply.
+//
+// Recomputing locally is deliberate. The exit code is the contract a cron
+// wrapper trusts, and taking the max of both readings means an older daemon
+// that under-reports the set verdict can never make a blocked tool look like a
+// clean run. Both readings use the same locked table (preflight.ExitCode), so
+// "worse" is just the higher exit code.
+func preflightExitVerdict(response *contracts.PreflightResponse) string {
+	if response == nil {
+		return preflight.VerdictReady
+	}
+	reasons := make([]string, 0, len(response.Tools))
+	for _, tool := range response.Tools {
+		if tool.Status == preflight.StatusReady {
+			continue
+		}
+		reasons = append(reasons, tool.Reason)
+	}
+	worst := preflight.VerdictForReasons(reasons)
+	if preflight.ExitCode(response.Verdict) > preflight.ExitCode(worst) {
+		return response.Verdict
+	}
+	return worst
+}
+
+// preflightSummary is the one-line context that rides along with the exit-code
+// error, e.g. "2 of 5 tools unavailable: server_disabled, not_found".
+func preflightSummary(response *contracts.PreflightResponse) string {
+	if response == nil {
+		return ""
+	}
+	unavailable := 0
+	seen := make(map[string]bool)
+	var reasons []string
+	for _, tool := range response.Tools {
+		if tool.Status == preflight.StatusReady {
+			continue
+		}
+		unavailable++
+		if tool.Reason != "" && !seen[tool.Reason] {
+			seen[tool.Reason] = true
+			reasons = append(reasons, tool.Reason)
+		}
+	}
+	if unavailable == 0 {
+		return ""
+	}
+	summary := fmt.Sprintf("%d of %d tools unavailable", unavailable, len(response.Tools))
+	if len(reasons) > 0 {
+		summary += ": " + strings.Join(reasons, ", ")
+	}
+	return summary
+}
+
+// renderPreflight formats one response for the requested output format. It is
+// pure (returns the string instead of printing) so every format is unit-tested
+// without capturing stdout.
+func renderPreflight(outputFormat string, response *contracts.PreflightResponse) (string, error) {
+	// Normalize ONCE, before both the formatter lookup and the branch below.
+	// NewFormatter is case-insensitive, so `-o JSON` used to select the JSON
+	// formatter and then fall into the table branch, emitting a table header
+	// followed by JSON-encoded rows.
+	format := strings.ToLower(strings.TrimSpace(outputFormat))
+
+	formatter, err := output.NewFormatter(format)
+	if err != nil {
+		return "", output.NewStructuredError(output.ErrCodeInvalidOutputFormat, err.Error()).
+			WithGuidance("Use -o table, -o json, or -o yaml")
+	}
+
+	if format == "json" || format == "yaml" {
+		// Marshal through the wire DTO's JSON tags so `-o yaml` emits the same
+		// key names as `-o json` and the REST payload, rather than yaml's
+		// lowercased Go field names.
+		payload, convErr := preflightWirePayload(response)
+		if convErr != nil {
+			return "", convErr
+		}
+		rendered, fmtErr := formatter.Format(payload)
+		if fmtErr != nil {
+			return "", fmt.Errorf("failed to format output: %w", fmtErr)
+		}
+		return rendered + "\n", nil
+	}
+
+	headers, rows := preflightRows(response)
+	table, fmtErr := formatter.FormatTable(headers, rows)
+	if fmtErr != nil {
+		return "", fmt.Errorf("failed to format table: %w", fmtErr)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "VERDICT: %s (exit %d)\n", response.Verdict, preflight.ExitCode(preflightExitVerdict(response)))
+	fmt.Fprintf(&b, "CHECKED: %s\n", response.CheckedAt.Format(time.RFC3339))
+	if response.WaitedMS != nil {
+		fmt.Fprintf(&b, "WAITED:  %dms\n", *response.WaitedMS)
+	}
+	b.WriteString("\n")
+	b.WriteString(table)
+	return b.String(), nil
+}
+
+// preflightWirePayload converts the response to generic JSON values so the
+// YAML formatter honours the wire key names.
+func preflightWirePayload(response *contracts.PreflightResponse) (map[string]interface{}, error) {
+	encoded, err := json.Marshal(response)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode preflight response: %w", err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		return nil, fmt.Errorf("failed to decode preflight response: %w", err)
+	}
+	return payload, nil
+}
+
+// preflightRows builds the table view. Detail and remediation are sanitized:
+// detail can quote an upstream-controlled server or tool name.
+func preflightRows(response *contracts.PreflightResponse) (headers []string, rows [][]string) {
+	headers = []string{"ID", "STATUS", "REASON", "RETRYABLE", "ACTION", "DETAIL"}
+	rows = make([][]string, 0, len(response.Tools))
+	for _, tool := range response.Tools {
+		reason := tool.Reason
+		retryable := ""
+		if tool.Retryable != nil {
+			retryable = fmt.Sprintf("%t", *tool.Retryable)
+		}
+		action := tool.Action
+		if reason == "" {
+			reason = "-"
+		}
+		if retryable == "" {
+			retryable = "-"
+		}
+		if action == "" {
+			action = "-"
+		}
+		detail := tool.Detail
+		if detail == "" {
+			detail = tool.Remediation
+		}
+		if detail == "" {
+			detail = "-"
+		}
+		rows = append(rows, []string{
+			sanitizeName(tool.ID),
+			tool.Status,
+			reason,
+			retryable,
+			action,
+			sanitizeDescriptionCell(detail, maxToolDescriptionCell),
+		})
+	}
+	return headers, rows
 }

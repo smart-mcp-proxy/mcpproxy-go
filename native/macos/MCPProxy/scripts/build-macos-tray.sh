@@ -378,6 +378,15 @@ else
     <string>public.app-category.utilities</string>
     <key>SUFeedURL</key>
     <string>https://mcpproxy.app/appcast.xml</string>
+    <!-- Spec 092 FR-011: a feed URL without a pinned EdDSA public key is a
+         bundle that would accept an unsigned update, so the placeholder must
+         be present here exactly as it is in the checked-in Info.plist. With
+         it, SPUUpdater.start() throws and the tray degrades to the browser
+         path; without the key entirely the bundle diverges from every one CI
+         produces. This branch only runs when the source Info.plist is
+         missing, but it must not be the one that ships a weaker bundle. -->
+    <key>SUPublicEDKey</key>
+    <string>SPARKLE_PUBLIC_KEY_PLACEHOLDER</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
     <key>SUScheduledCheckInterval</key>

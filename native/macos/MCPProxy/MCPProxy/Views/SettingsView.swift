@@ -3,7 +3,7 @@
 //
 // Native Settings window. The tray is a full alternative client to the core:
 // every backend setting is edited here over REST (GET/PATCH /api/v1/config),
-// mirroring the web UI Configuration page — the config JSON file is never read
+// mirroring the web UI Settings page — the config JSON file is never read
 // or written directly. The "App" tab holds the few OS-level prefs that are
 // genuinely the app's own concern (launch-at-login, interface size).
 
@@ -14,6 +14,9 @@ struct SettingsView: View {
     @ObservedObject var appState: AppState
     @StateObject private var store: ConfigStore
     @State private var tab = 0
+    /// Spec 108-k: what a fix button asked Settings to show.
+    @State private var scrollTarget: String?
+    @State private var anonymousPreselect: String?
 
     init(appState: AppState) {
         self.appState = appState
@@ -25,26 +28,62 @@ struct SettingsView: View {
             AppPrefsTab(appState: appState)
                 .tabItem { Label("App", systemImage: "macwindow") }.tag(0)
 
-            SecuritySettingsTab(store: store)
+            SecuritySettingsTab(appState: appState, store: store,
+                                scrollTarget: scrollTarget, anonymousPreselect: anonymousPreselect)
                 .tabItem { Label("Security", systemImage: "lock.shield") }.tag(1)
 
             GeneralConfigTab(store: store)
                 .tabItem { Label("General", systemImage: "gearshape") }.tag(2)
 
+            // Spec 109 T109: registry SOURCE management moved here from the
+            // (now-retired) Registries sidebar item — server discovery lives
+            // in the Add Server sheet's Catalog tab instead.
+            CatalogSourcesTab(appState: appState)
+                .tabItem { Label("Catalog Sources", systemImage: "books.vertical") }.tag(3)
+
             AdvancedSettingsTab(store: store)
-                .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }.tag(3)
+                .tabItem { Label("Advanced", systemImage: "slider.horizontal.3") }.tag(4)
 
             RawConfigTab(store: store)
-                .tabItem { Label("Raw", systemImage: "curlybraces") }.tag(4)
+                .tabItem { Label("Raw", systemImage: "curlybraces") }.tag(5)
         }
         .frame(minWidth: 540, minHeight: 560)
-        // ⌘1–⌘5 switch tabs (handy, and lets UI tests navigate).
+        .onAppear { consumeFocus() }
+        .onChange(of: appState.pendingRoute) { _ in consumeFocus() }
+        // ⌘1–⌘6 switch tabs (handy, and lets UI tests navigate).
         .background {
-            ForEach(0..<5, id: \.self) { i in
+            ForEach(0..<6, id: \.self) { i in
                 Button("") { tab = i }
                     .keyboardShortcut(KeyEquivalent(Character(String(i + 1))), modifiers: .command)
                     .opacity(0)
             }
+        }
+    }
+}
+
+extension SettingsView {
+    /// Spec 108-k K13/K20: a binding-guard or explainer fix opens Settings on
+    /// the Security tab. `require_mcp_auth` is scrolled to and highlighted; the
+    /// Anonymous callers picker is PRESELECTED, never saved.
+    fileprivate func consumeFocus() {
+        guard let focus: SettingsFocus = appState.consumeRoute({ route in
+            if case .settings(let focus) = route { return focus }
+            return nil
+        }) else { return }
+        tab = 1
+        switch focus {
+        case .requireMCPAuth:
+            anonymousPreselect = nil
+            scrollTarget = "require_mcp_auth"
+            store.highlightedKey = "require_mcp_auth"
+        case .anonymousProfile(let preselect):
+            scrollTarget = "anonymous_profile"
+            store.highlightedKey = nil
+            anonymousPreselect = preselect
+        case .setting(let key):
+            anonymousPreselect = nil
+            scrollTarget = key
+            store.highlightedKey = key
         }
     }
 }
@@ -59,12 +98,36 @@ private struct AppPrefsTab: View {
     var body: some View {
         Form {
             Section {
-                Toggle("Launch MCPProxy at login", isOn: $launchAtLogin)
+                // F9: the tray menu calls this same AutoStartService setting
+                // "Launch at Login" — one setting, one name.
+                Toggle("Launch at Login", isOn: $launchAtLogin)
                     .onChange(of: launchAtLogin) { applyLaunchAtLogin($0) }
+                Text("Starts the MCPProxy app when you log in. Also shown as “Launch at Login” in the menu-bar menu.")
+                    .font(.callout).foregroundColor(.secondary)
                 if let launchError {
                     Text(launchError).font(.callout).foregroundColor(.red)
                 }
-            } header: { Text("Startup") }
+
+                // GH #410. Deliberately independent of "Launch at login": that one
+                // controls whether the APP starts with macOS, this one whether the
+                // CORE starts with the app. Turning it off keeps the menu-bar app
+                // available without the core and its upstream server processes.
+                Toggle("Start MCPProxy Core when the app opens", isOn: $appState.startCoreOnLaunch)
+                    .disabled(appState.coreLaunchPinnedOffByEnvironment)
+                if appState.coreLaunchPinnedOffByEnvironment {
+                    Text("Pinned off by MCPPROXY_TRAY_SKIP_CORE in the environment.")
+                        .font(.callout).foregroundColor(.secondary)
+                } else if !appState.startCoreOnLaunch {
+                    Text("MCPProxy will not start the core. It still connects to a core you start yourself, and you can start one from the menu at any time.")
+                        .font(.callout).foregroundColor(.secondary)
+                }
+            } header: { Text("Startup") } footer: {
+                // F9: these two and the menu's "Start/Stop MCPProxy Core" are a
+                // genuinely confusable trio — one is at login, one is at app
+                // launch, one is right now — and nothing said so.
+                Text("These settings act at login and at app launch. To start or stop the core right now, use “Start/Stop MCPProxy Core” in the menu-bar menu.")
+                    .font(.callout).foregroundColor(.secondary)
+            }
 
             Section {
                 HStack {
@@ -83,6 +146,18 @@ private struct AppPrefsTab: View {
                         Circle().fill(appState.isConnected ? .green : .secondary).frame(width: 8, height: 8)
                         Text(appState.isConnected ? "Connected" : "Not connected")
                     }
+                }
+                // F14: the tray had no feedback path at all while the Web UI
+                // has /feedback and the CLI has `mcpproxy feedback`. A
+                // Homebrew user who never sees the repo now has one here and
+                // in the About panel — without spending a menu row.
+                LabeledContent("Help") {
+                    HStack(spacing: 12) {
+                        Link("Documentation", destination: ProjectLinks.docs)
+                        Link("Report an Issue", destination: ProjectLinks.issues)
+                        Link("Discussions", destination: ProjectLinks.discussions)
+                    }
+                    .font(.callout)
                 }
             } header: { Text("About") } footer: {
                 Text("All server configuration is managed in the Security, General and Advanced tabs.")

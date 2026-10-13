@@ -35,11 +35,55 @@ type ServerStatus struct {
 	RetryCount     int
 	ToolCount      int
 	Tools          []ToolInfo // Phase 7.1: Cached tool list for lock-free reads
-	Metadata       map[string]interface{}
+	// ToolsDiscovered reports that a discovery pass has COMPLETED for this
+	// connection and Tools is its authoritative result — including an
+	// authoritative EMPTY result for an upstream that lists zero tools. It is
+	// stamped by the supervisor when discovery publishes the tool set
+	// (RefreshToolsFromDiscovery / RefreshServerToolsFromDiscovery) and
+	// cleared together with Tools on disconnect, so a freshly connected server
+	// whose discovery has not run yet reads Connected=true, Tools=nil,
+	// ToolsDiscovered=false. Spec 105 FR-009 (research D4) keys tool-identity
+	// resolution on it rather than on len(Tools) > 0: the connect→discovery
+	// window and a genuinely tool-less server both fail CLOSED instead of
+	// admitting any name with the destructive-tier fallback.
+	ToolsDiscovered bool
+	// DiscoveryEpoch is the live client's connection-instance token
+	// (managed.Client.ConnectionEpoch) captured BEFORE the tools/list that
+	// produced Tools, stamped together with ToolsDiscovered. Identity
+	// resolution compares it with the client's current token: a mismatch
+	// means the connection changed since discovery ran — its events dropped
+	// or lagging, no reconcile edge observed yet — and the stamp certifies
+	// nothing for the live connection (Spec 105 FR-009; astra r2 C3). Zero
+	// when no discovery has been published for this connection.
+	DiscoveryEpoch int64
+	// Incarnation is the committed incarnation of the server configuration
+	// this status was reconciled from (Spec 116 PR2 review round 6, FR-017).
+	// A same-name replacement carries a different incarnation, so a reader
+	// that pairs this status's Tools with a committed incarnation can tell a
+	// lagging view of the removed server from the replacement's own. Zero
+	// when the configuration snapshot carries no generations.
+	Incarnation int64
+	Metadata    map[string]interface{}
 	// Diagnostic is the most recent classified failure for this server, or nil
 	// when the server is healthy (or the last failure has not yet been classified).
 	// Spec 044.
 	Diagnostic *diagnostics.DiagnosticError
+
+	// RetryStopped reports that automatic reconnection has been given up for
+	// good: the classifier proved the failure deterministic and unrecoverable,
+	// so re-dialing cannot succeed until a human changes something (GH #1145).
+	// It is NOT the ordinary exponential backoff — that keeps retrying.
+	//
+	// The three fields exist as first-class status so the REST API, the CLI and
+	// the tray all read the same thing; without them a parked server would look
+	// like any other error and the user would wait forever for a retry that is
+	// never coming.
+	RetryStopped bool
+	// RetryStoppedCode is the stable MCPX_* code that justified stopping.
+	RetryStoppedCode string
+	// RetryStoppedReason is the human-readable cause, taken from the diagnostics
+	// catalog entry for RetryStoppedCode (falling back to the raw error).
+	RetryStoppedReason string
 }
 
 // ServerStatusSnapshot is an immutable snapshot of all server statuses.

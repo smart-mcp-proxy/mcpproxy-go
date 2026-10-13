@@ -1,0 +1,296 @@
+// GlanceSelection.swift
+// MCPProxy
+//
+// Display rules for the tray glance section: which activity records qualify
+// as rows, how duplicates collapse, and which sessions count as clients.
+// Pure functions over ActivityEntry / APIClient.MCPSession — no AppKit.
+
+import Foundation
+
+/// One rendered activity row: a maximal run of *consecutive* qualifying records
+/// that share a group key (server, tool, outcome class, status class) — spec 090
+/// FR-001…004.
+///
+/// Consecutive-only is the whole point: the glance is a timeline, and clustering
+/// non-adjacent calls would claim an ordering that never happened. A burst of 19
+/// `jira_get_issue` calls becomes one row; the same tool called again after
+/// something else stays a second row.
+///
+/// A run is also HOMOGENEOUS in outcome: successes and failures never share one.
+/// The row is the count's subject, so "×12, failed" has to mean twelve failures
+/// — and until status class joined the key it did not, because one error in a
+/// stretch of successes marked the whole stretch failed and counted the
+/// successes into it.
+///
+/// The run is a *view* over the records, not a summary of them: every derived
+/// value names the record it came from, so a row can always be traced back.
+struct GlanceRun: Equatable {
+
+    /// What makes two adjacent records "the same thing happening again".
+    ///
+    /// Outcome class is in the key so a policy block never merges into a run of
+    /// calls to the same tool (FR-002): "27 blocked attempts" and "27 calls" are
+    /// different stories, and blocks are the ones worth reading.
+    ///
+    /// Status class is in it for the same reason one level down (FR-004): "×12
+    /// failed" and "×10 succeeded, ×2 failed" are different stories too, and a
+    /// single key for both told the alarming one about ten calls that were fine.
+    /// The two are separate fields rather than one merged enum because rule 6
+    /// (`qualifies`) asks only whether policy STOPPED the call, and merging
+    /// would make a block indistinguishable from a failure at that gate.
+    struct Key: Equatable {
+        let server: String
+        let tool: String
+        let outcomeClass: OutcomeClass
+        let statusClass: StatusClass
+
+        init(for entry: ActivityEntry) {
+            self.server = entry.serverName ?? ""
+            self.tool = entry.toolName ?? ""
+            self.outcomeClass = entry.outcomeClass
+            self.statusClass = entry.statusClass
+        }
+    }
+
+    let key: Key
+
+    /// The run's records, newest first (the feed's own order), never empty.
+    let records: [ActivityEntry]
+
+    init(key: Key, records: [ActivityEntry]) {
+        precondition(!records.isEmpty, "a run is a run of at least one record")
+        self.key = key
+        self.records = records
+    }
+
+    /// Repeat count — rendered as a `×N` suffix only when > 1 (FR-003).
+    ///
+    /// It counts what the fetched page holds and nothing more: a run longer than
+    /// the 100-record poll window reads ×100 (spec Edge Cases).
+    var count: Int { records.count }
+
+    /// The record whose clock the row shows.
+    var newest: ActivityEntry { records[0] }
+
+    /// The record the row is *identified* by — see `identity`.
+    var oldest: ActivityEntry { records[records.count - 1] }
+
+    /// Stable identity for in-place updates (FR-024).
+    ///
+    /// The oldest record, not the newest: a run grows at the head, so keying on
+    /// the newest would make every additional call in a burst look like a
+    /// brand-new row to `GlanceSection.updateInPlace` and rewrite the whole row
+    /// identity — icon, tooltip and click payload — on every tick.
+    var identity: String { GlanceSelection.recordKey(for: oldest) }
+
+    /// The newest failing record in the run, if any. `records` is newest-first,
+    /// so `first` is the newest.
+    ///
+    /// Either every record in the run is failing or none is — status class is
+    /// part of the key — so this is the newest record itself on a failed run,
+    /// and nil on every other kind.
+    var newestErroring: ActivityEntry? { records.first { $0.status == "error" } }
+
+    /// The status the row renders (FR-004).
+    ///
+    /// The newest record's own, and that is now the whole rule: a run cannot
+    /// mix success and failure, so there is no "worst" to pick. It used to be
+    /// `newestErroring?.status ?? newest.status` — one error anywhere in the
+    /// stretch dominated the row — which is exactly what made a `×12` row of
+    /// mostly-successful calls read as twelve failures.
+    var status: String { newest.status }
+
+    /// The error clause to show, from the NEWEST erroring record (FR-004) —
+    /// on a failed run, the newest record.
+    var errorMessage: String? { newestErroring?.errorMessage }
+
+    /// The reason to show: the newest record in the run that has one (FR-004) —
+    /// a later call that omitted its intent must not blank out the row.
+    var displayReason: String? { records.lazy.compactMap(\.reason).first }
+
+    /// The row's clock: the age of the newest record (FR-004).
+    var timestamp: String { newest.timestamp }
+}
+
+/// Presentation policy for the glance section. Pure and synchronous.
+enum GlanceSelection {
+
+    /// Proxy administration built-ins. Never shown, whatever their status.
+    static let managementBuiltIns: Set<String> = ["upstream_servers", "quarantine_security"]
+
+    /// Discovery built-ins that are worth a row even on success.
+    ///
+    /// `code_execution` is deliberately NOT here. It is an internal primitive —
+    /// a wrapper around the upstream calls a script makes — and since those
+    /// sub-calls became `tool_call` records of their own they speak for it far
+    /// better than it did: the glance now shows the REAL work ("jira_get_issue
+    /// ×3") instead of one opaque "code_execution" row that named no server and
+    /// no tool. A FAILED code_execution still rows, through rule 3's failure
+    /// branch below — a script that died of a syntax error has no children to
+    /// speak for it, so its own record is the only trace there is.
+    static let glanceInternalTools: Set<String> = ["retrieve_tools", "describe_tool"]
+
+    /// How many rows each list shows.
+    static let rowLimit = 5
+
+    // MARK: - Rules 1-3
+
+    /// Whether a single record qualifies for a glance row.
+    static func qualifies(_ entry: ActivityEntry) -> Bool {
+        let tool = entry.toolName ?? ""
+
+        // Rule 1 — management built-ins are excluded, whatever the status.
+        if managementBuiltIns.contains(tool) { return false }
+
+        // Rule 2 — every real upstream call.
+        if entry.type == "tool_call" { return true }
+
+        // Rule 6 (spec 090 FR-012) — a policy decision that actually STOPPED
+        // the call. It has no other trace anywhere in the menu: the call never
+        // dispatched, so no `tool_call` record was ever written for it, and
+        // without this a block is simply invisible. Warnings and redactions let
+        // the call through and are represented by the call's own record, so
+        // admitting them would spend one of five rows on a decision that
+        // changed nothing. `outcomeClass` is what decides, so a record whose
+        // `decision` metadata was projected away still qualifies on its status.
+        if entry.type == ActivityEntry.policyDecisionType {
+            return entry.outcomeClass == .blocked
+        }
+
+        // Rule 3 — discovery built-ins, plus any internal failure (a wrapper
+        // that died before dispatch has no upstream record). A SUCCESSFUL
+        // code_execution falls through both clauses on purpose: its sub-calls
+        // are the rows now.
+        if entry.type == "internal_tool_call" {
+            return glanceInternalTools.contains(tool) || entry.status != "success"
+        }
+
+        return false
+    }
+
+    // MARK: - Rule 4
+
+    /// Collapse records sharing a `request_id`, keeping the `tool_call` one.
+    ///
+    /// The surviving record is emitted at the position of the first record of
+    /// its group so recency ordering is preserved. Records with no request id
+    /// are never collapsed. When a group holds several `tool_call` records the
+    /// first one encountered wins — later ones are dropped, not merged.
+    ///
+    /// Why this is safe today: the core mints a request id per dispatch
+    /// (`internal/server/mcp.go`, both `requestID := fmt.Sprintf("%d-%s-%s", …)`
+    /// sites under "Generate requestID for activity tracking"), so two distinct
+    /// upstream calls carry distinct ids structurally. A group is therefore a
+    /// wrapper plus its upstream partner, never a fan-out.
+    ///
+    /// The sub-calls a `code_execution` script makes are visible here now, and
+    /// they do NOT break that: `emitSubCallActivity`
+    /// (`internal/server/mcp_code_execution.go`) mints a FRESH correlation id
+    /// per sub-call — the counter suffix in `mintCorrelationIDAt` is what makes
+    /// it unique — and names the script through `parent_id`, which carries the
+    /// parent's request id rather than a shared one. No child shares an id with
+    /// another child or with the parent, so a multi-tool script renders as one
+    /// row per sub-call (the transparency the feature exists for) instead of
+    /// collapsing to one. The successful wrapper itself never reaches this step
+    /// — rule 3 dropped it — so those rows are the script's whole story.
+    ///
+    /// Note the legacy `ToolCallRecord` written beside it still carries
+    /// `RequestID: u.executionID` ("Use execution ID as request ID to link
+    /// nested calls") — one id for the whole script. That is the history table,
+    /// not the activity stream this pipeline reads. Should the ACTIVITY records
+    /// ever be given that shape, this function would collapse an entire script
+    /// down to a single row, and rule 4 would have to narrow to "collapse a
+    /// wrapper with its upstream partner" rather than deduplicating a whole
+    /// request id.
+    static func collapseByRequestID(_ entries: [ActivityEntry]) -> [ActivityEntry] {
+        var winners: [String: ActivityEntry] = [:]
+        for entry in entries {
+            guard let rid = entry.requestId, !rid.isEmpty else { continue }
+            guard let existing = winners[rid] else {
+                winners[rid] = entry
+                continue
+            }
+            if existing.type != "tool_call" && entry.type == "tool_call" {
+                winners[rid] = entry
+            }
+        }
+
+        var emitted = Set<String>()
+        var result: [ActivityEntry] = []
+        for entry in entries {
+            guard let rid = entry.requestId, !rid.isEmpty else {
+                result.append(entry)
+                continue
+            }
+            if emitted.contains(rid) { continue }
+            emitted.insert(rid)
+            result.append(winners[rid] ?? entry)
+        }
+        return result
+    }
+
+    // MARK: - Record identity
+
+    /// Identity of one call: its `requestId`, never its `id`.
+    ///
+    /// A row rendered from a live SSE event carries a provisional id of the
+    /// form `"<request_id>:<type>"`, which the reconciling poll replaces with
+    /// the storage-assigned ULID for the very same call — so `id` reports a
+    /// wholesale turnover on every poll while `requestId` is identical on both
+    /// sides. It is what rule 4 collapses on, what `AppState`'s merge keys on,
+    /// and what `GlanceSection` diffs rows by. Records with no request id are
+    /// never collapsed, so their `id` is a safe fallback.
+    static func recordKey(for entry: ActivityEntry) -> String {
+        if let requestId = entry.requestId, !requestId.isEmpty { return requestId }
+        return entry.id
+    }
+
+    // MARK: - Rule 5
+
+    /// Fold each maximal stretch of consecutive records sharing a group key into
+    /// one `GlanceRun`, preserving feed order (spec 090 FR-001 step 3).
+    ///
+    /// This runs *after* qualification and collapse, and that order is the
+    /// requirement, not an implementation detail: a record that never renders —
+    /// a management built-in, a wrapper folded into its upstream partner — must
+    /// not split the run around it (US1 scenario 6). Filtering afterwards would
+    /// leave two adjacent identical rows wherever noise happened to land between
+    /// two calls to the same tool.
+    static func groupConsecutive(_ entries: [ActivityEntry]) -> [GlanceRun] {
+        var runs: [GlanceRun] = []
+        var currentKey: GlanceRun.Key?
+        var current: [ActivityEntry] = []
+
+        for entry in entries {
+            let key = GlanceRun.Key(for: entry)
+            if key == currentKey {
+                current.append(entry)
+                continue
+            }
+            if let currentKey, !current.isEmpty {
+                runs.append(GlanceRun(key: currentKey, records: current))
+            }
+            currentKey = key
+            current = [entry]
+        }
+        if let currentKey, !current.isEmpty {
+            runs.append(GlanceRun(key: currentKey, records: current))
+        }
+        return runs
+    }
+
+    // MARK: - Public entry points
+
+    /// The row pipeline, in the one order the spec fixes (FR-001):
+    /// qualify → collapse by request id → group consecutive runs → take `limit`.
+    ///
+    /// Every step is a narrowing, and each one must see the output of the one
+    /// before it: grouping before collapsing would count a wrapper and its
+    /// upstream partner as two calls, and taking the first five before grouping
+    /// would hand the whole menu to a single burst.
+    static func activityRows(from entries: [ActivityEntry], limit: Int = rowLimit) -> [GlanceRun] {
+        let qualified = entries.filter(qualifies)
+        let collapsed = collapseByRequestID(qualified)
+        return Array(groupConsecutive(collapsed).prefix(limit))
+    }
+}

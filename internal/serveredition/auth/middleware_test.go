@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -86,7 +87,7 @@ func setupMiddlewareTest(t *testing.T) *testMiddlewareSetup {
 	// Logger (discard output in tests)
 	logger := zap.NewNop().Sugar()
 
-	mw := NewServerEditionAuthMiddleware(sessionManager, userStore, teamsConfig, hmacKey, logger)
+	mw := NewServerEditionAuthMiddleware(sessionManager, userStore, StaticServerEditionConfig(teamsConfig), hmacKey, logger)
 
 	return &testMiddlewareSetup{
 		db:             db,
@@ -298,6 +299,91 @@ func TestMiddleware_ExpiredSession(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestSessionStatus_CookieOnlyBootstrap(t *testing.T) {
+	s := setupMiddlewareTest(t)
+
+	call := func(req *http.Request) *httptest.ResponseRecorder {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.middleware.SessionStatus(rec, req)
+		return rec
+	}
+	assertStatus := func(rec *httptest.ResponseRecorder, want bool) {
+		t.Helper()
+		if rec.Code != http.StatusOK {
+			t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+		}
+		if rec.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("expected no-store, got %q", rec.Header().Get("Cache-Control"))
+		}
+		var body struct {
+			Authenticated bool `json:"authenticated"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+			t.Fatal(err)
+		}
+		if body.Authenticated != want {
+			t.Fatalf("authenticated=%v, want %v", body.Authenticated, want)
+		}
+	}
+
+	// No cookie, malformed/unknown cookie, and a bearer token are all quiet
+	// false; this public hint must never accept a non-cookie credential.
+	assertStatus(call(httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)), false)
+	unknown := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	unknown.AddCookie(&http.Cookie{Name: SessionCookieName, Value: "unknown"})
+	assertStatus(call(unknown), false)
+	bearer := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	bearer.Header.Set("Authorization", "Bearer "+s.generateJWT(t, s.testUser.ID, s.testUser.Email, s.testUser.DisplayName, "user", s.testUser.Provider, time.Hour))
+	assertStatus(call(bearer), false)
+
+	active := s.createSessionForUser(t, s.testUser.ID)
+	valid := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	valid.AddCookie(&http.Cookie{Name: SessionCookieName, Value: active.ID})
+	assertStatus(call(valid), true)
+
+	expired := &users.Session{ID: "expired-bootstrap", UserID: s.testUser.ID, CreatedAt: time.Now().Add(-2 * time.Hour), ExpiresAt: time.Now().Add(-time.Hour)}
+	if err := s.userStore.CreateSession(expired); err != nil {
+		t.Fatal(err)
+	}
+	expiredReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	expiredReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: expired.ID})
+	assertStatus(call(expiredReq), false)
+
+	disabled := s.createSessionForUser(t, s.disabledUser.ID)
+	disabledReq := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	disabledReq.AddCookie(&http.Cookie{Name: SessionCookieName, Value: disabled.ID})
+	assertStatus(call(disabledReq), false)
+}
+
+func TestSessionStatus_StoreFailureFailsClosed(t *testing.T) {
+	s := setupMiddlewareTest(t)
+	session := s.createSessionForUser(t, s.testUser.ID)
+
+	// A valid cookie must not become a successful bootstrap when its backing
+	// store is unavailable. Closing the real BBolt handle makes the session
+	// lookup fail deterministically without replacing either the SessionManager
+	// or UserStore with a mock.
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close session store: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/session", nil)
+	req.AddCookie(&http.Cookie{Name: SessionCookieName, Value: session.ID})
+	rec := httptest.NewRecorder()
+	s.middleware.SessionStatus(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if rec.Header().Get("Cache-Control") != "no-store" {
+		t.Fatalf("expected no-store, got %q", rec.Header().Get("Cache-Control"))
+	}
+	if strings.Contains(rec.Body.String(), "authenticated") {
+		t.Fatalf("store failure disclosed session status: %s", rec.Body.String())
 	}
 }
 
@@ -598,5 +684,119 @@ func TestAdminOnly_NoContext(t *testing.T) {
 
 	if rr.Code != http.StatusUnauthorized {
 		t.Fatalf("expected 401, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+// --- Issue #1169: the bearer path must re-derive the role from config ---
+
+// TestMiddleware_DemotedAdminJWT_DerivesRoleFromConfig pins the demotion
+// direction: a JWT whose frozen `role` claim says "admin" must NOT confer
+// admin when the subject's email is no longer in admin_emails.
+//
+// BITES: on unfixed code authenticateFromBearer branches on claims.Role and
+// returns AdminUserContext, so type=admin_user / role=admin.
+func TestMiddleware_DemotedAdminJWT_DerivesRoleFromConfig(t *testing.T) {
+	s := setupMiddlewareTest(t)
+
+	// s.testUser (user@example.com) is NOT in AdminEmails. The claim lies.
+	token := s.generateJWT(t, s.testUser.ID, s.testUser.Email, s.testUser.DisplayName, "admin", s.testUser.Provider, 1*time.Hour)
+
+	handler := s.middleware.Middleware()(authContextHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if body["type"] != coreauth.AuthTypeUser {
+		t.Errorf("stale admin claim conferred admin: expected type %q, got %q", coreauth.AuthTypeUser, body["type"])
+	}
+	if body["role"] != "user" {
+		t.Errorf("stale admin claim conferred admin: expected role %q, got %q", "user", body["role"])
+	}
+}
+
+// TestMiddleware_PromotedUserJWT_DerivesRoleFromConfig pins the REVERSE
+// direction so nobody "hardens" the fix into a demote-only AND of the claim
+// and the config: that variant would silently strand promoted users and
+// re-create the very asymmetry with the session path that #1169 is about.
+//
+// BITES: on unfixed code the frozen role="user" claim wins, so type=user.
+func TestMiddleware_PromotedUserJWT_DerivesRoleFromConfig(t *testing.T) {
+	s := setupMiddlewareTest(t)
+
+	// s.adminUser (admin@example.com) IS in AdminEmails, but the token was
+	// minted before the promotion and carries role="user".
+	token := s.generateJWT(t, s.adminUser.ID, s.adminUser.Email, s.adminUser.DisplayName, "user", s.adminUser.Provider, 1*time.Hour)
+
+	handler := s.middleware.Middleware()(authContextHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	if body["type"] != coreauth.AuthTypeAdminUser {
+		t.Errorf("stale user claim blocked promotion: expected type %q, got %q", coreauth.AuthTypeAdminUser, body["type"])
+	}
+	if body["role"] != "admin" {
+		t.Errorf("stale user claim blocked promotion: expected role %q, got %q", "admin", body["role"])
+	}
+}
+
+// TestMiddleware_BearerContextFieldParity is deliberately NOT a bite test: it
+// passes both before and after the #1169 fix. It is the anti-regression net
+// for the constructor swap — switching from
+// AdminUserContext(claims.Subject, claims.Email, ...) to
+// buildAuthContext(user) must not silently drop the subject, email, display
+// name or provider. Do not flag it as non-biting; that is its job.
+func TestMiddleware_BearerContextFieldParity(t *testing.T) {
+	s := setupMiddlewareTest(t)
+
+	token := s.generateJWT(t, s.adminUser.ID, s.adminUser.Email, s.adminUser.DisplayName, "admin", s.adminUser.Provider, 1*time.Hour)
+
+	handler := s.middleware.Middleware()(authContextHandler())
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("failed to unmarshal response: %v", err)
+	}
+
+	for _, tc := range []struct{ field, want string }{
+		{"user_id", s.adminUser.ID},
+		{"email", s.adminUser.Email},
+		{"display_name", s.adminUser.DisplayName},
+		{"provider", s.adminUser.Provider},
+	} {
+		if got, _ := body[tc.field].(string); got != tc.want {
+			t.Errorf("bearer auth context dropped %s: want %q, got %q", tc.field, tc.want, got)
+		}
 	}
 }

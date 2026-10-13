@@ -144,7 +144,7 @@
 - [x] T043 [US5] Implement recent activities list (3 items) with server, tool, time, status
 - [x] T044 [US5] Add "View All" link navigating to /activity page
 - [x] T045 [US5] Add loading and error states to widget
-- [x] T046 [US5] Import and add ActivityWidget to Dashboard.vue in `frontend/src/views/Dashboard.vue`
+- [ ] T046 [US5] Import and add ActivityWidget to Dashboard.vue in `frontend/src/views/Dashboard.vue`
 - [x] T047 [US5] Verify with Playwriter that dashboard widget displays correct counts and recent activities
 
 **Checkpoint**: User Story 5 complete - Dashboard widget showing activity summary

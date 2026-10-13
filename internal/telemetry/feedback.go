@@ -133,7 +133,7 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *FeedbackRequest) (*Fe
 		return nil, fmt.Errorf("failed to marshal feedback: %w", err)
 	}
 
-	url := s.endpoint + "/feedback"
+	url := s.liveEndpoint() + "/feedback"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create feedback request: %w", err)

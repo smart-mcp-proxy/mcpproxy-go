@@ -83,7 +83,7 @@ This feature modifies:
 - [x] T018 [US2] Add step to save notes to RELEASE_NOTES-${{ github.ref_name }}.md file in .github/workflows/release.yml
 - [x] T019 [US2] Add upload-artifact step for release-notes artifact in .github/workflows/release.yml
 - [x] T020 [US2] Add download-artifact step in build jobs (continue-on-error: true) in .github/workflows/release.yml
-- [ ] T021 [US2] Create releases/ directory structure documentation in docs/release-notes-generation.md
+- [x] T021 [US2] Create releases/ directory structure documentation in docs/release-notes-generation.md
 - [ ] T022 [US2] Test artifact upload/download flow with workflow_dispatch (MANUAL TESTING)
 
 **Checkpoint**: US2 complete - release notes available as artifact for installer integration

@@ -1,0 +1,192 @@
+# Research: MCP Credential Lifecycle (Spec 115)
+
+All code references are to `origin/main` at `8282c3865`.
+
+## Existing code inventory
+
+| Area | Where | What it gives us | Gap |
+|---|---|---|---|
+| Agent-token record | `internal/auth/agent_token.go` (`AgentToken`, `KindAgent/KindClient`, `ProfileModeLocked/Switchable`, `ClientTokenName`, `ValidClientID`, `ParseTokenExpiry`, `MaxTokens`, `MaxTokenExpiry`) | One record type for both kinds. HMAC-hashed secret. 12-char display prefix | No `revoked_at`, issuer or purpose |
+| Token storage | `internal/storage/agent_tokens.go` (`CreateAgentToken`, `RevokeAgentToken(ForOwner)`, `ValidateAgentToken`, `ErrAgentTokenNameExists`, `ErrAgentTokenLimitReached`); `client_credentials.go` (`MintClientCredentialNamed`, `ForgetClientCredential`, rotation) | Atomic bbolt writes. Name uniqueness is enforced in the same tx | Revoke does not stamp a time |
+| Token create/revoke logic | `internal/httpapi/tokens.go` `handleCreateToken`/`handleRevokeToken` | Name, permission, expiry and pin validation; error classification | **Inline in the REST handler**: no service, no audit, no SSE (G3/G5) |
+| Client credentials | `internal/runtime/clients_service.go` (+`_connect.go`) `ClientsService.Add/Forget/List/Get/SetBinding/BulkAssign/Rotate` | "THE service behind every client-credential operation". It runs the guard and `profile_change` records under `bindingWriteMu` | `Add` writes `assign`. `Forget` publishes no event (G6) |
+| REST custom client add | `internal/httpapi/client_bindings.go` `handleCreateClient`, `CreateClientResponse{client, credential, snippet}`, `clientSnippet()` (X-API-Key header) | One-time delivery shape and the snippet format | — |
+| Binding guard | `internal/runtime/binding_guard.go` `CheckBindingGuard`, `ActiveNamedBinding` (Kind=client only), `BindingGuardError` → `binding_bypassable_without_auth` | Refuses a binding that is escapable while `require_mcp_auth` is off | Tokens are not modelled |
+| `profiles` admin MCP tool | `internal/server/mcp_profiles_tool.go` (`profilesToolAccess`, `filterProfilesTool`, `handleProfiles`, `runProfilesOperation`, `profilesActor`, live `ReadOnlyMode`/`DisableManagement` refusals), `mcp_profiles_tool_schema.go` | Visibility predicate, per-call gate, activity emission with `redactBuiltinResponseForActivity` | No credential operations (G1) |
+| Registration | `internal/server/mcp.go:1361` (default server), `mcp_routing.go:860,932` (code-exec and call-tool servers), `filterProfileV3Tools` → `filterProfilesTool` | Where `profiles` is registered and filtered | — |
+| MCP auth | `internal/server/server.go` `mcpAuthMiddleware` | Validates `mcp_agt_`/`mcp_cli_` **on every request** through `storage.ValidateAgentToken`, returning 401 `Agent token invalid: <reason>`. Revocation and expiry therefore take effect on the next request of a live session | — |
+| Resolver | `internal/server/profile_resolver_v3.go` | A pin is authoritative and a dangling pin denies all (FR-020 of Spec 108) | — |
+| Activity | `runtime.writeChangeRecord` (`profile_change`), `emitActivityInternalToolCall`, `redactBuiltinResponseForActivity` → `auditRedaction` | Records attributed to actor, client and token | Key-name redaction only |
+| SSE | `internal/runtime/events.go`, `frontend/src/stores/system.ts` | `client.binding_changed` and `profiles.changed` are relayed as window events | No token or credential event |
+| Web UI | `views/Clients.vue`, `views/AgentTokens.vue` (the Tokens tab of `/clients`), `views/ProfileEditor.vue` (Assigned to), `components/profiles/ProfileCard.vue`, `utils/profiles.ts` `tierPhrase` | Rows, revoked/expired badges, Reload affordance for a dirty editor | No issuer, lease or purpose. No client link in Assigned to. Misleading "Read-only" (G7) |
+| Goldens | `internal/server/toolslist_snapshot_test.go` + `testdata/toolslist_goldens/{default_server,default_server_read_only,retrieve_tools_mode,code_execution_mode}.json`, `toolsListAllowedDelta` | An enumerated-delta gate on the built-in surface | A new tool needs a deliberate regeneration plus an allowed-delta entry |
+| E2E harness | `internal/server/e2e_test.go` `NewTestEnvironmentWithOptions{Mutate}`, `CreateMockUpstreamServer`. CI lane `e2e-tests.yml` runs `-run TestE2E` | In-process daemon and in-process upstreams | No dispatch counter on the mock |
+
+## Decisions
+
+### D1. A dedicated `credentials` tool, not new `profiles` operations
+
+**Decision**: add a separate built-in tool `credentials` with `list | get | create_client | create_token | revoke`.
+
+**Rationale**:
+1. **Different risk class.** Only these operations return a bearer secret. With a separate tool name, MCP clients' per-tool permission prompts (Claude Code, Cursor and others) can require confirmation for credential minting without also gating routine profile reads such as `effective_tools` and `explain`.
+2. **Stable `profiles` contract.** `profiles` is frozen in four tool-surface goldens and its schema is generated by reflection from `ProfileConfig`. Adding five operations and their arguments (`purpose`, `expires_in`, `display_name`, `name` as a token name, which would collide with `name` as a profile name) would overload argument meanings. The profiles `name` argument already means "profile name" for seven operations.
+3. **Description budget.** The `profiles` description is already three sentences listing 11 operations, and it is listed for every admin session. A separate tool keeps each description short and specific (SC-006).
+4. **Same authorization.** Reusing `profilesToolAccess` (renamed `adminToolAccess`) gives identical visibility, so "dedicated tool" does not mean "different auth".
+
+**Rejected**: (a) `profiles` operations `create_client`/`create_token`/`revoke`, because of the argument collision, the secret mixed into a mostly-read tool, and golden churn on an existing tool. (b) Extending `upstream_servers`, which is the wrong domain and is hidden entirely under `disable_management`. (c) Separate tools per kind (`clients`, `tokens`), which doubles the surface for no gain since both kinds share one record and store.
+
+### D2. `runtime.CredentialsService`: one facade, existing services underneath
+
+**Decision**: add `internal/runtime/credentials_service.go`:
+- `IssueClient(ctx, actor, IssueClientRequest) (*CredentialView, secret string, error)`, which delegates to `ClientsService` (new `issueCustomLocked` internals shared with `Add`)
+- `IssueToken(ctx, actor, IssueTokenRequest) (*CredentialView, secret, error)`, whose body is moved out of `handleCreateToken`
+- `Revoke(ctx, actor, Ref) (*CredentialView, changed bool, error)`
+- `List(filter)` and `Get(ref)`
+
+Every mutation takes `bindingWriteMu`, which is the same `*sync.Mutex` as `ClientsService.mu`. REST `/tokens`, REST `/clients` (custom add) and the MCP tool all call this service.
+
+**Rationale**: the issue says "reuse existing credential/config services and guards". `ClientsService` is already the shared client path. Tokens have no service, so we extract one instead of having the MCP handler call `httpapi`. Moving the REST token logic gives REST and CLI the same audit record and live event (closing G5) at no extra cost.
+
+**Option flag**: `IssueTokenRequest.EnforceGuard bool`. MCP sets it to true. REST leaves it false to preserve today's behaviour (Assumption A9). `IssueTokenRequest.RequireProfile bool` is true from MCP. REST keeps its legacy `allowed_servers`/`permissions` path.
+
+### D3. Visibility and execution-time authorization
+
+`adminToolAccess(ctx)` is today's `profilesToolAccess` body without a name. It requires all of the following:
+- an AuthContext that is admin and not anonymous
+- `CredentialKind ∈ {api_key, socket}`
+- a resolution that is none, or a policy with `management_tools: true`
+- no binding-guarded or dangling base
+
+Two consequences follow. A hidden tool and a forged call by a non-admin look the same as a nonexistent tool: over MCP the tool filter answers a JSON-RPC "tool not found" error, and the handler's defensive refusal is `unknown tool: credentials` (A25). An admin whose session selected a non-management profile is refused until it calls `set_profile("")`, which the issue explicitly allows.
+
+Registration mirrors `profiles`: `mcp.go` (default server) and `mcp_routing.go` (call-tool and code-exec servers). It is never registered through `buildManagementTools`, because that path returns nothing under `read_only_mode` and `list`/`get` must stay readable. The JS sandbox's `call_tool` dispatches only `server:tool` upstream identities and has no path to built-ins (verified in `mcp_code_execution.go`). A test pins that `credentials` cannot be reached from JS.
+
+### D4. Gates
+
+- `read_only_mode` and `disable_management` are read from the live config per call and refuse the three mutating operations. The texts are byte-equal to `profiles`, and a `code` is added.
+- `require_mcp_auth`: no change. Anonymous callers fail D3.
+- The FR-008a guard is enforced on MCP issue for both kinds (FR-012) **and keeps confining MCP-issued tokens afterwards** (FR-012a). The real evaluator, `(*MCPProxyServer).BindingGuardDelta` in `internal/server/profile_binding_guard.go`, and every snapshot it is fed iterate only active **client** bindings: `runtime.ActiveNamedBinding` requires `Kind=client`, `runtime.clientCredentialSnapshot` (`binding_guard_wiring.go:44`, used by `MutateConfig`/`GuardedApplyConfig` in `config_funnel.go:90,192`) filters to clients, and the per-request anonymous guard `bindingGuardActive` (`profile_binding_guard.go:23-70`) calls `activeNamedClientBinding`. Checking a token only at issuance (the round-0 `PinnedTokens` design) is therefore not enough: an admin could issue a confined token under `require_mcp_auth: true` and then turn auth off or widen `anonymous_profile`, and the worker would gain broader access by omitting its credential. **Revised design (spec review r1)**: an MCP-issued token is stamped `guard_bound: true`, and a single predicate `ActiveGuardedBinding` (an active named client binding, or an active guard-bound token treated as locked to its pin) replaces `ActiveNamedBinding` at every guard call site, including both snapshots and the anonymous request guard (data-model §5). The `already` map in `BindingGuardDelta` is re-keyed from `ClientID` to `TokenName` so tokens (empty `ClientID`) do not collide. The core predicate `bindingBypassable(idx, cfg, token, tools)` keeps its shape (an empty `ProfileMode` already evaluates as locked), with one change from spec review r2: a dangling bound reach (pin missing, or no bound-reachable profile resolves) is no longer "cannot be bypassed" but bypassable whenever anonymous reach is not also entirely dangling (FR-012b, data-model §5). Without it, `profiles delete force=true` on the pin followed by auth-off disabled the standing guard while the credentialed request stayed deny-all. Config writes through the API funnel are refused; file-watcher reloads are not refused (existing rule, `server.go:3681`) but `bindingGuardActive` then denies every anonymous request, so the bypass fails closed. Legacy and REST/CLI tokens carry no `guard_bound` and keep today's behaviour (A13). Tests: a token and a locked client with the same pin give the same verdict in every path, and the E2E guard-persistence scenario (quickstart E2E-4) proves zero forbidden dispatches after both config changes.
+
+### D5. No silent defaults
+
+- `profile` is required, non-empty and existing. The check runs under the mutex, before mint.
+- `expires_in` is required and parsed by `auth.ParseTokenExpiry`, which caps it at 365 days. The MCP layer refuses `""` so the default does not apply. **Spec review r2**: the parser's day branch (`agent_token.go:179-186`) multiplies an unchecked `strconv.Atoi` count into `time.Duration`, so `106752d` overflows negative, passes the `d > MaxTokenExpiry` cap and mints an already-expired token, and larger counts can wrap positive. The shared parser gains checked arithmetic: refuse `days > int(MaxTokenExpiry/(24*time.Hour))` before multiplying (same ">365 days" error), and refuse a non-positive result in both branches. REST/CLI keep their codes and texts for ordinary inputs (A16); the MCP layer maps every parser error to `invalid_expiry` before any mint.
+- `mode` defaults to `locked`, the most restrictive mode. `switchable` is honoured only when explicit, and is still bounded by the pin's `switchable_to`.
+- `create_token` has no legacy scope arguments: `allowed_servers: ["*"]` and all permissions, with scope from the profile. Under a dangling pin the resolver denies all, so a deleted profile never widens to `*`. This is verified in `resolveProfileV3` (the tier-1 pin is authoritative even when dangling).
+
+### D6. Identity uniqueness and no partial grants
+
+- Tokens: the name follows `tokenNameRegex`, the `client-` prefix is reserved, and storage enforces uniqueness in the tx (`ErrAgentTokenNameExists`). A pre-check under the mutex classifies the state for `identity_exists.state`.
+- Clients: `ValidClientID`, connect-registry ids are reserved, and **any** existing record, active or not, is refused for MCP. MCP never takes `ClientsService.issueLocked`'s tombstone-revive path. The refusal happens before `issueLocked`, under the same mutex.
+- All validation precedes the single storage write. The audit record and SSE event come after the write and are best-effort.
+- **No fallible step after the commit (spec review r1).** Today's `ClientsService.Add` (`clients_service.go:844-850`) mints, writes the audit record, and then re-reads the store with `s.records()`; if that read fails it returns an error **after** the credential is committed, so the caller gets no secret while an active credential and its issuance record exist. The issue path must not inherit that. `MintClientCredentialNamed` and `CreateAgentToken` already return (or are changed to return) the committed `*auth.AgentToken`; `issueLocked` carries it out (`IssuedCredential` gains an unexported-to-connect `Record`), and the `CredentialView` is projected from that committed record with no further store read. After the commit, `CredentialsService` returns success with the secret unconditionally: audit, SSE, `NotifyBindingChanged` and link building are best-effort and only log on failure. REST `Add` is moved onto the same path, which fixes the existing defect for REST/CLI as well. A fault-injection test (store whose `ListAgentTokens` fails after a successful mint) requires the secret and view to be delivered, and a test with a failing mint requires no record and no issuance event.
+
+### D7. Revocation
+
+- Tokens use `RevokeAgentToken`. The storage change stamps `RevokedAt` (additive) and makes revoking an already-revoked token report `changed=false` (via a new `RevokeAgentTokenReport` returning `(before, after)`).
+- Clients use `ClientsService.forgetLocked` with diff `{"via":"credentials"}`, but the record kind is `revoke` (see D9). Through a new `forgetLockedOpt` parameter `change`, revocation from the existing Clients UI and REST stays `forget`.
+- Same-session invalidation needs no new code, because `mcpAuthMiddleware` validates every request. It is pinned by E2E-1/E2E-2. Also, `BindingNotifier.NotifyBindingChanged(tokenName)` is called on revoke so the revoked token's live sessions get their stored `set_profile` selection cleared. This is harmless, and it keeps session rows honest.
+
+### D8. One-time delivery format
+
+The format mirrors REST `CreateClientResponse` so that agents and docs learn one shape:
+
+```json
+{
+  "client" | "token": { ...CredentialView },
+  "credential": "mcp_cli_…|mcp_agt_…",
+  "snippet": { "generic_http": "{\"mcpServers\":{\"mcpproxy\":{\"url\":\"http://127.0.0.1:8080/mcp\",\"headers\":{\"X-API-Key\":\"…\"}}}}", "header_name": "X-API-Key" },
+  "delivery": { "shown_once": true, "endpoint": "http://127.0.0.1:8080/mcp", "header_name": "X-API-Key", "alternate_header": "Authorization: Bearer <credential>", "install_note": "…" },
+  "links": { "identity": "…", "profile": "…", "effective_tools": "…", "activity": "…" }
+}
+```
+
+`links` are absolute UI URLs built from the listen address, with no API key in them, plus `ui_path` relative forms. The snippet reuses `httpapi.(*Server).clientSnippet`, exposed through the `profilesAdminViews`-style interface (`CredentialSnippet(secret)`, `UILinks(ref)`).
+
+### D9. Audit model: `profile_change` with `issue` / `revoke`
+
+**Decision**: add `profile.ChangeIssue = "issue"` and `profile.ChangeRevoke = "revoke"`. `CredentialsService` writes them for every issue and revoke on every surface that goes through it: MCP, REST/CLI tokens, and REST/CLI custom client add (FR-010 changes the latter from `assign`). `forget` remains the Clients-page "Forget" action.
+
+**Rationale**: `profile_change` records are already attributed (actor, surface, client_id, token_name, profile), filterable (`/activity?type=profile_change&client=…|token=…|profile=…`) and rendered in Activity. A new activity *type* would need storage, filter, export and UI plumbing for no gain. The `diff` carries `credential_kind`, `expires_at`, `lease`, `mode`/`pin_source`, `token_prefix` and `purpose_set`. It holds no secret, no hash and no purpose text (A10).
+
+**Rejected**: (a) keeping `assign` for issue, which is indistinguishable from a reassignment in a lifecycle review; (b) a new `credential_lifecycle` activity type, for the plumbing cost above.
+
+### D10. Redaction strategy (defence in depth)
+
+1. The MCP handler builds **two** results: the delivery result for the caller, and an audit body (`auditSummaryFor(result)`) with `credential`/`snippet` replaced. `emitActivityInternalToolCall` gets only the audit body (FR-022).
+2. `redactBuiltinResponseForActivity` additionally learns the `mcp_agt_`/`mcp_cli_` value prefixes (`oauth.AuditRedaction` value rule). Any string containing them is masked as a backstop in every built-in tool's activity response.
+3. Logs: no `zap` field ever takes the secret. A test captures a zap observer at debug level across the whole lifecycle and searches for the secret. The mcp-go server is configured without response logging. The task list includes an audit that `server.WithLogging`/hooks do not log tool results, and a fix if they do.
+4. Sensitive-data detection scans tool **arguments and upstream responses**. Built-in `credentials` arguments must not be trusted to be secret-free (spec review r1): an admin agent can paste a delivered credential into `purpose`, `display_name`, an id, an unknown `operation` or a malformed `expires_in`. The handler therefore runs a secret-shaped input screen over every argument before any other check (data-model §8): the `mcp_agt_`/`mcp_cli_` prefixes, the configured API key, and the existing `internal/security.Detector` with all categories. A hit is refused with `secret_in_argument` naming only the field; nothing is persisted; the activity record's arguments are replaced wholesale by a server-built summary (round 2). Round 3: the screen's detector is forced on independently of the user's detection settings, payloads over 16 KiB are refused (`arguments_too_large`), and the same screen runs inside `CredentialsService` for REST and CLI issuance. Error texts never echo free text or unparsed values (contracts/errors.md). The secret-sink test reuses each issued secret in every free-text field and in each invalid-input path, then scans metadata, views, errors, logs, activity and exports, SSE, notifications and the `config.db` bytes.
+6. Reusing the existing detector is not a new auth or redaction model: it is the same `internal/security` engine that already scans tool arguments, called synchronously on this one built-in's input.
+5. SSE `activity.internal_tool_call.completed` is built from the stored record, so it inherits (1). `credentials.changed` carries ids only.
+
+### D11. Live updates
+
+New event `credentials.changed` `{kind, id, token_name, change, profile}`, published by `CredentialsService` after issue and revoke, and by `ClientsService.forgetLockedOpt` (closing G6). The frontend relays it in `stores/system.ts` as `mcpproxy:credentials.changed`. The clients store, the AgentTokens view and the profiles store (`used_by`) refetch. The profile editor already preserves drafts: `loadProfile` replaces only `saved`, `dirty` is computed against it, and the existing "Reload" banner handles the conflict. A test pins this for an MCP-driven assignment.
+
+### D12. UI vocabulary
+
+- Issuer: "via MCP · api_key", "via Web UI", "via CLI", "via REST". Legacy records with no issuer show nothing.
+- Lease (≤ 24 h lifetime at issue): "Lease ends in 45 min" / "Lease ended". No warning colour, no reconnect prompt.
+- Purpose: a collapsible "Stated purpose — not enforced" block. Enforced restrictions keep appearing in the profile's Tools → Callable table and the explain output.
+- Tier label: `tierPhrase(max_tier, tool_counts)` returns "Read-only + N write exception(s)" when `max_tier=read` and `tool_counts.write + destructive > 0` (counts already exist on `ProfileView`). "Read + write + N destructive exception(s)" is the equivalent for a write cap.
+
+### D13. E2E harness
+
+There are two layers:
+- **Go `TestE2E_CredentialsLifecycle_*`** in `internal/server/credentials_lifecycle_e2e_test.go`. These run in the `e2e-tests.yml` lane (`-run TestE2E`) and are skipped by the unit lane's `-skip E2E` regex, matching existing E2E tests. They use `NewTestEnvironmentWithOptions` with a `Mutate` that sets `require_mcp_auth: true`, profiles and two mock upstreams. `CreateMockUpstreamServer` gains a per-tool atomic dispatch counter (`MockUpstreamServer.Dispatches(tool)`). The MCP sessions are mcp-go streamable-HTTP clients that keep their session, so "same session" is literal.
+- **Live-harness verification** on the built binary (`/private/tmp/claude-501/qa070/start.sh`). It uses a fixture variant that appends every `tools/call` to a ledger file and a session-reusing MCP client, and checks the same six scenarios. Evidence goes under `docs/qa/0.70.0-ux-2026-10-10/remediation/evidence/i1552/` and is never committed.
+
+Expiry is tested two ways. `auth.AgentToken.IsExpired` reads `time.Now()` and has no clock seam, and adding one is not needed. `ParseTokenExpiry` accepts any positive Go duration, so the Go test issues `expires_in: "3s"` over MCP and waits with `require.Eventually` for the 401. The live harness uses `expires_in: "90s"` and waits.
+
+### D14. Tool-surface goldens
+
+Adding a tool deliberately changes four goldens (`default_server`, `default_server_read_only`, `retrieve_tools_mode`, `code_execution_mode`). Per the snapshot test's rules: regenerate once with `MCPPROXY_WRITE_TOOLSLIST_GOLDENS=1`, add `credentials` to `toolsListAllowedDelta` with a comment citing Spec 115, and record the token cost (SC-006) in the commit message. The `profiles` schema and description are **not** changed, so its goldens stay byte-equal. The `management_tools` description wording is not updated, and the new tool's description says it follows the same visibility.
+
+### D15. Error codes
+
+New codes go in `internal/profile/contract.go` beside the existing ones, are pinned in `internal/profile/testdata/contract/enums.json` and mirrored in `frontend/src/types/contracts.ts`: `missing_argument`, `invalid_argument`, `unknown_operation`, `profile_required`, `unknown_profile`, `invalid_expiry`, `identity_exists`, `identity_not_found`, `reserved_identity`, `token_limit_reached`, `read_only_mode`, `management_disabled`, `unsupported_edition`, `credentials_unavailable`, `secret_in_argument` (added in spec review r1), `arguments_too_large` (added in spec review r3). The existing code `binding_bypassable_without_auth` is reused; `connect_in_progress` is deliberately **not** used by `credentials` (revoke wins over connect, A19). See contracts/errors.md.
+
+## Open questions resolved by assumption
+
+All are recorded in spec.md §Assumptions A1–A12. None blocks planning.
+
+## Spec review round 1 (OpenCode GPT-6.1 Sol) resolutions
+
+All four findings were verified against `origin/main` 8282c3865 and accepted.
+
+| # | Finding | Verified at | Resolution |
+|---|---|---|---|
+| 1 (high) | Token confinement checked only at issuance; config and anonymous guards snapshot clients only | `binding_guard_wiring.go:44`, `profile_binding_guard.go:23-70`, `binding_guard.go:114` (`Kind == KindClient`), `server.go:3681` (hot reload not refused) | `guard_bound` + `ActiveGuardedBinding` at every guard site; FR-012a; A13 compatibility rule; T012/T013/T013a; E2E-4 guard persistence |
+| 2 (high) | Free-text arguments assumed secret-free, but stored and echoed | contract §Activity ("never contain a secret"), errors.md examples quoting values, A10 "stored as given" | Secret-shaped input screen first (data-model §8, FR-020a, `secret_in_argument`); echo rule (FR-020); A14; T038a; E2E-5 step 3 |
+| 3 (medium) | `ClientsService.Add` can fail after mint (`s.records()` re-read) | `clients_service.go:844-850` | View projected from the committed record; nothing after the commit can fail the call (D6, FR-007); T015a |
+| 4 (medium) | `/mcp/code` parity impossible with a `code_execution: false` profile | `mcp_routing.go:1076-1078` | Two-profile parity (code-enabled and code-disabled) in E2E-4 and T040 |
+
+## Spec review round 2 (OpenCode GPT-6.1 Sol) resolutions
+
+1. **Dangling pin disabled the standing guard (high, accepted).** Verified: `bindingBypassable` returns false for a missing bound profile (`profile_binding_guard.go:202-205`) and for an empty resolved bound reach, and the existing test case "dangling bound base is already deny all" pins that. The case was reasoned from the credentialed request only. Fixed by FR-012b / data-model §5 / A15 and T013b; the existing test case flips deliberately to `want: true`.
+2. **Secret screen covered only string values and substituted only the first key (high, accepted).** Verified against our own round-1 text (data-model §8, contract activity body). Fixed: whole-payload recursive screen over keys and values of every type, all hits collected, arguments replaced wholesale by a server-built summary on a hit, unknown keys never echoed (`"(unknown argument)"`). T038a extended.
+3. **`ParseTokenExpiry` overflow (medium, accepted).** Verified: `time.Duration(106752) * 24 * time.Hour` exceeds `math.MaxInt64` and goes negative, passing the cap check. Fixed with checked arithmetic in the shared parser (A16) and T009a.
+
+## Spec review round 3 (OpenCode GPT-6.1 Sol) resolutions
+
+All three findings were verified against the code and accepted.
+
+1. **REST issuance bypassed the screen (high, accepted).** Verified: round-2 T038a/T046 placed the screen in the MCP handler only, while T022/T024 add `purpose` to REST token and client creation and data-model §1 required screening before storage. Fixed: the screen is one runtime function owned by `CredentialsService` and runs as the first step of every `Issue*` call on every surface (data-model §8.1–8.2, FR-020b, A18). REST answers 400 naming the field. Regression: T038b.
+2. **Live detector config did not guarantee whole-payload screening (high, accepted).** Verified: `Detector.Scan` returns no detections when `!config.IsEnabled()` (`internal/security/detector.go:46`), skips arguments when `ScanRequests` is false (`:54`) and truncates content at `GetMaxPayloadSize()` (`:136-139`); round 2 overrode categories only. Fixed: a dedicated screening detector with enablement, request scanning, categories and payload limit forced on, `Truncated` treated as a hit, and a 16 KiB cap on the whole payload refused as `arguments_too_large` without retaining it (data-model §8, A17). Regression: T038c.
+3. **`connect_in_progress` blocked revoke (medium, accepted).** Verified: `ClientsService.Forget` does not check the connect claim (only `SetBinding`, `BulkAssign` and the minter do, `clients_service.go:525,601`, `clients_service_connect.go:206,223`), and `TestConnectMinter_ForgetDuringConnectFailsCommitClosed` pins "a deliberate revoke is never blocked by a connect"; our contract would have added the block. Fixed: revoke always proceeds; the in-flight connect fails closed with `credential_superseded` (contract §revoke, A19). Regression: T026 rewritten, T026a.
+
+## Spec review round 4 (OpenCode GPT-6.1 Sol) resolutions
+
+Both findings were verified against the code and accepted.
+
+1. **REST token arrays were outside the shared screen (medium, accepted).** Verified: `IssueTokenRequest` carries `AllowedServers` and `Permissions`, which the round-3 screened set omitted, while `auth.ValidatePermissions` returns `invalid permission: %q` (`internal/auth/agent_token.go:472`) and `validateAllowedServers` returns `unknown server: %q` (`internal/httpapi/tokens.go:584`), and T023 keeps those texts. `profile_pin` was also only screened indirectly. Fixed: every array element and the raw `profile_pin` are screened before any validator runs, with a fixed validation order; a hit names the array, never the element or index (data-model §8.2, FR-020b, A20). Regression: T038d, including mixed valid/secret arrays and control rows proving ordinary texts are unchanged.
+2. **REST decoder errors echoed caller keys before the screen (medium, accepted).** Verified: `handleCreateClient` decodes with `decodeProfileBody` (`DisallowUnknownFields`) and `badProfileBody` returns `err.Error()` verbatim (`internal/httpapi/profiles_crud.go:26-39`, `client_bindings.go:225`); a local Go 1.26 probe confirms `json: unknown field "mcp_agt_SECRET"`. Type errors in this Go version name only the struct field path and the JSON kind, but the path can carry caller keys for maps or future nested structs and `UnmarshalTypeError.Value` can carry a number literal, so they are sanitized too. `handleCreateToken` returns `"Invalid JSON body: "+err.Error()`. Fixed: both issuance routes decode through `decodeIssuanceBody` with a fixed error taxonomy that echoes only the route's own field names (data-model §8.3, A21). Regression: T038e.
+
+## Spec review round 5 (OpenCode GPT-6.1 Sol) resolutions
+
+Both findings were verified against the code and accepted.
+
+1. **Raw `expires_in` and `profile_pin` never reached the screen (medium, accepted).** Verified: `handleCreateClient` calls `parseClientExpiry` before `svc.Add` (`internal/httpapi/client_bindings.go:230-233`), `handleCreateToken` merges `profile`/`profile_pin` (`tokens.go:186-193`) and calls `parseExpiry` (`tokens.go:212`) in the handler, and `auth.ParseTokenExpiry` answers `invalid expiry duration: %q` (`internal/auth/agent_token.go:183,191`). The r4 request types carried a parsed `ExpiresAt` and a single `Profile`, so §8.2's "screen `expires_in` and `profile_pin` raw" was not implementable. Fixed: the requests carry raw `ExpiresIn` with an `ExpiryDefault`, and raw `Profile` and `ProfilePin`; the service screens them first, then reconciles aliases and parses expiry; handlers do neither (data-model §6, §8.2, FR-020b, A22). Regression: T038f, with control rows proving ordinary texts and defaults are unchanged.
+2. **Token namespace was owner-ambiguous (medium, accepted).** Verified: names are unique per owner (`CreateAgentToken`), `ListAgentTokens` returns every owner (`internal/storage/agent_tokens.go:401`), while `GetAgentTokenByName` and `RevokeAgentToken` resolve only ownerless tokens (`:324-325,432-433`); the contract listed all tokens and errors.md said "any record holds the name". Per-user tokens are already out of scope (A1), so we chose the narrower fix over an owner-qualified reference: every tool token operation addresses the ownerless namespace through the existing owner-scoped storage calls (`GetAgentTokenByOwnerAndName("", …)`, `RevokeAgentTokenForOwner("", …)`, `List` filtered to `UserID == ""`) (data-model §9, FR-005a, A23). REST `GET /api/v1/tokens` is unchanged. Regression: T028a.

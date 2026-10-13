@@ -311,7 +311,7 @@ func TestClassifyScannerExecFailureRecognisesAppArmorPattern(t *testing.T) {
 				if !strings.Contains(hint, "snap") {
 					t.Errorf("hint should mention snap docker remediation: %s", hint)
 				}
-				if !strings.Contains(hint, "scanner_disable_no_new_privileges") {
+				if !strings.Contains(hint, "disable_no_new_privileges") {
 					t.Errorf("hint should mention the config flag: %s", hint)
 				}
 			}

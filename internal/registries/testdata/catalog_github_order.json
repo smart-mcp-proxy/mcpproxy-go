@@ -1,0 +1,4677 @@
+{
+  "_comment": "Spec 109 fix-catalog-rank (SC-008, C1): catalog search \"github\" ranks GitHub's own official, verified server first, with identical order on REST, MCP, CLI, Web and macOS. sources + query are the INPUT: the official source's corpus is the union of three real registry.modelcontextprotocol.io responses (see recorded), served by RecordedRegistryHandlerForTest; ids + results are the golden OUTPUT written by internal/httpapi/spec109_catalog_order_test.go with UPDATE_GOLDEN=1 (REST GET /catalog/search?limit=20 data.results). ids are \"<source>:<entry id>\".",
+  "recorded": {
+    "at": "2026-10-02",
+    "from": "https://registry.modelcontextprotocol.io/v0.1/servers",
+    "queries": [
+      "github",
+      ".github/",
+      "/github"
+    ]
+  },
+  "query": "github",
+  "sources": [
+    {
+      "id": "official",
+      "name": "Official",
+      "provenance": "official",
+      "protocol": "modelcontextprotocol/registry",
+      "corpus": [
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Connect AI assistants to your GitHub-hosted Obsidian vault to seamlessly access, search, and analy…",
+            "name": "ai.smithery/Hint-Services-obsidian-github-mcp",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "Bearer token for Smithery authentication",
+                    "isSecret": true,
+                    "name": "Authorization"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://server.smithery.ai/@Hint-Services/obsidian-github-mcp/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/Hint-Services/obsidian-github-mcp"
+            },
+            "version": "0.4.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "A Model Context Protocol (MCP) application for automated GitHub PR analysis and issue management.…",
+            "name": "ai.smithery/saidsef-mcp-github-pr-issue-analyser",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "Bearer token for Smithery authentication",
+                    "name": "Authorization"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://server.smithery.ai/@saidsef/mcp-github-pr-issue-analyser/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/saidsef/mcp-github-pr-issue-analyser"
+            },
+            "version": "1.15.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Access the GitHub API, enabling file operations, repository management, search functionality, and…",
+            "name": "ai.smithery/smithery-ai-github",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "Bearer token for Smithery authentication",
+                    "isSecret": true,
+                    "name": "Authorization"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://server.smithery.ai/@smithery-ai/github/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/smithery-ai/mcp-servers"
+            },
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub platform changelog feed. $0.01/query. Register in-session — free testnet funds.",
+            "name": "com.a2awire/data-github-changelog-platform-change-announcement",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://a2awire.com/mcp/data/githubchangelog-github-platform-changelog-copilot-actions-security-change-394959/http"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/ee324/a2awire"
+            },
+            "title": "GitHub Platform Changelog — buy per-query in-session (githubchangelog)",
+            "version": "0.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Trending GitHub repos: new \u0026 rising daily. $0.01/query. Register in-session — free testnet funds.",
+            "name": "com.a2awire/data-trending-repository-new-github-repo-discovery",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://a2awire.com/mcp/data/ghtrend-fast-growing-new-github-repositories-01390c/http"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/ee324/a2awire"
+            },
+            "title": "Trending Repository Tracker — new GitHub repo discovery ($0.01/query)",
+            "version": "0.1.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Hiring developers? Find and source software engineers by what they build on GitHub.",
+            "name": "com.getstarhunt/github-developer-sourcing",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://app.getstarhunt.com/mcp"
+              }
+            ],
+            "title": "StarHunt",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Resolve a company domain to its GitHub organization with repo, language and activity signals.",
+            "name": "com.mambabuilt/mcp-github-organization-signal-scanner",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Apify API token from https://console.apify.com/account/integrations",
+                    "isSecret": true,
+                    "name": "APIFY_TOKEN"
+                  }
+                ],
+                "identifier": "@mambalabsdev/mcp-github-organization-signal-scanner",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/mambalabsdev/mcp-github-organization-signal-scanner"
+            },
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Manage repositories, users, releases, and automate GitHub workflows",
+            "name": "com.mcparmory/github",
+            "packages": [
+              {
+                "identifier": "mcparmory-github",
+                "registryType": "pypi",
+                "runtimeHint": "uvx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.6"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/mcparmory/registry"
+            },
+            "version": "1.0.6"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub repo analytics: stars, trending, code search, contributor maps for project research.",
+            "name": "com.thenextgennexus/github-mcp-server",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "Apify API token. Free tier at console.apify.com",
+                    "isSecret": true,
+                    "name": "Authorization"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://nexgendata-mcp-proxy.steve-corbeil.workers.dev/github-mcp-server/mcp"
+              }
+            ],
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "deprecated"
+            }
+          },
+          "server": {
+            "description": "Scrape GitHub repository metadata, stars, forks, topics, licences and activity. Pay per row.",
+            "name": "dev.reapx/github-repos",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "Your own Apify API token as 'Bearer \u003ctoken\u003e'. Get one free at https://console.apify.com/account/integrations, or buy a prepaid, spend-capped token with no signup at https://agi.apify.com. Runs bill to your own account, per result returned.",
+                    "isSecret": true,
+                    "name": "Authorization"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://mcp.apify.com/?actors=reapx/github-repo-scraper"
+              }
+            ],
+            "title": "reapx GitHub repos - repository metadata and activity",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "BlackHawkMCP - connect AI to Google Sheets",
+            "name": "io.github.000safah000-ai/blackhawk-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Google OAuth2 client ID",
+                    "name": "GOOGLE_CLIENT_ID"
+                  },
+                  {
+                    "description": "Google OAuth2 client secret",
+                    "isSecret": true,
+                    "name": "GOOGLE_CLIENT_SECRET"
+                  },
+                  {
+                    "description": "OAuth2 redirect URI",
+                    "name": "GOOGLE_REDIRECT_URI"
+                  }
+                ],
+                "identifier": "blackhawk-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/000safah000-ai/BlackHawkMCP"
+            },
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Decode any Base tx: plain English, strict JSON, risk flags, no LLM. 50 free/day per IP, then $0.02.",
+            "name": "io.github.0200project/base-transaction-decoder",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://api.0200project.com/mcp?ref=mcp-registry"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0200project/base-tx-explain"
+            },
+            "title": "Base Transaction Decoder",
+            "version": "0.1.4"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Research saved LinkedIn contacts, review monitored activity, and prepare engagement campaigns.",
+            "name": "io.github.02inf/opencomment-ai",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://mcp.opencomment.ai/mcp"
+              }
+            ],
+            "title": "OpenComment AI",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Pay-per-use tool API for AI agents. Free tier, x402 USDC micropayments, or API key.",
+            "name": "io.github.0580iris-lang/x711-gas-station",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://x711.io/mcp"
+              }
+            ],
+            "title": "x711 — Universal Agent Gas Station",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Medium CLI + 23-tool MCP server. Your IDE drafts replies. No API keys.",
+            "name": "io.github.06ketan/medium-ops",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Legacy Medium Integration Token (api.medium.com/v1/*). Optional. Generate at medium.com/me/settings → 'Integration tokens' (note: Medium stopped issuing new tokens in 2023).",
+                    "isSecret": true,
+                    "name": "MEDIUM_INTEGRATION_TOKEN"
+                  },
+                  {
+                    "description": "Medium 'sid' cookie value from medium.com (Application → Cookies). Used for authenticated reads + dashboard GraphQL.",
+                    "isSecret": true,
+                    "name": "MEDIUM_SID"
+                  },
+                  {
+                    "description": "Medium 'uid' cookie value. Required alongside sid for some authenticated endpoints.",
+                    "name": "MEDIUM_UID"
+                  },
+                  {
+                    "description": "Medium 'xsrf' cookie value. Required for any dashboard write (post_response, publish_post, delete_post, draft updates).",
+                    "isSecret": true,
+                    "name": "MEDIUM_XSRF"
+                  },
+                  {
+                    "description": "Cloudflare 'cf_clearance' cookie. Only required when Cloudflare challenges your IP for dashboard write calls.",
+                    "isSecret": true,
+                    "name": "MEDIUM_CF_CLEARANCE"
+                  },
+                  {
+                    "description": "Your Medium handle (without the @). Required for the public RSS read path so the client knows whose feed to fetch.",
+                    "name": "MEDIUM_USERNAME"
+                  },
+                  {
+                    "description": "Override path to the mcp.json file the auth layer reads. Defaults to ~/.cursor/mcp.json.",
+                    "name": "MEDIUM_OPS_MCP_PATH"
+                  },
+                  {
+                    "description": "Optional: override the host CLI used by the unattended daemon path (default: auto-detect claude / cursor-agent / codex on PATH). Use {prompt} placeholder if your CLI takes the prompt as an arg.",
+                    "name": "MEDIUM_OPS_LLM_CMD"
+                  }
+                ],
+                "identifier": "medium-ops",
+                "packageArguments": [
+                  {
+                    "type": "positional",
+                    "value": "mcp"
+                  },
+                  {
+                    "type": "positional",
+                    "value": "serve"
+                  }
+                ],
+                "registryType": "pypi",
+                "runtimeHint": "uvx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/06ketan/medium-ops"
+            },
+            "title": "medium-ops",
+            "version": "0.1.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Convert HTML to PDF/PNG/WebP/PPTX slide carousels with 11 themes — for LinkedIn, decks, posts.",
+            "name": "io.github.06ketan/slideshot",
+            "packages": [
+              {
+                "identifier": "slideshot-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "4.4.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/06ketan/slideshot"
+            },
+            "version": "4.4.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Substack CLI + 26-tool MCP server. Your IDE drafts replies via propose_reply. No API keys.",
+            "name": "io.github.06ketan/substack-ops",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Your Substack publication URL (e.g. https://you.substack.com/). Optional if set in ~/.cursor/mcp.json's mcpServers.substack-api.env.",
+                    "name": "SUBSTACK_PUBLICATION_URL"
+                  },
+                  {
+                    "description": "Your Substack numeric user id. Optional if set in ~/.cursor/mcp.json.",
+                    "name": "SUBSTACK_USER_ID"
+                  },
+                  {
+                    "description": "Your Substack session cookie value (the s%3A... string). Required for authenticated calls. Easier path: run `substack-ops auth login --browser chrome` and the cookie is auto-grabbed.",
+                    "isSecret": true,
+                    "name": "SUBSTACK_SESSION_TOKEN"
+                  },
+                  {
+                    "description": "Override path to the mcp.json file the auth layer reads. Defaults to ~/.cursor/mcp.json.",
+                    "name": "SUBSTACK_OPS_MCP_PATH"
+                  },
+                  {
+                    "description": "Optional: override the host CLI used by the unattended daemon path (default: auto-detect claude / cursor-agent / codex on PATH). Use {prompt} placeholder if your CLI takes the prompt as an arg.",
+                    "name": "SUBSTACK_OPS_LLM_CMD"
+                  }
+                ],
+                "identifier": "substack-ops",
+                "packageArguments": [
+                  {
+                    "type": "positional",
+                    "value": "mcp"
+                  },
+                  {
+                    "type": "positional",
+                    "value": "serve"
+                  }
+                ],
+                "registryType": "pypi",
+                "runtimeHint": "uvx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.3.5"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/06ketan/substack-ops"
+            },
+            "title": "substack-ops",
+            "version": "0.3.5"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Memory for coding agents, checked against the filesystem and git before it is believed.",
+            "name": "io.github.0Mattias/bettermemory",
+            "packages": [
+              {
+                "identifier": "bettermemory",
+                "registryType": "pypi",
+                "runtimeHint": "uvx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "8.0.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0Mattias/bettermemory"
+            },
+            "version": "8.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Human-to-AI code review bridge. Review UI in the browser, AI agents fix code via MCP.",
+            "name": "io.github.0ics-srls/ui-ticket-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Root directory of the project being reviewed",
+                    "name": "PROJECT_ROOT"
+                  },
+                  {
+                    "description": "HTTP port for REST API (default: 3200)",
+                    "name": "REVIEW_PORT"
+                  }
+                ],
+                "identifier": "ui-ticket-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.6.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0ics-srls/ui-ticket-mcp_public"
+            },
+            "title": "ui-ticket-mcp",
+            "version": "1.6.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Universal AI API Orchestrator — 1,554 tools, 96 services. One install.",
+            "name": "io.github.0nork/0nMCP",
+            "packages": [
+              {
+                "identifier": "0nmcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "4.5.1"
+              }
+            ],
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://0nmcp.com/api/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0nork/0nMCP"
+            },
+            "title": "0nMCP — Universal AI API Orchestrator",
+            "version": "4.5.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "PayPerByte — per-byte data for AI agents: x402 USDC on Base, EIP-712-attested. No token.",
+            "name": "io.github.0rkz/byte-protocol",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Ethereum private key for write/buy tools (subscribe, unsubscribe, publish, buy_data). buy_data spends real Base-mainnet USDC — use a dedicated wallet. Not required for read-only tools.",
+                    "isSecret": true,
+                    "name": "PRIVATE_KEY"
+                  },
+                  {
+                    "description": "RPC for the on-chain library + EIP-712 attestation layer (Arbitrum Sepolia, eip155:421614). The x402 buy rail settles USDC on Base mainnet and needs no RPC here. Defaults to Arbitrum Sepolia public RPC.",
+                    "name": "RPC_URL"
+                  },
+                  {
+                    "description": "Gateway attester address byte_buy_data pins receipts against. Defaults to the current PayPerByte gateway attester (rotated 2026-08-19; previous default 0x77c86a...C472 is retired). Override only if the gateway discloses a rotation you need ahead of a package update - see /.well-known/agent.json receipt.attester and receipt.retiredAttesters.",
+                    "name": "BYTE_GATEWAY_ATTESTER"
+                  }
+                ],
+                "identifier": "byte-mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.13.0"
+              }
+            ],
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://mcp.payperbyte.io/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0rkz/byte-mcp-server"
+            },
+            "version": "0.13.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Local-first shared memory and task coordination for AI coding agents. Go daemon plus headless CLI.",
+            "name": "io.github.0spoon/seamless",
+            "repository": {
+              "url": "https://github.com/0spoon/seamless"
+            },
+            "title": "Seamless",
+            "version": "0.4.9"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Read-only MCP server for querying the live NOVAI blockchain over its public JSON-RPC endpoint.",
+            "name": "io.github.0x-devc/novai-mcp-server",
+            "packages": [
+              {
+                "identifier": "novai-mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0x-devc/novai-mcp-server"
+            },
+            "version": "0.1.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Secret scanning for AI agents: rules and entropy find candidates, a model decides which are real.",
+            "name": "io.github.0x1Adi/klarion",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Optional. With a key Klarion adjudicates candidates itself; without one it hands them to the calling agent to judge.",
+                    "isSecret": true,
+                    "name": "ANTHROPIC_API_KEY"
+                  }
+                ],
+                "identifier": "https://github.com/0x1Adi/Klarion/releases/download/v0.4.3/klarion-mcp-v0.4.3.mcpb",
+                "registryType": "mcpb",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.4.3"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0x1Adi/Klarion"
+            },
+            "title": "Klarion",
+            "version": "0.4.3"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Search 1M+ open-access papers, standards, and case law from an AI agent.",
+            "name": "io.github.0x923041-dotcom/conceptio-search",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Conceptio API key (Free, Dev, Pro or Enterprise) from your profile at https://www.conceptio.app. Required because an MCP client cannot run the CLI's interactive auth.",
+                    "isSecret": true,
+                    "name": "CONCEPTIO_API_KEY"
+                  }
+                ],
+                "identifier": "conceptio-search",
+                "packageArguments": [
+                  {
+                    "type": "positional",
+                    "value": "mcp"
+                  }
+                ],
+                "registryType": "pypi",
+                "runtimeHint": "uvx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.3.8"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0x923041-dotcom/conceptio-cli"
+            },
+            "title": "Conceptio Search",
+            "version": "0.3.8"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "x402-paid Base agent tools (USDC). 5 deterministic tools. No API keys. No NFT pass.",
+            "name": "io.github.0xAxiom/axiom-agentic-tools",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://agentic.clawbots.org/api/agentic/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xAxiom/axiom-agentic-tools"
+            },
+            "title": "Axiom Agentic Tools",
+            "version": "0.2.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Read-only Polymarket prediction market data for AI agents.",
+            "name": "io.github.0xChron/polymarket-mcp",
+            "packages": [
+              {
+                "identifier": "0xchron-polymarket-mcp",
+                "registryType": "pypi",
+                "runtimeHint": "uvx",
+                "transport": {
+                  "type": "streamable-http",
+                  "url": "http://localhost:8000/mcp"
+                },
+                "version": "0.1.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xChron/polymarket-mcp"
+            },
+            "version": "0.1.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Public phishing feed: suspicious/confirmed phishing URLs detected hourly. No auth, CC0.",
+            "name": "io.github.0xDanielLopez/phishunt",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://mcp.phishunt.io/"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xDanielLopez/phishunt-mcp"
+            },
+            "title": "Phishunt",
+            "version": "0.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "IOCs (URLs, domains, IPs, hashes) shared by the infosec community on X/Twitter. No auth, CC0.",
+            "name": "io.github.0xDanielLopez/tweetfeed",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://mcp.tweetfeed.live/"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xDanielLopez/tweetfeed-mcp"
+            },
+            "title": "TweetFeed",
+            "version": "0.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Turn any URL into clean markdown/JSON for AI agents. Self-hostable web content extraction.",
+            "name": "io.github.0xMassi/webclaw",
+            "packages": [
+              {
+                "identifier": "@webclaw/mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.6.16"
+              }
+            ],
+            "title": "webclaw",
+            "version": "0.6.17"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Solana onchain intelligence for AI agents: wallet risk, due-diligence, perps funding, smart money.",
+            "name": "io.github.0xSardius/solenrich",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://api.solenrich.com/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xSardius/solenrich"
+            },
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Cross-chain DEX for AI agents. Swap tokens across 7+ chains.",
+            "name": "io.github.0xSoftBoi/suwappu",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Your Suwappu API key",
+                    "isSecret": true,
+                    "name": "SUWAPPU_API_KEY"
+                  }
+                ],
+                "identifier": "@suwappu/mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xSoftBoi/suwappubot"
+            },
+            "version": "0.1.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Wallet and payments for AI agents: auto-pay x402 APIs in USDC on XDC, within on-chain limits.",
+            "name": "io.github.0xbeny/xdc-ai",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://api.xdcai.tech/mcp"
+              }
+            ],
+            "title": "XDC AI",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Query AI agent profiles, trust scores, verifications, and marketplace jobs on AgentFolio.",
+            "name": "io.github.0xbrainkid/agentfolio",
+            "packages": [
+              {
+                "identifier": "agentfolio-mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.1.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xbrainkid/agentfolio-mcp-server"
+            },
+            "version": "1.1.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "AI agent identity verification via SATP on Solana. Trust scores and on-chain attestations.",
+            "name": "io.github.0xbrainkid/agentfolio-mcp-server",
+            "packages": [
+              {
+                "identifier": "agentfolio-mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.2.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xbrainkid/agentfolio-mcp-server"
+            },
+            "version": "1.2.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Private signed AI task receipts with replay checks and optional validated AIPOU claims.",
+            "name": "io.github.0xddneto/ai-proof-of-us",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Optional inline private key for a dedicated farming wallet. Prefer AIPOU_AGENT_KEY_FILE and never use a primary wallet.",
+                    "isSecret": true,
+                    "name": "AIPOU_AGENT_PRIVATE_KEY"
+                  },
+                  {
+                    "description": "Path to the protected dedicated-wallet key created by aipou-mcp --init.",
+                    "name": "AIPOU_AGENT_KEY_FILE"
+                  },
+                  {
+                    "description": "AIPOU token contract address on the configured network.",
+                    "name": "AIPOU_CONTRACT_ADDRESS"
+                  },
+                  {
+                    "description": "AIPOU claims contract address on the configured network.",
+                    "name": "AIPOU_CLAIMS_ADDRESS"
+                  },
+                  {
+                    "description": "Optional Base-compatible JSON-RPC endpoint.",
+                    "name": "AIPOU_RPC_URL"
+                  },
+                  {
+                    "description": "Optional local directory for receipt and collector state.",
+                    "name": "AIPOU_DATA_DIR"
+                  }
+                ],
+                "identifier": "aipou-mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.5.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xddneto/AI-Proof-of-Us"
+            },
+            "title": "AI Proof of Us",
+            "version": "0.5.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Agent-to-agent escrow on Base. Post quests with ETH/USDC bounties and settle on-chain.",
+            "name": "io.github.0xdirectping/escrow",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://0xdirectping.com/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xdirectping/app"
+            },
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Read-only Sui analytics: fund tracing, protocol-aware tx decoding, no API keys or wallet.",
+            "name": "io.github.0xfreak0/sui-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Default network when a tool call doesn't pass one. Every tool also takes a per-call network argument.",
+                    "name": "SUI_NETWORK"
+                  },
+                  {
+                    "description": "Override the gRPC fullnode endpoint for the default network only.",
+                    "name": "SUI_FULLNODE_URL"
+                  },
+                  {
+                    "description": "Override the GraphQL endpoint for the default network only.",
+                    "name": "SUI_GRAPHQL_URL"
+                  },
+                  {
+                    "description": "Requests per 10 seconds sent to one RPC endpoint. Defaults to 180 for *.sui.io endpoints and no limit for others; 0 turns it off.",
+                    "name": "SUI_RATE_LIMIT"
+                  },
+                  {
+                    "description": "Tool profiles to load at startup, comma-separated, or 'all'. Defaults to 'core'.",
+                    "name": "SUI_TOOLS"
+                  },
+                  {
+                    "description": "Path to a locally built Revela move-decompiler binary. Only decompile_module needs it.",
+                    "name": "SUI_DECOMPILER_PATH"
+                  },
+                  {
+                    "description": "JSON file of address attribution labels that overrides the shipped set for fund tracing.",
+                    "name": "SUI_LABELS_FILE"
+                  }
+                ],
+                "identifier": "sui-analytics-mcp",
+                "registryType": "npm",
+                "runtimeHint": "npx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.26.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xfreak0/sui-mcp"
+            },
+            "title": "Sui Analytics",
+            "version": "1.26.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Read-only Polymarket sports and esports data: wallet grades on settled P\u0026L, large trades, markets.",
+            "name": "io.github.0xinsider/mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "0xinsider API key (oxi_sk_live_...) from https://0xinsider.com/developers",
+                    "isSecret": true,
+                    "name": "OXINSIDER_API_KEY"
+                  }
+                ],
+                "identifier": "@0xinsider/mcp",
+                "registryType": "npm",
+                "runtimeHint": "npx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "2.14.0"
+              }
+            ],
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://api.0xinsider.com/api/v1/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xinsider/agent-plugin"
+            },
+            "title": "0xinsider",
+            "version": "2.14.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Microsoft Outlook (mail) MCP server — read, search, and send email through Microsoft Graph.",
+            "name": "io.github.0xka13b/microsoft-outlook-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Entra ID application (client) ID for the public client app used to sign in. Run `npx -y microsoft-outlook-mcp login` once to cache a refresh token.",
+                    "name": "MICROSOFT_CLIENT_ID"
+                  }
+                ],
+                "identifier": "microsoft-outlook-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xka13b/microsoft-mcps"
+            },
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Microsoft Calendar (Outlook Calendar) MCP server for managing events via Microsoft Graph.",
+            "name": "io.github.0xka13b/ms-calendar-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Entra ID application (client) ID for the public client app used to sign in. Run `npx -y ms-calendar-mcp login` once to cache a refresh token.",
+                    "name": "MICROSOFT_CLIENT_ID"
+                  }
+                ],
+                "identifier": "ms-calendar-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xka13b/microsoft-mcps"
+            },
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Microsoft Contacts MCP server — read and manage your address book through Microsoft Graph.",
+            "name": "io.github.0xka13b/ms-contacts-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Entra ID application (client) ID for the public client app used to sign in. Run `npx -y ms-contacts-mcp login` once to cache a refresh token.",
+                    "name": "MICROSOFT_CLIENT_ID"
+                  }
+                ],
+                "identifier": "ms-contacts-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xka13b/microsoft-mcps"
+            },
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Microsoft OneDrive MCP server — browse, read, and manage files and folders through Microsoft Graph.",
+            "name": "io.github.0xka13b/ms-onedrive-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Entra ID application (client) ID for the public client app used to sign in. Run `npx -y ms-onedrive-mcp login` once to cache a refresh token.",
+                    "name": "MICROSOFT_CLIENT_ID"
+                  }
+                ],
+                "identifier": "ms-onedrive-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xka13b/microsoft-mcps"
+            },
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Microsoft SharePoint MCP server — access sites, lists, and documents through Microsoft Graph.",
+            "name": "io.github.0xka13b/ms-sharepoint-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Entra ID application (client) ID for the public client app used to sign in. Run `npx -y ms-sharepoint-mcp login` once to cache a refresh token.",
+                    "name": "MICROSOFT_CLIENT_ID"
+                  }
+                ],
+                "identifier": "ms-sharepoint-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xka13b/microsoft-mcps"
+            },
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Read-only Hyperliquid vault search, risk, drawdown, rankings, TVL, alerts, and comparisons.",
+            "name": "io.github.0xkayser/vaultvision",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://vaultvision.tech/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xkayser/vaultvision-mcp"
+            },
+            "title": "VaultVision Hyperliquid Vault Research",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Attested evidence tools for AI agents: sanctions screening, agent/wallet records, paid via x402.",
+            "name": "io.github.0xsims/rubric-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Optional. USDC-on-Base wallet private key enabling paid x402 tools; without it paid tools return setup guidance.",
+                    "isSecret": true,
+                    "name": "RUBRIC_WALLET_KEY"
+                  },
+                  {
+                    "description": "Optional. Daily spend ceiling in USD for paid tools (default 1.00).",
+                    "name": "RUBRIC_X402_DAILY_LIMIT"
+                  },
+                  {
+                    "description": "Optional. Rubric developer key for HCS-anchored attestation.",
+                    "isSecret": true,
+                    "name": "RUBRIC_API_KEY"
+                  },
+                  {
+                    "description": "Optional. Comma-separated tool modules (default core,x402).",
+                    "name": "RUBRIC_MCP_MODULES"
+                  }
+                ],
+                "identifier": "@rubric-protocol/mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "2.2.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xsims/rubric-mcp"
+            },
+            "version": "2.2.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Attest agent decisions and verify records on a public ledger. Evidence, not just data.",
+            "name": "io.github.0xsims/rubric-mcp-server",
+            "packages": [
+              {
+                "identifier": "rubric_mcp_server",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "2.5.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xsims/rubric-mcp-py"
+            },
+            "version": "2.5.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "AI compliance attestation for EU AI Act, SR 11-7, HIPAA. Free local tier, no key required.",
+            "name": "io.github.0xsims/rubric-protocol",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Rubric API key for Hedera mainnet anchoring. Optional — omit for free local PQ-signed attestation.",
+                    "isSecret": true,
+                    "name": "RUBRIC_API_KEY"
+                  }
+                ],
+                "identifier": "@rubric-protocol/mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "2.0.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xsims/rubric-mcp-server"
+            },
+            "version": "2.0.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Real-time Hyperliquid perps intelligence: TA, funding, OI, liquidations. Pay-per-call via x402.",
+            "name": "io.github.0xsl1m/cerebrus-pulse-mcp",
+            "packages": [
+              {
+                "identifier": "cerebrus-pulse-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.5.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xsl1m/cerebrus-pulse-mcp"
+            },
+            "title": "Cerebrus Pulse MCP",
+            "version": "0.5.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Reputa: wallet risk \u0026 security plus DeFi cover (insurance) analyses, paid via x402.",
+            "name": "io.github.0xthaner/reputa",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "API base URL (default https://reputa.xyz). Use http://localhost:5173 for local dev.",
+                    "name": "REPUTA_BASE_URL"
+                  },
+                  {
+                    "description": "Optional wallet private key (USDC on Polygon) to auto-pay the paid x402 tools (scores, approvals, safe-check, safe-owner details, 24-month chain history).",
+                    "isSecret": true,
+                    "name": "REPUTA_PAYER_PRIVATE_KEY"
+                  }
+                ],
+                "identifier": "reputa-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.4.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xthaner/reputa"
+            },
+            "version": "1.4.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Free no-key IP intelligence: geolocation, VPN detection, DNS, WHOIS, blacklists, breach checks",
+            "name": "io.github.0xvibly/hackmyip-mcp",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://hackmyip.com/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xvibly/hackmyip-mcp"
+            },
+            "title": "HackMyIP — no-key IP intelligence",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "OpenAI-compatible MCP gateway cataloging 22 LLM providers, with routing, failover, and tools.",
+            "name": "io.github.0xzr/freellmpool",
+            "packages": [
+              {
+                "identifier": "freellmpool",
+                "packageArguments": [
+                  {
+                    "type": "positional",
+                    "value": "mcp"
+                  }
+                ],
+                "registryType": "pypi",
+                "runtimeHint": "uvx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.13.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/0xzr/freellmpool"
+            },
+            "title": "freellmpool",
+            "version": "0.13.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Shared knowledge base that people and AI agents read and write: pages, atoms, hybrid search.",
+            "name": "io.github.100monkeys-ai/cortex",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "Bearer \u003ctoken\u003e, a token minted in your instance's settings under API tokens",
+                    "isSecret": true,
+                    "name": "Authorization"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://{instance}.cortex.page/api/mcp"
+              }
+            ],
+            "title": "Cortex",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Runtime security for AI agent commerce. CLI + MCP server blocks hallucinated purchases.",
+            "name": "io.github.100xPercent/pop-pay",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Chrome DevTools Protocol endpoint for credential injection (default: http://localhost:9222)",
+                    "name": "POP_CDP_URL"
+                  },
+                  {
+                    "description": "JSON array of allowed vendor categories (e.g. '[\"aws\",\"cloudflare\"]')",
+                    "name": "POP_ALLOWED_CATEGORIES"
+                  },
+                  {
+                    "description": "Per-transaction spending limit in USD",
+                    "name": "POP_MAX_PER_TX"
+                  },
+                  {
+                    "description": "Daily spending limit in USD",
+                    "name": "POP_MAX_DAILY"
+                  },
+                  {
+                    "description": "Guardrail engine: 'keyword' (offline, default) or 'llm' (requires API key)",
+                    "name": "POP_GUARDRAIL_ENGINE"
+                  }
+                ],
+                "identifier": "pop-pay",
+                "registryType": "npm",
+                "runtimeArguments": [
+                  {
+                    "isRequired": true,
+                    "type": "positional",
+                    "value": "launch-mcp"
+                  }
+                ],
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.5.7"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/100xPercent/pop-pay"
+            },
+            "version": "0.5.7"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "AI-optimized tool output compression for read, grep, diff, bash, test, web, search, and more",
+            "name": "io.github.10iii/air",
+            "packages": [
+              {
+                "identifier": "@10iii/air-mcp-server",
+                "registryType": "npm",
+                "runtimeHint": "npx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.8"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/10iii/air"
+            },
+            "version": "0.2.8"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "BLS Occupational Employment and Wage Statistics market wages. 7 tools.",
+            "name": "io.github.1102tools/bls-oews-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Optional BLS API key from https://data.bls.gov/registrationEngine/ for v2 (500/day).",
+                    "name": "BLS_API_KEY"
+                  }
+                ],
+                "identifier": "bls-oews-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.7"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1102tools/federal-contracting-mcps"
+            },
+            "title": "BLS OEWS",
+            "version": "0.2.7"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Electronic Code of Federal Regulations including FAR and DFARS. 13 tools.",
+            "name": "io.github.1102tools/ecfr-mcp",
+            "packages": [
+              {
+                "identifier": "ecfr-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.6"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1102tools/federal-contracting-mcps"
+            },
+            "title": "eCFR",
+            "version": "0.2.6"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Federal Register proposed/final rules, notices, executive orders, FAR cases. 8 tools.",
+            "name": "io.github.1102tools/federal-register-mcp",
+            "packages": [
+              {
+                "identifier": "federal-register-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.7"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1102tools/federal-contracting-mcps"
+            },
+            "title": "Federal Register",
+            "version": "0.2.7"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GSA CALC+ awarded labor ceiling rates from 230K+ MAS contracts. 8 tools.",
+            "name": "io.github.1102tools/gsa-calc-mcp",
+            "packages": [
+              {
+                "identifier": "gsa-calc-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.7"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1102tools/federal-contracting-mcps"
+            },
+            "title": "GSA CALC+",
+            "version": "0.2.7"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GSA Per Diem federal travel lodging and M\u0026IE rates. 6 tools.",
+            "name": "io.github.1102tools/gsa-perdiem-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Free api.data.gov key from https://api.data.gov/signup/ for 1,000 req/hr.",
+                    "isSecret": true,
+                    "name": "PERDIEM_API_KEY"
+                  }
+                ],
+                "identifier": "gsa-perdiem-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.6"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1102tools/federal-contracting-mcps"
+            },
+            "title": "GSA Per Diem",
+            "version": "0.2.6"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Regulations.gov rulemaking dockets, documents, public comments. 8 tools.",
+            "name": "io.github.1102tools/regulations-gov-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Free api.data.gov key from https://api.data.gov/signup/ for 1,000 req/hr.",
+                    "isSecret": true,
+                    "name": "REGULATIONS_GOV_API_KEY"
+                  }
+                ],
+                "identifier": "regulationsgov-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.5"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1102tools/federal-contracting-mcps"
+            },
+            "title": "Regulations.gov",
+            "version": "0.2.5"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "SAM.gov entity registration, exclusions, opportunities, contract awards. 15 tools.",
+            "name": "io.github.1102tools/sam-gov-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Free SAM.gov API key from https://sam.gov. Rotates every 90 days.",
+                    "isSecret": true,
+                    "name": "SAM_API_KEY"
+                  }
+                ],
+                "identifier": "sam-gov-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.4.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1102tools/federal-contracting-mcps"
+            },
+            "title": "SAM.gov",
+            "version": "0.4.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "USASpending.gov federal contracts, subawards, recipients, agencies. 55 tools.",
+            "name": "io.github.1102tools/usaspending-gov-mcp",
+            "packages": [
+              {
+                "identifier": "usaspending-gov-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.3.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1102tools/federal-contracting-mcps"
+            },
+            "title": "USASpending.gov",
+            "version": "0.3.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Hypothesis-driven problem solving for AI agents: probe, falsify, escalate.",
+            "name": "io.github.1111111111111111111114oLvT2/inquisitor",
+            "packages": [
+              {
+                "identifier": "inquisitor-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1111111111111111111114oLvT2/inquisitor"
+            },
+            "version": "0.2.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Structured company \u0026 industry news for AI agents: typed, dated, source-linked events.",
+            "name": "io.github.1145-am/syracuse-mcp-server",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "Your Syracuse API key (the raw key, no prefix). Free at syracuse.1145.am; not needed to connect or register.",
+                    "isSecret": true,
+                    "name": "X-API-Key"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://syracuse.1145.am/mcp/"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1145-am/syracuse-mcp-server"
+            },
+            "title": "Syracuse Company News",
+            "version": "1.2.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Cloud MCP for project data, analytics, research, content planning, media generation, and growth.",
+            "name": "io.github.11Agents/cloud-mcp",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "11agents project token, sent as a Bearer token.",
+                    "isSecret": true,
+                    "name": "Authorization"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://app.11agents.ai/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/11Agents/11agents-cloud-mcp"
+            },
+            "title": "11agents Cloud MCP",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "URL intelligence for AI agents and developers. 16 tools, 25 signal weights, 20 free checks.",
+            "name": "io.github.123Ergo/unphurl",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Your Unphurl API key (get one at unphurl.com or via the signup tool)",
+                    "isSecret": true,
+                    "name": "UNPHURL_API_KEY"
+                  }
+                ],
+                "identifier": "@unphurl/mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.3"
+              }
+            ],
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://mcp.unphurl.com/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/123Ergo/unphurl-mcp"
+            },
+            "title": "Unphurl",
+            "version": "0.2.3"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Search 118,000+ Australian manufacturers by category and state, with Business contact access.",
+            "name": "io.github.1337mofo/australian-manufacturing-directory",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://mcp.ausmanufacturingdirectory.com/mcp"
+              }
+            ],
+            "title": "Australian Manufacturing Directory",
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Parametric should-cost: P50/P80/P90 estimates, 801 materials, 25 countries, quote review.",
+            "name": "io.github.1337mofo/costable",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://costable.ai/api/mcp"
+              }
+            ],
+            "title": "Costable — Parametric Should-Cost Analysis",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Qimen Dunjia \u0026 Da Liu Ren divination: complete nine-palace charts and four-lesson analysis.",
+            "name": "io.github.139user/tword-divination",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://profound.fate-craft.com/api/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/139user/twords"
+            },
+            "title": "衍象坊 · 奇门遁甲 \u0026 大六壬",
+            "version": "1.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Paid Capture and Guard tools for public-source observations before autonomous actions.",
+            "name": "io.github.15998194110/delta-witness",
+            "packages": [
+              {
+                "identifier": "delta-witness-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.7.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/15998194110/delta-witness"
+            },
+            "version": "0.7.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "One MCP server for mod platforms and local modding diagnostics. No data kept.",
+            "name": "io.github.171county/modwrench",
+            "packages": [
+              {
+                "identifier": "@modwrench/cli",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.4"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/171county/modwrench"
+            },
+            "title": "ModWrench",
+            "version": "0.2.4"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "ATS resume checking, job description analysis, and AI resume tailoring powered by MatchCV.",
+            "name": "io.github.18boys/matchcv",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Override MatchCV API origin. Defaults to https://matchcv.co.",
+                    "name": "MATCHCV_BASE_URL"
+                  }
+                ],
+                "identifier": "matchcv-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/18boys/matchcv-mcp"
+            },
+            "version": "0.1.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Italian trails, huts, avalanche bulletins and elevation weather",
+            "name": "io.github.19Alma98/trekking-mcp",
+            "packages": [
+              {
+                "identifier": "trekking-mcp",
+                "registryType": "pypi",
+                "runtimeHint": "uvx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.1.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/19Alma98/trekking_mcp"
+            },
+            "title": "Sentieri e condizioni di montagna",
+            "version": "1.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "HSM-backed vault secrets for AI agents (JIT fetch) plus prompt-injection and threat scanning.",
+            "name": "io.github.1clawAI/1claw-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Agent API key (ocv_...). Exchanged for a short-lived JWT; auto-discovers agent ID and vault. Recommended for stdio.",
+                    "isSecret": true,
+                    "name": "ONECLAW_AGENT_API_KEY"
+                  },
+                  {
+                    "description": "Optional agent UUID when pinning identity (usually auto-discovered from the API key).",
+                    "name": "ONECLAW_AGENT_ID"
+                  },
+                  {
+                    "description": "Optional vault UUID when the agent can access multiple vaults.",
+                    "name": "ONECLAW_VAULT_ID"
+                  },
+                  {
+                    "description": "Vault API base URL (default https://api.1claw.xyz).",
+                    "name": "ONECLAW_BASE_URL"
+                  },
+                  {
+                    "description": "Set to true for security-only mode (inspect_content only; no vault credentials).",
+                    "name": "ONECLAW_LOCAL_ONLY"
+                  }
+                ],
+                "identifier": "@1claw/mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.56.3"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1clawAI/1claw-mcp"
+            },
+            "title": "1Claw Vault",
+            "version": "0.56.3"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "75 tools for marketing analytics, campaign management and AI monitoring across 7 platforms.",
+            "name": "io.github.1clickreport/mcp",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://mcp.1clickreport.com/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1clickreport/mcp"
+            },
+            "title": "1ClickReport",
+            "version": "1.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Read-only MCP access to the 1F4BC job board for AI agents.",
+            "name": "io.github.1f4bcai/1f4bc",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://1f4bc.ai/mcp"
+              }
+            ],
+            "title": "1F4BC",
+            "version": "0.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "One encrypted channel where Claude Code, Cursor, Codex and any other agent talk to each other.",
+            "name": "io.github.1gr14/agents-party",
+            "packages": [
+              {
+                "identifier": "agents-party",
+                "packageArguments": [
+                  {
+                    "description": "Run the party MCP server over stdio.",
+                    "type": "positional",
+                    "value": "mcp",
+                    "valueHint": "command"
+                  }
+                ],
+                "registryType": "npm",
+                "runtimeHint": "npx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.7.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1gr14/agents-party"
+            },
+            "version": "0.7.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "MCP server for 1ly.store — buy/sell APIs and launch tokens on Bags.fm with USDC \u0026 $1LY.",
+            "name": "io.github.1lystore/mcp-server",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Path to Solana keypair JSON file (e.g. /home/user/.1ly/wallets/solana.json) or inline JSON byte array. Required for paid API calls and token tools (launch, trade, claim). Note: Claude Desktop does not expand ~, use absolute paths.",
+                    "isSecret": true,
+                    "name": "ONELY_WALLET_SOLANA_KEY"
+                  },
+                  {
+                    "description": "Path to EVM private key file or 0x-prefixed hex string. Required for payments on Base network.",
+                    "isSecret": true,
+                    "name": "ONELY_WALLET_EVM_KEY"
+                  },
+                  {
+                    "description": "1ly.store seller API key. Auto-saved locally after running the 1ly_create_store tool — you do not need to set this manually. Required for seller tools: manage links, stats, withdrawals, keys, and profile.",
+                    "isSecret": true,
+                    "name": "ONELY_API_KEY"
+                  },
+                  {
+                    "description": "Wallet provider to use. 'raw' (default) uses local key files via ONELY_WALLET_SOLANA_KEY or ONELY_WALLET_EVM_KEY. 'coinbase' uses Coinbase Agentic Wallet (Base network only, requires the wallet app running locally).",
+                    "name": "ONELY_WALLET_PROVIDER"
+                  },
+                  {
+                    "description": "Preferred blockchain network for payments. 'solana' (default) or 'base'. Determines which wallet is used when an API supports both networks.",
+                    "name": "ONELY_NETWORK"
+                  },
+                  {
+                    "description": "Solana RPC endpoint URL. Defaults to https://api.mainnet-beta.solana.com. Use a private RPC (e.g. Helius, Quicknode) for better reliability and rate limits.",
+                    "name": "ONELY_SOLANA_RPC_URL"
+                  },
+                  {
+                    "description": "Maximum USD amount allowed per single paid API call. Defaults to 1.00. The server will refuse any call priced above this limit.",
+                    "name": "ONELY_BUDGET_PER_CALL"
+                  },
+                  {
+                    "description": "Maximum total USD spending per calendar day (UTC). Defaults to 50.00. Resets at UTC midnight. The server will refuse calls that would exceed this limit.",
+                    "name": "ONELY_BUDGET_DAILY"
+                  },
+                  {
+                    "description": "Path to the local JSON file used to track daily spending. Defaults to ~/.1ly-mcp-budget.json. Created automatically with owner-only permissions (0600).",
+                    "name": "ONELY_BUDGET_STATE_FILE"
+                  },
+                  {
+                    "description": "Set to '1' to simulate Solana transactions without broadcasting to the blockchain. Returns a fake signature. Use for testing only — no real payments will be made.",
+                    "name": "ONELY_SOLANA_DRY_RUN"
+                  },
+                  {
+                    "description": "Override the 1ly.store API base URL. Defaults to https://1ly.store. Only http://localhost:PORT is accepted as an alternative (for local development). Do not change in production.",
+                    "name": "ONELY_API_BASE"
+                  }
+                ],
+                "identifier": "@1ly/mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.7"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1lystore/1ly-mcp-server"
+            },
+            "version": "0.1.7"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Search transcribed painting lessons. Results cite the exact lesson and Vimeo timestamp.",
+            "name": "io.github.1nzpainter/painting-lessons",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://mypaintingclub.com/kb/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1nzpainter/MCP"
+            },
+            "title": "My Painting Club — Painting Lessons",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Persistent memory and context for your agent, on a board you can see. Capped, so it stays small.",
+            "name": "io.github.1picassoai/sticky",
+            "packages": [
+              {
+                "identifier": "sticky-mcp",
+                "registryType": "npm",
+                "runtimeArguments": [
+                  {
+                    "isRequired": true,
+                    "type": "positional",
+                    "value": "--mcp",
+                    "valueHint": "--mcp"
+                  }
+                ],
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1picassoai/sticky"
+            },
+            "version": "0.2.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Private GANO MCP for feasibility, scenario analysis, persistence and executive operations.",
+            "name": "io.github.1powergrey/sios-gano-connector",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://sios-gano-connector.vercel.app/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1powergrey/sios-gano-connector"
+            },
+            "title": "GANO Connector",
+            "version": "1.5.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "MCP server for DebugAI. Browser sign-in, auto client setup, no key pasting.",
+            "name": "io.github.1shizaan/debugai-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Optional. Overrides browser sign-in (npx -y @debugai/mcp setup).",
+                    "isSecret": true,
+                    "name": "DEBUGAI_API_KEY"
+                  }
+                ],
+                "identifier": "@debugai/mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "2.1.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/1shizaan/debugai-mcp"
+            },
+            "version": "2.1.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Free joined public records for small business and CRE: Twin Cities parcels, sales, licences",
+            "name": "io.github.2016judea/small-business-intelligence",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://brickandmortar.dev/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/2016judea/small-business-intelligence-mcp"
+            },
+            "title": "Small Business Intelligence by Brick \u0026 Mortar",
+            "version": "0.2.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Read Chalkieboard (iPad) iCloud lesson folders, add materials, append lesson plans. No network.",
+            "name": "io.github.207studio/chalkieboard-icloud-mcp",
+            "packages": [
+              {
+                "identifier": "https://github.com/207studio/chalkieboard-icloud-mcp/releases/download/v2.0.1/chalkieboard.mcpb",
+                "registryType": "mcpb",
+                "transport": {
+                  "type": "stdio"
+                }
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/207studio/chalkieboard-icloud-mcp"
+            },
+            "title": "Chalkieboard iCloud",
+            "version": "2.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "MCP server that exposes Claude-style skills to any MCP client.",
+            "name": "io.github.214140846/skillhub-mcp",
+            "packages": [
+              {
+                "identifier": "skillhub-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.5"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/214140846/skillhub-mcp"
+            },
+            "version": "1.0.5"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "21 tools: search 4,000+ Australian promotional products with live pricing, quotes and curated edits.",
+            "name": "io.github.24seagull-beep/sense2-catalogue",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://sense2.com.au/api/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/24seagull-beep/sense2-next"
+            },
+            "title": "Sense2 Promotional Products",
+            "version": "1.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Game numerical design \u0026 balance auditing MCP server — 17 deterministic tools, zero LLM guessing.",
+            "name": "io.github.26048608982lp-ai/gamenumerics",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Workspace root directory where imported xlsx tables land (default: ~/.gamenumerics/workspaces)",
+                    "name": "GND_WORKSPACES_DIR"
+                  }
+                ],
+                "identifier": "mcp-server-gamenumerics",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/26048608982lp-ai/gamenumerics"
+            },
+            "version": "0.1.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Agent-built web app quality gate. Real browser is the judge. PASS/FAIL with receipts.",
+            "name": "io.github.263311487-ux/dsh-verify",
+            "packages": [
+              {
+                "identifier": "dsh-verify",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.9.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/263311487-ux/dsh-verify"
+            },
+            "version": "0.9.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "AI-native print-grade PDF generator. Markdown in, publisher-quality PDF out.",
+            "name": "io.github.263311487-ux/imprint-pdf",
+            "packages": [
+              {
+                "identifier": "imprint-pdf",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.14.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/263311487-ux/imprint-pdf"
+            },
+            "title": "Imprint PDF",
+            "version": "0.14.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Authorization-gated MCP server to discover and run 670+ security tools for CTF, pentest, and DFIR.",
+            "name": "io.github.26zl/cybersec-toolkit",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Set to 1 only for explicitly authorized external scopes.",
+                    "name": "CYBERSEC_MCP_ALLOW_EXTERNAL"
+                  },
+                  {
+                    "description": "Set to 1 to enable unsandboxed run_script execution.",
+                    "name": "CYBERSEC_MCP_ALLOW_SCRIPTS"
+                  }
+                ],
+                "identifier": "ghcr.io/26zl/cybersec-toolkit:1.3.0",
+                "packageArguments": [
+                  {
+                    "type": "positional",
+                    "value": "run"
+                  },
+                  {
+                    "type": "positional",
+                    "value": "--directory"
+                  },
+                  {
+                    "type": "positional",
+                    "value": "mcp_server"
+                  },
+                  {
+                    "type": "positional",
+                    "value": "fastmcp"
+                  },
+                  {
+                    "type": "positional",
+                    "value": "run"
+                  },
+                  {
+                    "type": "positional",
+                    "value": "server.py"
+                  },
+                  {
+                    "type": "positional",
+                    "value": "--transport"
+                  },
+                  {
+                    "type": "positional",
+                    "value": "stdio"
+                  },
+                  {
+                    "type": "positional",
+                    "value": "--no-banner"
+                  }
+                ],
+                "registryType": "oci",
+                "runtimeArguments": [
+                  {
+                    "name": "--entrypoint",
+                    "type": "named",
+                    "value": "uv"
+                  }
+                ],
+                "transport": {
+                  "type": "stdio"
+                }
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/26zl/cybersec-toolkit"
+            },
+            "version": "1.3.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Search live UK firefighter recruitment across 73 fire services, with on-call station data.",
+            "name": "io.github.29yeovil/bluewatch",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://bluewatch.app/mcp"
+              }
+            ],
+            "title": "Bluewatch",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Persistent, interactive MCP Apps — the AI builds an app once, you both reuse it",
+            "name": "io.github.2nd1st/open-mcp-apps",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Path to the SQLite store. Defaults to a fixed per-user data directory; set this to isolate a store.",
+                    "name": "OMA_DB"
+                  },
+                  {
+                    "description": "Browser viewer on loopback. On by default; set to 0 to turn it off.",
+                    "name": "OMA_VIEWER"
+                  },
+                  {
+                    "description": "Set to 1 to also expose one open_\u003cname\u003e tool per saved app. Off by default, because it costs prompt cache.",
+                    "name": "OMA_DYNAMIC_TOOLS"
+                  }
+                ],
+                "identifier": "@2nd1st/open-mcp-apps",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.5.9"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/2nd1st/open-mcp-apps"
+            },
+            "version": "0.5.9"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Star Ninja reports sky darkness, cloud cover and moonless hours for a night-sky spot you name.",
+            "name": "io.github.2pm-ninja/star-ninja",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://stars.2pm.ninja/mcp"
+              }
+            ],
+            "title": "Star Ninja",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "575+ agent tools: data, AI gateway, storage/queues/watchers. x402 USDC, no keys, usage billing.",
+            "name": "io.github.2s-io/mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Hex-encoded EVM private key (0x-prefixed) used by the SDK to sign x402 EIP-3009 payment authorizations. Funds USDC on Base.",
+                    "isSecret": true,
+                    "name": "EVM_PRIVATE_KEY"
+                  }
+                ],
+                "identifier": "@2sio/mcp",
+                "registryType": "npm",
+                "runtimeHint": "npx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.82.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/2s-io/sdk"
+            },
+            "version": "1.82.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Control DaVinci Resolve, including the free Lite edition. Manual setup only — see README.",
+            "name": "io.github.2sem/davinci-resolve-lite-mcp",
+            "repository": {
+              "url": "https://github.com/2sem/davinci-resolve-lite-mcp"
+            },
+            "title": "DaVinci Resolve Lite MCP",
+            "version": "0.18.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Norwegian address geocoding, places, properties, buildings \u0026 elevation from Kartverket.",
+            "name": "io.github.3121n/kartverket-mcp",
+            "packages": [
+              {
+                "identifier": "@nor-data/kartverket-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.4.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/3121n/nor-data-kartverket-mcp"
+            },
+            "version": "0.4.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Norwegian neighborhood data: transit, road-noise \u0026 green-area access by coordinate.",
+            "name": "io.github.3121n/nabolag-mcp",
+            "packages": [
+              {
+                "identifier": "@nor-data/nabolag-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/3121n/nor-data-nabolag-mcp"
+            },
+            "version": "0.2.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Norwegian flood \u0026 landslide hazard data from NVE, by WGS84 coordinate.",
+            "name": "io.github.3121n/nve-mcp",
+            "packages": [
+              {
+                "identifier": "@nor-data/nve-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/3121n/nor-data-nve-mcp"
+            },
+            "version": "0.1.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Statistics Finland (StatFin/PxWeb): search tables, read metadata, fetch JSON-stat2 data.",
+            "name": "io.github.3121n/statfin-mcp",
+            "packages": [
+              {
+                "identifier": "@nor-data/statfin-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/3121n/nor-data-statfin-mcp"
+            },
+            "version": "0.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub via MCP: search, repos, issues, PRs, files, notifications. OAuth device flow or token.",
+            "name": "io.github.Abhishekkumar2021/github",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "A GitHub Personal Access Token (skips the OAuth device flow).",
+                    "isSecret": true,
+                    "name": "GITHUB_TOKEN"
+                  },
+                  {
+                    "description": "OAuth App client id (public) to enable the device-flow login.",
+                    "name": "GITHUB_CLIENT_ID"
+                  },
+                  {
+                    "description": "Set to 1 or true to disable issue-creating/commenting tools.",
+                    "name": "GITHUB_READONLY"
+                  }
+                ],
+                "identifier": "@abhishekmcp/github",
+                "registryType": "npm",
+                "runtimeHint": "npx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.2.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/Abhishekkumar2021/mcp-suite"
+            },
+            "title": "GitHub",
+            "version": "0.2.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Personal RAG over your GitHub history (commits, code, reviews), served to Claude Code over MCP.",
+            "name": "io.github.ChristopherDavenport/github-twin",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "GitHub personal access token. Optional: github-twin can also pick the token up from `gh auth token` or from its own OAuth device-flow login (`gt auth login`).",
+                    "isSecret": true,
+                    "name": "GITHUB_TOKEN"
+                  },
+                  {
+                    "description": "Optional. Enables the Claude backend for `gt summarize`, `gt distill`, and `gt eval`. Defaults to local Ollama when unset.",
+                    "isSecret": true,
+                    "name": "ANTHROPIC_API_KEY"
+                  },
+                  {
+                    "description": "Optional. Enables the Gemini backend for embedding and the LLM seam. Vertex AI ADC via `GT_GEMINI_PROJECT` is also supported.",
+                    "isSecret": true,
+                    "name": "GEMINI_API_KEY"
+                  },
+                  {
+                    "description": "Optional. Override the on-disk data directory holding the SQLite index, embeddings, and cached GitHub responses. Defaults to `$XDG_DATA_HOME/github-twin`.",
+                    "name": "GT_PATHS__DATA_DIR"
+                  }
+                ],
+                "identifier": "github-twin",
+                "registryType": "pypi",
+                "runtimeArguments": [
+                  {
+                    "type": "positional",
+                    "value": "serve"
+                  }
+                ],
+                "runtimeHint": "uvx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.0.17"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/ChristopherDavenport/github-twin"
+            },
+            "title": "github-twin",
+            "version": "0.0.17"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "MCP server for GitHub operations (PRs, issues, actions) with structured, token-efficient output",
+            "name": "io.github.Dave-London/github",
+            "packages": [
+              {
+                "identifier": "@paretools/github",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.7.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/Dave-London/Pare"
+            },
+            "version": "0.7.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "MCP server for GitHub: repos, files, issues, PRs, search. Single Go binary.",
+            "name": "io.github.FerhatDundar/github-mcp-connector",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "GitHub personal access token (classic or fine-grained)",
+                    "isSecret": true,
+                    "name": "GITHUB_TOKEN"
+                  },
+                  {
+                    "description": "GitHub Enterprise Server API base URL. Leave unset for github.com.",
+                    "name": "GITHUB_API_URL"
+                  }
+                ],
+                "identifier": "https://github.com/FerhatDundar/github-mcp-connector/releases/download/v0.1.1/github-mcp-connector-plugin-v0.1.1-darwin-arm64.zip",
+                "registryType": "mcpb",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/FerhatDundar/github-mcp-connector"
+            },
+            "version": "0.1.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Normalized GitHub-CLI bridge for Claude Code — 89 ops, 6 families incl. federation sources",
+            "name": "io.github.Kirchlive/github-inside-claude-code",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "API key for the Tavily federation source (gh_research_tavily_search / gh_research_tavily_research). Required only if those research ops are invoked.",
+                    "isSecret": true,
+                    "name": "TAVILY_API_KEY"
+                  },
+                  {
+                    "description": "API key for the Brave Search federation source (gh_research_brave_search). Required only if that research op is invoked.",
+                    "isSecret": true,
+                    "name": "BRAVE_API_KEY"
+                  }
+                ],
+                "identifier": "github-inside-claude-code",
+                "registryType": "pypi",
+                "runtimeArguments": [
+                  {
+                    "type": "positional",
+                    "value": "gh-tool-use-mcp"
+                  }
+                ],
+                "runtimeHint": "uvx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.9.6"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/Kirchlive/github-inside-claude-code"
+            },
+            "title": "GitHub Inside Claude Code",
+            "version": "0.9.6"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "MCP server bridging GitHub webhooks via Cloudflare Worker for real-time event streaming",
+            "name": "io.github.Liplus-Project/github-webhook-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "URL of your deployed Cloudflare Worker endpoint (default: https://github-webhook.smgjp.com)",
+                    "name": "WEBHOOK_WORKER_URL"
+                  },
+                  {
+                    "description": "Set to '0' to disable SSE channel notifications (default: enabled)",
+                    "name": "WEBHOOK_CHANNEL"
+                  }
+                ],
+                "identifier": "github-webhook-mcp",
+                "registryType": "npm",
+                "runtimeHint": "npx",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.8.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/Liplus-Project/github-webhook-mcp"
+            },
+            "version": "0.8.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Get GitHub repository stats, search repos, analyze languages, and compare projects",
+            "name": "io.github.TheNextGenNexus/github-analytics-mcp-server",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Your Apify API token for accessing web scraping actors",
+                    "isSecret": true,
+                    "name": "APIFY_TOKEN"
+                  }
+                ],
+                "identifier": "@thenextgennexus/github-analytics-mcp-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/TheNextGenNexus/ai-analytics-mcp-servers"
+            },
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub Actions workflow security audit - 21 checks: pinning, permissions, secrets, injection.",
+            "name": "io.github.UnbearableDev/github-actions-audit",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "Apify API token. Format: 'Bearer \u003cYOUR_APIFY_TOKEN\u003e'. Get yours at https://console.apify.com/account/integrations",
+                    "isSecret": true,
+                    "name": "Authorization"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://unbearable-dev--github-actions-audit.apify.actor/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/UnbearableDev/github-actions-audit"
+            },
+            "title": "GitHub Actions Audit",
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Self-hosted GitHub MCP server. PAT auth, stdio transport, transport-agnostic so it works with…",
+            "name": "io.github.adelaidasofia/github-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "Classic or fine-grained PAT with repo + workflow scopes",
+                    "isSecret": true,
+                    "name": "GITHUB_TOKEN"
+                  }
+                ],
+                "identifier": "https://github.com/adelaidasofia/github-mcp/releases/download/v0.1.0/github-mcp.mcpb",
+                "registryType": "mcpb",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/adelaidasofia/github-mcp"
+            },
+            "title": "Self-hosted GitHub MCP server",
+            "version": "0.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Monitor GitHub repo health, DORA metrics and CI signals from your AI assistant.",
+            "name": "io.github.alexbypa/github-projectpulse-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "GitHub personal access token. Optional - public repos work without it; raises rate limits and enables private repository access.",
+                    "isSecret": true,
+                    "name": "GITHUB_TOKEN"
+                  }
+                ],
+                "identifier": "projectpulse-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.8.4"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/alexbypa/github-projectpulse-mcp"
+            },
+            "title": "ProjectPulse MCP",
+            "version": "1.8.4"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Track public GitHub repos: free snapshot, paid release, star \u0026 issue intel via x402 USDC.",
+            "name": "io.github.contentforge-press/github-intel",
+            "packages": [
+              {
+                "identifier": "github-repo-change-intelligence",
+                "registryType": "npm",
+                "transport": {
+                  "type": "streamable-http",
+                  "url": "https://s-github.pixharvest.com/mcp"
+                },
+                "version": "1.0.0"
+              }
+            ],
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://s-github.pixharvest.com/mcp"
+              }
+            ],
+            "title": "GitHub Repo Change Intelligence",
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "AI-optimized GitHub MCP server: 112 tools, 98% token reduction, compact responses.",
+            "name": "io.github.crypto-ninja/github-mcp-server",
+            "packages": [
+              {
+                "identifier": "github-mcp-server",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "2.5.7"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/crypto-ninja/mcp-server-for-Github"
+            },
+            "version": "2.5.7"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub MCP Server - List PRs, issues, repo info, and search code",
+            "name": "io.github.davidweb3-ctrl/github",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "GitHub Personal Access Token",
+                    "isSecret": true,
+                    "name": "GITHUB_TOKEN"
+                  }
+                ],
+                "identifier": "@davidweb3-ctrl/mcp-github-server",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/davidweb3-ctrl/mcp-github-server"
+            },
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub repo maintainability verdicts—maintained, slowing, at-risk, abandoned—via MCP.",
+            "name": "io.github.digitalgremlin/github-repo-intelligence-mcp",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://joeslade--github-repo-intelligence-mcp.apify.actor/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/digitalgremlin/github-repo-intelligence-mcp"
+            },
+            "version": "0.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Connect AI assistants to GitHub - manage repos, issues, PRs, and workflows through natural language.",
+            "name": "io.github.github/github-mcp-server",
+            "packages": [
+              {
+                "identifier": "ghcr.io/github/github-mcp-server:1.13.0",
+                "registryType": "oci",
+                "runtimeArguments": [
+                  {
+                    "description": "Publish the OAuth callback port to loopback so the in-container login callback is reachable",
+                    "name": "-p",
+                    "type": "named",
+                    "value": "127.0.0.1:8085:8085"
+                  },
+                  {
+                    "description": "Fixed OAuth callback port, matching the published port above",
+                    "name": "-e",
+                    "type": "named",
+                    "value": "GITHUB_OAUTH_CALLBACK_PORT=8085"
+                  },
+                  {
+                    "description": "Optional GitHub Personal Access Token. Omit to log in with OAuth on first use.",
+                    "name": "-e",
+                    "type": "named",
+                    "value": "GITHUB_PERSONAL_ACCESS_TOKEN={token}",
+                    "variables": {
+                      "token": {
+                        "format": "string",
+                        "isSecret": true
+                      }
+                    }
+                  }
+                ],
+                "transport": {
+                  "type": "stdio"
+                }
+              }
+            ],
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "Authorization header with authentication token (PAT or App token)",
+                    "isSecret": true,
+                    "name": "Authorization"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://api.githubcopilot.com/mcp/"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/github/github-mcp-server"
+            },
+            "title": "GitHub",
+            "version": "1.13.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Repo intel for AI coding agents: overview, PRs, contributors, hot files, CI, deps. Remote MCP.",
+            "name": "io.github.heisencodex-jpg/github-repo-intel-mcp",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "Apify API token, formatted as: Bearer apify_api_xxx. Get a free token at https://console.apify.com/account/integrations.",
+                    "isSecret": true,
+                    "name": "Authorization"
+                  }
+                ],
+                "type": "streamable-http",
+                "url": "https://cg-nguyen--github-repo-intel-mcp.apify.actor/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/heisencodex-jpg/github-repo-intel-mcp"
+            },
+            "title": "GitHub Repository Intelligence",
+            "version": "0.3.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "MCP server for the GitHub REST API: issues, PRs, repos; read always on, write env-gated.",
+            "name": "io.github.jaimenbell/github-mcp",
+            "packages": [
+              {
+                "identifier": "jaimenbell-github-mcp",
+                "registryType": "pypi",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/jaimenbell/github-mcp"
+            },
+            "version": "0.1.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub repository intelligence: search repos, read repo details, and list user repos. No key...",
+            "name": "io.github.mrfentmen/github-intel-mcp",
+            "packages": [
+              {
+                "identifier": "github-intel-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/mrfentmen/github-intel-mcp"
+            },
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub status from GitHub Status. No key required.",
+            "name": "io.github.mrfentmen/github-status-mcp",
+            "packages": [
+              {
+                "identifier": "github-status-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/mrfentmen/github-status-mcp"
+            },
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Convert any GitHub repo to MCP server - automatic tool generation API wrap",
+            "name": "io.github.nirholas/github-to-mcp",
+            "repository": {
+              "url": "https://github.com/nirholas/github-to-mcp"
+            },
+            "title": "GitHub to MCP Converter",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub Actions MCP — view runs, read logs, re-run jobs, and manage CI/CD.",
+            "name": "io.github.ofershap/github-actions",
+            "packages": [
+              {
+                "identifier": "mcp-server-github-actions",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/ofershap/mcp-server-github-actions"
+            },
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "MCP server to create, read, update, list, and search GitHub Gists from your IDE",
+            "name": "io.github.ofershap/github-gist",
+            "packages": [
+              {
+                "identifier": "mcp-server-github-gist",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/ofershap/mcp-server-github-gist"
+            },
+            "version": "1.0.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Retrieves GitHub PR history as context material; the connected IDE agent does the reasoning.",
+            "name": "io.github.paarths-collab/github-pr-context-mcp",
+            "repository": {
+              "url": "https://github.com/paarths-collab/github-pr-context-mcp"
+            },
+            "title": "GitHub PR Context",
+            "version": "0.3.3"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "AI agent vision for GitHub repository monitoring — with ROI measurement.",
+            "name": "io.github.perceptdot/github",
+            "packages": [
+              {
+                "identifier": "@perceptdot/github",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.5"
+              }
+            ],
+            "title": "Perceptdot GitHub",
+            "version": "0.1.5"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub MCP — wraps the GitHub public REST API (no auth required for public endpoints)",
+            "name": "io.github.pipeworx-io/github",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://gateway.pipeworx.io/github/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/pipeworx-io/mcp-github"
+            },
+            "title": "Github",
+            "version": "0.1.6"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub Private MCP Pack — access private repos, org data via OAuth.",
+            "name": "io.github.pipeworx-io/github_private",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://gateway.pipeworx.io/github_private/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/pipeworx-io/mcp-github_private"
+            },
+            "title": "Github_private",
+            "version": "0.1.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub analytics - repos, PRs, issues, releases, contributors",
+            "name": "io.github.rog0x/github",
+            "packages": [
+              {
+                "identifier": "@rog0x/mcp-github-tools",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.1"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/rog0x/mcp-github-tools"
+            },
+            "version": "1.0.1"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "MCP server for GitHub repo stats: stars, forks, contributors, activity.",
+            "name": "io.github.ryudi84/github-stats",
+            "packages": [
+              {
+                "identifier": "sovereign-github-stats-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.0.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/ryudi84/sovereign-mcp-servers"
+            },
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Parse owner and repo from a GitHub URL. Path discarded.",
+            "name": "io.github.sadri-dridi/github-repo-shape",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://agent-observatory-sensor.nolimit-observatory.workers.dev/s/github-repo-shape/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/sadri-dridi/named-mcp-utilities"
+            },
+            "title": "GitHub Repo Shape",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "AI-powered MCP server for generating GitHub issues and detecting semantic duplicates.",
+            "name": "io.github.sarim-aliii/github-issue-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "GitHub personal access token used to access the configured repository.",
+                    "isSecret": true,
+                    "name": "GITHUB_TOKEN"
+                  },
+                  {
+                    "description": "GitHub repository owner or organization.",
+                    "name": "GITHUB_OWNER"
+                  },
+                  {
+                    "description": "GitHub repository name.",
+                    "name": "GITHUB_REPO"
+                  },
+                  {
+                    "description": "Google Gemini API key used for AI-powered issue generation and semantic duplicate analysis.",
+                    "isSecret": true,
+                    "name": "GEMINI_API_KEY"
+                  }
+                ],
+                "identifier": "github-issue-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "1.1.2"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/sarim-aliii/github-issue-mcp"
+            },
+            "title": "GitHub Issue MCP",
+            "version": "1.1.2"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Read public GitHub Projects v2 boards without auth — items, fields, story points, priority.",
+            "name": "io.github.shubhtoy/github-project-info",
+            "packages": [
+              {
+                "identifier": "github-project-info-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.3"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/shubhtoy/github-project-info-mcp"
+            },
+            "version": "0.1.3"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "MCP server for GitHub repo health, commit summaries, issue triage, and RAG Q\u0026A.",
+            "name": "io.github.thedhruv-07/github-repo-mcp",
+            "packages": [
+              {
+                "environmentVariables": [
+                  {
+                    "description": "GitHub personal access token (classic, no scopes needed for public repos). Raises the rate limit from 60/hr to 5000/hr. https://github.com/settings/tokens",
+                    "isSecret": true,
+                    "name": "GITHUB_TOKEN"
+                  },
+                  {
+                    "description": "Voyage AI API key, required for ask_repo's embeddings. Free tier at https://dashboard.voyageai.com/",
+                    "isSecret": true,
+                    "name": "VOYAGE_API_KEY"
+                  },
+                  {
+                    "description": "Qdrant Cloud cluster URL, required for ask_repo's vector storage. Free tier at https://cloud.qdrant.io/",
+                    "name": "QDRANT_URL"
+                  },
+                  {
+                    "description": "API key for your Qdrant Cloud cluster.",
+                    "isSecret": true,
+                    "name": "QDRANT_API_KEY"
+                  }
+                ],
+                "identifier": "@thedhruv07/github-repo-mcp",
+                "registryType": "npm",
+                "transport": {
+                  "type": "stdio"
+                },
+                "version": "0.1.0"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/thedhruv-07/github-repo-mcp"
+            },
+            "version": "0.1.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "GitHub repo analytics, trending repos, contributor stats, and language breakdowns.",
+            "name": "io.github.therealMrFunGuy/github-insights",
+            "remotes": [
+              {
+                "headers": [
+                  {
+                    "description": "API key from https://auth.rjctdlabs.xyz/dashboard",
+                    "isSecret": true,
+                    "name": "X-API-Key"
+                  }
+                ],
+                "type": "sse",
+                "url": "https://github.rjctdlabs.xyz/sse"
+              }
+            ],
+            "title": "GitHubInsights",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Audit GitHub Actions workflows for script injection, unpinned actions and missing permissions.",
+            "name": "io.github.tylerscomic-lab/github-actions-audit-mcp",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://github-actions-audit-mcp.mcpize.run/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/tylerscomic-lab/github-actions-audit-mcp"
+            },
+            "title": "GitHub Actions Security Audit",
+            "version": "1.0.0"
+          }
+        },
+        {
+          "_meta": {
+            "io.modelcontextprotocol.registry/official": {
+              "isLatest": true,
+              "status": "active"
+            }
+          },
+          "server": {
+            "description": "Dive into the world of open-source with the GitHub Repo Explorer! Utilize the powerful GitHub",
+            "name": "io.github.varvararatta/github_public_repos_mcp",
+            "remotes": [
+              {
+                "type": "streamable-http",
+                "url": "https://github-public-repos-mcp.mcpize.run/mcp"
+              }
+            ],
+            "repository": {
+              "url": "https://github.com/varvararatta/botfactory-mcp"
+            },
+            "title": "Github Public Repos Mcp",
+            "version": "1.0.0"
+          }
+        }
+      ]
+    },
+    {
+      "id": "community",
+      "name": "Community",
+      "provenance": "custom",
+      "servers": [
+        {
+          "id": "acme/github-fork",
+          "name": "GitHub (community fork)",
+          "description": "A fork of the GitHub server",
+          "url": "https://fork.example.com/mcp"
+        },
+        {
+          "id": "acme/weather",
+          "name": "Weather",
+          "description": "Forecasts; mentions github once",
+          "url": "https://weather.example.com/mcp"
+        },
+        {
+          "id": "acme/github-bridge",
+          "name": "Issue Bridge",
+          "description": "Syncs github issues",
+          "installCmd": "npx issue-bridge"
+        }
+      ]
+    }
+  ],
+  "ids": [
+    "official:io.github.github/github-mcp-server",
+    "official:com.mcparmory/github",
+    "official:io.github.Abhishekkumar2021/github",
+    "official:io.github.Dave-London/github",
+    "official:io.github.davidweb3-ctrl/github",
+    "official:io.github.pipeworx-io/github",
+    "official:io.github.rog0x/github",
+    "official:io.github.perceptdot/github",
+    "official:io.github.UnbearableDev/github-actions-audit",
+    "official:io.github.tylerscomic-lab/github-actions-audit-mcp",
+    "official:io.github.Kirchlive/github-inside-claude-code",
+    "official:io.github.sarim-aliii/github-issue-mcp",
+    "official:io.github.paarths-collab/github-pr-context-mcp",
+    "official:io.github.varvararatta/github_public_repos_mcp",
+    "official:io.github.sadri-dridi/github-repo-shape",
+    "official:io.github.heisencodex-jpg/github-repo-intel-mcp",
+    "official:io.github.nirholas/github-to-mcp",
+    "official:io.github.ofershap/github-actions",
+    "official:io.github.TheNextGenNexus/github-analytics-mcp-server",
+    "official:io.github.ofershap/github-gist"
+  ],
+  "results": [
+    {
+      "source": "official",
+      "id": "io.github.github/github-mcp-server",
+      "title": "GitHub",
+      "publisher": "github",
+      "verified": true,
+      "official": true,
+      "description": "Connect AI assistants to GitHub - manage repos, issues, PRs, and workflows through natural language.",
+      "transport": "stdio",
+      "install": {
+        "command": "docker",
+        "args": [
+          "run",
+          "-i",
+          "--rm",
+          "-p",
+          "127.0.0.1:8085:8085",
+          "-e",
+          "GITHUB_OAUTH_CALLBACK_PORT=8085",
+          "-e",
+          "GITHUB_PERSONAL_ACCESS_TOKEN={token}",
+          "ghcr.io/github/github-mcp-server:1.13.0"
+        ]
+      },
+      "required_inputs": [
+        {
+          "name": "Authorization",
+          "description": "Authorization header with authentication token (PAT or App token)",
+          "secret_like": true
+        }
+      ],
+      "source_code_url": "https://github.com/github/github-mcp-server",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "com.mcparmory/github",
+      "title": "github",
+      "publisher": "mcparmory",
+      "verified": true,
+      "official": true,
+      "description": "Manage repositories, users, releases, and automate GitHub workflows",
+      "transport": "stdio",
+      "install": {
+        "command": "uvx",
+        "args": [
+          "mcparmory-github"
+        ]
+      },
+      "source_code_url": "https://github.com/mcparmory/registry",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.Abhishekkumar2021/github",
+      "title": "GitHub",
+      "publisher": "Abhishekkumar2021",
+      "verified": true,
+      "official": true,
+      "description": "GitHub via MCP: search, repos, issues, PRs, files, notifications. OAuth device flow or token.",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "@abhishekmcp/github@0.2.0"
+        ]
+      },
+      "required_inputs": [
+        {
+          "name": "GITHUB_CLIENT_ID",
+          "description": "OAuth App client id (public) to enable the device-flow login.",
+          "secret_like": false
+        },
+        {
+          "name": "GITHUB_READONLY",
+          "description": "Set to 1 or true to disable issue-creating/commenting tools.",
+          "secret_like": false
+        },
+        {
+          "name": "GITHUB_TOKEN",
+          "description": "A GitHub Personal Access Token (skips the OAuth device flow).",
+          "secret_like": true
+        }
+      ],
+      "source_code_url": "https://github.com/Abhishekkumar2021/mcp-suite",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.Dave-London/github",
+      "title": "github",
+      "publisher": "Dave-London",
+      "verified": true,
+      "official": true,
+      "description": "MCP server for GitHub operations (PRs, issues, actions) with structured, token-efficient output",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "@paretools/github@0.7.1"
+        ]
+      },
+      "source_code_url": "https://github.com/Dave-London/Pare",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.davidweb3-ctrl/github",
+      "title": "github",
+      "publisher": "davidweb3-ctrl",
+      "verified": true,
+      "official": true,
+      "description": "GitHub MCP Server - List PRs, issues, repo info, and search code",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "@davidweb3-ctrl/mcp-github-server@1.0.0"
+        ]
+      },
+      "required_inputs": [
+        {
+          "name": "GITHUB_TOKEN",
+          "description": "GitHub Personal Access Token",
+          "secret_like": true
+        }
+      ],
+      "source_code_url": "https://github.com/davidweb3-ctrl/mcp-github-server",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.pipeworx-io/github",
+      "title": "Github",
+      "publisher": "pipeworx-io",
+      "verified": true,
+      "official": true,
+      "description": "GitHub MCP — wraps the GitHub public REST API (no auth required for public endpoints)",
+      "transport": "http",
+      "install": {
+        "url": "https://gateway.pipeworx.io/github/mcp"
+      },
+      "source_code_url": "https://github.com/pipeworx-io/mcp-github",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.rog0x/github",
+      "title": "github",
+      "publisher": "rog0x",
+      "verified": true,
+      "official": true,
+      "description": "GitHub analytics - repos, PRs, issues, releases, contributors",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "@rog0x/mcp-github-tools@1.0.1"
+        ]
+      },
+      "source_code_url": "https://github.com/rog0x/mcp-github-tools",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.perceptdot/github",
+      "title": "Perceptdot GitHub",
+      "publisher": "perceptdot",
+      "verified": false,
+      "official": true,
+      "description": "AI agent vision for GitHub repository monitoring — with ROI measurement.",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "@perceptdot/github@0.1.5"
+        ]
+      },
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.UnbearableDev/github-actions-audit",
+      "title": "GitHub Actions Audit",
+      "publisher": "UnbearableDev",
+      "verified": true,
+      "official": true,
+      "description": "GitHub Actions workflow security audit - 21 checks: pinning, permissions, secrets, injection.",
+      "transport": "http",
+      "install": {
+        "url": "https://unbearable-dev--github-actions-audit.apify.actor/mcp"
+      },
+      "required_inputs": [
+        {
+          "name": "Authorization",
+          "description": "Apify API token. Format: 'Bearer <YOUR_APIFY_TOKEN>'. Get yours at https://console.apify.com/account/integrations",
+          "secret_like": true
+        }
+      ],
+      "source_code_url": "https://github.com/UnbearableDev/github-actions-audit",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.tylerscomic-lab/github-actions-audit-mcp",
+      "title": "GitHub Actions Security Audit",
+      "publisher": "tylerscomic-lab",
+      "verified": true,
+      "official": true,
+      "description": "Audit GitHub Actions workflows for script injection, unpinned actions and missing permissions.",
+      "transport": "http",
+      "install": {
+        "url": "https://github-actions-audit-mcp.mcpize.run/mcp"
+      },
+      "source_code_url": "https://github.com/tylerscomic-lab/github-actions-audit-mcp",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.Kirchlive/github-inside-claude-code",
+      "title": "GitHub Inside Claude Code",
+      "publisher": "Kirchlive",
+      "verified": true,
+      "official": true,
+      "description": "Normalized GitHub-CLI bridge for Claude Code — 89 ops, 6 families incl. federation sources",
+      "transport": "stdio",
+      "install": {
+        "command": "uvx",
+        "args": [
+          "gh-tool-use-mcp",
+          "github-inside-claude-code"
+        ]
+      },
+      "required_inputs": [
+        {
+          "name": "BRAVE_API_KEY",
+          "description": "API key for the Brave Search federation source (gh_research_brave_search). Required only if that research op is invoked.",
+          "secret_like": true
+        },
+        {
+          "name": "TAVILY_API_KEY",
+          "description": "API key for the Tavily federation source (gh_research_tavily_search / gh_research_tavily_research). Required only if those research ops are invoked.",
+          "secret_like": true
+        }
+      ],
+      "source_code_url": "https://github.com/Kirchlive/github-inside-claude-code",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.sarim-aliii/github-issue-mcp",
+      "title": "GitHub Issue MCP",
+      "publisher": "sarim-aliii",
+      "verified": true,
+      "official": true,
+      "description": "AI-powered MCP server for generating GitHub issues and detecting semantic duplicates.",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "github-issue-mcp@1.1.2"
+        ]
+      },
+      "required_inputs": [
+        {
+          "name": "GEMINI_API_KEY",
+          "description": "Google Gemini API key used for AI-powered issue generation and semantic duplicate analysis.",
+          "secret_like": true
+        },
+        {
+          "name": "GITHUB_OWNER",
+          "description": "GitHub repository owner or organization.",
+          "secret_like": false
+        },
+        {
+          "name": "GITHUB_REPO",
+          "description": "GitHub repository name.",
+          "secret_like": false
+        },
+        {
+          "name": "GITHUB_TOKEN",
+          "description": "GitHub personal access token used to access the configured repository.",
+          "secret_like": true
+        }
+      ],
+      "source_code_url": "https://github.com/sarim-aliii/github-issue-mcp",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.paarths-collab/github-pr-context-mcp",
+      "title": "GitHub PR Context",
+      "publisher": "paarths-collab",
+      "verified": true,
+      "official": true,
+      "description": "Retrieves GitHub PR history as context material; the connected IDE agent does the reasoning.",
+      "transport": "stdio",
+      "install": {},
+      "source_code_url": "https://github.com/paarths-collab/github-pr-context-mcp",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.varvararatta/github_public_repos_mcp",
+      "title": "Github Public Repos Mcp",
+      "publisher": "varvararatta",
+      "verified": true,
+      "official": true,
+      "description": "Dive into the world of open-source with the GitHub Repo Explorer! Utilize the powerful GitHub",
+      "transport": "http",
+      "install": {
+        "url": "https://github-public-repos-mcp.mcpize.run/mcp"
+      },
+      "source_code_url": "https://github.com/varvararatta/botfactory-mcp",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.sadri-dridi/github-repo-shape",
+      "title": "GitHub Repo Shape",
+      "publisher": "sadri-dridi",
+      "verified": true,
+      "official": true,
+      "description": "Parse owner and repo from a GitHub URL. Path discarded.",
+      "transport": "http",
+      "install": {
+        "url": "https://agent-observatory-sensor.nolimit-observatory.workers.dev/s/github-repo-shape/mcp"
+      },
+      "source_code_url": "https://github.com/sadri-dridi/named-mcp-utilities",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.heisencodex-jpg/github-repo-intel-mcp",
+      "title": "GitHub Repository Intelligence",
+      "publisher": "heisencodex-jpg",
+      "verified": true,
+      "official": true,
+      "description": "Repo intel for AI coding agents: overview, PRs, contributors, hot files, CI, deps. Remote MCP.",
+      "transport": "http",
+      "install": {
+        "url": "https://cg-nguyen--github-repo-intel-mcp.apify.actor/mcp"
+      },
+      "required_inputs": [
+        {
+          "name": "Authorization",
+          "description": "Apify API token, formatted as: Bearer apify_api_xxx. Get a free token at https://console.apify.com/account/integrations.",
+          "secret_like": true
+        }
+      ],
+      "source_code_url": "https://github.com/heisencodex-jpg/github-repo-intel-mcp",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.nirholas/github-to-mcp",
+      "title": "GitHub to MCP Converter",
+      "publisher": "nirholas",
+      "verified": true,
+      "official": true,
+      "description": "Convert any GitHub repo to MCP server - automatic tool generation API wrap",
+      "transport": "stdio",
+      "install": {},
+      "source_code_url": "https://github.com/nirholas/github-to-mcp",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.ofershap/github-actions",
+      "title": "github-actions",
+      "publisher": "ofershap",
+      "verified": true,
+      "official": true,
+      "description": "GitHub Actions MCP — view runs, read logs, re-run jobs, and manage CI/CD.",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "mcp-server-github-actions@1.0.1"
+        ]
+      },
+      "source_code_url": "https://github.com/ofershap/mcp-server-github-actions",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.TheNextGenNexus/github-analytics-mcp-server",
+      "title": "github-analytics-mcp-server",
+      "publisher": "TheNextGenNexus",
+      "verified": true,
+      "official": true,
+      "description": "Get GitHub repository stats, search repos, analyze languages, and compare projects",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "@thenextgennexus/github-analytics-mcp-server@1.0.1"
+        ]
+      },
+      "required_inputs": [
+        {
+          "name": "APIFY_TOKEN",
+          "description": "Your Apify API token for accessing web scraping actors",
+          "secret_like": true
+        }
+      ],
+      "source_code_url": "https://github.com/TheNextGenNexus/ai-analytics-mcp-servers",
+      "added": false
+    },
+    {
+      "source": "official",
+      "id": "io.github.ofershap/github-gist",
+      "title": "github-gist",
+      "publisher": "ofershap",
+      "verified": true,
+      "official": true,
+      "description": "MCP server to create, read, update, list, and search GitHub Gists from your IDE",
+      "transport": "stdio",
+      "install": {
+        "command": "npx",
+        "args": [
+          "mcp-server-github-gist@1.0.2"
+        ]
+      },
+      "source_code_url": "https://github.com/ofershap/mcp-server-github-gist",
+      "added": false
+    }
+  ]
+}

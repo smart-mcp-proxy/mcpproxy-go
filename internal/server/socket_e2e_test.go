@@ -403,11 +403,13 @@ func TestE2E_SocketPermissions(t *testing.T) {
 
 	socketPath := filepath.Join(tmpDir, "mcpproxy.sock")
 
-	// Wait for socket file to be created (HTTP server starts asynchronously)
+	// Wait for the socket file to be created AND hardened (HTTP server starts
+	// asynchronously, and net.Listen creates the file umask-default before the
+	// listener chmods it to 0600 — stat'ing inside that window sees 0755)
 	require.Eventually(t, func() bool {
-		_, err := os.Stat(socketPath)
-		return err == nil
-	}, 2*time.Second, 100*time.Millisecond, "Socket file should be created")
+		info, err := os.Stat(socketPath)
+		return err == nil && info.Mode().Perm() == 0600
+	}, 2*time.Second, 100*time.Millisecond, "Socket file should be created with 0600 permissions")
 
 	// Check socket file permissions
 	info, err := os.Stat(socketPath)

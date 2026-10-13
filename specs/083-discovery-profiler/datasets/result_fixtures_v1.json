@@ -1,0 +1,95 @@
+{
+  "captured": "2026-07-14",
+  "fixture_id": "result_fixtures_v1",
+  "results": [
+    {
+      "payload": "Contents of http://fixture.local/fetch_fixture.html:\nThis page is a frozen fixture served locally during result-fixture\ncapture (T037). It exists so the `fetch:fetch` tool has a\ndeterministic document to convert to markdown.\n\n## Reference servers\n\n* filesystem — directory listings\n* git — commit history\n* sqlite — tabular query results\n* time — current time lookup\n* fetch — this document\n\nImmutable once committed; a refresh is a new `_v2` file.",
+      "payload_class_hint": "non_tabular",
+      "tool_id": "fetch:fetch"
+    },
+    {
+      "payload": "[FILE] config.json\n[FILE] data.csv\n[FILE] notes.txt\n[DIR] subdir",
+      "payload_class_hint": "non_tabular",
+      "tool_id": "filesystem:list_directory"
+    },
+    {
+      "payload": "Commit history:\nCommit: '048f84bc39fd17b10c94d2b9af61860456cd48a4'\nAuthor: <git.Actor \"Algis Dumbris <a.dumbris@gmail.com>\">\nDate: 2026-07-14 12:00:00+00:00\nMessage: 'docs(spec): add 083-discovery-profiler spec, plan, tasks\\n\\nRelated #175\\n\\nDiscovery Effectiveness Profiler: extends bench/ to measure retrieve_tools\\nresponse cost (span-based token attribution, break-even), encoding arms\\n(baseline/compact/TSCG/TOON/TRON), public corpora (ToolRet, LiveMCPTool),\\nLAP as independent CI verdict, report v2 + public dashboard.\\n\\nSpec and plan cross-reviewed by Codex (4 rounds each, approved).\\n\\n## Changes\\n- spec.md with 23 FRs / 8 SCs, Codex-approved\\n- plan.md, research.md (12 decisions), data-model.md, quickstart.md\\n- contracts/: arm-interface.md, report-v2.schema.json (validated)\\n- tasks.md: 41 TDD-paired tasks in 9 phases\\n- ROADMAP.md regenerated (083 row)\\n\\n## Testing\\n- report-v2.schema.json conditionals verified with Draft202012Validator\\n'\n\nCommit: '95cfcfed5ddbd92b61e59bb5a496aaa14a1b8afa'\nAuthor: <git.Actor \"dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\">\nDate: 2026-07-14 12:00:00+00:00\nMessage: 'chore(deps): bump the frontend-dependencies group in /frontend with 10 updates (#833)\\n\\n* chore(deps): bump the frontend-dependencies group\\n\\nBumps the frontend-dependencies group in /frontend with 10 updates:\\n\\n| Package | From | To |\\n| --- | --- | --- |\\n| [vue-chartjs](https://github.com/apertureless/vue-chartjs) | `5.3.3` | `5.3.4` |\\n| [@typescript-eslint/eslint-plugin](https://github.com/typescript-eslint/typescript-eslint/tree/HEAD/packages/eslint-plugin) | `8.62.1` | `8.63.0` |\\n| [@typescript-eslint/parser](https://github.com/typescript-eslint/typescript-eslint/tree/HEAD/packages/parser) | `8.62.1` | `8.63.0` |\\n| [@vitest/coverage-v8](https://github.com/vitest-dev/vitest/tree/HEAD/packages/coverage-v8) | `4.1.9` | `4.1.10` |\\n| [@vitest/ui](https://github.com/vitest-dev/vitest/tree/HEAD/packages/ui) | `4.1.9` | `4.1.10` |\\n| [daisyui](https://github.com/saadeghi/daisyui/tree/HEAD/packages/daisyui) | `5.6.10` | `5.6.16` |\\n| [typescript](https://github.com/microsoft/TypeScript) | `6.0.3` | `7.0.2` |\\n| [vite](https://github.com/vitejs/vite/tree/HEAD/packages/vite) | `8.1.3` | `8.1.4` |\\n| [vitest](https://github.com/vitest-dev/vitest/tree/HEAD/packages/vitest) | `4.1.9` | `4.1.10` |\\n| [vue-tsc](https://github.com/vuejs/language-tools/tree/HEAD/packages/tsc) | `3.3.6` | `3.3.7` |\\n\\n\\nUpdates `vue-chartjs` from 5.3.3 to 5.3.4\\n- [Release notes](https://github.com/apertureless/vue-chartjs/releases)\\n- [Changelog](https://github.com/apertureless/vue-chartjs/blob/main/CHANGELOG.md)\\n- [Commits](https://github.com/apertureless/vue-chartjs/compare/v5.3.3...v5.3.4)\\n\\nUpdates `@typescript-eslint/eslint-plugin` from 8.62.1 to 8.63.0\\n- [Release notes](https://github.com/typescript-eslint/typescript-eslint/releases)\\n- [Changelog](https://github.com/typescript-eslint/typescript-eslint/blob/main/packages/eslint-plugin/CHANGELOG.md)\\n- [Commits](https://github.com/typescript-eslint/typescript-eslint/commits/v8.63.0/packages/eslint-plugin)\\n\\nUpdates `@typescript-eslint/parser` from 8.62.1 to 8.63.0\\n- [Release notes](https://github.com/typescript-eslint/typescript-eslint/releases)\\n- [Changelog](https://github.com/typescript-eslint/typescript-eslint/blob/main/packages/parser/CHANGELOG.md)\\n- [Commits](https://github.com/typescript-eslint/typescript-eslint/commits/v8.63.0/packages/parser)\\n\\nUpdates `@vitest/coverage-v8` from 4.1.9 to 4.1.10\\n- [Release notes](https://github.com/vitest-dev/vitest/releases)\\n- [Changelog](https://github.com/vitest-dev/vitest/blob/main/docs/releases.md)\\n- [Commits](https://github.com/vitest-dev/vitest/commits/v4.1.10/packages/coverage-v8)\\n\\nUpdates `@vitest/ui` from 4.1.9 to 4.1.10\\n- [Release notes](https://github.com/vitest-dev/vitest/releases)\\n- [Changelog](https://github.com/vitest-dev/vitest/blob/main/docs/releases.md)\\n- [Commits](https://github.com/vitest-dev/vitest/commits/v4.1.10/packages/ui)\\n\\nUpdates `daisyui` from 5.6.10 to 5.6.16\\n- [Release notes](https://github.com/saadeghi/daisyui/releases)\\n- [Changelog](https://github.com/saadeghi/daisyui/blob/master/CHANGELOG.md)\\n- [Commits](https://github.com/saadeghi/daisyui/commits/v5.6.16/packages/daisyui)\\n\\nUpdates `typescript` from 6.0.3 to 7.0.2\\n- [Release notes](https://github.com/microsoft/TypeScript/releases)\\n- [Commits](https://github.com/microsoft/TypeScript/commits)\\n\\nUpdates `vite` from 8.1.3 to 8.1.4\\n- [Release notes](https://github.com/vitejs/vite/releases)\\n- [Changelog](https://github.com/vitejs/vite/blob/main/packages/vite/CHANGELOG.md)\\n- [Commits](https://github.com/vitejs/vite/commits/v8.1.4/packages/vite)\\n\\nUpdates `vitest` from 4.1.9 to 4.1.10\\n- [Release notes](https://github.com/vitest-dev/vitest/releases)\\n- [Changelog](https://github.com/vitest-dev/vitest/blob/main/docs/releases.md)\\n- [Commits](https://github.com/vitest-dev/vitest/commits/v4.1.10/packages/vitest)\\n\\nUpdates `vue-tsc` from 3.3.6 to 3.3.7\\n- [Release notes](https://github.com/vuejs/language-tools/releases)\\n- [Changelog](https://github.com/vuejs/language-tools/blob/master/CHANGELOG.md)\\n- [Commits](https://github.com/vuejs/language-tools/commits/v3.3.7/packages/tsc)\\n\\n---\\nupdated-dependencies:\\n- dependency-name: vue-chartjs\\n  dependency-version: 5.3.4\\n  dependency-type: direct:production\\n  update-type: version-update:semver-patch\\n  dependency-group: frontend-dependencies\\n- dependency-name: \"@typescript-eslint/eslint-plugin\"\\n  dependency-version: 8.63.0\\n  dependency-type: direct:development\\n  update-type: version-update:semver-minor\\n  dependency-group: frontend-dependencies\\n- dependency-name: \"@typescript-eslint/parser\"\\n  dependency-version: 8.63.0\\n  dependency-type: direct:development\\n  update-type: version-update:semver-minor\\n  dependency-group: frontend-dependencies\\n- dependency-name: \"@vitest/coverage-v8\"\\n  dependency-version: 4.1.10\\n  dependency-type: direct:development\\n  update-type: version-update:semver-patch\\n  dependency-group: frontend-dependencies\\n- dependency-name: \"@vitest/ui\"\\n  dependency-version: 4.1.10\\n  dependency-type: direct:development\\n  update-type: version-update:semver-patch\\n  dependency-group: frontend-dependencies\\n- dependency-name: daisyui\\n  dependency-version: 5.6.16\\n  dependency-type: direct:development\\n  update-type: version-update:semver-patch\\n  dependency-group: frontend-dependencies\\n- dependency-name: typescript\\n  dependency-version: 7.0.2\\n  dependency-type: direct:development\\n  update-type: version-update:semver-major\\n  dependency-group: frontend-dependencies\\n- dependency-name: vite\\n  dependency-version: 8.1.4\\n  dependency-type: direct:development\\n  update-type: version-update:semver-patch\\n  dependency-group: frontend-dependencies\\n- dependency-name: vitest\\n  dependency-version: 4.1.10\\n  dependency-type: direct:development\\n  update-type: version-update:semver-patch\\n  dependency-group: frontend-dependencies\\n- dependency-name: vue-tsc\\n  dependency-version: 3.3.7\\n  dependency-type: direct:development\\n  update-type: version-update:semver-patch\\n  dependency-group: frontend-dependencies\\n...\\n\\nSigned-off-by: dependabot[bot] <support@github.com>\\n\\n* chore(deps): hold typescript at 6.x — 7.0 breaks the eslint peer range\\n\\nDependabot\\'s group bump took typescript from ^6.0.0 to ^7.0.2, which npm ci\\nrefuses: @typescript-eslint/eslint-plugin@8.63.0 declares\\npeer typescript \">=4.8.4 <6.1.0\", so the whole install ERESOLVEs and every\\nfrontend job fails.\\n\\nThe other nine updates in the group are fine and are kept. TypeScript stays on\\n6.x until the eslint toolchain supports 7 — a major TS bump is its own change,\\nnot a drive-by inside a dependency group, especially on the way into a release.\\n\\nVerified with the exact CI sequence: npm ci resolves, vue-tsc --noEmit clean,\\n297/297 frontend tests pass, build succeeds.\\n\\n---------\\n\\nSigned-off-by: dependabot[bot] <support@github.com>\\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\\nCo-authored-by: Dumbris <a.dumbris@gmail.com>'\n\nCommit: 'd9aff9bea7d89fe10ed4999a9509d4badadd2b64'\nAuthor: <git.Actor \"dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\">\nDate: 2026-07-14 12:00:00+00:00\nMessage: \"chore(ci): bump actions/checkout from 6 to 7 (#832)\\n\\nBumps [actions/checkout](https://github.com/actions/checkout) from 6 to 7.\\n- [Release notes](https://github.com/actions/checkout/releases)\\n- [Commits](https://github.com/actions/checkout/compare/v6...v7)\\n\\n---\\nupdated-dependencies:\\n- dependency-name: actions/checkout\\n  dependency-version: '7'\\n  dependency-type: direct:production\\n  update-type: version-update:semver-major\\n...\\n\\nSigned-off-by: dependabot[bot] <support@github.com>\\nCo-authored-by: dependabot[bot] <49699333+dependabot[bot]@users.noreply.github.com>\\nCo-authored-by: Dumbris <a.dumbris@gmail.com>\"\n",
+      "payload_class_hint": "non_tabular",
+      "tool_id": "git:git_log"
+    },
+    {
+      "payload": [
+        {
+          "name": "servers"
+        }
+      ],
+      "payload_class_hint": "tabular",
+      "tool_id": "sqlite:list_tables"
+    },
+    {
+      "payload": [
+        {
+          "id": 1,
+          "name": "filesystem",
+          "protocol": "stdio",
+          "quarantined": 0,
+          "tool_count": 14
+        },
+        {
+          "id": 2,
+          "name": "git",
+          "protocol": "stdio",
+          "quarantined": 0,
+          "tool_count": 13
+        },
+        {
+          "id": 3,
+          "name": "memory",
+          "protocol": "stdio",
+          "quarantined": 0,
+          "tool_count": 9
+        },
+        {
+          "id": 4,
+          "name": "sqlite",
+          "protocol": "stdio",
+          "quarantined": 0,
+          "tool_count": 6
+        },
+        {
+          "id": 5,
+          "name": "fetch",
+          "protocol": "stdio",
+          "quarantined": 0,
+          "tool_count": 1
+        },
+        {
+          "id": 6,
+          "name": "time",
+          "protocol": "stdio",
+          "quarantined": 0,
+          "tool_count": 2
+        },
+        {
+          "id": 7,
+          "name": "sequential-thinking",
+          "protocol": "stdio",
+          "quarantined": 0,
+          "tool_count": 1
+        }
+      ],
+      "payload_class_hint": "tabular",
+      "tool_id": "sqlite:read_query"
+    },
+    {
+      "payload": {
+        "datetime": "2026-07-14T12:00:00+00:00",
+        "day_of_week": "Tuesday",
+        "is_dst": false,
+        "timezone": "UTC"
+      },
+      "payload_class_hint": "non_tabular",
+      "tool_id": "time:get_current_time"
+    }
+  ]
+}

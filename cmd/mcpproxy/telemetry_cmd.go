@@ -14,9 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
@@ -83,15 +81,14 @@ func runTelemetryShowPayload(_ *cobra.Command, _ []string) error {
 
 	// Require running daemon so runtime stats are populated. Offline mode
 	// would emit zero-valued runtime fields and mislead users.
-	socketPath := socket.DetectSocketPath(cfg.DataDir)
-	if !socket.IsSocketAvailable(socketPath) {
+	client, ok := newDaemonClient(cfg, nil)
+	if !ok {
 		return fmt.Errorf("telemetry show-payload requires running daemon. Start with: mcpproxy serve")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	client := cliclient.NewClient(socketPath, nil)
 	payload, err := client.GetTelemetryPayload(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get telemetry payload from daemon: %w", err)
@@ -290,13 +287,20 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 	// command never appears to hang on the (best-effort) beacon below.
 	fmt.Println("Telemetry disabled.")
 
-	// One-time opt-out beacon. When a daemon is running it does NOT auto-reload
-	// this file (there is no fsnotify watcher), so the CLI is responsible for the
-	// beacon in the CLI-driven path. Route it through the SAME guarded server-side
-	// entry point (EmitOptOutBeacon applies the dev-build/semver, env, and
-	// anon-id guards and owns the single send) rather than duplicating the send
-	// or bypassing a guard. A short timeout keeps this from blocking on a slow
-	// endpoint; the CLI is short-lived so the send must complete before exit.
+	// One-time opt-out beacon. The CLI ALWAYS sends it after persisting the
+	// disable, routing through the SAME guarded server-side entry point
+	// (EmitOptOutBeacon applies the dev-build/semver, env, and anon-id guards
+	// and owns the single send) rather than duplicating the send or bypassing
+	// a guard. Accepted trade-off (PR #857): a running daemon hot-reloads this
+	// file via the fsnotify config watcher and may ALSO emit the beacon from
+	// its NotifyConfigChanged path — that double-send is benign (the telemetry
+	// backend dedupes opt-outs by anon_id), whereas gating the CLI send on
+	// daemon detection risks DROPPING the beacon entirely on a false positive
+	// (the socket check only stat()s the path, so a stale socket file — or a
+	// daemon on the same data dir that doesn't watch this --config file —
+	// would suppress the only send). A short timeout keeps this from blocking
+	// on a slow endpoint; the CLI is short-lived so the send must complete
+	// before exit.
 	if wasEnabled {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
@@ -307,24 +311,7 @@ func runTelemetryDisable(cmd *cobra.Command, _ []string) error {
 }
 
 func loadTelemetryConfig() (*config.Config, error) {
-	if configFile != "" {
-		cfg, err := config.LoadFromFile(configFile)
-		if err != nil {
-			return nil, err
-		}
-		if dataDir != "" {
-			cfg.DataDir = dataDir
-		}
-		return cfg, nil
-	}
-	cfg, err := config.Load()
-	if err != nil {
-		return nil, err
-	}
-	if dataDir != "" {
-		cfg.DataDir = dataDir
-	}
-	return cfg, nil
+	return loadCLIConfig(configFile)
 }
 
 // telemetryConfigSavePath returns the config path that telemetry subcommands

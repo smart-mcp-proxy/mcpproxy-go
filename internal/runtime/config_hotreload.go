@@ -1,9 +1,14 @@
 package runtime
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"reflect"
+	"slices"
+	"strings"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // ConfigApplyResult represents the result of applying a configuration
@@ -16,8 +21,60 @@ type ConfigApplyResult struct {
 	ValidationErrors   []config.ValidationError `json:"validation_errors,omitempty"`
 }
 
+// changedHTTPTimeoutFields returns the names of the HTTP server deadline keys
+// whose RESOLVED value differs between the two configs (GH #965). Resolving
+// first is what makes `nil` and an explicitly-written built-in default compare
+// equal, so a config rewrite that materializes the defaults does not report a
+// restart-required change.
+func changedHTTPTimeoutFields(oldCfg, newCfg *config.Config) []string {
+	var changed []string
+	if oldCfg.ResolveHTTPReadTimeout() != newCfg.ResolveHTTPReadTimeout() {
+		changed = append(changed, "http_read_timeout")
+	}
+	if oldCfg.ResolveHTTPWriteTimeout() != newCfg.ResolveHTTPWriteTimeout() {
+		changed = append(changed, "http_write_timeout")
+	}
+	if oldCfg.ResolveHTTPIdleTimeout() != newCfg.ResolveHTTPIdleTimeout() {
+		changed = append(changed, "http_idle_timeout")
+	}
+	return changed
+}
+
 // DetectConfigChanges compares old and new configurations to determine what changed
 // and whether a restart is required
+// normalizeDirectToolResponseMode resolves the empty value to the mode it
+// means, so the two spellings of "full" compare equal.
+func normalizeDirectToolResponseMode(mode string) string {
+	if mode == "" {
+		return config.DirectToolResponseModeFull
+	}
+	return mode
+}
+
+// normalizeRoutingMode resolves the empty value to the mode it means. Same
+// reason as its two serialization neighbours below: the routing_mode clause
+// compared raw strings, so an apply body that simply OMITS routing_mode (a
+// hand-written config, a CLI apply, any client that does not round-trip every
+// key) was reported as a restart-required change to the mode already being
+// served — and the empty value was persisted, after which /api/v1/routing
+// normalizes it back and reports nothing pending.
+func normalizeRoutingMode(mode string) string {
+	if mode == "" {
+		return config.RoutingModeRetrieveTools
+	}
+	return mode
+}
+
+// normalizeToolResponseMode is the retrieve-surface twin of the above. Both
+// axes document "" as meaning "full", so both comparisons have to normalize —
+// see the DirectToolResponseMode clause for why a raw comparison misreports.
+func normalizeToolResponseMode(mode string) string {
+	if mode == "" {
+		return config.ToolResponseModeFull
+	}
+	return mode
+}
+
 func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	result := &ConfigApplyResult{
 		Success:            true,
@@ -39,6 +96,33 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.RequiresRestart = true
 		result.AppliedImmediately = false
 		result.RestartReason = "Listen address changed - requires HTTP server restart"
+		return result
+	}
+
+	// 1b. Routing mode change (requires HTTP server rebind).
+	//
+	// /mcp is bound to ONE mcp-go server instance at startup, chosen from
+	// cfg.RoutingMode (internal/server/server.go StartServer →
+	// GetMCPServerForMode) and registered on an http.ServeMux, which cannot
+	// re-register a pattern. A routing_mode change therefore cannot take effect
+	// on a running proxy however much of the config is reloaded.
+	//
+	// Reporting it is what makes that honest. Before this clause the field was
+	// absent from detection entirely, so an API apply answered "No configuration
+	// changes detected" while writing the new value to disk — and
+	// /api/v1/status, /api/v1/routing, `mcpproxy doctor` and the Web UI header
+	// then all reported the configured INTENT while /mcp kept serving the old
+	// surface. Four surfaces agreeing on the same wrong answer, with the Web UI
+	// showing a green success toast because its warning branch keys on
+	// RequiresRestart.
+	//
+	// The dedicated routes (/mcp/all, /mcp/code, /mcp/call) are unaffected: each
+	// is permanently bound to its own mode by design (Spec 031).
+	if normalizeRoutingMode(oldCfg.RoutingMode) != normalizeRoutingMode(newCfg.RoutingMode) {
+		result.ChangedFields = append(result.ChangedFields, "routing_mode")
+		result.RequiresRestart = true
+		result.AppliedImmediately = false
+		result.RestartReason = "Routing mode changed - /mcp is bound to its mode at startup and requires a restart"
 		return result
 	}
 
@@ -67,7 +151,12 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 			tlsChanged = true
 		} else if oldCfg.TLS.Enabled != newCfg.TLS.Enabled ||
 			oldCfg.TLS.RequireClientCert != newCfg.TLS.RequireClientCert ||
-			oldCfg.TLS.CertsDir != newCfg.TLS.CertsDir {
+			oldCfg.TLS.CertsDir != newCfg.TLS.CertsDir ||
+			// HSTS wraps the handler chain once, where the HTTP server is built
+			// (server.go withHSTS), so it cannot apply hot. Settings already
+			// badges tls.hsts as restart-required; this makes the backend agree
+			// instead of silently reporting the edit as applied (UX audit F16).
+			oldCfg.TLS.HSTS != newCfg.TLS.HSTS {
 			tlsChanged = true
 		}
 
@@ -80,12 +169,58 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		}
 	}
 
+	// 5. HTTP server request deadlines (GH #965). ReadTimeout/WriteTimeout/
+	// IdleTimeout are baked into http.Server when it is constructed in
+	// startCustomHTTPServer, so changing one only takes effect on a rebind.
+	// Compare the RESOLVED values, not the pointers: writing a key out at its
+	// built-in default ("120s" read / "120s" write / "180s" idle) is not a
+	// real change and must not force a pointless restart.
+	if httpTimeoutFields := changedHTTPTimeoutFields(oldCfg, newCfg); len(httpTimeoutFields) > 0 {
+		result.ChangedFields = append(result.ChangedFields, httpTimeoutFields...)
+		result.RequiresRestart = true
+		result.AppliedImmediately = false
+		result.RestartReason = "HTTP server timeouts changed - requires restart"
+		return result
+	}
+
 	// Track hot-reloadable changes
 
-	// Server configuration changes (can be hot-reloaded)
-	if !reflect.DeepEqual(oldCfg.Servers, newCfg.Servers) {
+	// Server configuration changes (can be hot-reloaded).
+	//
+	// Compared via jsonEqual, not reflect.DeepEqual, for the same reason as
+	// docker_isolation and trusted_hosts below: PATCH /api/v1/config round-trips
+	// the LIVE config through JSON before merging the patch, so newCfg.Servers is
+	// a decoded copy while oldCfg.Servers is the in-memory slice. DeepEqual saw
+	// those as different for every patch — `Created`/`Updated` carry a monotonic
+	// reading and a *time.Location in memory but not after an RFC3339 decode, and
+	// `omitempty` collapses empty Args/Env/Headers to nil. That mislabelled
+	// changed_fields as ["mcpServers"] on unrelated edits (UX audit F16) AND
+	// triggered a spurious full upstream reload/reconnect on every settings save.
+	// The length guard keeps nil vs []*ServerConfig{} (`null` vs `[]`) from
+	// re-introducing the same false positive when there are no servers at all.
+	if len(oldCfg.Servers) != len(newCfg.Servers) ||
+		(len(oldCfg.Servers) > 0 && !jsonEqual(oldCfg.Servers, newCfg.Servers)) {
 		result.ChangedFields = append(result.ChangedFields, "mcpServers")
 		// These will be applied by triggering server reconnection
+	}
+
+	// Profiles v3 (Spec 108-l L9, config-field-checklist point 1 — hot-reloadable).
+	// The config funnel already rebuilds the profile indexes on a reload and
+	// notifies the sessions a change governs, and every resolver reads the live
+	// snapshot, so neither field needs a restart. Without these clauses a lone
+	// `anonymous_profile` save (Settings -> Anonymous callers, Web and macOS) or a
+	// profile edit made by hand computed empty ChangedFields and was answered
+	// "No configuration changes detected" with applied_immediately:false.
+	//
+	// jsonEqual, not DeepEqual, and the length guard, for the same reasons as the
+	// Servers clause above: PATCH /config hands us a JSON-decoded copy of the live
+	// config, whose nil-vs-empty slices and pointer fields must not read as edits.
+	if len(oldCfg.Profiles) != len(newCfg.Profiles) ||
+		(len(oldCfg.Profiles) > 0 && !jsonEqual(oldCfg.Profiles, newCfg.Profiles)) {
+		result.ChangedFields = append(result.ChangedFields, "profiles")
+	}
+	if oldCfg.AnonymousProfile != newCfg.AnonymousProfile {
+		result.ChangedFields = append(result.ChangedFields, "anonymous_profile")
 	}
 
 	// Tool limits (can be hot-reloaded)
@@ -115,6 +250,87 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "call_tool_timeout")
 	}
 
+	// TOON output (spec 084, FR-001 — hot-reloadable). The call_tool_* encoder
+	// seam reads ToonOutput/ToonMinSavingsPct fresh on every call (same pattern
+	// as output sanitisation), so applying the change is free; these entries
+	// exist so a lone toon edit is acknowledged instead of being reported as
+	// "no changes detected". Per-server toon_output overrides are already
+	// covered by the Servers DeepEqual above.
+	if oldCfg.ToonOutput != newCfg.ToonOutput {
+		result.ChangedFields = append(result.ChangedFields, "toon_output")
+	}
+	if oldCfg.ToonMinSavingsPct != newCfg.ToonMinSavingsPct {
+		result.ChangedFields = append(result.ChangedFields, "toon_min_savings_pct")
+	}
+
+	// Client header forwarding switch (Spec 112 FR-020 — hot-reloadable, no
+	// reconnect). Compare the RESOLVED bool, not the pointer: nil and an
+	// explicit true both mean enabled, so writing the default out is not a
+	// change, and a lone edit of the switch is acknowledged instead of being
+	// swallowed as "no changes detected".
+	if oldCfg.IsClientHeaderForwardingEnabled() != newCfg.IsClientHeaderForwardingEnabled() {
+		result.ChangedFields = append(result.ChangedFields, "forward_client_headers")
+	}
+
+	// Tool response mode (Spec 085 FR-015 — hot-reloadable, serialization
+	// only). Without this clause an API apply that changes only this field
+	// computes empty ChangedFields and is swallowed as "no changes detected".
+	// The retrieve path reads the live snapshot (p.currentConfig()), so
+	// reporting the change is all the propagation needed.
+	//
+	// Compared NORMALIZED, for the same reason as the direct axis below: "" and
+	// "full" are the same mode, so an operator deleting the key — or a PATCH
+	// round-trip dropping it — is not a change, and reporting one makes the
+	// apply RESULT tell the caller a field moved when nothing did. The direct
+	// clause gained this in Spec 102 review; this one was left comparing raw
+	// strings, and the Settings UI now offers "full" as an explicit choice,
+	// which makes an explicit-vs-absent round trip reachable from the form.
+	if normalizeToolResponseMode(oldCfg.ToolResponseMode) !=
+		normalizeToolResponseMode(newCfg.ToolResponseMode) {
+		result.ChangedFields = append(result.ChangedFields, "tool_response_mode")
+	}
+
+	// Direct-surface serialization (Spec 102 FR-014 — hot-reloadable,
+	// serialization only). A SEPARATE clause from the one above, not a shared
+	// one: the two axes govern different surfaces, so folding them together
+	// would make an operator's edit to retrieve_tools rebuild the direct
+	// listing and notify every connected client for nothing.
+	//
+	// Unlike the retrieve axis, reporting the change is NOT all the propagation
+	// needed: the direct listing is registered state, not rendered per request,
+	// so listenForRoutingModeRefresh's config.reloaded branch has to rebuild it.
+	// This clause is what makes that branch reachable at all — without it the
+	// apply computes empty ChangedFields and is swallowed as "no changes
+	// detected".
+	// Compared NORMALIZED: "" and "full" are the same mode (config.go documents
+	// the empty value as the default), so an operator deleting the key — or a
+	// PATCH round-trip dropping it — is not a change. Comparing raw strings
+	// reports a field that did not move, which the rebuild guard downstream
+	// would suppress but the apply RESULT would still misreport to the caller.
+	if normalizeDirectToolResponseMode(oldCfg.DirectToolResponseMode) !=
+		normalizeDirectToolResponseMode(newCfg.DirectToolResponseMode) {
+		result.ChangedFields = append(result.ChangedFields, "direct_tool_response_mode")
+	}
+
+	// advertise_upstream_servers is read live per connect/tools/list; this
+	// clause makes a lone toggle emit config.reloaded so connected clients
+	// are re-listed (NotifyUpstreamInventoryChanged). Compared resolved:
+	// unset and true are the same value.
+	if oldCfg.AdvertiseUpstreamServersEnabled() != newCfg.AdvertiseUpstreamServersEnabled() {
+		result.ChangedFields = append(result.ChangedFields, "advertise_upstream_servers")
+	}
+
+	// Upstream prompt aggregation (PR #973 — hot-reloadable, opt-in). Without
+	// this clause a lone aggregate_upstream_prompts toggle computes empty
+	// ChangedFields and is swallowed as "no changes detected", so ApplyConfig
+	// never emits config.reloaded and RefreshPrompts (which reads the live
+	// snapshot) never re-runs. EnablePrompts is deliberately absent: it gates
+	// the prompts CAPABILITY, baked into each server at construction, so
+	// toggling it is a restart concern.
+	if oldCfg.AggregateUpstreamPrompts != newCfg.AggregateUpstreamPrompts {
+		result.ChangedFields = append(result.ChangedFields, "aggregate_upstream_prompts")
+	}
+
 	// Discovery & health-check cadence (spec 074 — hot-reloadable). The health
 	// loop (managed client) and indexing loop (runtime) re-resolve their interval
 	// each cycle, and ApplyConfig propagates the new global config to the upstream
@@ -128,13 +344,70 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "tool_discovery_interval")
 	}
 
+	// Concurrency limits (spec 093 / GH #955 — hot-reloadable, FR-021). The
+	// limiter registry re-publishes one generation from the new snapshot on
+	// apply; occupancy is shared across generations, so running calls are never
+	// interrupted. These clauses cover the GLOBAL aggregate limiter and the
+	// per-server default set — per-server overrides are already covered by the
+	// Servers DeepEqual above. Without them a lone limit edit computes empty
+	// ChangedFields and is swallowed as "no changes detected".
+	if !reflect.DeepEqual(oldCfg.MaxConcurrentRequests, newCfg.MaxConcurrentRequests) {
+		result.ChangedFields = append(result.ChangedFields, "max_concurrent_requests")
+	}
+	if !reflect.DeepEqual(oldCfg.QueueSize, newCfg.QueueSize) {
+		result.ChangedFields = append(result.ChangedFields, "queue_size")
+	}
+	if !reflect.DeepEqual(oldCfg.QueueTimeout, newCfg.QueueTimeout) {
+		result.ChangedFields = append(result.ChangedFields, "queue_timeout")
+	}
+	if !reflect.DeepEqual(oldCfg.ServerConcurrencyDefaults, newCfg.ServerConcurrencyDefaults) {
+		result.ChangedFields = append(result.ChangedFields, "server_concurrency_defaults")
+	}
+
+	// Code execution settings (Spec 096 FR-004 — hot-reloadable). The
+	// code_execution handler resolves timeout / max_tool_calls /
+	// max_parallel from the LIVE snapshot (p.currentConfig()) on every
+	// execution, so a lone edit here must be reported as a change instead of
+	// being swallowed as "no changes detected".
+	if oldCfg.CodeExecutionTimeoutMs != newCfg.CodeExecutionTimeoutMs ||
+		oldCfg.CodeExecutionMaxToolCalls != newCfg.CodeExecutionMaxToolCalls ||
+		oldCfg.CodeExecutionMaxParallel != newCfg.CodeExecutionMaxParallel {
+		result.ChangedFields = append(result.ChangedFields, "code_execution")
+	}
+
+	// enable_code_execution (UX audit F16 — hot-reloadable). Toggling this
+	// changes the advertised tool set, which used to make it a restart concern:
+	// the routing-mode surfaces built their code_execution entry (live tool or
+	// "disabled" stub) once, from the construction-time config snapshot. Both
+	// now build from the LIVE snapshot and are rebuilt on config.reloaded
+	// (server.listenForRoutingModeRefresh), and the handler gate already read
+	// the live value per call — so the flag applies without a restart and must
+	// be reported here, or ApplyConfig swallows a lone toggle as "no changes
+	// detected" and never emits config.reloaded.
+	if oldCfg.EnableCodeExecution != newCfg.EnableCodeExecution {
+		result.ChangedFields = append(result.ChangedFields, "enable_code_execution")
+	}
+
+	// The JS runtime pool is sized once at server construction and never
+	// resized in-process, so unlike its siblings pool_size cannot apply hot.
+	if oldCfg.CodeExecutionPoolSize != newCfg.CodeExecutionPoolSize {
+		result.ChangedFields = append(result.ChangedFields, "code_execution_pool_size")
+		result.RequiresRestart = true
+		if result.RestartReason == "" {
+			result.RestartReason = "code_execution_pool_size is sized at startup - requires restart"
+		}
+	}
+
 	// Logging configuration (can be hot-reloaded)
 	if !reflect.DeepEqual(oldCfg.Logging, newCfg.Logging) {
 		result.ChangedFields = append(result.ChangedFields, "logging")
 	}
 
-	// Docker isolation configuration (can be hot-reloaded for new servers)
-	if !reflect.DeepEqual(oldCfg.DockerIsolation, newCfg.DockerIsolation) {
+	// Docker isolation configuration (can be hot-reloaded for new servers).
+	// Compared via jsonEqual, not reflect.DeepEqual: the PATCH /api/v1/config
+	// round-trip collapses ExtraArgs []string{} to nil (omitempty), which
+	// DeepEqual would spuriously report as a change.
+	if !jsonEqual(oldCfg.DockerIsolation, newCfg.DockerIsolation) {
 		result.ChangedFields = append(result.ChangedFields, "docker_isolation")
 	}
 
@@ -156,6 +429,21 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	if oldCfg.AllowServerRemove != newCfg.AllowServerRemove {
 		result.ChangedFields = append(result.ChangedFields, "allow_server_remove")
 	}
+	// trusted_hosts (GH #898 — hot-reloadable). hostValidationMiddleware reads
+	// the live snapshot per request, so reporting the change is all the
+	// propagation needed. slices.Equal, not DeepEqual: the PATCH round-trip
+	// collapses []string{} to nil (omitempty), which DeepEqual would
+	// spuriously report as a change.
+	if !slices.Equal(oldCfg.TrustedHosts, newCfg.TrustedHosts) {
+		result.ChangedFields = append(result.ChangedFields, "trusted_hosts")
+	}
+	// trusted_proxies (Spec 107 FR-027 — live). Every reader evaluates the
+	// config provider per request (config.ForwardedHeaders), so reporting the
+	// change is all the propagation needed; slices.Equal for the same
+	// omitempty reason as trusted_hosts.
+	if !slices.Equal(oldCfg.TrustedProxies, newCfg.TrustedProxies) {
+		result.ChangedFields = append(result.ChangedFields, "trusted_proxies")
+	}
 
 	// Environment configuration (can be hot-reloaded)
 	if !reflect.DeepEqual(oldCfg.Environment, newCfg.Environment) {
@@ -168,6 +456,116 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		result.ChangedFields = append(result.ChangedFields, "observability")
 	}
 
+	// Security scanner settings, incl. the opt-in deep-scan layer (Spec 077 US3
+	// — hot-reloadable). The scanner service is (re)configured from cfg.Security
+	// on the config.reloaded event, so a lone security.deep_scan.* edit MUST be
+	// reported as a change (not "No configuration changes detected") and drive
+	// that re-apply — otherwise toggling deep scan via config edit / API apply
+	// only takes effect on restart. Deep compare covers deep_scan.{enabled,
+	// fetch_package_source,disable_no_new_privileges,scanners} plus the deprecated
+	// top-level scanner_* keys.
+	if !reflect.DeepEqual(oldCfg.Security, newCfg.Security) {
+		result.ChangedFields = append(result.ChangedFields, "security")
+	}
+
+	// Update-check settings (Spec 079 FR-012 — hot-reloadable). ApplyConfig
+	// re-gates the running updatecheck.Checker when this field is reported,
+	// so an update_check.{enabled,channel} edit takes effect without a
+	// restart (and is not swallowed as "No configuration changes detected").
+	if !reflect.DeepEqual(oldCfg.UpdateCheck, newCfg.UpdateCheck) {
+		result.ChangedFields = append(result.ChangedFields, "update_check")
+	}
+
+	// server_edition (Spec 107 FR-039 part 2). Two clauses, because the block
+	// has two lifetimes:
+	//
+	//   - the restart-pinned subset (enabled, oauth.*, public_url,
+	//     session_cookie_secure, session_ttl, bearer_token_ttl,
+	//     credential_encryption_key) is bound once by serveredition/setup.go —
+	//     the login handler, the session store and the credential store are
+	//     built from it — so it is reported as ONE field, `server_edition`,
+	//     with RequiresRestart and a reason naming the key group (never a
+	//     value: the block holds a client secret and an encryption key);
+	//   - admin_emails is read live through ServerEditionConfigProvider by the
+	//     middleware and the login callback, so it is reported on its own as
+	//     `server_edition.admin_emails` and applies hot.
+	//
+	// The projection is build-tagged (internal/config/serveredition_accessors
+	// {,_stub}.go): the server build projects the typed struct; the personal
+	// build returns the opaque canonical-JSON carrier (FR-040), so ANY
+	// difference there is `server_edition`, restart-pinned — it cannot know
+	// which key moved, and must not pretend to. jsonEqual, not DeepEqual, for
+	// the same PATCH round-trip reason as docker_isolation: omitempty collapses
+	// nil-vs-[] on allowed_domains/scopes, and a nil block projects to the same
+	// bytes as `{}`. Like code_execution_pool_size above — and unlike the
+	// early-return keys at the top — this clause accumulates, so a write that
+	// pairs a restart-pinned key with a hot one reports both, and ApplyConfig
+	// can adopt the hot half.
+	if !jsonEqual(config.ServerEditionRestartProjection(oldCfg), config.ServerEditionRestartProjection(newCfg)) {
+		result.ChangedFields = append(result.ChangedFields, "server_edition")
+		result.RequiresRestart = true
+		result.AppliedImmediately = false
+		if result.RestartReason == "" {
+			result.RestartReason = config.ServerEditionRestartReason(oldCfg, newCfg)
+		}
+	}
+	// slices.Equal for the same omitempty reason as trusted_hosts.
+	if !slices.Equal(config.ServerEditionAdminEmails(oldCfg), config.ServerEditionAdminEmails(newCfg)) {
+		result.ChangedFields = append(result.ChangedFields, "server_edition.admin_emails")
+	}
+	// server_edition.access (Spec 107 FR-039 part 3) is read live by the
+	// entitlement predicate through ServerEditionConfigProvider, so like
+	// admin_emails it applies hot. jsonEqual: omitempty collapses nil-vs-{}.
+	if !jsonEqual(config.ServerEditionAccessProjection(oldCfg), config.ServerEditionAccessProjection(newCfg)) {
+		result.ChangedFields = append(result.ChangedFields, "server_edition.access")
+	}
+
+	// audit_log (Spec 107 FR-019/T109). Restart-pinned: the sink is
+	// constructed once at cmd/mcpproxy serve startup and handed to the
+	// server via server.WithAuditSink, so an edit here cannot take effect
+	// without rebuilding the sink. jsonEqual, not DeepEqual, for the same
+	// PATCH round-trip reason as trusted_proxies/server_edition: pointer
+	// fields and omitempty make byte-identical documents compare unequal
+	// under reflect.DeepEqual after a JSON round trip.
+	if !jsonEqual(oldCfg.AuditLog, newCfg.AuditLog) {
+		result.ChangedFields = append(result.ChangedFields, "audit_log")
+		result.RequiresRestart = true
+		result.AppliedImmediately = false
+		if result.RestartReason == "" {
+			result.RestartReason = "audit_log is bound at sink construction"
+		}
+	}
+
+	// Remaining top-level fields (#1435). Each of these used to be edited,
+	// saved and adopted into the live config but computed an empty
+	// ChangedFields, so the apply answered "No configuration changes detected"
+	// (applied_immediately:false) for a change that had in fact been made. The
+	// list is checked by TestDetectConfigChanges_EveryTopLevelFieldIsDiffed:
+	// adding a config.Config field there forces a clause here (or an entry in
+	// that test's documented exclusion list). jsonEqual, not DeepEqual, for the
+	// PATCH round-trip reason documented on it.
+	for _, name := range undiffedHotConfigFields {
+		if !jsonEqual(configFieldValue(oldCfg, name), configFieldValue(newCfg, name)) {
+			result.ChangedFields = append(result.ChangedFields, configFieldJSONName(name))
+		}
+	}
+	// These are bound once at startup (the unix-socket listener, the tray
+	// endpoint, the search index debug flag, the tokenizer, and the MCP
+	// prompts capability / server instructions read at server construction): an edit is saved
+	// and takes effect on the next start. They are pinned to the live value by
+	// pinRestartGated, like the other restart-gated fields.
+	for _, name := range restartGatedConfigFields {
+		if !jsonEqual(configFieldValue(oldCfg, name), configFieldValue(newCfg, name)) {
+			field := configFieldJSONName(name)
+			result.ChangedFields = append(result.ChangedFields, field)
+			result.RequiresRestart = true
+			result.AppliedImmediately = false
+			if result.RestartReason == "" {
+				result.RestartReason = field + " is bound at startup - requires restart"
+			}
+		}
+	}
+
 	// If no changes detected
 	if len(result.ChangedFields) == 0 {
 		result.AppliedImmediately = false
@@ -175,6 +573,23 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	}
 
 	return result
+}
+
+// jsonEqual reports whether a and b marshal to identical JSON. Config
+// sub-structs round-trip through JSON on the PATCH /api/v1/config path,
+// where `omitempty` collapses empty slices to absent keys; comparing the
+// JSON form treats nil and []T{} as the same effective value, unlike
+// reflect.DeepEqual (which spuriously reported "docker_isolation" as
+// changed because DefaultDockerIsolationConfig's ExtraArgs: []string{}
+// round-trips to nil). json.Marshal sorts map keys, so the comparison is
+// deterministic.
+func jsonEqual(a, b interface{}) bool {
+	ab, errA := json.Marshal(a)
+	bb, errB := json.Marshal(b)
+	if errA != nil || errB != nil {
+		return false // conservative: unmarshalable => treat as changed
+	}
+	return bytes.Equal(ab, bb)
 }
 
 // FormatChangedFields returns a human-readable string of changed fields
@@ -190,4 +605,36 @@ func (r *ConfigApplyResult) FormatChangedFields() string {
 	}
 	// For 3+ fields, show "field1, field2, and N others"
 	return fmt.Sprintf("%s, %s, and %d others", r.ChangedFields[0], r.ChangedFields[1], len(r.ChangedFields)-2)
+}
+
+// undiffedHotConfigFields are the top-level config.Config fields (Go names)
+// with no dedicated clause in DetectConfigChanges: a change is saved and
+// adopted into the live config, and reported by its JSON key.
+var undiffedHotConfigFields = []string{
+	"EnableTray", "TopK", "MaxResultSizeChars", "InitTimeout", "ForwardProxyEnv",
+	"RequireMCPAuth", "CheckServerRepo", "DockerRecovery",
+	"RegistriesLocked", "AllowPrivateRegistryFetch", "Features",
+	"ToolResponseSessionRiskWarning", "OAuthExpiryWarningHours",
+	"ActivityRetentionDays", "ActivityMaxRecords", "ActivityMaxSizeMB",
+	"ActivityMaxResponseSize", "ActivityCleanupIntervalMin",
+	"ToolCallMaxResponseSize", "ToolCallMaxRecordsPerServer",
+	"IntentDeclaration", "SensitiveDataDetection", "OutputValidation",
+	"OutputSanitisation", "Telemetry",
+	"QuarantineEnabled", "RevealSecretHeaders",
+}
+
+// restartGatedConfigFields are bound once at startup; see pinRestartGated.
+var restartGatedConfigFields = []string{"TrayEndpoint", "EnableSocket", "DebugSearch", "Tokenizer", "EnablePrompts", "Instructions"}
+
+func configFieldValue(cfg *config.Config, goName string) interface{} {
+	return reflect.ValueOf(cfg).Elem().FieldByName(goName).Interface()
+}
+
+func configFieldJSONName(goName string) string {
+	f, _ := reflect.TypeOf(config.Config{}).FieldByName(goName)
+	name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+	if name == "" {
+		return goName
+	}
+	return name
 }

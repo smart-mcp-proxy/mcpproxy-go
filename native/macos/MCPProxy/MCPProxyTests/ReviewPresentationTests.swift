@@ -1,0 +1,412 @@
+import XCTest
+@testable import MCPProxy
+
+/// Spec 109 fix-review-screen: the macOS review sheet shows the same scan
+/// coverage banner, headline and tool state as the Web review screen.
+final class ReviewPresentationTests: XCTestCase {
+    private func scan(_ json: String) throws -> ReviewScan {
+        try JSONDecoder().decode(ReviewScan.self, from: Data(json.utf8))
+    }
+
+    private func review(quarantined: Bool, tools: [(String, String, Bool)]) throws -> ServerReviewResponse {
+        let toolJSON = tools.map { name, status, disabled in
+            "{\"name\":\"\(name)\",\"description\":\"d\",\"tier\":\"read\",\"approval_status\":\"\(status)\",\"disabled\":\(disabled),\"scan_verdict\":\"clean\"}"
+        }.joined(separator: ",")
+        let json = "{\"server\":{\"name\":\"fixture\",\"quarantined\":\(quarantined),\"definitions_captured\":true},\"tools\":[\(toolJSON)]}"
+        return try JSONDecoder().decode(ServerReviewResponse.self, from: Data(json.utf8))
+    }
+
+    func testScanDecodesCoverageFieldsAndOldPayloadsStillDecode() throws {
+        let covered = try scan(#"{"verdict":"clean","risk_score":0,"coverage":"stale","tools_scanned":5,"unscanned_tools":["notes"]}"#)
+        XCTAssertEqual(covered.coverage, "stale")
+        XCTAssertEqual(covered.toolsScanned, 5)
+        XCTAssertEqual(covered.unscannedTools, ["notes"])
+
+        let old = try scan(#"{"verdict":"clean","risk_score":0,"report_id":"scan-1"}"#)
+        XCTAssertNil(old.coverage)
+        XCTAssertNil(old.toolsScanned)
+        XCTAssertNil(old.unscannedTools)
+        // A payload without coverage reads as "no completed scan", never as a covering clean scan.
+        let banner = try XCTUnwrap(ReviewPresentation.scanBanner(old, definitionsCaptured: true))
+        XCTAssertEqual(banner.text, "Not scanned yet.")
+        XCTAssertEqual(banner.action, .scanNow)
+    }
+
+    func testScanBannerForEveryCoverage() throws {
+        let current = try XCTUnwrap(ReviewPresentation.scanBanner(
+            scan(#"{"verdict":"clean","risk_score":0,"coverage":"current","tools_scanned":5}"#), definitionsCaptured: true))
+        XCTAssertEqual(current.text, "Baseline scan: clean · risk 0/100 · covers all 5 tools")
+        XCTAssertEqual(current.severity, .success)
+        XCTAssertEqual(current.action, .none)
+
+        let warnings = try XCTUnwrap(ReviewPresentation.scanBanner(
+            scan(#"{"verdict":"warnings","risk_score":30,"coverage":"current","tools_scanned":5}"#), definitionsCaptured: true))
+        XCTAssertEqual(warnings.severity, .warning)
+        XCTAssertTrue(warnings.text.contains("risk 30/100"))
+
+        let dangerous = try XCTUnwrap(ReviewPresentation.scanBanner(
+            scan(#"{"verdict":"dangerous","risk_score":90,"coverage":"current","tools_scanned":5}"#), definitionsCaptured: true))
+        XCTAssertEqual(dangerous.severity, .error)
+
+        let stale = try XCTUnwrap(ReviewPresentation.scanBanner(
+            scan(#"{"verdict":"clean","risk_score":0,"coverage":"stale","tools_scanned":5,"unscanned_tools":["a","b"]}"#), definitionsCaptured: true))
+        XCTAssertEqual(stale.text, "Scan out of date: 2 tool definitions changed or were added after the last scan (a, b). Last result: clean.")
+        XCTAssertEqual(stale.severity, .warning)
+        XCTAssertEqual(stale.action, .rescan)
+        XCTAssertFalse(stale.text.contains("risk"))
+
+        let staleOne = try XCTUnwrap(ReviewPresentation.scanBanner(
+            scan(#"{"verdict":"clean","coverage":"stale","unscanned_tools":["notes"]}"#), definitionsCaptured: true))
+        XCTAssertEqual(staleOne.text, "Scan out of date: 1 tool definition changed or was added after the last scan (notes). Last result: clean.")
+
+        let notCaptured = try XCTUnwrap(ReviewPresentation.scanBanner(
+            scan(#"{"verdict":"clean","risk_score":0,"coverage":"not_captured"}"#), definitionsCaptured: false))
+        XCTAssertEqual(notCaptured.text, "Scan not checked against tool definitions: they have not been captured yet.")
+        XCTAssertEqual(notCaptured.severity, .warning)
+        XCTAssertEqual(notCaptured.action, .fetchDefinitions)
+
+        // definitions_captured:false wins over whatever coverage the payload claims.
+        let forced = try XCTUnwrap(ReviewPresentation.scanBanner(
+            scan(#"{"verdict":"clean","risk_score":0,"coverage":"current","tools_scanned":5}"#), definitionsCaptured: false))
+        XCTAssertEqual(forced.action, .fetchDefinitions)
+
+        let toolsNotScanned = try XCTUnwrap(ReviewPresentation.scanBanner(
+            scan(#"{"verdict":"clean","risk_score":0,"coverage":"tools_not_scanned"}"#), definitionsCaptured: true))
+        XCTAssertEqual(toolsNotScanned.text, "The last scan did not analyse tool definitions (0 exported).")
+        XCTAssertEqual(toolsNotScanned.severity, .warning)
+        XCTAssertEqual(toolsNotScanned.action, .rescan)
+
+        let scanning = try XCTUnwrap(ReviewPresentation.scanBanner(
+            scan(#"{"verdict":"not_scanned","coverage":"scanning"}"#), definitionsCaptured: true))
+        XCTAssertEqual(scanning.text, "Scan in progress…")
+        XCTAssertEqual(scanning.severity, .info)
+        XCTAssertEqual(scanning.action, .none)
+
+        let none = try XCTUnwrap(ReviewPresentation.scanBanner(
+            scan(#"{"verdict":"not_scanned","coverage":"none"}"#), definitionsCaptured: true))
+        XCTAssertEqual(none.text, "Not scanned yet.")
+        XCTAssertEqual(none.severity, .warning)
+        XCTAssertEqual(none.action, .scanNow)
+
+        XCTAssertNil(ReviewPresentation.scanBanner(nil, definitionsCaptured: true))
+    }
+
+    func testHeadlineForTheThreeStates() throws {
+        let quarantined = try ReviewPresentation.headline(review(quarantined: true, tools: [("a", "pending", false)]))
+        XCTAssertEqual(quarantined.state, .review)
+        XCTAssertEqual(quarantined.title, "Review fixture")
+        XCTAssertEqual(quarantined.subtitle, "Review tool definitions before changing what agents can call.")
+
+        let mixed = try ReviewPresentation.headline(review(quarantined: false, tools: [("a", "approved", false), ("b", "changed", false)]))
+        XCTAssertEqual(mixed.state, .review)
+        XCTAssertEqual(mixed.title, "Review fixture")
+        XCTAssertEqual(mixed.subtitle, "1 tool needs review. Agents cannot call it until approved.")
+
+        let approved = try ReviewPresentation.headline(review(quarantined: false, tools: [("a", "approved", false), ("b", "approved", false), ("c", "approved", true)]))
+        XCTAssertEqual(approved.state, .approved)
+        XCTAssertEqual(approved.title, "fixture is approved")
+        XCTAssertEqual(approved.subtitle, "All 3 tools approved (1 blocked). New or changed tools come back here for review.")
+    }
+
+    func testTrustedServerWithNoCapturedToolsReadsAsApproved() throws {
+        let trusted = try ReviewPresentation.headline(review(quarantined: false, tools: []))
+        XCTAssertEqual(trusted.state, .approved)
+        XCTAssertEqual(trusted.title, "fixture is approved")
+        XCTAssertTrue(trusted.subtitle.contains("No tool definitions"))
+
+        let quarantined = try ReviewPresentation.headline(review(quarantined: true, tools: []))
+        XCTAssertEqual(quarantined.state, .review)
+    }
+
+    func testQuarantineEscapesTheServerNameInThePath() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+        let source = try String(contentsOf: root.appendingPathComponent("MCPProxy/API/APIClient.swift"))
+        XCTAssertTrue(source.contains(#"/api/v1/servers/\(Self.escapePathComponent(id))/quarantine"#))
+        XCTAssertFalse(source.contains(#"/api/v1/servers/\(id)/quarantine"#))
+    }
+
+    // MARK: Default selection (Spec 109 fix-review-defaults, D43)
+
+    private func selectionTool(_ name: String, defaultAllowed: Bool?, description: String = "d", verdict: String = "clean", heldReason: String? = nil, heldSignals: [String]? = nil) throws -> ReviewTool {
+        let field = defaultAllowed.map { ",\"default_allowed\":\($0)" } ?? ""
+        let held = (heldReason.map { ",\"held_reason\":\"\($0)\"" } ?? "") + (heldSignals.map { ",\"held_signals\":[" + $0.map { "\"\($0)\"" }.joined(separator: ",") + "]" } ?? "")
+        let json = "{\"name\":\"\(name)\",\"description\":\"\(description)\",\"tier\":\"read\",\"approval_status\":\"pending\",\"disabled\":false,\"scan_verdict\":\"\(verdict)\"\(held)\(field)}"
+        return try JSONDecoder().decode(ReviewTool.self, from: Data(json.utf8))
+    }
+
+    func testDefaultSelectionFollowsDefaultAllowed() throws {
+        let tools = [
+            try selectionTool("read_a", defaultAllowed: true),
+            try selectionTool("write_a", defaultAllowed: false),
+            // An older core sends no field: it reads as false, so a mismatched core fails closed.
+            try selectionTool("old_core", defaultAllowed: nil),
+        ]
+        XCTAssertEqual(tools[0].defaultAllowed, true)
+        XCTAssertNil(tools[2].defaultAllowed)
+        XCTAssertEqual(ReviewPresentation.initialSelection(tools), ["read_a"])
+    }
+
+    func testMergeSelectionKeepsUnchecksAndDropsStaleChecks() throws {
+        let readA = try selectionTool("read_a", defaultAllowed: true)
+        let writeA = try selectionTool("write_a", defaultAllowed: false)
+
+        // An explicit uncheck always survives a reload.
+        XCTAssertEqual(ReviewPresentation.mergeSelection([readA], choices: ["read_a": .init(allowed: false, tool: readA)]), [])
+        // An explicit check survives while the payload is the one the user saw.
+        XCTAssertEqual(ReviewPresentation.mergeSelection([writeA], choices: ["write_a": .init(allowed: true, tool: writeA)]), ["write_a"])
+        // A changed definition or verdict falls back to the default.
+        let redefined = try selectionTool("write_a", defaultAllowed: false, description: "now also deletes")
+        XCTAssertEqual(ReviewPresentation.mergeSelection([redefined], choices: ["write_a": .init(allowed: true, tool: writeA)]), [])
+        let rescanned = try selectionTool("write_a", defaultAllowed: false, verdict: "warnings")
+        XCTAssertEqual(ReviewPresentation.mergeSelection([rescanned], choices: ["write_a": .init(allowed: true, tool: writeA)]), [])
+        // A hold that appears after the click (held_reason / held_signals only) is a changed payload too.
+        let held = try selectionTool("write_a", defaultAllowed: false, heldReason: "scan_findings", heldSignals: ["tpa.x"])
+        XCTAssertEqual(held.heldReason, "scan_findings")
+        XCTAssertEqual(held.heldSignals, ["tpa.x"])
+        XCTAssertEqual(ReviewPresentation.mergeSelection([held], choices: ["write_a": .init(allowed: true, tool: writeA)]), [])
+        let reheld = try selectionTool("write_a", defaultAllowed: false, heldReason: "scan_coverage", heldSignals: ["tpa.x"])
+        XCTAssertEqual(ReviewPresentation.mergeSelection([reheld], choices: ["write_a": .init(allowed: true, tool: held)]), [])
+        // A choice for a tool that is gone is ignored.
+        XCTAssertEqual(ReviewPresentation.mergeSelection([readA], choices: ["gone": .init(allowed: true, tool: writeA)]), ["read_a"])
+    }
+
+    func testApproveLabels() {
+        XCTAssertEqual(ReviewPresentation.approveLabel(selected: 3, total: 9, definitionsCaptured: true), "Approve Server (3 of 9 tools)")
+        XCTAssertEqual(ReviewPresentation.approveLabel(selected: 0, total: 9, definitionsCaptured: true), "Approve Server (0 of 9 tools)")
+        XCTAssertEqual(ReviewPresentation.approveLabel(selected: 1, total: 1, definitionsCaptured: true), "Approve Server (1 of 1 tool)")
+        XCTAssertEqual(ReviewPresentation.approveLabel(selected: 0, total: 0, definitionsCaptured: true), "Approve Without Seeing Tools")
+        XCTAssertEqual(ReviewPresentation.approveLabel(selected: 0, total: 5, definitionsCaptured: false), "Approve Without Seeing Tools")
+        XCTAssertEqual(ReviewPresentation.approveAllLabel(total: 9), "Approve All (9 tools)")
+        XCTAssertEqual(ReviewPresentation.approveAllLabel(total: 1), "Approve All (1 tool)")
+    }
+
+    func testSelectionHintMatchesWeb() throws {
+        var url = URL(fileURLWithPath: #filePath)
+        for _ in 0..<5 { url.deleteLastPathComponent() }
+        let web = try String(contentsOf: url.appendingPathComponent("frontend/src/utils/reviewPresentation.ts"))
+        XCTAssertTrue(web.contains("'\(ReviewPresentation.selectionHint)'"), "the macOS hint must be the Web sentence")
+        XCTAssertEqual(ReviewPresentation.selectionHint, "Only read-only tools with a clean scan start checked. Unchecked tools stay blocked after approval until you enable them on the Tools tab.")
+    }
+
+    func testToolStateSelectsTheControl() throws {
+        let tools = try review(quarantined: false, tools: [("p", "pending", false), ("c", "changed", false), ("a", "approved", false), ("b", "approved", true)]).tools
+        XCTAssertEqual(ReviewPresentation.toolState(tools[0], quarantined: false), .approveReject)
+        XCTAssertEqual(ReviewPresentation.toolState(tools[1], quarantined: false), .approveReject)
+        XCTAssertEqual(ReviewPresentation.toolState(tools[2], quarantined: false), .approved)
+        XCTAssertEqual(ReviewPresentation.toolState(tools[3], quarantined: false), .blocked)
+        for tool in tools { XCTAssertEqual(ReviewPresentation.toolState(tool, quarantined: true), .allowToggle) }
+    }
+
+    // MARK: UX-02 cross-review r4: the decision is the one on screen at the click
+
+    private func hashedReview(server: String, captured: Bool = true, tools: [(String, String)]) throws -> ServerReviewResponse {
+        let toolJSON = tools.map { name, hash in
+            "{\"name\":\"\(name)\",\"description\":\"d\",\"tier\":\"read\",\"approval_status\":\"pending\",\"disabled\":false,\"scan_verdict\":\"clean\",\"current_hash\":\"\(hash)\"}"
+        }.joined(separator: ",")
+        let json = "{\"server\":{\"name\":\"\(server)\",\"quarantined\":true,\"definitions_captured\":\(captured)},\"tools\":[\(toolJSON)]}"
+        return try JSONDecoder().decode(ServerReviewResponse.self, from: Data(json.utf8))
+    }
+
+    func testApprovalDecisionRefusesAnotherServersReview() throws {
+        let reviewA = try hashedReview(server: "A", tools: [("op", "h-a")])
+        // The sheet now targets B but still holds A's review (or none yet).
+        XCTAssertNil(ReviewPresentation.approvalDecision(server: "B", review: reviewA, allowed: ["op"], everything: false))
+        XCTAssertNil(ReviewPresentation.approvalDecision(server: "B", review: nil, allowed: [], everything: true))
+        XCTAssertNil(ReviewPresentation.toolApprovalExpected(server: "B", tool: "op", review: reviewA) as [String: String]??)
+    }
+
+    func testApprovalDecisionIsCapturedAtTheClick() throws {
+        let h1 = try hashedReview(server: "A", tools: [("read", "h1-read"), ("drop", "h1-drop")])
+        let decision = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: h1, allowed: ["read"], everything: false))
+        // A review load (H2: drop changed, a new tool) lands after the click.
+        let h2 = try hashedReview(server: "A", tools: [("read", "h1-read"), ("drop", "h2-drop"), ("late", "h2-late")])
+        let late = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: h2, allowed: ["read"], everything: false))
+        XCTAssertNotEqual(late, decision, "a decision built from the late review differs (zcode r1 #4)")
+        XCTAssertEqual(late.expected, ["read": "h1-read", "drop": "h2-drop", "late": "h2-late"])
+        XCTAssertEqual(decision, ReviewPresentation.ApprovalDecision(server: "A", block: ["drop"], expected: ["read": "h1-read", "drop": "h1-drop"], blind: false),
+                       "the request carries H1's hashes and block list, so the core answers 409 when definitions changed")
+
+        let all = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: h1, allowed: [], everything: true))
+        XCTAssertEqual(all.block, [])
+        XCTAssertEqual(all.expected, ["read": "h1-read", "drop": "h1-drop"], "Approve All covers only the tools on screen at the click")
+
+        let perTool = try XCTUnwrap(ReviewPresentation.toolApprovalExpected(server: "A", tool: "drop", review: h1))
+        XCTAssertEqual(perTool, ["drop": "h1-drop"])
+    }
+
+    // MARK: UX-02 cross-review r5: one approval at a time; the force
+    // confirmation re-sends the decision whose request failed
+
+    func testForceConfirmationIsBoundToTheFailedAttempt() {
+        let d1 = ReviewPresentation.ApprovalDecision(server: "A", block: ["drop"], expected: ["read": "h1", "drop": "h2"], blind: false)
+        let d2 = ReviewPresentation.ApprovalDecision(server: "A", block: [], expected: ["read": "h1", "drop": "h2"], blind: false)
+
+        // D1 in flight: a second click (Approve All, D2) is not sent.
+        var attempts = ReviewPresentation.ApprovalAttempts()
+        XCTAssertTrue(attempts.begin(d1))
+        XCTAssertTrue(attempts.isApproving)
+        XCTAssertFalse(attempts.begin(d2), "a second approval must not start while one is in flight")
+        // A response for a decision that is not in flight changes nothing.
+        attempts.finish(d2, dangerous: true)
+        XCTAssertTrue(attempts.isApproving)
+        XCTAssertNil(attempts.forceCandidate)
+        // D1 answers dangerous: the force retry is D1, exactly.
+        attempts.finish(d1, dangerous: true)
+        XCTAssertFalse(attempts.isApproving)
+        XCTAssertEqual(attempts.takeForceCandidate(), d1)
+        XCTAssertNil(attempts.takeForceCandidate(), "the confirmation is consumed once")
+
+        // Other order: D1 succeeds, then D2 answers dangerous -> the retry is D2.
+        var other = ReviewPresentation.ApprovalAttempts()
+        XCTAssertTrue(other.begin(d1))
+        other.finish(d1, dangerous: false)
+        XCTAssertNil(other.forceCandidate)
+        XCTAssertTrue(other.begin(d2))
+        other.finish(d2, dangerous: true)
+        XCTAssertEqual(other.takeForceCandidate(), d2)
+
+        // A new attempt drops an unanswered force confirmation of an older one.
+        var stale = ReviewPresentation.ApprovalAttempts()
+        XCTAssertTrue(stale.begin(d1))
+        stale.finish(d1, dangerous: true)
+        XCTAssertTrue(stale.begin(d2))
+        XCTAssertNil(stale.forceCandidate, "an older failure's force retry cannot outlive a newer attempt")
+        stale.finish(d2, dangerous: false)
+        XCTAssertNil(stale.takeForceCandidate())
+    }
+
+    func testBlindDecisionWhenNothingWasCaptured() throws {
+        let empty = try hashedReview(server: "A", captured: false, tools: [])
+        let decision = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: empty, allowed: [], everything: false))
+        XCTAssertTrue(decision.blind)
+        // UX-02 r6: bound to the empty snapshot, so tools captured after the
+        // confirmation (or before a force retry) fail it as out of date.
+        XCTAssertEqual(decision.expected, [:])
+    }
+
+    func testCapturedEmptyInventoryIsBoundToTheEmptySnapshot() throws {
+        let empty = try hashedReview(server: "A", captured: true, tools: [])
+        let decision = try XCTUnwrap(ReviewPresentation.approvalDecision(server: "A", review: empty, allowed: [], everything: false))
+        XCTAssertFalse(decision.blind)
+        XCTAssertEqual(decision.expected, [:])
+        XCTAssertEqual(decision.block, [])
+    }
+
+    func testToolTogglesAreLockedWhileAnApprovalIsInFlight() throws {
+        let path = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("MCPProxy/Views/ReviewQueueView.swift")
+        let source = try String(contentsOf: path)
+        guard let toggle = source.range(of: "Toggle(\"Allow this tool\"") else { return XCTFail("no allow toggle") }
+        let after = source[toggle.upperBound...]
+        guard let style = after.range(of: ".toggleStyle(.checkbox)") else { return XCTFail("no checkbox style") }
+        XCTAssertTrue(after[style.upperBound...].prefix(400).contains(".disabled(attempts.isLocked)"),
+                      "the allow toggles must be disabled while an approval is in flight (UX-02 r6)")
+    }
+
+    // MARK: Reservation at the click (UX-02 cross-review, PR #1572 r1)
+
+    func testPerToolApprovalIsReservedOncePerTool() {
+        var tools = ReviewPresentation.ToolApprovals()
+        XCTAssertTrue(tools.begin("read_file"))
+        XCTAssertTrue(tools.isApproving("read_file"))
+        XCTAssertFalse(tools.begin("read_file"), "a second click on the same tool is not sent while the first is in flight")
+        XCTAssertTrue(tools.begin("write_file"), "another tool is independent")
+        tools.finish("read_file")
+        XCTAssertFalse(tools.isApproving("read_file"))
+        XCTAssertTrue(tools.begin("read_file"))
+    }
+
+    private func sheetSource() throws -> String {
+        let path = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("MCPProxy/Views/ReviewQueueView.swift")
+        return try String(contentsOf: path)
+    }
+
+    private func body(of function: String, in source: String) throws -> Substring {
+        let start = try XCTUnwrap(source.range(of: function), "missing \(function)")
+        let rest = source[start.upperBound...]
+        let end = rest.range(of: "\n    private func ")?.lowerBound ?? rest.endIndex
+        return rest[..<end]
+    }
+
+    /// The server approval is reserved synchronously, in the click handler,
+    /// before its Task is scheduled: the toggles lock at the click, so a
+    /// selection change can no longer slip in between the captured decision
+    /// and the request (Sol r1 #1).
+    func testServerApprovalIsReservedBeforeItsTaskIsScheduled() throws {
+        let source = try sheetSource()
+        let send = try body(of: "private func send(_ decision: ReviewPresentation.ApprovalDecision, force: Bool) {", in: source)
+        let begin = try XCTUnwrap(send.range(of: "guard attempts.begin(decision) else { return }"))
+        let task = try XCTUnwrap(send.range(of: "Task {"))
+        XCTAssertLessThan(begin.lowerBound, task.lowerBound)
+        let approve = try body(of: "private func approve(_ decision: ReviewPresentation.ApprovalDecision, force: Bool) async {", in: source)
+        XCTAssertFalse(approve.contains("attempts.begin("), "the async request must not be the place the attempt is reserved")
+        // Every entry point goes through send: the click, the blind and the force confirmation.
+        XCTAssertEqual(source.components(separatedBy: "Task { await approve(").count - 1, 1, "approve(...) must only be scheduled by send(...)")
+        XCTAssertTrue(send.contains("Task { await approve(decision, force: force) }"))
+        XCTAssertTrue(source.contains("send(decision, force: true)"))
+        XCTAssertTrue(source.contains("send(decision, force: false)"))
+    }
+
+    /// Per-tool Approve is reserved at the click and disabled while in flight (Sol r1 #2).
+    func testPerToolApprovalIsReservedAtTheClickAndDisabledInFlight() throws {
+        let source = try sheetSource()
+        let button = try XCTUnwrap(source.range(of: "Button(\"Approve\") {"))
+        let after = source[button.upperBound...].prefix(700)
+        let begin = try XCTUnwrap(after.range(of: "guard !attempts.isLocked, toolApprovals.begin(tool.name) else { return }"))
+        let task = try XCTUnwrap(after.range(of: "Task {"))
+        XCTAssertLessThan(begin.lowerBound, task.lowerBound)
+        XCTAssertTrue(after.contains(".disabled(attempts.isLocked || toolApprovals.isApproving(tool.name))"))
+        let approveTool = try body(of: "private func approveTool(_ name: String, expected: [String: String]?) async {", in: source)
+        XCTAssertTrue(approveTool.contains("defer { toolApprovals.finish(name) }"))
+    }
+
+    /// After a "dangerous" answer the sheet stays locked until the force
+    /// confirmation is answered, so a click before the alert presents cannot
+    /// consume the candidate and leave "Force Approve" a dead button (zcode r1 #3).
+    func testPendingForceConfirmationLocksTheSheetUntilAnswered() throws {
+        let decision = ReviewPresentation.ApprovalDecision(server: "A", block: ["w"], expected: ["r": "h"], blind: false)
+        var attempts = ReviewPresentation.ApprovalAttempts()
+        XCTAssertFalse(attempts.isLocked)
+        XCTAssertTrue(attempts.begin(decision))
+        XCTAssertTrue(attempts.isLocked)
+        attempts.finish(decision, dangerous: true)
+        XCTAssertFalse(attempts.isApproving)
+        XCTAssertTrue(attempts.isLocked, "the force confirmation is still open")
+        attempts.dropForceCandidate()
+        XCTAssertFalse(attempts.isLocked, "Cancel unlocks the sheet")
+        XCTAssertNil(attempts.takeForceCandidate())
+
+        XCTAssertTrue(attempts.begin(decision))
+        attempts.finish(decision, dangerous: true)
+        XCTAssertEqual(attempts.takeForceCandidate(), decision)
+        XCTAssertFalse(attempts.isLocked)
+    }
+
+    /// Controls lock on the pending force confirmation too, per-tool controls
+    /// lock during a server approval, and Cancel drops the candidate (zcode r1 #2, #3).
+    func testSheetControlsHonourTheApprovalLock() throws {
+        let source = try sheetSource()
+        XCTAssertFalse(source.contains(".disabled(attempts.isApproving)"), "controls must use isLocked, which covers the pending force confirmation")
+        XCTAssertTrue(source.contains("guard !attempts.isLocked, let decision = ReviewPresentation.approvalDecision("))
+        XCTAssertTrue(source.contains(".disabled(attempts.isLocked || toolApprovals.isApproving(tool.name))"))
+        XCTAssertTrue(source.contains(#"Button("Cancel", role: .cancel) { attempts.dropForceCandidate() }; Button("Force Approve""#))
+        // Reject is locked the same way: during a server approval and while this tool's approval is in flight (Sol r2 #1).
+        let reject = try XCTUnwrap(source.range(of: #"Button("Reject", role: .destructive) {"#))
+        let afterReject = source[reject.upperBound...].prefix(500)
+        XCTAssertTrue(afterReject.contains("guard !attempts.isLocked, toolApprovals.begin(tool.name) else { return }"), "Reject reserves the tool like Approve (zcode r2 #1)")
+        XCTAssertTrue(source.contains("private func rejectTool(_ name: String) async { defer { toolApprovals.finish(name) }"))
+        XCTAssertTrue(source.contains(#"Button("Quarantine to Review Again…") { showRequarantineConfirmation = true }.disabled(attempts.isLocked)"#), "zcode r2 #2")
+        XCTAssertTrue(afterReject.contains(".disabled(attempts.isLocked || toolApprovals.isApproving(tool.name))"))
+    }
+
+    /// The stale notice is set before the reload, so a newer attempt started
+    /// while the reload is suspended is not shown "out of date" (zcode r1 #1).
+    func testStaleNoticeIsSetBeforeTheReload() throws {
+        let source = try sheetSource()
+        XCTAssertFalse(source.contains("await load(); staleNotice = stale"))
+        XCTAssertEqual(source.components(separatedBy: "staleNotice = stale; await load()").count - 1, 2)
+    }
+}

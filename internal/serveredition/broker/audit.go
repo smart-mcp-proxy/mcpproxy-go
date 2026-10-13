@@ -5,30 +5,19 @@ package broker
 import (
 	"context"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
 
-// Audit vocabulary for per-user credential brokering (spec 074 T10, FR-028).
-// These strings are the stable, secret-free attribution values recorded on every
-// acquisition / refresh / injection / connect operation.
+// Audit vocabulary for the per-user OAuth connect flow (spec 074 T10, FR-028).
+// These strings are the stable, secret-free attribution values recorded on
+// every connect operation. Spec 107 (FR-031) retired the acquire / refresh /
+// inject actions and the token_exchange / entra_obo methods together with the
+// never-wired credential resolver that was their only emitter: the connect
+// flow is the one operation the broker performs.
 const (
-	// AuditMethodTokenExchange is the RFC 8693 token-exchange acquisition method.
-	AuditMethodTokenExchange = "token_exchange"
-	// AuditMethodEntraOBO is the Entra ID on-behalf-of acquisition method.
-	AuditMethodEntraOBO = "entra_obo"
 	// AuditMethodConnect is the per-user OAuth connect-flow acquisition method.
 	AuditMethodConnect = "connect"
-	// AuditMethodUnknown is recorded when the broker mode is unrecognised.
-	AuditMethodUnknown = "unknown"
 
-	// AuditActionAcquire is a first-time per-user credential acquisition.
-	AuditActionAcquire = "acquire"
-	// AuditActionRefresh is the renewal of a near-expiry per-user credential.
-	AuditActionRefresh = "refresh"
-	// AuditActionInject is the use of an already-valid cached credential for
-	// injection into a proxied request (no new acquisition occurred).
-	AuditActionInject = "inject"
 	// AuditActionConnect is the per-user OAuth connect-flow consent/callback.
 	AuditActionConnect = "connect"
 
@@ -48,9 +37,9 @@ type AuditEvent struct {
 	UserID string
 	// ServerName is the brokered upstream's configured name.
 	ServerName string
-	// Method is the acquisition method: token_exchange | entra_obo | connect.
+	// Method is the acquisition method: connect.
 	Method string
-	// Action is the operation: acquire | refresh | inject | connect.
+	// Action is the operation: connect.
 	Action string
 	// Outcome is success | failure.
 	Outcome string
@@ -72,22 +61,6 @@ type AuditSink interface {
 type nopAuditSink struct{}
 
 func (nopAuditSink) RecordBrokerEvent(context.Context, AuditEvent) {}
-
-// auditMethodForMode maps a configured auth-broker mode to its audit method
-// label. An unrecognised mode maps to AuditMethodUnknown rather than leaking the
-// raw value.
-func auditMethodForMode(mode string) string {
-	switch mode {
-	case config.AuthBrokerModeTokenExchange:
-		return AuditMethodTokenExchange
-	case config.AuthBrokerModeEntraOBO:
-		return AuditMethodEntraOBO
-	case config.AuthBrokerModeOAuthConnect:
-		return AuditMethodConnect
-	default:
-		return AuditMethodUnknown
-	}
-}
 
 // auditRequestID extracts the correlatable request id from ctx, if present.
 func auditRequestID(ctx context.Context) string {

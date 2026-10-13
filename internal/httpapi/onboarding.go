@@ -1,11 +1,13 @@
 package httpapi
 
 import (
-	"encoding/json"
+	"context"
 	"fmt"
 	"net/http"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -62,9 +64,27 @@ type OnboardingStateResponse struct {
 	// IncompleteTabCount is the number of wizard tabs whose state is incomplete.
 	// Drives the sidebar Setup entry's badge. Formula:
 	//   +1 if HasConnectedClient == false
-	//   +1 if HasConfiguredServer == false
+	//   +1 if HasUsableServer == false
 	//   +1 if FirstMCPClientEver == false
 	IncompleteTabCount int `json:"incomplete_tab_count"`
+
+	// --- Spec 109-b additions (FR-041/FR-042) ---
+
+	// HasUsableServer is true once at least one enabled, non-quarantined
+	// server has usable health and at least one approved (non-disabled) tool.
+	// This is the real "the wizard has something to try" signal:
+	// HasConfiguredServer only means a server entry exists, even while every
+	// one of them sits quarantined, requires sign-in, or has zero approved
+	// tools. The Servers step and Setup badge use this instead of
+	// HasConfiguredServer, which is kept above for compatibility.
+	// HealthStatus.Usable is the shared
+	// readiness contract used by every UI surface (Spec 109-c, tasks.md T051).
+	HasUsableServer bool `json:"has_usable_server"`
+
+	// UsableServers lists the names behind HasUsableServer, for the Verify
+	// step's suggested-prompt generator (FR-042): prompts are only built from
+	// tools of servers in this list, never from a quarantined or toolless one.
+	UsableServers []string `json:"usable_servers"`
 }
 
 // OnboardingMarkRequest is the request body for /api/v1/onboarding/mark
@@ -76,7 +96,13 @@ type OnboardingMarkRequest struct {
 	Engaged bool `json:"engaged"`
 
 	// ConnectStepStatus is one of: "", "completed", "skipped". Empty
-	// preserves the existing value.
+	// preserves the existing value. The stored enum is wider (Spec 080
+	// FR-001): a "skipped" request for a previously untouched connect step
+	// is upgraded server-side to "completed_external" when the install
+	// shows positive evidence of an external connection (Spec 080 FR-002).
+	// "completed_external" is NOT accepted from clients — it must never be
+	// persisted without that server-verified evidence (edge case: "never
+	// guess completed_external without positive evidence").
 	ConnectStepStatus string `json:"connect_step_status,omitempty"`
 
 	// ServerStepStatus is one of: "", "completed", "skipped". Empty
@@ -85,6 +111,24 @@ type OnboardingMarkRequest struct {
 
 	// MarkShown records the wizard's first display time if not already set.
 	MarkShown bool `json:"mark_shown,omitempty"`
+
+	// ConnectedClientID records a successful connect write for this client id
+	// (Spec 109-b FR-042, review round 6). The REST connect endpoint
+	// (POST /api/v1/connect/{client}) already records this itself on success;
+	// this field exists so `mcpproxy connect` — which writes the client's
+	// config file directly, without going through that endpoint, so the
+	// command still works when no daemon is running — can relay the same
+	// event to a daemon that IS running, keeping ClientConnectedAt in sync
+	// across both surfaces. Must be a known id from the fixed connect client
+	// registry (internal/connect.GetAllClients); any other value is rejected,
+	// matching the field's "bounded by the registry" invariant
+	// (data-model.md §7).
+	ConnectedClientID string `json:"connected_client_id,omitempty"`
+
+	// DisconnectedClientID relays a successful local CLI disconnect to a running
+	// daemon, which cannot observe the CLI's direct config-file edit itself.
+	// Like ConnectedClientID, it is bounded to the fixed client registry.
+	DisconnectedClientID string `json:"disconnected_client_id,omitempty"`
 }
 
 // handleGetOnboardingState godoc
@@ -96,11 +140,22 @@ type OnboardingMarkRequest struct {
 // @Produce     json
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
-// @Success     200 {object} contracts.APIResponse "OnboardingStateResponse"
+// @Success     200 {object} contracts.APIResponse{data=OnboardingStateResponse} "OnboardingStateResponse"
+// @Failure     403 {object} contracts.ErrorResponse "Agent tokens cannot read onboarding state"
 // @Failure     503 {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/onboarding/state [get]
 func (s *Server) handleGetOnboardingState(w http.ResponseWriter, r *http.Request) {
-	resp, err := s.computeOnboardingState()
+	// #1166 round 10 (P4): DENIED to a non-admin caller. The wizard document is
+	// an OPERATOR document twice over — configured_server_count is the size of
+	// the whole inventory (the oracle /servers now withholds), and
+	// connected_client_ids plus mcp_clients_seen_ever are the operator's
+	// MCP-client inventory, the same class of fact /sessions already 403s for.
+	// Neither has a per-server projection, so the whole document is denied.
+	if !s.requireAdminRead(w, r, onboardingDenialMessage) {
+		return
+	}
+
+	resp, err := s.computeOnboardingState(r.Context())
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("compute onboarding state: %v", err))
 		return
@@ -118,17 +173,27 @@ func (s *Server) handleGetOnboardingState(w http.ResponseWriter, r *http.Request
 // @Security    ApiKeyAuth
 // @Security    ApiKeyQuery
 // @Param       body body OnboardingMarkRequest true "Mark request"
-// @Success     200 {object} contracts.APIResponse "Updated OnboardingStateResponse"
+// @Success     200 {object} contracts.APIResponse{data=OnboardingStateResponse} "Updated OnboardingStateResponse"
 // @Failure     400 {object} contracts.ErrorResponse "Bad request"
+// @Failure     403 {object} contracts.ErrorResponse "Agent tokens cannot read onboarding state"
 // @Failure     503 {object} contracts.ErrorResponse "Service unavailable"
 // @Router      /api/v1/onboarding/mark [post]
 func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Request) {
+	// The mark POST ECHOES the same recomputed document on success, so gating
+	// the GET alone would leave the disclosure one POST away. It also writes
+	// operator wizard state, which an agent token has no business moving.
+	if !s.requireAdminRead(w, r, onboardingDenialMessage) {
+		return
+	}
+
+	// decodeOptionalJSONBody (connect.go), not a raw r.ContentLength > 0 gate:
+	// a chunked-encoding request reports ContentLength == -1, and gating on
+	// ">0" alone silently skips the decode, discarding engaged/step-status
+	// updates and the connected_client_id relay with a false 200 OK.
 	var req OnboardingMarkRequest
-	if r.Body != nil && r.ContentLength > 0 {
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
-			return
-		}
+	if err := decodeOptionalJSONBody(r, &req); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("invalid request body: %v", err))
+		return
 	}
 
 	if !validStepStatus(req.ConnectStepStatus) || !validStepStatus(req.ServerStepStatus) {
@@ -136,38 +201,69 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	state, err := s.controller.GetOnboardingState()
-	if err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("read state: %v", err))
+	// ConnectedClientID is bounded to the fixed connect client registry
+	// (data-model.md §7's invariant on ClientConnectedAt's keys) — never
+	// accept an arbitrary caller-supplied id into that map.
+	if req.ConnectedClientID != "" && connect.FindClient(req.ConnectedClientID) == nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("unknown client id: %s", req.ConnectedClientID))
 		return
 	}
-	if state == nil {
-		state = &storage.OnboardingState{}
+	if req.DisconnectedClientID != "" && connect.FindClient(req.DisconnectedClientID) == nil {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("unknown client id: %s", req.DisconnectedClientID))
+		return
 	}
+
+	// externalConnectionEvidence (FR-002a) itself reads the connect service and
+	// the shared telemetry/activation BBolt bucket. It must run OUTSIDE the
+	// UpdateOnboardingState transaction below — evaluating it lazily from
+	// inside that closure would open a second (read) transaction against the
+	// SAME *bbolt.DB nested inside the ongoing write transaction, which bbolt
+	// does not support. Evaluated eagerly here only when the request could
+	// possibly need it (an untouched-step dismissal), matching
+	// nextConnectStepStatus's own laziness — this reproduces the exact
+	// evaluation the pre-109-b separate Get+Save pair performed, just moved a
+	// few lines earlier.
+	hasEvidence := false
+	if req.ConnectStepStatus == storage.StepStatusSkipped {
+		hasEvidence = s.externalConnectionEvidence()
+	}
+	evidenceFn := func() bool { return hasEvidence }
 
 	now := time.Now()
-	if req.MarkShown && state.FirstShownAt == nil {
-		t := now
-		state.FirstShownAt = &t
-	}
-	if req.ConnectStepStatus != "" {
-		state.ConnectStepStatus = req.ConnectStepStatus
-	}
-	if req.ServerStepStatus != "" {
-		state.ServerStepStatus = req.ServerStepStatus
-	}
-	if req.Engaged && !state.Engaged {
-		state.Engaged = true
-		t := now
-		state.EngagedAt = &t
-	}
-
-	if err := s.controller.SaveOnboardingState(state); err != nil {
+	err := s.controller.UpdateOnboardingState(func(state *storage.OnboardingState) error {
+		if req.MarkShown && state.FirstShownAt == nil {
+			t := now
+			state.FirstShownAt = &t
+		}
+		if req.ConnectStepStatus != "" {
+			state.ConnectStepStatus = nextConnectStepStatus(
+				state.ConnectStepStatus, req.ConnectStepStatus, evidenceFn)
+		}
+		if req.ServerStepStatus != "" {
+			state.ServerStepStatus = req.ServerStepStatus
+		}
+		if req.Engaged && !state.Engaged {
+			state.Engaged = true
+			t := now
+			state.EngagedAt = &t
+		}
+		if req.ConnectedClientID != "" {
+			applyClientConnected(state, req.ConnectedClientID, now)
+		}
+		if req.DisconnectedClientID != "" {
+			applyClientDisconnected(state, req.DisconnectedClientID, now)
+		}
+		return nil
+	})
+	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("save state: %v", err))
 		return
 	}
+	if req.ConnectedClientID != "" || req.DisconnectedClientID != "" {
+		s.notifyClientPresenceChanged()
+	}
 
-	resp, err := s.computeOnboardingState()
+	resp, err := s.computeOnboardingState(r.Context())
 	if err != nil {
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("recompute state: %v", err))
 		return
@@ -177,9 +273,10 @@ func (s *Server) handleMarkOnboardingState(w http.ResponseWriter, r *http.Reques
 
 // computeOnboardingState assembles the response from the connect service,
 // the configured-server count, and the persisted engagement record.
-func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
+func (s *Server) computeOnboardingState(ctx context.Context) (*OnboardingStateResponse, error) {
 	resp := &OnboardingStateResponse{
 		ConnectedClientIDs: []string{},
+		UsableServers:      []string{},
 	}
 
 	if svc := s.getConnectService(); svc != nil {
@@ -188,11 +285,30 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 		resp.HasConnectedClient = resp.ConnectedClientCount > 0
 	}
 
-	servers, err := s.controller.GetAllServers()
-	if err == nil {
-		resp.ConfiguredServerCount = len(servers)
-		resp.HasConfiguredServer = len(servers) > 0
+	// Prefer the canonical typed projection used by GET /servers. The legacy
+	// StateView omits health inputs for OAuth and can misclassify authenticated
+	// or call-time OAuth servers. A management read failure fails closed for
+	// usability, while preserving the configured count when the legacy view is
+	// still available.
+	if mgmtSvc := s.controller.GetManagementService(); mgmtSvc != nil {
+		servers, _, listErr := mgmtSvc.ListServers(ctx)
+		if listErr == nil {
+			resp.ConfiguredServerCount = len(servers)
+			resp.HasConfiguredServer = len(servers) > 0
+			resp.UsableServers = s.computeUsableContractServers(servers)
+		} else if legacyServers, legacyErr := s.controller.GetAllServers(); legacyErr == nil {
+			resp.ConfiguredServerCount = len(legacyServers)
+			resp.HasConfiguredServer = len(legacyServers) > 0
+		}
+	} else {
+		servers, err := s.controller.GetAllServers()
+		if err == nil {
+			resp.ConfiguredServerCount = len(servers)
+			resp.HasConfiguredServer = len(servers) > 0
+		}
+		resp.UsableServers = s.computeUsableServers(servers)
 	}
+	resp.HasUsableServer = len(resp.UsableServers) > 0
 
 	state, err := s.controller.GetOnboardingState()
 	if err != nil {
@@ -209,11 +325,14 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 		resp.MCPClientsSeenEver = []string{}
 	}
 
-	// Badge formula: +1 per incomplete tab.
+	// Badge formula: +1 per incomplete tab. FR-041: the Servers step (and this
+	// badge) is driven by HasUsableServer, not HasConfiguredServer — a server
+	// entry that is still quarantined or has no approved tool is not yet
+	// something the user can actually use.
 	if !resp.HasConnectedClient {
 		resp.IncompleteTabCount++
 	}
-	if !resp.HasConfiguredServer {
+	if !resp.HasUsableServer {
 		resp.IncompleteTabCount++
 	}
 	if !resp.FirstMCPClientEver {
@@ -225,7 +344,160 @@ func (s *Server) computeOnboardingState() (*OnboardingStateResponse, error) {
 	return resp, nil
 }
 
-// validStepStatus returns true if v is an allowed step-status value.
+func (s *Server) computeUsableContractServers(servers []*contracts.Server) []string {
+	legacy := make([]map[string]interface{}, 0, len(servers))
+	for _, srv := range servers {
+		if srv == nil {
+			continue
+		}
+		legacy = append(legacy, map[string]interface{}{
+			"name": srv.Name, "enabled": srv.Enabled, "quarantined": srv.Quarantined, "health": srv.Health,
+		})
+	}
+	return s.computeUsableServers(legacy)
+}
+
+// computeUsableServers returns names from the small server projection that are
+// enabled, non-quarantined, health-usable, and have at least one approved
+// (non-disabled) tool (FR-041). Production typed management results are
+// adapted to this shape. A nil/failed fetch yields no usable servers rather
+// than erroring the onboarding document, which is a safe "not usable yet"
+// default.
+func (s *Server) computeUsableServers(servers []map[string]interface{}) []string {
+	hasUsableTool := s.usableToolServerSet(servers)
+
+	usable := make([]string, 0, len(servers))
+	for _, srv := range servers {
+		name, _ := srv["name"].(string)
+		if name == "" {
+			continue
+		}
+		enabled, _ := srv["enabled"].(bool)
+		quarantined, _ := srv["quarantined"].(bool)
+		health, ok := srv["health"].(*contracts.HealthStatus)
+		if !enabled || quarantined || !ok || health == nil || !health.Usable {
+			continue
+		}
+		if hasUsableTool[name] {
+			usable = append(usable, name)
+		}
+	}
+	return usable
+}
+
+// usableToolServerSet returns the set of server names with at least one
+// approved, non-disabled tool. It prefers one ListToolApprovals("") call,
+// which scans the approval bucket once (O(A) total decode work); a
+// ListToolApprovals(name) call per candidate server would instead re-scan the
+// WHOLE bucket per candidate (bbolt's ForEach + a Go-side prefix filter, not
+// a bucket seek) — O(S×A) on an endpoint the wizard polls every 5s while
+// open.
+//
+// bbolt's ForEach aborts the entire scan on the first record that fails to
+// decode (storage.BoltDB.ListToolApprovals), so a single corrupt record
+// anywhere would otherwise blank usable-status for every server, not just the
+// one whose own record is bad (review round 2 finding). On that error only,
+// fall back to the O(S×A) per-server form so a corrupt record is isolated to
+// its own server, matching the pre-optimization fault tolerance; any server
+// whose own ListToolApprovals(name) call also fails is simply left out of the
+// set, per this function's existing "fails closed" contract.
+func (s *Server) usableToolServerSet(servers []map[string]interface{}) map[string]bool {
+	hasUsableTool := make(map[string]bool, len(servers))
+
+	allRecords, err := s.controller.ListToolApprovals("")
+	if err == nil {
+		for _, rec := range allRecords {
+			if rec != nil && rec.Status == storage.ToolApprovalStatusApproved && !rec.Disabled {
+				hasUsableTool[rec.ServerName] = true
+			}
+		}
+		return hasUsableTool
+	}
+
+	for _, srv := range servers {
+		name, _ := srv["name"].(string)
+		if name == "" {
+			continue
+		}
+		records, recErr := s.controller.ListToolApprovals(name)
+		if recErr != nil {
+			continue
+		}
+		for _, rec := range records {
+			if rec != nil && rec.Status == storage.ToolApprovalStatusApproved && !rec.Disabled {
+				hasUsableTool[rec.ServerName] = true
+			}
+		}
+	}
+	return hasUsableTool
+}
+
+// validStepStatus returns true if v is an allowed step-status REQUEST value.
+// Note the request enum is deliberately narrower than the stored connect-step
+// enum (Spec 080 FR-001): "completed_external" is server-derived only (see
+// nextConnectStepStatus) and is rejected when a client sends it directly —
+// no shipped client produces it, and accepting it would let a caller persist
+// external-connection evidence that was never verified.
 func validStepStatus(v string) bool {
-	return v == "" || v == "completed" || v == "skipped"
+	return v == "" || v == storage.StepStatusCompleted || v == storage.StepStatusSkipped
+}
+
+// nextConnectStepStatus decides what to persist for the wizard's connect
+// step given its current value and the requested update (Spec 080 US1).
+// requested has passed validStepStatus, so it is "", "completed", or
+// "skipped" — "completed_external" can only ever be produced HERE, from the
+// server-side evidence check, never accepted from a client.
+//
+//   - "completed" and "completed_external" never regress to "skipped" once
+//     recorded, even if clients are later disconnected (FR-004). In-wizard
+//     completion may still upgrade "completed_external" to "completed".
+//   - A "skipped" request against a previously untouched step ("" current)
+//     is the wizard-dismissal case: if the install shows positive evidence
+//     of an external connection, record "completed_external" instead
+//     (FR-002). Without evidence, fall back to "skipped" (FR-002a).
+//   - An already-persisted "skipped" is never rewritten retroactively
+//     (FR-003): the evidence check only applies to the untouched step.
+//
+// hasExternalEvidence is evaluated lazily, only for the dismissal case.
+func nextConnectStepStatus(current, requested string, hasExternalEvidence func() bool) string {
+	if requested == "" {
+		return current
+	}
+	switch current {
+	case storage.StepStatusCompleted:
+		// Terminal: strongest status, never changes (FR-004).
+		return storage.StepStatusCompleted
+	case storage.StepStatusCompletedExternal:
+		// Never regresses; in-wizard completion is an allowed upgrade.
+		if requested == storage.StepStatusCompleted {
+			return storage.StepStatusCompleted
+		}
+		return storage.StepStatusCompletedExternal
+	}
+	if requested == storage.StepStatusSkipped && current == "" && hasExternalEvidence() {
+		return storage.StepStatusCompletedExternal
+	}
+	return requested
+}
+
+// externalConnectionEvidence reports whether this install shows positive
+// evidence of an MCP client connection made outside the wizard: at least one
+// supported client currently connected, or an MCP client has ever completed
+// an initialize handshake (Spec 080 FR-002).
+//
+// FR-002a: wizard dismissal must never be blocked or delayed by this check —
+// any failure while gathering evidence downgrades to "no evidence" so the
+// caller records "skipped" exactly as before Spec 080.
+func (s *Server) externalConnectionEvidence() (evidence bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Warnf("onboarding: external-connection evidence check failed, falling back to skipped: %v", r)
+			evidence = false
+		}
+	}()
+	if svc := s.getConnectService(); svc != nil && svc.GetConnectedCount() > 0 {
+		return true
+	}
+	firstEver, _ := s.controller.GetActivationFirstMCPClient()
+	return firstEver
 }

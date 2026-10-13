@@ -108,8 +108,14 @@ enum HealthAction: String, Codable, CaseIterable {
     case viewLogs = "view_logs"
     case setSecret = "set_secret"
     case configure
+    case editURL = "edit_url"
 
-    /// Human-readable button label.
+    /// Human-readable button label. Kept for the enum's own call sites
+    /// (decoding/matching); a renderer choosing the CROSS-SURFACE wording the
+    /// Web UI and CLI also show (FR-014) uses `HealthStatus.actionLabels`
+    /// instead — see e.g. ServerDetailView's "Suggested Action" row. Home's
+    /// own AttentionRow (HomeView.swift) renders `AttentionFix.label`
+    /// directly, which the core already sends pre-worded (Spec 109).
     var label: String {
         switch self {
         case .login:      return "Sign in"
@@ -119,6 +125,7 @@ enum HealthAction: String, Codable, CaseIterable {
         case .viewLogs:   return "View Logs"
         case .setSecret:  return "Set Secret"
         case .configure:  return "Configure"
+        case .editURL:    return "Edit URL"
         }
     }
 }
@@ -133,6 +140,16 @@ struct HealthStatus: Codable, Equatable {
     let summary: String
     let detail: String?
     let action: String?
+    /// The ONE status vocabulary rendered as text on every surface (Spec 109
+    /// FR-010/FR-011). `level` stays a severity signal for badge/tray coloring
+    /// only — no renderer may print it as text. Optional at decode time only
+    /// for tolerance against an older core; every current payload sets it.
+    let status: String?
+    /// True only when `status == "ready"`.
+    let usable: Bool?
+    /// Every applicable next step, in priority order (FR-012). `action`
+    /// always equals `actions.first`, or is nil/empty when `actions` is empty.
+    let actions: [String]?
 
     enum CodingKeys: String, CodingKey {
         case level
@@ -140,6 +157,22 @@ struct HealthStatus: Codable, Equatable {
         case summary
         case detail
         case action
+        case status
+        case usable
+        case actions
+    }
+
+    /// Every actionable next step, falling back to the legacy singular
+    /// `action` when `actions` is absent — an old-core payload that only
+    /// sends `level`/`admin_state`/`summary`/`action` (mirrors `isUsable`'s
+    /// own old-core tolerance below). Without this fallback, a renderer that
+    /// gates on `actions` alone (e.g. ServerDetailView's "Suggested Action"
+    /// row) silently drops for that payload shape — a regression from
+    /// before Spec 109.
+    var actionsOrLegacyFallback: [String] {
+        if let actions, !actions.isEmpty { return actions }
+        if let action, !action.isEmpty { return [action] }
+        return []
     }
 
     /// Parsed health level enum, falling back to `.unhealthy` for unknown values.
@@ -157,7 +190,209 @@ struct HealthStatus: Codable, Equatable {
         guard let action, !action.isEmpty else { return nil }
         return HealthAction(rawValue: action)
     }
+
+    /// Cross-surface label for `status` (Spec 109 FR-014),
+    /// binding for the Web UI, the macOS window and tray, and the CLI table.
+    /// Falls back to the raw value for forward-compat with an unrecognized
+    /// status (never crashes).
+    var statusLabel: String {
+        guard let status, !status.isEmpty else { return summary }
+        return HealthStatus.statusLabels[status] ?? status
+    }
+
+    /// True only when `status == "ready"`; defaults to the pre-Spec-109
+    /// reading (healthy level, not disabled/quarantined) when the field is
+    /// absent (older core).
+    ///
+    /// A pre-Spec-109 core's "connecting"/"idle" branch
+    /// (internal/health/calculator.go) already reported that exact shape —
+    /// level=healthy, admin_state=enabled, this literal summary — for a
+    /// mid-connect server, indistinguishable from a fully connected one on
+    /// level+adminState alone. Without this check a newer tray talking to an
+    /// older core would call a server usable before it can serve tool calls.
+    var isUsable: Bool {
+        if let usable { return usable }
+        if summary == "Connecting..." { return false }
+        return healthLevel == .healthy && adminStateEnum == .enabled
+    }
+
+    /// One label table for every `status` value (Spec 109 FR-014).
+    static let statusLabels: [String: String] = [
+        "ready": "Online",
+        "connecting": "Connecting",
+        "sign_in_required": "Sign-in required",
+        "needs_review": "Needs review",
+        "needs_secret": "Secret required",
+        "needs_config": "Needs configuration",
+        "error": "Error",
+        "disabled": "Disabled",
+    ]
+
+    /// One label table for a primary button keyed on an `actions` entry
+    /// (Spec 109 FR-014).
+    static let actionLabels: [String: String] = [
+        "login": "Sign in",
+        "set_secret": "Add secret",
+        "configure": "Fix config",
+        "edit_url": "Edit URL",
+        "approve": "Review",
+        "restart": "Restart",
+        "view_logs": "View logs",
+        "enable": "Enable",
+    ]
 }
+
+// MARK: - Attention (Spec 109 FR-001)
+
+/// What an `AttentionItem` is about. Matches the Go `contracts.AttentionSubject`.
+struct AttentionSubject: Codable, Equatable {
+    let type: String // "server" | "tool" | "client" | "setting"
+    let id: String
+    let name: String
+}
+
+/// The one action that resolves an `AttentionItem` (FR-005): a verb the
+/// caller may run directly, and a target screen/route. Matches the Go
+/// `contracts.AttentionFix`.
+struct AttentionFix: Codable, Equatable {
+    let verb: String
+    let label: String
+    let target: String
+}
+
+/// One row of the needs-attention list (contracts/rest-api.md#attention),
+/// identical across every surface (Web UI, macOS tray/Home, CLI). Matches
+/// the Go `contracts.AttentionItem`.
+struct AttentionItem: Codable, Equatable, Identifiable {
+    let id: String
+    let kind: String
+    let rank: Int
+    let subject: AttentionSubject
+    let summary: String
+    let detail: String?
+    let fix: AttentionFix
+    let since: Date
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, rank, subject, summary, detail, fix, since
+    }
+
+    /// Convenience for tests/fixtures (the custom `init(from:)` below
+    /// suppresses the synthesised memberwise initialiser).
+    init(id: String, kind: String, rank: Int, subject: AttentionSubject, summary: String,
+         detail: String? = nil, fix: AttentionFix, since: Date) {
+        self.id = id
+        self.kind = kind
+        self.rank = rank
+        self.subject = subject
+        self.summary = summary
+        self.detail = detail
+        self.fix = fix
+        self.since = since
+    }
+
+    // Manual Codable: `since` is Go's RFC 3339 rendering, which the shared
+    // `JSONDecoder` in `fetchWrapped` cannot parse with its default
+    // `.deferredToDate` strategy (see `UsageBucket`, the precedent for this
+    // pattern — kept model-local rather than forcing a decoder-wide date
+    // strategy onto every other model).
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        kind = try container.decode(String.self, forKey: .kind)
+        rank = try container.decode(Int.self, forKey: .rank)
+        subject = try container.decode(AttentionSubject.self, forKey: .subject)
+        summary = try container.decode(String.self, forKey: .summary)
+        detail = try container.decodeIfPresent(String.self, forKey: .detail)
+        fix = try container.decode(AttentionFix.self, forKey: .fix)
+        let raw = try container.decode(String.self, forKey: .since)
+        guard let parsed = UsageBucket.parseRFC3339(raw) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .since, in: container,
+                debugDescription: "Not an RFC 3339 timestamp: \(raw)"
+            )
+        }
+        since = parsed
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(rank, forKey: .rank)
+        try container.encode(subject, forKey: .subject)
+        try container.encode(summary, forKey: .summary)
+        try container.encodeIfPresent(detail, forKey: .detail)
+        try container.encode(fix, forKey: .fix)
+        try container.encode(UsageBucket.rfc3339String(from: since), forKey: .since)
+    }
+}
+
+/// `GET /api/v1/attention` success `data` payload.
+struct AttentionResponse: Codable, Equatable {
+    let count: Int
+    let generatedAt: Date
+    let items: [AttentionItem]
+
+    enum CodingKeys: String, CodingKey {
+        case count
+        case generatedAt = "generated_at"
+        case items
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        count = try container.decode(Int.self, forKey: .count)
+        let raw = try container.decode(String.self, forKey: .generatedAt)
+        guard let parsed = UsageBucket.parseRFC3339(raw) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .generatedAt, in: container,
+                debugDescription: "Not an RFC 3339 timestamp: \(raw)"
+            )
+        }
+        generatedAt = parsed
+        items = try container.decode([AttentionItem].self, forKey: .items)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(count, forKey: .count)
+        try container.encode(UsageBucket.rfc3339String(from: generatedAt), forKey: .generatedAt)
+        try container.encode(items, forKey: .items)
+    }
+
+    /// Convenience for tests/fixtures.
+    init(count: Int, generatedAt: Date, items: [AttentionItem]) {
+        self.count = count
+        self.generatedAt = generatedAt
+        self.items = items
+    }
+}
+
+// MARK: - Review queue (Spec 109-g)
+struct ReviewQueueRow: Codable, Equatable, Identifiable {
+    let server: String; let kind: String; let quarantined: Bool; let pending: Int?; let changed: Int?; let toolsCaptured: Int?
+    enum CodingKeys: String, CodingKey { case server, kind, quarantined, pending, changed; case toolsCaptured = "tools_captured" }
+    var id: String { server }
+}
+struct ReviewQueueResponse: Codable, Equatable { let count: Int; let servers: [ReviewQueueRow] }
+/// Baseline scan summary of a review. `coverage` (current, stale, not_captured,
+/// tools_not_scanned, scanning, none) says whether the verdict describes the
+/// definitions on screen; a payload from an older core omits it and is read as `none`.
+struct ReviewScan: Codable, Equatable {
+    let verdict: String; let riskScore: Int?; let reportID: String?
+    let coverage: String?; let toolsScanned: Int?; let unscannedTools: [String]?
+    enum CodingKeys: String, CodingKey {
+        case verdict, coverage
+        case riskScore = "risk_score"; case reportID = "report_id"
+        case toolsScanned = "tools_scanned"; case unscannedTools = "unscanned_tools"
+    }
+}
+struct ReviewServerSummary: Codable, Equatable { let name: String; let transport: String?; let command: String?; let url: String?; let quarantined: Bool; let trustMode: String?; let sourceRegistryID: String?; let sourceRegistryProvenance: String?; let definitionsCaptured: Bool; let scan: ReviewScan?; enum CodingKeys: String, CodingKey { case name, transport, command, url, quarantined, scan; case trustMode = "trust_mode"; case sourceRegistryID = "source_registry_id"; case sourceRegistryProvenance = "source_registry_provenance"; case definitionsCaptured = "definitions_captured" } }
+struct ReviewToolPrevious: Codable, Equatable { let description: String; let inputSchema: JSONValue?; let outputSchema: JSONValue?; let annotations: JSONValue?; enum CodingKeys: String, CodingKey { case description, annotations; case inputSchema = "input_schema"; case outputSchema = "output_schema" } }
+struct ReviewToolDiff: Codable, Equatable { let description: String?; let inputSchema: String?; let outputSchema: String?; let annotations: String?; enum CodingKeys: String, CodingKey { case description, annotations; case inputSchema = "input_schema"; case outputSchema = "output_schema" } }
+struct ReviewTool: Codable, Equatable, Identifiable { let name: String; let description: String; let inputSchema: JSONValue?; let outputSchema: JSONValue?; let annotations: JSONValue?; let tier: String; let approvalStatus: String; let disabled: Bool; let scanVerdict: String; let heldReason: String?; let heldSignals: [String]?; let defaultAllowed: Bool?; let previous: ReviewToolPrevious?; let diff: ReviewToolDiff?; let currentHash: String?; enum CodingKeys: String, CodingKey { case name, description, annotations, tier, disabled, previous, diff; case inputSchema = "input_schema"; case outputSchema = "output_schema"; case approvalStatus = "approval_status"; case scanVerdict = "scan_verdict"; case heldReason = "held_reason"; case heldSignals = "held_signals"; case defaultAllowed = "default_allowed"; case currentHash = "current_hash" }; var id: String { name } }
+struct ServerReviewResponse: Codable, Equatable { let server: ReviewServerSummary; let tools: [ReviewTool] }
 
 // MARK: - OAuth Status
 
@@ -237,7 +472,20 @@ struct DiagnosticPayload: Codable, Equatable {
 /// tray can both display and edit them. Mirrors the
 /// `contracts.IsolationConfig` struct on the Go side.
 struct IsolationConfigStatus: Codable, Equatable {
+    /// EFFECTIVE isolation state: what actually happens when the server spawns,
+    /// after the global setting, the per-server override and the structural
+    /// gates. NOT the raw override — read `enabledOverride` for that.
+    ///
+    /// Reading this as the override is exactly what corrupted configs before
+    /// GH #1142: an inheriting server reported `false`, the edit form seeded a
+    /// toggle from it, and saving any isolation field persisted an explicit
+    /// opt-out that silently un-containerised the server.
     let enabled: Bool
+    /// RAW per-server override. `nil` means "inherit the global setting" — a
+    /// distinct state from an explicit `false`.
+    let enabledOverride: Bool?
+    /// RAW per-server mode override ("docker" | "sandbox" | "none").
+    let modeOverride: String?
     let image: String?
     let networkMode: String?
     let extraArgs: [String]?
@@ -245,9 +493,59 @@ struct IsolationConfigStatus: Codable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case enabled, image
+        case enabledOverride = "enabled_override"
+        case modeOverride = "mode_override"
         case networkMode = "network_mode"
         case extraArgs = "extra_args"
         case workingDir = "working_dir"
+    }
+}
+
+/// Resolved isolation state plus the rule that produced it, so the tray can say
+/// WHY a server is (or is not) isolated instead of showing an ambiguous flag.
+/// Mirrors `contracts.IsolationEffective` on the Go side.
+struct IsolationEffectiveStatus: Codable, Equatable {
+    let mode: String            // "docker" | "sandbox" | "none"
+    let isolated: Bool
+    let globalMode: String?
+    let inherited: Bool
+    /// "global" | "server-mode" | "server-opt-out" | "server-opt-in-ignored" |
+    /// "not-stdio" | "already-docker" | "sandbox-unavailable" |
+    /// "unsupported-mode". Treat anything else as "global".
+    let source: String?
+
+    enum CodingKeys: String, CodingKey {
+        case mode, isolated, inherited, source
+        case globalMode = "global_mode"
+    }
+
+    /// One-line explanation for the read-only Config tab.
+    var explanation: String {
+        let global = (globalMode?.isEmpty == false) ? globalMode! : "none"
+        switch source {
+        case "server-mode":
+            return "Mode set for this server: \(mode)"
+        case "server-opt-out":
+            return "Turned off for this server (global setting is \(global))"
+        case "server-opt-in-ignored":
+            return "Turned on for this server, but global isolation is off — the setting is ignored"
+        case "not-stdio":
+            return "No local process to isolate"
+        case "already-docker":
+            return "This server already runs Docker itself"
+        case "sandbox-unavailable":
+            // The mode is set, but the spawn path degrades to unconfined here:
+            // Landlock is Linux-only, so a Mac never enforces it.
+            return "Sandbox mode is set, but this system cannot enforce it — the server runs unconfined"
+        case "unsupported-mode":
+            return "Isolation mode \(mode) is not one this version implements — the server runs unconfined"
+        default:
+            return inherited ? "Inherits the global setting (\(global))" : "Turned on for this server"
+        }
+    }
+
+    var label: String {
+        isolated ? "Isolated (\(mode))" : "Not isolated"
     }
 }
 
@@ -277,6 +575,9 @@ struct IsolationDefaultsStatus: Codable, Equatable {
 struct ServerStatus: Codable, Identifiable, Equatable {
     let id: String
     let name: String
+    /// Catalog provenance, used to resolve an existing Added/Open card without
+    /// exposing configured server names in the catalog DTO itself.
+    let sourceRegistryID: String?
     let url: String?
     let command: String?
     let args: [String]?
@@ -313,6 +614,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
     let quarantine: QuarantineStats?
     let isolation: IsolationConfigStatus?
     let isolationDefaults: IsolationDefaultsStatus?
+    let isolationEffective: IsolationEffectiveStatus?
     let error: String?
     /// Spec 044 — stable error code (e.g. MCPX_STDIO_SPAWN_ENOENT) and the
     /// structured diagnostic payload. Present only when the server has an
@@ -322,6 +624,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
 
     enum CodingKeys: String, CodingKey {
         case id, name, url, command, args
+        case sourceRegistryID = "source_registry_id"
         case workingDir = "working_dir"
         case headers
         case env
@@ -342,6 +645,7 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         case quarantine
         case isolation
         case isolationDefaults = "isolation_defaults"
+        case isolationEffective = "isolation_effective"
         case error
         case errorCode = "error_code"
         case diagnostic
@@ -353,13 +657,88 @@ struct ServerStatus: Codable, Identifiable, Equatable {
         return d.severity == "warn" || d.severity == "error"
     }
 
-    /// True when the server is in the OAuth login-required state (MCP-1819/T3).
-    /// `health.action == "login"` is the stable, cross-surface contract that
-    /// CLI/REST/Web-UI/tray all key off. In this state the server needs a calm,
-    /// actionable "Sign in" affordance — NOT hard-error framing — even when the
-    /// backend also attaches an error-severity diagnostic for the failed connect.
+    /// True when the server is held for quarantine review — an intentional
+    /// admin state, not a fault, exactly like `isOAuthLoginRequired`.
+    ///
+    /// mcpproxy still *attempts* a connection to a quarantined server so the
+    /// security scanner can export its tool definitions, and a failed attempt
+    /// leaves an error-severity diagnostic behind. That diagnostic used to tint
+    /// the menu-bar badge red while the very same payload reported
+    /// `admin_state == "quarantined"` — so the menu header drew a calm dot
+    /// under a red menu-bar dot, and the user could not clear it without
+    /// approving or disabling the server.
+    ///
+    /// Do not key anything on `health.level` here: it is not always "healthy".
+    /// A quarantined server whose transport faults reports unhealthy, and a
+    /// core that also surfaces sign-in under quarantine may report it degraded
+    /// or unhealthy. `admin_state == "quarantined"` and `action == "approve"`
+    /// hold in every case.
+    ///
+    /// The `admin_state` half is belt-and-braces, not a second independent
+    /// signal: the backend derives it FROM `quarantined`
+    /// (`internal/health/calculator.go` returns `AdminState: quarantined`
+    /// whenever the input is quarantined), so today it cannot be true while
+    /// `quarantined` is false. It is kept because `admin_state` is the
+    /// cross-surface contract CLI/REST/Web-UI/tray share, and this stays correct
+    /// if those two ever decouple.
+    var isQuarantineReview: Bool {
+        quarantined || health?.adminState == "quarantined"
+    }
+
+    /// Whether this server's diagnostic is allowed to tint the menu-bar badge.
+    ///
+    /// The badge answers "is something broken?", so a server sitting in a state
+    /// the user chose — or is being asked to act on calmly — must not turn it
+    /// red. Two such states exist, and both still carry an error-severity
+    /// diagnostic from the connect attempt that state implies:
+    /// waiting for sign-in, and held for quarantine review.
+    ///
+    /// Any future intentional non-connected state belongs here too, and must be
+    /// added to BOTH `worstDiagnosticSeverity` and `diagnosticCount` — they
+    /// share this predicate precisely so they cannot drift apart.
+    var isBadgeExempt: Bool {
+        isOAuthLoginRequired || isQuarantineReview
+    }
+
+    /// Diagnostic codes that mean the user must sign in: the first-time login
+    /// plus the re-auth codes for a session that expired or was revoked. Mirrors
+    /// `OAuthReauthCodes` + MCPX_OAUTH_LOGIN_REQUIRED in the Web UI's
+    /// `frontend/src/utils/health.ts`. Other MCPX_OAUTH_* codes (discovery,
+    /// callback) are configuration faults a sign-in click does not fix.
+    static let oauthSignInCodes: Set<String> = [
+        "MCPX_OAUTH_LOGIN_REQUIRED",
+        "MCPX_OAUTH_REAUTH_REQUIRED",
+        "MCPX_OAUTH_REFRESH_EXPIRED",
+        "MCPX_OAUTH_REFRESH_403",
+    ]
+
+    /// True when the server needs the user to sign in (MCP-1819/T3). In this
+    /// state the server needs a calm, actionable "Sign in" affordance — NOT
+    /// hard-error framing — even when the backend also attaches an
+    /// error-severity diagnostic for the failed connect.
+    ///
+    /// `health.action == "login"` is not enough on its own: health reports one
+    /// action, and quarantine outranks sign-in, so a quarantined OAuth server
+    /// awaiting sign-in says `action == "approve"`. The diagnostic code carries
+    /// the sign-in half — the same rule as the Web UI's `oauthSignInState`.
+    /// A disabled server is excluded: its diagnostic is left over from the last
+    /// connect attempt, and its next step is Enable.
     var isOAuthLoginRequired: Bool {
-        health?.action == "login"
+        if health?.action == "login" { return true }
+        guard enabled, let code = diagnostic?.code else { return false }
+        return Self.oauthSignInCodes.contains(code)
+    }
+
+    /// The buttons the Dashboard's "Servers Needing Attention" card shows, in
+    /// order. Health carries one action and quarantine outranks sign-in, so a
+    /// quarantined server awaiting sign-in says "approve" — Sign in is added
+    /// from `isOAuthLoginRequired`, beside the health action, never instead of
+    /// it.
+    var attentionActions: [HealthAction] {
+        var actions: [HealthAction] = []
+        if isOAuthLoginRequired { actions.append(.login) }
+        if let action = health?.healthAction, action != .login { actions.append(action) }
+        return actions
     }
 
     /// Number of tools awaiting approval (pending + changed), or 0 if quarantine stats are absent.
@@ -447,6 +826,15 @@ struct TokenMetrics: Codable, Equatable {
     let savedTokens: Int
     let savedTokensPercentage: Double
     let perServerToolListSizes: [String: Int]?
+    /// Mirrors `contracts.ServerTokenMetrics.Estimated` (Spec 109-k, FR-073/T120):
+    /// true while `averageQueryResultSize` is a synthetic simulation (no real
+    /// `retrieve_tools` call has completed yet in this runtime), false once a
+    /// real one has. Web (Usage/Home) and the CLI (`mcpproxy status`) both
+    /// render an "estimate" label while this is true — macOS had no field to
+    /// read it from at all until now (zcode review round 1, F7). Absent from
+    /// an older core's response, so it defaults to `false` (never claims
+    /// "estimate" on a build too old to say so) rather than failing to decode.
+    let estimated: Bool
 
     enum CodingKeys: String, CodingKey {
         case totalServerToolListSize = "total_server_tool_list_size"
@@ -454,6 +842,33 @@ struct TokenMetrics: Codable, Equatable {
         case savedTokens = "saved_tokens"
         case savedTokensPercentage = "saved_tokens_percentage"
         case perServerToolListSizes = "per_server_tool_list_sizes"
+        case estimated
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        totalServerToolListSize = try container.decode(Int.self, forKey: .totalServerToolListSize)
+        averageQueryResultSize = try container.decode(Int.self, forKey: .averageQueryResultSize)
+        savedTokens = try container.decode(Int.self, forKey: .savedTokens)
+        savedTokensPercentage = try container.decode(Double.self, forKey: .savedTokensPercentage)
+        perServerToolListSizes = try container.decodeIfPresent([String: Int].self, forKey: .perServerToolListSizes)
+        estimated = try container.decodeIfPresent(Bool.self, forKey: .estimated) ?? false
+    }
+
+    init(
+        totalServerToolListSize: Int,
+        averageQueryResultSize: Int,
+        savedTokens: Int,
+        savedTokensPercentage: Double,
+        perServerToolListSizes: [String: Int]?,
+        estimated: Bool = false
+    ) {
+        self.totalServerToolListSize = totalServerToolListSize
+        self.averageQueryResultSize = averageQueryResultSize
+        self.savedTokens = savedTokens
+        self.savedTokensPercentage = savedTokensPercentage
+        self.perServerToolListSizes = perServerToolListSizes
+        self.estimated = estimated
     }
 }
 
@@ -548,13 +963,40 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
     let timestamp: String
     let sessionId: String?
     let requestId: String?
+    /// Correlation id of the `code_execution` call this record is a sub-call of,
+    /// or nil for a top-level record.
+    ///
+    /// It is the PARENT's `requestId` (the core mints one `parentCallID` per
+    /// `code_execution` dispatch and stamps every sandboxed `call_tool` with
+    /// it), so `?parent_id=<parent request_id>` fetches a parent's children and
+    /// `?request_id=<child parent_id>` fetches a child's parent. Children carry
+    /// fresh request ids of their own, which is what keeps rule 4 from
+    /// collapsing a whole script into one row.
+    let parentId: String?
     let metadata: [String: JSONValue]?
     let hasSensitiveData: Bool?
     let detectionTypes: [String]?
     let maxSeverity: String?
+    // Spec 108-e attribution (108-k K18): who made the call and under which
+    // profile. Absent on a record from before 108 and on a core that predates
+    // it; `var` so the memberwise initialiser keeps defaulting them to nil.
+    var profile: String?
+    /// How the profile was resolved: `pin`, `binding`, `url`, `session`, `anonymous`.
+    var profileSource: String?
+    var clientId: String?
+    /// The advisory name the client announced (never trusted as identity).
+    var clientName: String?
+    var tokenName: String?
+    /// Why a blocked call was blocked (`profile_tier`, `profile_rule`, …).
+    var profileBlockReason: String?
 
     enum CodingKeys: String, CodingKey {
-        case id, type, source, status, timestamp, arguments, response, metadata
+        case id, type, source, status, timestamp, arguments, response, metadata, profile
+        case profileSource = "profile_source"
+        case clientId = "client_id"
+        case clientName = "client_name"
+        case tokenName = "token_name"
+        case profileBlockReason = "block_reason"
         case serverName = "server_name"
         case toolName = "tool_name"
         case responseTruncated = "response_truncated"
@@ -562,6 +1004,7 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
         case durationMs = "duration_ms"
         case sessionId = "session_id"
         case requestId = "request_id"
+        case parentId = "parent_id"
         case hasSensitiveData = "has_sensitive_data"
         case detectionTypes = "detection_types"
         case maxSeverity = "max_severity"
@@ -569,6 +1012,31 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
 
     static func == (lhs: ActivityEntry, rhs: ActivityEntry) -> Bool {
         lhs.id == rhs.id
+    }
+
+    // MARK: Attribution (Spec 108-k K18)
+
+    /// The client of the call: its id when the credential identified one, else
+    /// the advisory name marked with "~" (it is not an identity).
+    var callerClientLabel: String? {
+        if let id = clientId, !id.isEmpty { return id }
+        if let name = clientName, !name.isEmpty { return "~\(name)" }
+        return nil
+    }
+
+    /// `work-ro · locked by credential`: the profile and how it was resolved, in
+    /// the words the Web UI shows (Spec 108-l L6, `source` table of labels.json).
+    /// nil for an unattributed record.
+    var callerProfileLabel: String? {
+        guard let profile, !profile.isEmpty else { return nil }
+        let source = ProfileSourceText.label(profileSource ?? "")
+        return source.isEmpty ? profile : "\(profile) · \(source)"
+    }
+
+    /// Whether any attribution field is present.
+    var hasAttribution: Bool {
+        callerClientLabel != nil || callerProfileLabel != nil
+            || !(tokenName ?? "").isEmpty || !(profileBlockReason ?? "").isEmpty
     }
 
     // MARK: Intent Helpers
@@ -631,6 +1099,102 @@ struct ActivityEntry: Codable, Identifiable, Equatable {
     }
 }
 
+/// What a record *is*, for grouping purposes: a call (successful or failed) or
+/// a policy block. Blocks never group with calls — a burst of blocked attempts
+/// at a tool is a different story from a burst of calls to it (spec 090 FR-002).
+enum OutcomeClass: String, Equatable {
+    case call
+    case blocked
+}
+
+/// How a record *ended*, coarsened to what a row can render (spec 090 FR-004).
+///
+/// The second half of the group key, and the reason it exists: with only
+/// `OutcomeClass` in the key, a stretch of calls to one tool that failed twice
+/// in the middle was ONE run, rendered with the failure mark and a `×N` that
+/// counted the successes too — a row claiming twelve failures where two
+/// happened. Splitting the stretch by status class keeps every run homogeneous,
+/// so a `×N` is always a count of the thing the row is marked as.
+///
+/// Three classes, not one per raw status: `running`, `blocked` and anything
+/// else the core may write are all "not finished the way a row cares about",
+/// and bucketing them keeps an unfamiliar status from fragmenting a run record
+/// by record.
+enum StatusClass: String, Equatable {
+    case success
+    case failure
+    case pending
+}
+
+// MARK: - Glance accessors (spec 090)
+//
+// Derived, no stored fields. They exist so the tray's pure row pipeline reads
+// one vocabulary — `reason`, `outcomeClass`, `statusClass` — instead of
+// re-deriving the metadata layout at every call site, and so a live SSE-adapted
+// entry and a polled entry answer identically (`GlanceEvent` populates the same
+// slots).
+extension ActivityEntry {
+
+    /// Reason a policy decision gives for itself: `metadata.reason`.
+    ///
+    /// Separate from `intentReason`, which lives under `metadata.intent`: a
+    /// blocked record can carry both (the caller's plan and the policy's
+    /// refusal), and the row must show the refusal.
+    var blockReason: String? {
+        guard let meta = metadata,
+              case .string(let r) = meta["reason"] else { return nil }
+        return r.isEmpty ? nil : r
+    }
+
+    /// The reason to display for this record: the policy's on a policy record,
+    /// the caller's declared intent on everything else (FR-005).
+    var reason: String? {
+        type == ActivityEntry.policyDecisionType ? blockReason : intentReason
+    }
+
+    /// Grouping class (FR-002).
+    ///
+    /// A policy decision is a *block* only when it actually stopped the call —
+    /// `decision` (canonically "blocked"; legacy "block" accepted) rather than a
+    /// warning or a redaction, which let the call through. When the record
+    /// carries no `decision` metadata — legacy records, or a projection that
+    /// dropped it — the persisted status IS the decision (`activity_service.go`
+    /// writes `Status: decision`), so it is the fallback.
+    var outcomeClass: OutcomeClass {
+        guard type == ActivityEntry.policyDecisionType else { return .call }
+        let decision: String
+        if let meta = metadata, case .string(let d) = meta["decision"], !d.isEmpty {
+            decision = d
+        } else {
+            decision = status
+        }
+        return ActivityEntry.blockingDecisions.contains(decision) ? .blocked : .call
+    }
+
+    /// Grouping class for the record's outcome (FR-004).
+    ///
+    /// Deliberately parallel to `outcomeClass` rather than folded into it: rule
+    /// 6 (`GlanceSelection.qualifies`) asks "did policy stop this call?", which
+    /// is a question about the record's KIND, while grouping also has to ask
+    /// "how did it end?". One enum answering both would make a blocked record
+    /// and a failed call indistinguishable at the qualification gate.
+    var statusClass: StatusClass {
+        switch status {
+        case "success": return .success
+        case "error": return .failure
+        default: return .pending
+        }
+    }
+
+    /// Activity record type of a policy decision (`storage.ActivityTypePolicyDecision`).
+    static let policyDecisionType = "policy_decision"
+
+    /// Decisions that stopped the call. "blocked" is what the runtime emits
+    /// today; "block" is accepted because `event_bus.go` still treats both as a
+    /// block and old records may carry it.
+    static let blockingDecisions: Set<String> = ["blocked", "block"]
+}
+
 /// Response wrapper for `GET /api/v1/activity`.
 struct ActivityListResponse: Codable {
     let activities: [ActivityEntry]
@@ -680,6 +1244,196 @@ struct ActivitySummary: Codable, Equatable {
 
 // MARK: - Status / Info Responses
 
+/// One session attributed to a client by `GET /api/v1/clients/{id}`.
+///
+/// The list endpoint deliberately omits this content: opening a client config
+/// is only permitted after the operator expands that row.
+struct ClientPresenceSession: Codable, Identifiable, Equatable {
+    let id: String
+    let workSessionId: String?
+    let startedAt: String
+    let lastActivity: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case workSessionId = "work_session_id"
+        case startedAt = "started_at"
+        case lastActivity = "last_activity"
+    }
+
+    var displayID: String { workSessionId?.isEmpty == false ? workSessionId! : id }
+}
+
+/// Presence row returned by `GET /api/v1/clients` and its detail route.
+///
+/// Keep the vocabulary supplied by the core intact. A newer core may add a
+/// state, while older cores can omit additive path, hint, and session fields.
+struct ClientPresenceRecord: Codable, Identifiable, Equatable {
+    let id: String
+    let displayName: String
+    let kind: String
+    let icon: String?
+    let state: String
+    let installed: Bool
+    let connected: Bool
+    let connectionUnverified: Bool?
+    let configPath: String?
+    let displayPath: String?
+    let lastSeen: String?
+    let activeSessions: Int
+    let calls24h: Int
+    let reloadHint: String?
+    var sessions: [ClientPresenceSession]?
+
+    // Spec 108-f ClientView additions (108-k). All optional (`var`, so the
+    // memberwise init keeps defaulting them): a core older than 108 sends none
+    // of them and the Spec 109-h decoding above must not change.
+    var credentialState: CredentialState?
+    var tokenName: String?
+    var profile: String?
+    var profileTitle: String?
+    var profileMode: BindingMode?
+    /// `pin` (locked) or `binding` (switchable); empty without a client credential.
+    var profileSource: String?
+    var profileMissing: Bool?
+    var expiresAt: String?
+    var rotationPending: Bool?
+    var blocked24h: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case id, kind, icon, state, installed, connected, sessions, profile
+        case displayName = "display_name"
+        case connectionUnverified = "connection_unverified"
+        case configPath = "config_path"
+        case displayPath = "display_path"
+        case lastSeen = "last_seen"
+        case activeSessions = "active_sessions"
+        case calls24h = "calls_24h"
+        case reloadHint = "reload_hint"
+        case credentialState = "credential_state"
+        case tokenName = "token_name"
+        case profileTitle = "profile_title"
+        case profileMode = "profile_mode"
+        case profileSource = "profile_source"
+        case profileMissing = "profile_missing"
+        case expiresAt = "expires_at"
+        case rotationPending = "rotation_pending"
+        case blocked24h = "blocked_24h"
+    }
+
+    /// Whether this row holds an ACTIVE client credential, the only state in
+    /// which the profile picker and the lock toggle work (FR-026).
+    var hasClientCredential: Bool { credentialState == .client }
+
+    /// The row's current profile as a picker value: "" is All servers.
+    var boundProfile: String { profile ?? "" }
+
+    /// Locked only means something with a client credential and a profile.
+    var isLocked: Bool { hasClientCredential && profileMode == .locked && !boundProfile.isEmpty }
+
+    /// `Work · Read-only · locked` style label for the row; nil without a
+    /// client credential (there is nothing to show).
+    var bindingLabel: String? {
+        guard hasClientCredential else { return nil }
+        var label: String
+        if profileMissing == true {
+            label = "\(boundProfile) (missing)"
+        } else if boundProfile.isEmpty {
+            label = "All servers"
+        } else if let title = profileTitle, !title.isEmpty {
+            label = title
+        } else {
+            label = boundProfile
+        }
+        if isLocked { label += " · locked" }
+        return label
+    }
+
+    var effectiveDisplayPath: String? { displayPath ?? configPath }
+
+    var stateLabel: String {
+        switch state {
+        case "connected_seen": return "Connected"
+        case "connected_never_seen": return "Connected — awaiting first use"
+        case "installed": return connectionUnverified == true ? "Installed — connection unverified" : "Installed"
+        case "not_installed": return "Not installed"
+        case "other": return "Observed"
+        default: return state.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    var symbolName: String {
+        switch icon ?? id {
+        case "claude-code", "claude-desktop": return "brain"
+        case "cursor": return "cursorarrow.rays"
+        case "vscode", "copilot": return "chevron.left.forwardslash.chevron.right"
+        case "windsurf": return "wind"
+        case "codex", "opencode": return "terminal"
+        case "gemini": return "sparkles"
+        default: return "app.connected.to.app.below.fill"
+        }
+    }
+}
+
+struct ClientsResponse: Codable, Equatable {
+    let clients: [ClientPresenceRecord]
+    /// Spec 108-f: instance-level warnings, computed over the full set.
+    var warnings: [ClientWarning]?
+}
+
+/// The shared endpoint and routing-mode contract from `GET /api/v1/routing`.
+struct RoutingInfo: Codable, Equatable {
+    struct Endpoints: Codable, Equatable {
+        let `default`: String
+        let direct: String
+        let codeExecution: String
+        let retrieveTools: String
+
+        enum CodingKeys: String, CodingKey {
+            case `default`, direct
+            case codeExecution = "code_execution"
+            case retrieveTools = "retrieve_tools"
+        }
+
+        var rows: [(name: String, path: String)] {
+            [
+                ("Default", `default`),
+                ("Direct", direct),
+                ("Code execution", codeExecution),
+                ("Retrieve tools", retrieveTools),
+            ]
+        }
+    }
+
+    let routingMode: String
+    let description: String
+    let endpoints: Endpoints
+    let availableModes: [String]
+    let pendingRoutingMode: String?
+    let restartRequired: Bool?
+    let codeExecutionEnabled: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case description, endpoints
+        case routingMode = "routing_mode"
+        case availableModes = "available_modes"
+        case pendingRoutingMode = "pending_routing_mode"
+        case restartRequired = "restart_required"
+        case codeExecutionEnabled = "code_execution_enabled"
+    }
+
+    var servedModeLabel: String { Self.modeLabel(routingMode) }
+
+    static func modeLabel(_ mode: String) -> String {
+        switch mode {
+        case "retrieve_tools": return "Retrieve tools"
+        case "direct": return "Direct"
+        case "code_execution": return "Code execution"
+        default: return mode.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+}
+
 /// Response for `GET /api/v1/status`.
 /// The backend builds this as a dynamic map; we decode the known keys.
 struct StatusResponse: Codable {
@@ -689,6 +1443,17 @@ struct StatusResponse: Codable {
     let routingMode: String?
     let upstreamStats: UpstreamStats?
     let timestamp: Int64?
+    /// MCP-2176: the core's built-in default MCP instructions, rendered as the
+    /// placeholder of the Settings → Advanced instructions field so the shown
+    /// default never drifts from `resolveInstructions("")`. Optional — a core
+    /// older than the field simply omits it.
+    let defaultInstructions: String?
+    /// Spec 109-k FR-080a: availability signals. Omitted by a core that
+    /// supports none of them (109-k itself ships the list empty).
+    let features: StatusFeatures?
+    /// Spec 109 FR-044a: the effective telemetry state (env opt-out vs config
+    /// vs default). Omitted for scoped callers and by a core that predates it.
+    let telemetry: TelemetryStateDTO?
 
     enum CodingKeys: String, CodingKey {
         case running
@@ -697,6 +1462,24 @@ struct StatusResponse: Codable {
         case routingMode = "routing_mode"
         case upstreamStats = "upstream_stats"
         case timestamp
+        case defaultInstructions = "default_instructions"
+        case features
+        case telemetry
+    }
+
+    /// Whether the core accepts the Spec 108 `profile`/`client`/`token`
+    /// scope filters — until it does, the UI hides them and never sends them.
+    var scopeFiltersAvailable: Bool {
+        !(features?.scopeFilters ?? []).isEmpty
+    }
+}
+
+/// `GET /api/v1/status` → `features`.
+struct StatusFeatures: Codable, Equatable {
+    let scopeFilters: [String]?
+
+    enum CodingKeys: String, CodingKey {
+        case scopeFilters = "scope_filters"
     }
 }
 
@@ -715,6 +1498,14 @@ struct UpdateInfo: Codable, Equatable {
     let isPrerelease: Bool?
     let checkError: String?
 
+    /// Spec 079 FR-002 — the core-rendered "N releases / M weeks behind"
+    /// clause. Optional because a core older than this feature omits it, and
+    /// because the core withholds it whenever the delta could not be resolved
+    /// (offline, rate-limited, a build with no release record). Render it
+    /// verbatim; never re-derive the wording here, or this tray drifts from
+    /// `mcpproxy status`, `doctor` and the Web UI banner.
+    let behindSummary: String?
+
     enum CodingKeys: String, CodingKey {
         case available
         case latestVersion = "latest_version"
@@ -722,6 +1513,7 @@ struct UpdateInfo: Codable, Equatable {
         case checkedAt = "checked_at"
         case isPrerelease = "is_prerelease"
         case checkError = "check_error"
+        case behindSummary = "behind_summary"
     }
 }
 
@@ -733,12 +1525,33 @@ struct InfoResponse: Codable, Equatable {
     let endpoints: InfoEndpoints
     let update: UpdateInfo?
 
+    /// Spec 092 FR-001a — durable launch provenance: "tray"/"installer" when a
+    /// tray process started this core, "" when the user did. Optional in the
+    /// model, not in the contract: a core from before this field existed omits
+    /// it, and an older core is precisely the one the supersede logic has to
+    /// reason about, so decoding must not fail on its absence.
+    let launchedBy: String?
+
+    /// Spec 092 FR-002 — the core's own pid. Nil from a core too old to report
+    /// one, which downgrades the supersede action to "show instructions".
+    let pid: Int32?
+
+    /// Spec 092 FR-015 — the effective update policy. Optional for the same
+    /// reason as the two fields above: a pre-092 core omits it, and the tray
+    /// must keep working against one. Absence maps to the permissive default
+    /// those builds already behaved as (see `UpdatePolicyResolver`), never to
+    /// "silently disable updates".
+    let updatePolicy: CoreUpdatePolicy?
+
     enum CodingKeys: String, CodingKey {
         case version
         case webUiUrl = "web_ui_url"
         case listenAddr = "listen_addr"
         case endpoints
         case update
+        case launchedBy = "launched_by"
+        case pid
+        case updatePolicy = "update_policy"
     }
 }
 
@@ -767,11 +1580,19 @@ struct SSEEvent: Equatable {
     }
 
     /// Convenience: decode the data payload as a JSON dictionary.
+    ///
+    /// Always throws `SSEError.invalidData` on bad input. The `try` on
+    /// JSONSerialization used to let Foundation's own NSError escape — so an
+    /// event with an empty or malformed payload threw a raw Cocoa error instead
+    /// of the SSEError this function documents, and any caller matching on
+    /// SSEError missed it.
     func decodePayload() throws -> [String: Any] {
-        guard let jsonData = data.data(using: .utf8) else {
+        guard let jsonData = data.data(using: .utf8), !jsonData.isEmpty else {
             throw SSEError.invalidData
         }
-        guard let dict = try JSONSerialization.jsonObject(with: jsonData) as? [String: Any] else {
+        guard let object = try? JSONSerialization.jsonObject(with: jsonData),
+              let dict = object as? [String: Any]
+        else {
             throw SSEError.invalidData
         }
         return dict
@@ -892,9 +1713,12 @@ struct ServerTool: Codable, Identifiable, Equatable {
     let serverName: String?
     let annotations: ToolAnnotation?
     let approvalStatus: String?
+    /// Spec 109 FR-028: server-computed (`contracts.AnnotationTier`) —
+    /// `read`|`write`|`destructive`|`unannotated`. Never derived locally.
+    let tier: String?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, annotations
+        case name, description, annotations, tier
         case serverName = "server_name"
         case approvalStatus = "approval_status"
     }
@@ -992,10 +1816,18 @@ struct SearchTool: Codable {
     let description: String?
     let serverName: String?
     let annotations: ToolAnnotation?
+    /// Spec 109 FR-028: server-computed (`contracts.AnnotationTier`). Never
+    /// derived locally.
+    let tier: String?
+    /// Spec 108 view-as (`GET /tools?client=|profile=`): the tool's tier under
+    /// the viewed subject's profile and its verdict. Absent otherwise.
+    var profileTier: String?
+    var access: ToolAccess?
 
     enum CodingKeys: String, CodingKey {
-        case name, description, annotations
+        case name, description, annotations, tier, access
         case serverName = "server_name"
+        case profileTier = "profile_tier"
     }
 }
 
@@ -1012,4 +1844,97 @@ struct SearchToolsResponse: Codable {
     let results: [SearchResult]?
     let tools: [SearchTool]?
     let total: Int?
+    /// A non-administrator view-as lists visible rows only plus these counts.
+    var counts: ViewAsCounts?
+}
+
+// MARK: - Usage Aggregate (Spec 069 A3)
+
+/// One hourly bar of the usage timeline.
+/// Matches Go `contracts.UsageTimeBucket`.
+///
+/// `calls` INCLUDES `errors` — a stacked chart must plot `calls - errors` and
+/// `errors`, never the two raw fields, or failures are counted twice.
+/// Buckets are UTC-hour aligned and sparse: hours with no activity are omitted.
+struct UsageBucket: Codable, Equatable {
+    /// Start of the UTC hour this bucket covers.
+    let start: Date
+    let calls: Int
+    let errors: Int
+    let totalRespBytes: Int
+
+    enum CodingKeys: String, CodingKey {
+        case start, calls, errors
+        case totalRespBytes = "total_resp_bytes"
+    }
+}
+
+// The Codable conformance lives in an extension so the memberwise initialiser
+// is still synthesised (an `init` in the struct body would suppress it).
+extension UsageBucket {
+    /// The API emits Go's RFC 3339 rendering (`2026-07-29T13:00:00Z`), which the
+    /// shared `JSONDecoder` in `fetchWrapped` cannot parse with its default
+    /// `.deferredToDate` strategy. Parsing here keeps the model self-contained
+    /// instead of forcing a decoder-wide date strategy onto every other model.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let raw = try container.decode(String.self, forKey: .start)
+        guard let parsed = UsageBucket.parseRFC3339(raw) else {
+            throw DecodingError.dataCorruptedError(
+                forKey: .start, in: container,
+                debugDescription: "Not an RFC 3339 timestamp: \(raw)"
+            )
+        }
+        let calls = try container.decode(Int.self, forKey: .calls)
+        let errors = try container.decode(Int.self, forKey: .errors)
+        let bytes = try container.decode(Int.self, forKey: .totalRespBytes)
+        self.init(start: parsed, calls: calls, errors: errors, totalRespBytes: bytes)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(UsageBucket.rfc3339String(from: start), forKey: .start)
+        try container.encode(calls, forKey: .calls)
+        try container.encode(errors, forKey: .errors)
+        try container.encode(totalRespBytes, forKey: .totalRespBytes)
+    }
+
+    /// Parse an RFC 3339 timestamp, with or without fractional seconds.
+    static func parseRFC3339(_ value: String) -> Date? {
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if let date = fractional.date(from: value) { return date }
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        return plain.date(from: value)
+    }
+
+    /// Render a date the way the API renders bucket starts.
+    static func rfc3339String(from date: Date) -> String {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.string(from: date)
+    }
+}
+
+/// Response for `GET /api/v1/activity/usage`.
+/// Matches Go `contracts.UsageAggregateResponse`.
+///
+/// The per-tool rollup (`tools`, `other`) and `generated_at` are deliberately not
+/// decoded: the tray requests `top=1` and renders only the timeline plus the
+/// tokens-saved headline. Unknown keys are ignored by `JSONDecoder`.
+struct UsageAggregateResponse: Codable, Equatable {
+    let window: String
+    let tokenSource: String?
+    let tokensSaved: Int?
+    let tokensSavedPercentage: Double?
+    /// Global hourly buckets, trimmed to `window`. Never nil; empty when idle.
+    let timeline: [UsageBucket]
+
+    enum CodingKeys: String, CodingKey {
+        case window, timeline
+        case tokenSource = "token_source"
+        case tokensSaved = "tokens_saved"
+        case tokensSavedPercentage = "tokens_saved_percentage"
+    }
 }

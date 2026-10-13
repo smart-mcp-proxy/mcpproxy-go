@@ -7,7 +7,7 @@ import (
 
 // ClaudeDesktopConfig represents the Claude Desktop configuration file structure.
 type ClaudeDesktopConfig struct {
-	GlobalShortcut string                                `json:"globalShortcut,omitempty"`
+	GlobalShortcut string                               `json:"globalShortcut,omitempty"`
 	MCPServers     map[string]ClaudeDesktopServerConfig `json:"mcpServers"`
 }
 
@@ -38,7 +38,7 @@ func (p *ClaudeDesktopParser) Parse(content []byte) ([]*ParsedServer, error) {
 
 	if len(cfg.MCPServers) == 0 {
 		return nil, &ImportError{
-			Type:    "no_servers",
+			Type:    ErrTypeNoServers,
 			Message: "no MCP servers found in Claude Desktop config",
 		}
 	}

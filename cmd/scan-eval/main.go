@@ -45,6 +45,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	outPath := fs.String("out", "", "output path for verdict JSON (default: stdout)")
 	detectors := fs.String("detectors", detectorSensitiveData, "comma-separated detectors to run (only 'sensitive-data' is supported)")
 	scanners := fs.String("scanners", "", "comma-separated Docker bundled scanner ids to run (offline; set MCPPROXY_SCAN_EVAL_DOCKER=1 to enable)")
+	gate := fs.Bool("gate", false, "run the Spec-076 detect.Engine over the corpus, print per-category recall/FP metrics, and exit non-zero on a recall/FP breach (CI regression gate)")
+	minRecall := fs.Float64("min-recall", 0.90, "gate: minimum malicious recall over gated categories (FR-013)")
+	maxFP := fs.Float64("max-fp", 0.05, "gate: maximum false-positive rate over benign + hard-negative samples (FR-013)")
 
 	if err := fs.Parse(args); err != nil {
 		return exitConfigError
@@ -53,6 +56,19 @@ func run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "error: --corpus is required")
 		return exitConfigError
 	}
+
+	// Gate mode is a distinct pipeline: it runs the offline detect.Engine over
+	// the labeled detect corpus and enforces recall/FP thresholds. It does not
+	// emit the per-detector verdict report (that is the default --detectors path).
+	if *gate {
+		gc, err := loadGateCorpus(*corpusPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return exitConfigError
+		}
+		return runGate(gc, *minRecall, *maxFP, stdout, stderr)
+	}
+
 	if err := validateDetectors(*detectors); err != nil {
 		fmt.Fprintf(stderr, "error: %v\n", err)
 		return exitConfigError

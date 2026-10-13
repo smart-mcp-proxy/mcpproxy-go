@@ -13,10 +13,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e  # v6.4.0
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
         with:
           node-version: '22'
           cache: 'npm'
@@ -29,7 +29,7 @@ jobs:
         run: cd frontend && npm run build
 
       - name: Upload frontend artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: frontend-dist
           path: frontend/dist/
@@ -40,18 +40,70 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Install swag
         run: go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4
 
       - name: Regenerate and verify OpenAPI spec
         run: scripts/verify-oas.sh
+
+  # Review round 8, finding 5: proves the recursive process-tree walk
+  # (descendant_pids, scripts/descendant-pids.sh) the E2E cleanup trap uses
+  # to reap only what a run itself spawned. Hermetic (spawns only its own
+  # sleep/bash processes) — no build, frontend or binary needed — so it runs
+  # standalone rather than piggybacking on the `test` job below. Before this,
+  # neither this nor the heavier test-e2e-cleanup-check.sh (see
+  # release-qa-gate.yml's suite-api-e2e job) was wired into any workflow, so
+  # a regression reintroducing the blanket `pkill -f "mcpproxy.*serve"` this
+  # PR removes, or breaking descendant_pids' recursion, would pass CI
+  # undetected.
+  test-descendant-pids:
+    name: Descendant-PIDs Unit Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Run descendant_pids unit test
+        run: make test-descendant-pids
+
+  # Spec 109 SC-005 (T147): no first-party surface calls POST
+  # /servers/{id}/unquarantine, and the one-click approvals 109-f removed stay
+  # removed. Hermetic grep; the self-test proves the check can fail.
+  check-no-unquarantine-callers:
+    name: No Unquarantine Callers
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Self-test the checker
+        run: bash scripts/check-no-unquarantine-callers.test.sh
+
+      - name: Check the repository
+        run: bash scripts/check-no-unquarantine-callers.sh
+
+  # Spec 116 FR-009 (T002): storage's upstreams rows are written only by the
+  # config commit (internal/runtime/commit*.go). Hermetic grep; the self-test
+  # proves the check can fail.
+  check-upstream-write-sites:
+    name: Upstream Write Sites
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Self-test the checker
+        run: bash scripts/check-upstream-write-sites.test.sh
+
+      - name: Check the repository
+        run: bash scripts/check-upstream-write-sites.sh
 
   test:
     name: Unit Tests
@@ -64,18 +116,18 @@ jobs:
     strategy:
       matrix:
         # On PRs: test only ubuntu-latest. On main/push: test all OSes.
-        # Go is pinned to "1.25" because go.mod requires go 1.25.5 — older
-        # toolchains can't build the module, and auto-downloading 1.25.x under
+        # Go is pinned to "1.26" because go.mod requires go 1.26.0 — older
+        # toolchains can't build the module, and auto-downloading 1.26.x under
         # setup-go's module cache collides ("tar: ... File exists").
         os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest", "windows-latest"]') }}
-        go-version: ["1.25"]
+        go-version: ["1.26"]
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: ${{ matrix.go-version }}
           cache: true
@@ -85,6 +137,19 @@ jobs:
 
       - name: Verify dependencies
         run: go mod verify
+
+      # Spec 083: the bench/arms tscg tests spawn the committed Node shim
+      # (bench/tscg/shim.mjs) and hard-fail (never skip) under CI per FR-006, so
+      # the tscg runtime must be provisioned wherever `go test ./...` runs.
+      - name: Set up Node.js (TSCG bench arm)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: bench/tscg/package-lock.json
+
+      - name: Install pinned TSCG shim dependencies (FR-006)
+        run: npm ci --prefix bench/tscg
 
       - name: Download frontend artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -107,14 +172,45 @@ jobs:
           New-Item -ItemType Directory -Force -Path web/frontend
           Copy-Item -Recurse frontend/dist web/frontend/
 
+      # Warm the tiktoken vocabulary ONCE, before the parallel test run.
+      #
+      # tiktoken-go downloads the BPE on first use into a shared temp dir and
+      # finishes with an atomic rename. `go test ./...` runs packages in
+      # parallel, so several test binaries race to download the same file, and
+      # on Windows the loser hits "Access is denied" on the rename and the
+      # package fails — observed as TestBaseline_CountToolWithSchemaParity
+      # flaking in bench/arms with no code change anywhere near it.
+      #
+      # Setting TIKTOKEN_CACHE_DIR alone does NOT fix this: it only names a
+      # cache, and an empty one still races. Populating it first does, because
+      # every later tokenizer construction is a cache hit with no rename.
+      - name: Warm the tiktoken vocabulary cache
+        run: go run ./bench/cmd/warmtiktoken
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+      # internal/server alone takes 450-600s on windows-latest under -race with
+      # atomic coverage (the E2E workflow's -short, coverage-free run of the
+      # same package takes ~450s), so the default 10m package timeout is one
+      # slow runner away from "panic: test timed out" — which is how the leg
+      # failed on the first green-again push after #1266. It has since grown to
+      # ~1100-1200s, so the bound is 40m to leave real headroom.
       - name: Run unit tests (Windows)
         if: matrix.os == 'windows-latest'
         shell: pwsh
-        run: go test -v -race -timeout 5m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
+        run: go test -v -race -timeout 40m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
+      # internal/server under -race takes ~10 minutes on the macOS runner and
+      # grows with every spec's tests, so the default 10m package timeout
+      # ("panic: test timed out") is no longer enough there; match the
+      # Windows leg's 20m.
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
-        run: go test -v -race -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 20m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
       - name: Generate coverage report (Windows)
         if: matrix.os == 'windows-latest'
@@ -126,8 +222,8 @@ jobs:
         run: go tool cover -html=coverage.out -o coverage.html
 
       - name: Upload coverage to Codecov
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.25'
-        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f  # v7.0.0
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26'
+        uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5  # v7.1.1
         with:
           file: ./coverage.out
           flags: unittests
@@ -135,13 +231,93 @@ jobs:
           fail_ci_if_error: false
 
       - name: Upload coverage artifacts
-        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.25'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: matrix.os == 'ubuntu-latest' && matrix.go-version == '1.26'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: coverage-report
           path: |
             coverage.out
             coverage.html
+
+  # Advisory shuffle lane: the same test set as "Unit Tests" on ubuntu, run
+  # with -shuffle=on so tests that only pass because of file/declaration order
+  # fail here instead of by luck. Motivation: #1222 — two fixtures flipped the
+  # process-global registry SSRF allow-policy and never restored it, and the
+  # CWE-918 regression test passed only because its file sorted first.
+  #
+  # This job is deliberately NOT in the branch-protection required list, so a
+  # newly exposed order coupling in an unrelated package does not block a PR
+  # while the tail of such tests is being found. Promote it to required once
+  # it has a run of green results on main.
+  #
+  # Reproducing a failure: with -shuffle on, every package prints its seed as
+  # the first line of its output, e.g. `-test.shuffle 1757400000000000000`.
+  # Re-run the failing package with that exact seed to get the same order:
+  #   go test -race -count=1 -shuffle=<seed> ./internal/<pkg>/
+  # (add the -skip regex below if the failing test lives next to E2E tests).
+  # -shuffle is not one of go test's cacheable flags, so the replay is never
+  # served from the result cache; -count=1 is only the idiomatic belt-and-
+  # braces bypass for when flags get trimmed while bisecting. The seed fixes
+  # the test ORDER only — not goroutine scheduling or map iteration — and the
+  # blocked-value tests also depend on the host (hostname, $HOME basename).
+  test-shuffle:
+    name: Unit Tests (shuffle)
+    needs: [build-frontend]
+    runs-on: ubuntu-latest
+
+    env:
+      GO111MODULE: "on"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: "1.26"
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      # Same reason as in the "Unit Tests" job: bench/arms tscg tests hard-fail
+      # without the pinned Node shim wherever `go test ./...` runs (Spec 083).
+      - name: Set up Node.js (TSCG bench arm)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: bench/tscg/package-lock.json
+
+      - name: Install pinned TSCG shim dependencies (FR-006)
+        run: npm ci --prefix bench/tscg
+
+      - name: Download frontend artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Copy frontend dist for embedding
+        run: |
+          rm -rf web/frontend
+          mkdir -p web/frontend
+          cp -r frontend/dist web/frontend/
+
+      # Same tiktoken download race as in the "Unit Tests" job; see the comment
+      # there. Warm the cache once so parallel test binaries never rename.
+      - name: Warm the tiktoken vocabulary cache
+        run: go run ./bench/cmd/warmtiktoken
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+      # Keep the flags identical to the required ubuntu lane except for
+      # -shuffle=on (and no coverage — Codecov already gets the ordered run).
+      - name: Run unit tests (shuffled)
+        run: go test -v -race -timeout 20m -shuffle=on -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
   lint:
     name: Lint
@@ -153,12 +329,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
 
       - name: Download frontend artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
@@ -173,10 +349,28 @@ jobs:
           cp -r frontend/dist web/frontend/
 
       - name: golangci-lint
-        uses: golangci/golangci-lint-action@9fae48acfc02a90574d7c304a1758ef9895495fa  # v7.0.1
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
         with:
-          version: v2.6.2
-          args: --config .github/.golangci.yml --timeout=5m
+          version: v2.9.0
+          args: --config .github/.golangci.yml --timeout=10m
+          # skip-cache: the action's cross-run analysis cache produced stale
+          # staticcheck facts (SA5011 on t.Fatal no-return sites) that do not
+          # reproduce with the same version+config on a clean run. Cold runs
+          # cost ~2-3 min extra; correctness wins. Revisit after upstream
+          # cache-invalidation fix.
+          skip-cache: true
+
+      # Second pass under the server build tag (Spec 107 FR-047). Everything in
+      # internal/serveredition/ and every *_serveredition.go file is behind
+      # `//go:build server`, so the bare run above never sees it; without this
+      # step the server edition ships unlinted. Same config, same version — the
+      # only difference is the tag set.
+      - name: golangci-lint (server edition)
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a  # v9.3.0
+        with:
+          version: v2.9.0
+          args: --config .github/.golangci.yml --build-tags server --timeout=10m
+          skip-cache: true
 
   server-edition:
     name: Server Edition
@@ -186,12 +380,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: Download dependencies
@@ -203,8 +397,33 @@ jobs:
       - name: Build server edition
         run: go build -tags server ./cmd/mcpproxy
 
+      # internal/server is now in the list below and constructs the tiktoken
+      # tokenizer; warm the vocabulary once so parallel packages hit the cache
+      # (same reason as the unit-tests job above).
+      - name: Warm the tiktoken vocabulary cache
+        run: go run ./bench/cmd/warmtiktoken
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+      # internal/oauth is where the redaction rules live, and half of them are
+      # build-tagged: serverfields_serveredition.go holds the mask decisions for
+      # the `auth_broker` block, whose fields do not exist in the personal
+      # edition. Its canaries — the walk over config.ServerConfig that fails
+      # when a text-carrying leaf has no decision — therefore only compile under
+      # `-tags server`. Without this package in the list they never ran, and the
+      # guarantee the #1161 fix rests on (a field added to the tagged block is
+      # masked because the walk reaches it) was unenforced in CI.
+      #
+      # internal/server, internal/httpapi and internal/storage carry the
+      # server-edition wiring (serveredition_wire.go, the tagged handlers, the
+      # agent-token store) and were only ever *built* under the tag, never
+      # race-tested (Spec 107 FR-047). The -skip regex is the one the unit-test
+      # job uses (see "Run unit tests" above): it drops the binary-spawning
+      # internal/server tests that otherwise hang to the package timeout.
       - name: Test server edition packages
-        run: go test -race -tags server ./internal/serveredition/... ./internal/config/...
+        run: go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
   build:
     name: Build
@@ -222,12 +441,12 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff  # v5.6.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
-          go-version: "1.25"
+          go-version: "1.26"
           cache: true
 
       - name: Download frontend artifact
@@ -270,7 +489,7 @@ jobs:
 
       - name: Upload build artifacts
         if: matrix.os == 'ubuntu-latest'
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: binaries
           path: mcpproxy-*

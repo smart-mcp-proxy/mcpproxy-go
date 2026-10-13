@@ -1,0 +1,26 @@
+[
+  {
+    "server": "github",
+    "tool": "list_issues",
+    "intrinsic_tier": "read",
+    "profile_tier": "read",
+    "access": {"visible": true, "callable": true, "reason": ""},
+    "classification_stale": true
+  },
+  {
+    "server": "github",
+    "tool": "create_issue",
+    "intrinsic_tier": "write",
+    "profile_tier": "write",
+    "access": {"visible": false, "callable": false, "reason": "above_tier_cap"},
+    "classification_stale": false
+  },
+  {
+    "server": "github",
+    "tool": "search_code",
+    "intrinsic_tier": "unannotated",
+    "profile_tier": "read",
+    "access": {"visible": true, "callable": true, "reason": ""},
+    "classification_stale": false
+  }
+]

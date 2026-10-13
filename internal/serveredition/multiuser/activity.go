@@ -47,12 +47,34 @@ func (f *ActivityFilter) GetUserActivity(ctx context.Context, limit, offset int)
 		return f.storageProvider.ListActivities(filter)
 	}
 
-	// Regular users only see their own activity
-	if ac == nil || ac.UserID == "" {
+	// Regular users only see their own activity.
+	//
+	// Gated on the user TIER, not merely on a non-empty UserID. Since issue
+	// #1168 an agent token's AuthContext carries its OWNER's UserID so its
+	// activity can be attributed (EnrichRecord below is exactly that, and
+	// deliberately stays UserID-based). A bare `UserID != ""` check would have
+	// let that attribution field double as an authorization claim, handing a
+	// scoped, read-only agent token its owner's entire activity log. The
+	// server-edition middleware already refuses agent tokens on this route, so
+	// this is defence in depth — but the branch's rule is that per-user
+	// surfaces gate on IsUser(), never on a non-empty UserID, and one
+	// middleware branch must not be the whole boundary.
+	if ac == nil || !ac.IsUser() || ac.UserID == "" {
 		return nil, 0, fmt.Errorf("authentication required")
 	}
 
 	return f.listByUserID(ac.UserID, filter)
+}
+
+// ListActivities is a direct passthrough to the storage provider (Spec 107
+// T086): the caller (GET /api/v1/user/activity) builds a
+// storage.ActivityFilter with BOTH the UserID and AllowedServers
+// authorization terms set and lets storage.ActivityFilter.Matches evaluate
+// them inside the one query, replacing the read-everything-then-post-filter
+// shape of listByUserID below (which predates the UserID filter field and is
+// kept only for GetFilteredActivity's admin door).
+func (f *ActivityFilter) ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error) {
+	return f.storageProvider.ListActivities(filter)
 }
 
 // GetFilteredActivity returns activity for a specific user. Only admins can call this.

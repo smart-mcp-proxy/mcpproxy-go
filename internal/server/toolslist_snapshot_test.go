@@ -1,0 +1,569 @@
+package server
+
+import (
+	"bytes"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// Spec 098 (required-tools preflight) T002/T024 — FR-015: the preflight
+// feature adds a REST endpoint and a CLI command; it MUST NOT move the MCP
+// surface. `tools/list` payloads have to stay byte-identical to the merge-base
+// release across every routing mode an agent can be served.
+//
+// The goldens in testdata/toolslist_goldens/ were captured from the merge-base
+// commit (bfd43e7ce, origin/main, pre-098) with this exact test file — copied
+// into a throwaway `git worktree` of origin/main and run with
+// MCPPROXY_WRITE_TOOLSLIST_GOLDENS set — so the capture and the comparison
+// share one serializer and cannot drift.
+//
+// SPEC 099 (FR-014/FR-015) converted this from a NO-delta gate into an
+// ENUMERATED-delta gate — the spec-085/094 pattern in mcp_menu_surface_test.go
+// — because 099 ships an MCP feature where 098 shipped none. Two things now
+// hold together, and both have to:
+//
+//  1. Every surface is byte-identical to its golden, exactly as before. The
+//     goldens for the two surfaces that carry describe_tool were regenerated
+//     DELIBERATELY, once, so the new definition — including its prose — is
+//     pinned byte-for-byte and a later edit shows up as a reviewable diff
+//     rather than drifting silently under the token budget.
+//  2. The regenerated goldens differ from the frozen pre-feature capture
+//     (testdata/toolslist_goldens/pre099/) in EXACTLY the tool entries the
+//     shipped features were allowed to move — see toolsListAllowedDelta. Every
+//     other tool on every surface is byte-equal.
+//
+// A failure in (1) with no accompanying spec is a regression, not a golden to
+// refresh. A failure in (2) means a change reached further than it claimed.
+//
+// The enumerated delta currently covers two features:
+//
+//   - describe_tool (spec 099), on the two retrieve_tools-carrying surfaces;
+//   - quarantine_security, which gained the scan_server / get_scan_report
+//     operations so TPA scanning is reachable from the surface agents already
+//     use. It carries no new PARAMETER — the two operations reuse `name` — so
+//     the delta is the operation enum plus the prose that documents it. It is
+//     registered on all three surfaces, which is why code_execution_mode now
+//     has a frozen copy too (a byte-for-byte snapshot of its previous golden,
+//     which had never moved since the spec-098 capture).
+//
+// Surfaces covered (the three routing modes that expose a static, built-in
+// tool set):
+//
+//   - default_server      — the default /mcp server (`proxy.server`)
+//   - retrieve_tools_mode — buildCallToolModeTools() (/mcp/call, /mcp/p/<slug>)
+//   - code_execution_mode — buildCodeExecModeTools()
+//
+// Direct mode is deliberately excluded: its tools/list is a projection of live
+// upstream catalogs (buildDirectModeTools → upstreamManager.DiscoverTools), so
+// it has no static payload to snapshot. Direct-mode non-regression is covered
+// by the dispatch-parity tests instead.
+
+const (
+	toolsListGoldenDir = "toolslist_goldens"
+
+	// toolsListPre099Dir holds the FROZEN pre-feature capture of the surfaces
+	// an enumerated delta is measured against. It is never regenerated: it is
+	// the baseline, not a mirror of the current surface. (Named for spec 099,
+	// the first feature that needed it.)
+	toolsListPre099Dir = "pre099"
+
+	// toolsListGoldenWriteEnv, when set to a directory, makes this test WRITE
+	// the goldens instead of comparing them. Used once to capture the
+	// merge-base surface from a detached worktree of origin/main. Never set it
+	// to "fix" a failing run — see the doc comment above.
+	toolsListGoldenWriteEnv = "MCPPROXY_WRITE_TOOLSLIST_GOLDENS"
+)
+
+// toolsListGoldenSurfaces is the surface name -> golden file basename map.
+var toolsListGoldenSurfaces = []string{
+	"default_server",
+	"retrieve_tools_mode",
+	"code_execution_mode",
+}
+
+// captureToolsListSurfaces serializes each routing mode's registered tool
+// schemas exactly as an agent receives them from tools/list: name -> marshaled
+// mcp.Tool (description, annotations, inputSchema, outputSchema, …).
+func captureToolsListSurfaces(t *testing.T, proxy *MCPProxyServer) map[string]map[string]json.RawMessage {
+	t.Helper()
+
+	surfaces := map[string]map[string]json.RawMessage{
+		"default_server":      {},
+		"retrieve_tools_mode": {},
+		"code_execution_mode": {},
+	}
+
+	for name, st := range proxy.server.ListTools() {
+		raw, err := json.Marshal(st.Tool)
+		require.NoError(t, err, "marshal default-server tool %q", name)
+		surfaces["default_server"][name] = raw
+	}
+	for _, st := range proxy.buildCallToolModeTools() {
+		raw, err := json.Marshal(st.Tool)
+		require.NoError(t, err, "marshal retrieve_tools-mode tool %q", st.Tool.Name)
+		surfaces["retrieve_tools_mode"][st.Tool.Name] = raw
+	}
+	for _, st := range proxy.buildCodeExecModeTools() {
+		raw, err := json.Marshal(st.Tool)
+		require.NoError(t, err, "marshal code_execution-mode tool %q", st.Tool.Name)
+		surfaces["code_execution_mode"][st.Tool.Name] = raw
+	}
+
+	for _, surface := range toolsListGoldenSurfaces {
+		require.NotEmpty(t, surfaces[surface], "surface %s registered no tools — the snapshot would be vacuous", surface)
+	}
+	return surfaces
+}
+
+// renderToolsListGolden produces the canonical golden bytes for one surface:
+// MarshalIndent over a map (encoding/json sorts map keys and re-indents the
+// embedded RawMessages), plus a trailing newline so the files are diffable.
+func renderToolsListGolden(t *testing.T, tools map[string]json.RawMessage) []byte {
+	t.Helper()
+	raw, err := json.MarshalIndent(tools, "", "  ")
+	require.NoError(t, err)
+	return append(raw, '\n')
+}
+
+func toolsListGoldenPath(surface string) string {
+	return filepath.Join("testdata", toolsListGoldenDir, surface+".json")
+}
+
+// normalizeGoldenEOL strips CR from CRLF line endings. The goldens are pinned
+// to LF in .gitattributes, but Windows runners default to core.autocrlf=true,
+// so a checkout that predates (or ignores) that pin would otherwise fail the
+// byte comparison on \r alone — a spurious FR-015 "regression".
+func normalizeGoldenEOL(b []byte) []byte {
+	return bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
+}
+
+// TestToolsListSnapshot_MatchesMergeBaseGoldens is the FR-015 gate.
+func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	surfaces := captureToolsListSurfaces(t, proxy)
+
+	if outDir := os.Getenv(toolsListGoldenWriteEnv); outDir != "" {
+		require.NoError(t, os.MkdirAll(outDir, 0o755))
+		for _, surface := range toolsListGoldenSurfaces {
+			path := filepath.Join(outDir, surface+".json")
+			require.NoError(t, os.WriteFile(path, renderToolsListGolden(t, surfaces[surface]), 0o644))
+			t.Logf("wrote golden %s (%d tools)", path, len(surfaces[surface]))
+		}
+		t.Skipf("goldens written to %s (%s set); comparison skipped", outDir, toolsListGoldenWriteEnv)
+	}
+
+	for _, surface := range toolsListGoldenSurfaces {
+		surface := surface
+		t.Run(surface, func(t *testing.T) {
+			raw, err := os.ReadFile(toolsListGoldenPath(surface))
+			require.NoError(t, err, "missing golden for surface %s", surface)
+			want := normalizeGoldenEOL(raw)
+
+			got := renderToolsListGolden(t, surfaces[surface])
+			if bytes.Equal(got, want) {
+				return
+			}
+			// Byte comparison failed: report the per-tool diff so the
+			// regression is readable instead of a wall of JSON.
+			reportToolsListDiff(t, surface, want, got)
+			t.Errorf("surface %s: tools/list is not byte-identical to the merge-base golden (spec 098 FR-015)", surface)
+		})
+	}
+}
+
+// toolsListAllowedDelta maps a surface to the tool entries the shipped features
+// were allowed to change on it, measured against the frozen pre-feature
+// capture. Every surface with a frozen copy appears here; adding a name to a
+// list is a deliberate, reviewable act.
+//
+//   - describe_tool        — spec 099 (FR-014), retrieve_tools surfaces only.
+//   - quarantine_security  — scan_server / get_scan_report operations, on every
+//     surface that registers the tool (all three).
+//   - upstream_servers     — issue #1146: update/patch now mask secret-bearing
+//     values in the `changes` diff they return, which an agent reading the diff
+//     back can observe, so the description says so. DESCRIPTION ONLY — no
+//     parameter moves, which assertUpstreamServersDelta in
+//     mcp_menu_surface_test.go pins field by field.
+//   - code_execution       — v0.66.0 ships enable_code_execution=true. The frozen
+//     goldens were captured with the flag off, when the two routing-mode
+//     surfaces advertised a refusing "Code Execution (Disabled)" stub (retired
+//     by issue #1236), so on those surfaces the entry CHANGES from the stub to
+//     the live tool; mcp_menu_surface_test.go pins that transition field by
+//     field (assertCodeExecutionLive).
+//   - search_servers / list_registries — Spec 109 FR-060/067: 'registry'
+//     becomes optional on search_servers (was required) so it searches every
+//     enabled catalog source when omitted, both tools' descriptions gained
+//     "catalog source" wording, and search_servers documents its unsupported
+//     tag filter. Pinned field by field by
+//     TestMenuSurface_ExactDeltaFromPreFeature's assertSearchServersDelta /
+//     assertListRegistriesDelta.
+//   - call_tool_read / call_tool_write / call_tool_destructive — issue #1364:
+//     the `args` object parameter moves from {"properties":{}} to an open
+//     {"additionalProperties":true} object (see openObject). Grammar-constrained
+//     clients read the empty properties map as "no keys allowed". Schema shape
+//     of that one parameter only; assertCallToolVariantDelta and
+//     TestOpenObjectParamsAreNotGrammarClosed_Issue1364 pin it.
+//   - retrieve_tools — agent visibility: the description states that upstream
+//     tools are reachable ONLY through it, so agents search before falling
+//     back to shell CLIs (retrieveToolsReachNote). DESCRIPTION ONLY, static
+//     prose; the per-caller "CONNECTED SERVERS" suffix is added by a tool
+//     filter at list time and is absent here (no connected upstreams).
+var toolsListAllowedDelta = map[string][]string{
+	"default_server":      {"call_tool_read", "call_tool_write", "call_tool_destructive", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries", "retrieve_tools"},
+	"retrieve_tools_mode": {"call_tool_read", "call_tool_write", "call_tool_destructive", "code_execution", "describe_tool", "quarantine_security", "upstream_servers", "search_servers", "list_registries", "retrieve_tools"},
+	"code_execution_mode": {"code_execution", "quarantine_security", "upstream_servers", "search_servers", "list_registries", "retrieve_tools"},
+}
+
+// toolsListAllowedAdditions enumerates the tool entries a shipped change was
+// allowed to ADD to a surface, measured against the same frozen capture.
+//
+//   - code_execution on default_server — registerTools has always gated the
+//     tool on the flag, so the frozen (flag-off) capture never carried it
+//     there. With the flag on by default (v0.66.0) the default surface now
+//     registers the live tool.
+//   - profiles on every surface — the Spec 108-h administrator tool (FR-017). It
+//     is registered on the three static surfaces and hidden per session from
+//     everything but an administrator credential, so the goldens carry it.
+//   - credentials on every surface — the Spec 115 administrator tool (FR-001,
+//     FR-011, FR-015): registered exactly where `profiles` is, under the same
+//     per-session visibility, so the goldens carry it too. The `profiles` entry
+//     itself is byte-equal (TestToolsList_CredentialsBesideProfiles).
+var toolsListAllowedAdditions = map[string][]string{
+	"default_server":      {"code_execution", "profiles", "credentials"},
+	"retrieve_tools_mode": {"profiles", "credentials"},
+	"code_execution_mode": {"profiles", "credentials"},
+}
+
+// TestToolsListSnapshot_DeltaIsEnumerated is the FR-014 gate: the goldens
+// moved, and this is the enumeration of how far.
+func TestToolsListSnapshot_DeltaIsEnumerated(t *testing.T) {
+	for surface, allowed := range toolsListAllowedDelta {
+		surface, allowed := surface, allowed
+		t.Run(surface, func(t *testing.T) {
+			before := decodeToolsListGolden(t, filepath.Join("testdata", toolsListGoldenDir, toolsListPre099Dir, surface+".json"))
+			after := decodeToolsListGolden(t, toolsListGoldenPath(surface))
+
+			// The tool SET moves only by the enumerated additions: these
+			// features extend existing built-ins and retire nothing; the one
+			// new registration is the live code_execution on the default
+			// surface, which the flag-off capture never carried.
+			wantNames := append(sortedToolNames(before), toolsListAllowedAdditions[surface]...)
+			sort.Strings(wantNames)
+			assert.Equal(t, wantNames, sortedToolNames(after),
+				"surface %s: nothing may be removed, and only the enumerated additions may appear", surface)
+
+			changed := make([]string, 0, len(allowed))
+			for name, pre := range before {
+				post, ok := after[name]
+				if !ok {
+					continue // already reported by the set comparison
+				}
+				if !bytes.Equal(pre, post) {
+					changed = append(changed, name)
+				}
+			}
+			sort.Strings(changed)
+			sortedAllowed := append([]string(nil), allowed...)
+			sort.Strings(sortedAllowed)
+			assert.Equal(t, sortedAllowed, changed,
+				"surface %s: only the enumerated tools may change", surface)
+		})
+	}
+
+	// Every surface with a golden carries a frozen baseline to measure against:
+	// a surface silently dropping out of the map would stop being gated.
+	for _, surface := range toolsListGoldenSurfaces {
+		assert.Contains(t, toolsListAllowedDelta, surface,
+			"surface %s must be covered by the enumerated-delta gate", surface)
+	}
+}
+
+func decodeToolsListGolden(t *testing.T, path string) map[string]json.RawMessage {
+	t.Helper()
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err, "missing golden %s", path)
+	var tools map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(normalizeGoldenEOL(raw), &tools))
+	require.NotEmpty(t, tools)
+	return tools
+}
+
+func sortedToolNames(tools map[string]json.RawMessage) []string {
+	names := make([]string, 0, len(tools))
+	for name := range tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// reportToolsListDiff decodes both sides and reports added/removed/changed
+// tools individually.
+func reportToolsListDiff(t *testing.T, surface string, want, got []byte) {
+	t.Helper()
+
+	var wantTools, gotTools map[string]json.RawMessage
+	if err := json.Unmarshal(want, &wantTools); err != nil {
+		t.Errorf("surface %s: golden is not valid JSON: %v", surface, err)
+		return
+	}
+	if err := json.Unmarshal(got, &gotTools); err != nil {
+		t.Errorf("surface %s: current surface is not valid JSON: %v", surface, err)
+		return
+	}
+
+	var added, removed []string
+	for name := range gotTools {
+		if _, ok := wantTools[name]; !ok {
+			added = append(added, name)
+		}
+	}
+	for name := range wantTools {
+		if _, ok := gotTools[name]; !ok {
+			removed = append(removed, name)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(removed)
+	assert.Empty(t, added, "surface %s: tools added to the MCP surface (FR-015 forbids any change)", surface)
+	assert.Empty(t, removed, "surface %s: tools removed from the MCP surface (FR-015 forbids any change)", surface)
+
+	names := make([]string, 0, len(wantTools))
+	for name := range wantTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		gotTool, ok := gotTools[name]
+		if !ok {
+			continue // already reported as removed
+		}
+		assert.JSONEq(t, string(wantTools[name]), string(gotTool),
+			"surface %s: tool %q schema changed (FR-015)", surface, name)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Spec 105 FR-012 (PR H0, FR01x-G2): the ONE narrow golden exception.
+//
+// The code_execution definition told every caller to discover stored scripts
+// by requesting a name that does not exist. Under FR-012 that enumeration is
+// administrator-only (an agent-token caller gets a non-disclosing refusal,
+// see mcp_code_scripts_test.go), so the published text has to say so — and
+// the goldens that pin the text move by exactly those two strings and
+// nothing else. testdata/toolslist_goldens/pre105/ is the FROZEN copy of the
+// three goldens as they stood before this spec (never regenerated); the live
+// goldens are compared against it entry by entry and field by field.
+// ---------------------------------------------------------------------------
+
+const (
+	// toolsListPre105Dir holds the frozen pre-Spec-105 capture of the three
+	// surfaces, the baseline the FR-012 narrow-diff assertion measures against.
+	toolsListPre105Dir = "pre105"
+
+	// spec105CodeExecutionTool is the only entry allowed to differ from the
+	// pre-105 baseline, and only in the two description strings below.
+	spec105CodeExecutionTool = "code_execution"
+)
+
+// spec109CatalogTools are the two entries Spec 109 (FR-060/067) allowed to
+// move relative to the pre-105 baseline: search_servers' 'registry'
+// parameter becomes optional (was required) and both tools' descriptions
+// gained "catalog source" wording. Skipped in the pre-105 byte-comparison
+// loop below the same way code_execution is; their delta is pinned field by
+// field against the newer pre-099 baseline instead
+// (TestToolsListSnapshot_DeltaIsEnumerated / toolsListAllowedDelta) and by
+// TestMenuSurface_ExactDeltaFromPreFeature's assertSearchServersDelta /
+// assertListRegistriesDelta.
+var spec109CatalogTools = map[string]bool{"search_servers": true, "list_registries": true}
+
+// spec105EnumerationPhrases are the pre-105 fragments that advertised
+// discovery-by-failed-call. Neither may survive in the live strings.
+var spec105EnumerationPhrases = []string{
+	"returns the available names, which is how you discover what is stored",
+	"DISCOVERY: calling with a name that does not exist returns an error listing the available script names",
+	"so the current set can always be recovered from a single failed call",
+}
+
+// TestCodeExecutionDescriptions_EnumerationIsAdminOnly (T063) pins the
+// reworded definition text and the narrow golden delta together: the live
+// strings no longer teach enumeration by failed call and name the
+// administrator-only rule, and the regenerated goldens differ from the frozen
+// pre-105 capture in code_execution.description and
+// code_execution.inputSchema.properties.script.description ONLY.
+func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
+	t.Run("live strings", func(t *testing.T) {
+		for _, phrase := range spec105EnumerationPhrases {
+			assert.NotContains(t, codeExecutionToolDescription, phrase,
+				"code_execution.description must not advertise discovery by failed call (FR-012)")
+			assert.NotContains(t, codeExecutionScriptDescription, phrase,
+				"script.description must not advertise discovery by failed call (FR-012)")
+		}
+		for _, text := range []string{codeExecutionToolDescription, codeExecutionScriptDescription} {
+			lower := strings.ToLower(text)
+			assert.Contains(t, lower, "administrator",
+				"the definition must say enumeration is administrator-only (FR-012)")
+			assert.Contains(t, lower, "agent",
+				"the definition must tell agent-token callers they need to already know the name (FR-012)")
+		}
+	})
+
+	for _, surface := range toolsListGoldenSurfaces {
+		surface := surface
+		t.Run(surface, func(t *testing.T) {
+			before := decodeToolsListGolden(t, filepath.Join("testdata", toolsListGoldenDir, toolsListPre105Dir, surface+".json"))
+			after := decodeToolsListGolden(t, toolsListGoldenPath(surface))
+
+			// The tool SET is untouched: nothing added, nothing removed. The one
+			// addition since this baseline is the Spec 108-h `profiles` admin tool
+			// (declared in toolsListAllowedAdditions and asserted by
+			// TestToolsList_ProfilesPresentUnderReadOnlyMode).
+			afterNames := []string{}
+			for _, name := range sortedToolNames(after) {
+				if name != "profiles" && name != "credentials" {
+					afterNames = append(afterNames, name)
+				}
+			}
+			assert.Equal(t, sortedToolNames(before), afterNames,
+				"surface %s: the FR-012 exception changes two strings, never the tool set", surface)
+
+			// Every other entry is byte-equal to the frozen capture.
+			for name, pre := range before {
+				if name == spec105CodeExecutionTool || spec109CatalogTools[name] {
+					continue
+				}
+				if name == "upstream_servers" {
+					// Spec 112 adds exactly one optional parameter,
+					// forward_headers_json. With that property removed the
+					// entry must still equal the frozen pre-105 capture.
+					var postM map[string]interface{}
+					require.NoError(t, json.Unmarshal(after[name], &postM))
+					props := schemaProps(postM)
+					assert.Contains(t, props, "forward_headers_json",
+						"surface %s: upstream_servers carries the Spec 112 parameter", surface)
+					delete(props, "forward_headers_json")
+					trimmed, err := json.Marshal(postM)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(pre), string(trimmed),
+						"surface %s: upstream_servers may differ from the pre-105 golden only by the Spec 112 forward_headers_json parameter", surface)
+					continue
+				}
+				if name == "retrieve_tools" {
+					// Agent visibility: the description gained exactly
+					// retrieveToolsReachNote. With it removed the entry must
+					// still equal the frozen pre-105 capture.
+					var postM map[string]interface{}
+					require.NoError(t, json.Unmarshal(after[name], &postM))
+					desc, _ := postM["description"].(string)
+					assert.Contains(t, desc, retrieveToolsReachNote,
+						"surface %s: retrieve_tools carries the reach note", surface)
+					postM["description"] = strings.Replace(desc, retrieveToolsReachNote, "", 1)
+					trimmed, err := json.Marshal(postM)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(pre), string(trimmed),
+						"surface %s: retrieve_tools may differ from the pre-105 golden only by retrieveToolsReachNote", surface)
+					continue
+				}
+				if isCallToolVariantName(name) {
+					// Issue #1364: only args' open-object shape moved.
+					var postM map[string]interface{}
+					require.NoError(t, json.Unmarshal(after[name], &postM))
+					closeOpenObjects(t, postM, "args")
+					trimmed, err := json.Marshal(postM)
+					require.NoError(t, err)
+					assert.JSONEq(t, string(pre), string(trimmed),
+						"surface %s: %s may differ from the pre-105 golden only by the #1364 open-object args shape", surface, name)
+					continue
+				}
+				assert.True(t, bytes.Equal(pre, after[name]),
+					"surface %s: tool %q must be byte-identical to the pre-105 golden (FR-012: only code_execution may move)", surface, name)
+			}
+
+			preTool, ok := before[spec105CodeExecutionTool]
+			require.True(t, ok, "surface %s: frozen baseline carries code_execution", surface)
+			postTool, ok := after[spec105CodeExecutionTool]
+			require.True(t, ok, "surface %s: live golden carries code_execution", surface)
+
+			var preM, postM map[string]interface{}
+			require.NoError(t, json.Unmarshal(preTool, &preM))
+			require.NoError(t, json.Unmarshal(postTool, &postM))
+
+			preDesc, _ := preM["description"].(string)
+			postDesc, _ := postM["description"].(string)
+			preScript := codeExecScriptDescriptionOf(t, preM)
+			postScript := codeExecScriptDescriptionOf(t, postM)
+
+			// Both strings MOVED (a regenerated golden that still carries the
+			// pre-105 wording is the description lying about the runtime), and
+			// the live golden carries exactly the live constants.
+			assert.NotEqual(t, preDesc, postDesc,
+				"surface %s: code_execution.description must be regenerated with the FR-012 wording", surface)
+			assert.NotEqual(t, preScript, postScript,
+				"surface %s: script.description must be regenerated with the FR-012 wording", surface)
+			assert.Equal(t, codeExecutionToolDescription, postDesc, "surface %s: golden description == live constant", surface)
+			assert.Equal(t, codeExecutionScriptDescription, postScript, "surface %s: golden script.description == live constant", surface)
+			for _, phrase := range spec105EnumerationPhrases {
+				assert.NotContains(t, postDesc, phrase, "surface %s: regenerated golden still advertises enumeration", surface)
+				assert.NotContains(t, postScript, phrase, "surface %s: regenerated golden still advertises enumeration", surface)
+			}
+
+			// And NOTHING else moved: put the two pre-105 strings back into the
+			// live entry and it must deep-equal the frozen one.
+			postM["description"] = preDesc
+			setCodeExecScriptDescription(t, postM, preScript)
+			// Issue #1364: input/options became open objects; undo just that.
+			closeOpenObjects(t, postM, "input", "options")
+			assert.Equal(t, preM, postM,
+				"surface %s: code_execution may differ from the pre-105 golden in description and script.description only (FR-012)", surface)
+		})
+	}
+}
+
+// codeExecScriptDescriptionOf reads inputSchema.properties.script.description
+// from a decoded tool entry.
+func codeExecScriptDescriptionOf(t *testing.T, tool map[string]interface{}) string {
+	t.Helper()
+	schema, _ := tool["inputSchema"].(map[string]interface{})
+	props, _ := schema["properties"].(map[string]interface{})
+	script, _ := props["script"].(map[string]interface{})
+	require.NotNil(t, script, "code_execution must expose the `script` parameter")
+	desc, _ := script["description"].(string)
+	return desc
+}
+
+func setCodeExecScriptDescription(t *testing.T, tool map[string]interface{}, desc string) {
+	t.Helper()
+	schema, _ := tool["inputSchema"].(map[string]interface{})
+	props, _ := schema["properties"].(map[string]interface{})
+	script, _ := props["script"].(map[string]interface{})
+	require.NotNil(t, script)
+	script["description"] = desc
+}
+
+func isCallToolVariantName(name string) bool {
+	return name == "call_tool_read" || name == "call_tool_write" || name == "call_tool_destructive"
+}
+
+// closeOpenObjects reverts the issue #1364 shape change on the named
+// parameters (asserting it is present first), turning
+// {"additionalProperties":true} back into the frozen {"properties":{}} so the
+// entry can be compared against a pre-#1364 golden.
+func closeOpenObjects(t *testing.T, tool map[string]interface{}, params ...string) {
+	t.Helper()
+	props := schemaProps(tool)
+	for _, param := range params {
+		p, ok := props[param].(map[string]interface{})
+		require.True(t, ok, "tool %v: param %q missing", tool["name"], param)
+		require.Equal(t, true, p["additionalProperties"], "tool %v: %q must be an open object (#1364)", tool["name"], param)
+		require.NotContains(t, p, "properties", "tool %v: %q must not carry empty properties (#1364)", tool["name"], param)
+		delete(p, "additionalProperties")
+		p["properties"] = map[string]interface{}{}
+	}
+}

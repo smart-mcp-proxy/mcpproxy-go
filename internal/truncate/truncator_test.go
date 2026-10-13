@@ -1,6 +1,7 @@
 package truncate
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -164,7 +165,7 @@ func TestAnalyzeJSONStructure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			path, count, err := truncator.analyzeJSONStructure(tt.content)
+			path, count, err := truncator.analyzeJSONStructure(tt.content, "")
 
 			if tt.expectError {
 				if err == nil {
@@ -210,7 +211,9 @@ func TestTruncateWithinLimit(t *testing.T) {
 }
 
 func TestTruncateSimpleMode(t *testing.T) {
-	truncator := NewTruncator(50) // Very small limit
+	// Small, but with room for the notice under the limit — at or below
+	// len(simpleTruncateNotice) the notice is dropped to keep the bound.
+	truncator := NewTruncator(60)
 	content := `{"message": "this is a simple response that doesn't have structured records"}`
 	args := map[string]interface{}{"param": "value"}
 
@@ -218,6 +221,10 @@ func TestTruncateSimpleMode(t *testing.T) {
 
 	if !strings.Contains(result.TruncatedContent, "truncated by mcpproxy, cache not available") {
 		t.Error("Simple truncation message not found")
+	}
+
+	if len(result.TruncatedContent) > 60 {
+		t.Errorf("Truncated content exceeds the limit: %d bytes", len(result.TruncatedContent))
 	}
 
 	if result.CacheAvailable {
@@ -230,8 +237,15 @@ func TestTruncateSimpleMode(t *testing.T) {
 }
 
 func TestTruncateWithCache(t *testing.T) {
-	truncator := NewTruncator(100) // Small limit to trigger truncation
-	content := `{"data": [{"id": 1, "name": "item1"}, {"id": 2, "name": "item2"}, {"id": 3, "name": "item3"}], "total": 3}`
+	// The limit must have room for the ~300-byte cache banner — below that the
+	// truncator falls back to bounded simple truncation with no handle.
+	truncator := NewTruncator(500)
+	items := make([]string, 0, 3)
+	for i := 1; i <= 3; i++ {
+		items = append(items, fmt.Sprintf(`{"id": %d, "name": "item%d", "description": %q}`,
+			i, i, strings.Repeat("padding ", 30)))
+	}
+	content := `{"data": [` + strings.Join(items, ", ") + `], "total": 3}`
 	args := map[string]interface{}{"param": "value"}
 
 	result := truncator.Truncate(content, "test_tool", args)
@@ -266,8 +280,13 @@ func TestTruncateWithCache(t *testing.T) {
 }
 
 func TestTruncateRootArray(t *testing.T) {
-	truncator := NewTruncator(30) // Small limit to trigger truncation
-	content := `[{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}]`
+	// Same banner-room constraint as TestTruncateWithCache.
+	truncator := NewTruncator(500)
+	items := make([]string, 0, 4)
+	for i := 1; i <= 4; i++ {
+		items = append(items, fmt.Sprintf(`{"id": %d, "payload": %q}`, i, strings.Repeat("padding ", 25)))
+	}
+	content := `[` + strings.Join(items, ", ") + `]`
 	args := map[string]interface{}{}
 
 	result := truncator.Truncate(content, "test_tool", args)
@@ -354,7 +373,7 @@ func TestMultipleArrayFields(t *testing.T) {
 		"results": [{"name": "x"}]
 	}`
 
-	path, count, err := truncator.analyzeJSONStructure(content)
+	path, count, err := truncator.analyzeJSONStructure(content, "")
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -545,5 +564,102 @@ func TestChooseBestArray(t *testing.T) {
 				t.Errorf("Expected path '%s', got '%s'", tt.expected, best.Path)
 			}
 		})
+	}
+}
+
+// A caller that composes its own payload knows which array its truncation
+// banner promises. Pinning that path keeps read_cache paging those records
+// even when a sibling array has more elements and would win the heuristic.
+func TestTruncateWithRecordPath_PinBeatsHeuristic(t *testing.T) {
+	truncator := NewTruncator(400)
+	content := `{"tools":[{"name":"a"},{"name":"b"}],` +
+		`"disabled":[{"n":1},{"n":2},{"n":3},{"n":4},{"n":5},{"n":6},{"n":7},{"n":8},{"n":9},{"n":10}],` +
+		`"padding":"` + strings.Repeat("x", 600) + `"}`
+
+	inferred := truncator.Truncate(content, "retrieve_tools", nil)
+	if inferred.RecordPath != "disabled" {
+		t.Fatalf("fixture no longer exercises the heuristic: got record path %q", inferred.RecordPath)
+	}
+
+	pinned := truncator.TruncateWithRecordPath(content, "retrieve_tools", nil, "tools")
+	if !pinned.CacheAvailable {
+		t.Fatal("Expected a cache handle for a resolvable pinned path")
+	}
+	if pinned.RecordPath != "tools" {
+		t.Errorf("Expected record path 'tools', got '%s'", pinned.RecordPath)
+	}
+	if pinned.TotalRecords != 2 {
+		t.Errorf("Expected 2 records (the pinned array), got %d", pinned.TotalRecords)
+	}
+	if !strings.Contains(pinned.TruncatedContent, "records: 2") {
+		t.Error("Banner must report the pinned array's record count")
+	}
+}
+
+// SimpleTruncate is the terminal path for callers that have nothing left to
+// subdivide: it enforces the limit with the plain notice and never mints a
+// pagination handle. Content already inside the limit — and a limit of 0, which
+// disables truncation entirely — must come back untouched.
+func TestSimpleTruncate_ExportedEntryPoint(t *testing.T) {
+	content := `{"tool":"` + strings.Repeat("x", 1000) + `"}`
+
+	t.Run("over the limit", func(t *testing.T) {
+		truncator := NewTruncator(300)
+		out := truncator.SimpleTruncate(content)
+
+		if len(out) > 300 {
+			t.Errorf("Output length %d exceeds limit 300", len(out))
+		}
+		if !strings.Contains(out, "truncated by mcpproxy, cache not available") {
+			t.Errorf("Expected the plain-truncation notice, got: %s", out)
+		}
+		if strings.Contains(out, `key="`) {
+			t.Error("Plain truncation must not advertise a cache key")
+		}
+	})
+
+	t.Run("within the limit", func(t *testing.T) {
+		truncator := NewTruncator(100000)
+		if out := truncator.SimpleTruncate(content); out != content {
+			t.Error("Content within the limit must pass through unchanged")
+		}
+	})
+
+	t.Run("truncation disabled", func(t *testing.T) {
+		truncator := NewTruncator(0)
+		if out := truncator.SimpleTruncate(content); out != content {
+			t.Errorf("A limit of 0 disables truncation; got %d bytes back", len(out))
+		}
+	})
+
+	// The bound must hold for every legal limit, including ones smaller than
+	// the truncation notice itself — there the notice is dropped rather than
+	// letting the output exceed the limit it exists to enforce.
+	t.Run("small limits stay bounded", func(t *testing.T) {
+		for _, limit := range []int{10, 50, 100, 120} {
+			truncator := NewTruncator(limit)
+			if out := truncator.SimpleTruncate(content); len(out) > limit {
+				t.Errorf("limit %d: output is %d bytes", limit, len(out))
+			}
+		}
+	})
+}
+
+// An unresolvable pin must never fall back to the heuristic: the banner would
+// then advertise pagination over records the caller never promised. Plain
+// truncation with no cache handle is the safe answer.
+func TestTruncateWithRecordPath_UnresolvablePinDropsCacheHandle(t *testing.T) {
+	truncator := NewTruncator(300)
+	content := `{"disabled":[{"n":1},{"n":2},{"n":3}],"padding":"` + strings.Repeat("x", 400) + `"}`
+
+	result := truncator.TruncateWithRecordPath(content, "retrieve_tools", nil, "tools")
+	if result.CacheAvailable {
+		t.Error("Expected no cache handle when the pinned path is absent")
+	}
+	if result.RecordPath != "" || result.CacheKey != "" {
+		t.Errorf("Expected no pagination contract, got path '%s' key '%s'", result.RecordPath, result.CacheKey)
+	}
+	if !strings.Contains(result.TruncatedContent, "cache not available") {
+		t.Error("Expected the plain-truncation notice")
 	}
 }

@@ -43,6 +43,24 @@ type Spec struct {
 
 	// StopGrace overrides DefaultStopGrace if non-zero.
 	StopGrace time.Duration
+
+	// RedactArgs masks the child's argv for the startup banner written to
+	// LogSink (issue #1158).
+	//
+	// The banner previously wrote cmd.Args verbatim into
+	// ~/.mcpproxy/logs/server-<name>.log on every spawn - fully transformed,
+	// i.e. AFTER the docker env->argv injection has turned every configured
+	// env var into `-e KEY=VALUE`, and after a login-shell wrap has folded the
+	// whole command line into one `-c "..."` element.
+	//
+	// The redactor is injected rather than imported because this package is
+	// deliberately dependency-free (`go list -deps` returns only itself);
+	// importing internal/oauth would drag config/security/storage in with it.
+	//
+	// nil means the banner OMITS argv entirely. That default is fail-CLOSED on
+	// purpose: a future caller that forgets to set the field loses a
+	// diagnostic, not a secret.
+	RedactArgs func([]string) []string
 }
 
 // Handle represents a running child managed by the launcher. Stop, Wait,
@@ -58,12 +76,23 @@ type Handle interface {
 	// exec.Cmd.Wait() (nil on clean exit, *exec.ExitError on non-zero).
 	Wait() error
 
-	// Done is closed when the child has exited for any reason. Useful
-	// for select{}-driven supervision.
+	// Done is closed when the child has exited for any reason and been
+	// reaped. Useful for select{}-driven supervision. On Unix (Linux and
+	// macOS) the reaper keeps an exited leader unreaped while another
+	// member of its process group runs (Spec 116 PR4, review round 6), so
+	// Done stays open while a descendant the launcher left behind runs.
 	Done() <-chan struct{}
 
 	// Pid returns the OS process id, or 0 if the child has exited.
 	Pid() int
+
+	// Kill hard-kills the child and everything it spawned (the process
+	// group on Unix, the Job Object on Windows) at once, without a grace
+	// period and without waiting for the exit. It is the retirement kill
+	// of Spec 116 PR4: safe to call more than once and after the child
+	// exited, while a descendant it left in its process group runs.
+	// The reaper reaps the child; Stop and Wait wait for that.
+	Kill() error
 }
 
 // Spawn starts spec.Cmd and returns a Handle owning its lifecycle.
@@ -117,6 +146,19 @@ func Spawn(ctx context.Context, spec *Spec, log *zap.Logger) (Handle, error) {
 		return nil, fmt.Errorf("launcher: start %s: %w", name, err)
 	}
 
+	// Contain the tree before the handle exists (Windows: a Job Object; a
+	// no-op on Unix, where the process group set up by applyProcAttrs does
+	// it). A child that cannot be contained is killed and the launch fails
+	// (Spec 116 FR-025a, review round 3): the retirement kill could
+	// otherwise reach only the immediate process and leave its
+	// descendants running.
+	job, err := containTree(cmd)
+	if err != nil {
+		_ = killProcess(cmd, log)
+		_ = cmd.Wait() // reaps the child and closes both pipes
+		return nil, fmt.Errorf("launcher: contain %s: %w", name, err)
+	}
+
 	h := &handle{
 		cmd:       cmd,
 		name:      name,
@@ -128,6 +170,14 @@ func Spawn(ctx context.Context, spec *Spec, log *zap.Logger) (Handle, error) {
 		h.stopGrace = DefaultStopGrace
 	}
 	h.pid.Store(int64(cmd.Process.Pid))
+	h.pgid = startedGroupID(cmd)
+
+	// On Windows the just-started process is in a Job Object (containTree
+	// above) so that terminate/kill (and the natural-exit path in reap)
+	// reach the grandchildren it spawns — Process.Kill() alone only ever
+	// reaches this one PID. nil on Unix, where the process-group attrs
+	// applied via applyProcAttrs already cover this.
+	h.job = job
 
 	// Pump stdout+stderr to LogSink. Both streams write to the same
 	// sink, prefixed so they remain distinguishable. Discard mode is
@@ -146,8 +196,14 @@ func Spawn(ctx context.Context, spec *Spec, log *zap.Logger) (Handle, error) {
 		if len(args) > 0 {
 			args = args[1:]
 		}
-		_, _ = fmt.Fprintf(sink, "[launcher] starting: %s %v (pid=%d)\n",
-			cmd.Path, args, cmd.Process.Pid)
+		if spec.RedactArgs == nil {
+			// Fail closed: no redactor, no argv. See Spec.RedactArgs.
+			_, _ = fmt.Fprintf(sink, "[launcher] starting: %s (%d args, redacted) (pid=%d)\n",
+				cmd.Path, len(args), cmd.Process.Pid)
+		} else {
+			_, _ = fmt.Fprintf(sink, "[launcher] starting: %s %v (pid=%d)\n",
+				cmd.Path, spec.RedactArgs(args), cmd.Process.Pid)
+		}
 	}
 
 	h.pumpWG.Add(2)
@@ -171,9 +227,24 @@ type handle struct {
 	log       *zap.Logger
 	done      chan struct{}
 	stopGrace time.Duration
+	job       io.Closer // Windows Job Object wrapper; nil on Unix (see createJob)
+	// pgid is the process group the child leads (Unix; 0 on Windows),
+	// recorded at spawn (Spec 116 PR4, review round 2): the retirement kill
+	// and the reaper's killGroupBeforeReap signal it without a Getpgid
+	// lookup. It is never signalled after the leader was reaped (review
+	// round 6).
+	pgid int
 
 	pid    atomic.Int64 // 0 once exited
 	pumpWG sync.WaitGroup
+
+	// reapMu orders the retirement kill with the reaper (review rounds 3
+	// and 4): reap calls cmd.Wait and sets reaped under it, and retireKill
+	// reads reaped and signals under the same lock. A kill that sees
+	// reaped == false therefore signals while the leader (alive or a
+	// zombie) still holds the group ID, so the ID cannot have been reused.
+	reapMu sync.Mutex
+	reaped bool
 
 	stopOnce sync.Once
 	stopErr  error
@@ -184,6 +255,17 @@ type handle struct {
 
 func (h *handle) Pid() int {
 	return int(h.pid.Load())
+}
+
+// Kill implements Handle.Kill: the same hard-kill step stopLocked
+// escalates to, without the SIGTERM and the grace period. Unlike Stop it
+// still acts after the leader exited: a descendant the launcher left in its
+// process group is killed too (see retireKill in the platform files).
+func (h *handle) Kill() error {
+	if h.cmd.Process == nil {
+		return nil
+	}
+	return h.retireKill()
 }
 
 func (h *handle) Done() <-chan struct{} {
@@ -232,8 +314,9 @@ func (h *handle) stopLocked(ctx context.Context) error {
 		zap.Int("pid", h.Pid()),
 		zap.Duration("grace", h.stopGrace))
 
-	// SIGTERM the process group (Unix) / process (Windows fallback).
-	if err := terminateProcess(h.cmd, h.log); err != nil {
+	// SIGTERM the process group (Unix) / terminate the Job Object tree
+	// (Windows) — see the platform files for h.terminate.
+	if err := h.terminate(); err != nil {
 		h.log.Warn("terminate failed (will fall through to wait/kill)",
 			zap.Error(err))
 	}
@@ -252,7 +335,7 @@ func (h *handle) stopLocked(ctx context.Context) error {
 	h.log.Warn("child did not exit within grace period; sending SIGKILL",
 		zap.Int("pid", h.Pid()),
 		zap.Duration("grace", h.stopGrace))
-	if err := killProcess(h.cmd, h.log); err != nil {
+	if err := h.kill(); err != nil {
 		h.log.Error("kill failed", zap.Error(err))
 		// Fall through — we still wait for done.
 	}
@@ -274,7 +357,53 @@ func (h *handle) reap() {
 	// pipe have completed." Pumps naturally finish when the child exits and the
 	// kernel propagates EOF — we don't need Wait() to reach that state.
 	h.pumpWG.Wait()
-	err := h.cmd.Wait()
+
+	// Reap the leader under reapMu (review round 4). cmd.Wait releases the
+	// leader's PID, and with it the process-group ID once the group is
+	// empty; reaping outside the lock let a concurrent retireKill observe
+	// reaped == false after the kernel had already released the ID, and
+	// signal a group that reused it. waitExited first observes the exit
+	// without reaping, so the locked cmd.Wait returns at once and Kill is
+	// never held up by a live child.
+	//
+	// Where the exit cannot be observed that way (kqueue refused under fd
+	// exhaustion, waitid denied, or no such call on the platform),
+	// reapUnobserved still reaps only under reapMu (review round 5): on
+	// Unix it polls a non-blocking wait4 under the lock, so the leader is
+	// never released between a Kill's reaped check and its signal.
+	//
+	// Before the locked reap, awaitGroupEmpty keeps the exited leader a
+	// zombie while another member of its process group runs, and
+	// killGroupBeforeReap kills whatever is left while the zombie still
+	// pins the group ID (review round 6): after the reap neither Kill nor
+	// Stop signals the group at all.
+	var err error
+	exitCode := -1
+	if observeExit(h.cmd.Process.Pid) {
+		h.awaitGroupEmpty()
+		h.reapMu.Lock()
+		h.killGroupBeforeReap()
+		err = h.cmd.Wait()
+		if hook := reapedLockedHook.Load(); hook != nil {
+			(*hook)(h)
+		}
+		h.reaped = true
+		h.reapMu.Unlock()
+	} else {
+		exitCode, err = h.reapUnobserved()
+	}
+	if hook := afterReapHook.Load(); hook != nil {
+		(*hook)(h)
+	}
+
+	// Release the Job Object (Windows only — see createJob/winjob). By the
+	// time we get here every pipe holder has exited, so on the Stop path
+	// this is a no-op (h.terminate/h.kill already closed the job — that is
+	// what made the pumps reach EOF); it only does real work when the
+	// whole tree exited on its own. Close is idempotent and goroutine-safe.
+	if h.job != nil {
+		_ = h.job.Close()
+	}
 
 	h.waitErrMu.Lock()
 	h.waitErr = err
@@ -282,7 +411,6 @@ func (h *handle) reap() {
 
 	h.pid.Store(0)
 
-	exitCode := -1
 	if h.cmd.ProcessState != nil {
 		exitCode = h.cmd.ProcessState.ExitCode()
 	}
@@ -291,6 +419,32 @@ func (h *handle) reap() {
 		zap.Error(err))
 
 	close(h.done)
+}
+
+// containTree contains a just-started child's process tree (createJob in
+// the platform files). A test seam: tests replace it to inject a
+// containment failure.
+var containTree = createJob
+
+// afterReapHook runs in the reaper after the leader was reaped and before
+// Done closes. A test seam; nil in production. Atomic because reapers of
+// earlier tests' handles may still read it while a test installs its own.
+var afterReapHook atomic.Pointer[func(*handle)]
+
+// reapedLockedHook runs in the reaper right after the leader was really
+// reaped (cmd.Wait, or the non-blocking wait4 of reapUnobserved) and before
+// reaped is published, with reapMu held. A test seam; nil in production.
+var reapedLockedHook atomic.Pointer[func(*handle)]
+
+// exitObserverHook replaces waitExited in reap. A test seam that injects an
+// exit-observation failure; nil in production.
+var exitObserverHook atomic.Pointer[func(pid int) bool]
+
+func observeExit(pid int) bool {
+	if hook := exitObserverHook.Load(); hook != nil {
+		return (*hook)(pid)
+	}
+	return waitExited(pid)
 }
 
 // pumpLines reads r line-by-line and writes each line, prefixed, to dst.

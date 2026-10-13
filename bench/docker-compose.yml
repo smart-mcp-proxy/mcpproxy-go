@@ -1,0 +1,37 @@
+# Reproducible benchmark substrate (skeleton).
+#
+# Boots mcpproxy over the frozen Spec 065 reference-server config so the tool
+# corpus and live tool list are identical across machines. The live
+# accuracy/latency scorers (see bench/README.md "follow-ups") attach to this.
+#
+# Usage:
+#   docker compose -f bench/docker-compose.yml up --build
+#   # then, against the running proxy on 127.0.0.1:8092:
+#   #   GET /api/v1/tools     -> full tool defs (with schemas) for the live token run
+#   #   retrieve_tools        -> Recall@k accuracy over retrieval_golden_v1.json
+#
+# The committed corpus_v1 snapshot was frozen from exactly this config
+# (specs/065-evaluation-foundation/datasets/README.md), so a live snapshot here
+# reproduces it (modulo upstream-server version drift — pin images before
+# publishing headline numbers).
+services:
+  mcpproxy:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command:
+      - serve
+      - --config=/data/snapshot-servers.config.json
+      - --data-dir=/data/state
+      - --listen=0.0.0.0:8092
+    environment:
+      MCPPROXY_API_KEY: eval-corpus-snapshot
+    ports:
+      - "127.0.0.1:8092:8092"
+    volumes:
+      # The frozen, servable reference-server config (7 no-auth servers).
+      - ../specs/065-evaluation-foundation/datasets/snapshot-servers.config.json:/data/snapshot-servers.config.json:ro
+      - bench-state:/data/state
+
+volumes:
+  bench-state:

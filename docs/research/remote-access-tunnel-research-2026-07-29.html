@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Удалённый доступ к mcpproxy: исследование (2026-07-29)</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1a1d23; --muted: #6b7280; --card: #f7f8fa;
+    --border: #e2e5ea; --accent: #2563eb; --ok: #15803d; --ok-bg: #ecfdf3;
+    --warn: #b45309; --warn-bg: #fffbeb; --bad: #b91c1c; --bad-bg: #fef2f2;
+    --info-bg: #eff6ff; --code-bg: #eef1f5;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #101318; --fg: #e5e8ee; --muted: #9aa3b2; --card: #181c24;
+      --border: #2a3140; --accent: #60a5fa; --ok: #4ade80; --ok-bg: #10281a;
+      --warn: #fbbf24; --warn-bg: #2a2210; --bad: #f87171; --bad-bg: #2a1414;
+      --info-bg: #14202f; --code-bg: #1e242f;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+         background: var(--bg); color: var(--fg); line-height: 1.6; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 2rem 1.25rem 4rem; }
+  h1 { font-size: 1.7rem; line-height: 1.3; margin: .2rem 0 .4rem; }
+  h2 { font-size: 1.25rem; margin: 2.2rem 0 .8rem; padding-bottom: .3rem; border-bottom: 1px solid var(--border); }
+  h3 { font-size: 1.05rem; margin: 1.4rem 0 .5rem; }
+  p { margin: .6rem 0; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .meta { color: var(--muted); font-size: .88rem; }
+  .badge { display: inline-block; font-size: .72rem; font-weight: 600; padding: .1rem .5rem;
+           border-radius: 999px; vertical-align: middle; white-space: nowrap; }
+  .b-ok   { color: var(--ok); background: var(--ok-bg); }
+  .b-warn { color: var(--warn); background: var(--warn-bg); }
+  .b-bad  { color: var(--bad); background: var(--bad-bg); }
+  .b-info { color: var(--accent); background: var(--info-bg); }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+          padding: 1rem 1.2rem; margin: 1rem 0; }
+  .verdict { border-left: 4px solid var(--ok); }
+  .warncard { border-left: 4px solid var(--warn); }
+  table { border-collapse: collapse; width: 100%; margin: .8rem 0; font-size: .92rem; }
+  .tablewrap { overflow-x: auto; }
+  th, td { border: 1px solid var(--border); padding: .45rem .6rem; text-align: left; vertical-align: top; }
+  th { background: var(--card); }
+  code { background: var(--code-bg); padding: .1rem .35rem; border-radius: 4px; font-size: .87em;
+         font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .3rem 0; }
+  details { margin: .5rem 0; }
+  summary { cursor: pointer; font-weight: 600; }
+  .kpi-row { display: flex; flex-wrap: wrap; gap: .7rem; margin: 1rem 0; }
+  .kpi { flex: 1 1 130px; background: var(--card); border: 1px solid var(--border); border-radius: 10px;
+         padding: .7rem .9rem; text-align: center; }
+  .kpi .num { font-size: 1.5rem; font-weight: 700; }
+  .kpi .lbl { font-size: .78rem; color: var(--muted); }
+  .src { font-size: .82rem; color: var(--muted); margin-top: .4rem; }
+  blockquote { border-left: 3px solid var(--border); margin: .6rem 0; padding: .1rem 0 .1rem .9rem;
+               color: var(--muted); font-size: .92rem; }
+  .toc { font-size: .92rem; }
+  .toc a { display: inline-block; margin: .1rem 0; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<p class="meta">mcpproxy-go · deep-research · 29 июля 2026 · 104 агента · 22 источника · 109 извлечённых утверждений · 25 верифицировано (25 подтверждено, 0 опровергнуто)</p>
+<h1>Стоит ли встраивать в mcpproxy удалённый доступ к локальному инстансу?</h1>
+<p class="meta">«Кнопка в Web UI открывает защищённый туннель наружу» — чтобы Claude mobile (и другие клиенты) доставали до локальных MCP-серверов вроде Obsidian MCP.</p>
+
+<div class="card verdict">
+<h3 style="margin-top:0">Вердикт: <span class="badge b-ok">ПРОБУЕМ</span> — но как security-gated MVP, а не «голый туннель»</h3>
+<ul>
+<li><b>Спрос реален и подтверждён:</b> Claude custom connectors работают на <b>всех</b> тарифах, включая Free, и синхронизируются на iOS/Android — но требуют публично доступный HTTPS-endpoint со Streamable HTTP и OAuth 2.1. Localhost-mcpproxy без туннеля недостижим для Claude в принципе (подключается облако Anthropic, не телефон).</li>
+<li><b>Ниша не занята:</b> ngrok официально документирует себя как «MCP gateway», OpenAI выпустила собственный first-party Secure MCP Tunnel — а ближайший конкурент Docker MCP Gateway такой функции не имеет при открытом запросе от пользователей (issue #503).</li>
+<li><b>Планка безопасности жёсткая:</b> в интернете уже тысячи неаутентифицированных MCP-серверов (Censys: 12,5 → 21+ тыс.). Фича обязана быть off-by-default, per-server, с <b>невыключаемым</b> OAuth 2.1 + DCR на уровне самого mcpproxy.</li>
+<li><b>Монетизация напрямую — нет:</b> при 100–300 DAU платящих будет единицы (~1–15 чел., $10–150/мес — оценка, см. §7); бесплатные Cloudflare Tunnel / Tailscale Funnel убивают ценность платного relay. Ценность фичи — <b>рост и дифференциация</b>, мостик к монетизации позже, если появится массовый спрос.</li>
+<li><b>Рекомендуемый MVP — архитектура (a):</b> UX-обёртка над внешним туннелем (cloudflared / Tailscale Funnel; опц. zrok SDK / tsnet как embed-вариант), спереди — собственный обязательный OAuth-гейт mcpproxy. Свой relay-бэкенд и юрлицо — не сейчас.</li>
+</ul>
+</div>
+
+<div class="kpi-row">
+  <div class="kpi"><div class="num">25/25</div><div class="lbl">утверждений подтверждено (3-голосная адверсариальная проверка)</div></div>
+  <div class="kpi"><div class="num">0</div><div class="lbl">опровергнуто</div></div>
+  <div class="kpi"><div class="num">5</div><div class="lbl">направлений поиска</div></div>
+  <div class="kpi"><div class="num">22</div><div class="lbl">источника (Anthropic, OpenAI, NSA, Censys, Trend Micro, CSA…)</div></div>
+</div>
+
+<div class="card toc">
+<b>Содержание:</b><br>
+<a href="#demand">1. Спрос: что могут мобильные AI-клиенты</a> ·
+<a href="#tech">2. Технические требования</a> ·
+<a href="#competitors">3. Прецеденты и конкуренты</a> ·
+<a href="#security">4. Безопасность: масштаб проблемы</a> ·
+<a href="#localfirst">5. Не противоречит ли local-first?</a> ·
+<a href="#assets">6. Что уже есть в mcpproxy</a> ·
+<a href="#arch">7. Архитектурные варианты и экономика</a> ·
+<a href="#mvp">8. Рекомендация: MVP по фазам</a> ·
+<a href="#open">9. Открытые вопросы и оговорки</a> ·
+<a href="#method">10. Методология и источники</a>
+</div>
+
+<h2 id="demand">1. Спрос: что реально могут мобильные AI-клиенты <span class="badge b-ok">верифицировано 3-0</span></h2>
+
+<h3>Claude — сильная и фактически единственная цель сегодня</h3>
+<ul>
+<li>Custom connectors через remote MCP доступны на <b>всех тарифах</b>: Free (лимит — 1 коннектор), Pro, Max, Team, Enterprise; и во всех клиентах: claude.ai web, Claude Desktop, Cowork, <b>iOS/Android</b>. Проверено дословно на живой странице поддержки 29.07.2026.</li>
+<li>Нюанс UX: добавить коннектор <b>с телефона нельзя</b> — настройка только на claude.ai web, затем коннектор синхронизируется на мобильные. На Team/Enterprise добавлять могут только Owners.</li>
+<li><b>Туннель — необходимость, а не удобство:</b> к MCP-серверу подключается <b>облако Anthropic</b> (не устройство пользователя), поэтому endpoint должен быть достижим из интернета с IP-диапазонов Anthropic. Localhost, LAN, корпоративный VPN и «обычный» Tailscale (без Funnel) — не работают. Локальные stdio-серверы из <code>claude_desktop_config.json</code> живут только в Claude Desktop и недоступны в web/mobile.</li>
+<li>Это ровно тот сценарий, который нужен Algis'у: <b>Obsidian MCP с телефона</b> — сейчас недостижим без туннеля, и встроенного решения у Anthropic нет (открытый feature request на Tailscale-only connectivity это подтверждает).</li>
+</ul>
+
+<h3>ChatGPT — слабая цель <span class="badge b-warn">medium confidence</span></h3>
+<ul>
+<li>Кастомные MCP apps/connectors: <b>«Are MCP apps available on mobile? No — web only»</b> (дословно из FAQ OpenAI, июль 2026). Доступ только на web, за developer mode / планами Business-Enterprise-Edu.</li>
+<li>Для локальных серверов OpenAI предлагает собственный <b>Secure MCP Tunnel</b> (май 2026) — но он требует Platform-org доступа, ориентирован на enterprise, не consumer one-click. Т.е. OpenAI сама подтверждает паттерн, но не закрывает consumer-нишу.</li>
+</ul>
+<p class="src">Источники: <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp">support.claude.com #11175166</a> · <a href="https://claude.com/docs/connectors/building">claude.com/docs/connectors/building</a> · <a href="https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta">help.openai.com #12584461</a> · <a href="https://developers.openai.com/api/docs/guides/secure-mcp-tunnels">OpenAI Secure MCP Tunnels</a></p>
+
+<h2 id="tech">2. Технические требования клиентского пути <span class="badge b-ok">верифицировано</span></h2>
+<div class="tablewrap"><table>
+<tr><th>Требование</th><th>Детали</th><th>Статус в mcpproxy</th></tr>
+<tr><td>Транспорт</td><td>Streamable HTTP (легаси HTTP+SSE депрекируется)</td><td><span class="badge b-ok">есть</span> — <code>/mcp</code> уже Streamable HTTP</td></tr>
+<tr><td>Публичная достижимость</td><td>HTTPS-endpoint, доступный с IP-диапазонов Anthropic</td><td><span class="badge b-bad">нет</span> — нужен туннель (предмет фичи)</td></tr>
+<tr><td>Авторизация</td><td>OAuth 2.1-сервер по MCP auth-спекам 2025-03-26 / 2025-06-18 / 2025-11-25, PKCE</td><td><span class="badge b-warn">частично</span> — есть OAuth-<i>клиент</i> (<code>internal/oauth</code>) и OAuth-логин в server edition (Spec 024); серверной роли для personal edition нет</td></tr>
+<tr><td>Dynamic Client Registration</td><td>DCR — zero-config default для Claude (ручные креды тоже поддерживаются)</td><td><span class="badge b-bad">нет</span> — надо реализовать</td></tr>
+<tr><td>Redirect URI allowlist</td><td><code>https://claude.ai/api/mcp/auth_callback</code> + <code>https://claude.com/…</code> (Anthropic предупреждает: домен может смениться) + loopback для Claude Code</td><td><span class="badge b-bad">нет</span></td></tr>
+<tr><td>Token lifecycle</td><td>Протокол не задаёт refresh/revocation/reuse-контроль — прокси должен сам управлять истечением/ротацией/отзывом (NSA)</td><td><span class="badge b-warn">частично</span> — есть agent tokens (HMAC-SHA256), JWT в server edition</td></tr>
+</table></div>
+
+<h2 id="competitors">3. Прецеденты и конкуренты</h2>
+<div class="tablewrap"><table>
+<tr><th>Игрок</th><th>Что делает</th><th>Вывод для mcpproxy</th></tr>
+<tr><td><b>ngrok</b> <span class="badge b-ok">3-0</span></td><td>Официальная документация «Using ngrok as your MCP gateway»: экспонирование локального MCP для OpenAI/Claude. Рекомендует лишь static bearer + IP-allowlist + rate limits.</td><td>Паттерн легитимизирован вендором №1. Их security-планка низкая — mcpproxy может её превзойти (полноценный OAuth 2.1 + DCR).</td></tr>
+<tr><td><b>OpenAI Secure MCP Tunnel</b> <span class="badge b-ok">3-0</span></td><td>First-party продукт (27.05.2026, open-source клиент): outbound-only HTTPS к OpenAI-hosted MCP endpoint. Требует Platform org.</td><td>Сильнейший сигнал валидности паттерна. Enterprise-ориентирован → consumer-desktop-ниша свободна.</td></tr>
+<tr><td><b>Docker MCP Gateway</b> <span class="badge b-warn">2-1</span></td><td>Чисто локальный прокси, туннеля/remote-exposure <b>нет</b>. Открытый feature request <a href="https://github.com/docker/mcp-gateway/issues/503">#503</a> «expose MCP servers remotely on public internet» — пользователи городят Cloudflare Tunnel + OAuth 2.1 руками.</td><td>Прямое свидетельство неудовлетворённого спроса; ближайший конкурент нишу не занял. (Proof-of-absence — перепроверить при реализации.)</td></tr>
+<tr><td>Smithery / Composio / Glama / LiteLLM</td><td colspan="2"><span class="badge b-warn">пробел покрытия</span> — по ним верифицированных данных не собрано (см. §9).</td></tr>
+</table></div>
+<p>Дополнительный контекст из fetch-фазы (не прошёл финальную верификацию): типовой «playbook» для деплоя кастомных агентов на Claude mobile рекомендует <b>облачный хостинг (~$15/мес Cloud Run)</b> и даже не упоминает туннели — то есть однокнопочный локальный туннель в mcpproxy закрыл бы дыру, которую сейчас затыкают платным облаком.</p>
+
+<h2 id="security">4. Безопасность: масштаб проблемы <span class="badge b-ok">верифицировано 3-0 (6 слитых утверждений)</span></h2>
+<div class="card warncard">
+<p style="margin-top:0"><b>Это главный риск фичи.</b> Незащищённая экспозиция MCP — массовый, измеряемый сканерами феномен:</p>
+<ul>
+<li><b>Censys:</b> 12 520 интернет-доступных MCP-сервисов / 8 758 IP / 56 стран (28.04.2026) → 21 000+ к 06.05.2026 (частично — расширение покрытия сканера). Возможности серверов перечислимы полностью неаутентифицированным клиентом; <b>~90 серверов</b> рекламировали <code>run_command</code>/<code>shell_exec</code>-класс инструментов = неаутентифицированный RCE.</li>
+<li><b>Trend Micro:</b> когорта выросла с 492 (июль 2025, все — без auth и шифрования) до 1 467; <code>execute_sql</code> на 70 хостах, Graphiti Agent Memory на 39, 3+ сервера <b>сливали медкарты пациентов</b>. (~74% когорты — cloud-hosted, но failure mode идентичен туннелированному локальному.)</li>
+<li><b>CSA / arXiv:</b> 7 973 каталогизированных открытых серверов, 40,55% — вовсе без аутентификации.</li>
+<li><b>Спека MCP:</b> «Authorization is OPTIONAL for MCP implementations» — на upstream-серверы полагаться нельзя.</li>
+<li><b>CVE-2025-6514</b> (из fetch-фазы, не в финальном сете): command injection в <code>mcp-remote</code>, 437 тыс.+ загрузок — даже мостики-посредники были дырявыми.</li>
+</ul>
+<p><b>Конвергенция рекомендаций (NSA CSI + Trend Micro):</b> OAuth-аутентификация клиентов + reverse-proxy/gateway-слой с authn/authz/логированием перед любым интернет-экспонированным MCP — <i>ровно роль mcpproxy</i>. NSA отдельно: MCP OAuth 2.1 bearer не задаёт lifecycle токенов → прокси обязан сам реализовать expiration/rotation/revocation. Практический мандат: <b>OAuth 2.1 + PKCE на воротах туннеля, невыключаемо, с proxy-managed token lifecycle</b>.</p>
+</div>
+<p class="src">Источники: <a href="https://censys.com/blog/mcp-servers-on-the-internet/">Censys</a> · <a href="https://www.trendmicro.com/vinfo/us/security/news/vulnerabilities-and-exploits/update-on-exposed-mcp-servers-the-threat-widens-to-the-cloud">Trend Micro</a> · <a href="https://media.defense.gov/2026/Jun/02/2003943289/-1/-1/0/CSI_MCP_SECURITY.PDF">NSA CSI (U/OO/6030316-26)</a> · <a href="https://labs.cloudsecurityalliance.org/agentic/agentic-mcp-security-best-practices-v1/">CSA</a> · arXiv:2605.22333 · <a href="https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization">MCP spec</a></p>
+
+<h2 id="localfirst">5. Не противоречит ли это local-first? <span class="badge b-ok">3-0</span></h2>
+<p><b>Нет — при правильной постановке.</b> NSA прямо рекомендует предпочитать локальные MCP-инстансы для приватных данных и пропускать внешние подключения через фильтрующие прокси/DLP. В продуктовых терминах фича — «<b>local-first с охраняемой дверью</b>», а не «cloud-first»:</p>
+<ul>
+<li>обработка и данные остаются локально; наружу — только явно выбранное;</li>
+<li>туннель строго <b>off-by-default</b>;</li>
+<li>экспонирование <b>per-server</b> (allowlist, least privilege): открыть наружу Obsidian MCP ≠ открыть весь прокси;</li>
+<li>на воротах — существующая машинерия mcpproxy: quarantine, sensitive-data detection, activity log, intent-варианты <code>call_tool_*</code>.</li>
+</ul>
+<p>Более того, это <i>усиливает</i> позиционирование: пользователь получает облачный UX без передачи данных в чьё-либо облако — данные проходят транзитом через туннель, но живут дома. (Оговорка воркфлоу: NSA-гайд написан для enterprise; перенос на продукт — интерпретация, не прямая валидация.)</p>
+
+<h2 id="assets">6. Что уже есть в mcpproxy (локальный аудит репозитория)</h2>
+<div class="tablewrap"><table>
+<tr><th>Актив</th><th>Где</th><th>Переиспользование для фичи</th></tr>
+<tr><td>OAuth-логин Google/GitHub/MS: PKCE, session cookie + JWT bearer для MCP</td><td>Server edition, Spec 024 (<code>internal/serveredition/auth/</code>)</td><td>Прямой прототип «пароль/OAuth как в SynapBus». Но код за build-тегом <code>server</code> — для personal edition нужен перенос/адаптация.</td></tr>
+<tr><td>OAuth 2.1-клиент + PKCE, координатор, refresh</td><td><code>internal/oauth/</code></td><td>Частично: нужна <i>серверная</i> роль (authorization server + DCR) — открытый вопрос объёма работ (§9).</td></tr>
+<tr><td>Agent tokens (<code>mcp_agt_</code>, HMAC-SHA256), API-ключи, <code>require_mcp_auth</code></td><td>Spec 028, core</td><td>Готовые скоупированные креды — быстрый фолбэк-механизм до полного OAuth.</td></tr>
+<tr><td>Quarantine + TPA-сканер, sensitive-data detection, activity log</td><td><code>internal/security/</code>, <code>internal/runtime/</code></td><td>Готовый «gateway-слой с authn/authz/логированием», который NSA/Trend Micro требуют перед экспонированием.</td></tr>
+<tr><td>Туннелей нет; официальная позиция — «BYO Tailscale/WireGuard/SSH»</td><td><code>docs/getting-started/installation.md:247</code></td><td>Фича закрывает разрыв между рекомендацией и однокнопочным UX.</td></tr>
+</table></div>
+
+<h2 id="arch">7. Архитектурные варианты и экономика</h2>
+<p><span class="badge b-warn">Внимание:</span> ни одно экономическое утверждение (цены туннелей, стоимость relay, конверсия free→paid) <b>не прошло верификацию воркфлоу</b> — до verify-фазы дошли только спрос/прецеденты/безопасность. Цифры ниже — из fetch-фазы (сырьё из блогов/прайс-страниц) и помечены как неверифицированные.</p>
+
+<h3>Цены туннелей <span class="badge b-warn">не верифицировано</span></h3>
+<div class="tablewrap"><table>
+<tr><th>Сервис</th><th>Free tier</th><th>Платно</th></tr>
+<tr><td>Cloudflare Tunnel</td><td>Бесплатно, без лимитов трафика для типового использования</td><td>—</td></tr>
+<tr><td>Tailscale (Funnel)</td><td>Personal: до 6 юзеров, 100 устройств — $0</td><td>$8–18 /юзер/мес</td></tr>
+<tr><td>ngrok</td><td>1 ГБ/мес, 3 endpoint'а, interstitial-страница</td><td>Hobbyist $8–10/мес (5 ГБ); PAYG от $20</td></tr>
+<tr><td>zrok (NetFoundry)</td><td>5 ГБ/<b>день</b>, 25 environments; open source, self-hostable, <b>Go SDK</b></td><td>hosted-тарифы NetFoundry</td></tr>
+<tr><td>Pinggy / Homeway / localtunnel</td><td>free (с ограничениями)</td><td>$2.5 / $2.49 / — в мес</td></tr>
+</table></div>
+<p><b>Вывод по ценам:</b> рынок туннелей переполнен (40+ open-source инструментов в awesome-tunneling), якорные цены — $0–2.5/мес. Продавать <i>сам туннель</i> за $5–10/мес против бесплатного Cloudflare — нежизнеспособно.</p>
+
+<h3>Сравнение архитектур</h3>
+<div class="tablewrap"><table>
+<tr><th></th><th>(a) BYO-туннель, UX-обёртка</th><th>(b) Собственный relay</th><th>(c) P2P / WebRTC</th></tr>
+<tr><td>Что это</td><td>mcpproxy оркестрирует cloudflared / Tailscale Funnel (или embed: zrok SDK, tsnet — оба Go-native, in-process, без root) + свой обязательный OAuth-гейт</td><td>Свой backend: relay-серверы, домены, abuse-handling, биллинг, юрлицо</td><td>Прямое соединение устройство↔устройство</td></tr>
+<tr><td>Стоимость для нас</td><td>~0 инфраструктуры; только код</td><td>Bandwidth + опс + юрлицо + приём платежей</td><td>Средняя (STUN/TURN)</td></tr>
+<tr><td>Стоимость для юзера</td><td>$0 (Cloudflare/Tailscale free)</td><td>Подписка $5–10</td><td>$0</td></tr>
+<tr><td>Совместимость с Claude</td><td><span class="badge b-ok">Да</span> — публичный HTTPS URL</td><td><span class="badge b-ok">Да</span></td><td><span class="badge b-bad">Нет</span> — соединение инициирует <b>облако Anthropic/OpenAI</b>, ему нужен публичный HTTPS endpoint; P2P до телефона не поможет для Claude app</td></tr>
+<tr><td>Вердикт</td><td><span class="badge b-ok">MVP</span></td><td><span class="badge b-warn">Только при доказанном спросе</span></td><td><span class="badge b-bad">Не для этого сценария</span></td></tr>
+</table></div>
+
+<h3>Прогноз для 100–300 DAU <span class="badge b-warn">оценка, не данные</span></h3>
+<ul>
+<li><b>Заинтересуются</b> (пользуются Claude web/mobile и хотят доступ к локальным серверам): по аналогии с активностью запросов у конкурентов и долей mobile-юзеров — порядка <b>15–30%</b> ≈ 15–90 человек попробуют.</li>
+<li><b>Заплатят $5–10/мес</b> за hosted relay при бесплатных альтернативах: типовая конверсия OSS free→paid 1–5% даёт <b>~1–15 платящих ≈ $10–150/мес</b> — не окупает ни backend, ни юрлицо.</li>
+<li><b>Но:</b> как <i>бесплатная</i> фича это сильный магнит роста («Obsidian с телефона через Claude за 2 клика» — готовый вирусный сценарий для блога/YouTube) и строительный блок будущей монетизации (mcpproxy Cloud / Teams), когда DAU вырастет на порядок. Мостик к монетизации — да; монетизация сейчас — нет.</li>
+</ul>
+
+<h2 id="mvp">8. Рекомендация: MVP по фазам</h2>
+<ol>
+<li><b>Фаза 0 — OAuth-ворота (пререквизит):</b> OAuth 2.1 authorization server в personal edition: DCR endpoint, PKCE, allowlist callback-доменов Claude (оба: claude.ai и claude.com), собственный lifecycle токенов (expiry/rotation/revocation). Максимум переиспользовать Spec 024 (server edition) и <code>internal/oauth</code>. Это ценность и без туннеля — любой сам-настроенный reverse proxy станет безопасным.</li>
+<li><b>Фаза 1 — BYO-туннель UX:</b> кнопка «Открыть удалённый доступ» в Web UI: детект/запуск <code>cloudflared</code> (quick tunnel — бесплатно, без аккаунта) или Tailscale Funnel; показ итогового URL + QR + пошаговая инструкция «добавьте коннектор на claude.ai web → появится на телефоне». Off-by-default, per-server allowlist экспонируемых серверов, баннер-предупреждение, всё в activity log.</li>
+<li><b>Фаза 2 — embed-вариант:</b> если внешний бинарь — трение, встроить zrok SDK (Go-first, self-hostable) или tsnet (нужно проверить Funnel-доступность через tsnet). Телеметрия использования фичи (opt-in) — она и ответит, есть ли спрос для фазы 3.</li>
+<li><b>Фаза 3 (условная) — hosted relay:</b> только при доказанном спросе (сотни активных туннелей): управляемые поддомены <code>*.mcpproxy.app</code>, биллинг, юрлицо. Не раньше.</li>
+</ol>
+<p>Перед стартом: спот-перепроверить proof-of-absence утверждения (Docker всё ещё без туннеля; у Claude web/mobile всё ещё нет локального пути) и актуальность callback-доменов — Anthropic явно предупреждает, что они могут смениться.</p>
+
+<h2 id="open">9. Открытые вопросы и оговорки воркфлоу</h2>
+<ul>
+<li><b>Экономика не верифицирована:</b> вопрос 4 исследования (цены, стоимость relay, конверсии, прецеденты Tailscale/Headscale/LocalCan) не покрыт подтверждёнными утверждениями — прогноз §7 опирается на неверифицированное сырьё и экспертную оценку.</li>
+<li><b>Пробел по MCP-экосистеме:</b> mcp-remote, Smithery, Composio, Glama, LiteLLM gateway — верифицированных данных нет; конкурентная картина подтверждена только для Docker MCP Gateway, ngrok и OpenAI.</li>
+<li><b>Объём работ по OAuth-серверу</b> (DCR + lifecycle) внутри mcpproxy не оценён — сколько из <code>internal/oauth</code> (клиентская роль) переиспользуемо, надо смотреть в коде.</li>
+<li><b>Волатильность вендорских политик:</b> все факты о клиентах (Free-tier коннекторы, mobile sync, web-only setup, отсутствие ChatGPT mobile, депрекация SSE) проверены на 29.07.2026 и могут измениться быстро. Если OpenAI выкатит consumer-туннель или Anthropic разрешит private-network connectivity — адресуемость фичи изменится.</li>
+<li><b>Нюансы измерений:</b> рост Censys частично от расширения сканера; когорта Trend Micro на ~74% cloud-hosted (аналогия, не идентичная популяция); «примерно половина» у CSA завышает измеренные 40,55%.</li>
+<li>Три вывода включают утверждения с голосованием 2-1 (пробел Docker, нюанс Cowork, DCR, ChatGPT mobile) — каждое сверено с первоисточником, но с оговорками.</li>
+</ul>
+
+<h2 id="method">10. Методология и источники</h2>
+<p class="meta">Deep-research workflow: декомпозиция на 5 направлений → 5 параллельных поисковых агентов → фетч 22 источников → извлечение 109 фальсифицируемых утверждений → адверсариальная верификация топ-25 (3 независимых «опровергателя» на утверждение, порог 2/3) → синтез. Итог: 25 подтверждено, 0 опровергнуто, 8 отброшено по бюджету. 104 агента, ~4,1 млн токенов, 13 мин.</p>
+<details><summary>Ключевые источники (22)</summary>
+<ul>
+<li><b>Первичные:</b> <a href="https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp">Claude Help: custom connectors</a>, <a href="https://claude.com/docs/connectors/building">Claude: building connectors</a>, <a href="https://help.openai.com/en/articles/12584461-developer-mode-apps-and-full-mcp-connectors-in-chatgpt-beta">OpenAI: MCP apps FAQ</a>, <a href="https://developers.openai.com/api/docs/guides/secure-mcp-tunnels">OpenAI Secure MCP Tunnels</a>, <a href="https://github.com/openai/tunnel-client">openai/tunnel-client</a>, <a href="https://ngrok.com/docs/using-ngrok-with/using-mcp">ngrok MCP gateway docs</a>, <a href="https://github.com/docker/mcp-gateway">docker/mcp-gateway</a> (+ <a href="https://github.com/docker/mcp-gateway/issues/503">issue #503</a>), <a href="https://censys.com/blog/mcp-servers-on-the-internet/">Censys</a>, <a href="https://www.trendmicro.com/vinfo/us/security/news/vulnerabilities-and-exploits/update-on-exposed-mcp-servers-the-threat-widens-to-the-cloud">Trend Micro</a>, NSA CSI «MCP Security» (media.defense.gov), <a href="https://labs.cloudsecurityalliance.org/agentic/agentic-mcp-security-best-practices-v1/">CSA best practices</a>, <a href="https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization">MCP spec: authorization</a>, <a href="https://tailscale.com/docs/features/tsnet">Tailscale tsnet</a></li>
+<li><b>Вторичные/блоги:</b> authzed.com (таймлайн MCP-инцидентов, CVE-2025-6514), practical-devsecops.com, nomadlab (Tailscale vs Cloudflare vs ngrok 2026), pinggy.io, instatunnel.my (zrok), thenewstack.io (туннель для локального MCP), <a href="https://github.com/anderspitman/awesome-tunneling">awesome-tunneling</a>, blog.openziti.io (zrok SDK), medium.com (MCP playbook для Claude mobile), GitHub issues anthropics/claude-ai-mcp</li>
+<li><b>Устаревшие URL:</b> claude.com/docs/connectors/faq → 404 (контент сверен на support.claude.com); NSA PDF блокируется Akamai для не-браузеров (сверено через зеркало media.defense.gov); Trend Micro отдаёт 403 на прямой fetch (сверено по индексированным выдержкам).</li>
+</ul>
+</details>
+
+<p class="meta" style="margin-top:2rem">Отчёт сгенерирован Claude Code (deep-research workflow, 104 агента) · 29 июля 2026 · файл: docs/research/remote-access-tunnel-research-2026-07-29.html</p>
+
+</div>
+</body>
+</html>

@@ -3,11 +3,13 @@ package oauthserver
 import (
 	"context"
 	"crypto/rand"
+	"crypto/rsa"
 	"encoding/hex"
 	"fmt"
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,6 +35,13 @@ type OAuthTestServer struct {
 	// Rate limit tracking
 	mcpRateLimitHits int
 
+	// Request counters (see RegistrationCount / AuthorizeGETCount).
+	registrationCount atomic.Int64
+	authorizeGETCount atomic.Int64
+
+	// bogusKey signs id_tokens under IDTokenBadSignature; never published.
+	bogusKey *rsa.PrivateKey
+
 	mu sync.RWMutex
 
 	// Test reference
@@ -42,15 +51,17 @@ type OAuthTestServer struct {
 // ServerResult contains everything needed to configure a test client.
 type ServerResult struct {
 	// Server URLs
-	IssuerURL                      string
-	AuthorizationEndpoint          string
-	TokenEndpoint                  string
-	JWKSURL                        string
-	RegistrationEndpoint           string // Empty if DCR disabled
-	DeviceAuthorizationEndpoint    string // Empty if device code disabled
-	ProtectedResourceURL           string // For WWW-Authenticate detection tests
-	MCPURL                         string // MCP endpoint URL (for resource auto-detection testing)
-	ProtectedResourceMetadataURL   string // RFC 9728 metadata URL
+	IssuerURL                    string
+	AuthorizationEndpoint        string
+	TokenEndpoint                string
+	JWKSURL                      string
+	RegistrationEndpoint         string // Empty if DCR disabled
+	DeviceAuthorizationEndpoint  string // Empty if device code disabled
+	ProtectedResourceURL         string // For WWW-Authenticate detection tests
+	MCPURL                       string // MCP endpoint URL (for resource auto-detection testing)
+	SSEURL                       string // Legacy SSE MCP endpoint (same tools, same auth middleware)
+	ProtectedResourceMetadataURL string // RFC 9728 metadata URL
+	UserinfoEndpoint             string // OIDC userinfo (empty unless Options.OIDC)
 
 	// Pre-registered test client (confidential)
 	ClientID     string
@@ -80,6 +91,13 @@ func StartOnPort(t *testing.T, port int, opts Options) *ServerResult {
 			t.Fatalf("Failed to create key ring: %v", err)
 		}
 		panic(fmt.Sprintf("Failed to create key ring: %v", err))
+	}
+
+	if err := addOIDCKeys(keyRing, opts); err != nil {
+		if t != nil {
+			t.Fatalf("Failed to create EC key: %v", err)
+		}
+		panic(fmt.Sprintf("Failed to create EC key: %v", err))
 	}
 
 	// Create listener on specific port
@@ -146,6 +164,7 @@ func StartOnPort(t *testing.T, port int, opts Options) *ServerResult {
 		JWKSURL:                      issuerURL + "/jwks.json",
 		ProtectedResourceURL:         issuerURL + "/protected",
 		MCPURL:                       issuerURL + "/mcp",
+		SSEURL:                       issuerURL + "/sse",
 		ProtectedResourceMetadataURL: issuerURL + "/.well-known/oauth-protected-resource",
 		ClientID:                     confidentialClient.ClientID,
 		ClientSecret:                 confidentialClient.ClientSecret,
@@ -159,6 +178,9 @@ func StartOnPort(t *testing.T, port int, opts Options) *ServerResult {
 	}
 	if opts.EnableDeviceCode {
 		result.DeviceAuthorizationEndpoint = issuerURL + "/device_authorization"
+	}
+	if opts.OIDC {
+		result.UserinfoEndpoint = issuerURL + "/userinfo"
 	}
 
 	return result
@@ -178,6 +200,10 @@ func Start(t *testing.T, opts Options) *ServerResult {
 	keyRing, err := NewKeyRing()
 	if err != nil {
 		t.Fatalf("Failed to create key ring: %v", err)
+	}
+
+	if err := addOIDCKeys(keyRing, opts); err != nil {
+		t.Fatalf("Failed to create EC key: %v", err)
 	}
 
 	// Create listener on ephemeral port
@@ -239,6 +265,7 @@ func Start(t *testing.T, opts Options) *ServerResult {
 		JWKSURL:                      issuerURL + "/jwks.json",
 		ProtectedResourceURL:         issuerURL + "/protected",
 		MCPURL:                       issuerURL + "/mcp",
+		SSEURL:                       issuerURL + "/sse",
 		ProtectedResourceMetadataURL: issuerURL + "/.well-known/oauth-protected-resource",
 		ClientID:                     confidentialClient.ClientID,
 		ClientSecret:                 confidentialClient.ClientSecret,
@@ -252,6 +279,9 @@ func Start(t *testing.T, opts Options) *ServerResult {
 	}
 	if opts.EnableDeviceCode {
 		result.DeviceAuthorizationEndpoint = issuerURL + "/device_authorization"
+	}
+	if opts.OIDC {
+		result.UserinfoEndpoint = issuerURL + "/userinfo"
 	}
 
 	return result
@@ -293,6 +323,11 @@ func (s *OAuthTestServer) setupRoutes(mux *http.ServeMux) {
 		mux.HandleFunc("/protected", s.handleProtected)
 	}
 
+	// OIDC userinfo (Options.OIDC only)
+	if s.options.OIDC {
+		mux.HandleFunc("/userinfo", s.handleUserinfo)
+	}
+
 	// Callback endpoint for testing - displays received OAuth parameters
 	mux.HandleFunc("/callback", s.handleCallback)
 
@@ -300,6 +335,16 @@ func (s *OAuthTestServer) setupRoutes(mux *http.ServeMux) {
 	mcpSrv := s.createMCPServer()
 	streamableServer := mcpserver.NewStreamableHTTPServer(mcpSrv, mcpserver.WithStateLess(true))
 	mux.Handle("/mcp", s.oauthMiddleware(streamableServer))
+
+	// Legacy SSE transport behind the same middleware (GH #1271 needs an SSE
+	// upstream that authorises per method): GET /sse opens the stream, POST
+	// /message carries the JSON-RPC requests.
+	sseServer := mcpserver.NewSSEServer(mcpSrv,
+		mcpserver.WithBaseURL(s.issuerURL),
+		mcpserver.WithSSEEndpoint("/sse"),
+		mcpserver.WithMessageEndpoint("/message"))
+	mux.Handle("/sse", s.oauthMiddleware(sseServer))
+	mux.Handle("/message", s.oauthMiddleware(sseServer))
 }
 
 // handleCallback handles the OAuth callback and displays the received parameters.
@@ -376,7 +421,7 @@ func (s *OAuthTestServer) registerTestClient(isPublic bool) *Client {
 	client := &Client{
 		ClientID:      clientID,
 		ClientSecret:  clientSecret,
-		RedirectURIs:  []string{"http://127.0.0.1/callback", "http://localhost/callback"},
+		RedirectURIs:  append([]string{"http://127.0.0.1/callback", "http://localhost/callback"}, s.options.ClientRedirectURIs...),
 		GrantTypes:    []string{"authorization_code", "refresh_token"},
 		ResponseTypes: []string{"code"},
 		Scopes:        s.options.SupportedScopes,
@@ -443,12 +488,33 @@ func (s *OAuthTestServer) RegisterClient(cfg ClientConfig) (*Client, error) {
 	return client, nil
 }
 
+// RegistrationCount reports how many POST /registration (DCR) requests the
+// server has received.
+func (s *OAuthTestServer) RegistrationCount() int64 { return s.registrationCount.Load() }
+
+// AuthorizeGETCount reports how many GET /authorize requests the server has
+// received.
+func (s *OAuthTestServer) AuthorizeGETCount() int64 { return s.authorizeGETCount.Load() }
+
 // GetClient retrieves a client by ID.
 func (s *OAuthTestServer) GetClient(clientID string) (*Client, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	client, exists := s.clients[clientID]
 	return client, exists
+}
+
+// KeyRing exposes the signing keys so tests can rotate keys or mint their own
+// tokens (Spec 107 T037 crafts alg:none/HS256 tokens against the real JWKS).
+func (s *OAuthTestServer) KeyRing() *KeyRing {
+	return s.keyRing
+}
+
+// errorMode returns a snapshot of the current error injection settings.
+func (s *OAuthTestServer) errorMode() ErrorMode {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.options.ErrorMode
 }
 
 // SetErrorMode updates error injection at runtime.
@@ -491,6 +557,15 @@ type AuthCodeInfo struct {
 	Scopes    []string
 	ExpiresAt time.Time
 	Used      bool
+}
+
+// addOIDCKeys publishes the EC key the OIDC mode needs (JWKS with RSA and EC).
+func addOIDCKeys(keyRing *KeyRing, opts Options) error {
+	if !opts.OIDC {
+		return nil
+	}
+	_, err := keyRing.AddECKey()
+	return err
 }
 
 // generateRandomString creates a random hex string of specified length.

@@ -144,7 +144,7 @@ func ExtractPaths(content string) []string {
 	}
 
 	// File names that might be sensitive
-	fileNamePattern := regexp.MustCompile(`(?:^|[\s"'=:])([a-zA-Z0-9._\-]+\.(?:pem|key|ppk|p12|pfx|jks|keystore|env))`)
+	fileNamePattern := regexp.MustCompile(`(?:^|[\s"'=:])([a-zA-Z0-9._\-]+\.(?:pem|key|ppk|p12|pfx|jks|keystore|env|kdbx|pgpass))`)
 	for _, match := range fileNamePattern.FindAllStringSubmatch(content, -1) {
 		if len(match) > 1 && !seen[match[1]] {
 			seen[match[1]] = true
@@ -292,6 +292,8 @@ func GetFilePathPatterns() []*FilePathPattern {
 				"*.ppk",
 				"*.p12",
 				"*.pfx",
+				"*.kdbx",
+				"*.pgpass",
 			},
 			Platform: "all",
 		},
@@ -316,8 +318,10 @@ func GetFilePathPatterns() []*FilePathPattern {
 			Patterns: []string{
 				"~/.npmrc",
 				"~/.pypirc",
+				"~/.netrc",
 				"%USERPROFILE%\\.npmrc",
 				"%USERPROFILE%\\.pypirc",
+				"%USERPROFILE%\\.netrc",
 			},
 			Platform: "all",
 		},

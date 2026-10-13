@@ -9,6 +9,25 @@ enum APIClientError: Error, LocalizedError {
     case decodingError(underlying: Error)
     case noData
     case invalidURL(String)
+    /// A 409 from the connect write, carrying the core's own discriminator:
+    /// `precondition_failed` (the previewed state drifted — re-preview) versus
+    /// `already_exists` (the legacy conflict). Callers must be able to tell them
+    /// apart without string matching (contracts §2, research D9).
+    ///
+    /// `displayPath`/`reloadHint` (review round 3 finding): the core fills
+    /// both on every ConnectResult branch, conflicts included (FR-037/
+    /// FR-042's "populated for every result whose ConfigPath is known"), but
+    /// `connectConflict(from:)` used to keep only `action`/`message` and drop
+    /// them — so no conflict/failure UI state could ever show the path or
+    /// reload hint the success path already renders.
+    case connectConflict(action: String, message: String, displayPath: String? = nil, reloadHint: String? = nil)
+    /// An administrative write was attempted while the app is not talking to the
+    /// core over its private local socket. Never sent, by design.
+    case socketRequired
+    /// A non-2xx answer from a Profiles v3 route (Spec 108-k K1): the status and
+    /// the FULL structured body, so a caller can branch on `code`, highlight the
+    /// offending `field`, list `used_by`, or render the guard's `fixes`.
+    case service(status: Int, body: ServiceErrorBody)
 
     var errorDescription: String? {
         switch self {
@@ -22,6 +41,13 @@ enum APIClientError: Error, LocalizedError {
             return "No data in response"
         case .invalidURL(let url):
             return "Invalid URL: \(url)"
+        case .connectConflict(_, let message, _, _):
+            return message
+        case .service(_, let body):
+            return body.error
+        case .socketRequired:
+            return "This action requires MCPProxy's private local socket; "
+                + "the app is currently talking to the core over TCP."
         }
     }
 }
@@ -37,6 +63,40 @@ actor APIClient {
     private let baseURL: String
     private let apiKey: String?
 
+    /// Where a fire-and-forget call's single failure line goes (Spec 095
+    /// FR-010). Injected so a test can read what was written; nothing else in
+    /// this client logs, and nothing here may log a body or a URL.
+    private let log: @Sendable (String) -> Void
+
+    /// Which transport this client was configured for.
+    ///
+    /// The core treats socket callers as administrative, so the native form
+    /// gates its mutating controls on this identity (research D6). It is derived
+    /// from the configured endpoint, never probed — a probe answers "is the
+    /// socket up right now", which is a different question from "is this client
+    /// an administrative caller at all".
+    enum TransportKind: Equatable {
+        case unixSocket
+        case tcp
+    }
+
+    /// Transport identity of this client. `nonisolated` because callers need it
+    /// synchronously to decide whether a control is even enabled.
+    nonisolated let transportKind: TransportKind
+
+    /// Returns an absolute URL for an advertised MCP endpoint path, for
+    /// copyable client configuration examples in the native Clients hub.
+    func endpointURL(_ path: String) -> String {
+        Self.endpointURL(path, baseURL: baseURL)
+    }
+
+    /// Compose an advertised endpoint using the daemon's observed Web UI
+    /// address. The API client's socket fallback URL may use the default port
+    /// even when the daemon is listening elsewhere.
+    nonisolated static func endpointURL(_ path: String, baseURL: String) -> String {
+        baseURL + (path.hasPrefix("/") ? path : "/" + path)
+    }
+
     /// Create an API client.
     ///
     /// - Parameters:
@@ -44,9 +104,19 @@ actor APIClient {
     ///     Pass an empty string to force TCP-only mode.
     ///   - baseURL: TCP base URL. Used as fallback or when socket is unavailable.
     ///   - apiKey: Optional API key for authentication.
-    init(socketPath: String? = nil, baseURL: String = "http://127.0.0.1:8080", apiKey: String? = nil) {
+    ///   - requestTimeout: Per-request timeout. The default is deliberately
+    ///     generous; a liveness probe wants something much shorter so one slow
+    ///     response cannot stall it (see `CoreProcessManager.probeTimeout`).
+    init(
+        socketPath: String? = nil,
+        baseURL: String = "http://127.0.0.1:8080",
+        apiKey: String? = nil,
+        requestTimeout: TimeInterval = 30,
+        log: @escaping @Sendable (String) -> Void = { NSLog("%@", $0) }
+    ) {
         self.baseURL = baseURL
         self.apiKey = apiKey
+        self.log = log
 
         // Unix socket is the default and preferred transport.
         // Only fall back to TCP if explicitly requested (empty socketPath string).
@@ -54,19 +124,32 @@ actor APIClient {
         // so it's safe to register even before the socket file exists.
         if let path = socketPath, path.isEmpty {
             // Explicitly requested TCP-only
-            self.session = SocketTransport.makeTCPSession()
+            self.session = SocketTransport.makeTCPSession(timeout: requestTimeout)
+            self.transportKind = .tcp
         } else {
             // Always use socket-backed session — SocketURLProtocol falls through
             // to standard networking if the socket file doesn't exist yet.
-            self.session = SocketTransport.makeURLSession(socketPath: socketPath)
+            self.session = SocketTransport.makeURLSession(socketPath: socketPath, timeout: requestTimeout)
+            self.transportKind = .unixSocket
         }
     }
 
     /// Create an API client with an explicit URLSession (for testing).
-    init(session: URLSession, baseURL: String = "http://127.0.0.1:8080", apiKey: String? = nil) {
+    ///
+    /// A stubbed session has no transport of its own, so tests state the
+    /// identity they mean to exercise.
+    init(
+        session: URLSession,
+        baseURL: String = "http://127.0.0.1:8080",
+        apiKey: String? = nil,
+        transportKind: TransportKind = .unixSocket,
+        log: @escaping @Sendable (String) -> Void = { NSLog("%@", $0) }
+    ) {
         self.session = session
         self.baseURL = baseURL
         self.apiKey = apiKey
+        self.transportKind = transportKind
+        self.log = log
     }
 
     // MARK: - Health
@@ -87,6 +170,25 @@ actor APIClient {
     /// Fetch server info from `GET /api/v1/info`.
     func info() async throws -> InfoResponse {
         return try await fetchWrapped(path: "/api/v1/info")
+    }
+
+    // MARK: - Clients hub (Spec 109-h)
+
+    /// Presence-only list. The core does not inspect client config contents for
+    /// this request; use `clientPresence(_:)` only after the user expands a row.
+    func clients() async throws -> [ClientPresenceRecord] {
+        let response: ClientsResponse = try await fetchWrapped(path: "/api/v1/clients")
+        return response.clients
+    }
+
+    /// One presence row including recent sessions, fetched on explicit demand.
+    func clientPresence(_ id: String) async throws -> ClientPresenceRecord {
+        try await fetchWrapped(path: "/api/v1/clients/\(id.uriComponentEncoded)")
+    }
+
+    /// The served routing mode, its restart-pending value, and every MCP path.
+    func routing() async throws -> RoutingInfo {
+        try await fetchWrapped(path: "/api/v1/routing")
     }
 
     // MARK: - Docker & Diagnostics
@@ -125,6 +227,20 @@ actor APIClient {
         return try await fetchWrapped(path: "/api/v1/diagnostics")
     }
 
+    /// Fetch the needs-attention list from `GET /api/v1/attention`
+    /// (Spec 109 FR-001): the one list the Web UI Home page, the tray
+    /// "Needs Attention" group and Home section, and the CLI's
+    /// `attention`/`status`/`doctor` commands all read.
+    func attention() async throws -> AttentionResponse {
+        return try await fetchWrapped(path: "/api/v1/attention")
+    }
+
+    func reviewQueue() async throws -> ReviewQueueResponse { try await fetchWrapped(path: "/api/v1/review") }
+    func serverReview(_ name: String) async throws -> ServerReviewResponse { try await fetchWrapped(path: "/api/v1/servers/\(Self.escapePathComponent(name))/review") }
+    func startSecurityScan(_ id: String) async throws { try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/scan") }
+    func discoverServerTools(_ id: String) async throws { try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/discover-tools") }
+    func blockSpecificTools(_ id: String, tools: [String]) async throws { try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/tools/block", body: ["tools": tools]) }
+
     // MARK: - Servers
 
     /// List all upstream servers from `GET /api/v1/servers`.
@@ -133,34 +249,58 @@ actor APIClient {
         return response.servers
     }
 
+    /// Percent-encode one PATH segment.
+    ///
+    /// Server names are only validated against `:` (see
+    /// `internal/config/server_name_validation_test.go`), so `my/server` or
+    /// `my server` are legal names that would otherwise split the path into
+    /// extra segments and 404 — or, worse, address a different route. Every
+    /// `/servers/{id}/…` action the tray menu can fire goes through this.
+    static func escapePathComponent(_ value: String) -> String {
+        let unreserved = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
+    }
+
     /// Enable a server via `POST /api/v1/servers/{id}/enable`.
     func enableServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/enable")
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/enable")
     }
 
     /// Disable a server via `POST /api/v1/servers/{id}/disable`.
     func disableServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/disable")
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/disable")
     }
 
     /// Restart a server via `POST /api/v1/servers/{id}/restart`.
     func restartServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/restart")
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/restart")
     }
 
     /// Trigger OAuth login for a server via `POST /api/v1/servers/{id}/login`.
     func loginServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/login")
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/login")
     }
 
     /// Quarantine a server via `POST /api/v1/servers/{id}/quarantine`.
     func quarantineServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/quarantine")
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/quarantine")
     }
 
-    /// Unquarantine a server via `POST /api/v1/servers/{id}/unquarantine`.
-    func unquarantineServer(_ id: String) async throws {
-        try await postAction(path: "/api/v1/servers/\(id)/unquarantine")
+    /// Approve a quarantined server through the scan gate. This is the only
+    /// native path that may release quarantine. `expectedHashes` (tool name ->
+    /// the review's `current_hash`) binds the approval to the reviewed
+    /// definitions: the core answers 409 "out of date" and approves nothing when
+    /// one changed or an unreviewed tool appeared. Nil sends an unbound request.
+    func securityApproveServer(_ id: String, force: Bool = false, block: [String] = [], expectedHashes: [String: String]? = nil) async throws {
+        var body: [String: Any] = ["force": force, "block": block]
+        if let expectedHashes { body["expected_hashes"] = expectedHashes }
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/security/approve", body: body)
+    }
+
+    /// Reject a quarantined server after reviewing its captured definitions.
+    func securityRejectServer(_ id: String) async throws {
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/security/reject")
     }
 
     /// Approve all pending/changed tools for a server via `POST /api/v1/servers/{id}/tools/approve`.
@@ -209,10 +349,38 @@ actor APIClient {
         )
     }
 
+    /// Every keyring/env secret reference currently configured (masked), via
+    /// `GET /api/v1/secrets/refs`. Used by the Add Server sheet's secret
+    /// toggle (Spec 109 FR-065) as the "taken names" set before computing a
+    /// new `SecretRefName`.
+    func getSecretRefs() async throws -> [SecretRefEntry] {
+        let response: SecretRefsResponse = try await fetchWrapped(path: "/api/v1/secrets/refs")
+        return response.refs
+    }
+
+    /// Keyring capability for add forms. The response has no secret values.
+    func keyringAvailability() async throws -> KeyringAvailability {
+        try await fetchWrapped(path: "/api/v1/secrets/config")
+    }
+
+    /// Delete a keyring secret via `DELETE /api/v1/secrets/{name}?type=keyring`.
+    /// Used to roll back a secret this session's own Add Server flow just
+    /// wrote, when the add itself then fails (FR-065) — never a pre-existing
+    /// entry, since callers only ever pass back a ref they just got from
+    /// `storeSecret`.
+    func deleteSecret(name: String, type: String = "keyring") async throws {
+        try await deleteAction(path: "/api/v1/secrets/\(name.uriComponentEncoded)?type=\(type.uriComponentEncoded)")
+    }
+
     // MARK: - Connect (Client Registration)
 
-    /// Client status model returned by `GET /api/v1/connect`.
-    struct ClientStatus: Codable, Identifiable {
+    /// Client status model returned by `GET /api/v1/connect` (list, existence
+    /// checks only) and `GET /api/v1/connect/{id}` (detail, one on-demand read).
+    ///
+    /// Every spec-091 addition is optional: a core older than this app sends
+    /// none of them, and a list that refuses to decode is a much worse outcome
+    /// than a row rendered with defaults.
+    struct ClientStatus: Codable, Identifiable, Equatable {
         var id: String { clientId }
         let clientId: String
         let name: String
@@ -221,17 +389,80 @@ actor APIClient {
         let connected: Bool
         let supported: Bool
         let reason: String?
+        /// Icon slug from the core registry ("claude-code", "cursor", …) — a
+        /// registry identity, NOT an SF Symbol name; see `symbolName`.
+        let icon: String?
+        /// Entry name under which mcpproxy is registered, when connected.
+        let serverName: String?
+        /// Resolved by the detail read; absent in the content-read-free list.
+        let accessState: ConnectAccessState?
+        /// Actionable fix text, populated only when access is denied.
+        let remediation: String?
+        /// Caveat for a supported client (e.g. a bridge requirement).
+        let note: String?
+        /// Connects through a stdio bridge; connectable without an existing config.
+        let bridge: Bool?
+        /// Every config location the core's existence check consults, highest
+        /// precedence first (e.g. OpenCode's opencode.jsonc then opencode.json).
+        let checkedPaths: [String]?
+        /// `config_path` with the home directory shortened to "~" (Spec 109-b
+        /// FR-037), for display; nil for a core that predates this field.
+        let displayPath: String?
+        /// This client's instruction for making a freshly-written config take
+        /// effect (Spec 109-b FR-037/FR-042), e.g. "Restart Cursor to load
+        /// MCPProxy". Nil for an unsupported client or an older core.
+        let reloadHint: String?
+        /// Spec 108-c (108-k K21): what the client's connection carries. Nil for
+        /// a core that predates client credentials.
+        let credentialState: CredentialState?
 
         enum CodingKeys: String, CodingKey {
+            case credentialState = "credential_state"
             case clientId = "id"
             case name
             case configPath = "config_path"
-            case exists, connected, supported, reason
+            case exists, connected, supported, reason, icon, note, bridge
+            case serverName = "server_name"
+            case accessState = "access_state"
+            case remediation
+            case checkedPaths = "checked_paths"
+            case displayPath = "display_path"
+            case reloadHint = "reload_hint"
+        }
+
+        /// Name to render; a core newer than the app may report a client this
+        /// build never heard of, which still renders by name (FR-009).
+        var displayName: String { name.isEmpty ? clientId : name }
+
+        /// The path to show in the UI: the home-shortened form when the core
+        /// sent one, falling back to the full path for an older core.
+        var effectiveDisplayPath: String { displayPath ?? configPath }
+
+        /// SF Symbol for the row. The core's `icon` is a registry slug, so an
+        /// unknown one — the newer-core case — resolves to the generic symbol
+        /// rather than an empty image.
+        var symbolName: String {
+            switch icon ?? clientId {
+            case "claude-code", "claude-desktop":
+                return "brain"
+            case "cursor":
+                return "cursorarrow.rays"
+            case "vscode", "copilot":
+                return "chevron.left.forwardslash.chevron.right"
+            case "windsurf":
+                return "wind"
+            case "codex", "opencode":
+                return "terminal"
+            case "gemini":
+                return "sparkles"
+            default:
+                return "app.connected.to.app.below.fill"
+            }
         }
     }
 
     /// Result of a connect/disconnect action.
-    struct ConnectResult: Codable {
+    struct ConnectResult: Codable, Equatable {
         let success: Bool
         let client: String?
         let configPath: String?
@@ -239,12 +470,107 @@ actor APIClient {
         let serverName: String?
         let action: String?
         let message: String?
+        /// `config_path` with the home directory shortened to "~" (Spec 109-b
+        /// FR-037). Populated on every branch, not only success; nil for a
+        /// core that predates this field.
+        let displayPath: String?
+        /// This client's instruction for making the write take effect (Spec
+        /// 109-b FR-037/FR-042), e.g. "Restart Cursor to load MCPProxy". Nil
+        /// for an unsupported client or a core that predates this field.
+        let reloadHint: String?
+        /// Spec 108-c2 (108-k K21): the MASKED credential the write embedded
+        /// (`mcp_cli_••••`), never the secret, plus the binding it carries.
+        let credential: String?
+        let tokenName: String?
+        let profile: String?
+        let mode: BindingMode?
+        let keyless: Bool?
+        /// `finalized` when a reconnect replaced an active credential.
+        let rotation: String?
+        /// On an undo: the credential it revoked because the restored config no
+        /// longer holds it (`credential_revoked`).
+        let credentialRevoked: String?
 
         enum CodingKeys: String, CodingKey {
+            case credentialRevoked = "credential_revoked"
             case success, client, action, message
             case configPath = "config_path"
             case backupPath = "backup_path"
             case serverName = "server_name"
+            case displayPath = "display_path"
+            case reloadHint = "reload_hint"
+            case credential, profile, mode, keyless, rotation
+            case tokenName = "token_name"
+        }
+
+        init(
+            success: Bool,
+            client: String? = nil,
+            configPath: String? = nil,
+            backupPath: String? = nil,
+            serverName: String? = nil,
+            action: String? = nil,
+            message: String? = nil,
+            displayPath: String? = nil,
+            reloadHint: String? = nil,
+            credential: String? = nil,
+            tokenName: String? = nil,
+            profile: String? = nil,
+            mode: BindingMode? = nil,
+            keyless: Bool? = nil,
+            rotation: String? = nil,
+            credentialRevoked: String? = nil
+        ) {
+            self.success = success
+            self.client = client
+            self.configPath = configPath
+            self.backupPath = backupPath
+            self.serverName = serverName
+            self.action = action
+            self.message = message
+            self.displayPath = displayPath
+            self.reloadHint = reloadHint
+            self.credential = credential
+            self.tokenName = tokenName
+            self.profile = profile
+            self.mode = mode
+            self.keyless = keyless
+            self.rotation = rotation
+            self.credentialRevoked = credentialRevoked
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            credential = try container.decodeIfPresent(String.self, forKey: .credential)
+            tokenName = try container.decodeIfPresent(String.self, forKey: .tokenName)
+            profile = try container.decodeIfPresent(String.self, forKey: .profile)
+            mode = try container.decodeIfPresent(BindingMode.self, forKey: .mode)
+            keyless = try container.decodeIfPresent(Bool.self, forKey: .keyless)
+            rotation = try container.decodeIfPresent(String.self, forKey: .rotation)
+            credentialRevoked = try container.decodeIfPresent(String.self, forKey: .credentialRevoked)
+            success = try container.decodeIfPresent(Bool.self, forKey: .success) ?? false
+            client = try container.decodeIfPresent(String.self, forKey: .client)
+            configPath = try container.decodeIfPresent(String.self, forKey: .configPath)
+            backupPath = try container.decodeIfPresent(String.self, forKey: .backupPath)
+            serverName = try container.decodeIfPresent(String.self, forKey: .serverName)
+            action = try container.decodeIfPresent(String.self, forKey: .action)
+            message = try container.decodeIfPresent(String.self, forKey: .message)
+            displayPath = try container.decodeIfPresent(String.self, forKey: .displayPath)
+            reloadHint = try container.decodeIfPresent(String.self, forKey: .reloadHint)
+        }
+
+        /// The path to show in the UI: the home-shortened form when the core
+        /// sent one, falling back to the full path for an older core.
+        var effectiveDisplayPath: String? { displayPath ?? configPath }
+
+        /// The CLI's credential line: `Credential: mcp_cli_•••• (token
+        /// client-codex, profile work-ro, locked)`; nil when the write embedded
+        /// no credential (a disconnect, a refusal, a core that predates 108).
+        var credentialLine: String? {
+            if keyless == true { return "Credential: none (keyless)" }
+            guard let credential, !credential.isEmpty else { return nil }
+            let scope = (profile?.isEmpty == false) ? "profile \(profile!)" : "all servers"
+            return "Credential: \(credential) (token \(tokenName ?? ""), \(scope), \(mode?.wire ?? ""))"
         }
     }
 
@@ -277,32 +603,150 @@ actor APIClient {
         return []
     }
 
-    /// Connect MCPProxy to a client via `POST /api/v1/connect/{clientId}`.
-    func connectToClient(_ clientId: String) async throws -> ConnectResult {
-        let data = try await postRaw(path: "/api/v1/connect/\(clientId)")
-        let decoder = JSONDecoder()
-        if let wrapper = try? decoder.decode(APIResponse<ConnectResult>.self, from: data),
-           let payload = wrapper.data {
-            return payload
-        }
-        return try decoder.decode(ConnectResult.self, from: data)
+    // MARK: - Connect (native form surface, Spec 091)
+    //
+    // The preview-less `connectToClient` / `disconnectFromClient` pair that the
+    // legacy dashboard sheet used is deliberately gone (FR-012): the only writes
+    // this app can perform are the token-bound, preview-gated ones below.
+
+    /// One client's authoritative state via `GET /api/v1/connect/{id}` — the
+    /// only Connect read that opens a client config file, so it happens strictly
+    /// on an explicit user selection.
+    func clientDetail(_ clientId: String) async throws -> ClientStatus {
+        let (data, _) = try await performRequest(
+            path: "/api/v1/connect/\(clientId.uriComponentEncoded)", method: "GET")
+        return try decodeConnectPayload(ClientStatus.self, from: data)
     }
 
-    /// Disconnect MCPProxy from a client via `DELETE /api/v1/connect/{clientId}`.
-    func disconnectFromClient(_ clientId: String) async throws -> ConnectResult {
-        let data = try await deleteRaw(path: "/api/v1/connect/\(clientId)")
+    /// The no-write preview via `GET /api/v1/connect/{id}/preview?server_name=…`.
+    /// The entry name is mirrored from what the subsequent write would send, so
+    /// the preview describes exactly the pending change (FR-003).
+    func connectPreview(
+        _ clientId: String,
+        serverName: String = ConnectPreviewModel.defaultServerName
+    ) async throws -> ConnectPreviewModel {
+        let path = "/api/v1/connect/\(clientId.uriComponentEncoded)/preview"
+            + "?server_name=\(serverName.uriComponentEncoded)"
+        let (data, _) = try await performRequest(path: path, method: "GET")
+        return try decodeConnectPayload(ConnectPreviewModel.self, from: data)
+    }
+
+    /// Write the entry via `POST /api/v1/connect/{id}`, echoing the preview's
+    /// precondition token (FR-005). A 409 surfaces as `.connectConflict` with
+    /// the core's own discriminator so the caller can re-preview on drift
+    /// instead of retrying blindly.
+    func connect(
+        _ clientId: String,
+        serverName: String = ConnectPreviewModel.defaultServerName,
+        force: Bool,
+        preconditionToken: String?
+    ) async throws -> ConnectResult {
+        var body: [String: Any] = ["server_name": serverName]
+        if force { body["force"] = true }
+        if let preconditionToken, !preconditionToken.isEmpty {
+            body["precondition_token"] = preconditionToken
+        }
+        return try await mutatingConnectRequest(
+            path: "/api/v1/connect/\(clientId.uriComponentEncoded)", method: "POST", body: body)
+    }
+
+    /// Reverse the connect that produced `backupName` via
+    /// `POST /api/v1/connect/{id}/undo`. A nil backup identity means the connect
+    /// CREATED the file, and undo removes it — the core reads that from the
+    /// field being absent, so an empty string must not be sent instead.
+    func undoConnect(
+        _ clientId: String,
+        serverName: String = ConnectPreviewModel.defaultServerName,
+        backupName: String?
+    ) async throws -> ConnectResult {
+        var body: [String: Any] = ["server_name": serverName]
+        if let backupName, !backupName.isEmpty { body["backup_name"] = backupName }
+        return try await mutatingConnectRequest(
+            path: "/api/v1/connect/\(clientId.uriComponentEncoded)/undo", method: "POST", body: body)
+    }
+
+    /// Remove the entry via `DELETE /api/v1/connect/{id}`.
+    func disconnect(
+        _ clientId: String,
+        serverName: String = ConnectPreviewModel.defaultServerName
+    ) async throws -> ConnectResult {
+        try await mutatingConnectRequest(
+            path: "/api/v1/connect/\(clientId.uriComponentEncoded)",
+            method: "DELETE",
+            body: ["server_name": serverName]
+        )
+    }
+
+    /// Shared shape of the three mutating connect calls: socket-gated, sent in
+    /// strict-socket mode, and 409-aware.
+    private func mutatingConnectRequest(
+        path: String,
+        method: String,
+        body: [String: Any]
+    ) async throws -> ConnectResult {
+        guard transportKind == .unixSocket else { throw APIClientError.socketRequired }
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await rawRequest(
+            path: path, method: method, body: bodyData, strictSocket: true)
+
+        if response.statusCode == http409Conflict {
+            throw connectConflict(from: data)
+        }
+        guard (200...299).contains(response.statusCode) else {
+            throw APIClientError.httpError(
+                statusCode: response.statusCode, message: errorMessage(from: data, response: response))
+        }
+        return try decodeConnectPayload(ConnectResult.self, from: data)
+    }
+
+    private var http409Conflict: Int { 409 }
+
+    /// Build the typed conflict from a 409 body, preferring the typed result's
+    /// `action` (the machine-readable discriminator) over the error string.
+    private func connectConflict(from data: Data) -> APIClientError {
         let decoder = JSONDecoder()
-        if let wrapper = try? decoder.decode(APIResponse<ConnectResult>.self, from: data),
+        let result = (try? decoder.decode(APIResponse<ConnectResult>.self, from: data))?.data
+            ?? (try? decoder.decode(ConnectResult.self, from: data))
+        let errorText = (try? decoder.decode(APIErrorResponse.self, from: data))?.error
+        return .connectConflict(
+            action: result?.action ?? "conflict",
+            message: result?.message ?? errorText ?? "The client configuration changed.",
+            displayPath: result?.displayPath,
+            reloadHint: result?.reloadHint
+        )
+    }
+
+    /// Decode a payload that may or may not be enveloped.
+    private func decodeConnectPayload<T: Decodable>(_ type: T.Type, from data: Data) throws -> T {
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<T>.self, from: data),
            let payload = wrapper.data {
             return payload
         }
-        return try decoder.decode(ConnectResult.self, from: data)
+        do {
+            return try decoder.decode(T.self, from: data)
+        } catch {
+            throw APIClientError.decodingError(underlying: error)
+        }
+    }
+
+    private func errorMessage(from data: Data, response: HTTPURLResponse) -> String {
+        if let body = try? JSONDecoder().decode(APIErrorResponse.self, from: data),
+           let apiError = body.error {
+            return apiError
+        }
+        return HTTPURLResponse.localizedString(forStatusCode: response.statusCode)
     }
 
     // MARK: - Sessions
 
     /// MCP session model from `GET /api/v1/sessions`.
-    struct MCPSession: Codable, Identifiable {
+    ///
+    /// `Equatable` (synthesised — all eleven stored properties are Equatable value
+    /// types) so `AppState.updateGlanceSessions` can guard on the whole value.
+    /// The tray's Clients rows render a live `toolCallCount` and `lastActivity`,
+    /// which an id-only guard would freeze at the first poll's numbers.
+    struct MCPSession: Codable, Identifiable, Equatable {
         var id: String
         let clientName: String?
         let clientVersion: String?
@@ -312,10 +756,30 @@ actor APIClient {
         let toolCallCount: Int?
         let totalTokens: Int?
         let startTime: String?
-        let lastActive: String?
+        /// Timestamp of the session's most recent activity. The API field is
+        /// `last_activity` (Go `contracts.MCPSession.LastActivity`); decoding
+        /// `last_active` silently produced nil for every session.
+        let lastActivity: String?
+        /// Spec 082 work session grouping the reconnects of one stretch of
+        /// work. The Sessions view links a row by this id (Spec 109-k link
+        /// map); a legacy row without one links by its transport `id`.
+        let workSessionId: String?
+        // Spec 108-e attribution (108-k K18): the credential the session
+        // initialized with and its latest effective profile. Empty on legacy
+        // sessions; `var` keeps the memberwise initialiser defaulting them.
+        var clientId: String?
+        var tokenName: String?
+        var profile: String?
+        /// `pin`, `binding`, `url`, `session`, `anonymous`.
+        var profileSource: String?
 
         enum CodingKeys: String, CodingKey {
             case id
+            case clientId = "client_id"
+            case tokenName = "token_name"
+            case profile
+            case profileSource = "profile_source"
+            case workSessionId = "work_session_id"
             case clientName = "client_name"
             case clientVersion = "client_version"
             case status
@@ -324,7 +788,7 @@ actor APIClient {
             case toolCallCount = "tool_call_count"
             case totalTokens = "total_tokens"
             case startTime = "start_time"
-            case lastActive = "last_active"
+            case lastActivity = "last_activity"
         }
     }
 
@@ -341,12 +805,74 @@ actor APIClient {
         return response.sessions
     }
 
+    /// Fetch the retained MCP sessions for the tray glance "Clients" rows —
+    /// every one of them, whatever its status (spec 090 FR-016a).
+    ///
+    /// This used to ask for `status=active` only, which is the wrong question
+    /// for a stateless transport: a session closes after 30 minutes of silence,
+    /// so the filter emptied the section for most of the day. The tray now
+    /// classifies what comes back by time since last activity
+    /// (`GlancePresence`), and it needs the whole retained page to do it: the
+    /// dedupe (one client, many reconnections) and the summary counts run over
+    /// the response, so a truncated page would understate both.
+    ///
+    /// The server orders by `last_activity` descending BEFORE truncating (spec
+    /// 090 FR-016), so the page is the most recently used sessions rather than
+    /// the most recently started ones.
+    func recentSessions(limit: Int = 100) async throws -> [MCPSession] {
+        let response: SessionsResponse = try await fetchWrapped(
+            path: "/api/v1/sessions?limit=\(limit)"
+        )
+        return response.sessions
+    }
+
     // MARK: - Activity
 
     /// Fetch recent activity entries from `GET /api/v1/activity`.
     func recentActivity(limit: Int = 50) async throws -> [ActivityEntry] {
         let response: ActivityListResponse = try await fetchWrapped(path: "/api/v1/activity?limit=\(limit)")
         return response.activities
+    }
+
+    /// Fetch the tray glance activity feed from `GET /api/v1/activity`.
+    ///
+    /// Separate from `recentActivity(limit:)` on purpose: this one carries the
+    /// tool-call `type` filter, while `recentActivity` feeds the native Dashboard,
+    /// which renders the FULL log (security scans, quarantine changes, OAuth).
+    /// The page is deliberately the server's maximum — management built-ins are
+    /// filtered client-side, so a smaller page can be filled entirely by proxy
+    /// admin calls and leave the menu claiming there are no tool calls. The
+    /// endpoint clamps `limit` to 100; see `AppState.glanceActivityPageSize`
+    /// for why the tray takes one deep page rather than paging.
+    ///
+    /// `exclude_payloads=true` is what makes that page affordable. A full record
+    /// carries `arguments`, `response` and `metadata`, none of which the glance
+    /// renders and only one of which is truncated (at 64KB); measured against a
+    /// real activity log, the newest 100 matching records are ~848KB whole and
+    /// ~30KB projected — a 28x saving on a request the tray repeats every 30
+    /// seconds. `recentActivity(limit:)` deliberately does NOT set it: the
+    /// Dashboard renders exactly those fields.
+    ///
+    /// `policy_decision` is in the type filter because a blocked call is the
+    /// proxy doing its job, and it is the one outcome with no other trace in the
+    /// menu: a block never dispatches, so there is no `tool_call` record to
+    /// stand in for it (spec 090 FR-014). Warnings and redactions ride the same
+    /// record type and are rejected later, by `GlanceSelection.qualifies`.
+    func glanceActivity(limit: Int = AppState.glanceActivityPageSize) async throws -> [ActivityEntry] {
+        let response: ActivityListResponse = try await fetchWrapped(
+            path: "/api/v1/activity?type=tool_call,internal_tool_call,policy_decision"
+                + "&limit=\(limit)&exclude_payloads=true"
+        )
+        return response.activities
+    }
+
+    /// Fetch the usage aggregate from `GET /api/v1/activity/usage`.
+    ///
+    /// Served from an in-memory snapshot behind a short TTL cache — never a log
+    /// scan. `top` trims the per-tool rollup the tray does not render; the
+    /// timeline is global and unaffected by it.
+    func usageAggregate(window: String = "24h", top: Int = 1) async throws -> UsageAggregateResponse {
+        return try await fetchWrapped(path: "/api/v1/activity/usage?window=\(window)&top=\(top)")
     }
 
     /// Fetch the activity summary from `GET /api/v1/activity/summary`.
@@ -455,12 +981,105 @@ actor APIClient {
         }
     }
 
+    /// Preview-detect a server from pasted content (URL, command line, or a
+    /// JSON/TOML config) via `POST /api/v1/servers/import/json?preview=true`
+    /// (Spec 109 FR-064). Never performs the import itself — the Paste tab
+    /// calls `applyImportContent` once the user fills in the detected
+    /// fields, which re-parses this same content server-side.
+    func previewImportContent(_ content: String) async throws -> ImportPreviewResponse {
+        // allow_paste_fallback (review round 4 F-E): only the Paste tab may
+        // guess a bare URL or single command line when JSON/TOML detection
+        // fails — every other import surface keeps getting a clear
+        // detection error for a plain one-liner instead of it being
+        // silently guessed at and, on apply, added with no confirmation.
+        let data = try await postRaw(
+            path: "/api/v1/servers/import/json?preview=true",
+            body: ["content": content, "allow_paste_fallback": true]
+        )
+        return try Self.decodeImportPreviewResponse(data)
+    }
+
+    /// Applies (preview=false) the server detected from `content` via
+    /// `POST /api/v1/servers/import/json` (Spec 109 FR-064/065, PR review
+    /// round 4 F-A/F-D fix). The backend re-parses `content` itself and adds
+    /// the server with the TRUE, unredacted url/command/args — the Paste
+    /// tab must never reconstruct the config from a preview response, since
+    /// a credential embedded directly in a URL query param or an argv flag
+    /// is masked there for display (`••••23 (16 chars)`) and baking that
+    /// placeholder into the real config would leave the server permanently
+    /// unable to connect with no way to recover the original secret.
+    /// `envOverride`/`headerOverride` carry the user's SecretToggle edits
+    /// (a plain value, or a keyring ref if they chose Secret) across, since
+    /// those never appeared in the preview at all. `serverName` scopes the
+    /// apply to just the one entry the Paste tab previewed, matching either
+    /// its raw or sanitized name server-side. Deliberately no `format` hint:
+    /// detection is a pure function of content, so re-detecting the
+    /// identical `content` reproduces the exact same format the preview
+    /// already showed — a preview's own format string can be e.g.
+    /// "claude_desktop", which the backend's format-hint parser does not
+    /// accept, so passing it back as a hint would 400 the apply for those
+    /// inputs. Re-detection (allow_paste_fallback) avoids that mismatch.
+    func applyImportContent(
+        _ content: String,
+        serverName: String,
+        envOverride: [String: String] = [:],
+        headerOverride: [String: String] = [:]
+    ) async throws -> ImportPreviewResponse {
+        var body: [String: Any] = ["content": content, "server_names": [serverName], "allow_paste_fallback": true]
+        if !envOverride.isEmpty { body["env_override"] = envOverride }
+        if !headerOverride.isEmpty { body["header_override"] = headerOverride }
+        let data = try await postRaw(path: "/api/v1/servers/import/json", body: body)
+        return try Self.decodeImportPreviewResponse(data)
+    }
+
+    private static func decodeImportPreviewResponse(_ data: Data) throws -> ImportPreviewResponse {
+        let decoder = JSONDecoder()
+
+        if let wrapper = try? decoder.decode(APIResponse<ImportPreviewResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload
+        }
+        if let errorResp = try? decoder.decode(APIErrorResponse.self, from: data),
+           !errorResp.success, let message = errorResp.error {
+            throw APIClientError.httpError(statusCode: 400, message: message)
+        }
+        do {
+            return try decoder.decode(ImportPreviewResponse.self, from: data)
+        } catch {
+            let preview = String(data: data.prefix(200), encoding: .utf8) ?? "binary"
+            throw APIClientError.decodingError(
+                underlying: NSError(domain: "ImportPreviewDecode", code: -1,
+                                    userInfo: [NSLocalizedDescriptionKey: "Cannot decode import preview response: \(preview)"])
+            )
+        }
+    }
+
     // MARK: - Tool Search
 
-    /// Search tools across all servers via `GET /api/v1/tools`.
-    func searchTools(query: String, limit: Int = 20) async throws -> [SearchResult] {
-        let encoded = query.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? query
-        let data = try await fetchRaw(path: "/api/v1/tools?q=\(encoded)&limit=\(limit)")
+    /// Percent-encode one query-string VALUE.
+    ///
+    /// `.urlQueryAllowed` is the wrong set for a value: it deliberately leaves
+    /// `&`, `=`, `+` and `?` intact, so a tool search for "a&limit=1" would
+    /// silently become two parameters, and a `+` in a session id would decode
+    /// as a space. Only unreserved characters survive here.
+    static func escapeQueryValue(_ value: String) -> String {
+        let unreserved = CharacterSet(
+            charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+        return value.addingPercentEncoding(withAllowedCharacters: unreserved) ?? ""
+    }
+
+    /// BM25 search across every upstream tool via `GET /api/v1/index/search`.
+    ///
+    /// This used to call `GET /api/v1/tools?q=…`, which has no `q` parameter:
+    /// it returns the full catalogue under `tools`, while this function reads
+    /// `results` — so every call returned an empty array. Nothing consumed it,
+    /// which is how it stayed broken; `ToolsView` (F16) is the first caller.
+    ///
+    /// Note the REST contract (#871): `tool.name` here is the BARE tool name
+    /// with `server_name` alongside — callers assemble `server:tool` themselves.
+    func searchTools(query: String, limit: Int = 50) async throws -> [SearchResult] {
+        let encoded = Self.escapeQueryValue(query)
+        let data = try await fetchRaw(path: "/api/v1/index/search?q=\(encoded)&limit=\(limit)")
         let decoder = JSONDecoder()
         if let wrapper = try? decoder.decode(APIResponse<SearchToolsResponse>.self, from: data),
            let payload = wrapper.data {
@@ -468,6 +1087,21 @@ actor APIClient {
         }
         if let direct = try? decoder.decode(SearchToolsResponse.self, from: data) {
             return direct.results ?? []
+        }
+        return []
+    }
+
+    /// The whole tool catalogue via `GET /api/v1/tools` — what the Tools view
+    /// shows before anything is typed.
+    func allTools() async throws -> [SearchTool] {
+        let data = try await fetchRaw(path: "/api/v1/tools")
+        let decoder = JSONDecoder()
+        if let wrapper = try? decoder.decode(APIResponse<SearchToolsResponse>.self, from: data),
+           let payload = wrapper.data {
+            return payload.tools ?? []
+        }
+        if let direct = try? decoder.decode(SearchToolsResponse.self, from: data) {
+            return direct.tools ?? []
         }
         return []
     }
@@ -491,9 +1125,12 @@ actor APIClient {
     }
 
     /// Approve specific tools for a server via `POST /api/v1/servers/{id}/tools/approve`.
-    func approveSpecificTools(_ id: String, tools: [String]) async throws {
-        let body: [String: Any] = ["tools": tools]
-        try await postAction(path: "/api/v1/servers/\(id)/tools/approve", body: body)
+    /// `expectedHashes` binds the approval to the reviewed definitions, as on
+    /// `securityApproveServer`.
+    func approveSpecificTools(_ id: String, tools: [String], expectedHashes: [String: String]? = nil) async throws {
+        var body: [String: Any] = ["tools": tools]
+        if let expectedHashes { body["expected_hashes"] = expectedHashes }
+        try await postAction(path: "/api/v1/servers/\(Self.escapePathComponent(id))/tools/approve", body: body)
     }
 
     // MARK: - Generic Endpoints (for views that need raw data access)
@@ -565,7 +1202,10 @@ actor APIClient {
     @discardableResult
     func patchConfig(_ partial: [String: Any]) async throws -> [String: Any] {
         let bodyData = try JSONSerialization.data(withJSONObject: partial)
-        let (data, response) = try await performRequest(path: "/api/v1/config", method: "PATCH", body: bodyData)
+        let (data, response) = try await rawRequest(path: "/api/v1/config", method: "PATCH", body: bodyData)
+        guard (200...299).contains(response.statusCode) else {
+            throw Self.patchConfigError(status: response.statusCode, data: data)
+        }
         let root = (try? JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
         if let success = root["success"] as? Bool, !success {
             let msg = (root["error"] as? String) ?? "Failed to apply configuration"
@@ -574,10 +1214,38 @@ actor APIClient {
         return (root["data"] as? [String: Any]) ?? [:]
     }
 
+    /// The error for a non-2xx `PATCH /config`. A guard refusal (409
+    /// `binding_bypassable_without_auth`) keeps its structured body so Settings
+    /// can render the fixes; everything else is the plain HTTP error.
+    nonisolated static func patchConfigError(status: Int, data: Data) -> APIClientError {
+        if status == 409,
+           let body = try? JSONDecoder().decode(ServiceErrorBody.self, from: data),
+           body.isGuardRefusal {
+            return .service(status: status, body: body)
+        }
+        var message = HTTPURLResponse.localizedString(forStatusCode: status)
+        if let errorBody = try? JSONDecoder().decode(APIErrorResponse.self, from: data),
+           let apiError = errorBody.error {
+            message = apiError
+        }
+        return .httpError(statusCode: status, message: message)
+    }
+
     // MARK: - Private Helpers
 
+    /// Detects the standard response envelope without caring about its payload.
+    ///
+    /// It answers "does this body carry a `success` field", not "is this body an
+    /// envelope": a bare payload that happens to have its own `success` field
+    /// probes as enveloped. That misclassification is reachable and harmless —
+    /// it only chooses which of two decoding errors is reported in a diagnostic
+    /// string, on a path where the body has already failed to decode both ways.
+    private struct EnvelopeProbe: Decodable {
+        let success: Bool
+    }
+
     /// Fetch a resource wrapped in the standard `APIResponse` envelope.
-    private func fetchWrapped<T: Decodable>(path: String) async throws -> T {
+    func fetchWrapped<T: Decodable>(path: String) async throws -> T {
         let (data, _) = try await performRequest(path: path, method: "GET")
         let decoder = JSONDecoder()
         do {
@@ -588,12 +1256,20 @@ actor APIClient {
             throw APIClientError.httpError(statusCode: 200, message: wrapper.error ?? "Unknown error")
         } catch let error as APIClientError {
             throw error
-        } catch {
+        } catch let envelopeError {
             // Try decoding directly without the wrapper (some endpoints don't wrap)
             do {
                 return try decoder.decode(T.self, from: data)
-            } catch {
-                throw APIClientError.decodingError(underlying: error)
+            } catch let bareError {
+                // Both decodes failed, so one of the two errors is noise. For an
+                // enveloped body the envelope error describes the real problem
+                // inside `data` (a model's own throwing decoder, say), and the
+                // fallback only re-fails because T's keys are one level down —
+                // reporting that would mask the cause. For a genuinely unwrapped
+                // body it is the other way round, which is the pre-existing
+                // behaviour and stays untouched.
+                let isEnveloped = (try? decoder.decode(EnvelopeProbe.self, from: data)) != nil
+                throw APIClientError.decodingError(underlying: isEnveloped ? envelopeError : bareError)
             }
         }
     }
@@ -618,14 +1294,51 @@ actor APIClient {
         return data
     }
 
+    // MARK: - Update-failure recording (Spec 095)
+
+    /// Record one update-failure occurrence with the core.
+    ///
+    /// Bounded fire-and-forget (FR-010): one attempt, no retry, no user-visible
+    /// consequence. Every failure mode is treated identically — an older core
+    /// answering 404, a 500, a socket that is not there — because there is
+    /// nothing useful to do about any of them and the dialog must not be
+    /// affected by whether a counter got incremented (FR-016).
+    func recordUpdateFailure(stage: UpdateFailureStage) async {
+        let body = Data(#"{"stage":"\#(stage.rawValue)"}"#.utf8)
+        do {
+            let status = try await statusOnlyRequest(
+                path: "/api/v1/telemetry/update-failure", method: "POST", body: body
+            )
+            guard (200...299).contains(status) else {
+                log("[MCPProxy] update-failure not recorded: stage=\(stage.rawValue) status=\(status)")
+                return
+            }
+        } catch let error as URLError {
+            log("[MCPProxy] update-failure not recorded: stage=\(stage.rawValue) urlerror=\(error.errorCode)")
+        } catch {
+            log("[MCPProxy] update-failure not recorded: stage=\(stage.rawValue) error=\(type(of: error))")
+        }
+    }
+
+    /// Send a request and read ONLY the HTTP status.
+    ///
+    /// Deliberately not `performRequest`/`postAction`: both decode the response
+    /// body to build an error message, and FR-016 forbids depending on anything
+    /// an older core might put there. The body is dropped unread.
+    private func statusOnlyRequest(path: String, method: String, body: Data?) async throws -> Int {
+        let (_, response) = try await rawRequest(path: path, method: method, body: body)
+        return response.statusCode
+    }
+
     /// Low-level request execution WITHOUT HTTP status validation. Returns the
     /// raw body and response for any status. Callers that need to inspect error
     /// bodies (e.g. the registry add-source flow, which reads a stable `code`)
     /// use this directly; most callers use `performRequest`, which validates.
-    private func rawRequest(
+    func rawRequest(
         path: String,
         method: String,
-        body: Data? = nil
+        body: Data? = nil,
+        strictSocket: Bool = false
     ) async throws -> (Data, HTTPURLResponse) {
         guard let url = URL(string: baseURL + path) else {
             throw APIClientError.invalidURL(baseURL + path)
@@ -634,6 +1347,13 @@ actor APIClient {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        // Administrative writes must never fall back to TCP if the socket
+        // disappears mid-session (research D6); the transport strips this hint
+        // before anything goes on the wire.
+        if strictSocket {
+            request.setValue("1", forHTTPHeaderField: SocketURLProtocol.strictSocketHeader)
+        }
 
         // Spec 042: telemetry surface header so the daemon can attribute
         // requests to the macOS tray for the surface_requests counter.
@@ -660,7 +1380,7 @@ actor APIClient {
     }
 
     /// Low-level request execution with HTTP status validation.
-    private func performRequest(
+    func performRequest(
         path: String,
         method: String,
         body: Data? = nil
@@ -813,7 +1533,10 @@ actor APIClient {
         do {
             let bodyData = try JSONSerialization.data(withJSONObject: body)
             let (data, response) = try await rawRequest(path: path, method: "POST", body: bodyData)
-            if (200...299).contains(response.statusCode) { return .ok() }
+            if (200...299).contains(response.statusCode) {
+                let body = try? JSONDecoder().decode(RegistryAddServerSuccessBody.self, from: data)
+                return .ok(serverName: body?.data?.server?.name)
+            }
             let err = try? JSONDecoder().decode(RegistryAddServerErrorBody.self, from: data)
             return .failure(
                 message: err?.message ?? "HTTP \(response.statusCode): \(HTTPURLResponse.localizedString(forStatusCode: response.statusCode))",
@@ -822,5 +1545,17 @@ actor APIClient {
         } catch {
             return .failure(message: error.localizedDescription)
         }
+    }
+
+    /// Search the catalog across every enabled source (Spec 109 FR-060) via
+    /// `GET /api/v1/catalog/search?q=&source=&tag=&limit=`. `source` narrows
+    /// to one catalog source id; omit for "every enabled source at once".
+    func searchCatalog(query: String = "", source: String? = nil, tag: String? = nil, limit: Int = 20) async throws -> CatalogSearchResponse {
+        var params: [String] = ["limit=\(limit)"]
+        if !query.isEmpty { params.append("q=\(query.uriComponentEncoded)") }
+        if let source, !source.isEmpty { params.append("source=\(source.uriComponentEncoded)") }
+        if let tag, !tag.isEmpty { params.append("tag=\(tag.uriComponentEncoded)") }
+        let path = "/api/v1/catalog/search?\(params.joined(separator: "&"))"
+        return try await fetchWrapped(path: path)
     }
 }

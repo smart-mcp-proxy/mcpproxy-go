@@ -30,7 +30,17 @@ final class AutoStartTests: XCTestCase {
     func testFirstRunFlagRoundTrip() {
         let suite = "MCPProxyTests.AutoStartTests.firstRun"
         let defaults = UserDefaults(suiteName: suite)!
-        defer { defaults.removeSuite(named: suite) }
+
+        // removeSuite() only drops the suite from THIS instance's search list — it
+        // does not erase the persisted domain, so the `true` written below survived
+        // on disk and the next run of this test saw a "fresh" suite that already
+        // reported firstRunCompleted=true. Purge the domain on both ends instead,
+        // so the test is hermetic no matter what earlier runs left behind.
+        defaults.removePersistentDomain(forName: suite)
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suite)
+            defaults.removeSuite(named: suite)
+        }
 
         // Fresh domain → not completed.
         XCTAssertFalse(defaults.bool(forKey: firstRunCompletedKey),

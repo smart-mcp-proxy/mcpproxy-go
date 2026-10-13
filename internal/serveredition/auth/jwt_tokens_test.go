@@ -65,7 +65,7 @@ func TestGenerateBearerToken_Claims(t *testing.T) {
 	}
 	// Expiry should be approximately 2 hours from now
 	expectedExpiry := time.Now().UTC().Add(2 * time.Hour)
-	diff := claims.ExpiresAt.Time.Sub(expectedExpiry)
+	diff := claims.ExpiresAt.Sub(expectedExpiry)
 	if diff < -5*time.Second || diff > 5*time.Second {
 		t.Errorf("expiry differs from expected by %v", diff)
 	}

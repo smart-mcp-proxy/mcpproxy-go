@@ -11,10 +11,32 @@ import (
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
+	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 )
+
+// doctorUpdateActionLine renders the guided-update action for the /api/v1/info
+// update object (Spec 079 US2, FR-009): the channel's exact one-line command
+// when one exists, the channel-appropriate guidance otherwise, or "" when the
+// daemon reported no install channel (older daemons). The release URL is
+// already printed on the Download line, so guidance uses the generic
+// "releases page" wording.
+func doctorUpdateActionLine(updateInfo map[string]interface{}) string {
+	if cmd := getStringField(updateInfo, "update_command"); cmd != "" {
+		return "Run: " + cmd
+	}
+	channel := getStringField(updateInfo, "install_channel")
+	if channel == "" {
+		return ""
+	}
+	if guidance := updatecheck.GuidanceLine(channel, ""); guidance != "" {
+		return "Update: " + guidance
+	}
+	return ""
+}
 
 var (
 	doctorCmd = &cobra.Command{
@@ -53,15 +75,26 @@ func GetDoctorCommand() *cobra.Command {
 }
 
 func init() {
-	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "pretty", "Output format (pretty, json)")
+	doctorCmd.Flags().StringVarP(&doctorOutput, "output", "o", "pretty", "Output format (pretty, json, yaml)")
 	doctorCmd.Flags().StringVarP(&doctorLogLevel, "log-level", "l", "warn", "Log level")
-	doctorCmd.Flags().StringVarP(&doctorConfigPath, "config", "c", "", "Path to config file")
+	addConfigFlag(doctorCmd.Flags(), &doctorConfigPath, "Path to config file")
 	doctorCmd.Flags().StringVar(&doctorServerFilter, "server", "", "Limit health checks to a single upstream server (by name)")
 }
 
-func runDoctor(_ *cobra.Command, _ []string) error {
+func runDoctor(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+
+	// The local -o shadows the root -o/--json; honour the global ones when
+	// doctor's own flag was not given.
+	if !cmd.Flags().Changed("output") {
+		switch {
+		case globalJSONOutput:
+			doctorOutput = "json"
+		case globalOutputFormat != "" && globalOutputFormat != "table":
+			doctorOutput = globalOutputFormat
+		}
+	}
 
 	// Load configuration
 	globalConfig, err := loadDoctorConfig()
@@ -70,6 +103,9 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
+	doctorSecretLiterals = []string{globalConfig.APIKey}
+	defer func() { doctorSecretLiterals = nil }()
+
 	// Create logger
 	logger, err := createDoctorLogger(doctorLogLevel)
 	if err != nil {
@@ -77,18 +113,14 @@ func runDoctor(_ *cobra.Command, _ []string) error {
 		return err
 	}
 
-	// Check if daemon is running
-	if !shouldUseDoctorDaemon(globalConfig.DataDir) {
+	// Check if daemon is running (socket first, then TCP fallback)
+	client, ok := newDaemonClient(globalConfig, logger.Sugar())
+	if !ok {
 		return fmt.Errorf("doctor requires running daemon. Start with: mcpproxy serve")
 	}
 
 	logger.Info("Fetching diagnostics from daemon")
-	return runDoctorClientMode(ctx, globalConfig.DataDir, logger)
-}
-
-func shouldUseDoctorDaemon(dataDir string) bool {
-	socketPath := socket.DetectSocketPath(dataDir)
-	return socket.IsSocketAvailable(socketPath)
+	return runDoctorClientMode(ctx, client, logger)
 }
 
 // quarantineServerStats holds quarantine stats for a single server.
@@ -98,10 +130,7 @@ type quarantineServerStats struct {
 	ChangedCount int
 }
 
-func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger) error {
-	socketPath := socket.DetectSocketPath(dataDir)
-	client := cliclient.NewClient(socketPath, logger.Sugar())
-
+func runDoctorClientMode(ctx context.Context, client *cliclient.Client, logger *zap.Logger) error {
 	// Call GET /api/v1/info with refresh=true to get fresh update info
 	info, err := client.GetInfoWithRefresh(ctx, true)
 	if err != nil {
@@ -113,6 +142,15 @@ func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger
 	diag, err := client.GetDiagnostics(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get diagnostics from daemon: %w", err)
+	}
+
+	// Spec 109 FR-004: doctor's first section is the one needs-attention list
+	// every surface reads (FR-001). Non-fatal: an older or unreachable
+	// endpoint just omits the section rather than failing the whole command.
+	attention, attErr := client.GetAttention(ctx)
+	if attErr != nil {
+		logger.Debug("Failed to get attention list from daemon", zap.Error(attErr))
+		attention = nil
 	}
 
 	// Collect quarantine stats from servers
@@ -143,9 +181,33 @@ func runDoctorClientMode(ctx context.Context, dataDir string, logger *zap.Logger
 	if doctorServerFilter != "" {
 		diag = filterDiagnosticsByServer(diag, doctorServerFilter)
 		quarantineStats = filterQuarantineStatsByServer(quarantineStats, doctorServerFilter)
+		attention = filterAttentionByServer(attention, doctorServerFilter)
 	}
 
-	return outputDiagnostics(diag, info, quarantineStats, envHint)
+	// Spec 108-g: profile/client checks derived from GET /clients warnings.
+	// Instance-level, so skipped when the run is scoped to one server.
+	var profileChecks []profileCheck
+	if doctorServerFilter == "" {
+		profileChecks = collectProfileChecks(client)
+	}
+
+	return outputDiagnosticsWithProfileChecks(diag, info, quarantineStats, envHint, attention, profileChecks)
+}
+
+// filterAttentionByServer narrows an attention response to the items whose
+// subject is the requested server. A single-server doctor run is not
+// interested in another server's attention items, or in client items at all.
+func filterAttentionByServer(resp *cliclient.AttentionResponse, serverName string) *cliclient.AttentionResponse {
+	if resp == nil {
+		return nil
+	}
+	items := make([]contracts.AttentionItem, 0, len(resp.Items))
+	for _, it := range resp.Items {
+		if it.Subject.Type == "server" && it.Subject.ID == serverName {
+			items = append(items, it)
+		}
+	}
+	return &cliclient.AttentionResponse{Count: len(items), GeneratedAt: resp.GeneratedAt, Items: items}
 }
 
 // filterDiagnosticsByServer returns a shallow copy of the diagnostics
@@ -258,9 +320,43 @@ func collectQuarantineStats(ctx context.Context, client *cliclient.Client, logge
 	return stats
 }
 
-func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats, envHint string) error {
+// printDoctorAttentionSection prints doctor's first section (FR-004): the
+// same needs-attention list FR-001 computes, rendered identically to
+// `mcpproxy attention`'s table rows. nil (endpoint unreachable, e.g. an
+// older daemon) prints nothing — the diagnostics sections below still run.
+func printDoctorAttentionSection(attention *cliclient.AttentionResponse) {
+	if attention == nil {
+		return
+	}
+	fmt.Printf("📋 Needs attention (%d)\n", attention.Count)
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	if attention.Count == 0 {
+		fmt.Println("All clear")
+	} else {
+		for _, item := range attention.Items {
+			fmt.Printf("  [%s] %s (%s)\n", item.Kind, item.Summary, item.Fix.Label)
+		}
+	}
+	fmt.Println()
+}
+
+func outputDiagnostics(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats, envHint string, attention *cliclient.AttentionResponse) error {
+	return outputDiagnosticsWithProfileChecks(diag, info, quarantineStats, envHint, attention, nil)
+}
+
+func outputDiagnosticsWithProfileChecks(diag map[string]interface{}, info map[string]interface{}, quarantineStats []quarantineServerStats, envHint string, attention *cliclient.AttentionResponse, profileChecks []profileCheck) error {
+	// The one funnel for every doctor format: credentials (the keyed
+	// web_ui_url from GET /api/v1/info, tokens in upstream error messages, the
+	// admin key itself) never reach stdout. The report is made to be shared.
+	diag = redactDoctorMap(diag)
+	info = redactDoctorMap(info)
+	envHint = redactDoctorString(envHint)
+	attention = redactDoctorTyped(attention)
+	profileChecks = redactDoctorTyped(profileChecks)
+	quarantineStats = redactDoctorTyped(quarantineStats)
+
 	switch doctorOutput {
-	case "json":
+	case "json", "yaml":
 		// Combine diagnostics with info for JSON output
 		combined := map[string]interface{}{
 			"diagnostics": diag,
@@ -273,6 +369,24 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		}
 		if envHint != "" {
 			combined["environment_warnings"] = []string{envHint}
+		}
+		if attention != nil {
+			combined["attention"] = attention
+		}
+		if profileChecks != nil {
+			combined["profile_checks"] = profileChecks
+		}
+		if doctorOutput == "yaml" {
+			formatter, err := clioutput.NewFormatter("yaml")
+			if err != nil {
+				return err
+			}
+			output, err := formatter.Format(combined)
+			if err != nil {
+				return fmt.Errorf("failed to format output: %w", err)
+			}
+			fmt.Print(output)
+			return nil
 		}
 		output, err := json.MarshalIndent(combined, "", "  ")
 		if err != nil {
@@ -298,9 +412,20 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 					releaseURL := getStringField(updateInfo, "release_url")
 
 					if updateAvailable && latestVersion != "" {
-						fmt.Printf("Version: %s (update available: %s)\n", version, latestVersion)
+						// Spec 079 FR-002: the same daemon-rendered delta
+						// clause status prints, so the two surfaces cannot
+						// word it differently. Absent from an older daemon.
+						behind := ""
+						if b := getStringField(updateInfo, "behind_summary"); b != "" {
+							behind = ", " + b
+						}
+						fmt.Printf("Version: %s (update available: %s%s)\n", version, latestVersion, behind)
 						if releaseURL != "" {
 							fmt.Printf("Download: %s\n", releaseURL)
+						}
+						// Spec 079 US2 (FR-009): channel-aware guided update.
+						if action := doctorUpdateActionLine(updateInfo); action != "" {
+							fmt.Println(action)
 						}
 					} else {
 						fmt.Printf("Version: %s (latest)\n", version)
@@ -312,7 +437,18 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		}
 		fmt.Println()
 
-		if totalIssues == 0 {
+		// Spec 109 FR-004: doctor's first section, from the same GET
+		// /attention every other surface reads (FR-001/FR-003).
+		printDoctorAttentionSection(attention)
+		printProfileChecksSection(profileChecks)
+
+		// Fix review finding: the "all clear" verdict must also require the
+		// FR-001 attention list (a separate counter from `total_issues`) to
+		// be empty, or a quarantined server / tool awaiting review with no
+		// other diagnostics findings prints two contradicting verdicts back
+		// to back — exactly what FR-004 exists to prevent.
+		attentionClear := (attention == nil || attention.Count == 0) && !profileChecksWarn(profileChecks)
+		if totalIssues == 0 && attentionClear {
 			fmt.Println("✅ All systems operational! No issues detected.")
 			fmt.Println()
 
@@ -335,12 +471,10 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 			return nil
 		}
 
-		// Show issue summary
-		issueWord := "issue"
-		if totalIssues > 1 {
-			issueWord = "issues"
-		}
-		fmt.Printf("⚠️  Found %d %s that need attention\n", totalIssues, issueWord)
+		// Show issue summary. FR-004: "need attention" refers only to the
+		// FR-001 attention count above; the diagnostics count below is a
+		// different, separately named number.
+		fmt.Printf("Diagnostics: %d findings\n", totalIssues)
 		fmt.Println()
 
 		// 1. Upstream Connection Errors
@@ -504,16 +638,15 @@ func outputDiagnostics(diag map[string]interface{}, info map[string]interface{},
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 		displaySecurityFeaturesStatus()
 		fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	default:
+		return fmt.Errorf("unsupported output format %q for doctor (pretty, json, yaml)", doctorOutput)
 	}
 
 	return nil
 }
 
 func loadDoctorConfig() (*config.Config, error) {
-	if doctorConfigPath != "" {
-		return config.LoadFromFile(doctorConfigPath)
-	}
-	return config.Load()
+	return loadCLIConfig(doctorConfigPath)
 }
 
 func createDoctorLogger(level string) (*zap.Logger, error) {
@@ -596,7 +729,11 @@ func displaySecurityFeaturesStatus() {
 	if routingMode == "" {
 		routingMode = config.RoutingModeRetrieveTools
 	}
-	fmt.Printf("  Routing Mode: %s\n", routingMode)
+	// Labelled "configured" on purpose: this function reads the config FILE, and
+	// /mcp binds its routing mode at startup — a mode saved but not yet adopted
+	// (or hand-edited into the file) is not what a running daemon is serving.
+	// `mcpproxy status` asks the daemon and reports the served one.
+	fmt.Printf("  Routing Mode (configured): %s\n", routingMode)
 	switch routingMode {
 	case config.RoutingModeDirect:
 		fmt.Println("    All upstream tools exposed directly via /mcp endpoint")
@@ -606,6 +743,7 @@ func displaySecurityFeaturesStatus() {
 		fmt.Println("    BM25 search via retrieve_tools + call_tool variants")
 	}
 	fmt.Printf("    Endpoints: /mcp/all (direct), /mcp/code (code_execution), /mcp/call (retrieve_tools)\n")
+	fmt.Println("    A running daemon keeps serving the mode it started with — `mcpproxy status` reports that one")
 	fmt.Println()
 
 	// Sensitive Data Detection status

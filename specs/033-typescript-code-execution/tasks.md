@@ -1,5 +1,14 @@
 # Tasks: TypeScript Code Execution Support
 
+> **Status: COMPLETE / GA (2026-06-24, MCP-38).** All 19 tasks implemented and
+> verified: esbuild `LoaderTS` transpiler in `internal/jsruntime/typescript.go`
+> (+`typescript_test.go`, passing), `Language` option threaded through the MCP
+> tool (`internal/server/mcp_code_execution.go`), REST `/api/v1/code/exec`
+> (+`internal/httpapi/code_exec_test.go`), and CLI `code exec --language`.
+> Acceptance US1.1 verified live: `code exec --language typescript --code 'const
+> x: number = 42; ({ result: x })'` → `{ ok: true, value: { result: 42 } }`.
+> Cookbook + benchmarks published in `docs/code_execution/cookbook.md`.
+
 **Input**: Design documents from `/specs/033-typescript-code-execution/`
 **Prerequisites**: plan.md (required), spec.md (required for user stories), research.md, data-model.md, contracts/
 
@@ -17,9 +26,9 @@
 
 **Purpose**: Add esbuild dependency and foundational types
 
-- [ ] T001 Add esbuild dependency by running `go get github.com/evanw/esbuild` and verify `go.mod` / `go.sum` are updated
-- [ ] T002 Add `ErrorCodeTranspileError` error code constant to `internal/jsruntime/errors.go`
-- [ ] T003 Add `Language` field (string, default "javascript") to `ExecutionOptions` struct in `internal/jsruntime/runtime.go`
+- [x] T001 Add esbuild dependency by running `go get github.com/evanw/esbuild` and verify `go.mod` / `go.sum` are updated
+- [x] T002 Add `ErrorCodeTranspileError` error code constant to `internal/jsruntime/errors.go`
+- [x] T003 Add `Language` field (string, default "javascript") to `ExecutionOptions` struct in `internal/jsruntime/runtime.go`
 
 ---
 
@@ -27,10 +36,10 @@
 
 **Purpose**: Core transpilation layer that ALL user stories depend on
 
-- [ ] T004 Create `internal/jsruntime/typescript.go` with `TranspileTypeScript(code string) (string, error)` function using esbuild `api.Transform()` with `Loader: api.LoaderTS`. Return transpiled JS code on success; return `*JsError` with `ErrorCodeTranspileError` on failure, including line/column from esbuild error messages.
-- [ ] T005 Create `internal/jsruntime/typescript_test.go` with unit tests: (a) basic type annotation stripping, (b) interfaces removed, (c) generics removed, (d) enums produce valid JS, (e) namespaces produce valid JS, (f) plain JavaScript passes through unchanged, (g) invalid TypeScript returns error with line/column, (h) empty code input, (i) performance benchmark `BenchmarkTranspileTypeScript` verifying <5ms for 10KB code
-- [ ] T006 Modify `Execute()` function in `internal/jsruntime/runtime.go` to check `opts.Language`: if `"typescript"`, call `TranspileTypeScript(code)` before passing to `executeWithVM()`. If transpilation fails, return the transpile error. If `"javascript"` or empty, execute as before (no transpilation). If unsupported language value, return error with code `INVALID_ARGS` listing valid options.
-- [ ] T007 Add TypeScript execution tests to `internal/jsruntime/runtime_test.go`: (a) TypeScript code with types executes correctly via `Execute()`, (b) JavaScript code with `Language: "javascript"` works unchanged, (c) empty `Language` defaults to JavaScript, (d) invalid language returns error, (e) TypeScript with `call_tool()` works, (f) TypeScript transpilation error returns `TRANSPILE_ERROR` code, (g) transpilation overhead is logged
+- [x] T004 Create `internal/jsruntime/typescript.go` with `TranspileTypeScript(code string) (string, error)` function using esbuild `api.Transform()` with `Loader: api.LoaderTS`. Return transpiled JS code on success; return `*JsError` with `ErrorCodeTranspileError` on failure, including line/column from esbuild error messages.
+- [x] T005 Create `internal/jsruntime/typescript_test.go` with unit tests: (a) basic type annotation stripping, (b) interfaces removed, (c) generics removed, (d) enums produce valid JS, (e) namespaces produce valid JS, (f) plain JavaScript passes through unchanged, (g) invalid TypeScript returns error with line/column, (h) empty code input, (i) performance benchmark `BenchmarkTranspileTypeScript` verifying <5ms for 10KB code
+- [x] T006 Modify `Execute()` function in `internal/jsruntime/runtime.go` to check `opts.Language`: if `"typescript"`, call `TranspileTypeScript(code)` before passing to `executeWithVM()`. If transpilation fails, return the transpile error. If `"javascript"` or empty, execute as before (no transpilation). If unsupported language value, return error with code `INVALID_ARGS` listing valid options.
+- [x] T007 Add TypeScript execution tests to `internal/jsruntime/runtime_test.go`: (a) TypeScript code with types executes correctly via `Execute()`, (b) JavaScript code with `Language: "javascript"` works unchanged, (c) empty `Language` defaults to JavaScript, (d) invalid language returns error, (e) TypeScript with `call_tool()` works, (f) TypeScript transpilation error returns `TRANSPILE_ERROR` code, (g) transpilation overhead is logged
 
 **Checkpoint**: Transpilation layer is complete and tested. All user stories can now proceed.
 
@@ -44,12 +53,12 @@
 
 ### Tests for User Story 1
 
-- [ ] T008 [P] [US1] Add test cases to `internal/server/mcp_code_execution_test.go`: (a) TypeScript code with `language: "typescript"` executes correctly, (b) JavaScript code without language parameter works unchanged, (c) invalid language returns error, (d) TypeScript transpilation error returns proper MCP error format, (e) language parameter is passed through to activity log
+- [x] T008 [P] [US1] Add test cases to `internal/server/mcp_code_execution_test.go`: (a) TypeScript code with `language: "typescript"` executes correctly, (b) JavaScript code without language parameter works unchanged, (c) invalid language returns error, (d) TypeScript transpilation error returns proper MCP error format, (e) language parameter is passed through to activity log
 
 ### Implementation for User Story 1
 
-- [ ] T009 [US1] Add `language` string parameter to the `code_execution` tool schema in `internal/server/mcp.go` (around line 450) using `mcp.WithString("language", mcp.Description("..."), mcp.Enum("javascript", "typescript"))` with description from contracts/mcp-tool-schema.md. Update the tool description to mention TypeScript support.
-- [ ] T010 [US1] Modify `handleCodeExecution()` in `internal/server/mcp_code_execution.go` to: (a) parse `language` from `request.GetArguments()` with default `"javascript"`, (b) set `options.Language` before calling `jsruntime.Execute()`, (c) log the language used alongside existing execution logging, (d) include `language` in the activity record arguments map
+- [x] T009 [US1] Add `language` string parameter to the `code_execution` tool schema in `internal/server/mcp.go` (around line 450) using `mcp.WithString("language", mcp.Description("..."), mcp.Enum("javascript", "typescript"))` with description from contracts/mcp-tool-schema.md. Update the tool description to mention TypeScript support.
+- [x] T010 [US1] Modify `handleCodeExecution()` in `internal/server/mcp_code_execution.go` to: (a) parse `language` from `request.GetArguments()` with default `"javascript"`, (b) set `options.Language` before calling `jsruntime.Execute()`, (c) log the language used alongside existing execution logging, (d) include `language` in the activity record arguments map
 
 **Checkpoint**: TypeScript execution works via MCP tool. AI agents can use `language: "typescript"`.
 
@@ -63,12 +72,12 @@
 
 ### Tests for User Story 2
 
-- [ ] T011 [P] [US2] Add test cases to `internal/httpapi/code_exec_test.go`: (a) TypeScript code with `language: "typescript"` returns successful result, (b) request without `language` field defaults to JavaScript, (c) invalid language returns `INVALID_LANGUAGE` error, (d) TypeScript transpilation error returns proper error response
+- [x] T011 [P] [US2] Add test cases to `internal/httpapi/code_exec_test.go`: (a) TypeScript code with `language: "typescript"` returns successful result, (b) request without `language` field defaults to JavaScript, (c) invalid language returns `INVALID_LANGUAGE` error, (d) TypeScript transpilation error returns proper error response
 
 ### Implementation for User Story 2
 
-- [ ] T012 [US2] Add `Language` field (`json:"language"`) to `CodeExecRequest` struct in `internal/httpapi/code_exec.go`
-- [ ] T013 [US2] Modify `ServeHTTP()` in `internal/httpapi/code_exec.go` to: (a) pass `req.Language` in the `args` map as `"language"` key when calling `h.toolCaller.CallTool()`, (b) validate language if non-empty (must be "javascript" or "typescript"), returning `INVALID_LANGUAGE` error for unsupported values
+- [x] T012 [US2] Add `Language` field (`json:"language"`) to `CodeExecRequest` struct in `internal/httpapi/code_exec.go`
+- [x] T013 [US2] Modify `ServeHTTP()` in `internal/httpapi/code_exec.go` to: (a) pass `req.Language` in the `args` map as `"language"` key when calling `h.toolCaller.CallTool()`, (b) validate language if non-empty (must be "javascript" or "typescript"), returning `INVALID_LANGUAGE` error for unsupported values
 
 **Checkpoint**: TypeScript execution works via REST API. Integrations and automation tools can use `language: "typescript"`.
 
@@ -82,8 +91,8 @@
 
 ### Implementation for User Story 3
 
-- [ ] T014 [US3] Add `--language` flag (string, default "javascript") to `codeExecCmd` in `cmd/mcpproxy/code_cmd.go` using `codeExecCmd.Flags().StringVar()`. Add validation in `validateOptions()` to reject unsupported language values.
-- [ ] T015 [US3] Pass the language flag value in the `args` map in both `runCodeExecStandalone()` and `runCodeExecClientMode()` functions in `cmd/mcpproxy/code_cmd.go`. Update the command description and examples to include TypeScript usage.
+- [x] T014 [US3] Add `--language` flag (string, default "javascript") to `codeExecCmd` in `cmd/mcpproxy/code_cmd.go` using `codeExecCmd.Flags().StringVar()`. Add validation in `validateOptions()` to reject unsupported language values.
+- [x] T015 [US3] Pass the language flag value in the `args` map in both `runCodeExecStandalone()` and `runCodeExecClientMode()` functions in `cmd/mcpproxy/code_cmd.go`. Update the command description and examples to include TypeScript usage.
 
 **Checkpoint**: TypeScript execution works via CLI. Developers can test TypeScript code locally.
 
@@ -93,10 +102,10 @@
 
 **Purpose**: Documentation, backward compatibility verification, and build validation
 
-- [ ] T016 [P] Update `docs/code_execution/overview.md` to document TypeScript support: what it is, how to use it, language parameter, limitations (type-stripping only, no type checking)
-- [ ] T017 [P] Update `docs/code_execution/api-reference.md` to document the `language` parameter in the MCP tool schema and REST API request body
-- [ ] T018 Verify full build succeeds: `go build ./cmd/mcpproxy` (personal edition) and `go build -tags server ./cmd/mcpproxy` (server edition)
-- [ ] T019 Run complete test suite: `go test ./internal/jsruntime/... -v -race && go test ./internal/server/... -v -race && go test ./internal/httpapi/... -v -race`
+- [x] T016 [P] Update `docs/code_execution/overview.md` to document TypeScript support: what it is, how to use it, language parameter, limitations (type-stripping only, no type checking)
+- [x] T017 [P] Update `docs/code_execution/api-reference.md` to document the `language` parameter in the MCP tool schema and REST API request body
+- [x] T018 Verify full build succeeds: `go build ./cmd/mcpproxy` (personal edition) and `go build -tags server ./cmd/mcpproxy` (server edition)
+- [x] T019 Run complete test suite: `go test ./internal/jsruntime/... -v -race && go test ./internal/server/... -v -race && go test ./internal/httpapi/... -v -race`
 
 ---
 

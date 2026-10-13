@@ -55,7 +55,13 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 	if reg == nil {
 		return nil, fmt.Errorf("registry '%s' not found", registryID)
 	}
+	return searchRegistry(ctx, reg, tag, query, limit, guesser)
+}
 
+// searchRegistry is SearchServers for an already-resolved registry. The
+// catalog's background fetches call it with their own copy of the entry rather
+// than re-reading the (unsynchronised) registry list.
+func searchRegistry(ctx context.Context, reg *RegistryEntry, tag, query string, limit int, guesser *experiments.Guesser) ([]ServerEntry, error) {
 	// FR-008: skip a key-requiring registry when no key is configured, rather
 	// than performing a doomed fetch. Surfaces map ErrRegistryKeyMissing to an
 	// "unavailable" marker so the overall search still succeeds.
@@ -67,23 +73,27 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 		return nil, fmt.Errorf("registry '%s' has no servers endpoint", reg.Name)
 	}
 
-	// Fetch servers from registry WITHOUT repository guessing (for performance).
-	// Forward the query so search-capable protocols can filter server-side.
-	servers, err := fetchServers(ctx, reg, nil, query) // Pass nil guesser to skip expensive operations
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch servers from %s: %w", reg.Name, err)
-	}
-
-	// Filter results BEFORE expensive repository guessing
-	filtered := filterServers(servers, tag, query)
-
-	// Apply limit BEFORE expensive repository guessing (default 10, max 50)
+	// Clamp the limit up front (default 10, max 50) so it can also bound how many
+	// pages a paginating registry is asked for. Applying it only after the whole
+	// listing had been fetched meant a limit=3 search still crawled every page —
+	// six-plus minutes against a registry answering in ~20s per page.
 	if limit <= 0 {
 		limit = 10 // Default limit
 	}
 	if limit > 50 {
 		limit = 50 // Max limit
 	}
+
+	// Fetch servers from registry WITHOUT repository guessing (for performance).
+	// Forward the query so search-capable protocols can filter server-side, and
+	// the limit so they can stop paginating once they have enough.
+	servers, err := fetchServers(ctx, reg, nil, query, limit) // Pass nil guesser to skip expensive operations
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch servers from %s: %w", reg.Name, err)
+	}
+
+	// Filter results BEFORE expensive repository guessing
+	filtered := filterServers(servers, tag, query)
 
 	if len(filtered) > limit {
 		filtered = filtered[:limit]
@@ -99,7 +109,111 @@ func SearchServers(ctx context.Context, registryID, tag, query string, limit int
 		filtered[i].Registry = reg.Name
 	}
 
+	// Non-nil so an empty result serializes as "servers": [] — never null
+	// (issue #953: strict MCP clients crash iterating a null array). An empty
+	// query skips filterServers' allocation, so a nil fetch result would
+	// otherwise flow straight through.
+	if filtered == nil {
+		filtered = []ServerEntry{}
+	}
+
 	return filtered, nil
+}
+
+// typedFetchCap bounds how many entries one source contributes to a typed
+// catalog query before ranking (Spec 109 D37.3): the fetch is one page per
+// query (3 on the official protocol), so this is a ceiling, not a target.
+const typedFetchCap = 300
+
+// searchCatalogSource is the typed-query fetch behind catalog search (Spec 109
+// D37.3). Unlike SearchServers it does NOT truncate to a limit in the
+// registry's own order: the official registry's search returns names in byte
+// order, so truncating first decided what the user could ever see. It returns
+// every match (capped at typedFetchCap) and lets Rank order them. The official
+// protocol also fetches the owner and name-prefix expansion queries
+// (fetchOfficialCatalog). When the official source's main query fails the
+// error is returned together with the expansion hits that did arrive.
+func searchCatalogSource(ctx context.Context, reg *RegistryEntry, q string) ([]ServerEntry, error) {
+	return searchCatalogSourceProgress(ctx, reg, q, nil)
+}
+
+// searchCatalogSourceProgress is searchCatalogSource that also reports, through
+// onPartial, the already-filtered hits of the official protocol's expansion
+// queries as they arrive. A caller that stops waiting (the 5s source budget)
+// can then still show them while the slow main query finishes in the
+// background (Spec 109 D37.2/D37.11). onPartial may be nil.
+func searchCatalogSourceProgress(ctx context.Context, reg *RegistryEntry, q string, onPartial func([]ServerEntry, bool)) ([]ServerEntry, error) {
+	// FR-008: skip a key-requiring registry when no key is configured.
+	if err := checkRegistryKey(reg); err != nil {
+		return nil, err
+	}
+	if reg.ServersURL == "" {
+		return nil, fmt.Errorf("registry '%s' has no servers endpoint", reg.Name)
+	}
+
+	var (
+		servers []ServerEntry
+		err     error
+	)
+	if reg.Protocol == protocolOfficial {
+		var progress func([]ServerEntry, bool)
+		if onPartial != nil {
+			progress = func(landed []ServerEntry, mainLanded bool) {
+				onPartial(finishCatalogEntries(reg, q, landed), mainLanded)
+			}
+		}
+		servers, err = fetchOfficialCatalogProgress(ctx, reg, q, progress)
+	} else {
+		servers, err = fetchServers(ctx, reg, nil, q, 0)
+	}
+	if err != nil {
+		err = fmt.Errorf("failed to fetch servers from %s: %w", reg.Name, err)
+	}
+
+	return finishCatalogEntries(reg, q, servers), err
+}
+
+// finishCatalogEntries applies the typed query's filter and the per-source cap
+// to fetched entries and stamps the registry name.
+func finishCatalogEntries(reg *RegistryEntry, q string, servers []ServerEntry) []ServerEntry {
+	filtered := filterCatalogEntries(servers, q)
+	if len(filtered) > typedFetchCap {
+		filtered = filtered[:typedFetchCap]
+	}
+	for i := range filtered {
+		filtered[i].Registry = reg.Name
+	}
+	return filtered
+}
+
+// filterCatalogEntries keeps the entries a typed catalog query matches: the
+// per-registry filter (name, title, description substring) plus a
+// separator-insensitive match, so "github actions" finds "github-actions".
+func filterCatalogEntries(servers []ServerEntry, q string) []ServerEntry {
+	filtered := make([]ServerEntry, 0, len(servers))
+	nq := normalizeMatchText(q)
+	for i := range servers {
+		e := &servers[i]
+		if entryMatchesQuery(e, q) ||
+			(nq != "" && (strings.Contains(normalizeMatchText(e.Name), nq) ||
+				strings.Contains(normalizeMatchText(e.Title), nq) ||
+				strings.Contains(normalizeMatchText(e.Description), nq))) {
+			filtered = append(filtered, *e)
+		}
+	}
+	return filtered
+}
+
+// entryMatchesQuery is filterServers' per-entry query test: a case-insensitive
+// substring of the name, the title or the description. An empty query matches.
+func entryMatchesQuery(e *ServerEntry, query string) bool {
+	if query == "" {
+		return true
+	}
+	q := strings.ToLower(query)
+	return strings.Contains(strings.ToLower(e.Name), q) ||
+		strings.Contains(strings.ToLower(e.Title), q) ||
+		strings.Contains(strings.ToLower(e.Description), q)
 }
 
 // FindServerByID resolves a single server within a registry by its exact ID.
@@ -143,12 +257,12 @@ func FindServerByID(ctx context.Context, registryID, serverID string, guesser *e
 // the hinted search does not surface the exact entry — so the match is found
 // regardless of its position in the listing.
 func findServerByIDFetch(ctx context.Context, reg *RegistryEntry, serverID string) (*ServerEntry, error) {
-	if servers, err := fetchServers(ctx, reg, nil, serverID); err == nil {
+	if servers, err := fetchServers(ctx, reg, nil, serverID, 0); err == nil {
 		if match, err := findServerByIDIn(servers, serverID); err == nil {
 			return match, nil
 		}
 	}
-	servers, err := fetchServers(ctx, reg, nil, "")
+	servers, err := fetchServers(ctx, reg, nil, "", 0)
 	if err != nil {
 		return nil, err
 	}
@@ -170,13 +284,15 @@ func findServerByIDIn(servers []ServerEntry, serverID string) (*ServerEntry, err
 // fetchServers fetches and parses servers from a registry based on its protocol.
 // The optional query is forwarded to protocols that support server-side search
 // (currently the official v0.1 protocol); other protocols filter client-side.
-func fetchServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.Guesser, query string) ([]ServerEntry, error) {
+// maxResults (0 = no cap) lets a paginating protocol stop early once it has
+// enough to satisfy the caller — see fetchOfficialServers.
+func fetchServers(ctx context.Context, reg *RegistryEntry, guesser *experiments.Guesser, query string, maxResults int) ([]ServerEntry, error) {
 	// The official protocol paginates (cursor follow-loop) and is handled by a
 	// dedicated fetcher; the built-in reference source is served in-binary with
 	// no network request at all.
 	switch reg.Protocol {
 	case protocolOfficial:
-		return fetchOfficialServers(ctx, reg, guesser, query)
+		return fetchOfficialServers(ctx, reg, guesser, query, maxResults)
 	case protocolReference:
 		return referenceServers(), nil
 	}
@@ -392,6 +508,16 @@ func parseDocker(rawData interface{}) []ServerEntry {
 				server.UpdatedAt = lastUpdated
 			}
 
+			// Spec 110 FR-001: pull_count -> Installs (comes free with the
+			// listing this parser already fetches). Docker's own star_count
+			// is deliberately NEVER mapped to Stars — it lives on a wildly
+			// different scale from GitHub stars (single digits vs tens of
+			// thousands) and mixing them would be meaningless.
+			if pullCount, ok := itemMap["pull_count"].(float64); ok && pullCount >= 0 {
+				installs := int(pullCount)
+				server.Popularity = &Popularity{Installs: &installs}
+			}
+
 			servers = append(servers, server)
 		}
 	}
@@ -530,15 +656,9 @@ func filterServers(servers []ServerEntry, tag, query string) []ServerEntry {
 	for i := range servers {
 		srv := &servers[i]
 
-		// Filter by query (search in name and description)
-		if query != "" {
-			q := strings.ToLower(query)
-			name := strings.ToLower(srv.Name)
-			desc := strings.ToLower(srv.Description)
-
-			if !strings.Contains(name, q) && !strings.Contains(desc, q) {
-				continue
-			}
+		// Filter by query (search in name, title and description)
+		if !entryMatchesQuery(srv, query) {
+			continue
 		}
 
 		filtered = append(filtered, *srv)

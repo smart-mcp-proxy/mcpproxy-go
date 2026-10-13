@@ -77,4 +77,11 @@ type ConfigSecretsResponse struct {
 	EnvironmentVars []EnvVarStatus        `json:"environment_vars"`
 	TotalSecrets    int                   `json:"total_secrets"`
 	TotalEnvVars    int                   `json:"total_env_vars"`
+
+	// KeyringAvailable and KeyringReason (FR-065) report whether the OS
+	// keyring provider is usable, from the provider's own IsAvailable()
+	// probe. When false, the Value/Secret toggle on Paste/Manual/Catalog
+	// surfaces is disabled and shows KeyringReason.
+	KeyringAvailable bool   `json:"keyring_available"`
+	KeyringReason    string `json:"keyring_reason,omitempty"`
 }

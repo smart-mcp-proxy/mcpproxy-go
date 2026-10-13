@@ -22,6 +22,7 @@ const (
 	activationKeyFirstConnectedServerEver   = "first_connected_server_ever"
 	activationKeyFirstMCPClientEver         = "first_mcp_client_ever"
 	activationKeyFirstRetrieveToolsCallEver = "first_retrieve_tools_call_ever"
+	activationKeyFirstRealToolCallEver      = "first_real_tool_call_ever"
 	activationKeyMCPClientsSeenEver         = "mcp_clients_seen_ever"
 	activationKeyRetrieveToolsCalls24h      = "retrieve_tools_calls_24h"
 	activationKeyEstimatedTokensSaved24h    = "estimated_tokens_saved_24h"
@@ -42,6 +43,7 @@ type ActivationState struct {
 	FirstConnectedServerEver      bool     `json:"first_connected_server_ever"`
 	FirstMCPClientEver            bool     `json:"first_mcp_client_ever"`
 	FirstRetrieveToolsCallEver    bool     `json:"first_retrieve_tools_call_ever"`
+	FirstRealToolCallEver         bool     `json:"first_real_tool_call_ever"`
 	MCPClientsSeenEver            []string `json:"mcp_clients_seen_ever"`
 	RetrieveToolsCalls24h         int      `json:"retrieve_tools_calls_24h"`
 	EstimatedTokensSaved24hBucket string   `json:"estimated_tokens_saved_24h_bucket"`
@@ -74,6 +76,16 @@ type ActivationStore interface {
 	// MarkFirstRetrieveToolsCall sets first_retrieve_tools_call_ever=true
 	// if not already set.
 	MarkFirstRetrieveToolsCall(db *bbolt.DB) error
+
+	// MarkFirstRealToolCall sets first_real_tool_call_ever=true if not
+	// already set. "Real" means a call proxied to an upstream server, as
+	// opposed to a built-in tool such as retrieve_tools.
+	//
+	// This is the symmetric counterpart of MarkFirstRetrieveToolsCall. Without
+	// it the retrieve→call funnel step could only be measured as a lifetime
+	// flag against a windowed counter, which made conversion look far worse
+	// than it is.
+	MarkFirstRealToolCall(db *bbolt.DB) error
 
 	// RecordMCPClient adds sanitized client name to the seen list. Dedups
 	// on insert; drops when cap (16) is reached.
@@ -172,6 +184,7 @@ func loadActivationAt(db *bbolt.DB, now time.Time) (ActivationState, error) {
 		st.FirstConnectedServerEver = decodeBool(b.Get([]byte(activationKeyFirstConnectedServerEver)))
 		st.FirstMCPClientEver = decodeBool(b.Get([]byte(activationKeyFirstMCPClientEver)))
 		st.FirstRetrieveToolsCallEver = decodeBool(b.Get([]byte(activationKeyFirstRetrieveToolsCallEver)))
+		st.FirstRealToolCallEver = decodeBool(b.Get([]byte(activationKeyFirstRealToolCallEver)))
 
 		if raw := b.Get([]byte(activationKeyMCPClientsSeenEver)); len(raw) > 0 {
 			var list []string
@@ -237,6 +250,10 @@ func (bboltActivationStore) Save(db *bbolt.DB, st ActivationState) error {
 		if err := b.Put([]byte(activationKeyFirstRetrieveToolsCallEver), encodeBool(existing)); err != nil {
 			return err
 		}
+		existing = decodeBool(b.Get([]byte(activationKeyFirstRealToolCallEver))) || st.FirstRealToolCallEver
+		if err := b.Put([]byte(activationKeyFirstRealToolCallEver), encodeBool(existing)); err != nil {
+			return err
+		}
 
 		// Clients list: write as-is (trimmed to cap).
 		list := st.MCPClientsSeenEver
@@ -283,6 +300,10 @@ func (s bboltActivationStore) MarkFirstMCPClient(db *bbolt.DB) error {
 
 func (s bboltActivationStore) MarkFirstRetrieveToolsCall(db *bbolt.DB) error {
 	return s.markFlag(db, activationKeyFirstRetrieveToolsCallEver)
+}
+
+func (s bboltActivationStore) MarkFirstRealToolCall(db *bbolt.DB) error {
+	return s.markFlag(db, activationKeyFirstRealToolCallEver)
 }
 
 // --- MCP client list ---

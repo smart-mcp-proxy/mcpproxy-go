@@ -1,0 +1,7 @@
+Server: filesystem
+TOOL      TIER         APPROVAL  SCAN   DESCRIPTION
+delete_0  destructive  pending   clean  from the server, not verified:
+Delete a file
+This cannot be undone
+Input schema:
+{"type":"object"}

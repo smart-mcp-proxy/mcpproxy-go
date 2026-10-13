@@ -339,4 +339,42 @@ final class SSEParserTests: XCTestCase {
         XCTAssertEqual(events[2].event, "config.reloaded")
         XCTAssertEqual(events[2].id, "3")
     }
+
+    // MARK: - Empty-data events (native-test-suite-green)
+
+    /// An event carrying a `data` field with an EMPTY value must still be
+    /// dispatched — only an event with no data field at all is dropped.
+    ///
+    /// The parser used to decide this by looking at the data buffer alone, which
+    /// cannot tell "data: (empty)" from "no data field", so it silently swallowed
+    /// spec-valid empty-data events. The two tests above pinned exactly this and
+    /// were being SKIPPED in CI, which is how the bug survived.
+    func testEmptyDataFieldStillDispatchesAnEvent() {
+        var parser = SSEParser()
+        XCTAssertNil(parser.feed("event: ping"))
+        XCTAssertNil(parser.feed("data:"))
+
+        let event = parser.feed("")
+        XCTAssertNotNil(event, "a data field with an empty value must still produce an event")
+        XCTAssertEqual(event?.event, "ping")
+        XCTAssertEqual(event?.data, "")
+    }
+
+    /// ...while an event with NO data field is still dropped, per spec.
+    func testEventWithoutAnyDataFieldIsDropped() {
+        var parser = SSEParser()
+        XCTAssertNil(parser.feed("event: ping"))
+        XCTAssertNil(parser.feed(""), "no data field => no event")
+    }
+
+    /// The empty-data path must not corrupt the NEXT event's buffer.
+    func testEmptyDataEventDoesNotLeakIntoTheNextEvent() {
+        var parser = SSEParser()
+        _ = parser.feed("data:")
+        _ = parser.feed("")
+
+        XCTAssertNil(parser.feed("data: {\"ok\":true}"))
+        let next = parser.feed("")
+        XCTAssertEqual(next?.data, "{\"ok\":true}", "a stale empty data field must not prepend a newline")
+    }
 }

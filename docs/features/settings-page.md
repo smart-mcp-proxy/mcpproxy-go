@@ -1,3 +1,9 @@
+---
+title: "Settings Page"
+sidebar_label: "Settings Page"
+description: "The Web UI Configuration page: prioritized form sections over mcpproxy's config, with a raw JSON escape hatch."
+---
+
 # Settings Page (Web UI)
 
 The Web UI **Configuration** page (`/ui/settings`) presents mcpproxy's config as
@@ -6,13 +12,14 @@ friendly, prioritized form sections instead of raw JSON:
 - **Security & Access** — API key (masked, show/regenerate), require MCP auth,
   quarantine, global Docker isolation, code execution, read-only mode,
   sensitive-data detection, reveal secret headers, listen address.
-- **General** — routing mode, tool limits, response limit, call timeout, log
-  level, telemetry, prompts.
+- **General** — routing mode, the two response-detail modes (`tool_response_mode`
+  for Retrieve, `direct_tool_response_mode` for Direct), tool limits, response
+  limit, call timeout, log level, telemetry, prompts.
 - **Advanced** — collapsible accordions per subsystem (code execution, Docker
   isolation, sensitive-data detection, output validation, output sanitisation,
   activity retention, logging, TLS, …).
 - **Raw JSON** — the full Monaco editor, kept as an escape hatch.
-- **Server Edition** — server edition only.
+- **Server Edition** — server edition only: `admin_emails`, front-door keys, OAuth provider settings and the `access` group-to-server map that decides tenant entitlement (see [Server Edition](../configuration/config-file.md#server-edition)).
 
 ## How saving works
 
@@ -22,10 +29,17 @@ pipeline. Because the merge starts from the live config and overlays just your
 changes, unrelated values and masked secrets (API key, secret headers) are never
 overwritten.
 
-Fields that need a restart (`listen`, `data_dir`, `api_key`, `tls.*`) show a
-**restart** badge; sensitive changes (reveal secret headers, disabling
-quarantine/management, binding to a non-loopback address) require an explicit
-confirmation before they apply.
+Fields that need a restart (`listen`, `api_key`, `routing_mode`, `tls.*`,
+`code_execution_pool_size`, and most of `server_edition` — `enabled`, `oauth.*`,
+`public_url`, `session_cookie_secure`, `session_ttl`, `bearer_token_ttl`,
+`credential_encryption_key`) show a **restart** badge — the two response-detail
+modes deliberately carry no badge, because they hot-reload; likewise
+`server_edition.admin_emails` and `server_edition.access` (the group-to-server
+map) apply on the next request with no restart and no badge, so editing who is
+an administrator or which group sees which server never needs a bounce.
+Sensitive changes (reveal secret headers, disabling quarantine/management,
+binding to a non-loopback address) require an explicit confirmation before they
+apply.
 
 ```bash
 # Equivalent API call — change one field, everything else preserved

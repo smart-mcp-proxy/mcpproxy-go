@@ -1,0 +1,72 @@
+{
+  "api": "MCP server (11 advertised tool(s))",
+  "source": "http://127.0.0.1:8080/mcp",
+  "grade": {
+    "score": 60,
+    "letter": "C",
+    "subscores": {
+      "menu": 50,
+      "hygiene": 77
+    }
+  },
+  "menu_tokens": 4741,
+  "heaviest_tools": [
+    {
+      "tool": "upstream_servers",
+      "tokens": 1189,
+      "description_tokens": 312,
+      "schema_tokens": 840
+    },
+    {
+      "tool": "code_execution",
+      "tokens": 697,
+      "description_tokens": 333,
+      "schema_tokens": 328
+    },
+    {
+      "tool": "retrieve_tools",
+      "tokens": 514,
+      "description_tokens": 142,
+      "schema_tokens": 355
+    },
+    {
+      "tool": "call_tool_read",
+      "tokens": 446,
+      "description_tokens": 125,
+      "schema_tokens": 303
+    },
+    {
+      "tool": "call_tool_write",
+      "tokens": 441,
+      "description_tokens": 125,
+      "schema_tokens": 298
+    }
+  ],
+  "next_grade": {
+    "letter": "B",
+    "threshold": 70,
+    "menu_budget": 2845
+  },
+  "findings": [
+    {
+      "rule": "M3",
+      "severity": "warn",
+      "where": "code_execution",
+      "message": "tool definition costs ~697 tokens (> 600) - every session pays this whether the tool is used or not; trim the description/schema or defer via tool search"
+    },
+    {
+      "rule": "M4",
+      "severity": "info",
+      "where": "set_profile",
+      "message": "inputSchema declares parameters but no 'required' list - the model can't tell mandatory from optional arguments"
+    },
+    {
+      "rule": "M3",
+      "severity": "warn",
+      "where": "upstream_servers",
+      "message": "tool definition costs ~1189 tokens (> 600) - every session pays this whether the tool is used or not; trim the description/schema or defer via tool search"
+    }
+  ],
+  "warnings": 2,
+  "suggestions": 1
+}

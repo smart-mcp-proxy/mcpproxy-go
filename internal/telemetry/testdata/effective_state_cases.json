@@ -1,0 +1,170 @@
+{
+  "_comment": "Shared by Go (internal/telemetry), vitest (frontend/tests/unit/telemetry-state.spec.ts) and XCTest (TelemetryNoticeTests). Spec 109 FR-044a. notice is one of notice|off_env|hidden.",
+  "cases": [
+    {
+      "name": "unset_config_defaults_on",
+      "env": {
+        "DO_NOT_TRACK": "",
+        "CI": "",
+        "MCPPROXY_TELEMETRY": ""
+      },
+      "config_enabled": null,
+      "want": {
+        "enabled": true,
+        "source": "default"
+      },
+      "notice": "notice",
+      "off_line": null,
+      "setting_lock": null
+    },
+    {
+      "name": "config_false",
+      "env": {
+        "DO_NOT_TRACK": "",
+        "CI": "",
+        "MCPPROXY_TELEMETRY": ""
+      },
+      "config_enabled": false,
+      "want": {
+        "enabled": false,
+        "source": "config"
+      },
+      "notice": "hidden",
+      "off_line": null,
+      "setting_lock": null
+    },
+    {
+      "name": "config_true",
+      "env": {
+        "DO_NOT_TRACK": "",
+        "CI": "",
+        "MCPPROXY_TELEMETRY": ""
+      },
+      "config_enabled": true,
+      "want": {
+        "enabled": true,
+        "source": "config"
+      },
+      "notice": "notice",
+      "off_line": null,
+      "setting_lock": null
+    },
+    {
+      "name": "env_mcpproxy_false_overrides_config_true",
+      "env": {
+        "DO_NOT_TRACK": "",
+        "CI": "",
+        "MCPPROXY_TELEMETRY": "false"
+      },
+      "config_enabled": true,
+      "want": {
+        "enabled": false,
+        "source": "env",
+        "disabled_by": "MCPPROXY_TELEMETRY=false"
+      },
+      "notice": "off_env",
+      "off_line": "Anonymous usage telemetry is off — disabled by MCPPROXY_TELEMETRY=false in the environment. Nothing is sent.",
+      "setting_lock": "Off — disabled by MCPPROXY_TELEMETRY=false in the environment. Unset it and restart MCPProxy to change this setting."
+    },
+    {
+      "name": "env_mcpproxy_false_trimmed_case_folded",
+      "env": {
+        "DO_NOT_TRACK": "",
+        "CI": "",
+        "MCPPROXY_TELEMETRY": " False "
+      },
+      "config_enabled": null,
+      "want": {
+        "enabled": false,
+        "source": "env",
+        "disabled_by": "MCPPROXY_TELEMETRY=false"
+      },
+      "notice": "off_env",
+      "off_line": "Anonymous usage telemetry is off — disabled by MCPPROXY_TELEMETRY=false in the environment. Nothing is sent.",
+      "setting_lock": "Off — disabled by MCPPROXY_TELEMETRY=false in the environment. Unset it and restart MCPProxy to change this setting."
+    },
+    {
+      "name": "env_mcpproxy_true_does_not_override_config_false",
+      "env": {
+        "DO_NOT_TRACK": "",
+        "CI": "",
+        "MCPPROXY_TELEMETRY": "true"
+      },
+      "config_enabled": false,
+      "want": {
+        "enabled": false,
+        "source": "config"
+      },
+      "notice": "hidden",
+      "off_line": null,
+      "setting_lock": null
+    },
+    {
+      "name": "env_do_not_track_1",
+      "env": {
+        "DO_NOT_TRACK": "1",
+        "CI": "",
+        "MCPPROXY_TELEMETRY": ""
+      },
+      "config_enabled": true,
+      "want": {
+        "enabled": false,
+        "source": "env",
+        "disabled_by": "DO_NOT_TRACK"
+      },
+      "notice": "off_env",
+      "off_line": "Anonymous usage telemetry is off — disabled by DO_NOT_TRACK in the environment. Nothing is sent.",
+      "setting_lock": "Off — disabled by DO_NOT_TRACK in the environment. Unset it and restart MCPProxy to change this setting."
+    },
+    {
+      "name": "env_do_not_track_0_is_not_env",
+      "env": {
+        "DO_NOT_TRACK": "0",
+        "CI": "",
+        "MCPPROXY_TELEMETRY": ""
+      },
+      "config_enabled": null,
+      "want": {
+        "enabled": true,
+        "source": "default"
+      },
+      "notice": "notice",
+      "off_line": null,
+      "setting_lock": null
+    },
+    {
+      "name": "env_ci_true",
+      "env": {
+        "DO_NOT_TRACK": "",
+        "CI": "true",
+        "MCPPROXY_TELEMETRY": ""
+      },
+      "config_enabled": true,
+      "want": {
+        "enabled": false,
+        "source": "env",
+        "disabled_by": "CI"
+      },
+      "notice": "off_env",
+      "off_line": "Anonymous usage telemetry is off — disabled by CI in the environment. Nothing is sent.",
+      "setting_lock": "Off — disabled by CI in the environment. Unset it and restart MCPProxy to change this setting."
+    },
+    {
+      "name": "env_ci_1_beats_mcpproxy_false",
+      "env": {
+        "DO_NOT_TRACK": "",
+        "CI": "1",
+        "MCPPROXY_TELEMETRY": "false"
+      },
+      "config_enabled": null,
+      "want": {
+        "enabled": false,
+        "source": "env",
+        "disabled_by": "CI"
+      },
+      "notice": "off_env",
+      "off_line": "Anonymous usage telemetry is off — disabled by CI in the environment. Nothing is sent.",
+      "setting_lock": "Off — disabled by CI in the environment. Unset it and restart MCPProxy to change this setting."
+    }
+  ]
+}

@@ -2,12 +2,14 @@ package api
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,6 +35,17 @@ type HealthStatus struct {
 	Summary    string `json:"summary"`          // e.g., "Connected (5 tools)"
 	Detail     string `json:"detail,omitempty"` // Optional longer explanation
 	Action     string `json:"action,omitempty"` // "login", "restart", "enable", "approve", "set_secret", "configure", "view_logs", ""
+
+	// Status is the ONE status vocabulary rendered as text on every surface
+	// (Spec 109 FR-010/FR-011) — mirrors contracts.HealthStatus.Status.
+	// Unlike Level (severity/coloring only), this may be printed as text.
+	Status string `json:"status"`
+	// Usable reports whether the server can currently serve tool calls.
+	Usable bool `json:"usable"`
+	// Actions lists every applicable next step in priority order (FR-012).
+	// Always non-nil (empty slice, never null) on a current core; may be
+	// absent from an older core's payload.
+	Actions []string `json:"actions"`
 }
 
 // Server represents a server from the API
@@ -511,6 +524,9 @@ func (c *Client) GetServers() ([]Server, error) {
 				Summary:    getString(healthMap, "summary"),
 				Detail:     getString(healthMap, "detail"),
 				Action:     getString(healthMap, "action"),
+				Status:     getString(healthMap, "status"),
+				Usable:     getBool(healthMap, "usable"),
+				Actions:    getStringSlice(healthMap, "actions"),
 			}
 			if c.logger != nil && server.Health.Level != "" {
 				c.logger.Debugw("Health extracted",
@@ -638,6 +654,63 @@ func (c *Client) TriggerOAuthLogin(serverName string) error {
 	return nil
 }
 
+// GetProfiles fetches the configured profiles (Profiles v2 T5) from
+// GET /api/v1/profiles for the tray profile switcher.
+func (c *Client) GetProfiles() ([]tray.ProfileInfo, error) {
+	resp, err := c.makeRequest("GET", "/api/v1/profiles", nil)
+	if err != nil {
+		return nil, err
+	}
+	if !resp.Success {
+		return nil, fmt.Errorf("API error: %s", resp.Error)
+	}
+
+	raw, ok := resp.Data["profiles"].([]interface{})
+	if !ok {
+		// No profiles configured is a valid, empty result.
+		return nil, nil
+	}
+
+	var result []tray.ProfileInfo
+	for _, p := range raw {
+		pm, ok := p.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		result = append(result, tray.ProfileInfo{
+			Name:      getString(pm, "name"),
+			ToolCount: getInt(pm, "tool_count"),
+		})
+	}
+	return result, nil
+}
+
+// GetActiveProfile fetches the server-level default active profile from
+// GET /api/v1/profiles/active. An empty string means "all servers".
+func (c *Client) GetActiveProfile() (string, error) {
+	resp, err := c.makeRequest("GET", "/api/v1/profiles/active", nil)
+	if err != nil {
+		return "", err
+	}
+	if !resp.Success {
+		return "", fmt.Errorf("API error: %s", resp.Error)
+	}
+	return getString(resp.Data, "active_profile"), nil
+}
+
+// SetActiveProfile sets the server-level default active profile via
+// PUT /api/v1/profiles/active. An empty name clears the selection (all servers).
+func (c *Client) SetActiveProfile(name string) error {
+	resp, err := c.makeRequest("PUT", "/api/v1/profiles/active", map[string]string{"profile": name})
+	if err != nil {
+		return err
+	}
+	if !resp.Success {
+		return fmt.Errorf("API error: %s", resp.Error)
+	}
+	return nil
+}
+
 // GetServerTools gets tools for a specific server
 func (c *Client) GetServerTools(serverName string) ([]Tool, error) {
 	endpoint := fmt.Sprintf("/api/v1/servers/%s/tools", serverName)
@@ -682,22 +755,6 @@ func (c *Client) GetServerTools(serverName string) ([]Tool, error) {
 // QuarantineServer places a server in quarantine
 func (c *Client) QuarantineServer(serverName string) error {
 	endpoint := fmt.Sprintf("/api/v1/servers/%s/quarantine", serverName)
-
-	resp, err := c.makeRequest("POST", endpoint, nil)
-	if err != nil {
-		return err
-	}
-
-	if !resp.Success {
-		return fmt.Errorf("API error: %s", resp.Error)
-	}
-
-	return nil
-}
-
-// UnquarantineServer removes a server from quarantine
-func (c *Client) UnquarantineServer(serverName string) error {
-	endpoint := fmt.Sprintf("/api/v1/servers/%s/unquarantine", serverName)
 
 	resp, err := c.makeRequest("POST", endpoint, nil)
 	if err != nil {
@@ -821,6 +878,13 @@ func (c *Client) SearchTools(query string, limit int) ([]SearchResult, error) {
 
 // OpenWebUI opens the web control panel in the default browser
 func (c *Client) OpenWebUI() error {
+	return c.OpenWebUIPath("")
+}
+
+// OpenWebUIPath opens a path inside the Web UI while preserving its API-key
+// authentication. Tray quarantine entries use this to open review, never to
+// approve or unquarantine a server directly.
+func (c *Client) OpenWebUIPath(path string) error {
 	// Get the actual web UI URL from the /api/v1/info endpoint
 	// This ensures we use the correct HTTP URL even when connected via socket
 	resp, err := c.makeRequest("GET", "/api/v1/info", nil)
@@ -842,7 +906,7 @@ func (c *Client) OpenWebUI() error {
 	}
 
 	// Add API key if not using socket communication
-	url := webUIURL
+	url := strings.TrimRight(webUIURL, "/") + path
 	if c.apiKey != "" && !strings.HasPrefix(c.baseURL, "unix://") && !strings.HasPrefix(c.baseURL, "npipe://") {
 		separator := "?"
 		if strings.Contains(url, "?") {
@@ -887,8 +951,10 @@ func (c *Client) OpenWebUI() error {
 	}
 }
 
-// makeRequest makes an HTTP request to the API with enhanced error handling and retry logic
-func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, error) {
+// makeRequest makes an HTTP request to the API with enhanced error handling and retry logic.
+// When body is non-nil it is JSON-encoded and sent as the request payload (e.g. PUT bodies);
+// nil yields a bodyless request, preserving every existing call site.
+func (c *Client) makeRequest(method, path string, body interface{}) (*Response, error) {
 	url, err := c.buildURL(path)
 	if err != nil {
 		return nil, err
@@ -896,8 +962,21 @@ func (c *Client) makeRequest(method, path string, _ interface{}) (*Response, err
 	maxRetries := 3
 	baseDelay := 1 * time.Second
 
+	var bodyBytes []byte
+	if body != nil {
+		bodyBytes, err = json.Marshal(body)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal request body: %w", err)
+		}
+	}
+
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		req, err := http.NewRequest(method, url, http.NoBody)
+		// Recreate the reader each attempt so retries resend the full body.
+		var bodyReader io.Reader = http.NoBody
+		if bodyBytes != nil {
+			bodyReader = bytes.NewReader(bodyBytes)
+		}
+		req, err := http.NewRequest(method, url, bodyReader)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request: %w", err)
 		}
@@ -1029,6 +1108,20 @@ func getFloat64(m map[string]interface{}, key string) float64 {
 		return v
 	}
 	return 0.0
+}
+
+func getStringSlice(m map[string]interface{}, key string) []string {
+	raw, ok := m[key].([]interface{})
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(raw))
+	for _, v := range raw {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 func keys(m map[string]interface{}) []string {

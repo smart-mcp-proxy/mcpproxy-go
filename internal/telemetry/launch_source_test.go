@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -47,6 +48,38 @@ func TestDetectLaunchSource_DecisionTree(t *testing.T) {
 			ppid:      fakePPID{isLaunchdLoginItem: true},
 			tty:       fakeTTY(true),
 			want:      LaunchSourceTray,
+		},
+		{
+			// The real macOS path: the tray spawns the core as a child, so the
+			// core's parent is the tray app (not launchd) and it has no TTY.
+			// Without an explicit signal it fell through to "unknown" — the
+			// cause of the 79%-unknown launch_source. The tray now stamps
+			// MCPPROXY_LAUNCHED_BY=tray on the core it spawns.
+			name:      "MCPPROXY_LAUNCHED_BY=tray maps to tray",
+			env:       map[string]string{"MCPPROXY_LAUNCHED_BY": "tray"},
+			handshake: fakeHandshake{},
+			ppid:      fakePPID{},
+			tty:       fakeTTY(false),
+			want:      LaunchSourceTray,
+		},
+		{
+			// First run after the DMG install: the installer launches the tray
+			// with MCPPROXY_LAUNCHED_BY=installer, and the tray must not
+			// overwrite it when spawning the core.
+			name:      "installer env still wins over a tray env",
+			env:       map[string]string{"MCPPROXY_LAUNCHED_BY": "installer"},
+			handshake: fakeHandshake{},
+			ppid:      fakePPID{},
+			tty:       fakeTTY(false),
+			want:      LaunchSourceInstaller,
+		},
+		{
+			name:      "unrecognised MCPPROXY_LAUNCHED_BY does not hijack detection",
+			env:       map[string]string{"MCPPROXY_LAUNCHED_BY": "banana"},
+			handshake: fakeHandshake{},
+			ppid:      fakePPID{isLaunchdLoginItem: true},
+			tty:       fakeTTY(false),
+			want:      LaunchSourceLoginItem,
 		},
 		{
 			name:      "ppid-is-launchd maps to login_item",
@@ -97,8 +130,10 @@ func TestDetectLaunchSource_DecisionTree(t *testing.T) {
 			want:      LaunchSourceUnknown,
 		},
 		{
-			name:      "installer env with non-installer value is ignored",
-			env:       map[string]string{"MCPPROXY_LAUNCHED_BY": "tray"},
+			// "tray" used to be ignored here; it is now a recognised value (see
+			// the tray cases above). An UNRECOGNISED value is still ignored.
+			name:      "unrecognised MCPPROXY_LAUNCHED_BY value is ignored",
+			env:       map[string]string{"MCPPROXY_LAUNCHED_BY": "somethingelse"},
 			handshake: fakeHandshake{},
 			ppid:      fakePPID{},
 			tty:       fakeTTY(true),
@@ -130,5 +165,32 @@ func TestDetectLaunchSourceOnce_Cached(t *testing.T) {
 	}
 	if !IsValidLaunchSource(first) {
 		t.Fatalf("DetectLaunchSourceOnce returned invalid %q", first)
+	}
+}
+
+// DetectLaunchSourceOnce is reached concurrently by every surface that reports
+// telemetry (two listeners' /api/v1/status handlers race here in practice);
+// the once-guard must be goroutine-safe. Red under -race before the guard
+// gained its mutex.
+func TestDetectLaunchSourceOnceConcurrent(t *testing.T) {
+	resetLaunchSourceOnce()
+	t.Cleanup(resetLaunchSourceOnce)
+
+	const goroutines = 32
+	results := make([]LaunchSource, goroutines)
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func(i int) {
+			defer wg.Done()
+			results[i] = DetectLaunchSourceOnce()
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 1; i < goroutines; i++ {
+		if results[i] != results[0] {
+			t.Fatalf("goroutine %d saw %q, goroutine 0 saw %q", i, results[i], results[0])
+		}
 	}
 }

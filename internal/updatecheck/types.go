@@ -4,7 +4,8 @@ package updatecheck
 import "time"
 
 // VersionInfo represents the current version and update availability.
-// This is stored in-memory only and refreshed on startup + every 4 hours.
+// This is stored in-memory only and refreshed on startup + every
+// DefaultCheckInterval (24h; stretched by backoff after failed checks).
 type VersionInfo struct {
 	// CurrentVersion is the version of the running MCPProxy instance.
 	// Format: semver with "v" prefix (e.g., "v1.2.3") or "development"
@@ -30,6 +31,58 @@ type VersionInfo struct {
 	// CheckError contains the error message if the last check failed.
 	// Empty string if no error.
 	CheckError string `json:"check_error,omitempty"`
+
+	// InstallChannel identifies the distribution channel of the running
+	// binary (homebrew, dmg, deb, rpm, docker, go-install,
+	// windows-installer, tarball, or unknown). Detected once at startup and
+	// always populated, even when no update is available (Spec 079 FR-008,
+	// additive per FR-021).
+	InstallChannel string `json:"install_channel,omitempty"`
+
+	// UpdateCommand is the exact one-line update command for InstallChannel.
+	// Only set when UpdateAvailable is true AND the channel has a safe
+	// command (homebrew, deb, rpm, go-install); empty otherwise (Spec 079
+	// FR-009, additive per FR-021). When the offered version is a
+	// prerelease, only go-install gets a command (version-pinned) — the
+	// package-manager channels serve stable artifacts only.
+	UpdateCommand string `json:"update_command,omitempty"`
+
+	// NudgesSuppressed tells UI surfaces (Web UI banner, tray indicator) to
+	// stay quiet: the process runs in a CI / non-interactive context where a
+	// nudge is noise. Machine-readable consumers still get the full facts
+	// (Spec 079 FR-019, additive per FR-021).
+	NudgesSuppressed bool `json:"nudges_suppressed,omitempty"`
+
+	// ReleasesBehind / ReleasesBehindSaturated / WeeksBehind / BehindSummary
+	// carry the Spec 079 FR-002 delta. All four are additive and omitted when
+	// unknown (FR-021): the delta is best-effort enrichment of the check, so a
+	// failed or skipped delta scan leaves them absent and every surface falls
+	// back to exactly the message it rendered before.
+	//
+	// Only ever populated when UpdateAvailable is true, which is what makes a
+	// negative delta structurally impossible (FR-016).
+
+	// ReleasesBehind counts releases on the offered channel between the
+	// running version and the offered one. A pointer because "unknown" and a
+	// value must stay distinguishable.
+	ReleasesBehind *int `json:"releases_behind,omitempty"`
+
+	// ReleasesBehindSaturated marks ReleasesBehind as a lower bound: the
+	// running build predates the scanned release window. Surfaces render
+	// "N+ releases".
+	ReleasesBehindSaturated bool `json:"releases_behind_saturated,omitempty"`
+
+	// WeeksBehind is whole weeks between the two releases' publish dates.
+	// A pointer because 0 is legitimate — a same-week release is one release
+	// and zero weeks behind — and must not be confused with "unknown".
+	WeeksBehind *int `json:"weeks_behind,omitempty"`
+
+	// BehindSummary is the pre-rendered clause every surface prints verbatim,
+	// e.g. "8 releases / ~14 weeks behind". Rendered once in Go
+	// (FormatBehindSummary) precisely so the CLI, the Web UI banner and the
+	// tray cannot word it differently; the raw numbers above sit alongside it
+	// so machine consumers never parse prose.
+	BehindSummary string `json:"behind_summary,omitempty"`
 }
 
 // GitHubRelease represents a release from the GitHub Releases API.
@@ -94,6 +147,23 @@ type InfoResponseUpdate struct {
 
 	// CheckError is set if the last check failed
 	CheckError string `json:"check_error,omitempty"`
+
+	// InstallChannel is the detected distribution channel (Spec 079 FR-008)
+	InstallChannel string `json:"install_channel,omitempty"`
+
+	// UpdateCommand is the channel's one-line update command, only present
+	// when an update is available and the channel has one (Spec 079 FR-009)
+	UpdateCommand string `json:"update_command,omitempty"`
+
+	// NudgesSuppressed tells UI surfaces to stay quiet in CI /
+	// non-interactive contexts (Spec 079 FR-019)
+	NudgesSuppressed bool `json:"nudges_suppressed,omitempty"`
+
+	// Spec 079 FR-002 delta — see the matching fields on VersionInfo.
+	ReleasesBehind          *int   `json:"releases_behind,omitempty"`
+	ReleasesBehindSaturated bool   `json:"releases_behind_saturated,omitempty"`
+	WeeksBehind             *int   `json:"weeks_behind,omitempty"`
+	BehindSummary           string `json:"behind_summary,omitempty"`
 }
 
 // ToAPIResponse converts VersionInfo to the API response format.
@@ -102,11 +172,19 @@ func (v *VersionInfo) ToAPIResponse() *InfoResponseUpdate {
 		return nil
 	}
 	return &InfoResponseUpdate{
-		Available:     v.UpdateAvailable,
-		LatestVersion: v.LatestVersion,
-		ReleaseURL:    v.ReleaseURL,
-		CheckedAt:     v.CheckedAt,
-		IsPrerelease:  v.IsPrerelease,
-		CheckError:    v.CheckError,
+		Available:        v.UpdateAvailable,
+		LatestVersion:    v.LatestVersion,
+		ReleaseURL:       v.ReleaseURL,
+		CheckedAt:        v.CheckedAt,
+		IsPrerelease:     v.IsPrerelease,
+		CheckError:       v.CheckError,
+		InstallChannel:   v.InstallChannel,
+		UpdateCommand:    v.UpdateCommand,
+		NudgesSuppressed: v.NudgesSuppressed,
+
+		ReleasesBehind:          v.ReleasesBehind,
+		ReleasesBehindSaturated: v.ReleasesBehindSaturated,
+		WeeksBehind:             v.WeeksBehind,
+		BehindSummary:           v.BehindSummary,
 	}
 }

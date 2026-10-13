@@ -17,9 +17,9 @@
 
 **Purpose**: Backend PATCH endpoint (foundation for Edit Server)
 
-- [ ] T001 Add PATCH /api/v1/servers/{name} handler in internal/httpapi/server.go
-- [ ] T002 Write Go test for PATCH endpoint in internal/httpapi/server_test.go
-- [ ] T003 Add updateServer() method to Swift APIClient in native/macos/MCPProxy/MCPProxy/API/APIClient.swift
+- [x] T001 Add PATCH /api/v1/servers/{name} handler in internal/httpapi/server.go
+- [x] T002 Write Go test for PATCH endpoint in internal/httpapi/server_test.go
+- [x] T003 Add updateServer() method to Swift APIClient in native/macos/MCPProxy/MCPProxy/API/APIClient.swift
 
 **Checkpoint**: PATCH API working, Swift client can call it
 
@@ -31,12 +31,12 @@
 
 **Independent Test**: Open Add Server, leave fields empty (verify red labels), fill correctly, submit (verify connection feedback).
 
-- [ ] T004 [US1] Increase sheet size to 560x560 and pin submit button outside ScrollView in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift
-- [ ] T005 [US1] Simplify protocol picker to ["Local Command (stdio)", "Remote URL (HTTP)"] in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift
-- [ ] T006 [US1] Add @FocusState tracking and inline red validation text below required fields in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift
-- [ ] T007 [US1] Implement phased connection test feedback (Saving → Connecting → Success/Failure) in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift
-- [ ] T008 [US1] Add "Save Anyway" and "Retry" buttons for connection failure state in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift
-- [ ] T009 [US1] Build Swift tray app binary and verify Add Server flow with mcpproxy-ui-test tool
+- [x] T004 [US1] Increase sheet size to 560x560 and pin submit button outside ScrollView in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift
+- [x] T005 [US1] Simplify protocol picker to ["Local Command (stdio)", "Remote URL (HTTP)"] in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift
+- [x] T006 [US1] Add @FocusState tracking and inline red validation text below required fields in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift
+- [x] T007 [US1] Implement phased connection test feedback (Saving → Connecting → Success/Failure) in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift
+- [x] T008 [US1] Add "Save Anyway" and "Retry" buttons for connection failure state in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift
+- [x] T009 [US1] Build Swift tray app binary and verify Add Server flow with mcpproxy-ui-test tool
 
 **Checkpoint**: Add Server sheet fully functional with validation and connection feedback
 
@@ -48,12 +48,12 @@
 
 **Independent Test**: Navigate to server detail, click Edit, modify field, save, verify change persists.
 
-- [ ] T010 [US2] Add "Edit" button and edit mode state to Config tab in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
-- [ ] T011 [US2] Convert Config tab read-only labels to editable TextFields and Toggles in edit mode in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
-- [ ] T012 [US2] Add Save (calls PATCH API) and Cancel buttons to Config tab edit mode in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
-- [ ] T013 [US2] Add inline validation for required fields in edit mode in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
-- [ ] T014 [US2] Fix "Command: N/A" bug — read command from config, not runtime state in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
-- [ ] T015 [US2] Build and verify Edit Server flow with mcpproxy-ui-test tool
+- [x] T010 [US2] Add "Edit" button and edit mode state to Config tab in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
+- [x] T011 [US2] Convert Config tab read-only labels to editable TextFields and Toggles in edit mode in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
+- [x] T012 [US2] Add Save (calls PATCH API) and Cancel buttons to Config tab edit mode in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
+- [x] T013 [US2] Add inline validation for required fields in edit mode in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
+- [x] T014 [US2] Fix "Command: N/A" bug — read command from config, not runtime state in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
+- [x] T015 [US2] Build and verify Edit Server flow with mcpproxy-ui-test tool
 
 **Checkpoint**: Edit Server fully functional, changes persist via PATCH API
 
@@ -81,11 +81,11 @@
 
 **Independent Test**: Configure invalid server URL, observe error tooltip in server list, view colored logs.
 
-- [ ] T021 [P] [US4] Add tooltip showing health.detail on hover over unhealthy server status in native/macos/MCPProxy/MCPProxy/Views/ServersView.swift
-- [ ] T022 [P] [US4] Add log auto-refresh (3s interval) to Logs tab in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
-- [ ] T023 [US4] Color-code ERROR (red) and WARN (yellow) log lines in Logs tab in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
-- [ ] T024 [US4] Show last_error prominently at top of Logs tab when server is unhealthy in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
-- [ ] T025 [US4] Build and verify error display with mcpproxy-ui-test tool
+- [x] T021 [P] [US4] Add tooltip showing health.detail on hover over unhealthy server status in native/macos/MCPProxy/MCPProxy/Views/ServersView.swift
+- [x] T022 [P] [US4] Add log auto-refresh (3s interval) to Logs tab in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
+- [x] T023 [US4] Color-code ERROR (red) and WARN (yellow) log lines in Logs tab in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
+- [x] T024 [US4] Show last_error prominently at top of Logs tab when server is unhealthy in native/macos/MCPProxy/MCPProxy/Views/ServerDetailView.swift
+- [x] T025 [US4] Build and verify error display with mcpproxy-ui-test tool
 
 **Checkpoint**: Connection errors visible in table and detail view
 
@@ -97,12 +97,12 @@
 
 **Independent Test**: Cmd+N opens Add Server, Dashboard import opens Import tab, empty state visible.
 
-- [ ] T026 [US5] Add Cmd+N keyboard shortcut via SwiftUI .commands in native/macos/MCPProxy/MCPProxy/MCPProxyApp.swift
-- [ ] T027 [P] [US5] Add default tab parameter (manual vs import) to AddServerView and wire from Dashboard import button in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift and DashboardView.swift
-- [ ] T028 [P] [US5] Add empty state view for server list in native/macos/MCPProxy/MCPProxy/Views/ServersView.swift
-- [ ] T029 [P] [US5] Add .accessibilityLabel() to Dashboard action buttons in native/macos/MCPProxy/MCPProxy/Views/DashboardView.swift
-- [ ] T030 [US5] Remove "Security Scan: soon" placeholder from Dashboard in native/macos/MCPProxy/MCPProxy/Views/DashboardView.swift
-- [ ] T031 [US5] Build and verify all polish items with mcpproxy-ui-test tool
+- [x] T026 [US5] Add Cmd+N keyboard shortcut via SwiftUI .commands in native/macos/MCPProxy/MCPProxy/MCPProxyApp.swift
+- [x] T027 [P] [US5] Add default tab parameter (manual vs import) to AddServerView and wire from Dashboard import button in native/macos/MCPProxy/MCPProxy/Views/AddServerView.swift and DashboardView.swift
+- [x] T028 [P] [US5] Add empty state view for server list in native/macos/MCPProxy/MCPProxy/Views/ServersView.swift
+- [x] T029 [P] [US5] Add .accessibilityLabel() to Dashboard action buttons in native/macos/MCPProxy/MCPProxy/Views/DashboardView.swift
+- [x] T030 [US5] Remove "Security Scan: soon" placeholder from Dashboard in native/macos/MCPProxy/MCPProxy/Views/DashboardView.swift
+- [x] T031 [US5] Build and verify all polish items with mcpproxy-ui-test tool
 
 **Checkpoint**: All polish items complete
 
@@ -112,10 +112,10 @@
 
 **Purpose**: Final verification and documentation
 
-- [ ] T032 Full regression build — compile Swift tray app + Go core binary
+- [x] T032 Full regression build — compile Swift tray app + Go core binary
 - [ ] T033 Run full mcpproxy-ui-test verification of all 5 user stories
 - [ ] T034 Update CLAUDE.md if API endpoints changed
-- [ ] T035 Commit all changes with descriptive commit message
+- [x] T035 Commit all changes with descriptive commit message
 
 ---
 

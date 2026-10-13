@@ -44,7 +44,11 @@ func TestServerEditionConfig_CredentialEncryptionKeyEnvFallback(t *testing.T) {
 			ClientSecret: "csec",
 		},
 	}
+	// Spec 107 FR-039: the fallback moved from Validate to ApplyDefaults so a
+	// write door never persists the environment's key into the config file.
 	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "", cfg.CredentialEncryptionKey, "Validate must not apply the MCPPROXY_CRED_KEY fallback")
+	cfg.ApplyDefaults()
 	assert.Equal(t, "from-env-key", cfg.CredentialEncryptionKey, "env MCPPROXY_CRED_KEY should fill an empty key")
 }
 
@@ -61,5 +65,6 @@ func TestServerEditionConfig_CredentialEncryptionKeyConfigWins(t *testing.T) {
 		},
 	}
 	require.NoError(t, cfg.Validate())
+	cfg.ApplyDefaults()
 	assert.Equal(t, "from-config", cfg.CredentialEncryptionKey, "explicit config key should win over env")
 }

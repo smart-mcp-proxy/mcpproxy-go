@@ -7,12 +7,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
 
 // errNoScans is returned by findLatestPassJobs when the scan-job bucket has no
@@ -45,10 +51,13 @@ type Storage interface {
 	DeleteServerScanReports(serverName string) error
 
 	SaveIntegrityBaseline(baseline *IntegrityBaseline) error
+	SaveIntegrityBaselineWithBlocks(baseline *IntegrityBaseline, blocks []ToolApprovalBlock) error
 	GetIntegrityBaseline(serverName string) (*IntegrityBaseline, error)
 	DeleteIntegrityBaseline(serverName string) error
 	ListIntegrityBaselines() ([]*IntegrityBaseline, error)
 }
+
+var ErrToolApprovalBlockNotFound = errors.New("tool approval block target not found")
 
 // EventEmitter defines how the service emits events
 type EventEmitter interface {
@@ -61,6 +70,18 @@ type EventEmitter interface {
 	// changed (e.g., background pull started/finished/failed) so the web UI
 	// can refresh its scanner list without polling.
 	EmitSecurityScannerChanged(scannerID, status, errMsg string)
+	// EmitSecurityScanTelemetry records ONE anonymous, counts-only sample for a
+	// terminal scan JOB. It is deliberately separate from the UI-facing
+	// EmitSecurityScanCompleted/EmitSecurityScanFailed events, which fire per
+	// SCANNER and per PASS and would therefore over-count: the unit measured
+	// here is "one non-deep-scan (Pass 1) scan job".
+	//
+	// Only the scanner package knows a job's pass and dry-run status, so the
+	// decision of whether a job counts lives here (scanCallbackAdapter) rather
+	// than in the emitter. Implementations must accept counts only:
+	// findingsBySeverity is severity -> count and carries no server name,
+	// scanner id, rule id, or free text.
+	EmitSecurityScanTelemetry(completed bool, findingsBySeverity map[string]int)
 }
 
 // NoopEmitter is a no-op implementation of EventEmitter
@@ -72,6 +93,7 @@ func (n *NoopEmitter) EmitSecurityScanCompleted(string, map[string]int)     {}
 func (n *NoopEmitter) EmitSecurityScanFailed(string, string, string)        {}
 func (n *NoopEmitter) EmitSecurityIntegrityAlert(string, string, string)    {}
 func (n *NoopEmitter) EmitSecurityScannerChanged(string, string, string)    {}
+func (n *NoopEmitter) EmitSecurityScanTelemetry(bool, map[string]int)       {}
 
 // ServerInfoProvider resolves server configuration for auto-source resolution
 type ServerInfoProvider interface {
@@ -85,6 +107,28 @@ type ServerInfoProvider interface {
 	IsConnected(serverName string) bool
 }
 
+// ingestedToolContractsProvider is an OPTIONAL capability a ServerInfoProvider
+// may also implement (RT-06, red-team 2026-10-11): return the tool contracts
+// discovery actually ingested for a server — the definitions recorded on its
+// tool-approval records (current, plus the approved one of a changed record) —
+// in the same tools/list shape as GetServerTools. The scan export is a fresh
+// tools/list that a malicious server can answer differently from the list
+// discovery ingested (TOCTOU); scanning the ingested contracts too makes the
+// verdict reflect what the proxy actually trusted.
+type ingestedToolContractsProvider interface {
+	GetIngestedToolContracts(serverName string) ([]map[string]interface{}, error)
+}
+
+// allServerToolsProvider is an OPTIONAL capability a ServerInfoProvider may also
+// implement: enumerate every known server's current tool definitions, keyed by
+// server name. The Service uses it to build the cross-server snapshot that lets
+// the deterministic shadowing.cross_server check (Spec 076) detect impersonation
+// across servers. Providers that don't implement it simply contribute no peers
+// (cross-server shadowing is then inert, but every other check is unaffected).
+type allServerToolsProvider interface {
+	GetAllServerTools() (map[string][]map[string]interface{}, error)
+}
+
 // ServerUnquarantiner performs the full unquarantine workflow for a server.
 // Implementations are expected to:
 //   - Clear the quarantined flag in storage and persist config
@@ -96,6 +140,90 @@ type ServerInfoProvider interface {
 // to depend on the full runtime package.
 type ServerUnquarantiner interface {
 	UnquarantineServer(serverName string) error
+}
+
+// ApprovalIncarnationBinder is an OPTIONAL capability of the
+// ServerUnquarantiner (Spec 116 FR-014, FR-015): bind a scanner approval to
+// the incarnation of the server it reviewed. The approval captures the
+// incarnation when it starts, saves the baseline and blocks under the
+// server's approval lock only while the stored row still carries it, and
+// unquarantines through a commit that expects it — so a remove and re-add of
+// the name in between can never release, or hand a baseline to, the
+// replacement.
+type ApprovalIncarnationBinder interface {
+	// CaptureApprovalIncarnation returns expected when it is > 0 (the
+	// incarnation the caller reviewed), otherwise the server's current one.
+	CaptureApprovalIncarnation(serverName string, expected int64) (int64, error)
+	WithServerApprovalLockAt(serverName string, inc int64, fn func() error) error
+	UnquarantineServerAt(serverName string, inc int64) error
+}
+
+// ServerIncarnationProvider is an OPTIONAL capability of the
+// ServerUnquarantiner: the server's current incarnation, recorded on scan
+// jobs and reports (Spec 116 FR-014a).
+type ServerIncarnationProvider interface {
+	ServerIncarnation(serverName string) (int64, bool)
+}
+
+// IncarnationStorage is an OPTIONAL capability of the Storage: scan job and
+// report saves conditional on the server's stored row carrying the job's
+// incarnation, in one transaction (Spec 116 FR-014a, research D12).
+type IncarnationStorage interface {
+	SaveScanJobIfIncarnation(job *ScanJob, inc int64) (bool, error)
+	SaveScanReportIfIncarnation(report *ScanReport, inc int64) (bool, error)
+}
+
+type ToolBlockRecorder interface {
+	RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string)
+}
+
+// ToolApprovalLocker is an OPTIONAL capability of the ServerUnquarantiner: run
+// fn while holding the runtime's per-server tool-approval lock (UX-02). The
+// atomic baseline+blocks commit writes approval records directly in storage;
+// serializing it with discovery passes keeps a pass holding a stale pending
+// copy of a record from overwriting the operator's block (approved+disabled)
+// back to pending+enabled, which the server-approval baseline would then
+// promote to approved+enabled. fn must not unquarantine the server.
+type ToolApprovalLocker interface {
+	WithToolApprovalLock(serverName string, fn func() error) error
+}
+
+// ServerApprovalCommitter is an OPTIONAL capability of the
+// ServerUnquarantiner (Spec 117 PR-1, #1567): run the approval's storage
+// commit under the runtime's per-server tool-approval lock, after recording
+// the server's durable tool baseline decision (source server_approval, by).
+// It lets the scanner reach the baseline marker without importing storage or
+// the runtime (storage imports this package). expected is the Spec 117 PR-2
+// review binding and is nil in this release; the returned count is the
+// number of tools the commit section promoted (0 in this release).
+type ServerApprovalCommitter interface {
+	CommitServerApproval(serverName string, blocks []string, expected map[string]string, by string, commit func() error) (int, error)
+}
+
+// ReviewedServerApprover is the Spec 117 PR-2 (#1566) form of the approval
+// commit capability. Its CommitServerApproval runs the whole server approval
+// in one critical section under the per-server tool-approval lock: validate
+// expected (the review binding; nil = unbound), record the tool baseline,
+// run commit (the integrity baseline + blocks), promote the pending tools
+// present at that moment, and clear the quarantine in storage, config and
+// file. A stale binding returns *toolreview.StaleToolReviewError with nothing
+// written. FinishServerApproval then runs the rest without the lock (activity
+// record, upstream/index refresh) and promotes nothing, so a tool filed after
+// the commit stays pending (FR-012). When the unquarantiner implements it the
+// scanner never calls UnquarantineServer for an approval.
+type ReviewedServerApprover interface {
+	ServerApprovalCommitter
+	FinishServerApproval(serverName string) error
+}
+
+// IncarnationServerApprovalCommitter extends ServerApprovalCommitter with the
+// Spec 116 incarnation binding: CommitServerApprovalAt runs the same locked
+// section but first checks (under the approval lock) that the stored row
+// still carries incarnation inc, returning ErrServerReplaced otherwise
+// without recording the marker or running commit.
+type IncarnationServerApprovalCommitter interface {
+	ServerApprovalCommitter
+	CommitServerApprovalAt(serverName string, inc int64, blocks []string, expected map[string]string, by string, commit func() error) (int, error)
 }
 
 // Service coordinates scanner management, scan execution, and approval workflow
@@ -113,26 +241,70 @@ type Service struct {
 	pulls          *pullManager
 	logger         *zap.Logger
 
-	// In-memory scan summary cache — avoids expensive BBolt reads per server
-	summaryCache   map[string]*ScanSummary
-	summaryCacheMu sync.RWMutex
+	// isolationModeResolver returns a server's resolved isolation mode
+	// ("docker"/"sandbox"/"none", or "" if unknown). Injected by the wiring
+	// layer so the scanner honours per-server isolation.mode overrides
+	// (MCP-34.4) without the scanner package depending on the isolation
+	// resolver. Nil ⇒ fall back to the engine-wide default.
+	isolationModeResolver func(serverName string) string
+
+	// In-memory scan summary cache — avoids expensive BBolt reads per server.
+	//
+	// summaryCacheGen is a per-server invalidation counter. GetScanSummary
+	// computes a summary from BBolt OUTSIDE the cache lock, so a scan that
+	// starts mid-computation would otherwise have its invalidation overwritten
+	// by the in-flight reader storing the pre-scan summary — leaving a stale
+	// "clean" verdict cached for a server whose scan is running. The reader
+	// samples the generation on the cache miss and refuses to store if it moved.
+	//
+	// summaryCacheInc records the server incarnation each entry was computed
+	// for (Spec 116 PR2 review round 3): the purge observer that invalidates
+	// a removed server's entry runs after the commit, so a same-name
+	// replacement committed in between must not be served the old entry.
+	summaryCache    map[string]*ScanSummary
+	summaryCacheGen map[string]uint64
+	summaryCacheInc map[string]int64
+	summaryCacheMu  sync.RWMutex
+
+	// approvalHooks are Spec 116 PR2 test seams (plan.md §Test seams), nil
+	// in production.
+	approvalHooks scannerApprovalHooks
+}
+
+// scannerApprovalHooks are the scanner's Spec 116 test seams.
+type scannerApprovalHooks struct {
+	// afterBaselineBeforeUnquarantine runs in approveServer after its
+	// approval-lock section (baseline and blocks) has exited and before the
+	// unquarantine commit, with the captured incarnation (T2.5, review R5.6).
+	afterBaselineBeforeUnquarantine func(serverName string, incarnation int64)
+}
+
+// SetAfterBaselineBeforeUnquarantineHookForTest installs the
+// afterBaselineBeforeUnquarantine seam. Test-only.
+func (s *Service) SetAfterBaselineBeforeUnquarantineHookForTest(fn func(serverName string, incarnation int64)) {
+	s.approvalHooks.afterBaselineBeforeUnquarantine = fn
 }
 
 // NewService creates a new SecurityService
 func NewService(storage Storage, registry *Registry, docker *DockerRunner, dataDir string, logger *zap.Logger) *Service {
 	engine := NewEngine(docker, registry, dataDir, logger)
 	svc := &Service{
-		storage:        storage,
-		engine:         engine,
-		registry:       registry,
-		docker:         docker,
-		sourceResolver: NewSourceResolver(logger),
-		queue:          NewScanQueue(logger),
-		summaryCache:   make(map[string]*ScanSummary),
-		logger:         logger,
+		storage:         storage,
+		engine:          engine,
+		registry:        registry,
+		docker:          docker,
+		sourceResolver:  NewSourceResolver(logger),
+		queue:           NewScanQueue(logger),
+		summaryCache:    make(map[string]*ScanSummary),
+		summaryCacheGen: make(map[string]uint64),
+		summaryCacheInc: make(map[string]int64),
+		logger:          logger,
 	}
 	var noop EventEmitter = &NoopEmitter{}
 	svc.emitter.Store(&noop)
+	// A job prepared for an incarnation that is no longer current never takes
+	// the active slot (Spec 116 FR-014a, review round 2).
+	engine.registrationCheck = svc.incarnationIsCurrent
 	svc.pulls = newPullManager(docker, storage, registry, logger, svc.emit)
 	// Restore installed scanner state from storage (survives restart)
 	svc.syncRegistryFromStorage()
@@ -146,6 +318,13 @@ func (s *Service) SetEmitter(emitter EventEmitter) {
 	s.emitter.Store(&emitter)
 }
 
+// SetInstanceID scopes this service's Docker container-ownership lookups to
+// the given mcpproxy instance ID (internal/upstream/core.GetInstanceID()).
+// See SourceResolver.instanceID for why this is injected rather than imported.
+func (s *Service) SetInstanceID(instanceID string) {
+	s.sourceResolver.SetInstanceID(instanceID)
+}
+
 // SetScannerDisableNoNewPrivileges controls whether scanner containers are
 // launched without `--security-opt no-new-privileges`. This is the runtime
 // knob for SecurityConfig.ScannerDisableNoNewPrivileges. See the config
@@ -157,14 +336,235 @@ func (s *Service) SetScannerDisableNoNewPrivileges(disable bool) {
 	s.engine.disableNoNewPrivileges = disable
 	if disable {
 		s.logger.Warn("Scanner containers will run WITHOUT --security-opt no-new-privileges " +
-			"(security.scanner_disable_no_new_privileges=true). This is a workaround for " +
+			"(security.deep_scan.disable_no_new_privileges=true). This is a workaround for " +
 			"snap-docker + AppArmor hosts; prefer replacing snap docker with a distro package.")
 	}
 }
 
+// SetIsolationMode records the engine-wide DEFAULT isolation mode ("docker",
+// "sandbox", "none", or "" == docker), used when a scan has no per-server mode
+// (no resolver wired, or the resolver returns ""). Per-server resolution via
+// SetIsolationModeResolver takes precedence. Under "sandbox"/"none" the host
+// runs no Docker for scanners, so Docker (deep) scanner plugins are cleanly
+// skipped while the in-process baseline still runs — MCP-34.4 / D3 option (b).
+// Per Spec 077 US3 such a skip is informational (surfaced via the deep-scan
+// descriptor) and NEVER degrades the baseline verdict; deep scanners only run at
+// all when security.deep_scan.enabled is set.
+func (s *Service) SetIsolationMode(mode string) {
+	if s.engine == nil {
+		return
+	}
+	s.engine.isolationMode = mode
+	if mode == "sandbox" || mode == "none" {
+		s.logger.Info("Default isolation mode runs no Docker for scanner plugins; Docker-based deep "+
+			"scanners are skipped (per-server isolation.mode:docker overrides). The deterministic "+
+			"in-process baseline still runs and the baseline verdict is unaffected (Spec 077). "+
+			"See docs/errors/MCPX_DOCKER_SNAP_APPARMOR.md.",
+			zap.String("isolation_mode", mode))
+	}
+}
+
+// SetDeepScan configures the opt-in "deep scan" layer (Spec 077 US3). When
+// enabled is false (the default), only the deterministic in-process baseline
+// scanner runs and no Docker container is ever invoked; a deep-scan failure can
+// therefore never degrade the baseline verdict. scanners optionally restricts
+// which deep scanners are eligible (empty ⇒ all enabled deep scanners). This is
+// the runtime knob for security.deep_scan.enabled / security.deep_scan.scanners.
+func (s *Service) SetDeepScan(enabled bool, scanners []string) {
+	if s.engine == nil {
+		return
+	}
+	var allow map[string]bool
+	if len(scanners) > 0 {
+		allow = make(map[string]bool, len(scanners))
+		for _, id := range scanners {
+			allow[id] = true
+		}
+	}
+	s.engine.setDeepScan(enabled, allow)
+	// Spec 077 US3: published-package-source extraction is part of the opt-in
+	// deep-scan layer, so it must never run (and never cause network egress)
+	// while deep scan is off. Force the resolver's fetch fallback off here as
+	// defense-in-depth. When deep scan is ENABLED the server layer decides the
+	// concrete value from deep_scan.fetch_package_source (default true) via
+	// SetFetchPackageSource, so we deliberately do not flip it back on here.
+	if !enabled && s.sourceResolver != nil {
+		s.sourceResolver.SetFetchPackageSource(false)
+	}
+	if enabled {
+		s.logger.Info("Deep scan enabled (security.deep_scan.enabled=true): Docker scanner " +
+			"plugins + published-package-source extraction may run as an opt-in enrichment " +
+			"layer. Failures are surfaced as an informational note and NEVER change the " +
+			"baseline verdict (Spec 077 FR-007/FR-008).")
+	}
+}
+
+// deepScanEnabled reports whether the opt-in deep-scan layer is currently on.
+func (s *Service) deepScanEnabled() bool {
+	return s.engine != nil && s.engine.deepScanIsEnabled()
+}
+
+// DeepScanEnabled reports whether the opt-in deep-scan layer is currently on.
+// Exported so the wiring/reload path (and its tests) can observe a config
+// hot-reload taking effect without recreating the service (Spec 077 US3).
+func (s *Service) DeepScanEnabled() bool {
+	return s.deepScanEnabled()
+}
+
+// ApplySecurityConfig (re)configures the opt-in deep-scan layer from the
+// effective security config in a single call, so both the startup wiring and
+// config hot-reload gate the scanner identically (Spec 077 US3). It resolves the
+// deep-scan master switch + per-scanner allow-list (SetDeepScan), the
+// no-new-privileges escape hatch (SetScannerDisableNoNewPrivileges), and the
+// published-package-source fetch (SetFetchPackageSource) — which only runs when
+// deep scan is ON and fetch is not explicitly disabled. All accessors are
+// nil-safe, so a nil SecurityConfig forces the layer fully off (baseline-only).
+// Idempotent: safe to call on every config.reloaded event.
+func (s *Service) ApplySecurityConfig(sec *config.SecurityConfig) {
+	// Spec 086 FR-019: the offline TPA signature corpus location is
+	// configuration-driven (security.tpa_bundle_path / MCPPROXY_TPA_BUNDLE_PATH)
+	// and re-read here, which is what makes it hot-reloadable. An empty path
+	// means the corpus embedded in this build; a broken configured bundle keeps
+	// the previously active corpus and surfaces the reason via BundleStatus().
+	ConfigureBundle(sec.EffectiveTPABundlePath(), s.logger)
+
+	enabled := sec.IsDeepScanEnabled()
+	s.SetDeepScan(enabled, sec.DeepScanScanners())
+	s.SetScannerDisableNoNewPrivileges(sec.IsDisableNoNewPrivileges())
+	fetchPref := true
+	if f := sec.EffectiveFetchPackageSource(); f != nil {
+		fetchPref = *f
+	}
+	s.SetFetchPackageSource(enabled && fetchPref)
+}
+
+// BundleStatus reports the offline TPA signature corpus this process is
+// running (spec 086 FR-019). Exposed on the service so the REST/CLI surfaces
+// can answer "which signatures is my proxy running, and how old are they?"
+// without importing the loader internals (GH #938 finding 2).
+func (s *Service) BundleStatus() BundleInfo {
+	return BundleStatus()
+}
+
+// isBaselineScanner reports whether a scanner id belongs to the deterministic
+// in-process baseline (Spec 077). An unknown id is treated as a deep scanner so
+// its failure is attributed to the deep-scan layer, never the baseline.
+func (s *Service) isBaselineScanner(scannerID string) bool {
+	if s.registry != nil {
+		if p, err := s.registry.Get(scannerID); err == nil {
+			return p.InProcess
+		}
+	}
+	return false
+}
+
+// buildDeepScanDescriptor assembles the informational deep-scan availability
+// descriptor (Spec 077 FR-008) from the per-scanner statuses of one or more
+// jobs. It reports the opt-in layer's state SEPARATELY from the baseline verdict
+// and MUST NOT influence ScanSummary.Status. Both passes are considered: Pass 1
+// (security scan) and Pass 2 (supply-chain audit, where the heavy trivy /
+// supply-chain scanners run), so a Pass-2 scanner failure is reflected too.
+//
+// The descriptor is ALWAYS emitted. When deep scan is disabled it reports
+// {enabled:false, ran:false} plus the ids of any enabled-but-skipped Docker
+// scanners, so quickstart scenario 1 (`deep_scan.enabled=false`) is observable
+// and a Docker scanner enabled while the layer is off is never skipped
+// silently. The invariant (Enabled=false ⇒ Ran/Available false, no failures)
+// still holds.
+func (s *Service) buildDeepScanDescriptor(jobs ...*ScanJob) *DeepScanDescriptor {
+	if !s.deepScanEnabled() {
+		return &DeepScanDescriptor{SkippedScanners: s.skippedDeepScannerIDs()}
+	}
+	haveJob := false
+	desc := &DeepScanDescriptor{Enabled: true}
+	seenFailed := make(map[string]bool)
+	for _, job := range jobs {
+		if job == nil {
+			continue
+		}
+		haveJob = true
+		for _, ss := range job.ScannerStatuses {
+			if s.isBaselineScanner(ss.ScannerID) {
+				continue // baseline coverage drives Status, not the descriptor
+			}
+			switch ss.Status {
+			case ScanJobStatusCompleted:
+				desc.Ran = true
+				desc.Available = true
+			case ScanJobStatusFailed:
+				if seenFailed[ss.ScannerID] {
+					continue // dedupe the same deep scanner across passes
+				}
+				seenFailed[ss.ScannerID] = true
+				desc.ScannersFailed = append(desc.ScannersFailed, DeepScanScannerFailure{
+					ID:     ss.ScannerID,
+					Reason: ss.Error,
+				})
+			}
+		}
+	}
+	if !haveJob {
+		return nil
+	}
+	return desc
+}
+
+// skippedDeepScannerIDs returns the ids of Docker (non-in-process) scanners
+// that the user has enabled (installed/configured) but that will NOT run
+// because the opt-in deep-scan layer is off. Surfaced via the deep-scan
+// descriptor so the skip is visible instead of silent (audit FIX 3a).
+// Registry.List is sorted, so the result is deterministic.
+func (s *Service) skippedDeepScannerIDs() []string {
+	if s.registry == nil {
+		return nil
+	}
+	var ids []string
+	for _, p := range s.registry.List() {
+		if p.InProcess {
+			continue
+		}
+		if p.Status == ScannerStatusInstalled || p.Status == ScannerStatusConfigured {
+			ids = append(ids, p.ID)
+		}
+	}
+	return ids
+}
+
+// SetIsolationModeResolver injects a per-server isolation-mode resolver so the
+// Docker-scanner skip (MCP-34.4) follows each scanned server's RESOLVED mode —
+// a per-server isolation.mode override beats the global default. The resolver
+// returns "docker"/"sandbox"/"none", or "" to fall back to the engine-wide
+// default. Wired in the server layer from the upstream IsolationManager so the
+// scanner package stays decoupled from the resolver.
+func (s *Service) SetIsolationModeResolver(resolver func(serverName string) string) {
+	s.isolationModeResolver = resolver
+}
+
+// resolveIsolationMode returns the isolation mode to apply to a scan of
+// serverName: the per-server resolver result when it yields a concrete mode,
+// otherwise the engine-wide default. Falls back gracefully when no resolver is
+// wired (e.g. unit tests) so behaviour matches SetIsolationMode alone.
+func (s *Service) resolveIsolationMode(serverName string) string {
+	if s.isolationModeResolver != nil {
+		if mode := s.isolationModeResolver(serverName); mode != "" {
+			return mode
+		}
+	}
+	if s.engine != nil {
+		return s.engine.isolationMode
+	}
+	return ""
+}
+
 // SetFetchPackageSource toggles whether the source resolver may fetch the
-// published source of package-runner servers (npx/uvx) for scanning. See
-// SecurityConfig.ScannerFetchPackageSource (MCP-2206). Default is enabled.
+// published source of package-runner servers (npx/uvx) for scanning. This is a
+// facet of the opt-in deep-scan layer (Spec 077 US3): the server layer only
+// enables it when security.deep_scan.enabled is true AND
+// security.deep_scan.fetch_package_source is not explicitly false (the
+// deprecated top-level ScannerFetchPackageSource, MCP-2206, is still honored as
+// a fallback). With deep scan off the effective value is always false, so
+// scanning an npx/uvx server performs no published-package-source network
+// egress by default.
 func (s *Service) SetFetchPackageSource(enabled bool) {
 	if s.sourceResolver == nil {
 		return
@@ -172,7 +572,7 @@ func (s *Service) SetFetchPackageSource(enabled bool) {
 	s.sourceResolver.SetFetchPackageSource(enabled)
 	if !enabled {
 		s.logger.Info("Scanner published-package-source fetch disabled " +
-			"(security.scanner_fetch_package_source=false); npx/uvx servers " +
+			"(security.deep_scan.fetch_package_source=false); npx/uvx servers " +
 			"without local source will scan tool definitions only.")
 	}
 }
@@ -222,11 +622,11 @@ func (s *Service) syncRegistryFromStorage() {
 		}
 
 		_ = s.registry.UpdateStatus(inst.ID, inst.Status)
-		// Also update configured env so the engine can pass it to containers
+		// Also update configured env so the engine can pass it to containers.
+		// Registry.Get hands back a copy, so this must go through the locked
+		// setter to actually land on the record the engine reads.
 		if inst.ConfiguredEnv != nil {
-			if reg, err := s.registry.Get(inst.ID); err == nil {
-				reg.ConfiguredEnv = inst.ConfiguredEnv
-			}
+			_ = s.registry.SetConfiguredEnv(inst.ID, inst.ConfiguredEnv)
 		}
 	}
 	s.logger.Info("Synced scanner registry from storage", zap.Int("count", len(installed)))
@@ -318,6 +718,8 @@ func (s *Service) InstallScanner(ctx context.Context, id string) error {
 
 	// Reuse any previously-stored configured env / image override so that
 	// toggling the scanner off and back on doesn't wipe the user's API keys.
+	// `scanner` is a copy of the registry record, so the reused values are
+	// written back through the locked setter for the engine to see them.
 	if existing, err := s.storage.GetScanner(id); err == nil && existing != nil {
 		if len(existing.ConfiguredEnv) > 0 {
 			scanner.ConfiguredEnv = existing.ConfiguredEnv
@@ -325,6 +727,7 @@ func (s *Service) InstallScanner(ctx context.Context, id string) error {
 		if existing.ImageOverride != "" {
 			scanner.ImageOverride = existing.ImageOverride
 		}
+		_ = s.registry.SetRuntimeConfig(id, scanner.ConfiguredEnv, scanner.ImageOverride)
 	}
 
 	// In-process scanners (e.g. tpa-descriptions) run in Go with no Docker
@@ -546,11 +949,9 @@ func (s *Service) ConfigureScanner(_ context.Context, id string, env map[string]
 	_ = s.registry.UpdateStatus(id, sc.Status)
 
 	// Also update the registry's ConfiguredEnv and ImageOverride so the engine
-	// picks up changes without requiring a restart
-	if reg, err := s.registry.Get(id); err == nil {
-		reg.ConfiguredEnv = sc.ConfiguredEnv
-		reg.ImageOverride = sc.ImageOverride
-	}
+	// picks up changes without requiring a restart. Both fields land in one
+	// locked update — a reader never sees the new env against the old image.
+	_ = s.registry.SetRuntimeConfig(id, sc.ConfiguredEnv, sc.ImageOverride)
 
 	s.emit().EmitSecurityScannerChanged(id, sc.Status, "")
 
@@ -589,31 +990,137 @@ type scanCallbackAdapter struct {
 	serverInfo *ServerInfo // Cached server info for pass 2 auto-start
 }
 
+// countsForTelemetry reports whether this job is the unit the anonymous
+// schema-v8 scanner counters measure: one real (non-dry-run) Pass-1 scan job.
+//
+// Pass 2 (the deep supply-chain audit auto-started after Pass 1) is excluded
+// deliberately — counting it would double the reported scan volume of exactly
+// the deep-scan cohort the counters exist to compare. Dry-run jobs are excluded
+// because they do not affect quarantine state and are not real scans.
+func (a *scanCallbackAdapter) countsForTelemetry(job *ScanJob) bool {
+	return job != nil && a.scanPass == ScanPassSecurityScan && !job.DryRun
+}
+
+// saveJob persists job, conditionally on its incarnation when both the job
+// and the storage support it (Spec 116 FR-014a). A job of a server that was
+// removed or replaced since the scan started is dropped.
+func (s *Service) saveJob(job *ScanJob) {
+	if job == nil {
+		return
+	}
+	// Every save goes through the conditional writer when the storage has
+	// one, an unbound (zero) incarnation included: the storage refuses an
+	// unbound write once a config commit exists (review round 1).
+	if cs, ok := s.storage.(IncarnationStorage); ok {
+		written, err := cs.SaveScanJobIfIncarnation(job, job.Incarnation)
+		if err == nil && !written {
+			s.logger.Debug("Scan job dropped: the server was removed or replaced since the scan started",
+				zap.String("server", job.ServerName), zap.String("job", job.ID), zap.Int64("incarnation", job.Incarnation))
+		}
+		return
+	}
+	_ = s.storage.SaveScanJob(job)
+}
+
+// saveReport persists report for job's incarnation (see saveJob).
+func (s *Service) saveReport(job *ScanJob, report *ScanReport) {
+	if report == nil {
+		return
+	}
+	if job != nil && report.Incarnation == 0 {
+		report.Incarnation = job.Incarnation
+	}
+	if cs, ok := s.storage.(IncarnationStorage); ok {
+		written, err := cs.SaveScanReportIfIncarnation(report, report.Incarnation)
+		if err == nil && !written {
+			s.logger.Debug("Scan report dropped: the server was removed or replaced since the scan started",
+				zap.String("server", report.ServerName), zap.String("report", report.ID), zap.Int64("incarnation", report.Incarnation))
+		}
+		return
+	}
+	_ = s.storage.SaveScanReport(report)
+}
+
+// currentIncarnation returns the server's current incarnation. configured is
+// false only when a committed-view provider is installed and does not know
+// the server; without a provider it returns (0, true): an unbound scan.
+func (s *Service) currentIncarnation(serverName string) (inc int64, configured bool) {
+	p, ok := s.unquarantiner.(ServerIncarnationProvider)
+	if !ok {
+		return 0, true
+	}
+	return p.ServerIncarnation(serverName)
+}
+
+// scanIncarnation is the incarnation a new scan of serverName binds to. With
+// a committed-view provider installed, a server it does not know is refused
+// (review round 1, FR-014a): an unbound job started in a remove/re-add gap
+// would persist evidence the later same-name server inherits.
+func (s *Service) scanIncarnation(serverName string) (int64, error) {
+	inc, configured := s.currentIncarnation(serverName)
+	if !configured {
+		return 0, fmt.Errorf("cannot scan server %s: server is not configured", serverName)
+	}
+	return inc, nil
+}
+
+// incarnationIsCurrent reports whether inc is still serverName's incarnation
+// (always true without a provider, or for an unbound inc of 0 there).
+func (s *Service) incarnationIsCurrent(serverName string, inc int64) bool {
+	p, ok := s.unquarantiner.(ServerIncarnationProvider)
+	if !ok {
+		return true
+	}
+	cur, found := p.ServerIncarnation(serverName)
+	return found && cur == inc
+}
+
+// InvalidateServerState drops the scan state of a server whose stored scan
+// state was purged (Spec 116 FR-014a: a removal), so a re-added server never
+// shows the old server's verdict: the cached summary, and the engine's active
+// job when it belongs to an incarnation that is no longer current (review
+// round 1). A job of the current incarnation — a re-added server's own scan
+// that started before this observer ran — is kept; the engine's identity-
+// checked cleanup keeps the detached job's goroutine from evicting it.
+func (s *Service) InvalidateServerState(serverName string) {
+	if s.engine != nil {
+		// The incarnation is read inside the predicate, under the engine
+		// lock that registration also takes (review round 3): a value read
+		// before it could predate a re-add whose own scan registered in
+		// between, and that scan would be detached as obsolete.
+		s.engine.DetachObsoleteJob(serverName, func(job *ScanJob) bool {
+			cur, configured := s.currentIncarnation(serverName)
+			return !configured || job.Incarnation != cur
+		})
+	}
+	s.invalidateScanSummaryCache(serverName)
+}
+
 func (a *scanCallbackAdapter) OnScanStarted(job *ScanJob) {
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveJob(job)
 	a.service.emit().EmitSecurityScanStarted(job.ServerName, job.Scanners, job.ID)
 	// Invalidate cached summary so server list shows "scanning"
 	a.service.invalidateScanSummaryCache(job.ServerName)
 }
 
 func (a *scanCallbackAdapter) OnScannerStarted(job *ScanJob, scannerID string) {
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveJob(job)
 	a.service.emit().EmitSecurityScanProgress(job.ServerName, scannerID, ScanJobStatusRunning, 0)
 }
 
 func (a *scanCallbackAdapter) OnScannerCompleted(job *ScanJob, scannerID string, report *ScanReport) {
-	_ = a.service.storage.SaveScanReport(report)
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveReport(job, report)
+	a.service.saveJob(job)
 	a.service.emit().EmitSecurityScanProgress(job.ServerName, scannerID, ScanJobStatusCompleted, 100)
 }
 
 func (a *scanCallbackAdapter) OnScannerFailed(job *ScanJob, scannerID string, err error) {
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveJob(job)
 	a.service.emit().EmitSecurityScanFailed(job.ServerName, scannerID, err.Error())
 }
 
 func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanReport) {
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveJob(job)
 	// Invalidate cached summary so next read gets fresh results
 	a.service.invalidateScanSummaryCache(job.ServerName)
 	// Aggregate findings summary for event
@@ -624,24 +1131,45 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 		}
 	}
 	a.service.emit().EmitSecurityScanCompleted(job.ServerName, summary)
+	// Anonymous telemetry (schema v8): one sample per real Pass-1 job, NOT per
+	// scanner and NOT for the Pass-2 deep audit.
+	if a.countsForTelemetry(job) {
+		a.service.emit().EmitSecurityScanTelemetry(true, summary)
+	}
 	// Cleanup auto-resolved source directory
 	if a.cleanup != nil {
 		a.cleanup()
 	}
 	// Auto-start Pass 2 (supply chain audit) in background after Pass 1 completes.
+	//
+	// Spec 077 US3 (FR-006): Pass 2 is the heavy/deep pass — it calls
+	// ResolveFullSource (Docker image pull / container creation / full-source
+	// extraction) and runs Docker-based deep scanners. It belongs to the opt-in
+	// deep-scan layer, so with deep scan OFF (the default) it must NOT be
+	// scheduled at all; the scan is the Pass-1 in-process baseline only.
 	// Skip for HTTP/URL servers — they have no filesystem to do supply chain analysis on.
-	if a.scanPass == ScanPassSecurityScan && !job.DryRun {
+	if a.scanPass == ScanPassSecurityScan && !job.DryRun && a.service.deepScanEnabled() {
 		isURLServer := a.serverInfo != nil && (a.serverInfo.Protocol == "http" || a.serverInfo.Protocol == "sse" || a.serverInfo.Protocol == "streamable-http")
 		if !isURLServer {
-			go a.service.startPass2(job.ServerName, a.serverInfo)
+			// The ORIGINATING job's incarnation (review round 1): a late
+			// Pass 1 of a removed server must not bind Pass 2 to a
+			// same-name replacement.
+			go a.service.startPass2(job.ServerName, a.serverInfo, job.Incarnation)
 		}
 	}
 }
 
 func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
-	_ = a.service.storage.SaveScanJob(job)
+	a.service.saveJob(job)
 	// Invalidate cached summary
 	a.service.invalidateScanSummaryCache(job.ServerName)
+	// Anonymous telemetry (schema v8): a FAILED job counts once here. The
+	// per-scanner OnScannerFailed path must not record — a job with three
+	// failing scanners is still one failed scan, and a job that fails some
+	// scanners but still completes is a completion, not a failure.
+	if a.countsForTelemetry(job) {
+		a.service.emit().EmitSecurityScanTelemetry(false, nil)
+	}
 	// Cleanup auto-resolved source directory
 	if a.cleanup != nil {
 		a.cleanup()
@@ -651,12 +1179,18 @@ func (a *scanCallbackAdapter) OnScanFailed(job *ScanJob, err error) {
 // StartScan triggers a security scan for a server (Pass 1: fast security scan).
 // After Pass 1 completes, Pass 2 (supply chain audit) is auto-started in the background.
 func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool, scannerIDs []string, sourceDir string) (*ScanJob, error) {
+	inc, err := s.scanIncarnation(serverName)
+	if err != nil {
+		return nil, err
+	}
 	req := ScanRequest{
-		ServerName: serverName,
-		DryRun:     dryRun,
-		ScannerIDs: scannerIDs,
-		SourceDir:  sourceDir,
-		ScanPass:   ScanPassSecurityScan,
+		ServerName:    serverName,
+		Incarnation:   inc,
+		DryRun:        dryRun,
+		ScannerIDs:    scannerIDs,
+		SourceDir:     sourceDir,
+		ScanPass:      ScanPassSecurityScan,
+		IsolationMode: s.resolveIsolationMode(serverName),
 	}
 
 	// Build scan context for transparency
@@ -674,9 +1208,37 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		}
 	}
 
-	// Auto-resolve source if not explicitly provided
+	// Cross-server snapshot for the in-process tpa-descriptions scanner so its
+	// shadowing.cross_server check can detect impersonation across servers
+	// (Spec 076 FR-003). Best-effort: a provider without the capability, or an
+	// error, just yields no peers and leaves cross-server shadowing inert.
+	if prov, ok := s.serverInfo.(allServerToolsProvider); ok {
+		if all, err := prov.GetAllServerTools(); err == nil && len(all) > 0 {
+			peers := make(map[string][]map[string]interface{}, len(all))
+			for name, tools := range all {
+				if name != serverName && len(tools) > 0 {
+					peers[name] = tools
+				}
+			}
+			if len(peers) > 0 {
+				req.PeerTools = peers
+			}
+		}
+	}
+
+	// Auto-resolve source if not explicitly provided.
+	//
+	// Spec 077 US3 (FR-006): source resolution — Docker container lookup /
+	// extraction (source_resolver.go:findServerContainer/extractFromContainer)
+	// and the published-package-source fetch fallback — is part of the opt-in
+	// deep-scan layer. With deep scan OFF (the default) the only scanner is the
+	// deterministic in-process tpa-descriptions baseline, which scans tool
+	// DEFINITIONS (exported to a temp dir below), not source files — so any
+	// resolved source would be unused anyway. Skip Resolve entirely so no Docker
+	// invocation, network egress, or filesystem extraction ever happens by
+	// default. An explicitly supplied SourceDir (manual scan) is still honored.
 	var resolvedCleanup func()
-	if req.SourceDir == "" && serverInfo != nil {
+	if req.SourceDir == "" && serverInfo != nil && s.deepScanEnabled() {
 		resolved, err := s.sourceResolver.Resolve(ctx, *serverInfo)
 		if err != nil {
 			s.logger.Warn("Auto-source resolution failed",
@@ -692,6 +1254,7 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 				scanCtx.SourcePath = resolved.ServerURL
 			}
 			scanCtx.ContainerID = resolved.ContainerID
+			scanCtx.ContainerOwner = resolved.ContainerOwner
 			// Docker-image servers (`docker run mcp/fetch`): the scan target is the
 			// image itself, not a source dir. Carry the reference so image-capable
 			// scanners (Trivy) run in image mode, and surface it in the context.
@@ -765,6 +1328,20 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 		}
 
 		if req.SourceDir != "" {
+			// exportInto applies a usable export to the scan context, or
+			// reports why nothing may be scanned.
+			var liveErr error
+			exportInto := func(sc *ScanContext) error {
+				e := s.exportToolDefinitionsStamped(serverName, req.SourceDir)
+				if e.Err != nil {
+					return e.Err
+				}
+				liveErr = e.LiveErr
+				e.applyTo(sc)
+				// The scan analyses exactly what was exported (Sol r4 P1).
+				req.ToolDefinitions = e.Data
+				return nil
+			}
 			if !s.serverInfo.IsConnected(serverName) {
 				s.logger.Info("Server is disconnected, attempting to connect for scan",
 					zap.String("server", serverName))
@@ -776,21 +1353,46 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 					s.waitForConnection(serverName, 30*time.Second)
 				}
 			}
-			scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
+			exportErr := exportInto(scanCtx)
 
-			// If export failed but server should be connected, retry once after
-			// ensuring connection (handles quarantined servers that need an
-			// inspection exemption, and stale StateView snapshots)
-			if scanCtx.ToolsExported == 0 {
-				s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
-					zap.String("server", serverName))
-				if err := s.serverInfo.EnsureConnected(ctx, serverName); err != nil {
-					s.logger.Warn("Retry EnsureConnected failed",
-						zap.String("server", serverName), zap.Error(err))
+			// If export failed, retry once. Reconnect ONLY when the server is
+			// actually disconnected (that path handles quarantined servers
+			// needing an inspection exemption). EnsureConnected RESTARTS the
+			// server, so calling it on an already-connected server tore down a
+			// healthy connection mid-export and turned a recoverable "0 tools"
+			// into a misleading "server is disconnected" — the retry churn seen
+			// on spec-086 admission scans. A connected server just re-exports.
+			if exportErr == nil && scanCtx.ToolsExported == 0 {
+				if s.serverInfo.IsConnected(serverName) {
+					s.logger.Info("Tool export returned 0 for a connected server, retrying export without restarting it",
+						zap.String("server", serverName))
+					exportErr = exportInto(scanCtx)
 				} else {
-					s.waitForConnection(serverName, 30*time.Second)
-					scanCtx.ToolsExported = s.exportToolDefinitions(serverName, req.SourceDir)
+					s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
+						zap.String("server", serverName))
+					if err := s.serverInfo.EnsureConnected(ctx, serverName); err != nil {
+						s.logger.Warn("Retry EnsureConnected failed",
+							zap.String("server", serverName), zap.Error(err))
+					} else {
+						s.waitForConnection(serverName, 30*time.Second)
+						exportErr = exportInto(scanCtx)
+					}
 				}
+			}
+			if exportErr == nil && liveErr != nil {
+				// Fail closed (Sol r3 P1): the live export failed even on the
+				// retry and there was no ingested contract to scan, so this
+				// pass wrote no tools.json — whatever the source dir holds
+				// must not be scanned in its place.
+				exportErr = fmt.Errorf("export tool definitions: %w", liveErr)
+			}
+			if exportErr != nil {
+				// Fail closed (RT-06, Sol r2 P1): never scan a source dir
+				// whose tools.json this pass did not write.
+				if resolvedCleanup != nil {
+					resolvedCleanup()
+				}
+				return nil, fmt.Errorf("cannot scan server %s: %w", serverName, exportErr)
 			}
 		}
 	}
@@ -825,6 +1427,16 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 	}
 	job, err := s.engine.StartScan(ctx, req, callback)
 	if err != nil {
+		// The callback owns resolvedCleanup, but the engine only ever invokes
+		// the callback for a scan it ACCEPTED. Every rejection path here —
+		// "scan already in progress", scanner resolution failure, no scanners
+		// installed — returns before OnScanStarted, so the temp source
+		// directory prepared above would be orphaned on disk. Release it on the
+		// way out; the automatic baseline paths retry, and the concurrent-scan
+		// rejection is exactly what they hit when they race a manual scan.
+		if resolvedCleanup != nil {
+			resolvedCleanup()
+		}
 		return nil, err
 	}
 
@@ -837,7 +1449,16 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 // startPass2 starts the background supply chain audit (Pass 2) for a server.
 // It re-resolves source WITHOUT filtering (full container filesystem including deps)
 // and runs only Trivy-compatible scanners for deep CVE analysis.
-func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
+//
+// inc is the incarnation of the Pass 1 job that scheduled it: Pass 2 and its
+// failed-source placeholder bind to it, and Pass 2 does not start at all once
+// that incarnation is no longer current (Spec 116 FR-014a, review round 1).
+func (s *Service) startPass2(serverName string, serverInfo *ServerInfo, inc int64) {
+	if !s.incarnationIsCurrent(serverName, inc) {
+		s.logger.Info("Pass 2 skipped: the server was removed or replaced since Pass 1 started",
+			zap.String("server", serverName), zap.Int64("incarnation", inc))
+		return
+	}
 	s.logger.Info("Starting Pass 2 (supply chain audit) in background",
 		zap.String("server", serverName),
 	)
@@ -845,9 +1466,11 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 	ctx := context.Background()
 
 	req := ScanRequest{
-		ServerName: serverName,
-		DryRun:     false,
-		ScanPass:   ScanPassSupplyChainAudit,
+		ServerName:    serverName,
+		Incarnation:   inc,
+		DryRun:        false,
+		ScanPass:      ScanPassSupplyChainAudit,
+		IsolationMode: s.resolveIsolationMode(serverName),
 	}
 
 	// Build scan context
@@ -868,7 +1491,7 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 				zap.Error(err),
 			)
 			// Fall back to a failed pass 2 job so the UI knows it was attempted
-			s.saveFailedPass2Job(serverName, "source resolution failed: "+err.Error())
+			s.saveFailedPass2Job(serverName, "source resolution failed: "+err.Error(), inc)
 			return
 		}
 		req.SourceDir = resolved.SourceDir
@@ -879,6 +1502,7 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 			scanCtx.SourcePath = resolved.ServerURL
 		}
 		scanCtx.ContainerID = resolved.ContainerID
+		scanCtx.ContainerOwner = resolved.ContainerOwner
 		// Docker-image servers: scan the image (Trivy image mode reports OS-package
 		// and bundled-dependency CVEs). No source dir to enrich or export tools into.
 		if resolved.ContainerImage != "" {
@@ -898,7 +1522,22 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 		// Export tool definitions for Cisco scanner (only when there is a real
 		// source dir to write tools.json into — image-only servers have none).
 		if s.serverInfo != nil && req.SourceDir != "" {
-			s.exportToolDefinitions(serverName, req.SourceDir)
+			e := s.exportToolDefinitionsFull(serverName, req.SourceDir)
+			if e.Err == nil && e.LiveErr != nil {
+				e.Err = fmt.Errorf("export tool definitions: %w", e.LiveErr)
+			}
+			if e.Err != nil {
+				// The source dir may hold a tools.json this pass did not
+				// write, so every scanner that may analyse tool metadata is
+				// failed (RT-06). Pass 2's purpose — dependency / image CVE
+				// analysis — does not depend on the definitions, so those
+				// scanners still run (Sol r4 P2).
+				s.logger.Warn("Pass 2: tool definitions could not be exported; running only scanners independent of tool metadata",
+					zap.String("server", serverName), zap.Error(e.Err))
+				req.ToolDefinitionsUnavailable = true
+			} else {
+				req.ToolDefinitions = e.Data
+			}
 		}
 	} else {
 		s.logger.Warn("No server info available for Pass 2, skipping",
@@ -927,7 +1566,8 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo) {
 }
 
 // saveFailedPass2Job creates a failed ScanJob for Pass 2 so the UI knows it was attempted.
-func (s *Service) saveFailedPass2Job(serverName, errMsg string) {
+// It is bound to inc, the originating Pass 1 job's incarnation.
+func (s *Service) saveFailedPass2Job(serverName, errMsg string, inc int64) {
 	job := &ScanJob{
 		ID:          fmt.Sprintf("scan-%s-pass2-%d", serverName, time.Now().UnixNano()),
 		ServerName:  serverName,
@@ -936,8 +1576,9 @@ func (s *Service) saveFailedPass2Job(serverName, errMsg string) {
 		StartedAt:   time.Now(),
 		CompletedAt: time.Now(),
 		Error:       errMsg,
+		Incarnation: inc,
 	}
-	_ = s.storage.SaveScanJob(job)
+	s.saveJob(job)
 }
 
 // GetScanStatus returns the current scan status for a server.
@@ -1059,12 +1700,41 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 	agg.ScanContext = primaryJob.ScanContext
 	agg.ScannerStatuses = primaryJob.ScannerStatuses
 
+	// Spec 077 US3 (FR-008): mirror the opt-in deep-scan availability descriptor
+	// onto the report so the report page renders the informational banner. Both
+	// passes are considered. Informational only — never changes the verdict;
+	// reports enabled=false (+ skipped scanners) while the layer is off.
+	agg.DeepScan = s.buildDeepScanDescriptor(pass1Job, pass2Job)
+
 	return agg, nil
 }
 
 // CleanupStaleJobs marks any running/pending scan jobs as failed.
 // Called on startup to clean up jobs that were interrupted by a process crash.
 func (s *Service) CleanupStaleJobs() {
+	// Spec 116 FR-014a (review round 2): the config watcher can remove a
+	// server while this runs, so every save goes through the
+	// incarnation-conditional writer (saveJob) and a purge between the list
+	// and the save is never undone. A legacy job with no incarnation is bound
+	// to the server's incarnation read BEFORE the list: if a remove and re-add
+	// happened after that read, the conditional write refuses it; if it
+	// happened before, the list no longer holds the purged job.
+	_, conditional := s.storage.(IncarnationStorage)
+	type incView struct {
+		inc        int64
+		configured bool
+	}
+	incarnations := map[string]incView{}
+	if conditional {
+		if names, err := s.storage.ListScanJobs(""); err == nil {
+			for _, job := range names {
+				if _, seen := incarnations[job.ServerName]; !seen {
+					inc, configured := s.currentIncarnation(job.ServerName)
+					incarnations[job.ServerName] = incView{inc, configured}
+				}
+			}
+		}
+	}
 	jobs, err := s.storage.ListScanJobs("")
 	if err != nil {
 		s.logger.Warn("failed to list scan jobs for stale cleanup", zap.Error(err))
@@ -1073,10 +1743,13 @@ func (s *Service) CleanupStaleJobs() {
 
 	cleaned := 0
 	for _, job := range jobs {
-		if job.Status == ScanJobStatusRunning || job.Status == ScanJobStatusPending {
-			job.Status = ScanJobStatusFailed
-			job.Error = "interrupted by server restart"
-			job.CompletedAt = time.Now()
+		if job.Status != ScanJobStatusRunning && job.Status != ScanJobStatusPending {
+			continue
+		}
+		job.Status = ScanJobStatusFailed
+		job.Error = "interrupted by server restart"
+		job.CompletedAt = time.Now()
+		if !conditional {
 			if err := s.storage.SaveScanJob(job); err != nil {
 				s.logger.Warn("failed to clean up stale scan job",
 					zap.String("job_id", job.ID),
@@ -1085,6 +1758,24 @@ func (s *Service) CleanupStaleJobs() {
 			} else {
 				cleaned++
 			}
+			continue
+		}
+		if job.Incarnation == 0 {
+			v, ok := incarnations[job.ServerName]
+			if !ok || !v.configured {
+				continue // not configured (or appeared after the read): leave it to the purge
+			}
+			job.Incarnation = v.inc
+		}
+		written, err := s.storage.(IncarnationStorage).SaveScanJobIfIncarnation(job, job.Incarnation)
+		switch {
+		case err != nil:
+			s.logger.Warn("failed to clean up stale scan job",
+				zap.String("job_id", job.ID),
+				zap.Error(err),
+			)
+		case written:
+			cleaned++
 		}
 	}
 
@@ -1155,6 +1846,7 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 	// If this is a Pass 1 job, try to find and merge companion Pass 2 results.
 	// The companion is resolved via the lightweight scan-job index, so this does
 	// NOT deserialize the full per-server scan history (MCP-2205).
+	var companionPass2 *ScanJob
 	if job.ScanPass == ScanPassSecurityScan || job.ScanPass == 0 {
 		if companionID := s.findCompanionPass2JobID(job); companionID != "" {
 			pass2Reports, err := s.storage.ListScanReportsByJob(companionID)
@@ -1170,6 +1862,12 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 				agg.Pass1Complete = true
 				agg.Pass2Complete = true
 			}
+			// Load the companion Pass-2 job so its per-scanner statuses feed the
+			// deep-scan descriptor (Spec 077 FR-008) — the heavy trivy /
+			// supply-chain scanners run in Pass 2.
+			if cj, cerr := s.storage.GetScanJob(companionID); cerr == nil {
+				companionPass2 = cj
+			}
 		}
 
 		// Check if Pass 2 is running
@@ -1181,6 +1879,13 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 	// Attach scan context and scanner execution logs from job
 	agg.ScanContext = job.ScanContext
 	agg.ScannerStatuses = job.ScannerStatuses
+
+	// Spec 077 US3 (FR-008): mirror the opt-in deep-scan availability descriptor
+	// so the report page renders the informational banner. Considers this job and
+	// its companion Pass-2 job (when the requested job is a Pass-1 job).
+	// Informational only — never changes the verdict; nil (omitted) when deep
+	// scan is off.
+	agg.DeepScan = s.buildDeepScanDescriptor(job, companionPass2)
 
 	return agg, nil
 }
@@ -1316,17 +2021,131 @@ func (s *Service) CancelScan(ctx context.Context, serverName string) error {
 
 // ApproveServer approves a scanned server, storing the integrity baseline
 func (s *Service) ApproveServer(ctx context.Context, serverName string, force bool, approvedBy string) error {
+	return s.approveServerBlocks(ctx, serverName, force, approvedBy, nil, nil, 0)
+}
+
+// ApproveServerReviewed approves a scanned server bound to the review the
+// caller showed (Spec 117 PR-2, #1566). expected maps tool name to the review
+// fingerprint (current_hash) the operator saw; nil is an unbound (legacy)
+// request and an empty map binds to the empty snapshot. blocks are the tools
+// to keep disabled. The dangerous-scan gate runs first and keeps its message;
+// a stale binding returns *toolreview.StaleToolReviewError unchanged, with
+// nothing written and the server still quarantined.
+func (s *Service) ApproveServerReviewed(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string) error {
+	return s.ApproveServerReviewedAt(ctx, serverName, force, approvedBy, blocks, expected, 0)
+}
+
+// ApproveServerReviewedAt is ApproveServerReviewed also bound to
+// expectedIncarnation, the incarnation of the server the caller reviewed
+// (Spec 116 FR-017). The two bindings are independent: a remove and re-add
+// since the review fails with server_replaced (the replacement stays
+// quarantined), changed definitions with the stale-review error. 0 binds to
+// the incarnation current when the call starts.
+func (s *Service) ApproveServerReviewedAt(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string, expectedIncarnation int64) error {
+	return s.approveServerBlocks(ctx, serverName, force, approvedBy, blocks, expected, expectedIncarnation)
+}
+
+func (s *Service) approveServerBlocks(ctx context.Context, serverName string, force bool, approvedBy string, blocks []string, expected map[string]string, expectedIncarnation int64) error {
+	if len(blocks) == 0 {
+		return s.approveServer(ctx, serverName, force, approvedBy, nil, expected, expectedIncarnation)
+	}
+	approvalBlocks, err := toolApprovalBlocks(blocks, approvedBy)
+	if err != nil {
+		return err
+	}
+	return s.approveServer(ctx, serverName, force, approvedBy, approvalBlocks, expected, expectedIncarnation)
+}
+
+// ApproveServerAt is ApproveServerWithBlocks (toolNames may be empty) bound
+// to expectedIncarnation, the incarnation of the server the caller reviewed
+// (Spec 116 FR-017). A remove and re-add since then fails it with
+// server_replaced and leaves the replacement quarantined. 0 binds to the
+// incarnation current when the call starts.
+func (s *Service) ApproveServerAt(ctx context.Context, serverName string, force bool, approvedBy string, toolNames []string, expectedIncarnation int64) error {
+	return s.approveServerBlocks(ctx, serverName, force, approvedBy, toolNames, nil, expectedIncarnation)
+}
+
+// ApproveServerWithBlocks approves a scanned server and atomically records the
+// selected tool blocks with the integrity baseline before the server can be
+// unquarantined.
+func (s *Service) ApproveServerWithBlocks(ctx context.Context, serverName string, force bool, approvedBy string, toolNames []string) error {
+	blocks, err := toolApprovalBlocks(toolNames, approvedBy)
+	if err != nil {
+		return err
+	}
+	return s.approveServer(ctx, serverName, force, approvedBy, blocks, nil, 0)
+}
+
+// toolApprovalBlocks validates and deduplicates block names.
+func toolApprovalBlocks(toolNames []string, approvedBy string) ([]ToolApprovalBlock, error) {
+	seen := make(map[string]struct{}, len(toolNames))
+	blocks := make([]ToolApprovalBlock, 0, len(toolNames))
+	for _, name := range toolNames {
+		if name == "" {
+			return nil, fmt.Errorf("%w: empty tool name", ErrToolApprovalBlockNotFound)
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		blocks = append(blocks, ToolApprovalBlock{ToolName: name, ApprovedAt: time.Now().UTC(), ApprovedBy: approvedBy})
+	}
+	return blocks, nil
+}
+
+func (s *Service) approveServer(ctx context.Context, serverName string, force bool, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string, expectedIncarnation int64) error {
+	// Spec 116 FR-014: bind the approval to the server identity it reviews.
+	binder, bound := s.unquarantiner.(ApprovalIncarnationBinder)
+	var inc int64
+	if bound {
+		var err error
+		if inc, err = binder.CaptureApprovalIncarnation(serverName, expectedIncarnation); err != nil {
+			return err
+		}
+	}
+
 	// Get latest scan report
 	aggReport, err := s.GetScanReport(ctx, serverName)
+	if err == nil && aggReport != nil && inc != 0 && !s.reportIsForIncarnation(aggReport, inc) {
+		// A scan of an earlier server with this name (FR-014a): it does not
+		// describe the server being approved.
+		aggReport, err = nil, fmt.Errorf("scan results belong to a removed server")
+	}
 	if err != nil {
 		if !force {
 			return fmt.Errorf("no scan results found; run a scan first or use --force")
 		}
 	}
 
-	// Check for critical findings (block unless force)
-	if aggReport != nil && aggReport.Summary.Critical > 0 && !force {
-		return fmt.Errorf("server has %d critical findings; resolve them or use --force to approve anyway", aggReport.Summary.Critical)
+	// Block approval on blocking findings unless forced. Spec 077 FR-021: the
+	// approval gate is PURELY tier-driven, mirroring the server verdict
+	// (GetScanSummary) and the Approve modal exactly. isBlockingFinding is the SAME
+	// predicate that drives the "dangerous" summary status, so the gate and the
+	// verdict can never disagree: a server blocks the gate if and only if its
+	// summary reads "dangerous".
+	//
+	// The former extra `Summary.Critical > 0` guard is intentionally gone (Codex
+	// round-4 finding #3). It could reject an unforced approval on a Critical-
+	// severity but NON-dangerous finding — e.g. a critical CVE, which the classifier
+	// maps to threat_level "warnings" (supply-chain findings inform, they do not
+	// gate), or a deep-scan/external finding — even though the very same summary and
+	// verdict showed the server as non-dangerous. Gate and verdict then disagreed.
+	// Under Spec 077's baseline-only, tier-driven model (FR-021, US3 FR-021 —
+	// deep-scan/external findings inform but never gate) ONLY a HARD-tier baseline
+	// finding blocks. Legacy/external/deep-scan findings carry no tier and never
+	// gate, even at threat_level "dangerous"; they still surface in the summary as
+	// warnings/info. isBlockingFinding is that single tier-driven predicate, so
+	// the gate and the "dangerous" summary status stay consistent.
+	if aggReport != nil && !force {
+		blocking := 0
+		for _, f := range aggReport.Findings {
+			if isBlockingFinding(f) {
+				blocking++
+			}
+		}
+		if blocking > 0 {
+			return fmt.Errorf("server has %d dangerous (hard-tier) finding(s); resolve them or use --force to approve anyway", blocking)
+		}
 	}
 
 	// Create integrity baseline
@@ -1348,8 +2167,65 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 		}
 	}
 
-	if err := s.storage.SaveIntegrityBaseline(baseline); err != nil {
-		return fmt.Errorf("failed to save integrity baseline: %w", err)
+	save := func() error { return s.storage.SaveIntegrityBaseline(baseline) }
+	if len(blocks) > 0 {
+		save = func() error { return s.storage.SaveIntegrityBaselineWithBlocks(baseline, blocks) }
+	}
+	if approver, ok := s.unquarantiner.(ReviewedServerApprover); ok {
+		return s.approveServerReviewed(approver, serverName, approvedBy, blocks, expected, save, bound, inc)
+	}
+	if expected != nil {
+		// Never drop a binding silently: without the reviewed capability the
+		// approval could not be checked against the review.
+		return fmt.Errorf("review-bound approval is not supported for server %q by this core", serverName)
+	}
+	var saveErr error
+	blockNames := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		blockNames = append(blockNames, block.ToolName)
+	}
+	switch committer := s.unquarantiner.(type) {
+	case IncarnationServerApprovalCommitter:
+		// Spec 117 PR-1 (FR-023) + Spec 116 FR-014: record the tool baseline
+		// decision and commit the baseline (+ blocks) in the runtime's locked
+		// section, only while the stored row still carries the reviewed
+		// incarnation. A removal purges the baseline, blocks and the marker
+		// under the same lock, so either this commit ran first (and was
+		// purged) or it sees the replacement and records nothing.
+		if bound {
+			_, saveErr = committer.CommitServerApprovalAt(serverName, inc, blockNames, nil, approvedBy, save)
+		} else {
+			_, saveErr = committer.CommitServerApproval(serverName, blockNames, nil, approvedBy, save)
+		}
+	case ServerApprovalCommitter:
+		// Spec 117 PR-1 (FR-023): both branches commit inside the runtime's
+		// locked section, which first records the server's tool baseline
+		// decision, also for an empty or blind review.
+		_, saveErr = committer.CommitServerApproval(serverName, blockNames, nil, approvedBy, save)
+	default:
+		if locker, ok := s.unquarantiner.(ToolApprovalLocker); ok && len(blocks) > 0 {
+			saveErr = locker.WithToolApprovalLock(serverName, save)
+		} else {
+			saveErr = save()
+		}
+	}
+	if saveErr != nil {
+		if errors.Is(saveErr, commitview.ErrServerReplaced) {
+			return saveErr
+		}
+		return fmt.Errorf("failed to save integrity baseline: %w", saveErr)
+	}
+	if h := s.approvalHooks.afterBaselineBeforeUnquarantine; h != nil {
+		h(serverName, inc)
+	}
+	if len(blocks) > 0 {
+		if recorder, ok := s.unquarantiner.(ToolBlockRecorder); ok {
+			toolNames := make([]string, 0, len(blocks))
+			for _, block := range blocks {
+				toolNames = append(toolNames, block.ToolName)
+			}
+			recorder.RecordToolBlocksForSecurityApproval(serverName, toolNames, approvedBy)
+		}
 	}
 
 	// Actually unquarantine the server: clear the flag in storage, persist
@@ -1358,7 +2234,17 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 	// approval — without it, the server stays quarantined forever and the
 	// approval is cosmetic.
 	if s.unquarantiner != nil {
-		if err := s.unquarantiner.UnquarantineServer(serverName); err != nil {
+		unquarantine := s.unquarantiner.UnquarantineServer
+		if bound {
+			// One commit that expects the reviewed incarnation (FR-015).
+			unquarantine = func(name string) error { return binder.UnquarantineServerAt(name, inc) }
+		}
+		if err := unquarantine(serverName); err != nil {
+			if errors.Is(err, commitview.ErrServerReplaced) {
+				s.logger.Info("Scanner approval not applied: the server was removed or replaced since it was reviewed",
+					zap.String("server", serverName), zap.Int64("incarnation", inc))
+				return &commitview.ServerReplacedError{Name: serverName}
+			}
 			// Report the error to the caller but keep the baseline we just
 			// saved — the caller can retry via the normal unquarantine path.
 			s.logger.Error("Failed to unquarantine server after approval",
@@ -1379,6 +2265,71 @@ func (s *Service) ApproveServer(ctx context.Context, serverName string, force bo
 	)
 
 	return nil
+}
+
+// approveServerReviewed is approveServer's Spec 117 PR-2 path: one locked
+// commit section (validate, baseline marker, integrity baseline + blocks,
+// promotion of the pending tools present, storage/config unquarantine), then
+// the block audit events and the unlocked finish.
+func (s *Service) approveServerReviewed(approver ReviewedServerApprover, serverName, approvedBy string, blocks []ToolApprovalBlock, expected map[string]string, save func() error, bound bool, inc int64) error {
+	blockNames := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		blockNames = append(blockNames, block.ToolName)
+	}
+	var commitErr error
+	if ic, ok := approver.(IncarnationServerApprovalCommitter); ok && bound {
+		// Spec 116 FR-014 + Spec 117 FR-011: the incarnation is checked
+		// first, under the approval lock, then the fingerprints.
+		_, commitErr = ic.CommitServerApprovalAt(serverName, inc, blockNames, expected, approvedBy, save)
+	} else {
+		_, commitErr = approver.CommitServerApproval(serverName, blockNames, expected, approvedBy, save)
+	}
+	if err := commitErr; err != nil {
+		if errors.Is(err, commitview.ErrServerReplaced) {
+			s.logger.Info("Scanner approval not applied: the server was removed or replaced since it was reviewed",
+				zap.String("server", serverName), zap.Int64("incarnation", inc))
+			return &commitview.ServerReplacedError{Name: serverName}
+		}
+		var stale *toolreview.StaleToolReviewError
+		if errors.As(err, &stale) {
+			return stale
+		}
+		return fmt.Errorf("failed to save integrity baseline: %w", err)
+	}
+	if len(blocks) > 0 {
+		if recorder, ok := s.unquarantiner.(ToolBlockRecorder); ok {
+			recorder.RecordToolBlocksForSecurityApproval(serverName, blockNames, approvedBy)
+		}
+	}
+	if err := approver.FinishServerApproval(serverName); err != nil {
+		s.logger.Error("Failed to finish server approval",
+			zap.String("server", serverName), zap.Error(err))
+		return fmt.Errorf("failed to finish approval of server %q: %w", serverName, err)
+	}
+	s.logger.Info("Server approved after security scan",
+		zap.String("server", serverName),
+		zap.String("approved_by", approvedBy),
+		zap.Bool("review_bound", expected != nil),
+	)
+	return nil
+}
+
+// reportIsForIncarnation reports whether an aggregated report describes the
+// server incarnation inc: its job carries inc, or carries none (a job saved
+// before Spec 116 PR2, which can only belong to the current server because a
+// removal purges every job of the name). A zero-incarnation job cannot be
+// written AFTER a commit (review round 1): StartScan refuses a server the
+// committed view does not know, and storage refuses an unbound job or report
+// once a config commit exists, so a remove/re-add gap cannot mint one.
+func (s *Service) reportIsForIncarnation(agg *AggregatedReport, inc int64) bool {
+	if agg == nil || agg.JobID == "" {
+		return true
+	}
+	job, err := s.storage.GetScanJob(agg.JobID)
+	if err != nil || job == nil {
+		return true
+	}
+	return job.Incarnation == 0 || job.Incarnation == inc
 }
 
 // RejectServer rejects a server, cleaning up all artifacts
@@ -1406,6 +2357,19 @@ func (s *Service) RejectServer(ctx context.Context, serverName string) error {
 }
 
 // --- Integrity ---
+
+// HasApprovalBaseline reports whether an integrity baseline already exists for
+// the server — i.e. it has been approved/unquarantined at least once. The
+// spec-086 admission gate uses this to distinguish a first-time admission
+// quarantine (auto-approve on a clean baseline scan) from a deliberate operator
+// re-quarantine of an already-admitted server (never silently auto-approved).
+func (s *Service) HasApprovalBaseline(serverName string) bool {
+	if s.storage == nil {
+		return false
+	}
+	baseline, err := s.storage.GetIntegrityBaseline(serverName)
+	return err == nil && baseline != nil
+}
 
 // CheckIntegrity verifies a server's runtime integrity against its baseline
 func (s *Service) CheckIntegrity(ctx context.Context, serverName string) (*IntegrityCheckResult, error) {
@@ -1457,17 +2421,36 @@ func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {
 	overview := &SecurityOverview{}
 
 	// Count installed scanners. ScannersInstalled is the total number of
-	// scanners persisted in storage; ScannersEnabled is the subset the engine
-	// will actually run (status installed or configured). UI uses
-	// ScannersEnabled to decide whether to show scan-trigger buttons.
+	// scanners the proxy holds an install record for; ScannersEnabled is the
+	// subset the engine will actually run (status installed or configured). UI
+	// uses ScannersEnabled to decide whether to show scan-trigger buttons.
+	//
+	// Both counts have to include the in-process baseline scanner
+	// (tpa-descriptions), which is always installed+enabled and lives in the
+	// in-memory registry — nothing persists it to BBolt until a Docker scanner
+	// is installed. Counting storage alone reported 0/0 on a fresh install and
+	// hid the web UI's "Scan All Servers" button on exactly the installs that
+	// have never scanned anything.
+	seen := make(map[string]bool)
 	scanners, err := s.storage.ListScanners()
 	if err == nil {
 		overview.ScannersInstalled = len(scanners)
 		for _, sc := range scanners {
+			seen[sc.ID] = true
 			if sc.Status == ScannerStatusInstalled || sc.Status == ScannerStatusConfigured {
 				overview.ScannersEnabled++
 			}
 		}
+	}
+	// InProcessRunnableIDs resolves the predicate under the registry lock:
+	// List() returns the live *ScannerPlugin records that UpdateStatus mutates,
+	// so reading Status out here would race with a concurrent install/pull.
+	for _, id := range s.registry.InProcessRunnableIDs() {
+		if seen[id] {
+			continue
+		}
+		overview.ScannersInstalled++
+		overview.ScannersEnabled++
 	}
 
 	// Count scan jobs
@@ -1526,6 +2509,12 @@ func (s *Service) GetOverview(ctx context.Context) (*SecurityOverview, error) {
 	// Check Docker availability
 	overview.DockerAvailable = s.docker.IsDockerAvailable(ctx)
 
+	// Spec 086 FR-019 / GH #938: report the live TPA signature corpus so an
+	// operator can see which signatures are running, where they came from, and
+	// how fresh they are — including a failed configured-bundle load.
+	bundle := BundleStatus()
+	overview.SignatureBundle = &bundle
+
 	return overview, nil
 }
 
@@ -1549,12 +2538,21 @@ type IntegrityViolation struct {
 // Returns nil if no scans have been run for this server.
 // Considers both Pass 1 and Pass 2 results when computing status.
 func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSummary {
+	// The entry must belong to the server's current incarnation: a removed
+	// server's entry is dropped by the purge observer only after the commit,
+	// and a same-name re-add may already be live (review round 3).
+	inc, _ := s.currentIncarnation(serverName)
 	// Check cache first (avoids expensive BBolt reads for every server)
 	s.summaryCacheMu.RLock()
-	if cached, ok := s.summaryCache[serverName]; ok {
+	if cached, ok := s.summaryCache[serverName]; ok && s.summaryCacheInc[serverName] == inc {
 		s.summaryCacheMu.RUnlock()
 		return cached
 	}
+	// Sample the invalidation generation in the same critical section as the
+	// miss. Everything below reads BBolt with no lock held, so this is the
+	// token that lets cacheScanSummary tell "still current" from "a scan
+	// started while I was computing".
+	cacheGen := summaryCacheToken{gen: s.summaryCacheGen[serverName], inc: inc}
 	s.summaryCacheMu.RUnlock()
 
 	// Check for active scan (Pass 1 takes priority in status display)
@@ -1576,7 +2574,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		// Only cache the explicit "no scans found" sentinel — transient
 		// I/O errors must retry on the next call.
 		if errors.Is(err, errNoScans) {
-			s.cacheScanSummary(serverName, nil)
+			s.cacheScanSummary(serverName, nil, cacheGen)
 		}
 		return nil
 	}
@@ -1592,10 +2590,17 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		Status:     "clean",
 	}
 
+	// Spec 077 US3 (FR-008): surface the opt-in deep-scan layer as a SEPARATE
+	// informational dimension. This never influences Status — a failed or
+	// unavailable deep scanner leaves the baseline verdict untouched. Always
+	// present; reports enabled=false (+ any enabled-but-skipped Docker
+	// scanners) while the layer is off.
+	summary.DeepScan = s.buildDeepScanDescriptor(pass1Job, pass2Job)
+
 	// Check if the primary job failed
 	if primaryJob.Status == ScanJobStatusFailed {
 		summary.Status = "failed"
-		s.cacheScanSummary(serverName, summary)
+		s.cacheScanSummary(serverName, summary, cacheGen)
 		return summary
 	}
 
@@ -1615,7 +2620,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 		}
 		if summary.ScannersRun == 0 {
 			summary.Status = "failed"
-			s.cacheScanSummary(serverName, summary)
+			s.cacheScanSummary(serverName, summary, cacheGen)
 			return summary
 		}
 	}
@@ -1658,8 +2663,7 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 				summary.Status = "failed"
 			}
 		}
-		summary.degradeIfIncompleteCoverage()
-		s.cacheScanSummary(serverName, summary)
+		s.cacheScanSummary(serverName, summary, cacheGen)
 		return summary
 	}
 
@@ -1668,45 +2672,83 @@ func (s *Service) GetScanSummary(ctx context.Context, serverName string) *ScanSu
 
 	summary.RiskScore = CalculateRiskScore(allFindings)
 
-	// Count by threat level
-	counts := FindingCounts{Total: len(allFindings)}
-	for _, f := range allFindings {
-		switch f.ThreatLevel {
-		case ThreatLevelDangerous:
+	// Tier-driven, baseline-only bucketing + verdict (Spec 077 FR-014/FR-021).
+	// deriveBaselineVerdict is SHARED with AggregateReports so the server-list
+	// status and the report-page verdict can never disagree.
+	verdict, counts := deriveBaselineVerdict(allFindings)
+	summary.FindingCounts = &counts
+	summary.Status = verdict
+
+	// Cache for fast subsequent reads
+	s.cacheScanSummary(serverName, summary, cacheGen)
+	return summary
+}
+
+// isBlockingFinding reports whether a finding gates approval / drives a
+// "dangerous" verdict under the Spec 077 two-tier model (FR-021, US3 FR-021).
+// Blocking is PURELY tier-driven: a finding blocks if and only if it is a
+// HARD-tier baseline finding. Only the in-process detect engine (the baseline
+// scanner) sets Tier, and it emits Tier=="hard" exactly for the hard-tier
+// checks. Every other producer carries no tier:
+//
+//   - Baseline SOFT findings carry Tier=="soft" — review-only, never block.
+//   - Deep-scan / external / legacy findings (Docker scanners, imported SARIF,
+//     supply-chain audits) carry no tier. Per US3 FR-021 these INFORM but do
+//     NOT gate approval, so they never block regardless of threat_level. This
+//     keeps the gate consistent with the baseline-only, tier-driven verdict:
+//     a no-tier "dangerous" finding must not silently unquarantine-block a
+//     server when the baseline itself is clean.
+//
+// This is the SAME predicate that drives the "dangerous" summary status
+// (GetScanSummary) and the ApproveServer gate, so the two can never disagree.
+func isBlockingFinding(f ScanFinding) bool {
+	return f.Tier == TierHard
+}
+
+// deriveBaselineVerdict buckets findings by the Spec 077 tier-driven model and
+// derives the baseline-only verdict (FR-014/FR-021). It is the SINGLE source of
+// truth shared by GetScanSummary (server-list status) and AggregateReports
+// (report-page verdict), so the two surfaces can never disagree.
+//
+// Bucketing: only a HARD baseline finding counts as dangerous
+// (isBlockingFinding). A baseline soft finding (detect emits ThreatLevelWarning
+// for soft-only) counts as a warning. Legacy/external/deep-scan findings carry
+// no tier and therefore never count as dangerous (US3 FR-021 — they inform but
+// do not gate); they surface at warning/info prominence by threat_level. A
+// tierless finding at threat_level "dangerous" is bucketed as a WARNING: it
+// informs without gating, and it must not rank BELOW a warning-level finding
+// (the old bucketing dropped it into Info — an inversion).
+//
+// Verdict: derives SOLELY from baseline findings at every level — "dangerous"
+// requires ≥1 hard-tier baseline finding, "warnings" requires ≥1 warning-level
+// baseline (soft) finding, else "clean". Deep-scan/external/legacy findings are
+// reported via FindingCounts and the DeepScan descriptor but never move it.
+// Only the in-process detect engine sets Tier, so a non-empty Tier identifies a
+// baseline finding.
+func deriveBaselineVerdict(findings []ScanFinding) (string, FindingCounts) {
+	counts := FindingCounts{Total: len(findings)}
+	baselineWarnings := 0
+	for _, f := range findings {
+		switch {
+		case isBlockingFinding(f):
 			counts.Dangerous++
-		case ThreatLevelWarning:
+		case f.ThreatLevel == ThreatLevelWarning,
+			f.Tier == "" && f.ThreatLevel == ThreatLevelDangerous:
 			counts.Warning++
 		default:
 			counts.Info++
 		}
+		if f.Tier != "" && !isBlockingFinding(f) && f.ThreatLevel == ThreatLevelWarning {
+			baselineWarnings++
+		}
 	}
-	summary.FindingCounts = &counts
-
-	// Determine status
-	if counts.Dangerous > 0 {
-		summary.Status = "dangerous"
-	} else if counts.Warning > 0 {
-		summary.Status = "warnings"
-	} else if counts.Total > 0 {
-		summary.Status = "clean" // Only informational findings
-	}
-
-	// Incomplete coverage downgrades a would-be "clean" verdict (MCP-2401).
-	summary.degradeIfIncompleteCoverage()
-
-	// Cache for fast subsequent reads
-	s.cacheScanSummary(serverName, summary)
-	return summary
-}
-
-// degradeIfIncompleteCoverage downgrades a "clean" verdict to "degraded" when
-// at least one scanner failed, so a low/zero risk score is not read as a
-// trustworthy all-clear while a chunk of the scanner fleet never ran. Findings-
-// driven verdicts ("dangerous"/"warnings") are left intact — they already
-// signal risk; coverage can only have hidden more, never less (MCP-2401).
-func (sum *ScanSummary) degradeIfIncompleteCoverage() {
-	if sum.Status == "clean" && sum.ScannersFailed > 0 {
-		sum.Status = "degraded"
+	switch {
+	case counts.Dangerous > 0:
+		return "dangerous", counts
+	case baselineWarnings > 0:
+		return "warnings", counts
+	default:
+		return "clean", counts // baseline produced nothing above info level
 	}
 }
 
@@ -1714,14 +2756,53 @@ func (sum *ScanSummary) degradeIfIncompleteCoverage() {
 type ScanSummary struct {
 	LastScanAt    *time.Time     `json:"last_scan_at,omitempty"`
 	RiskScore     int            `json:"risk_score"`
-	Status        string         `json:"status"` // clean, degraded, warnings, dangerous, failed, not_scanned, scanning
+	Status        string         `json:"status"` // clean, warnings, dangerous, failed, not_scanned, scanning
 	FindingCounts *FindingCounts `json:"finding_counts,omitempty"`
-	// Scanner coverage for the primary (security) scan pass. When ScannersFailed
-	// > 0 the risk score is computed from incomplete data, so a "clean"/low score
-	// is not trustworthy — Status is reported as "degraded" instead (MCP-2401).
+	// Scanner coverage for the primary (security) scan pass. Informational only.
+	// Spec 077 US3 (FR-008/FR-014): Status is derived SOLELY from baseline
+	// findings — a failed Docker deep scanner no longer downgrades a clean
+	// verdict to "degraded"; that failure is surfaced via DeepScan instead.
 	ScannersRun    int `json:"scanners_run"`
 	ScannersFailed int `json:"scanners_failed"`
 	ScannersTotal  int `json:"scanners_total"`
+	// DeepScan is the opt-in heavy-layer availability descriptor (Spec 077
+	// FR-008). It is a SEPARATE informational dimension and MUST NOT influence
+	// Status. Always emitted on a computed summary: when deep scan is off (the
+	// default) it reports enabled=false plus any enabled-but-skipped Docker
+	// scanners, so the skip is observable (audit FIX 3a).
+	DeepScan *DeepScanDescriptor `json:"deep_scan,omitempty"`
+}
+
+// DeepScanDescriptor reports the informational status of the opt-in "deep scan"
+// layer (Docker-based scanners + source extraction) separately from the
+// baseline verdict (Spec 077 FR-008, US3). A disabled, unavailable, or failed
+// deep scan is surfaced here as a quiet note — it never downgrades an otherwise
+// clean baseline to "degraded" and never gates approval (FR-007/FR-021).
+//
+// Invariant: when Enabled is false, Ran and Available are false and
+// ScannersFailed is empty; SkippedScanners is only populated in that disabled
+// state. The descriptor itself is ALWAYS emitted (audit FIX 3a), so a
+// deep-scan-off scan observably reports enabled=false rather than omitting the
+// field.
+type DeepScanDescriptor struct {
+	// Enabled reflects security.deep_scan.enabled (default false).
+	Enabled bool `json:"enabled"`
+	// Ran is true when at least one deep scanner executed this scan.
+	Ran bool `json:"ran"`
+	// Available is false when Docker/source-extraction/prereqs are unavailable.
+	Available bool `json:"available"`
+	// ScannersFailed lists per-scanner best-effort failures (informational).
+	ScannersFailed []DeepScanScannerFailure `json:"scanners_failed,omitempty"`
+	// SkippedScanners lists Docker scanners the user enabled that are being
+	// skipped because deep scan is off (informational; disabled state only).
+	SkippedScanners []string `json:"skipped_scanners,omitempty"`
+}
+
+// DeepScanScannerFailure names a single deep scanner that could not run and why.
+// It is informational only and never affects the baseline verdict.
+type DeepScanScannerFailure struct {
+	ID     string `json:"id"`
+	Reason string `json:"reason"`
 }
 
 // FindingCounts groups findings by user-facing threat level.
@@ -1733,21 +2814,47 @@ type FindingCounts struct {
 }
 
 // invalidateScanSummaryCache removes a server's cached scan summary,
-// forcing the next GetScanSummary call to recompute from storage.
+// forcing the next GetScanSummary call to recompute from storage. It also bumps
+// the server's cache generation so any GetScanSummary already mid-flight — it
+// read BBolt before this scan existed — cannot store its now-stale result on
+// top of this invalidation.
 func (s *Service) invalidateScanSummaryCache(serverName string) {
 	s.summaryCacheMu.Lock()
 	delete(s.summaryCache, serverName)
+	delete(s.summaryCacheInc, serverName)
+	s.summaryCacheGen[serverName]++
 	s.summaryCacheMu.Unlock()
+}
+
+// summaryCacheToken is what GetScanSummary samples on a cache miss: the
+// server's invalidation generation and the incarnation the summary is
+// computed for.
+type summaryCacheToken struct {
+	gen uint64
+	inc int64
 }
 
 // cacheScanSummary stores a computed scan summary in the cache. A nil summary
 // is stored as a sentinel meaning "we already checked, this server has no
 // scans" — used by spec 047 to avoid re-scanning the BBolt scan-job bucket on
 // every poll for untouched servers.
-func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary) {
+//
+// tok carries the generation sampled when the caller missed the cache and the
+// incarnation the summary was computed for. If the server
+// was invalidated since (a scan started, progressed or finished while this
+// summary was being computed) the result describes a superseded state, so it is
+// dropped rather than published: a resurrected pre-scan summary would report a
+// stale "clean" verdict for a server that is being scanned right now, and
+// quarantine_security's scan_server/get_scan_report hand that verdict straight
+// to an agent.
+func (s *Service) cacheScanSummary(serverName string, summary *ScanSummary, tok summaryCacheToken) {
 	s.summaryCacheMu.Lock()
+	defer s.summaryCacheMu.Unlock()
+	if s.summaryCacheGen[serverName] != tok.gen {
+		return
+	}
 	s.summaryCache[serverName] = summary
-	s.summaryCacheMu.Unlock()
+	s.summaryCacheInc[serverName] = tok.inc
 }
 
 // waitForConnection polls IsConnected until the server connects or the timeout expires.
@@ -1766,40 +2873,281 @@ func (s *Service) waitForConnection(serverName string, timeout time.Duration) {
 		zap.Duration("timeout", timeout))
 }
 
+// toolExport is the outcome of one tool-definition export.
+type toolExport struct {
+	Count  int
+	Names  []string
+	Hashes map[string]string
+	// Contracts holds the output-aware digest of every analysed contract
+	// per tool name (live and divergent ingested), see
+	// ScanContext.ToolContractDigests.
+	Contracts map[string][]string
+	At        time.Time
+	// Err is set when the export must not be scanned at all: the tool
+	// contracts discovery ingested could not be read (RT-06). A source-backed
+	// scan would otherwise read whatever tools.json the source dir already
+	// held — a stale or planted clean file — and return a clean verdict, so
+	// the caller must abort the scan rather than continue without an export
+	// (Sol r2 P1). A tools.json serialization or write failure is reported
+	// the same way (Sol r3 P1).
+	Err error
+	// LiveErr is set when the live tools/list export failed and no ingested
+	// contract was available to scan instead; nothing was written. The caller
+	// may retry, but must not scan the source dir if it persists (Sol r3 P1).
+	LiveErr error
+	// Data is the exact tools.json document written, handed to the scan as
+	// its immutable snapshot (ScanRequest.ToolDefinitions, Sol r4 P1).
+	Data []byte
+}
+
+// applyTo records the export on the scan context.
+func (e toolExport) applyTo(sc *ScanContext) {
+	sc.ToolsExported, sc.ToolNames, sc.ToolHashes, sc.ToolsExportedAt = e.Count, e.Names, e.Hashes, e.At
+	sc.ToolContractDigests = e.Contracts
+}
+
+// exportToolDefinitionsStamped runs exportToolDefinitions and also records the
+// instant just before the definitions were read. Taking the stamp first means a
+// definition change racing the read is judged not covered rather than covered.
+func (s *Service) exportToolDefinitionsStamped(serverName, sourceDir string) toolExport {
+	at := time.Now().UTC()
+	e := s.exportToolDefinitionsFull(serverName, sourceDir)
+	e.At = at
+	return e
+}
+
 // exportToolDefinitions writes a tools.json file to the source directory
 // so the Cisco MCP Scanner can analyze tool descriptions for poisoning attacks.
-// Returns the number of tools exported.
-func (s *Service) exportToolDefinitions(serverName, sourceDir string) int {
-	tools, err := s.serverInfo.GetServerTools(serverName)
-	if err != nil {
-		s.logger.Warn("Could not export tool definitions for scanning",
-			zap.String("server", serverName), zap.Error(err))
-		return 0
-	}
-	if len(tools) == 0 {
-		return 0
+// Returns the number of tools exported and their sorted, de-duplicated names,
+// so a scan records which definitions it actually saw.
+func (s *Service) exportToolDefinitions(serverName, sourceDir string) (int, []string) {
+	e := s.exportToolDefinitionsFull(serverName, sourceDir)
+	return e.Count, e.Names
+}
+
+// exportToolDefinitionsFull is exportToolDefinitions plus the per-tool
+// definition digests of what was written, so a scan can later be matched to
+// the exact definitions it analysed.
+func (s *Service) exportToolDefinitionsFull(serverName, sourceDir string) toolExport {
+	live, liveErr := s.serverInfo.GetServerTools(serverName)
+	if liveErr != nil {
+		s.logger.Warn("Could not export live tool definitions for scanning",
+			zap.String("server", serverName), zap.Error(liveErr))
+		live = nil
 	}
 
-	// Format as MCP tools/list output
+	// The contracts discovery ingested are read independently of the live
+	// export (Sol r3 P1): an empty or failed live tools/list must not hide a
+	// stored contract from the scan. Names/hashes describe the LIVE export
+	// (what the scan coverage is matched against) when there is one;
+	// diverging ingested contracts are scanned in addition.
+	scanned, err := s.withDivergentIngestedContracts(serverName, live)
+	if err != nil {
+		// Fail closed (Sol r1 P2): without the ingested contracts the scan
+		// would see only what the server chose to answer this time — the
+		// RT-06 bypass. Export nothing so the scan errors out instead of
+		// producing a verdict that could support admission.
+		s.logger.Warn("Could not read the tool contracts discovery ingested; refusing to export a live-only tool list for scanning",
+			zap.String("server", serverName), zap.Error(err))
+		return toolExport{Err: fmt.Errorf("read the tool contracts discovery ingested for %s: %w", serverName, err)}
+	}
+	if liveErr != nil && len(scanned) == 0 {
+		// Nothing to scan and the live export failed: leave the source dir
+		// alone and let the caller retry or fail closed (Sol r3 P1).
+		return toolExport{LiveErr: liveErr}
+	}
+
+	covered := live
+	if len(covered) == 0 {
+		// The live export is empty or failed but discovery ingested
+		// contracts: those are what this scan analyses, so they are what it
+		// covers (never an empty name list with a non-zero count, which would
+		// read as a legacy whole-server coverage claim).
+		covered = scanned
+	}
+
+	// Always (re)write tools.json — also for an empty list — so a stale or
+	// planted file already in a source dir is never what gets scanned
+	// (Sol r3 P1). A write failure is fatal for the same reason.
 	toolsData := map[string]interface{}{
-		"tools": tools,
+		"tools": scanned,
+	}
+	if scanned == nil {
+		toolsData["tools"] = []map[string]interface{}{}
 	}
 	data, err := json.MarshalIndent(toolsData, "", "  ")
 	if err != nil {
-		return 0
+		return toolExport{Err: fmt.Errorf("serialize tool definitions for %s: %w", serverName, err)}
 	}
 
 	toolsPath := filepath.Join(sourceDir, "tools.json")
 	if err := os.WriteFile(toolsPath, data, 0644); err != nil {
-		s.logger.Debug("Failed to write tools.json", zap.Error(err))
-		return 0
+		s.logger.Warn("Failed to write tools.json for scanning",
+			zap.String("server", serverName), zap.Error(err))
+		return toolExport{Err: fmt.Errorf("write tool definitions for %s: %w", serverName, err)}
+	}
+	if len(covered) == 0 {
+		return toolExport{Data: data}
 	}
 	s.logger.Info("Exported tool definitions for scanning",
 		zap.String("server", serverName),
-		zap.Int("tools", len(tools)),
+		zap.Int("tools", len(covered)),
+		zap.Int("scanned_contracts", len(scanned)),
 		zap.String("path", toolsPath),
 	)
-	return len(tools)
+	return toolExport{
+		Count: len(covered), Names: toolDefinitionNames(covered), Hashes: toolDefinitionHashes(covered),
+		// Every analysed contract — not only the live list — is covered
+		// (Sol r7 P2): an ingested contract the live response omitted or
+		// answered differently was scanned too, so its findings apply.
+		Contracts: ToolContractDigests(scanned),
+		Data:      data,
+	}
+}
+
+// ToolContractDigests maps each exported tool name to the sorted,
+// de-duplicated hash.ToolContractDigest of every definition exported under
+// that name.
+func ToolContractDigests(tools []map[string]interface{}) map[string][]string {
+	digests := make(map[string][]string, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		description, _ := tool["description"].(string)
+		digest := hash.ToolContractDigest(description, normalizedScanJSON(tool["inputSchema"]), normalizedScanJSON(tool["outputSchema"]))
+		if !slices.Contains(digests[name], digest) {
+			digests[name] = append(digests[name], digest)
+		}
+	}
+	if len(digests) == 0 {
+		return nil
+	}
+	for name := range digests {
+		sort.Strings(digests[name])
+	}
+	return digests
+}
+
+// withDivergentIngestedContracts returns the live export plus every contract
+// discovery ingested for the server that the live export does not reproduce
+// (same name, description and normalized input schema) — RT-06. Divergence
+// means the server answered the scan's tools/list differently from the list
+// the proxy approved or recorded, so the ingested contract is scanned too and
+// the divergence is logged. A provider without the capability leaves the
+// export unchanged; a lookup error is returned so the caller fails closed.
+func (s *Service) withDivergentIngestedContracts(serverName string, live []map[string]interface{}) ([]map[string]interface{}, error) {
+	provider, ok := s.serverInfo.(ingestedToolContractsProvider)
+	if !ok {
+		return live, nil
+	}
+	ingested, err := provider.GetIngestedToolContracts(serverName)
+	if err != nil {
+		return nil, fmt.Errorf("read ingested tool contracts for %s: %w", serverName, err)
+	}
+	if len(ingested) == 0 {
+		return live, nil
+	}
+	seen := make(map[string]struct{}, len(live)+len(ingested))
+	for _, tool := range live {
+		seen[scanContractKey(tool)] = struct{}{}
+	}
+	out := live
+	var divergent []string
+	for _, tool := range ingested {
+		key := scanContractKey(tool)
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		if len(out) == len(live) {
+			out = append(make([]map[string]interface{}, 0, len(live)+len(ingested)), live...)
+		}
+		out = append(out, tool)
+		name, _ := tool["name"].(string)
+		divergent = append(divergent, name)
+	}
+	if len(divergent) > 0 {
+		sort.Strings(divergent)
+		s.logger.Warn("Scan export diverges from the tool contracts discovery ingested; scanning the ingested contracts too",
+			zap.String("server", serverName),
+			zap.Strings("tools", divergent))
+	}
+	return out, nil
+}
+
+// scanContractKey identifies a tool contract by name, description and
+// normalized input and output schemas — an output-schema-only divergence is
+// a divergence too (Sol r1 P1), since the detector scans output schemas.
+func scanContractKey(tool map[string]interface{}) string {
+	name, _ := tool["name"].(string)
+	description, _ := tool["description"].(string)
+	return name + "\x00" + hash.ToolDefinitionDigest(description, normalizedScanJSON(tool["inputSchema"])) +
+		"\x00" + normalizedScanJSON(tool["outputSchema"])
+}
+
+// normalizedScanJSON renders an exported schema value as normalized JSON ("" when absent).
+func normalizedScanJSON(value interface{}) string {
+	switch v := value.(type) {
+	case nil:
+		return ""
+	case string:
+		return hash.NormalizeJSON(v)
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return ""
+	}
+	return hash.NormalizeJSON(string(raw))
+}
+
+// toolDefinitionHashes maps each exported tool name to the digest of its
+// description and input schema (hash.ToolDefinitionDigest). A duplicate name
+// keeps the first definition, matching what the scan reads first.
+func toolDefinitionHashes(tools []map[string]interface{}) map[string]string {
+	hashes := make(map[string]string, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		if _, dup := hashes[name]; dup {
+			continue
+		}
+		description, _ := tool["description"].(string)
+		schemaJSON := ""
+		if schema := tool["inputSchema"]; schema != nil {
+			if raw, err := json.Marshal(schema); err == nil {
+				schemaJSON = string(raw)
+			}
+		}
+		hashes[name] = hash.ToolDefinitionDigest(description, schemaJSON)
+	}
+	if len(hashes) == 0 {
+		return nil
+	}
+	return hashes
+}
+
+// toolDefinitionNames returns the sorted, de-duplicated non-empty "name"
+// values of exported tool definitions.
+func toolDefinitionNames(tools []map[string]interface{}) []string {
+	seen := make(map[string]struct{}, len(tools))
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		name, _ := tool["name"].(string)
+		if name == "" {
+			continue
+		}
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // pruneOldScans removes old scan jobs and reports beyond MaxScansPerServer

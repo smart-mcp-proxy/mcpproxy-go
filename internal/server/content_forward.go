@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -39,6 +40,69 @@ func logCacheStoreFailure(logger *zap.Logger, err error, toolName, cacheKey stri
 		zap.Int("payload_bytes", payloadBytes),
 		zap.Error(err),
 	)
+}
+
+// proxyResultEnvelope builds the mcp.Result envelope mcpproxy puts on a
+// forwarded tool result (Spec 058 FR-016b).
+//
+// Only _meta is relayed. Copying the upstream's envelope wholesale would also
+// replay its ResultType — a 2026-07-28 field telling the CLIENT how to
+// interpret the response — while mcp.CallToolResult embeds MultiRoundTripResult
+// separately, so the inputRequests and requestState that make an
+// "input_required" answerable were dropped on the same hop. The client was left
+// told to supply input it had no way to supply.
+//
+// Leaving ResultType unset lets mcp-go stamp the value appropriate to the era
+// mcpproxy is answering on, which is the only party that knows it.
+//
+// Both forwarding paths (forwardContentResult here, and the direct-surface
+// handler in mcp_routing.go) call this, so the two cannot drift apart.
+func proxyResultEnvelope(ctr *mcp.CallToolResult) mcp.Result {
+	if ctr == nil {
+		return mcp.Result{}
+	}
+	return mcp.Result{Meta: relaySafeResultMeta(ctr.Meta)}
+}
+
+// hopScopedResultMetaKeys are reserved _meta keys that describe the HOP a result
+// travelled over rather than the payload it carries, so they must not survive a
+// proxy hop.
+//
+// serverInfo is the one that bites. mcp-go stamps mcpproxy's own identity into
+// an outgoing modern result only when the field is still absent
+// (server/response.go decorateResult: `if meta.ServerInfo() == nil`). Relaying
+// an upstream's serverInfo therefore does not merely add noise — it suppresses
+// mcpproxy's identity and makes its response claim to BE the upstream server.
+// protocolVersion is hop-scoped for the same reason: the era mcpproxy negotiated
+// upstream is not the era it is answering on.
+var hopScopedResultMetaKeys = []string{
+	mcp.MetaKeyServerInfo,
+	mcp.MetaKeyProtocolVersion,
+}
+
+// relaySafeResultMeta copies meta minus the hop-scoped keys, leaving trace
+// context and any upstream-specific fields intact. It returns nil when nothing
+// survives, so no empty _meta object is emitted.
+func relaySafeResultMeta(meta *mcp.Meta) *mcp.Meta {
+	if meta == nil {
+		return nil
+	}
+
+	var fields map[string]any
+	for key, value := range meta.AdditionalFields {
+		if slices.Contains(hopScopedResultMetaKeys, key) {
+			continue
+		}
+		if fields == nil {
+			fields = make(map[string]any, len(meta.AdditionalFields))
+		}
+		fields[key] = value
+	}
+
+	if fields == nil && meta.ProgressToken == nil {
+		return nil
+	}
+	return &mcp.Meta{ProgressToken: meta.ProgressToken, AdditionalFields: fields}
 }
 
 // forwardContentResult preserves non-text content blocks (ImageContent, AudioContent,
@@ -133,7 +197,7 @@ func forwardContentResult(result interface{}, truncator *truncate.Truncator, cac
 	}
 
 	forwarded = &mcp.CallToolResult{
-		Result:            ctr.Result,
+		Result:            proxyResultEnvelope(ctr),
 		Content:           newContent,
 		StructuredContent: ctr.StructuredContent,
 		IsError:           ctr.IsError,
@@ -153,8 +217,9 @@ func forwardContentResult(result interface{}, truncator *truncate.Truncator, cac
 // may themselves be paginating (notably read_cache). If paginableUnits <= 1
 // the caller has nothing further to subdivide — caching a fresh key here would
 // just hand the agent a new key resolving to the same oversize payload, an
-// inescapable loop. In that case the text is returned as-is (still over the
-// limit) and the caller decides what to do.
+// inescapable loop. That case still respects the limit, just without a
+// pagination contract: the text is cut plainly and carries the
+// "cache not available" notice instead of a read_cache banner.
 //
 // Termination is therefore agent-driven, not strictly algorithmic: a level
 // whose records all fit individually but overflow collectively keeps minting
@@ -172,16 +237,37 @@ func forwardContentResult(result interface{}, truncator *truncate.Truncator, cac
 // logger is optional; receives a zap.Warn if cacheStore.Store fails so the
 // resulting "cache key not found" can be debugged. Pass nil to silence.
 func maybeTruncateAndCacheText(text, toolName string, args map[string]interface{}, paginableUnits int, truncator *truncate.Truncator, cacheStore CacheStore, logger *zap.Logger) (out string, wasTruncated bool) {
+	return maybeTruncateAndCacheTextPinned(text, toolName, args, paginableUnits, "", truncator, cacheStore, logger)
+}
+
+// maybeTruncateAndCacheTextPinned is maybeTruncateAndCacheText for callers that
+// compose their own payload and therefore know which array the banner they emit
+// promises to page. pinnedRecordPath forces that array to be the pagination
+// record path instead of letting the truncator's heuristic pick whichever array
+// happens to hold the most elements — for retrieve_tools that heuristic can land
+// on the Spec 049 "disabled" list or on an array nested inside a tool's input
+// schema, so read_cache would page non-tool records under a banner that
+// advertises tools.
+//
+// The pin is also what makes paginableUnits meaningful: the guard counts units
+// of the SAME array the key pages. If the pinned path is not an array in the
+// payload the truncator emits no cache handle at all (plain truncation), so the
+// banner can never advertise a contract that does not hold. An empty
+// pinnedRecordPath keeps the inferred behaviour.
+func maybeTruncateAndCacheTextPinned(text, toolName string, args map[string]interface{}, paginableUnits int, pinnedRecordPath string, truncator *truncate.Truncator, cacheStore CacheStore, logger *zap.Logger) (out string, wasTruncated bool) {
 	if truncator == nil || !truncator.ShouldTruncate(text) {
 		return text, false
 	}
 	if paginableUnits <= 1 {
 		// Cannot subdivide further; recursive caching here would just hand the
-		// agent a new key that resolves to the exact same payload. Return the
-		// oversize text intact and let the caller (and the agent) handle it.
-		return text, false
+		// agent a new key that resolves to the exact same payload. The response
+		// limit still holds, so cut plainly: the standard truncation notice, no
+		// read_cache banner and no cache write. Returning the oversize text
+		// intact would have let a single fat record (one tool with a sprawling
+		// schema) pass tool_response_limit unbounded.
+		return truncator.SimpleTruncate(text), true
 	}
-	tr := truncator.Truncate(text, toolName, args)
+	tr := truncator.TruncateWithRecordPath(text, toolName, args, pinnedRecordPath)
 	if tr.CacheAvailable && cacheStore != nil {
 		if storeErr := cacheStore.Store(tr.CacheKey, toolName, args, text, tr.RecordPath, tr.TotalRecords); storeErr != nil {
 			logCacheStoreFailure(logger, storeErr, toolName, tr.CacheKey, tr.TotalRecords, len(text))
@@ -417,6 +503,46 @@ func writeSaveToFile(params saveToFileParams, cfg saveToFileConfig, format strin
 	return mcp.NewToolResultText(string(envJSON)), true
 }
 
+// currentSaveToFileConfig returns the save_to_file settings from the LIVE
+// config snapshot when a runtime is attached, falling back to p.config.
+// p.config is captured once in NewMCPProxyServer and never reassigned, so a
+// hot-reloaded tool_output_roots/tool_output_max_bytes change would otherwise
+// not take effect until a full restart.
+func (p *MCPProxyServer) currentSaveToFileConfig() saveToFileConfig {
+	cfg := saveToFileConfig{}
+	if p.config != nil {
+		cfg = saveToFileConfig{Roots: p.config.ToolOutputRoots, MaxBytes: p.config.ToolOutputMaxBytes}
+	}
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		if live := p.mainServer.runtime.Config(); live != nil {
+			cfg = saveToFileConfig{Roots: live.ToolOutputRoots, MaxBytes: live.ToolOutputMaxBytes}
+		}
+	}
+	return cfg
+}
+
+// preflightSaveToFile runs the request-side save_to_file checks BEFORE the
+// upstream call is dispatched: feature disabled (no roots), invalid path,
+// path outside every root, an existing file without save_overwrite, or an
+// unavailable root. Without it, a (possibly destructive) upstream tool would
+// execute only for its result to be discarded by a save that could never
+// succeed — and an agent retrying the "failed" call would repeat the side
+// effect. It returns nil when save_to_file was not requested or the target
+// currently passes; the post-dispatch Resolve+Write in maybeSaveToFile still
+// runs (the filesystem can change in between, and that path is the one that
+// actually enforces the whitelist for the write).
+func preflightSaveToFile(params saveToFileParams, cfg saveToFileConfig) *mcp.CallToolResult {
+	if params.Path == "" {
+		return nil
+	}
+	target, err := outputfile.Resolve(cfg.Roots, params.Path, params.Overwrite)
+	if err != nil {
+		return saveToFileErrorResult(err)
+	}
+	_ = target.Close()
+	return nil
+}
+
 // saveToFileErrorResult wraps err as the standard "save_to_file: <reason>"
 // tool error text mandated by the save_to_file contract (Spec 076).
 func saveToFileErrorResult(err error) *mcp.CallToolResult {
@@ -426,9 +552,10 @@ func saveToFileErrorResult(err error) *mcp.CallToolResult {
 // recountSaveOrTruncateTokenMetrics corrects tokenMetrics.OutputTokens/
 // TotalTokens to reflect what the agent actually received, for the two
 // cases where the raw upstream-body token count computed earlier is wrong:
-// a truncated response (wasTruncated) or a save_to_file-diverted response
-// (savedToFile) — in both cases the agent saw a shorter forwarded/response
-// text, not the full upstream body. tokenMetrics.SavedToFile is always set
+// a truncated response (wasTruncated), a TOON re-encoded response (reencoded,
+// Spec 084 FR-010) or a save_to_file-diverted response (savedToFile) — in
+// each case the agent saw a different forwarded/response text than the raw
+// upstream body. tokenMetrics.SavedToFile is always set
 // unconditionally (independent of whether a recount is possible below) so a
 // caller can tell "this call went through the save path" apart from "this
 // call had a coincidentally small body", even when tokenizer is nil or
@@ -440,17 +567,17 @@ func saveToFileErrorResult(err error) *mcp.CallToolResult {
 // save_to_file response STILL gets corrected to OutputTokens=0/
 // TotalTokens=InputTokens (the agent never saw the un-recountable full
 // body either way) — but a truncated-without-save response keeps its
-// original (uncorrected, full-body) count, since fixing that pre-existing
-// gap is out of scope for this fix pass.
+// original (uncorrected, full-body) count, matching the pre-existing
+// truncation/TOON behaviour.
 //
 // Returns true if tokenMetrics was mutated in a way the caller should
 // propagate onto its own copy (toolCallRecord.Metrics = tokenMetrics).
-func recountSaveOrTruncateTokenMetrics(tokenMetrics *storage.TokenMetrics, wasTruncated, savedToFile bool, response string, tokenizer tokens.Tokenizer) bool {
+func recountSaveOrTruncateTokenMetrics(tokenMetrics *storage.TokenMetrics, wasTruncated, reencoded, savedToFile bool, response string, tokenizer tokens.Tokenizer) bool {
 	if tokenMetrics == nil {
 		return false
 	}
 	tokenMetrics.SavedToFile = savedToFile
-	if !wasTruncated && !savedToFile {
+	if !wasTruncated && !reencoded && !savedToFile {
 		return false
 	}
 	if tokenizer != nil {

@@ -128,6 +128,19 @@ final class ModelsTests: XCTestCase {
         XCTAssertNil(health.healthAction)
     }
 
+    func testHealthActionParsesEditURL() throws {
+        // HealthAction previously had no case for "edit_url", so
+        // HealthAction(rawValue:) returned nil for it and the Dashboard's
+        // AttentionRow rendered no action button at all for a server whose
+        // actions[0] is edit_url — silently missing the CTA that the Web UI
+        // and CLI both show.
+        let json = """
+        {"level": "unhealthy", "admin_state": "enabled", "summary": "Bad endpoint", "action": "edit_url"}
+        """
+        let health = try decode(HealthStatus.self, from: json)
+        XCTAssertEqual(health.healthAction, .editURL)
+    }
+
     // MARK: - HealthLevel Enum
 
     func testHealthLevelSFSymbolNames() {
@@ -152,6 +165,7 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(HealthAction.viewLogs.label, "View Logs")
         XCTAssertEqual(HealthAction.setSecret.label, "Set Secret")
         XCTAssertEqual(HealthAction.configure.label, "Configure")
+        XCTAssertEqual(HealthAction.editURL.label, "Edit URL")
     }
 
     // MARK: - ServerStatus
@@ -646,6 +660,27 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(stats.tokenMetrics?.savedTokensPercentage), 95.83, accuracy: 0.01)
         XCTAssertEqual(stats.tokenMetrics?.perServerToolListSizes?["github"], 80000)
         XCTAssertEqual(stats.tokenMetrics?.perServerToolListSizes?["gitlab"], 40000)
+        // zcode review round 1, F7: `estimated` absent from an older core's
+        // response must default to false, not fail to decode.
+        XCTAssertEqual(stats.tokenMetrics?.estimated, false)
+    }
+
+    // zcode review round 1, F7: FR-073/T120 names macOS as one of the three
+    // surfaces (Web, CLI, macOS) that must show the token-savings estimate —
+    // contracts.ServerTokenMetrics.Estimated had no Swift counterpart at all.
+    func testDecodeTokenMetricsEstimatedTrue() throws {
+        let json = """
+        {
+            "total_server_tool_list_size": 120000,
+            "average_query_result_size": 5000,
+            "saved_tokens": 115000,
+            "saved_tokens_percentage": 95.83,
+            "per_server_tool_list_sizes": {},
+            "estimated": true
+        }
+        """
+        let metrics = try decode(TokenMetrics.self, from: json)
+        XCTAssertTrue(metrics.estimated)
     }
 
     func testDecodeUpstreamStatsMinimal() throws {
@@ -684,6 +719,28 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(info.endpoints.http, "http://127.0.0.1:8080")
         XCTAssertEqual(info.endpoints.socket, "~/.mcpproxy/mcpproxy.sock")
         XCTAssertNil(info.update)
+        // Spec 092: a core from before FR-001a/FR-002 sends neither field, and
+        // an OLD core is exactly the one the supersede check must reason about
+        // — so their absence must not fail decoding.
+        XCTAssertNil(info.launchedBy)
+        XCTAssertNil(info.pid)
+    }
+
+    /// Spec 092 FR-001a/FR-002: durable provenance and the core's pid.
+    func testDecodeInfoResponseWithLaunchProvenanceAndPID() throws {
+        let json = """
+        {
+            "version": "v0.54.0",
+            "web_ui_url": "http://127.0.0.1:8080/ui/",
+            "listen_addr": "127.0.0.1:8080",
+            "endpoints": { "http": "http://127.0.0.1:8080", "socket": "s" },
+            "launched_by": "tray",
+            "pid": 4711
+        }
+        """
+        let info = try decode(InfoResponse.self, from: json)
+        XCTAssertEqual(info.launchedBy, "tray")
+        XCTAssertEqual(info.pid, 4711)
     }
 
     func testDecodeInfoResponseWithUpdateAvailable() throws {
@@ -926,7 +983,7 @@ final class ModelsTests: XCTestCase {
 
     func testHealthActionCaseIterable() {
         let allCases = HealthAction.allCases
-        XCTAssertEqual(allCases.count, 7)
+        XCTAssertEqual(allCases.count, 8)
     }
 
     func testHealthActionRawValues() {
@@ -937,5 +994,133 @@ final class ModelsTests: XCTestCase {
         XCTAssertEqual(HealthAction.enable.rawValue, "enable")
         XCTAssertEqual(HealthAction.approve.rawValue, "approve")
         XCTAssertEqual(HealthAction.configure.rawValue, "configure")
+        XCTAssertEqual(HealthAction.editURL.rawValue, "edit_url")
+    }
+
+    // MARK: - ActivityEntry glance accessors (spec 090, data-model.md)
+
+    /// Builds an entry from a JSON dictionary so the accessors are exercised
+    /// against decoded `JSONValue` metadata, exactly as the poll delivers it.
+    private func entry(
+        id: String = "e",
+        type: String,
+        status: String,
+        metadata: [String: Any]? = nil,
+        extra: [String: Any] = [:]
+    ) throws -> ActivityEntry {
+        var json: [String: Any] = [
+            "id": id,
+            "type": type,
+            "status": status,
+            "timestamp": "2026-03-23T12:00:00Z"
+        ]
+        if let metadata { json["metadata"] = metadata }
+        for (key, value) in extra { json[key] = value }
+        let data = try JSONSerialization.data(withJSONObject: json)
+        return try JSONDecoder().decode(ActivityEntry.self, from: data)
+    }
+
+    func testIntentReasonComesFromTheIntentObject() throws {
+        let call = try entry(type: "tool_call", status: "success",
+                             metadata: ["intent": ["reason": "Verify the transition"]])
+        XCTAssertEqual(call.intentReason, "Verify the transition")
+        XCTAssertEqual(call.reason, "Verify the transition")
+    }
+
+    func testIntentReasonIsNilWhenAbsentOrEmpty() throws {
+        XCTAssertNil(try entry(type: "tool_call", status: "success").intentReason)
+        XCTAssertNil(try entry(type: "tool_call", status: "success",
+                               metadata: ["intent": ["operation_type": "read"]]).intentReason)
+        XCTAssertNil(try entry(type: "tool_call", status: "success",
+                               metadata: ["intent": ["reason": ""]]).intentReason)
+    }
+
+    func testBlockReasonComesFromTheTopLevelReasonKey() throws {
+        let blocked = try entry(type: "policy_decision", status: "blocked",
+                                metadata: ["decision": "blocked",
+                                           "reason": "Intent rejected: tool variant conflicts"])
+        XCTAssertEqual(blocked.blockReason, "Intent rejected: tool variant conflicts")
+    }
+
+    func testBlockReasonIsNilWhenAbsentOrEmpty() throws {
+        XCTAssertNil(try entry(type: "policy_decision", status: "blocked").blockReason)
+        XCTAssertNil(try entry(type: "policy_decision", status: "blocked",
+                               metadata: ["decision": "blocked", "reason": ""]).blockReason)
+    }
+
+    /// The pipeline-facing accessor: a policy row explains itself with the
+    /// policy's reason, a call row with the caller's declared intent.
+    func testReasonPrefersTheBlockReasonOnPolicyRecords() throws {
+        let blocked = try entry(type: "policy_decision", status: "blocked",
+                                metadata: ["decision": "blocked",
+                                           "reason": "Quarantined server",
+                                           "intent": ["reason": "Fetch the ticket"]])
+        XCTAssertEqual(blocked.reason, "Quarantined server",
+                       "a blocked row must explain the block, not the caller's plan")
+
+        let call = try entry(type: "tool_call", status: "error",
+                             metadata: ["reason": "unrelated", "intent": ["reason": "Fetch the ticket"]])
+        XCTAssertEqual(call.reason, "Fetch the ticket")
+    }
+
+    func testReasonIsNilWhenNeitherSourceHasOne() throws {
+        XCTAssertNil(try entry(type: "tool_call", status: "success").reason)
+        XCTAssertNil(try entry(type: "policy_decision", status: "blocked").reason)
+    }
+
+    func testOutcomeClassSeparatesBlocksFromCalls() throws {
+        for decision in ["blocked", "block"] {
+            let record = try entry(type: "policy_decision", status: decision,
+                                   metadata: ["decision": decision, "reason": "nope"])
+            XCTAssertEqual(record.outcomeClass, .blocked, "decision \(decision) is a block")
+        }
+
+        XCTAssertEqual(try entry(type: "tool_call", status: "success").outcomeClass, .call)
+        XCTAssertEqual(try entry(type: "tool_call", status: "error").outcomeClass, .call)
+        XCTAssertEqual(try entry(type: "internal_tool_call", status: "error").outcomeClass, .call)
+    }
+
+    /// Warnings and redactions are policy decisions that did NOT stop the call,
+    /// so they are not blocks (and, per FR-012, never become rows).
+    func testNonBlockingPolicyDecisionsAreNotBlocks() throws {
+        for decision in ["warning", "redacted", "allowed"] {
+            let record = try entry(type: "policy_decision", status: decision,
+                                   metadata: ["decision": decision, "reason": "fyi"])
+            XCTAssertEqual(record.outcomeClass, .call, "decision \(decision) is not a block")
+        }
+    }
+
+    /// Legacy/lossy records carry no `metadata.decision` — the persisted record's
+    /// own status is the decision (`activity_service.go` writes `Status: decision`),
+    /// so the class must fall back to it rather than silently declassifying a block.
+    func testOutcomeClassFallsBackToStatusWhenDecisionMetadataIsAbsent() throws {
+        XCTAssertEqual(try entry(type: "policy_decision", status: "blocked").outcomeClass, .blocked)
+        XCTAssertEqual(try entry(type: "policy_decision", status: "block").outcomeClass, .blocked)
+        XCTAssertEqual(try entry(type: "policy_decision", status: "warning").outcomeClass, .call)
+    }
+
+    /// The second half of the group key (FR-004): three coarse classes, so a
+    /// success and a failure at the same tool can never share a run.
+    func testStatusClassCoarsensTheStatusIntoThreeGroups() throws {
+        XCTAssertEqual(try entry(type: "tool_call", status: "success").statusClass, .success)
+        XCTAssertEqual(try entry(type: "tool_call", status: "error").statusClass, .failure)
+        XCTAssertEqual(try entry(type: "tool_call", status: "running").statusClass, .pending)
+        XCTAssertEqual(try entry(type: "tool_call", status: "pending").statusClass, .pending)
+        // Everything the core may ever write that is neither of the two known
+        // terminal statuses lands in one bucket, so an unrecognised status
+        // never fragments a run record by record.
+        XCTAssertEqual(try entry(type: "policy_decision", status: "blocked").statusClass, .pending)
+        XCTAssertEqual(try entry(type: "tool_call", status: "something-new").statusClass, .pending)
+    }
+
+    /// A `parent_id` on the wire is the correlation id of the `code_execution`
+    /// call that made this sub-call. It must survive decoding so the tray can
+    /// route a child row back to its parent.
+    func testActivityEntryDecodesParentID() throws {
+        let child = try entry(type: "tool_call", status: "success",
+                              extra: ["parent_id": "1770000000-abc-code_execution"])
+        XCTAssertEqual(child.parentId, "1770000000-abc-code_execution")
+        XCTAssertNil(try entry(type: "tool_call", status: "success").parentId,
+                     "a record with no parent decodes with none")
     }
 }

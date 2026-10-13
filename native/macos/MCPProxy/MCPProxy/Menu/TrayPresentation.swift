@@ -1,0 +1,534 @@
+// TrayPresentation.swift
+// MCPProxy
+//
+// Pure presentation rules for the status-bar menu. Everything here is a value
+// -> value function so the menu's *decisions* can be tested without AppKit,
+// leaving `rebuildMenu()` to do nothing but hang the results on NSMenuItems.
+//
+// Introduced by the 2026-08 macOS tray UX audit (F1, F3, F11, F12, F15).
+
+import Foundation
+
+// MARK: - F1 · What the menu-bar icon says
+
+/// The one badge the status-bar button carries, in priority order.
+///
+/// Before the audit the icon badged only *core stopped* and *core error*: with
+/// five servers needing attention the menu bar looked exactly like all-healthy,
+/// which defeats the point of a status item. `severity` restores the Spec 044
+/// red/orange dot that `TrayIcon.swift` was written for and never delivered
+/// (that view was never instantiated).
+enum TrayIconBadge: Equatable {
+    /// Everything is fine — the plain template icon, nothing beside it.
+    case none
+    /// The core is not running.
+    case stopped
+    /// The core reported an error.
+    case coreError
+    /// At least one enabled server has an attached warn/error diagnostic.
+    case severity(TrayIconSeverity)
+}
+
+enum TrayIconSeverity: String, Equatable {
+    case warn
+    case error
+}
+
+enum TrayStatusIcon {
+    /// Decide the badge from the three inputs the app delegate already has.
+    ///
+    /// Core state wins over server severity: a stopped or erroring core makes
+    /// every server verdict stale, so showing an amber server dot on top of it
+    /// would be a second, quieter story about the same outage.
+    static func badge(isStopped: Bool, hasCoreError: Bool, worstDiagnosticSeverity: String?) -> TrayIconBadge {
+        if isStopped { return .stopped }
+        if hasCoreError { return .coreError }
+        switch worstDiagnosticSeverity {
+        case "error": return .severity(.error)
+        case "warn": return .severity(.warn)
+        default: return .none
+        }
+    }
+
+    /// The glyph drawn BESIDE the template icon. Empty for `.none` and for
+    /// `.severity`, which is drawn as a corner dot instead (see `dotSeverity`).
+    ///
+    /// Deliberately text, not a composited image: an NSStatusItem image must
+    /// stay `isTemplate` to follow the light/dark menu bar, and a template
+    /// image is re-rendered monochrome — a coloured dot drawn into it would
+    /// come back black. The button's attributed title is the one place a
+    /// colour survives, and the ⏹ / ⚠ core states live there.
+    ///
+    /// `.severity` used to live here too, as a full-size "●" plus a leading
+    /// space. That widened the status item by roughly a character and read as a
+    /// second icon rather than a badge on the first. It now rides as a small
+    /// overlay dot in the icon's bottom-right corner, which is what a badge
+    /// looks like everywhere else on the platform — so this returns "" for it
+    /// and `dotSeverity(for:)` is what the button acts on.
+    static func glyph(for badge: TrayIconBadge) -> String {
+        switch badge {
+        case .none: return ""
+        case .stopped: return "⏹"
+        case .coreError: return "⚠"
+        case .severity: return ""
+        }
+    }
+
+    /// The severity to draw as a corner dot over the icon, or nil for no dot.
+    ///
+    /// Only `.severity` badges: a stopped or erroring CORE is about the proxy
+    /// itself rather than one server, so it keeps its full-size glyph — the
+    /// distinction is worth the width for a state that means "nothing is
+    /// working", and collapsing it into the same dot would lose it.
+    static func dotSeverity(for badge: TrayIconBadge) -> TrayIconSeverity? {
+        if case .severity(let severity) = badge { return severity }
+        return nil
+    }
+
+    /// Every badge must be visible somehow: as a glyph beside the icon, as a
+    /// corner dot, or both. A badge that is neither is an invisible state.
+    static func isVisible(_ badge: TrayIconBadge) -> Bool {
+        if badge == .none { return true }
+        return !glyph(for: badge).isEmpty || dotSeverity(for: badge) != nil
+    }
+
+    /// Default geometry for the corner dot. 6pt against an 18pt icon is small
+    /// enough to read as a badge rather than a second symbol — the complaint
+    /// that prompted the change was that a full-size "●" beside the icon was
+    /// simply too big.
+    static let badgeDotDiameter: CGFloat = 6
+    static let statusIconSide: CGFloat = 18
+
+    /// Where the corner dot sits, in BOTTOM-LEFT-ORIGIN coordinates.
+    ///
+    /// Read that twice before reusing this: it is the coordinate space of
+    /// `TrayBadgeDotView` (a plain, unflipped `NSView`), NOT of the status item
+    /// button that view sits in. `NSStatusBarButton.isFlipped` is `true`, so
+    /// applying this rect directly to a subview OF THE BUTTON puts the dot in
+    /// the icon's TOP-right corner. That bug shipped once already.
+    ///
+    /// Pure maths so the placement is testable without a live menu bar — this
+    /// machine cannot screenshot the status item without a Screen Recording
+    /// grant, and "it looked right once" is not a regression test.
+    ///
+    /// AppKit centres the icon in the button, so the dot is anchored to the
+    /// icon's bottom-right corner rather than the button's: the button is wider
+    /// than the icon, and hanging the dot off the button's edge would float it
+    /// away from the glyph it badges.
+    static func badgeDotFrame(inButtonSize buttonSize: CGSize,
+                              iconSide: CGFloat = statusIconSide,
+                              diameter: CGFloat = badgeDotDiameter) -> CGRect {
+        let originX = (buttonSize.width - iconSide) / 2
+        let originY = (buttonSize.height - iconSide) / 2
+        return CGRect(x: originX + iconSide - diameter,
+                      y: originY,
+                      width: diameter,
+                      height: diameter)
+    }
+
+    /// F2 · What VoiceOver and the tooltip say. `summary` is
+    /// `AppState.statusSummary` ("13/29 servers, 942 tools").
+    static func accessibilityLabel(for badge: TrayIconBadge, summary: String, attentionCount: Int) -> String {
+        var parts = ["MCPProxy"]
+        if !summary.isEmpty { parts.append(summary) }
+        switch badge {
+        case .none:
+            break
+        case .stopped:
+            parts.append("core stopped")
+        case .coreError:
+            parts.append("core error")
+        case .severity(let severity):
+            let noun = severity == .error ? "error" : "warning"
+            parts.append(attentionCount == 1
+                ? "1 server \(noun)"
+                : "\(attentionCount) server \(noun)s")
+        }
+        return parts.joined(separator: " — ")
+    }
+}
+
+// MARK: - F12 · Transport names users recognise
+
+enum TrayProtocolDisplay {
+    /// `Protocol: streamable-http` beside `Protocol: http` and `Protocol: sse`
+    /// exposed three wire spellings of what users experience as one transport
+    /// family. Normalise for display only — the config value is untouched.
+    static func label(for raw: String) -> String {
+        switch raw.lowercased() {
+        case "stdio": return "stdio"
+        case "http": return "HTTP"
+        case "streamable-http", "streamable_http", "http-stream": return "HTTP (streamable)"
+        case "sse": return "HTTP (SSE)"
+        case "auto", "": return "auto-detect"
+        default: return raw
+        }
+    }
+}
+
+// MARK: - F15 · A Servers submenu that fits on screen
+
+/// How one server is filed in the Servers submenu.
+enum TrayServerGroup: Equatable {
+    /// Something is wrong or waiting: sign-in, connection error, quarantine.
+    case needsAttention
+    /// Enabled and behaving.
+    case active
+    /// Switched off on purpose — the long tail, folded away.
+    case disabled
+}
+
+enum TrayServerGrouping {
+    /// The audit found 29 flat alphabetical entries with 13 disabled and 3
+    /// quarantined interleaved, distinguishable only by dot colour, in a
+    /// submenu taller than the screen. Attention first, then the working
+    /// servers, then the disabled ones behind one row.
+    ///
+    /// Generic over anything that can answer the three questions, so the
+    /// ordering is testable without building `ServerStatus` fixtures.
+    static func group(enabled: Bool, needsAttention: Bool) -> TrayServerGroup {
+        if !enabled { return .disabled }
+        return needsAttention ? .needsAttention : .active
+    }
+
+    /// Below this many disabled servers, folding them costs a click and saves
+    /// nothing. At or above it the fold is the point.
+    static let disabledFoldThreshold = 3
+}
+
+// MARK: - F3 · Server actions that fail out loud
+
+/// The five per-server menu actions used to be fired as `try? await …`: a
+/// restart that 500s was indistinguishable from one that worked, because the
+/// menu simply closed. The Web UI raises a toast and Server Detail shows an
+/// inline error, so the tray was the only surface that lied by omission.
+enum TrayServerAction: String, Equatable {
+    case enable
+    case disable
+    case restart
+    case login
+    case approve
+
+    /// Present tense, for the failure title: "Couldn't restart github".
+    var verb: String {
+        switch self {
+        case .enable: return "enable"
+        case .disable: return "disable"
+        case .restart: return "restart"
+        case .login: return "sign in to"
+        case .approve: return "approve"
+        }
+    }
+
+    /// Imperative, for a menu row: the user must be told what a click does.
+    var menuTitle: String {
+        switch self {
+        case .enable: return "Enable"
+        case .disable: return "Disable"
+        case .restart: return "Restart"
+        case .login: return "Sign in"
+        case .approve: return "Review quarantine…"
+        }
+    }
+
+    /// Maps the `health.action` string the core sends to the action the tray
+    /// would perform. `approve` is deliberately absent: a quarantine review is
+    /// a human decision, never something a menu click does on the user's
+    /// behalf.
+    static func fromHealthAction(_ action: String) -> TrayServerAction? {
+        switch action {
+        case "login": return .login
+        case "restart": return .restart
+        case "enable": return .enable
+        default: return nil
+        }
+    }
+
+    /// The verb a Needs Attention row dispatches for `server`.
+    ///
+    /// Sign-in is read from `isOAuthLoginRequired`, not `health.action`: a
+    /// quarantined server awaiting OAuth sign-in reports `action == "approve"`
+    /// (quarantine outranks everything in the core's health calculator), and
+    /// `approve` is never dispatched — so keying on the action alone left that
+    /// row with nothing to run.
+    static func forAttention(_ server: ServerStatus) -> TrayServerAction? {
+        if server.isOAuthLoginRequired { return .login }
+        return fromHealthAction(server.health?.action ?? "")
+    }
+
+    /// The actions that lead a server's submenu, in menu order. Sign in and
+    /// Review quarantine are independent: a quarantined server awaiting
+    /// sign-in gets both, because signing in is what lets the scanner see its
+    /// tools and approval is still the operator's call.
+    static func leadingMenuActions(for server: ServerStatus) -> [TrayServerAction] {
+        var actions: [TrayServerAction] = []
+        if server.isOAuthLoginRequired { actions.append(.login) }
+        if server.quarantined { actions.append(.approve) }
+        return actions
+    }
+}
+
+// MARK: - F14 · One primary action, wherever it's shown (Spec 109 FR-014)
+
+/// Where a primary action that does not run in place takes the user. Both
+/// the macOS Servers row and the tray server submenu resolve to the SAME
+/// destination for the same `actions[0]` value — only how they get there
+/// (a sheet vs. `.showServerDetail`) is AppKit/SwiftUI wiring, not a decision
+/// this pure type makes.
+enum TrayPrimaryDestination: Equatable {
+    /// The server's review location — the Tools tab, where the per-tool
+    /// approval banner and the quarantine review UI already live, until
+    /// 109-g's dedicated review sheet ships (matches the Web UI's interim
+    /// `/review/<name>` → `?tab=tools` redirect, 109-a T026a).
+    case review
+    /// A field to fill in: the secret value (`set_secret`) or the endpoint
+    /// (`edit_url`) — both resolved to the server's Config tab, the one
+    /// place either can be edited today (mirrors DashboardView.AttentionRow).
+    case config
+    /// The server's log viewer.
+    case logs
+}
+
+/// What clicking the primary item does: run the action in place, or open the
+/// screen that performs it. Never a one-click approve (FR-005) — `approve`
+/// only ever resolves to `.open(.review)`.
+enum TrayPrimaryKind: Equatable {
+    case execute(TrayServerAction)
+    case open(TrayPrimaryDestination)
+}
+
+/// A field to draw focus to once a `.open(.config)` destination has opened —
+/// FR-014's "with the field focused" (review round 3, F-FR014-focus). Only
+/// `edit_url` names one: the URL field is the one concrete remedy for a bad
+/// endpoint, the same field the Web UI's `ServerCard.primaryHref` sends
+/// `&focus=endpoint` for (`ServerDetail.vue`'s `applyEndpointFocus`).
+/// `configure`'s underlying causes are heterogeneous (a hash mismatch, a
+/// denied tool, a missing annotation, …) with no single field to name — the
+/// Web UI itself does not focus anything for `configure` either, so this
+/// stays `nil` for it rather than guessing a field that would often be wrong.
+enum TrayConfigFocusField: Equatable {
+    case endpoint
+}
+
+/// The ONE primary item for a server's `health.actions[0]` (or the legacy
+/// singular `action`), shared verbatim by the Servers row and the tray
+/// submenu (FR-014). `label` always comes from `HealthStatus.actionLabels` —
+/// the same table the Web UI and CLI render — never a private per-surface
+/// wording (the old tray submenu said "Review quarantine…"; the shared table
+/// says "Review").
+struct TrayPrimaryItem: Equatable {
+    let label: String
+    let kind: TrayPrimaryKind
+    /// Non-nil only for `edit_url` (see `TrayConfigFocusField`). Both
+    /// `ServersView.primaryActionClicked` and `MCPProxyApp`'s tray submenu
+    /// forward this into `ServerDetailTarget.focusField` so `ServerDetailView`
+    /// can focus the matching control once Config opens.
+    let focusField: TrayConfigFocusField?
+}
+
+enum TrayPrimaryPresentation {
+    /// Resolves a raw `actions[0]` (or legacy `action`) STRING value. `nil`
+    /// for an empty or unrecognized action — no button, no menu item (the
+    /// normal `ready` case, FR-013). Every value `HealthStatus.actionLabels`
+    /// carries a label for is handled explicitly below, so a label with no
+    /// destination can only mean this table and this function have drifted —
+    /// caught by TrayPrimaryItemTests, not silently swallowed into `nil`.
+    static func primaryItem(for action: String?) -> TrayPrimaryItem? {
+        guard let action, !action.isEmpty else { return nil }
+        guard let label = HealthStatus.actionLabels[action] else { return nil }
+        if let executable = TrayServerAction.fromHealthAction(action) {
+            return TrayPrimaryItem(label: label, kind: .execute(executable), focusField: nil)
+        }
+        switch action {
+        case "approve": return TrayPrimaryItem(label: label, kind: .open(.review), focusField: nil)
+        case "set_secret": return TrayPrimaryItem(label: label, kind: .open(.config), focusField: nil)
+        case "configure": return TrayPrimaryItem(label: label, kind: .open(.config), focusField: nil)
+        case "edit_url": return TrayPrimaryItem(label: label, kind: .open(.config), focusField: .endpoint)
+        case "view_logs": return TrayPrimaryItem(label: label, kind: .open(.logs), focusField: nil)
+        default: return nil
+        }
+    }
+
+    /// `server.health.action`, falling back to a synthesized `"approve"` for
+    /// a quarantined server whose core predates the health vocabulary (no
+    /// `health` object at all) — the same old-core tolerance
+    /// `HealthStatus.isUsable`/`actionsOrLegacyFallback` already give every
+    /// other consumer of this field, so a quarantined server never loses its
+    /// one path to review just because the payload is from an older core.
+    static func effectiveAction(for server: ServerStatus) -> String? {
+        if let action = server.health?.action, !action.isEmpty { return action }
+        if server.quarantined { return "approve" }
+        return nil
+    }
+
+    /// Convenience over a `ServerStatus` — the Servers row and the tray
+    /// submenu both call this one function (FR-014's "one pure function").
+    static func primaryItem(for server: ServerStatus) -> TrayPrimaryItem? {
+        primaryItem(for: effectiveAction(for: server))
+    }
+}
+
+// MARK: - Spec 109 FR-011/FR-014 (T049) · The one server status line
+
+/// How a status line is coloured. Mirrors the colours in
+/// specs/109-ux-navigation-consistency/contracts/health-vocabulary.md; the
+/// AppKit/SwiftUI layers map it to a concrete colour.
+enum ServerStatusTone: Equatable {
+    case success
+    case neutral
+    case warning
+    case error
+}
+
+/// What the Servers row, the tray submenu's first line and the Server Detail
+/// header show for one server: the shared status label, then an optional detail.
+struct ServerStatusLine: Equatable {
+    let label: String
+    let detail: String?
+    let tooltip: String?
+    let tone: ServerStatusTone
+}
+
+/// The ONE function that turns a `ServerStatus` into visible status text on
+/// macOS (audit S4/S5). Before it, the row hardcoded "Connected" for any server
+/// whose transport was up — including one that still needed sign-in — and the
+/// tray submenu and detail header each derived their own wording. The label
+/// comes from `HealthStatus.statusLabels` (the same table Web and the CLI use);
+/// the detail mirrors `ServerCard.vue`'s `statusDetail`.
+enum ServerStatusLinePresentation {
+    static func line(for server: ServerStatus) -> ServerStatusLine {
+        if let health = server.health, let status = health.status, !status.isEmpty {
+            let label = health.statusLabel
+            // A summary that only restates the admin state (quarantined /
+            // disabled) or the label itself adds nothing.
+            var detail: String?
+            if health.adminState == "enabled", !health.summary.isEmpty,
+               normalised(health.summary).caseInsensitiveCompare(normalised(label)) != .orderedSame {
+                detail = health.summary
+            }
+            return ServerStatusLine(label: label, detail: detail,
+                                    tooltip: tooltip(for: health), tone: tone(forStatus: status))
+        }
+        // Old core: `health` without a `status` still has a sentence to show.
+        if let health = server.health, !health.summary.isEmpty {
+            return ServerStatusLine(label: health.summary, detail: nil,
+                                    tooltip: tooltip(for: health), tone: legacyTone(for: server, level: health.level))
+        }
+        // No vocabulary at all: the legacy words are the only thing left.
+        let tooltip = server.health.flatMap(tooltip(for:))
+        if server.quarantined {
+            return ServerStatusLine(label: "Needs review", detail: nil, tooltip: tooltip, tone: .warning)
+        }
+        if !server.enabled {
+            return ServerStatusLine(label: "Disabled", detail: nil, tooltip: tooltip, tone: .neutral)
+        }
+        if server.connecting == true {
+            return ServerStatusLine(label: "Connecting", detail: nil, tooltip: tooltip, tone: .neutral)
+        }
+        if server.connected {
+            // SC-003: a server the core reported as not usable never reads
+            // "Connected", whatever the legacy transport flag says.
+            if server.health?.usable == false {
+                return ServerStatusLine(label: "Unavailable", detail: nil, tooltip: tooltip, tone: .neutral)
+            }
+            return ServerStatusLine(label: "Connected", detail: nil, tooltip: tooltip, tone: .success)
+        }
+        return ServerStatusLine(label: "Disconnected", detail: nil, tooltip: tooltip, tone: .neutral)
+    }
+
+    /// The rendered text: `label`, then ` · detail` when there is one. Row,
+    /// tray submenu and detail header all show exactly this.
+    static func text(for server: ServerStatus) -> String {
+        let line = line(for: server)
+        guard let detail = line.detail else { return line.label }
+        return "\(line.label) · \(detail)"
+    }
+
+    private static func tooltip(for health: HealthStatus) -> String? {
+        if let detail = health.detail, !detail.isEmpty { return detail }
+        return health.summary.isEmpty ? nil : health.summary
+    }
+
+    private static func tone(forStatus status: String) -> ServerStatusTone {
+        switch status {
+        case "ready": return .success
+        case "sign_in_required", "needs_review", "needs_secret", "needs_config": return .warning
+        case "error": return .error
+        default: return .neutral // connecting, disabled, unknown
+        }
+    }
+
+    private static func legacyTone(for server: ServerStatus, level: String) -> ServerStatusTone {
+        if server.quarantined { return .warning }
+        if !server.enabled { return .neutral }
+        switch level {
+        case "healthy": return .success
+        case "degraded": return .warning
+        case "unhealthy": return .error
+        default: return .neutral
+        }
+    }
+
+    /// "Connecting..." restates the label "Connecting"; ignore trailing dots.
+    private static func normalised(_ text: String) -> String {
+        text.trimmingCharacters(in: CharacterSet(charactersIn: ".… ").union(.whitespacesAndNewlines))
+    }
+}
+
+// MARK: - F14 (round 2) · The always-present tail, minus the primary's echo
+
+/// One of the tray submenu's/Servers-row's always-present secondary rows —
+/// Enable/Disable, Restart, View Logs — that stay regardless of whichever
+/// `actions[0]` value is primary.
+enum TraySecondaryAction: Equatable {
+    case toggleEnabled(enable: Bool)
+    case restart
+    case viewLogs
+}
+
+/// Review round 2 (109-e medium finding): the primary item added for
+/// FR-014 was laid ABOVE these three always-present rows without suppressing
+/// whichever one it duplicates, so a disabled server (primary = Enable) or a
+/// restart-needing one (primary = Restart) or a token-refresh-pending one
+/// (primary = View logs) showed the identical command twice in the same
+/// menu/row — once as the accent-tinted primary, once as the plain tail
+/// item. `items(for:)` is the ONE place both the tray submenu
+/// (`MCPProxyApp.buildServerMenuItem`) and the Servers row
+/// (`ServersView.makeActionsCell`) decide which of the three tail rows to
+/// actually render, so neither surface can reintroduce the duplicate by
+/// drifting from the other.
+enum TraySecondaryPresentation {
+    static func items(for server: ServerStatus) -> [TraySecondaryAction] {
+        let primaryKind = TrayPrimaryPresentation.primaryItem(for: server)?.kind
+        var items: [TraySecondaryAction] = []
+        if server.enabled {
+            // `disable` is never a primary action (TrayServerAction.fromHealthAction
+            // never produces it), so Disable can never be the primary's echo.
+            items.append(.toggleEnabled(enable: false))
+        } else if primaryKind != .execute(.enable) {
+            items.append(.toggleEnabled(enable: true))
+        }
+        if primaryKind != .execute(.restart) {
+            items.append(.restart)
+        }
+        if primaryKind != .open(.logs) {
+            items.append(.viewLogs)
+        }
+        return items
+    }
+}
+
+enum TrayServerActionFailure {
+    static func title(action: TrayServerAction, server: String) -> String {
+        "Couldn’t \(action.verb) \(server)"
+    }
+
+    /// The error as the user can act on it, with the one thing the tray knows
+    /// they can do next. Never empty — an alert with no body reads as a bug.
+    static func message(action: TrayServerAction, server: String, error: Error) -> String {
+        let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        let body = detail.trimmingCharacters(in: .whitespacesAndNewlines)
+        let reason = body.isEmpty ? "The core did not say why." : body
+        return "\(reason)\n\nOpen \(server) in MCPProxy to see its logs, or try again."
+    }
+}

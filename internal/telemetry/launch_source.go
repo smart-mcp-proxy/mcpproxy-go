@@ -1,5 +1,7 @@
 package telemetry
 
+import "sync"
+
 // LaunchSource identifies how the current mcpproxy process was launched, for
 // retention telemetry (spec 044). Detection happens once at process startup
 // (via DetectLaunchSourceOnce, added in a later task), with a one-shot
@@ -68,17 +70,27 @@ type PPIDChecker interface {
 // DetectLaunchSource is the pure classifier implementing the precedence
 // rules from research.md R3:
 //  1. MCPPROXY_LAUNCHED_BY=installer env var → installer
-//  2. handshake.LaunchedViaTray() → tray
+//  2. MCPPROXY_LAUNCHED_BY=tray env var, or handshake.LaunchedViaTray() → tray
 //  3. ppid.IsLoginItemParent() → login_item
 //  4. tty.IsTerminal() → cli
 //  5. fallthrough → unknown
+//
+// An unrecognised MCPPROXY_LAUNCHED_BY value is ignored rather than trusted, so
+// a stray env var cannot hijack classification.
 //
 // All parameters are nil-safe: a nil HandshakeChecker / PPIDChecker / TTYChecker
 // simply contributes "false" to its respective branch.
 func DetectLaunchSource(env map[string]string, handshake HandshakeChecker, ppid PPIDChecker, tty TTYChecker) LaunchSource {
 	if env != nil {
-		if v, ok := env["MCPPROXY_LAUNCHED_BY"]; ok && v == "installer" {
+		switch env["MCPPROXY_LAUNCHED_BY"] {
+		case "installer":
 			return LaunchSourceInstaller
+		case "tray":
+			// Both trays stamp this on the core they spawn. Without it a
+			// tray-spawned core is unclassifiable: its parent is the tray app
+			// (not launchd, so not login_item) and it has no TTY (so not cli),
+			// leaving it "unknown".
+			return LaunchSourceTray
 		}
 	}
 	if handshake != nil && handshake.LaunchedViaTray() {
@@ -100,11 +112,17 @@ var (
 )
 
 // launchSourceOnceT is a test-friendly sync.Once clone with reset support.
+// Do is mutex-guarded: DetectLaunchSourceOnce is reached concurrently by every
+// telemetry-reporting surface (two listeners' status handlers race here), and
+// the mutex also orders the launchSourceCached write before any post-Do read.
 type launchSourceOnceT struct {
+	mu   sync.Mutex
 	done bool
 }
 
 func (o *launchSourceOnceT) Do(f func()) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
 	if o.done {
 		return
 	}
@@ -114,7 +132,9 @@ func (o *launchSourceOnceT) Do(f func()) {
 
 // resetLaunchSourceOnce is exposed for tests (lower-case).
 func resetLaunchSourceOnce() {
-	launchSourceOnce = launchSourceOnceT{}
+	launchSourceOnce.mu.Lock()
+	defer launchSourceOnce.mu.Unlock()
+	launchSourceOnce.done = false
 	launchSourceCached = ""
 }
 
@@ -132,10 +152,12 @@ func DetectLaunchSourceOnce() LaunchSource {
 	return launchSourceCached
 }
 
-// defaultHandshakeChecker is the production HandshakeChecker. Until
-// tray→core handshake wiring lands, this always returns false; the actual
-// tray-mediated launch is still correctly classified because launch_source
-// is then "installer" (first run) or "login_item" (subsequent).
+// defaultHandshakeChecker is the production HandshakeChecker. It always returns
+// false: there is no tray→core socket handshake yet, and tray launches are
+// instead signalled by MCPPROXY_LAUNCHED_BY=tray, handled in DetectLaunchSource.
+//
+// The interface is kept for the eventual socket handshake, which can classify a
+// core the tray *adopted* rather than spawned (and which no env var can reach).
 type defaultHandshakeChecker struct{}
 
 func (defaultHandshakeChecker) LaunchedViaTray() bool { return false }

@@ -5,8 +5,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -16,10 +18,18 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	teamsauth "github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/multiuser"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/serveredition/users"
 )
+
+// adminTokenRevoker revokes every agent token an owner holds. Implemented by
+// *storage.Manager; optional, so the handlers work in tests and in deployments
+// with no token storage wired.
+type adminTokenRevoker interface {
+	RevokeAgentTokensForOwner(userID string) (int, error)
+}
 
 // AdminHandlers provides admin-only REST endpoints.
 type AdminHandlers struct {
@@ -28,10 +38,40 @@ type AdminHandlers struct {
 	sessionManager *teamsauth.SessionManager
 	adminEmails    []string
 	sharedServers  []*config.ServerConfig
+	adminServers   AdminServersProvider
 	config         *config.Config
 	configPath     string
 	managementSvc  interface{} // management.Service - kept as interface{} to avoid circular imports
+	tokenRevoker   adminTokenRevoker
+	agentTokens    adminAgentTokenStore
+	sharingUpdater func(string, bool) (*config.ServerConfig, error)
 	logger         *zap.SugaredLogger
+}
+
+// SetTokenRevoker wires the agent-token store used when disabling a user.
+// Optional: with no revoker, disabling still disables the account and the
+// storage-level owner gate still refuses that user's tokens; only the permanent
+// burn of already-minted credentials is skipped. Passing nil clears it.
+func (h *AdminHandlers) SetTokenRevoker(revoker adminTokenRevoker) {
+	h.tokenRevoker = revoker
+}
+
+func (h *AdminHandlers) SetSharingUpdater(update func(string, bool) (*config.ServerConfig, error)) {
+	h.sharingUpdater = update
+}
+
+func (h *AdminHandlers) SetAdminServersProvider(provider AdminServersProvider) {
+	h.adminServers = provider
+}
+
+func (h *AdminHandlers) currentAdminServers() []*config.ServerConfig {
+	if h.adminServers != nil {
+		return h.adminServers()
+	}
+	if h.config != nil {
+		return h.config.Servers
+	}
+	return h.sharedServers
 }
 
 // NewAdminHandlers creates a new AdminHandlers instance.
@@ -60,8 +100,16 @@ func NewAdminHandlers(
 }
 
 // RegisterRoutes registers admin routes on the provided router.
-// The caller should wrap this with AdminOnly middleware.
+//
+// NOTE: enforcement lives in each handler's own requireAdmin call, NOT in
+// middleware. Production (internal/serveredition/setup.go) applies only
+// authMiddleware.Middleware() to this group; ServerEditionAuthMiddleware's
+// AdminOnly() is not used there. Every route added here MUST call requireAdmin
+// as its first statement, or it ships unguarded.
 func (h *AdminHandlers) RegisterRoutes(r chi.Router) {
+	r.Get("/admin/tokens", h.listAgentTokens)
+	r.Post("/admin/users/{id}/tokens/revoke", h.revokeAgentTokenByBody)
+	r.Post("/admin/users/{id}/tokens/{name}/revoke", h.revokeAgentToken)
 	r.Get("/admin/users", h.listUsers)
 	r.Post("/admin/users/{id}/disable", h.disableUser)
 	r.Post("/admin/users/{id}/enable", h.enableUser)
@@ -77,6 +125,9 @@ func (h *AdminHandlers) RegisterRoutes(r chi.Router) {
 
 // RegisterRoutesWithPrefix registers admin routes with a path prefix.
 func (h *AdminHandlers) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
+	r.Get(prefix+"/admin/tokens", h.listAgentTokens)
+	r.Post(prefix+"/admin/users/{id}/tokens/revoke", h.revokeAgentTokenByBody)
+	r.Post(prefix+"/admin/users/{id}/tokens/{name}/revoke", h.revokeAgentToken)
 	r.Get(prefix+"/admin/users", h.listUsers)
 	r.Post(prefix+"/admin/users/{id}/disable", h.disableUser)
 	r.Post(prefix+"/admin/users/{id}/enable", h.enableUser)
@@ -93,13 +144,37 @@ func (h *AdminHandlers) RegisterRoutesWithPrefix(r chi.Router, prefix string) {
 // --- Response types ---
 
 // UserProfileResponse represents a user profile in admin responses.
+//
+// Spec 107 FR-008/FR-023 (contracts/rest-endpoints.md §4): groups is always
+// an array (never null), groups_updated_at and subject_rebind_armed_at are
+// RFC 3339 or null — the keys are present on every row.
 type UserProfileResponse struct {
-	ID          string `json:"id"`
-	Email       string `json:"email"`
-	DisplayName string `json:"display_name"`
-	Provider    string `json:"provider"`
-	LastLoginAt string `json:"last_login_at"`
-	Disabled    bool   `json:"disabled"`
+	ID                   string   `json:"id"`
+	Email                string   `json:"email"`
+	DisplayName          string   `json:"display_name"`
+	Provider             string   `json:"provider"`
+	LastLoginAt          string   `json:"last_login_at"`
+	Disabled             bool     `json:"disabled"`
+	Groups               []string `json:"groups"`
+	GroupsUpdatedAt      *string  `json:"groups_updated_at"`
+	SubjectRebindArmedAt *string  `json:"subject_rebind_armed_at"`
+}
+
+// rfc3339OrNil renders a timestamp for the wire: nil for the zero time.
+func rfc3339OrNil(t time.Time) *string {
+	if t.IsZero() {
+		return nil
+	}
+	s := t.UTC().Format(time.RFC3339)
+	return &s
+}
+
+// rfc3339PtrOrNil renders an optional timestamp for the wire.
+func rfc3339PtrOrNil(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	return rfc3339OrNil(*t)
 }
 
 // SessionResponse represents a session in admin responses.
@@ -131,20 +206,48 @@ func (h *AdminHandlers) listUsers(w http.ResponseWriter, r *http.Request) {
 
 	profiles := make([]*UserProfileResponse, 0, len(allUsers))
 	for _, u := range allUsers {
+		groups := u.Groups
+		if groups == nil {
+			groups = []string{}
+		}
 		profiles = append(profiles, &UserProfileResponse{
-			ID:          u.ID,
-			Email:       u.Email,
-			DisplayName: u.DisplayName,
-			Provider:    u.Provider,
-			LastLoginAt: u.LastLoginAt.Format("2006-01-02T15:04:05Z"),
-			Disabled:    u.Disabled,
+			ID:                   u.ID,
+			Email:                u.Email,
+			DisplayName:          u.DisplayName,
+			Provider:             u.Provider,
+			LastLoginAt:          u.LastLoginAt.Format("2006-01-02T15:04:05Z"),
+			Disabled:             u.Disabled,
+			Groups:               groups,
+			GroupsUpdatedAt:      rfc3339OrNil(u.GroupsUpdatedAt),
+			SubjectRebindArmedAt: rfc3339PtrOrNil(u.SubjectRebindArmedAt),
 		})
 	}
 
 	writeJSON(w, http.StatusOK, profiles)
 }
 
-// disableUser disables a user and revokes all their sessions.
+// disableUser disables a user and revokes all their sessions AND agent tokens.
+//
+// Disabling is the documented remediation for a compromised account, so it has
+// to reach every credential that speaks for that account, not just the
+// interactive ones. Sessions and JWTs were already covered; agent tokens are
+// separate records that nothing here touched, and each one carries the user's
+// UserID into every downstream authorisation and activity decision.
+//
+// Two mechanisms, deliberately:
+//
+//   - storage.Manager's owner gate (installed in internal/serveredition/setup.go)
+//     refuses a disabled owner's tokens on the authentication path, which is what
+//     makes the remediation take effect IMMEDIATELY and covers tokens minted in
+//     the same instant, without this handler having to win a race;
+//   - the revocation below burns them permanently, so RE-ENABLING the account
+//     does not hand the attacker their stolen token back. Revoked is a soft
+//     delete: the records stay visible to the operator, and the owner mints new
+//     tokens once they are re-enabled.
+//
+// Token revocation is non-fatal on error, exactly like session revocation: the
+// account is disabled either way, and the owner gate is the part that must not
+// be missed.
 func (h *AdminHandlers) disableUser(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
@@ -156,21 +259,18 @@ func (h *AdminHandlers) disableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.userStore.GetUser(userID)
+	// SetUserDisabled re-reads and writes the record inside one transaction
+	// (cross-review round 1, chunk 2 P1): a blind GetUser+UpdateUser here
+	// could overwrite a concurrent login's own atomic write (groups, subject,
+	// last-login, or its own clearing of this same rebind flag).
+	user, _, err := h.userStore.SetUserDisabled(userID, true)
 	if err != nil {
-		h.logger.Errorw("failed to get user for disable", "user_id", userID, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to get user")
+		h.logger.Errorw("failed to disable user", "user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to disable user")
 		return
 	}
 	if user == nil {
 		writeError(w, http.StatusNotFound, "User not found")
-		return
-	}
-
-	user.Disabled = true
-	if err := h.userStore.UpdateUser(user); err != nil {
-		h.logger.Errorw("failed to disable user", "user_id", userID, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to disable user")
 		return
 	}
 
@@ -180,11 +280,27 @@ func (h *AdminHandlers) disableUser(w http.ResponseWriter, r *http.Request) {
 		// Non-fatal: user is disabled even if session revocation fails.
 	}
 
+	// Revoke the agent tokens they minted. See this handler's doc comment for
+	// why this is done in addition to the authentication-path owner gate.
+	if h.tokenRevoker != nil {
+		revoked, err := h.tokenRevoker.RevokeAgentTokensForOwner(userID)
+		if err != nil {
+			h.logger.Errorw("failed to revoke agent tokens for disabled user", "user_id", userID, "error", err)
+			// Non-fatal: the owner gate already refuses this user's tokens.
+		} else if revoked > 0 {
+			h.logger.Infow("revoked agent tokens for disabled user", "user_id", userID, "count", revoked)
+		}
+	}
+
 	h.logger.Infow("user disabled", "user_id", userID, "email", user.Email)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "User disabled"})
 }
 
 // enableUser enables a previously disabled user.
+//
+// Their agent tokens are NOT un-revoked. disableUser burns them precisely so
+// that re-enabling an account cannot resurrect a credential that may be why the
+// account was disabled; the owner mints new ones.
 func (h *AdminHandlers) enableUser(w http.ResponseWriter, r *http.Request) {
 	if !h.requireAdmin(w, r) {
 		return
@@ -196,10 +312,18 @@ func (h *AdminHandlers) enableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.userStore.GetUser(userID)
+	// Spec 107 FR-023: a REAL disabled→enabled transition opens the
+	// single-use rebind window — the next successful login for this record
+	// may present a new provider subject. Enabling an already-enabled user is
+	// not a transition and neither re-arms nor closes an open window.
+	// SetUserDisabled re-reads and writes the record inside one transaction
+	// (cross-review round 1, chunk 2 P1): a blind GetUser+UpdateUser here
+	// could overwrite a concurrent login's own atomic write, including its
+	// own consumption of this same rebind flag.
+	user, armed, err := h.userStore.SetUserDisabled(userID, false)
 	if err != nil {
-		h.logger.Errorw("failed to get user for enable", "user_id", userID, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to get user")
+		h.logger.Errorw("failed to enable user", "user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "Failed to enable user")
 		return
 	}
 	if user == nil {
@@ -207,14 +331,7 @@ func (h *AdminHandlers) enableUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user.Disabled = false
-	if err := h.userStore.UpdateUser(user); err != nil {
-		h.logger.Errorw("failed to enable user", "user_id", userID, "error", err)
-		writeError(w, http.StatusInternalServerError, "Failed to enable user")
-		return
-	}
-
-	h.logger.Infow("user enabled", "user_id", userID, "email", user.Email)
+	h.logger.Infow("user enabled", "user_id", userID, "email", user.Email, "subject_rebind_armed", armed)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "User enabled"})
 }
 
@@ -254,6 +371,11 @@ func (h *AdminHandlers) getActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// NOTE: raw storage records, serialised as-is — safe only while
+	// activityFilter is nil (setup.go wires nil today). Whoever wires it must
+	// mask first, as the personal-edition activity API does
+	// (httpapi.maskActivityPayloads), or flagged credentials are served in
+	// cleartext (audit F13).
 	writeJSON(w, http.StatusOK, ActivityListResponse{
 		Items: records,
 		Total: total,
@@ -350,8 +472,9 @@ func (h *AdminHandlers) getDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Servers
-	resp.TotalServers = len(h.sharedServers)
-	for _, sc := range h.sharedServers {
+	servers := h.currentAdminServers()
+	resp.TotalServers = len(servers)
+	for _, sc := range servers {
 		if sc.Enabled {
 			resp.HealthyServers++
 		}
@@ -453,6 +576,23 @@ func (h *AdminHandlers) toggleSharedServer(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Find the server in the config.
+	if h.sharingUpdater != nil {
+		found, err := h.sharingUpdater(name, req.Shared)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				writeError(w, http.StatusNotFound, "Server not found")
+				return
+			}
+			h.logger.Errorw("failed to update server sharing", "server", name, "error", err)
+			writeError(w, http.StatusInternalServerError, "Failed to update server sharing")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"message": fmt.Sprintf("Server %q shared status set to %v", name, req.Shared),
+			"server":  oauth.RedactedConfigView("", found),
+		})
+		return
+	}
 	var found *config.ServerConfig
 	for _, sc := range h.config.Servers {
 		if strings.EqualFold(sc.Name, name) {
@@ -476,9 +616,15 @@ func (h *AdminHandlers) toggleSharedServer(w http.ResponseWriter, r *http.Reques
 	}
 
 	h.logger.Infow("server shared status toggled", "server", name, "shared", req.Shared)
+	// Issue #1148, round 8: `found` is a raw *config.ServerConfig — every env
+	// value, header, oauth.client_secret and URL credential the operator
+	// configured. Echoing it back handed the whole upstream credential set to
+	// any admin session over the server edition's REST API. Build the echo from
+	// the shared redacted view instead, exactly as every personal-edition door
+	// does.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"message": fmt.Sprintf("Server %q shared status set to %v", name, req.Shared),
-		"server":  found,
+		"server":  oauth.RedactedConfigView("", found),
 	})
 }
 
@@ -494,8 +640,11 @@ func (h *AdminHandlers) listAdminServers(w http.ResponseWriter, r *http.Request)
 	}
 	mgmt, ok := h.managementSvc.(lister)
 	if !ok {
-		// Fallback to config-only listing when management service is not available.
-		writeJSON(w, http.StatusOK, h.config.Servers)
+		// Issue #1148, round 8: this fallback wrote the raw
+		// []*config.ServerConfig straight to JSON — the exact shape
+		// `quarantine_security list_quarantined` was fixed for in round 1,
+		// still open on the server edition's admin API. One shared view.
+		writeJSON(w, http.StatusOK, oauth.RedactedConfigViews("", h.currentAdminServers()))
 		return
 	}
 
@@ -503,13 +652,17 @@ func (h *AdminHandlers) listAdminServers(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		h.logger.Errorw("failed to list servers via management service", "error", err)
 		// Fallback to config-only listing on error.
-		writeJSON(w, http.StatusOK, h.config.Servers)
+		writeJSON(w, http.StatusOK, oauth.RedactedConfigViews("", h.currentAdminServers()))
 		return
 	}
 
 	// Build a lookup for the shared flag from config (contracts.Server doesn't have it).
-	sharedMap := make(map[string]bool, len(h.config.Servers))
-	for _, sc := range h.config.Servers {
+	configured := h.currentAdminServers()
+	sharedMap := make(map[string]bool, len(configured))
+	for _, sc := range configured {
+		if sc == nil {
+			continue
+		}
 		sharedMap[sc.Name] = sc.Shared
 	}
 
@@ -518,9 +671,18 @@ func (h *AdminHandlers) listAdminServers(w http.ResponseWriter, r *http.Request)
 		*contracts.Server
 		Shared bool `json:"shared"`
 	}
+	// Issue #1148, round 8: management.ListServers hands back RAW
+	// contracts.Server values — the personal edition redacts them at its own
+	// serialization boundary (httpapi.redactServerSecrets), and this door,
+	// which is the server edition's boundary onto the same structs, did not.
+	// The copy matters: the projection may still share maps/slices with the
+	// stored config, and RedactServerSecretFields replaces rather than mutates
+	// them.
 	enriched := make([]*enrichedServer, len(servers))
 	for i, s := range servers {
-		enriched[i] = &enrichedServer{Server: s, Shared: sharedMap[s.Name]}
+		redacted := *s
+		oauth.RedactServerSecretFields(&redacted)
+		enriched[i] = &enrichedServer{Server: &redacted, Shared: sharedMap[s.Name]}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{

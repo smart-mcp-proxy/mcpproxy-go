@@ -10,6 +10,11 @@ const (
 	ConnectionSourceTCP ConnectionSource = "tcp"
 	// ConnectionSourceTray identifies connections from tray via Unix socket or named pipe
 	ConnectionSourceTray ConnectionSource = "tray"
+	// ConnectionSourceStdio identifies the native stdio MCP transport: the
+	// local process that launched mcpproxy, with no listener at all (Spec
+	// 107 T103 — tagged by server.stdioAuthContext so the audit line reports
+	// caller.kind: stdio instead of the TCP default's api_key).
+	ConnectionSourceStdio ConnectionSource = "stdio"
 )
 
 // Context key for connection source tagging

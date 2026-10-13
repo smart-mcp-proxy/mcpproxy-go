@@ -1,0 +1,295 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Request queueing &amp; concurrency limits — decision report (#955)</title>
+<style>
+  :root {
+    --paper: #f6f7f8;
+    --card: #ffffff;
+    --ink: #1b1e23;
+    --muted: #5b6470;
+    --line: #dde1e6;
+    --accent: #0f766e;
+    --accent-soft: #e4f2f0;
+    --good: #177245;
+    --good-soft: #e6f3ec;
+    --warn: #a8630a;
+    --warn-soft: #f9f0e2;
+    --risk: #b3372e;
+    --risk-soft: #f9e9e7;
+    --code-bg: #eef0f3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #15181c; --card: #1d2127; --ink: #e6e9ed; --muted: #98a1ad;
+      --line: #323841; --accent: #4fb3a9; --accent-soft: #16302d;
+      --good: #52b788; --good-soft: #1c2e26; --warn: #dfa04e; --warn-soft: #332916;
+      --risk: #e0776c; --risk-soft: #362020; --code-bg: #262b32;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #15181c; --card: #1d2127; --ink: #e6e9ed; --muted: #98a1ad;
+    --line: #323841; --accent: #4fb3a9; --accent-soft: #16302d;
+    --good: #52b788; --good-soft: #1c2e26; --warn: #dfa04e; --warn-soft: #332916;
+    --risk: #e0776c; --risk-soft: #362020; --code-bg: #262b32;
+  }
+  :root[data-theme="light"] {
+    --paper: #f6f7f8; --card: #ffffff; --ink: #1b1e23; --muted: #5b6470;
+    --line: #dde1e6; --accent: #0f766e; --accent-soft: #e4f2f0;
+    --good: #177245; --good-soft: #e6f3ec; --warn: #a8630a; --warn-soft: #f9f0e2;
+    --risk: #b3372e; --risk-soft: #f9e9e7; --code-bg: #eef0f3;
+  }
+  body {
+    background: var(--paper); color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    margin: 0; -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 880px; margin: 0 auto; padding: 48px 24px 96px; }
+  .eyebrow {
+    font: 600 11.5px/1 ui-monospace, "SF Mono", Menlo, monospace;
+    letter-spacing: .14em; text-transform: uppercase; color: var(--accent); margin: 0 0 14px;
+  }
+  h1 { font-size: 34px; line-height: 1.15; font-weight: 750; letter-spacing: -.02em; margin: 0 0 10px; text-wrap: balance; }
+  .meta { color: var(--muted); font-size: 14px; margin: 0 0 34px; }
+  .meta a { color: var(--accent); text-decoration: none; }
+  .meta a:hover, .meta a:focus-visible { text-decoration: underline; }
+  h2 { font-size: 21px; font-weight: 700; letter-spacing: -.01em; margin: 52px 0 6px; text-wrap: balance; }
+  h2 .sec { font: 600 12px/1 ui-monospace, "SF Mono", Menlo, monospace; color: var(--muted); letter-spacing: .1em; display: block; margin-bottom: 6px; }
+  h3 { font-size: 16.5px; font-weight: 700; margin: 26px 0 8px; }
+  p { margin: 10px 0; max-width: 72ch; }
+  .lede { font-size: 17.5px; }
+  code, .path { font: 13.2px/1.5 ui-monospace, "SF Mono", Menlo, monospace; background: var(--code-bg); border-radius: 4px; padding: 1.5px 5px; }
+  .verdict { background: var(--card); border: 1px solid var(--line); border-left: 4px solid var(--accent); border-radius: 8px; padding: 20px 24px; margin: 0 0 8px; }
+  .verdict .eyebrow { margin-bottom: 8px; }
+  .verdict p { margin: 6px 0; }
+  .facts { display: grid; gap: 10px; margin: 18px 0; padding: 0; list-style: none; }
+  .facts li { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 16px; font-size: 14.5px; }
+  .facts .ev { display: block; margin-top: 5px; color: var(--muted); font: 12.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  .tablewrap { overflow-x: auto; margin: 18px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--card); }
+  th, td { text-align: left; padding: 10px 14px; border-top: 1px solid var(--line); vertical-align: top; }
+  thead th { border-top: none; font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+  td:first-child { font-weight: 600; white-space: nowrap; }
+  .chip { display: inline-block; font: 600 11.5px/1 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .05em; border-radius: 99px; padding: 5px 10px; white-space: nowrap; }
+  .chip.good { background: var(--good-soft); color: var(--good); }
+  .chip.warn { background: var(--warn-soft); color: var(--warn); }
+  .chip.risk { background: var(--risk-soft); color: var(--risk); }
+  .chip.acc  { background: var(--accent-soft); color: var(--accent); }
+  .option { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 22px 24px; margin: 18px 0; }
+  .option.pick { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .option header { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; justify-content: space-between; }
+  .option h3 { margin: 0; max-width: 60ch; }
+  .option .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .option .desc { color: var(--muted); font-size: 14.5px; margin-top: 10px; }
+  .pc { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 14px; }
+  @media (max-width: 640px) { .pc { grid-template-columns: 1fr; } }
+  .pc h4 { margin: 0 0 6px; font: 600 11.5px/1 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .1em; text-transform: uppercase; }
+  .pc .pro h4 { color: var(--good); } .pc .con h4 { color: var(--risk); }
+  .pc ul { margin: 0; padding-left: 18px; font-size: 14px; }
+  .pc li { margin: 5px 0; }
+  ol.phases { counter-reset: ph; list-style: none; margin: 18px 0; padding: 0; display: grid; gap: 14px; }
+  ol.phases > li { counter-increment: ph; background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px 18px 62px; position: relative; }
+  ol.phases > li::before {
+    content: "P" counter(ph, decimal); position: absolute; left: 18px; top: 20px;
+    font: 700 13px/1 ui-monospace, "SF Mono", Menlo, monospace; color: var(--accent);
+    background: var(--accent-soft); border-radius: 6px; padding: 6px 7px;
+  }
+  ol.phases h3 { margin: 0 0 8px; }
+  ol.phases ul { margin: 8px 0 0; padding-left: 18px; font-size: 14.5px; }
+  ol.phases li li { margin: 6px 0; }
+  ol.decisions { margin: 18px 0; padding-left: 22px; font-size: 15px; }
+  ol.decisions li { margin: 10px 0; max-width: 75ch; }
+  .flow { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 18px 22px; margin: 18px 0; overflow-x: auto; }
+  .flow pre { margin: 0; font: 12.8px/1.7 ui-monospace, "SF Mono", Menlo, monospace; color: var(--ink); }
+  .flow .hot { color: var(--accent); font-weight: 700; }
+  .flow .dim { color: var(--muted); }
+  .foot { margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+</style>
+<main>
+  <p class="eyebrow">MCPProxy · Engineering decision report</p>
+  <h1>Request queueing &amp; per-upstream concurrency limits</h1>
+  <p class="meta">
+    Issue <a href="https://github.com/smart-mcp-proxy/mcpproxy-go/issues/955">#955 — request queueing / concurrency limit for multi-user deployments</a>
+    · 2026-08-07 · 21-agent research workflow; choke-point analysis verified against the code
+  </p>
+
+  <div class="verdict">
+    <p class="eyebrow">Recommendation</p>
+    <p class="lede"><strong>Option A — a two-tier semaphore limiter inside <code>managed.Client.CallTool</code></strong>, per-server first, then global.</p>
+    <p>It is the only placement that covers <em>every</em> in-daemon upstream call path — the audit proved <code>code_execution</code> and activity replay bypass <code>Manager.CallTool</code> and hit the managed client directly. It needs no new dependency (<code>golang.org/x/sync</code> is already pinned), inherits FIFO fairness and ctx-aware <code>queue_timeout</code> from <code>semaphore.Weighted</code>, sidesteps the <code>Manager.CallTool</code> RLock stall hazard, and gets hot-reload propagation free from the existing <code>SetGlobalConfig</code> fan-out. Config: <code>max_concurrent_requests</code>, <code>queue_size</code>, <code>queue_timeout</code> — global + per-server overrides, <strong>0 = unlimited (pure opt-in, zero behavior change on upgrade)</strong>.</p>
+  </div>
+
+  <h2><span class="sec">01</span>The choke point (verified)</h2>
+  <p>All four dispatch paths converge on one function — and two of them bypass the Manager entirely, which rules out any limiter placed above the managed client:</p>
+  <div class="flow"><pre>
+call_tool_read|write|destructive  <span class="dim">mcp.go:2112</span> ──┐
+legacy call_tool                  <span class="dim">mcp.go:2536</span> ──┼── Manager.CallTool ──┐
+direct-routing mode           <span class="dim">mcp_routing.go:216</span> ──┘   <span class="dim">manager.go:1123</span>      │
+REST /api/v1/tools/call → CallToolDirect <span class="dim">mcp.go:5356</span> ──(same variants)──┤
+                                                                          ├──▶ <span class="hot">managed.Client.CallTool</span>
+code_execution     <span class="dim">mcp_code_execution.go:453-464</span> ──── GetClient ─────────┤     <span class="hot">client.go:640 — limiter here</span>
+activity replay          <span class="dim">runtime.go:1218-1228</span>  ──── GetClient ─────────┘</pre></div>
+  <ul class="facts">
+    <li><strong>No limit exists today.</strong> The only serialization is <code>sseRequestMu</code> for SSE transports. Stdio upstreams are fully multiplexed by mcp-go v0.57.0 (frame write under <code>stdinMu</code>, responses matched by JSON-RPC id) — so queued goroutines block naturally before the frame write, and a semaphore wrapping CallTool works for stdio too.
+      <span class="ev">core/client.go:70,396-405 · mcp-go stdio.go:423-489</span></li>
+    <li><strong>Queue wait won’t eat <code>call_tool_timeout</code>:</strong> that 2-minute context is created deeper, inside <code>core.Client.CallTool</code> — acquiring before delegation keeps queue time separate.
+      <span class="ev">core/client.go:430-445</span></li>
+    <li><strong>Server edition is covered automatically:</strong> the multi-user Router only filters visibility; all users share one managed client per server, so per-server limits bound aggregate multi-user load with zero extra code.
+      <span class="ev">internal/serveredition/multiuser/router.go</span></li>
+    <li><strong>Deliberately outside the limit:</strong> <code>retrieve_tools</code> (local Bleve, no upstream traffic), <code>ListTools</code> (already leader/follower-coalesced), health-check <code>Ping</code> (5s lightweight probe), and the separate-process CLI debug client.
+      <span class="ev">managed/client.go:504-637, 971-985 · cli/client.go:266</span></li>
+    <li><strong>Hot-reload is free:</strong> per-server config flows through atomic <code>GetConfig/SetConfig</code>; global config fans out via <code>Manager.SetGlobalConfig</code>. Caveat: <code>semaphore.Weighted</code> can’t resize, so reload means an atomic limiter swap with release-closures bound to the old instance.
+      <span class="ev">manager.go:298-314</span></li>
+  </ul>
+
+  <h2><span class="sec">02</span>Options</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Option</th><th>Covers code_execution / replay</th><th>Effort</th><th>Risk</th></tr></thead>
+    <tbody>
+      <tr><td>A · Two-tier semaphore in managed client</td><td>Yes — only option that does</td><td><span class="chip acc">M</span></td><td><span class="chip good">Low-medium</span></td></tr>
+      <tr><td>B · Manager.CallTool + MCP dispatch</td><td><strong>No</strong> — verified bypass hole</td><td><span class="chip good">S</span></td><td><span class="chip warn">Medium</span></td></tr>
+      <tr><td>C · Inbound HTTP middleware only</td><td>No per-upstream limits at all</td><td><span class="chip good">S</span></td><td><span class="chip warn">Low impl / high product</span></td></tr>
+      <tr><td>D · Bounded-queue dispatcher per upstream</td><td>Yes</td><td><span class="chip risk">L</span></td><td><span class="chip risk">High</span></td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="option pick">
+    <header>
+      <h3>Option A — Two-tier semaphore limiter at the managed-client choke point</h3>
+      <div class="chips"><span class="chip acc">RECOMMENDED</span><span class="chip acc">Effort M</span><span class="chip good">Risk Low-medium</span></div>
+    </header>
+    <p class="desc">New <code>internal/upstream/limiter</code> package on <code>x/sync/semaphore</code>. Each limiter = two weighted semaphores: an <em>admission</em> semaphore sized <code>max_concurrent + queue_size</code> acquired with <code>TryAcquire</code> (failure = queue full → instant shed, Envoy <code>max_pending_requests</code> semantics), and a <em>run</em> semaphore sized <code>max_concurrent</code> acquired ctx-aware under <code>queue_timeout</code>. One limiter per server (registry keyed by name) + one global; acquired per-server-first inside <code>managed.Client.CallTool</code>.</p>
+    <div class="pc">
+      <div class="pro"><h4>Pros</h4><ul>
+        <li>Covers 100% of in-daemon upstream traffic including the code_execution and replay bypass paths — the only placement that does.</li>
+        <li>No new dependency; <code>semaphore.Weighted</code> gives FIFO fairness, cancellable waits, and queue_timeout free.</li>
+        <li>Server edition works automatically (shared managed client per server bounds aggregate multi-user load).</li>
+        <li>Hot-reload free via existing SetGlobalConfig fan-out + per-server config atomics.</li>
+        <li>Avoids the <code>Manager.CallTool</code> RLock hazard (blocking there stalls AddServer/RemoveServer writers).</li>
+        <li>Registry keyed by server name is forward-compatible with Spec 074 per-(user,server) brokered pools.</li>
+        <li>Protects stdio naturally — the transport genuinely multiplexes, so waiters just block before the frame write.</li>
+      </ul></div>
+      <div class="con"><h4>Cons</h4><ul>
+        <li>Touches a hot, subtle file (<span class="path">managed/client.go</span>) — must not regress the state machine, ListTools coalescing, or reconnect paths.</li>
+        <li>Typed shed errors must propagate to mcp.go/httpapi for correct rendering (isError vs 429) — a small cross-layer contract.</li>
+        <li>Semaphores can’t resize → hot-reload needs the atomic-swap-with-bound-release-closures pattern (fiddly but unit-testable).</li>
+        <li>Doesn’t govern the separate-process CLI debug client — acceptable; document it.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="option">
+    <header><h3>Option B — Limiter in Manager.CallTool + MCP dispatch layer</h3>
+      <div class="chips"><span class="chip good">Effort S</span><span class="chip warn">Risk Medium</span></div></header>
+    <p class="desc">Global limit in the mcp.go call_tool dispatch; per-server limit in Manager.CallTool. No managed-client changes.</p>
+    <div class="pc">
+      <div class="pro"><h4>Pros</h4><ul>
+        <li>Smaller upstream-layer diff; mcp.go already has activity/span/metrics seams in place.</li>
+        <li>Global sheds map cleanly to MCP tool errors with no error-type plumbing.</li>
+      </ul></div>
+      <div class="con"><h4>Cons</h4><ul>
+        <li><strong>Verified hole:</strong> code_execution and replay call the managed client directly — one script can still stampede a stdio upstream, defeating the issue’s core requirement.</li>
+        <li><code>Manager.CallTool</code> holds <code>m.mu.RLock</code> for the whole call; a limiter blocking under it stalls AddServer/RemoveServer — fixing that replicates the drop-and-reacquire dance Option A avoids.</li>
+        <li>Two enforcement sites; future call paths must remember to route through them.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="option">
+    <header><h3>Option C — Inbound HTTP middleware only</h3>
+      <div class="chips"><span class="chip good">Effort S</span><span class="chip warn">High product risk</span></div></header>
+    <p class="desc">A chi middleware capping concurrent inbound requests on /mcp and /api/v1, returning 429 when saturated. No per-upstream awareness.</p>
+    <div class="pc">
+      <div class="pro"><h4>Pros</h4><ul>
+        <li>Trivial; standard reverse-proxy pattern; clean 429 semantics on REST; protects the daemon’s own goroutine budget.</li>
+      </ul></div>
+      <div class="con"><h4>Cons</h4><ul>
+        <li>Cannot express per-upstream limits — one slow stdio server still absorbs unbounded calls while fast servers get throttled: the opposite of what #955 asks.</li>
+        <li>Amplification blind spot: one code_execution request fans out to many upstream calls, invisible to inbound counting.</li>
+        <li>Transport-level sheds can abort agent client loops; internal callers (replay) never traverse the listener.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <div class="option">
+    <header><h3>Option D — Explicit bounded-queue dispatcher (worker pool per upstream)</h3>
+      <div class="chips"><span class="chip risk">Effort L</span><span class="chip risk">Risk High</span></div></header>
+    <p class="desc">Dedicated dispatcher goroutine + FIFO queue struct per upstream, requests as first-class objects with deadlines, identity, priority — mirroring mcp-go’s own stdio worker pool (5 workers / queue 100).</p>
+    <div class="pc">
+      <div class="pro"><h4>Pros</h4><ul>
+        <li>Richest future capabilities: queue introspection in the Web UI, per-user fair queuing, priorities, cancellation by id.</li>
+      </ul></div>
+      <div class="con"><h4>Cons</h4><ul>
+        <li>Substantially more code and state for behavior two semaphores already deliver (semaphore waiters are FIFO — fairness is equal today).</li>
+        <li>New failure modes: dispatcher leaks, queue-entry lifecycle bugs, shutdown ordering against the managed-client state machine.</li>
+        <li>Per-user fairness — the one thing this buys — is a server-edition concern with no current demand, interacting with unimplemented Spec 074. Speculative now.</li>
+      </ul></div>
+    </div>
+  </div>
+
+  <h2><span class="sec">03</span>Shed semantics</h2>
+  <div class="tablewrap"><table>
+    <thead><tr><th>Surface</th><th>On queue full / timeout</th><th>Why</th></tr></thead>
+    <tbody>
+      <tr><td>MCP <code>tools/call</code></td><td style="white-space:normal"><code>isError:true</code> tool result: “server '&lt;name&gt;' is at its concurrency limit (&lt;n&gt; running, &lt;q&gt; queued). Retry in a few seconds.”</td><td style="white-space:normal">The MCP spec’s own canonical isError example is a rate-limit message; agent LLMs read it and back off. A JSON-RPC protocol error can abort some client loops.</td></tr>
+      <tr><td>REST API</td><td style="white-space:normal">HTTP 429 + <code>Retry-After</code></td><td style="white-space:normal">nginx-documented API-correct status; Envoy/LiteLLM precedent.</td></tr>
+      <tr><td>Activity log</td><td style="white-space:normal">New status <code>rejected</code> (not generic <code>error</code>)</td><td style="white-space:normal">Dashboards must separate saturation from upstream failure.</td></tr>
+      <tr><td>Metrics</td><td style="white-space:normal"><code>mcpproxy_tool_calls_rejected_total{server, reason="queue_full"|"queue_timeout"}</code> + queue-depth gauge</td><td style="white-space:normal">Envoy-style overflow counters; via the event-bus metrics bridge.</td></tr>
+    </tbody>
+  </table></div>
+  <p><strong>Stdio does not mean limit=1.</strong> mcp-go’s own stdio server runs tools/call through a 5-worker pool (queue 100); the client transport legally pipelines by JSON-RPC id; TS/Python SDKs process concurrently. Docs should recommend <code>max_concurrent_requests: 5</code> for stdio upstreams, with 1 as the floor for fragile servers.</p>
+
+  <h2><span class="sec">04</span>Implementation plan</h2>
+  <ol class="phases">
+    <li>
+      <h3>Limiter package (pure, TDD-first)</h3>
+      <ul>
+        <li><span class="path">internal/upstream/limiter/limiter.go</span> + tests. <code>Acquire(ctx, queueTimeout) (release func(), err)</code>: admission <code>TryAcquire</code> fail → <code>ErrQueueFull</code>; run <code>Acquire</code> under timeout fail → release admission, <code>ErrQueueTimeout</code> (wrap ctx.Err to distinguish caller-cancel). Release closure bound to <em>this</em> instance so hot-swaps can’t double-release. Zero-config limiter = no-op passthrough.</li>
+        <li><code>Registry</code>: <code>map[serverName]*atomic.Pointer[Limiter]</code> + global pointer; <code>Update()</code> swaps atomically; in-flight releases drain the old instance harmlessly.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Config fields — follow the 4-point checklist exactly</h3>
+      <ul>
+        <li>Global <code>max_concurrent_requests</code>, <code>queue_size</code>, <code>queue_timeout</code> near <code>CallToolTimeout</code> (<span class="path">config.go:173</span>); per-server tri-state pointers copying the <code>HealthCheckInterval</code> pattern (<span class="path">config.go:521-530</span>). Defaults 0 / 0 / 30s. Validation: non-negative; queue_size&gt;0 requires max&gt;0.</li>
+        <li>Explicit <code>DetectConfigChanges</code> clause for the three global fields (<span class="path">config_hotreload.go:102-104</span> model) — per-server fields are already covered by the Servers DeepEqual.</li>
+        <li>Env overrides <code>MCPPROXY_MAX_CONCURRENT_REQUESTS</code> / <code>_QUEUE_SIZE</code> / <code>_QUEUE_TIMEOUT</code> (<span class="path">loader.go:638-690</span>); then <code>make swagger</code> (CI verifies) and docs/configuration.md.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Enforcement at the choke point</h3>
+      <ul>
+        <li>Manager owns the Registry; builds per-server limiters in AddServer/ApplyConfig, global in SetGlobalConfig.</li>
+        <li><span class="path">managed/client.go:640</span> CallTool: resolve effective values (per-server pointer → global default); acquire per-server, then global (a slow upstream’s queue can’t pin global slots); <code>defer release()</code> both; delegate to coreClient. Do <em>not</em> wrap ListTools or Ping. Reconnect-on-use runs before CallTool, so it never holds a slot.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Shed semantics + observability</h3>
+      <ul>
+        <li>Map <code>ErrQueueFull</code>/<code>ErrQueueTimeout</code> via <code>errors.Is</code> in <span class="path">mcp.go</span> (isError tool result, early-error pattern at :2074-2076) and <span class="path">httpapi</span> (429 + Retry-After).</li>
+        <li>Activity event status <code>rejected</code>; rejection counter + queue-depth gauge next to existing tool-call metrics (<span class="path">observability/metrics.go:114-129</span>, bridge at <span class="path">observability_bridge.go:16-66</span>). Follow-up: sustained saturation → <code>degraded</code> in the health calculator.</li>
+      </ul>
+    </li>
+    <li>
+      <h3>Tests + rollout</h3>
+      <ul>
+        <li>Unit: concurrent acquire/release, instant reject on full queue, queue-timeout, hot-swap under load, zero-config no-op. Hot-reload: extend <span class="path">global_config_hotreload_test.go</span>.</li>
+        <li>E2E: slow stdio server with max=1/queue=1 — call 2 queues, call 3 sheds with isError; a code_execution case proving the bypass path is limited. <code>go test -race</code>, <code>-tags server</code>, <span class="path">./scripts/test-api-e2e.sh</span>.</li>
+        <li>Rollout: defaults 0/0 = pure opt-in, ships dark, no migration; hot-reload lets headless operators tune without restarts.</li>
+      </ul>
+    </li>
+  </ol>
+
+  <h2><span class="sec">05</span>Open decisions (maintainer input needed)</h2>
+  <ol class="decisions">
+    <li><strong>Defaults</strong>: keep 0 = unlimited everywhere (recommended, zero behavior change) vs an out-of-the-box stdio default (e.g. 5, mirroring mcp-go’s worker pool) that changes behavior on upgrade.</li>
+    <li><strong>Protocol-level shed</strong>: is isError + REST 429 enough, or also emit a <code>-32029</code> JSON-RPC error with <code>data.retryAfter</code> for non-tool methods (emerging convention; unverified how Claude Code/Cursor react mid-loop)?</li>
+    <li><strong>Literal guarantee</strong>: should upstream <code>tools/list</code> and <code>Ping</code> ever count against a strict per-upstream limit for fragile single-threaded stdio servers (sketch excludes them)?</li>
+    <li><strong>Activity vocabulary</strong>: new <code>rejected</code> status (touches Web UI filters, possibly telemetry schema) vs reusing <code>error</code> with a distinguishing code.</li>
+    <li><strong>Per-user fairness</strong> (server edition): acceptable for v1 that one noisy user can occupy a FIFO queue, or reserve a (user,server) key shape in the Registry API now, ahead of Spec 074?</li>
+    <li><strong>queue_timeout scope</strong>: per-server override for symmetry (as sketched) or global-only for a smaller config surface?</li>
+    <li><strong>Health integration</strong>: saturation → <code>degraded</code> in v1 or follow-up?</li>
+  </ol>
+
+  <p class="foot">Method: multi-agent workflow (codebase choke-point audit + external prior-art research: Envoy, nginx, LiteLLM, MCP spec 2025-06-18, mcp-go v0.57.0 internals · 1.2M tokens). Companion report: macOS auto-updater for issue #957.</p>
+</main>

@@ -1,0 +1,45 @@
+{
+  "$comment": "Canonical executionPolicy showing the Reviewer-Liveness Contract (FR-014a). Validated by execution_policy_test.go. Values mirror the MCP-3066 shell backstop (~/.mcpproxy-gatekeeper/bin/ensure-pr-gates.sh), which remains the source of truth. Agent ids are the documented cockpit roster: CodexReviewer 5b94562c (openai/gpt-5.5, the primary), KimiReviewer fdaa1d4c (moonshot), GeminiCritic d89dd1db (gemini), GLMReviewer caf2df03 (glm), CEO 2dbf9388 (escalation target). The gpt-5.5 'Critic' (4439bdfe) is deliberately absent from the roster: it shares CodexReviewer's openai family, so the same-family exclusion drops it.",
+  "$rationale": {
+    "slaMinutes": "T=120 (2h). A primary reviewer silent on the current head for longer than 2h with a green head is a silent stall (classify_stall mode1); only then is a fallback eligible.",
+    "maxFallbacksPerHead": "N=1. At most one fallback hop per head SHA, mirroring the per-head marker state/fallback-<pr>-<sha>; the budget resets when the PR head moves so a pushed fix re-arms failover.",
+    "maxHops": "2. Up to two cumulative roster hops (hop ledger state/fallback-<pr>.hops) before escalating to the CEO (escalate_ceo).",
+    "failoverStallModes": "silent + stale_ci_pending only. A substantive request_changes on the current head is a mandatory fence (mode3) and is never routed around, so 'substantive' is not a permitted failover mode.",
+    "roster": "Model-diverse, ordered: KimiReviewer (moonshot) -> GeminiCritic (gemini) -> GLMReviewer (glm). Each family differs from the primary openai family and from one another (FR-011 model diversity)."
+  },
+  "mode": "normal",
+  "stages": [
+    {
+      "id": "adversarial-review",
+      "type": "review",
+      "label": "Adversarial review (Critic) with liveness failover",
+      "participants": [
+        { "type": "agent", "agentId": "5b94562c", "modelFamily": "openai" }
+      ],
+      "liveness": {
+        "slaMinutes": 120,
+        "maxFallbacksPerHead": 1,
+        "maxHops": 2,
+        "escalateTo": { "type": "agent", "agentId": "2dbf9388" },
+        "failoverStallModes": ["silent", "stale_ci_pending"],
+        "roster": [
+          { "agentId": "fdaa1d4c", "name": "KimiReviewer", "model": "kimi-k2", "modelFamily": "moonshot" },
+          { "agentId": "d89dd1db", "name": "GeminiCritic", "model": "gemini-2.5", "modelFamily": "gemini" },
+          { "agentId": "caf2df03", "name": "GLMReviewer", "model": "glm-4.7", "modelFamily": "glm" }
+        ]
+      }
+    },
+    {
+      "id": "design-gate",
+      "type": "approval",
+      "label": "Per-spec design sign-off (Gate 2)",
+      "participants": [ { "type": "user", "userId": "local-board" } ]
+    },
+    {
+      "id": "pre-merge-gate",
+      "type": "approval",
+      "label": "Pre-merge (Gate 3)",
+      "participants": [ { "type": "user", "userId": "local-board" } ]
+    }
+  ]
+}

@@ -50,7 +50,7 @@ func (p *CursorParser) Parse(content []byte) ([]*ParsedServer, error) {
 
 	if len(cfg.MCPServers) == 0 {
 		return nil, &ImportError{
-			Type:    "no_servers",
+			Type:    ErrTypeNoServers,
 			Message: "no MCP servers found in Cursor config",
 		}
 	}
@@ -75,14 +75,14 @@ func (p *CursorParser) Parse(content []byte) ([]*ParsedServer, error) {
 			Name:         name,
 			SourceFormat: FormatCursor,
 			Fields: map[string]interface{}{
-				"command":     serverCfg.Command,
-				"args":        serverCfg.Args,
-				"env":         serverCfg.Env,
-				"cwd":         serverCfg.Cwd,
-				"url":         serverCfg.URL,
-				"headers":     serverCfg.Headers,
-				"protocol":    protocol,
-				"auth":        serverCfg.Auth,
+				"command":  serverCfg.Command,
+				"args":     serverCfg.Args,
+				"env":      serverCfg.Env,
+				"cwd":      serverCfg.Cwd,
+				"url":      serverCfg.URL,
+				"headers":  serverCfg.Headers,
+				"protocol": protocol,
+				"auth":     serverCfg.Auth,
 			},
 			Warnings: []string{},
 		}

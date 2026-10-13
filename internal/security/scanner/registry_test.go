@@ -183,6 +183,30 @@ func TestRegistryUserOverride(t *testing.T) {
 	}
 }
 
+// TestBundledScannerDefaultEnablement locks Spec 077 FR-018: the in-process
+// baseline scanner loads enabled ("installed") while every Docker-backed scanner
+// loads disabled ("available"). This is the default-safe posture — the heavy
+// deep-scan layer is off until explicitly enabled.
+func TestBundledScannerDefaultEnablement(t *testing.T) {
+	r := NewRegistry(t.TempDir(), zap.NewNop())
+	var sawInProcess bool
+	for _, s := range r.List() {
+		if s.InProcess {
+			sawInProcess = true
+			if s.Status != ScannerStatusInstalled {
+				t.Errorf("in-process scanner %s must default to %q (enabled), got %q", s.ID, ScannerStatusInstalled, s.Status)
+			}
+			continue
+		}
+		if s.Status != ScannerStatusAvailable {
+			t.Errorf("Docker scanner %s must default to %q (disabled), got %q", s.ID, ScannerStatusAvailable, s.Status)
+		}
+	}
+	if !sawInProcess {
+		t.Fatalf("expected at least one in-process (baseline) scanner in the bundled registry")
+	}
+}
+
 func TestValidateManifest(t *testing.T) {
 	tests := []struct {
 		name    string

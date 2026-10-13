@@ -1,0 +1,153 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mcpproxy.app/schemas/required-tools-extension/v1.json",
+  "title": "app.mcpproxy/required-tools extension payloads (v1)",
+  "description": "Machine-readable companion to the extension payload specification. Defines the settings object, the _meta request rider, the _meta response facet (Shape A, batch) and the per-tool verdict. Shape B — the SEP-1862 tools/resolve facet — is the resolveFacet def: a single verdict without id. This schema validates v1 producer output; the reason enum is closed per settings version, so consumers validating with it MUST pin the version they know and MUST treat codes unknown to them as non-retryable.",
+  "$defs": {
+    "settings": {
+      "type": "object",
+      "properties": {
+        "version": { "const": 1 },
+        "max_tools": { "const": 50, "$comment": "Fixed in v1 (matches the spec-099 in-band batch cap); informational, not negotiable." }
+      },
+      "required": ["version"],
+      "additionalProperties": false
+    },
+    "requestRider": {
+      "type": "object",
+      "properties": {
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": {
+            "type": "object",
+            "properties": { "id": { "type": "string", "minLength": 1 } },
+            "required": ["id"],
+            "additionalProperties": false
+          }
+        },
+        "policy": {
+          "type": "object",
+          "properties": {
+            "read_only_only": { "type": "boolean" },
+            "exclude_destructive": { "type": "boolean" },
+            "exclude_open_world": { "type": "boolean" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["tools"],
+      "additionalProperties": false,
+      "$comment": "pin_hash/expect_hashes, wait_ms and profile are RESERVED in v1: their presence is a malformed-rider error (-32602 on the carrier when the extension was negotiated)."
+    },
+    "reasonRegistry": {
+      "enum": [
+        "server_initializing",
+        "server_unhealthy",
+        "server_disabled",
+        "server_quarantined",
+        "tool_pending_approval",
+        "tool_changed",
+        "tool_blocked_by_user",
+        "oauth_required",
+        "hash_mismatch",
+        "server_not_in_scope",
+        "tool_denied_by_config",
+        "missing_annotation",
+        "policy_filtered",
+        "not_found",
+        "server_not_configured"
+      ],
+      "$comment": "The full 15-code registry shared with the REST/CLI surfaces (spec 098 FR-003). Closed per settings version; new codes ship with a settings-version bump."
+    },
+    "wireReason": {
+      "enum": [
+        "server_initializing",
+        "server_unhealthy",
+        "server_disabled",
+        "server_quarantined",
+        "tool_pending_approval",
+        "tool_changed",
+        "tool_blocked_by_user",
+        "oauth_required",
+        "tool_denied_by_config",
+        "missing_annotation",
+        "policy_filtered",
+        "not_found"
+      ],
+      "$comment": "The 12 codes this extension can emit. The extension always evaluates at the agent-token tier: server_not_in_scope and server_not_configured collapse to a byte-indistinguishable not_found, and hash_mismatch cannot fire in v1 (pins are reserved)."
+    },
+    "retryableReason": { "enum": ["server_initializing", "server_unhealthy"] },
+    "action": {
+      "enum": ["login", "restart", "enable", "approve", "view_logs", "set_secret", "configure"],
+      "$comment": "'No action' is represented by omitting the field."
+    },
+    "perToolResult": {
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["ready", "unavailable"] },
+        "reason": { "$ref": "#/$defs/wireReason" },
+        "retryable": { "type": "boolean" },
+        "action": { "$ref": "#/$defs/action" },
+        "detail": { "type": "string" },
+        "remediation": { "type": "string" },
+        "did_you_mean": { "type": "array", "maxItems": 3, "items": { "type": "string" } }
+      },
+      "required": ["status"],
+      "additionalProperties": false,
+      "$comment": "id is required in the Shape A batch facet (see responseFacet) and forbidden in the Shape B resolve facet (see resolveFacet), where the resolved tool names itself.",
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "ready" } } },
+          "then": {
+            "properties": {
+              "reason": false, "retryable": false, "action": false,
+              "detail": false, "remediation": false, "did_you_mean": false
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "unavailable" } } },
+          "then": { "required": ["reason", "retryable"] }
+        },
+        {
+          "if": { "properties": { "reason": { "$ref": "#/$defs/retryableReason" } }, "required": ["reason"] },
+          "then": { "properties": { "retryable": { "const": true } } }
+        },
+        {
+          "if": { "properties": { "reason": { "not": { "$ref": "#/$defs/retryableReason" } } }, "required": ["reason"] },
+          "then": { "properties": { "retryable": { "const": false } } }
+        },
+        {
+          "if": { "properties": { "reason": { "const": "not_found" } }, "required": ["reason"] },
+          "else": { "properties": { "did_you_mean": false } }
+        }
+      ]
+    },
+    "resolveFacet": {
+      "allOf": [
+        { "$ref": "#/$defs/perToolResult" },
+        { "properties": { "id": false } }
+      ],
+      "$comment": "Shape B: the single per-tool verdict carried in a resolved Tool's _meta under app.mcpproxy/required-tools. No id, no set wrapper; set aggregation is the client's job."
+    },
+    "responseFacet": {
+      "type": "object",
+      "properties": {
+        "verdict": { "enum": ["ready", "degraded_retryable", "blocked", "unknown_ids"] },
+        "checked_at": { "type": "string", "format": "date-time" },
+        "request_id": { "type": "string" },
+        "tools": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "allOf": [ { "$ref": "#/$defs/perToolResult" }, { "required": ["id"] } ] }
+        }
+      },
+      "required": ["verdict", "checked_at", "tools"],
+      "additionalProperties": false,
+      "$comment": "Shape A batch facet. Set-level verdict = worst class present: unknown_ids > blocked > degraded_retryable > ready."
+    }
+  }
+}

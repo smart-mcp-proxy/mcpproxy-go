@@ -21,6 +21,76 @@ func newTestDB(t *testing.T) *BoltDB {
 	return db
 }
 
+func TestSaveIntegrityBaselineWithBlocksIsAtomic(t *testing.T) {
+	db := newTestDB(t)
+	now := time.Now().UTC()
+	record := &ToolApprovalRecord{
+		ServerName: "github", ToolName: "delete_issue", Status: ToolApprovalStatusPending,
+		CurrentHash: "current-hash", CurrentDescription: "Delete an issue",
+	}
+	if err := db.SaveToolApproval(record); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveToolApproval(&ToolApprovalRecord{
+		ServerName: "github", ToolName: "read_issue", Status: ToolApprovalStatusPending,
+		CurrentHash: "read-hash", CurrentDescription: "Read an issue",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	baseline := &scanner.IntegrityBaseline{ServerName: "github", ApprovedAt: now, ApprovedBy: "reviewer"}
+
+	// A later unknown name fails after the transaction has already staged both
+	// the baseline and the first block. Neither mutation may survive rollback.
+	err := db.SaveIntegrityBaselineWithBlocks(baseline, []scanner.ToolApprovalBlock{
+		{ToolName: "delete_issue", ApprovedAt: now, ApprovedBy: "reviewer"},
+		{ToolName: "does_not_exist", ApprovedAt: now, ApprovedBy: "reviewer"},
+	})
+	if err == nil {
+		t.Fatal("expected unknown block target to abort the transaction")
+	}
+	if _, err := db.GetIntegrityBaseline("github"); err == nil {
+		t.Fatal("integrity baseline survived failed atomic write")
+	}
+	stillPending, err := db.GetToolApproval("github", "delete_issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stillPending.Status != ToolApprovalStatusPending || stillPending.Disabled {
+		t.Fatalf("partial block survived failed atomic write: %#v", stillPending)
+	}
+	untouched, err := db.GetToolApproval("github", "read_issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untouched.Status != ToolApprovalStatusPending || untouched.Disabled {
+		t.Fatalf("unselected tool changed during failed atomic write: %#v", untouched)
+	}
+
+	if err := db.SaveIntegrityBaselineWithBlocks(baseline, []scanner.ToolApprovalBlock{{
+		ToolName: "delete_issue", ApprovedAt: now, ApprovedBy: "reviewer",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	storedBaseline, err := db.GetIntegrityBaseline("github")
+	if err != nil || storedBaseline == nil {
+		t.Fatalf("baseline missing after successful block: %#v, %v", storedBaseline, err)
+	}
+	blocked, err := db.GetToolApproval("github", "delete_issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blocked.Status != ToolApprovalStatusApproved || !blocked.Disabled || blocked.ApprovedHash != blocked.CurrentHash {
+		t.Fatalf("block is not persisted using BlockTools representation: %#v", blocked)
+	}
+	untouched, err = db.GetToolApproval("github", "read_issue")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untouched.Status != ToolApprovalStatusPending || untouched.Disabled {
+		t.Fatalf("unselected tool was modified by the successful block: %#v", untouched)
+	}
+}
+
 func TestScannerCRUD(t *testing.T) {
 	db := newTestDB(t)
 

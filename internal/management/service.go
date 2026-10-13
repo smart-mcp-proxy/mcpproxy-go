@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -126,6 +127,14 @@ type Service interface {
 	// setter rather than a constructor parameter. Optional — callers without
 	// a scanner can skip the call and ListServers will return SecurityScan=nil.
 	SetScanSummaryEnricher(e SecurityScanEnricher)
+
+	// AddRuntimeWarningSource registers a producer of free-text findings that
+	// Doctor appends to Diagnostics.RuntimeWarnings (and counts in
+	// TotalIssues) on every call — the `mcpproxy doctor` seam for
+	// configuration findings that are not errors (Spec 107 T052:
+	// config.DoctorFindings over the live config; PR-D adds the audit sink's
+	// failure counter). Sources are consulted in registration order.
+	AddRuntimeWarningSource(source func() []string)
 }
 
 // EventEmitter defines the interface for emitting runtime events.
@@ -181,6 +190,33 @@ type service struct {
 	// guarded by scanEnricherMu so wiring is concurrency-safe.
 	scanEnricher   SecurityScanEnricher
 	scanEnricherMu sync.RWMutex
+
+	// warningSources feed Doctor's RuntimeWarnings; guarded like scanEnricher.
+	warningSources   []func() []string
+	warningSourcesMu sync.RWMutex
+}
+
+// AddRuntimeWarningSource registers one Doctor runtime-warning producer. A nil
+// source is ignored.
+func (s *service) AddRuntimeWarningSource(source func() []string) {
+	if source == nil {
+		return
+	}
+	s.warningSourcesMu.Lock()
+	s.warningSources = append(s.warningSources, source)
+	s.warningSourcesMu.Unlock()
+}
+
+// runtimeWarningsFromSources evaluates every registered source.
+func (s *service) runtimeWarningsFromSources() []string {
+	s.warningSourcesMu.RLock()
+	sources := append([]func() []string(nil), s.warningSources...)
+	s.warningSourcesMu.RUnlock()
+	var out []string
+	for _, src := range sources {
+		out = append(out, src()...)
+	}
+	return out
 }
 
 // SetScanSummaryEnricher installs the SecurityScanEnricher used by
@@ -326,7 +362,7 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// (map[string]interface{}, the shape after a JSON round-trip)
 		// so this works regardless of how the runtime layer delivered
 		// the server map. Header redaction is applied later in the HTTP
-		// layer (see httpapi/server.go:redactServerHeaders).
+		// layer (see httpapi/server.go:redactServerSecrets).
 		if headersTyped, ok := srvRaw["headers"].(map[string]string); ok && len(headersTyped) > 0 {
 			srv.Headers = headersTyped
 		} else if headersGeneric, ok := srvRaw["headers"].(map[string]interface{}); ok && len(headersGeneric) > 0 {
@@ -354,8 +390,16 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// or goes through a json round-trip first.
 		if isoRaw, ok := srvRaw["isolation"].(map[string]interface{}); ok && isoRaw != nil {
 			iso := &contracts.IsolationConfig{}
+			// `enabled` is the EFFECTIVE state; `enabled_override` is the raw
+			// tri-state and is absent when the server inherits (GH #1142).
 			if enabled, ok := isoRaw["enabled"].(bool); ok {
 				iso.Enabled = enabled
+			}
+			if override, ok := isoRaw["enabled_override"].(bool); ok {
+				iso.EnabledOverride = config.BoolPtr(override)
+			}
+			if modeOverride, ok := isoRaw["mode_override"].(string); ok {
+				iso.ModeOverride = modeOverride
 			}
 			if img, ok := isoRaw["image"].(string); ok {
 				iso.Image = img
@@ -379,6 +423,28 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.Isolation = iso
 		}
 
+		// Resolution block: explains WHY the server is (or is not) isolated so a
+		// UI can render "inherits global: docker" instead of a bare toggle.
+		if effRaw, ok := srvRaw["isolation_effective"].(map[string]interface{}); ok && effRaw != nil {
+			eff := &contracts.IsolationEffective{}
+			if mode, ok := effRaw["mode"].(string); ok {
+				eff.Mode = mode
+			}
+			if isolated, ok := effRaw["isolated"].(bool); ok {
+				eff.Isolated = isolated
+			}
+			if globalMode, ok := effRaw["global_mode"].(string); ok {
+				eff.GlobalMode = globalMode
+			}
+			if inherited, ok := effRaw["inherited"].(bool); ok {
+				eff.Inherited = inherited
+			}
+			if source, ok := effRaw["source"].(string); ok {
+				eff.Source = source
+			}
+			srv.IsolationEffective = eff
+		}
+
 		// Populate resolved isolation defaults so UI clients (macOS tray,
 		// web UI) can render meaningful placeholders for the override
 		// fields. Only meaningful for stdio servers — HTTP servers don't
@@ -386,7 +452,11 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// server is currently isolated; the UI uses it as a hint.
 		if srv.Protocol == "stdio" && srv.Command != "" && s.config != nil && s.config.DockerIsolation != nil {
 			im := core.NewIsolationManager(s.config.DockerIsolation)
-			tmpCfg := &config.ServerConfig{Name: srv.Name, Command: srv.Command}
+			// Args are load-bearing, not decoration: the git-capable image
+			// substitution (#1143) is derived from them, so dropping them here
+			// makes the placeholder resolve a different image than the spawn
+			// path and the two surfaces disagree.
+			tmpCfg := &config.ServerConfig{Name: srv.Name, Command: srv.Command, Args: srv.Args}
 			if defaults := im.ResolveDefaults(tmpCfg); defaults != nil {
 				srv.IsolationDefaults = &contracts.IsolationDefaults{
 					RuntimeType: defaults.RuntimeType,
@@ -442,6 +512,18 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			if pkceEnabled, ok := oauthRaw["pkce_enabled"].(bool); ok {
 				oauthCfg.PKCEEnabled = pkceEnabled
 			}
+			if v, ok := oauthRaw["authorization_endpoint"].(string); ok {
+				oauthCfg.AuthorizationEndpoint = v
+			}
+			if v, ok := oauthRaw["token_endpoint"].(string); ok {
+				oauthCfg.TokenEndpoint = v
+			}
+			if v, ok := oauthRaw["registration_endpoint"].(string); ok {
+				oauthCfg.RegistrationEndpoint = v
+			}
+			if v, ok := oauthRaw["auth_server_metadata_url"].(string); ok {
+				oauthCfg.AuthServerMetadataURL = v
+			}
 			if tokenExpiresAt, ok := oauthRaw["token_expires_at"].(string); ok && tokenExpiresAt != "" {
 				if parsedTime, err := time.Parse(time.RFC3339, tokenExpiresAt); err == nil {
 					oauthCfg.TokenExpiresAt = &parsedTime
@@ -456,8 +538,10 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// Extract numeric fields
 		if toolCount, ok := srvRaw["tool_count"].(int); ok {
 			srv.ToolCount = toolCount
-			// Only count tools from enabled servers in the total
-			if srv.Enabled {
+			// Only count tools from servers that actually contribute available
+			// tools: enabled, and not quarantined (#1064 -- a quarantined
+			// server's tools are refused at dispatch and purged from the index).
+			if config.ServerContributesTools(srv.Enabled, srv.Quarantined) {
 				stats.TotalTools += toolCount
 			}
 		}
@@ -486,6 +570,42 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			srv.AutoApproveToolChanges = &v
 		}
 
+		// Spec 116 FR-017: the committed generation and incarnation (int64 in
+		// the runtime projection). Clients echo the incarnation back as
+		// expected_incarnation on approval writes.
+		if g, ok := srvRaw["generation"].(int64); ok {
+			srv.Generation = g
+		}
+		if inc, ok := srvRaw["incarnation"].(int64); ok {
+			srv.Incarnation = inc
+		}
+
+		// Spec 112: project the forward_headers allowlist (names only).
+		if names, ok := srvRaw["forward_headers"].([]string); ok && len(names) > 0 {
+			srv.ForwardHeaders = append([]string(nil), names...)
+		}
+
+		// Spec 086: project the per-server trust tier (auto|scan|manual) so the
+		// GET payload, `mcpproxy upstream list` and the SSE servers.changed
+		// embed can read back the persisted mode. Plain string — an absent key
+		// leaves it empty, which contracts.Server omits from the wire.
+		if trustMode, ok := srvRaw["trust_mode"].(string); ok {
+			srv.TrustMode = trustMode
+		}
+
+		// MCP-3322: project the per-server init_timeout override. The runtime
+		// emits it as a duration string; accept a typed *config.Duration too in
+		// case the map was delivered without a JSON round-trip.
+		if its, ok := srvRaw["init_timeout"].(string); ok && its != "" {
+			if d, err := time.ParseDuration(its); err == nil {
+				v := config.Duration(d)
+				srv.InitTimeout = &v
+			}
+		} else if itd, ok := srvRaw["init_timeout"].(*config.Duration); ok && itd != nil {
+			v := *itd
+			srv.InitTimeout = &v
+		}
+
 		// Extract unified health status
 		if health, ok := srvRaw["health"].(*contracts.HealthStatus); ok {
 			srv.Health = health
@@ -505,7 +625,12 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			d.Code = stringifyDiagnosticField(diagRaw["code"])
 			d.Severity = stringifyDiagnosticField(diagRaw["severity"])
 			if cause, ok := diagRaw["cause"].(string); ok {
-				d.Cause = cause
+				// Audit F12: same double-wrapper the runtime already collapses on
+				// last_error — mcp-go's transport wraps a send failure with
+				// "failed to send request" at two nesting levels. The diagnostic
+				// takes its cause straight from the raw connect error, so it
+				// needs the same treatment or the detail panel repeats itself.
+				d.Cause = stringutil.CollapseRepeatedErrorWrappers(cause)
 			}
 			if detected, ok := diagRaw["detected_at"].(time.Time); ok && !detected.IsZero() {
 				t := detected
@@ -953,6 +1078,14 @@ func (s *service) GetServerTools(ctx context.Context, name string) ([]map[string
 		}
 		if record, err := s.runtime.GetToolApproval(name, toolName); err == nil && record != nil {
 			tools[i]["approval_status"] = string(record.Status)
+			// Scan-gate hold evidence (spec 086 FR-018): why the tool is held,
+			// including the matched TPA signature / check ids. Omitted entirely
+			// when there is no scan hold, so pre-existing records are unchanged.
+			if record.HeldReason != "" {
+				tools[i]["held_reason"] = record.HeldReason
+				tools[i]["held_verdict"] = record.HeldVerdict
+				tools[i]["held_signals"] = record.HeldSignals
+			}
 		}
 	}
 

@@ -1,0 +1,112 @@
+{
+  "count": 6,
+  "items": [
+    {
+      "id": "client_holds_admin_key:client:cursor",
+      "kind": "client_holds_admin_key",
+      "rank": 5,
+      "subject": {
+        "type": "client",
+        "id": "cursor",
+        "name": "Cursor"
+      },
+      "summary": "Cursor: holds the admin API key",
+      "detail": "Upgrade it to a client credential, then rotate the admin API key.",
+      "fix": {
+        "verb": "upgrade_admin_key_holders",
+        "label": "Upgrade…",
+        "target": "/clients?focus=cursor"
+      },
+      "since": "2026-10-02T11:30:00Z"
+    },
+    {
+      "id": "sign_in_required:server:github-oauth",
+      "kind": "sign_in_required",
+      "rank": 10,
+      "subject": {
+        "type": "server",
+        "id": "github-oauth",
+        "name": "github-oauth"
+      },
+      "summary": "github-oauth: sign in required",
+      "detail": "OAuth · api.githubcopilot.com",
+      "fix": {
+        "verb": "login",
+        "label": "Sign in",
+        "target": "/servers/github-oauth"
+      },
+      "since": "2026-10-02T11:00:00Z"
+    },
+    {
+      "id": "missing_secret:server:needs-key",
+      "kind": "missing_secret",
+      "rank": 20,
+      "subject": {
+        "type": "server",
+        "id": "needs-key",
+        "name": "needs-key"
+      },
+      "summary": "needs-key: missing secret",
+      "detail": "env API_KEY",
+      "fix": {
+        "verb": "set_secret",
+        "label": "Add secret",
+        "target": "/servers/needs-key?tab=config&focus=env"
+      },
+      "since": "2026-10-02T10:30:00Z"
+    },
+    {
+      "id": "server_review:server:github-oauth",
+      "kind": "server_review",
+      "rank": 50,
+      "subject": {
+        "type": "server",
+        "id": "github-oauth",
+        "name": "github-oauth"
+      },
+      "summary": "github-oauth: waiting for review",
+      "detail": "Tools can be reviewed once sign-in finishes",
+      "fix": {
+        "verb": "review",
+        "label": "Review",
+        "target": "/review/github-oauth"
+      },
+      "since": "2026-10-02T11:00:00Z"
+    },
+    {
+      "id": "tool_review:server:changed-tools:changed",
+      "kind": "tool_review",
+      "rank": 60,
+      "subject": {
+        "type": "server",
+        "id": "changed-tools",
+        "name": "changed-tools"
+      },
+      "summary": "changed-tools: 2 tool(s) changed, needs review",
+      "fix": {
+        "verb": "review",
+        "label": "Review",
+        "target": "/review/changed-tools?change=changed"
+      },
+      "since": "2026-10-02T09:00:00Z"
+    },
+    {
+      "id": "client_never_seen:client:codex",
+      "kind": "client_never_seen",
+      "rank": 70,
+      "subject": {
+        "type": "client",
+        "id": "codex",
+        "name": "Codex"
+      },
+      "summary": "Codex: connected, never seen",
+      "detail": "Restart Codex to load MCPProxy",
+      "fix": {
+        "verb": "reload_hint",
+        "label": "How to restart",
+        "target": "/clients?focus=codex"
+      },
+      "since": "2026-10-01T08:00:00Z"
+    }
+  ]
+}

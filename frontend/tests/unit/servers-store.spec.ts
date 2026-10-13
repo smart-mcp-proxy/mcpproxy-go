@@ -8,6 +8,8 @@ vi.mock('@/services/api', () => ({
     getServers: vi.fn(),
     securityApprove: vi.fn(),
     unquarantineServer: vi.fn(),
+    disableServer: vi.fn(),
+    quarantineServer: vi.fn(),
   },
 }))
 
@@ -186,5 +188,198 @@ describe('useServersStore — securityApproveServer (F-04)', () => {
     await expect(store.securityApproveServer('srv')).rejects.toThrow('scan required')
     // It should NOT have fallen back to unquarantineServer
     expect(api.unquarantineServer).not.toHaveBeenCalled()
+  })
+})
+
+describe('useServersStore — a successful list clears a stale error', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  const srv = { name: 'srv', protocol: 'http' as const, enabled: true, connected: true, tool_count: 1 }
+
+  it('clears loading.error once a list arrives', async () => {
+    // `loading.error` was write-only: a silent background refresh sets it and
+    // nothing ever cleared it, so one transient blip pinned an error on the
+    // Servers page for the rest of the session.
+    const store = useServersStore()
+
+    ;(api.getServers as any).mockResolvedValue({ success: false, error: 'network down' })
+    await store.fetchServers(true)
+    expect(store.loading.error).toBe('network down')
+
+    ;(api.getServers as any).mockResolvedValue({ success: true, data: { servers: [srv] } })
+    await store.fetchServers(true)
+
+    expect(store.loading.error).toBeNull()
+    expect(store.servers).toHaveLength(1)
+    expect(store.loaded).toBe(true)
+  })
+
+  it('drops a failure from a request the newer list already superseded', async () => {
+    // Failures are sequenced like successes: an older request failing after a
+    // newer one delivered a list must not raise a stale error over fresh data.
+    const store = useServersStore()
+
+    let failOld: (v: unknown) => void = () => {}
+    ;(api.getServers as any).mockReturnValueOnce(
+      new Promise((resolve) => { failOld = resolve })
+    )
+    const oldFetch = store.fetchServers(true)
+
+    // A newer request completes first, with a real list.
+    ;(api.getServers as any).mockResolvedValueOnce({ success: true, data: { servers: [srv] } })
+    await store.fetchServers(true)
+    expect(store.loading.error).toBeNull()
+
+    // Only now does the older one come back, failing.
+    failOld({ success: false, error: 'stale failure' })
+    await oldFetch
+
+    expect(store.loading.error).toBeNull()
+    expect(store.servers).toHaveLength(1)
+  })
+
+  it('does not let an older list land on top of a newer failure', async () => {
+    // A failure is news about the list too, so it advances the sequencing mark.
+    // Otherwise a newer request failing leaves the mark behind and an older
+    // list arriving afterwards is still accepted — overwriting the newer
+    // outcome with stale servers and silently clearing its error.
+    const store = useServersStore()
+
+    let finishOld: (v: unknown) => void = () => {}
+    ;(api.getServers as any).mockReturnValueOnce(
+      new Promise((resolve) => { finishOld = resolve })
+    )
+    const oldFetch = store.fetchServers(true)
+
+    // A newer request settles first — with a failure.
+    ;(api.getServers as any).mockResolvedValueOnce({ success: false, error: 'network down' })
+    await store.fetchServers(true)
+    expect(store.loading.error).toBe('network down')
+
+    // The older request now succeeds. It is stale: it must not apply.
+    finishOld({ success: true, data: { servers: [srv] } })
+    await oldFetch
+
+    expect(store.servers).toHaveLength(0)
+    expect(store.loading.error).toBe('network down')
+  })
+
+  it('still records a failure that happens after a successful load', async () => {
+    // Clearing on success must not make errors unreportable afterwards.
+    const store = useServersStore()
+
+    ;(api.getServers as any).mockResolvedValue({ success: true, data: { servers: [srv] } })
+    await store.fetchServers(true)
+    expect(store.loading.error).toBeNull()
+
+    ;(api.getServers as any).mockResolvedValue({ success: false, error: 'network down' })
+    await store.fetchServers(true)
+
+    expect(store.loading.error).toBe('network down')
+    // …and the servers we already hold are still there to fall back on.
+    expect(store.servers).toHaveLength(1)
+  })
+})
+
+// Issue #1064: a quarantined server's tools are refused at dispatch and purged
+// from the search index, so counting them under "Available across all servers"
+// tells the operator N tools are available when none of them are callable.
+describe('useServersStore — totalTools counts only available tools (#1064)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  function srv(overrides: Record<string, unknown> = {}) {
+    return {
+      name: 'srv',
+      protocol: 'http' as const,
+      enabled: true,
+      quarantined: false,
+      connected: true,
+      connecting: false,
+      tool_count: 0,
+      ...overrides,
+    }
+  }
+
+  async function load(servers: Record<string, unknown>[]) {
+    const store = useServersStore()
+    ;(api.getServers as any).mockResolvedValue({ success: true, data: { servers } })
+    await store.fetchServers(true)
+    return store
+  }
+
+  it('excludes a quarantined server', async () => {
+    const store = await load([
+      srv({ name: 'clean', tool_count: 5 }),
+      srv({ name: 'held', quarantined: true, tool_count: 7 }),
+    ])
+    expect(store.totalTools).toBe(5)
+  })
+
+  it('still excludes a disabled server (issue #285)', async () => {
+    const store = await load([
+      srv({ name: 'clean', tool_count: 5 }),
+      srv({ name: 'off', enabled: false, tool_count: 3 }),
+    ])
+    expect(store.totalTools).toBe(5)
+  })
+
+  it('counts nothing when every server is quarantined', async () => {
+    const store = await load([srv({ name: 'held', quarantined: true, tool_count: 9 })])
+    expect(store.totalTools).toBe(0)
+    // ...while the server itself is still listed for review.
+    expect(store.quarantinedServers).toHaveLength(1)
+  })
+})
+
+describe('useServersStore — optimistic disable/quarantine keep health.admin_state in step (#1466)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+  })
+
+  async function seeded() {
+    ;(api.getServers as any).mockResolvedValueOnce({
+      success: true,
+      data: {
+        servers: [{
+          name: 'srv', protocol: 'http', enabled: true, quarantined: false, connected: true,
+          connecting: false, tool_count: 1,
+          health: { level: 'healthy', admin_state: 'enabled', summary: 'Connected', status: 'ready' },
+        }],
+      },
+    })
+    const store = useServersStore()
+    await store.fetchServers()
+    return store
+  }
+
+  it('disable sets admin_state=disabled', async () => {
+    ;(api.disableServer as any).mockResolvedValueOnce({ success: true })
+    const store = await seeded()
+    await store.disableServer('srv')
+    expect(store.servers[0].health?.admin_state).toBe('disabled')
+    expect(store.servers[0].health?.status).toBe('disabled')
+  })
+
+  it('a failed disable restores admin_state', async () => {
+    ;(api.disableServer as any).mockResolvedValueOnce({ success: false, error: 'nope' })
+    const store = await seeded()
+    await expect(store.disableServer('srv')).rejects.toThrow()
+    expect(store.servers[0].health?.admin_state).toBe('enabled')
+    expect(store.servers[0].health?.status).toBe('ready')
+  })
+
+  it('quarantine sets admin_state=quarantined', async () => {
+    ;(api.quarantineServer as any).mockResolvedValueOnce({ success: true })
+    const store = await seeded()
+    await store.quarantineServer('srv')
+    expect(store.servers[0].health?.admin_state).toBe('quarantined')
+    expect(store.servers[0].health?.status).toBe('needs_review')
   })
 })

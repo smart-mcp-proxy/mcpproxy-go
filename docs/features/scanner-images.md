@@ -1,3 +1,9 @@
+---
+title: "Security Scanner Images"
+sidebar_label: "Scanner Images"
+description: "Where the Docker images behind the security scanners come from and how they are published."
+---
+
 # Security Scanner Images
 
 MCPProxy's security scanners run as Docker containers. This document

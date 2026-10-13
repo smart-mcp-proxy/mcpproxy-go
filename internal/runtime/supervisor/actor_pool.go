@@ -2,6 +2,7 @@ package supervisor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // ActorPoolSimple is a simplified facade over UpstreamManager that delegates all operations.
@@ -80,11 +82,15 @@ func (p *ActorPoolSimple) SendNotification(notification *upstream.Notification) 
 	p.emitEvent(event)
 }
 
-// AddServer adds a server configuration to the manager.
-func (p *ActorPoolSimple) AddServer(name string, cfg *config.ServerConfig) error {
-	p.logger.Debug("Adding server via manager", zap.String("name", name))
+// AddServerAt installs (or keeps) the manager instance serving cfg at commit
+// generation gen. upstream.ErrStaleGeneration when gen is no longer current.
+func (p *ActorPoolSimple) AddServerAt(name string, cfg *config.ServerConfig, gen int64) error {
+	p.logger.Debug("Adding server via manager", zap.String("name", name), zap.Int64("generation", gen))
 
-	if err := p.manager.AddServerConfig(name, cfg); err != nil {
+	if err := p.manager.AddServerConfigAt(name, cfg, gen); err != nil {
+		if errors.Is(err, upstream.ErrStaleGeneration) {
+			return err
+		}
 		return fmt.Errorf("failed to add server config: %w", err)
 	}
 
@@ -102,11 +108,14 @@ func (p *ActorPoolSimple) AddServer(name string, cfg *config.ServerConfig) error
 	return nil
 }
 
-// RemoveServer removes a server from the manager.
-func (p *ActorPoolSimple) RemoveServer(name string) error {
-	p.logger.Debug("Removing server via manager", zap.String("name", name))
+// RemoveServerAt removes the manager instance serving name (see
+// upstream.Manager.RemoveServerAt for the gen-0 removal semantics).
+func (p *ActorPoolSimple) RemoveServerAt(name string, gen int64) error {
+	p.logger.Debug("Removing server via manager", zap.String("name", name), zap.Int64("generation", gen))
 
-	p.manager.RemoveServer(name)
+	if err := p.manager.RemoveServerAt(name, gen); err != nil {
+		return err
+	}
 
 	// Emit event
 	p.emitEvent(Event{
@@ -119,39 +128,28 @@ func (p *ActorPoolSimple) RemoveServer(name string) error {
 	return nil
 }
 
-// ConnectServer tells the manager to connect a server.
-func (p *ActorPoolSimple) ConnectServer(ctx context.Context, name string) error {
-	p.logger.Debug("Connecting server via manager", zap.String("name", name))
+// ConnectServerAt connects the manager instance serving name at gen. A connect
+// error other than a stale generation is logged and not returned: the
+// supervisor's next reconcile retries (as before Spec 116 PR3).
+func (p *ActorPoolSimple) ConnectServerAt(ctx context.Context, name string, gen int64) error {
+	p.logger.Debug("Connecting server via manager", zap.String("name", name), zap.Int64("generation", gen))
 
-	client, exists := p.manager.GetClient(name)
-	if !exists {
-		return fmt.Errorf("server %s not found", name)
-	}
-
-	// Attempt to connect (managed client will handle state checks)
-	// If client is already connecting/connected, Connect() will return an error
-	// which we log but don't treat as fatal (supervisor will retry)
-	if err := client.Connect(ctx); err != nil {
+	if err := p.manager.ConnectServerAt(ctx, name, gen); err != nil {
+		if errors.Is(err, upstream.ErrStaleGeneration) {
+			return err
+		}
 		p.logger.Debug("Connect returned error (may be already connecting/connected)",
 			zap.String("server", name),
 			zap.Error(err))
-		// Not returning error - this is expected if client is already connecting
-		// Supervisor's reconciliation logic will handle retries if needed
 	}
-
 	return nil
 }
 
-// DisconnectServer tells the manager to disconnect a server.
-func (p *ActorPoolSimple) DisconnectServer(name string) error {
-	p.logger.Debug("Disconnecting server via manager", zap.String("name", name))
-
-	client, exists := p.manager.GetClient(name)
-	if !exists {
-		return fmt.Errorf("server %s not found", name)
-	}
-
-	return client.Disconnect()
+// DisconnectServerAt disconnects exactly instance inst serving name at gen. It
+// never resolves the name to whatever instance serves it now (review R5.2).
+func (p *ActorPoolSimple) DisconnectServerAt(name string, gen int64, inst managed.InstanceID) error {
+	p.logger.Debug("Disconnecting server via manager", zap.String("name", name), zap.Int64("generation", gen))
+	return p.manager.DisconnectServerAt(name, gen, inst)
 }
 
 // ConnectAll tells the manager to connect all servers.
@@ -172,10 +170,12 @@ func (p *ActorPoolSimple) GetServerState(name string) (*ServerState, error) {
 	config := client.GetConfig() // Thread-safe config access
 
 	state := &ServerState{
-		Name:      name,
-		Config:    config,
-		Enabled:   config.Enabled,
-		Connected: connected,
+		Name:            name,
+		Config:          config,
+		Enabled:         config.Enabled,
+		Connected:       connected,
+		ConnectionEpoch: client.ConnectionEpoch(),
+		InstanceID:      client.InstanceID(),
 	}
 
 	if config.Quarantined {
@@ -210,10 +210,12 @@ func (p *ActorPoolSimple) GetAllStates() map[string]*ServerState {
 		connected := client.IsConnected()
 
 		state := &ServerState{
-			Name:      name,
-			Config:    client.GetConfig(),
-			Enabled:   client.GetConfig().Enabled,
-			Connected: connected,
+			Name:            name,
+			Config:          client.GetConfig(),
+			Enabled:         client.GetConfig().Enabled,
+			Connected:       connected,
+			ConnectionEpoch: client.ConnectionEpoch(),
+			InstanceID:      client.InstanceID(),
 		}
 
 		if client.GetConfig().Quarantined {

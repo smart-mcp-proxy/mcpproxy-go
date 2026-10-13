@@ -42,7 +42,7 @@ Write-Host "Commit: $Commit" -ForegroundColor Green
 Write-Host "Date: $Date" -ForegroundColor Green
 Write-Host ""
 
-$LDFLAGS = "-X main.version=$Version -X main.commit=$Commit -X main.date=$Date -s -w"
+$LDFLAGS = "-X main.version=$Version -X main.commit=$Commit -X main.date=$Date -X github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi.buildVersion=$Version -s -w"
 
 # Array to track built binaries
 $BuiltBinaries = @()
@@ -96,7 +96,7 @@ if (!$OnlyCurrentPlatform) {
 if ($BuildTray) {
     Write-Host ""
     Write-Host "Building mcpproxy-tray binaries..." -ForegroundColor Magenta
-    
+
     # Build tray for current platform (Windows with CGO)
     Write-Host "Building tray for Windows..." -ForegroundColor Cyan
     $env:CGO_ENABLED = "1"
@@ -109,7 +109,7 @@ if ($BuildTray) {
         Write-Host "✓ Windows tray binary built successfully" -ForegroundColor Green
         $BuiltBinaries += "mcpproxy-tray.exe"
     }
-    
+
     if (!$OnlyCurrentPlatform) {
         # Build tray for macOS (requires macOS host for proper CGO compilation)
         Write-Host "Attempting to build tray for macOS..." -ForegroundColor Cyan
@@ -123,7 +123,7 @@ if ($BuildTray) {
             Write-Host "✓ macOS tray binary built successfully" -ForegroundColor Green
             $BuiltBinaries += "mcpproxy-tray-darwin-amd64"
         }
-        
+
         # Build tray for macOS ARM64
         Write-Host "Attempting to build tray for macOS ARM64..." -ForegroundColor Cyan
         $env:CGO_ENABLED = "1"
@@ -139,7 +139,7 @@ if ($BuildTray) {
     } else {
         Write-Host "Skipping cross-platform tray builds (OnlyCurrentPlatform flag is set)" -ForegroundColor Yellow
     }
-    
+
     # Reset environment variables
     Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue
     Remove-Item Env:GOOS -ErrorAction SilentlyContinue
@@ -172,4 +172,3 @@ if ($BuiltFiles.Count -gt 0) {
 Write-Host ""
 Write-Host "Test version info:" -ForegroundColor Cyan
 & .\mcpproxy.exe --version
-

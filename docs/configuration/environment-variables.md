@@ -37,6 +37,8 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `MCPPROXY_TRUSTED_HOSTS` | Comma-separated `Host` header allowlist for loopback listeners behind a reverse proxy (see [Reverse Proxy Deployment](/operations/reverse-proxy)) | - |
+| `MCPPROXY_TRUSTED_PROXIES` | Comma-separated CIDRs or IP addresses whose `X-Forwarded-For` / `X-Real-IP` / `X-Forwarded-Proto` / `X-Forwarded-Host` headers are honoured (overrides `trusted_proxies`). Any other peer's forwarded headers are ignored. An entry that is neither a CIDR nor an IP is refused at boot with `trusted_proxies[N] "value" is not a valid CIDR or IP address`, exactly like a file value. See [trusted_proxies](/operations/reverse-proxy#trusted_proxies-forwarded-headers) | - (trust nobody) |
 | `MCPPROXY_TLS_ENABLED` | Enable TLS/HTTPS | `false` |
 | `MCPPROXY_TLS_CERT` | Path to TLS certificate | - |
 | `MCPPROXY_TLS_KEY` | Path to TLS private key | - |
@@ -45,11 +47,33 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 
 **Note:** TLS certificates are managed in `~/.mcpproxy/certs/` or via the `tls.certs_dir` config option. Use `mcpproxy trust-cert` to set up certificates.
 
+### Audit Log
+
+See [Audit Log](/features/audit-log) and [`audit_log`](./config-file.md#audit_log-edition-neutral-jsonl-audit-record) for the full key set — only `enabled`, `path` and `stdout` have an env override; the rotation/`compress` keys are file-only.
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_AUDIT_LOG_ENABLED` | Override `audit_log.enabled` | see `audit_log` default |
+| `MCPPROXY_AUDIT_LOG_PATH` | Override `audit_log.path` | `""` |
+| `MCPPROXY_AUDIT_LOG_STDOUT` | Override `audit_log.stdout` | server: `true` when the block is absent |
+
 ### OAuth Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_DISABLE_OAUTH` | Disable OAuth for testing | `false` |
+
+### Server Edition (SSO)
+
+These are read only by the Server edition binary (`mcpproxy-server`, the Docker
+image); the Personal edition ignores them. Every other `server_edition.*` key is
+file-only — reference secrets with `${env:NAME}` inside the config file instead
+(see [Server Edition](./config-file.md#server-edition)).
+
+| Variable | Config key | Description | Default |
+|----------|------------|-------------|---------|
+| `MCPPROXY_PUBLIC_URL` | `server_edition.public_url` | Absolute origin users reach the deployment at (`https://mcp.example.com`, no path). Sole source of the IdP `redirect_uri`, the connect-flow base URL and the `Secure` cookie decision when set. Overrides the file value; validated with the same message (`server_edition.public_url must be an absolute origin (scheme://host[:port]) with no path`) | - |
+| `MCPPROXY_CRED_KEY` | `server_edition.credential_encryption_key` | Key for encrypting per-user upstream credentials at rest (the `oauth_connect` broker — see [Auth Broker](/features/auth-broker)). Used only when the config key is empty; an explicit config value wins | - |
 
 ### Browser Detection
 
@@ -61,6 +85,37 @@ These variables control browser behavior for OAuth flows:
 | `NO_BROWSER` | Prevent browser opening for OAuth | `false` |
 | `CI` | CI environment detection (disables browser) | - |
 | `BROWSER` | Custom browser executable for OAuth | System default |
+
+### Concurrency Limits
+
+These override the **global aggregate** limiter only — the per-server default
+set and per-server overrides are file/API-configured. See
+[Concurrency Limits & Request Queueing](./config-file.md#concurrency-limits--request-queueing).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_MAX_CONCURRENT_REQUESTS` | Proxy-wide cap on upstream tool calls running at once. `0` disables the global limiter | `0` (off) |
+| `MCPPROXY_QUEUE_SIZE` | How many calls may wait for a global slot. `0` = shed immediately at the cap | `0` |
+| `MCPPROXY_QUEUE_TIMEOUT` | How long a call may wait before being shed, e.g. `30s` | `30s` when the limiter is active |
+
+### HTTP Server Timeouts
+
+Deadlines on MCPProxy's own HTTP listener (REST API, `/mcp`, `/events`). Each
+takes a duration string; **`0s` means "no timeout"** (unset means "use the
+default"; for the idle timeout, `0s` falls back to the read timeout — see its
+row). Valid range: `1s`–`24h`, or `0s`. Malformed values are ignored with a
+warning on stderr. Changing any of these requires a restart. See
+[HTTP Server Timeouts](./config-file.md#http-server-timeouts).
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `MCPPROXY_HTTP_READ_TIMEOUT` | Deadline for reading the whole request (headers + body) | `120s` |
+| `MCPPROXY_HTTP_WRITE_TIMEOUT` | Wall-clock cap on writing the whole response for non-streaming endpoints (REST, Web UI, health). MCP endpoints and SSE `/events` are exempt by design, so slow tool calls and event streams are never truncated; `0s` disables it globally ([#965](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/965)) | `120s` |
+| `MCPPROXY_HTTP_IDLE_TIMEOUT` | Keep-alive timeout for idle persistent connections (`0s` falls back to the read timeout; unbounded only if that is also `0s`) | `180s` |
+
+The 60s request-header read deadline (slowloris protection) is hardcoded and not
+configurable. `call_tool_timeout` (default `2m`) separately caps tool execution —
+raise it too when you expect tool calls longer than two minutes.
 
 ### Core Server Examples
 
@@ -99,7 +154,7 @@ The tray application doesn't read the config file directly. It launches the core
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MCPPROXY_TRAY_PORT` | Port for tray-launched core | `8080` |
-| `MCPPROXY_TRAY_LISTEN` | Listen address for core (e.g., `:8080`) | - |
+| `MCPPROXY_TRAY_LISTEN` | Listen address for core (e.g., `127.0.0.1:8080`; a bare port binds loopback) | - |
 | `MCPPROXY_CORE_URL` | Full URL override (e.g., `http://127.0.0.1:30080`) | - |
 | `MCPPROXY_CORE_PATH` | Custom path to mcpproxy core binary | - |
 | `MCPPROXY_TRAY_CONFIG_PATH` | Custom config file path for core | - |
@@ -111,14 +166,27 @@ The tray application doesn't read the config file directly. It launches the core
 | `MCPPROXY_TRAY_ENDPOINT` | Override tray-core communication endpoint (unix:///path/socket.sock or npipe:////./pipe/name) | Auto-detect |
 | `MCPPROXY_TRAY_INSPECT_ADDR` | Address for tray instrumentation/debug server | - |
 
-### Auto-Update Settings (Tray)
+### Auto-Update Settings
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MCPPROXY_DISABLE_AUTO_UPDATE` | Disable automatic update checks | `false` |
-| `MCPPROXY_UPDATE_NOTIFY_ONLY` | Only notify about updates, don't auto-install | `false` |
-| `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Allow prerelease/beta version updates | `false` |
-| `MCPPROXY_UPDATE_APP_BUNDLE` | Enable app bundle updates (macOS) | `false` |
+| `MCPPROXY_DISABLE_AUTO_UPDATE` | Disable automatic update checks (core + tray) | `false` |
+| `MCPPROXY_UPDATE_NOTIFY_ONLY` | Only notify about updates, don't auto-install (tray) | `false` |
+| `MCPPROXY_ALLOW_PRERELEASE_UPDATES` | Allow prerelease/beta version updates (core + tray) | `false` |
+| `MCPPROXY_UPDATE_APP_BUNDLE` | Enable app bundle updates (macOS tray) | `false` |
+
+`CI=true` (or `CI=1`) additionally suppresses every update nudge and the tray's
+unattended checks — a non-interactive run has nobody to nudge. Machine-readable
+fields keep reporting the facts, and a user-initiated "Check for Updates" still
+runs.
+
+Update checking can also be controlled from the config file via the
+`update_check` block (`enabled`, `channel`) — see
+[Version Updates](/features/version-updates). When both are set, the
+environment variables **win** over the config keys. The resolved answer is
+published to the macOS tray as `update_policy` in `GET /api/v1/info`; the
+one-click updater, the per-channel behaviour matrix and the release
+infrastructure are documented in [Auto-Update](/features/auto-update).
 
 ### Setting Tray Variables on macOS
 

@@ -3,9 +3,6 @@
 package tray
 
 import (
-	"archive/tar"
-	"archive/zip"
-	"compress/gzip"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -13,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,9 +24,9 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/mod/semver"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	// "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/cli" // replaced by in-process OAuth
 )
 
@@ -72,7 +70,6 @@ type ServerInterface interface {
 
 	// Quarantine management methods
 	GetQuarantinedServers() ([]map[string]interface{}, error)
-	UnquarantineServer(serverName string) error
 
 	// Server management methods for tray menu
 	EnableServer(serverName string, enabled bool) error
@@ -88,15 +85,25 @@ type ServerInterface interface {
 
 	// OAuth control
 	TriggerOAuthLogin(serverName string) error
+
+	// Profile switcher (Profiles v2 T5). The tray holds no state — it reads the
+	// configured profiles and the server-level default active profile from the
+	// core, and writes the active profile back, all via REST.
+	GetProfiles() ([]ProfileInfo, error)
+	GetActiveProfile() (string, error)
+	SetActiveProfile(name string) error
 }
 
 // App represents the system tray application
 type App struct {
 	server    ServerInterface
-	apiClient interface{ OpenWebUI() error } // API client for web UI access (optional)
-	logger    *zap.SugaredLogger
-	version   string
-	shutdown  func()
+	apiClient interface {
+		OpenWebUI() error
+		OpenWebUIPath(string) error
+	} // API client for web UI access (optional)
+	logger   *zap.SugaredLogger
+	version  string
+	shutdown func()
 
 	connectionState   ConnectionState
 	connectionStateMu sync.RWMutex
@@ -111,6 +118,7 @@ type App struct {
 	// startStopItem removed - tray doesn't directly control core lifecycle
 	upstreamServersMenu *systray.MenuItem
 	quarantineMenu      *systray.MenuItem
+	profileMenu         *systray.MenuItem
 	portConflictMenu    *systray.MenuItem
 	portConflictInfo    *systray.MenuItem
 	portConflictRetry   *systray.MenuItem
@@ -128,11 +136,22 @@ type App struct {
 	autostartItem    *systray.MenuItem
 
 	// Update notification menu item (hidden until update is available)
-	updateMenuItem     *systray.MenuItem
-	updateAvailable    bool
-	latestVersion      string
-	latestReleaseURL   string
-	updateCheckMu      sync.RWMutex
+	updateMenuItem   *systray.MenuItem
+	updateAvailable  bool
+	latestVersion    string
+	latestReleaseURL string
+	updateCheckMu    sync.RWMutex
+
+	// selfUpdateFunc, when non-nil, replaces the legacy GitHub self-update flow
+	// that runs after the core-API update-check gate. Tests inject it to assert
+	// whether the network path runs once the gate passes; production leaves it
+	// nil so performSelfUpdate runs.
+	selfUpdateFunc func()
+
+	// applyUpdateFn, when non-nil, replaces the real binary swap
+	// (update.Apply). Tests inject it to observe whether the self-update path
+	// would have installed an artifact; production leaves it nil.
+	applyUpdateFn func(io.Reader, update.Options) error
 
 	// Config path for opening from menu
 	configPath string
@@ -161,7 +180,10 @@ func New(server ServerInterface, logger *zap.SugaredLogger, version string, shut
 }
 
 // NewWithAPIClient creates a new tray application with an API client for web UI access
-func NewWithAPIClient(server ServerInterface, apiClient interface{ OpenWebUI() error }, logger *zap.SugaredLogger, version string, shutdown func()) *App {
+func NewWithAPIClient(server ServerInterface, apiClient interface {
+	OpenWebUI() error
+	OpenWebUIPath(string) error
+}, logger *zap.SugaredLogger, version string, shutdown func()) *App {
 	app := &App{
 		server:          server,
 		apiClient:       apiClient,
@@ -540,10 +562,13 @@ func (a *App) onReady() {
 	// --- Upstream & Quarantine Menus ---
 	a.upstreamServersMenu = systray.AddMenuItem("Upstream Servers", "Manage upstream servers")
 	a.quarantineMenu = systray.AddMenuItem("Security Quarantine", "Manage quarantined servers")
+
+	// --- Profile Switcher (Profiles v2 T5) ---
+	a.profileMenu = systray.AddMenuItem("Profile: All servers", "Switch the active tool-discovery profile")
 	systray.AddSeparator()
 
 	// --- Initialize Managers ---
-	a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.logger)
+	a.menuManager = NewMenuManager(a.upstreamServersMenu, a.quarantineMenu, a.profileMenu, a.logger)
 	a.syncManager = NewSynchronizationManager(a.stateManager, a.server, a.menuManager, a.logger)
 	a.syncManager.SetOnSync(func() {
 		a.instrumentation.NotifyMenus()
@@ -1024,7 +1049,13 @@ func (a *App) onExit() {
 	}
 }
 
-// checkForUpdates checks for new releases on GitHub
+// checkForUpdates gates the tray's legacy GitHub self-update check on the
+// core's decision, then runs it. Per the tray-holds-no-state rule the tray must
+// never read mcp_config.json itself; instead it asks the core (via the same
+// /api/v1/info endpoint checkUpdateFromAPI uses) whether update checking is on.
+// The core's update_check config is thus the single source of truth (Spec 079
+// FR-015). The environment kill-switch MCPPROXY_DISABLE_AUTO_UPDATE is checked
+// first and wins regardless (FR-014 precedence: env > config).
 func (a *App) checkForUpdates() {
 	// Check if auto-update is disabled by environment variable
 	if os.Getenv("MCPPROXY_DISABLE_AUTO_UPDATE") == trueStr {
@@ -1032,6 +1063,38 @@ func (a *App) checkForUpdates() {
 		return
 	}
 
+	// Ask the core whether an update check should run. The core omits the
+	// update object when update_check.enabled=false (or when no update exists),
+	// so its answer gates this tray-owned GitHub check without the tray reading
+	// the config file.
+	info, reachable := a.fetchCoreUpdateInfo()
+	if !reachable {
+		// Core unreachable: skip this tick rather than fall open to a network
+		// check the operator may have disabled via config. The 24h ticker
+		// retries; env kill-switch semantics are unchanged.
+		a.logger.Debug("Core unreachable for update-check gate; skipping tray self-update check this tick")
+		return
+	}
+	if info == nil {
+		// Core answered but omitted the update object: update checking is
+		// disabled (update_check.enabled=false, Spec 079 FR-015) or no update
+		// exists. Either way the tray must not run its own network check.
+		a.logger.Info("Update checking disabled or no update reported by core; skipping tray self-update check")
+		return
+	}
+
+	if a.selfUpdateFunc != nil {
+		a.selfUpdateFunc()
+		return
+	}
+	a.performSelfUpdate()
+}
+
+// performSelfUpdate runs the legacy tray-owned GitHub self-update flow (asset
+// resolution + download/apply). It only runs after checkForUpdates confirms via
+// the core that update checking is enabled. Full FR-001a convergence onto the
+// core's resolved asset is out of scope; the GitHub resolution stays here.
+func (a *App) performSelfUpdate() {
 	// Disable auto-update for app bundles by default (DMG installation should be manual)
 	if a.isAppBundle() && os.Getenv("MCPPROXY_UPDATE_APP_BUNDLE") != trueStr {
 		a.logger.Info("Auto-update disabled for app bundle installations (use DMG for updates)")
@@ -1067,21 +1130,38 @@ func (a *App) checkForUpdates() {
 		return
 	}
 
-	downloadURL, err := a.findAssetURL(release)
+	assetName, downloadURL, err := a.findAsset(release)
 	if err != nil {
 		a.logger.Error("Failed to find asset for your system", zap.Error(err))
 		return
 	}
 
-	if err := a.downloadAndApplyUpdate(downloadURL); err != nil {
+	if err := a.downloadAndApplyUpdate(release, assetName, downloadURL); err != nil {
 		a.logger.Error("Update failed", zap.Error(err))
 	}
 }
 
+// includePrereleases reports whether this tray build may be offered a
+// prerelease. The running build's own version is authoritative: a stable
+// build is never offered an RC (even with the env flag set — a stale opt-in
+// must not resurrect RC offers), while an RC build tracks the rc channel. A
+// dev/unstamped build honors the env opt-in so local testing can exercise it.
+// Mirrors internal/updatecheck.Checker.IncludePrereleases.
+func (a *App) includePrereleases() bool {
+	v := a.version
+	if !strings.HasPrefix(v, "v") {
+		v = "v" + v
+	}
+	if semver.IsValid(v) {
+		return semver.Prerelease(v) != ""
+	}
+	return os.Getenv("MCPPROXY_ALLOW_PRERELEASE_UPDATES") == trueStr
+}
+
 // getLatestRelease fetches the latest release information from GitHub
 func (a *App) getLatestRelease() (*GitHubRelease, error) {
-	// Check if prerelease updates are allowed
-	allowPrerelease := os.Getenv("MCPPROXY_ALLOW_PRERELEASE_UPDATES") == trueStr
+	// Check if prerelease updates are allowed (build-identity authoritative)
+	allowPrerelease := a.includePrereleases()
 
 	if allowPrerelease {
 		// Get all releases and find the latest (including prereleases)
@@ -1125,11 +1205,20 @@ func (a *App) getLatestReleaseIncludingPrereleases() (*GitHubRelease, error) {
 	return &releases[0], nil
 }
 
-// findAssetURL finds the correct asset URL for the current system
+// findAssetURL finds the correct asset URL for the current system.
 func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
+	_, url, err := a.findAsset(release)
+	return url, err
+}
+
+// findAsset resolves both the asset NAME and its download URL for the current
+// system. The name is what checksums.txt keys its digests by, so callers must
+// verify against the name actually selected here rather than rederiving one:
+// the "latest-*" aliases and the versioned archives have different digests.
+func (a *App) findAsset(release *GitHubRelease) (name, url string, err error) {
 	// Check if this is a Homebrew installation to avoid conflicts
 	if a.isHomebrewInstallation() {
-		return "", fmt.Errorf("auto-update disabled for Homebrew installations - use 'brew upgrade mcpproxy' instead")
+		return "", "", fmt.Errorf("auto-update disabled for Homebrew installations - use 'brew upgrade mcpproxy' instead")
 	}
 
 	// Determine file extension based on platform
@@ -1145,7 +1234,7 @@ func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 	latestSuffix := fmt.Sprintf("latest-%s-%s%s", runtime.GOOS, runtime.GOARCH, extension)
 	for _, asset := range release.Assets {
 		if strings.HasSuffix(asset.Name, latestSuffix) {
-			return asset.BrowserDownloadURL, nil
+			return asset.Name, asset.BrowserDownloadURL, nil
 		}
 	}
 
@@ -1153,24 +1242,38 @@ func (a *App) findAssetURL(release *GitHubRelease) (string, error) {
 	versionedSuffix := fmt.Sprintf("-%s-%s%s", runtime.GOOS, runtime.GOARCH, extension)
 	for _, asset := range release.Assets {
 		if strings.HasSuffix(asset.Name, versionedSuffix) {
-			return asset.BrowserDownloadURL, nil
+			return asset.Name, asset.BrowserDownloadURL, nil
 		}
 	}
 
-	return "", fmt.Errorf("no suitable asset found for %s-%s (tried %s and %s)",
+	return "", "", fmt.Errorf("no suitable asset found for %s-%s (tried %s and %s)",
 		runtime.GOOS, runtime.GOARCH, latestSuffix, versionedSuffix)
 }
 
-// isHomebrewInstallation checks if this is a Homebrew installation
+// isHomebrewInstallation checks if this is a Homebrew installation.
+// Self-update is suppressed for Homebrew installs so it never conflicts with
+// the package manager (Spec 079 FR-011).
 func (a *App) isHomebrewInstallation() bool {
 	execPath, err := os.Executable()
 	if err != nil {
 		return false
 	}
 
-	// Check if running from Homebrew path
+	return isHomebrewPath(execPath)
+}
+
+// isHomebrewPath reports whether the executable path belongs to a Homebrew
+// prefix. Symlinks are resolved first: on Intel macs the binary is exposed as
+// /usr/local/bin/mcpproxy-tray, a symlink into /usr/local/Cellar/…, which the
+// raw-path checks would miss (Spec 079 US2 gap fix).
+func isHomebrewPath(execPath string) bool {
+	if resolved, err := filepath.EvalSymlinks(execPath); err == nil && resolved != "" {
+		execPath = resolved
+	}
+
 	return strings.Contains(execPath, "/opt/homebrew/") ||
 		strings.Contains(execPath, "/usr/local/Homebrew/") ||
+		strings.Contains(execPath, "/usr/local/Cellar/") ||
 		strings.Contains(execPath, "/home/linuxbrew/")
 }
 
@@ -1188,113 +1291,221 @@ func (a *App) isAppBundle() bool {
 	return strings.Contains(execPath, ".app/Contents/MacOS/")
 }
 
-// downloadAndApplyUpdate downloads and applies the update
-func (a *App) downloadAndApplyUpdate(url string) error {
-	resp, err := http.Get(url) // #nosec G107 -- URL is from GitHub releases API which is trusted
+// maxUpdateDownloadBytes bounds a single downloaded release artifact. The
+// archives are ~30-90 MB; the cap exists so a hostile or broken response
+// cannot fill the disk before verification would have rejected it.
+const maxUpdateDownloadBytes = 512 << 20
+
+// checksumsAssetName is the sha256sum-format manifest every release publishes
+// beside its artifacts (.github/workflows/release.yml and prerelease.yml both
+// generate it over every file in release-files/).
+const checksumsAssetName = "checksums.txt"
+
+// applyUpdate performs the binary swap. Tests inject applyUpdateFn so the
+// gating logic can be exercised without rewriting the test binary.
+func (a *App) applyUpdate(r io.Reader, opts update.Options) error {
+	if a.applyUpdateFn != nil {
+		return a.applyUpdateFn(r, opts)
+	}
+	return update.Apply(r, opts)
+}
+
+// downloadToFile fetches url into destPath, refusing any non-200 response.
+func downloadToFile(url, destPath string) error {
+	resp, err := http.Get(url) // #nosec G107 -- URL comes from the GitHub releases API for this repo
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
-	if strings.HasSuffix(url, assetZipExt) {
-		return a.applyZipUpdate(resp.Body)
-	} else if strings.HasSuffix(url, assetTarGzExt) {
-		return a.applyTarGzUpdate(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected HTTP status %s", resp.Status)
 	}
 
-	return update.Apply(resp.Body, update.Options{})
+	f, err := os.Create(destPath) // #nosec G304 -- destPath is inside a temp dir this process just created
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxUpdateDownloadBytes))
+	closeErr := f.Close()
+	if copyErr != nil {
+		return copyErr
+	}
+	return closeErr
 }
 
-// applyZipUpdate extracts and applies an update from a zip archive
-func (a *App) applyZipUpdate(body io.Reader) error {
-	tmpfile, err := os.CreateTemp("", fmt.Sprintf("update-*%s", assetZipExt))
-	if err != nil {
-		return err
+// resolveAssetDigest fetches checksums.txt from the SAME release and returns
+// the digest it publishes for assetName. Every failure mode - no manifest
+// asset, an unreachable or unparseable manifest, an asset the manifest does not
+// list - is an error, so the caller can never fall through to an unverified
+// install.
+//
+// The lookup keys on the exact asset name that was selected for download: a
+// release publishes both "mcpproxy-latest-<os>-<arch>" aliases and versioned
+// archives, and on macOS their digests differ (notarization), so rederiving a
+// name here instead of using the downloaded one would compare the wrong entry.
+func (a *App) resolveAssetDigest(release *GitHubRelease, assetName, workDir string) (string, error) {
+	var checksumsURL string
+	for _, asset := range release.Assets {
+		if asset.Name == checksumsAssetName {
+			checksumsURL = asset.BrowserDownloadURL
+			break
+		}
 	}
-	defer os.Remove(tmpfile.Name())
-	defer tmpfile.Close()
+	if checksumsURL == "" {
+		return "", fmt.Errorf("release %s publishes no %s, so %s cannot be verified; refusing to install it",
+			release.TagName, checksumsAssetName, assetName)
+	}
 
-	_, err = io.Copy(tmpfile, body)
+	checksumsPath := filepath.Join(workDir, checksumsAssetName)
+	if err := downloadToFile(checksumsURL, checksumsPath); err != nil {
+		return "", fmt.Errorf("download %s for release %s: %w", checksumsAssetName, release.TagName, err)
+	}
+
+	f, err := os.Open(checksumsPath) // #nosec G304 -- checksumsPath is inside a temp dir this process just created
+	if err != nil {
+		return "", fmt.Errorf("open %s: %w", checksumsAssetName, err)
+	}
+	defer f.Close()
+
+	manifest, err := updatecheck.ParseChecksums(f)
+	if err != nil {
+		return "", fmt.Errorf("parse %s for release %s: %w", checksumsAssetName, release.TagName, err)
+	}
+
+	digest, ok := manifest[assetName]
+	if !ok {
+		return "", fmt.Errorf("%s is not listed in %s for release %s; refusing to install an unlisted artifact",
+			assetName, checksumsAssetName, release.TagName)
+	}
+	return digest, nil
+}
+
+// downloadAndApplyUpdate downloads the release asset and applies it, but only
+// once the downloaded bytes match the SHA-256 that the release's own
+// checksums.txt publishes for that exact asset. It fails closed: a missing
+// manifest, a missing entry or any mismatch refuses the update rather than
+// installing an unverified binary.
+//
+// The digest covers the ARCHIVE as published, so the hash is taken over the
+// downloaded file before anything is extracted from it - update.Options.Checksum
+// would instead hash the extracted member, which the manifest says nothing
+// about. Signature verification of checksums.txt itself (the cosign bundle the
+// release also publishes, as `mcpproxy update --self` verifies) is a follow-up;
+// it needs the cosign binary, which a tray user's machine usually lacks.
+func (a *App) downloadAndApplyUpdate(release *GitHubRelease, assetName, url string) error {
+	workDir, err := os.MkdirTemp("", "mcpproxy-tray-update-*")
+	if err != nil {
+		return fmt.Errorf("create work directory: %w", err)
+	}
+	defer os.RemoveAll(workDir)
+
+	// Resolved before the ~90 MB download so an unverifiable release costs
+	// nothing, and so no code path can reach the apply without a digest.
+	wantDigest, err := a.resolveAssetDigest(release, assetName, workDir)
 	if err != nil {
 		return err
 	}
 
-	r, err := zip.OpenReader(tmpfile.Name())
-	if err != nil {
-		return err
+	// The archive keeps the published extension (and only that — never the
+	// asset name itself, which is server-supplied): ExtractBinary dispatches
+	// tar.gz vs zip off the path suffix.
+	archivePath := filepath.Join(workDir, "artifact"+archiveExt(assetName))
+	if err := downloadToFile(url, archivePath); err != nil {
+		return fmt.Errorf("download %s: %w", assetName, err)
 	}
-	defer r.Close()
+
+	if err := updatecheck.VerifyFileSHA256(archivePath, wantDigest); err != nil {
+		return fmt.Errorf("refusing to install %s from release %s: %w", assetName, release.TagName, err)
+	}
+
+	a.logger.Info("Update artifact verified against release checksums",
+		zap.String("asset", assetName),
+		zap.String("release", release.TagName),
+		zap.String("sha256", wantDigest))
+
+	switch {
+	case archiveExt(assetName) != "":
+		return a.applyArchiveUpdate(archivePath)
+	default:
+		f, err := os.Open(archivePath) // #nosec G304 -- archivePath is inside a temp dir this process just created
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		return a.applyUpdate(f, update.Options{})
+	}
+}
+
+// archiveExt returns the archive extension assetName carries, or "" when it is
+// not an archive this path knows how to open.
+func archiveExt(assetName string) string {
+	switch {
+	case strings.HasSuffix(assetName, assetZipExt):
+		return assetZipExt
+	case strings.HasSuffix(assetName, assetTarGzExt):
+		return assetTarGzExt
+	default:
+		return ""
+	}
+}
+
+// trayBinaryName is the archive member this process installs over itself.
+//
+// The self-update runs inside mcpproxy-tray (cmd/mcpproxy-tray is the only
+// importer of this package) and hands update.Apply a TargetPath of
+// os.Executable(), so the member extracted has to be the TRAY binary. Release
+// archives ship the core binary and the tray binary side by side —
+// .github/workflows/release.yml stages mcpproxy plus mcpproxy-tray[.exe] — and
+// list the core first, so any "first entry" or suffix-based rule pulls out the
+// core and installs it over the tray, leaving the user with a tray executable
+// that is really a headless core. The core keeps updating itself through
+// `mcpproxy update`, which selects its own member the same way
+// (coreBinaryName in cmd/mcpproxy/update_cmd.go).
+func trayBinaryName() string {
+	name := "mcpproxy-tray"
+	if runtime.GOOS == osWindows {
+		name += ".exe"
+	}
+	return name
+}
+
+// applyArchiveUpdate extracts the tray binary out of the already-downloaded,
+// already-checksum-verified archive and swaps it over the running executable.
+//
+// Extraction matches the member on its exact base name and fails closed when it
+// is absent: an archive without the tray binary means the layout changed, and
+// installing some other member instead is worse than not updating.
+func (a *App) applyArchiveUpdate(archivePath string) error {
+	member := trayBinaryName()
+
+	stageDir, err := os.MkdirTemp(filepath.Dir(archivePath), "extract-*")
+	if err != nil {
+		return fmt.Errorf("create extraction directory: %w", err)
+	}
+	defer os.RemoveAll(stageDir)
+
+	stagedPath := filepath.Join(stageDir, member)
+	if err := updatecheck.ExtractBinary(archivePath, member, stagedPath); err != nil {
+		return fmt.Errorf("extract %s: %w", member, err)
+	}
+
+	staged, err := os.Open(stagedPath) // #nosec G304 -- stagedPath is inside a temp dir this process just created
+	if err != nil {
+		return fmt.Errorf("open extracted %s: %w", member, err)
+	}
+	defer staged.Close()
 
 	executablePath, err := os.Executable()
 	if err != nil {
 		return err
 	}
 
-	for _, f := range r.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
+	a.logger.Info("Installing tray binary from update archive",
+		zap.String("member", member),
+		zap.String("target", executablePath))
 
-		err = update.Apply(rc, update.Options{TargetPath: executablePath})
-		rc.Close()
-		return err
-	}
-
-	return fmt.Errorf("no file found in zip archive to apply")
-}
-
-// applyTarGzUpdate extracts and applies an update from a tar.gz archive
-func (a *App) applyTarGzUpdate(body io.Reader) error {
-	// For tar.gz files, we need to extract and find the binary
-	tmpfile, err := os.CreateTemp("", fmt.Sprintf("update-*%s", assetTarGzExt))
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmpfile.Name())
-	defer tmpfile.Close()
-
-	_, err = io.Copy(tmpfile, body)
-	if err != nil {
-		return err
-	}
-
-	// Open the tar.gz file and extract the binary
-	if _, err := tmpfile.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to seek to beginning of file: %w", err)
-	}
-
-	gzr, err := gzip.NewReader(tmpfile)
-	if err != nil {
-		return err
-	}
-	defer gzr.Close()
-
-	tr := tar.NewReader(gzr)
-	for {
-		header, err := tr.Next()
-		if err == io.EOF {
-			break
-		}
-		if err != nil {
-			return err
-		}
-
-		// Look for the mcpproxy binary (could be mcpproxy or mcpproxy.exe)
-		if strings.HasSuffix(header.Name, "mcpproxy") || strings.HasSuffix(header.Name, "mcpproxy.exe") {
-			executablePath, err := os.Executable()
-			if err != nil {
-				return err
-			}
-
-			return update.Apply(tr, update.Options{TargetPath: executablePath})
-		}
-	}
-
-	return fmt.Errorf("no mcpproxy binary found in tar.gz archive")
+	return a.applyUpdate(staged, update.Options{TargetPath: executablePath})
 }
 
 // openConfigDir opens the directory containing the configuration file
@@ -1603,8 +1814,16 @@ func (a *App) handleServerAction(serverName, action string) {
 	case "quarantine":
 		err = a.syncManager.HandleServerQuarantine(serverName, true)
 
-	case "unquarantine":
-		err = a.syncManager.HandleServerUnquarantine(serverName)
+	case "review":
+		if a.apiClient == nil {
+			err = fmt.Errorf("API client unavailable")
+		} else {
+			err = a.apiClient.OpenWebUIPath("/review/" + url.PathEscape(serverName))
+		}
+
+	case "switch_profile":
+		// Profiles v2 T5: serverName carries the profile slug ("" = all servers).
+		err = a.handleSwitchProfile(serverName)
 
 	default:
 		a.logger.Warn("Unknown server action requested", zap.String("action", action))
@@ -1616,6 +1835,26 @@ func (a *App) handleServerAction(serverName, action string) {
 			zap.String("action", action),
 			zap.Error(err))
 	}
+}
+
+// handleSwitchProfile sets the server-level default active profile via the core
+// REST surface (Profiles v2 T5) and triggers an immediate sync so the submenu's
+// title and checkmarks reflect the new selection without waiting for the next
+// poll. An empty slug clears the profile (all servers).
+func (a *App) handleSwitchProfile(slug string) error {
+	if a.server == nil {
+		return fmt.Errorf("server interface unavailable")
+	}
+	a.logger.Info("Switching active profile from tray", zap.String("profile", slug))
+	if err := a.server.SetActiveProfile(slug); err != nil {
+		return fmt.Errorf("failed to set active profile %q: %w", slug, err)
+	}
+	if a.syncManager != nil {
+		if err := a.syncManager.SyncNow(); err != nil {
+			a.logger.Debug("Profile switch sync refresh failed", zap.Error(err))
+		}
+	}
+	return nil
 }
 
 // handleOAuthLogin handles OAuth authentication for a server from the tray menu
@@ -1662,47 +1901,6 @@ func (a *App) handleOAuthLogin(serverName string) error {
 	a.logger.Info("Found server for OAuth",
 		zap.String("server", serverName),
 		zap.Any("server_data", targetServer))
-
-	// Load the config file that mcpproxy is using
-	configPath := a.server.GetConfigPath()
-	if configPath == "" {
-		err := fmt.Errorf("config path not available")
-		a.logger.Error("Failed to get config path for OAuth login",
-			zap.String("server", serverName),
-			zap.Error(err))
-		return err
-	}
-
-	a.logger.Info("Loading config file for OAuth",
-		zap.String("server", serverName),
-		zap.String("config_path", configPath))
-
-	globalConfig, err := config.LoadFromFile(configPath)
-	if err != nil {
-		a.logger.Error("Failed to load server configuration for OAuth login",
-			zap.String("server", serverName),
-			zap.String("config_path", configPath),
-			zap.Error(err))
-		return fmt.Errorf("failed to load server configuration: %w", err)
-	}
-
-	// Debug: Check if server exists in config
-	var serverFound bool
-	for _, server := range globalConfig.Servers {
-		if server.Name == serverName {
-			serverFound = true
-			break
-		}
-	}
-
-	a.logger.Info("Server lookup in config",
-		zap.String("server", serverName),
-		zap.Bool("found_in_config", serverFound),
-		zap.String("config_path", configPath))
-
-	a.logger.Info("Config loaded for OAuth",
-		zap.String("server", serverName),
-		zap.Int("total_servers", len(globalConfig.Servers)))
 
 	// Trigger OAuth inside the running daemon to avoid DB lock conflicts
 	a.logger.Info("Triggering in-process OAuth from tray", zap.String("server", serverName))
@@ -1792,11 +1990,38 @@ func (a *App) startUpdateChecker() {
 	}
 }
 
-// checkUpdateFromAPI queries the core's /api/v1/info endpoint for update information
-func (a *App) checkUpdateFromAPI() {
+// coreUpdateInfo mirrors the update object the core exposes at /api/v1/info.
+type coreUpdateInfo struct {
+	Available     bool   `json:"available"`
+	LatestVersion string `json:"latest_version"`
+	ReleaseURL    string `json:"release_url"`
+	IsPrerelease  bool   `json:"is_prerelease"`
+	// NudgesSuppressed: the core runs in a CI / non-interactive context and
+	// UI nudges must stay quiet (Spec 079 FR-019).
+	NudgesSuppressed bool `json:"nudges_suppressed"`
+	// BehindSummary is the core-rendered "N releases / M weeks behind" clause
+	// (Spec 079 FR-002). Rendered verbatim, never re-derived here — that is
+	// what keeps this tray, the Web UI banner and the CLI wording identical.
+	// Empty against a core that predates it, or when the delta could not be
+	// resolved; the menu item then reads exactly as it did before.
+	BehindSummary string `json:"behind_summary"`
+}
+
+// fetchCoreUpdateInfo queries the core's /api/v1/info endpoint. It returns the
+// update object and whether the core was reachable and answered successfully:
+//   - reachable=false → the core could not be reached / did not answer OK; the
+//     caller cannot infer anything and should skip (not fall open).
+//   - reachable=true, info=nil → the core omitted the update object, meaning
+//     update checking is disabled (update_check.enabled=false, Spec 079 FR-015)
+//     or no update exists.
+//   - reachable=true, info!=nil → the core reported update details.
+//
+// This lets the tray use the core as the single source of truth for update
+// checking without ever reading mcp_config.json itself.
+func (a *App) fetchCoreUpdateInfo() (info *coreUpdateInfo, reachable bool) {
 	// Only check when connected
 	if a.getConnectionState() != ConnectionStateConnected {
-		return
+		return nil, false
 	}
 
 	// Build URL to core's API
@@ -1812,7 +2037,7 @@ func (a *App) checkUpdateFromAPI() {
 	host, port, err := net.SplitHostPort(listenAddr)
 	if err != nil {
 		a.logger.Debug("Failed to parse listen address for update check", zap.Error(err))
-		return
+		return nil, false
 	}
 	if host == "" || host == "0.0.0.0" {
 		host = "127.0.0.1"
@@ -1825,60 +2050,100 @@ func (a *App) checkUpdateFromAPI() {
 	resp, err := client.Get(apiURL)
 	if err != nil {
 		a.logger.Debug("Failed to fetch update info from core", zap.Error(err))
-		return
+		return nil, false
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		a.logger.Debug("Unexpected status from core info endpoint", zap.Int("status", resp.StatusCode))
-		return
+		return nil, false
 	}
 
 	var response struct {
 		Success bool `json:"success"`
 		Data    struct {
-			Version string `json:"version"`
-			Update  *struct {
-				Available     bool   `json:"available"`
-				LatestVersion string `json:"latest_version"`
-				ReleaseURL    string `json:"release_url"`
-				IsPrerelease  bool   `json:"is_prerelease"`
-			} `json:"update"`
+			Version string          `json:"version"`
+			Update  *coreUpdateInfo `json:"update"`
 		} `json:"data"`
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
 		a.logger.Debug("Failed to parse update info from core", zap.Error(err))
+		return nil, false
+	}
+
+	if !response.Success {
+		return nil, false
+	}
+
+	return response.Data.Update, true
+}
+
+// checkUpdateFromAPI queries the core's /api/v1/info endpoint and reflects the
+// result onto the tray's update nudge menu item.
+func (a *App) checkUpdateFromAPI() {
+	update, reachable := a.fetchCoreUpdateInfo()
+	if !reachable {
 		return
 	}
 
-	if !response.Success || response.Data.Update == nil {
+	if update == nil {
+		// The core omits the update object entirely when update checking is
+		// disabled (update_check.enabled=false, Spec 079 FR-015). Treat the
+		// absence as "no update": clear state and hide any previously shown
+		// nudge so a hot-reload disable doesn't leave a stale
+		// "New version available" menu item until tray restart.
+		a.updateCheckMu.Lock()
+		wasAvailable := a.updateAvailable
+		a.updateAvailable = false
+		a.latestVersion = ""
+		a.latestReleaseURL = ""
+		a.updateCheckMu.Unlock()
+		if wasAvailable {
+			a.logger.Info("Update checking disabled on core; clearing update nudge")
+		}
+		a.hideUpdateMenuItem()
 		return
 	}
 
 	// Update internal state
 	a.updateCheckMu.Lock()
 	wasAvailable := a.updateAvailable
-	a.updateAvailable = response.Data.Update.Available
-	a.latestVersion = response.Data.Update.LatestVersion
-	a.latestReleaseURL = response.Data.Update.ReleaseURL
+	a.updateAvailable = update.Available
+	a.latestVersion = update.LatestVersion
+	a.latestReleaseURL = update.ReleaseURL
 	a.updateCheckMu.Unlock()
 
-	// Update menu visibility
-	if response.Data.Update.Available {
+	// Update menu visibility. When the core reports nudges_suppressed
+	// (CI / non-interactive context, Spec 079 FR-019) the tray keeps the
+	// facts in its state but shows no nudge and logs at debug only.
+	if update.Available && !update.NudgesSuppressed {
 		if !wasAvailable {
-			a.logger.Info("Update available",
-				zap.String("current", a.version),
-				zap.String("latest", response.Data.Update.LatestVersion))
+			// Sugared logger: loose key/value args, and the FR-002 delta only
+			// when the core resolved one.
+			if update.BehindSummary != "" {
+				a.logger.Infow("Update available",
+					"current", a.version,
+					"latest", update.LatestVersion,
+					"behind", update.BehindSummary)
+			} else {
+				a.logger.Infow("Update available",
+					"current", a.version,
+					"latest", update.LatestVersion)
+			}
 		}
-		a.showUpdateMenuItem(response.Data.Update.LatestVersion, response.Data.Update.IsPrerelease)
+		a.showUpdateMenuItem(update.LatestVersion, update.IsPrerelease, update.BehindSummary)
 	} else {
+		if update.Available && update.NudgesSuppressed {
+			a.logger.Debug("Update available but nudges suppressed (CI/non-interactive)",
+				zap.String("latest", update.LatestVersion))
+		}
 		a.hideUpdateMenuItem()
 	}
 }
 
 // showUpdateMenuItem shows the update menu item with the new version
-func (a *App) showUpdateMenuItem(version string, isPrerelease bool) {
+func (a *App) showUpdateMenuItem(version string, isPrerelease bool, behindSummary string) {
 	if a.updateMenuItem == nil {
 		return
 	}
@@ -1893,8 +2158,19 @@ func (a *App) showUpdateMenuItem(version string, isPrerelease bool) {
 		title = fmt.Sprintf("Update available: %s (use brew upgrade)", version)
 	}
 
+	// Spec 079 FR-002: how far behind the running build is. It goes in the
+	// tooltip rather than the title because the title is already carrying the
+	// version and the channel's update hint, and a menu-bar item that grows to
+	// "New version available (v0.62.0) — 8 releases / ~14 weeks behind" stops
+	// being scannable. Printed verbatim from the core so this tray cannot word
+	// the delta differently from status, doctor and the Web UI banner.
+	tooltip := "Click to open the download page"
+	if behindSummary != "" {
+		tooltip = "You are " + behindSummary + ". Click to open the download page."
+	}
+
 	a.updateMenuItem.SetTitle(title)
-	a.updateMenuItem.SetTooltip("Click to open the download page")
+	a.updateMenuItem.SetTooltip(tooltip)
 	a.updateMenuItem.Show()
 }
 

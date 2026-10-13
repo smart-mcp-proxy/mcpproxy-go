@@ -1,0 +1,261 @@
+package server
+
+import (
+	"context"
+	"testing"
+
+	"github.com/mark3labs/mcp-go/mcp"
+	mcpserver "github.com/mark3labs/mcp-go/server"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+)
+
+// fakeClientSession is a minimal mcp-go ClientSession for injecting a stable
+// session id into a context via MCPServer.WithContext.
+type fakeClientSession struct{ id string }
+
+func (f *fakeClientSession) Initialize()                                         {}
+func (f *fakeClientSession) Initialized() bool                                   { return true }
+func (f *fakeClientSession) NotificationChannel() chan<- mcp.JSONRPCNotification { return nil }
+func (f *fakeClientSession) SessionID() string                                   { return f.id }
+
+// TestResolveActiveProfile_Precedence exercises the Profiles v2 resolver:
+// URL > session set_profile > none, and stale-selection cleanup. (The token
+// profile_pin tier is a T3 hook that is always "" here.)
+func TestResolveActiveProfile_Precedence(t *testing.T) {
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "research-srv"},
+			{Name: "deploy-srv"},
+		},
+		Profiles: []config.ProfileConfig{
+			{Name: "research", Servers: []string{"research-srv"}},
+			{Name: "deploy", Servers: []string{"deploy-srv"}},
+		},
+	}
+	p := &MCPProxyServer{config: cfg, sessionStore: NewSessionStore(zap.NewNop())}
+
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	base := helper.WithContext(context.Background(), &fakeClientSession{id: "sess-1"})
+
+	// (1) Nothing set → none.
+	name, scope := p.resolveActiveProfile(base)
+	require.Equal(t, "", name)
+	require.Nil(t, scope)
+
+	// (2) set_profile session selection applies on the base endpoint.
+	p.sessionStore.SetActiveProfile("sess-1", "research")
+	name, scope = p.resolveActiveProfile(base)
+	require.Equal(t, "research", name)
+	require.NotNil(t, scope)
+	require.True(t, scope.Allows("research-srv"))
+	require.False(t, scope.Allows("deploy-srv"))
+
+	// (3) An explicit URL profile overrides the session selection for that request.
+	urlCtx := profile.WithProfileScope(base, profile.NewProfileScope("deploy", []string{"deploy-srv"}))
+	name, scope = p.resolveActiveProfile(urlCtx)
+	require.Equal(t, "deploy", name)
+	require.NotNil(t, scope)
+	require.True(t, scope.Allows("deploy-srv"))
+	require.False(t, scope.Allows("research-srv"))
+
+	// (4) Clearing the session selection returns to none.
+	p.sessionStore.SetActiveProfile("sess-1", "")
+	name, scope = p.resolveActiveProfile(base)
+	require.Equal(t, "", name)
+	require.Nil(t, scope)
+
+	// (5) A stale session selection (profile removed from config) is dropped.
+	p.sessionStore.SetActiveProfile("sess-1", "ghost")
+	name, scope = p.resolveActiveProfile(base)
+	require.Equal(t, "", name)
+	require.Nil(t, scope)
+	require.Equal(t, "", p.sessionStore.GetActiveProfile("sess-1"), "stale selection should be cleared")
+}
+
+// TestProfilePinFromContext reads the agent-token profile_pin off the auth
+// context (Profiles v2 T3). Non-agent contexts and unpinned tokens yield "".
+func TestProfilePinFromContext(t *testing.T) {
+	// No auth context at all.
+	require.Equal(t, "", profilePinFromContext(context.Background()))
+
+	// Agent token with a pin.
+	pinned := auth.WithAuthContext(context.Background(),
+		&auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: "research"})
+	require.Equal(t, "research", profilePinFromContext(pinned))
+
+	// Agent token without a pin.
+	unpinned := auth.WithAuthContext(context.Background(),
+		&auth.AuthContext{Type: auth.AuthTypeAgent})
+	require.Equal(t, "", profilePinFromContext(unpinned))
+
+	// Admin context never carries a pin even if the field is set.
+	admin := auth.WithAuthContext(context.Background(),
+		&auth.AuthContext{Type: auth.AuthTypeAdmin, ProfilePin: "research"})
+	require.Equal(t, "", profilePinFromContext(admin))
+}
+
+// TestResolveActiveProfile_PinHighestPrecedence verifies that a token
+// profile_pin is the highest-precedence resolver source: it wins over an
+// explicit URL scope and over a session set_profile selection (Profiles v2 T3).
+func TestResolveActiveProfile_PinHighestPrecedence(t *testing.T) {
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "research-srv"},
+			{Name: "deploy-srv"},
+		},
+		Profiles: []config.ProfileConfig{
+			{Name: "research", Servers: []string{"research-srv"}},
+			{Name: "deploy", Servers: []string{"deploy-srv"}},
+		},
+	}
+	p := &MCPProxyServer{config: cfg, sessionStore: NewSessionStore(zap.NewNop())}
+
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	base := helper.WithContext(context.Background(), &fakeClientSession{id: "sess-pin"})
+
+	// Pin to "research" via the auth context.
+	pinned := auth.WithAuthContext(base,
+		&auth.AuthContext{Type: auth.AuthTypeAgent, ProfilePin: "research"})
+
+	// Even with a conflicting session selection AND a conflicting URL scope, the
+	// pin wins.
+	p.sessionStore.SetActiveProfile("sess-pin", "deploy")
+	pinned = profile.WithProfileScope(pinned, profile.NewProfileScope("deploy", []string{"deploy-srv"}))
+
+	name, scope := p.resolveActiveProfile(pinned)
+	require.Equal(t, "research", name)
+	require.NotNil(t, scope)
+	require.True(t, scope.Allows("research-srv"))
+	require.False(t, scope.Allows("deploy-srv"))
+}
+
+// TestResolveActiveProfile_StalePinDeniesAll is the session-path half of the
+// stale-pin contract (the preflight half is
+// TestRunPreflightStaleTokenPinDeniesRatherThanWidens). A pin naming a profile
+// the operator has since deleted must NOT degrade to the next resolver tier —
+// doing so hands the session the token's own, wider scope, i.e. exactly the
+// privilege widening the pin existed to prevent. It resolves to a deny-all
+// scope that still carries the removed profile's name, so rejections and
+// activity records name it.
+func TestResolveActiveProfile_StalePinDeniesAll(t *testing.T) {
+	cfg := &config.Config{
+		Servers: []*config.ServerConfig{
+			{Name: "research-srv"},
+			{Name: "deploy-srv"},
+		},
+		Profiles: []config.ProfileConfig{
+			{Name: "deploy", Servers: []string{"deploy-srv"}},
+		},
+	}
+	p := &MCPProxyServer{config: cfg, sessionStore: NewSessionStore(zap.NewNop()), logger: zap.NewNop()}
+
+	helper := mcpserver.NewMCPServer("test", "1.0.0")
+	base := helper.WithContext(context.Background(), &fakeClientSession{id: "sess-stale"})
+
+	// The token is pinned to "research", which no longer exists, and its own
+	// scope covers BOTH servers — the widening the old warn-skip enabled.
+	pinned := auth.WithAuthContext(base, &auth.AuthContext{
+		Type:           auth.AuthTypeAgent,
+		ProfilePin:     "research",
+		AllowedServers: []string{"research-srv", "deploy-srv"},
+	})
+
+	name, scope := p.resolveActiveProfile(pinned)
+	require.Equal(t, "research", name, "the removed profile's name must survive for logs/rejections")
+	require.NotNil(t, scope, "a stale pin must produce a scope, not fall through to nil (allow-all)")
+	require.True(t, scope.DeniesAll())
+	require.False(t, scope.Allows("research-srv"))
+	require.False(t, scope.Allows("deploy-srv"))
+
+	// The lower resolver tiers must not rescue the pin: neither a session
+	// selection nor an explicit URL scope may re-widen it.
+	p.sessionStore.SetActiveProfile("sess-stale", "deploy")
+	withURL := profile.WithProfileScope(pinned, profile.NewProfileScope("deploy", []string{"deploy-srv"}))
+	name, scope = p.resolveActiveProfile(withURL)
+	require.Equal(t, "research", name)
+	require.NotNil(t, scope)
+	require.False(t, scope.Allows("deploy-srv"), "a stale pin must not be widened by URL or session state")
+}
+
+// TestSessionStore_ActiveProfileLifecycle verifies the per-session profile map
+// is set, read and cleared on session close.
+func TestSessionStore_ActiveProfileLifecycle(t *testing.T) {
+	store := NewSessionStore(zap.NewNop())
+
+	require.Equal(t, "", store.GetActiveProfile("s1"))
+
+	store.SetActiveProfile("s1", "research")
+	require.Equal(t, "research", store.GetActiveProfile("s1"))
+
+	// Empty slug clears.
+	store.SetActiveProfile("s1", "")
+	require.Equal(t, "", store.GetActiveProfile("s1"))
+
+	// Cleared on session close.
+	store.SetActiveProfile("s1", "deploy")
+	store.RemoveSession("s1")
+	require.Equal(t, "", store.GetActiveProfile("s1"))
+
+	// Empty session id is a no-op.
+	store.SetActiveProfile("", "research")
+	require.Equal(t, "", store.GetActiveProfile(""))
+}
+
+// TestResolveActiveProfile_UsesInjectedPairDirectly_NeverFallsBackToFor (Spec
+// 105 PR D review round 15, MUST-FIX): resolveActiveProfile must decide
+// straight from the (index, snapshot) PAIR profileMiddleware already injected
+// on the context (profileRequestIndexFromContext) — never extract only its
+// cfg and re-resolve the index a second, independent time through
+// resolveActiveProfileIn/profileIndexFor(cfg), which does an O(1)
+// Published(cfg) match that falls back to a fleet-sized For(cfg) build on a
+// miss. Here the injected snapshot (A) is aged out of BOTH the warm and
+// previous slots by two further publications before resolveActiveProfile
+// ever runs — exactly the pair-acquisition bypass rounds 11/13 closed on the
+// admission path (profileIndexCurrent/Acquire), reopened here on the
+// downstream resolution path a paused request reaches next. Using the
+// already-resolved pair outright cannot miss: there is no lookup left to
+// fall back from.
+func TestResolveActiveProfile_UsesInjectedPairDirectly_NeverFallsBackToFor(t *testing.T) {
+	cfgA := &config.Config{
+		Servers:  []*config.ServerConfig{{Name: "a-srv"}},
+		Profiles: []config.ProfileConfig{{Name: "research", Servers: []string{"a-srv"}}},
+	}
+	cfgB := &config.Config{
+		Servers:  []*config.ServerConfig{{Name: "b-srv"}},
+		Profiles: []config.ProfileConfig{{Name: "research", Servers: []string{"b-srv"}}},
+	}
+	cfgC := &config.Config{
+		Servers:  []*config.ServerConfig{{Name: "c-srv"}},
+		Profiles: []config.ProfileConfig{{Name: "research", Servers: []string{"c-srv"}}},
+	}
+
+	p := &MCPProxyServer{logger: zap.NewNop(), sessionStore: NewSessionStore(zap.NewNop())}
+	srv := &Server{logger: zap.NewNop(), mcpProxy: p}
+	p.mainServer = srv
+
+	idxA := srv.profileIndexes.warmPublishing(cfgA)
+	// Two further publications land, aging A out of BOTH the warm and the
+	// previous slots.
+	srv.profileIndexes.warmPublishing(cfgB)
+	srv.profileIndexes.warmPublishing(cfgC)
+	require.Nil(t, srv.profileIndexes.Published(cfgA), "premise: A must no longer be a Published cache hit")
+
+	ctx := withProfileRequestIndex(context.Background(), idxA)
+	ctx = auth.WithAuthContext(ctx, &auth.AuthContext{
+		Type: auth.AuthTypeAgent, ProfilePin: "research", AllowedServers: []string{"*"},
+	})
+
+	name, scope := p.resolveActiveProfile(ctx)
+	require.Equal(t, "research", name)
+	require.NotNil(t, scope)
+	require.Equal(t, []string{"a-srv"}, scope.AllowedServerNames(),
+		"must decide from the injected pair (A), never a config/index resolved independently")
+
+	require.Zero(t, srv.profileIndexes.lazyBuilds.Load(),
+		"resolveActiveProfile with an injected pair must never fall back to a fleet-sized For rebuild")
+}

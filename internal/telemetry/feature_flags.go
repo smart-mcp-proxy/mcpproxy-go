@@ -14,6 +14,7 @@ type FeatureFlagSnapshot struct {
 	EnableSocket                  bool     `json:"enable_socket"`
 	EnableWebUI                   bool     `json:"enable_web_ui"`
 	EnablePrompts                 bool     `json:"enable_prompts"`
+	AggregateUpstreamPrompts      bool     `json:"aggregate_upstream_prompts"`
 	RequireMCPAuth                bool     `json:"require_mcp_auth"`
 	EnableCodeExecution           bool     `json:"enable_code_execution"`
 	QuarantineEnabled             bool     `json:"quarantine_enabled"`
@@ -40,6 +41,61 @@ type FeatureFlagSnapshot struct {
 	// Populated by the telemetry service at heartbeat time (the resolution is a
 	// runtime concern) — mirrors DockerAvailable.
 	DockerCLISource string `json:"docker_cli_source,omitempty"`
+
+	// Schema v8: DeepScanEnabled is the opt-in deep-scan master switch
+	// (security.deep_scan.enabled). Set by BuildFeatureFlagSnapshot (pure,
+	// config-only) like DockerIsolationEnabled. It lets the dashboard read
+	// tpa_scanner scan volume against the population that actually turned the
+	// deep-scan layer on.
+	DeepScanEnabled bool `json:"deep_scan_enabled"`
+
+	// Schema v13 (Spec 107 US7): ServerEditionEnabled reports whether the
+	// server_edition block is present and enabled. Read through the
+	// build-tagged config.ServerEditionEnabled accessor, so the personal
+	// build — where the block is an opaque, uninterpreted carrier — always
+	// reports false.
+	ServerEditionEnabled bool `json:"server_edition_enabled"`
+
+	// Schema v13 (Spec 107 US7): IdPProvider is the configured identity
+	// provider FAMILY as a closed enum — one of "google" | "github" |
+	// "microsoft" | "oidc" | "none". It is the provider kind only: NEVER the
+	// issuer URL, tenant id, client id or display name. "none" when the block
+	// is disabled, absent, has no oauth section, or (personal build) cannot be
+	// interpreted. Set by BuildFeatureFlagSnapshot (pure, config-only).
+	IdPProvider string `json:"idp_provider"`
+}
+
+// IdP provider families reported in feature_flags.idp_provider (schema v13).
+// The vocabulary is closed: idpProviderEnum clamps anything else to
+// IdPProviderNone so a misconfigured or pre-validation provider string can
+// never widen the enum on the wire.
+const (
+	IdPProviderGoogle    = "google"
+	IdPProviderGitHub    = "github"
+	IdPProviderMicrosoft = "microsoft"
+	IdPProviderOIDC      = "oidc"
+	IdPProviderNone      = "none"
+)
+
+// idpProviderEnum maps the accessor's raw provider family to the closed
+// telemetry enum. enabled=false short-circuits to "none" regardless of what
+// the block says (contract: "none when disabled/unset").
+func idpProviderEnum(enabled bool, family string) string {
+	if !enabled {
+		return IdPProviderNone
+	}
+	switch strings.ToLower(strings.TrimSpace(family)) {
+	case IdPProviderGoogle:
+		return IdPProviderGoogle
+	case IdPProviderGitHub:
+		return IdPProviderGitHub
+	case IdPProviderMicrosoft:
+		return IdPProviderMicrosoft
+	case IdPProviderOIDC:
+		return IdPProviderOIDC
+	default:
+		return IdPProviderNone
+	}
 }
 
 // protocolKeys is the canonical fixed-enum set of protocol labels emitted by
@@ -113,15 +169,16 @@ func normalizeProtocolKey(p string) string {
 // is returned if no upstream servers have OAuth configured.
 func BuildFeatureFlagSnapshot(cfg *config.Config) *FeatureFlagSnapshot {
 	if cfg == nil {
-		return &FeatureFlagSnapshot{OAuthProviderTypes: []string{}}
+		return &FeatureFlagSnapshot{OAuthProviderTypes: []string{}, IdPProvider: IdPProviderNone}
 	}
 
 	snap := &FeatureFlagSnapshot{
-		EnableSocket:        cfg.EnableSocket,
-		EnablePrompts:       cfg.EnablePrompts,
-		RequireMCPAuth:      cfg.RequireMCPAuth,
-		EnableCodeExecution: cfg.EnableCodeExecution,
-		QuarantineEnabled:   cfg.IsQuarantineEnabled(),
+		EnableSocket:             cfg.EnableSocket,
+		EnablePrompts:            cfg.EnablePrompts,
+		AggregateUpstreamPrompts: cfg.AggregateUpstreamPrompts,
+		RequireMCPAuth:           cfg.RequireMCPAuth,
+		EnableCodeExecution:      cfg.EnableCodeExecution,
+		QuarantineEnabled:        cfg.IsQuarantineEnabled(),
 	}
 	// Read EnableWebUI from the legacy Features block. The Features struct is
 	// flagged as deprecated for runtime purposes, but it is still the canonical
@@ -141,6 +198,18 @@ func BuildFeatureFlagSnapshot(cfg *config.Config) *FeatureFlagSnapshot {
 	if cfg.DockerIsolation != nil {
 		snap.DockerIsolationEnabled = cfg.DockerIsolation.Enabled
 	}
+
+	// Schema v8: deep-scan master switch. IsDeepScanEnabled is nil-safe on
+	// both the SecurityConfig and its DeepScan block, so a config without the
+	// security block reports false.
+	snap.DeepScanEnabled = cfg.Security.IsDeepScanEnabled()
+
+	// Schema v13 (Spec 107 US7): server-edition presence and IdP family, read
+	// only through the build-tagged accessors so the personal build never
+	// interprets the block. The family is clamped to the closed enum; the
+	// issuer is never consulted.
+	snap.ServerEditionEnabled = config.ServerEditionEnabled(cfg)
+	snap.IdPProvider = idpProviderEnum(snap.ServerEditionEnabled, config.IdPProviderFamily(cfg))
 
 	// Derive OAuth provider types from upstream server URLs.
 	var providerTypes []string

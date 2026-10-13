@@ -13,7 +13,10 @@ These are the **canonical source** for the rewritten agent brains. They evolve t
 - **Gate 3 (pre-merge)** — agents open PRs, never merge; the human merges on GitHub (branch protection enforced).
 
 ## Behavioral contract
-The required behaviors (and their probe tests) are pinned in [`../contracts/agent-instructions-contract.md`](../contracts/agent-instructions-contract.md). The execution-policy JSON shape is in [`../contracts/execution-policy.schema.json`](../contracts/execution-policy.schema.json).
+The required behaviors (and their probe tests) are pinned in [`../contracts/agent-instructions-contract.md`](../contracts/agent-instructions-contract.md). The execution-policy JSON shape is in [`../contracts/execution-policy.schema.json`](../contracts/execution-policy.schema.json) (validated by `../contracts/execution_policy_test.go`).
+
+### Reviewer-Liveness Contract (FR-014a)
+A `review` stage MAY carry an optional `liveness` block describing **health-based, model-diverse reviewer failover**: an ordered fallback `roster`, an SLA (`slaMinutes`, default 120 = 2h), and a per-head re-trigger budget (`maxFallbacksPerHead` default 1, `maxHops` default 2 → `escalateTo` the CEO). It codifies the MCP-3066 shell backstop (`~/.mcpproxy-gatekeeper/bin/ensure-pr-gates.sh`: `classify_stall` + `route_fallback`), which **remains the source of truth**; the schema mirrors it. A *substantive* `request_changes` on the current head is a mandatory fence and is never routed around, so it is not a permitted `failoverStallModes` value. When `liveness` is omitted, a review stage runs a single reviewer with no failover (existing policies are unchanged). See the worked [`../contracts/reviewer-liveness.example.json`](../contracts/reviewer-liveness.example.json) for the contract values and their rationale.
 
 ## Roster mapping (live company `16edd8ed-…`)
 | Agent | adapterType | Instruction file | Activate for dry-run? |

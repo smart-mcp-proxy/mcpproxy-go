@@ -13,11 +13,67 @@ MCPProxy can be installed on macOS, Windows, and Linux. Choose the installation 
 
 ## macOS
 
-### DMG Installer (Recommended)
+### Installer DMG (Recommended)
 
-Download the latest `.dmg` file from the [releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases) and drag MCPProxy to your Applications folder.
+**Requires macOS 13 (Ventura) or later** (`LSMinimumSystemVersion` in the app
+bundle). On anything older the package installs but the app will not launch.
 
-The DMG installers are signed and notarized by Apple.
+Download `mcpproxy-<version>-darwin-arm64-installer.dmg` (Apple Silicon) or
+`-darwin-amd64-installer.dmg` (Intel) from the
+[releases page](https://github.com/smart-mcp-proxy/mcpproxy-go/releases).
+
+**There is nothing to drag.** The disk image contains a `.pkg` installer and a
+`README.txt`:
+
+1. Open the DMG and double-click the `.pkg` file.
+2. macOS asks for an administrator password — the package installs for all
+   users, so this is required.
+3. Follow the installer. There are no components to choose.
+4. **The installer launches mcpproxy for you** when it finishes — look for the
+   icon in your menu bar. If it is not there, open it from Applications.
+
+Both the disk image and the package are signed and notarized by Apple.
+
+#### What the installer puts on your machine
+
+| Path | What it is |
+|------|------------|
+| `/Applications/mcpproxy.app` | The menu-bar app, with the headless core bundled inside it |
+| `/usr/local/bin/mcpproxy` | Symlink to the core binary, so `mcpproxy` works in a terminal |
+| `~/.mcpproxy/` | Your config, database and search index |
+| `~/Library/Logs/mcpproxy/` | Logs (the macOS standard location, not `~/.mcpproxy/`) |
+| `~/.mcpproxy/certs/ca.pem` | A local CA certificate, copied to disk only — see below |
+
+The `ca.pem` row is conditional: `postinstall.sh` copies it only when it can
+resolve a non-root `$USER` and the build actually bundled a certificate, and it
+has no console-user fallback, so the file may simply be absent. Nothing depends
+on it — `mcpproxy trust-cert` generates a certificate itself when none exists.
+
+**The installer does not change your system's certificate trust.** The bundled
+`ca.pem` exists so that the optional HTTPS mode has a certificate available;
+trust is modified only if you later run `mcpproxy trust-cert` yourself, which
+defaults to the **System** keychain (`--keychain=system`) and asks for your
+password. The default mode is plain HTTP on `127.0.0.1:8080` and needs no
+certificate at all.
+
+The installer also removes a stale `LaunchAgent` left behind by pre-0.5x
+builds. It does **not** configure auto-start — that is a per-user toggle in the
+tray menu ("Launch at Login").
+
+#### Uninstalling
+
+Quit the app first — from the tray menu, or `pkill -x mcpproxy`. Deleting the
+bundle does not stop a running process, and the tray is what shuts the core
+down cleanly.
+
+```bash
+sudo rm -rf /Applications/mcpproxy.app /usr/local/bin/mcpproxy
+rm -rf ~/.mcpproxy ~/Library/Logs/mcpproxy   # config, database, index and logs
+```
+
+If you ran `mcpproxy trust-cert`, remove the certificate as well. It is in the
+**System** keychain unless you passed `--keychain=login`: open **Keychain
+Access → System → Certificates** and delete the MCPProxy CA.
 
 ### Homebrew
 
@@ -308,6 +364,102 @@ You can then run `mcpproxy serve` directly, or wire up your own systemd unit mod
 | `/usr/share/doc/mcpproxy/{LICENSE,README.md}` | Documentation |
 
 The systemd unit launches mcpproxy with `--config=/etc/mcpproxy/mcp_config.json --data-dir=/var/lib/mcpproxy` and uses `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, and friends.
+
+## Docker (Server edition)
+
+The Server edition is published as a multi-arch image (`linux/amd64`, `linux/arm64`) on
+every stable release:
+
+```bash
+docker run -d --name mcpproxy \
+  -p 127.0.0.1:8080:8080 \
+  -e MCPPROXY_API_KEY="$(openssl rand -hex 32)" \
+  -v mcpproxy-data:/root/.mcpproxy \
+  ghcr.io/smart-mcp-proxy/mcpproxy-server:latest
+```
+
+- **Tags**: `ghcr.io/smart-mcp-proxy/mcpproxy-server:<version>` (e.g. `v0.64.0`) and `:latest`,
+  which always points at the newest stable release. RC builds publish no image.
+- **State survives restarts, not replacement**: `docker restart` keeps everything. Removing and
+  re-running the container, upgrading the tag, or rescheduling the pod destroys whatever is not
+  on the volume — so mount one before you configure anything.
+- **Don't use `MCPPROXY_DATA` or a bare `--data-dir` to relocate state.** The data-dir override is
+  applied after the config file is resolved, so the config in that directory is never read and is
+  overwritten with a fresh default (rotating the API key) on every boot. Mount the volume at the
+  default `/root/.mcpproxy` path instead. (`MCPPROXY_DATA_DIR`, referenced elsewhere in the docs,
+  is not implemented at all.)
+- **Port**: the entrypoint is `mcpproxy serve --listen 0.0.0.0:8080`, so the container listens on
+  `8080` inside the network namespace. The `-p 127.0.0.1:8080:8080` above keeps it reachable only
+  from the host; drop the `127.0.0.1:` prefix only if you deliberately want it on the network, and
+  read [Network exposure: localhost by default](#network-exposure-localhost-by-default) first.
+- **State**: config, the BBolt DB, and the search index live in `/root/.mcpproxy`. Mount a volume
+  there or every restart starts from an empty config.
+- **API key**: the REST API and Web UI require one. Set `MCPPROXY_API_KEY` explicitly and keep a
+  copy — the image is distroless (no shell), so reading an auto-generated key back out of the
+  container is awkward.
+- **Web UI**: `http://localhost:8080/ui/`.
+
+### Behind an ingress with SSO
+
+To put the container behind a TLS-terminating ingress and sign users in through your
+IdP, add the `server_edition` block to the config on the volume and pass the secrets as
+environment variables that the file references with `${env:...}` — nothing secret is
+written into `mcp_config.json`:
+
+```bash
+docker run -d --name mcpproxy \
+  -p 8080:8080 \
+  -e MCPPROXY_API_KEY \
+  -e OIDC_CLIENT_SECRET \
+  -e MCPPROXY_CRED_KEY \
+  -e MCPPROXY_PUBLIC_URL="https://mcp.example.com" \
+  -e MCPPROXY_TRUSTED_PROXIES="10.42.0.0/16" \
+  -v mcpproxy-data:/root/.mcpproxy \
+  ghcr.io/smart-mcp-proxy/mcpproxy-server:latest
+```
+
+```json
+{
+  "listen": "0.0.0.0:8080",
+  "trusted_proxies": ["10.42.0.0/16"],
+  "server_edition": {
+    "enabled": true,
+    "admin_emails": ["admin@example.com"],
+    "public_url": "https://mcp.example.com",
+    "credential_encryption_key": "${env:MCPPROXY_CRED_KEY}",
+    "oauth": {
+      "provider": "oidc",
+      "issuer_url": "https://login.example.com/realms/team",
+      "client_id": "mcpproxy",
+      "client_secret": "${env:OIDC_CLIENT_SECRET}"
+    }
+  }
+}
+```
+
+- **`public_url`** is the origin users reach — the IdP `redirect_uri` becomes
+  `https://mcp.example.com/api/v1/auth/callback` and the session cookie is `Secure`,
+  independent of what the ingress puts in `Host` or `X-Forwarded-*`. The image listens on
+  `0.0.0.0:8080`, so leaving it unset is a boot warning and a `mcpproxy doctor` finding.
+  `MCPPROXY_PUBLIC_URL` overrides the file value; it is the only nested `server_edition`
+  key with an environment alias.
+- **`trusted_proxies`** is the ingress's source range as the container sees it. Forwarded
+  headers from anywhere else are ignored, so a direct client cannot spoof its address or
+  scheme. `MCPPROXY_TRUSTED_PROXIES` (comma list) overrides the file value. `trusted_hosts`
+  is unrelated here — it never runs on a non-loopback listener.
+- **Secrets** stay in the environment: `client_secret`, `credential_encryption_key` (or
+  just `MCPPROXY_CRED_KEY`, its fallback) and the API key. `${env:NAME}` is expanded when
+  the file is loaded and the secret is masked in every API response.
+- **`/mcp` requires a credential** as soon as `server_edition.enabled` is `true`, whatever
+  `require_mcp_auth` says — agent tokens, the API key or the socket; a browser session is
+  never an MCP credential.
+
+The full key table — `session_cookie_secure`, `scopes`, `groups_claim`,
+`email_verified_policy`, `display_name`, the per-IdP groups-claim notes — is in
+[Server Edition](/configuration/config-file#server-edition).
+
+Note that this image ships the Server edition binary (`mcpproxy version` reports `(server)`); it is
+the headless core only, with no system tray.
 
 ## Verify Installation
 

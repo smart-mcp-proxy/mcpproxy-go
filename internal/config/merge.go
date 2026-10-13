@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"time"
 )
 
@@ -226,6 +227,16 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		merged.WorkingDir = patch.WorkingDir
 	}
 
+	// TrustMode (spec 086): a PATCH that omits trust_mode keeps the base value
+	// (merged started as CopyServerConfig(base)); a non-empty, differing value
+	// updates it. Enables REST PATCH /api/v1/servers/{id} to change the trust tier.
+	if patch.TrustMode != "" && patch.TrustMode != base.TrustMode {
+		if diff != nil {
+			diff.Modified["trust_mode"] = FieldChange{Path: "trust_mode", From: base.TrustMode, To: patch.TrustMode}
+		}
+		merged.TrustMode = patch.TrustMode
+	}
+
 	// Boolean fields - use reflection to detect if explicitly set
 	// For booleans, we check if the patch has them set differently from base
 	// Since Go booleans default to false, we need a different approach for explicit false
@@ -251,6 +262,16 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 		}
 		merged.Args = make([]string, len(patch.Args))
 		copy(merged.Args, patch.Args)
+	}
+
+	// ForwardHeaders (Spec 112): nil keeps the base allowlist; a non-nil slice
+	// replaces it entirely, and an empty non-nil slice ([]) clears it.
+	if patch.ForwardHeaders != nil {
+		if diff != nil && !slices.Equal(base.ForwardHeaders, patch.ForwardHeaders) {
+			diff.Modified["forward_headers"] = FieldChange{Path: "forward_headers", From: base.ForwardHeaders, To: patch.ForwardHeaders}
+		}
+		merged.ForwardHeaders = make([]string, len(patch.ForwardHeaders))
+		copy(merged.ForwardHeaders, patch.ForwardHeaders)
 	}
 
 	// Map fields - deep merge with RFC 7396 null-means-remove support
@@ -317,6 +338,53 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 			diff.Modified["oauth"] = FieldChange{Path: "oauth", From: base.OAuth, To: newOAuth}
 		}
 		merged.OAuth = newOAuth
+	}
+
+	// InitTimeout (MCP-3322): *Duration tri-state. A non-nil pointer in the
+	// patch sets/replaces the per-server override; nil leaves the base value
+	// (already carried by CopyServerConfig) untouched.
+	if patch.InitTimeout != nil {
+		it := *patch.InitTimeout
+		if diff != nil && (base.InitTimeout == nil || *base.InitTimeout != it) {
+			diff.Modified["init_timeout"] = FieldChange{Path: "init_timeout", From: base.InitTimeout, To: patch.InitTimeout}
+		}
+		merged.InitTimeout = &it
+	}
+
+	// ExposePrompts: same tri-state patch semantics as InitTimeout — a
+	// non-nil pointer sets/replaces the per-server override (including an
+	// explicit false = opt out), nil leaves the base value untouched.
+	if patch.ExposePrompts != nil {
+		v := *patch.ExposePrompts
+		if diff != nil && (base.ExposePrompts == nil || *base.ExposePrompts != v) {
+			diff.Modified["expose_prompts"] = FieldChange{Path: "expose_prompts", From: base.ExposePrompts, To: patch.ExposePrompts}
+		}
+		merged.ExposePrompts = &v
+	}
+
+	// Per-server concurrency overrides (spec 093, FR-020(c)): same tri-state
+	// patch semantics as InitTimeout — a non-nil pointer sets/replaces the
+	// override (including an explicit 0 = opt out), nil leaves the base value.
+	if patch.MaxConcurrentRequests != nil {
+		v := *patch.MaxConcurrentRequests
+		if diff != nil && (base.MaxConcurrentRequests == nil || *base.MaxConcurrentRequests != v) {
+			diff.Modified["max_concurrent_requests"] = FieldChange{Path: "max_concurrent_requests", From: base.MaxConcurrentRequests, To: patch.MaxConcurrentRequests}
+		}
+		merged.MaxConcurrentRequests = &v
+	}
+	if patch.QueueSize != nil {
+		v := *patch.QueueSize
+		if diff != nil && (base.QueueSize == nil || *base.QueueSize != v) {
+			diff.Modified["queue_size"] = FieldChange{Path: "queue_size", From: base.QueueSize, To: patch.QueueSize}
+		}
+		merged.QueueSize = &v
+	}
+	if patch.QueueTimeout != nil {
+		v := *patch.QueueTimeout
+		if diff != nil && (base.QueueTimeout == nil || *base.QueueTimeout != v) {
+			diff.Modified["queue_timeout"] = FieldChange{Path: "queue_timeout", From: base.QueueTimeout, To: patch.QueueTimeout}
+		}
+		merged.QueueTimeout = &v
 	}
 
 	// Always update the Updated timestamp
@@ -441,6 +509,15 @@ func MergeIsolationConfig(base, patch *IsolationConfig, removeIfNil bool) *Isola
 		result.Enabled = patch.Enabled
 	}
 
+	// Mode (*IsolationMode) has the same tri-state semantics as Enabled: nil
+	// means "not set in the patch", so only a non-nil value overrides. Missing
+	// this case silently dropped the per-server isolation mode on every
+	// unrelated patch (GH #1142).
+	if patch.Mode != nil {
+		mode := *patch.Mode
+		result.Mode = &mode
+	}
+
 	if patch.Image != "" {
 		result.Image = patch.Image
 	}
@@ -502,6 +579,22 @@ func MergeOAuthConfig(base, patch *OAuthConfig, removeIfNil bool) *OAuthConfig {
 	if patch.RedirectURI != "" {
 		result.RedirectURI = patch.RedirectURI
 	}
+	if patch.CallbackBaseURL != "" {
+		result.CallbackBaseURL = patch.CallbackBaseURL
+	}
+
+	if patch.AuthorizationEndpoint != "" {
+		result.AuthorizationEndpoint = patch.AuthorizationEndpoint
+	}
+	if patch.TokenEndpoint != "" {
+		result.TokenEndpoint = patch.TokenEndpoint
+	}
+	if patch.RegistrationEndpoint != "" {
+		result.RegistrationEndpoint = patch.RegistrationEndpoint
+	}
+	if patch.AuthServerMetadataURL != "" {
+		result.AuthServerMetadataURL = patch.AuthServerMetadataURL
+	}
 
 	// Boolean - always take patch value
 	result.PKCEEnabled = patch.PKCEEnabled
@@ -528,24 +621,41 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 	}
 
 	dst := &ServerConfig{
-		Name:                src.Name,
-		URL:                 src.URL,
-		Protocol:            src.Protocol,
-		Command:             src.Command,
-		WorkingDir:          src.WorkingDir,
-		Enabled:             src.Enabled,
-		Quarantined:         src.Quarantined,
-		SkipQuarantine:      src.SkipQuarantine,
-		Shared:              src.Shared,
-		Created:             src.Created,
-		Updated:             src.Updated,
-		LauncherWaitTimeout: src.LauncherWaitTimeout,
+		Name:                     src.Name,
+		URL:                      src.URL,
+		Protocol:                 src.Protocol,
+		Command:                  src.Command,
+		WorkingDir:               src.WorkingDir,
+		Enabled:                  src.Enabled,
+		Quarantined:              src.Quarantined,
+		SkipQuarantine:           src.SkipQuarantine,
+		TrustMode:                src.TrustMode,
+		Shared:                   src.Shared,
+		Created:                  src.Created,
+		Updated:                  src.Updated,
+		LauncherWaitTimeout:      src.LauncherWaitTimeout,
+		ReconnectOnUse:           src.ReconnectOnUse,
+		SourceRegistryID:         src.SourceRegistryID,
+		SourceRegistryProvenance: src.SourceRegistryProvenance,
+		ToonOutput:               src.ToonOutput,
 	}
 
 	// Copy slices
 	if src.Args != nil {
 		dst.Args = make([]string, len(src.Args))
 		copy(dst.Args, src.Args)
+	}
+	if src.EnabledTools != nil {
+		dst.EnabledTools = make([]string, len(src.EnabledTools))
+		copy(dst.EnabledTools, src.EnabledTools)
+	}
+	if src.DisabledTools != nil {
+		dst.DisabledTools = make([]string, len(src.DisabledTools))
+		copy(dst.DisabledTools, src.DisabledTools)
+	}
+	if src.ForwardHeaders != nil {
+		dst.ForwardHeaders = make([]string, len(src.ForwardHeaders))
+		copy(dst.ForwardHeaders, src.ForwardHeaders)
 	}
 
 	// Copy maps
@@ -568,11 +678,65 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 		dst.AutoApproveToolChanges = &autoApprove
 	}
 
+	// Copy *Duration overrides by value to avoid shared pointer state (spec 074)
+	if src.HealthCheckInterval != nil {
+		hc := *src.HealthCheckInterval
+		dst.HealthCheckInterval = &hc
+	}
+	if src.ToolDiscoveryInterval != nil {
+		td := *src.ToolDiscoveryInterval
+		dst.ToolDiscoveryInterval = &td
+	}
+	if src.InitTimeout != nil {
+		it := *src.InitTimeout
+		dst.InitTimeout = &it
+	}
+
+	// Per-server concurrency overrides (spec 093): tri-state pointers copied by
+	// value so a copy-on-write snapshot never shares state with the live config.
+	if src.MaxConcurrentRequests != nil {
+		v := *src.MaxConcurrentRequests
+		dst.MaxConcurrentRequests = &v
+	}
+	if src.QueueSize != nil {
+		v := *src.QueueSize
+		dst.QueueSize = &v
+	}
+	if src.QueueTimeout != nil {
+		v := *src.QueueTimeout
+		dst.QueueTimeout = &v
+	}
+
+	// Deep-copy the per-upstream auth-broker block (spec 074, server edition).
+	// In the personal edition AuthBrokerConfig is a raw-JSON carrier (Spec 107
+	// FR-040); a value copy would alias its backing array, so both editions
+	// clone through the build-tagged Clone().
+	dst.AuthBroker = src.AuthBroker.Clone()
+
+	// Copy *bool by value (not pointer) to avoid shared state
+	if src.ExposePrompts != nil {
+		exposePrompts := *src.ExposePrompts
+		dst.ExposePrompts = &exposePrompts
+	}
+
 	// Copy nested structs
 	dst.Isolation = copyIsolationConfig(src.Isolation)
 	dst.OAuth = copyOAuthConfig(src.OAuth)
 
+	// Carry the unexported "quarantined key was present" bit (issue #937).
+	// Dropping it here would make an explicitly-opted-out server look un-stated
+	// to the config-load admission gate on the next sync.
+	dst.quarantineExplicitlySet = src.quarantineExplicitlySet
+
 	return dst
+}
+
+// CopyIsolationConfig returns a deep copy of an isolation override set, or nil
+// for a nil input. Exported so the REST PATCH seam can start from the persisted
+// overrides and apply only the fields the request actually carried, instead of
+// dropping the ones it does not expose (GH #1142).
+func CopyIsolationConfig(src *IsolationConfig) *IsolationConfig {
+	return copyIsolationConfig(src)
 }
 
 func copyIsolationConfig(src *IsolationConfig) *IsolationConfig {
@@ -595,6 +759,13 @@ func copyIsolationConfig(src *IsolationConfig) *IsolationConfig {
 		dst.Enabled = &enabled
 	}
 
+	// Same for *IsolationMode — copying the pointer would alias the source and
+	// let a later in-place edit leak across configs.
+	if src.Mode != nil {
+		mode := *src.Mode
+		dst.Mode = &mode
+	}
+
 	if src.ExtraArgs != nil {
 		dst.ExtraArgs = make([]string, len(src.ExtraArgs))
 		copy(dst.ExtraArgs, src.ExtraArgs)
@@ -609,10 +780,16 @@ func copyOAuthConfig(src *OAuthConfig) *OAuthConfig {
 	}
 
 	dst := &OAuthConfig{
-		ClientID:     src.ClientID,
-		ClientSecret: src.ClientSecret,
-		RedirectURI:  src.RedirectURI,
-		PKCEEnabled:  src.PKCEEnabled,
+		ClientID:        src.ClientID,
+		ClientSecret:    src.ClientSecret,
+		RedirectURI:     src.RedirectURI,
+		CallbackBaseURL: src.CallbackBaseURL,
+		PKCEEnabled:     src.PKCEEnabled,
+
+		AuthorizationEndpoint: src.AuthorizationEndpoint,
+		TokenEndpoint:         src.TokenEndpoint,
+		RegistrationEndpoint:  src.RegistrationEndpoint,
+		AuthServerMetadataURL: src.AuthServerMetadataURL,
 	}
 
 	if src.Scopes != nil {

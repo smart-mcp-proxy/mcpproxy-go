@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -17,14 +18,12 @@ type authStrategy struct {
 
 // httpAuthStrategies returns the ordered HTTP auth strategies to attempt.
 //
-// A per-user brokered connection is FAIL-CLOSED (spec 074, security-critical):
-// the ONLY permitted strategy is the brokered headers. It must never fall back
-// to no-auth or shared OAuth — either would connect with the wrong identity and
-// defeat per-user isolation (FR-014/FR-017). Non-brokered connections keep the
-// historical headers -> no-auth -> OAuth chain unchanged.
+// Connections keep the historical headers -> no-auth -> OAuth chain, except
+// that a configured oauth block makes OAuth the only strategy (see
+// oauthRequiredByConfig).
 func (c *Client) httpAuthStrategies() []authStrategy {
-	if c.brokeredAuth != nil {
-		return []authStrategy{{"headers", c.tryHeadersAuth}}
+	if c.oauthRequiredByConfig() {
+		return []authStrategy{{"OAuth", c.tryOAuthAuth}}
 	}
 	return []authStrategy{
 		{"headers", c.tryHeadersAuth},
@@ -34,10 +33,10 @@ func (c *Client) httpAuthStrategies() []authStrategy {
 }
 
 // sseAuthStrategies is the SSE counterpart of httpAuthStrategies, with the same
-// fail-closed guarantee for brokered connections.
+// oauth-block rule.
 func (c *Client) sseAuthStrategies() []authStrategy {
-	if c.brokeredAuth != nil {
-		return []authStrategy{{"headers", c.trySSEHeadersAuth}}
+	if c.oauthRequiredByConfig() {
+		return []authStrategy{{"OAuth", c.trySSEOAuthAuth}}
 	}
 	return []authStrategy{
 		{"headers", c.trySSEHeadersAuth},
@@ -46,77 +45,109 @@ func (c *Client) sseAuthStrategies() []authStrategy {
 	}
 }
 
+// oauthRequiredByConfig reports whether the server config carries an oauth
+// block. The block is the operator's declaration that this upstream needs
+// OAuth (config.ServerConfig.OAuth: "keep even when empty to signal OAuth
+// requirement"), and it is only ever present when the operator wrote one —
+// nothing in the add/import/PATCH paths synthesises it.
+//
+// GH #1271: the no-auth strategy decides "no auth needed" from a successful
+// anonymous initialize. Upstreams that authorise per method (Google's Gmail
+// MCP answers initialize/tools/list anonymously and 401s only tools/call)
+// pass that probe, so no-auth used to win the ladder and the OAuth strategy —
+// with a valid token already in the store — was never reached. When the
+// operator has declared OAuth, the anonymous probe must not be allowed to win;
+// the OAuth strategy either attaches the stored token to every request or
+// surfaces the sign-in requirement, which is what the operator asked for.
+//
+// The headers strategy draws the same conclusion from a successful initialize,
+// so it is dropped too — a stale static Authorization header would otherwise
+// win the anonymous handshake and pin the connection just the same. Static
+// headers ride on the OAuth transport instead, where the token store owns the
+// Authorization header (matching the GH #1172 projection, which already treats
+// an oauth block as decisive over a static Authorization header).
+//
+// MCPPROXY_DISABLE_OAUTH keeps the historical chain: the ladder never consulted
+// oauth.ShouldUseOAuth, so the fixture gate has to be honoured here too.
+func (c *Client) oauthRequiredByConfig() bool {
+	if os.Getenv("MCPPROXY_DISABLE_OAUTH") == "true" {
+		return false
+	}
+	return c.config != nil && c.config.OAuth != nil
+}
+
+// AuthStrategyOAuth is the name of the OAuth auth strategy as recorded by
+// AuthStrategy. The other strategies ("headers", "no-auth") are internal; only
+// OAuth is something a consumer needs to recognise, because it is the one
+// strategy whose credential lives in the oauth_tokens bucket (GH #1172).
+const AuthStrategyOAuth = "OAuth"
+
+// AuthStrategy reports the name of the auth strategy the CURRENT connection
+// was established with ("headers", "no-auth" or AuthStrategyOAuth), or "" when
+// the client is not connected over HTTP/SSE. It is a fact about the live
+// connection, not the config: a server with a stored OAuth token that
+// connected through its static headers did not use that token.
+func (c *Client) AuthStrategy() string {
+	if v, ok := c.authStrategy.Load().(string); ok {
+		return v
+	}
+	return ""
+}
+
 // connectHTTP establishes HTTP transport connection with auth fallback
 func (c *Client) connectHTTP(ctx context.Context) error {
-	// Strategy order (and, for brokered connections, the fail-closed single
+	// Strategy order (and, for a configured oauth block, the single OAuth
 	// strategy) is decided by httpAuthStrategies.
-	authStrategies := c.httpAuthStrategies()
-
-	var lastErr error
-	for i, strategy := range authStrategies {
-		c.logger.Debug("🔐 Trying authentication strategy",
-			zap.Int("strategy_index", i),
-			zap.String("strategy", strategy.name))
-
-		if err := strategy.fn(ctx); err != nil {
-			lastErr = err
-			c.logger.Debug("🚫 Auth strategy failed",
-				zap.Int("strategy_index", i),
-				zap.String("strategy", strategy.name),
-				zap.Error(err))
-
-			// For configuration errors (like no headers), always try next strategy
-			if c.isConfigError(err) {
-				continue
-			}
-
-			// For OAuth errors, continue to OAuth strategy
-			if c.isOAuthError(err) {
-				continue
-			}
-
-			// If it's not an auth error, don't try fallback
-			if !c.isAuthError(err) {
-				return err
-			}
-			continue
-		}
-		c.logger.Info("✅ Authentication successful",
-			zap.Int("strategy_index", i),
-			zap.String("strategy", strategy.name))
-
-		// Register notification handler for tools/list_changed
-		c.registerNotificationHandler()
-
-		return nil
-	}
-
-	return fmt.Errorf("all authentication strategies failed, last error: %w", lastErr)
+	return c.runAuthStrategies(ctx, c.httpAuthStrategies(), "")
 }
 
 // connectSSE establishes SSE transport connection with auth fallback
 func (c *Client) connectSSE(ctx context.Context) error {
-	// Strategy order (and, for brokered connections, the fail-closed single
+	// Strategy order (and, for a configured oauth block, the single OAuth
 	// strategy) is decided by sseAuthStrategies.
-	authStrategies := c.sseAuthStrategies()
+	return c.runAuthStrategies(ctx, c.sseAuthStrategies(), "SSE ")
+}
 
+// runAuthStrategies attempts the strategies in order until one connects,
+// recording the winner so AuthStrategy can report it. transportLabel is "" for
+// streamable HTTP and "SSE " for SSE; it only prefixes the log and error text.
+// The returned error strings are unchanged from the two loops this replaced
+// (other packages match on "all authentication strategies failed").
+func (c *Client) runAuthStrategies(ctx context.Context, authStrategies []authStrategy, transportLabel string) error {
 	var lastErr error
+	// GH #1537: tell the OAuth strategy whether an anonymous attempt saw a
+	// real 401, so a park without one can be re-probed instead of stranded.
+	evidence := &authEvidence{}
+	ctx = withAuthEvidence(ctx, evidence)
 	for i, strategy := range authStrategies {
-		strategyName := strategy.name
-		c.logger.Debug("🔐 Trying SSE authentication strategy",
+		c.logger.Debug("🔐 Trying "+transportLabel+"authentication strategy",
 			zap.Int("strategy_index", i),
-			zap.String("strategy", strategyName))
+			zap.String("strategy", strategy.name))
 
 		if err := strategy.fn(ctx); err != nil {
 			lastErr = err
-			c.logger.Debug("🚫 SSE auth strategy failed",
+			c.logger.Debug("🚫 "+transportLabel+"Auth strategy failed",
 				zap.Int("strategy_index", i),
-				zap.String("strategy", strategyName),
-				zap.Error(err))
+				zap.String("strategy", strategy.name),
+				// #1148: the transport error quotes the request URL with its
+				// query credential; this fires on every failed attempt.
+				logSafeErrorField(err))
 
 			// For configuration errors (like no headers), always try next strategy
 			if c.isConfigError(err) {
 				continue
+			}
+
+			// A DNS/dial/timeout failure says nothing about auth, and its text
+			// quotes addresses and ports that the substring classifiers below
+			// can misread as "401"/"403" (GH #1537). Return it so the managed
+			// client retries with backoff instead of falling into OAuth.
+			if IsNetworkError(err) {
+				return err
+			}
+
+			if hasHTTPAuthChallenge(err) {
+				evidence.challenged = true
 			}
 
 			// For OAuth errors, continue to OAuth strategy
@@ -130,9 +161,10 @@ func (c *Client) connectSSE(ctx context.Context) error {
 			}
 			continue
 		}
-		c.logger.Info("✅ SSE Authentication successful",
+		c.logger.Info("✅ "+transportLabel+"Authentication successful",
 			zap.Int("strategy_index", i),
-			zap.String("strategy", strategyName))
+			zap.String("strategy", strategy.name))
+		c.authStrategy.Store(strategy.name)
 
 		// Register notification handler for tools/list_changed
 		c.registerNotificationHandler()
@@ -140,40 +172,16 @@ func (c *Client) connectSSE(ctx context.Context) error {
 		return nil
 	}
 
-	return fmt.Errorf("all SSE authentication strategies failed, last error: %w", lastErr)
-}
-
-// SetBrokeredAuth sets the per-user resolved upstream credential for this
-// connection. When set, the headers-auth strategy injects it into the configured
-// outbound header, replacing any inbound/configured auth (spec 074
-// FR-016/FR-017). Pass nil to clear it (non-brokered behaviour).
-func (c *Client) SetBrokeredAuth(b *transport.BrokeredAuth) {
-	c.brokeredAuth = b
-}
-
-// canUseHeadersStrategy reports whether the headers-auth strategy can run: it
-// needs either statically-configured headers or a per-user brokered credential
-// to inject. A brokered upstream commonly carries no static headers (FR-016).
-func (c *Client) canUseHeadersStrategy() bool {
-	return len(c.config.Headers) > 0 || c.brokeredAuth != nil
-}
-
-// brokeredHTTPConfig builds the HTTP transport config for the headers-auth
-// strategy, threading the per-user brokered credential through so the transport
-// layer injects it (spec 074 FR-016/FR-017).
-func (c *Client) brokeredHTTPConfig() *transport.HTTPTransportConfig {
-	httpConfig := transport.CreateHTTPTransportConfig(c.config, nil)
-	httpConfig.BrokeredAuth = c.brokeredAuth
-	return httpConfig
+	return fmt.Errorf("all "+transportLabel+"authentication strategies failed, last error: %w", lastErr)
 }
 
 // tryHeadersAuth attempts authentication using configured headers
 func (c *Client) tryHeadersAuth(ctx context.Context) error {
-	if !c.canUseHeadersStrategy() {
+	if len(c.config.Headers) == 0 {
 		return fmt.Errorf("no headers configured")
 	}
 
-	httpConfig := c.brokeredHTTPConfig()
+	httpConfig := c.httpTransportConfig(c.config, nil)
 	httpClient, err := transport.CreateHTTPClient(httpConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP client with headers: %w", err)
@@ -201,7 +209,7 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 	configNoAuth := *c.config
 	configNoAuth.Headers = nil
 
-	httpConfig := transport.CreateHTTPTransportConfig(&configNoAuth, nil)
+	httpConfig := c.httpTransportConfig(&configNoAuth, nil)
 	httpClient, err := transport.CreateHTTPClient(httpConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create HTTP client without auth: %w", err)
@@ -225,11 +233,11 @@ func (c *Client) tryNoAuth(ctx context.Context) error {
 
 // trySSEHeadersAuth attempts SSE authentication using configured headers
 func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
-	if !c.canUseHeadersStrategy() {
+	if len(c.config.Headers) == 0 {
 		return fmt.Errorf("no headers configured")
 	}
 
-	httpConfig := c.brokeredHTTPConfig()
+	httpConfig := c.httpTransportConfig(c.config, nil)
 	sseClient, err := transport.CreateSSEClient(httpConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create SSE client with headers: %w", err)
@@ -241,7 +249,8 @@ func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
 	c.client.OnConnectionLost(func(err error) {
 		c.logger.Warn("⚠️ SSE connection lost detected",
 			zap.String("server", c.config.Name),
-			zap.Error(err),
+			// #1148: a dropped-stream error quotes the stream URL.
+			logSafeErrorField(err),
 			zap.String("transport", "sse"),
 			zap.String("note", "Connection dropped by server or network - will attempt reconnection"))
 	})
@@ -249,7 +258,7 @@ func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
 	// Start the client with persistent context so SSE stream keeps running
 	// even if the connect context is short-lived (same as stdio transport).
 	// SSE stream runs in a background goroutine and needs context to stay alive.
-	persistentCtx := context.Background()
+	persistentCtx := c.Gate().Context() // Spec 116 PR4: cancelled when the instance is retired
 	if err := c.client.Start(persistentCtx); err != nil {
 		return err
 	}
@@ -270,7 +279,7 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 	configNoAuth := *c.config
 	configNoAuth.Headers = nil
 
-	httpConfig := transport.CreateHTTPTransportConfig(&configNoAuth, nil)
+	httpConfig := c.httpTransportConfig(&configNoAuth, nil)
 	sseClient, err := transport.CreateSSEClient(httpConfig)
 	if err != nil {
 		return fmt.Errorf("failed to create SSE client without auth: %w", err)
@@ -282,7 +291,8 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 	c.client.OnConnectionLost(func(err error) {
 		c.logger.Warn("⚠️ SSE connection lost detected",
 			zap.String("server", c.config.Name),
-			zap.Error(err),
+			// #1148: a dropped-stream error quotes the stream URL.
+			logSafeErrorField(err),
 			zap.String("transport", "sse"),
 			zap.String("note", "Connection dropped by server or network - will attempt reconnection"))
 	})
@@ -290,7 +300,7 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 	// Start the client with persistent context so SSE stream keeps running
 	// even if the connect context is short-lived (same as stdio transport).
 	// SSE stream runs in a background goroutine and needs context to stay alive.
-	persistentCtx := context.Background()
+	persistentCtx := c.Gate().Context() // Spec 116 PR4: cancelled when the instance is retired
 	if err := c.client.Start(persistentCtx); err != nil {
 		return err
 	}

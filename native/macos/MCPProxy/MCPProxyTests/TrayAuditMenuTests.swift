@@ -1,0 +1,579 @@
+// TrayAuditMenuTests.swift
+// MCPProxyTests
+//
+// Drives the real `rebuildMenu()` and pins the menu-shaped fixes from the
+// 2026-08 macOS tray UX audit:
+//
+//   F4  a "Needs Attention" row no longer runs an API action on a click that
+//       reads as navigation — the verb has its own row
+//   F7  one operation, one verb pair (Enable/Disable), stdio included
+//   F8a a quarantined server offers a review path
+//   F9  the login item is called the same thing here and in Settings; the two
+//       "open" rows say where they open
+//   F11 a profile that resolves to no servers says so
+//   F12 transports are display-normalised
+//   F15 the Servers submenu groups by state and folds the disabled tail
+//
+// Same seams as MenuStructureTests / SupersedeMenuTests, so a regression fails
+// here rather than shipping.
+
+import XCTest
+import AppKit
+@testable import MCPProxy
+
+@MainActor
+final class TrayAuditMenuTests: XCTestCase {
+
+    private final class TestMenuHost: TrayMenuHost {
+        var menu: NSMenu?
+    }
+
+    private func makeController(servers: [ServerStatus] = [],
+                                profiles: [ProfileView] = [],
+                                clients: [ClientPresenceRecord] = []) -> (AppController, TestMenuHost) {
+        let host = TestMenuHost()
+        let controller = AppController(
+            glanceDataSource: CountingGlanceDataSource(), menuHost: host
+        )
+        controller.appState.coreState = .connected
+        controller.appState.servers = servers
+        controller.appState.profiles = profiles
+        controller.appState.clients = clients
+        // Spec 109 FR-001: the tray's "Needs Attention" group is built from
+        // `appState.attention` (fed from the core's GET /api/v1/attention /
+        // SSE attention.changed), not derived from `servers` in-process any
+        // more (the retired `serversNeedingAttention` predicate). This harness
+        // re-derives the same fixture-shaped items so the existing scenarios
+        // below keep exercising the menu-building code they were written for.
+        controller.appState.updateAttention(Self.attentionItems(from: servers))
+        return (controller, host)
+    }
+
+    /// Mirrors the retired `AppState.serversNeedingAttention` predicate over
+    /// the `(level, summary, action)` fixtures this file already builds — and,
+    /// since the real needs-attention list is built server-side
+    /// (`internal/runtime/attention.go`'s `computeServerItems`), mirrors that
+    /// function's own shape too: sign-in is its own item (keyed off
+    /// `ServerStatus.isOAuthLoginRequired`, the same signal the rest of the
+    /// tray/Web UI use — NOT the bare `health.action` string, since quarantine
+    /// outranks sign-in there), and quarantine review is ALWAYS its own
+    /// separate item, appended unconditionally whenever `quarantined` is set,
+    /// never folded into whatever other action is also true. A quarantined
+    /// server awaiting sign-in therefore produces TWO items here, exactly as
+    /// the real backend does — never one row carrying both verbs.
+    private static func attentionItems(from servers: [ServerStatus]) -> [AttentionItem] {
+        servers.flatMap { server -> [AttentionItem] in
+            var items: [AttentionItem] = []
+            if server.isOAuthLoginRequired {
+                items.append(AttentionItem(
+                    id: "fixture:server:\(server.name):login",
+                    kind: "fixture-login",
+                    rank: 9,
+                    subject: AttentionSubject(type: "server", id: server.name, name: server.name),
+                    summary: "\(server.name): sign in required",
+                    fix: AttentionFix(verb: "login", label: "Sign in", target: "/servers/\(server.name)"),
+                    since: Date()
+                ))
+            } else if let action = server.health?.action, !action.isEmpty, action != "enable", action != "approve" {
+                let label = HealthStatus.actionLabels[action] ?? action
+                items.append(AttentionItem(
+                    id: "fixture:server:\(server.name)",
+                    kind: "fixture",
+                    rank: 10,
+                    subject: AttentionSubject(type: "server", id: server.name, name: server.name),
+                    summary: "\(server.name): \(server.health?.summary ?? action)",
+                    fix: AttentionFix(verb: action, label: label, target: "/servers/\(server.name)"),
+                    since: Date()
+                ))
+            }
+            if server.quarantined {
+                items.append(AttentionItem(
+                    id: "fixture:server:\(server.name):review",
+                    kind: "fixture-review",
+                    rank: 11,
+                    subject: AttentionSubject(type: "server", id: server.name, name: server.name),
+                    summary: "\(server.name): waiting for review",
+                    fix: AttentionFix(verb: "review", label: "Review", target: "/review/\(server.name)"),
+                    since: Date()
+                ))
+            }
+            return items
+        }
+    }
+
+    private func topLevelTitles(_ host: TestMenuHost) -> [String] {
+        (host.menu?.items ?? []).map(\.title)
+    }
+
+    private func submenu(_ host: TestMenuHost, startingWith prefix: String) throws -> NSMenu {
+        let parent = try XCTUnwrap(
+            (host.menu?.items ?? []).first { $0.title.hasPrefix(prefix) },
+            "expected a top-level item starting with \(prefix); got \(topLevelTitles(host))")
+        return try XCTUnwrap(parent.submenu)
+    }
+
+    private func serverSubmenu(_ host: TestMenuHost, named name: String) throws -> NSMenu {
+        let servers = try submenu(host, startingWith: "Servers (")
+        let item = try XCTUnwrap(servers.items.first { $0.title == name },
+                                 "no row for \(name) in \(servers.items.map(\.title))")
+        return try XCTUnwrap(item.submenu)
+    }
+
+    // MARK: - F7 · One verb pair
+
+    /// The audit's Appendix A: four rows, identical admin state, four different
+    /// verbs — and a stdio submenu reading "Disabled … Start".
+    func testStdioAndHTTPServersUseTheSameEnableDisableVerbs() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "stdio-on", proto: "stdio", enabled: true),
+            Self.server(name: "http-on", proto: "http", enabled: true),
+            Self.server(name: "stdio-off", proto: "stdio", enabled: false),
+            Self.server(name: "http-off", proto: "http", enabled: false),
+        ])
+        controller.rebuildMenu()
+
+        for name in ["stdio-on", "http-on"] {
+            let titles = try serverSubmenu(host, named: name).items.map(\.title)
+            XCTAssertTrue(titles.contains("Disable"), "\(name): \(titles)")
+            XCTAssertFalse(titles.contains("Stop"), "process-control verbs are a different mental model")
+        }
+        // Disabled servers are folded (F15) — reach them through the fold when
+        // there are enough of them, or inline when there are not.
+        for name in ["stdio-off", "http-off"] {
+            let titles = try Self.disabledServerSubmenu(host, named: name).items.map(\.title)
+            XCTAssertTrue(titles.contains("Enable"), "\(name): \(titles)")
+            XCTAssertFalse(titles.contains("Start"))
+        }
+    }
+
+    // MARK: - F12 · Transport names
+
+    func testTheProtocolLineIsDisplayNormalised() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "everything", proto: "streamable-http", enabled: true)
+        ])
+        controller.rebuildMenu()
+
+        let titles = try serverSubmenu(host, named: "everything").items.map(\.title)
+        XCTAssertTrue(titles.contains("Protocol: HTTP (streamable)"), "\(titles)")
+        XCTAssertFalse(titles.contains("Protocol: streamable-http"))
+    }
+
+    // MARK: - F8a / Spec 109 FR-014 · A path to the quarantine review
+
+    // Spec 109 FR-014 moved this row's wording onto the ONE cross-surface
+    // label table (`HealthStatus.actionLabels`), so it now reads "Review" —
+    // the same word the Servers row and the Web UI use for `actions[0] ==
+    // "approve"` — rather than the tray's own private "Review quarantine…".
+    func testAQuarantinedServerOffersAReview() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "everything", proto: "http", enabled: true, quarantined: true)
+        ])
+        controller.rebuildMenu()
+
+        let items = try serverSubmenu(host, named: "everything").items
+        let review = try XCTUnwrap(items.first { $0.title == "Review" },
+                                   "quarantined server offered only \(items.map(\.title))")
+        XCTAssertEqual(items.filter { $0.title == "Review" }.count, 1,
+                       "Review shown more than once: \(items.map(\.title))")
+        XCTAssertNotNil(review.action, "a review row with no action is the F14 dead link again")
+        XCTAssertTrue(review.target === controller)
+        XCTAssertEqual(review.representedObject as? String, "everything")
+    }
+
+    func testAHealthyServerHasNoReviewRow() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "github", proto: "http", enabled: true)
+        ])
+        controller.rebuildMenu()
+        let titles = try serverSubmenu(host, named: "github").items.map(\.title)
+        XCTAssertFalse(titles.contains("Review"))
+    }
+
+    /// Review round 1 (109-e high finding): a server that is BOTH quarantined
+    /// AND needs OAuth sign-in reports `actions = ["login", "approve"]`
+    /// (FR-010, internal/health/calculator.go quarantinedOAuthLoginState) —
+    /// the primary item is "Sign in", from `actions[0]` alone, exactly like
+    /// `TrayPrimaryItemTests` verifies. But dropping "approve" that way must
+    /// not drop the row's ONLY path to review: the old unconditional
+    /// `if server.quarantined { show Review }` block this replaced would have
+    /// still shown a review row here, and this submenu must too.
+    func testAQuarantinedServerThatAlsoNeedsLoginOffersBothSignInAndReview() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "everything", proto: "http", enabled: true, quarantined: true,
+                        health: ("degraded", "Sign-in required", "login"))
+        ])
+        controller.rebuildMenu()
+
+        let items = try serverSubmenu(host, named: "everything").items
+        let titles = items.map(\.title)
+
+        let signIn = try XCTUnwrap(items.first { $0.title == "Sign in" },
+                                   "expected the primary Sign-in row: \(titles)")
+        XCTAssertNotNil(signIn.action)
+        XCTAssertEqual(titles.filter { $0 == "Sign in" }.count, 1, "Sign in shown more than once: \(titles)")
+        XCTAssertEqual(titles.filter { $0 == "Review" }.count, 1, "Review shown more than once: \(titles)")
+
+        let review = try XCTUnwrap(items.first { $0.title == "Review" },
+                                   "a quarantined+login server must still offer a review path (FR-010/FR-014 parity — the ⋯/context-menu surfaces still gate independently on `quarantined`): \(titles)")
+        XCTAssertNotNil(review.action, "a review row with no action is the F14 dead link again")
+        XCTAssertTrue(review.target === controller)
+        XCTAssertEqual(review.representedObject as? String, "everything")
+    }
+
+    /// Review round 2 (109-e medium finding): `actions[0]` in
+    /// {enable, restart, view_logs} rendered the same command TWICE in this
+    /// submenu — once as the accent-tinted primary item, once as the
+    /// always-present tail row it was never suppressing. Each case here
+    /// asserts there is exactly ONE menu item for the command, not that the
+    /// primary exists (that's `TrayPrimaryItemTests`'s job).
+    func testDisabledServerWithEnablePrimaryShowsEnableOnlyOnce() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "demo", proto: "http", enabled: false,
+                        health: ("degraded", "Disabled", "enable"))
+        ])
+        controller.rebuildMenu()
+
+        let titles = try Self.disabledServerSubmenu(host, named: "demo").items.map(\.title)
+        XCTAssertEqual(titles.filter { $0 == "Enable" }.count, 1, "Enable shown twice: \(titles)")
+    }
+
+    func testRestartNeedingServerShowsRestartOnlyOnce() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "broken", proto: "http", enabled: true,
+                        health: ("unhealthy", "failed to connect", "restart"))
+        ])
+        controller.rebuildMenu()
+
+        let titles = try serverSubmenu(host, named: "broken").items.map(\.title)
+        XCTAssertEqual(titles.filter { $0 == "Restart" }.count, 1, "Restart shown twice: \(titles)")
+    }
+
+    func testTokenRefreshPendingServerShowsViewLogsOnlyOnce() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "stale-token", proto: "http", enabled: true,
+                        health: ("degraded", "Token refresh pending", "view_logs"))
+        ])
+        controller.rebuildMenu()
+
+        let items = try serverSubmenu(host, named: "stale-token").items
+        // The primary reads "View logs" (shared actionLabels wording); the
+        // static tail row reads "View Logs" — same command, different
+        // casing, so match case-insensitively to catch either spelling.
+        let logRows = items.filter { $0.title.caseInsensitiveCompare("View Logs") == .orderedSame }
+        XCTAssertEqual(logRows.count, 1, "View Logs shown twice: \(items.map(\.title))")
+    }
+
+    // MARK: - F4 · Attention rows do not mutate on a navigation click
+
+    func testAnAttentionRowDoesNotFireItsActionOnClick() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "cloudflare", proto: "http", enabled: true,
+                        health: ("degraded", "Sign-in required", "login"))
+        ])
+        controller.rebuildMenu()
+
+        let attention = try submenu(host, startingWith: "Needs Attention")
+        let row = try XCTUnwrap(attention.items.first)
+        // An item that owns a submenu is wired by AppKit to its own
+        // `submenuAction:` (and targeted at the submenu). What matters is that
+        // the row no longer carries the ServerStatus payload the old handler
+        // acted on, so no API call is reachable by clicking the row.
+        XCTAssertEqual(row.action, NSSelectorFromString("submenuAction:"),
+                       "the row itself must do nothing — clicking it used to sign in / restart / ENABLE a server")
+        XCTAssertNil(row.representedObject as? ServerStatus)
+        let rowMenu = try XCTUnwrap(row.submenu, "the action needs somewhere explicit to live")
+        XCTAssertEqual(rowMenu.items.first?.title, "Sign in")
+        XCTAssertNotNil(rowMenu.items.first?.action)
+        XCTAssertTrue(rowMenu.items.first?.target === controller)
+        XCTAssertTrue(rowMenu.items.map(\.title).contains("Open Server Details"))
+    }
+
+    /// The security case the audit calls out by name: enabling a server is a
+    /// state change and must never be an unlabelled side effect.
+    ///
+    /// A disabled server is intentional, so it is not in Needs Attention at
+    /// all (`AppState.serversNeedingAttention` drops `enable`) — the only way
+    /// to enable one from the tray is the explicitly named row under
+    /// `Servers ▸ <name> ▸ Enable`.
+    func testEnablingAServerIsOnlyEverAnExplicitlyNamedRow() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "demo", proto: "stdio", enabled: false,
+                        health: ("degraded", "Disabled", "enable"))
+        ])
+        controller.rebuildMenu()
+
+        XCTAssertFalse(topLevelTitles(host).contains { $0.hasPrefix("Needs Attention") },
+                       "a server the user switched off is not an alert")
+        let items = try Self.disabledServerSubmenu(host, named: "demo").items
+        let enable = try XCTUnwrap(items.first { $0.title == "Enable" })
+        XCTAssertTrue(enable.target === controller)
+    }
+
+    /// A row with nothing to run (quarantine, missing secret) stays a plain
+    /// clickable disclosure — no submenu for a menu of one navigation.
+    func testARowWithNoActionNavigatesDirectly() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "everything", proto: "http", enabled: true, quarantined: true,
+                        health: ("degraded", "Quarantined for review", "approve"))
+        ])
+        controller.rebuildMenu()
+
+        let attention = try submenu(host, startingWith: "Needs Attention")
+        let row = try XCTUnwrap(attention.items.first)
+        XCTAssertNil(row.submenu)
+        XCTAssertNotNil(row.action)
+        XCTAssertEqual(row.representedObject as? String, "everything")
+        XCTAssertEqual(row.action, NSSelectorFromString("showReviewFromMenu:"))
+    }
+
+    // MARK: - F8a + sign-in · Combined quarantine + awaiting sign-in
+
+    /// Quarantine outranks sign-in in the core's health calculator, so a
+    /// quarantined server awaiting OAuth sign-in reports `health.action ==
+    /// "approve"` — the same payload shape as
+    /// `QuarantinedOAuthSignInTests.liveQuarantinedGitHub`, trimmed to what
+    /// `rebuildMenu()` reads. `QuarantinedOAuthSignInTests` only exercises the
+    /// pure `ServerStatus`/`TrayServerAction` properties for this combination;
+    /// nothing drove it through the real menu build.
+    private static func quarantinedAwaitingSignIn(name: String) -> ServerStatus {
+        let json = """
+        {
+            "id": "\(name)", "name": "\(name)", "protocol": "http",
+            "enabled": true, "connected": false, "quarantined": true, "tool_count": 0,
+            "diagnostic": {"code": "MCPX_OAUTH_LOGIN_REQUIRED", "severity": "warn", "summary": "sign in"},
+            "health": {"level": "healthy", "admin_state": "quarantined",
+                       "summary": "Quarantined for review", "action": "approve"}
+        }
+        """.data(using: .utf8)!
+        // swiftlint:disable:next force_try
+        return try! JSONDecoder().decode(ServerStatus.self, from: json)
+    }
+
+    /// The combined state: Spec 109's one-list design (`internal/runtime/
+    /// attention.go`'s `computeServerItems`) makes sign-in and quarantine
+    /// review two SEPARATE attention items, never one row carrying both verbs
+    /// — quarantine is appended unconditionally whenever `Quarantined` is set,
+    /// regardless of what other item the server's status also produced. So a
+    /// quarantined server awaiting sign-in gets a runnable "Sign in" row (with
+    /// its own submenu) AND a plain, non-runnable review row that navigates
+    /// straight to the server's detail view (`review` is never a one-click
+    /// approve — `MCPProxyApp.rebuildMenu()`'s `TrayServerAction
+    /// .fromHealthAction` deliberately has no case for it). Neither
+    /// `testAnAttentionRowDoesNotFireItsActionOnClick` (plain sign-in, not
+    /// quarantined) nor `testARowWithNoActionNavigatesDirectly` (plain
+    /// quarantine, no sign-in) exercises both facts on one server.
+    func testNeedsAttentionRowOffersSignInAndReviewWhenBothApply() throws {
+        let (controller, host) = makeController(servers: [
+            Self.quarantinedAwaitingSignIn(name: "github")
+        ])
+        controller.rebuildMenu()
+
+        let attention = try submenu(host, startingWith: "Needs Attention")
+        XCTAssertEqual(attention.items.count, 2,
+                       "a quarantined server awaiting sign-in is TWO separate attention items, never one " +
+                       "row combining both verbs: \(attention.items.map(\.title))")
+
+        let signInRow = try XCTUnwrap(attention.items.first { $0.submenu != nil },
+                                     "the sign-in item is the one runnable action, so it owns a row submenu")
+        let rowMenu = try XCTUnwrap(signInRow.submenu)
+        XCTAssertEqual(rowMenu.items.first?.title, "Sign in",
+                       "quarantine outranks sign-in in health.action, but the sign-in item's own fix.verb must still be login")
+        XCTAssertTrue(rowMenu.items.first?.target === controller)
+        XCTAssertTrue(rowMenu.items.map(\.title).contains("Open Server Details"))
+
+        let reviewRow = try XCTUnwrap(attention.items.first { $0.submenu == nil },
+                                      "review is never a one-click approve, so its row navigates directly with no submenu")
+        XCTAssertNotNil(reviewRow.action, "a review row with no action is the F14 dead link again")
+        XCTAssertEqual(reviewRow.representedObject as? String, "github")
+        XCTAssertEqual(reviewRow.action, NSSelectorFromString("showReviewFromMenu:"))
+    }
+
+    // MARK: - F15 · A Servers submenu that fits
+
+    func testDisabledServersFoldIntoTheirOwnSubmenu() throws {
+        var servers = [
+            Self.server(name: "alive-1", proto: "http", enabled: true),
+            Self.server(name: "alive-2", proto: "http", enabled: true),
+        ]
+        for i in 1...4 {
+            servers.append(Self.server(name: "off-\(i)", proto: "http", enabled: false))
+        }
+        let (controller, host) = makeController(servers: servers)
+        controller.rebuildMenu()
+
+        let menu = try submenu(host, startingWith: "Servers (")
+        let titles = menu.items.map(\.title).filter { !$0.isEmpty }
+        XCTAssertEqual(titles, ["Add Server...", "alive-1", "alive-2", "Disabled (4)"])
+        let fold = try XCTUnwrap(menu.items.first { $0.title == "Disabled (4)" }?.submenu)
+        XCTAssertEqual(fold.items.map(\.title), ["off-1", "off-2", "off-3", "off-4"])
+    }
+
+    func testAFewDisabledServersStayInline() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "alive", proto: "http", enabled: true),
+            Self.server(name: "off", proto: "http", enabled: false),
+        ])
+        controller.rebuildMenu()
+
+        let titles = try submenu(host, startingWith: "Servers (").items.map(\.title).filter { !$0.isEmpty }
+        XCTAssertEqual(titles, ["Add Server...", "alive", "off"],
+                       "one disabled server behind a fold costs a click and saves nothing")
+    }
+
+    func testServersNeedingAttentionSortFirst() throws {
+        let (controller, host) = makeController(servers: [
+            Self.server(name: "aaa-fine", proto: "http", enabled: true),
+            Self.server(name: "zzz-broken", proto: "http", enabled: true,
+                        health: ("unhealthy", "failed to connect", "restart")),
+        ])
+        controller.rebuildMenu()
+
+        let titles = try submenu(host, startingWith: "Servers (").items.map(\.title).filter { !$0.isEmpty }
+        XCTAssertEqual(titles, ["Add Server...", "zzz-broken", "aaa-fine"],
+                       "alphabetical order buried the servers that need something")
+    }
+
+    // MARK: - Spec 108-k · Profiles are a property of a client
+
+    /// The v2 "Profile: <active>" instance switcher is gone (FR-048): profiles
+    /// are bound per client, in the Clients submenu.
+    func testThereIsNoInstanceWideProfileSwitcher() throws {
+        let (controller, host) = makeController(
+            servers: [Self.server(name: "everything", proto: "http", enabled: true)],
+            profiles: [
+                Self.profile(name: "research", servers: ["github", "gitlab"], toolCount: 0),
+                Self.profile(name: "live", servers: ["everything"], toolCount: 12),
+            ],
+            clients: [Self.client(id: "cursor", name: "Cursor", credential: "client", profile: "live")])
+        controller.rebuildMenu()
+
+        let titles = topLevelTitles(host)
+        XCTAssertFalse(titles.contains { $0.hasPrefix("Profile:") }, "\(titles)")
+        XCTAssertNotNil(clientsSubmenuItem(host), "\(titles)")
+    }
+
+    func testTheClientsSubmenuListsACredentialedClientWithItsProfile() throws {
+        let (controller, host) = makeController(
+            profiles: [Self.profile(name: "live", servers: ["everything"], toolCount: 12)],
+            clients: [Self.client(id: "cursor", name: "Cursor", credential: "client", profile: "live", locked: true)])
+        controller.rebuildMenu()
+
+        let clients = try XCTUnwrap(clientsSubmenuItem(host)?.submenu, "\(topLevelTitles(host))")
+        XCTAssertEqual(clients.items.map(\.title), ["Cursor — live 🔒"])
+    }
+
+    func testNoClientsMeansNoClientsItem() {
+        let (controller, host) = makeController(profiles: [Self.profile(name: "live", servers: [], toolCount: 0)])
+        controller.rebuildMenu()
+        XCTAssertNil(clientsSubmenuItem(host), "no credentialed or connected client: no Clients submenu")
+    }
+
+    /// The top-level "Clients" submenu (not the glance section's header of the
+    /// same name, which is a plain disabled row).
+    private func clientsSubmenuItem(_ host: TestMenuHost) -> NSMenuItem? {
+        (host.menu?.items ?? []).first { $0.title == "Clients" && $0.submenu != nil }
+    }
+
+    // MARK: - F9 · Names that say what happens
+
+    func testTheOpenRowsSayWhereTheyOpen() {
+        let (controller, host) = makeController(servers: [Self.server(name: "github", proto: "http", enabled: true)])
+        controller.rebuildMenu()
+
+        let titles = topLevelTitles(host)
+        XCTAssertTrue(titles.contains("Open MCPProxy Window"), "\(titles)")
+        XCTAssertTrue(titles.contains("Open Web UI in Browser"), "\(titles)")
+    }
+
+    /// The same AutoStartService setting is "Launch at Login" in Settings → App.
+    func testTheLoginItemHasOneName() {
+        let (controller, host) = makeController(servers: [Self.server(name: "github", proto: "http", enabled: true)])
+        controller.rebuildMenu()
+
+        let titles = topLevelTitles(host)
+        XCTAssertTrue(titles.contains("Launch at Login"), "\(titles)")
+        XCTAssertFalse(titles.contains("Run at Startup"))
+    }
+
+    // MARK: - F5 / F16 · The unreachable views
+
+    func testClientsAndToolsAreReachableFromTheSidebar() {
+        let items = SidebarItem.allCases.map(\.rawValue)
+        XCTAssertTrue(items.contains("Clients"),
+                      "Clients is the native hub for connection, endpoint mode, and agent tokens")
+        XCTAssertTrue(items.contains("Tools"),
+                      "BM25 discovery is the headline feature and had no native home")
+    }
+
+    func testEverySidebarItemHasAnIcon() {
+        for item in SidebarItem.allCases {
+            XCTAssertFalse(item.icon.isEmpty, "\(item.rawValue) has no symbol")
+        }
+    }
+
+    // MARK: - Helpers
+
+    /// Find a disabled server's submenu whether or not it landed behind the fold.
+    private static func disabledServerSubmenu(_ host: TestMenuHost, named name: String) throws -> NSMenu {
+        let parent = try XCTUnwrap(
+            (host.menu?.items ?? []).first { $0.title.hasPrefix("Servers (") }?.submenu)
+        if let direct = parent.items.first(where: { $0.title == name })?.submenu {
+            return direct
+        }
+        let fold = try XCTUnwrap(
+            parent.items.first { $0.title.hasPrefix("Disabled (") }?.submenu,
+            "\(name) is neither inline nor folded: \(parent.items.map(\.title))")
+        return try XCTUnwrap(fold.items.first { $0.title == name }?.submenu)
+    }
+
+    /// Built through the canonical Codable path so fixtures survive future
+    /// field additions on `ServerStatus`.
+    private static func server(name: String,
+                               proto: String = "http",
+                               enabled: Bool = true,
+                               quarantined: Bool = false,
+                               health: (level: String, summary: String, action: String)? = nil) -> ServerStatus {
+        var healthJSON = ""
+        if let health {
+            healthJSON = """
+            , "health": {"level": "\(health.level)", "admin_state": "enabled",
+                          "summary": "\(health.summary)", "action": "\(health.action)"}
+            """
+        }
+        let json = """
+        {
+            "id": "\(name)",
+            "name": "\(name)",
+            "protocol": "\(proto)",
+            "enabled": \(enabled),
+            "connected": \(enabled && health == nil),
+            "quarantined": \(quarantined),
+            "tool_count": 4
+            \(healthJSON)
+        }
+        """.data(using: .utf8)!
+        // swiftlint:disable:next force_try
+        return try! JSONDecoder().decode(ServerStatus.self, from: json)
+    }
+
+    private static func profile(name: String, servers: [String], toolCount: Int) -> ProfileView {
+        let list = servers.map { "\"\($0)\"" }.joined(separator: ",")
+        let json = """
+        {"name": "\(name)", "servers": [\(list)], "tool_count": \(toolCount)}
+        """.data(using: .utf8)!
+        // swiftlint:disable:next force_try
+        return try! JSONDecoder().decode(ProfileView.self, from: json)
+    }
+
+    private static func client(id: String, name: String, credential: String, profile: String = "",
+                               locked: Bool = false, connected: Bool = true) -> ClientPresenceRecord {
+        let json = """
+        {"id":"\(id)","display_name":"\(name)","kind":"supported","state":"connected_seen","installed":true,
+         "connected":\(connected),"active_sessions":0,"calls_24h":0,"credential_state":"\(credential)",
+         "profile":"\(profile)","profile_mode":"\(locked ? "locked" : "switchable")"}
+        """.data(using: .utf8)!
+        // swiftlint:disable:next force_try
+        return try! JSONDecoder().decode(ClientPresenceRecord.self, from: json)
+    }
+}

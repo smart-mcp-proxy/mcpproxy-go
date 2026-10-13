@@ -4,7 +4,7 @@ package diagnostics
 // See FR-004 in specs/044-diagnostics-taxonomy/spec.md.
 //
 // Code format: MCPX_<DOMAIN>_<SPECIFIC> where DOMAIN is one of
-// OAUTH, STDIO, HTTP, DOCKER, CONFIG, QUARANTINE, NETWORK, UNKNOWN.
+// OAUTH, STDIO, HTTP, DOCKER, CONFIG, QUARANTINE, NETWORK, UPDATE, UNKNOWN.
 
 // STDIO domain — stdio-transport MCP server failures.
 const (
@@ -48,6 +48,34 @@ const (
 	HTTPServerErr  Code = "MCPX_HTTP_5XX"
 	HTTPConnRefuse Code = "MCPX_HTTP_CONN_REFUSED"
 	HTTPTimeout    Code = "MCPX_HTTP_TIMEOUT"
+	// HTTPConnReset: the TCP connection was reset by the peer (ECONNRESET) —
+	// an idle-timeout kill by a proxy/load balancer in front of the MCP server,
+	// or the upstream closing mid-response. Distinct from CONN_REFUSED (nothing
+	// listening at all) and transient by nature, so it must never be parked.
+	HTTPConnReset Code = "MCPX_HTTP_CONN_RESET"
+	// HTTPRateLimited: the server returned 429 Too Many Requests. Its own
+	// category rather than a generic 4xx because the remediation is "wait / slow
+	// down", never "fix your config" — and mcpproxy already honours the
+	// Retry-After header on this status (internal/transport/retry_after.go).
+	HTTPRateLimited Code = "MCPX_HTTP_RATE_LIMITED"
+	// HTTPClientErr: the enumerated client-error statuses that have no more
+	// specific code of their own — 400, 408, 409, 410 and 451. (401, 403, 404
+	// and 429 each keep their own code; every other 4xx still falls through
+	// deliberately, see DiagnoseHTTPStatus.) The bucket exists so a named status
+	// stops landing in MCPX_UNKNOWN_UNCLASSIFIED with its "file a bug report"
+	// CTA: the exact status travels in DiagnosticError.Cause, the raw error text.
+	HTTPClientErr Code = "MCPX_HTTP_4XX"
+	// HTTPCanceled: the attempt was canceled before it finished — shutdown, a
+	// config reload replacing the client, or a user-initiated disconnect. Not a
+	// fault, hence severity info: it describes mcpproxy's own decision to stop
+	// waiting, and telling the user to file a bug about it is noise.
+	HTTPCanceled Code = "MCPX_HTTP_CANCELED"
+	// HTTPLegacySSE: the endpoint rejected the streamable-HTTP `initialize`
+	// POST with a 4xx. That is the signature of a server that only speaks the
+	// older SSE transport, so the fix is a transport change in config — not a
+	// credential or reachability problem, which is why it must not fall through
+	// to a generic MCPX_HTTP_4xx or to MCPX_UNKNOWN_UNCLASSIFIED.
+	HTTPLegacySSE Code = "MCPX_HTTP_LEGACY_SSE"
 )
 
 // DOCKER domain — Docker isolation subsystem failures.
@@ -67,6 +95,15 @@ const (
 	// DockerOCIRuntime: the OCI runtime (runc) failed to start the container —
 	// e.g. an `exec format error` (image/host architecture mismatch).
 	DockerOCIRuntime Code = "MCPX_DOCKER_OCI_RUNTIME"
+	// DockerMissingToolchain: the container started and its entrypoint ran, but
+	// a tool the server shells out to is absent from the image — git for a
+	// `uvx --from …git+https://…` server, or any `<tool>: not found` on the
+	// container's stderr. Distinct from DockerExecNotFound, which is the
+	// ENTRYPOINT interpreter missing (an OCI exec failure, before the process
+	// runs). Container stderr is its own failure surface, and everything the
+	// image lacked used to land in MCPX_UNKNOWN_UNCLASSIFIED — i.e. a
+	// "please file a bug report" CTA on an image/config problem (#1144).
+	DockerMissingToolchain Code = "MCPX_DOCKER_MISSING_TOOLCHAIN"
 )
 
 // CONFIG domain — configuration parsing and validation failures.
@@ -74,6 +111,12 @@ const (
 	ConfigDeprecatedField Code = "MCPX_CONFIG_DEPRECATED_FIELD"
 	ConfigParseError      Code = "MCPX_CONFIG_PARSE_ERROR"
 	ConfigMissingSecret   Code = "MCPX_CONFIG_MISSING_SECRET"
+	// ConfigInvalidCommand: the server's stdio `command`/`args` pair cannot
+	// spawn anything useful — e.g. a package-runner (`npx`, `uvx`) with no
+	// package to run. mcpproxy detects this itself before spawning, so the
+	// message is ours and the user can fix it in mcp_config.json; surfacing it
+	// as UNKNOWN told them to file a bug against us instead.
+	ConfigInvalidCommand Code = "MCPX_CONFIG_INVALID_COMMAND"
 )
 
 // QUARANTINE domain — security quarantine failures.
@@ -86,6 +129,21 @@ const (
 const (
 	NetworkProxyMisconfig Code = "MCPX_NETWORK_PROXY_MISCONFIG"
 	NetworkOffline        Code = "MCPX_NETWORK_OFFLINE"
+)
+
+// UPDATE domain — desktop auto-update session failures reported by the tray
+// (spec 095). One code per stage of the closed `appcast|download|install|other`
+// enum: the stage is the ONLY failure information that ever leaves the tray, so
+// these codes carry no error text, URL, or version. Unlike every other domain,
+// they are never attached to a server's stateview — they exist purely as
+// counters in the heartbeat's error_code_counts_24h map, which admits keys by
+// catalog membership. Registration below is therefore what makes them
+// transmissible.
+const (
+	UpdateAppcastFailed  Code = "MCPX_UPDATE_APPCAST_FAILED"
+	UpdateDownloadFailed Code = "MCPX_UPDATE_DOWNLOAD_FAILED"
+	UpdateInstallFailed  Code = "MCPX_UPDATE_INSTALL_FAILED"
+	UpdateOtherFailed    Code = "MCPX_UPDATE_OTHER_FAILED"
 )
 
 // UNKNOWN — fallback when no specific classification applies.

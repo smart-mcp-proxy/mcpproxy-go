@@ -39,6 +39,7 @@ type AuthorizationCode struct {
 	CodeChallengeMethod string
 	Resource            string // RFC 8707 resource indicator
 	State               string
+	Nonce               string // OIDC nonce from the authorize request, echoed in the id_token
 	Subject             string // Username who authorized
 	ExpiresAt           time.Time
 	Used                bool
@@ -77,6 +78,7 @@ type TokenResponse struct {
 	ExpiresIn    int    `json:"expires_in"`
 	RefreshToken string `json:"refresh_token,omitempty"`
 	Scope        string `json:"scope,omitempty"`
+	IDToken      string `json:"id_token,omitempty"` // OIDC (Options.OIDC) auth-code responses only
 }
 
 // TokenErrorResponse represents a token error response.
@@ -88,9 +90,9 @@ type TokenErrorResponse struct {
 
 // ProtectedResourceMetadata represents OAuth 2.0 Protected Resource Metadata (RFC 9728).
 type ProtectedResourceMetadata struct {
-	Resource              string   `json:"resource"`
-	AuthorizationServers  []string `json:"authorization_servers"`
-	ScopesSupported       []string `json:"scopes_supported,omitempty"`
+	Resource               string   `json:"resource"`
+	AuthorizationServers   []string `json:"authorization_servers"`
+	ScopesSupported        []string `json:"scopes_supported,omitempty"`
 	BearerMethodsSupported []string `json:"bearer_methods_supported,omitempty"`
 }
 
@@ -107,6 +109,12 @@ type DiscoveryMetadata struct {
 	GrantTypesSupported               []string `json:"grant_types_supported"`
 	CodeChallengeMethodsSupported     []string `json:"code_challenge_methods_supported"`
 	TokenEndpointAuthMethodsSupported []string `json:"token_endpoint_auth_methods_supported"`
+
+	// OpenID Provider Metadata additions (Options.OIDC only).
+	UserinfoEndpoint                 string   `json:"userinfo_endpoint,omitempty"`
+	IDTokenSigningAlgValuesSupported []string `json:"id_token_signing_alg_values_supported,omitempty"`
+	SubjectTypesSupported            []string `json:"subject_types_supported,omitempty"`
+	ClaimsSupported                  []string `json:"claims_supported,omitempty"`
 }
 
 // DeviceAuthorizationResponse represents the response from the device authorization endpoint.
@@ -121,12 +129,12 @@ type DeviceAuthorizationResponse struct {
 
 // ClientRegistrationRequest represents a DCR request.
 type ClientRegistrationRequest struct {
-	RedirectURIs              []string `json:"redirect_uris"`
-	GrantTypes                []string `json:"grant_types,omitempty"`
-	ResponseTypes             []string `json:"response_types,omitempty"`
-	ClientName                string   `json:"client_name,omitempty"`
-	Scope                     string   `json:"scope,omitempty"`
-	TokenEndpointAuthMethod   string   `json:"token_endpoint_auth_method,omitempty"`
+	RedirectURIs            []string `json:"redirect_uris"`
+	GrantTypes              []string `json:"grant_types,omitempty"`
+	ResponseTypes           []string `json:"response_types,omitempty"`
+	ClientName              string   `json:"client_name,omitempty"`
+	Scope                   string   `json:"scope,omitempty"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method,omitempty"`
 }
 
 // ClientRegistrationResponse represents a successful DCR response.

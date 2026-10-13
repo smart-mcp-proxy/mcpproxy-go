@@ -1,4 +1,7 @@
-import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ConnectResult, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus } from '@/types'
+import type { APIResponse, Server, Tool, ToolApproval, SearchResult, StatusUpdate, StatusResponse, SecretRef, MigrationAnalysis, ConfigSecretsResponse, GetToolCallsResponse, GetToolCallDetailResponse, GetServerToolCallsResponse, GetConfigResponse, ValidateConfigResponse, ConfigApplyResult, ServerTokenMetrics, GetRegistriesResponse, SearchRegistryServersResponse, RegistrySummary, CatalogSearchResponse, GetSessionsResponse, GetSessionDetailResponse, InfoResponse, ActivityListResponse, ActivityDetailResponse, ActivityRecord, ActivitySummaryResponse, ImportResponse, AgentTokenInfo, CreateAgentTokenRequest, CreateAgentTokenResponse, RoutingInfo, ConnectStatusResponse, ClientStatus, ConnectResult, ConnectPreview, OnboardingStateResponse, OnboardingMarkRequest, DiagnosticFixResponse, GlobalToolsResponse, UsageAggregateResponse, UsageWindow, UsageSort, UsageStatus, AttentionResponse, ReviewQueueResponse, ServerReviewResponse } from '@/types'
+import type { ProfileConfig, ProfileList, ProfileView, ProfileWriteResult, ProfileRenameResult, ProfileDeleteResult, EffectiveToolsResult, TryProfileResponse, AccessExplanation, ExplainSubjectQuery, ClientView, ClientsResponse, BulkAssignResponse, CustomClientResponse, RotateResponse, UpgradePreview, UpgradeApplyResult, ForgetClientResponse, ConnectOptions } from '@/types/api'
+
+import { joinHoldEvidence, type HoldEvidenceSource } from '@/utils/holdEvidence'
 
 // Event types for API service
 export interface APIAuthEvent {
@@ -44,6 +47,63 @@ export interface AddRegistrySourceResult {
   code?: string
 }
 
+// Spec 108-i: a REST refusal that keeps the whole body. The generic request()
+// collapses a failure to its `error` text; a guard refusal needs `bindings` and
+// `fixes`, a delete-in-use needs `used_by`, a validator 400 needs `field`.
+type BindingRefBody = { client_id: string; token_name: string; profile: string; mode: string }
+type GuardFixBody = { kind: string; target?: string }
+
+export class ApiError extends Error {
+  status: number
+  code?: string
+  field?: string
+  used_by?: { clients: Array<{ id: string; mode: string }>; tokens: string[]; anonymous_profile: boolean }
+  bindings?: BindingRefBody[]
+  fixes?: GuardFixBody[]
+  skipped?: Array<{ client_id: string; code: string; error?: string }>
+  conflicting_token?: string
+  remediation?: string
+  action?: string
+  constructor(status: number, body: Record<string, any>, fallback: string) {
+    super(typeof body?.error === 'string' && body.error ? body.error : fallback)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = body?.code
+    this.field = body?.field
+    this.used_by = body?.used_by
+    this.bindings = body?.bindings
+    this.fixes = body?.fixes
+    this.skipped = body?.skipped
+    this.conflicting_token = body?.conflicting_token
+    this.remediation = body?.remediation
+    this.action = body?.action
+  }
+}
+
+function queryString(params: Record<string, string | number | boolean | undefined | null>): string {
+  const q = new URLSearchParams()
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue
+    q.set(k, String(v))
+  }
+  const text = q.toString()
+  return text ? `?${text}` : ''
+}
+
+
+/**
+ * withExpectedIncarnation adds `expected_incarnation` to an approval body when
+ * the caller knows the incarnation of the server it reviewed (Spec 116
+ * FR-017). Unknown (undefined or 0) leaves the body unchanged: the backend then
+ * binds to the incarnation current when the request arrives.
+ */
+export function withExpectedIncarnation<T extends object>(body: T, expectedIncarnation?: number): T & { expected_incarnation?: number } {
+  if (expectedIncarnation && expectedIncarnation > 0) {
+    return { ...body, expected_incarnation: expectedIncarnation }
+  }
+  return body
+}
+
 class APIService {
   private baseUrl = ''
   private apiKey = ''
@@ -71,7 +131,7 @@ class APIService {
       this.apiKey = apiKeyFromURL
       // Store the new API key for future navigation/refreshes
       localStorage.setItem('mcpproxy-api-key', apiKeyFromURL)
-      console.log('API key from URL (updating storage):', this.apiKey.substring(0, 8) + '...')
+      // SEC-07: never log key material (not even a prefix) to the devtools console.
       // Clean the URL by removing the API key parameter for security
       urlParams.delete('apikey')
       const newURL = window.location.pathname + (urlParams.toString() ? '?' + urlParams.toString() : '')
@@ -81,9 +141,6 @@ class APIService {
       const storedApiKey = localStorage.getItem('mcpproxy-api-key')
       if (storedApiKey) {
         this.apiKey = storedApiKey
-        console.log('API key from localStorage:', this.apiKey.substring(0, 8) + '...')
-      } else {
-        console.log('No API key found in URL or localStorage')
       }
     }
   }
@@ -116,7 +173,7 @@ class APIService {
     this.apiKey = key
     if (key) {
       localStorage.setItem('mcpproxy-api-key', key)
-      console.log('API key set and stored:', key.substring(0, 8) + '...')
+      // SEC-07: no key material in the console, not even a prefix.
     } else {
       localStorage.removeItem('mcpproxy-api-key')
       console.log('API key cleared')
@@ -200,11 +257,11 @@ class APIService {
       // Add API key header if available
       if (this.apiKey) {
         headers['X-API-Key'] = this.apiKey
-        console.log(`API request to ${endpoint} with API key: ${this.getAPIKeyPreview()}`)
       } else {
+        // SEC-07: log only that the request is unauthenticated. The previous
+        // lines echoed the key prefix, window.location.search (which can still
+        // carry ?apikey=) and the localStorage value on every single call.
         console.log(`API request to ${endpoint} without API key - initialized: ${this.initialized}`)
-        console.log('Current URL search params:', window.location.search)
-        console.log('LocalStorage API key:', localStorage.getItem('mcpproxy-api-key')?.substring(0, 8) + '...')
       }
 
       const response = await fetch(`${this.baseUrl}${endpoint}`, {
@@ -245,12 +302,59 @@ class APIService {
     }
   }
 
+  // Spec 108-i I1: like request() but a failure throws an ApiError that carries
+  // the whole error body. It reports an auth error for a 401 only: a 403 from
+  // requireServerOp means "not an administrator" and is shown inline, never as
+  // a lost API key.
+  private async requestRaw<T>(endpoint: string, options: RequestInit = {}): Promise<APIResponse<T>> {
+    if (!this.initialized) this.initializeAPIKey()
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'X-MCPProxy-Client': 'webui/web',
+    }
+    if (options.headers) {
+      if (options.headers instanceof Headers) {
+        options.headers.forEach((value, key) => { headers[key] = value })
+      } else if (Array.isArray(options.headers)) {
+        options.headers.forEach(([key, value]) => { headers[key] = value })
+      } else {
+        Object.assign(headers, options.headers)
+      }
+    }
+    if (this.apiKey) headers['X-API-Key'] = this.apiKey
+
+    let response: Response
+    try {
+      response = await fetch(`${this.baseUrl}${endpoint}`, { ...options, headers })
+    } catch (err) {
+      throw new ApiError(0, {}, err instanceof Error ? err.message : 'Network error')
+    }
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}))
+      const error = new ApiError(response.status, body ?? {}, `HTTP ${response.status}: ${response.statusText}`)
+      if (response.status === 401) this.emitAuthError(error.message, response.status)
+      throw error
+    }
+    if (response.status === 204) return { success: true } as APIResponse<T>
+    return (await response.json()) as APIResponse<T>
+  }
+
+  // The unwrapped form the new Profiles v3 methods return: the envelope's data.
+  private async data<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
+    const response = await this.requestRaw<T>(endpoint, options)
+    return response.data as T
+  }
+
   // Status endpoint
   // `default_instructions` is the resolved built-in MCP instructions default
   // (MCP-2175) — present once the backend exposes it; optional so the Web UI
   // degrades gracefully against older cores.
-  async getStatus(): Promise<APIResponse<{ edition: string; running: boolean; routing_mode: string; default_instructions?: string }>> {
-    return this.request<{ edition: string; running: boolean; routing_mode: string; default_instructions?: string }>('/api/v1/status')
+  //
+  // `activation` is the Spec 044 activation funnel snapshot the endpoint
+  // already serves to an admin caller (omitted for scoped agent tokens, and
+  // absent when telemetry is not yet wired) — hence optional all the way down.
+  async getStatus(): Promise<APIResponse<StatusResponse>> {
+    return this.request<StatusResponse>('/api/v1/status')
   }
 
   // Routing mode endpoint
@@ -258,9 +362,62 @@ class APIService {
     return this.request<RoutingInfo>('/api/v1/routing')
   }
 
+  // Profiles v3 (Spec 108-f routes, Spec 108-i names verbatim). Every method
+  // throws an ApiError on a non-2xx answer. The v2 getActiveProfile /
+  // setActiveProfile pair is gone: nothing first-party reads or writes the
+  // server-level default any more (FR-039).
+  getProfiles(): Promise<ProfileList> {
+    return this.data<ProfileList>('/api/v1/profiles')
+  }
+
+  getProfile(name: string): Promise<ProfileView> {
+    return this.data<ProfileView>(`/api/v1/profiles/${encodeURIComponent(name)}`)
+  }
+
+  createProfile(cfg: ProfileConfig): Promise<ProfileWriteResult> {
+    return this.data<ProfileWriteResult>('/api/v1/profiles', { method: 'POST', body: JSON.stringify(cfg) })
+  }
+
+  updateProfile(name: string, cfg: ProfileConfig): Promise<ProfileWriteResult> {
+    return this.data<ProfileWriteResult>(`/api/v1/profiles/${encodeURIComponent(name)}`, { method: 'PUT', body: JSON.stringify(cfg) })
+  }
+
+  renameProfile(name: string, new_name: string): Promise<ProfileRenameResult> {
+    return this.data<ProfileRenameResult>(`/api/v1/profiles/${encodeURIComponent(name)}/rename`, { method: 'POST', body: JSON.stringify({ new_name }) })
+  }
+
+  deleteProfile(name: string, opts: { reassign_to?: string; force?: boolean } = {}): Promise<ProfileDeleteResult> {
+    const q = queryString({ reassign_to: opts.reassign_to, force: opts.force ? 'true' : undefined })
+    return this.data<ProfileDeleteResult>(`/api/v1/profiles/${encodeURIComponent(name)}${q}`, { method: 'DELETE' })
+  }
+
+  getProfileEffectiveTools(name: string, opts: { client?: string; server?: string; reason?: string } = {}): Promise<EffectiveToolsResult> {
+    return this.data<EffectiveToolsResult>(`/api/v1/profiles/${encodeURIComponent(name)}/effective-tools${queryString(opts)}`)
+  }
+
+  tryProfile(body: { profile: ProfileConfig; query: string; limit?: number }): Promise<TryProfileResponse> {
+    return this.data<TryProfileResponse>('/api/v1/profiles/try', { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  explainAccess(subject: ExplainSubjectQuery): Promise<AccessExplanation> {
+    const q = queryString({ tool: subject.tool, client: subject.client, token: subject.token, profile: subject.profile, anonymous: subject.anonymous ? 'true' : undefined })
+    return this.data<AccessExplanation>(`/api/v1/access/explain${q}`)
+  }
+
+  // Needs-attention list (Spec 109 FR-001): the one list every surface reads.
+  async getAttention(): Promise<APIResponse<AttentionResponse>> {
+    return this.request<AttentionResponse>('/api/v1/attention')
+  }
+
   // Server endpoints
-  async getServers(): Promise<APIResponse<{ servers: Server[] }>> {
-    return this.request<{ servers: Server[] }>('/api/v1/servers')
+  // Spec 109-l: `scope.profile` asks for the servers (and tool counts) a profile
+  // admits (GET /servers?profile=, Spec 108-e). An unscoped call is the plain
+  // request; a scoped one throws an ApiError that carries the status, so the
+  // page can say "Profile not found" instead of a generic failure.
+  async getServers(scope?: { profile?: string }): Promise<APIResponse<{ servers: Server[] }>> {
+    const query = queryString({ profile: scope?.profile })
+    if (!query) return this.request<{ servers: Server[] }>('/api/v1/servers')
+    return this.requestRaw<{ servers: Server[] }>(`/api/v1/servers${query}`)
   }
 
   async enableServer(serverName: string): Promise<APIResponse> {
@@ -295,12 +452,6 @@ class APIService {
 
   async quarantineServer(serverName: string): Promise<APIResponse> {
     return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}/quarantine`, {
-      method: 'POST',
-    })
-  }
-
-  async unquarantineServer(serverName: string): Promise<APIResponse> {
-    return this.request(`/api/v1/servers/${encodeURIComponent(serverName)}/unquarantine`, {
       method: 'POST',
     })
   }
@@ -363,20 +514,44 @@ class APIService {
     )
   }
 
-  async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[] }>> {
-    return this.request<{ tools: Tool[] }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
+  // `incarnation` (Spec 116 FR-017) is the server identity the rows were read
+  // for; per-tool decisions echo it as expected_incarnation.
+  async getServerTools(serverName: string): Promise<APIResponse<{ tools: Tool[]; incarnation?: number }>> {
+    return this.request<{ tools: Tool[]; incarnation?: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools`)
   }
 
   // Global tools listing (Spec 050) — all tools across all servers from a single consolidated endpoint.
-  async getGlobalTools(): Promise<APIResponse<GlobalToolsResponse>> {
-    return this.request<GlobalToolsResponse>('/api/v1/tools')
+  //
+  // Spec 108-j (FR-032): with a `client` or `profile` the listing is a view-as
+  // (rows gain `access`/`profile_tier`). That goes through requestRaw so a
+  // 400/403/404 keeps its status and body: the page shows "Client not found"
+  // inline instead of a blank table. Without a scope the call is unchanged.
+  async getGlobalTools(scope?: { client?: string; profile?: string }): Promise<APIResponse<GlobalToolsResponse>> {
+    const query = queryString({ client: scope?.client, profile: scope?.profile })
+    if (!query) return this.request<GlobalToolsResponse>('/api/v1/tools')
+    return this.requestRaw<GlobalToolsResponse>(`/api/v1/tools${query}`)
   }
 
-  // Tool-level quarantine (Spec 032)
-  async getToolApprovals(serverName: string): Promise<APIResponse<{ tools: ToolApproval[], count: number }>> {
-    const response = await this.request<{ tools: ToolApproval[], count: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/export`)
+  // Tool-level quarantine (Spec 032) + scan-gate hold evidence (Spec 088).
+  //
+  // The record source stays `/tools/export`: those approval records are durable,
+  // so pending/blocked tools remain visible when a server is disconnected or the
+  // index is empty. That payload carries no held_* evidence, so the inventory
+  // endpoint `/tools` is fetched in parallel purely as ENRICHMENT and joined by
+  // tool name. The enrichment call is caught individually and degrades to null —
+  // a failed evidence fetch must never drop a durable approval record. The
+  // enrichment is joined only when both reads name the same server incarnation
+  // (Spec 116 FR-017).
+  async getToolApprovals(serverName: string): Promise<APIResponse<{ tools: ToolApproval[], count: number, incarnation?: number }>> {
+    const encoded = encodeURIComponent(serverName)
+    const [response, enrichment] = await Promise.all([
+      this.request<{ tools: ToolApproval[], count: number, incarnation?: number }>(`/api/v1/servers/${encoded}/tools/export`),
+      this.request<{ tools: HoldEvidenceSource[]; incarnation?: number }>(`/api/v1/servers/${encoded}/tools`)
+        .catch(() => null),
+    ])
+
     if (response.success && response.data?.tools) {
-      response.data.tools = response.data.tools.map((tool) => {
+      const normalized = response.data.tools.map((tool) => {
         const disabled = typeof tool.disabled === 'boolean'
           ? tool.disabled
           : (typeof tool.enabled === 'boolean' ? !tool.enabled : false)
@@ -386,6 +561,14 @@ class APIService {
           enabled: !disabled,
         }
       })
+      // Spec 116 PR2 review round 8 (FR-017): the two reads are independent,
+      // so a remove + same-name re-add between them pairs the replacement's
+      // records with the removed server's hold verdict and signals. Enrich
+      // only when both envelopes name the same incarnation; otherwise the
+      // records are returned without evidence (the degraded path above).
+      const sameServer = (enrichment?.data?.incarnation ?? null) === (response.data.incarnation ?? null)
+      const evidence = enrichment?.success && sameServer ? enrichment.data?.tools ?? null : null
+      response.data.tools = joinHoldEvidence(normalized, evidence)
     }
     return response
   }
@@ -394,13 +577,22 @@ class APIService {
     return this.request<ToolApproval>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/${encodeURIComponent(toolName)}/diff`)
   }
 
-  async approveTools(serverName: string, tools?: string[]): Promise<APIResponse<{ approved: number }>> {
-    const body = tools && tools.length > 0
+  // Spec 116 FR-017: every approval write accepts the incarnation of the server
+  // the operator reviewed (the `incarnation` of GET /servers or of the review
+  // payload). The backend answers 409 server_replaced, and writes nothing, when
+  // the server was removed and re-added since. Omitted when unknown.
+  // Spec 117 PR-2 (#1566): expectedHashes (tool name -> the review's current_hash) binds the
+  // approval to the reviewed definitions; the core answers 409 review_out_of_date ("out of date")
+  // and approves nothing when one changed. The two bindings are independent and may be sent
+  // together. Undefined sends an unbound (legacy) request.
+  async approveTools(serverName: string, tools?: string[], expectedIncarnation?: number, expectedHashes?: Record<string, string>): Promise<APIResponse<{ approved: number }>> {
+    const body: Record<string, unknown> = tools && tools.length > 0
       ? { tools }
       : { approve_all: true }
+    if (expectedHashes) body.expected_hashes = expectedHashes
     return this.request<{ approved: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/approve`, {
       method: 'POST',
-      body: JSON.stringify(body),
+      body: JSON.stringify(withExpectedIncarnation(body, expectedIncarnation)),
     })
   }
 
@@ -408,38 +600,40 @@ class APIService {
   // against POST .../tools/block — {tools:[...]} for an explicit set,
   // {block_all:true} otherwise. Blocking is reversible (the tool can be
   // re-enabled later), so no destructive-confirm gate is needed.
-  async blockTools(serverName: string, tools?: string[]): Promise<APIResponse<{ blocked: number }>> {
+  async blockTools(serverName: string, tools?: string[], expectedIncarnation?: number): Promise<APIResponse<{ blocked: number }>> {
     const body = tools && tools.length > 0
       ? { tools }
       : { block_all: true }
     return this.request<{ blocked: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/block`, {
       method: 'POST',
-      body: JSON.stringify(body),
+      body: JSON.stringify(withExpectedIncarnation(body, expectedIncarnation)),
     })
   }
 
-  async setToolEnabled(serverName: string, toolName: string, enabled: boolean): Promise<APIResponse<{
+  async setToolEnabled(serverName: string, toolName: string, enabled: boolean, expectedIncarnation?: number): Promise<APIResponse<{
     server_name: string
     tool_name: string
     enabled: boolean
   }>> {
     return this.request<{ server_name: string; tool_name: string; enabled: boolean }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/${encodeURIComponent(toolName)}/enabled`, {
       method: 'POST',
-      body: JSON.stringify({ enabled }),
+      body: JSON.stringify(withExpectedIncarnation({ enabled }, expectedIncarnation)),
     })
   }
 
   // Bulk-toggle every known tool of a server. The response's `changed`
   // field reflects only tools whose state actually changed — already-correct
   // tools are skipped on the server side.
-  async setAllToolsEnabled(serverName: string, enabled: boolean): Promise<APIResponse<{
+  async setAllToolsEnabled(serverName: string, enabled: boolean, expectedIncarnation?: number): Promise<APIResponse<{
     server_name: string
     enabled: boolean
     changed: number
   }>> {
     const action = enabled ? 'enable_all' : 'disable_all'
+    const bound = expectedIncarnation && expectedIncarnation > 0
     return this.request<{ server_name: string; enabled: boolean; changed: number }>(`/api/v1/servers/${encodeURIComponent(serverName)}/tools/${action}`, {
       method: 'POST',
+      ...(bound ? { body: JSON.stringify({ expected_incarnation: expectedIncarnation }) } : {}),
     })
   }
 
@@ -460,10 +654,11 @@ class APIService {
       ? `${this.baseUrl}/events?apikey=${encodeURIComponent(this.apiKey)}`
       : `${this.baseUrl}/events`
 
+    // SEC-07: the "redacted" URL used to be redacted WITH the key preview, so it
+    // leaked the first 8 characters anyway. Redact fully and drop the preview.
     console.log('Creating EventSource:', {
       hasApiKey: !!this.apiKey,
-      apiKeyPreview: this.getAPIKeyPreview(),
-      url: this.apiKey ? url.replace(this.apiKey, this.getAPIKeyPreview()) : url
+      url: this.apiKey ? url.replace(encodeURIComponent(this.apiKey), '[redacted]') : url
     })
 
     return new EventSource(url)
@@ -610,9 +805,26 @@ class APIService {
   }
 
   // Session management endpoints
-  async getSessions(limit?: number): Promise<APIResponse<GetSessionsResponse>> {
-    const url = `/api/v1/sessions${limit ? `?limit=${limit}` : ''}`
-    return this.request<GetSessionsResponse>(url)
+  // status narrows the listing server-side ('active' | 'closed'). Without it the
+  // backend returns the most recent sessions of ANY status, so a small limit can
+  // be filled entirely by closed ones and hide a live client (audit F10).
+  // `scope` is Spec 108 FR-031 / url-filter-contract.md's Sessions row:
+  // profile/client/token, sent only once `features.scope_filters` lists them
+  // (macOS's ScopeFilter.restRequest does the identical thing for the same
+  // endpoint — zcode review round 1, F8).
+  async getSessions(
+    limit?: number,
+    status?: 'active' | 'closed',
+    scope?: { profile?: string; client?: string; token?: string }
+  ): Promise<APIResponse<GetSessionsResponse>> {
+    const params = new URLSearchParams()
+    if (limit) params.set('limit', String(limit))
+    if (status) params.set('status', status)
+    if (scope?.profile) params.set('profile', scope.profile)
+    if (scope?.client) params.set('client', scope.client)
+    if (scope?.token) params.set('token', scope.token)
+    const query = params.toString()
+    return this.request<GetSessionsResponse>(`/api/v1/sessions${query ? `?${query}` : ''}`)
   }
 
   async getSessionDetail(sessionId: string): Promise<APIResponse<GetSessionDetailResponse>> {
@@ -658,6 +870,17 @@ class APIService {
     })
   }
 
+  // Spec 108-i I21: the anonymous_profile setting is written through PATCH
+  // /config like every setting, but a refusal (409 binding_bypassable_without_auth)
+  // must keep its `bindings` and `fixes`, which patchConfig's generic error path
+  // drops. `profile: ''` is "Unconfined".
+  async setAnonymousProfile(profile: string): Promise<APIResponse<ConfigApplyResult>> {
+    return this.requestRaw<ConfigApplyResult>('/api/v1/config', {
+      method: 'PATCH',
+      body: JSON.stringify({ anonymous_profile: profile }),
+    })
+  }
+
   // Token statistics endpoints
   async getTokenStats(): Promise<APIResponse<ServerTokenMetrics>> {
     return this.request<ServerTokenMetrics>('/api/v1/stats/tokens')
@@ -694,6 +917,25 @@ class APIService {
 
     const url = `/api/v1/registries/${encodeURIComponent(registryId)}/servers${params.toString() ? '?' + params.toString() : ''}`
     return this.request<SearchRegistryServersResponse>(url)
+  }
+
+  // Catalog (Spec 109 FR-060): source-agnostic search across every enabled
+  // catalog source. `source` narrows to one (never selects a UI tab — that's
+  // the caller's job, FR-062).
+  async catalogSearch(options?: {
+    q?: string
+    source?: string
+    tag?: string
+    limit?: number
+  }): Promise<APIResponse<CatalogSearchResponse>> {
+    const params = new URLSearchParams()
+    if (options?.q) params.append('q', options.q)
+    if (options?.source) params.append('source', options.source)
+    if (options?.tag) params.append('tag', options.tag)
+    if (options?.limit) params.append('limit', options.limit.toString())
+
+    const url = `/api/v1/catalog/search${params.toString() ? '?' + params.toString() : ''}`
+    return this.request<CatalogSearchResponse>(url)
   }
 
   // MCP-866 / MCP-867: add a user-supplied registry source. The server tags an
@@ -898,12 +1140,21 @@ class APIService {
     server?: string
     tool?: string
     session_id?: string
+    work_session_id?: string
     status?: string
     intent_type?: string
+    /** Sub-calls of one code_execution run: the parent record's request_id. */
+    parent_id?: string
+    /** Exact correlation id — used to jump from a sub-call back to its parent. */
+    request_id?: string
     start_time?: string
     end_time?: string
     limit?: number
     offset?: number
+    /** Spec 108 FR-031: `-` means unattributed. Sent only once available. */
+    profile?: string
+    client?: string
+    token?: string
   }): Promise<APIResponse<ActivityListResponse>> {
     const searchParams = new URLSearchParams()
     if (params) {
@@ -917,12 +1168,32 @@ class APIService {
     return this.request<ActivityListResponse>(url)
   }
 
+  // Spec 107 FR-041/FR-043(k), T086/T088: the tenant-scoped twin of
+  // getActivities() above — the core `/activity*` doors 403 a session
+  // principal (contracts/rest-endpoints.md); a tenant reads their own
+  // records, entitled-server-filtered, from this door instead. Response
+  // shape is `{items,total}` with only `limit`/`offset` (no type/server/etc.
+  // query params — those apply client-side in Activity.vue, same as today).
+  async getUserActivity(params?: { limit?: number; offset?: number }): Promise<APIResponse<{ items: ActivityRecord[]; total: number }>> {
+    const searchParams = new URLSearchParams()
+    if (params) {
+      Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined) searchParams.append(key, String(value))
+      })
+    }
+    const url = `/api/v1/user/activity${searchParams.toString() ? '?' + searchParams.toString() : ''}`
+    return this.request<{ items: ActivityRecord[]; total: number }>(url)
+  }
+
   async getActivityDetail(id: string): Promise<APIResponse<ActivityDetailResponse>> {
     return this.request<ActivityDetailResponse>(`/api/v1/activity/${encodeURIComponent(id)}`)
   }
 
-  async getActivitySummary(period: string = '24h'): Promise<APIResponse<ActivitySummaryResponse>> {
-    return this.request<ActivitySummaryResponse>(`/api/v1/activity/summary?period=${period}`)
+  async getActivitySummary(
+    period: string = '24h',
+    scope?: { profile?: string; client?: string; token?: string },
+  ): Promise<APIResponse<ActivitySummaryResponse>> {
+    return this.request<ActivitySummaryResponse>(`/api/v1/activity/summary${queryString({ period, ...scope })}`)
   }
 
   // Usage statistics aggregate for the Web UI usage graphs (Spec 069).
@@ -933,6 +1204,10 @@ class APIService {
     status?: UsageStatus
     top?: number
     sort?: UsageSort
+    /** Spec 108 FR-031: `-` means unattributed. Sent only once available. */
+    profile?: string
+    client?: string
+    token?: string
   }): Promise<APIResponse<UsageAggregateResponse>> {
     const searchParams = new URLSearchParams()
     if (params) {
@@ -950,10 +1225,21 @@ class APIService {
     format: 'json' | 'csv'
     type?: string
     server?: string
+    tool?: string
     status?: string
+    /** Raw MCP transport session id (see useScopeQuery's sessionRestParam). */
+    session_id?: string
+    /** Work session id (`ws-` prefix; see useScopeQuery's sessionRestParam). */
+    work_session_id?: string
+    /** Export only the sub-calls of one code_execution run. */
+    parent_id?: string
     start_time?: string
     end_time?: string
     include_bodies?: boolean
+    /** Spec 108 FR-031: the export matches the filtered table. */
+    profile?: string
+    client?: string
+    token?: string
   }): string {
     const searchParams = new URLSearchParams()
     searchParams.append('format', params.format)
@@ -974,6 +1260,17 @@ class APIService {
     format?: string
     server_names?: string[]
     preview?: boolean
+    // Paste tab env/header edits (Value or Secret-ref), applied server-side
+    // to the server this same request's `content` parses to — only takes
+    // effect when preview is false. See PasteServer.vue's handleAdd.
+    env_override?: Record<string, string>
+    header_override?: Record<string, string>
+    // Opt into detecting a bare URL or single command line (FR-064) when
+    // JSON/TOML detection fails. Only the Paste tab sets this — every other
+    // caller (the general "Import config" panel, canonical-path import)
+    // must keep getting a clear detection error for a plain one-liner
+    // instead of it being silently guessed at (review round 4 F-E).
+    allow_paste_fallback?: boolean
   }): Promise<APIResponse<ImportResponse>> {
     const url = `/api/v1/servers/import/json${params.preview ? '?preview=true' : ''}`
     return this.request<ImportResponse>(url, {
@@ -981,7 +1278,10 @@ class APIService {
       body: JSON.stringify({
         content: params.content,
         format: params.format,
-        server_names: params.server_names
+        server_names: params.server_names,
+        env_override: params.env_override,
+        header_override: params.header_override,
+        allow_paste_fallback: params.allow_paste_fallback
       })
     })
   }
@@ -1064,12 +1364,15 @@ class APIService {
   }
 
   // Agent Token Management (Spec 028)
-  async listAgentTokens(): Promise<APIResponse<{ tokens: AgentTokenInfo[] }>> {
-    return this.request<{ tokens: AgentTokenInfo[] }>('/api/v1/tokens')
+  // Spec 108-i: `profile` / `token` are the Spec 108-f server-side filters
+  // (current pin; `token` is an exact name). A 400 body reaches the caller as an
+  // ApiError so a `field: "name"` refusal can be shown under the name input.
+  async listAgentTokens(scope: { profile?: string; token?: string } = {}): Promise<APIResponse<{ tokens: AgentTokenInfo[] }>> {
+    return this.requestRaw<{ tokens: AgentTokenInfo[] }>(`/api/v1/tokens${queryString(scope)}`)
   }
 
   async createAgentToken(req: CreateAgentTokenRequest): Promise<APIResponse<CreateAgentTokenResponse>> {
-    return this.request<CreateAgentTokenResponse>('/api/v1/tokens', {
+    return this.requestRaw<CreateAgentTokenResponse>('/api/v1/tokens', {
       method: 'POST',
       body: JSON.stringify(req),
     })
@@ -1077,6 +1380,13 @@ class APIService {
 
   async revokeAgentToken(name: string): Promise<APIResponse<void>> {
     return this.request<void>(`/api/v1/tokens/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    })
+  }
+
+  // Permanently delete a token, freeing its name for reuse (unlike revoke, a soft delete).
+  async deleteAgentToken(name: string): Promise<APIResponse<void>> {
+    return this.request<void>(`/api/v1/tokens/${encodeURIComponent(name)}/permanent`, {
       method: 'DELETE',
     })
   }
@@ -1141,10 +1451,99 @@ class APIService {
     return this.request<ConnectStatusResponse>('/api/v1/connect')
   }
 
-  async connectClient(clientId: string, serverName = 'mcpproxy', force = false): Promise<APIResponse<ConnectResult>> {
-    return this.request<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
+  async getClients(scope: { profile?: string; client?: string } = {}): Promise<APIResponse<ClientsResponse>> { return this.request(`/api/v1/clients${queryString(scope)}`) }
+  async getClient(id: string): Promise<APIResponse<import('@/types/api').ClientPresence>> { return this.request(`/api/v1/clients/${encodeURIComponent(id)}`) }
+
+  // Spec 108-f client credential routes. They answer {client, ...}; every one
+  // throws an ApiError (guard refusals carry bindings and fixes).
+  setClientBinding(id: string, body: { profile: string; mode?: 'locked' | 'switchable' }): Promise<{ client: ClientView; warnings: ClientsResponse['warnings'] }> {
+    return this.data(`/api/v1/clients/${encodeURIComponent(id)}/binding`, { method: 'PUT', body: JSON.stringify(body) })
+  }
+
+  bulkAssignClients(body: { from_profile: string; to_profile: string; mode?: 'locked' | 'switchable' }): Promise<BulkAssignResponse> {
+    return this.data<BulkAssignResponse>('/api/v1/clients/bulk-assign', { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  createCustomClient(body: { id: string; display_name?: string; profile?: string; mode?: 'locked' | 'switchable'; expires_in?: string }): Promise<CustomClientResponse> {
+    return this.data<CustomClientResponse>('/api/v1/clients', { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  rotateClient(id: string, body: { precondition_token?: string } = {}): Promise<RotateResponse> {
+    return this.data<RotateResponse>(`/api/v1/clients/${encodeURIComponent(id)}/rotate`, { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  finalizeClientRotation(id: string): Promise<{ client: ClientView; rotation: { state: string } }> {
+    return this.data(`/api/v1/clients/${encodeURIComponent(id)}/rotate/finalize`, { method: 'POST', body: '{}' })
+  }
+
+  forgetClient(id: string, opts: { disconnect?: boolean } = {}): Promise<ForgetClientResponse> {
+    return this.data<ForgetClientResponse>(`/api/v1/clients/${encodeURIComponent(id)}${queryString({ disconnect: opts.disconnect ? 'true' : undefined })}`, { method: 'DELETE' })
+  }
+
+  upgradeAdminKeyHolders(body: { profile?: string; mode?: 'locked' | 'switchable'; apply?: boolean; precondition_token?: string } = {}): Promise<UpgradePreview & UpgradeApplyResult> {
+    return this.data('/api/v1/clients/upgrade-admin-key-holders', { method: 'POST', body: JSON.stringify(body) })
+  }
+
+  // Spec 075: resolve a single client's status on demand. This is the only
+  // Connect call that reads a client config file's contents (to classify
+  // access_state), so on macOS it is the sole place an App-Data privacy prompt
+  // may legitimately appear — and it is always scoped to an explicit user
+  // action ("Check access"), never the passive listing. Returns 200 with the
+  // resolved access_state (accessible|absent|denied|malformed) and, when
+  // denied, the remediation text.
+  async getConnectClientStatus(clientId: string): Promise<APIResponse<ClientStatus>> {
+    return this.request<ClientStatus>(`/api/v1/connect/${encodeURIComponent(clientId)}`)
+  }
+
+  // Spec 078 US1: preview the exact entry a connect would write, WITHOUT
+  // modifying the file or creating a backup. The apikey in the returned entry is
+  // masked. Like getConnectClientStatus this reads the config on demand (to
+  // classify create-vs-overwrite), so on macOS it may raise an App-Data prompt;
+  // a denial returns 403 with remediation (surfaced as success:false + error).
+  async getConnectPreview(clientId: string, opts: Pick<ConnectOptions, 'profile' | 'mode' | 'keyless'> = {}): Promise<APIResponse<ConnectPreview>> {
+    // `profile: ''` is an explicit All servers, so the empty string is sent.
+    const q = new URLSearchParams()
+    if (opts.profile !== undefined) q.set('profile', opts.profile)
+    if (opts.mode) q.set('mode', opts.mode)
+    if (opts.keyless) q.set('keyless', 'true')
+    const text = q.toString()
+    return this.requestRaw<ConnectPreview>(`/api/v1/connect/${encodeURIComponent(clientId)}/preview${text ? `?${text}` : ''}`)
+  }
+
+  // Spec 108-c2/108-i: the body carries the binding and the preview's
+  // precondition token only when the caller chose them, so a reconnect without
+  // them keeps the existing binding. A refusal throws an ApiError.
+  async connectClient(clientId: string, serverName = 'mcpproxy', force = false, opts: ConnectOptions = {}): Promise<APIResponse<ConnectResult>> {
+    const body: Record<string, unknown> = { server_name: serverName, force }
+    if (opts.profile !== undefined) body.profile = opts.profile
+    if (opts.mode) body.mode = opts.mode
+    if (opts.keyless) body.keyless = true
+    if (opts.precondition_token) body.precondition_token = opts.precondition_token
+    return this.requestRaw<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}`, {
       method: 'POST',
-      body: JSON.stringify({ server_name: serverName, force })
+      body: JSON.stringify(body),
+    })
+  }
+
+  // Spec 078 US3: one-click undo of the immediately-preceding connect.
+  // backupPath is the backup_path that connect returned (null = no prior file
+  // existed, so undo removes the file connect created). The backend refuses
+  // with 409 when the config changed since the connect (never clobbers edits).
+  //
+  // The wire payload carries only the backup's bare FILENAME (backup_name), not
+  // a path: the server resolves the full path inside the client's own config
+  // directory and never trusts a client-supplied path (defense against path
+  // injection). We strip any directory component here on both / and \ so a
+  // Windows path resolves the same way.
+  async undoConnectClient(
+    clientId: string,
+    serverName = 'mcpproxy',
+    backupPath: string | null = null
+  ): Promise<APIResponse<ConnectResult>> {
+    const backupName = backupPath ? (backupPath.split(/[/\\]/).pop() ?? '') : ''
+    return this.request<ConnectResult>(`/api/v1/connect/${encodeURIComponent(clientId)}/undo`, {
+      method: 'POST',
+      body: JSON.stringify({ server_name: serverName, backup_name: backupName }),
     })
   }
 
@@ -1236,10 +1635,15 @@ class APIService {
     })
   }
 
-  async securityApprove(serverName: string, force = false): Promise<APIResponse<void>> {
+  // Spec 117 PR-2 (#1566): expectedHashes binds the approval to the reviewed definitions ({} for
+  // an empty review); undefined sends an unbound request (a review without fingerprints). It is
+  // independent of expectedIncarnation (Spec 116 FR-017) and the two travel together.
+  async securityApprove(serverName: string, force = false, block: string[] = [], expectedIncarnation?: number, expectedHashes?: Record<string, string>): Promise<APIResponse<void>> {
+    const body: Record<string, unknown> = { force, block }
+    if (expectedHashes) body.expected_hashes = expectedHashes
     return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/approve`, {
       method: 'POST',
-      body: JSON.stringify({ force }),
+      body: JSON.stringify(withExpectedIncarnation(body, expectedIncarnation)),
     })
   }
 
@@ -1247,6 +1651,14 @@ class APIService {
     return this.request<void>(`/api/v1/servers/${encodeURIComponent(serverName)}/security/reject`, {
       method: 'POST',
     })
+  }
+
+  async getReviewQueue(): Promise<APIResponse<ReviewQueueResponse>> {
+    return this.request<ReviewQueueResponse>('/api/v1/review')
+  }
+
+  async getServerReview(serverName: string): Promise<APIResponse<ServerReviewResponse>> {
+    return this.request<ServerReviewResponse>(`/api/v1/servers/${encodeURIComponent(serverName)}/review`)
   }
 
   async checkIntegrity(serverName: string): Promise<APIResponse<any>> {

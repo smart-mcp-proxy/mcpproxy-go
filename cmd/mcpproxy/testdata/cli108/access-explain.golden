@@ -1,0 +1,19 @@
+Tool: github:create_issue
+Subject: client cursor
+Profile: work-readonly (pin)
+STEP              STATUS  DETAIL          FIX
+credential        pass    -               -
+profile           pass    -               -
+server_in_scope   pass    -               -
+tool_rule         pass    -               -
+tier_cap          fail    above_tier_cap  Allow github:create_issue in Work Read-only
+token_permission  skip    -               -
+global_gate       skip    -               -
+server_state      skip    -               -
+tool_approval     skip    -               -
+VERDICT: hidden at tier_cap
+Fixes:
+  1. Allow github:create_issue in Work Read-only
+     mcpproxy profile update work-readonly --add-allow github:create_issue
+  2. Move Cursor to Work Full
+     mcpproxy client set-profile cursor <profile>

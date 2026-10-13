@@ -1,14 +1,22 @@
+---
+title: "Anonymous Telemetry"
+sidebar_label: "Telemetry"
+description: "What the anonymous daily heartbeat contains, what it never contains, and how to disable it."
+---
+
 # Anonymous Telemetry
 
 MCPProxy collects anonymous usage statistics to help improve the product. This page explains what is collected, what is not, and how to disable it.
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 5** (`schema_version: 5` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 14** (`schema_version: 14` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
 | `anonymous_id` | `550e8400-...` | Random UUID for deduplication (not linked to you) |
+| `machine_id` | `9f86d081...` (64-hex) | Stable, **non-reversible** salted hash of the OS machine id — dedups ephemeral installs whose `anonymous_id` churns every run (schema v6). Empty/omitted when unreadable. Never the raw machine id |
+| `heartbeat_id` | `7e43f31d-...` | Random UUID for one reset-on-accept counter window (schema v12). Stable across retries; rotates only after an accepted heartbeat so receivers can ingest delta counters idempotently |
 | `version` | `0.21.3` | Track version adoption |
 | `edition` | `personal` | Understand edition usage |
 | `os` | `darwin` | Platform distribution |
@@ -24,12 +32,53 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `server_docker_isolated_count` | `2` | How many configured servers the runtime actually wraps in Docker isolation (schema v3) |
 | `feature_flags.docker_isolation_enabled` | `true` | Whether global Docker isolation is turned on (schema v5). Lets us tell "isolation on, 0 matching servers" apart from "isolation off" |
 | `feature_flags.docker_cli_source` | `bundled` | How the `docker` CLI was located — fixed enum `path` / `bundled` / `login_shell` / `absent` (schema v5). The direct signal for "Docker installed but not on the spawn PATH" (issue #696). **Never** the path string itself |
+| `wizard_shown` | `true` | Whether the onboarding wizard ever rendered for this install (schema v7). Makes "shown but ignored" measurable |
+| `wizard_connect_step` | `completed_external` | Onboarding connect-step outcome — fixed enum, widened in v7 (see below) |
+| `web_ui_opened` | `12` | Lifetime count of embedded Web UI entrypoint serves (schema v7) |
+| `days_since_install` | `14` | Whole-day age of the install (schema v7). A day count, never a timestamp |
+| `active_days_30d` | `5` | Distinct UTC days with process activity in the trailing 30 days (schema v7). Only the count — never the per-day breakdown |
+| `previous_shutdown` | `clean` | How the previous process instance ended — fixed enum `clean` / `crash`, absent on first run (schema v7) |
+| `last_error_code` | `MCPX_DOCKER_CLI_NOT_FOUND` | Most recent stable `MCPX_*` diagnostic code (schema v7). Enum code only, never error text |
+| `diagnostics.current_error_codes` | `{"MCPX_OAUTH_LOGIN_REQUIRED":2}` | How many configured servers are in each failure state **right now** (schema v11) — fixed `MCPX_*` enum keys, counts only. Never server names. Omitted when nothing is failing. See below |
+| `tpa_scanner` | `{"scans_completed":4,"scans_failed":0,"scans_with_findings":1,"findings":{"high":2},"tool_change_gate_scans":6,"prompt_scans":11}` | Security/TPA scanner activity (schema v8, extended in v9) — counts only, keyed by the fixed severity enum. Omitted entirely when no scan of any kind ran |
+| `trust_mode_distribution` | `{"auto":1,"scan":3,"manual":8}` | Configured servers per effective trust tier (schema v9) — fixed enum keys `auto`/`scan`/`manual`, counts only. Never server names |
+| `feature_flags.deep_scan_enabled` | `false` | Whether the opt-in deep-scan layer is turned on (schema v8) |
+| `feature_flags.server_edition_enabled` | `false` | Whether the `server_edition` block is present and enabled (schema v13, Spec 107). Always `false` on the personal edition, where the block is never interpreted |
+| `feature_flags.idp_provider` | `none` | The configured identity-provider **family** for server-edition SSO (schema v13) — fixed enum `google` / `github` / `microsoft` / `oidc` / `none`. The kind only: never the issuer URL, tenant, client id or display name. `none` when the block is disabled or unset |
+| `member_count_bucket` | `1-10` | Number of server-edition user accounts, bucketed (schema v13) — fixed enum `0` / `1-10` / `11-100` / `101-1000` / `1000+`. `0` on the personal edition (no counter is installed); omitted only when the counter fails. A count only, never an identity. (Named `member_…`, not `user_…`: the anonymity scanner blocks the home-dir basename as a substring of the whole payload, and `user` is the username of every `USER user` container image) |
+| `env_markers.is_container` | `true` | Unchanged in v13; read together with the fields above to see how server-edition installs are deployed |
+| `preflight` | `{"filter_diag_emitted_24h":3,"availability_block_24h":2,"availability_block_reasons_24h":{"server_quarantined":2},"discovery_omission_24h":5}` | Preflight baseline counters (issue #969) — counts only, reason map keyed by a fixed enum. Omitted entirely when nothing was counted. See below |
 
 The `server_protocol_counts` map uses a **fixed enum of keys** (`stdio`, `http`, `sse`, `streamable_http`, `auto`) — server names and URLs are never included. Unknown or misconfigured protocol values are bucketed into `auto`.
 
 The `docker_cli_source` field is likewise a **fixed enum** (`path`, `bundled`, `login_shell`, `absent`); the resolved path is never transmitted.
 
 Docker isolation failures surface in `error_code_counts_24h` via three stable diagnostic codes (schema v5): `MCPX_DOCKER_CLI_NOT_FOUND` (isolation requested but the `docker` binary is unresolved — issue #696), `MCPX_DOCKER_EXEC_NOT_FOUND` (the image lacks the interpreter the server needs, e.g. `uvx` missing in `python:3.11`), and `MCPX_DOCKER_OCI_RUNTIME` (OCI runtime / architecture-mismatch failures).
+
+### Diagnostic error codes: events vs standing state (schema v11)
+
+The `diagnostics` object carries two `MCPX_*`-keyed maps, and they answer different questions:
+
+| Field | Meaning |
+|-------|---------|
+| `error_code_counts_24h` | **Events.** How many times something *newly* broke in the trailing 24 hours — a new failure classification, or a new failed connection attempt for a failure that was already standing. |
+| `current_error_codes` | **Standing state.** How many configured servers are in each failure state *right now*, recomputed at heartbeat time. Only enabled, non-quarantined servers are counted. |
+
+Both are keyed exclusively by the fixed `MCPX_*` catalog and valued by non-negative integers — never a server name, URL, command, or any free text — and the whole `diagnostics` object is omitted when there is nothing to report.
+
+**Schema v11 changed the meaning of `error_code_counts_24h`, so v10-and-earlier volumes are not comparable with v11 ones.** Through v10 the counter was level-triggered: the supervisor re-counted every *standing* failure on its 30-second reconcile tick, so a server parked awaiting an OAuth login emitted ~2,880 "events" a day while making zero connection attempts, and the number measured failing-server count times uptime rather than anything a user experienced. From v11 it is edge-triggered. `current_error_codes` was added in the same change because edge-triggering alone would have removed the "how many installs are affected right now" signal: the 24-hour window decays, so a permanently broken install would emit once and then vanish from the payload — and an absent field reads as zero.
+
+The per-code counters also start from **zero** on the upgrade to v11 rather than carrying the previous day forward: they persist in a 24-hour sliding window, so an install upgrading mid-window would otherwise have spent its first post-upgrade day reporting v10 polling volume under the v11 label. The v11 counters are stored under a separate key namespace, and the leftover v10 records are never read.
+
+## When heartbeats are sent
+
+A heartbeat goes out 5 minutes after start (so short-lived processes stay quiet), then once every 24 hours, and **once more on graceful shutdown**.
+
+The shutdown heartbeat exists because the windowed counters live in memory and are marked delivered only after the endpoint accepts a send. Without it, everything an install did after its 5-minute heartbeat was discarded whenever the process exited before the 24-hour tick — which is most desktop sessions. It is skipped when telemetry is disabled or opted out, and when nothing has been recorded since the last accepted heartbeat. It is hard-bounded to a few seconds, so an unreachable endpoint can never delay quitting. A failed send retains its frozen counter window for another attempt while the process remains alive; because counters are intentionally not persisted, a final shutdown timeout can still lose that window when the process exits.
+
+Delivery is therefore **at-least-once**, not exactly-once. If a send is cut off after the endpoint accepted it but before mcpproxy sees the response, the counts stay pending locally and are re-sent — a lost response is indistinguishable from a lost request. Schema v12 receivers treat the random `heartbeat_id` as a globally unique delta-counter window key, including if the anonymous install ID changes before a retry. `timestamp` is observation time and may change when a payload is rebuilt for retry; it is not an idempotency key. Retrying is the deliberate choice: the alternative is silently discarding the window, which is the problem the shutdown heartbeat was added to solve.
+
+Two housekeeping steps are deliberately *not* performed by the shutdown heartbeat — the 365-day anonymous-ID rotation and the one-shot `installer` launch-source attribution. Both are consumed when the payload is built rather than when it is accepted, so running them for a send that may never land would spend state a normal run still has. The next start performs both.
 
 ## What is NOT collected
 
@@ -39,16 +88,201 @@ The following is **never** collected:
 - Tool names or descriptions
 - API keys, tokens, or credentials
 - File paths or environment variables
-- IP addresses (stripped by our server before storage)
+- Your raw IP address is not part of the payload. The receiver's handling of the connection IP changed in a receiver update that is rolling out separately; see [Data handling](#data-handling) for what it does and does not keep
 - User identity, email, or account information
+- Server-edition IdP issuer URLs, tenant ids, client ids, or group names (only the provider family and a bucketed member count are sent — schema v13)
 - Tool call content, arguments, or responses
 - Any user-generated content
+- The **raw** OS machine id or any reversible hardware identifier (only the salted, non-reversible `machine_id` hash is sent — see below)
 
 ## Anonymous ID
 
 The anonymous ID is a random UUID (v4) generated on first run. It has **no correlation** to your hardware, user account, or identity. It exists solely to deduplicate heartbeats (so we don't count the same install twice in a day).
 
 You can delete it by removing the `telemetry.anonymous_id` field from your config — a new random ID will be generated on next startup.
+
+## Machine ID (schema v6)
+
+The `anonymous_id` above is a UUID persisted in the config file. In **ephemeral environments** — throwaway `HOME`s, layered Docker builds, CI runners — the config (and therefore the UUID) is regenerated on every run, so a single machine can masquerade as hundreds of distinct installs. That inflates our install counts and defeats deduplication.
+
+`machine_id` fixes this without collecting anything identifying:
+
+- It is a **salted, non-reversible hash** — `HMAC-SHA256` keyed by the OS machine id, scoped by an mcpproxy-specific application key. The **raw machine id is never transmitted**; only the hash leaves your machine.
+- The application-specific key means the value **cannot be correlated** with any other application's telemetry that hashes the same OS machine id.
+- It is **stable per physical machine**, so ephemeral installs collapse to one identity for counting.
+- If the OS machine id **cannot be read** (a container without `/etc/machine-id`, a permission error, or an exotic platform), the field is simply **omitted** — the heartbeat is never blocked, and the backend treats an absent value as "unknown".
+
+`machine_id` respects the **same opt-out** as every other field: when telemetry is disabled (see below), the entire heartbeat — including `machine_id` — is never sent.
+
+## Schema v7 — activation funnel & churn fields (Spec 080)
+
+Schema v7 adds seven purely **additive** signals so we can measure whether installs come back after day one — and, when they don't, whether the last session ended cleanly or crashed. Every field keeps the established privacy posture: **booleans, non-negative integers, or documented fixed enums only** — no timestamps, no per-server identity, no free text. The anonymity scanner (`internal/telemetry/anonymity.go`) enforces these shapes on the serialized payload before every send, and all fields use `omitempty`, so a payload with none of them set is shape-identical to a v6 payload except for `schema_version`.
+
+### Widened enum: `wizard_connect_step`
+
+The onboarding connect-step status (a v4 field) gains a fourth value in v7:
+
+| Value | Meaning |
+|-------|---------|
+| *(absent)* | Step never shown to this install |
+| `completed` | User completed the connect step inside the wizard |
+| `completed_external` | **New in v7.** User dismissed the wizard with the connect step untouched, but the install was already connected (via `mcpproxy connect`, the ConnectModal, or manual config). Previously miscounted as `skipped` |
+| `skipped` | User dismissed the wizard with the connect step untouched and **no** connection evidence existed |
+
+**Guidance for consumers**: this is a string enum that may widen again. Code that switches on `completed` / `skipped` must treat **unknown values as "other/engaged"**, never as a skip or an error. Statuses recorded before v7 are never rewritten — segment analyses by `schema_version`.
+
+### New fields
+
+| Field | Type | When it is set | Privacy rationale |
+|-------|------|----------------|-------------------|
+| `wizard_shown` | boolean | `true` once the onboarding wizard has rendered at least once for this install; omitted otherwise. Together with `wizard_engaged` it distinguishes "shown but ignored" from "never shown" | A single boolean about our own UI; carries no user data |
+| `web_ui_opened` | non-negative integer | Lifetime count of serves of the embedded Web UI **entrypoint** (index document). Asset and API requests never increment it; it is independent of `surface_requests.webui`. Coarse by design — health checkers fetching `/` count too | A counter of our own page serves; no URLs, sessions, or timing |
+| `days_since_install` | non-negative integer | Whole-day UTC age of the install, from a persisted first-install day stamp (independent of `anonymous_id`). `0` on install day; clamped at 0 on clock skew. Omitted when the local store isn't available (short-lived CLI commands) | Only a day **count** is transmitted — the install timestamp itself never leaves the machine |
+| `active_days_30d` | non-negative integer (1–30) | Number of distinct UTC days with process activity in the trailing 30-day window. Old days age out | The per-day set is stored locally and **never transmitted** — counters, not timelines |
+| `previous_shutdown` | fixed enum `clean` \| `crash` | How the **previous** process instance ended: `clean` = the graceful-shutdown path ran; `crash` = it didn't (SIGKILL, panic, power loss). Absent on a first-ever run — a fresh install is never reported as a crash. Stable across all heartbeats of the current instance | One enum value about our own process lifecycle; no stack traces, no session timing |
+| `last_error_code` | fixed enum (`MCPX_*`) | The most recently observed stable diagnostic code (same fixed set as `diagnostics.error_code_counts_24h`), persisted across restarts so a post-crash heartbeat carries the pre-crash code. Absent when no error was ever recorded | Only the enum code is stored and sent — **never** error messages, server names, paths, or stack traces. The scanner rejects any value outside the fixed diagnostics catalog |
+
+Why these exist: telemetry showed most installs connect successfully but never return after day one. `days_since_install` + `active_days_30d` make retention computable from a single heartbeat (no cross-heartbeat identity joins), and `previous_shutdown` records how the **previous** run of an install ended, and `last_error_code` the latest persisted diagnostic.
+
+**How to read churn with these fields.** `previous_shutdown` is prior-session evidence: it is fixed at startup, so every heartbeat of a run reports how the run before it ended. `last_error_code` is different: it is re-read on every heartbeat as the latest persisted diagnostic code, so it can reflect an error from the current run and has no reliable session attribution. Neither can explain why an install goes silent, because a terminal crash would be reported by a later heartbeat that, for a churned install, never arrives. Silence has competing explanations that these fields cannot separate (the user went offline, opted out, uninstalled, or simply stopped using the app). Use `previous_shutdown` to ask whether installs with a crashed previous run return less often than others, as a correlation, not as the cause of churn for any one install.
+
+### Activation: `first_real_tool_call_ever`
+
+The `activation` block gains one additive boolean:
+
+| Field | Type | When it is set | Privacy rationale |
+|-------|------|----------------|-------------------|
+| `first_real_tool_call_ever` | boolean | `true` once an upstream server has **successfully returned a usable result** for at least one real tool call, on any dispatch path: `call_tool_read` / `call_tool_write` / `call_tool_destructive`, direct routing, or a `call_tool()` sub-call inside `code_execution`. Built-in tools such as `retrieve_tools` do **not** set it, and neither do **attempted** calls that fail — malformed args, a quarantined or disabled tool, a policy refusal, a disconnected server, a transport error, an upstream answer with `isError: true`, or a result that output policy (sanitisation block, output-schema strict mode) withheld. Monotonic and lifetime-scoped, exactly like `first_retrieve_tools_call_ever` | A single boolean about our own funnel; no tool name, server, or arguments |
+
+**Why it exists.** The retrieve→call funnel used to compare a *lifetime* flag (`first_retrieve_tools_call_ever`) against a *24h windowed* counter (`retrieve_tools_calls_24h` / upstream-call counters). That asymmetry made conversion look like a cliff ("42% search → 16% call") when the true lifetime-vs-lifetime conversion is far higher. This flag is the missing symmetric term.
+
+**Success, not attempt.** The flag is stamped only for a usable result: the upstream answered, did not answer `isError: true`, and no output policy withheld the result. It is deliberately *not* stamped alongside the attempt counter. An install whose first tool call was blocked by quarantine has **not** activated, and counting it as activated would hide exactly the breakage this metric exists to surface.
+
+**One definition on every path (schema v14).** Through v13 only the `call_tool_*` wrappers fed the flag and `upstream_tool_call_count_bucket`, and the wrapper stamped the flag before checking for an upstream `isError: true` answer. From v14:
+
+- `first_real_tool_call_ever` is stamped by the wrappers, by direct routing and by each `code_execution` sub-call, under the success definition above.
+- `upstream_tool_call_count_bucket` counts one attempt per actual upstream dispatch on all three paths. Each `code_execution` sub-call counts as one attempt; the `code_execution` invocation itself is a built-in call and does not. The count is taken from the requests the core client actually handed to the transport: calls refused before dispatch (validation, quarantine, policy, disconnected server), shed or retired by the concurrency limiter, cancelled while queued, or refused because the connection generation moved are not counted, and a request repeated after an upstream session was re-initialized counts twice. An operator replaying a stored call from the REST API or Web UI is not an MCP client dispatch and counts toward neither instrument. Through v13 the wrappers counted every `call_tool_*` invocation, including refused ones, and direct routing and `code_execution` sub-calls were not counted at all.
+
+**Comparability.** The instrument's meaning changed at v14, with no new fields. Segment by `schema_version`: v13-and-earlier values of `first_real_tool_call_ever` and `upstream_tool_call_count_bucket` are not comparable with v14 ones, so do not graph them as one series. Flags already persisted on installs are lifetime and monotonic; they are not rewritten, so a pre-v14 install may carry a `true` stamped by a call that failed upstream. Receivers need no change: both fields already exist and `schema_version` is stored per heartbeat.
+
+**Eligible cohort (corrected success measurement).** Filtering heartbeats on `schema_version >= 14` is **not** enough: an install that stamped the flag on a v13 build after a failed upstream call reports that same `true` in its first v14 heartbeat with no successful call. Treat the flag as *unknown* for any install whose **earliest observed heartbeat** has `schema_version < 14`; the corrected measurement covers only installs first seen at v14 or later (compute `min(schema_version)` per `anonymous_id`). A fresh v14 install is eligible. The historical flag is deliberately not rewritten or split into a second field, so no receiver change is needed.
+
+**Guidance for consumers**: two different questions need two different definitions, and dividing flag totals answers neither.
+
+- **Prevalence (two independent rates).** Of eligible installs, the share with `first_retrieve_tools_call_ever = true`, and separately the share with `first_real_tool_call_ever = true`. These are unconditional rates over the same eligible denominator; do not divide one by the other.
+- **Conditional conversion (retrieve to real call).** Restrict to eligible installs with `first_retrieve_tools_call_ever = true`, then take the share of those with `first_real_tool_call_ever = true`. Example: three installs report (retrieve, real call) as (true, true), (true, false), (false, true). Dividing flag totals gives 2/2 = 100%, but conversion among retrieve users is 1/2 = 50%; the third install's success happened without any `retrieve_tools` call and must not sit in the numerator.
+- **Direct routing is a separate activation path.** Direct routing exposes upstream tools without `retrieve_tools`, so a successful call there stamps `first_real_tool_call_ever` with no retrieve flag. Report that group (`first_real_tool_call_ever = true` and `first_retrieve_tools_call_ever = false`) as its own count, never as a retrieve-to-call conversion.
+- **Eligible and unknown counts.** Use only the eligible cohort above. Installs whose earliest observed heartbeat has `schema_version < 14` have an unknown flag: exclude them from both numerator and denominator, and report the eligible count and the unknown count next to every rate so the coverage is visible.
+
+Do **not** compare either lifetime flag against a windowed counter, and note that the upstream attempt counter counts *dispatches* while this flag counts *success* — they are not the same denominator.
+
+### `launch_source` = `tray`
+
+`launch_source` is a v3 field, but its `tray` value was **unreachable in practice until now**: a tray-spawned core has the tray app as its parent (not `launchd`, so not `login_item`) and no TTY (so not `cli`), and nothing told it otherwise — so it fell through to `unknown`. That is why `launch_source` was ~79% `unknown` on the flagship macOS path.
+
+Both trays now stamp `MCPPROXY_LAUNCHED_BY=tray` on the core process they spawn, and the core honours it. The DMG installer's `MCPPROXY_LAUNCHED_BY=installer` still outranks it, so first-run attribution is unchanged.
+
+**Guidance for consumers**: `unknown` counts from before this fix are not comparable with counts after it — segment by version.
+
+All v7 fields ride the **same opt-out** as the rest of the heartbeat: when telemetry is disabled, nothing is transmitted. Local counters may still persist on disk (so re-enabling doesn't fabricate a fresh-install picture), but they never leave the machine.
+
+You can inspect exactly what would be sent — including every v7 field — with:
+
+```bash
+mcpproxy telemetry show-payload
+```
+
+## Schema v8 — security-scanner stats
+
+Schema v8 adds two purely **additive** signals so we can see whether the TPA / security scanner actually runs in the fleet, whether it fails, and whether it finds anything — without learning *what* it found or *where*.
+
+| Field | Type | When it is set | Privacy rationale |
+|-------|------|----------------|-------------------|
+| `tpa_scanner.scans_completed` | non-negative integer | Terminal, successful **scan jobs** since the last accepted heartbeat | A count of our own scan runs |
+| `tpa_scanner.scans_failed` | non-negative integer | Terminal **scan job** failures in the same window | The scanner id, the server, and the error text are never accepted by the counter API |
+| `tpa_scanner.scans_with_findings` | non-negative integer | Subset of `scans_completed` that produced at least one finding | Tells "scanner is running" apart from "scanner is finding things" |
+| `tpa_scanner.findings` | map, **fixed enum keys only** (`critical`/`high`/`medium`/`low`/`info`) → non-negative integer | Per-severity finding totals across the window. Severities with a zero total are omitted | Severity is a five-value enum; rule ids, finding titles, tool names, and file paths are dropped before they reach the counter |
+| `feature_flags.deep_scan_enabled` | boolean | The `security.deep_scan.enabled` master switch | A single boolean about our own config |
+
+**Unit of measure — one non-deep-scan (Pass 1) scan job.** Every `scans_*` counter counts *scan jobs*, not scanner invocations and not passes:
+
+- a job that runs five scanners counts **once**, however many of them fail — `scans_failed` counts failed jobs (all scanners failed), and a job that loses some scanners but still completes counts only in `scans_completed`;
+- the **Pass-2 deep supply-chain audit** that deep scan auto-starts after Pass 1 is **not counted**. Counting it would report ~2× the scans for exactly the deep-scan cohort that `feature_flags.deep_scan_enabled` exists to compare against everyone else;
+- **dry-run** jobs are not counted.
+
+The decision lives in the scanner package (`scanCallbackAdapter.countsForTelemetry` in `internal/security/scanner/service.go`), which is the only layer that knows a job's pass and dry-run status; it calls the single-purpose `EmitSecurityScanTelemetry` emitter hook, implemented on `Runtime` (`internal/runtime/event_bus.go`) as the only caller of the counter API. The UI-facing scan events (`EmitSecurityScanCompleted` / `EmitSecurityScanFailed`) deliberately record nothing — they fire per scanner and per pass.
+
+The whole `tpa_scanner` object is **omitted** when every counter is zero (v9 counters included), so an install that never scans emits a payload shape-identical to v7. The anonymity scanner (`internal/telemetry/anonymity.go`, rule `v8_field_invalid`) re-asserts the contract on the serialized payload before every send: whitelisted keys, non-negative integers, and severity-enum keys only — a producer-side regression that leaked a server name or rule id as a map key would block the heartbeat rather than transmit it.
+
+**Never transmitted**: the scanned server's name, the scanner id, rule ids, finding titles or descriptions, matched content, file paths, and scan error messages.
+
+## Schema v9 — making the TPA funnel measurable
+
+The v8 counters above only see **scan jobs**, which most installs never start. Two TPA detection paths run *synchronously, for ordinary users* and emitted nothing at all, so the fleet read as "the scanner never runs". Schema v9 adds a counter for each, plus the denominator they need.
+
+| Field | Type | When it is set | Privacy rationale |
+|-------|------|----------------|-------------------|
+| `tpa_scanner.tool_change_gate_scans` | non-negative integer | One per changed tool put through the synchronous `trust_mode: scan` gate (`internal/runtime.scanChangeIsClean`) since the last accepted heartbeat | Counts gate **invocations**, not outcomes. Whether the change was auto-approved or held, which server it was, and which checks matched are never accepted by the counter API |
+| `tpa_scanner.prompt_scans` | non-negative integer | One per aggregated upstream **prompt** put through the poisoning filter (`internal/server.scanAggregatedPrompts`) in the same window | Same posture: invocation count only — never the prompt name, the server, or the verdict |
+| `trust_mode_distribution` | map, **fixed enum keys only** (`auto`/`scan`/`manual`) → non-negative integer | Every heartbeat: configured servers grouped by `ServerConfig.EffectiveTrustMode()` | Three-value enum plus counts. Server names and raw config strings never reach the map |
+
+`trust_mode_distribution` is a **state** field, not a delta counter: it is recomputed from the live config on every heartbeat and never reset, and all three keys are always present (zero included) so consumers can rely on the shape. It is the denominator for `tool_change_gate_scans` — only servers resolving to `scan` can produce a gate scan at all — and the first fleet-wide view of which trust tier installs actually sit in. `EffectiveTrustMode()` is the single resolution point, so an empty (inherit) mode, a typo'd mode, and the legacy `auto_approve_tool_changes` / `skip_quarantine` fields all fold into one of the three tiers before counting.
+
+The two new counters share the window and reset semantics of every other registry counter — zeroed only after an accepted (2xx) heartbeat. **Do not sum them with the v8 job counters**: the units differ (one changed tool / one prompt vs. one scan job).
+
+The anonymity scanner enforces both shapes on the wire form: the v9 counters widen the `tpa_scanner` key whitelist (rule `v8_field_invalid`), and `trust_mode_distribution` gets its own rule `trust_mode_field_invalid` — fixed trust-tier keys with non-negative integer counts, or the heartbeat is blocked.
+
+## Preflight baseline counters (issue #969)
+
+The `preflight` sub-object measures two things the proxy currently does silently:
+how often a `retrieve_tools` response **explains a filter** it applied (spec 094's
+`filter_diagnostics` block) and whether the agent then acted on that explanation,
+and how often a tool the caller asked for **existed but was withheld**.
+
+These counters ship **one release ahead** of the required-tools-preflight feature
+on purpose. Without a live pre-feature window there is nothing to compare the
+post-feature numbers against, and "did preflight help?" degrades into an argument
+about anecdotes.
+
+| Field | Type | What it counts |
+|-------|------|----------------|
+| `preflight.filter_diag_emitted_24h` | non-negative integer | `retrieve_tools` responses that **delivered** a `filter_diagnostics` block in the last 24h — the denominator for the rest. Counted after response truncation, so a block that `tool_response_limit` cut back out of the payload is not counted (and cannot be "followed") |
+| `preflight.filter_diag_missing_annotation_24h` | non-negative integer | Omissions in those blocks caused by **absent upstream annotations** ("fix the server" class), summed across filters |
+| `preflight.filter_diag_explicit_24h` | non-negative integer | Omissions caused by an **explicitly unsafe hint** ("the filter is working" class), summed across filters |
+| `preflight.filter_diag_followed_24h` | non-negative integer | Blocks the agent **acted on**: a later `retrieve_tools` call in the same MCP session dropped or relaxed a filter the block blamed |
+| `preflight.availability_block_24h` | non-negative integer | Policy **blocks** (quarantine, scope, permissions, tool approval, output policy) in the last 24h. Derived as the sum of the reason split below — each reason is stored with its own 24h window, and a separate stored total would drift out of agreement with the split it summarises |
+| `preflight.availability_block_reasons_24h` | map, **fixed enum keys only** → non-negative integer | The same total split by reason: `intent_invalid`, `intent_rejected`, `profile_scope`, `token_scope`, `token_permission`, `server_quarantined`, `tool_pending_approval`, `tool_changed_approval`, `tool_not_callable`, `output_sanitisation`, `output_schema`, `other` |
+| `preflight.discovery_omission_24h` | non-negative integer | `retrieve_tools` responses that **withheld locked or quarantined matches** the caller could not see (`include_disabled` unset) — the silent-unavailability substrate |
+
+**How the reason keys stay safe.** The classification comes from the gate that
+fired, not from parsing the message it wrote: every call site of the single
+policy-decision funnel (`emitActivityPolicyDecision`) declares a key from the
+closed enum above, while the operator-facing prose — which embeds server and tool
+names — stays in the activity log and never reaches telemetry. A key outside the
+enum is folded into `other` at write time, filtered again at read time and in the
+wire form, and the anonymity scanner (rule `preflight_field_invalid`) blocks the
+heartbeat outright if a non-enum key ever reaches the serialized payload.
+
+**The follow-through signal holds no identity.** Detecting "the agent relaxed the
+filter" needs only the previous call's blamed filter *keys* plus the session it
+belonged to. That note is in-memory, per session, expires after 15 minutes,
+is capped, is consumed on first use (one block can be followed at most once), and
+is never persisted or transmitted — only the resulting count is.
+
+Because that note is keyed by session, a transport that mints no session id
+cannot be credited with a follow-through, while its emissions still count. Read
+`filter_diag_followed_24h / filter_diag_emitted_24h` as a **lower bound** on
+engagement, not an exact rate.
+
+The whole `preflight` object is **omitted** when every counter is zero, so an
+install that never trips one emits a payload shape-identical to one from before
+the field existed. Counters are gated at **event time**: nothing is written while
+telemetry is opted out, so an occurrence observed during opt-out can never become
+transmissible if telemetry is re-enabled later.
+
+**Never transmitted**: the query text, tool or server names, filter values, the
+session id, the number of tools in the response, or any part of the suggestion
+string the agent saw.
 
 ## One-time opt-out signal
 
@@ -103,10 +337,18 @@ export MCPPROXY_TELEMETRY=false
 
 This overrides the config file setting and is useful for CI/CD environments or system-wide policies.
 
+### How the UI shows an environment opt-out
+
+When an environment variable (`MCPPROXY_TELEMETRY=false`, `DO_NOT_TRACK` or `CI`) disables telemetry, the Web UI and the macOS app say so instead of showing the usual notice: the setup wizard's last step, the Home banner and the macOS welcome read "Anonymous usage telemetry is off — disabled by MCPPROXY_TELEMETRY=false in the environment. Nothing is sent." The telemetry toggle in Settings is shown off and disabled with the same reason; unset the variable and restart MCPProxy to change it. If you turned telemetry off in the config file yourself, no notice is shown. The core reports this state at `telemetry` in `GET /api/v1/status`.
+
+Development builds (a version that is not a release number) never send telemetry, whatever the setting. That is a property of the build and is not reflected in the UI.
+
 ## Data handling
 
 - Telemetry data is sent to a Cloudflare Worker over HTTPS
-- Source IP addresses are stripped before storage
+- Cloudflare's edge sees the connection's IP address in order to deliver the request, as it does for any HTTPS request.
+- **Rollout dependency.** The receiver update (`fix/assess-ip-minimization` in `smart-mcp-proxy/mcpproxy-telemetry`) stops persisting the raw source IP: the Worker then keeps only the heartbeat payload fields described on this page, a server-assigned timestamp, and coarse geography derived by Cloudflare. Until that update is deployed, the previously deployed receiver may still store the IP address with each heartbeat. This page describes the target contract; treat the deployed receiver revision, not this page, as the source of truth until the rollout is confirmed.
+- Heartbeats stored before the receiver stopped keeping IP addresses may still hold one; the change does not rewrite or delete historical rows. Clearing or pseudonymizing historical values is a separate operation.
 - Data is stored in Cloudflare D1 (EU region)
 - Used only for aggregate product analytics
 - No third-party analytics services receive the data

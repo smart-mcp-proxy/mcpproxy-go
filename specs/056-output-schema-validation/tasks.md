@@ -84,7 +84,7 @@ These unblock every story. Config + metadata field must exist before wiring.
 
 ## Phase 6: E2E + Polish & Cross-Cutting
 
-- [x] T019 [US1] Extend `scripts/test-api-e2e.sh` (or add a sibling stub MCP server under `e2e/`/`scripts/`) with an upstream tool declaring an `outputSchema`; assert via curl: strict-mode block returns an error mentioning schema validation, warn-mode forwards, and a `policy_decision` activity record appears. This is the mandatory curl-based verification.
+- [ ] T019 [US1] Extend `scripts/test-api-e2e.sh` (or add a sibling stub MCP server under `e2e/`/`scripts/`) with an upstream tool declaring an `outputSchema`; assert via curl: strict-mode block returns an error mentioning schema validation, warn-mode forwards, and a `policy_decision` activity record appears. This is the mandatory curl-based verification.
 - [x] T020 [P] Run `go test -race ./internal/outputvalidation/... ./internal/config/... ./internal/server/...` and fix any race/flake.
 - [x] T021 [P] Write `docs/features/output-schema-validation.md` (config block, modes table, activity queries) mirroring `quickstart.md`; add the REST/MCP behaviour note. Do NOT expand `CLAUDE.md` (40k char CI gate — at most one line if any).
 - [x] T022 [P] Run `./scripts/run-linter.sh` (golangci-lint) and resolve all findings in touched files.

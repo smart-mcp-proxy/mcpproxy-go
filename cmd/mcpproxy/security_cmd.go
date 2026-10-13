@@ -17,7 +17,6 @@ import (
 	clioutput "github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 )
 
 var (
@@ -42,8 +41,15 @@ func GetSecurityCommand() *cobra.Command {
 		Long: `Commands for managing security scanners, scanning MCP servers,
 and reviewing scan results.
 
-Security scanners run as Docker containers and analyze upstream MCP servers
-for vulnerabilities, tool poisoning attacks, and other security issues.
+Scanning works out of the box: the offline baseline scanner is built into
+mcpproxy, runs in-process on every scan, and needs no Docker and no setup. It
+analyzes tool descriptions and schemas for tool poisoning attacks (TPAs),
+prompt injection, and data exfiltration.
+
+Deep scanners are the optional extra layer. They run as Docker containers for
+source and dependency analysis (CVEs, secrets), so they need Docker plus
+"deep scan" enabled — and when they are unavailable they are skipped, never
+blocking the baseline verdict.
 
 Examples:
   mcpproxy security scanners
@@ -80,34 +86,19 @@ Examples:
 // `mcpproxy security ...` commands behave consistently with `mcpproxy serve`,
 // `mcpproxy status`, and `mcpproxy upstream ...`.
 func newSecurityCLIClient() (*cliclient.Client, *config.Config, error) {
-	var (
-		cfg *config.Config
-		err error
-	)
-	if configFile != "" {
-		cfg, err = config.LoadFromFile(configFile)
-	} else {
-		cfg, err = config.Load()
-	}
+	cfg, err := loadSecurityConfig()
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to load config: %w", err)
 	}
-	if dataDir != "" {
-		cfg.DataDir = dataDir
-	}
-	cfg.EnsureAPIKey()
-
-	socketPath := socket.DetectSocketPath(cfg.DataDir)
 
 	logger, _ := zap.NewProduction()
 	defer func() { _ = logger.Sync() }()
 
-	var client *cliclient.Client
-	if socket.IsSocketAvailable(socketPath) {
-		client = cliclient.NewClient(socketPath, logger.Sugar())
-	} else {
-		endpoint := fmt.Sprintf("http://%s", cfg.Listen)
-		client = cliclient.NewClientWithAPIKey(endpoint, cfg.APIKey, logger.Sugar())
+	// Socket first, then TCP fallback. Never generate an API key here —
+	// a fabricated key cannot match the running daemon's.
+	client, ok := newDaemonClient(cfg, logger.Sugar())
+	if !ok {
+		return nil, nil, fmt.Errorf("mcpproxy daemon is not reachable. Start with: mcpproxy serve")
 	}
 
 	return client, cfg, nil
@@ -133,6 +124,10 @@ func newSecurityEnableCmd() *cobra.Command {
 		Use:   "enable <scanner-id>",
 		Short: "Enable a security scanner",
 		Long: `Enable a security scanner by pulling its Docker image.
+
+Docker-based scanners belong to the opt-in deep-scan layer (Spec 077): they
+only run during scans when security.deep_scan.enabled=true in mcp_config.json.
+Enabling one here while deep scan is off prints a reminder.
 
 Examples:
   mcpproxy security enable mcp-scan
@@ -267,7 +262,8 @@ func newSecurityApproveCmd() *cobra.Command {
 		Use:   "approve <server>",
 		Short: "Approve a server after security scan",
 		Long: `Approve a server's security posture based on scan results.
-Use --force to approve even if findings exist.
+Use --force to approve even if findings exist. This remains an alias for
+'mcpproxy review approve <server>'.
 
 Examples:
   mcpproxy security approve github-server
@@ -285,7 +281,8 @@ func newSecurityRejectCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "reject <server>",
 		Short: "Reject a server and quarantine it",
-		Long: `Reject a server's security posture and quarantine it.
+		Long: `Reject a server's security posture and quarantine it. This remains
+an alias for 'mcpproxy review reject <server>'.
 
 Examples:
   mcpproxy security reject github-server`,
@@ -455,7 +452,29 @@ func runSecurityInstall(_ *cobra.Command, args []string) error {
 	}
 
 	fmt.Printf("Scanner %q enabled successfully.\n", scannerID)
+	// Audit FIX 3b: if the core reports that the scanner belongs to the opt-in
+	// deep-scan layer and that layer is off, tell the user — otherwise the
+	// scanner is enabled but silently never runs.
+	if hint := scannerEnableHint(respBody); hint != "" {
+		fmt.Printf("Note: %s\n", hint)
+	}
 	return nil
+}
+
+// scannerEnableHint extracts the optional "hint" field from a successful
+// POST /security/scanners/{id}/enable response ({"success":true,"data":
+// {"status":"enabled","id":...,"hint":...}}). Returns "" when the response
+// carries no hint (older cores, deep scan already enabled, in-process scanner).
+func scannerEnableHint(respBody []byte) string {
+	var wrapper struct {
+		Data struct {
+			Hint string `json:"hint"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &wrapper); err != nil {
+		return ""
+	}
+	return wrapper.Data.Hint
 }
 
 func runSecurityRemove(_ *cobra.Command, args []string) error {
@@ -677,7 +696,9 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 	//   2. Use a 750ms ticker (no tight loop, no 2s lag).
 	//   3. Honor a hard timeout based on the configured per-scanner timeout.
 	//   4. Print one progress line per tick with run/running/failed counts.
-	fmt.Printf("Scanning %q (timeout %s, job %s)...\n", serverName, hardTimeout, jobID)
+	// Progress goes to stderr so stdout stays clean for machine formats
+	// (see docs/cli-output-formatting.md).
+	fmt.Fprintf(os.Stderr, "Scanning %q (timeout %s, job %s)...\n", serverName, hardTimeout, jobID)
 	scanStart := time.Now()
 
 	ticker := time.NewTicker(750 * time.Millisecond)
@@ -687,7 +708,7 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 	for {
 		select {
 		case <-ctx.Done():
-			fmt.Println()
+			fmt.Fprintln(os.Stderr)
 			return fmt.Errorf("scan timed out after %s for %q (job %s); use 'mcpproxy security status %s' to inspect", hardTimeout, serverName, jobID, serverName)
 		case <-ticker.C:
 		}
@@ -751,40 +772,42 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 			progress += fmt.Sprintf(" (running: %s)", strings.Join(runningNames, ", "))
 		}
 		// Erase previous line on TTY for a clean rolling display; on a pipe
-		// just print one progress line per tick.
-		if stdoutIsTTY() {
+		// just print one progress line per tick. Progress is written to
+		// stderr, so the TTY check must follow stderr (not stdout) — else
+		// `2>scan.log` on a terminal would fill the log with \r frames.
+		if stderrIsTTY() {
 			pad := ""
 			if lastProgressLen > len(progress) {
 				pad = strings.Repeat(" ", lastProgressLen-len(progress))
 			}
-			fmt.Print("\r" + progress + pad)
+			fmt.Fprint(os.Stderr, "\r"+progress+pad)
 			lastProgressLen = len(progress)
 		} else {
-			fmt.Println(progress)
+			fmt.Fprintln(os.Stderr, progress)
 		}
 
 		switch jobStatus {
 		case "completed":
-			if stdoutIsTTY() {
-				fmt.Println()
+			if stderrIsTTY() {
+				fmt.Fprintln(os.Stderr)
 			}
-			fmt.Printf("  Scan completed in %s\n", elapsed)
+			fmt.Fprintf(os.Stderr, "  Scan completed in %s\n", elapsed)
 			return printScanSummary(client, ctx, serverName)
 		case "failed":
-			if stdoutIsTTY() {
-				fmt.Println()
+			if stderrIsTTY() {
+				fmt.Fprintln(os.Stderr)
 			}
-			fmt.Printf("  Scan failed after %s\n", elapsed)
+			fmt.Fprintf(os.Stderr, "  Scan failed after %s\n", elapsed)
 			errMsg := getMapString(status, "error")
 			if errMsg != "" {
 				return fmt.Errorf("scan failed: %s", errMsg)
 			}
 			return fmt.Errorf("scan failed for %q", serverName)
 		case "cancelled":
-			if stdoutIsTTY() {
-				fmt.Println()
+			if stderrIsTTY() {
+				fmt.Fprintln(os.Stderr)
 			}
-			fmt.Printf("  Scan cancelled after %s\n", elapsed)
+			fmt.Fprintf(os.Stderr, "  Scan cancelled after %s\n", elapsed)
 			return fmt.Errorf("scan was cancelled for %q", serverName)
 		}
 		// pending or running: continue polling
@@ -1571,14 +1594,23 @@ func runSecurityApprove(_ *cobra.Command, args []string) error {
 
 	format := ResolveOutputFormat()
 	if format == "json" || format == "yaml" {
-		return formatAndPrintRaw(format, respBody)
+		if err := formatAndPrintRaw(format, respBody); err != nil {
+			return err
+		}
+		warnApprovalHolds(os.Stderr, serverName, respBody)
+		return nil
 	}
 
-	if secApproveForce {
-		fmt.Printf("Server %q force-approved.\n", serverName)
-	} else {
-		fmt.Printf("Server %q approved.\n", serverName)
+	var envelope struct {
+		Data map[string]interface{} `json:"data"`
 	}
+	_ = json.Unmarshal(respBody, &envelope)
+	verb := "approved"
+	if secApproveForce {
+		verb = "force-approved"
+	}
+	fmt.Printf("Server %q %s%s.\n", serverName, verb, approvalCountsSuffix(envelope.Data))
+	warnApprovalHolds(os.Stderr, serverName, respBody)
 	return nil
 }
 
@@ -1675,6 +1707,12 @@ func runSecurityOverview(_ *cobra.Command, _ []string) error {
 		fmt.Printf("  Last scan:          %s\n", "never")
 	}
 	fmt.Println()
+
+	// Signature bundle (spec 086 FR-019 / GH #938): which TPA corpus is live,
+	// where it came from, and how fresh it is.
+	for _, line := range signatureBundleLines(overview) {
+		fmt.Println(line)
+	}
 
 	// Findings breakdown
 	if findings, ok := overview["findings_by_severity"].(map[string]interface{}); ok {
@@ -2072,6 +2110,25 @@ func printFindingsList(findings []interface{}) {
 			}
 		}
 
+		// Deterministic-scanner transparency (Spec 076 US4): the combined
+		// confidence and the independent checks that contributed to this
+		// finding, so an operator can see WHY a tool was flagged and that
+		// agreement among checks raised its score.
+		if conf, ok := finding["confidence"].(float64); ok && conf > 0 {
+			fmt.Printf("         Confidence: %.2f\n", conf)
+		}
+		if rawSignals, ok := finding["signals"].([]interface{}); ok && len(rawSignals) > 0 {
+			names := make([]string, 0, len(rawSignals))
+			for _, s := range rawSignals {
+				if name, ok := s.(string); ok && name != "" {
+					names = append(names, name)
+				}
+			}
+			if len(names) > 0 {
+				fmt.Println("         Signals:  " + strings.Join(names, ", "))
+			}
+		}
+
 		// Package info
 		if pkg != "" {
 			pkgLine := "         Package:  " + pkg
@@ -2214,6 +2271,55 @@ func secJoinSlice(m map[string]interface{}, key string) string {
 }
 
 // secFormatInt formats a numeric field from a map as a string.
+// signatureBundleLines renders the security overview's `signature_bundle`
+// descriptor (spec 086 FR-019 / GH #938 finding 2). Before this, no supported
+// surface could answer "which signatures is my proxy running, and how old are
+// they?" — a years-stale corpus looked identical to a fresh export.
+//
+// Returns nil when the field is absent so an older daemon renders nothing
+// rather than an empty block.
+func signatureBundleLines(overview map[string]interface{}) []string {
+	bundle, ok := overview["signature_bundle"].(map[string]interface{})
+	if !ok || len(bundle) == 0 {
+		return nil
+	}
+
+	source, _ := bundle["source"].(string)
+	if path, _ := bundle["path"].(string); path != "" {
+		source = fmt.Sprintf("%s (%s)", source, path)
+	}
+
+	lines := []string{
+		"  Signature bundle:",
+		fmt.Sprintf("    Source:      %s", source),
+	}
+	if version, _ := bundle["bundle_version"].(string); version != "" {
+		lines = append(lines, fmt.Sprintf("    Version:     %s", version))
+	}
+	if generated, _ := bundle["generated_at"].(string); generated != "" {
+		lines = append(lines, fmt.Sprintf("    Generated:   %s", generated))
+	}
+	if fingerprint, _ := bundle["fingerprint"].(string); fingerprint != "" {
+		lines = append(lines, fmt.Sprintf("    Fingerprint: %s", fingerprint))
+	}
+	lines = append(lines, fmt.Sprintf("    Rules:       %s runnable, %s skipped, %s declared-skipped",
+		secFormatInt(bundle, "runnable_rules"),
+		secFormatInt(bundle, "skipped_rules"),
+		secFormatInt(bundle, "declared_skipped")))
+	if loadErr, _ := bundle["load_error"].(string); loadErr != "" {
+		// A configured bundle that failed to load keeps the previous corpus
+		// live; say so loudly rather than letting the counts imply all is well.
+		lines = append(lines, fmt.Sprintf("    load error:  %s", loadErr))
+	}
+	if runnable, _ := bundle["runnable_rules"].(float64); runnable == 0 {
+		// Zero runnable rules means offline TPA coverage is OFF. Printed in the
+		// same tone as a healthy count, it read as "fine" — the exact class of
+		// "the runtime is right but the operator is misled" bug #938 is about.
+		lines = append(lines, "    WARNING:     no TPA signatures are running — offline scan coverage is OFF")
+	}
+	return append(lines, "")
+}
+
 func secFormatInt(m map[string]interface{}, key string) string {
 	if v, ok := m[key].(float64); ok {
 		return fmt.Sprintf("%d", int(v))
@@ -2271,6 +2377,13 @@ func scannerStatusColor(status string) (open, reset string) {
 // Used to gate ANSI escapes (colors, cursor moves) so piped output stays clean.
 func stdoutIsTTY() bool {
 	return term.IsTerminal(int(os.Stdout.Fd()))
+}
+
+// stderrIsTTY returns true when stderr is connected to an interactive
+// terminal. Used to gate the rolling (\r) progress display, which is written
+// to stderr so machine formats keep stdout parseable.
+func stderrIsTTY() bool {
+	return term.IsTerminal(int(os.Stderr.Fd()))
 }
 
 // normalizeOverviewLastScan replaces a Go zero-time `last_scan_at` value with

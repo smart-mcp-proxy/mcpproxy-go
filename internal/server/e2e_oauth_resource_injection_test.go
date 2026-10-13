@@ -16,10 +16,10 @@ import (
 // the RFC 8707 resource parameter in the authorization URL.
 // This mimics the behavior that caused issue #271.
 type mockRunlayerServer struct {
-	server              *httptest.Server
-	capturedAuthURL     string
-	capturedAuthParams  url.Values
-	resourceParamFound  bool
+	server             *httptest.Server
+	capturedAuthURL    string
+	capturedAuthParams url.Values
+	resourceParamFound bool
 }
 
 func newMockRunlayerServer() *mockRunlayerServer {
@@ -31,9 +31,9 @@ func newMockRunlayerServer() *mockRunlayerServer {
 	mux.HandleFunc("/.well-known/oauth-protected-resource", func(w http.ResponseWriter, r *http.Request) {
 		// Return metadata with the resource field - this is what Runlayer returns
 		metadata := map[string]interface{}{
-			"resource":              mock.server.URL + "/mcp",
-			"authorization_servers": []string{mock.server.URL},
-			"scopes_supported":      []string{"read", "write"},
+			"resource":                 mock.server.URL + "/mcp",
+			"authorization_servers":    []string{mock.server.URL},
+			"scopes_supported":         []string{"read", "write"},
 			"bearer_methods_supported": []string{"header"},
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -43,13 +43,13 @@ func newMockRunlayerServer() *mockRunlayerServer {
 	// OAuth Authorization Server Metadata endpoint (RFC 8414)
 	mux.HandleFunc("/.well-known/oauth-authorization-server", func(w http.ResponseWriter, r *http.Request) {
 		metadata := map[string]interface{}{
-			"issuer":                            mock.server.URL,
-			"authorization_endpoint":            mock.server.URL + "/authorize",
-			"token_endpoint":                    mock.server.URL + "/token",
-			"registration_endpoint":             mock.server.URL + "/register",
-			"response_types_supported":          []string{"code"},
-			"code_challenge_methods_supported":  []string{"S256"},
-			"grant_types_supported":             []string{"authorization_code", "refresh_token"},
+			"issuer":                                mock.server.URL,
+			"authorization_endpoint":                mock.server.URL + "/authorize",
+			"token_endpoint":                        mock.server.URL + "/token",
+			"registration_endpoint":                 mock.server.URL + "/register",
+			"response_types_supported":              []string{"code"},
+			"code_challenge_methods_supported":      []string{"S256"},
+			"grant_types_supported":                 []string{"authorization_code", "refresh_token"},
 			"token_endpoint_auth_methods_supported": []string{"none", "client_secret_post"},
 		}
 		w.Header().Set("Content-Type", "application/json")

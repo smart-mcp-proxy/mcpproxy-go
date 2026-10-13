@@ -3,9 +3,43 @@
 # CRLF and break cmd/generate-types TestContractsInSync).
 frontend/src/types/contracts.ts text eol=lf
 
+# Spec 083 bench arm golden fixtures are whole-file byte-compared against the
+# LF-only encoder output; without this Windows checks out CRLF and the
+# compact/toon/tron golden tests report spurious encoding drift.
+bench/arms/testdata/*.txt text eol=lf
+
+# retrieve_tools golden fixtures are compared byte-for-byte (Spec 085
+# GoldenByteIdentity); CRLF on Windows checkout would leave a trailing \r after
+# the test's \n-trim and fail the comparison.
+internal/server/testdata/*.golden.json text eol=lf
+
+# Spec 094 pre-feature response goldens (SC-002 byte-identity): the * above
+# does not cross into subdirectories, so pin the spec094/ captures too —
+# without this Windows checks out CRLF and all six TestSpec094Goldens
+# comparisons fail with a trailing \r.
+internal/server/testdata/**/*.golden.json text eol=lf
+
+# Spec 098 tools/list merge-base snapshots (FR-015 byte-identity): these are
+# plain .json (not *.golden.json), so the patterns above do not reach them.
+# Without this Windows checks out CRLF and all three
+# TestToolsListSnapshot_MatchesMergeBaseGoldens surfaces fail on \r alone.
+internal/server/testdata/toolslist_goldens/*.json text eol=lf
+# The frozen baselines (pre099/, pre105/) live one level down, where a single
+# `*` does not reach.
+internal/server/testdata/toolslist_goldens/**/*.json text eol=lf
+
 # Self-contained verification/QA reports embed base64 PNG screenshots, so a
 # single file is multiple MB of "HTML". They are point-in-time artifacts, not
 # source. Mark them linguist-generated so GitHub's language stats reflect the
 # actual Go/Vue/Swift source instead of being dominated by these reports.
 specs/**/verification/*.html linguist-generated
 docs/qa/*.html linguist-generated
+
+# Spec 108-l: the profile contract goldens (Go, vitest and XCTest all read
+# them), the SC-006 activity record-set golden and the CLI goldens are
+# whole-file byte-compared; pin them to LF so a Windows autocrlf checkout does
+# not turn the comparison into a \r diff.
+internal/profile/testdata/contract/*.json text eol=lf
+internal/httpapi/testdata/sc006_activity_recordsets.json text eol=lf
+cmd/mcpproxy/testdata/cli108/* text eol=lf
+internal/server/testdata/profiles_v3/*.json text eol=lf

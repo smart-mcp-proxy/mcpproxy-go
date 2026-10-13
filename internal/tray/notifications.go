@@ -65,6 +65,22 @@ func ShowDockerRecoverySuccess(serverCount int) error {
 	)
 }
 
+// ShowPortConflictPinned shows a notification when the core cannot start
+// because the listen address the user explicitly pinned is already in use.
+// The tray deliberately does not pick another port in that case, so the user
+// has to be told.
+func ShowPortConflictPinned(listenAddr string) error {
+	msg := "The address the tray was started with is already in use. Free the port or restart with a different --listen."
+	if listenAddr != "" {
+		msg = fmt.Sprintf("%s is already in use. Free the port or restart the tray with a different --listen.", listenAddr)
+	}
+	return beeep.Notify(
+		"mcpproxy: port conflict",
+		msg,
+		"",
+	)
+}
+
 // ShowDockerRecoveryFailed shows a notification when Docker recovery fails
 func ShowDockerRecoveryFailed(reason string) error {
 	msg := "Unable to reconnect servers. Check Docker status."

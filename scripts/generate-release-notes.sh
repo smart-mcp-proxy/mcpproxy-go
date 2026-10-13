@@ -70,8 +70,16 @@ get_previous_tag() {
     local current_tag="${1:-}"
 
     if [ -n "$current_tag" ]; then
-        # Get the tag before the specified one
-        git describe --tags --abbrev=0 "${current_tag}^" 2>/dev/null || echo ""
+        # Get the tag before the specified one. A stable tag (no "-" suffix)
+        # is compared with the previous STABLE tag: after an RC cycle the
+        # nearest tag is the last RC, which would summarize only the final
+        # RC delta instead of everything since the last release. RC tags
+        # keep comparing with the nearest tag of any kind.
+        if [[ "$current_tag" != *-* ]]; then
+            git describe --tags --abbrev=0 --exclude '*-*' "${current_tag}^" 2>/dev/null || echo ""
+        else
+            git describe --tags --abbrev=0 "${current_tag}^" 2>/dev/null || echo ""
+        fi
     else
         # Get the most recent tag
         git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo ""

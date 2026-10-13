@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -12,25 +13,29 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // globalToolsController drives the GET /api/v1/tools handler (spec 050).
 type globalToolsController struct {
 	MockServerController
-	allServers   []map[string]interface{}
-	serverTools  map[string][]map[string]interface{}
-	serverErr    map[string]error
-	approvals    map[string]*storage.ToolApprovalRecord // key serverName + "\x00" + toolName
-	configDenied map[string]bool
-	usage        map[string]storage.ToolUsageStat
-	usageErr     error
+	allServers           []map[string]interface{}
+	serverTools          map[string][]map[string]interface{}
+	serverErr            map[string]error
+	approvals            map[string]*storage.ToolApprovalRecord // key serverName + "\x00" + toolName
+	configDenied         map[string]bool
+	usage                map[string]storage.ToolUsageStat
+	usageErr             error
+	profileSearchResults []map[string]interface{}
+	profileSearchHandled bool
+	profileAllowed       map[string]bool
 }
 
 // GetManagementService returns nil so handleGetGlobalTools exercises the
 // controller GetServerTools path this mock controls. The management-service
 // path is verified end-to-end via the API E2E + curl verification.
-func (m *globalToolsController) GetManagementService() interface{} { return nil }
+func (m *globalToolsController) GetManagementService() management.Service { return nil }
 
 func (m *globalToolsController) GetAllServers() ([]map[string]interface{}, error) {
 	return m.allServers, nil
@@ -61,10 +66,20 @@ func (m *globalToolsController) AggregateToolUsage(_ time.Time) (map[string]stor
 	return m.usage, nil
 }
 
+func (m *globalToolsController) SearchToolsForProfile(_ context.Context, _ string, _ int, _ func(string) bool) ([]map[string]interface{}, bool, error) {
+	return m.profileSearchResults, m.profileSearchHandled, nil
+}
+
+func (m *globalToolsController) ToolAllowedByProfile(_ context.Context, serverName, toolName string) bool {
+	allowed, exists := m.profileAllowed[serverName+"\x00"+toolName]
+	return !exists || allowed
+}
+
 func doGlobalTools(t *testing.T, ctrl *globalToolsController) map[string]interface{} {
 	t.Helper()
 	srv := NewServer(ctrl, zaptest.NewLogger(t).Sugar(), nil)
 	req := httptest.NewRequest("GET", "/api/v1/tools", nil)
+	req.Header.Set("X-API-Key", mockControllerAPIKey)
 	req.Header.Set("X-Request-Source", "socket")
 	w := httptest.NewRecorder()
 	srv.router.ServeHTTP(w, req)
@@ -133,6 +148,23 @@ func TestGlobalTools_MergeEnrichmentStatsUsage(t *testing.T) {
 	assert.NotEqual(t, true, data["partial"])
 }
 
+func TestGlobalTools_ProfileFiltersDisallowedRows(t *testing.T) {
+	ctrl := &globalToolsController{
+		allServers: []map[string]interface{}{{"name": "github"}},
+		serverTools: map[string][]map[string]interface{}{
+			"github": {{"name": "list_issues", "description": "List issues"}, {"name": "create_issue", "description": "Create issue"}},
+		},
+		profileAllowed: map[string]bool{"github\x00create_issue": false},
+	}
+	data := doGlobalTools(t, ctrl)
+	tools, ok := data["tools"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, tools, 1)
+	tool := tools[0].(map[string]interface{})
+	require.Equal(t, "list_issues", tool["name"])
+	require.Equal(t, "github", tool["server_name"])
+}
+
 func TestGlobalTools_PartialServerFailureDoesNotFail(t *testing.T) {
 	ctrl := &globalToolsController{
 		allServers: []map[string]interface{}{
@@ -170,4 +202,109 @@ func TestGlobalTools_Empty(t *testing.T) {
 	data := doGlobalTools(t, ctrl)
 	assert.Len(t, data["tools"].([]interface{}), 0)
 	assert.Equal(t, float64(0), data["stats"].(map[string]interface{})["total"])
+}
+
+// TestGlobalTools_ScanHoldEvidenceSurfaced verifies the global tools payload —
+// the tool-approval view backing `mcpproxy tools list` — carries the scan-gate
+// hold evidence (spec 086 FR-018), and that records without it stay clean
+// (back-compat: no phantom held_* keys).
+func TestGlobalTools_ScanHoldEvidenceSurfaced(t *testing.T) {
+	ctrl := &globalToolsController{
+		allServers: []map[string]interface{}{{"name": "github"}},
+		serverTools: map[string][]map[string]interface{}{
+			"github": {
+				{"name": "create_issue", "description": "Create issue"},
+				{"name": "list_issues", "description": "List issues"},
+			},
+		},
+		approvals: map[string]*storage.ToolApprovalRecord{
+			"github\x00create_issue": {
+				Status:      storage.ToolApprovalStatusChanged,
+				HeldReason:  storage.ToolHeldReasonScanFindings,
+				HeldVerdict: "dangerous",
+				HeldSignals: []string{"tpa.TPA-2026-0001.hidden_instruction"},
+			},
+			// Legacy record: written before the held_* fields existed.
+			"github\x00list_issues": {Status: storage.ToolApprovalStatusApproved},
+		},
+	}
+
+	data := doGlobalTools(t, ctrl)
+
+	byName := map[string]map[string]interface{}{}
+	for _, x := range data["tools"].([]interface{}) {
+		tm := x.(map[string]interface{})
+		byName[tm["name"].(string)] = tm
+	}
+
+	held := byName["create_issue"]
+	assert.Equal(t, storage.ToolHeldReasonScanFindings, held["held_reason"])
+	assert.Equal(t, "dangerous", held["held_verdict"])
+	assert.Equal(t, []interface{}{"tpa.TPA-2026-0001.hidden_instruction"}, held["held_signals"])
+
+	legacy := byName["list_issues"]
+	assert.NotContains(t, legacy, "held_reason", "records without hold evidence must stay unchanged")
+	assert.NotContains(t, legacy, "held_signals")
+}
+
+// Issue #1064: a quarantined server kept reporting its tools as available.
+// Unlike the DISABLED case — which reaches this handler as an empty tool set
+// only because disabling disconnects the server — quarantine leaves the server
+// dialed for security inspection with status ready, so the tools came straight
+// through while every call to them was refused and the search index correctly
+// held nothing.
+func TestGlobalTools_QuarantinedServerContributesNothing(t *testing.T) {
+	ctrl := &globalToolsController{
+		allServers: []map[string]interface{}{
+			{"name": "github", "quarantined": false},
+			{"name": "memory", "quarantined": true},
+			// A disabled server must STILL contribute its tools: the
+			// GlobalToolsResponse contract lists them as disabled rather than
+			// hiding them.
+			{"name": "notes", "quarantined": false},
+		},
+		serverTools: map[string][]map[string]interface{}{
+			"github": {
+				{"name": "create_issue", "description": "Create issue"},
+				{"name": "delete_repo", "description": "Delete repo"},
+			},
+			"memory": {
+				{"name": "store", "description": "Store memory"},
+				{"name": "recall", "description": "Recall memory"},
+				{"name": "forget", "description": "Forget memory"},
+			},
+			"notes": {
+				{"name": "append", "description": "Append note"},
+			},
+		},
+		configDenied: map[string]bool{"notes\x00append": true},
+	}
+
+	data := doGlobalTools(t, ctrl)
+
+	tools := data["tools"].([]interface{})
+	byName := map[string]string{}
+	for _, x := range tools {
+		tm := x.(map[string]interface{})
+		byName[tm["name"].(string)] = tm["server_name"].(string)
+	}
+
+	assert.Contains(t, byName, "create_issue")
+	assert.Contains(t, byName, "delete_repo")
+	assert.Contains(t, byName, "append", "a disabled server's tools must still be listed")
+
+	for _, quarantined := range []string{"store", "recall", "forget"} {
+		assert.NotContains(t, byName, quarantined,
+			"quarantined server's tools must not be reported as available")
+	}
+
+	stats := data["stats"].(map[string]interface{})
+	assert.Equal(t, float64(3), stats["total"])
+
+	// Skipping a quarantined server is a deliberate exclusion, not a fetch
+	// failure — it must not be reported as a degraded response.
+	assert.NotEqual(t, true, data["partial"])
+	if failed, ok := data["failed_servers"]; ok {
+		assert.Empty(t, failed, "a quarantined server is not a failed server")
+	}
 }

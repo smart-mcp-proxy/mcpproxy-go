@@ -21,6 +21,7 @@ For background on the architecture, scanner images, and storage see:
 - [Security Scanner Plugin System](/features/security-scanner-plugins)
 - [Scanner Images](/features/scanner-images)
 - [Quarantine System](/features/security-quarantine)
+- [Review Commands](/cli/review-commands): `mcpproxy review list|show|approve|reject`, the one CLI for review decisions
 
 ## Overview
 
@@ -498,7 +499,13 @@ The `Scanners: X run, Y failed (names) of Z` line surfaces per-scanner failures 
 
 - `risk_score` — composite 0-100 score
 - `summary` — severity counts (`critical`, `high`, `medium`, `low`, `info`, `dangerous`, `warnings`, `info_level`, `total`)
-- `findings` — normalized findings across all scanners
+- `findings` — normalized findings across all scanners. Findings from the
+  deterministic tool-scanner (Spec 076) additionally carry `confidence` (0.0–1.0
+  combined confidence) and `signals` (the independent check IDs that fired, e.g.
+  `unicode.hidden`, `directive.imperative`). When several independent checks
+  agree on one tool, that agreement **adds** to the composite `risk_score`
+  rather than being collapsed — the table report renders these as `Confidence:`
+  and `Signals:` lines under the finding.
 - `reports` — per-scanner raw results (also includes SARIF when `?include_sarif=true` is passed to the REST endpoint)
 - `scanner_statuses` — per-scanner execution records, each with `scanner_id`, `status`, `started_at`, `completed_at`, `duration_ms` (wall-clock execution time in milliseconds), `findings_count`, and `error`
 - `scan_context` — source method, source path, scanned file list
@@ -591,7 +598,7 @@ mcpproxy security reject <server>
 5. Leaves the server **still quarantined** — its config is untouched so you can run a fresh scan later.
 
 :::note Reject is not "delete"
-`security reject` never removes the server config or the server from the BBolt `servers` bucket. To fully remove a server, use `mcpproxy upstream delete <server>`.
+`security reject` never removes the server config or the server from the BBolt `servers` bucket. To fully remove a server, use `mcpproxy upstream remove <server>`.
 :::
 
 ### Example
@@ -707,7 +714,7 @@ $ mcpproxy security overview -o json | jq '.batch_status // "none"'
 
 ```bash
 # 1. Add the server (lands in quarantine by default)
-mcpproxy upstream add my-server --command=npx --args="-y,@my-org/mcp-server"
+mcpproxy upstream add my-server -- npx -y @my-org/mcp-server
 
 # 2. Make sure scanners are ready
 mcpproxy security scanners

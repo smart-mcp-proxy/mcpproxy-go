@@ -27,6 +27,14 @@ import (
 // runtime so tests can seed/verify approval records directly.
 func createTestProxyWithRuntime(t *testing.T, servers []*config.ServerConfig) (*MCPProxyServer, *runtime.Runtime) {
 	t.Helper()
+	return createTestProxyWithRuntimeCfg(t, servers, nil)
+}
+
+// createTestProxyWithRuntimeCfg is createTestProxyWithRuntime with a hook to
+// edit the config BEFORE the proxy is constructed, for tests that must observe
+// construction-time gating (e.g. EnablePrompts false at boot, flipped live).
+func createTestProxyWithRuntimeCfg(t *testing.T, servers []*config.ServerConfig, configure func(*config.Config)) (*MCPProxyServer, *runtime.Runtime) {
+	t.Helper()
 
 	logger := zap.NewNop()
 
@@ -35,6 +43,9 @@ func createTestProxyWithRuntime(t *testing.T, servers []*config.ServerConfig) (*
 	cfg.Listen = "127.0.0.1:0"
 	cfg.ToolsLimit = 20
 	cfg.Servers = servers
+	if configure != nil {
+		configure(cfg)
+	}
 
 	rt, err := runtime.New(cfg, "", logger)
 	require.NoError(t, err)
@@ -56,7 +67,13 @@ func createTestProxyWithRuntime(t *testing.T, servers []*config.ServerConfig) (*
 	tr := truncate.NewTruncator(0)
 
 	mainSrv := &Server{runtime: rt}
-	proxy := NewMCPProxyServer(sm, idx, um, cm, tr, logger, mainSrv, false, cfg)
+	// Production warms the profile index for the initial runtime snapshot
+	// during server construction. Scoped request tests rely on the same
+	// publication guarantee: a nil cache result intentionally fails closed,
+	// which would otherwise make every scoped fixture appear to have no
+	// code_execution tool even when no profile applies.
+	mainSrv.profileIndexes.warmCurrent(rt.Config())
+	proxy := NewMCPProxyServer(sm, idx, um, cm, func() *truncate.Truncator { return tr }, logger, mainSrv, false, cfg, rt.SignatureCache())
 	return proxy, rt
 }
 

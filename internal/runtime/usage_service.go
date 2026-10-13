@@ -30,6 +30,11 @@ func encodeUsageAggregate(a *UsageAggregate) ([]byte, error) {
 // defaults for any maps absent from the blob.
 func decodeUsageAggregate(data []byte) (*UsageAggregate, error) {
 	agg := newUsageAggregate()
+	// A pre-versioning snapshot has no admission_version field, and Unmarshal
+	// leaves absent fields alone — so the constructor's CURRENT stamp must be
+	// cleared first, or every legacy snapshot would masquerade as current and
+	// skip the rebuild the version check exists for.
+	agg.AdmissionVersion = 0
 	if err := json.Unmarshal(data, agg); err != nil {
 		return nil, err
 	}
@@ -83,10 +88,20 @@ func (s *ActivityService) initUsageFromStorage() {
 	} else if len(data) > 0 {
 		if agg, derr := decodeUsageAggregate(data); derr != nil {
 			s.logger.Warn("Failed to decode usage snapshot; rebuilding from scan", zap.Error(derr))
+		} else if agg.AdmissionVersion != usageAdmissionVersion {
+			// Counted under a different admission rule (e.g. before internal
+			// calls joined the timeline): incremental catch-up cannot fix the
+			// hours it already contains, so rebuild from scratch once.
+			s.logger.Info("Usage snapshot predates the current admission rule; rebuilding from scan",
+				zap.Int("snapshot_version", agg.AdmissionVersion),
+				zap.Int("current_version", usageAdmissionVersion))
 		} else {
 			s.usage.Replace(agg)
+			replayed := s.replayActivitiesSince(agg.UpdatedAt)
 			s.logger.Info("Loaded usage aggregate from persisted snapshot",
-				zap.Int("tools", len(agg.Tools)))
+				zap.Int("tools", len(agg.Tools)),
+				zap.Time("snapshot_updated_at", agg.UpdatedAt),
+				zap.Int("records_replayed", replayed))
 			return
 		}
 	}
@@ -104,6 +119,39 @@ func (s *ActivityService) initUsageFromStorage() {
 	s.logger.Info("Rebuilt usage aggregate from activity scan",
 		zap.Int("records_scanned", scanned),
 		zap.Int("tools", len(agg.Tools)))
+}
+
+// replayActivitiesSince folds every activity record persisted AFTER the loaded
+// snapshot was stamped into the aggregate, and reports how many it applied.
+//
+// Without it, restoring a snapshot silently dropped every record written since
+// the last 30s flush. On a clean shutdown that tail is small (the flush-on-stop
+// covers it); on a crash or a kill it is up to 30 seconds of calls, and the
+// loss is PERMANENT — the aggregate is never rebuilt again, so the usage
+// histogram drifts further from the activity list with every unclean stop.
+//
+// Safe to run on every start because the write path persists a record BEFORE
+// folding it in (ActivityService.handleToolCallCompleted), so "saved but not
+// counted" is the only inconsistency possible, never "counted but not saved".
+// The bound is strictly greater than the stamp, so nothing already in the
+// snapshot can be applied a second time.
+func (s *ActivityService) replayActivitiesSince(since time.Time) int {
+	if since.IsZero() {
+		// Snapshot from a build that did not stamp its aggregate: there is no
+		// safe lower bound, and replaying from the beginning would double every
+		// record it already contains. Keep the snapshot as loaded.
+		s.logger.Warn("Persisted usage snapshot has no timestamp; skipping catch-up replay")
+		return 0
+	}
+	replayed := 0
+	if err := s.storage.ScanActivitiesAfter(since, func(rec *storage.ActivityRecord) {
+		replayed++
+		s.usage.Apply(rec)
+	}); err != nil {
+		s.logger.Warn("Failed to replay activity records into the usage aggregate",
+			zap.Error(err), zap.Time("since", since))
+	}
+	return replayed
 }
 
 // persistUsage flushes the current snapshot to storage. No-op if usage tracking

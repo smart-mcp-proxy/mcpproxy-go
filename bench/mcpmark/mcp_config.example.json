@@ -1,0 +1,99 @@
+{
+  "_example": "EXAMPLE ONLY — spec 103 T048. Copy this OUTSIDE the repository, fill the REPLACE_ME placeholders, and never commit the copy: the real file carries credentials and absolute paths. See bench/mcpmark/README.md.",
+  "listen": "127.0.0.1:18080",
+  "data_dir": "REPLACE_ME_ABSOLUTE_PATH/mcpmark-bench-datadir",
+  "api_key": "REPLACE_ME_WITH_A_RANDOM_STRING",
+  "require_mcp_auth": true,
+  "enable_socket": false,
+  "enable_tray": false,
+  "check_server_repo": false,
+  "quarantine_enabled": false,
+  "enable_code_execution": true,
+  "tool_response_mode": "full",
+  "direct_tool_response_mode": "full",
+  "tools_limit": 15,
+  "tool_response_limit": 20000,
+  "top_k": 5,
+  "telemetry": {
+    "enabled": false
+  },
+  "mcpServers": [
+    {
+      "name": "mcpmark_filesystem",
+      "protocol": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem@2025.12.18",
+        "REPLACE_ME_ABSOLUTE_PATH/mcpmark/.mcpmark_backups"
+      ],
+      "enabled": true,
+      "quarantined": false
+    },
+    {
+      "name": "mcpmark_postgres",
+      "protocol": "stdio",
+      "command": "pipx",
+      "args": [
+        "run",
+        "postgres-mcp==0.3.0",
+        "--access-mode=unrestricted"
+      ],
+      "env": {
+        "DATABASE_URI": "postgresql://REPLACE_ME_USER:REPLACE_ME_PASSWORD@127.0.0.1:5432/REPLACE_ME_TASK_DATABASE"
+      },
+      "enabled": true,
+      "quarantined": false
+    },
+    {
+      "name": "mcpmark_playwright",
+      "protocol": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@0.0.68",
+        "--headless",
+        "--isolated",
+        "--no-sandbox",
+        "--browser",
+        "chromium",
+        "--viewport-size",
+        "1280,720"
+      ],
+      "enabled": true,
+      "quarantined": false
+    },
+    {
+      "name": "mcpmark_github",
+      "protocol": "stdio",
+      "command": "docker",
+      "args": [
+        "run",
+        "-i",
+        "--rm",
+        "-e",
+        "GITHUB_PERSONAL_ACCESS_TOKEN",
+        "ghcr.io/github/github-mcp-server:v0.15.0"
+      ],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "REPLACE_ME_SCOPED_PAT_FOR_A_THROWAWAY_ACCOUNT"
+      },
+      "enabled": true,
+      "quarantined": false
+    },
+    {
+      "name": "mcpmark_notion",
+      "protocol": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@notionhq/notion-mcp-server@1.9.1"
+      ],
+      "env": {
+        "OPENAPI_MCP_HEADERS": "{\"Authorization\": \"Bearer REPLACE_ME_NOTION_INTEGRATION_TOKEN\", \"Notion-Version\": \"2022-06-28\"}"
+      },
+      "enabled": true,
+      "quarantined": false
+    }
+  ]
+}

@@ -40,6 +40,10 @@ import (
 const (
 	platformDarwin  = "darwin"
 	platformWindows = "windows"
+
+	// loopbackHost is the bind/dial host the tray falls back to whenever an
+	// address is derived rather than explicitly pinned by the user.
+	loopbackHost = "127.0.0.1"
 )
 
 var (
@@ -47,6 +51,7 @@ var (
 	defaultCoreURL   = "http://127.0.0.1:8080"
 	errNoBundledCore = errors.New("no bundled core binary found")
 	trayAPIKey       = ""                  // API key generated for core communication
+	trayCLIListen    = ""                  // --listen from the tray's own command line (set in main)
 	shutdownComplete = make(chan struct{}) // Signal when shutdown is complete
 	shutdownOnce     sync.Once
 )
@@ -77,13 +82,17 @@ func getLogDir() string {
 	return fallback
 }
 
-// generateAPIKey creates a cryptographically secure random API key
+// generateAPIKey creates a cryptographically secure random API key: 32 random
+// bytes (256 bits), hex-encoded to 64 characters.
+//
+// crypto/rand.Read is documented since Go 1.24 as never returning an error and
+// always filling b entirely; on a failure of the system source it terminates
+// the process (runtime fatal, not a recoverable panic). The former
+// time-based fallback branch here was therefore unreachable, and is gone —
+// nothing can observe a predictable key from this function.
 func generateAPIKey() string {
 	bytes := make([]byte, 32) // 32 bytes = 256 bits
-	if _, err := rand.Read(bytes); err != nil {
-		// Fallback to less secure method if crypto/rand fails
-		return fmt.Sprintf("tray_%d", time.Now().UnixNano())
-	}
+	_, _ = rand.Read(bytes)   // documented never to fail; see above
 	return hex.EncodeToString(bytes)
 }
 
@@ -101,6 +110,11 @@ func main() {
 
 	logger.Info("Starting mcpproxy-tray", zap.String("version", version))
 
+	// Pick up a --listen flag from the tray's own command line (launchers
+	// commonly invoke `mcpproxy-tray serve --listen <addr>`, mirroring the
+	// core's serve command). It must be forwarded to the spawned core.
+	trayCLIListen = trayListenFromArgs(os.Args[1:])
+
 	// Check environment variables for configuration
 	coreTimeout := getCoreTimeout()
 	retryDelay := getRetryDelay()
@@ -114,14 +128,30 @@ func main() {
 		zap.Duration("core_timeout", coreTimeout),
 		zap.Duration("retry_delay", retryDelay),
 		zap.Bool("state_debug", stateDebug),
-		zap.Bool("skip_core", shouldSkipCoreLaunch()))
+		zap.Bool("skip_core", shouldSkipCoreLaunch()),
+		zap.String("cli_listen", trayCLIListen))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	// Resolve core configuration up front
-	coreURL := resolveCoreURL()
+	coreURL := resolveCoreURL(trayCLIListen)
 	logger.Info("Resolved core URL", zap.String("core_url", coreURL))
+
+	// An explicitly configured listen address that cannot be parsed must not
+	// pass unnoticed: it cannot contribute to the core URL, so resolution falls
+	// through to the next source (another listen setting, or the default). If a
+	// core is already listening on whatever that resolves to, the tray attaches
+	// to it and looks as though it honoured the address. Report the offending
+	// value and the endpoint that actually won, without claiming which source
+	// that was or that the value went unused — a bad CLI --listen is still
+	// forwarded to the core by buildCoreArgs.
+	for _, src := range unparseableListenSources(trayCLIListen) {
+		logger.Warn("Listen address cannot be parsed into an endpoint the tray can dial - it did not determine the core URL",
+			zap.String("source", src.name),
+			zap.String("value", src.value),
+			zap.String("core_url", coreURL))
+	}
 
 	// Determine if we're using socket/pipe communication (which doesn't need API key)
 	usingSocketCommunication := isSocketEndpoint(coreURL)
@@ -435,7 +465,12 @@ func newTrayJSONEncoder() zapcore.Encoder {
 	})
 }
 
-func resolveCoreURL() string {
+// resolveCoreURL determines the endpoint the tray uses to talk to the core.
+// cliListen is the --listen value parsed from the tray's own command line (see
+// trayListenFromArgs); it matters on the TCP fallback path, where the core is
+// launched with that pinned address and the tray must probe the SAME address
+// instead of the 127.0.0.1:8080 default.
+func resolveCoreURL(cliListen string) string {
 	// Priority 1: Explicit override via environment variable
 	if override := strings.TrimSpace(os.Getenv("MCPPROXY_CORE_URL")); override != "" {
 		return override
@@ -452,18 +487,59 @@ func resolveCoreURL() string {
 	}
 
 	// Priority 3: Fall back to TCP (HTTP/HTTPS)
+	return resolveCoreTCPURL(cliListen)
+}
+
+// listenSource names where an explicitly configured listen address came from.
+type listenSource struct {
+	name  string
+	value string
+}
+
+// unparseableListenSources reports every explicitly configured listen address
+// that is set but cannot be turned into an endpoint the tray can dial. Such a
+// value cannot win resolveCoreTCPURL's precedence chain, so resolution falls
+// through to the next source and buildCoreArgs then derives --listen from the
+// core URL that source produced. Callers surface these values instead of
+// letting the tray look as though it honoured an address it could not use.
+func unparseableListenSources(cliListen string) []listenSource {
+	var bad []listenSource
+	for _, src := range []listenSource{
+		{"--listen", cliListen},
+		{"MCPPROXY_TRAY_LISTEN", os.Getenv("MCPPROXY_TRAY_LISTEN")},
+	} {
+		if strings.TrimSpace(src.value) == "" {
+			continue
+		}
+		if coreURLFromListen("http", src.value) == "" {
+			bad = append(bad, src)
+		}
+	}
+	return bad
+}
+
+// resolveCoreTCPURL builds the TCP endpoint for the core, honouring (in order)
+// an explicit --listen from the tray's command line, MCPPROXY_TRAY_LISTEN,
+// MCPPROXY_TRAY_PORT, and finally the built-in default.
+func resolveCoreTCPURL(cliListen string) string {
 	// Determine protocol based on TLS setting
 	protocol := "http"
 	if strings.TrimSpace(os.Getenv("MCPPROXY_TLS_ENABLED")) == "true" {
 		protocol = "https"
 	}
 
-	if listen := normalizeListen(strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_LISTEN"))); listen != "" {
-		return protocol + "://127.0.0.1" + listen
+	// An explicit --listen on the tray's command line wins: buildCoreArgs always
+	// forwards it to the core, so the core binds it and nothing else.
+	if coreURL := coreURLFromListen(protocol, cliListen); coreURL != "" {
+		return coreURL
+	}
+
+	if coreURL := coreURLFromListen(protocol, os.Getenv("MCPPROXY_TRAY_LISTEN")); coreURL != "" {
+		return coreURL
 	}
 
 	if port := strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_PORT")); port != "" {
-		return fmt.Sprintf("%s://127.0.0.1:%s", protocol, port)
+		return fmt.Sprintf("%s://%s", protocol, net.JoinHostPort(loopbackHost, port))
 	}
 
 	// Update default URL based on TLS setting
@@ -824,9 +900,17 @@ func buildCoreArgs(coreURL string) []string {
 		args = append(args, "--config", cfg)
 	}
 
-	// IMPORTANT: Only add --listen for TCP/HTTP connections
-	// Socket/pipe connections should NOT have --listen (core enables socket by default)
-	if !isSocketEndpoint(coreURL) {
+	// An explicit --listen on the tray's own command line is ALWAYS forwarded
+	// to the core, even when the tray talks to the core over a socket/pipe:
+	// the socket only covers tray<->core communication, while the core must
+	// still open the advertised TCP address (otherwise it silently falls back
+	// to the config-file default, typically 127.0.0.1:8080).
+	if cliListen := normalizeListen(strings.TrimSpace(trayCLIListen)); cliListen != "" {
+		args = append(args, "--listen", cliListen)
+	} else if !isSocketEndpoint(coreURL) {
+		// IMPORTANT: Only derive --listen from the core URL / env for TCP/HTTP
+		// connections. Socket/pipe connections should NOT get a derived
+		// --listen (core enables the socket by default).
 		if listen := listenArgFromURL(coreURL); listen != "" {
 			args = append(args, "--listen", listen)
 		} else if listenEnv := normalizeListen(strings.TrimSpace(os.Getenv("MCPPROXY_TRAY_LISTEN"))); listenEnv != "" {
@@ -909,6 +993,40 @@ func shellQuote(arg string) string {
 	return builder.String()
 }
 
+// trayListenFromArgs extracts the value of a --listen / -l flag from the
+// tray's command-line arguments. The tray historically ignored its CLI
+// entirely, so launchers invoking `mcpproxy-tray serve --listen <addr>`
+// (mirroring the core's serve command) had the listen address silently
+// dropped and the core fell back to the config-file default. Any other
+// arguments remain ignored. Malformed occurrences — a dangling flag, an
+// empty value, or a value that is itself another flag (starts with "-") —
+// are skipped and scanning continues, so the first valid listen value wins.
+// Returns "" when no valid listen value is present.
+func trayListenFromArgs(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		var value string
+		switch {
+		case arg == "--listen" || arg == "-l":
+			if i+1 >= len(args) {
+				continue // dangling flag without a value
+			}
+			value = strings.TrimSpace(args[i+1])
+		case strings.HasPrefix(arg, "--listen="):
+			value = strings.TrimSpace(strings.TrimPrefix(arg, "--listen="))
+		case strings.HasPrefix(arg, "-l="):
+			value = strings.TrimSpace(strings.TrimPrefix(arg, "-l="))
+		default:
+			continue
+		}
+		if value == "" || strings.HasPrefix(value, "-") {
+			continue // malformed value — keep scanning
+		}
+		return value
+	}
+	return ""
+}
+
 func listenArgFromURL(raw string) string {
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -929,28 +1047,72 @@ func listenArgFromURL(raw string) string {
 	return net.JoinHostPort(host, port)
 }
 
+// normalizeListen canonicalises a listen address before it is handed to the
+// core as --listen. Its one hard rule is that it NEVER widens a bind:
+//
+//   - a host the caller pinned is preserved verbatim ("127.0.0.1:8181" stays
+//     loopback; "localhost" stays localhost — resolving it is the core's job),
+//   - a bare port with no host at all ("8181") defaults to loopback, mirroring
+//     listenArgFromURL's "never bind to all interfaces" rule for derived
+//     addresses,
+//   - an explicit all-interfaces request (":8181", "0.0.0.0:8181", "[::]:8181")
+//     is honoured as written — the caller asked for it, and rewriting it would
+//     break the LAN-exposure use case the tray --listen flag exists for,
+//   - anything that is not a host:port pair is passed through untouched so the
+//     core rejects it loudly instead of the tray silently rewriting it.
+//
+// It used to strip the loopback host ("127.0.0.1:8181" -> ":8181"), which
+// silently rebound a loopback-pinned address to every interface.
 func normalizeListen(listen string) string {
+	listen = strings.TrimSpace(listen)
 	if listen == "" {
 		return ""
 	}
 
-	if strings.HasPrefix(listen, "localhost:") {
-		return strings.TrimPrefix(listen, "localhost")
-	}
-
-	if strings.HasPrefix(listen, "127.0.0.1:") {
-		return strings.TrimPrefix(listen, "127.0.0.1")
-	}
-
-	if strings.HasPrefix(listen, ":") {
-		return listen
-	}
-
+	// Bare port, e.g. "8181": no host was expressed at all, so pick loopback
+	// rather than letting the core infer the ":8181" all-interfaces bind.
 	if !strings.Contains(listen, ":") {
-		return ":" + listen
+		if _, err := strconv.Atoi(listen); err != nil {
+			return listen // not a port — leave it for the core to reject
+		}
+		return net.JoinHostPort(loopbackHost, listen)
 	}
 
-	return listen
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil {
+		return listen // not a host:port pair — leave it for the core to reject
+	}
+
+	// JoinHostPort re-adds IPv6 brackets; host "" round-trips to ":<port>".
+	return net.JoinHostPort(host, port)
+}
+
+// coreURLFromListen converts a --listen address into a URL the tray can dial.
+// Wildcard binds are dialed on loopback: the core listens on every interface,
+// but the tray always talks to it locally.
+func coreURLFromListen(protocol, listen string) string {
+	listen = normalizeListen(listen)
+	if listen == "" {
+		return ""
+	}
+
+	host, port, err := net.SplitHostPort(listen)
+	if err != nil || port == "" {
+		return ""
+	}
+
+	switch host {
+	case "", "0.0.0.0", "::":
+		host = loopbackHost
+	}
+
+	// Build via url.URL rather than concatenating: an IPv6 zone must be
+	// percent-escaped in a URL ("fe80::1%en0" -> "fe80::1%25en0"). Plain
+	// concatenation emits a string that url.Parse rejects outright with
+	// "invalid URL escape", which would break every later parse of the core
+	// URL (health checks, listenArgFromURL, the port-conflict handler).
+	u := url.URL{Scheme: protocol, Host: net.JoinHostPort(host, port)}
+	return u.String()
 }
 
 // Legacy process termination removed - replaced by monitor.ProcessMonitor
@@ -996,6 +1158,18 @@ const (
 	coreOwnershipExternalManaged
 	coreOwnershipExternalUnmanaged
 )
+
+// shouldTerminateCore reports whether tray shutdown may kill the core: only a
+// core the tray itself launched.
+//
+// GH #410: coreOwnershipExternalManaged ("a core was already running, so I
+// attached to it") used to be terminated as well — via the PID from /status and
+// a `pgrep -f "mcpproxy serve"` sweep — so quitting the tray killed a core the
+// user was running under launchd/brew. Attaching to a process is not a claim of
+// ownership over it.
+func shouldTerminateCore(ownership coreOwnershipMode) bool {
+	return ownership == coreOwnershipTrayManaged
+}
 
 // CoreProcessLauncher manages the mcpproxy core process with state machine integration
 type CoreProcessLauncher struct {
@@ -1421,8 +1595,44 @@ func (cpl *CoreProcessLauncher) handleReconnecting(_ context.Context) {
 	// The state machine will handle retry logic automatically
 }
 
-// handlePortConflictError handles port conflict errors
+// pinnedCoreListen returns the listen address the user explicitly pinned on the
+// tray's command line (normalized), or "" when nothing was pinned.
+//
+// Only the CLI flag counts as pinned: buildCoreArgs forwards it unconditionally
+// and it beats every other source, so the core can only ever bind that address.
+// MCPPROXY_TRAY_LISTEN, by contrast, flows through coreURL (resolveCoreTCPURL),
+// so the port-conflict auto-bump can still move it and have the new address
+// reach the core.
+func pinnedCoreListen() string {
+	return normalizeListen(trayCLIListen)
+}
+
+// handlePortConflictError handles port conflict errors.
+//
+// Semantics, decided in the follow-up to PR #1015 (tray --listen forwarding):
+// an explicitly pinned --listen is a user contract — the core comes up on THAT
+// address or not at all. Auto-bumping the port here only ever worked because
+// buildCoreArgs derived --listen from cpl.coreURL; now that an explicit CLI
+// --listen always wins, bumping the port would relaunch the core on the very
+// same busy address forever. Silently moving off the pinned address would be
+// worse still: clients configured for it would talk to nothing. So we fail
+// loudly instead — log an error, record it on the state machine, and notify the
+// user — and leave the tray in the port-conflict state (the state machine keeps
+// error states until the user acts). Unpinned setups keep the old auto-bump.
 func (cpl *CoreProcessLauncher) handlePortConflictError() {
+	if pinned := pinnedCoreListen(); pinned != "" {
+		err := fmt.Errorf("core cannot start: the pinned listen address %s is already in use; "+
+			"free the port or restart the tray with a different --listen", pinned)
+		cpl.logger.Errorw("Port conflict on an explicitly pinned listen address - not auto-selecting another port",
+			"listen", pinned,
+			"error", err)
+		cpl.stateMachine.SetError(err)
+		if notifyErr := tray.ShowPortConflictPinned(pinned); notifyErr != nil {
+			cpl.logger.Warnw("Failed to show port conflict notification", "error", notifyErr)
+		}
+		return
+	}
+
 	cpl.logger.Warn("Core failed due to port conflict")
 	// Attempt automatic port resolution on Windows/macOS
 	// 1) Parse current coreURL and extract port
@@ -1598,19 +1808,16 @@ func (cpl *CoreProcessLauncher) handleShutdown() {
 			cpl.forceKillCore()
 			time.Sleep(1 * time.Second) // Give it a moment to die
 		}
-	} else {
-		switch cpl.coreOwnership {
-		case coreOwnershipExternalUnmanaged:
-			cpl.logger.Info("Core management skipped by configuration - leaving external core running")
-		default:
-			cpl.logger.Warn("Process monitor unavailable during shutdown - attempting emergency core termination")
-			if err := cpl.shutdownExternalCoreFallback(); err != nil {
-				cpl.logger.Error("Emergency core shutdown failed", zap.Error(err))
-			}
+	} else if shouldTerminateCore(cpl.coreOwnership) {
+		cpl.logger.Warn("Process monitor unavailable during shutdown - attempting emergency core termination")
+		if err := cpl.shutdownExternalCoreFallback(); err != nil {
+			cpl.logger.Error("Emergency core shutdown failed", zap.Error(err))
 		}
+	} else {
+		cpl.logger.Info("Core was not started by the tray - leaving it running")
 	}
 
-	if cpl.coreOwnership != coreOwnershipExternalUnmanaged {
+	if shouldTerminateCore(cpl.coreOwnership) {
 		if err := cpl.ensureCoreTermination(); err != nil {
 			cpl.logger.Error("Final core termination verification failed", zap.Error(err))
 		}
@@ -1731,6 +1938,18 @@ func (cpl *CoreProcessLauncher) buildCoreEnvironment() []string {
 	filtered = append(filtered,
 		"MCPPROXY_ENABLE_TRAY=false",
 		fmt.Sprintf("MCPPROXY_API_KEY=%s", trayAPIKey))
+
+	// Tell the core it was launched by the tray, so telemetry's launch_source
+	// can say so. Without this a tray-spawned core is unclassifiable: its parent
+	// is the tray (not launchd, so not login_item) and it has no TTY (so not
+	// cli), leaving launch_source "unknown".
+	//
+	// The installer launches the tray with MCPPROXY_LAUNCHED_BY=installer and
+	// the core inherits it through os.Environ() above; that first-run
+	// attribution outranks "tray", so we must not overwrite it.
+	if strings.TrimSpace(os.Getenv("MCPPROXY_LAUNCHED_BY")) != "installer" {
+		filtered = append(filtered, "MCPPROXY_LAUNCHED_BY=tray")
+	}
 
 	// Pass through TLS configuration if set
 	if tlsEnabled := strings.TrimSpace(os.Getenv("MCPPROXY_TLS_ENABLED")); tlsEnabled != "" {

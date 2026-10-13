@@ -10,7 +10,9 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // MCP-1072: `registry edit` updates a user-added custom registry source (name,
@@ -43,6 +45,8 @@ func EditRegistrySourceErrorCode(err error) string {
 		return "registry_shadows_builtin"
 	case errors.Is(err, ErrInvalidRegistryURL):
 		return "invalid_registry_url"
+	case errors.Is(err, ErrRegistrySourceUnusable):
+		return "registry_source_unusable"
 	}
 	return ""
 }
@@ -55,33 +59,81 @@ func (s *Server) EditRegistrySource(req *EditRegistrySourceRequest) (*config.Reg
 		return nil, errors.New("nil request")
 	}
 
+	// Issue #1148, round 8: an echoed read mask is REFUSED, never persisted
+	// over the stored credential — the same answer the server write path gives
+	// for every field with no key-bound revert.
+	if err := oauth.CheckServerWriteMasks("registry_source.", map[string]interface{}{
+		"url": req.URL, "servers_url": req.ServersURL,
+	}); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrInvalidRegistryURL, err)
+	}
+
 	currentConfig := s.runtime.Config()
 	if currentConfig == nil {
 		return nil, errors.New("configuration unavailable")
 	}
 
-	updated, remaining, err := editRegistrySourceInConfig(currentConfig, req)
+	updated, _, err := editRegistrySourceInConfig(currentConfig, req)
 	if err != nil {
 		return nil, err
 	}
 
-	// Copy-on-write: clone the config and publish a fresh registries slice so
-	// background readers ranging over the shared snapshot are never disturbed.
-	updatedConfig := *currentConfig
-	updatedConfig.Registries = remaining
-	s.runtime.UpdateConfig(&updatedConfig, "")
+	// A new base URL re-opens the "what protocol does this source speak?" question
+	// (GH #783), so re-probe it — unless the caller pinned the servers URL
+	// explicitly, in which case that is the answer. This is what lets a user REPAIR
+	// a registry that was added while the URL was being mangled.
+	reprobed := false
+	if strings.TrimSpace(req.URL) != "" && strings.TrimSpace(req.ServersURL) == "" {
+		if err := s.resolveRegistrySourceShape(&updated); err != nil {
+			return nil, err
+		}
+		reprobed = true
+	}
+
+	// One config commit (Spec 116): the edit is re-applied to the LIVE
+	// configuration inside the commit lock (the probe above ran outside it), so
+	// a concurrent change to another source or to the servers is never
+	// reverted by the copy read before the probe.
+	//
+	// Only the probe-derived fields (ServersURL, Protocol) are carried over
+	// from the probe; everything else comes from the request applied to the
+	// live entry, so a concurrent edit of another field of the same source
+	// (its name, say) committed while this one was probing is kept (review
+	// round 1).
+	probed := updated
+	res, err := s.runtime.Commit("registry_source_edit", func(tx *runtime.CommitTx) error {
+		edited, live, err := editRegistrySourceInConfig(tx.Config(), req)
+		if err != nil {
+			return err
+		}
+		if reprobed {
+			edited.ServersURL = probed.ServersURL
+			edited.Protocol = probed.Protocol
+			for i := range live {
+				if strings.EqualFold(live[i].ID, edited.ID) {
+					live[i] = edited
+					break
+				}
+			}
+		}
+		updated = edited
+		return tx.MutateGlobal(func(cfg *config.Config) error {
+			cfg.Registries = live
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
 
 	// Rebuild the effective catalog so the edit takes effect immediately.
-	registries.SetRegistriesFromConfig(&updatedConfig)
-
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Warn("Failed to save configuration after editing registry source",
-			zap.String("registry_id", updated.ID), zap.Error(err))
+	if res != nil && res.Snapshot != nil {
+		registries.SetRegistriesFromConfig(res.Snapshot.Config)
 	}
 
 	s.logger.Info("Edited custom registry source",
 		zap.String("registry_id", updated.ID),
-		zap.String("url", updated.URL))
+		zap.String("url", oauth.LogSafeURL(updated.URL)))
 
 	return &updated, nil
 }
@@ -143,6 +195,10 @@ func editRegistrySourceInConfig(cfg *config.Config, req *EditRegistrySourceReque
 		if err != nil || u.Scheme != "https" || u.Host == "" {
 			return config.RegistryEntry{}, nil, fmt.Errorf("%w: %q (must be an https URL)", ErrInvalidRegistryURL, rawURL)
 		}
+		// SSRF fail-fast (CWE-918) — same literal-IP guard as add-source.
+		if err := registries.ValidateRegistrySourceURL(rawURL); err != nil {
+			return config.RegistryEntry{}, nil, fmt.Errorf("%w: %v", ErrInvalidRegistryURL, err)
+		}
 		updated.URL = rawURL
 		// Re-derive the servers URL from the new base unless the caller also
 		// supplied an explicit one below.
@@ -151,6 +207,10 @@ func editRegistrySourceInConfig(cfg *config.Config, req *EditRegistrySourceReque
 		}
 	}
 	if serversURL := strings.TrimSpace(req.ServersURL); serversURL != "" {
+		// An explicit servers-collection URL is also a fetch target — guard it.
+		if err := registries.ValidateRegistrySourceURL(serversURL); err != nil {
+			return config.RegistryEntry{}, nil, fmt.Errorf("%w: %v", ErrInvalidRegistryURL, err)
+		}
 		updated.ServersURL = serversURL
 	}
 	// A custom registry stays "custom" — the merge recomputes provenance from the

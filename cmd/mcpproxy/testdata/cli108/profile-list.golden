@@ -1,0 +1,3 @@
+NAME       TITLE           SERVERS        MAX TIER     READ  WRITE  DESTR  UNANNOTATED HIDDEN  USED BY            CALLS 24H  BLOCKED 24H
+work-ro2   Work Read-only  github,notion  read         4     0      0      2                   1 client, 1 token  12         3
+work-full  -               github         destructive  2     3      1      0                   anonymous          0          0

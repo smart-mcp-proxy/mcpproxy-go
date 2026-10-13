@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -11,6 +12,9 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 )
 
@@ -77,12 +81,16 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 
 	sink := newLoggerWriter(c.upstreamLogger, c.logger)
 	spec := &launcher.Spec{
-		Cmd:     cmd,
-		LogSink: sink,
-		Name:    c.config.Name,
+		Cmd:        cmd,
+		LogSink:    sink,
+		Name:       c.config.Name,
+		RedactArgs: logSafeArgs,
 	}
 
-	handle, err := launcher.Spawn(ctx, spec, c.logger)
+	// Spec 116 PR4 (FR-023, FR-025a): the spawn and the gate's tracking of
+	// the child are one admitted section, so a retired instance launches
+	// nothing and a launch admitted before retirement is killed by Retire.
+	handle, err := c.spawnLauncherAdmitted(ctx, spec)
 	if err != nil {
 		if cidFile != "" {
 			_ = os.Remove(cidFile)
@@ -115,19 +123,30 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 
 	c.logger.Info("waiting for upstream URL to become reachable",
 		zap.String("server", c.config.Name),
-		zap.String("url", c.config.URL),
+		zap.String("url", c.logSafeURL()),
 		zap.Duration("timeout", waitTimeout))
 
-	if err := launcher.WaitForURL(ctx, c.config.URL, waitTimeout); err != nil {
+	// The reachability probe dials through the gate (T4.14): a retired
+	// instance stops probing its old endpoint.
+	if err := launcher.WaitForURLWithDial(ctx, c.config.URL, waitTimeout, c.Gate().DialContext(launcherProbeDialer.DialContext)); err != nil {
 		// Tear down the child we just started — caller will see a
 		// failed Connect and the next attempt should start fresh.
 		// Release c.mu around handle.Stop because it blocks until the
 		// child is reaped; the `connecting` flag (set by Connect)
 		// prevents a concurrent Connect from sneaking in. Reacquire
 		// before returning so the caller's deferred Unlock balances.
+		//
+		// The child stays tracked by the gate until Stop has reaped it
+		// (Spec 116 PR4): a retirement during Stop's grace period kills
+		// the group at once instead of finding nothing to kill.
+		proc := c.launcherProc
 		c.launcherHandle = nil
 		c.launcherCIDFile = ""
+		c.launcherProc = nil
 		c.mu.Unlock()
+		if hook := launcherBeforeStopHook; hook != nil {
+			hook()
+		}
 		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if stopErr := handle.Stop(stopCtx); stopErr != nil {
 			c.logger.Warn("failed to stop launcher after wait-for-url failure",
@@ -135,6 +154,7 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 				zap.Error(stopErr))
 		}
 		cancel()
+		proc.Untrack()
 		if cidFile != "" {
 			_ = os.Remove(cidFile)
 		}
@@ -144,7 +164,7 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 
 	c.logger.Info("upstream URL is reachable",
 		zap.String("server", c.config.Name),
-		zap.String("url", c.config.URL))
+		zap.String("url", c.logSafeURL()))
 	return nil
 }
 
@@ -155,9 +175,12 @@ func (c *Client) stopLauncher(ctx context.Context) {
 	c.mu.Lock()
 	handle := c.launcherHandle
 	cidFile := c.launcherCIDFile
+	proc := c.launcherProc
 	c.launcherHandle = nil
 	c.launcherCIDFile = ""
+	c.launcherProc = nil
 	c.mu.Unlock()
+	defer proc.Untrack()
 
 	if handle == nil {
 		return
@@ -296,6 +319,14 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 	} else {
 		// Plain (non-docker) launcher command. Shell-wrap for login-env inheritance.
 		finalCommand, finalArgs = c.wrapWithUserShell(c.config.Command, args)
+
+		// Native sandbox isolation (MCP-34.3): mirror connectStdio — re-exec the
+		// shell-wrapped command through the sandbox wrapper when mode is "sandbox".
+		if c.isolationManager != nil && c.isolationManager.ResolveMode(c.config) == config.IsolationModeSandbox {
+			var extraEnv []string
+			finalCommand, finalArgs, extraEnv = c.wrapWithSandbox(finalCommand, finalArgs)
+			envVars = append(envVars, extraEnv...)
+		}
 	}
 
 	cmd := exec.Command(finalCommand, finalArgs...)
@@ -307,7 +338,7 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 	c.logger.Debug("launcher command prepared",
 		zap.String("server", c.config.Name),
 		zap.String("command", finalCommand),
-		zap.Strings("args", finalArgs),
+		zap.Strings("args", logSafeArgs(finalArgs)),
 		zap.String("working_dir", c.config.WorkingDir),
 		zap.Bool("docker", willUseDocker))
 
@@ -330,15 +361,81 @@ func newLoggerWriter(primary, fallback *zap.Logger) io.Writer {
 }
 
 func (w *loggerWriter) Write(p []byte) (int, error) {
-	line := strings.TrimRight(string(p), "\n")
-	if line == "" {
-		return len(p), nil
-	}
-	switch {
-	case w.primary != nil:
-		w.primary.Info(line)
-	case w.fallback != nil:
-		w.fallback.Info(line)
+	// One record per line: pumpLines already writes one line per call, and
+	// the split keeps that shape for any other producer (one record per
+	// child line is what `mcpproxy upstream logs` shows).
+	for _, line := range strings.Split(strings.TrimRight(string(p), "\n"), "\n") {
+		w.writeLine(strings.TrimRight(line, "\r"))
 	}
 	return len(p), nil
+}
+
+// writeLine records one child output line through the per-server logger.
+// The child's text is the `message` FIELD of a constant-message record
+// stamped child_output=true, never the record message (Spec 105 FR-007,
+// internal/logs research D8 rule 1): the console encoder writes a message
+// unescaped, so child text there could carry a record header or boundary,
+// and a docker CLI failure names another server's container — the
+// attributed reader withholds child-output records that mention a container
+// (codex round 2).
+func (w *loggerWriter) writeLine(line string) {
+	if line == "" {
+		return
+	}
+	// Issue #1158 (review round 2, investigation 3). This is the child
+	// process's own stdout/stderr, written verbatim into
+	// ~/.mcpproxy/logs/server-<name>.log — and that file is not local-only: it
+	// is tailed by `mcpproxy upstream logs`, returned by the
+	// `upstream_servers tail_log` MCP tool, and served over HTTP by
+	// GET /api/v1/servers/{id}/logs. An upstream that echoes its own
+	// configuration on startup ("connecting with token sk-live-…", a stack
+	// trace quoting the request URL) therefore puts a credential on a REST
+	// surface, and it is a credential mcpproxy itself handed the child.
+	//
+	// ScrubUpstreamText is the rule this exact class of string gets everywhere
+	// else in the tree: text originated OUTSIDE mcpproxy's own structured
+	// fields, with no enclosing key to judge it by, so both the name rule and
+	// the value-shaped detector run. Ordinary child output is untouched by it.
+	line = oauth.ScrubUpstreamText(line)
+	switch {
+	case w.primary != nil:
+		w.primary.Info("launcher", zap.String("message", line), logs.ChildOutputField())
+	case w.fallback != nil:
+		w.fallback.Info("launcher", zap.String("message", line), logs.ChildOutputField())
+	}
+}
+
+// launcherBeforeStopHook is a test seam run on a launcher failure path
+// after c.mu is released and before handle.Stop. Nil in production.
+var launcherBeforeStopHook func()
+
+// launcherProbeDialer is the per-attempt dialer of the launcher's
+// reachability probe; the gate wraps it.
+var launcherProbeDialer = &net.Dialer{Timeout: 2 * time.Second}
+
+// spawnLauncherAdmitted spawns the launcher child inside one admitted
+// section of the instance's gate and registers it with the gate there. A
+// child the gate refuses to track (retired during the section) is killed
+// before this returns.
+func (c *Client) spawnLauncherAdmitted(ctx context.Context, spec *launcher.Spec) (launcher.Handle, error) {
+	gate := c.Gate()
+	release, err := gate.Admit(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	handle, err := launcher.Spawn(ctx, spec, c.logger)
+	if err != nil {
+		return nil, err
+	}
+	observeLaunch(c.config.Name, "launcher")
+	// The handle's Kill reaches the whole tree on every platform: the
+	// process group on Unix and the launcher's own Job Object on Windows
+	// (core's Windows Job registry does not hold launcher children).
+	proc, err := gate.TrackProcess(func() { _ = handle.Kill() })
+	if err != nil {
+		return nil, err
+	}
+	c.launcherProc = proc
+	return handle, nil
 }
