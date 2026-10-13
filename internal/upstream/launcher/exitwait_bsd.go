@@ -13,7 +13,7 @@ import (
 // calls cmd.Wait under reapMu (Spec 116 PR4, review round 4). The process
 // is our unreaped child, so a registration refused with ESRCH means it
 // already exited. It reports false when the exit could not be observed
-// that way; reap then falls back to an unlocked cmd.Wait.
+// that way; reap then falls back to reapUnobserved.
 func waitExited(pid int) bool {
 	kq, err := syscall.Kqueue()
 	if err != nil {

@@ -508,6 +508,55 @@ ungated "a gated client with a comment before its brace" internal/oauth a.go 'pa
 func f() { c := &http.Client /* gated */ {Transport: gated}; _ = c }' 0
 ungated "a slice of client pointers is not a client literal" internal/oauth a.go 'package oauth
 var cs = []*http.Client {a, b}' 0
+# Slice, array and map literals of clients (Sol review round 5): the outer
+# brace opens the container, and each element brace (type elided) is the
+# client literal whose Transport: key counts.
+ungated "a gated slice literal of clients" internal/oauth a.go 'package oauth
+var cs = []http.Client{{Transport: gated}}' 0
+ungated "a gated array literal of clients" internal/oauth a.go 'package oauth
+var cs = [1]http.Client{{Transport: gated}}' 0
+ungated "a gated [...] array literal of two clients" internal/transport a.go 'package transport
+var cs = [...]http.Client{{Transport: a}, {Transport: b}}' 0
+ungated "a gated multi-line slice literal of clients" internal/upstream/core a.go 'package core
+var cs = []http.Client{
+	{
+		Timeout:   t,
+		Transport: gated,
+	},
+}' 0
+ungated "an empty slice literal of clients" internal/oauth a.go 'package oauth
+var cs = []http.Client{}' 0
+ungated "a slice literal with one transport-less client" internal/oauth a.go 'package oauth
+var cs = []http.Client{{Transport: a}, {Timeout: t}}' 1
+ungated "a transport-less elided client pointer in a slice" internal/oauth a.go 'package oauth
+var cs = []*http.Client{{Timeout: t}}' 1
+ungated "a gated elided client pointer in a slice" internal/oauth a.go 'package oauth
+var cs = []*http.Client{{Transport: gated}}' 0
+ungated "a gated map literal of clients" internal/transport a.go 'package transport
+var cs = map[string]http.Client{"a": {Transport: gated}}' 0
+ungated "a transport-less map literal of client pointers" internal/transport a.go 'package transport
+var cs = map[string]*http.Client{"a": {}}' 1
+ungated "a gated explicit client inside a slice literal" internal/oauth a.go 'package oauth
+var cs = []http.Client{http.Client{Transport: gated}}' 0
+ungated "a transport-less explicit client inside a slice literal" internal/oauth a.go 'package oauth
+var cs = []http.Client{http.Client{}}' 1
+ungated "a gated two-dimensional slice literal of clients" internal/oauth a.go 'package oauth
+var cs = [][]http.Client{{{Transport: gated}}}' 0
+ungated "a transport-less two-dimensional slice literal of clients" internal/oauth a.go 'package oauth
+var cs = [][]http.Client{{{Timeout: t}}}' 1
+ungated "a slice element whose Transport: is only in a nested func body" internal/oauth a.go 'package oauth
+var cs = []http.Client{{CheckRedirect: func(*http.Request, []*http.Request) error { _ = opts{Transport: g}; return nil }}}' 1
+ungated "a []http.Client func result type is not a literal" internal/oauth a.go 'package oauth
+func f() []http.Client {
+	if x {
+		return nil
+	}
+	return nil
+}' 0
+ungated "a slice element built by a call is not an elided client" internal/oauth a.go 'package oauth
+var cs = []http.Client{mk(opts{Timeout: t})}' 0
+ungated "a genuine transport-less http.Client{}" internal/oauth a.go 'package oauth
+var c = http.Client{}' 1
 ungated "a spaced selector http . DefaultTransport" internal/transport a.go 'package transport
 var rt = http . DefaultTransport' 1
 ungated "a spaced helper call http. Get" internal/oauth a.go 'package oauth

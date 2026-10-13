@@ -12,7 +12,7 @@ import (
 // with WNOWAIT): the exited leader stays a zombie, which keeps its PID and
 // process-group ID reserved, until reap calls cmd.Wait under reapMu (Spec
 // 116 PR4, review round 4). It reports false when the exit could not be
-// observed that way; reap then falls back to an unlocked cmd.Wait.
+// observed that way; reap then falls back to reapUnobserved.
 func waitExited(pid int) bool {
 	for {
 		var info unix.Siginfo

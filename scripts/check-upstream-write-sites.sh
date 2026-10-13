@@ -388,18 +388,38 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
     # literal does not close the client. A literal that closes without a
     # Transport: key is a hit, reported at its opening line; one still open
     # at the end of its file too. bd is the brace depth of the file.
-    function scan_clients(code, file, n, raw,    i, L, ch, pc) {
+    #
+    # Slice, array and map literals of clients (review round 5):
+    # []http.Client{, [N]http.Client{, [...]http.Client{,
+    # map[K]http.Client{ (and the *http.Client element forms) open a
+    # container, kept on its own stack with its depth and its dimension
+    # count (the bracket groups before the element type). The client
+    # literals are its elements, whose type is elided: a brace at the
+    # container depth plus its dimensions that starts an element (it
+    # follows {, a comma, a key colon, or starts its line). An explicit
+    # http.Client{ element is a client in its own right. A type followed by
+    # its brace right after a closing parenthesis is a func result type
+    # before the body, not a literal.
+    function scan_clients(code, file, n, raw,    i, L, ch, pc, pre, m, dims) {
       L = length(code)
       for (i = 1; i <= L; i++) {
         ch = substr(code, i, 1)
         if (ch == "{") {
           bd++
+          pre = substr(code, 1, i - 1)
           # The type may be spaced from its brace and its selector dot
           # spaced too (review round 3): `http.Client /* x */ {` (strip
           # turns the comment into a space) and `http . Client{` are the
           # same literal. A brace on a later line cannot open it (Go
           # inserts a semicolon after Client).
-          if (substr(code, 1, i - 1) ~ /(^|[^*A-Za-z0-9_.])http[ \t]*[.][ \t]*Client[ \t]*$/) {
+          if (pre ~ /[)][ \t]*((map[ \t]*)?\[[^]]*\][ \t]*)*[*]?[ \t]*http[ \t]*[.][ \t]*Client[ \t]*$/) {
+            # a func result type: the brace opens the body
+          } else if (match(pre, /(^|[^A-Za-z0-9_.])((map[ \t]*)?\[[^]]*\][ \t]*)+[*]?[ \t]*http[ \t]*[.][ \t]*Client[ \t]*$/)) {
+            m = substr(pre, RSTART, RLENGTH)
+            sub(/[*]?[ \t]*http[ \t]*[.][ \t]*Client[ \t]*$/, "", m)
+            dims = gsub(/\[/, "[", m)
+            nc++; cdepth[nc] = bd; cdims[nc] = dims
+          } else if (pre ~ /(^|[^*A-Za-z0-9_.])http[ \t]*[.][ \t]*Client[ \t]*$/ || (nc > 0 && bd == cdepth[nc] + cdims[nc] && pre ~ /(^|[{,:])[ \t]*$/)) {
             ns++; sdepth[ns] = bd; shas[ns] = 0; sfile[ns] = file; sline[ns] = n; sraw[ns] = raw
           }
         } else if (ch == "}") {
@@ -407,6 +427,7 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
             if (!shas[ns]) report(sfile[ns], sline[ns], sraw[ns])
             ns--
           }
+          if (nc > 0 && cdepth[nc] == bd) nc--
           bd--
         } else if (ch == "T" && ns > 0 && bd == sdepth[ns] && substr(code, i, 9) == "Transport") {
           pc = (i > 1) ? substr(code, i - 1, 1) : ""
@@ -416,7 +437,7 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
     }
     function flush_clients(    k) {
       for (k = 1; k <= ns; k++) if (!shas[k]) report(sfile[k], sline[k], sraw[k])
-      ns = 0; bd = 0
+      ns = 0; nc = 0; bd = 0
     }
     FNR == 1 {
       flush_clients()

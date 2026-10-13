@@ -224,3 +224,113 @@ func readPid(t *testing.T, path string) int {
 	require.NoError(t, err)
 	return pid
 }
+
+// injectExitObservationFailure makes reap's non-reaping exit wait report
+// failure, as kqueue under fd exhaustion or a denied waitid would.
+func injectExitObservationFailure(t *testing.T) {
+	t.Helper()
+	fail := func(int) bool { return false }
+	prev := exitObserverHook.Swap(&fail)
+	t.Cleanup(func() { exitObserverHook.Store(prev) })
+}
+
+// Sol review round 5: when the exit could not be observed without reaping,
+// reap fell back to a cmd.Wait outside reapMu, which reopened the round-4
+// window. The fallback now reaps only under reapMu as well: a Kill that
+// arrives after the real reap but before reaped is published waits for it
+// and then leaves a reused group alone.
+func TestHandleKill_ObservationFailure_AfterRealReapBeforePublish_DoesNotSignalReusedID(t *testing.T) {
+	injectExitObservationFailure(t)
+	inWindow := make(chan *handle, 1)
+	releaseReaper := make(chan struct{})
+	hook := func(h *handle) {
+		if h.name == "reap-unobserved-window" {
+			inWindow <- h
+			<-releaseReaper
+		}
+	}
+	prev := reapedLockedHook.Swap(&hook)
+	t.Cleanup(func() { reapedLockedHook.Store(prev) })
+
+	h, err := Spawn(context.Background(), &Spec{Cmd: exec.Command("/bin/sh", "-c", "exit 0"), Name: "reap-unobserved-window"}, zap.NewNop())
+	require.NoError(t, err)
+	var hh *handle
+	select {
+	case hh = <-inWindow:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reaper did not reach the window after the real reap (the fallback reaped outside reapMu)")
+	}
+	released := false
+	release := func() {
+		if !released {
+			released = true
+			close(releaseReaper)
+		}
+	}
+	defer release()
+	require.ErrorIs(t, syscall.Kill(hh.cmd.Process.Pid, 0), syscall.ESRCH,
+		"control: the leader is really reaped in the window")
+
+	other := exec.Command("sleep", "30")
+	other.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, other.Start())
+	exited := make(chan struct{})
+	go func() { _ = other.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = other.Process.Kill(); <-exited })
+	hh.pgid = other.Process.Pid
+
+	killed := make(chan error, 1)
+	go func() { killed <- h.Kill() }()
+	select {
+	case <-exited:
+		t.Fatal("an unrelated group with a reused ID was signalled between the fallback's real reap and publishing reaped")
+	case <-time.After(300 * time.Millisecond):
+	}
+	release()
+	select {
+	case err := <-killed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Kill did not return after the reaper published reaped")
+	}
+	select {
+	case <-exited:
+		t.Fatal("an unrelated group with a reused ID was signalled after the reap was published")
+	case <-time.After(300 * time.Millisecond):
+	}
+	<-h.Done()
+}
+
+// The round-5 fallback must not hold up Kill while the leader lives (a
+// blocking wait under reapMu would), must reach the group, and must still
+// report the exit status.
+func TestHandle_ObservationFailure_KillNotBlockedAndExitStatusKept(t *testing.T) {
+	injectExitObservationFailure(t)
+
+	h, err := Spawn(context.Background(), &Spec{Cmd: exec.Command("sleep", "300"), Name: "unobserved-live"}, zap.NewNop())
+	require.NoError(t, err)
+	killed := make(chan error, 1)
+	go func() { killed <- h.Kill() }()
+	select {
+	case err := <-killed:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Kill was held up by the fallback reaper while the leader was alive")
+	}
+	select {
+	case <-h.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("the fallback reaper did not reap the killed leader")
+	}
+	require.ErrorContains(t, h.Wait(), "signal: killed")
+
+	h2, err := Spawn(context.Background(), &Spec{Cmd: exec.Command("/bin/sh", "-c", "exit 3"), Name: "unobserved-exit"}, zap.NewNop())
+	require.NoError(t, err)
+	<-h2.Done()
+	require.EqualError(t, h2.Wait(), "exit status 3")
+
+	h3, err := Spawn(context.Background(), &Spec{Cmd: exec.Command("/bin/sh", "-c", "exit 0"), Name: "unobserved-ok"}, zap.NewNop())
+	require.NoError(t, err)
+	<-h3.Done()
+	require.NoError(t, h3.Wait())
+}

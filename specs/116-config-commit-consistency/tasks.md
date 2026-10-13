@@ -521,6 +521,25 @@ each documented in the PR:
   (`MCPPROXY_SC004_MEASURE=1`). The 320-tool purge misses its budget for a
   reason that predates this PR, tracked in #1617, so T098 stays open.
 
+#### PR4 review round 5 (Sol) design notes
+
+- When the non-reaping exit wait is not available (kqueue refused under fd
+  exhaustion, `waitid` denied), the Unix reaper no longer falls back to a
+  `cmd.Wait` outside `reapMu`. It polls a non-blocking `wait4(WNOHANG)`
+  under `reapMu`, with a backoff capped at 50 ms. Each attempt finds the
+  leader still running or a zombie, which releases nothing, or it reaps the
+  leader and publishes `reaped` before it drops the lock. `Kill` is never
+  held up by a live child. `cmd.Wait` then runs only for its cleanup, and
+  the exit status comes from the `wait4` status. On this degraded path that
+  status is a plain error, not an `*exec.ExitError`. Windows keeps
+  `cmd.Wait`.
+- The FR-024a scanner also tracks slice, array and map literals of clients:
+  `[]http.Client{`, `[N]`, `[...]`, `map[K]`, multi-dimensional, and the
+  `*http.Client` element forms. Each element brace, with its type elided,
+  is a client literal whose `Transport:` key counts at its own depth. A
+  `[]http.Client {` result type after a closing parenthesis opens a func
+  body, not a literal.
+
 **Checkpoint**: a retired instance cannot launch, dial or write. #1564 is
 closed.
 

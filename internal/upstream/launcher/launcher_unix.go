@@ -4,9 +4,11 @@ package launcher
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os/exec"
 	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 )
@@ -90,8 +92,10 @@ func startedGroupID(cmd *exec.Cmd) int {
 // Done closes only after reap has logged, so keying the reuse check on Done
 // left a window in which a reused group was signalled unchecked. Since
 // review round 4 the reap itself (cmd.Wait) also runs under reapMu, after a
-// non-reaping wait for the exit (waitExited), so the leader cannot be
-// reaped between the check and the signal: while reaped is false the
+// non-reaping wait for the exit (waitExited), or, where that wait is not
+// available, as a non-blocking wait4 polled under the lock (reapUnobserved,
+// review round 5), so the leader cannot be reaped between the check and the
+// signal: while reaped is false the
 // leader, alive or a zombie, holds the group ID.
 func (h *handle) retireKill() error {
 	h.reapMu.Lock()
@@ -111,4 +115,74 @@ func (h *handle) retireKill() error {
 		return err
 	}
 	return nil
+}
+
+// reapUnobservedMaxPoll caps the poll interval of reapUnobserved.
+const reapUnobservedMaxPoll = 50 * time.Millisecond
+
+// reapUnobserved reaps the leader when waitExited could not observe its
+// exit (Spec 116 PR4, review round 5): kqueue refused under fd exhaustion,
+// or waitid denied. A blocking cmd.Wait outside reapMu would release the
+// leader's PID, and with it the group ID, while reaped is still false, and
+// a concurrent retireKill would then signal the number unchecked. Holding
+// reapMu across a blocking wait instead would stall Kill until the child it
+// is meant to kill exits.
+//
+// So the reap is a non-blocking wait4 polled under reapMu: each attempt
+// either finds the leader still running or a zombie (nothing released) or
+// reaps it and publishes reaped before the lock is dropped. cmd.Wait then
+// runs only for its cleanup (pipes, copying goroutines); the leader is
+// already reaped, so its own wait reports ECHILD and is ignored, and the
+// exit status comes from the wait4 status instead (a plain error, not an
+// *exec.ExitError, on this degraded path — documented assumption).
+//
+// ECHILD from wait4 means the leader is no longer our unreaped child, so it
+// is treated as reaped. Any other error keeps polling: the leader has not
+// been released, so reaped stays false, which is the safe state for Kill.
+func (h *handle) reapUnobserved() (int, error) {
+	pid := h.cmd.Process.Pid
+	var ws syscall.WaitStatus
+	collected := false
+	delay := time.Millisecond
+	for {
+		h.reapMu.Lock()
+		wpid, err := syscall.Wait4(pid, &ws, syscall.WNOHANG, nil)
+		if errors.Is(err, syscall.EINTR) {
+			h.reapMu.Unlock()
+			continue
+		}
+		if (err == nil && wpid == pid) || errors.Is(err, syscall.ECHILD) {
+			collected = err == nil
+			if hook := reapedLockedHook.Load(); hook != nil {
+				(*hook)(h)
+			}
+			h.reaped = true
+			h.reapMu.Unlock()
+			break
+		}
+		h.reapMu.Unlock()
+		time.Sleep(delay)
+		if delay *= 2; delay > reapUnobservedMaxPoll {
+			delay = reapUnobservedMaxPoll
+		}
+	}
+
+	waitErr := h.cmd.Wait()
+	// No Process.Release here: it rewrites Process.Pid, which Kill and
+	// Spawn read concurrently. A pidfd left open by the failed wait is
+	// closed by the os.Process cleanup when the handle is collected.
+	if !collected {
+		return -1, waitErr
+	}
+	switch {
+	case ws.Exited():
+		if code := ws.ExitStatus(); code != 0 {
+			return code, fmt.Errorf("exit status %d", code)
+		}
+		return 0, nil
+	case ws.Signaled():
+		return -1, fmt.Errorf("signal: %v", ws.Signal())
+	default:
+		return -1, waitErr
+	}
 }

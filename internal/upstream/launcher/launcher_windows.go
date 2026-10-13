@@ -111,3 +111,14 @@ func (h *handle) retireKill() error {
 	}
 	return h.kill()
 }
+
+// reapUnobserved reaps the child with cmd.Wait. Windows has no non-reaping
+// exit wait and needs none: there is no process-group ID to reuse, and
+// retireKill keys on Done, not reaped.
+func (h *handle) reapUnobserved() (int, error) {
+	err := h.cmd.Wait()
+	h.reapMu.Lock()
+	h.reaped = true
+	h.reapMu.Unlock()
+	return -1, err
+}

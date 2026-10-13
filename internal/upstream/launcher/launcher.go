@@ -359,10 +359,16 @@ func (h *handle) reap() {
 	// reaped == false after the kernel had already released the ID, and
 	// signal a group that reused it. waitExited first observes the exit
 	// without reaping, so the locked cmd.Wait returns at once and Kill is
-	// never held up by a live child. Where that is not available, reap
-	// falls back to the unlocked order.
+	// never held up by a live child.
+	//
+	// Where the exit cannot be observed that way (kqueue refused under fd
+	// exhaustion, waitid denied, or no such call on the platform),
+	// reapUnobserved still reaps only under reapMu (review round 5): on
+	// Unix it polls a non-blocking wait4 under the lock, so the leader is
+	// never released between a Kill's reaped check and its signal.
 	var err error
-	if waitExited(h.cmd.Process.Pid) {
+	exitCode := -1
+	if observeExit(h.cmd.Process.Pid) {
 		h.reapMu.Lock()
 		err = h.cmd.Wait()
 		if hook := reapedLockedHook.Load(); hook != nil {
@@ -371,10 +377,7 @@ func (h *handle) reap() {
 		h.reaped = true
 		h.reapMu.Unlock()
 	} else {
-		err = h.cmd.Wait()
-		h.reapMu.Lock()
-		h.reaped = true
-		h.reapMu.Unlock()
+		exitCode, err = h.reapUnobserved()
 	}
 	if hook := afterReapHook.Load(); hook != nil {
 		(*hook)(h)
@@ -395,7 +398,6 @@ func (h *handle) reap() {
 
 	h.pid.Store(0)
 
-	exitCode := -1
 	if h.cmd.ProcessState != nil {
 		exitCode = h.cmd.ProcessState.ExitCode()
 	}
@@ -416,10 +418,21 @@ var containTree = createJob
 // earlier tests' handles may still read it while a test installs its own.
 var afterReapHook atomic.Pointer[func(*handle)]
 
-// reapedLockedHook runs in the reaper right after cmd.Wait reaped the
-// leader and before reaped is published, with reapMu held. A test seam; nil
-// in production.
+// reapedLockedHook runs in the reaper right after the leader was really
+// reaped (cmd.Wait, or the non-blocking wait4 of reapUnobserved) and before
+// reaped is published, with reapMu held. A test seam; nil in production.
 var reapedLockedHook atomic.Pointer[func(*handle)]
+
+// exitObserverHook replaces waitExited in reap. A test seam that injects an
+// exit-observation failure; nil in production.
+var exitObserverHook atomic.Pointer[func(pid int) bool]
+
+func observeExit(pid int) bool {
+	if hook := exitObserverHook.Load(); hook != nil {
+		return (*hook)(pid)
+	}
+	return waitExited(pid)
+}
 
 // pumpLines reads r line-by-line and writes each line, prefixed, to dst.
 // One Write per line so adapters that bridge io.Writer to a structured
