@@ -124,6 +124,10 @@ func (s *Server) removeServerFromConfig(name string) (storage.PurgeReport, error
 	if s.runtime == nil {
 		return storage.PurgeReport{}, fmt.Errorf("runtime not available")
 	}
+	// The informational-scan bookkeeping of a removed server is forgotten by
+	// the purge observer (forgetInformationalScansOnPurge), which runs only
+	// after the commit persisted: a removal that fails to persist leaves the
+	// server configured and must keep its known mark and retry budget.
 	res, err := s.runtime.Commit("remove_server", func(tx *runtime.CommitTx) error {
 		return tx.RemoveServer(name)
 	})

@@ -269,6 +269,7 @@ const sidebars = {
         'development/web-ui-verification',
         'development/macos-tray',
         'development/release-gate',
+        'development/quarantine-approval-pilot',
         'development/server-edition-multiuser-auth',
         'features/quarantine-testing',
         'features/scanner-images',

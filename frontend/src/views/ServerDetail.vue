@@ -76,10 +76,10 @@
                   {{ isHttpProtocol ? 'Reconnect' : 'Restart' }}
                 </button>
               </li>
-              <li v-if="healthAction === 'login'">
-                <button @click="triggerOAuth" :disabled="actionLoading">
+              <li v-if="canSignIn">
+                <button @click="triggerOAuth" :disabled="actionLoading" data-test="server-detail-menu-login">
                   <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                  Login
+                  {{ server.authenticated || server.connected ? 'Sign in again' : 'Sign in' }}
                 </button>
               </li>
               <li v-if="server.enabled && server.connected">
@@ -300,7 +300,7 @@
               class="btn btn-sm btn-warning"
             >
               <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-              Approve
+              Review &amp; approve
             </button>
           </div>
         </div>
@@ -1605,6 +1605,7 @@ import { refName } from '@/utils/secretRef'
 import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState, healthStatusLabel, healthActionLabel, healthStatusText } from '@/utils/health'
+import { canStartOAuthLogin } from '@/utils/oauthActions'
 import type { HealthStatusValue } from '@/types/contracts'
 import { describeIsolation } from '@/utils/isolationState'
 import { computeToolDiffSections } from '@/utils/toolDiff'
@@ -1862,6 +1863,7 @@ const logTail = ref(100)
 const isHttpProtocol = computed(() => {
   return server.value?.protocol === 'http' || server.value?.protocol === 'streamable-http'
 })
+const canSignIn = computed(() => !!server.value && canStartOAuthLogin(server.value))
 
 // Suggested action from unified health status
 const healthAction = computed(() => {
@@ -3052,11 +3054,13 @@ async function triggerOAuth() {
 
   actionLoading.value = true
   try {
-    await serversStore.triggerOAuthLogin(server.value.name)
+    const result = await serversStore.triggerOAuthLogin(server.value.name)
     systemStore.addToast({
-      type: 'success',
-      title: 'OAuth Login Triggered',
-      message: `Check your browser for ${server.value.name} login`,
+      type: result.browser_opened ? 'info' : 'warning',
+      title: result.browser_opened ? 'Sign-in opened' : 'Open the sign-in page',
+      message: result.browser_opened ? `Finish signing in to ${server.value.name} in your browser.` : 'Your browser blocked the new tab. Use the link below to continue.',
+      link: result.auth_url ? { url: result.auth_url, label: `Sign in to ${server.value.name}` } : undefined,
+      duration: result.browser_opened ? 10000 : 0,
     })
   } catch (error) {
     systemStore.addToast({

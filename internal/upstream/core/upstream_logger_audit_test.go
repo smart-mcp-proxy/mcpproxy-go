@@ -83,7 +83,7 @@ func TestUpstreamLoggerAudit_MessagesAreConstant(t *testing.T) {
 					}
 					// zap.Error(err) is a field constructor, not a level call;
 					// err.Error() takes no message.
-					if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "zap" {
+					if ident, ok := sel.X.(*ast.Ident); ok && (ident.Name == "zap" || (ident.Name == "http" && sel.Sel.Name == "Error")) {
 						return true
 					}
 					if len(call.Args) == 0 {
