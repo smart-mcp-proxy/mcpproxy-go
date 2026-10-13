@@ -30,8 +30,16 @@ import (
 // same-generation replacement) superseded them.
 //
 // Lock order (plan.md §Lock order): captureMu (L3, W for every registry
-// change) → mu (L4). Neither is held while connecting or disconnecting an
-// instance, or while calling back into the runtime.
+// change) → mu (L4) → limiterPubMu (L4', taken hand over hand before mu is
+// released, held across the limiter publication) → limiter.Registry.mu
+// (leaf). None is held while connecting or disconnecting an instance, or
+// while calling back into the runtime.
+//
+// Limiter publication is part of the bound action (Sol round 2): a registry
+// mutation publishes the limits it decided before any later registry
+// mutation can publish, so an action that validated generation G and then
+// lost the CPU after the unlock cannot retire, or republish G's limits over,
+// what a newer commit published.
 
 // ErrStaleGeneration is returned by the *At methods when the action was bound
 // to a generation, or an instance, that is no longer the server's current
@@ -138,15 +146,19 @@ func (m *Manager) AdvanceGenerations(changes []GenerationChange) AdvanceResult {
 			}
 		}
 	}
+	m.limiterPubMu.Lock()
 	m.mu.Unlock()
 	m.captureMu.Unlock()
 
 	for _, name := range limiterRetire {
+		m.runLimiterPublishHook(name)
 		m.retireServerConcurrency(name)
 	}
 	for _, cfg := range limiterApply {
+		m.runLimiterPublishHook(cfg.Name)
 		m.applyServerConcurrency(cfg)
 	}
+	m.limiterPubMu.Unlock()
 	return res
 }
 
@@ -324,15 +336,19 @@ func (m *Manager) addServerConfigAt(id string, serverConfig *config.ServerConfig
 		return nil, err
 	}
 	inst, old, err := m.installAtLocked(id, serverConfig, gen, false)
+	m.limiterPubMu.Lock()
 	m.mu.Unlock()
 	m.captureMu.Unlock()
 
 	if err == nil {
 		// Spec 093: publish this server's limits (or retire them when the
-		// server is disabled/quarantined, FR-009). Off the lock — Retire
-		// wakes queued callers.
+		// server is disabled/quarantined, FR-009). Off the registry locks —
+		// Retire wakes queued callers — but under limiterPubMu, so a newer
+		// commit cannot publish first.
+		m.runLimiterPublishHook(id)
 		m.applyServerConcurrency(serverConfig)
 	}
+	m.limiterPubMu.Unlock()
 	if old != nil {
 		_ = old.Disconnect()
 	}
@@ -419,12 +435,17 @@ func (m *Manager) RemoveServerAt(name string, gen int64) error {
 	if err == nil {
 		old = m.unregisterLocked(name)
 	}
-	m.mu.Unlock()
-	m.captureMu.Unlock()
 	if err != nil {
+		m.mu.Unlock()
+		m.captureMu.Unlock()
 		return err
 	}
+	m.limiterPubMu.Lock()
+	m.mu.Unlock()
+	m.captureMu.Unlock()
+	m.runLimiterPublishHook(name)
 	m.retireServerConcurrency(name)
+	m.limiterPubMu.Unlock()
 	if old != nil {
 		m.logger.Info("Removing upstream server",
 			zap.String("id", name),
@@ -468,9 +489,11 @@ func (m *Manager) ReplaceInstanceAt(name string, gen int64, expected *managed.Cl
 	if err == nil {
 		m.installLocked(name, client)
 	}
+	m.limiterPubMu.Lock()
 	m.mu.Unlock()
 	m.captureMu.Unlock()
 
+	m.runLimiterPublishHook(name)
 	if err == nil {
 		m.applyServerConcurrency(cfg)
 	} else {
@@ -478,6 +501,7 @@ func (m *Manager) ReplaceInstanceAt(name string, gen int64, expected *managed.Cl
 		// installs it again.
 		m.retireServerConcurrency(name)
 	}
+	m.limiterPubMu.Unlock()
 	if old != nil {
 		_ = old.Disconnect()
 	}
@@ -592,11 +616,14 @@ func (m *Manager) addServerConfigUnbound(id string, serverConfig *config.ServerC
 		m.setDesiredLocked(id, desiredGen{gen: 0, present: true})
 	}
 	inst, old, err := m.installAtLocked(id, serverConfig, gen, true)
+	m.limiterPubMu.Lock()
 	m.mu.Unlock()
 	m.captureMu.Unlock()
 	if err == nil {
+		m.runLimiterPublishHook(id)
 		m.applyServerConcurrency(serverConfig)
 	}
+	m.limiterPubMu.Unlock()
 	if old != nil {
 		_ = old.Disconnect()
 	}
@@ -625,6 +652,7 @@ func (m *Manager) RemoveServer(id string) {
 		delete(m.desired, id)
 	}
 	old := m.unregisterLocked(id)
+	m.limiterPubMu.Lock()
 	m.mu.Unlock()
 	m.captureMu.Unlock()
 
@@ -636,11 +664,20 @@ func (m *Manager) RemoveServer(id string) {
 			name = cfg.Name
 		}
 	}
+	m.runLimiterPublishHook(name)
 	m.retireServerConcurrency(name)
+	m.limiterPubMu.Unlock()
 	if old != nil {
 		m.logger.Info("Removing upstream server",
 			zap.String("id", id),
 			zap.String("state", old.GetState().String()))
 		_ = old.Disconnect()
+	}
+}
+
+// runLimiterPublishHook runs the test seam, if installed.
+func (m *Manager) runLimiterPublishHook(name string) {
+	if h := m.limiterPublishHook.Load(); h != nil {
+		(*h)(name)
 	}
 }

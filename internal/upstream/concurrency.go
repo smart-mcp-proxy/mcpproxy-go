@@ -101,6 +101,10 @@ func (m *Manager) applyConcurrencyLimits(cfg *config.Config) {
 
 	// Clients added out-of-band (AddServerConfig before the new config snapshot
 	// reaches the manager) must keep their limiter across the generation swap.
+	//
+	// The snapshot is taken under mu and the publication under limiterPubMu,
+	// hand over hand (Spec 116 PR3): a registry mutation that follows this
+	// snapshot publishes after this Apply, never before it.
 	m.mu.RLock()
 	clientConfigs := make([]*config.ServerConfig, 0, len(m.clients))
 	for _, client := range m.clients {
@@ -108,7 +112,9 @@ func (m *Manager) applyConcurrencyLimits(cfg *config.Config) {
 			clientConfigs = append(clientConfigs, client.GetConfig())
 		}
 	}
+	m.limiterPubMu.Lock()
 	m.mu.RUnlock()
+	defer m.limiterPubMu.Unlock()
 
 	for _, sc := range clientConfigs {
 		if !limiterEligible(sc) {

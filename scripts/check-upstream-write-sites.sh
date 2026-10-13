@@ -140,10 +140,20 @@ fi
 #    named upstreamManager, UpstreamManager(), manager or upstream); they use
 #    the *At forms.
 #  - internal/upstream/*.go (non-test) never calls them internally (m.X(...)),
-#    and only unregisterLocked / installLocked delete from or assign into
-#    m.clients.
+#    and only unregisterLocked / installLocked delete from, clear or assign
+#    into m.clients. An assignment is found by its operator, not by its
+#    shape: the left-hand side of the first assignment operator (`=`, `:=`,
+#    `op=`; never `==`, `!=`, `<=`, `>=`) of each statement is split on its
+#    top-level commas, and any operand that is m.clients or an index of it is
+#    a write, so a multi-target assignment (`m.clients[name], ok = c, true`)
+#    is one too (Sol round 2).
 #  A statement split across lines (a code line ending in `.`, `(`, `[`, `,`
 #  or `=` continues on the next code line) is matched as one logical line.
+#  The enclosing function is tracked on the lexed CODE, and only from a
+#  top-level declaration (a line starting in column 0): a declaration inside a
+#  raw string, a string or a comment never changes it (Sol round 2).
+#  Not covered (documented): writes through an alias of the map
+#  (`cs := m.clients; cs[n] = c`); review catches those.
 pr3_files=()
 while IFS= read -r f; do
   [[ -n "$f" ]] || continue
@@ -156,16 +166,54 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
   # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
   hits2="$(awk '
 '"$STRIP_AWK"'
+    # writes_clients reports whether one logical line assigns to m.clients
+    # or an index of it in the left-hand side of an assignment.
+    function writes_clients(line,    segs, ns, k, seg, n, i, c, depth, nx, pv, pp, lhs, el, ne, j) {
+      ns = split(line, segs, /[;{}]/)
+      for (k = 1; k <= ns; k++) {
+        seg = segs[k]; n = length(seg); depth = 0; lhs = ""
+        for (i = 1; i <= n; i++) {
+          c = substr(seg, i, 1)
+          if (c == "(" || c == "[") { depth++; continue }
+          if (c == ")" || c == "]") { if (depth > 0) depth--; continue }
+          if (depth > 0 || c != "=") continue
+          nx = substr(seg, i + 1, 1); pv = substr(seg, i - 1, 1); pp = substr(seg, i - 2, 1)
+          if (nx == "=") { i++; continue }                      # ==
+          if (pv == "!" || pv == "=") continue                  # !=
+          if ((pv == "<" || pv == ">") && pp != pv) continue    # <= >=
+          lhs = substr(seg, 1, i - 1)
+          sub(/(<<|>>|&\^|[-:+*\/%&|^])$/, "", lhs)
+          break
+        }
+        if (lhs == "") continue
+        ne = 0; el = ""; depth = 0
+        for (j = 1; j <= length(lhs); j++) {
+          c = substr(lhs, j, 1)
+          if (c == "(" || c == "[") depth++
+          if (c == ")" || c == "]") depth--
+          if (c == "," && depth == 0) { if (is_clients(el)) return 1; el = ""; continue }
+          el = el c
+        }
+        if (is_clients(el)) return 1
+      }
+      return 0
+    }
+    function is_clients(el) {
+      gsub(/^[ \t(*]+|[ \t)]+$/, "", el)
+      return el ~ /^m[ \t]*[.][ \t]*clients[ \t)]*(\[.*\])?$/
+    }
     FNR == 1 { inblock = 0; inraw = 0; fn = ""; joined = "" }
     {
       raw = $0
-      if (raw ~ /^func /) {
-        fn = raw
-        sub(/^func (\([^)]*\) )?/, "", fn)
+      code = strip(raw)
+      decl = code
+      sub(/^[ \t]+/, "", decl)
+      if (raw !~ /^[ \t]/ && decl ~ /^func[ \t(]/) {
+        fn = decl
+        sub(/^func[ \t]*(\([^)]*\)[ \t]*)?/, "", fn)
         sub(/[^A-Za-z0-9_].*$/, "", fn)
         joined = ""
       }
-      code = strip(raw)
       gsub(/^[ \t]+|[ \t]+$/, "", code)
       if (code == "") next
       # A statement continued on the next line (the code ends with `.`, `(`,
@@ -182,7 +230,7 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
           hit = 1
       } else if (FILENAME ~ /^internal\/upstream\/[^\/]*\.go$/) {
         if (joined ~ ("(^|[^A-Za-z0-9_])m[ \t]*" legacy)) hit = 1
-        else if (fn != "unregisterLocked" && fn != "installLocked" && (joined ~ /delete[ \t]*[(][ \t]*m[ \t]*[.][ \t]*clients[ \t]*,/ || joined ~ /m[ \t]*[.][ \t]*clients[ \t]*\[[^]]*\][ \t]*=([^=]|$)/ || joined ~ /m[ \t]*[.][ \t]*clients[ \t]*=([^=]|$)/))
+        else if (fn != "unregisterLocked" && fn != "installLocked" && (joined ~ /(delete|clear)[ \t]*[(][ \t(]*m[ \t]*[.][ \t]*clients[ \t)]*[,)]/ || writes_clients(joined)))
           hit = 1
       }
       if (hit) { print FILENAME ":" FNR ":" raw; joined = "" }

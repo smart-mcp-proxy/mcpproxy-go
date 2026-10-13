@@ -116,8 +116,18 @@ type Manager struct {
 	// deadlock behind a queued AddServerConfig writer. Lock order is captureMu
 	// then mu; mutation releases both before disconnecting or invoking callbacks.
 	captureMu sync.RWMutex
-	logger    *zap.Logger
-	logConfig *config.LogConfig
+	// limiterPubMu serializes limiter publication (Spec 093 SetServer /
+	// RetireServer / Apply) in the order of the registry critical sections
+	// that decided it (Spec 116 PR3, Sol round 2). Every registry mutation
+	// takes it hand over hand: it is acquired while mu is still held and
+	// released after the publication, so a newer commit's publication can
+	// never be overtaken by an older action that validated its generation and
+	// then lost the CPU after the unlock. Lock order: captureMu → mu →
+	// limiterPubMu → limiter.Registry.mu (leaf). Nothing that holds it takes
+	// captureMu or mu, connects, disconnects or calls back into the runtime.
+	limiterPubMu sync.Mutex
+	logger       *zap.Logger
+	logConfig    *config.LogConfig
 	// globalConfig holds the proxy-wide config as an atomic pointer so a config
 	// hot-reload (SetGlobalConfig) can swap it lock-free while the construction
 	// paths and the Docker-recovery goroutine read it concurrently (spec 074:
@@ -168,6 +178,11 @@ type Manager struct {
 	// in ForceReconnectAll after the clients were captured and before the
 	// captured instance is replaced. Nil in production.
 	forceReconnectBeforeReplace atomic.Pointer[func(id string)]
+
+	// limiterPublishHook is a Spec 116 PR3 test seam (Sol round 2): it runs
+	// with the server name right before a registry mutation publishes that
+	// server's limiter. Nil in production.
+	limiterPublishHook atomic.Pointer[func(name string)]
 
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error

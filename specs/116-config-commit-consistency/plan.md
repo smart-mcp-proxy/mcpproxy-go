@@ -204,13 +204,14 @@ L1 server approval lock(name)  [sorted when >1]     (runtime.toolApprovalLocks; 
 L2 storage.Manager.mu → bbolt tx                    (leaf)
 L1' index (bleve) writes                            (taken under L1 in step 6; leaf w.r.t. L0-L2)
 L3 upstream.Manager.captureMu (W in commit step 7: RestampRetained in PR1, AdvanceGenerations from PR3; R in capture) → L4 Manager.mu
+L4' upstream.Manager.limiterPubMu (PR3: taken hand over hand before L4 is released, held across the Spec 093 limiter publication → limiter.Registry.mu leaf)
 L5 dialgate.Gate.mu (W only in Retire; R per admitted section / conn Write)
 L5' dialgate.Gate.connsMu (leaf: track/sweep; taken under L5 R in a dial section, and without L5 in Retire)
 L6 configsvc.updateMu (leaf observers only; the pre-publish hook is removed, review R1.7)
 L7 Runtime.mu                                        (leaf: field swaps only)
 ```
 
-**Allowed nestings**: L0→L1→{L2, L1'}; L0→L3→L4→L5→L5'; dial section L5(R)→L5'; L0→L6; L0→L7;
+**Allowed nestings**: L0→L1→{L2, L1'}; L0→L3→L4→L5→L5'; L3→L4→L4' and L4(R)→L4' (hand over hand: every registry mutation and the hot-reload limit republication acquire L4' before releasing L4, so limiter publications happen in the order of the registry critical sections that decided them — an action that validated generation G and lost the CPU after the unlock cannot retire or overwrite the limiter a newer commit published; L4' never takes L3/L4, connects, disconnects or calls the runtime); dial section L5(R)→L5'; L0→L6; L0→L7;
 capture path: L3(R)→L1(one)→L2 on `main`, or L1(one)→L3(R)→`epochMu` after Spec 117 PR-3 (either is compatible, because the commit never holds L1 and L3 together); L1(one)→L2 / L1' / L4(R) (discovery, approvals). Spec 117's global `captureSnapMu` sits above L1, and `Commit` never takes it.
 
 **Forbidden** (each one has a test in PR1/PR2/PR3/PR4, `TestLockOrder_*`):

@@ -11,8 +11,9 @@
 # `*save = st.SaveUpstreamServer` (exit 1), code after a closed block comment
 # (exit 1), a block comment or blanks between the dot and the method name on
 # one line or across lines (exit 1), the FR-020 legacy manager mutators as
-# calls, method values or split across lines and multiline m.clients writes
-# (exit 1), and whole-line, block and string-literal mentions (must exit 0), a failing
+# calls, method values or split across lines, multiline and multi-target
+# m.clients writes, clear(m.clients) and writes after a fake helper
+# declaration in a raw string, string or block comment (exit 1), and whole-line, block and string-literal mentions (must exit 0), a failing
 # find or awk (must exit 2, not report a clean tree). Then runs the real script
 # on the repository (must exit 0).
 set -uo pipefail
@@ -223,6 +224,42 @@ r="$(mkroot pr3-manager-multiline-ok)"
 mkdir -p "$r/internal/upstream"
 printf 'func (m *Manager) unregisterLocked(name string) *managed.Client {\n\tdelete(\n\t\tm.clients, name)\n\treturn nil\n}\n\nfunc (m *Manager) installLocked(name string, c *managed.Client) {\n\tm.clients[name] =\n\t\tc\n}\n\nfunc (m *Manager) read(name string) bool {\n\tok :=\n\t\tm.clients[name] == nil\n\treturn ok\n}\n' > "$r/internal/upstream/manager_generation.go"
 expect "multiline writes in the permitted helpers and multiline reads are allowed" 0 "$r"
+# Sol round 2: a multi-target assignment writes the registry too, and a fake
+# helper declaration inside a raw string or a block comment never moves the
+# tracked function into an allowlisted helper.
+r="$(mkroot pr3-manager-multi-target)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(name string, client *managed.Client) {\n\tvar ok bool\n\tm.clients[name], ok = client, true\n\t_ = ok\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted multi-target m.clients[name], ok = assignment" 1 "$r"
+r="$(mkroot pr3-manager-multi-target-second)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(name string, client *managed.Client) {\n\tvar ok bool\n\tok, m.clients[name] = true, client\n\t_ = ok\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted multi-target assignment with m.clients second" 1 "$r"
+r="$(mkroot pr3-manager-multi-target-split)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(name string, client *managed.Client) {\n\tvar ok bool\n\tm.clients[name],\n\t\tok = client, true\n\t_ = ok\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted multi-target assignment split across lines" 1 "$r"
+r="$(mkroot pr3-manager-clear)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other() {\n\tclear(m.clients)\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted clear(m.clients) outside the helpers" 1 "$r"
+r="$(mkroot pr3-manager-multi-read-ok)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(name string) bool {\n\tvar c *managed.Client\n\tvar ok bool\n\tc, ok = m.clients[name]\n\tif d, found := m.clients[name]; found && d == c {\n\t\treturn ok\n\t}\n\tif m.clients[name] != nil || len(m.clients) >= 1 || m.clients[name] == c {\n\t\treturn true\n\t}\n\treturn ok\n}\n' > "$r/internal/upstream/manager.go"
+expect "multi-target reads and comparisons of m.clients are allowed" 0 "$r"
+r="$(mkroot pr3-manager-fake-helper-raw)"
+mkdir -p "$r/internal/upstream"
+# shellcheck disable=SC2016 # a Go raw string, single-quoted on purpose
+printf 'func (m *Manager) Other(name string) {\n\tdoc := `\nfunc (m *Manager) installLocked() {}\n`\n\t_ = doc\n\tdelete(m.clients, name)\n}\n' > "$r/internal/upstream/manager.go"
+expect "a fake installLocked declaration in a raw string does not exempt a later delete" 1 "$r"
+r="$(mkroot pr3-manager-fake-helper-block)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(name string, c *managed.Client) {\n\t/*\nfunc (m *Manager) unregisterLocked() {}\n\t*/\n\tm.clients[name] = c\n}\n' > "$r/internal/upstream/manager.go"
+expect "a fake unregisterLocked declaration in a block comment does not exempt a later write" 1 "$r"
+r="$(mkroot pr3-manager-fake-helper-string)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(name string, c *managed.Client) {\n\ts := "func (m *Manager) installLocked() {}"\n\t_ = s\n\tm.clients[name], _ = c, 0\n}\n' > "$r/internal/upstream/manager.go"
+expect "a fake helper declaration in a string literal does not exempt a later write" 1 "$r"
 r="$(mkroot pr3-manager-ok)"
 mkdir -p "$r/internal/upstream"
 printf 'func (m *Manager) unregisterLocked(name string) *managed.Client {
