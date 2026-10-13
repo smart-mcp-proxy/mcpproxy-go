@@ -244,7 +244,10 @@ from the design text:
   after a reactive refresh, the refreshed record's revision (re-read, kept
   only when it still holds that access token). The 5xx `ClearToken` then
   erases the refreshed token, while a write that replaced it afterwards
-  still survives (Sol r1 on #1621).
+  still survives (Sol r1 on #1621). Any successful refresh moves the served
+  revision, including one that returned the same access token with a new
+  expiry or refresh token, which persistence still writes as a new revision
+  (Sol r2 on #1621).
 - **Superseded failures.** A login whose result storage refused, or whose
   instance was retired, is not recorded on the server status by name
   (`core.reportOAuthFailure`, `TokenStoreManager.RecordOAuthFailure`): the

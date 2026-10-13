@@ -149,7 +149,7 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 	p.servedRev.Store(record.Revision)
 
 	if b := p.binding.Load(); b != nil {
-		tok, err := reactiveToken(ctx, p.now, reactiveTarget{
+		tok, refreshed, err := reactiveTokenOutcome(ctx, p.now, reactiveTarget{
 			key: p.serverKey, name: p.serverName, logger: p.logger,
 			binding: p.cb,
 			load:    p.loadRecord,
@@ -157,7 +157,10 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 				return clearClientIfBound(p.storage, p.serverKey, p.serverName, p.cb, rec)
 			},
 		}, record, b)
-		if err == nil && tok.AccessToken != record.AccessToken {
+		// Any successful refresh persisted a new record revision, even one
+		// that returned the same access token with a new expiry or refresh
+		// token (Sol r2 on #1621), so the served revision follows it.
+		if err == nil && refreshed {
 			p.noteServedAfterRefresh(tok.AccessToken)
 		}
 		return tok, err
@@ -511,14 +514,23 @@ type reactiveTarget struct {
 // keeps the real expires_at, and an upstream 401 still triggers the existing
 // authorization-required path.
 func reactiveToken(ctx context.Context, clock func() time.Time, t reactiveTarget, rec *storage.OAuthTokenRecord, b *RefreshBinding) (*client.Token, error) {
+	tok, _, err := reactiveTokenOutcome(ctx, clock, t, rec, b)
+	return tok, err
+}
+
+// reactiveTokenOutcome is reactiveToken that also reports whether a refresh
+// flight succeeded (and so persisted a new record revision), whatever the
+// refreshed access token is.
+func reactiveTokenOutcome(ctx context.Context, clock func() time.Time, t reactiveTarget, rec *storage.OAuthTokenRecord, b *RefreshBinding) (*client.Token, bool, error) {
 	tok := tokenFromRecord(rec)
+	refreshed := false
 	now := clock()
 	expired := !rec.ExpiresAt.IsZero() && !now.Before(rec.ExpiresAt)
 
 	if needsReactiveRefresh(rec, now) {
 		if rec.RefreshToken == "" {
 			if expired {
-				return nil, fmt.Errorf("%w: access token expired and no refresh token is stored", transport.ErrOAuthAuthorizationRequired)
+				return nil, false, fmt.Errorf("%w: access token expired and no refresh token is stored", transport.ErrOAuthAuthorizationRequired)
 			}
 		} else {
 			if hook := oauthBeforeRefreshDoHook; hook != nil {
@@ -537,12 +549,13 @@ func reactiveToken(ctx context.Context, clock func() time.Time, t reactiveTarget
 			switch {
 			case err == nil:
 				tok = newTok
+				refreshed = true
 			case ctx.Err() != nil:
-				return nil, ctx.Err()
+				return nil, false, ctx.Err()
 			case !expired && !accessTokenStillStored(t, rec):
 				// A logout (or a login) replaced the record while the flight
 				// ran: the pre-flight access token is no longer ours to serve.
-				return nil, fmt.Errorf("%w: OAuth token changed during refresh: %w", ErrTokenRefreshTransient, err)
+				return nil, false, fmt.Errorf("%w: OAuth token changed during refresh: %w", ErrTokenRefreshTransient, err)
 			case !expired:
 				// The current access token still works; keep serving it and
 				// let the next request (or the proactive schedule) retry.
@@ -551,18 +564,18 @@ func reactiveToken(ctx context.Context, clock func() time.Time, t reactiveTarget
 						zap.Time("expires_at", rec.ExpiresAt), zap.Error(ScrubRefreshError(err)))
 				}
 			case errIsTerminal(err):
-				return nil, fmt.Errorf("%w: %w", transport.ErrOAuthAuthorizationRequired, err)
+				return nil, false, fmt.Errorf("%w: %w", transport.ErrOAuthAuthorizationRequired, err)
 			case errors.Is(err, ErrTokenRefreshTransient):
-				return nil, err
+				return nil, false, err
 			default:
-				return nil, fmt.Errorf("%w: %w", ErrTokenRefreshTransient, err)
+				return nil, false, fmt.Errorf("%w: %w", ErrTokenRefreshTransient, err)
 			}
 		}
 	}
 
 	out := *tok
 	out.ExpiresAt = time.Time{}
-	return &out, nil
+	return &out, refreshed, nil
 }
 
 // coordinatedMemoryTokenStore is the CLI in-memory token store (no BBolt).

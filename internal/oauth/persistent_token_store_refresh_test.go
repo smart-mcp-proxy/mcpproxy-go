@@ -355,3 +355,33 @@ func TestPersistentTokenStore_ClearAfterReactiveRefreshKeepsLaterReplacement(t *
 	require.NoError(t, err)
 	assert.Equal(t, "at-later", rec.AccessToken)
 }
+
+// Sol r2 (#1621): a reactive refresh may return the SAME access token while
+// extending its expiry or rotating the refresh token. Persistence still gives
+// the record a new revision, so the 5xx-recovery ClearToken must guard the
+// refreshed record's revision, not the pre-refresh one.
+func TestPersistentTokenStore_ClearAfterSameAccessTokenRefreshDeletesRefreshedRecord(t *testing.T) {
+	db := newTestBolt(t)
+	name, u := uniqueServerName(t), "https://clear-after-same-at-refresh.example.com/mcp"
+	seedToken(t, db, name, u, "rt-0", -time.Minute)
+	store := NewPersistentTokenStore(name, u, db)
+	require.True(t, BindRefresher(store, RefreshBinding{Refresh: func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
+		tok := &client.Token{AccessToken: rec.AccessToken, RefreshToken: "rt-1", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour)}
+		if err := store.SaveToken(ctx, tok); err != nil {
+			return nil, err
+		}
+		return tok, nil
+	}}))
+
+	key := GenerateServerKey(name, u)
+	tok, err := store.GetToken(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "at-0", tok.AccessToken)
+	rec, err := db.GetOAuthToken(key)
+	require.NoError(t, err)
+	require.Equal(t, "rt-1", rec.RefreshToken, "the refresh persisted a new record")
+
+	require.NoError(t, store.(*PersistentTokenStore).ClearToken())
+	_, err = db.GetOAuthToken(key)
+	assert.Error(t, err, "the refreshed record the store served must be cleared even when its access token is unchanged")
+}
