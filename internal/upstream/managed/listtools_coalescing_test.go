@@ -410,7 +410,7 @@ func TestListToolsFresh_DoesNotJoinLeaderThatPredatesTheCall(t *testing.T) {
 	defer cancel()
 	freshDone := make(chan []*config.ToolMetadata, 1)
 	go func() {
-		tools, err := mc.listTools(ctx, true, entrySeq)
+		tools, _, err := mc.listTools(ctx, true, entrySeq)
 		assert.NoError(t, err)
 		freshDone <- tools
 	}()
