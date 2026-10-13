@@ -239,10 +239,20 @@ from the design text:
   and the selection cannot hand the old flight's failure to a replacement
   token with the same expiry (Sol r1 on #1621). A schedule with no binding
   (loaded from storage at startup) relies on the resolver check alone.
+  A save notification from a binding older than the schedule's (bindings
+  are commit generations, so older is decidable without the runtime) does
+  not replace it: a bound save that committed before a removal or an
+  OAuth-config change and notified late leaves the replacement's schedule,
+  expiry, binding and timer alone (Sol r3 on #1621).
 - **Served revision after a reactive refresh.** `PersistentTokenStore`
   records as its served revision the record that holds the token it served:
-  after a reactive refresh, the refreshed record's revision (re-read, kept
-  only when it still holds that access token). The 5xx `ClearToken` then
+  after a reactive refresh, the revision the refresh flight itself wrote
+  (its persist reports it to the flight) or, for a flight that wrote nothing
+  (another flight rotated the grant), the revision it read
+  (`RefreshCoordinator.DoServed`). It is never a re-read after the flight: a
+  same-binding replacement that rewrote the record since, even with the same
+  access token, must not be adopted and then erased (Sol r3 on #1621). The
+  5xx `ClearToken` then
   erases the refreshed token, while a write that replaced it afterwards
   still survives (Sol r1 on #1621). Any successful refresh moves the served
   revision, including one that returned the same access token with a new

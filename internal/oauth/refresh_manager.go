@@ -462,6 +462,21 @@ func (m *RefreshManager) OnTokenSavedFor(serverName string, expiresAt time.Time,
 		return
 	}
 
+	// A late notification from a superseded binding (Sol r3 on #1621): a
+	// bound save that committed before a removal or an OAuth-config change
+	// and notified only after the replacement installed its own schedule
+	// must not replace that schedule. Bindings are commit generations
+	// (monotonic across restarts), so the older one is known without the
+	// runtime. A zero binding on either side (startup-loaded schedules, CLI
+	// and test callers) is not compared.
+	if existing, ok := m.schedules[serverName]; ok && bindingOlder(binding, existing.Binding) {
+		m.logger.Debug("Ignoring the token save of a superseded server instance",
+			zap.String("server", serverName),
+			zap.String("save_binding", binding.String()),
+			zap.String("schedule_binding", existing.Binding.String()))
+		return
+	}
+
 	// Cancel existing schedule if any
 	if existing, ok := m.schedules[serverName]; ok && existing.Timer != nil {
 		existing.Timer.Stop()
@@ -469,6 +484,20 @@ func (m *RefreshManager) OnTokenSavedFor(serverName string, expiresAt time.Time,
 
 	// Schedule refresh for new token
 	m.scheduleRefreshLocked(serverName, expiresAt, binding)
+}
+
+// bindingOlder reports whether a is a credential binding committed before b.
+// Incarnation and OAuth epoch are both commit generations, so a later
+// incarnation, or the same incarnation with a later epoch, is newer. Zero
+// bindings are never older.
+func bindingOlder(a, b commitview.CredentialBinding) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	if a.Incarnation != b.Incarnation {
+		return a.Incarnation < b.Incarnation
+	}
+	return a.OAuthEpoch < b.OAuthEpoch
 }
 
 // OnTokenCleared is called when a token is cleared (e.g., logout).

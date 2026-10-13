@@ -272,9 +272,19 @@ binding (a removal and re-add, or an OAuth-config change) or receives its
 token. A same-binding replacement (a restart) shares the key and can join
 the old instance's flight; a joiner whose flight failed because its
 initiator was retired retries on its own transport rather than taking that
-answer. Each refresh schedule records the binding its token was saved
-under, and a reactive flight's terminal outcome is applied only to a
-schedule of the flight's binding, checked when that schedule is selected. Before it builds an instance the manager also checks that the
+answer. A refresh schedule built from a token save records the binding the
+token was saved under, and a reactive flight's terminal outcome is applied
+only to a schedule of the flight's binding, checked when that schedule is
+selected. A late save notification from an older binding (bindings are
+commit generations, so older is known) does not replace the schedule of a
+newer one. The exception is a schedule loaded from storage at startup: it
+carries the zero binding, so no binding comparison is made for it, and a
+terminal outcome of any flight for the server applies to it (the resolver
+check that the flight ran under the server's current binding still
+applies). Its first token save replaces it with a bound schedule. A token
+store guards its 5xx-recovery clear with the revision the refresh flight
+itself wrote or read, never a later re-read, so a same-binding rewrite with
+the same access token survives the clear. Before it builds an instance the manager also checks that the
 stored row still carries exactly the committed view it holds (one bbolt
 `View`), so a stale worker builds no OAuth config at all. Logout and the
 standalone CLI logout (`ClearOAuthTokenForStandaloneLogout`, one exact key)

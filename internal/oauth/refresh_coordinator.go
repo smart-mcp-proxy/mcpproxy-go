@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mark3labs/mcp-go/client"
@@ -96,6 +97,10 @@ type refreshFlight struct {
 	done    chan struct{}
 	waiters int
 	tok     *client.Token
+	// rev is the revision of the stored record whose token the flight
+	// handed out, as read by the flight itself (Sol r3 on #1621); zero when
+	// it handed out no token or the store has no revisions.
+	rev     uint64
 	skipped bool
 	err     error
 }
@@ -247,6 +252,16 @@ func (c *RefreshCoordinator) ForgetServer(serverKey string) {
 // rotated the token, or the latch/cooldown answered). A caller whose own ctx
 // ends returns ctx.Err(); the flight continues for the others.
 func (c *RefreshCoordinator) Do(ctx context.Context, req RefreshRequest) (*client.Token, bool, error) {
+	tok, _, skipped, err := c.DoServed(ctx, req)
+	return tok, skipped, err
+}
+
+// DoServed is Do that also returns the revision of the stored record whose
+// token it handed out, as the flight read it (Sol r3 on #1621). A token store
+// guards its later 5xx-recovery clear with that revision: a record a
+// same-binding replacement rewrote after the flight's read, even with the
+// same access token, carries a newer revision and is not erased.
+func (c *RefreshCoordinator) DoServed(ctx context.Context, req RefreshRequest) (*client.Token, uint64, bool, error) {
 	// Spec 116 PR4: a flight that ran on a retired upstream instance (its
 	// gate refused the token request, or closed the connection under the
 	// response) says nothing about the grant. A caller that only joined such
@@ -262,9 +277,9 @@ func (c *RefreshCoordinator) Do(ctx context.Context, req RefreshRequest) (*clien
 		ctx = context.Background()
 	}
 	for {
-		tok, skipped, led, err := c.do(ctx, req)
+		tok, rev, skipped, led, err := c.do(ctx, req)
 		if !dialgate.IsRetired(err) || led || ctx.Err() != nil {
-			return tok, skipped, err
+			return tok, rev, skipped, err
 		}
 		if hook := refreshRetiredRetryHook; hook != nil {
 			hook(req)
@@ -278,7 +293,7 @@ var refreshRetiredRetryHook func(RefreshRequest)
 
 // do joins the key's flight or starts one. led reports that this call
 // started the flight it returns the result of.
-func (c *RefreshCoordinator) do(ctx context.Context, req RefreshRequest) (tok *client.Token, skipped, led bool, err error) {
+func (c *RefreshCoordinator) do(ctx context.Context, req RefreshRequest) (tok *client.Token, rev uint64, skipped, led bool, err error) {
 	c.mu.Lock()
 	st := c.stateLocked(flightKey{req.Key, req.Binding})
 	f := st.flight
@@ -299,9 +314,9 @@ func (c *RefreshCoordinator) do(ctx context.Context, req RefreshRequest) (tok *c
 
 	select {
 	case <-f.done:
-		return f.tok, f.skipped, led, f.err
+		return f.tok, f.rev, f.skipped, led, f.err
 	case <-ctx.Done():
-		return nil, false, led, ctx.Err()
+		return nil, 0, false, led, ctx.Err()
 	}
 }
 
@@ -310,7 +325,7 @@ func (c *RefreshCoordinator) run(callerCtx context.Context, req RefreshRequest, 
 	defer cancel()
 
 	start := c.now()
-	tok, skipped, err := c.flight(fctx, req, st)
+	tok, rev, skipped, err := c.flight(fctx, req, st)
 
 	cls, status := ClassifyRefreshError(err)
 	c.log().Info("OAuth refresh flight finished",
@@ -322,23 +337,23 @@ func (c *RefreshCoordinator) run(callerCtx context.Context, req RefreshRequest, 
 		zap.Duration("duration", c.now().Sub(start)))
 
 	c.mu.Lock()
-	f.tok, f.skipped, f.err = tok, skipped, err
+	f.tok, f.rev, f.skipped, f.err = tok, rev, skipped, err
 	st.flight = nil
 	c.mu.Unlock()
 	close(f.done)
 }
 
-func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st *refreshKeyState) (*client.Token, bool, error) {
+func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st *refreshKeyState) (*client.Token, uint64, bool, error) {
 	rec, err := req.Load()
 	if err != nil || rec == nil || (rec.AccessToken == "" && rec.RefreshToken == "") {
-		return nil, true, &RefreshFailure{Class: RefreshClassTerminalOther, Message: "no stored OAuth token; sign in again", Err: ErrNoRefreshToken}
+		return nil, 0, true, &RefreshFailure{Class: RefreshClassTerminalOther, Message: "no stored OAuth token; sign in again", Err: ErrNoRefreshToken}
 	}
 	// FR-003: another flight (or a login) already rotated the token.
 	if rec.RefreshToken != req.ObservedRefreshToken && rec.AccessToken != "" {
-		return tokenFromRecord(rec), true, nil
+		return tokenFromRecord(rec), rec.Revision, true, nil
 	}
 	if rec.RefreshToken == "" {
-		return nil, true, &RefreshFailure{Class: RefreshClassTerminalOther, Message: "no refresh token stored; sign in again", Err: ErrNoRefreshToken}
+		return nil, 0, true, &RefreshFailure{Class: RefreshClassTerminalOther, Message: "no refresh token stored; sign in again", Err: ErrNoRefreshToken}
 	}
 
 	gen := generationOf(rec)
@@ -353,21 +368,22 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		c.now().Sub(st.lastSavedAt) < proactiveFreshWindow &&
 		(rec.ExpiresAt.IsZero() || rec.ExpiresAt.Sub(c.now()) > proactiveFreshWindow) {
 		c.mu.Unlock()
-		return tokenFromRecord(rec), true, nil
+		return tokenFromRecord(rec), rec.Revision, true, nil
 	}
 	if st.latchErr != nil && st.latchGen == gen {
 		latched := st.latchErr
 		c.mu.Unlock()
-		return nil, true, latched
+		return nil, 0, true, latched
 	}
 	if req.Trigger == RefreshTriggerReactive && st.cooldownGen == gen && c.now().Before(st.cooldownUntil) {
 		until, last := st.cooldownUntil, st.cooldownErr
 		c.mu.Unlock()
-		return nil, true, fmt.Errorf("%w (retry after %s): %w", ErrTokenRefreshTransient, until.Format(time.RFC3339), last)
+		return nil, 0, true, fmt.Errorf("%w (retry after %s): %w", ErrTokenRefreshTransient, until.Format(time.RFC3339), last)
 	}
 	c.mu.Unlock()
 
-	tok, refreshErr := req.Refresh(withFlightGeneration(ctx, gen), rec)
+	saved := &atomic.Uint64{}
+	tok, refreshErr := req.Refresh(withFlightSavedRevision(withFlightGeneration(ctx, gen), saved), rec)
 	cur, loadErr := req.Load()
 	if loadErr != nil {
 		cur = nil
@@ -385,19 +401,27 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		// ran, or an unreadable store): the persist was discarded, so the
 		// flight's token must not be handed out either.
 		if cur == nil || cur.AccessToken == "" {
-			return nil, false, &RefreshFailure{Class: RefreshClassOther, Message: "refresh succeeded but no token is stored", Err: ErrRefreshFailed}
+			return nil, 0, false, &RefreshFailure{Class: RefreshClassOther, Message: "refresh succeeded but no token is stored", Err: ErrRefreshFailed}
 		}
 		if tok == nil || cur.AccessToken != tok.AccessToken {
-			return tokenFromRecord(cur), false, nil
+			return tokenFromRecord(cur), cur.Revision, false, nil
 		}
-		return tok, false, nil
+		// The served record is the one the flight's own persist wrote
+		// (Sol r3 on #1621): a replacement that rewrote it since, even
+		// with the same access token, has a newer revision and is not the
+		// served one. A store that reports no revision falls back to the
+		// record read here.
+		if rev := saved.Load(); rev != 0 {
+			return tok, rev, false, nil
+		}
+		return tok, cur.Revision, false, nil
 	}
 
 	// Spec 116 PR4: the instance that ran the refresh was retired and its
 	// gate refused the request. No token request was sent, so the failure
 	// has no side effects: no latch, no cooldown, no client clear.
 	if dialgate.IsRetired(refreshErr) {
-		return nil, false, refreshErr
+		return nil, 0, false, refreshErr
 	}
 
 	cls, _ := ClassifyRefreshError(refreshErr)
@@ -406,9 +430,9 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	// Its failure has no side effects; a newer grant is handed out.
 	if cur == nil || generationOf(cur) != gen {
 		if cur != nil && cur.AccessToken != "" && cur.RefreshToken != rec.RefreshToken {
-			return tokenFromRecord(cur), false, nil
+			return tokenFromRecord(cur), cur.Revision, false, nil
 		}
-		return nil, false, refreshErr
+		return nil, 0, false, refreshErr
 	}
 
 	if cls == RefreshClassInvalidClient {
@@ -427,9 +451,9 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 			// generation here.
 			if again.RefreshToken != rec.RefreshToken || (again.ClientID != "" && again.ClientID != rec.ClientID) {
 				if again.AccessToken != "" {
-					return tokenFromRecord(again), false, nil
+					return tokenFromRecord(again), again.Revision, false, nil
 				}
-				return nil, false, refreshErr
+				return nil, 0, false, refreshErr
 			}
 			latchRec = again // after a DCR clear the generation changed
 		}
@@ -441,7 +465,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		if hook != nil {
 			hook(RefreshOutcome{ServerName: req.ServerName, Key: req.Key, Binding: req.Binding, Trigger: req.Trigger, Class: cls, Err: refreshErr, ExpiresAt: latchRec.ExpiresAt})
 		}
-		return nil, false, refreshErr
+		return nil, 0, false, refreshErr
 	}
 
 	c.mu.Lock()
@@ -450,7 +474,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 	st.cooldownUntil = c.now().Add(refreshBackoff(st.transientFailures - 1))
 	st.cooldownErr = refreshErr
 	c.mu.Unlock()
-	return nil, false, refreshErr
+	return nil, 0, false, refreshErr
 }
 
 // handleInvalidClient implements FR-009 and returns the error to hand out.
@@ -590,6 +614,24 @@ type flightGenerationKey struct{}
 
 func withFlightGeneration(ctx context.Context, gen string) context.Context {
 	return context.WithValue(ctx, flightGenerationKey{}, gen)
+}
+
+type flightSavedRevisionKey struct{}
+
+func withFlightSavedRevision(ctx context.Context, sink *atomic.Uint64) context.Context {
+	return context.WithValue(ctx, flightSavedRevisionKey{}, sink)
+}
+
+// noteFlightSavedRevision records, for the refresh flight ctx belongs to, the
+// revision of the record its persist wrote (Sol r3 on #1621). No-op outside a
+// flight.
+func noteFlightSavedRevision(ctx context.Context, rev uint64) {
+	if ctx == nil {
+		return
+	}
+	if sink, ok := ctx.Value(flightSavedRevisionKey{}).(*atomic.Uint64); ok && sink != nil {
+		sink.Store(rev)
+	}
 }
 
 // FlightGeneration returns the generation of the refresh flight ctx belongs

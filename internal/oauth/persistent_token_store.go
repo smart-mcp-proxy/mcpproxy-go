@@ -149,7 +149,7 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 	p.servedRev.Store(record.Revision)
 
 	if b := p.binding.Load(); b != nil {
-		tok, refreshed, err := reactiveTokenOutcome(ctx, p.now, reactiveTarget{
+		tok, servedRev, refreshed, err := reactiveTokenOutcome(ctx, p.now, reactiveTarget{
 			key: p.serverKey, name: p.serverName, logger: p.logger,
 			binding: p.cb,
 			load:    p.loadRecord,
@@ -159,9 +159,16 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 		}, record, b)
 		// Any successful refresh persisted a new record revision, even one
 		// that returned the same access token with a new expiry or refresh
-		// token (Sol r2 on #1621), so the served revision follows it.
+		// token (Sol r2 on #1621), so the served revision follows it. It is
+		// the revision the refresh flight itself read or wrote, never a
+		// re-read here: a same-binding replacement that rewrote the record
+		// since, even with the same access token, must not be adopted and
+		// then erased by this store's clear (Sol r3 on #1621).
 		if err == nil && refreshed {
-			p.noteServedAfterRefresh(tok.AccessToken)
+			if hook := oauthAfterReactiveRefreshHook; hook != nil {
+				hook(p.serverName, p.cb)
+			}
+			p.servedRev.Store(servedRev)
 		}
 		return tok, err
 	}
@@ -322,11 +329,13 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	if qahooks.ParkOAuthPersist != nil {
 		qahooks.ParkOAuthPersist(p.serverName)
 	}
+	var savedRec *storage.OAuthTokenRecord
 	written, err := p.storage.UpdateOAuthTokenIfBound(p.serverKey, p.serverName, p.cb, func(rec *storage.OAuthTokenRecord) error {
 		if inFlight && !GenerationMatches(rec, flightGen) {
 			discarded = true
 			return storage.ErrSkipOAuthTokenUpdate
 		}
+		savedRec = rec                 // the write assigns its revision to rec
 		rec.DisplayName = p.serverName // Actual server name (for RefreshManager)
 		rec.AccessToken = token.AccessToken
 		rec.RefreshToken = token.RefreshToken
@@ -364,6 +373,9 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 			zap.String("binding", p.cb.String()))
 		return fmt.Errorf("failed to save OAuth token: %w", ErrCredentialBindingStale)
 	}
+	if savedRec != nil {
+		noteFlightSavedRevision(ctx, savedRec.Revision)
+	}
 	DefaultRefreshCoordinator().NoteTokenSavedFor(p.serverKey, p.cb)
 
 	p.logger.Info("✅ OAuth token saved to persistent storage successfully",
@@ -385,22 +397,6 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 	globalTokenStoreManager.NotifyTokenSavedFor(p.serverName, token.ExpiresAt, p.cb)
 
 	return nil
-}
-
-// noteServedAfterRefresh records, as the served revision, the revision of the
-// record holding accessToken: the token a reactive refresh persisted and this
-// GetToken served (Sol r1 on #1621). The 5xx-recovery ClearToken must then
-// erase that refreshed record, not guard the pre-refresh revision, which no
-// longer exists. When the record already holds a different access token (a
-// later login or refresh replaced it after the flight), the old revision is
-// kept: it matches nothing, so the clear erases nothing and the genuinely
-// later write survives.
-func (p *PersistentTokenStore) noteServedAfterRefresh(accessToken string) {
-	cur, err := p.storage.GetOAuthTokenBound(p.serverKey, p.cb)
-	if err != nil || cur == nil || cur.AccessToken != accessToken {
-		return
-	}
-	p.servedRev.Store(cur.Revision)
 }
 
 // ClearToken removes the OAuth token from persistent storage. It deletes
@@ -514,29 +510,31 @@ type reactiveTarget struct {
 // keeps the real expires_at, and an upstream 401 still triggers the existing
 // authorization-required path.
 func reactiveToken(ctx context.Context, clock func() time.Time, t reactiveTarget, rec *storage.OAuthTokenRecord, b *RefreshBinding) (*client.Token, error) {
-	tok, _, err := reactiveTokenOutcome(ctx, clock, t, rec, b)
+	tok, _, _, err := reactiveTokenOutcome(ctx, clock, t, rec, b)
 	return tok, err
 }
 
 // reactiveTokenOutcome is reactiveToken that also reports whether a refresh
 // flight succeeded (and so persisted a new record revision), whatever the
-// refreshed access token is.
-func reactiveTokenOutcome(ctx context.Context, clock func() time.Time, t reactiveTarget, rec *storage.OAuthTokenRecord, b *RefreshBinding) (*client.Token, bool, error) {
+// refreshed access token is, and the revision of the record whose token the
+// flight handed out (RefreshCoordinator.DoServed).
+func reactiveTokenOutcome(ctx context.Context, clock func() time.Time, t reactiveTarget, rec *storage.OAuthTokenRecord, b *RefreshBinding) (*client.Token, uint64, bool, error) {
 	tok := tokenFromRecord(rec)
 	refreshed := false
+	var servedRev uint64
 	now := clock()
 	expired := !rec.ExpiresAt.IsZero() && !now.Before(rec.ExpiresAt)
 
 	if needsReactiveRefresh(rec, now) {
 		if rec.RefreshToken == "" {
 			if expired {
-				return nil, false, fmt.Errorf("%w: access token expired and no refresh token is stored", transport.ErrOAuthAuthorizationRequired)
+				return nil, 0, false, fmt.Errorf("%w: access token expired and no refresh token is stored", transport.ErrOAuthAuthorizationRequired)
 			}
 		} else {
 			if hook := oauthBeforeRefreshDoHook; hook != nil {
 				hook(t.name, t.binding)
 			}
-			newTok, _, err := DefaultRefreshCoordinator().Do(ctx, RefreshRequest{
+			newTok, newRev, _, err := DefaultRefreshCoordinator().DoServed(ctx, RefreshRequest{
 				Key: t.key, Binding: t.binding, ServerName: t.name, ObservedRefreshToken: rec.RefreshToken,
 				Trigger: RefreshTriggerReactive, Load: t.load, Refresh: b.Refresh,
 				StaticClient: b.StaticClient, ClearClientAt: t.clearAt,
@@ -549,13 +547,14 @@ func reactiveTokenOutcome(ctx context.Context, clock func() time.Time, t reactiv
 			switch {
 			case err == nil:
 				tok = newTok
+				servedRev = newRev
 				refreshed = true
 			case ctx.Err() != nil:
-				return nil, false, ctx.Err()
+				return nil, 0, false, ctx.Err()
 			case !expired && !accessTokenStillStored(t, rec):
 				// A logout (or a login) replaced the record while the flight
 				// ran: the pre-flight access token is no longer ours to serve.
-				return nil, false, fmt.Errorf("%w: OAuth token changed during refresh: %w", ErrTokenRefreshTransient, err)
+				return nil, 0, false, fmt.Errorf("%w: OAuth token changed during refresh: %w", ErrTokenRefreshTransient, err)
 			case !expired:
 				// The current access token still works; keep serving it and
 				// let the next request (or the proactive schedule) retry.
@@ -564,18 +563,18 @@ func reactiveTokenOutcome(ctx context.Context, clock func() time.Time, t reactiv
 						zap.Time("expires_at", rec.ExpiresAt), zap.Error(ScrubRefreshError(err)))
 				}
 			case errIsTerminal(err):
-				return nil, false, fmt.Errorf("%w: %w", transport.ErrOAuthAuthorizationRequired, err)
+				return nil, 0, false, fmt.Errorf("%w: %w", transport.ErrOAuthAuthorizationRequired, err)
 			case errors.Is(err, ErrTokenRefreshTransient):
-				return nil, false, err
+				return nil, 0, false, err
 			default:
-				return nil, false, fmt.Errorf("%w: %w", ErrTokenRefreshTransient, err)
+				return nil, 0, false, fmt.Errorf("%w: %w", ErrTokenRefreshTransient, err)
 			}
 		}
 	}
 
 	out := *tok
 	out.ExpiresAt = time.Time{}
-	return &out, refreshed, nil
+	return &out, servedRev, refreshed, nil
 }
 
 // coordinatedMemoryTokenStore is the CLI in-memory token store (no BBolt).

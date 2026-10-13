@@ -49,6 +49,10 @@ var (
 	// oauthBeforeRefreshDoHook runs after a caller's bound read and before
 	// RefreshCoordinator.Do (T2.16).
 	oauthBeforeRefreshDoHook func(server string, b commitview.CredentialBinding)
+	// oauthAfterReactiveRefreshHook runs in GetToken after a successful
+	// reactive refresh returned, before the store records the served
+	// revision (Sol r3 on #1621).
+	oauthAfterReactiveRefreshHook func(server string, b commitview.CredentialBinding)
 )
 
 // BindingTestHooks are the PR2b test seams, settable from other packages'
