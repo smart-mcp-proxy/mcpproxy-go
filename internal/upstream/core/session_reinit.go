@@ -30,7 +30,7 @@ func (c *Client) SessionSnapshot() (id string, modern bool) {
 	if cl == nil {
 		return "", modern
 	}
-	if sh, ok := cl.GetTransport().(*transport.StreamableHTTP); ok {
+	if sh, ok := innerTransport(cl).(*transport.StreamableHTTP); ok {
 		return sh.GetSessionId(), modern
 	}
 	return "", modern

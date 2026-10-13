@@ -22,6 +22,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
 	mcptransport "github.com/mark3labs/mcp-go/client/transport"
@@ -496,6 +497,14 @@ var ErrConnectAlreadyActive = errors.New("connection already in progress or esta
 // manager has unregistered (Spec 116 PR3): a newer config commit, a removal or
 // a same-generation replacement superseded it, so it must not connect.
 var ErrInstanceUnregistered = errors.New("instance unregistered: superseded by a newer config commit or replacement")
+
+// ErrInstanceRetired is returned by a tool call, tools/list or probe on an
+// instance the upstream manager retired (Spec 116 PR4, FR-026): the server
+// was removed, replaced or quarantined while the request was on its way. It
+// is the "server unavailable" answer; the internal dialgate.ErrRetired never
+// reaches a surface (FR-027). It is not a connection failure: it marks
+// nothing unhealthy and is not charged to the replacement instance.
+var ErrInstanceRetired = errors.New("server unavailable: it was removed, replaced or quarantined while the request was in flight")
 
 // ErrConnectAborted is returned by Connect when a Disconnect, or a newer
 // connect attempt, ran while the transport was being established. The dial's
@@ -1281,6 +1290,9 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 		zap.String("state", mc.StateManager.GetState().String()),
 		zap.Bool("connected", mc.IsConnected()))
 
+	if mc.retired.Load() {
+		return nil, InventoryCapture{}, ErrInstanceRetired
+	}
 	if !mc.IsConnected() {
 		mc.logger.Debug("🔍 ListTools rejected - client not connected",
 			zap.String("server", mc.GetConfig().Name),
@@ -1449,6 +1461,9 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
 		return nil, ErrConnectionGenerationChanged
 	}
+	if mc.retired.Load() {
+		return nil, ErrInstanceRetired
+	}
 	if !mc.IsConnected() {
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
@@ -1510,6 +1525,17 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	// only ever charged to the session that produced it (RC4-STDIO-001).
 	callEpoch := mc.connectionEpoch.Load()
 	result, err := mc.callToolWithSession(core.WithConnectionGeneration(ctx, callEpoch), invoker, toolName, args, expectedEpoch)
+	if err != nil && mc.retired.Load() {
+		// Spec 116 PR4 (FR-026): the instance was retired while the call
+		// was in flight; its gate closed the connection or refused the
+		// send. Unavailable, and nothing to classify: a retired instance's
+		// failure says nothing about the server's health.
+		mc.logger.Debug("Tool call failed on a retired instance",
+			zap.String("server", mc.GetConfig().Name),
+			zap.String("tool", toolName),
+			zap.Error(err))
+		return nil, ErrInstanceRetired
+	}
 	if err != nil {
 		if errors.Is(err, ErrSessionReestablished) || errors.Is(err, ErrConnectionGenerationChanged) {
 			// Spec 113-e: the session was re-established and the call was
@@ -1697,6 +1723,9 @@ func isAmbiguousCancellationError(err error) bool {
 // disconnect+reconnect completing mid-probe: a verdict about a superseded
 // session is dropped rather than applied to the fresh one.
 func (mc *Client) probeAfterAmbiguousCallError(cause error) {
+	if mc.retired.Load() {
+		return
+	}
 	if !mc.ambiguousProbeInFlight.CompareAndSwap(false, true) {
 		return
 	}
@@ -2016,6 +2045,12 @@ func (mc *Client) backgroundHealthCheck() {
 
 // performHealthCheck checks if the connection is still healthy and attempts reconnection if needed
 func (mc *Client) performHealthCheck() {
+	// A retired instance has no health to report (Spec 116 PR4, FR-026):
+	// its probes are refused by its gate, and their failure must not drive
+	// a reconnect or an Error state.
+	if mc.retired.Load() {
+		return
+	}
 	// Skip all health/reconnect work when user explicitly logged out
 	if mc.IsUserLoggedOut() {
 		mc.logger.Debug("Health check skipped - user explicitly logged out",
@@ -2275,7 +2310,20 @@ func (mc *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 	if mc == nil || mc.coreClient == nil {
 		return fmt.Errorf("client not initialized")
 	}
+	// Spec 116 PR4 (FR-024): a retired instance runs no refresh.
+	if mc.retired.Load() || mc.unregistered.Load() {
+		return ErrInstanceRetired
+	}
 	return mc.coreClient.RefreshOAuthTokenDirect(ctx)
+}
+
+// Gate returns the instance's retirement barrier (Spec 116 PR4). The upstream
+// manager shares it with the transient clients of a manual OAuth flow.
+func (mc *Client) Gate() *dialgate.Gate {
+	if mc == nil || mc.coreClient == nil {
+		return nil
+	}
+	return mc.coreClient.Gate()
 }
 
 // ForceReconnect triggers an immediate reconnection attempt regardless of backoff state.

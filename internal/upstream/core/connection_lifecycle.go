@@ -433,7 +433,12 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	c.cachedTools = nil
 	c.processGroupID = 0
 	c.processCmd = nil
+	stdioProc := c.stdioProc
+	c.stdioProc = nil
 	c.mu.Unlock()
+	// The child is this teardown's now (it closed or killed it above): the
+	// gate must not signal a process group whose ID the OS may reuse.
+	stdioProc.Untrack()
 
 	// Step 8: release the per-server log sink (issue #1266). Every
 	// teardown path — RemoveServer, ShutdownAll, a reconnect — comes

@@ -314,37 +314,92 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 
 ### Tests first (must fail on PR3)
 
-- [ ] T080 [P] [US4] `internal/upstream/dialgate/gate_test.go`: Admit/Retire ordering, conn Write after Retire → `ErrRetired`, a blocked Write unblocked by Retire, Retire bounded (< 1 s with a hung peer), idempotent, under `-race -count=50`
-- [ ] T081 [P] [US4] `internal/upstream/managed/retire_stdio_test.go`: T4.1 (marker launcher; Docker via a mock docker binary; launcher)
-- [ ] T082 [P] [US4] `internal/upstream/managed/retire_http_test.go`: T4.2 for HTTP and SSE × remove/replace/quarantine, synchronized on "commit returned"
-- [ ] T083 [P] [US4] `internal/transport/retire_retry_test.go`: T4.3 (flaky reused connection forces a retry; zero hits after retirement; Retire bounded)
-- [ ] T084 [P] [US4] `internal/upstream/core/retire_oauth_test.go`: T4.4 (code exchange and refresh; no secret or refresh token after retirement; `RefreshOAuthToken` on a retired name refused)
-- [ ] T085 [P] [US4] `internal/runtime/retire_capture_test.go`: T4.5; `internal/upstream/retire_inflight_call_test.go`: T4.6
-- [ ] T081a [P] [US4] `internal/upstream/core/retire_stdio_write_test.go`: T4.8 (a launched stdio instance; `Retire` returns; a parked `SendRequest`/`SendNotification` resumes → `ErrRetired`, the child's stdin receives nothing, and the process group is dead when `Retire` returns)
-- [ ] T084a [P] [US4] `internal/oauth/retire_preflight_test.go`: T4.9 (park `preflightPRMScopes`, `autoDetectResource` and `httpFetchRaw` before sending; retire; zero hits on the counter)
-- [ ] T085a [P] [US4] `internal/upstream/dialgate/nesting_test.go` + `internal/upstream/core/retire_launch_registration_test.go`: T4.10, T4.11
-- [ ] T085b [P] [US4] `internal/upstream/core/process_windows_job_test.go` (windows build tag, T4.12) and `internal/upstream/core/retire_browser_test.go` (T4.13)
-- [ ] T085c [P] [US4] `internal/upstream/retire_same_generation_test.go`: T4.15 (old instance parked before its stdio launch and before its HTTP/OAuth send; `RestartServer`, `ForceReconnectAll` and Docker recovery replace it at the same generation; release → no launch, no request; replacement unaffected; review R5.4)
-- [ ] T085d [P] [US4] `internal/upstream/dialgate/late_register_test.go`: T4.16 (dial parked before `track`; sweep finishes; register + blocking write → closed, `ErrRetired`, `Retire` ≤ 1 s; review R5.1)
-- [ ] T085e [P] [US4] `internal/upstream/dialgate/capability_parity_test.go` (`TestWrapTransportCapabilityParity`, `TestMCPGoTransportMethodSetPinned`) and `internal/upstream/core/wrapped_transport_consumers_test.go`: T4.17 (a)-(f) with the production wrapped transports: OAuth handler extraction, concurrent reactive + proactive refresh, per-method-auth manual login, Streamable HTTP 404 session re-init, protocol header, server-to-client ping over stdio and Streamable HTTP, SSE connection loss, retired request handler (review R8.1)
-- [ ] T086 [P] [US4] `internal/upstream/dialgate/bench_test.go`: T4.7
+- [x] T080 [P] [US4] `internal/upstream/dialgate/gate_test.go`: Admit/Retire ordering, conn Write after Retire → `ErrRetired`, a blocked Write unblocked by Retire, Retire bounded (< 1 s with a hung peer), idempotent, under `-race -count=50`
+- [x] T081 [P] [US4] `internal/upstream/managed/retire_stdio_test.go`: T4.1 (marker launcher; Docker via a mock docker binary; launcher)
+- [x] T082 [P] [US4] `internal/upstream/managed/retire_http_test.go`: T4.2 for HTTP and SSE × remove/replace/quarantine, synchronized on "commit returned"
+- [x] T083 [P] [US4] `internal/transport/retire_retry_test.go`: T4.3 (flaky reused connection forces a retry; zero hits after retirement; Retire bounded)
+- [x] T084 [P] [US4] `internal/upstream/core/retire_oauth_test.go`: T4.4 (code exchange and refresh; no secret or refresh token after retirement; `RefreshOAuthToken` on a retired name refused)
+- [x] T085 [P] [US4] `internal/runtime/retire_capture_test.go`: T4.5; `internal/upstream/retire_inflight_call_test.go`: T4.6
+- [x] T081a [P] [US4] `internal/upstream/core/retire_stdio_write_test.go`: T4.8 (a launched stdio instance; `Retire` returns; a parked `SendRequest`/`SendNotification` resumes → `ErrRetired`, the child's stdin receives nothing, and the process group is dead when `Retire` returns)
+- [x] T084a [P] [US4] `internal/oauth/retire_preflight_test.go`: T4.9 (park `preflightPRMScopes`, `autoDetectResource` and `httpFetchRaw` before sending; retire; zero hits on the counter)
+- [x] T085a [P] [US4] `internal/upstream/dialgate/nesting_test.go` + `internal/upstream/core/retire_launch_registration_test.go`: T4.10, T4.11
+- [ ] **(deferred: Windows follow-up)** T085b [P] [US4] `internal/upstream/core/process_windows_job_test.go` (windows build tag, T4.12) and `internal/upstream/core/retire_browser_test.go` (T4.13)
+- [x] T085c [P] [US4] `internal/upstream/retire_same_generation_test.go`: T4.15 (old instance parked before its stdio launch and before its HTTP/OAuth send; `RestartServer`, `ForceReconnectAll` and Docker recovery replace it at the same generation; release → no launch, no request; replacement unaffected; review R5.4)
+- [x] T085d [P] [US4] `internal/upstream/dialgate/late_register_test.go`: T4.16 (dial parked before `track`; sweep finishes; register + blocking write → closed, `ErrRetired`, `Retire` ≤ 1 s; review R5.1)
+- [x] T085e [P] [US4] `internal/upstream/dialgate/capability_parity_test.go` (`TestWrapTransportCapabilityParity`, `TestMCPGoTransportMethodSetPinned`) and `internal/upstream/core/wrapped_transport_consumers_test.go`: T4.17 (a)-(f) with the production wrapped transports: OAuth handler extraction, concurrent reactive + proactive refresh, per-method-auth manual login, Streamable HTTP 404 session re-init, protocol header, server-to-client ping over stdio and Streamable HTTP, SSE connection loss, retired request handler (review R8.1)
+- [x] T086 [P] [US4] `internal/upstream/dialgate/bench_test.go`: T4.7
 
 ### Implementation
 
-- [ ] T090 [US4] `internal/upstream/dialgate`: `Gate`, `gatedConn`, `Transport(base)`, `DialContext` (dial **and** `track` in one admitted section), retirement-aware `track` (latch checked under `connsMu`; close on retired), `Admit`, `Retire` (latch set under `connsMu`; second conn sweep after the barrier) (makes T080, T085d and T086 pass; review R5.1)
-- [ ] T091 [US4] `managed.NewClient` creates the gate; the CLI client gets an always-open gate; `Disconnect` does not retire (only the manager retires)
-- [ ] T092 [US4] `core`: stdio `client.Start`, Docker launch and launcher spawn under `gate.Admit` (makes T081 pass)
-- [ ] T093 [US4] `transport/http.go`: every branch builds on `gate.Transport(base)` instead of `http.DefaultTransport` (trace, plain, headers, OAuth, SSE) (makes T082 and T083 pass)
-- [ ] T093a [US4] Lock-free, capability-preserving `dialgate.WrapTransport` around every core-built mcp-go transport (`gatedStdio`/`gatedStreamableHTTP`/`gatedSSE` forwarding exactly their inner kind's capability rows, `Unwrap()`, retired-aware `SetRequestHandler`); `core.innerTransport` in `core/transport_unwrap.go` used by `extractOAuthHandler` and `SessionSnapshot`; T099 forbids `GetTransport()` elsewhere in `internal/upstream/**` (makes T085e pass; review R8.1); stdio `cmd.Start` + group/Job registration + `TrackProcess` in one admitted section, with a kill on a Job assignment failure; `Retire` kills before and after its barrier (makes T081a, T085a pass)
-- [ ] T093b [US4] Windows: `CREATE_SUSPENDED` → `AssignProcessToJobObject` → `NtResumeProcess` inside the admitted section (stdio, Docker, launcher); `openBrowser` under `gate.Admit` (makes T085b pass)
-- [ ] T093c [US4] `launcher.WaitForURL` takes the gate dialer; Docker diagnostic/recovery execs under `gate.Admit`; teardown exemption documented (T4.14, `internal/upstream/core/retire_launcher_probe_test.go` written first)
-- [ ] T094a [US4] `oauth.Env{Transport, Ctx}` threaded through `preflightPRMScopes`, `autoDetectResource`, the discovery cache fetch and `CreateOAuthConfig*` (makes T084a pass)
-- [ ] T094 [US4] `oauth`: `WithBaseTransport` on `CreateOAuthConfig*` and the transport wrapper `inner`; the core OAuth strategy and manual OAuth pass the instance transport; `Manager.RefreshOAuthToken`/`StartManualOAuth*` refuse an unregistered or retired instance (makes T084 pass)
-- [ ] T095 [US4] `unregisterLocked` calls `Retire()` on the instance it removes, before returning. This covers `AdvanceGenerations` (and so before publish) and the same-generation `ReplaceInstanceAt`/`RemoveServerAt` paths (restart, `ForceReconnectAll`, Docker recovery), which retire the old instance before installing the replacement (makes T085 and T085c pass; review R5.4)
-- [ ] T096 [US4] A retired-instance call or probe maps to the existing unavailable error and does not feed call-stats or health for the replacement
-- [ ] T097 [US4] Live fixtures `counting_http_fixture.py` and the marker launcher; `qa_hooks` `MCPPROXY_QA_PARK_DIAL` / `MCPPROXY_QA_PARK_OAUTH`; live L4; evidence `s116-pr4`
-- [ ] T099 [US4] Extend `check-upstream-write-sites.sh` with the FR-024a ungated-HTTP grep (allowlist file `scripts/ungated-http-allowlist.txt`)
-- [ ] T098 [US4] The race/lint/e2e matrix; SC-004 measurements recorded; Sol review (transport + OAuth chunk separately); docs (`docs/architecture.md` "Retirement barrier")
+- [x] T090 [US4] `internal/upstream/dialgate`: `Gate`, `gatedConn`, `Transport(base)`, `DialContext` (dial **and** `track` in one admitted section), retirement-aware `track` (latch checked under `connsMu`; close on retired), `Admit`, `Retire` (latch set under `connsMu`; second conn sweep after the barrier) (makes T080, T085d and T086 pass; review R5.1)
+- [x] T091 [US4] `managed.NewClient` creates the gate; the CLI client gets an always-open gate; `Disconnect` does not retire (only the manager retires)
+- [x] T092 [US4] `core`: stdio `client.Start`, Docker launch and launcher spawn under `gate.Admit` (makes T081 pass)
+- [x] T093 [US4] `transport/http.go`: every branch builds on `gate.Transport(base)` instead of `http.DefaultTransport` (trace, plain, headers, OAuth, SSE) (makes T082 and T083 pass)
+- [x] T093a [US4] Lock-free, capability-preserving `dialgate.WrapTransport` around every core-built mcp-go transport (`gatedStdio`/`gatedStreamableHTTP`/`gatedSSE` forwarding exactly their inner kind's capability rows, `Unwrap()`, retired-aware `SetRequestHandler`); `core.innerTransport` in `core/transport_unwrap.go` used by `extractOAuthHandler` and `SessionSnapshot`; T099 forbids `GetTransport()` elsewhere in `internal/upstream/**` (makes T085e pass; review R8.1); stdio `cmd.Start` + group/Job registration + `TrackProcess` in one admitted section, with a kill on a Job assignment failure; `Retire` kills before and after its barrier (makes T081a, T085a pass)
+- [ ] **(deferred: Windows follow-up; `openBrowser` under `gate.Admit` is done)** T093b [US4] Windows: `CREATE_SUSPENDED` → `AssignProcessToJobObject` → `NtResumeProcess` inside the admitted section (stdio, Docker, launcher); `openBrowser` under `gate.Admit` (makes T085b pass)
+- [x] T093c [US4] `launcher.WaitForURL` takes the gate dialer; Docker diagnostic/recovery execs under `gate.Admit`; teardown exemption documented (T4.14, `internal/upstream/core/retire_launcher_probe_test.go` written first)
+- [x] T094a [US4] `oauth.Env{Transport, Ctx}` threaded through `preflightPRMScopes`, `autoDetectResource`, the discovery cache fetch and `CreateOAuthConfig*` (makes T084a pass)
+- [x] T094 [US4] `oauth`: `WithBaseTransport` on `CreateOAuthConfig*` and the transport wrapper `inner`; the core OAuth strategy and manual OAuth pass the instance transport; `Manager.RefreshOAuthToken`/`StartManualOAuth*` refuse an unregistered or retired instance (makes T084 pass)
+- [x] T095 [US4] `unregisterLocked` calls `Retire()` on the instance it removes, before returning. This covers `AdvanceGenerations` (and so before publish) and the same-generation `ReplaceInstanceAt`/`RemoveServerAt` paths (restart, `ForceReconnectAll`, Docker recovery), which retire the old instance before installing the replacement (makes T085 and T085c pass; review R5.4)
+- [x] T096 [US4] A retired-instance call or probe maps to the existing unavailable error and does not feed call-stats or health for the replacement
+- [x] T097 [US4] Live fixtures `counting_http_fixture.py` and the marker launcher; `qa_hooks` `MCPPROXY_QA_PARK_DIAL` / `MCPPROXY_QA_PARK_OAUTH`; live L4; evidence `s116-pr4`
+- [x] T099 [US4] Extend `check-upstream-write-sites.sh` with the FR-024a ungated-HTTP grep (allowlist file `scripts/ungated-http-allowlist.txt`)
+- [x] T098 [US4] The race/lint/e2e matrix; SC-004 measurements recorded; Sol review (transport + OAuth chunk separately); docs (`docs/architecture.md` "Retirement barrier")
+
+
+### PR4 implementation note (as shipped, 2026-10-13)
+
+Branch `fix/116-pr4-retirement-barrier`. Deviations from the design text,
+each documented in the PR:
+
+- `Retire` signals instead of polling: it SIGKILLs every tracked process
+  group (Windows: closes the Job) before and after its barrier and returns
+  without waiting for the kernel to reap the children; the reap belongs to
+  the transport's own `Close`. Polling up to 1 s for exit would hold the
+  manager's locks (L3 W + L4 W) for that long on every stdio removal.
+  T4.8/T4.11 poll for the group's death after `Retire` returns.
+- Windows suspended creation (T093b) and the Windows Job test (T085b, T4.12)
+  are not in this PR: Windows keeps today's Job assignment right after
+  `Start`, now inside the admitted section, so `Retire` reaches the Job; a
+  grandchild forked between `Start` and the assignment can still escape it
+  (pre-existing). Follow-up.
+- Docker CLI calls other than the launch (`docker ps`/`rm` before a launch,
+  `docker logs`, `inspect`, `stop`) are not admitted sections: they talk to
+  the local Docker daemon, never to the upstream, and are ownership checks or
+  teardown. The `docker run` launch is gated as the stdio/launcher start.
+- stdio sends: the wrapper refuses after the latch (mcp-go v1.0.0 owns the
+  stdin pipe, so a byte-level gate is not possible there); a send that passed
+  the latch before `Retire` can reach the child's stdin, and `Retire` kills
+  the process group before it returns.
+- `oauth.Env` carries the instance transport (and the caller's context for
+  the resource auto-detection only). Cached discovery requests keep their
+  background context, so one caller's cancellation never poisons the shared
+  cache; a flight refused by a retired gate is not cached, and a waiter that
+  joined it runs its own fetch.
+- The refresh coordinator treats a refusal by a retired gate as having no
+  side effects (no latch, cooldown or client clear), and a caller that
+  joined such a flight runs one of its own. Binding flights and token writes
+  to the incarnation stays #1607 (`oauth.Env` and this refusal path are the
+  hooks).
+- `GatedConn.Write` checks the latch before touching the socket, so in T4.16's
+  bypass variant the write returns `ErrRetired` immediately and the second
+  sweep closes the connection.
+- The single capability helper is `core.innerTransport` in
+  `internal/upstream/core/gate.go` (not `transport_unwrap.go`); the write-site
+  script allows `GetTransport()` only there.
+- The manual OAuth flow's transient core clients share the registered
+  instance's gate (`core.Client.SetGate`), so retiring the instance stops a
+  login it started (browser, registration, code exchange).
+- A streamable-HTTP session `DELETE` on the teardown of a retired instance is
+  refused by the gate: nothing reaches the retired endpoint.
+- Test placement: T4.1/T4.2/T4.5/T4.6/T4.11/T4.15 in `internal/upstream`
+  (they drive the manager's real `unregisterLocked`), T4.3/T4.7/T4.10/T4.16
+  and the parity tests in `internal/upstream/dialgate`, T4.4 (stored-credential
+  refresh), T4.8, T4.13, T4.14, T4.17 (a)(d)(e: protocol header) in
+  `internal/upstream/core/retire_test.go`, T4.9 and the OAuth-config part of
+  T4.4 in `internal/oauth/retire_preflight_test.go`. T4.17 (b)(c) are the
+  existing `oauth_refresh_race_test.go` and `per_method_auth_e2e_test.go`,
+  which now run over the wrapped transports.
 
 **Checkpoint**: a retired instance cannot launch, dial or write. #1564 is
 closed.

@@ -266,3 +266,18 @@ func registerWindowsJob(pid int, cmd *exec.Cmd, job *winjob.Job, logger *zap.Log
 		_ = prev.job.Close()
 	}
 }
+
+// killProcessTreeNow is the retirement kill (Spec 116 PR4, FR-023a): it
+// terminates the process's Job Object (the whole tree) at once, or the
+// immediate process when no Job was recorded. Safe to call more than once.
+func killProcessTreeNow(pgid int, cmd *exec.Cmd) {
+	if pgid > 0 {
+		if job := takeWindowsJob(pgid, cmd); job != nil {
+			_ = job.Close()
+			return
+		}
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}

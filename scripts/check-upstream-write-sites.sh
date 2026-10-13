@@ -336,6 +336,84 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
   fi
 fi
 
+# Spec 116 PR4 (FR-024a, T099): upstream HTTP never bypasses the instance's
+# dial gate. In internal/oauth, internal/upstream/core and internal/transport
+# (non-test) these are hits:
+#  - the package-level helpers http.Get/Head/Post/PostForm( (they use
+#    http.DefaultClient), http.DefaultClient, http.DefaultTransport;
+#  - an http.Client{ composite literal with no Transport: field before its
+#    closing brace (its zero Transport is http.DefaultTransport).
+# In internal/upstream/** a GetTransport() call outside
+# internal/upstream/core/gate.go is a hit: core asserts transport
+# capabilities only on the unwrapped transport, through innerTransport
+# (FR-023b, review R8.1).
+# scripts/ungated-http-allowlist.txt lists the deliberate exceptions, one
+# `<path> <text>` pair per line: a hit in <path> whose line contains <text>
+# is allowed (the process-default fallbacks used outside an instance).
+allowlist="scripts/ungated-http-allowlist.txt"
+pr4_files=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  case "$f" in
+    internal/oauth/*|internal/upstream/core/*|internal/transport/*|internal/upstream/*) pr4_files+=("$f") ;;
+  esac
+done <<<"$listing"
+hits3=""
+if [[ ${#pr4_files[@]} -gt 0 ]]; then
+  [[ -f "$allowlist" ]] || : >/dev/null
+  # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
+  hits3="$(awk -v allowfile="$allowlist" '
+'"$STRIP_AWK"'
+    BEGIN {
+      na = 0
+      while ((getline line < allowfile) > 0) {
+        if (line ~ /^[ \t]*(#|$)/) continue
+        sp = index(line, " ")
+        if (sp == 0) continue
+        na++; apath[na] = substr(line, 1, sp - 1); atext[na] = substr(line, sp + 1)
+      }
+    }
+    function allowed(file, raw,    k) {
+      for (k = 1; k <= na; k++) if (apath[k] == file && index(raw, atext[k]) > 0) return 1
+      return 0
+    }
+    function report(file, n, raw) {
+      if (!allowed(file, raw)) print file ":" n ":" raw
+    }
+    FNR == 1 {
+      if (pending != "") report(pfile, pline, pending)
+      pending = ""; inblock = 0; inraw = 0
+    }
+    {
+      raw = $0
+      code = strip(raw)
+      http_scope = (FILENAME ~ /^internal\/(oauth|transport|upstream\/core)\//)
+      if (pending != "") {
+        if (code ~ /Transport[ \t]*:/) pending = ""
+        else if (index(code, "}") > 0) { report(pfile, pline, pending); pending = "" }
+      }
+      if (http_scope) {
+        if (code ~ /(^|[^A-Za-z0-9_.])http[.](Get|Head|Post|PostForm)[ \t]*[(]/ || code ~ /http[.]Default(Client|Transport)([^A-Za-z0-9_]|$)/)
+          report(FILENAME, FNR, raw)
+        if (code ~ /(^|[^*A-Za-z0-9_.])http[.]Client[{]/) {
+          rest = substr(code, index(code, "http.Client"))
+          if (rest !~ /Transport[ \t]*:/) {
+            if (rest ~ /[{][^}]*[}]/) report(FILENAME, FNR, raw)
+            else { pending = raw; pfile = FILENAME; pline = FNR }
+          }
+        }
+      }
+      if (FILENAME ~ /^internal\/upstream\// && FILENAME != "internal/upstream/core/gate.go" && code ~ /GetTransport[ \t]*[(][ \t]*[)]/)
+        report(FILENAME, FNR, raw)
+    }
+    END { if (pending != "") report(pfile, pline, pending) }' "${pr4_files[@]}")"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "upstream write sites: ungated-HTTP scanner failed (awk exit $rc)" >&2
+    exit 2
+  fi
+fi
+
 status=0
 if [[ -n "$hits" ]]; then
   echo "Spec 116 FR-009: upstreams rows written outside the config commit (use runtime.Commit):"
@@ -350,5 +428,12 @@ if [[ -n "$hits2" ]]; then
   status=1
 else
   echo "Spec 116 FR-020: every upstream manager registry mutation is generation-bound"
+fi
+if [[ -n "$hits3" ]]; then
+  echo "Spec 116 FR-024a: upstream HTTP outside the instance's dial gate (use the instance transport / oauth.Env; capabilities via core.innerTransport):"
+  echo "$hits3"
+  status=1
+else
+  echo "Spec 116 FR-024a: every upstream HTTP request runs on a gated transport"
 fi
 exit $status

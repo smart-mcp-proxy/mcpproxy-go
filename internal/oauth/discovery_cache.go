@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
 
 // Spec 113-b FR-026/FR-027: preflight OAuth discovery results (PRM, AS metadata,
@@ -185,6 +186,12 @@ func (c *discoveryCache) doWith(key discoveryKey, serverURL string, fn func() (a
 	if fl, ok := c.inflight[key]; ok {
 		c.mu.Unlock()
 		<-fl.done
+		// The flight belonged to an upstream instance that was retired while
+		// it ran (Spec 116 PR4): its refusal says nothing about the server,
+		// so this caller runs its own fetch on its own transport.
+		if dialgate.IsRetired(fl.err) {
+			return c.doWith(key, serverURL, fn)
+		}
 		return fl.val, fl.err
 	}
 	fl := &discoveryFlight{serverURL: serverURL, done: make(chan struct{})}
@@ -196,7 +203,11 @@ func (c *discoveryCache) doWith(key discoveryKey, serverURL string, fn func() (a
 	c.mu.Lock()
 	// An invalidation that ran while fn was in flight removed this flight: its
 	// result is stale and must not repopulate the cache (waiters still get it).
-	if c.inflight[key] == fl {
+	// A retired instance's refusal is not cached either (Spec 116 PR4): it
+	// would fail the next instance's discovery for the failure TTL.
+	if c.inflight[key] == fl && dialgate.IsRetired(err) {
+		delete(c.inflight, key)
+	} else if c.inflight[key] == fl {
 		c.storeLocked(key, serverURL, val, err, ttl)
 		if err == nil {
 			for _, sd := range seeds {
@@ -296,7 +307,7 @@ func parseASMetadataDoc(raw []byte) (*asMetadataDoc, error) {
 
 // httpFetchRaw GETs a metadata document with the OAuth redirect policy and a
 // size bound. Only a 200 is a success.
-func httpFetchRaw(metadataURL string, timeout time.Duration) ([]byte, error) {
+func httpFetchRaw(env Env, metadataURL string, timeout time.Duration) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, metadataURL, nil)
@@ -304,7 +315,8 @@ func httpFetchRaw(metadataURL string, timeout time.Duration) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	c := &http.Client{Timeout: timeout, CheckRedirect: oauthCheckRedirect}
+	c := env.client(timeout)
+	c.CheckRedirect = oauthCheckRedirect
 	resp, err := c.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch metadata: %w", err)

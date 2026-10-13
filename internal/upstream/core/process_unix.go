@@ -165,3 +165,18 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 // platform that needs it (the Job Object handle + registry entry, keyed by
 // PID and disambiguated by the owning cmd).
 func releaseProcessGroup(_ int, _ *exec.Cmd, _ *zap.Logger, _ string) {}
+
+// killProcessTreeNow is the retirement kill (Spec 116 PR4, FR-023a): SIGKILL
+// to the whole process group, at once and without waiting, so a retired
+// instance's child executes nothing further. Falls back to the immediate
+// process when no group was recorded. Safe to call more than once; it does
+// not reap (the transport's Close owns the child's exit status).
+func killProcessTreeNow(pgid int, cmd *exec.Cmd) {
+	if pgid > 0 {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		return
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}

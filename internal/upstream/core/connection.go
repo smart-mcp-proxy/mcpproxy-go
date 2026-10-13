@@ -8,7 +8,9 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 
 	"go.uber.org/zap"
 )
@@ -232,6 +234,18 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.connecting = false
 	}()
 
+	// Spec 116 PR4: live-QA park point (quickstart L4, -tags qa_hooks only).
+	// It sits after the caller's last registry lookup and before anything is
+	// launched or dialed, the window #1564 describes.
+	if qahooks.ParkDial != nil {
+		qahooks.ParkDial(c.config.Name)
+	}
+	// A retired instance never starts a connection. This is only the early
+	// exit: every launch, dial and write below is refused by the gate itself.
+	if c.Gate().Retired() {
+		return fmt.Errorf("connect refused: %w", dialgate.ErrRetired)
+	}
+
 	// Reset connection state for fresh connection attempt
 	if c.connected {
 		c.logger.Info("🔄 Reconnecting after OAuth completion",
@@ -369,6 +383,10 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 			c.processGroupID = 0
 		}
+		if c.stdioProc != nil {
+			c.stdioProc.Untrack()
+			c.stdioProc = nil
+		}
 
 		// Stop any locally-launched upstream child the HTTP/SSE path
 		// started — connectWithLauncher itself only stops it on
@@ -386,6 +404,8 @@ func (c *Client) Connect(ctx context.Context) error {
 			cidFile := c.launcherCIDFile
 			c.launcherHandle = nil
 			c.launcherCIDFile = ""
+			c.launcherProc.Untrack()
+			c.launcherProc = nil
 			c.mu.Unlock()
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if stopErr := handle.Stop(stopCtx); stopErr != nil {

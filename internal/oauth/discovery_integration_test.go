@@ -92,7 +92,7 @@ func TestCreateOAuthConfig_DiscoveryIsCached(t *testing.T) {
 	store := setupTestStorage(t)
 
 	for i := 0; i < 5; i++ {
-		cfg, err := createOAuthConfigInternal(f.serverConfig(name, nil), store, nil, zap.NewNop())
+		cfg, err := createOAuthConfigInternal(defaultEnv(), f.serverConfig(name, nil), store, nil, zap.NewNop())
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
 	}
@@ -109,16 +109,16 @@ func TestCreateOAuthConfig_DifferentOverridesUseSeparateCacheEntries(t *testing.
 	stopCallbackServer(t, name)
 	store := setupTestStorage(t)
 
-	_, err := createOAuthConfigInternal(f.serverConfig(name, nil), store, nil, zap.NewNop())
+	_, err := createOAuthConfigInternal(defaultEnv(), f.serverConfig(name, nil), store, nil, zap.NewNop())
 	require.NoError(t, err)
-	_, err = createOAuthConfigInternal(f.serverConfig(name, &config.OAuthConfig{
+	_, err = createOAuthConfigInternal(defaultEnv(), f.serverConfig(name, &config.OAuthConfig{
 		TokenEndpoint: "https://login.example.com/oauth2/token", AuthorizationEndpoint: "https://login.example.com/oauth2/authorize",
 	}), store, nil, zap.NewNop())
 	require.NoError(t, err)
 	assert.Equal(t, 2, f.count("HEAD /mcp"), "a different override set is a different cache key")
 
 	// other oauth fields do not affect discovery and keep the entry (FR-027)
-	_, err = createOAuthConfigInternal(f.serverConfig(name, &config.OAuthConfig{
+	_, err = createOAuthConfigInternal(defaultEnv(), f.serverConfig(name, &config.OAuthConfig{
 		TokenEndpoint: "https://login.example.com/oauth2/token", AuthorizationEndpoint: "https://login.example.com/oauth2/authorize",
 		ExtraParams: map[string]string{"audience": "x"}, ClientID: "c",
 	}), store, nil, zap.NewNop())
@@ -134,7 +134,7 @@ func TestCreateOAuthConfig_FailedDiscoveryIsCachedBriefly(t *testing.T) {
 	stopCallbackServer(t, name)
 	store := setupTestStorage(t)
 	for i := 0; i < 3; i++ {
-		_, err := createOAuthConfigInternal(f.serverConfig(name, nil), store, nil, zap.NewNop())
+		_, err := createOAuthConfigInternal(defaultEnv(), f.serverConfig(name, nil), store, nil, zap.NewNop())
 		require.NoError(t, err)
 	}
 	assert.Equal(t, 1, f.count("GET "+f.asPath), "a failing metadata URL is not hammered")
@@ -163,7 +163,7 @@ func TestCreateOAuthConfig_OfflineAccessWaterfall(t *testing.T) {
 			f.prmScopes, f.asScopes = c.prmScopes, c.asScopes
 			name := fmt.Sprintf("offline-srv-%d", i)
 			stopCallbackServer(t, name)
-			cfg, err := createOAuthConfigInternal(f.serverConfig(name, c.oauth), setupTestStorage(t), nil, zap.NewNop())
+			cfg, err := createOAuthConfigInternal(defaultEnv(), f.serverConfig(name, c.oauth), setupTestStorage(t), nil, zap.NewNop())
 			require.NoError(t, err)
 			assert.Equal(t, c.wantScopes, cfg.Scopes)
 		})
@@ -209,15 +209,15 @@ func TestCreateOAuthConfig_ExplicitScopesStillInvalidatedByNewPRMURL(t *testing.
 	stopCallbackServer(t, name)
 	store := setupTestStorage(t)
 	sc := f.serverConfig(name, &config.OAuthConfig{Scopes: []string{"custom"}})
-	_, err := createOAuthConfigInternal(sc, store, nil, zap.NewNop())
+	_, err := createOAuthConfigInternal(defaultEnv(), sc, store, nil, zap.NewNop())
 	require.NoError(t, err)
-	_, err = createOAuthConfigInternal(sc, store, nil, zap.NewNop())
+	_, err = createOAuthConfigInternal(defaultEnv(), sc, store, nil, zap.NewNop())
 	require.NoError(t, err)
 	assert.Equal(t, 1, f.count("POST /mcp"))
 
 	assert.True(t, globalDiscoveryCache.noteResourceMetadataURL(sc.URL, "https://elsewhere.example/prm"),
 		"the PRM URL the POST preflight used was recorded, so a different advertised one invalidates")
-	_, err = createOAuthConfigInternal(sc, store, nil, zap.NewNop())
+	_, err = createOAuthConfigInternal(defaultEnv(), sc, store, nil, zap.NewNop())
 	require.NoError(t, err)
 	assert.Equal(t, 2, f.count("POST /mcp"))
 }
@@ -230,7 +230,7 @@ func TestCreateOAuthConfig_WarnsOnMissingRefreshGrant(t *testing.T) {
 	name := "refresh-warn-srv"
 	stopCallbackServer(t, name)
 	for i := 0; i < 2; i++ {
-		_, err := createOAuthConfigInternal(f.serverConfig(name, nil), setupTestStorage(t), nil, zap.New(core))
+		_, err := createOAuthConfigInternal(defaultEnv(), f.serverConfig(name, nil), setupTestStorage(t), nil, zap.New(core))
 		require.NoError(t, err)
 	}
 	n := 0
@@ -251,7 +251,7 @@ func TestCreateOAuthConfig_EndpointOverridesSetMetadataURL(t *testing.T) {
 	name := "ov-meta-srv"
 	stopCallbackServer(t, name)
 
-	cfg, err := createOAuthConfigInternal(f.serverConfig(name, &config.OAuthConfig{
+	cfg, err := createOAuthConfigInternal(defaultEnv(), f.serverConfig(name, &config.OAuthConfig{
 		AuthorizationEndpoint: "https://login.example.com/oauth2/authorize",
 		TokenEndpoint:         "https://login.example.com/oauth2/token",
 	}), setupTestStorage(t), nil, zap.NewNop())
@@ -265,7 +265,7 @@ func TestCreateOAuthConfig_EndpointOverridesSetMetadataURL(t *testing.T) {
 	f.asAvailable = true
 	explicit := f.srv.URL + "/custom/meta"
 	before := f.count("HEAD /mcp") + f.count("POST /mcp")
-	cfg, err = createOAuthConfigInternal(f.serverConfig(name2, &config.OAuthConfig{AuthServerMetadataURL: explicit}), setupTestStorage(t), nil, zap.NewNop())
+	cfg, err = createOAuthConfigInternal(defaultEnv(), f.serverConfig(name2, &config.OAuthConfig{AuthServerMetadataURL: explicit}), setupTestStorage(t), nil, zap.NewNop())
 	require.NoError(t, err)
 	assert.Equal(t, explicit, cfg.AuthServerMetadataURL)
 	assert.Equal(t, before+1, f.count("HEAD /mcp")+f.count("POST /mcp"),

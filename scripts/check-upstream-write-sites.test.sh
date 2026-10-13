@@ -428,6 +428,57 @@ mkdir -p "$r/internal/upstream"
 printf 'func (m *Manager) installLocked(\n\tname string,\n\tc *managed.Client,\n) {\n\tm.clients[name] = c\n}\n\nfunc (m *Manager) unregisterLocked(\n\tname string,\n) *managed.Client {\n\tdelete(m.clients, name)\n\treturn nil\n}\n' > "$r/internal/upstream/manager_generation.go"
 expect "helpers with a multi-line signature keep the exemption for their body" 0 "$r"
 
+# Spec 116 PR4 (FR-024a, T099): ungated upstream HTTP.
+ungated() { # name dir file content expected
+  local r
+  r="$(mkroot "pr4-$1")"
+  mkdir -p "$r/$2"
+  printf '%s\n' "$4" > "$r/$2/$3"
+  expect "FR-024a: $1" "$5" "$r"
+}
+ungated "http.Head in oauth" internal/oauth a.go 'package oauth
+func f() { resp, _ := http.Head(u); _ = resp }' 1
+ungated "http.Get in core" internal/upstream/core a.go 'package core
+func f() { _, _ = http.Get(u) }' 1
+ungated "http.DefaultTransport in transport" internal/transport a.go 'package transport
+var rt = http.DefaultTransport' 1
+ungated "http.DefaultClient in core" internal/upstream/core a.go 'package core
+func f() { _, _ = http.DefaultClient.Do(r) }' 1
+ungated "transport-less http.Client literal" internal/oauth a.go 'package oauth
+func f() { c := &http.Client{Timeout: t}; _ = c }' 1
+ungated "transport-less multi-line http.Client literal" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.Client{
+		Timeout: t,
+	}
+	_ = c
+}' 1
+ungated "http.Client literal with a Transport" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.Client{
+		Timeout:   t,
+		Transport: env.transport(),
+	}
+	_ = c
+}' 0
+ungated "*http.Client return type" internal/transport a.go 'package transport
+func f() *http.Client {
+	return nil
+}' 0
+ungated "GetTransport outside core/gate.go" internal/upstream/core a.go 'package core
+func f() { _ = cl.GetTransport() }' 1
+ungated "GetTransport in core/gate.go" internal/upstream/core gate.go 'package core
+func innerTransport() { _ = cl.GetTransport() }' 0
+ungated "http.Get outside the scoped packages" internal/server a.go 'package server
+func f() { _, _ = http.Get(u) }' 0
+ungated "http.Get in a comment" internal/oauth a.go 'package oauth
+// http.Get(u) is not used here' 0
+r="$(mkroot pr4-allowlisted)"
+mkdir -p "$r/internal/oauth" "$r/scripts"
+printf 'package oauth\nfunc f() { return http.DefaultTransport }\n' > "$r/internal/oauth/env.go"
+echo 'internal/oauth/env.go return http.DefaultTransport' > "$r/scripts/ungated-http-allowlist.txt"
+expect "FR-024a: an allowlisted fallback" 0 "$r"
+
 # An operational failure never reports a clean tree (review rounds 18-20): a
 # failing file discovery or scanner exits 2, whether the tool is shadowed on
 # PATH or by an exported shell function.

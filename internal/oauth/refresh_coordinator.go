@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
 
 // RefreshTrigger names what started a refresh flight (Spec 113 FR-011).
@@ -191,6 +192,18 @@ func (c *RefreshCoordinator) waiters(key string) int {
 // rotated the token, or the latch/cooldown answered). A caller whose own ctx
 // ends returns ctx.Err(); the flight continues for the others.
 func (c *RefreshCoordinator) Do(ctx context.Context, req RefreshRequest) (*client.Token, bool, error) {
+	tok, skipped, err := c.do(ctx, req)
+	// Spec 116 PR4: a flight that ran on a retired upstream instance (its
+	// gate refused the token request) says nothing about the grant. A caller
+	// that joined it runs one flight of its own, on its own transport; a
+	// retired caller's own flight is refused again at once.
+	if dialgate.IsRetired(err) {
+		return c.do(ctx, req)
+	}
+	return tok, skipped, err
+}
+
+func (c *RefreshCoordinator) do(ctx context.Context, req RefreshRequest) (*client.Token, bool, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -305,6 +318,13 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 			return tokenFromRecord(cur), false, nil
 		}
 		return tok, false, nil
+	}
+
+	// Spec 116 PR4: the instance that ran the refresh was retired and its
+	// gate refused the request. No token request was sent, so the failure
+	// has no side effects: no latch, no cooldown, no client clear.
+	if dialgate.IsRetired(refreshErr) {
+		return nil, false, refreshErr
 	}
 
 	cls, _ := ClassifyRefreshError(refreshErr)

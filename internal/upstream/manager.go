@@ -1536,6 +1536,12 @@ func (m *Manager) callTool(ctx context.Context, toolName string, args map[string
 		if errors.Is(err, managed.ErrConnectionGenerationChanged) {
 			return nil, err
 		}
+		// Spec 116 PR4 (FR-026, FR-027): the instance was retired (removed,
+		// replaced or quarantined) while the call was on its way. Unavailable,
+		// with no connection or authentication advice.
+		if errors.Is(err, managed.ErrInstanceRetired) {
+			return nil, fmt.Errorf("server '%s' is unavailable: it was removed, replaced or quarantined while tool '%s' was being called: %w", serverName, actualToolName, err)
+		}
 
 		// Enrich errors at source with server context
 		errStr := err.Error()
@@ -2661,7 +2667,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	m.mu.RLock()
 	client, exists := m.clients[serverName]
 	m.mu.RUnlock()
-	if !exists {
+	if !exists || client.Retired() {
 		return fmt.Errorf("server not found: %s", serverName)
 	}
 
@@ -2680,6 +2686,13 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 
 	// Create a transient core client that uses the daemon's storage
 	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
+	if err == nil {
+		// Spec 116 PR4 (FR-024): the login runs behind the registered
+		// instance's gate, so retiring the instance (removal, replacement,
+		// quarantine) stops it: no browser, no registration, no code
+		// exchange, no token request.
+		coreClient.SetGate(client.Gate())
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
@@ -2704,6 +2717,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 				m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
 				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 				if err2 == nil {
+					testClient.SetGate(client.Gate())
 					tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
 					_ = testClient.Connect(tctx)
 					tcancel()
@@ -2744,7 +2758,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	m.mu.RLock()
 	client, exists := m.clients[serverName]
 	m.mu.RUnlock()
-	if !exists {
+	if !exists || client.Retired() {
 		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
@@ -2763,6 +2777,8 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
+	// Spec 116 PR4 (FR-024): behind the registered instance's gate.
+	coreClient.SetGate(client.Gate())
 
 	// Use a long-running context for the OAuth callback (30 minutes)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
@@ -2840,7 +2856,7 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 	m.mu.RLock()
 	client, exists := m.clients[serverName]
 	m.mu.RUnlock()
-	if !exists {
+	if !exists || client.Retired() {
 		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
@@ -2857,6 +2873,13 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 
 	// Create a transient core client that uses the daemon's storage
 	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
+	if err == nil {
+		// Spec 116 PR4 (FR-024): the login runs behind the registered
+		// instance's gate, so retiring the instance (removal, replacement,
+		// quarantine) stops it: no browser, no registration, no code
+		// exchange, no token request.
+		coreClient.SetGate(client.Gate())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
@@ -2876,6 +2899,7 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 			m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
 			testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 			if err2 == nil {
+				testClient.SetGate(client.Gate())
 				tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
 				_ = testClient.Connect(tctx)
 				tcancel()
@@ -3325,7 +3349,9 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 	client, exists := m.clients[serverName]
 	m.mu.RUnlock()
 
-	if !exists {
+	// Spec 116 PR4 (FR-024): an unregistered or retired instance runs no
+	// refresh; the gate refuses its token request in any case.
+	if !exists || client.Retired() {
 		return fmt.Errorf("server not found: %s", serverName)
 	}
 
@@ -3362,6 +3388,10 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 	defer cancel()
 
 	err := client.RefreshOAuthTokenDirect(ctx)
+	if err != nil && client.Retired() {
+		// Retired while the refresh was on its way: nothing to reconnect.
+		return fmt.Errorf("server not found: %s", serverName)
+	}
 	if err != nil {
 		m.logger.Warn("Direct OAuth refresh failed, falling back to reconnect",
 			zap.String("server", serverName),

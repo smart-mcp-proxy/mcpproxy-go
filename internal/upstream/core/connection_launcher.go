@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -86,7 +87,10 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 		RedactArgs: logSafeArgs,
 	}
 
-	handle, err := launcher.Spawn(ctx, spec, c.logger)
+	// Spec 116 PR4 (FR-023, FR-025a): the spawn and the gate's tracking of
+	// the child are one admitted section, so a retired instance launches
+	// nothing and a launch admitted before retirement is killed by Retire.
+	handle, err := c.spawnLauncherAdmitted(ctx, spec)
 	if err != nil {
 		if cidFile != "" {
 			_ = os.Remove(cidFile)
@@ -122,7 +126,9 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 		zap.String("url", c.logSafeURL()),
 		zap.Duration("timeout", waitTimeout))
 
-	if err := launcher.WaitForURL(ctx, c.config.URL, waitTimeout); err != nil {
+	// The reachability probe dials through the gate (T4.14): a retired
+	// instance stops probing its old endpoint.
+	if err := launcher.WaitForURLWithDial(ctx, c.config.URL, waitTimeout, c.Gate().DialContext(launcherProbeDialer.DialContext)); err != nil {
 		// Tear down the child we just started — caller will see a
 		// failed Connect and the next attempt should start fresh.
 		// Release c.mu around handle.Stop because it blocks until the
@@ -131,6 +137,8 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 		// before returning so the caller's deferred Unlock balances.
 		c.launcherHandle = nil
 		c.launcherCIDFile = ""
+		c.launcherProc.Untrack()
+		c.launcherProc = nil
 		c.mu.Unlock()
 		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if stopErr := handle.Stop(stopCtx); stopErr != nil {
@@ -159,9 +167,12 @@ func (c *Client) stopLauncher(ctx context.Context) {
 	c.mu.Lock()
 	handle := c.launcherHandle
 	cidFile := c.launcherCIDFile
+	proc := c.launcherProc
 	c.launcherHandle = nil
 	c.launcherCIDFile = ""
+	c.launcherProc = nil
 	c.mu.Unlock()
+	defer proc.Untrack()
 
 	if handle == nil {
 		return
@@ -384,4 +395,32 @@ func (w *loggerWriter) writeLine(line string) {
 	case w.fallback != nil:
 		w.fallback.Info("launcher", zap.String("message", line), logs.ChildOutputField())
 	}
+}
+
+// launcherProbeDialer is the per-attempt dialer of the launcher's
+// reachability probe; the gate wraps it.
+var launcherProbeDialer = &net.Dialer{Timeout: 2 * time.Second}
+
+// spawnLauncherAdmitted spawns the launcher child inside one admitted
+// section of the instance's gate and registers it with the gate there. A
+// child the gate refuses to track (retired during the section) is killed
+// before this returns.
+func (c *Client) spawnLauncherAdmitted(ctx context.Context, spec *launcher.Spec) (launcher.Handle, error) {
+	gate := c.Gate()
+	release, err := gate.Admit(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	handle, err := launcher.Spawn(ctx, spec, c.logger)
+	if err != nil {
+		return nil, err
+	}
+	pid, cmd := handle.Pid(), spec.Cmd
+	proc, err := gate.TrackProcess(func() { killProcessTreeNow(pid, cmd) })
+	if err != nil {
+		return nil, err
+	}
+	c.launcherProc = proc
+	return handle, nil
 }

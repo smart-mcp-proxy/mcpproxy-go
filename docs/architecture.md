@@ -196,7 +196,7 @@ disconnect, a restart or reconnect replacement through `ReplaceInstanceAt`)
 is also bound to that instance's `InstanceID`, because a restart installs a
 new instance at the same generation. Every instance leaves the registry
 through one `unregisterLocked`, which marks it unregistered so it never
-connects again (Spec 116 PR4 turns this into a full retirement barrier).
+connects again and retires it (the retirement barrier below).
 Discovery and review captures carry the generation of the instance they
 listed and are dropped when it is not the stored row's; a last-good tool
 snapshot carries it too, so an approval-driven reindex never reapplies an
@@ -204,6 +204,35 @@ old endpoint's tools after an endpoint change (it re-lists instead).
 `scripts/check-upstream-write-sites.sh` also fails on an unbound manager
 mutation in `internal/runtime` or `internal/server`, and on any change to
 `Manager.clients` outside `unregisterLocked`/`installLocked`.
+
+**Retirement barrier** (Spec 116 PR4, #1564). Each upstream instance owns a
+dial gate (`internal/upstream/dialgate`). Everything the instance sends goes
+through it: every TCP dial of its HTTP, SSE and OAuth traffic and every write
+on a connection it dialed (a per-instance gated `*http.Transport`), every
+process it launches (stdio, Docker `run`, the local launcher, the OAuth
+browser: an admitted section that also registers the process group with the
+gate), every MCP request and notification its mcp-go transport sends (a
+capability-preserving `dialgate.WrapTransport`), and every OAuth preflight,
+discovery, registration, code exchange and refresh (`oauth.Env` carries the
+instance transport). `unregisterLocked` retires the instance before it
+returns, so a commit retires a removed, replaced or quarantined instance
+before it publishes, and a restart, `ForceReconnectAll` or Docker recovery
+retires the old instance before it installs the new one. `Retire` sets the
+latch, cancels the gate context, closes tracked connections, kills tracked
+process groups, waits for admitted sections that began before the latch (a
+write-lock barrier; each section is one leaf operation whose connection it
+has already closed, so the wait is bounded), and sweeps again. After it
+returns nothing new is launched, dialed or written: a dial, a launch or a
+write fails with `ErrRetired` without touching the network, and a tool call
+on the retired instance fails as "server unavailable" without marking the
+replacement unhealthy. Teardown (the MCP close, the process-group kill,
+`docker stop`) still runs; the manual OAuth flow and token refresh refuse a
+retired instance. `scripts/check-upstream-write-sites.sh` also fails on
+ungated HTTP in `internal/oauth`, `internal/upstream/core` and
+`internal/transport` (allowlist: `scripts/ungated-http-allowlist.txt`).
+Lock order: the gate's lock is innermost (`captureMu` → `Manager.mu` →
+`Gate.mu` → `Gate.connsMu`) and is held only around one dial, one write or
+one process start.
 
 **Incarnation-bound approvals** (Spec 116 PR2). Each server has an
 incarnation that changes only when its name is removed and created again.
