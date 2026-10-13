@@ -698,3 +698,29 @@ func TestInformationalScan_FailedRemovalKeepsBookkeeping(t *testing.T) {
 	assert.True(t, s.infoScanKnown["acme"], "known mark must survive a failed removal")
 	assert.Equal(t, maxInformationalScanAttempts, s.infoScanAttempts["acme"], "retry budget must survive a failed removal")
 }
+
+// The forget-on-purge observer must exist from construction, not from HTTP
+// startup: the config watcher and background initialization start in the
+// constructor, so a removal can commit before the HTTP server ever starts. A
+// startup-known name removed and re-added in that window must be a fresh
+// admission.
+func TestInformationalScan_PurgeObserverRegisteredAtConstruction(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.Servers = []*config.ServerConfig{enabledServer("acme", config.TrustModeManual)}
+	srv, err := NewServer(cfg, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	srv.infoScanMu.Lock()
+	known := srv.infoScanKnown["acme"]
+	srv.infoScanMu.Unlock()
+	require.True(t, known, "a startup server is seeded as known")
+
+	_, err = srv.removeServerFromConfig("acme")
+	require.NoError(t, err)
+
+	srv.infoScanMu.Lock()
+	defer srv.infoScanMu.Unlock()
+	assert.False(t, srv.infoScanKnown["acme"], "removal before HTTP startup must forget the known mark")
+}

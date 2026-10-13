@@ -356,6 +356,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// synchronously) rather than from the first servers.changed, so the very
 	// first server a fresh install adds still counts as new.
 	server.seedKnownServers(cfg.Servers)
+	// Registered here, before the config watcher and background initialization
+	// start below, so no removal can commit without forgetting its scan state.
+	server.forgetInformationalScansOnPurge()
 
 	// Replace the diagnostics package's placeholder fixers with the real,
 	// runtime-backed ones (see diagnostics_fixers.go). builtin_fixers.go has
@@ -3256,7 +3259,6 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 				secService.InvalidateServerState(name)
 			}
 		})
-		s.forgetInformationalScansOnPurge()
 		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
 		secService.CleanupStaleJobs()
 		httpAPIServer.SetSecurityController(secService)
