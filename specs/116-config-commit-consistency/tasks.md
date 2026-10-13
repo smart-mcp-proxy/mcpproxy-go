@@ -231,7 +231,20 @@ from the design text:
   OAuth-cleared servers in commit step 6 and on logout. The RefreshManager
   ignores a terminal outcome whose binding is not the registered instance's
   (`Runtime.CurrentCredentialBinding`), in addition to the existing
-  expiry match.
+  expiry match. Each `RefreshSchedule` also carries the binding its token was
+  saved under (`TokenStoreManager.NotifyTokenSavedFor` →
+  `RefreshManager.OnTokenSavedFor`), and the outcome is matched against it
+  while the schedule is selected under the manager lock, so a removal and
+  re-add (or an OAuth-config commit) that lands between the resolver check
+  and the selection cannot hand the old flight's failure to a replacement
+  token with the same expiry (Sol r1 on #1621). A schedule with no binding
+  (loaded from storage at startup) relies on the resolver check alone.
+- **Served revision after a reactive refresh.** `PersistentTokenStore`
+  records as its served revision the record that holds the token it served:
+  after a reactive refresh, the refreshed record's revision (re-read, kept
+  only when it still holds that access token). The 5xx `ClearToken` then
+  erases the refreshed token, while a write that replaced it afterwards
+  still survives (Sol r1 on #1621).
 - **Superseded failures.** A login whose result storage refused, or whose
   instance was retired, is not recorded on the server status by name
   (`core.reportOAuthFailure`, `TokenStoreManager.RecordOAuthFailure`): the

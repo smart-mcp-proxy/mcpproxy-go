@@ -89,6 +89,11 @@ type RefreshSchedule struct {
 	MaxBackoff       time.Duration // Maximum backoff duration (5 minutes)
 	LastAttempt      time.Time     // Time of last refresh attempt
 	RefreshState     RefreshState  // Current state for health reporting
+	// Binding is the credential binding of the instance whose token save
+	// built this schedule (Spec 116 PR2b, Sol r1 on #1621); zero when unknown
+	// (schedules loaded from storage at startup, unbound stores). A reactive
+	// flight's terminal outcome applies only to a schedule of its binding.
+	Binding commitview.CredentialBinding
 }
 
 // RefreshTokenStore defines storage operations needed by RefreshManager.
@@ -266,7 +271,7 @@ func (m *RefreshManager) Start(ctx context.Context) error {
 					m.logger.Debug("Scheduling proactive refresh for non-expired token",
 						zap.String("server", serverName),
 						zap.Time("expires_at", token.ExpiresAt))
-					m.scheduleRefreshLocked(serverName, token.ExpiresAt)
+					m.scheduleRefreshLocked(serverName, token.ExpiresAt, commitview.CredentialBinding{})
 					scheduled++
 				} else if token.RefreshToken != "" {
 					// Access token expired but has refresh token - queue for immediate refresh
@@ -443,6 +448,13 @@ func (m *RefreshManager) Stop() {
 // OnTokenSaved is called when a token is saved to storage.
 // It reschedules the proactive refresh for the new token expiration.
 func (m *RefreshManager) OnTokenSaved(serverName string, expiresAt time.Time) {
+	m.OnTokenSavedFor(serverName, expiresAt, commitview.CredentialBinding{})
+}
+
+// OnTokenSavedFor is OnTokenSaved for a token saved under binding (Spec 116
+// PR2b): the new schedule carries the binding, so a terminal outcome of
+// another binding's flight never fails it (Sol r1 on #1621).
+func (m *RefreshManager) OnTokenSavedFor(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -456,7 +468,7 @@ func (m *RefreshManager) OnTokenSaved(serverName string, expiresAt time.Time) {
 	}
 
 	// Schedule refresh for new token
-	m.scheduleRefreshLocked(serverName, expiresAt)
+	m.scheduleRefreshLocked(serverName, expiresAt, binding)
 }
 
 // OnTokenCleared is called when a token is cleared (e.g., logout).
@@ -533,7 +545,7 @@ func (m *RefreshManager) GetRefreshState(serverName string) *RefreshStateInfo {
 //   - This ensures short-lived tokens get adequate buffer time for retries
 //   - Long-lived tokens refresh at 75% of lifetime (e.g., 1-hour token → 45 min)
 //   - Short-lived tokens get at least 5 minutes buffer (e.g., 10-min token → 5 min)
-func (m *RefreshManager) scheduleRefreshLocked(serverName string, expiresAt time.Time) {
+func (m *RefreshManager) scheduleRefreshLocked(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) {
 	now := time.Now()
 
 	lifetime := expiresAt.Sub(now)
@@ -592,6 +604,7 @@ func (m *RefreshManager) scheduleRefreshLocked(serverName string, expiresAt time
 		RetryCount:       0,
 		RefreshState:     RefreshStateScheduled,
 		MaxBackoff:       MaxRetryBackoff,
+		Binding:          binding,
 	}
 
 	// Start timer
@@ -846,10 +859,16 @@ func (m *RefreshManager) onRefreshOutcome(o RefreshOutcome) {
 			}
 		}
 	}
-	var match func(*RefreshSchedule) bool
-	if !o.ExpiresAt.IsZero() {
+	// The match runs under m.mu while the schedule is selected, so the
+	// binding check above cannot race a replacement installing its schedule
+	// (Sol r1 on #1621): a schedule built by another binding's token save is
+	// never failed by this flight, even for a token with the same expiry.
+	match := func(s *RefreshSchedule) bool {
+		if !o.Binding.IsZero() && !s.Binding.IsZero() && s.Binding != o.Binding {
+			return false
+		}
 		// Only the schedule built for the token the flight failed on.
-		match = func(s *RefreshSchedule) bool { return s.ExpiresAt.Equal(o.ExpiresAt) }
+		return o.ExpiresAt.IsZero() || s.ExpiresAt.Equal(o.ExpiresAt)
 	}
 	m.handleRefreshFailureFor(o.ServerName, o.Err, match)
 }

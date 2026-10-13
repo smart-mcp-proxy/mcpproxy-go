@@ -311,3 +311,47 @@ func TestPersistentTokenStore_LogoutDuringGraceRefreshServesNothing(t *testing.T
 	assert.Nil(t, tok)
 	assert.Error(t, err)
 }
+
+// Sol r1 (#1621): GetToken served the token a reactive refresh persisted, so
+// the 5xx-recovery ClearToken must guard THAT record's revision, not the
+// pre-refresh one; otherwise a stale refreshed token survives the clear.
+func TestPersistentTokenStore_ClearAfterReactiveRefreshDeletesRefreshedRecord(t *testing.T) {
+	db := newTestBolt(t)
+	as := newRotatingAS(t, "rt-0")
+	name, u := uniqueServerName(t), "https://clear-after-refresh.example.com/mcp"
+	seedToken(t, db, name, u, "rt-0", -time.Minute)
+	store := NewPersistentTokenStore(name, u, db)
+	require.True(t, BindRefresher(store, RefreshBinding{Refresh: asRefreshFunc(as, store)}))
+
+	tok, err := store.GetToken(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "at-1", tok.AccessToken)
+
+	require.NoError(t, store.(*PersistentTokenStore).ClearToken())
+	_, err = db.GetOAuthToken(GenerateServerKey(name, u))
+	assert.Error(t, err, "the refreshed record the store served must be cleared")
+}
+
+// Sol r1 (#1621) companion: a write that lands after the refreshed token was
+// served is a genuinely later replacement and survives the clear.
+func TestPersistentTokenStore_ClearAfterReactiveRefreshKeepsLaterReplacement(t *testing.T) {
+	db := newTestBolt(t)
+	as := newRotatingAS(t, "rt-0")
+	name, u := uniqueServerName(t), "https://clear-after-refresh-later.example.com/mcp"
+	seedToken(t, db, name, u, "rt-0", -time.Minute)
+	store := NewPersistentTokenStore(name, u, db)
+	require.True(t, BindRefresher(store, RefreshBinding{Refresh: asRefreshFunc(as, store)}))
+
+	tok, err := store.GetToken(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "at-1", tok.AccessToken)
+
+	key := GenerateServerKey(name, u)
+	require.NoError(t, store.SaveToken(context.Background(), &client.Token{
+		AccessToken: "at-later", RefreshToken: "rt-later", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Hour),
+	}))
+	require.NoError(t, store.(*PersistentTokenStore).ClearToken())
+	rec, err := db.GetOAuthToken(key)
+	require.NoError(t, err)
+	assert.Equal(t, "at-later", rec.AccessToken)
+}

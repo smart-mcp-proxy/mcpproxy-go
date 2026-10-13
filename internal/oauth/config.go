@@ -181,6 +181,7 @@ type TokenStoreManager struct {
 	oauthCompletionCallback func(serverName string)                      // Callback when OAuth completes
 	oauthFailureCallback    func(serverName string, err error)           // Callback when an unattended OAuth flow fails
 	tokenSavedCallback      func(serverName string, expiresAt time.Time) // Callback when token is saved
+	tokenSavedBoundCallback func(serverName string, expiresAt time.Time, binding commitview.CredentialBinding)
 }
 
 var globalTokenStoreManager = &TokenStoreManager{
@@ -352,14 +353,34 @@ func (m *TokenStoreManager) SetTokenSavedCallback(callback func(serverName strin
 	m.tokenSavedCallback = callback
 }
 
-// NotifyTokenSaved triggers the token saved callback if set.
-// Called by PersistentTokenStore.SaveToken() to notify the RefreshManager.
+// SetTokenSavedBoundCallback sets the binding-aware token saved callback
+// (Spec 116 PR2b). When set it is called instead of the plain callback, with
+// the credential binding the token was saved under (zero when unbound).
+func (m *TokenStoreManager) SetTokenSavedBoundCallback(callback func(serverName string, expiresAt time.Time, binding commitview.CredentialBinding)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokenSavedBoundCallback = callback
+}
+
+// NotifyTokenSaved triggers the token saved callback if set, for a token
+// saved without a credential binding.
 func (m *TokenStoreManager) NotifyTokenSaved(serverName string, expiresAt time.Time) {
+	m.NotifyTokenSavedFor(serverName, expiresAt, commitview.CredentialBinding{})
+}
+
+// NotifyTokenSavedFor triggers the token saved callback for a token saved
+// under binding. Called by PersistentTokenStore.SaveToken() and the stored-DCR
+// refresh to notify the RefreshManager.
+func (m *TokenStoreManager) NotifyTokenSavedFor(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) {
 	m.mu.RLock()
 	callback := m.tokenSavedCallback
+	bound := m.tokenSavedBoundCallback
 	m.mu.RUnlock()
 
-	if callback != nil {
+	switch {
+	case bound != nil:
+		bound(serverName, expiresAt, binding)
+	case callback != nil:
 		callback(serverName, expiresAt)
 	}
 }

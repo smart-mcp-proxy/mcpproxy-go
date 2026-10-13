@@ -13,6 +13,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
@@ -74,12 +75,15 @@ func (r *Runtime) StartBackgroundInitialization() {
 		}
 
 		// Register token saved callback to wire PersistentTokenStore -> RefreshManager
-		oauth.GetTokenStoreManager().SetTokenSavedCallback(func(serverName string, expiresAt time.Time) {
+		// Spec 116 PR2b: the binding the token was saved under goes onto the
+		// schedule, so a superseded instance's reactive failure never fails it.
+		oauth.GetTokenStoreManager().SetTokenSavedBoundCallback(func(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) {
 			r.logger.Info("OnTokenSaved callback fired - scheduling proactive refresh",
 				zap.String("server", serverName),
 				zap.Time("expires_at", expiresAt),
-				zap.Duration("valid_for", time.Until(expiresAt)))
-			r.refreshManager.OnTokenSaved(serverName, expiresAt)
+				zap.Duration("valid_for", time.Until(expiresAt)),
+				zap.String("binding", binding.String()))
+			r.refreshManager.OnTokenSavedFor(serverName, expiresAt, binding)
 		})
 		r.logger.Info("Token saved callback registered for proactive refresh")
 	}

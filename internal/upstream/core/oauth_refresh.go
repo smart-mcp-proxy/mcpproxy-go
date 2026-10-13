@@ -173,7 +173,7 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 	}
 
 	oauth.DefaultRefreshCoordinator().NoteTokenSavedFor(serverKey, binding)
-	oauth.GetTokenStoreManager().NotifyTokenSaved(c.config.Name, newToken.ExpiresAt)
+	oauth.GetTokenStoreManager().NotifyTokenSavedFor(c.config.Name, newToken.ExpiresAt, binding)
 	c.logger.Info("OAuth token refreshed via stored DCR credentials",
 		zap.String("server", c.config.Name),
 		zap.Time("new_expiry", newToken.ExpiresAt))

@@ -261,11 +261,20 @@ sees the old server's tokens. Reads ignore records of another epoch. Every
 write to the `oauth_tokens` bucket takes a new `Revision` from the bucket
 sequence, and a binding-conditional clear acts only on the revision its
 caller inspected, so a parked clear never erases what a same-binding
-replacement (a restart) rewrote. Refresh flights, the terminal latch, the
-cooldown and the re-registration state are keyed by `(server key, binding)`,
-so an old instance never joins its replacement's flight or receives its
-token, and a stale flight's terminal outcome is ignored by the refresh
-schedule. Before it builds an instance the manager also checks that the
+replacement (a restart) rewrote. The one exception is the login flow's
+stale-DCR clear (`ClearOAuthClientIfBoundAndClientID`): it holds the client
+id it sent, not a record it read, so it checks the binding and that client
+id; a parked login-path clear can still erase a same-binding rewrite that
+kept the same client id. Refresh flights, the terminal latch, the cooldown
+and the re-registration state are keyed by `(server key, binding)`, so an
+old instance never joins the flight of a replacement with a different
+binding (a removal and re-add, or an OAuth-config change) or receives its
+token. A same-binding replacement (a restart) shares the key and can join
+the old instance's flight; a joiner whose flight failed because its
+initiator was retired retries on its own transport rather than taking that
+answer. Each refresh schedule records the binding its token was saved
+under, and a reactive flight's terminal outcome is applied only to a
+schedule of the flight's binding, checked when that schedule is selected. Before it builds an instance the manager also checks that the
 stored row still carries exactly the committed view it holds (one bbolt
 `View`), so a stale worker builds no OAuth config at all. Logout and the
 standalone CLI logout (`ClearOAuthTokenForStandaloneLogout`, one exact key)

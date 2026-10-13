@@ -489,10 +489,18 @@ fi
 # logout), and is a hit in every other non-test file outside internal/storage.
 oauth_methods='SaveOAuthToken|UpdateOAuthToken|DeleteOAuthToken|UpdateOAuthClientCredentials|SaveOAuthClientCredentialsIfUnsetOrSame|SaveOAuthClientCredentialsIfSameOrEmpty|ClearOAuthClientCredentials|ClearOAuthClientCredentialsIf|ClearOAuthClientCredentialsIfClientID'
 standalone_method='ClearOAuthTokenForStandaloneLogout'
+# The file list is built from the full listing, NOT from "files": the
+# internal/runtime/commit*.go exemption covers upstream-row writes only, so a
+# standalone clear (or a bound-dir mutator) in a commit file is still a hit
+# (Sol r1 on #1621). Only internal/storage (the implementations) is skipped.
 pr2b_files=()
-for f in "${files[@]}"; do
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  case "$f" in
+    internal/storage/*) continue ;;
+  esac
   pr2b_files+=("$f")
-done
+done <<<"$listing"
 hits4=""
 if [[ ${#pr2b_files[@]} -gt 0 ]]; then
   # shellcheck disable=SC2016 # the awk program is single-quoted on purpose

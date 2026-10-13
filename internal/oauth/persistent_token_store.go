@@ -149,7 +149,7 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 	p.servedRev.Store(record.Revision)
 
 	if b := p.binding.Load(); b != nil {
-		return reactiveToken(ctx, p.now, reactiveTarget{
+		tok, err := reactiveToken(ctx, p.now, reactiveTarget{
 			key: p.serverKey, name: p.serverName, logger: p.logger,
 			binding: p.cb,
 			load:    p.loadRecord,
@@ -157,6 +157,10 @@ func (p *PersistentTokenStore) GetToken(ctx context.Context) (*client.Token, err
 				return clearClientIfBound(p.storage, p.serverKey, p.serverName, p.cb, rec)
 			},
 		}, record, b)
+		if err == nil && tok.AccessToken != record.AccessToken {
+			p.noteServedAfterRefresh(tok.AccessToken)
+		}
+		return tok, err
 	}
 
 	now := time.Now()
@@ -375,9 +379,25 @@ func (p *PersistentTokenStore) SaveToken(ctx context.Context, token *client.Toke
 
 	// Notify RefreshManager about the new token so it can schedule proactive refresh
 	// Use serverName (not serverKey) so RefreshManager can look up the actual server
-	globalTokenStoreManager.NotifyTokenSaved(p.serverName, token.ExpiresAt)
+	globalTokenStoreManager.NotifyTokenSavedFor(p.serverName, token.ExpiresAt, p.cb)
 
 	return nil
+}
+
+// noteServedAfterRefresh records, as the served revision, the revision of the
+// record holding accessToken: the token a reactive refresh persisted and this
+// GetToken served (Sol r1 on #1621). The 5xx-recovery ClearToken must then
+// erase that refreshed record, not guard the pre-refresh revision, which no
+// longer exists. When the record already holds a different access token (a
+// later login or refresh replaced it after the flight), the old revision is
+// kept: it matches nothing, so the clear erases nothing and the genuinely
+// later write survives.
+func (p *PersistentTokenStore) noteServedAfterRefresh(accessToken string) {
+	cur, err := p.storage.GetOAuthTokenBound(p.serverKey, p.cb)
+	if err != nil || cur == nil || cur.AccessToken != accessToken {
+		return
+	}
+	p.servedRev.Store(cur.Revision)
 }
 
 // ClearToken removes the OAuth token from persistent storage. It deletes

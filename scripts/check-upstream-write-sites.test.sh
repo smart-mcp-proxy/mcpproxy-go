@@ -659,6 +659,18 @@ oauthsite "standalone logout clear planted in core" internal/upstream/core a.go 
 func f() { _ = c.storage.ClearOAuthTokenForStandaloneLogout(key) }' 1
 oauthsite "standalone logout clear planted in server" internal/server a.go 'package server
 func f() { _ = db.ClearOAuthTokenForStandaloneLogout(key) }' 1
+# Sol r1 (#1621): the commit files' upstream-row exemption does not extend to
+# the standalone logout clear.
+# Each tree also holds a clean file outside the exemption, so the scan has
+# files to read and a hit is the planted call, not an empty-list error.
+for cf in commit_oauth.go commit.go; do
+  r="$(mkroot "pr2b-standalone-runtime-$cf")"
+  echo 'package server' > "$r/internal/server/a.go"
+  printf '%s\n' 'package runtime' 'func f() { _ = db.ClearOAuthTokenForStandaloneLogout(key) }' > "$r/internal/runtime/$cf"
+  expect "PR2b: standalone logout clear planted in runtime/$cf" 1 "$r"
+  printf '%s\n' 'package runtime' 'func f() {}' > "$r/internal/runtime/$cf"
+  expect "PR2b: clean runtime/$cf next to a clean file" 0 "$r"
+done
 oauthsite "DeleteOAuthToken in a comment" internal/upstream/core a.go 'package core
 // c.storage.DeleteOAuthToken(key) is not called here' 0
 
