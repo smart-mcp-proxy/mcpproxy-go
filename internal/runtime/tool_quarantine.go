@@ -2223,19 +2223,21 @@ func (r *Runtime) serverEligibleForIndexing(serverName string) bool {
 // last-good snapshot for a since-quarantined server) — is never (re)indexed.
 // Returns true only when the differential update actually ran.
 func (r *Runtime) applyServerDiffIfEligible(ctx context.Context, serverName string, tools []*config.ToolMetadata) bool {
-	return r.applyServerDiffIfEligibleGuarded(ctx, serverName, tools, nil)
+	return r.applyServerDiffIfEligibleGuarded(ctx, serverName, tools, inventoryRef{}, nil)
 }
 
-// applyServerDiffIfEligibleGuarded is applyServerDiffIfEligible with the
-// under-lock stale check of applyDifferentialToolUpdateGuarded.
-func (r *Runtime) applyServerDiffIfEligibleGuarded(ctx context.Context, serverName string, tools []*config.ToolMetadata, stale func() bool) bool {
+// applyServerDiffIfEligibleGuarded is applyServerDiffIfEligible for the
+// inventory inv, with the under-lock stale check of
+// applyDifferentialToolUpdateGuarded. An inventory the capture-order gate
+// refuses (Spec 117 PR-3) writes nothing and reports false.
+func (r *Runtime) applyServerDiffIfEligibleGuarded(ctx context.Context, serverName string, tools []*config.ToolMetadata, inv inventoryRef, stale func() bool) bool {
 	if !r.serverEligibleForIndexing(serverName) {
 		r.logger.Info("Skipping sweep index write for ineligible server (disabled or quarantined)",
 			zap.String("server", serverName))
 		return false
 	}
-	if err := r.applyDifferentialToolUpdateGuarded(ctx, serverName, tools, 0, stale, nil); err != nil {
-		if errors.Is(err, errLocalSnapshotPurged) {
+	if err := r.applyInventoryGuarded(ctx, serverName, tools, 0, inv, stale, nil); err != nil {
+		if errors.Is(err, errLocalSnapshotPurged) || errors.Is(err, errInventoryStale) || errors.Is(err, errInventoryNotCurrent) {
 			return false
 		}
 		r.logger.Error("Failed to apply differential update for server during sweep",
@@ -2289,12 +2291,15 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 
 // reindexFromLastGoodSnapshot re-runs the differential update from the
 // last-good snapshot under captureSnapMu. It reports false when no snapshot
-// exists yet.
+// exists yet, or (Spec 117 PR-3, FR-037) when the snapshot no longer
+// describes the live connection — its client was replaced, retired or
+// reconnected, or a newer capture with definitions was applied — so the caller
+// re-lists the server instead of re-applying older definitions.
 func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 
-	snapshot, seq := r.lastGoodSnapshotWithSeq(serverName)
+	snapshot, inv, seq := r.lastGoodSnapshotWithCapture(serverName)
 	if len(snapshot) == 0 {
 		return false
 	}
@@ -2312,7 +2317,13 @@ func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
 	// Rug-pull safety is preserved: if the tool mutated after approval,
 	// checkToolApprovals re-flags it changed and it stays blocked.
 	stale := func() bool { return r.lastGoodPurgedSince(serverName, seq) }
-	if err := r.applyDifferentialToolUpdateGuarded(r.AppContext(), serverName, snapshot, 0, stale, nil); err != nil && !errors.Is(err, errLocalSnapshotPurged) {
+	err := r.applyInventoryGuarded(r.AppContext(), serverName, snapshot, 0, inventoryRef{capture: inv, mode: inventoryReconcile}, stale, nil)
+	switch {
+	case errors.Is(err, errInventoryNotCurrent), errors.Is(err, errInventoryStale):
+		r.logger.Info("Approval reindex re-lists the server: its last-good snapshot no longer describes the live connection",
+			zap.String("server", serverName))
+		return false
+	case err != nil && !errors.Is(err, errLocalSnapshotPurged):
 		r.logger.Warn("Failed to reindex tools after approval change",
 			zap.String("server", serverName), zap.Error(err))
 	}

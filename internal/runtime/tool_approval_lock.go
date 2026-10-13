@@ -40,16 +40,45 @@ import (
 //     calls back into the runtime, so the order approval lock -> storage lock
 //     cannot invert.
 
+// toolApprovalServerLock is one server's tool-approval lock plus the capture
+// order state it guards (Spec 117 PR-3, #1565; data-model.md §7).
+//
+// applied is the highest capture sequence that entered an inventory apply for
+// the server (records, deletes, eviction, index, last-good snapshot, StateView
+// publish). Every admitted capture advances it, including one whose apply
+// later fails and a lenient-empty observation, so it is a fence: an older
+// capture that reaches the apply afterwards writes nothing.
+//
+// definitions is the sequence of the newest admitted capture that carried
+// definitions (a non-empty inventory, an authoritative empty one, or a
+// quarantined review capture). The retained last-good snapshot may be
+// re-applied by operator reconciliation (the approval reindex, the sweep
+// fallback) only while its capture is that one (FR-033a, FR-037).
+//
+// Both fields are guarded by mu. Sequences are process-global (managed.
+// InventoryCapture), so a removed and re-added server needs no reset: every
+// capture of the new instance is newer.
+type toolApprovalServerLock struct {
+	mu          sync.Mutex
+	applied     uint64
+	definitions uint64
+}
+
+// toolApprovalServerState returns serverName's lock state, creating it.
+func (r *Runtime) toolApprovalServerState(serverName string) *toolApprovalServerLock {
+	v, _ := r.toolApprovalLocks.LoadOrStore(serverName, &toolApprovalServerLock{})
+	return v.(*toolApprovalServerLock)
+}
+
 // lockToolApprovals acquires the per-server tool-approval lock and returns its
 // unlock function.
 func (r *Runtime) lockToolApprovals(serverName string) func() {
-	v, _ := r.toolApprovalLocks.LoadOrStore(serverName, &sync.Mutex{})
-	mu := v.(*sync.Mutex)
+	st := r.toolApprovalServerState(serverName)
 	waiting := r.approvalLockWaiter(serverName)
 	waiting.Add(1)
-	mu.Lock()
+	st.mu.Lock()
 	waiting.Add(-1)
-	return mu.Unlock
+	return st.mu.Unlock
 }
 
 // WithToolApprovalLock runs fn while holding serverName's tool-approval lock.

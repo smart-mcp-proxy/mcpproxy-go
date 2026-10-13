@@ -511,6 +511,28 @@ skip the pass: its tools are approved and indexed as usual, and those approved
 tools are themselves the baseline, so the next pass writes the record before it
 can remove or auto-approve anything.
 
+### Tool lists are applied in the order they were captured {#capture-order}
+
+Several things re-list a server's tools: its connection, a
+`notifications/tools/list_changed`, the periodic sweep, an explicit refresh,
+the reindex after an approval or block, and the review capture of a quarantined
+server. They can finish in any order. MCPProxy numbers every upstream
+`tools/list` when it is sent, and applies a server's tool list only if no newer
+one was applied before it. An older list that arrives late changes nothing:
+not the review records, not the search index, not the tool hints that decide
+which `call_tool_*` variant may run a tool, and not the stored tool list the
+next reindex starts from. For example, a sweep that listed `read_note` as
+read-only cannot undo a later refresh that found it destructive and held it for
+review.
+
+The same rule covers a list that came from a connection that is gone: when a
+server's endpoint is replaced or the server is removed, or it reconnects, a
+list still in flight from the old connection is dropped. After a reconnect the
+reindex that follows an approval lists the server again instead of reusing the
+tool list the old connection returned. A list that came back empty and was
+ignored as a transient blip (connect and `tools/list_changed`) still counts as
+the newest list: an older non-empty one is dropped after it.
+
 ### Trust modes (auto | scan | manual)
 
 Since spec 086, each server carries a **trust mode** that governs both

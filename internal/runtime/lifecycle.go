@@ -360,7 +360,11 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	gens := r.discoveryGenerations()
 	instanceGens := r.instanceGenerations()
 
-	tools, listed, err := r.upstreamManager.DiscoverToolsReport(ctx, dueOnly)
+	// Each listed server comes with the capture of its own tools/list
+	// (Spec 117 PR-3, FR-031), so every server's result is applied in
+	// capture order: a result older than one already applied for that server
+	// (a concurrent connect or tools/list_changed pass) writes nothing.
+	tools, listed, captures, err := r.upstreamManager.DiscoverToolsReportCaptured(ctx, dueOnly)
 	if err != nil {
 		return fmt.Errorf("failed to discover tools: %w", err)
 	}
@@ -379,7 +383,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	// or that failed to list are not stamped.
 	// An empty result from a superseded instance generation is re-listed
 	// below like a non-empty one (review round 7).
-	staleEmpty := r.markZeroToolServersDiscovered(listed, toolsByServer, gens, instanceGens)
+	staleEmpty := r.markZeroToolServersDiscovered(listed, toolsByServer, gens, instanceGens, captures)
 
 	if len(tools) == 0 {
 		r.logger.Warn("No tools discovered from upstream servers")
@@ -405,6 +409,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 		if _, ok := knownServerSet[serverName]; !ok {
 			delete(r.lastGoodTools, serverName)
 			delete(r.lastCaptureAt, serverName)
+			delete(r.lastGoodCapture, serverName)
 		}
 	}
 	r.lastGoodToolsMu.Unlock()
@@ -430,7 +435,8 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 		if r.supervisor != nil && captured {
 			capture = &c
 		}
-		eligible, published, err := r.commitDiscoveredToolsAt(ctx, serverName, serverTools, instanceGens[serverName], capture)
+		eligible, published, err := r.commitInventoryAt(ctx, serverName, serverTools, instanceGens[serverName], capture,
+			inventoryRef{capture: captures[serverName]})
 		if err != nil {
 			r.logger.Error("Failed to apply differential update for server during sweep",
 				zap.String("server", serverName), zap.Error(err))
@@ -575,14 +581,14 @@ func (r *Runtime) captureQuarantinedToolDefinitions(ctx context.Context, serverN
 			// the review record lie about what is currently offered.
 			// A fresh list: an explicit inspection must not reuse a
 			// tools/list that was already in flight (Sol r5 P2).
-			if tools, err := client.ListToolsFresh(ctx); err == nil {
+			if tools, inv, err := client.ListToolsFreshCaptured(ctx); err == nil {
 				if !r.quarantinedCaptureIsCurrent(serverName, client, capture) {
 					lastErr = fmt.Errorf("inspection client replaced during tools/list")
 					r.logger.Info("Quarantined definition capture used a superseded connection; re-listing",
 						zap.String("server", serverName), zap.Int("attempt", attempt+1))
 					continue
 				}
-				published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, instanceGen, tools)
+				published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, instanceGen, tools, inv)
 				if err != nil {
 					return err
 				}
@@ -850,7 +856,7 @@ func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverNa
 	// when tools/list_changed arrived could verify the contract as it was
 	// BEFORE the change, and periodic discovery never re-verifies a
 	// quarantined server.
-	tools, err := client.ListToolsFresh(ctx)
+	tools, inv, err := client.ListToolsFreshCaptured(ctx)
 	if err != nil {
 		r.logger.Debug("Quarantined contract verification: tools/list failed",
 			zap.String("server", serverName), zap.Error(err))
@@ -862,7 +868,7 @@ func (r *Runtime) verifyQuarantinedServerContracts(ctx context.Context, serverNa
 	if len(tools) == 0 {
 		return false
 	}
-	published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, instanceGen, tools)
+	published, err := r.captureQuarantinedToolDefinitionsFromCurrentClient(serverName, client, capture, instanceGen, tools, inv)
 	if err != nil {
 		r.logger.Warn("Quarantined contract verification failed",
 			zap.String("server", serverName), zap.Error(err))
@@ -904,10 +910,11 @@ func (r *Runtime) quarantinedCaptureIsCurrent(serverName string, client interfac
 // current-generation check immediately before checkToolApprovals writes review
 // records. A false result is deliberately retried by the caller; no stale
 // response is persisted or announced as review.changed.
-func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName string, client *managed.Client, capture supervisor.DiscoveryCapture, instanceGen int64, tools []*config.ToolMetadata) (bool, error) {
+func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName string, client *managed.Client, capture supervisor.DiscoveryCapture, instanceGen int64, tools []*config.ToolMetadata, inv managed.InventoryCapture) (bool, error) {
 	if r.quarantinedCaptureBeforePersist != nil {
 		r.quarantinedCaptureBeforePersist()
 	}
+	r.inventoryBeforeApply(serverName, inv)
 	if r.upstreamManager == nil {
 		return false, fmt.Errorf("upstream manager not initialized")
 	}
@@ -926,7 +933,7 @@ func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName 
 		if r.discoveryGeneration(serverName) != capture {
 			return nil
 		}
-		ok, err := r.persistQuarantinedToolDefinitionsAt(serverName, tools, instanceGen)
+		ok, err := r.persistInventoryDefinitions(serverName, tools, instanceGen, inv)
 		if err != nil {
 			return err
 		}
@@ -1003,9 +1010,17 @@ func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*
 // for tools that came from an instance at commit generation instanceGen (0 =
 // unknown). persisted is false when the capture was dropped as stale.
 func (r *Runtime) persistQuarantinedToolDefinitionsAt(serverName string, tools []*config.ToolMetadata, instanceGen int64) (persisted bool, err error) {
+	return r.persistInventoryDefinitions(serverName, tools, instanceGen, managed.InventoryCapture{})
+}
+
+// persistInventoryDefinitions is persistQuarantinedToolDefinitionsAt for a
+// captured inventory (Spec 117 PR-3): a capture older than one already
+// applied for the server, or from a retired or reconnected client, persists
+// nothing.
+func (r *Runtime) persistInventoryDefinitions(serverName string, tools []*config.ToolMetadata, instanceGen int64, inv managed.InventoryCapture) (persisted bool, err error) {
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
-	return r.persistToolDefinitionsLocked(serverName, tools, instanceGen)
+	return r.persistToolDefinitionsLocked(serverName, tools, instanceGen, inv)
 }
 
 // persistToolDefinitionsLocked records, prunes and publishes one review
@@ -1018,11 +1033,18 @@ func (r *Runtime) persistQuarantinedToolDefinitionsAt(serverName string, tools [
 // no longer the row's (a tools/list that was in flight when a commit changed
 // the endpoint and quarantined the server) writes nothing and reports
 // persisted=false; the commit's after-unlock discovery request replaces it.
-func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*config.ToolMetadata, instanceGen int64) (persisted bool, err error) {
+//
+// Spec 117 PR-3: the capture is admitted in the same hold, after the
+// generation check; a capture older than one already applied, or from a
+// retired or reconnected client, writes nothing and reports persisted=false.
+func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*config.ToolMetadata, instanceGen int64, inv managed.InventoryCapture) (persisted bool, err error) {
 	defer r.lockToolApprovals(serverName)()
 	if !r.discoveryCaptureCurrentHeld(serverName, instanceGen) {
 		r.logger.Info("Review capture dropped: the server's committed generation moved on",
 			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
+		return false, nil
+	}
+	if r.admitInventoryHeld(serverName, inventoryRef{capture: inv}) != inventoryAdmitted {
 		return false, nil
 	}
 	if _, err := r.checkToolApprovalsHeld(serverName, tools); err != nil {
@@ -1033,10 +1055,7 @@ func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*confi
 		hook()
 	}
 	r.lastGoodToolsMu.Lock()
-	snapshot := make([]*config.ToolMetadata, len(tools))
-	copy(snapshot, tools)
-	r.lastGoodTools[serverName] = snapshot
-	r.noteCaptureLocked(serverName)
+	r.storeLastGoodLocked(serverName, tools, inv)
 	r.lastGoodToolsMu.Unlock()
 	return true, nil
 }
@@ -1079,10 +1098,22 @@ func (r *Runtime) commitDiscoveredTools(ctx context.Context, serverName string, 
 // server was removed, disabled or quarantined returns eligible=false
 // (terminal, no re-list).
 func (r *Runtime) commitDiscoveredToolsAt(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64, capture *supervisor.DiscoveryCapture) (eligible, published bool, err error) {
+	return r.commitInventoryAt(ctx, serverName, tools, instanceGen, capture, inventoryRef{})
+}
+
+// commitInventoryAt is commitDiscoveredToolsAt for the inventory inv (Spec
+// 117 PR-3). The capture is admitted under the server's approval lock in the
+// same hold as every write of the pass. A capture older than one already
+// applied writes nothing and reports eligible and published (the newer
+// capture stands; no re-list). A capture from a retired or reconnected client
+// writes nothing and reports eligible but not published, so the caller
+// re-lists the current client.
+func (r *Runtime) commitInventoryAt(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64, capture *supervisor.DiscoveryCapture, inv inventoryRef) (eligible, published bool, err error) {
+	r.inventoryBeforeApply(serverName, inv.capture)
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 	if !r.serverEligibleForIndexing(serverName) {
-		if _, perr := r.persistToolDefinitionsLocked(serverName, tools, instanceGen); perr != nil {
+		if _, perr := r.persistToolDefinitionsLocked(serverName, tools, instanceGen, inv.capture); perr != nil {
 			r.logger.Warn("Failed to capture review definitions for ineligible server",
 				zap.String("server", serverName), zap.Error(perr))
 		}
@@ -1091,10 +1122,7 @@ func (r *Runtime) commitDiscoveredToolsAt(ctx context.Context, serverName string
 	published = true
 	held := func() {
 		r.lastGoodToolsMu.Lock()
-		snapshot := make([]*config.ToolMetadata, len(tools))
-		copy(snapshot, tools)
-		r.lastGoodTools[serverName] = snapshot
-		r.noteCaptureLocked(serverName)
+		r.storeLastGoodLocked(serverName, tools, inv.capture)
 		r.lastGoodToolsMu.Unlock()
 		if capture != nil && r.supervisor != nil {
 			// The per-server variant stamps the server's discovery as
@@ -1114,11 +1142,16 @@ func (r *Runtime) commitDiscoveredToolsAt(ctx context.Context, serverName string
 			hook()
 		}
 	}
-	if err := r.applyDifferentialToolUpdateHeld(ctx, serverName, tools, instanceGen, held); err != nil {
+	if err := r.applyInventoryGuarded(ctx, serverName, tools, instanceGen, inv, nil, held); err != nil {
 		if errors.Is(err, errDiscoveryIneligible) {
 			return false, false, nil
 		}
-		if errors.Is(err, errDiscoveryStaleGeneration) {
+		if errors.Is(err, errInventoryStale) {
+			// A newer capture of this server was already applied: it
+			// stands, and nothing of this one was written.
+			return true, true, nil
+		}
+		if errors.Is(err, errDiscoveryStaleGeneration) || errors.Is(err, errInventoryNotCurrent) {
 			// Eligible but not published: the caller re-lists the
 			// current instance (review round 7).
 			return true, false, nil
@@ -1206,6 +1239,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// Retry logic: Sometimes connection events fire slightly before the server is fully ready
 	// We retry up to 3 times with exponential backoff (500ms, 1s, 2s)
 	var tools []*config.ToolMetadata
+	var inv managed.InventoryCapture
 	maxRetries := 3
 	baseDelay := 500 * time.Millisecond
 
@@ -1231,7 +1265,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 		// BEFORE the change and keep a stale approval — which persists when
 		// periodic discovery is disabled. ListToolsFresh waits for such a
 		// request and lists again.
-		tools, err = client.ListToolsFresh(ctx)
+		tools, inv, err = client.ListToolsFreshCaptured(ctx)
 		if err == nil {
 			break // Success!
 		}
@@ -1272,7 +1306,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 				zap.String("server", serverName))
 			// A stale-generation empty result is re-listed like a
 			// non-empty one (review round 7).
-			return r.markServerZeroToolsDiscovered(serverName, gen, instanceGen), nil
+			return r.markServerZeroToolsDiscovered(serverName, gen, instanceGen, inv), nil
 		}
 		// Authoritative path (explicit refresh/discover, issue #873): zero tools
 		// is the truth. Fall through with an empty toolset so the differential
@@ -1295,7 +1329,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	// quarantined in that window has its records captured for review (no index
 	// write); a microsecond window remains before the index mutation, which is
 	// deliberately not closed with a lock across the index write.
-	eligible, published, err := r.commitDiscoveredToolsAt(ctx, serverName, tools, instanceGen, &gen)
+	eligible, published, err := r.commitInventoryAt(ctx, serverName, tools, instanceGen, &gen, inventoryRef{capture: inv})
 	if !eligible {
 		r.logger.Info("Server became ineligible during discovery (quarantined or disabled); skipping index write",
 			zap.String("server", serverName))
@@ -1364,7 +1398,7 @@ func (r *Runtime) discoveryGeneration(serverName string) supervisor.DiscoveryCap
 //
 // It returns the servers whose empty result came from a superseded instance
 // generation, for the caller to re-list (review round 7).
-func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer map[string][]*config.ToolMetadata, gens map[string]supervisor.DiscoveryCapture, instanceGens map[string]int64) []string {
+func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer map[string][]*config.ToolMetadata, gens map[string]supervisor.DiscoveryCapture, instanceGens map[string]int64, captures map[string]managed.InventoryCapture) []string {
 	if r.supervisor == nil {
 		return nil
 	}
@@ -1373,7 +1407,7 @@ func (r *Runtime) markZeroToolServersDiscovered(listed []string, toolsByServer m
 		if _, hasTools := toolsByServer[serverName]; hasTools {
 			continue
 		}
-		if !r.markServerZeroToolsDiscoveredWith(serverName, gens, instanceGens[serverName]) {
+		if !r.markServerZeroToolsDiscoveredWith(serverName, gens, instanceGens[serverName], captures[serverName]) {
 			stale = append(stale, serverName)
 		}
 	}
@@ -1406,17 +1440,21 @@ func (r *Runtime) relistStaleSweepServers(ctx context.Context, stale []string) {
 //
 // It reports false only when the result came from a superseded instance
 // generation, so the caller re-lists the current instance (review round 7).
-func (r *Runtime) markServerZeroToolsDiscovered(serverName string, gen supervisor.DiscoveryCapture, instanceGen int64) bool {
-	return r.markServerZeroToolsDiscoveredWith(serverName, map[string]supervisor.DiscoveryCapture{serverName: gen}, instanceGen)
+func (r *Runtime) markServerZeroToolsDiscovered(serverName string, gen supervisor.DiscoveryCapture, instanceGen int64, inv managed.InventoryCapture) bool {
+	return r.markServerZeroToolsDiscoveredWith(serverName, map[string]supervisor.DiscoveryCapture{serverName: gen}, instanceGen, inv)
 }
 
 // markServerZeroToolsDiscoveredWith is markServerZeroToolsDiscovered with the
 // sweep's capture map handed to the supervisor as is (a server missing from it
 // is judged by the supervisor's own rules, as before).
-func (r *Runtime) markServerZeroToolsDiscoveredWith(serverName string, gens map[string]supervisor.DiscoveryCapture, instanceGen int64) bool {
-	if r.supervisor == nil {
-		return true
-	}
+//
+// Spec 117 PR-3 (FR-033a): the empty result is admitted as an observation in
+// the same hold. It advances the server's applied sequence, so an older
+// non-empty capture still in flight writes nothing afterwards, and it keeps
+// the retained inventory. An empty result older than one already applied is
+// dropped (no re-list); one from a retired or reconnected client is re-listed.
+func (r *Runtime) markServerZeroToolsDiscoveredWith(serverName string, gens map[string]supervisor.DiscoveryCapture, instanceGen int64, inv managed.InventoryCapture) bool {
+	r.inventoryBeforeApply(serverName, inv)
 	defer r.lockToolApprovals(serverName)()
 	switch r.discoveryVerdictHeld(serverName, instanceGen) {
 	case discoveryIneligible:
@@ -1427,6 +1465,15 @@ func (r *Runtime) markServerZeroToolsDiscoveredWith(serverName string, gens map[
 		r.logger.Info("Empty discovery result dropped: it came from a superseded instance generation",
 			zap.String("server", serverName), zap.Int64("instance_generation", instanceGen))
 		return false
+	}
+	switch r.admitInventoryHeld(serverName, inventoryRef{capture: inv, mode: inventoryObservation}) {
+	case inventoryStale:
+		return true
+	case inventoryNotCurrent:
+		return false
+	}
+	if r.supervisor == nil {
+		return true
 	}
 	r.supervisor.MarkServersToolsDiscovered([]string{serverName}, gens)
 	return true
@@ -1552,6 +1599,15 @@ var errLocalSnapshotPurged = errors.New("last-good snapshot was purged by a remo
 // nothing and returns errLocalSnapshotPurged. The local reindex paths pass a
 // purge-sequence check, because their tools carry no instance generation.
 func (r *Runtime) applyDifferentialToolUpdateGuarded(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, stale func() bool, held func()) error {
+	return r.applyInventoryGuarded(ctx, serverName, newTools, instanceGen, inventoryRef{}, stale, held)
+}
+
+// applyInventoryGuarded is applyDifferentialToolUpdateGuarded for the
+// inventory inv (Spec 117 PR-3). Right after the D15 verdict and the purge
+// check, still before held and any write, the capture is admitted in capture
+// order (admitInventoryHeld): a refused capture writes nothing and returns
+// errInventoryStale or errInventoryNotCurrent.
+func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, inv inventoryRef, stale func() bool, held func()) error {
 	unlock := r.lockToolApprovals(serverName)
 	locked := true
 	release := func() {
@@ -1576,6 +1632,9 @@ func (r *Runtime) applyDifferentialToolUpdateGuarded(ctx context.Context, server
 		r.logger.Info("Local reindex dropped: the server was removed after its last-good snapshot was selected",
 			zap.String("server", serverName))
 		return errLocalSnapshotPurged
+	}
+	if err := inventoryVerdictErr(r.admitInventoryHeld(serverName, inv)); err != nil {
+		return err
 	}
 	// Spec 117 PR-1 (FR-027, FR-027a): the server's tool baseline is resolved
 	// (and an older store's marker back-filled) BEFORE anything of this pass
@@ -2736,7 +2795,7 @@ func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 
-	snapshot, seq := r.lastGoodSnapshotWithSeq(serverName)
+	snapshot, inv, seq := r.lastGoodSnapshotWithCapture(serverName)
 	if len(snapshot) == 0 {
 		return
 	}
@@ -2751,7 +2810,10 @@ func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string
 		zap.Int("snapshot_tools", len(snapshot)))
 
 	// Re-checks eligibility again immediately before the write.
-	r.applyServerDiffIfEligibleGuarded(ctx, serverName, snapshot, func() bool {
+	// Spec 117 PR-3 (FR-037): only while the snapshot's capture is still
+	// current (same client and connection, no newer definitions); otherwise
+	// the server's connect discovery owns it and the fallback skips it.
+	r.applyServerDiffIfEligibleGuarded(ctx, serverName, snapshot, inventoryRef{capture: inv, mode: inventoryReconcile}, func() bool {
 		return r.lastGoodPurgedSince(serverName, seq)
 	})
 }

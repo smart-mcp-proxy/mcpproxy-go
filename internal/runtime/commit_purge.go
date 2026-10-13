@@ -6,7 +6,6 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -31,26 +30,12 @@ func (r *Runtime) commitMemoryPurgeHeld(reports map[string]storage.PurgeReport) 
 	for name := range reports {
 		delete(r.lastGoodTools, name)
 		delete(r.lastCaptureAt, name)
+		delete(r.lastGoodCapture, name)
 		// A local reindex that already copied the snapshot sees the bump
 		// under the approval lock and drops its copy (review round 3).
 		r.lastGoodPurgeSeq[name]++
 	}
 	r.lastGoodToolsMu.Unlock()
-}
-
-// lastGoodSnapshotWithSeq returns a copy of serverName's last-good snapshot
-// and the server's purge sequence, read together under lastGoodToolsMu.
-func (r *Runtime) lastGoodSnapshotWithSeq(serverName string) ([]*config.ToolMetadata, uint64) {
-	r.lastGoodToolsMu.RLock()
-	defer r.lastGoodToolsMu.RUnlock()
-	seq := r.lastGoodPurgeSeq[serverName]
-	snapshot := r.lastGoodTools[serverName]
-	if len(snapshot) == 0 {
-		return nil, seq
-	}
-	cp := make([]*config.ToolMetadata, len(snapshot))
-	copy(cp, snapshot)
-	return cp, seq
 }
 
 // lastGoodPurgedSince reports whether serverName's snapshot was purged after
