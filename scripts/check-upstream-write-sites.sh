@@ -394,11 +394,13 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
         ch = substr(code, i, 1)
         if (ch == "{") {
           bd++
-          if (i >= 12 && substr(code, i - 11, 12) == "http.Client{") {
-            pc = (i > 12) ? substr(code, i - 12, 1) : ""
-            if (pc !~ /[*A-Za-z0-9_.]/) {
-              ns++; sdepth[ns] = bd; shas[ns] = 0; sfile[ns] = file; sline[ns] = n; sraw[ns] = raw
-            }
+          # The type may be spaced from its brace and its selector dot
+          # spaced too (review round 3): `http.Client /* x */ {` (strip
+          # turns the comment into a space) and `http . Client{` are the
+          # same literal. A brace on a later line cannot open it (Go
+          # inserts a semicolon after Client).
+          if (substr(code, 1, i - 1) ~ /(^|[^*A-Za-z0-9_.])http[ \t]*[.][ \t]*Client[ \t]*$/) {
+            ns++; sdepth[ns] = bd; shas[ns] = 0; sfile[ns] = file; sline[ns] = n; sraw[ns] = raw
           }
         } else if (ch == "}") {
           if (ns > 0 && sdepth[ns] == bd) {
@@ -425,7 +427,7 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
       code = strip(raw)
       http_scope = (FILENAME ~ /^internal\/(oauth|transport|upstream\/core)\//)
       if (http_scope) {
-        if (code ~ /(^|[^A-Za-z0-9_.])http[.](Get|Head|Post|PostForm)[ \t]*[(]/ || code ~ /http[.]Default(Client|Transport)([^A-Za-z0-9_]|$)/)
+        if (code ~ /(^|[^A-Za-z0-9_.])http[ \t]*[.][ \t]*(Get|Head|Post|PostForm)[ \t]*[(]/ || code ~ /(^|[^A-Za-z0-9_.])http[ \t]*[.][ \t]*Default(Client|Transport)([^A-Za-z0-9_]|$)/)
           report(FILENAME, FNR, raw)
         scan_clients(code, FILENAME, FNR, raw)
       }

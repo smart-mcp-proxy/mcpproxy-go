@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	uptransport "github.com/mark3labs/mcp-go/client/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -245,4 +247,65 @@ func TestDiscoveryCache_RetiredMidReadNotCached(t *testing.T) {
 	require.NoError(t, err, "the cut-off fetch was not cached as a failure")
 	assert.Equal(t, []string{"read"}, prm.ScopesSupported)
 	assert.Equal(t, int64(1), full.Load())
+}
+
+// T4.4 (code exchange; Sol review round 3): mcp-go's authorization-code
+// exchange runs on the OAuth config's HTTP client, the instance transport.
+// The exchange's token POST is parked at the gate, the instance is retired,
+// and the POST is released: the token endpoint receives no request, so no
+// code, client secret or verifier leaves the retired instance.
+func TestRetireOAuthConfig_CodeExchangeParkedRefused(t *testing.T) {
+	up := newOAuthCounter(t)
+	gate := dialgate.New()
+	sc := &config.ServerConfig{
+		Name: "retire-code-exchange",
+		URL:  up.srv.URL + "/mcp",
+		OAuth: &config.OAuthConfig{
+			ClientID:     "static-client",
+			ClientSecret: "static-secret",
+		},
+	}
+	InvalidateDiscovery(sc.URL)
+	oc, _, err := CreateOAuthConfigWithEnv(Env{Transport: gate.HTTPTransport()}, sc, setupTestStorage(t), zap.NewNop())
+	require.NoError(t, err)
+	require.NotNil(t, oc.HTTPClient)
+
+	h := uptransport.NewOAuthHandler(*oc)
+	h.SetBaseURL(up.srv.URL)
+	// Metadata is discovered on the open gate; the exchange then needs only
+	// the token POST, on a fresh connection.
+	_, err = h.GetServerMetadata(context.Background())
+	require.NoError(t, err)
+	gate.HTTPTransport().CloseIdleConnections()
+	hitsBefore := up.hits.Load()
+
+	parked := make(chan struct{})
+	resume := make(chan struct{})
+	var once atomic.Bool
+	gate.SetHooks(&dialgate.Hooks{BeforeAdmit: func() {
+		if once.CompareAndSwap(false, true) {
+			close(parked)
+			<-resume
+		}
+	}})
+	h.SetExpectedState("st-1")
+	done := make(chan error, 1)
+	go func() { done <- h.ProcessAuthorizationResponse(context.Background(), "code-1", "st-1", "verifier-1") }()
+	select {
+	case <-parked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the code exchange never reached the gate")
+	}
+	gate.Retire()
+	close(resume)
+
+	select {
+	case err = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the code exchange did not return")
+	}
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, dialgate.ErrRetired), "got %v", err)
+	assert.Equal(t, hitsBefore, up.hits.Load(), "nothing reaches the authorization server after retirement")
+	assert.Zero(t, up.tokens.Load(), "no code, client secret or verifier reaches /token")
 }

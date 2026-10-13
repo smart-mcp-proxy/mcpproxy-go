@@ -39,7 +39,10 @@ func TestHandleKill_AfterLeaderExit_KillsDescendant(t *testing.T) {
 	require.NoError(t, syscall.Kill(pid, 0), "control: the descendant outlives the leader")
 
 	require.NoError(t, h.Kill())
-	require.Eventually(t, func() bool { return syscall.Kill(pid, 0) == syscall.ESRCH },
+	// Gone or a zombie: in a container whose PID 1 does not reap orphans
+	// the killed descendant stays a zombie, which kill(pid, 0) still finds
+	// (review round 3).
+	require.Eventually(t, func() bool { return !liveNonZombie(pid) },
 		5*time.Second, 20*time.Millisecond,
 		"Kill after the leader exited must reach the descendant left in its process group")
 }
@@ -72,6 +75,75 @@ func TestHandleKill_AfterGroupGone_DoesNotSignalReusedID(t *testing.T) {
 		t.Fatal("an unrelated group with a reused ID was signalled")
 	case <-time.After(300 * time.Millisecond):
 	}
+}
+
+// Sol review round 3: Done closes only after the reaper has logged, so a
+// reuse check keyed on Done misses the window between the leader being
+// reaped and Done closing. Kill in that window must still leave a reused
+// group alone.
+func TestHandleKill_ReapedBeforeDone_DoesNotSignalReusedID(t *testing.T) {
+	inWindow := make(chan *handle, 1)
+	releaseReaper := make(chan struct{})
+	prev := afterReapHook
+	afterReapHook = func(h *handle) {
+		if h.name == "reap-window" {
+			inWindow <- h
+			<-releaseReaper
+		}
+	}
+	t.Cleanup(func() { afterReapHook = prev })
+
+	h, err := Spawn(context.Background(), &Spec{Cmd: exec.Command("/bin/sh", "-c", "exit 0"), Name: "reap-window"}, zap.NewNop())
+	require.NoError(t, err)
+	var hh *handle
+	select {
+	case hh = <-inWindow:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the reaper did not reach the window")
+	}
+	defer close(releaseReaper)
+	select {
+	case <-h.Done():
+		t.Fatal("control: Done must still be open in the window")
+	default:
+	}
+
+	other := exec.Command("sleep", "30")
+	other.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	require.NoError(t, other.Start())
+	exited := make(chan struct{})
+	go func() { _ = other.Wait(); close(exited) }()
+	t.Cleanup(func() { _ = other.Process.Kill(); <-exited })
+	hh.pgid = other.Process.Pid
+
+	require.NoError(t, h.Kill())
+	select {
+	case <-exited:
+		t.Fatal("an unrelated group with a reused ID was signalled between the reap and Done")
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// liveNonZombie reports whether pid names a process that is alive and not a
+// zombie.
+func liveNonZombie(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	if b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err == nil {
+		// pid (comm) S ...: the state follows the last ')'.
+		s := string(b)
+		if i := strings.LastIndexByte(s, ')'); i >= 0 && i+2 < len(s) {
+			return s[i+2] != 'Z'
+		}
+		return true
+	}
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	if err != nil {
+		return true
+	}
+	st := strings.TrimSpace(string(out))
+	return st != "" && !strings.HasPrefix(st, "Z")
 }
 
 func readPid(t *testing.T, path string) int {

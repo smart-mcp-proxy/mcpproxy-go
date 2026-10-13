@@ -20,12 +20,14 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/callstats"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
@@ -2779,6 +2781,9 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	}
 	// Spec 116 PR4 (FR-024): behind the registered instance's gate.
 	coreClient.SetGate(client.Gate())
+	if qahooks.ParkLogin != nil {
+		qahooks.ParkLogin(cfg.Name)
+	}
 
 	// Use a long-running context for the OAuth callback (30 minutes)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
@@ -2792,6 +2797,14 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 
 	// Start the quick OAuth flow - this returns immediately with browser status
 	result, err := coreClient.StartOAuthFlowQuick(ctx)
+	if client.Retired() || dialgate.IsRetired(err) {
+		// Spec 116 PR4 (FR-027, review round 3): retired (removed,
+		// replaced, quarantined) while the login was starting. The gate
+		// refused its requests and browser launch; the caller sees the
+		// unavailable server, never the internal retirement error.
+		cancel()
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
 	if err != nil {
 		cancel()
 		return result, err
@@ -2884,6 +2897,9 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
 
+	if qahooks.ParkLogin != nil {
+		qahooks.ParkLogin(cfg.Name)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 
 	if force {
@@ -2921,6 +2937,11 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 	result, err := coreClient.ForceOAuthFlowWithResult(ctx)
 	cancel()
 
+	if client.Retired() || dialgate.IsRetired(err) {
+		// Spec 116 PR4 (FR-027, review round 3): retired during the login;
+		// mapped like RefreshOAuthToken, and no reconnect.
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
 	if err != nil {
 		m.logger.Warn("In-process OAuth flow failed",
 			zap.String("server", cfg.Name),
@@ -3338,6 +3359,11 @@ func (m *Manager) SetUserLoggedOut(serverName string, loggedOut bool) error {
 	return nil
 }
 
+// refreshOAuthAfterLookupHook is a test seam run by RefreshOAuthToken after
+// it looked the instance up and before the refresh (T4.4). Nil in
+// production.
+var refreshOAuthAfterLookupHook func()
+
 // RefreshOAuthToken triggers a token refresh for a specific server.
 // This is called by the RefreshManager for proactive token refresh.
 //
@@ -3379,6 +3405,10 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 
 	if !hasStaticOAuth && !hasStoredTokens {
 		return fmt.Errorf("server does not use OAuth: %s", serverName)
+	}
+
+	if hook := refreshOAuthAfterLookupHook; hook != nil {
+		hook()
 	}
 
 	// Use direct token refresh to bypass ForceReconnect's early return when connected.

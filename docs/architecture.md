@@ -228,7 +228,9 @@ write fails with `ErrRetired` without touching the network, and a tool call
 on the retired instance fails as "server unavailable" without marking the
 replacement unhealthy. Teardown (the MCP close, the process-group kill,
 `docker stop`) still runs; the manual OAuth flow and token refresh refuse a
-retired instance. `scripts/check-upstream-write-sites.sh` also fails on
+retired instance and report it as "server not found". A launched process
+whose tree cannot be contained (a Windows Job Object that cannot be created
+or assigned) is killed and its start fails. `scripts/check-upstream-write-sites.sh` also fails on
 ungated HTTP in `internal/oauth`, `internal/upstream/core` and
 `internal/transport` (allowlist: `scripts/ungated-http-allowlist.txt`).
 Lock order: the gate's lock is innermost (`captureMu` → `Manager.mu` →

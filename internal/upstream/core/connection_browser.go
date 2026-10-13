@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"go.uber.org/zap"
@@ -53,7 +54,22 @@ func (c *Client) openBrowser(authURL string) error {
 		hook()
 	}
 	execCmd := exec.Command(cmd, args...)
+	observeLaunch(c.config.Name, "browser")
+	if fn := browserStartOverride.Load(); fn != nil {
+		return (*fn)(execCmd)
+	}
 	return browserStart(execCmd)
+}
+
+// browserStartOverride replaces browserStart for tests outside this package
+// (SetBrowserStartForTest). Nil in production.
+var browserStartOverride atomic.Pointer[func(*exec.Cmd) error]
+
+// SetBrowserStartForTest makes the OAuth browser launch call fn instead of
+// starting a browser, and returns a restore func. Test-only.
+func SetBrowserStartForTest(fn func(*exec.Cmd) error) (restore func()) {
+	prev := browserStartOverride.Swap(&fn)
+	return func() { browserStartOverride.Store(prev) }
 }
 
 // browserStart starts the browser command. A test seam: tests replace it so

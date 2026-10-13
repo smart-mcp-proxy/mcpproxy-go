@@ -3,6 +3,7 @@
 package launcher
 
 import (
+	"fmt"
 	"io"
 	"os/exec"
 
@@ -25,22 +26,29 @@ func applyProcAttrs(_ *exec.Cmd) {}
 // (terminateProcess/killProcess below called cmd.Process.Kill()), so a
 // launcher-managed server on Windows leaked every grandchild it spawned —
 // the same class of leak process_windows.go had on the stdio path.
-func createJob(cmd *exec.Cmd) io.Closer {
+//
+// A Job that cannot be created or assigned is an error (Spec 116 FR-025a,
+// review round 3): Spawn kills the child and fails the launch. It used to
+// degrade to the single-process kill, which let a retired instance's
+// descendants run on.
+func createJob(cmd *exec.Cmd) (io.Closer, error) {
 	if cmd == nil || cmd.Process == nil {
-		return nil
+		return nil, fmt.Errorf("create Windows Job Object: process not started")
 	}
-	job, err := winjob.New()
+	job, err := newJob()
 	if err != nil {
-		// Degrade to the old single-process behaviour rather than failing
-		// the whole launch over a diagnostics-only feature.
-		return nil
+		return nil, fmt.Errorf("create Windows Job Object for pid %d: %w", cmd.Process.Pid, err)
 	}
 	if err := job.Assign(cmd.Process.Pid); err != nil {
 		_ = job.Close()
-		return nil
+		return nil, fmt.Errorf("assign pid %d to a Windows Job Object: %w", cmd.Process.Pid, err)
 	}
-	return job
+	return job, nil
 }
+
+// newJob creates the Job Object a launcher child is contained in. A test
+// seam: tests inject a creation failure.
+var newJob = winjob.New
 
 // terminate is stopLocked's first escalation step. On Windows there is no
 // graceful phase to protect: Process.Kill() is TerminateProcess, so the

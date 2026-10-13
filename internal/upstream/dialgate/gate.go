@@ -382,7 +382,10 @@ type gatedConn struct {
 // Write refuses once the gate is retired, without touching the socket. A
 // Write that began before the latch holds the read lock until it returns;
 // its connection was tracked before it was handed out, so Retire's first
-// sweep closes it and unblocks the write.
+// sweep closes it and unblocks the write. That write's error (the socket
+// closed under it) carries ErrRetired too, like Read's (review round 3):
+// a refresh POST cut off by retirement is then charged to no grant and
+// sets no cooldown.
 func (c *gatedConn) Write(b []byte) (int, error) {
 	if c.g.retired.Load() {
 		return 0, ErrRetired
@@ -392,7 +395,11 @@ func (c *gatedConn) Write(b []byte) (int, error) {
 	if c.g.retired.Load() {
 		return 0, ErrRetired
 	}
-	return c.Conn.Write(b)
+	n, err := c.Conn.Write(b)
+	if err != nil && c.g.retired.Load() && !errors.Is(err, ErrRetired) {
+		err = fmt.Errorf("%w: %w", ErrRetired, err)
+	}
+	return n, err
 }
 
 // Read is not gated (a read sends nothing), but a read that fails because

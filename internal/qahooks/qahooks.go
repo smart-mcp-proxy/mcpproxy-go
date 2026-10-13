@@ -19,3 +19,8 @@ var ParkDial func(server string)
 // ParkOAuth, when set, blocks an upstream instance's OAuth token refresh for
 // server before the refresh request is sent (Spec 116 PR4, quickstart L4).
 var ParkOAuth func(server string)
+
+// ParkLogin, when set, blocks a manual OAuth login (StartManualOAuthQuick,
+// StartManualOAuthWithInfo) for server after it bound the login to the
+// instance's gate and before it sends anything (Spec 116 PR4 review round 3).
+var ParkLogin func(server string)

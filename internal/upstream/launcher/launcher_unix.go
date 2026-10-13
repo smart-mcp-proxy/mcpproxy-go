@@ -15,8 +15,8 @@ import (
 // gives terminateProcess/killProcess a way to reach grandchildren, so there
 // is nothing extra to track here. See launcher_windows.go for the platform
 // that actually needs this.
-func createJob(_ *exec.Cmd) io.Closer {
-	return nil
+func createJob(_ *exec.Cmd) (io.Closer, error) {
+	return nil, nil
 }
 
 // applyProcAttrs places the child in its own process group so we can signal
@@ -84,24 +84,28 @@ func startedGroupID(cmd *exec.Cmd) int {
 // After the leader was reaped the group ID is ours only while a member of
 // the group lives, and while one does the kernel does not hand the number
 // out as a PID. A live process holding the number as its PID therefore means
-// our group is gone and the number was reused: the group is left alone. (The
-// leader may be reaped a moment before Done closes; that window is a few
-// instructions long and the number cannot be reused in it in practice.)
+// our group is gone and the number was reused: the group is left alone.
+//
+// "Reaped" is the flag reap sets under reapMu right after cmd.Wait returns,
+// not Done (review round 3): Done closes only after reap has logged, so
+// keying the reuse check on Done left a window in which a reused group was
+// signalled unchecked. The kill runs under reapMu, so the leader cannot be
+// reaped by our reaper between the check and the signal; what remains is
+// the instant inside cmd.Wait between the kernel reaping the leader and
+// reap taking the lock, in which the number cannot be reused in practice.
 func (h *handle) retireKill() error {
+	h.reapMu.Lock()
+	defer h.reapMu.Unlock()
 	if h.pgid <= 0 {
-		select {
-		case <-h.done:
+		if h.reaped {
 			return nil
-		default:
 		}
 		return h.kill()
 	}
-	select {
-	case <-h.done:
+	if h.reaped {
 		if err := syscall.Kill(h.pgid, 0); !errors.Is(err, syscall.ESRCH) {
 			return nil
 		}
-	default:
 	}
 	if err := syscall.Kill(-h.pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err

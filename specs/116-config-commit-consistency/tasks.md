@@ -318,7 +318,7 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [x] T081 [P] [US4] `internal/upstream/retire_stdio_test.go` and `internal/upstream/retire_launch_admission_test.go`: T4.1 (marker launcher; Docker via a mock docker binary; launcher; each with an unretired control and the launch observer; review round 2)
 - [x] T082 [P] [US4] `internal/upstream/managed/retire_http_test.go`: T4.2 for HTTP and SSE × remove/replace/quarantine, synchronized on "commit returned"
 - [x] T083 [P] [US4] `internal/transport/retire_retry_test.go`: T4.3 (flaky reused connection forces a retry; zero hits after retirement; Retire bounded)
-- [x] T084 [P] [US4] `internal/upstream/core/retire_oauth_test.go`: T4.4 (code exchange and refresh; no secret or refresh token after retirement; `RefreshOAuthToken` on a retired name refused)
+- [x] T084 [P] [US4] T4.4 (code exchange and refresh; no secret or refresh token after retirement; `RefreshOAuthToken` on a retired name refused). As shipped: refresh with stored credentials parked and retired in `internal/upstream/core/retire_test.go` (`TestRetire_StoredCredentialRefresh_NoTokenRequest`); mcp-go's authorization-code exchange through the gated OAuth client, its token POST parked, in `internal/oauth/retire_preflight_test.go` (`TestRetireOAuthConfig_CodeExchangeParkedRefused`); `Manager.RefreshOAuthToken` on an instance retired after lookup returns "server not found" with zero upstream requests and no reconnect fallback, and both manual-login entry points retired mid-flight return the mapped error with zero requests and zero browser launches, in `internal/upstream/retire_manual_oauth_test.go` (review round 3)
 - [x] T085 [P] [US4] `internal/runtime/retire_capture_test.go`: T4.5; `internal/upstream/retire_inflight_call_test.go`: T4.6
 - [x] T081a [P] [US4] `internal/upstream/core/retire_stdio_write_test.go`: T4.8 (a launched stdio instance; `Retire` returns; a parked `SendRequest`/`SendNotification` resumes → `ErrRetired`, the child's stdin receives nothing, and the process group is dead when `Retire` returns)
 - [x] T084a [P] [US4] `internal/oauth/retire_preflight_test.go`: T4.9 (park `preflightPRMScopes`, `autoDetectResource` and `httpFetchRaw` before sending; retire; zero hits on the counter)
@@ -475,6 +475,29 @@ each documented in the PR:
   connection loss are exercised through the production wrappers
   (`internal/upstream/dialgate/wrap_forwarding_test.go`); dropping the
   `SetRequestHandler` or `SetConnectionLostHandler` forwarding fails them.
+
+#### PR4 review round 3 (Sol) design notes
+
+- FR-025a's fail-closed containment now covers the launcher too: on Windows
+  a launcher child whose Job Object cannot be created or assigned is killed
+  and `launcher.Spawn` fails, inside the admitted launch section (it used to
+  degrade to a single-process kill that left descendants running). The
+  containment step is the `containTree` seam, so the shared failure path is
+  tested on every platform.
+- The launcher's reused-group guard keys on a `reaped` flag the reaper sets
+  under `reapMu` as soon as `cmd.Wait` returns, not on `Done` (which closes
+  only after the reaper logs). `Handle.Kill` runs under the same lock.
+- A gated connection's `Write` that was admitted before the latch and is cut
+  off by the sweep reports `ErrRetired` wrapped around the socket error, like
+  `Read`. A refresh POST cut off by retirement therefore sets no cooldown
+  for the grant the replacement instance uses.
+- `StartManualOAuthQuick` and `StartManualOAuthWithInfo` map a login on an
+  instance retired meanwhile to "server not found" (FR-027), as
+  `RefreshOAuthToken` does; the browser launch is reported to the launch
+  observer.
+- The FR-024a scan matches `http.Client` with whitespace or a comment
+  before its brace and spaced selectors (`http . Client{`,
+  `http . DefaultTransport`, `http. Get(`).
 
 **Checkpoint**: a retired instance cannot launch, dial or write. #1564 is
 closed.

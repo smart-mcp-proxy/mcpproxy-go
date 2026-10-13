@@ -142,6 +142,19 @@ func Spawn(ctx context.Context, spec *Spec, log *zap.Logger) (Handle, error) {
 		return nil, fmt.Errorf("launcher: start %s: %w", name, err)
 	}
 
+	// Contain the tree before the handle exists (Windows: a Job Object; a
+	// no-op on Unix, where the process group set up by applyProcAttrs does
+	// it). A child that cannot be contained is killed and the launch fails
+	// (Spec 116 FR-025a, review round 3): the retirement kill could
+	// otherwise reach only the immediate process and leave its
+	// descendants running.
+	job, err := containTree(cmd)
+	if err != nil {
+		_ = killProcess(cmd, log)
+		_ = cmd.Wait() // reaps the child and closes both pipes
+		return nil, fmt.Errorf("launcher: contain %s: %w", name, err)
+	}
+
 	h := &handle{
 		cmd:       cmd,
 		name:      name,
@@ -155,12 +168,12 @@ func Spawn(ctx context.Context, spec *Spec, log *zap.Logger) (Handle, error) {
 	h.pid.Store(int64(cmd.Process.Pid))
 	h.pgid = startedGroupID(cmd)
 
-	// On Windows, wrap the just-started process in a Job Object so that
-	// terminateProcess/killProcess below (and the natural-exit path in
-	// reap) can reach grandchildren the process spawns — Process.Kill()
-	// alone only ever reaches this one PID. No-op on Unix, where the
-	// process-group attrs applied via applyProcAttrs already cover this.
-	h.job = createJob(cmd)
+	// On Windows the just-started process is in a Job Object (containTree
+	// above) so that terminate/kill (and the natural-exit path in reap)
+	// reach the grandchildren it spawns — Process.Kill() alone only ever
+	// reaches this one PID. nil on Unix, where the process-group attrs
+	// applied via applyProcAttrs already cover this.
+	h.job = job
 
 	// Pump stdout+stderr to LogSink. Both streams write to the same
 	// sink, prefixed so they remain distinguishable. Discard mode is
@@ -219,6 +232,14 @@ type handle struct {
 
 	pid    atomic.Int64 // 0 once exited
 	pumpWG sync.WaitGroup
+
+	// reapMu orders the retirement kill with the reaper (review round 3):
+	// reap sets reaped under it as soon as cmd.Wait returns, before it does
+	// anything else, and retireKill reads it under the same lock. A kill
+	// that sees reaped == false signals while the leader (alive or a
+	// zombie) still holds the group ID, so the ID cannot have been reused.
+	reapMu sync.Mutex
+	reaped bool
 
 	stopOnce sync.Once
 	stopErr  error
@@ -332,6 +353,12 @@ func (h *handle) reap() {
 	// kernel propagates EOF — we don't need Wait() to reach that state.
 	h.pumpWG.Wait()
 	err := h.cmd.Wait()
+	h.reapMu.Lock()
+	h.reaped = true
+	h.reapMu.Unlock()
+	if hook := afterReapHook; hook != nil {
+		hook(h)
+	}
 
 	// Release the Job Object (Windows only — see createJob/winjob). By the
 	// time we get here every pipe holder has exited, so on the Stop path
@@ -358,6 +385,15 @@ func (h *handle) reap() {
 
 	close(h.done)
 }
+
+// containTree contains a just-started child's process tree (createJob in
+// the platform files). A test seam: tests replace it to inject a
+// containment failure.
+var containTree = createJob
+
+// afterReapHook runs in the reaper after the leader was reaped and before
+// Done closes. A test seam; nil in production.
+var afterReapHook func(*handle)
 
 // pumpLines reads r line-by-line and writes each line, prefixed, to dst.
 // One Write per line so adapters that bridge io.Writer to a structured

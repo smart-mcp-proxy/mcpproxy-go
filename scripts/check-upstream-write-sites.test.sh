@@ -498,6 +498,20 @@ ungated "one-line gated client with a func literal before Transport" internal/oa
 func f() { c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }, Transport: gated}; _ = c }' 0
 ungated "a nested struct field named Transport does not gate the client" internal/oauth a.go 'package oauth
 func f() { c := &http.Client{Jar: jar(opts{Transport: gated})}; _ = c }' 1
+ungated "a comment between http.Client and its brace" internal/oauth a.go 'package oauth
+func f() { c := &http.Client /* x */ {}; _ = c }' 1
+ungated "whitespace between http.Client and its brace" internal/upstream/core a.go 'package core
+func f() { c := &http.Client	 {Timeout: t}; _ = c }' 1
+ungated "a spaced selector http . Client" internal/transport a.go 'package transport
+func f() { c := http . Client{}; _ = c }' 1
+ungated "a gated client with a comment before its brace" internal/oauth a.go 'package oauth
+func f() { c := &http.Client /* gated */ {Transport: gated}; _ = c }' 0
+ungated "a slice of client pointers is not a client literal" internal/oauth a.go 'package oauth
+var cs = []*http.Client {a, b}' 0
+ungated "a spaced selector http . DefaultTransport" internal/transport a.go 'package transport
+var rt = http . DefaultTransport' 1
+ungated "a spaced helper call http. Get" internal/oauth a.go 'package oauth
+func f() { _, _ = http. Get(u) }' 1
 ungated "*http.Client return type" internal/transport a.go 'package transport
 func f() *http.Client {
 	return nil

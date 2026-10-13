@@ -17,6 +17,7 @@ import (
 //	MCPPROXY_QA_PARK_SUPERVISOR_DISCONNECT=<server>   park that server's supervisor disconnects
 //	MCPPROXY_QA_PARK_DIAL=<server>[,<server>...]       park those servers' instance connects (Spec 116 PR4)
 //	MCPPROXY_QA_PARK_OAUTH=<server>[,<server>...]      park those servers' OAuth token refreshes (Spec 116 PR4)
+//	MCPPROXY_QA_PARK_LOGIN=<server>[,<server>...]      park those servers' manual OAuth logins (Spec 116 PR4)
 //	MCPPROXY_QA_RELEASE_DIR=<dir>                     (default: the OS temp dir)
 //
 // A parked call writes <dir>/parked-<kind>-<server> and waits until
@@ -40,6 +41,9 @@ func init() {
 	}
 	if name := os.Getenv("MCPPROXY_QA_PARK_OAUTH"); name != "" {
 		ParkOAuth = parker(dir, "oauth", name)
+	}
+	if name := os.Getenv("MCPPROXY_QA_PARK_LOGIN"); name != "" {
+		ParkLogin = parker(dir, "login", name)
 	}
 }
 
