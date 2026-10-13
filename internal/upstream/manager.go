@@ -2351,7 +2351,12 @@ func (m *Manager) ForceReconnectAll(reason string) *ReconnectResult {
 			continue
 		}
 
-		cfg := cloneServerConfig(client.GetConfig())
+		// Spec 116 PR3 (review R4.1, R5.4, Sol round 1): the config and the
+		// generation are read from ONE atomic load, so a non-connection commit
+		// that restamps the instance in between cannot pair the old config
+		// with the new generation.
+		capturedCfg, gen := client.ConfigAt()
+		cfg := cloneServerConfig(capturedCfg)
 		if cfg == nil {
 			result.SkippedServers[id] = "failed to clone config"
 			continue
@@ -2371,19 +2376,36 @@ func (m *Manager) ForceReconnectAll(reason string) *ReconnectResult {
 			zap.String("id", id),
 			zap.String("reason", reason))
 
-		if hook := m.forceReconnectBeforeReplace.Load(); hook != nil {
-			(*hook)(id)
+		// Replace exactly the instance captured above, at its generation. A
+		// server a commit removed or replaced since the capture is left alone
+		// (ErrStaleGeneration): a removed one is not re-created and a
+		// replacement is not torn down. When the SAME instance is still
+		// registered (a commit only restamped it with a non-connection edit),
+		// the recovery re-reads its (config, generation) pair and retries, so
+		// it installs the latest committed config.
+		var fresh *managed.Client
+		var err error
+		for attempt := 0; ; attempt++ {
+			if hook := m.forceReconnectBeforeReplace.Load(); hook != nil {
+				(*hook)(id)
+			}
+			fresh, err = m.ReplaceInstanceAt(id, gen, client, cfg)
+			if !errors.Is(err, ErrStaleGeneration) || attempt >= 2 {
+				break
+			}
+			if cur, ok := m.GetClient(id); !ok || cur != client {
+				break
+			}
+			capturedCfg, gen = client.ConfigAt()
+			if cfg = cloneServerConfig(capturedCfg); cfg == nil || !cfg.Enabled {
+				break
+			}
 		}
-		// Spec 116 PR3 (review R4.1, R5.4): replace exactly the instance
-		// captured above, at its generation. A server a commit removed or
-		// replaced since the capture is left alone (ErrStaleGeneration): a
-		// removed one is not re-created and a replacement is not torn down.
-		fresh, err := m.ReplaceInstanceAt(id, client.Generation(), client, cfg)
-		if errors.Is(err, ErrStaleGeneration) {
+		if errors.Is(err, ErrStaleGeneration) || cfg == nil || !cfg.Enabled {
 			result.AttemptedServers--
 			result.SkippedServers[id] = "replaced or removed since the reconnect started"
 			m.logger.Debug("ForceReconnectAll: skipping a server a newer commit or replacement superseded",
-				zap.String("server", cfg.Name))
+				zap.String("server", id))
 			continue
 		}
 

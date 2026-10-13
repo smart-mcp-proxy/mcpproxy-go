@@ -915,6 +915,19 @@ func (mc *Client) Generation() int64 {
 	return 0
 }
 
+// ConfigAt returns the config this instance holds together with the commit
+// generation it was stamped with, read from ONE atomic load. A caller that
+// binds an action to (config, generation) must use it instead of separate
+// GetConfig and Generation calls: a restamp (SetConfigAt) between those two
+// reads would pair the OLD config with the NEW generation (Spec 116 PR3 Sol
+// round 1).
+func (mc *Client) ConfigAt() (*config.ServerConfig, int64) {
+	if p := mc.cfg.Load(); p != nil {
+		return p.cfg, p.gen
+	}
+	return nil, 0
+}
+
 // SetConfigAt stores cfg together with its commit generation gen as one atomic
 // pair, but only when gen is newer than the generation the instance holds, so
 // a late legacy worker can never roll the config back (Spec 116 review R9.1).

@@ -237,6 +237,39 @@ func TestManagerGenerations_T3_8_ForceReconnectAllAfterCommit(t *testing.T) {
 	assert.Contains(t, result.SkippedServers, "b")
 }
 
+// T3.8 round 1 (Sol review P2): a non-connection commit that restamps the
+// captured instance between ForceReconnectAll's config read and its
+// replacement must not let recovery install the OLD config stamped with the
+// NEW generation. Recovery either skips the server or installs the latest
+// committed config; here it retries against the restamped instance.
+func TestManagerGenerations_T3_8_ForceReconnectAllAfterRestamp(t *testing.T) {
+	m := newGenTestManager(t)
+	a := &config.ServerConfig{Name: "a", Command: "/nonexistent/docker-fake", Args: []string{"one"}, Protocol: "stdio", Enabled: true}
+	m.AdvanceGenerations([]GenerationChange{present("a", 1, a)})
+	require.NoError(t, m.AddServerConfigAt("a", a, 1))
+	captured := registered(t, m, "a")
+
+	a2 := cloneServerConfig(a)
+	yes := true
+	a2.ExposePrompts = &yes // not a connection setting: restamp, not replace
+	var once sync.Once
+	hook := func(string) {
+		once.Do(func() {
+			res := m.AdvanceGenerations([]GenerationChange{present("a", 2, a2)})
+			require.Equal(t, []string{"a"}, res.Restamped)
+			require.Same(t, captured, registered(t, m, "a"))
+		})
+	}
+	m.forceReconnectBeforeReplace.Store(&hook)
+
+	result := m.ForceReconnectAll("test")
+	cur := registered(t, m, "a")
+	assert.Equal(t, int64(2), cur.Generation())
+	ep := cur.GetConfig().ExposePrompts
+	assert.True(t, ep != nil && *ep,
+		"recovery must not install the pre-restamp config at the restamped generation (result: %+v)", result)
+}
+
 type recordingNotifier struct{ ch chan *Notification }
 
 func (r recordingNotifier) SendNotification(n *Notification) { r.ch <- n }

@@ -10,7 +10,9 @@
 # split across lines (exit 1), a code line starting with `*` such as
 # `*save = st.SaveUpstreamServer` (exit 1), code after a closed block comment
 # (exit 1), a block comment or blanks between the dot and the method name on
-# one line or across lines (exit 1), and whole-line, block and string-literal mentions (must exit 0), a failing
+# one line or across lines (exit 1), the FR-020 legacy manager mutators as
+# calls, method values or split across lines and multiline m.clients writes
+# (exit 1), and whole-line, block and string-literal mentions (must exit 0), a failing
 # find or awk (must exit 2, not report a clean tree). Then runs the real script
 # on the repository (must exit 0).
 set -uo pipefail
@@ -184,6 +186,43 @@ printf 'func (m *Manager) Other(id string, c *managed.Client) {
 }
 ' > "$r/internal/upstream/manager.go"
 expect "planted m.clients[id] = outside installLocked" 1 "$r"
+# Sol round 1: a method value, a call split across lines, a multiline
+# delete and a multiline assignment are the same unbound mutations.
+r="$(mkroot pr3-method-value)"
+printf '\tremove := r.upstreamManager.RemoveServer\n\tremove(name)\n' > "$r/internal/runtime/lifecycle.go"
+expect "planted legacy method value in internal/runtime" 1 "$r"
+r="$(mkroot pr3-method-value-arg)"
+printf '\trun(s.runtime.UpstreamManager().DisconnectServer, name)\n' > "$r/internal/server/a.go"
+expect "planted legacy method value passed as an argument in internal/server" 1 "$r"
+r="$(mkroot pr3-multiline-call)"
+printf '\tr.upstreamManager.\n\t\tRemoveServer(name)\n' > "$r/internal/runtime/lifecycle.go"
+expect "planted legacy call split across lines in internal/runtime" 1 "$r"
+r="$(mkroot pr3-multiline-call-gap)"
+printf '\tr.upstreamManager. // the manager\n\n\t\t// still the manager\n\t\tAddServer(name, cfg)\n' > "$r/internal/runtime/lifecycle.go"
+expect "planted legacy call split across a blank line and comments" 1 "$r"
+r="$(mkroot pr3-manager-internal-value)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other() {\n\tf := m.RemoveServer\n\t_ = f\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted internal legacy method value in internal/upstream" 1 "$r"
+r="$(mkroot pr3-manager-internal-multiline)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other() {\n\t_ = m.\n\t\tDisconnectServer(id)\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted internal legacy call split across lines in internal/upstream" 1 "$r"
+r="$(mkroot pr3-manager-delete-multiline)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(name string) {\n\tdelete(\n\t\tm.clients, name)\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted multiline delete(m.clients) outside unregisterLocked" 1 "$r"
+r="$(mkroot pr3-manager-assign-multiline)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(name string, client *managed.Client) {\n\tm.clients[name] =\n\t\tclient\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted multiline m.clients[name] = outside installLocked" 1 "$r"
+r="$(mkroot pr3-bound-multiline-ok)"
+printf '\t_ = r.upstreamManager.\n\t\tAddServerAt(name, cfg, gen)\n\tremove := r.upstreamManager.RemoveServerAt\n\t_ = remove\n\tx := r.upstreamManager.\n\t\tGetClient\n' > "$r/internal/runtime/lifecycle.go"
+expect "bound calls, bound method values and reads split across lines are allowed" 0 "$r"
+r="$(mkroot pr3-manager-multiline-ok)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) unregisterLocked(name string) *managed.Client {\n\tdelete(\n\t\tm.clients, name)\n\treturn nil\n}\n\nfunc (m *Manager) installLocked(name string, c *managed.Client) {\n\tm.clients[name] =\n\t\tc\n}\n\nfunc (m *Manager) read(name string) bool {\n\tok :=\n\t\tm.clients[name] == nil\n\treturn ok\n}\n' > "$r/internal/upstream/manager_generation.go"
+expect "multiline writes in the permitted helpers and multiline reads are allowed" 0 "$r"
 r="$(mkroot pr3-manager-ok)"
 mkdir -p "$r/internal/upstream"
 printf 'func (m *Manager) unregisterLocked(name string) *managed.Client {

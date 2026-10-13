@@ -134,13 +134,16 @@ fi
 
 # Spec 116 PR3 (FR-020, FR-020a, T076): the upstream manager's registry is
 # changed only by generation-bound calls.
-#  - internal/runtime and internal/server (non-test) never call the unbound
-#    legacy mutators AddServerConfig / AddServer / RemoveServer /
-#    DisconnectServer on the manager (a receiver named upstreamManager,
-#    UpstreamManager(), manager or upstream); they use the *At forms.
+#  - internal/runtime and internal/server (non-test) never call, or take a
+#    method value of, the unbound legacy mutators AddServerConfig /
+#    AddServer / RemoveServer / DisconnectServer on the manager (a receiver
+#    named upstreamManager, UpstreamManager(), manager or upstream); they use
+#    the *At forms.
 #  - internal/upstream/*.go (non-test) never calls them internally (m.X(...)),
 #    and only unregisterLocked / installLocked delete from or assign into
 #    m.clients.
+#  A statement split across lines (a code line ending in `.`, `(`, `[`, `,`
+#  or `=` continues on the next code line) is matched as one logical line.
 pr3_files=()
 while IFS= read -r f; do
   [[ -n "$f" ]] || continue
@@ -153,26 +156,36 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
   # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
   hits2="$(awk '
 '"$STRIP_AWK"'
-    FNR == 1 { inblock = 0; inraw = 0; fn = "" }
+    FNR == 1 { inblock = 0; inraw = 0; fn = ""; joined = "" }
     {
       raw = $0
       if (raw ~ /^func /) {
         fn = raw
         sub(/^func (\([^)]*\) )?/, "", fn)
         sub(/[^A-Za-z0-9_].*$/, "", fn)
+        joined = ""
       }
       code = strip(raw)
-      if (code ~ /^[ \t]*$/) next
-      legacy = "[.][ \t]*(AddServerConfig|AddServer|RemoveServer|DisconnectServer)[ \t]*[(]"
+      gsub(/^[ \t]+|[ \t]+$/, "", code)
+      if (code == "") next
+      # A statement continued on the next line (the code ends with `.`, `(`,
+      # `[`, `,` or `=`) is matched as one logical line, so a selector, a
+      # call or an assignment split across lines is still seen (Sol round 1).
+      if (joined != "" && joined ~ /[.([,=]$/) joined = joined " " code
+      else joined = code
+      # A legacy method followed by anything but an identifier character:
+      # a call AND a method value (`remove := r.upstreamManager.RemoveServer`).
+      legacy = "[.][ \t]*(AddServerConfig|AddServer|RemoveServer|DisconnectServer)([^A-Za-z0-9_]|$)"
+      hit = 0
       if (FILENAME ~ /^internal\/(runtime|server)\//) {
-        if (code ~ ("(^|[^A-Za-z0-9_])(upstreamManager|manager|upstream)[ \t]*" legacy) || code ~ ("UpstreamManager[(][)][ \t]*" legacy))
-          print FILENAME ":" FNR ":" raw
-        next
+        if (joined ~ ("(^|[^A-Za-z0-9_])(upstreamManager|manager|upstream)[ \t]*" legacy) || joined ~ ("UpstreamManager[(][)][ \t]*" legacy))
+          hit = 1
+      } else if (FILENAME ~ /^internal\/upstream\/[^\/]*\.go$/) {
+        if (joined ~ ("(^|[^A-Za-z0-9_])m[ \t]*" legacy)) hit = 1
+        else if (fn != "unregisterLocked" && fn != "installLocked" && (joined ~ /delete[ \t]*[(][ \t]*m[ \t]*[.][ \t]*clients[ \t]*,/ || joined ~ /m[ \t]*[.][ \t]*clients[ \t]*\[[^]]*\][ \t]*=([^=]|$)/ || joined ~ /m[ \t]*[.][ \t]*clients[ \t]*=([^=]|$)/))
+          hit = 1
       }
-      if (FILENAME !~ /^internal\/upstream\/[^\/]*\.go$/) next
-      if (code ~ ("(^|[^A-Za-z0-9_])m[ \t]*" legacy)) { print FILENAME ":" FNR ":" raw; next }
-      if (fn != "unregisterLocked" && fn != "installLocked" && (code ~ /delete[(][ \t]*m[.]clients[ \t]*,/ || code ~ /m[.]clients[ \t]*\[[^]]*\][ \t]*=[^=]/ || code ~ /m[.]clients[ \t]*=[^=]/))
-        print FILENAME ":" FNR ":" raw
+      if (hit) { print FILENAME ":" FNR ":" raw; joined = "" }
     }' "${pr3_files[@]}")"
   rc=$?
   if [[ $rc -ne 0 ]]; then
