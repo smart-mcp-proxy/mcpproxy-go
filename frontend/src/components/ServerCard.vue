@@ -699,7 +699,7 @@ async function triggerOAuth() {
     systemStore.addToast({
       type: result.browser_opened ? 'info' : 'warning',
       title: result.browser_opened ? 'Sign-in opened' : 'Open the sign-in page',
-      message: result.browser_opened ? `Finish signing in to ${props.server.name} in the new tab.` : 'Your browser blocked the new tab. Use the link below to continue.',
+      message: result.browser_opened ? `Finish signing in to ${props.server.name} in your browser.` : 'Your browser blocked the new tab. Use the link below to continue.',
       link: result.auth_url ? { url: result.auth_url, label: `Sign in to ${props.server.name}` } : undefined,
       duration: result.browser_opened ? 10000 : 0,
     })
