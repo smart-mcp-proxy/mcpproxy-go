@@ -139,7 +139,11 @@ fi
 #    AddServer / RemoveServer / DisconnectServer on the manager (a receiver
 #    named upstreamManager, UpstreamManager(), manager or upstream); they use
 #    the *At forms.
-#  - internal/upstream/*.go (non-test) never calls them internally (m.X(...)),
+#    A parenthesized receiver or a (*upstream.Manager) method expression is
+#    the same call (Sol round 6).
+#  - internal/upstream/*.go (non-test) never calls them internally: no
+#    selector of them appears at all, whatever the receiver spelling (m.X,
+#    (m).X, (*m).X, an alias, a method expression (*Manager).X; Sol round 6),
 #    and only unregisterLocked / installLocked delete from, clear or assign
 #    into m.clients. An assignment is found by its operator, not by its
 #    shape: the left-hand side of the first assignment operator (`=`, `:=`,
@@ -294,10 +298,17 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
       legacy = "[.][ \t]*(AddServerConfig|AddServer|RemoveServer|DisconnectServer)([^A-Za-z0-9_]|$)"
       hit = 0
       if (FILENAME ~ /^internal\/(runtime|server)\//) {
-        if (joined ~ ("(^|[^A-Za-z0-9_])(upstreamManager|manager|upstream)[ \t]*" legacy) || joined ~ ("UpstreamManager[(][)][ \t]*" legacy))
+        # The receiver may be parenthesized, `(r.upstreamManager).RemoveServer`,
+        # or a method expression, `(*upstream.Manager).RemoveServer(mgr, n)`
+        # (Sol round 6).
+        if (joined ~ ("(^|[^A-Za-z0-9_])(upstreamManager|manager|upstream|Manager)[ \t)]*" legacy) || joined ~ ("UpstreamManager[(][)][ \t)]*" legacy))
           hit = 1
       } else if (FILENAME ~ /^internal\/upstream\/[^\/]*\.go$/) {
-        if (joined ~ ("(^|[^A-Za-z0-9_])m[ \t]*" legacy)) hit = 1
+        # Nothing in the package calls a legacy mutator, so ANY selector of
+        # one is a hit whatever the receiver spelling: `m.X`, `(m).X`,
+        # `(*m).X`, an alias `mm.X`, a method expression `(*Manager).X`
+        # (Sol round 6). The declarations `func (m *Manager) X(` have no dot.
+        if (joined ~ legacy) hit = 1
         else if (fn != "unregisterLocked" && fn != "installLocked" && (joined ~ /(delete|clear)[ \t]*[(][ \t(]*m[ \t]*[.][ \t]*clients[ \t)]*[,)]/ || writes_clients(joined)))
           hit = 1
       }

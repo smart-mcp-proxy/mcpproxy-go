@@ -11,7 +11,9 @@
 # `*save = st.SaveUpstreamServer` (exit 1), code after a closed block comment
 # (exit 1), a block comment or blanks between the dot and the method name on
 # one line or across lines (exit 1), the FR-020 legacy manager mutators as
-# calls, method values or split across lines, multiline and multi-target
+# calls, method values or split across lines (and, Sol round 6, with a
+# parenthesized receiver, an alias or a method expression such as
+# `(*Manager).RemoveServer`), multiline and multi-target
 # m.clients writes (including an index expression split inside its brackets
 # a write inside a func literal argument, and a composite literal inside the
 # index expression on one line or across lines), clear(m.clients) and writes after a fake helper
@@ -360,6 +362,28 @@ r="$(mkroot pr3-manager-composite-index-helper-ok)"
 mkdir -p "$r/internal/upstream"
 printf 'func (m *Manager) installLocked(prefix, name string, c *managed.Client) {\n\tm.clients[strings.Join([]string{prefix, name}, "")] = c\n}\n' > "$r/internal/upstream/manager_generation.go"
 expect "a composite-literal index write inside installLocked is allowed" 0 "$r"
+# Sol round 6: a parenthesized receiver or a method expression is the same
+# unbound mutation. In internal/upstream/*.go no selector of a legacy mutator
+# is allowed at all (nothing there calls one), whatever its receiver
+# spelling; in internal/runtime and internal/server a parenthesized manager
+# receiver and a (*upstream.Manager) method expression are caught.
+for line in '	(m).RemoveServer(name)' '	go (*Manager).RemoveServer(m, name)' '	_ = (*m).AddServer(name, cfg)' \
+            '	mm := m\n	mm.AddServerConfig(name, cfg)' '	f := Manager.DisconnectServer'; do
+  r="$(mkroot "pr3-manager-spelling-$RANDOM")"
+  mkdir -p "$r/internal/upstream"
+  printf 'func (m *Manager) Other(name string) {\n%b\n}\n' "$line" > "$r/internal/upstream/manager.go"
+  expect "planted legacy mutator spelled ${line#	} in internal/upstream" 1 "$r"
+done
+for line in '	(r.upstreamManager).RemoveServer(name)' '	go (*upstream.Manager).RemoveServer(r.upstreamManager, name)' \
+            '	_ = (s.runtime.UpstreamManager()).AddServer(name, cfg)'; do
+  r="$(mkroot "pr3-runtime-spelling-$RANDOM")"
+  echo "$line" > "$r/internal/runtime/lifecycle.go"
+  expect "planted legacy mutator spelled ${line#	} in internal/runtime" 1 "$r"
+done
+r="$(mkroot pr3-manager-spelling-ok)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) RemoveServer(id string) {\n\tm.RemoveServerAt(id, 0)\n\t(m).RemoveServerAt(id, 0)\n\t_ = (*Manager).AddServerAt\n\t// m.RemoveServer(id)\n}\n' > "$r/internal/upstream/manager_generation.go"
+expect "legacy declarations, generation-bound calls in any spelling and comments are allowed in internal/upstream" 0 "$r"
 
 # An operational failure never reports a clean tree (review rounds 18-20): a
 # failing file discovery or scanner exits 2, whether the tool is shadowed on
