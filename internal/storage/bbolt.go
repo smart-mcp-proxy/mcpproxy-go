@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -36,6 +37,19 @@ type BoltDB struct {
 	logger *zap.SugaredLogger
 }
 
+// noSync opens databases with bbolt's NoSync. Only tests set it, through
+// DisableSyncForTesting; production databases always sync their commits.
+var noSync atomic.Bool
+
+// DisableSyncForTesting makes every database opened afterwards in this
+// process skip the fsync on commit (bbolt Options.NoSync). Committed data is
+// still visible to every reader of the open database; only crash durability is
+// lost, which no unit test exercises. Call it from TestMain in packages whose
+// tests open many databases or commit heavily: an fsync per commit on the
+// Windows CI runner dominated internal/runtime's test time. Never call it from
+// production code.
+func DisableSyncForTesting() { noSync.Store(true) }
+
 // NewBoltDB creates a new BoltDB instance
 func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	dbPath := filepath.Join(dataDir, "config.db")
@@ -45,6 +59,7 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	// owner-only (0600).
 	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{
 		Timeout: 10 * time.Second,
+		NoSync:  noSync.Load(),
 	})
 	if err != nil {
 		logger.Warnf("Failed to open database on first attempt: %v", err)
