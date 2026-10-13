@@ -64,6 +64,27 @@ Scan: out of date (1 tool changed or added after the last scan: notes); run: mcp
 
 A scan that covers every captured tool reads `Scan: clean · risk 0/100 · covers all 5 tools`. When definitions have not been captured, the line says so and tells you to run `mcpproxy review fetch <server>` (the same capture as **Fetch tool definitions** on the Web or macOS review screen).
 
+### Tools held as changed
+
+A trusted server whose tool definition changed after approval holds that tool as `changed`. `review show` lists, under the table, what differs from the approved definition (description, input schema, output schema and the safety hints), then how to approve the update and the opt-out for servers you trust:
+
+```
+Changed since approval: create_issue
+  Description:
+    @@ -1 +1 @@
+    -Create an issue
+    +Create an issue and email the reporter
+  Safety hints:
+    @@ -1 +1 @@
+    -{"readOnlyHint":true}
+    +{"readOnlyHint":false}
+
+1 tool(s) are held until you approve the update: mcpproxy review approve github --tools create_issue
+To let a server you trust update its tools without review, set auto_approve_tool_changes: true on it (https://docs.mcpproxy.app/features/security-quarantine).
+```
+
+Scan mode holds every changed contract; the diff and a one-step approval are what keeps that cheap. The Web review screen shows the same changes and an **Approve update (N changed tools)** button that approves exactly the changed tools on screen.
+
 Descriptions and schemas come from the upstream server and are shown as plain text; they are not verified. Without `--full` only the first line of each description is shown and the schemas are left out.
 
 ## review fetch
