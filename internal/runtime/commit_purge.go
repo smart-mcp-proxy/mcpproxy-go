@@ -29,6 +29,7 @@ func (r *Runtime) commitMemoryPurgeHeld(reports map[string]storage.PurgeReport) 
 	}
 	for name := range reports {
 		delete(r.lastGoodTools, name)
+		delete(r.lastGoodGen, name)
 		delete(r.lastCaptureAt, name)
 		delete(r.lastGoodCapture, name)
 		// A local reindex that already copied the snapshot sees the bump

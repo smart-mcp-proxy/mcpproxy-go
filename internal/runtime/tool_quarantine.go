@@ -2223,21 +2223,21 @@ func (r *Runtime) serverEligibleForIndexing(serverName string) bool {
 // last-good snapshot for a since-quarantined server) — is never (re)indexed.
 // Returns true only when the differential update actually ran.
 func (r *Runtime) applyServerDiffIfEligible(ctx context.Context, serverName string, tools []*config.ToolMetadata) bool {
-	return r.applyServerDiffIfEligibleGuarded(ctx, serverName, tools, inventoryRef{}, nil)
+	return r.applyServerDiffIfEligibleGuarded(ctx, serverName, tools, 0, inventoryRef{}, nil)
 }
 
 // applyServerDiffIfEligibleGuarded is applyServerDiffIfEligible for the
 // inventory inv, with the under-lock stale check of
 // applyDifferentialToolUpdateGuarded. An inventory the capture-order gate
 // refuses (Spec 117 PR-3) writes nothing and reports false.
-func (r *Runtime) applyServerDiffIfEligibleGuarded(ctx context.Context, serverName string, tools []*config.ToolMetadata, inv inventoryRef, stale func() bool) bool {
+func (r *Runtime) applyServerDiffIfEligibleGuarded(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64, inv inventoryRef, stale func() bool) bool {
 	if !r.serverEligibleForIndexing(serverName) {
 		r.logger.Info("Skipping sweep index write for ineligible server (disabled or quarantined)",
 			zap.String("server", serverName))
 		return false
 	}
-	if err := r.applyInventoryGuarded(ctx, serverName, tools, 0, inv, stale, nil); err != nil {
-		if errors.Is(err, errLocalSnapshotPurged) || errors.Is(err, errInventoryStale) || errors.Is(err, errInventoryNotCurrent) {
+	if err := r.applyInventoryGuarded(ctx, serverName, tools, instanceGen, inv, stale, nil); err != nil {
+		if errors.Is(err, errLocalSnapshotPurged) || errors.Is(err, errDiscoveryStaleGeneration) || errors.Is(err, errDiscoveryIneligible) || errors.Is(err, errInventoryStale) || errors.Is(err, errInventoryNotCurrent) {
 			return false
 		}
 		r.logger.Error("Failed to apply differential update for server during sweep",
@@ -2299,7 +2299,7 @@ func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 
-	snapshot, inv, seq := r.lastGoodSnapshotWithCapture(serverName)
+	snapshot, inv, seq, snapshotGen := r.lastGoodSnapshotWithCaptureGen(serverName)
 	if len(snapshot) == 0 {
 		return false
 	}
@@ -2316,14 +2316,22 @@ func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
 	// Re-run the differential update against the current approval records.
 	// Rug-pull safety is preserved: if the tool mutated after approval,
 	// checkToolApprovals re-flags it changed and it stays blocked.
+	// Spec 116 PR3 (FR-021b): the snapshot is bound to the commit generation
+	// of the instance it was listed from. After an endpoint change it is
+	// rejected by the final check, and the caller re-lists the current
+	// instance instead of reapplying the old endpoint's tools.
 	stale := func() bool { return r.lastGoodPurgedSince(serverName, seq) }
-	err := r.applyInventoryGuarded(r.AppContext(), serverName, snapshot, 0, inventoryRef{capture: inv, mode: inventoryReconcile}, stale, nil)
+	err := r.applyInventoryGuarded(r.AppContext(), serverName, snapshot, snapshotGen, inventoryRef{capture: inv, mode: inventoryReconcile}, stale, nil)
 	switch {
+	case errors.Is(err, errDiscoveryStaleGeneration):
+		r.logger.Info("Last-good snapshot belongs to a superseded instance generation; re-listing the server",
+			zap.String("server", serverName), zap.Int64("snapshot_generation", snapshotGen))
+		return false
 	case errors.Is(err, errInventoryNotCurrent), errors.Is(err, errInventoryStale):
 		r.logger.Info("Approval reindex re-lists the server: its last-good snapshot no longer describes the live connection",
 			zap.String("server", serverName))
 		return false
-	case err != nil && !errors.Is(err, errLocalSnapshotPurged):
+	case err != nil && !errors.Is(err, errLocalSnapshotPurged) && !errors.Is(err, errDiscoveryIneligible):
 		r.logger.Warn("Failed to reindex tools after approval change",
 			zap.String("server", serverName), zap.Error(err))
 	}

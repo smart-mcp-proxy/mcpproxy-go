@@ -390,14 +390,14 @@ func TestInventoryOrder_UnorderedCaptureOnlyBeforeOrdered(t *testing.T) {
 	ctx := context.Background()
 
 	y := &config.ToolMetadata{ServerName: "inv", Name: "y", Description: "tool y", ParamsJSON: `{"type":"object"}`}
-	_, err := rt.commitDiscoveredTools(ctx, "inv", []*config.ToolMetadata{y}, 0)
+	_, err := rt.commitDiscoveredTools(ctx, "inv", []*config.ToolMetadata{y}, storedStamp(t, rt, "inv").Stamp.Gen)
 	require.NoError(t, err)
 	require.NotNil(t, invRecord(t, rt, "y"), "an unordered inventory applies while nothing ordered was applied")
 
 	require.NoError(t, rt.discoverAndIndexToolsForServer(ctx, "inv", true))
 	require.Nil(t, invRecord(t, rt, "y"), "the ordered authoritative capture removed y")
 
-	_, err = rt.commitDiscoveredTools(ctx, "inv", []*config.ToolMetadata{y}, 0)
+	_, err = rt.commitDiscoveredTools(ctx, "inv", []*config.ToolMetadata{y}, storedStamp(t, rt, "inv").Stamp.Gen)
 	require.NoError(t, err)
 	assert.Nil(t, invRecord(t, rt, "y"), "an unordered inventory never applies after an ordered one")
 }
@@ -437,11 +437,11 @@ func TestInventoryOrder_QuarantinedReviewCaptureInOrder(t *testing.T) {
 	a := &config.ToolMetadata{ServerName: "q", Name: "a", Description: "tool a", ParamsJSON: `{"type":"object"}`}
 	b := &config.ToolMetadata{ServerName: "q", Name: "b", Description: "tool b", ParamsJSON: `{"type":"object"}`}
 
-	ok, err := rt.persistInventoryDefinitions("q", []*config.ToolMetadata{a}, 0, managed.InventoryCapture{Seq: 200})
+	ok, err := rt.persistInventoryDefinitions("q", []*config.ToolMetadata{a}, storedStamp(t, rt, "q").Stamp.Gen, managed.InventoryCapture{Seq: 200})
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	ok, err = rt.persistInventoryDefinitions("q", []*config.ToolMetadata{a, b}, 0, managed.InventoryCapture{Seq: 100})
+	ok, err = rt.persistInventoryDefinitions("q", []*config.ToolMetadata{a, b}, storedStamp(t, rt, "q").Stamp.Gen, managed.InventoryCapture{Seq: 100})
 	require.NoError(t, err)
 	assert.False(t, ok, "the older review capture is not persisted")
 	_, err = rt.storageManager.GetToolApproval("q", "b")
@@ -449,7 +449,7 @@ func TestInventoryOrder_QuarantinedReviewCaptureInOrder(t *testing.T) {
 	snap := rt.lastGoodToolsSnapshot("q")
 	require.Len(t, snap, 1, "the last-good snapshot keeps the newer capture")
 
-	ok, err = rt.persistInventoryDefinitions("q", []*config.ToolMetadata{a, b}, 0, managed.InventoryCapture{Seq: 200})
+	ok, err = rt.persistInventoryDefinitions("q", []*config.ToolMetadata{a, b}, storedStamp(t, rt, "q").Stamp.Gen, managed.InventoryCapture{Seq: 200})
 	require.NoError(t, err)
 	assert.True(t, ok, "re-applying the same capture is allowed")
 }

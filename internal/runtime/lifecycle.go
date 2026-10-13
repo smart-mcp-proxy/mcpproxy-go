@@ -17,6 +17,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
@@ -408,6 +409,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 	for serverName := range r.lastGoodTools {
 		if _, ok := knownServerSet[serverName]; !ok {
 			delete(r.lastGoodTools, serverName)
+			delete(r.lastGoodGen, serverName)
 			delete(r.lastCaptureAt, serverName)
 			delete(r.lastGoodCapture, serverName)
 		}
@@ -952,16 +954,6 @@ func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName 
 	return true, nil
 }
 
-func (r *Runtime) captureQuarantinedToolDefinitionsFromTools(serverName string, tools []*config.ToolMetadata) error {
-	if err := r.persistQuarantinedToolDefinitions(serverName, tools); err != nil {
-		return err
-	}
-	r.emitReviewChanged(serverName)
-	r.logger.Info("Captured quarantined server tool definitions for review",
-		zap.String("server", serverName), zap.Int("count", len(tools)))
-	return nil
-}
-
 // pruneAbsentUndecidedApprovals drops pending review records for tools
 // the upstream no longer lists, so a quarantined capture reflects the live
 // toolset rather than the union of every past capture. Operator decisions are
@@ -999,11 +991,6 @@ func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*conf
 			r.logger.Debug("Failed to prune review record for absent tool", zap.String("server", serverName), zap.String("tool", rec.ToolName), zap.Error(err))
 		}
 	}
-}
-
-func (r *Runtime) persistQuarantinedToolDefinitions(serverName string, tools []*config.ToolMetadata) error {
-	_, err := r.persistQuarantinedToolDefinitionsAt(serverName, tools, 0)
-	return err
 }
 
 // persistQuarantinedToolDefinitionsAt is persistQuarantinedToolDefinitions
@@ -1055,7 +1042,7 @@ func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*confi
 		hook()
 	}
 	r.lastGoodToolsMu.Lock()
-	r.storeLastGoodLocked(serverName, tools, inv)
+	r.storeLastGoodLocked(serverName, tools, inv, instanceGen)
 	r.lastGoodToolsMu.Unlock()
 	return true, nil
 }
@@ -1122,7 +1109,7 @@ func (r *Runtime) commitInventoryAt(ctx context.Context, serverName string, tool
 	published = true
 	held := func() {
 		r.lastGoodToolsMu.Lock()
-		r.storeLastGoodLocked(serverName, tools, inv.capture)
+		r.storeLastGoodLocked(serverName, tools, inv.capture, instanceGen)
 		r.lastGoodToolsMu.Unlock()
 		if capture != nil && r.supervisor != nil {
 			// The per-server variant stamps the server's discovery as
@@ -1479,16 +1466,6 @@ func (r *Runtime) markServerZeroToolsDiscoveredWith(serverName string, gens map[
 	return true
 }
 
-// applyDifferentialToolUpdate performs differential update of tools for a server.
-// It compares new tools with existing indexed tools and applies only the changes:
-// - Removed tools are deleted from the index
-// - Added tools are indexed (unless blocked by tool-level quarantine)
-// - Modified tools (different hash) are re-indexed (unless blocked by tool-level quarantine)
-// - Tools blocked by quarantine are removed from the index if previously indexed
-func (r *Runtime) applyDifferentialToolUpdate(ctx context.Context, serverName string, newTools []*config.ToolMetadata) error {
-	return r.applyDifferentialToolUpdateAt(ctx, serverName, newTools, 0)
-}
-
 // errDiscoveryIneligible reports a discovery result dropped by the final
 // eligibility check (D15). It is not an error for the caller's caller.
 var errDiscoveryIneligible = errors.New("server not eligible for indexing at the committed generation")
@@ -1540,7 +1517,7 @@ func (r *Runtime) discoveryVerdictHeld(serverName string, instanceGen int64) dis
 	if !row.Config.Enabled || row.Config.Quarantined {
 		return discoveryIneligible
 	}
-	if instanceGen != 0 && row.Stamp.Gen != 0 && row.Stamp.Gen != instanceGen {
+	if row.Stamp.Gen != 0 && row.Stamp.Gen != instanceGen {
 		return discoveryStaleGen
 	}
 	return discoveryCurrent
@@ -1564,7 +1541,7 @@ func (r *Runtime) discoveryCaptureCurrentHeld(serverName string, instanceGen int
 	if err != nil || row == nil || row.Config == nil {
 		return false
 	}
-	if instanceGen != 0 && row.Stamp.Gen != 0 && row.Stamp.Gen != instanceGen {
+	if row.Stamp.Gen != 0 && row.Stamp.Gen != instanceGen {
 		return false
 	}
 	return true
@@ -2534,73 +2511,113 @@ func (r *Runtime) RestartServer(serverName string) error {
 		return r.EnableServer(serverName, true)
 	}
 
-	// Get the client to restart
-	client, exists := r.upstreamManager.GetClient(serverName)
-	if !exists {
-		// Server is enabled but client doesn't exist, add it asynchronously
-		r.logger.Info("Server client not found, attempting to create and connect",
+	// Spec 116 PR3 (#1563, review R5.4): the restart is bound to the
+	// server's committed generation, read together with its config from one
+	// snapshot. The old instance is replaced at that SAME generation by
+	// ReplaceInstanceAt, which acts only while that generation is current and
+	// the instance is the one observed here; the new instance is connected
+	// by a worker that holds that exact instance, never the name, so a commit
+	// that removes or changes the server meanwhile wins.
+	for attempt := 0; ; attempt++ {
+		snap := r.configSvc.Current()
+		cfg := snap.GetServer(serverName)
+		sg, ok := snap.ServerGeneration(serverName)
+		if cfg == nil || !ok {
+			return fmt.Errorf("server '%s' not found in configuration", serverName)
+		}
+		if !cfg.Enabled {
+			return r.EnableServer(serverName, true)
+		}
+		client, exists := r.upstreamManager.GetClient(serverName)
+		if !exists {
+			// Enabled but no instance (its commit's worker has not run yet,
+			// or construction failed): install one at the committed
+			// generation.
+			r.logger.Info("Server client not found, attempting to create and connect",
+				zap.String("server", serverName))
+			go r.restartInstallWorker(serverName, cfg, sg.Gen)
+			return nil
+		}
+
+		// Recreate the client to pick up new secrets: simply reconnecting
+		// reuses the old client with old (unresolved) secrets.
+		r.logger.Info("Replacing the server's client to recreate it with fresh secret resolution",
 			zap.String("server", serverName))
-		go func() {
-			if err := r.upstreamManager.AddServer(serverName, serverConfig); err != nil {
-				r.logger.Error("Failed to add server during restart",
-					zap.String("server", serverName),
-					zap.Error(err))
-				return
+		fresh, err := r.upstreamManager.ReplaceInstanceAt(serverName, sg.Gen, client, cfg)
+		if errors.Is(err, upstream.ErrStaleGeneration) {
+			if attempt < 3 {
+				continue
 			}
-			r.logger.Info("Successfully added server", zap.String("server", serverName))
-			r.emitServersChanged("restart", map[string]any{
-				"server": serverName,
-				"reason": "server_added",
-			})
-		}()
-		return nil
-	}
-
-	// CRITICAL FIX: Remove and recreate the client to pick up new secrets
-	// Simply reconnecting reuses the old client with old (unresolved) secrets
-	r.logger.Info("Removing existing client to recreate with fresh secret resolution",
-		zap.String("server", serverName))
-
-	// Disconnect and remove the old client synchronously (fast operation)
-	if err := client.Disconnect(); err != nil {
-		r.logger.Warn("Error disconnecting server during restart",
-			zap.String("server", serverName),
-			zap.Error(err))
-	}
-
-	// Remove the client from the manager (this will clean up resources)
-	r.upstreamManager.RemoveServer(serverName)
-
-	// Recreate the client and reindex tools asynchronously
-	go func() {
-		r.logger.Info("Creating new client with fresh secret resolution",
-			zap.String("server", serverName))
-
-		if err := r.upstreamManager.AddServer(serverName, serverConfig); err != nil {
-			r.logger.Error("Failed to recreate server after restart",
-				zap.String("server", serverName),
-				zap.Error(err))
-			return
+			return fmt.Errorf("server '%s' changed while it was being restarted; try again", serverName)
 		}
-
-		r.logger.Info("Successfully recreated server with fresh secrets",
-			zap.String("server", serverName))
-
-		// Trigger tool reindexing and emit SSE event AFTER completion
-		// to ensure frontend receives accurate tool counts
-		if err := r.DiscoverAndIndexTools(r.AppContext()); err != nil {
-			r.logger.Error("Failed to reindex tools after restart", zap.Error(err))
+		if err != nil {
+			return fmt.Errorf("failed to restart server '%s': %w", serverName, err)
 		}
-
-		// Emit event AFTER tool discovery completes so frontend gets fresh stats
-		r.emitServersChanged("restart", map[string]any{
-			"server": serverName,
-			"reason": "tool_discovery_complete",
-		})
-	}()
+		go r.restartConnectWorker(serverName, fresh, sg.Gen)
+		break
+	}
 
 	r.logger.Info("Server restart initiated asynchronously", zap.String("server", serverName))
 	return nil
+}
+
+// restartInstallWorker is RestartServer's worker for a server with no
+// instance: it installs and connects one at generation gen, and is inert once
+// a newer commit superseded gen.
+func (r *Runtime) restartInstallWorker(serverName string, cfg *config.ServerConfig, gen int64) {
+	defer r.workerActEnter(serverName, gen)()
+	if err := r.upstreamManager.AddServerAt(serverName, cfg, gen); err != nil {
+		if errors.Is(err, upstream.ErrStaleGeneration) {
+			r.logger.Debug("Restart worker superseded by a newer config commit; nothing to do",
+				zap.String("server", serverName), zap.Int64("generation", gen))
+			return
+		}
+		r.logger.Error("Failed to add server during restart",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return
+	}
+	r.logger.Info("Successfully added server", zap.String("server", serverName))
+	r.emitServersChanged("restart", map[string]any{
+		"server": serverName,
+		"reason": "server_added",
+	})
+}
+
+// restartConnectWorker connects inst, the instance RestartServer installed,
+// then reindexes. An instance a newer commit (or another replacement)
+// unregistered meanwhile refuses to connect, so nothing comes back.
+func (r *Runtime) restartConnectWorker(serverName string, inst *managed.Client, gen int64) {
+	defer r.workerActEnter(serverName, gen)()
+	r.logger.Info("Connecting the recreated client",
+		zap.String("server", serverName),
+		zap.Uint64("instance", uint64(inst.InstanceID())))
+	if err := r.upstreamManager.ConnectInstance(serverName, inst); err != nil {
+		r.logger.Error("Failed to recreate server after restart",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return
+	}
+	if inst.Unregistered() {
+		r.logger.Debug("Restarted instance was superseded before it connected",
+			zap.String("server", serverName))
+		return
+	}
+
+	r.logger.Info("Successfully recreated server with fresh secrets",
+		zap.String("server", serverName))
+
+	// Trigger tool reindexing and emit SSE event AFTER completion
+	// to ensure frontend receives accurate tool counts
+	if err := r.DiscoverAndIndexTools(r.AppContext()); err != nil {
+		r.logger.Error("Failed to reindex tools after restart", zap.Error(err))
+	}
+
+	// Emit event AFTER tool discovery completes so frontend gets fresh stats
+	r.emitServersChanged("restart", map[string]any{
+		"server": serverName,
+		"reason": "tool_discovery_complete",
+	})
 }
 
 // ForceReconnectAllServers triggers reconnection attempts for all managed servers.
@@ -2795,7 +2812,7 @@ func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 
-	snapshot, inv, seq := r.lastGoodSnapshotWithCapture(serverName)
+	snapshot, inv, seq, snapshotGen := r.lastGoodSnapshotWithCaptureGen(serverName)
 	if len(snapshot) == 0 {
 		return
 	}
@@ -2813,7 +2830,7 @@ func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string
 	// Spec 117 PR-3 (FR-037): only while the snapshot's capture is still
 	// current (same client and connection, no newer definitions); otherwise
 	// the server's connect discovery owns it and the fallback skips it.
-	r.applyServerDiffIfEligibleGuarded(ctx, serverName, snapshot, inventoryRef{capture: inv, mode: inventoryReconcile}, func() bool {
+	r.applyServerDiffIfEligibleGuarded(ctx, serverName, snapshot, snapshotGen, inventoryRef{capture: inv, mode: inventoryReconcile}, func() bool {
 		return r.lastGoodPurgedSince(serverName, seq)
 	})
 }

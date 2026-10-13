@@ -80,6 +80,42 @@ type commitTestHooks struct {
 	serverViewAfterRead func()
 }
 
+// workerActHooks are the Spec 116 PR3 worker seams (plan.md §Test seams).
+// before runs in a post-commit connect or disconnect worker, and in
+// RestartServer's asynchronous worker, before it acts on the manager, with
+// the commit generation the worker is bound to (T3.1, T3.2, T3.4). after runs
+// when that worker has finished acting. Either may be nil.
+type workerActHooks struct {
+	before func(serverName string, gen int64)
+	after  func(serverName string, gen int64)
+}
+
+// workerActEnter runs the before seam and returns the after seam to defer
+// (a no-op when none is installed). Production: one atomic load.
+func (r *Runtime) workerActEnter(serverName string, gen int64) func() {
+	h := r.workerHooks.Load()
+	if h == nil {
+		return func() {}
+	}
+	if h.before != nil {
+		h.before(serverName, gen)
+	}
+	if h.after == nil {
+		return func() {}
+	}
+	return func() { h.after(serverName, gen) }
+}
+
+// SetWorkerActHooksForTest installs the PR3 worker seams. Test-only; packages
+// outside runtime (internal/server) hold back a commit's worker with it.
+func (r *Runtime) SetWorkerActHooksForTest(before, after func(serverName string, gen int64)) {
+	if before == nil && after == nil {
+		r.workerHooks.Store(nil)
+		return
+	}
+	r.workerHooks.Store(&workerActHooks{before: before, after: after})
+}
+
 // commitWaitState carries the commit-lock and approval-lock waiter probes and
 // the test hooks. Embedded in Runtime.
 type commitWaitState struct {
@@ -91,6 +127,9 @@ type commitWaitState struct {
 	// nil in production; atomic because background emitters may run while a
 	// test sets it, and outside commitTestHooks because that struct is copied.
 	serversChangedHook atomic.Pointer[func(reason string, extra map[string]any)]
+	// workerHooks holds the PR3 worker seams (atomic: workers read them
+	// while a test installs them).
+	workerHooks atomic.Pointer[workerActHooks]
 }
 
 // lockConfigCommit takes configCommitMu and counts the goroutines waiting for

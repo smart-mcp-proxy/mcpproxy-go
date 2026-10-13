@@ -533,7 +533,7 @@ func TestLockOrder_PR1(t *testing.T) {
 	t.Run("commit_vs_capture", func(t *testing.T) {
 		client, ok := rt.upstreamManager.GetClient("lo")
 		if !ok {
-			require.NoError(t, rt.upstreamManager.AddServerConfigAt("lo", spec116Live(rt, "lo"), 1))
+			require.NoError(t, rt.upstreamManager.AddServerConfigAt("lo", spec116Live(rt, "lo"), storedStamp(t, rt, "lo").Stamp.Gen))
 			client, _ = rt.upstreamManager.GetClient("lo")
 		}
 		var wg sync.WaitGroup

@@ -227,31 +227,82 @@ in PR2.
 ## PR3: Generation-bound workers and supervisor (US3; #1563)
 
 Branch `116-pr3-generation-workers` from `main` after PR1 merges. It is
-independent of PR2.
+independent of PR2. (Implemented as `fix/116-pr3-stale-workers`, from `main`
+after PR1, PR2, #1603 and Spec 117 PR-1.)
+
+**Implementation note (PR3 as shipped).** The runtime-level tests live in
+`internal/runtime/spec116_pr3_test.go` (T3.1, T3.2, T3.3, T3.4, T3.5b, T3.6,
+T3.7, T3.9; all failing on `main`, output in the PR evidence) and the manager
+tests in `internal/upstream/manager_generation_test.go` (T064, T3.8, T3.10;
+they need the new API, so on the parent they fail to build). T3.5(a) is the
+existing `TestCaptureQuarantinedToolDefinitions_DropsReplacementBeforePersist`
+and `_RelistsAfterClientReplacement`, now driven at the committed generation.
+Deviations from the design text, each documented in the PR:
+
+- `unregisterLocked` also marks the instance unregistered
+  (`managed.Client.MarkUnregistered`); `Connect` on it returns
+  `managed.ErrInstanceUnregistered`, and a dial that was in flight when it was
+  unregistered discards its result. Without this a stale holder (a worker, the
+  reconnect loop, `ConnectAll`) could reconnect an instance the manager no
+  longer serves and leak its process; the baseline live run shows that leak.
+  It is a connect-level latch only: the byte-level `Retire` barrier is PR4.
+- `AdvanceGenerations` is handed every server of the published configuration
+  (unchanged ones too) plus the removed ones, so the desired view is complete
+  after the boot (and admission-gate) commit; it returns
+  `AdvanceResult{Unregistered, Restamped}`. A registered instance behind the
+  committed generation is restamped, or unregistered when it does not run
+  the committed connection settings.
+- `ReplaceInstanceAt(name, gen, expected, cfg)` returns the new instance and
+  takes an optional config; the caller connects that exact instance
+  (`Manager.ConnectInstance`). `AddServerAt` likewise connects the instance it
+  installed, never the name (the round-6 shape recorded on #1563).
+- `ActionReconnect` has had no disconnect leg since #1603, so only
+  `ActionDisconnect` carries the observed `InstanceID`. `ActionRemove` calls
+  `RemoveServerAt(name, 0)`, which acts only while the committed configuration
+  has no such name (tombstone).
+- The legacy unbound `AddServerConfig`/`AddServer`/`RemoveServer` stay for
+  tests and CLI-only managers; for a name a commit recorded they install at the
+  committed generation and never move it. The extended write-site script
+  forbids them (and `DisconnectServer`) in `internal/runtime` and
+  `internal/server`, and forbids `m.X(...)` calls of them and any `m.clients`
+  write outside `unregisterLocked`/`installLocked` in `internal/upstream`.
+- The OAuth logout (`TriggerOAuthLogout`) resolves the instance once and
+  disconnects it with `DisconnectServerAt` (the hazard recorded on #1563); the
+  token clear stays name-keyed (OAuth binding is #1607).
+- The last-good tool snapshot is stamped with the instance generation only;
+  the incarnation is already covered by the PR2 purge sequence.
+- `actor_pool_complex_reference.go` (unreferenced, unbound manager calls) is
+  deleted. The test-only discovery wrappers (`applyDifferentialToolUpdate`,
+  `persistQuarantinedToolDefinitions`, `captureQuarantinedToolDefinitionsFromTools`)
+  move to a test file and bind to the server's committed generation, since the
+  generation-0 exemption of D15 is gone.
+- `qa_hooks`: `MCPPROXY_QA_RELEASE_DIR` names the release directory; one call
+  per park point is parked at a time (a later commit's worker passes through).
 
 ### Tests first (must fail on PR1)
 
-- [ ] T060 [P] [US3] `internal/runtime/worker_generation_test.go`: T3.1 (a/b/c) and T3.2, parking with `beforeWorkerAct`
-- [ ] T061 [P] [US3] `internal/runtime/supervisor/stale_action_generation_test.go`: T3.3 with the **real** `ActorPoolSimple` + `upstream.Manager` (no settle-before-act)
-- [ ] T062 [P] [US3] `internal/runtime/restart_generation_test.go`: T3.4
-- [ ] T063 [P] [US3] `internal/runtime/capture_generation_test.go`: T3.5
-- [ ] T061a [P] [US3] `internal/runtime/supervisor/stale_disconnect_test.go`: T3.6 (an old `ActionDisconnect` parked, then a newer commit installs and connects the replacement, then release → the replacement stays connected)
-- [ ] T061b [P] [US3] `internal/runtime/supervisor/stale_disconnect_restart_test.go`: T3.9 (a real disconnect captured for instance I1 parked; `RestartServer` installs I2 at the same generation; release → `ErrStaleGeneration`, I2 stays connected; review R5.2)
-- [ ] T063a [P] [US3] `internal/runtime/lastgood_stamp_test.go`: T3.7
-- [ ] T064a [P] [US3] `internal/runtime/replace_same_name_instance_test.go`: T3.10 (one-commit remove and re-create of a connected server with an equal entry → old instance unregistered, new `InstanceID`, new connect; review R8.2)
-- [ ] T064 [P] [US3] `internal/upstream/manager_generation_test.go`: `*At` methods; `AdvanceGenerations` unregisters vs restamps; a removed tombstone refuses re-registration at the old generation and is overwritten by a create
+- [x] T060 [P] [US3] `internal/runtime/worker_generation_test.go`: T3.1 (a/b/c) and T3.2, parking with `beforeWorkerAct`
+- [x] T061 [P] [US3] `internal/runtime/supervisor/stale_action_generation_test.go`: T3.3 with the **real** `ActorPoolSimple` + `upstream.Manager` (no settle-before-act)
+- [x] T062 [P] [US3] `internal/runtime/restart_generation_test.go`: T3.4
+- [x] T063 [P] [US3] `internal/runtime/capture_generation_test.go`: T3.5
+- [x] T061a [P] [US3] `internal/runtime/supervisor/stale_disconnect_test.go`: T3.6 (an old `ActionDisconnect` parked, then a newer commit installs and connects the replacement, then release → the replacement stays connected)
+- [x] T061b [P] [US3] `internal/runtime/supervisor/stale_disconnect_restart_test.go`: T3.9 (a real disconnect captured for instance I1 parked; `RestartServer` installs I2 at the same generation; release → `ErrStaleGeneration`, I2 stays connected; review R5.2)
+- [x] T063a [P] [US3] `internal/runtime/lastgood_stamp_test.go`: T3.7
+- [x] T064a [P] [US3] `internal/runtime/replace_same_name_instance_test.go`: T3.10 (one-commit remove and re-create of a connected server with an equal entry → old instance unregistered, new `InstanceID`, new connect; review R8.2)
+- [x] T064 [P] [US3] `internal/upstream/manager_generation_test.go`: `*At` methods; `AdvanceGenerations` unregisters vs restamps; a removed tombstone refuses re-registration at the old generation and is overwritten by a create
 
 ### Implementation
 
-- [ ] T070 [US3] `upstream.Manager`: `desired`, `AddServerConfigAt`, `RemoveServerAt`, `ConnectServerAt`, `AdvanceGenerations` (under captureMu W + mu; restamps retained instances with `SetConfigAt` only when `desired[name].gen` moves and deletes PR1's `RestampRetained`, with T1.19 kept unchanged, review R9.1; `GenerationChange.Replaced` always unregisters, review R8.2, makes T064a pass); `managed.Client.InstanceID()`; `DisconnectServerAt(name, gen, inst)`, `ReplaceInstanceAt`; one `unregisterLocked` helper for every delete or overwrite of `m.clients` (its `Retire` hook is a no-op until PR4) (makes T064, T061a and T061b pass; reviews R5.2, R5.4)
-- [ ] T071 [US3] `commit.go` step 7 calls `AdvanceGenerations(changes)`; the instances it returns are disconnected after unlock
-- [ ] T072 [US3] Post-commit workers use `*At` with `(name, g)` (makes T060 pass)
-- [ ] T073 [US3] Supervisor: actions carry `ServerGen.Gen` from their snapshot, and instance-targeted actions (`ActionDisconnect`, the first leg of `ActionReconnect`) also carry the observed `InstanceID`; `ActorPoolSimple` uses `*At` (its name-resolving `DisconnectServer`, `actor_pool.go:146-154`, is replaced); `ErrStaleGeneration` → debug + no-op (makes T061 pass)
-- [ ] T074 [US3] `RestartServer` → `manager.ReplaceInstanceAt(name, gen, expected)` (unregister + retire the old instance through `unregisterLocked`, then a fresh instance with a new `InstanceID` at the same generation) (makes T062 pass)
-- [ ] T075 [US3] Capture and discovery carry the instance generation and drop on mismatch; `lastGoodTools` stamped `{Incarnation, Gen}` and reapply rejects a mismatch (makes T063 and T063a pass)
-- [ ] T075a [US3] `ForceReconnectAll` + Docker recovery → `ReplaceInstanceAt` (T3.8, `internal/upstream/force_reconnect_generation_test.go` written first)
-- [ ] T076 [US3] Extend `check-upstream-write-sites.sh` (including manager-internal calls in `internal/upstream/manager.go`, review R4.1): forbid `AddServerConfig(`, `AddServer(` and `RemoveServer(` on the manager inside `internal/runtime/**` and `internal/server/**` outside tests; forbid `delete(m.clients` and `m.clients[...] =` in `manager.go` outside `unregisterLocked` and the install helper (review R5.4)
-- [ ] T077 [US3] `qa_hooks` build tag: `MCPPROXY_QA_PARK_WORKER`, `MCPPROXY_QA_PARK_SUPERVISOR_DISCONNECT` (L3 step 3); live L3; evidence `s116-pr3`; the race/lint/e2e matrix; Sol review
+- [x] T070 [US3] `upstream.Manager`: `desired`, `AddServerConfigAt`, `RemoveServerAt`, `ConnectServerAt`, `AdvanceGenerations` (under captureMu W + mu; restamps retained instances with `SetConfigAt` only when `desired[name].gen` moves and deletes PR1's `RestampRetained`, with T1.19 kept unchanged, review R9.1; `GenerationChange.Replaced` always unregisters, review R8.2, makes T064a pass); `managed.Client.InstanceID()`; `DisconnectServerAt(name, gen, inst)`, `ReplaceInstanceAt`; one `unregisterLocked` helper for every delete or overwrite of `m.clients` (its `Retire` hook is a no-op until PR4) (makes T064, T061a and T061b pass; reviews R5.2, R5.4)
+- [x] T071 [US3] `commit.go` step 7 calls `AdvanceGenerations(changes)`; the instances it returns are disconnected after unlock
+- [x] T072 [US3] Post-commit workers use `*At` with `(name, g)` (makes T060 pass)
+- [x] T073 [US3] Supervisor: actions carry `ServerGen.Gen` from their snapshot, and instance-targeted actions (`ActionDisconnect`, the first leg of `ActionReconnect`) also carry the observed `InstanceID`; `ActorPoolSimple` uses `*At` (its name-resolving `DisconnectServer`, `actor_pool.go:146-154`, is replaced); `ErrStaleGeneration` → debug + no-op (makes T061 pass)
+- [x] T074 [US3] `RestartServer` → `manager.ReplaceInstanceAt(name, gen, expected)` (unregister + retire the old instance through `unregisterLocked`, then a fresh instance with a new `InstanceID` at the same generation) (makes T062 pass)
+- [x] T075 [US3] Capture and discovery carry the instance generation and drop on mismatch; `lastGoodTools` stamped `{Incarnation, Gen}` and reapply rejects a mismatch (makes T063 and T063a pass)
+- [x] T075a [US3] `ForceReconnectAll` + Docker recovery → `ReplaceInstanceAt` (T3.8, `internal/upstream/force_reconnect_generation_test.go` written first); the `(config, generation)` pair is read with one atomic load (`managed.Client.ConfigAt`) and re-read when only a restamp moved the generation (T3.8b, Sol PR3 round 1)
+- [x] T075b [US3] Limiter publication is bound to the registry section that decided it (Sol PR3 round 2): every registry mutation (`AdvanceGenerations`, `AddServerConfigAt`, `RemoveServerAt`, `ReplaceInstanceAt`, the unbound legacy methods) and the hot-reload republication take `Manager.limiterPubMu` (L4') before releasing `mu` and hold it across the Spec 093 publication, so a stale action parked after its unlock cannot retire or overwrite the limiter a newer commit published (`internal/upstream/manager_generation_limiter_test.go`, written first)
+- [x] T076 [US3] Extend `check-upstream-write-sites.sh` (including manager-internal calls in `internal/upstream/manager.go`, review R4.1): forbid `AddServerConfig(`, `AddServer(` and `RemoveServer(` on the manager inside `internal/runtime/**` and `internal/server/**` outside tests; forbid `delete(m.clients` and `m.clients[...] =` in `manager.go` outside `unregisterLocked` and the install helper (review R5.4)
+- [x] T077 [US3] `qa_hooks` build tag: `MCPPROXY_QA_PARK_WORKER`, `MCPPROXY_QA_PARK_SUPERVISOR_DISCONNECT` (L3 step 3); live L3; evidence `s116-pr3`; the race/lint/e2e matrix; Sol review (the cross-model review is run by the lead)
 
 **Checkpoint**: stale workers and actions are inert. #1563 is closed.
 

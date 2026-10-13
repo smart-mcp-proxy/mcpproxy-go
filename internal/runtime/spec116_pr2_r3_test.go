@@ -31,7 +31,7 @@ func TestRemoval_R3_LocalReindexDropsSnapshotSelectedBeforeReAdd(t *testing.T) {
 			}
 			rt, _ := newSpec116Runtime(t, nil, live())
 			ctx := context.Background()
-			_, err := rt.commitDiscoveredTools(ctx, "acme", []*config.ToolMetadata{descTool("acme", "old")}, 0)
+			_, err := rt.commitDiscoveredTools(ctx, "acme", []*config.ToolMetadata{descTool("acme", "old")}, rt.committedGenForTest("acme"))
 			require.NoError(t, err)
 			_, err = rt.storageManager.GetToolApproval("acme", "t")
 			require.NoError(t, err, "the old server has a record before the removal")

@@ -167,16 +167,43 @@ config is published and runs one pipeline:
    unapplied: the next reload applies it, but the next disk-writing commit
    (`SaveConfiguration`, a server mutation, `ApplyConfig`) writes the live
    config over it.
-7. **Advance**: retained instances get their new config and generation
-   (`Manager.RestampRetained`).
+7. **Advance**: `Manager.AdvanceGenerations` records every configured
+   server's committed generation in the upstream manager (and a tombstone
+   for a removed one), unregisters the instance of every removed or replaced
+   server and of every server whose connection settings, `enabled` or
+   `quarantined` changed, and restamps the retained instances with their new
+   config and generation (Spec 116 PR3).
 8. **Publish**: `configsvc.Publish` and the legacy `r.cfg` swap.
 
-After the lock is released the commit unregisters removed servers,
-reconciles the supervisor when an exemption was revoked, drops cached scan
-verdicts (purge observers; the scanner's verdict cache is also keyed by
-incarnation, so a replacement is never served the old entry before the
-observer runs), schedules connect workers, requests discovery for restamped
-instances and sends its events once.
+After the lock is released the commit disconnects the instances step 7
+unregistered, reconciles the supervisor when an exemption was revoked, drops
+cached scan verdicts (purge observers; the scanner's verdict cache is also
+keyed by incarnation, so a replacement is never served the old entry before
+the observer runs), schedules connect workers, requests discovery for
+restamped instances and sends its events once.
+
+**Generation-bound workers and supervisor actions** (Spec 116 PR3, #1563).
+Everything that changes the manager's registry or connects an instance
+asynchronously is bound to the commit generation it was scheduled for: the
+commit's connect/disconnect workers (`AddServerAt`, `RemoveServerAt`), the
+supervisor's actions (generation from the snapshot they were planned from),
+`RestartServer`, `ForceReconnectAll` and Docker recovery. The manager
+re-checks the generation against its desired view under `captureMu` +
+`Manager.mu`, in the same critical section as the change, and a stale call
+returns `ErrStaleGeneration` and does nothing (logged at debug level). An
+action on an existing instance (a supervisor disconnect, an OAuth logout's
+disconnect, a restart or reconnect replacement through `ReplaceInstanceAt`)
+is also bound to that instance's `InstanceID`, because a restart installs a
+new instance at the same generation. Every instance leaves the registry
+through one `unregisterLocked`, which marks it unregistered so it never
+connects again (Spec 116 PR4 turns this into a full retirement barrier).
+Discovery and review captures carry the generation of the instance they
+listed and are dropped when it is not the stored row's; a last-good tool
+snapshot carries it too, so an approval-driven reindex never reapplies an
+old endpoint's tools after an endpoint change (it re-lists instead).
+`scripts/check-upstream-write-sites.sh` also fails on an unbound manager
+mutation in `internal/runtime` or `internal/server`, and on any change to
+`Manager.clients` outside `unregisterLocked`/`installLocked`.
 
 **Incarnation-bound approvals** (Spec 116 PR2). Each server has an
 incarnation that changes only when its name is removed and created again.

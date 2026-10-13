@@ -137,7 +137,7 @@ func inventoryVerdictErr(v inventoryVerdict) error {
 // storeLastGoodLocked replaces serverName's last-good snapshot and capture
 // stamp with tools from capture c, unless the stored snapshot came from a
 // newer capture (FR-037). The caller holds lastGoodToolsMu for writing.
-func (r *Runtime) storeLastGoodLocked(serverName string, tools []*config.ToolMetadata, c managed.InventoryCapture) {
+func (r *Runtime) storeLastGoodLocked(serverName string, tools []*config.ToolMetadata, c managed.InventoryCapture, instanceGen int64) {
 	if r.lastGoodCapture == nil {
 		r.lastGoodCapture = make(map[string]managed.InventoryCapture)
 	}
@@ -148,6 +148,13 @@ func (r *Runtime) storeLastGoodLocked(serverName string, tools []*config.ToolMet
 	copy(snapshot, tools)
 	r.lastGoodTools[serverName] = snapshot
 	r.lastGoodCapture[serverName] = c
+	// Spec 116 PR3 (FR-021b): the snapshot is bound to the commit generation
+	// of the instance it was listed from, so a local reindex hands it to the
+	// final D15 check and never reapplies a superseded instance's tools.
+	if r.lastGoodGen == nil {
+		r.lastGoodGen = make(map[string]int64)
+	}
+	r.lastGoodGen[serverName] = instanceGen
 	r.noteCaptureLocked(serverName)
 }
 
@@ -155,16 +162,24 @@ func (r *Runtime) storeLastGoodLocked(serverName string, tools []*config.ToolMet
 // snapshot, the capture it came from and the server's purge sequence, read
 // together under lastGoodToolsMu.
 func (r *Runtime) lastGoodSnapshotWithCapture(serverName string) ([]*config.ToolMetadata, managed.InventoryCapture, uint64) {
+	snapshot, c, seq, _ := r.lastGoodSnapshotWithCaptureGen(serverName)
+	return snapshot, c, seq
+}
+
+// lastGoodSnapshotWithCaptureGen is lastGoodSnapshotWithCapture that also
+// returns the commit generation of the instance the snapshot was listed from
+// (Spec 116 PR3), read in the same hold.
+func (r *Runtime) lastGoodSnapshotWithCaptureGen(serverName string) ([]*config.ToolMetadata, managed.InventoryCapture, uint64, int64) {
 	r.lastGoodToolsMu.RLock()
 	defer r.lastGoodToolsMu.RUnlock()
 	seq := r.lastGoodPurgeSeq[serverName]
 	snapshot := r.lastGoodTools[serverName]
 	if len(snapshot) == 0 {
-		return nil, managed.InventoryCapture{}, seq
+		return nil, managed.InventoryCapture{}, seq, 0
 	}
 	cp := make([]*config.ToolMetadata, len(snapshot))
 	copy(cp, snapshot)
-	return cp, r.lastGoodCapture[serverName], seq
+	return cp, r.lastGoodCapture[serverName], seq, r.lastGoodGen[serverName]
 }
 
 // inventoryBeforeApply runs the inventoryBeforeApplyLock test seam.
