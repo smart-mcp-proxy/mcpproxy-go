@@ -146,7 +146,10 @@ fi
 #    `op=`; never `==`, `!=`, `<=`, `>=`) of each statement is split on its
 #    top-level commas, and any operand that is m.clients or an index of it is
 #    a write, so a multi-target assignment (`m.clients[name], ok = c, true`)
-#    is one too (Sol round 2).
+#    is one too (Sol round 2). The keyword of an `if`, `else if`, `for` or
+#    `switch` initializer, a `for ... = range` clause or a `select` receive
+#    `case` is dropped first, so `if m.clients[n] = c; ok {` is a write too
+#    (Sol round 3).
 #  A statement split across lines (a code line ending in `.`, `(`, `[`, `,`
 #  or `=` continues on the next code line) is matched as one logical line.
 #  The enclosing function is tracked on the lexed CODE, and only from a
@@ -183,6 +186,12 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
           if ((pv == "<" || pv == ">") && pp != pv) continue    # <= >=
           lhs = substr(seg, 1, i - 1)
           sub(/(<<|>>|&\^|[-:+*\/%&|^])$/, "", lhs)
+          # The statement keyword that introduces a simple statement is not
+          # part of its left-hand side: `if m.clients[n] = c; ...`, `for`,
+          # `switch` and `else if` initializers, a `for ... = range` clause
+          # and a `select` receive `case m.clients[n] = <-ch:` (Sol round 3).
+          if (match(lhs, /^[ \t]*((else[ \t]+)?if|for|switch|case)[^A-Za-z0-9_]/))
+            lhs = substr(lhs, RLENGTH)
           break
         }
         if (lhs == "") continue
