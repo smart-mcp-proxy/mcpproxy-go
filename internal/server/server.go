@@ -356,6 +356,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// synchronously) rather than from the first servers.changed, so the very
 	// first server a fresh install adds still counts as new.
 	server.seedKnownServers(cfg.Servers)
+	// Registered here, before the config watcher and background initialization
+	// start below, so no removal can commit without forgetting its scan state.
+	server.forgetInformationalScansOnPurge()
 
 	// Replace the diagnostics package's placeholder fixers with the real,
 	// runtime-backed ones (see diagnostics_fixers.go). builtin_fixers.go has
@@ -1990,25 +1993,37 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 	// Notify about upstream server change
 	s.OnUpstreamServerChange()
 
-	// If quarantined, grant inspection exemption so tools can be discovered and reviewed
-	if serverConfig.Quarantined {
-		if supervisor := s.runtime.Supervisor(); supervisor != nil {
-			// Grant 1 hour exemption for initial tool review
-			if err := supervisor.RequestInspectionExemption(serverConfig.Name, 1*time.Hour); err != nil {
-				s.logger.Warn("Failed to grant inspection exemption for new quarantined server",
-					zap.String("server", serverConfig.Name),
-					zap.Error(err))
-			} else {
-				s.logger.Info("Granted inspection exemption for new quarantined server — tools will be discoverable for review",
-					zap.String("server", serverConfig.Name))
-			}
-		}
-	}
+	s.grantNewServerInspectionExemption(serverConfig)
 
 	s.logger.Info("Server added successfully",
 		zap.String("name", serverConfig.Name))
 
 	return nil
+}
+
+// grantNewServerInspectionExemption lets a newly admitted quarantined server be
+// connected for review. Without it the supervisor's quarantine policy keeps the
+// server disconnected (or tears down the connection the add just made), so no
+// tool definition is captured and the admission scan churns through restarts.
+// Every create door (REST, MCP `upstream_servers add`, registry add) must call
+// it after the create commit.
+func (s *Server) grantNewServerInspectionExemption(serverConfig *config.ServerConfig) {
+	if serverConfig == nil || !serverConfig.Quarantined {
+		return
+	}
+	supervisor := s.runtime.Supervisor()
+	if supervisor == nil {
+		return
+	}
+	// 1 hour covers the initial tool review.
+	if err := supervisor.RequestInspectionExemption(serverConfig.Name, 1*time.Hour); err != nil {
+		s.logger.Warn("Failed to grant inspection exemption for new quarantined server",
+			zap.String("server", serverConfig.Name),
+			zap.Error(err))
+		return
+	}
+	s.logger.Info("Granted inspection exemption for new quarantined server — tools will be discoverable for review",
+		zap.String("server", serverConfig.Name))
 }
 
 // applyServerUpdates applies a partial update to existing in place: the
