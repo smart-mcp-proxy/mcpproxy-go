@@ -2126,21 +2126,22 @@ func (m *Manager) installOAuthCompletionHandlers(tm *oauth.TokenStoreManager) {
 	tm.SetOAuthCompletionBoundCallback(m.onOAuthCompleted)
 }
 
+// afterOAuthCompletionBindingCheckHook is a test seam (Spec 116 PR2b review
+// r10): it runs right after the completion's binding check passed and the
+// retry target was selected, before the retry acts. Nil in production.
+var afterOAuthCompletionBindingCheckHook atomic.Pointer[func(serverName string)]
+
 // onOAuthCompleted retries the connection of serverName after an OAuth login
 // completed, only when the completing instance's binding (zero: unbound, e.g.
-// the CLI process) is still the registered instance's.
+// the CLI process) is still the registered instance's. The binding check and
+// the selection of the retry target are one registry critical section
+// (review r10), and the retry acts on that captured instance: a removal and
+// same-name re-add landing after the check cannot redirect the old
+// instance's completion onto the replacement.
 func (m *Manager) onOAuthCompleted(serverName string, binding commitview.CredentialBinding) {
-	if !binding.IsZero() {
-		if cur, ok := m.CurrentCredentialBinding(serverName); !ok || cur != binding {
-			m.logger.Debug("Ignoring the OAuth completion of a superseded server instance",
-				zap.String("server", serverName),
-				zap.String("binding", binding.String()))
-			return
-		}
-	}
 	m.logger.Info("OAuth completion callback triggered, attempting connection retry",
 		zap.String("server", serverName))
-	if err := m.RetryConnection(serverName); err != nil {
+	if err := m.retryConnection(serverName, binding, !binding.IsZero()); err != nil {
 		m.logger.Warn("Failed to trigger connection retry after OAuth completion",
 			zap.String("server", serverName),
 			zap.Error(err))
@@ -2150,6 +2151,16 @@ func (m *Manager) onOAuthCompleted(serverName string, binding commitview.Credent
 // RetryConnection triggers a connection retry for a specific server
 // This is typically called after OAuth completion to immediately use new tokens
 func (m *Manager) RetryConnection(serverName string) error {
+	return m.retryConnection(serverName, commitview.CredentialBinding{}, false)
+}
+
+// retryConnection is RetryConnection with an optional binding check: when
+// checkBinding is set, the instance registered under serverName is selected
+// and its binding compared to want under the same m.mu read lock, and a
+// mismatch (removed, replaced or re-bound) is a no-op. Everything after acts
+// on the captured instance only, never on a later lookup of the name; an
+// instance unregistered or retired after the check never connects again.
+func (m *Manager) retryConnection(serverName string, want commitview.CredentialBinding, checkBinding bool) error {
 	m.mu.RLock()
 	// Check if we're shutting down - prevent reconnections during shutdown
 	if m.shuttingDown {
@@ -2159,10 +2170,26 @@ func (m *Manager) RetryConnection(serverName string) error {
 		return nil
 	}
 	client, exists := m.clients[serverName]
+	if exists && client != nil && checkBinding && client.CredentialBinding() != want {
+		m.mu.RUnlock()
+		m.logger.Debug("Ignoring the OAuth completion of a superseded server instance",
+			zap.String("server", serverName),
+			zap.String("binding", want.String()))
+		return nil
+	}
 	m.mu.RUnlock()
 
-	if !exists {
+	if !exists || client == nil {
+		if checkBinding {
+			m.logger.Debug("Ignoring the OAuth completion of a removed server instance",
+				zap.String("server", serverName),
+				zap.String("binding", want.String()))
+			return nil
+		}
 		return fmt.Errorf("server not found: %s", serverName)
+	}
+	if h := afterOAuthCompletionBindingCheckHook.Load(); h != nil {
+		(*h)(serverName)
 	}
 
 	// If the client is already connected or connecting, do not force a

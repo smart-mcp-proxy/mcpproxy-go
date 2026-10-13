@@ -274,8 +274,11 @@ from the design text:
   nothing and calls nothing back when the resolver
   (`upstream.Manager.CurrentCredentialBinding`) reports another binding, or
   no instance, for the name, and the manager's binding-aware callback
-  (`onOAuthCompleted`) re-checks the binding before `RetryConnection`, so a
-  superseded login never disconnects or reconnects a same-name replacement.
+  (`onOAuthCompleted`) selects the retry target and checks its binding in
+  one `m.mu` critical section, then retries only that captured instance
+  (Sol r10 on #1621), so a superseded login never disconnects or reconnects
+  a same-name replacement, even when the removal and re-add land after the
+  check. A captured instance that is unregistered by then never connects.
   Unbound readers and unbound records (the standalone CLI) keep the
   name-only semantics.
 - **Served revision after a reactive refresh.** `PersistentTokenStore`
