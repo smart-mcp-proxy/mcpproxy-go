@@ -30,6 +30,7 @@ type inventoryUpstream struct {
 	destructive atomic.Bool
 	withX       atomic.Bool
 	empty       atomic.Bool
+	lists       atomic.Int64 // tools/list answers served (the filter runs once per list)
 	url         string
 }
 
@@ -37,6 +38,7 @@ func newInventoryUpstream(t *testing.T) *inventoryUpstream {
 	t.Helper()
 	u := &inventoryUpstream{}
 	filter := func(_ context.Context, tools []mcp.Tool) []mcp.Tool {
+		u.lists.Add(1)
 		if u.empty.Load() {
 			return []mcp.Tool{}
 		}
@@ -243,6 +245,69 @@ func TestInventoryOrder_LenientEmptyFencesOlderCapture(t *testing.T) {
 	assert.Nil(t, invRecord(t, rt, "x"), "the older capture is fenced by the newer empty observation")
 	assert.NotContains(t, invIndexed(t, rt), "x")
 	assert.Contains(t, invIndexed(t, rt), "t", "the lenient empty result keeps the retained inventory")
+}
+
+// T306(5r), FR-033a composition regression (design review r8 #3, r9 #4): a
+// lenient-empty observation C2 advances applied past the retained snapshot's
+// capture C1, but no newer definitions exist (snapshot.seq == definitions <
+// applied). Operator reconciliation must still re-apply the retained
+// snapshot: approving the held tool x indexes it, and blocking the approved
+// tool t evicts it, both from the snapshot with no further upstream
+// tools/list (the upstream still answers empty, so a re-list would leave x
+// undiscoverable). Neither reconciliation moves the fences or relabels the
+// snapshot. Against an implementation of the (5e) fence without the
+// definitions rule (reconcile admitted only while snapshot.seq == applied)
+// both reconciliations are rejected as stale and fall back to a re-list.
+func TestInventoryOrder_ReconcileAfterLenientEmptyUsesRetainedSnapshot(t *testing.T) {
+	up := newInventoryUpstream(t)
+	rt := newInventoryRuntime(t, up)
+	ctx := context.Background()
+
+	require.NoError(t, rt.discoverAndIndexToolsForServer(ctx, "inv", false), "baseline")
+	require.Equal(t, storage.ToolApprovalStatusApproved, invRecord(t, rt, "t").Status)
+
+	up.withX.Store(true)
+	require.NoError(t, rt.discoverAndIndexToolsForServer(ctx, "inv", false), "capture C1 (t, x)")
+	require.NotNil(t, invRecord(t, rt, "x"))
+	require.NotEqual(t, storage.ToolApprovalStatusApproved, invRecord(t, rt, "x").Status, "C1 holds the new tool x")
+	require.NotContains(t, invIndexed(t, rt), "x")
+	require.Contains(t, invIndexed(t, rt), "t")
+
+	up.empty.Store(true)
+	require.NoError(t, rt.discoverAndIndexToolsForServer(ctx, "inv", false), "lenient-empty C2")
+	require.Contains(t, invIndexed(t, rt), "t", "the lenient empty result keeps the retained inventory")
+
+	fences := func() (applied, definitions uint64) {
+		st := rt.toolApprovalServerState("inv")
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		return st.applied, st.definitions
+	}
+	applied, definitions := fences()
+	_, snapCapture, _ := rt.lastGoodSnapshotWithCapture("inv")
+	require.Equal(t, definitions, snapCapture.Seq, "the retained snapshot is the newest capture with definitions")
+	require.Greater(t, applied, definitions, "C2 advanced the observation fence past the snapshot")
+	listsBefore := up.lists.Load()
+
+	require.NoError(t, rt.ApproveTools("inv", []string{"x"}, "operator"))
+	require.Eventually(t, func() bool { _, ok := invIndexed(t, rt)["x"]; return ok }, 10*time.Second, 10*time.Millisecond,
+		"the approved held tool is indexed from the retained snapshot")
+	assert.Equal(t, storage.ToolApprovalStatusApproved, invRecord(t, rt, "x").Status)
+
+	_, err := rt.BlockTools("inv", []string{"t"}, "operator")
+	require.NoError(t, err)
+	require.Eventually(t, func() bool { _, ok := invIndexed(t, rt)["t"]; return !ok }, 10*time.Second, 10*time.Millisecond,
+		"the blocked approved tool is evicted from the retained snapshot")
+	assert.Contains(t, invIndexed(t, rt), "x", "the block reconciliation keeps the approved x indexed")
+
+	assert.Equal(t, listsBefore, up.lists.Load(), "reconciliation re-applies the retained snapshot with no upstream tools/list")
+	a2, d2 := fences()
+	assert.Equal(t, applied, a2, "reconciliation does not move applied")
+	assert.Equal(t, definitions, d2, "reconciliation does not move definitions")
+	snap2, snapCapture2, _ := rt.lastGoodSnapshotWithCapture("inv")
+	assert.Equal(t, snapCapture.Seq, snapCapture2.Seq, "the snapshot is not relabelled as a fresh capture")
+	assert.Equal(t, snapCapture.Client, snapCapture2.Client)
+	assert.Len(t, snap2, 2, "the retained snapshot still holds t and x")
 }
 
 // FR-037 (6b, failing-first): after a reconnect the retained snapshot no
