@@ -64,6 +64,25 @@ const reviewOf = (tools: ReviewTool[], server: Record<string, unknown> = {}) => 
 const mountOn = async () => { const w = mount(ReviewScreen, { props: { serverName: 'fx' }, ...stubs }); await flushPromises(); return w }
 const STALE = "tool review for server 'fx' is out of date (definition changed since review: a); nothing was approved — fetch the review again"
 
+describe('summarizeToolChange schema edge cases (Sol r1)', () => {
+  it('keeps a root-level change next to a property line', () => {
+    const t = changed('a', 'h', {
+      input_schema: { ...schema({ extra: 'string' }), additionalProperties: true },
+      previous: { description: 'a', input_schema: { ...schema({}), additionalProperties: false }, output_schema: null, annotations: { readOnlyHint: true } },
+    })
+    const texts = summarizeToolChange(t)[0].lines.map(l => l.text)
+    expect(texts).toContain('Parameter extra (string)')
+    expect(texts).toContain('Schema setting additionalProperties changed')
+  })
+  it('treats inherited names as plain property names', () => {
+    const added = changed('a', 'h', { input_schema: schema({ constructor: 'string', toString: 'number' }) })
+    expect(summarizeToolChange(added)[0].lines.map(l => l.text)).toEqual(['Parameter constructor (string)', 'Parameter toString (number)'])
+    const removed = changed('a', 'h', { previous: { description: 'a', input_schema: schema({ constructor: 'string' }), output_schema: null, annotations: { readOnlyHint: true } } })
+    expect(summarizeToolChange(removed)[0].lines.map(l => l.text)).toEqual(['Parameter constructor (string)'])
+    expect(summarizeToolChange(removed)[0].lines[0].kind).toBe('removed')
+  })
+})
+
 describe('ReviewScreen held changes', () => {
   beforeEach(() => { vi.clearAllMocks(); (api.listScanHistory as any).mockResolvedValue({ success: true, data: { scans: [], total: 0 } }); (api.getQueueProgress as any).mockResolvedValue({ success: true, data: { status: 'idle' } }) })
 

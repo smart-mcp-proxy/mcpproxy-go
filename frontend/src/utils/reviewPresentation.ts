@@ -258,17 +258,25 @@ function schemaLines(before: unknown, after: unknown): ChangeLine[] {
   const lines: ChangeLine[] = []
   const bp = isObj(before) && isObj(before.properties) ? before.properties : {}
   const ap = isObj(after) && isObj(after.properties) ? after.properties : {}
-  for (const key of Object.keys(ap)) if (!(key in bp)) lines.push({ kind: 'added', text: `Parameter ${key} (${typeOf(ap[key])})` })
-  for (const key of Object.keys(bp)) if (!(key in ap)) lines.push({ kind: 'removed', text: `Parameter ${key} (${typeOf(bp[key])})` })
+  const has = (o: Record<string, unknown>, k: string) => Object.prototype.hasOwnProperty.call(o, k)
+  for (const key of Object.keys(ap)) if (!has(bp, key)) lines.push({ kind: 'added', text: `Parameter ${key} (${typeOf(ap[key])})` })
+  for (const key of Object.keys(bp)) if (!has(ap, key)) lines.push({ kind: 'removed', text: `Parameter ${key} (${typeOf(bp[key])})` })
   for (const key of Object.keys(ap)) {
-    if (!(key in bp) || same(bp[key], ap[key])) continue
+    if (!has(bp, key) || same(bp[key], ap[key])) continue
     lines.push({ kind: 'changed', text: typeOf(bp[key]) !== typeOf(ap[key]) ? `Parameter ${key} type ${typeOf(bp[key])} → ${typeOf(ap[key])}` : `Parameter ${key} changed` })
   }
   const breq = new Set<string>(isObj(before) && Array.isArray(before.required) ? before.required.map(String) : [])
   const areq = new Set<string>(isObj(after) && Array.isArray(after.required) ? after.required.map(String) : [])
   for (const key of areq) if (!breq.has(key)) lines.push({ kind: 'changed', text: `Parameter ${key} is now required` })
   for (const key of breq) if (!areq.has(key)) lines.push({ kind: 'changed', text: `Parameter ${key} is no longer required` })
-  // Differences outside properties/required (or no property-level difference at all) must not vanish.
+  // Differences outside properties/required (additionalProperties, enum, ...) are reported independently,
+  // so a widened contract is never hidden behind a property line.
+  const rb = isObj(before) ? before : {}; const ra = isObj(after) ? after : {}
+  for (const key of new Set([...Object.keys(rb), ...Object.keys(ra)])) {
+    if (key === 'properties' || key === 'required' || same(rb[key], ra[key])) continue
+    lines.push({ kind: 'changed', text: `Schema setting ${key} changed` })
+  }
+  // Nothing recognised at all (e.g. a non-object schema) must not vanish.
   if (lines.length === 0) lines.push({ kind: 'changed', text: 'Schema changed' })
   return lines
 }
