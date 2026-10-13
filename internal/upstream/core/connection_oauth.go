@@ -232,7 +232,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 			zap.String("server", c.config.Name),
 			zap.Bool("has_refresh_token", hasRefreshPrecheck))
 		skipBrowserFlow = true
-	} else if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
+	} else if tokenManager.HasRecentOAuthCompletionBound(c.config.Name, c.CredentialBinding()) {
 		// Also check in-memory completion flag (same-process OAuth)
 		logger.Info("🔄 OAuth was recently completed in this process but token may be stale",
 			zap.String("server", c.config.Name),
@@ -678,7 +678,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 			zap.String("server", c.config.Name),
 			zap.Bool("has_refresh_token", hasRefreshPrecheck))
 		skipBrowserFlow = true
-	} else if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
+	} else if tokenManager.HasRecentOAuthCompletionBound(c.config.Name, c.CredentialBinding()) {
 		// Also check in-memory completion flag (same-process OAuth)
 		logger.Info("🔄 SSE OAuth was recently completed in this process but token may be stale",
 			zap.String("server", c.config.Name),
@@ -1356,7 +1356,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 
 		// Record OAuth completion in global token manager for other clients
 		tokenManager := oauth.GetTokenStoreManager()
-		tokenManager.MarkOAuthCompleted(c.config.Name)
+		tokenManager.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 
 		return nil
 
@@ -1621,7 +1621,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		// Mark OAuth as complete
 		c.finishOAuth(!clientStored)
 		tokenManager := oauth.GetTokenStoreManager()
-		tokenManager.MarkOAuthCompleted(c.config.Name)
+		tokenManager.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 
 		return result, nil
 
@@ -1720,13 +1720,13 @@ func (c *Client) finishOAuth(persistClient bool) {
 			c.logger.Warn("Failed to persist OAuth completion event to DB; using in-memory notification",
 				zap.String("server", c.config.Name),
 				logSafeErrorField(err))
-			tm.MarkOAuthCompleted(c.config.Name)
+			tm.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 		} else {
 			c.logger.Info("📢 OAuth completion recorded to DB for cross-process notification",
 				zap.String("server", c.config.Name))
 		}
 	} else {
-		tm.MarkOAuthCompleted(c.config.Name)
+		tm.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 		c.logger.Info("📢 OAuth completion recorded in-memory (no DB available)",
 			zap.String("server", c.config.Name))
 	}
@@ -2361,7 +2361,7 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		// Mark OAuth as complete
 		c.finishOAuth(!clientStored)
 		tokenManager := oauth.GetTokenStoreManager()
-		tokenManager.MarkOAuthCompleted(c.config.Name)
+		tokenManager.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 
 	case <-ctx.Done():
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {

@@ -256,6 +256,16 @@ from the design text:
   not replace it: a bound save that committed before a removal or an
   OAuth-config change and notified late leaves the replacement's schedule,
   expiry, binding and timer alone (Sol r3 on #1621).
+- **In-memory recent-completion flag.** `TokenStoreManager`'s
+  recent-completion record (which lets a just-signed-in server skip the
+  automatic OAuth deferral) carries the binding of the instance that
+  completed the login. `MarkOAuthCompletedWithDBBound` sets it only after
+  the bound completion event was written (a refused write records nothing),
+  core instances mark and read it through `MarkOAuthCompletedBound` /
+  `HasRecentOAuthCompletionBound` with their binding, and a completion of
+  another binding is not recent for a same-name replacement, which keeps
+  its deferral (Sol r8 on #1621). Unbound readers and unbound records (the
+  standalone CLI) keep the name-only semantics.
 - **Served revision after a reactive refresh.** `PersistentTokenStore`
   records as its served revision the record that holds the token it served:
   after a reactive refresh, the revision the refresh flight itself wrote

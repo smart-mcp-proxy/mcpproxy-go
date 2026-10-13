@@ -15,7 +15,7 @@ import (
 // through the same coordinator, keyed by server name.
 func TestGlobalMemoryTokenStore_BoundRefreshIsSerialized(t *testing.T) {
 	as := newRotatingAS(t, "rt-0")
-	m := &TokenStoreManager{stores: map[string]client.TokenStore{}, completedOAuth: map[string]time.Time{}, logger: globalTokenStoreManager.logger}
+	m := &TokenStoreManager{stores: map[string]client.TokenStore{}, completedOAuth: map[string]oauthCompletion{}, logger: globalTokenStoreManager.logger}
 	name := uniqueServerName(t)
 	store := m.GetOrCreateTokenStore(name)
 	require.NoError(t, store.SaveToken(context.Background(), &client.Token{
@@ -52,7 +52,7 @@ func TestGlobalMemoryTokenStore_BoundRefreshIsSerialized(t *testing.T) {
 // refresh margin on every request and is refreshed again and again.
 func TestGlobalMemoryTokenStore_ShortTokenNotRefreshedEveryRequest(t *testing.T) {
 	as := newRotatingAS(t, "rt-0")
-	m := &TokenStoreManager{stores: map[string]client.TokenStore{}, completedOAuth: map[string]time.Time{}, logger: globalTokenStoreManager.logger}
+	m := &TokenStoreManager{stores: map[string]client.TokenStore{}, completedOAuth: map[string]oauthCompletion{}, logger: globalTokenStoreManager.logger}
 	store := m.GetOrCreateTokenStore(uniqueServerName(t))
 	require.NoError(t, store.SaveToken(context.Background(), &client.Token{
 		AccessToken: "at-0", RefreshToken: "rt-0", TokenType: "Bearer", ExpiresAt: time.Now().Add(time.Minute),

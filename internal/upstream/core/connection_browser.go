@@ -115,7 +115,7 @@ func (c *Client) isDeferOAuthForTray(ctx context.Context) bool {
 
 	// If OAuth has been recently attempted (within last 5 minutes), don't defer
 	// This allows manual retry flows to work
-	if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
+	if tokenManager.HasRecentOAuthCompletionBound(c.config.Name, c.CredentialBinding()) {
 		c.logger.Debug("OAuth recently attempted - allowing manual flow",
 			zap.String("server", c.config.Name))
 		return false

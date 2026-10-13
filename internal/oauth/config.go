@@ -172,10 +172,20 @@ var globalCallbackManager = &CallbackServerManager{
 	logger:  zap.L().Named(oauthCallbackLoggerName),
 }
 
+// oauthCompletion is a recorded login completion and the credential binding
+// of the instance that completed it (zero: unbound, e.g. the CLI process).
+// Spec 116 PR2b review r8 (#1607): the flag is bound like the DB event, so a
+// completion of an instance a commit superseded never reads as recent for a
+// same-name replacement.
+type oauthCompletion struct {
+	at      time.Time
+	binding commitview.CredentialBinding
+}
+
 // Global token store manager to persist tokens across client instances
 type TokenStoreManager struct {
 	stores                  map[string]client.TokenStore
-	completedOAuth          map[string]time.Time // Track successful OAuth completions
+	completedOAuth          map[string]oauthCompletion // Track successful OAuth completions
 	mu                      sync.RWMutex
 	logger                  *zap.Logger
 	oauthCompletionCallback func(serverName string)                      // Callback when OAuth completes
@@ -186,7 +196,7 @@ type TokenStoreManager struct {
 
 var globalTokenStoreManager = &TokenStoreManager{
 	stores:         make(map[string]client.TokenStore),
-	completedOAuth: make(map[string]time.Time),
+	completedOAuth: make(map[string]oauthCompletion),
 	logger:         zap.L().Named("oauth-tokens"),
 }
 
@@ -388,10 +398,17 @@ func (m *TokenStoreManager) NotifyTokenSavedFor(serverName string, expiresAt tim
 // MarkOAuthCompleted records that OAuth was successfully completed for a server
 // This method is used by CLI processes to notify server processes about OAuth completion
 func (m *TokenStoreManager) MarkOAuthCompleted(serverName string) {
+	m.MarkOAuthCompletedBound(serverName, commitview.CredentialBinding{})
+}
+
+// MarkOAuthCompletedBound is MarkOAuthCompleted for an upstream instance bound
+// to binding: the recorded completion reads as recent only for readers with
+// the same binding (or unbound readers), never for a same-name replacement.
+func (m *TokenStoreManager) MarkOAuthCompletedBound(serverName string, binding commitview.CredentialBinding) {
 	m.mu.Lock()
 	callback := m.oauthCompletionCallback
 	completionTime := time.Now()
-	m.completedOAuth[serverName] = completionTime
+	m.completedOAuth[serverName] = oauthCompletion{at: completionTime, binding: binding}
 	m.mu.Unlock()
 
 	m.logger.Info("OAuth completion recorded",
@@ -414,7 +431,7 @@ func (m *TokenStoreManager) MarkOAuthCompleted(serverName string) {
 func (m *TokenStoreManager) MarkOAuthCompletedWithDB(serverName string, storage DatabaseOAuthNotifier) error {
 	m.mu.Lock()
 	completionTime := time.Now()
-	m.completedOAuth[serverName] = completionTime
+	m.completedOAuth[serverName] = oauthCompletion{at: completionTime}
 	m.mu.Unlock()
 
 	// Save to database for cross-process notification
@@ -452,13 +469,12 @@ type BoundOAuthNotifier interface {
 // instance bound to binding: the event is written only while the server's
 // row still carries the binding, and carries it, so the consumer never
 // retries a replacement for a login an instance the commit superseded
-// completed. A refused write is not an error.
+// completed. A refused write is not an error, and records nothing in memory
+// either: the in-memory recent-completion flag is set (bound to binding) only
+// once the bound DB write landed (review r8), so a superseded instance's login
+// cannot make a replacement skip its automatic OAuth deferral.
 func (m *TokenStoreManager) MarkOAuthCompletedWithDBBound(serverName string, storage BoundOAuthNotifier, binding commitview.CredentialBinding) error {
-	m.mu.Lock()
 	completionTime := time.Now()
-	m.completedOAuth[serverName] = completionTime
-	m.mu.Unlock()
-
 	event := &CompletionEvent{ServerName: serverName, CompletedAt: completionTime}
 	written, err := storage.SaveOAuthCompletionEventIfBound(event, binding)
 	if err != nil {
@@ -473,6 +489,9 @@ func (m *TokenStoreManager) MarkOAuthCompletedWithDBBound(serverName string, sto
 			zap.String("binding", binding.String()))
 		return nil
 	}
+	m.mu.Lock()
+	m.completedOAuth[serverName] = oauthCompletion{at: completionTime, binding: binding}
+	m.mu.Unlock()
 	m.logger.Info("OAuth completion saved to database for cross-process notification",
 		zap.String("server", serverName),
 		zap.Time("completion_time", completionTime))
@@ -484,13 +503,26 @@ type CompletionEvent = storage.OAuthCompletionEvent
 
 // HasRecentOAuthCompletion checks if OAuth was recently completed for a server
 func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
+	return m.HasRecentOAuthCompletionBound(serverName, commitview.CredentialBinding{})
+}
+
+// HasRecentOAuthCompletionBound is HasRecentOAuthCompletion for an upstream
+// instance bound to binding: a completion recorded for another binding (an
+// old incarnation, or an OAuth epoch a commit superseded) is not recent for
+// it. An unbound reader, or an unbound record (the CLI process), keeps the
+// name-only semantics.
+func (m *TokenStoreManager) HasRecentOAuthCompletionBound(serverName string, binding commitview.CredentialBinding) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	completionTime, exists := m.completedOAuth[serverName]
+	rec, exists := m.completedOAuth[serverName]
 	if !exists {
 		return false
 	}
+	if !binding.IsZero() && !rec.binding.IsZero() && rec.binding != binding {
+		return false
+	}
+	completionTime := rec.at
 
 	// Consider OAuth recent if completed within last 5 minutes
 	isRecent := time.Since(completionTime) < 5*time.Minute
