@@ -593,3 +593,24 @@ func TestIsTerminalScanStatus(t *testing.T) {
 		assert.False(t, isTerminalScanStatus(status), status)
 	}
 }
+
+// A server removed and added again under the same name is a NEW admission and
+// must get its informational baseline scan again. Without forgetting the name
+// on removal, infoScanKnown keeps it "seen" for the rest of the process and the
+// re-added server never gets a badge (observed 2026-10-13 while reproducing the
+// Roblox add on a scratch core: REST add → remove → MCP add was never scanned).
+func TestInformationalScan_ReaddAfterRemoveIsScannedAgain(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	acme := enabledServer("acme", config.TrustModeManual)
+	s := newInformationalTestServer(t, fake, nil, acme)
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+
+	require.NoError(t, s.RemoveServer(context.Background(), "acme"))
+	fake = newFakeSecurityScanner()
+	s.securityScanner = fake
+
+	require.NoError(t, s.AddServer(context.Background(), enabledServer("acme", config.TrustModeManual)))
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+}

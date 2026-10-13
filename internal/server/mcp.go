@@ -5995,6 +5995,10 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	// notifies the supervisor to reconcile and connect (Spec 116).
 	if p.mainServer != nil {
 		p.mainServer.OnUpstreamServerChange()
+		// Same post-create step as the REST door: a quarantined server needs the
+		// inspection exemption or the supervisor never (or only briefly) connects
+		// it and nothing is captured for review.
+		p.mainServer.grantNewServerInspectionExemption(serverConfig)
 
 		// Spec 024: Emit config change activity for server addition.
 		//

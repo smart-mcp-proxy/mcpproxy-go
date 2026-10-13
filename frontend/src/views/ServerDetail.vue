@@ -300,7 +300,7 @@
               class="btn btn-sm btn-warning"
             >
               <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-              Approve
+              Review &amp; approve
             </button>
           </div>
         </div>
