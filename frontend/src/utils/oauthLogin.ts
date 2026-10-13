@@ -51,8 +51,11 @@ export async function openOAuthLogin(
       }
       return { ...result, browser_opened: false }
     }
-    popup?.close()
     if (!result.browser_opened) throw new Error(result.browser_error || 'No sign-in URL was returned')
+    // browser_opened describes the daemon's host browser, which a remote UI
+    // cannot see; without a URL there is nothing to open here.
+    if (options.remote) throw new Error('The server did not return a sign-in URL for this browser')
+    popup?.close()
     return result
   } catch (error) {
     popup?.close()

@@ -1638,7 +1638,8 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 // storage transaction (oauth.WithLoginClient): saving the token alone kept
 // whatever client was stored, so a login whose save was delayed past another
 // login's completion paired its refresh token with that login's client_id.
-// The callback port and redirect URI come from cb, the callback server this
+// The callback port and the EFFECTIVE redirect URI (the HTTPS one under
+// oauth.callback_base_url) come from cb, the callback server this
 // login registered its state on (not whichever one the registry holds by the
 // time the exchange runs); with no cb the stored values are kept.
 // With oauth.extra_params.client_id the token request is sent with that id
@@ -1654,7 +1655,7 @@ func (c *Client) exchangeAuthorizationCode(ctx context.Context, h *uptransport.O
 		login = oauth.LoginClient{ClientID: h.GetClientID(), ClientSecret: h.GetClientSecret()}
 		if cb != nil && cb.Port > 0 {
 			login.CallbackPort = cb.Port
-			login.RedirectURI = cb.RedirectURI
+			login.RedirectURI = cb.EffectiveRedirectURI()
 		}
 		ctx = oauth.WithLoginClient(ctx, login)
 	}

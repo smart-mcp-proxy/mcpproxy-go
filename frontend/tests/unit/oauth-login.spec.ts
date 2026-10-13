@@ -21,6 +21,12 @@ describe('remote browser OAuth login', () => {
     vi.spyOn(window, 'open').mockReturnValue(null)
     expect(await openOAuthLogin(async () => result, remote)).toEqual(result.data)
   })
+  it('does not report the daemon host browser as opened here when no URL comes back', async () => {
+    const close = vi.fn()
+    vi.spyOn(window, 'open').mockReturnValue({ opener: null, closed: false, close, location: { replace: vi.fn() } } as unknown as Window)
+    await expect(openOAuthLogin(async () => ({ success: true, data: { browser_opened: true } }), remote)).rejects.toThrow('sign-in URL')
+    expect(close).toHaveBeenCalledTimes(1)
+  })
   it('closes the reserved tab on API failures or unsafe URLs', async () => {
     const close = vi.fn(), replace = vi.fn()
     vi.spyOn(window, 'open').mockReturnValue({ opener: null, closed: false, close, location: { replace } } as unknown as Window)

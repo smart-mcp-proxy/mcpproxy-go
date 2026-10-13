@@ -50,7 +50,7 @@ describe('manual OAuth sign-in', () => {
     expect(canStartOAuthLogin({ ...server, oauth: undefined, authenticated: false })).toBe(true)
   })
   it('starts a fresh OAuth flow from the card even when reconnect is the primary action', async () => {
-    const spy = vi.spyOn(useServersStore(), 'triggerOAuthLogin').mockResolvedValue(true)
+    const spy = vi.spyOn(useServersStore(), 'triggerOAuthLogin').mockResolvedValue({ browser_opened: true })
     const card = mount(ServerCard, { props: { server }, global: { stubs: { RouterLink: true } } })
     const action = card.find('[data-test="server-card-menu-login"]')
     expect(action.text()).toBe('Sign in again')
@@ -65,7 +65,7 @@ describe('manual OAuth sign-in', () => {
     const router = createRouter({ history: createWebHistory(), routes: [{ path: '/servers/:serverName', component: { template: '<div/>' } }] })
     await router.push('/servers/notion'); await router.isReady()
     const pinia = createPinia(); setActivePinia(pinia)
-    const spy = vi.spyOn(useServersStore(), 'triggerOAuthLogin').mockResolvedValue(true)
+    const spy = vi.spyOn(useServersStore(), 'triggerOAuthLogin').mockResolvedValue({ browser_opened: true })
     const detail = mount(ServerDetail, { props: { serverName: 'notion' }, global: { plugins: [pinia, router] } })
     await flushPromises(); await flushPromises()
     const action = detail.find('[data-test="server-detail-menu-login"]')
