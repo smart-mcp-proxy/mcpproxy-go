@@ -156,10 +156,12 @@ func TestBlockedWrite_UnblockedByRetire_Bounded(t *testing.T) {
 	defer conn.Close()
 
 	// Keep writing until the peer's and our socket buffers are full and a
-	// write blocks. A single large write is not enough everywhere: Windows
-	// loopback can absorb a 64 MiB write without blocking, so the writer loops
-	// until a write returns an error (which only Retire's close can cause).
+	// write blocks inside the socket. A single large write is not enough
+	// everywhere: Windows loopback can absorb a 64 MiB write without
+	// blocking. The writer counts completed writes; once the count stops
+	// moving, the current write is stuck in c.Conn.Write.
 	chunk := make([]byte, 1<<20)
+	var completed atomic.Int64
 	writeDone := make(chan error, 1)
 	go func() {
 		for {
@@ -167,10 +169,14 @@ func TestBlockedWrite_UnblockedByRetire_Bounded(t *testing.T) {
 				writeDone <- err
 				return
 			}
+			completed.Add(1)
 		}
 	}()
-	// Let the writer fill the buffers and block.
-	time.Sleep(200 * time.Millisecond)
+	require.Eventually(t, func() bool {
+		before := completed.Load()
+		time.Sleep(150 * time.Millisecond)
+		return completed.Load() == before
+	}, 10*time.Second, 10*time.Millisecond, "a write never blocked")
 	select {
 	case err := <-writeDone:
 		t.Fatalf("writer was expected to be blocked, returned %v", err)
@@ -182,7 +188,14 @@ func TestBlockedWrite_UnblockedByRetire_Bounded(t *testing.T) {
 	assert.Less(t, time.Since(start), time.Second, "Retire is bounded with a hung peer")
 	select {
 	case err := <-writeDone:
-		assert.Error(t, err, "the blocked write returns once its conn is closed")
+		require.Error(t, err, "the blocked write returns once its conn is closed")
+		// The latch path returns the bare sentinel without touching the
+		// socket; a write unblocked by Retire closing its connection returns
+		// the socket error wrapped with ErrRetired. Requiring the wrapped
+		// form proves Retire closed the tracked connection.
+		assert.ErrorIs(t, err, ErrRetired)
+		assert.NotSame(t, ErrRetired, err, "error must come from the closed socket, not the latch check")
+		assert.NotEqual(t, ErrRetired.Error(), err.Error(), "error must wrap the socket error")
 	case <-time.After(time.Second):
 		t.Fatal("blocked write not unblocked by Retire")
 	}
