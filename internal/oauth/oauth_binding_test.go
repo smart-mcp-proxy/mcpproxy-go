@@ -459,3 +459,68 @@ func TestBoundRefreshInvalidClientKeepsSameBindingRewrite(t *testing.T) {
 	assert.Equal(t, "at2", tok.AccessToken)
 	assert.Equal(t, int32(2), calls.Load())
 }
+
+// Sol r6 on #1621: the same-binding rewrite lands after the flight's
+// revision check, inside the window before its revision-checked DCR clear.
+// The clear correctly refuses (the record moved on), and that refusal must
+// reach the flight: the old rejection is of the registration the request
+// sent, so it latches nothing and emits no terminal outcome, and the next
+// GetToken refreshes with the corrected registration.
+func TestBoundRefreshInvalidClientKeepsRewriteBeforeClear(t *testing.T) {
+	f := newBindingFixture(t)
+	b := f.create(t)
+	t.Cleanup(func() { DefaultRefreshCoordinator().Forget(f.key, b) })
+	_, err := f.db.SaveOAuthClientIfBound(f.key, "acme", b, storage.OAuthClientSaveAlways, "cid", "sec", 4000, "http://127.0.0.1:4000/oauth/callback")
+	require.NoError(t, err)
+	store := NewBoundPersistentTokenStore("acme", bindURL, f.db, b).(*PersistentTokenStore)
+	require.NoError(t, store.SaveToken(context.Background(), &client.Token{AccessToken: "at", RefreshToken: "rt", ExpiresAt: time.Now().Add(-time.Second)}))
+
+	var outcomes []RefreshOutcome
+	var outMu sync.Mutex
+	DefaultRefreshCoordinator().SetCompletionHook(func(o RefreshOutcome) {
+		outMu.Lock()
+		outcomes = append(outcomes, o)
+		outMu.Unlock()
+	})
+	t.Cleanup(func() { DefaultRefreshCoordinator().SetCompletionHook(nil) })
+
+	var rewrote atomic.Bool
+	restore := SetBindingTestHooks(BindingTestHooks{BeforeClear: func(server string, cb commitview.CredentialBinding, op string) {
+		if op != "dcr_client" || !rewrote.CompareAndSwap(false, true) {
+			return
+		}
+		ok, err := f.db.SaveOAuthClientIfBound(f.key, "acme", b, storage.OAuthClientSaveAlways, "cid", "sec2", 4100, "http://127.0.0.1:4100/oauth/callback")
+		assert.NoError(t, err)
+		assert.True(t, ok)
+	}})
+	t.Cleanup(restore)
+
+	var calls atomic.Int32
+	BindRefresher(store, RefreshBinding{Refresh: func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
+		if calls.Add(1) > 1 {
+			assert.Equal(t, "sec2", rec.ClientSecret, "the retry uses the corrected registration")
+			tok := &client.Token{AccessToken: "at2", RefreshToken: "rt2", ExpiresAt: time.Now().Add(time.Hour)}
+			return tok, store.SaveToken(ctx, tok)
+		}
+		return nil, fmt.Errorf("x: %w", transport.OAuthError{ErrorCode: "invalid_client"})
+	}})
+
+	_, err = store.GetToken(context.Background())
+	require.Error(t, err)
+	require.True(t, rewrote.Load(), "the rewrite ran inside the clear window")
+
+	after := f.record(t)
+	require.NotNil(t, after)
+	assert.Equal(t, "cid", after.ClientID)
+	assert.Equal(t, "sec2", after.ClientSecret)
+	assert.Equal(t, 4100, after.CallbackPort)
+	assert.Equal(t, "http://127.0.0.1:4100/oauth/callback", after.RedirectURI)
+	outMu.Lock()
+	assert.Empty(t, outcomes, "a superseded rejection emits no terminal outcome")
+	outMu.Unlock()
+
+	tok, err := store.GetToken(context.Background())
+	require.NoError(t, err, "nothing was latched against the corrected registration")
+	assert.Equal(t, "at2", tok.AccessToken)
+	assert.Equal(t, int32(2), calls.Load())
+}

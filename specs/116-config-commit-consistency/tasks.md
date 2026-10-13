@@ -230,7 +230,10 @@ from the design text:
   the post-request re-read; when the re-read's revision differs (a
   same-binding replacement rewrote the registration with the same client id
   and refresh token, Sol r5 on #1621) the invalid_client failure is
-  superseded: no clear, no latch. `Forget`/`ForgetServer` run for purged and
+  superseded: no clear, no latch. The same holds when the rewrite lands
+  after that check but before the clear (Sol r6 on #1621): the
+  revision-checked clear clears nothing, `handleInvalidClient` reports it,
+  and the flight skips the latch and the terminal outcome. `Forget`/`ForgetServer` run for purged and
   OAuth-cleared servers in commit step 6 and on logout. The RefreshManager
   ignores a terminal outcome whose binding is not the registered instance's
   (`Runtime.CurrentCredentialBinding`), in addition to the existing
