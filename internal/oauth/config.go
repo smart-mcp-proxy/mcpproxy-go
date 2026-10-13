@@ -161,8 +161,9 @@ type CallbackServer struct {
 	Path   string
 	logger *zap.Logger
 
-	waitersMu sync.Mutex
-	waiters   map[string]chan map[string]string
+	waitersMu         sync.Mutex
+	waiters           map[string]chan map[string]string
+	remoteCallbackURL string // protected by waitersMu
 }
 
 var globalCallbackManager = &CallbackServerManager{
@@ -927,6 +928,14 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	// It is never obtained from — nor refreshable by — Dynamic Client Registration,
 	// so the DCR "clear and re-register" recovery paths below must never wipe it.
 	hasStaticClientID := serverConfig.OAuth != nil && serverConfig.OAuth.ClientID != ""
+	var remoteRedirectURI string
+	if serverConfig.OAuth != nil {
+		var err error
+		remoteRedirectURI, err = config.OAuthRemoteCallbackURL(serverConfig.OAuth.CallbackBaseURL, serverConfig.Name)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// An explicit `oauth.redirect_uri` pins the loopback callback port. Providers
 	// such as GitHub OAuth Apps match the callback URL exactly and reject
@@ -1015,6 +1024,9 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			// what StartCallbackServerOnHost will try first.
 			expectedRedirectURI = fmt.Sprintf("http://%s%s", net.JoinHostPort(config.LoopbackIPv4Host, strconv.Itoa(storedPort)), DefaultRedirectPath)
 		}
+		if remoteRedirectURI != "" {
+			expectedRedirectURI = remoteRedirectURI
+		}
 
 		switch {
 		case storedPort == 0:
@@ -1024,7 +1036,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("server", serverConfig.Name),
 				zap.String("client_id", storedClientID))
 			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
-		case storedRedirectURI == "" && pinnedPort > 0:
+		case storedRedirectURI == "" && (pinnedPort > 0 || remoteRedirectURI != ""):
 			// A legacy record (predates persisting the exact redirect_uri, or
 			// was never pinned before) is about to be used under a pin. Whether
 			// it still matches cannot be verified from a port number alone —
@@ -1100,7 +1112,8 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 
 	// Spec 022: Detect port conflict and clear DCR credentials if port changed
 	// This forces fresh DCR with the new port
-	if preferredPort > 0 && callbackServer.Port != preferredPort {
+	// An unpinned private listener moving does not change an HTTPS redirect.
+	if preferredPort > 0 && callbackServer.Port != preferredPort && (remoteRedirectURI == "" || pinnedPort > 0) {
 		switch {
 		case pinnedPort > 0:
 			// The operator pinned this port; any other port produces a
@@ -1140,6 +1153,12 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	redirectURI := callbackServer.RedirectURI
 	if pinnedRedirectURI != "" {
 		redirectURI = pinnedRedirectURI
+	}
+	if remoteRedirectURI != "" {
+		redirectURI = remoteRedirectURI
+	}
+	if err := callbackServer.configureRemoteCallback(remoteRedirectURI); err != nil {
+		return nil, err
 	}
 
 	logger.Info("Using exact redirect URI from allocated callback server",
@@ -1762,6 +1781,10 @@ func (c *CallbackServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // handleCallback handles OAuth callback requests
 func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) {
+	c.handleCallbackWithFailureNotification(w, r, true)
+}
+
+func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWriter, r *http.Request, notifyFailure bool) {
 	c.logger.Info("🎯 OAuth callback received",
 		zap.String("method", r.Method),
 		zap.String("path", LogSafeRequestPath(r.URL.Path)),
@@ -1808,7 +1831,9 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 			zap.String("error", ScrubUpstreamText(params["error"])))
 
 		// Surface it to the operator instead of burying it in the log (issue #975).
-		GetTokenStoreManager().RecordOAuthFailure(c.ServerName, reason)
+		if notifyFailure {
+			GetTokenStoreManager().RecordOAuthFailure(c.ServerName, reason)
+		}
 
 		c.writePage(w, http.StatusBadRequest, callbackPage(
 			"Authorization Failed",

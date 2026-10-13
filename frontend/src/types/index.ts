@@ -72,6 +72,7 @@ export interface Toast {
   title: string
   message?: string
   duration?: number
+  link?: { url: string; label: string }
 }
 
 // Component prop types

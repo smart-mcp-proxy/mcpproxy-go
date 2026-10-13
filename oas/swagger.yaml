@@ -748,6 +748,8 @@ components:
             The endpoint overrides rewrite the matching fields of the authorization
             server metadata mcp-go reads; AuthServerMetadataURL replaces discovery.
           type: string
+        callback_base_url:
+          type: string
         client_id:
           type: string
         client_secret:

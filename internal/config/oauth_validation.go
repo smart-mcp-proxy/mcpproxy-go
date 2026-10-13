@@ -148,6 +148,9 @@ func (o *OAuthConfig) Validate() error {
 	if o == nil {
 		return nil
 	}
+	if err := ValidateOAuthCallbackBaseURL(o.CallbackBaseURL); err != nil {
+		return err
+	}
 
 	// Validate extra params
 	if err := ValidateOAuthExtraParams(o.ExtraParams); err != nil {

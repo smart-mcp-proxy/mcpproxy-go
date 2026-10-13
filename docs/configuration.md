@@ -576,6 +576,7 @@ explicitly to one of `http`, `sse`, or `streamable-http`.
 | `client_id` | string | No | OAuth client ID (uses Dynamic Client Registration if empty) |
 | `client_secret` | string | No | OAuth client secret (can reference secure storage) |
 | `redirect_uri` | string | No | Pins the loopback callback URL (auto-allocated if not provided) |
+| `callback_base_url` | string | No | Explicit HTTPS origin for remote Web UI callbacks at `/oauth/callback/<server-name>`; loopback remains the default |
 | `scopes` | array | No | OAuth scopes to request |
 | `pkce_enabled` | boolean | No | PKCE is always enabled for security; this flag is currently ignored |
 | `authorization_endpoint` | string | No | Overrides the authorization endpoint the authorization server advertises (see [Overriding OAuth discovery](#overriding-oauth-discovery)) |
