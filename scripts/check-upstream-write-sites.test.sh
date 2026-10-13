@@ -13,7 +13,8 @@
 # one line or across lines (exit 1), the FR-020 legacy manager mutators as
 # calls, method values or split across lines, multiline and multi-target
 # m.clients writes (including an index expression split inside its brackets
-# and a write inside a func literal argument), clear(m.clients) and writes after a fake helper
+# a write inside a func literal argument, and a composite literal inside the
+# index expression on one line or across lines), clear(m.clients) and writes after a fake helper
 # declaration in a raw string, string or block comment (exit 1), and whole-line, block and string-literal mentions (must exit 0), a failing
 # find or awk (must exit 2, not report a clean tree). Then runs the real script
 # on the repository (must exit 0).
@@ -333,6 +334,32 @@ func (m *Manager) read(name string) bool {
 }
 ' > "$r/internal/upstream/manager_generation.go"
 expect "unregisterLocked/installLocked and reads are allowed in internal/upstream" 0 "$r"
+
+# Sol round 5: statement splitting respects nested delimiters. A composite
+# literal inside an index expression (`[]string{prefix, name}`) does not cut
+# the statement in two, so its left-hand side is still m.clients[...]; the
+# body of a brace pair is checked as its own statements. The same holds when
+# the composite literal spans lines.
+r="$(mkroot pr3-manager-composite-index)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(prefix, name string, c *managed.Client) {\n\tm.clients[strings.Join([]string{prefix, name}, "")] = c\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted composite-literal index write m.clients[strings.Join([]string{prefix, name}, \"\")] = c" 1 "$r"
+r="$(mkroot pr3-manager-composite-index-multiline)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(prefix, name string, c *managed.Client) {\n\tm.clients[strings.Join([]string{\n\t\tprefix,\n\t\tname,\n\t}, "")] = c\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted composite-literal index write split across lines" 1 "$r"
+r="$(mkroot pr3-manager-funclit-composite-write)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(prefix, name string, c *managed.Client) {\n\trun(func() {\n\t\tparts := []string{prefix, name}\n\t\tm.clients[strings.Join(parts, "")] = c\n\t})\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted write after a composite literal inside a func literal argument" 1 "$r"
+r="$(mkroot pr3-manager-composite-index-read-ok)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(prefix, name string) bool {\n\tc := m.clients[strings.Join([]string{prefix, name}, "")]\n\td := m.clients[strings.Join([]string{\n\t\tprefix,\n\t\tname,\n\t}, "")]\n\trun(func() {\n\t\tparts := []string{prefix, name}\n\t\t_ = m.clients[strings.Join(parts, "")]\n\t})\n\treturn c == d\n}\n' > "$r/internal/upstream/manager.go"
+expect "composite-literal index reads (one line, multiline, in a func literal) are allowed" 0 "$r"
+r="$(mkroot pr3-manager-composite-index-helper-ok)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) installLocked(prefix, name string, c *managed.Client) {\n\tm.clients[strings.Join([]string{prefix, name}, "")] = c\n}\n' > "$r/internal/upstream/manager_generation.go"
+expect "a composite-literal index write inside installLocked is allowed" 0 "$r"
 
 # An operational failure never reports a clean tree (review rounds 18-20): a
 # failing file discovery or scanner exits 2, whether the tool is shadowed on

@@ -151,12 +151,16 @@ fi
 #    `case` is dropped first, so `if m.clients[n] = c; ok {` is a write too
 #    (Sol round 3).
 #  A statement split across lines (a code line ending in `.`, `(`, `[`, `,`
-#  or `=` continues on the next code line, and so does a line that leaves a
-#  `(` or `[` open as its innermost open delimiter: `m.clients[prefix+` then
-#  `name] = c`, Sol round 4) is matched as one logical line. Delimiter depth
-#  is tracked on the lexed code across lines; a `{` (a func literal or a
-#  composite literal body) ends the continuation, so the statements inside a
-#  func literal passed as an argument are still separate lines.
+#  or `=` continues on the next code line, and so does a line that leaves any
+#  `(` or `[` open: `m.clients[prefix+` then `name] = c`, Sol round 4, and a
+#  composite literal split across lines inside an index, Sol round 5) is
+#  matched as one logical line. Delimiter depth is tracked on the lexed code
+#  across lines. Statements are split by brace NESTING, not on every brace
+#  (Sol round 5): a `{...}` body is checked as its own statements and leaves
+#  a `{}` placeholder in the enclosing statement, so
+#  `m.clients[strings.Join([]string{prefix, name}, "")] = c` keeps its
+#  left-hand side, and the statements inside a func literal passed as an
+#  argument (joined with `;`) are still checked one by one.
 #  The enclosing function is tracked on the lexed CODE, and only from a
 #  top-level declaration (a line starting in column 0): a declaration inside a
 #  raw string, a string or a comment never changes it (Sol round 2).
@@ -176,10 +180,34 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
 '"$STRIP_AWK"'
     # writes_clients reports whether one logical line assigns to m.clients
     # or an index of it in the left-hand side of an assignment.
-    function writes_clients(line,    segs, ns, k, seg, n, i, c, depth, nx, pv, pp, lhs, el, ne, j) {
-      ns = split(line, segs, /[;{}]/)
-      for (k = 1; k <= ns; k++) {
-        seg = segs[k]; n = length(seg); depth = 0; lhs = ""
+    # segment splits one logical line into statements (SEG[1..NSEG]) by
+    # brace nesting, not by a flat split on every brace (Sol round 5): the
+    # body of each `{...}` is its own statement list (split on `;`), and the
+    # enclosing statement keeps a `{}` placeholder in its place. So a
+    # composite literal inside an index expression,
+    # `m.clients[strings.Join([]string{prefix, name}, "")] = c`, leaves the
+    # outer statement whole, and the statements of a func literal body are
+    # still checked one by one. A `}` closing a brace opened on an earlier
+    # logical line ends the current statement.
+    function segment(line,    n, i, c, lvl, buf) {
+      NSEG = 0; lvl = 0; buf[0] = ""; n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "{") { buf[lvl] = buf[lvl] "{}"; lvl++; buf[lvl] = ""; continue }
+        if (c == "}") {
+          SEG[++NSEG] = buf[lvl]; buf[lvl] = ""
+          if (lvl > 0) lvl--
+          continue
+        }
+        if (c == ";") { SEG[++NSEG] = buf[lvl]; buf[lvl] = ""; continue }
+        buf[lvl] = buf[lvl] c
+      }
+      for (; lvl >= 0; lvl--) SEG[++NSEG] = buf[lvl]
+    }
+    function writes_clients(line,    k, seg, n, i, c, depth, nx, pv, pp, lhs, el, ne, j) {
+      segment(line)
+      for (k = 1; k <= NSEG; k++) {
+        seg = SEG[k]; n = length(seg); depth = 0; lhs = ""
         for (i = 1; i <= n; i++) {
           c = substr(seg, i, 1)
           if (c == "(" || c == "[") { depth++; continue }
@@ -247,10 +275,20 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
       # open delimiter (Sol round 4): `m.clients[prefix+` then `name] = c`.
       # Inside a func literal body the innermost open delimiter is `{`, so
       # its statements stay separate logical lines.
-      if (joined != "" && (cont || joined ~ /[.([,=]$/)) joined = joined " " code
+      # Since Sol round 5 it continues while ANY `(` or `[` it opened is
+      # still open, even under a `{` opened after it, so a composite literal
+      # split across lines inside an index (`m.clients[f([]string{` ...
+      # `}, "")] = c`) or a func literal body passed as an argument is one
+      # logical line. A line that starts a new statement inside such a `{`
+      # (the innermost open delimiter is `{` and the previous line does not
+      # end in a continuation token) is joined with `;`, so segment() keeps
+      # each statement of the body separate.
+      if (joined != "" && joined ~ /[.([,=]$/) joined = joined " " code
+      else if (joined != "" && cont && stack ~ /[{]$/) joined = joined "; " code
+      else if (joined != "" && cont) joined = joined " " code
       else joined = code
       track(code)
-      cont = (stack ~ /[([]$/)
+      cont = (stack ~ /[([]/)
       # A legacy method followed by anything but an identifier character:
       # a call AND a method value (`remove := r.upstreamManager.RemoveServer`).
       legacy = "[.][ \t]*(AddServerConfig|AddServer|RemoveServer|DisconnectServer)([^A-Za-z0-9_]|$)"
