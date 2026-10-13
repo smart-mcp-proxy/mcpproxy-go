@@ -12,7 +12,8 @@
 # (exit 1), a block comment or blanks between the dot and the method name on
 # one line or across lines (exit 1), the FR-020 legacy manager mutators as
 # calls, method values or split across lines, multiline and multi-target
-# m.clients writes, clear(m.clients) and writes after a fake helper
+# m.clients writes (including an index expression split inside its brackets
+# and a write inside a func literal argument), clear(m.clients) and writes after a fake helper
 # declaration in a raw string, string or block comment (exit 1), and whole-line, block and string-literal mentions (must exit 0), a failing
 # find or awk (must exit 2, not report a clean tree). Then runs the real script
 # on the repository (must exit 0).
@@ -278,6 +279,31 @@ r="$(mkroot pr3-manager-init-read-ok)"
 mkdir -p "$r/internal/upstream"
 printf 'func (m *Manager) Other(name string) bool {\n\tif c, ok := m.clients[name]; ok && c != nil {\n\t\treturn true\n\t}\n\tfor n, c := range m.clients {\n\t\t_, _ = n, c\n\t}\n\tfor i := 0; i < len(m.clients); i++ {\n\t}\n\tswitch c := m.clients[name]; {\n\tcase c == nil:\n\t}\n\tif m.clients[name] == nil {\n\t\treturn false\n\t}\n\treturn false\n}\n' > "$r/internal/upstream/manager.go"
 expect "read-only if/for/switch initializers and range over m.clients are allowed" 0 "$r"
+# Sol round 4: a statement continues while a `(` or `[` it opened is still
+# open (delimiter depth), not only when the line ends in `.`, `(`, `[`, `,`
+# or `=`: gofmt keeps `m.clients[prefix+` / `name] = c` split, and that is a
+# registry write. Inside a func literal body the innermost open delimiter is
+# `{`, so its statements stay separate lines.
+r="$(mkroot pr3-manager-multiline-index)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(prefix, name string, c *managed.Client) {\n\tm.clients[prefix+\n\t\tname] = c\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted multiline index expression m.clients[prefix+ / name] = c" 1 "$r"
+r="$(mkroot pr3-manager-multiline-index-call)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(name string, c *managed.Client) {\n\tvar ok bool\n\tm.clients[key(name,\n\t\t"x")], ok = c, true\n\t_ = ok\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted multi-target write with a call split inside the index" 1 "$r"
+r="$(mkroot pr3-manager-funclit-write)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(name string, c *managed.Client) {\n\trun(func() {\n\t\tx := 1\n\t\tm.clients[name] = c\n\t\t_ = x\n\t})\n}\n' > "$r/internal/upstream/manager.go"
+expect "planted write inside a func literal passed as an argument" 1 "$r"
+r="$(mkroot pr3-manager-multiline-index-read-ok)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) Other(prefix, name string) bool {\n\tc := m.clients[prefix+\n\t\tname]\n\trun(func() {\n\t\t_ = m.clients[name]\n\t})\n\treturn c == m.clients[prefix+\n\t\tname]\n}\n' > "$r/internal/upstream/manager.go"
+expect "multiline index reads and reads in a func literal are allowed" 0 "$r"
+r="$(mkroot pr3-manager-multiline-index-helper-ok)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) installLocked(prefix, name string, c *managed.Client) {\n\tm.clients[prefix+\n\t\tname] = c\n}\n' > "$r/internal/upstream/manager_generation.go"
+expect "a multiline index write inside installLocked is allowed" 0 "$r"
 r="$(mkroot pr3-manager-fake-helper-raw)"
 mkdir -p "$r/internal/upstream"
 # shellcheck disable=SC2016 # a Go raw string, single-quoted on purpose

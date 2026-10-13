@@ -151,7 +151,12 @@ fi
 #    `case` is dropped first, so `if m.clients[n] = c; ok {` is a write too
 #    (Sol round 3).
 #  A statement split across lines (a code line ending in `.`, `(`, `[`, `,`
-#  or `=` continues on the next code line) is matched as one logical line.
+#  or `=` continues on the next code line, and so does a line that leaves a
+#  `(` or `[` open as its innermost open delimiter: `m.clients[prefix+` then
+#  `name] = c`, Sol round 4) is matched as one logical line. Delimiter depth
+#  is tracked on the lexed code across lines; a `{` (a func literal or a
+#  composite literal body) ends the continuation, so the statements inside a
+#  func literal passed as an argument are still separate lines.
 #  The enclosing function is tracked on the lexed CODE, and only from a
 #  top-level declaration (a line starting in column 0): a declaration inside a
 #  raw string, a string or a comment never changes it (Sol round 2).
@@ -211,7 +216,17 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
       gsub(/^[ \t(*]+|[ \t)]+$/, "", el)
       return el ~ /^m[ \t]*[.][ \t]*clients[ \t)]*(\[.*\])?$/
     }
-    FNR == 1 { inblock = 0; inraw = 0; fn = ""; joined = "" }
+    # track updates the open-delimiter stack (one character per open `(`,
+    # `[` or `{`) with one line of lexed code; it persists across lines.
+    function track(line,    i, n, c) {
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        if (c == "(" || c == "[" || c == "{") stack = stack c
+        else if ((c == ")" || c == "]" || c == "}") && stack != "") stack = substr(stack, 1, length(stack) - 1)
+      }
+    }
+    FNR == 1 { inblock = 0; inraw = 0; fn = ""; joined = ""; stack = ""; cont = 0 }
     {
       raw = $0
       code = strip(raw)
@@ -221,15 +236,21 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
         fn = decl
         sub(/^func[ \t]*(\([^)]*\)[ \t]*)?/, "", fn)
         sub(/[^A-Za-z0-9_].*$/, "", fn)
-        joined = ""
+        joined = ""; stack = ""; cont = 0
       }
       gsub(/^[ \t]+|[ \t]+$/, "", code)
       if (code == "") next
       # A statement continued on the next line (the code ends with `.`, `(`,
       # `[`, `,` or `=`) is matched as one logical line, so a selector, a
       # call or an assignment split across lines is still seen (Sol round 1).
-      if (joined != "" && joined ~ /[.([,=]$/) joined = joined " " code
+      # It also continues while a `(` or `[` it opened is still the innermost
+      # open delimiter (Sol round 4): `m.clients[prefix+` then `name] = c`.
+      # Inside a func literal body the innermost open delimiter is `{`, so
+      # its statements stay separate logical lines.
+      if (joined != "" && (cont || joined ~ /[.([,=]$/)) joined = joined " " code
       else joined = code
+      track(code)
+      cont = (stack ~ /[([]$/)
       # A legacy method followed by anything but an identifier character:
       # a call AND a method value (`remove := r.upstreamManager.RemoveServer`).
       legacy = "[.][ \t]*(AddServerConfig|AddServer|RemoveServer|DisconnectServer)([^A-Za-z0-9_]|$)"
