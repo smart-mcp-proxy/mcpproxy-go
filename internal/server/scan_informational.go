@@ -305,6 +305,18 @@ func (s *Server) unclaimInformationalScan(name string) {
 	delete(s.infoScanKnown, name)
 }
 
+// forgetInformationalScan drops every trace of a removed server: the claim, the
+// known mark and the retry budget. A server added again under the same name is
+// a new admission and must neither be skipped as "already seen" nor inherit a
+// retired server's exhausted attempts.
+func (s *Server) forgetInformationalScan(name string) {
+	s.infoScanMu.Lock()
+	defer s.infoScanMu.Unlock()
+	delete(s.infoScanQueued, name)
+	delete(s.infoScanKnown, name)
+	delete(s.infoScanAttempts, name)
+}
+
 func (s *Server) releaseInformationalScan(name string) {
 	s.infoScanMu.Lock()
 	defer s.infoScanMu.Unlock()

@@ -125,7 +125,17 @@ func (s *Server) removeServerFromConfig(name string) (storage.PurgeReport, error
 		return storage.PurgeReport{}, fmt.Errorf("runtime not available")
 	}
 	res, err := s.runtime.Commit("remove_server", func(tx *runtime.CommitTx) error {
-		return tx.RemoveServer(name)
+		if err := tx.RemoveServer(name); err != nil {
+			return err
+		}
+		// A later add under this name is a NEW admission: forget the
+		// informational-scan bookkeeping (claim, known mark, retry budget) so
+		// the re-added server gets its baseline scan again. Done inside the
+		// commit so an add of the same name cannot be forgotten by a removal
+		// that was committed before it. Both removal doors (REST
+		// Server.RemoveServer and the MCP commit writer) pass through here.
+		s.forgetInformationalScan(name)
+		return nil
 	})
 	if err != nil {
 		return storage.PurgeReport{}, err

@@ -2200,9 +2200,6 @@ func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 
 	// Notify about upstream server change
 	s.OnUpstreamServerChange()
-	// A later add under this name is a NEW admission: forget the informational
-	// scan claim so the re-added server gets its baseline scan again.
-	s.unclaimInformationalScan(serverName)
 
 	s.logger.Info("Server removed successfully",
 		zap.String("name", serverName),

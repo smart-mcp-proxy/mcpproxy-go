@@ -614,3 +614,61 @@ func TestInformationalScan_ReaddAfterRemoveIsScannedAgain(t *testing.T) {
 	s.maybeStartInformationalScans(context.Background())
 	waitForStartedScans(t, fake, []string{"acme"})
 }
+
+// The MCP `upstream_servers remove` door does not go through Server.RemoveServer:
+// it calls the commit writer, which is removeServerFromConfig. The claim must be
+// forgotten on that path too, or MCP remove + add under one name skips the scan.
+func TestInformationalScan_ReaddAfterWriterRemoveIsScannedAgain(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s := newInformationalTestServer(t, fake, nil, enabledServer("acme", config.TrustModeManual))
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+
+	_, err := commitUpstreamWriter{s: s}.removeServer("acme")
+	require.NoError(t, err)
+	fake = newFakeSecurityScanner()
+	s.securityScanner = fake
+
+	require.NoError(t, s.AddServer(context.Background(), enabledServer("acme", config.TrustModeManual)))
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+}
+
+// A replacement must not inherit the removed server's exhausted retry budget:
+// after the old server was retired at the cap, one transient start failure on
+// the re-added server must still be retried on the next servers.changed.
+func TestInformationalScan_ReaddDoesNotInheritRetiredAttempts(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	fake.startScanErr = errors.New("server is disconnected")
+	s := newInformationalTestServer(t, fake, nil, enabledServer("acme", config.TrustModeManual))
+	for i := 0; i < maxInformationalScanAttempts; i++ {
+		s.maybeStartInformationalScans(context.Background())
+		require.Eventually(t, func() bool {
+			s.infoScanMu.Lock()
+			defer s.infoScanMu.Unlock()
+			return !s.infoScanQueued["acme"]
+		}, 2*time.Second, 5*time.Millisecond)
+	}
+	require.Len(t, fake.startScanAttempts(), maxInformationalScanAttempts, "old server retired at the cap")
+
+	require.NoError(t, s.RemoveServer(context.Background(), "acme"))
+	fake = newFakeSecurityScanner()
+	fake.startScanErr = errors.New("transient")
+	s.securityScanner = fake
+	require.NoError(t, s.AddServer(context.Background(), enabledServer("acme", config.TrustModeManual)))
+
+	// First attempt on the replacement fails...
+	s.maybeStartInformationalScans(context.Background())
+	require.Eventually(t, func() bool {
+		s.infoScanMu.Lock()
+		defer s.infoScanMu.Unlock()
+		return !s.infoScanQueued["acme"]
+	}, 2*time.Second, 5*time.Millisecond)
+	fake.mu.Lock()
+	fake.startScanErr = nil
+	fake.mu.Unlock()
+
+	// ...and must be retried, not retired on the old server's budget.
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+}
