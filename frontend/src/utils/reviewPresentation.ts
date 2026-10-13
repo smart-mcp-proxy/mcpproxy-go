@@ -273,7 +273,9 @@ function schemaLines(before: unknown, after: unknown): ChangeLine[] {
   // so a widened contract is never hidden behind a property line.
   const rb = isObj(before) ? before : {}; const ra = isObj(after) ? after : {}
   for (const key of new Set([...Object.keys(rb), ...Object.keys(ra)])) {
-    if (key === 'properties' || key === 'required' || same(rb[key], ra[key])) continue
+    if (key === 'properties' || key === 'required') continue
+    // An absent key and an explicit null are different contracts (const: null, default: null).
+    if (has(rb, key) === has(ra, key) && same(rb[key], ra[key])) continue
     lines.push({ kind: 'changed', text: `Schema setting ${key} changed` })
   }
   // Nothing recognised at all (e.g. a non-object schema) must not vanish.

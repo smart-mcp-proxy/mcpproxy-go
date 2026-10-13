@@ -74,6 +74,16 @@ describe('summarizeToolChange schema edge cases (Sol r1)', () => {
     expect(texts).toContain('Parameter extra (string)')
     expect(texts).toContain('Schema setting additionalProperties changed')
   })
+  it('reports a removed or added null-valued root setting next to a property line', () => {
+    const prev = { description: 'a', input_schema: { ...schema({}), const: null, default: null }, output_schema: null, annotations: { readOnlyHint: true } }
+    const removed = changed('a', 'h', { input_schema: schema({ extra: 'string' }), previous: prev })
+    const texts = summarizeToolChange(removed)[0].lines.map(l => l.text)
+    expect(texts).toContain('Parameter extra (string)')
+    expect(texts).toContain('Schema setting const changed')
+    expect(texts).toContain('Schema setting default changed')
+    const added = changed('a', 'h', { input_schema: { ...schema({}), const: null }, previous: { ...prev, input_schema: schema({}) } })
+    expect(summarizeToolChange(added)[0].lines.map(l => l.text)).toEqual(['Schema setting const changed'])
+  })
   it('treats inherited names as plain property names', () => {
     const added = changed('a', 'h', { input_schema: schema({ constructor: 'string', toString: 'number' }) })
     expect(summarizeToolChange(added)[0].lines.map(l => l.text)).toEqual(['Parameter constructor (string)', 'Parameter toString (number)'])
