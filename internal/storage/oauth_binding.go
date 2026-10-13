@@ -181,7 +181,9 @@ func (b *BoltDB) GetOAuthClientCredentialsBound(serverKey string, binding commit
 // of another epoch under the key is a leftover the bound writer does not
 // build on: mutate starts from an empty record. The written record carries
 // the binding's epoch. It reports whether it wrote; mutate returning
-// ErrSkipOAuthTokenUpdate leaves the record alone and reports false.
+// ErrSkipOAuthTokenUpdate leaves the record alone and reports false. On a
+// write, the record passed to mutate carries the written Revision afterwards
+// (a refresh flight reports it as the revision it serves).
 func (b *BoltDB) UpdateOAuthTokenIfBound(serverKey, server string, binding commitview.CredentialBinding, mutate func(rec *OAuthTokenRecord) error) (bool, error) {
 	written := false
 	err := b.db.Update(func(tx *bbolt.Tx) error {

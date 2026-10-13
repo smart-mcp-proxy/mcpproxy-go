@@ -404,3 +404,66 @@ func gatedOAuthClient(t *testing.T, g *dialgate.Gate, url string, oauthCfg *clie
 	require.NoError(t, err)
 	return client.NewClient(dialgate.WrapTransport(g, tr))
 }
+
+// Sol r4 (#1621): the stored-DCR refresh persists through
+// UpdateOAuthTokenIfBound and must report the revision it wrote to the
+// flight. A same-binding replacement that rewrites the record with the SAME
+// access token between that persist and the coordinator's final read is a
+// later write: the old store must not adopt its revision, so the old store's
+// 5xx-recovery ClearToken erases nothing.
+func TestRefreshWithStoredCredentials_ClearKeepsSameAccessTokenReplacement(t *testing.T) {
+	as := newRotatingAuthServer(t)
+	db, err := storage.NewBoltDB(t.TempDir(), zap.NewNop().Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	name := strings.ReplaceAll(t.Name(), "/", "_")
+	srvURL := "https://mcp.example.invalid/mcp"
+	cfg := &config.ServerConfig{Name: name, URL: srvURL, Protocol: "streamable-http"}
+	key := oauth.GenerateServerKey(cfg.Name, cfg.URL)
+	require.NoError(t, db.SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName: key, DisplayName: cfg.Name, AccessToken: "at-0", RefreshToken: "rt-0",
+		TokenType: "Bearer", ExpiresAt: time.Now().Add(-time.Second), ClientID: "dcr-client",
+	}))
+	store := oauth.NewPersistentTokenStore(cfg.Name, cfg.URL, db)
+	oauthCfg := &client.OAuthConfig{
+		TokenStore:            store,
+		PKCEEnabled:           true,
+		AuthServerMetadataURL: as.srv.URL + "/.well-known/oauth-authorization-server",
+	}
+	tr, err := transport.NewStreamableHTTP(srvURL, transport.WithHTTPOAuth(*oauthCfg))
+	require.NoError(t, err)
+	c := &Client{config: cfg, storage: db, logger: zap.NewNop()}
+	c.client = client.NewClient(tr)
+	c.bindOAuthRefresher(oauthCfg)
+
+	var replacedRev uint64
+	afterStoredDCRPersistHook = func(server string) {
+		if server != name {
+			return
+		}
+		require.NoError(t, db.UpdateOAuthToken(key, func(r *storage.OAuthTokenRecord) error {
+			r.RefreshToken = "rt-replacement"
+			return nil
+		}))
+		rec, err := db.GetOAuthToken(key)
+		require.NoError(t, err)
+		require.Equal(t, "at-1", rec.AccessToken, "the replacement keeps the access token")
+		replacedRev = rec.Revision
+	}
+	t.Cleanup(func() { afterStoredDCRPersistHook = nil })
+
+	tok, err := store.GetToken(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "at-1", tok.AccessToken)
+	require.NotZero(t, replacedRev)
+	as.mu.Lock()
+	require.Equal(t, []string{"dcr-client"}, as.clientIDs, "the stored-DCR branch ran")
+	as.mu.Unlock()
+
+	require.NoError(t, store.(*oauth.PersistentTokenStore).ClearToken())
+	rec, err := db.GetOAuthToken(key)
+	require.NoError(t, err, "the replacement's record must survive the old store's clear")
+	assert.Equal(t, "rt-replacement", rec.RefreshToken)
+	assert.Equal(t, replacedRev, rec.Revision)
+}

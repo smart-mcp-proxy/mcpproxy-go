@@ -54,6 +54,10 @@ func (c *Client) extraParamValue(key string) string {
 	return ""
 }
 
+// afterStoredDCRPersistHook, when set (tests only), runs after the stored-DCR
+// refresh persisted its token and before the flight's final read.
+var afterStoredDCRPersistHook func(server string)
+
 // oauthRefreshFunc returns the one refresh function both triggers use (FR-003):
 // mcp-go's handler.RefreshToken when the live handler has a client id (static
 // clients, and DCR clients whose stored registration matches or is unknown),
@@ -126,7 +130,9 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 	if qahooks.ParkOAuthPersist != nil {
 		qahooks.ParkOAuthPersist(c.config.Name)
 	}
+	var savedRec *storage.OAuthTokenRecord
 	written, err := c.storage.UpdateOAuthTokenIfBound(serverKey, c.config.Name, binding, func(cur *storage.OAuthTokenRecord) error {
+		savedRec = cur
 		if inFlight && !oauth.GenerationMatches(cur, gen) {
 			discarded = true
 			return storage.ErrSkipOAuthTokenUpdate
@@ -172,8 +178,17 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 		return nil, fmt.Errorf("failed to save refreshed token for %s: %w", c.config.Name, oauth.ErrCredentialBindingStale)
 	}
 
+	// Sol r4 (#1621): report the revision this persist wrote (the record
+	// passed to mutate carries it once written), so the flight serves this
+	// record and a later same-access-token rewrite is not adopted.
+	if savedRec != nil {
+		oauth.NoteFlightSavedRevision(ctx, savedRec.Revision)
+	}
 	oauth.DefaultRefreshCoordinator().NoteTokenSavedFor(serverKey, binding)
 	oauth.GetTokenStoreManager().NotifyTokenSavedFor(c.config.Name, newToken.ExpiresAt, binding)
+	if hook := afterStoredDCRPersistHook; hook != nil {
+		hook(c.config.Name)
+	}
 	c.logger.Info("OAuth token refreshed via stored DCR credentials",
 		zap.String("server", c.config.Name),
 		zap.Time("new_expiry", newToken.ExpiresAt))

@@ -248,8 +248,8 @@ configuration changed. `{Incarnation, OAuthEpoch}` is the server's credential
 binding. The commit stamps it on the snapshot, the `upstreams` row and the
 manager's desired view in one pass, and the manager binds every instance it
 builds to the binding of the generation it was built for (never read from the
-row). Every OAuth write, read and clear an instance makes goes through a
-storage method that checks the binding in the same bbolt transaction: token
+row). Every OAuth write and clear an instance makes goes through a storage
+method that checks the row's binding in the same bbolt transaction: token
 saves (a login's code exchange with its paired client, a refresh), DCR client
 saves, completion events, the 5xx token clear, the config-build DCR hygiene
 clears and the clears after a rejected refresh or login. The removal purge
@@ -257,7 +257,9 @@ deletes the row and the OAuth-config clear raises the row's epoch in the
 transaction that deletes the credentials, so an old instance's write that was
 already past its network round-trip either committed first (and was deleted)
 or finds the row gone or re-bound and writes nothing; a same-name re-add never
-sees the old server's tokens. Reads ignore records of another epoch. Every
+sees the old server's tokens. Reads are epoch-filtered only: a bound read
+treats a record of another epoch as absent, but does not check the row, so a
+removed name stays unreadable because its removal purges the records. Every
 write to the `oauth_tokens` bucket takes a new `Revision` from the bucket
 sequence, and a binding-conditional clear acts only on the revision its
 caller inspected, so a parked clear never erases what a same-binding

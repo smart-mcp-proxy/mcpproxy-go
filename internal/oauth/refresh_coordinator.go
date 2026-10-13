@@ -634,6 +634,14 @@ func noteFlightSavedRevision(ctx context.Context, rev uint64) {
 	}
 }
 
+// NoteFlightSavedRevision is noteFlightSavedRevision for a refresh function
+// that persists outside PersistentTokenStore.SaveToken (core's stored-DCR
+// sub-path, Sol r4 on #1621): every flight persist reports the revision it
+// wrote, so the flight serves that record and never a later rewrite's.
+func NoteFlightSavedRevision(ctx context.Context, rev uint64) {
+	noteFlightSavedRevision(ctx, rev)
+}
+
 // FlightGeneration returns the generation of the refresh flight ctx belongs
 // to. A token persisted under such a ctx MUST only be written while the stored
 // record still has that generation (FR-006a).

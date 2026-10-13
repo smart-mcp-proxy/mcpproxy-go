@@ -345,3 +345,22 @@ func TestSaveOAuthCompletionEventIfBound(t *testing.T) {
 	assert.Equal(t, int64(2), events[0].Incarnation)
 	assert.Equal(t, int64(2), events[0].OAuthEpoch)
 }
+
+// Sol r4 (#1621): on a write, the record UpdateOAuthTokenIfBound passed to
+// mutate carries the written revision afterwards; a refresh flight reports it
+// as the revision it serves.
+func TestUpdateOAuthTokenIfBound_MutateRecordCarriesWrittenRevision(t *testing.T) {
+	m := newCommitTestManager(t)
+	var seen *OAuthTokenRecord
+	ok, err := m.db.UpdateOAuthTokenIfBound(bindKey, "acme", commitview.CredentialBinding{}, func(rec *OAuthTokenRecord) error {
+		seen = rec
+		rec.AccessToken = "at"
+		return nil
+	})
+	require.NoError(t, err)
+	require.True(t, ok)
+	stored, err := m.db.GetOAuthToken(bindKey)
+	require.NoError(t, err)
+	require.NotZero(t, stored.Revision)
+	assert.Equal(t, stored.Revision, seen.Revision)
+}
