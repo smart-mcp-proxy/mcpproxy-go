@@ -14,7 +14,7 @@
 # calls, method values or split across lines (and, Sol round 6, with a
 # parenthesized receiver, an alias or a method expression such as
 # `(*Manager).RemoveServer`), multiline and multi-target
-# m.clients writes (including an index expression split inside its brackets
+# m.clients writes (any receiver spelling: (m), (*m), an alias; Sol round 7) (including an index expression split inside its brackets
 # a write inside a func literal argument, and a composite literal inside the
 # index expression on one line or across lines), clear(m.clients) and writes after a fake helper
 # declaration in a raw string, string or block comment (exit 1), and whole-line, block and string-literal mentions (must exit 0), a failing
@@ -384,6 +384,23 @@ r="$(mkroot pr3-manager-spelling-ok)"
 mkdir -p "$r/internal/upstream"
 printf 'func (m *Manager) RemoveServer(id string) {\n\tm.RemoveServerAt(id, 0)\n\t(m).RemoveServerAt(id, 0)\n\t_ = (*Manager).AddServerAt\n\t// m.RemoveServer(id)\n}\n' > "$r/internal/upstream/manager_generation.go"
 expect "legacy declarations, generation-bound calls in any spelling and comments are allowed in internal/upstream" 0 "$r"
+
+# Sol round 7: a parenthesized, dereferenced or aliased receiver writes the
+# same registry. Outside unregisterLocked/installLocked every spelling of a
+# .clients write, delete or clear is a hit; inside them it is allowed.
+for line in '	(m).clients[name] = c' '	(*m).clients[name] = c' '	delete((m).clients, name)' \
+            '	clear((m).clients)' '	delete((*m).clients, name)' '	clear((*m).clients)' \
+            '	mm := m\n	mm.clients[name] = c' '	mm := m\n	delete(mm.clients, name)' \
+            '	( m ).clients[name], ok = c, true'; do
+  r="$(mkroot "pr3-registry-spelling-$RANDOM")"
+  mkdir -p "$r/internal/upstream"
+  printf 'func (m *Manager) Other(name string, c *managed.Client) {\n\tvar ok bool\n%b\n\t_ = ok\n}\n' "$line" > "$r/internal/upstream/manager.go"
+  expect "planted registry write spelled ${line#	} outside the helpers" 1 "$r"
+done
+r="$(mkroot pr3-registry-spelling-helpers-ok)"
+mkdir -p "$r/internal/upstream"
+printf 'func (m *Manager) unregisterLocked(name string) *managed.Client {\n\tdelete((m).clients, name)\n\tdelete((*m).clients, name)\n\treturn nil\n}\n\nfunc (m *Manager) installLocked(name string, c *managed.Client) {\n\t(m).clients[name] = c\n\t(*m).clients[name] = c\n}\n\nfunc (m *Manager) read(name string) bool {\n\treturn (m).clients[name] == nil || len((*m).clients) > 0\n}\n' > "$r/internal/upstream/manager_generation.go"
+expect "parenthesized registry writes inside unregisterLocked/installLocked and reads elsewhere are allowed" 0 "$r"
 
 # An operational failure never reports a clean tree (review rounds 18-20): a
 # failing file discovery or scanner exits 2, whether the tool is shadowed on

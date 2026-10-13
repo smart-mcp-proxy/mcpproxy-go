@@ -168,6 +168,8 @@ fi
 #  The enclosing function is tracked on the lexed CODE, and only from a
 #  top-level declaration (a line starting in column 0): a declaration inside a
 #  raw string, a string or a comment never changes it (Sol round 2).
+#  The receiver of a .clients write, delete or clear may be spelled in any
+#  way, `m`, `(m)`, `(*m)` or an alias of the manager (Sol round 7).
 #  Not covered (documented): writes through an alias of the map
 #  (`cs := m.clients; cs[n] = c`); review catches those.
 pr3_files=()
@@ -246,7 +248,10 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
     }
     function is_clients(el) {
       gsub(/^[ \t(*]+|[ \t)]+$/, "", el)
-      return el ~ /^m[ \t]*[.][ \t]*clients[ \t)]*(\[.*\])?$/
+      # Any receiver spelling (Sol round 7): `m`, `(m)`, `(*m)`, `( m )` and an
+      # alias `mm` all name the same registry; leading `(`/`*` are stripped
+      # above, a `)` may follow the receiver identifier.
+      return el ~ /^[A-Za-z_][A-Za-z0-9_]*[ \t)]*[.][ \t]*clients[ \t)]*(\[.*\])?$/
     }
     # track updates the open-delimiter stack (one character per open `(`,
     # `[` or `{`) with one line of lexed code; it persists across lines.
@@ -309,7 +314,7 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
         # `(*m).X`, an alias `mm.X`, a method expression `(*Manager).X`
         # (Sol round 6). The declarations `func (m *Manager) X(` have no dot.
         if (joined ~ legacy) hit = 1
-        else if (fn != "unregisterLocked" && fn != "installLocked" && (joined ~ /(delete|clear)[ \t]*[(][ \t(]*m[ \t]*[.][ \t]*clients[ \t)]*[,)]/ || writes_clients(joined)))
+        else if (fn != "unregisterLocked" && fn != "installLocked" && (joined ~ /(^|[^A-Za-z0-9_.])(delete|clear)[ \t]*[(][ \t(*]*[A-Za-z_][A-Za-z0-9_]*[ \t)]*[.][ \t]*clients[ \t)]*[,)]/ || writes_clients(joined)))
           hit = 1
       }
       if (hit) { print FILENAME ":" FNR ":" raw; joined = "" }
