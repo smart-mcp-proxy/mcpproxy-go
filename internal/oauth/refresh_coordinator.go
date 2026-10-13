@@ -435,6 +435,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		return nil, 0, false, refreshErr
 	}
 
+	clearedByFlight := false
 	if cls == RefreshClassInvalidClient {
 		// Sol r5 on #1621: a writer rewrote the record after the request
 		// read it (e.g. a same-binding replacement that kept the client id
@@ -447,7 +448,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 		}
 		// The clear acts on exactly the record the failed request used, by
 		// its revision (Spec 116 PR2b), never on a record re-read after it.
-		annotated, superseded := c.handleInvalidClient(req, rec, st, refreshErr)
+		superseded, cleared, annotated := c.handleInvalidClient(req, rec, st, refreshErr)
 		if superseded {
 			// Sol r6 on #1621: the revision-checked clear refused because a
 			// writer rewrote the record (or re-bound the server) between the
@@ -458,6 +459,7 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 			return nil, 0, false, refreshErr
 		}
 		refreshErr = annotated
+		clearedByFlight = cleared
 	}
 
 	if cls.IsTerminal() {
@@ -472,6 +474,22 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 				if again.AccessToken != "" {
 					return tokenFromRecord(again), again.Revision, false, nil
 				}
+				return nil, 0, false, refreshErr
+			}
+			if clearedByFlight && again.ClientID != "" {
+				// Sol r7 on #1621: the flight's revision-checked clear
+				// succeeded, yet the stored record has a client id again: a
+				// same-binding writer re-saved a registration after the clear
+				// (e.g. the same client id with a corrected secret, callback
+				// port or redirect URI). That record has the flight's
+				// generation but is not the one the flight cleared, so the
+				// rejection must not latch against it or emit a terminal
+				// outcome; the next refresh tries the rewritten registration.
+				c.mu.Lock()
+				if st.clearedClientID == rec.ClientID {
+					st.dcrCleared, st.clearedClientID = false, ""
+				}
+				c.mu.Unlock()
 				return nil, 0, false, refreshErr
 			}
 			latchRec = again // after a DCR clear the generation changed
@@ -501,17 +519,18 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 // without error and cleared nothing: the record the failed request used is
 // no longer the stored one (a same-binding rewrite or a re-bind landed in the
 // window before the clear), so the rejection must not latch against it.
-func (c *RefreshCoordinator) handleInvalidClient(req RefreshRequest, rec *storage.OAuthTokenRecord, st *refreshKeyState, err error) (annotated error, superseded bool) {
+// cleared is true when the flight's own clear removed the registration.
+func (c *RefreshCoordinator) handleInvalidClient(req RefreshRequest, rec *storage.OAuthTokenRecord, st *refreshKeyState, err error) (superseded, cleared bool, annotated error) {
 	if req.StaticClient {
-		return &RefreshFailure{Class: RefreshClassInvalidClient, Err: err,
-			Message: "the authorization server rejected the configured OAuth client (invalid_client); fix oauth.client_id / oauth.client_secret for this server, then sign in again"}, false
+		return false, false, &RefreshFailure{Class: RefreshClassInvalidClient, Err: err,
+			Message: "the authorization server rejected the configured OAuth client (invalid_client); fix oauth.client_id / oauth.client_secret for this server, then sign in again"}
 	}
 	c.mu.Lock()
 	alreadyCleared := st.dcrCleared
 	seq := st.saveSeq
 	c.mu.Unlock()
 	if alreadyCleared {
-		return &RefreshFailure{Class: RefreshClassInvalidClient, Err: err, Message: rejectsNewRegistrationsMessage}, false
+		return false, false, &RefreshFailure{Class: RefreshClassInvalidClient, Err: err, Message: rejectsNewRegistrationsMessage}
 	}
 	// No "login flow active" exemption: the clear is a compare-and-clear on
 	// the client id AND refresh token this request used, so a login that
@@ -519,6 +538,7 @@ func (c *RefreshCoordinator) handleInvalidClient(req RefreshRequest, rec *storag
 	// connect attempt that is itself running this refresh (tryOAuthAuth
 	// holds a flow for its whole duration) still gets the rejected
 	// registration removed and can re-register on the next sign-in.
+	didClear := false
 	if (req.ClearClient != nil || req.ClearClientAt != nil) && rec.ClientID != "" {
 		var cleared bool
 		var clearErr error
@@ -534,9 +554,10 @@ func (c *RefreshCoordinator) handleInvalidClient(req RefreshRequest, rec *storag
 		if !cleared && clearErr == nil && req.ClearClientAt != nil {
 			c.log().Debug("rejected DCR client registration not cleared: the record changed since the refresh read it",
 				zap.String("server", req.ServerName))
-			return err, true
+			return true, false, err
 		}
 		if cleared {
+			didClear = true
 			c.mu.Lock()
 			if st.saveSeq == seq {
 				st.dcrCleared = true
@@ -547,8 +568,8 @@ func (c *RefreshCoordinator) handleInvalidClient(req RefreshRequest, rec *storag
 				zap.String("server", req.ServerName))
 		}
 	}
-	return &RefreshFailure{Class: RefreshClassInvalidClient, Err: err,
-		Message: signInToReRegisterMessage}, false
+	return false, didClear, &RefreshFailure{Class: RefreshClassInvalidClient, Err: err,
+		Message: signInToReRegisterMessage}
 }
 
 const signInToReRegisterMessage = "client registration rejected by the authorization server; sign in again to re-register"

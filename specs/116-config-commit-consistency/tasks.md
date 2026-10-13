@@ -233,7 +233,13 @@ from the design text:
   superseded: no clear, no latch. The same holds when the rewrite lands
   after that check but before the clear (Sol r6 on #1621): the
   revision-checked clear clears nothing, `handleInvalidClient` reports it,
-  and the flight skips the latch and the terminal outcome. `Forget`/`ForgetServer` run for purged and
+  and the flight skips the latch and the terminal outcome. When the clear
+  succeeds but a same-binding writer re-saves a registration before the
+  terminal re-read (Sol r7 on #1621: same client id and refresh token, so
+  the flight's generation again), the re-read still carries a client id
+  that the flight's own clear removed: that record is not the one cleared,
+  so the flight skips the latch and the terminal outcome and resets its
+  re-registration state for that client id. `Forget`/`ForgetServer` run for purged and
   OAuth-cleared servers in commit step 6 and on logout. The RefreshManager
   ignores a terminal outcome whose binding is not the registered instance's
   (`Runtime.CurrentCredentialBinding`), in addition to the existing
