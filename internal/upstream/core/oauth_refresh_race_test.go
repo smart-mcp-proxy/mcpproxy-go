@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
 
 // rotatingAuthServer issues one-time refresh tokens. Reusing a refresh token
@@ -144,11 +145,11 @@ func TestOAuthRefreshRace_OneTokenRequestPerExpiry(t *testing.T) {
 				PKCEEnabled:           true,
 				AuthServerMetadataURL: as.srv.URL + "/.well-known/oauth-authorization-server",
 			}
-			tr, err := transport.NewStreamableHTTP(mcpSrv.URL, transport.WithHTTPOAuth(*oauthCfg))
-			require.NoError(t, err)
-			mcpClient := client.NewClient(tr)
+			gate, gatedDials := countingGate()
+			mcpClient := gatedOAuthClient(t, gate, mcpSrv.URL, oauthCfg)
 
 			c := &Client{config: cfg, storage: db, logger: zap.NewNop()}
+			c.gate.Store(gate)
 			c.client = mcpClient
 			c.bindOAuthRefresher(oauthCfg)
 
@@ -196,6 +197,7 @@ func TestOAuthRefreshRace_OneTokenRequestPerExpiry(t *testing.T) {
 				assert.NoError(t, e, "caller %d", i)
 			}
 			assert.Equal(t, int32(1), as.tokenRequests.Load(), "exactly one refresh request per expiry")
+			assert.Positive(t, gatedDials.Load(), "the MCP and token traffic ran on the gated transport")
 			as.mu.Lock()
 			assert.False(t, as.revoked, "the grant was never replayed")
 			assert.Equal(t, []string{tc.wantClientID}, as.clientIDs, "never an empty client_id")
@@ -248,10 +250,10 @@ func TestOAuthRefreshRace_LateProactiveAfterReactiveFlight(t *testing.T) {
 				PKCEEnabled:           true,
 				AuthServerMetadataURL: as.srv.URL + "/.well-known/oauth-authorization-server",
 			}
-			tr, err := transport.NewStreamableHTTP(mcpSrv.URL, transport.WithHTTPOAuth(*oauthCfg))
-			require.NoError(t, err)
-			mcpClient := client.NewClient(tr)
+			gate, gatedDials := countingGate()
+			mcpClient := gatedOAuthClient(t, gate, mcpSrv.URL, oauthCfg)
 			c := &Client{config: cfg, storage: db, logger: zap.NewNop()}
+			c.gate.Store(gate)
 			c.client = mcpClient
 			c.bindOAuthRefresher(oauthCfg)
 
@@ -267,6 +269,7 @@ func TestOAuthRefreshRace_LateProactiveAfterReactiveFlight(t *testing.T) {
 			// The proactive timer for the old expiry lands afterwards.
 			require.NoError(t, c.RefreshOAuthTokenDirect(ctx))
 			assert.Equal(t, int32(1), as.tokenRequests.Load(), "exactly one refresh request per expiry")
+			assert.Positive(t, gatedDials.Load(), "the token request ran on the gated transport")
 
 			rec, err := db.GetOAuthToken(key)
 			require.NoError(t, err)
@@ -377,4 +380,27 @@ func TestRefreshWithStoredCredentials_CodeRedactedAndLongBodyClassified(t *testi
 	_, err = c.refreshTokenWithStoredCredentials(context.Background(), srv.URL, rec)
 	cls, _ = oauth.ClassifyRefreshError(err)
 	assert.Equal(t, oauth.RefreshClassServerError, cls)
+}
+
+// countingGate returns an open dial gate and a count of the connections it
+// dialed (Spec 116 PR4, T4.17 (b)): the race tests run over the production
+// wrapped transports, so their MCP and token traffic must be gated.
+func countingGate() (*dialgate.Gate, *atomic.Int64) {
+	g := dialgate.New()
+	var n atomic.Int64
+	g.SetHooks(&dialgate.Hooks{BeforeTrack: func() { n.Add(1) }})
+	return g, &n
+}
+
+// gatedOAuthClient builds the mcp-go client the way
+// transport.CreateHTTPClient does for an OAuth streamable-HTTP upstream with
+// a gate: the OAuth HTTP client and the MCP HTTP client run on the gate's
+// transport, and the mcp-go transport is wrapped by dialgate.WrapTransport.
+func gatedOAuthClient(t *testing.T, g *dialgate.Gate, url string, oauthCfg *client.OAuthConfig) *client.Client {
+	t.Helper()
+	oc := *oauthCfg
+	oc.HTTPClient = g.HTTPClient(30 * time.Second)
+	tr, err := transport.NewStreamableHTTP(url, transport.WithHTTPOAuth(oc), transport.WithHTTPBasicClient(g.HTTPClient(0)))
+	require.NoError(t, err)
+	return client.NewClient(dialgate.WrapTransport(g, tr))
 }

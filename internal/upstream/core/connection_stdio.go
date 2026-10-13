@@ -7,12 +7,14 @@ import (
 	"os/exec"
 	"reflect"
 	"strings"
+	"sync/atomic"
 
 	"github.com/mark3labs/mcp-go/client"
 	uptransport "github.com/mark3labs/mcp-go/client/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 	"go.uber.org/zap"
 )
 
@@ -241,7 +243,10 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			uptransport.WithCommandFunc(commandFunc))
 	}
 
-	c.client = client.NewClient(stdioTransport)
+	// Spec 116 PR4 (FR-023a): the mcp-go transport is wrapped by the
+	// instance's gate, so a retired instance sends no request or
+	// notification on the child's stdin.
+	c.client = client.NewClient(dialgate.WrapTransport(c.Gate(), stdioTransport))
 
 	// Log final stdio configuration for debugging
 	c.logger.Debug("Initialized stdio transport",
@@ -253,26 +258,28 @@ func (c *Client) connectStdio(ctx context.Context) error {
 		zap.String("working_dir", c.config.WorkingDir),
 		zap.Bool("docker_isolation", c.isDockerCommand))
 
-	// Start stdio transport with a persistent background context so the child
-	// process keeps running even if the connect context is short-lived.
-	persistentCtx := context.Background()
-	if err := c.client.Start(persistentCtx); err != nil {
+	// Start the stdio transport (this spawns the child, Docker included) in
+	// one admitted section of the instance's gate, together with the
+	// process-group (Windows: Job Object) registration and its tracking by the
+	// gate (Spec 116 PR4, FR-023, FR-025a). A retired instance launches
+	// nothing; a launch that was admitted before retirement is registered
+	// before Retire returns, and Retire kills it.
+	//
+	// The child runs under the gate's context rather than the connect
+	// context, so it keeps running when the connect context is short-lived
+	// and is cancelled when the instance is retired.
+	//
+	// The process group ID is extracted IMMEDIATELY after Start() succeeds,
+	// not after initialize() below. A restart/disconnect that interrupts an
+	// in-progress handshake (slow npx download, bulk-add contention, a
+	// timeout) previously left processGroupID at its zero value the whole time
+	// initialize() was running, so the init-failure cleanup path a few lines
+	// down (`if c.processGroupID > 0 { killProcessGroup(...) }`) silently did
+	// nothing and the spawned process (and on Windows, everything IT spawns)
+	// leaked. The later extraction below is now just a no-op (its own
+	// `if c.processGroupID <= 0` guard) for the normal success path.
+	if err := c.startStdioAdmitted(ctx); err != nil {
 		return fmt.Errorf("failed to start stdio client: %w", err)
-	}
-
-	// Extract the process group ID (Windows: assign to a Job Object) IMMEDIATELY
-	// after Start() succeeds, not after initialize() below. A restart/disconnect
-	// that interrupts an in-progress handshake (slow npx download, bulk-add
-	// contention, a timeout) previously left processGroupID at its zero value
-	// the whole time initialize() was running, so the init-failure cleanup path
-	// a few lines down (`if c.processGroupID > 0 { killProcessGroup(...) }`)
-	// silently did nothing and the spawned process (and on Windows, everything
-	// IT spawns) leaked. Setting it here means that cleanup path — and any
-	// concurrent restart that arrives before initialize() returns — has a real
-	// PID/Job Object to kill. The later extraction below is now just a no-op
-	// (its own `if c.processGroupID <= 0` guard) for the normal success path.
-	if c.processCmd != nil && c.processCmd.Process != nil {
-		c.processGroupID = extractProcessGroupID(c.processCmd, c.logger, c.config.Name)
 	}
 
 	// CRITICAL FIX: Enable stderr monitoring IMMEDIATELY after starting the process
@@ -372,7 +379,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 			zap.String("transport_type", fmt.Sprintf("%T", stdioTransport)))
 
 		transportValue := reflect.ValueOf(stdioTransport)
-		if transportValue.Kind() == reflect.Ptr {
+		if transportValue.Kind() == reflect.Pointer {
 			transportValue = transportValue.Elem()
 		}
 
@@ -511,3 +518,115 @@ func createWorkingDirCommandFunc(workingDir string) uptransport.CommandFunc {
 func createEnhancedWorkingDirCommandFunc(client *Client, workingDir string, logger *zap.Logger) uptransport.CommandFunc {
 	return createProcessGroupCommandFunc(client, workingDir, logger)
 }
+
+// stdioLaunchHook is a test seam run inside the admitted launch section,
+// after the child started and before its process group is registered with
+// the gate (T4.11). Nil in production.
+var stdioLaunchHook func()
+
+// startStdioAdmitted starts c.client (a stdio transport) inside one admitted
+// section of the gate: the start, the process-group / Job registration and
+// the gate's tracking of the child happen together, or not at all. A child
+// the gate refuses to track (it was retired during the section) is killed
+// before this returns.
+func (c *Client) startStdioAdmitted(ctx context.Context) error {
+	gate := c.Gate()
+	release, err := gate.Admit(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	if err := c.client.Start(gate.Context()); err != nil {
+		return err
+	}
+	if c.processCmd == nil || c.processCmd.Process == nil {
+		return nil
+	}
+	if c.isDockerCommand {
+		observeLaunch(c.config.Name, "docker")
+	} else {
+		observeLaunch(c.config.Name, "stdio")
+	}
+	if hook := stdioLaunchHook; hook != nil {
+		hook()
+	}
+	pgidAssigned, err := assignStdioProcessTree(c.processCmd, c.logger, c.config.Name)
+	if err != nil {
+		// FR-025a (review round 2): a child that cannot be contained (on
+		// Windows, no Job Object) is killed inside the admitted section and
+		// the start fails. Left running, its descendants would survive a
+		// retirement that can only reach the immediate process. On Windows
+		// a grandchild forked before this point is outside reach either
+		// way; CREATE_SUSPENDED (T093b, deferred) closes that window.
+		cmd := c.processCmd
+		killProcessTreeNow(startedProcessGroupID(cmd), cmd)
+		c.processGroupID = 0
+		release()
+		_ = c.client.Close()
+		return fmt.Errorf("contain stdio child: %w", err)
+	}
+	c.processGroupID = pgidAssigned
+	if c.processGroupID <= 0 {
+		// The child may already be dead (a retirement during the section
+		// cancelled the gate context, which kills the immediate child):
+		// its group, and the descendants in it, still need the kill.
+		c.processGroupID = startedProcessGroupID(c.processCmd)
+	}
+	pgid, cmd := c.processGroupID, c.processCmd
+	proc, err := gate.TrackProcess(func() { killProcessTreeNow(pgid, cmd) })
+	if err != nil {
+		// Retired while the section ran: TrackProcess already killed the
+		// group. Leave the section, then reap the child through the
+		// transport's own Close so no zombie is left behind. The recorded
+		// group ID is cleared first (review round 4): once the child is
+		// reaped the number can be handed out again, and Connect's failure
+		// cleanup would otherwise signal it unchecked.
+		c.processGroupID = 0
+		release()
+		_ = c.client.Close()
+		if hook := stdioRetiredCloseHook; hook != nil {
+			hook(c)
+		}
+		return err
+	}
+	c.stdioProc = proc
+	return nil
+}
+
+// stdioRetiredCloseHook is a test seam run after the transport's Close
+// reaped a child the retired gate refused to track (review round 4). Nil in
+// production.
+var stdioRetiredCloseHook func(*Client)
+
+// launchObserver is a test seam told about every process a launch section
+// started (Spec 116 PR4, T4.1): it proves a retired instance launched
+// nothing, even a child the gate would kill at once. Nil in production.
+var launchObserver atomic.Pointer[func(server, kind string)]
+
+func observeLaunch(server, kind string) {
+	if fn := launchObserver.Load(); fn != nil {
+		(*fn)(server, kind)
+	}
+}
+
+// SetLaunchObserverForTest installs the launch observer and returns a
+// restore func. Test-only.
+func SetLaunchObserverForTest(fn func(server, kind string)) (restore func()) {
+	prev := launchObserver.Swap(&fn)
+	return func() { launchObserver.Store(prev) }
+}
+
+// SetStdioLaunchHookForTest installs the stdio launch-section test seam
+// (T4.11) and returns a restore func. Test-only.
+func SetStdioLaunchHookForTest(fn func()) (restore func()) {
+	prev := stdioLaunchHook
+	stdioLaunchHook = fn
+	return func() { stdioLaunchHook = prev }
+}
+
+// assignStdioProcessTree contains the just-started stdio child: on Unix it
+// reads the process group the child leads; on Windows it assigns the child
+// to a Job Object and fails when it cannot (Spec 116 PR4, FR-025a). A
+// variable so a test can make containment fail on any platform.
+var assignStdioProcessTree = assignProcessTree

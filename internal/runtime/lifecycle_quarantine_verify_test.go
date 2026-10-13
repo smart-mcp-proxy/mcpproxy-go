@@ -289,6 +289,11 @@ func TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp(t *testing.T) {
 	indexed, err := rt.indexManager.GetToolsByServer("quarantined")
 	require.NoError(t, err)
 	assert.Empty(t, indexed, "a quarantined server's tools must never be indexed")
-	_, busy := rt.discoveryInProgress.Load("quarantined")
-	assert.False(t, busy, "the marker is released after the follow-up")
+	// The marker must be released after the follow-up. A background pass
+	// (sweep or reconnect) may briefly hold it again under CI load, so wait for
+	// it rather than sampling once; a leaked marker still fails here.
+	assert.Eventually(t, func() bool {
+		_, busy := rt.discoveryInProgress.Load("quarantined")
+		return !busy
+	}, 5*time.Second, 10*time.Millisecond, "the marker is released after the follow-up")
 }

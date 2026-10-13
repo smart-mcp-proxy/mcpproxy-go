@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -196,8 +198,12 @@ func (m *Manager) checkDesiredLocked(name string, gen int64) error {
 // (FR-020a, review R5.4). It runs under captureMu W + mu W, drops the
 // server's call-outcome history in the same critical section (Spec 113-d
 // FR-066), marks the instance unregistered so it never connects again, and
-// returns it for an asynchronous Disconnect by the caller. Spec 116 PR4 adds
-// the retirement barrier here (Retire, Spec 117 PR-3).
+// returns it for an asynchronous Disconnect by the caller. It also retires the
+// instance (Spec 117 PR-3 FR-036; Spec 116 PR4 FR-022): once this returns,
+// the instance launches nothing, dials nothing and sends nothing, OAuth
+// included, so every path that unregisters (AdvanceGenerations before the
+// commit publishes, RemoveServerAt, ReplaceInstanceAt for restart,
+// ForceReconnectAll and Docker recovery) leaves no live instance behind.
 //
 // The call-outcome history is dropped even when no instance is registered:
 // a removed or replaced server must not carry its failure history into
@@ -215,9 +221,21 @@ func (m *Manager) unregisterLocked(name string) *managed.Client {
 			old.MarkUnregistered()
 			// Spec 117 PR-3 (FR-036): retire the replaced or removed
 			// client while captureMu is held for writing, so a tools/list
-			// it captured can no longer be applied. Retire is an atomic
-			// store and takes no lock, so it adds no lock-order edge.
-			old.Retire()
+			// it captured can no longer be applied.
+			// Spec 116 PR4 (FR-022, FR-025): Retire also closes the dial
+			// gate before this returns. Its barrier takes Gate.mu (L5)
+			// under captureMu W + mu W (L3 → L4 → L5, the documented
+			// order) and waits only for admitted leaf operations (a dial,
+			// one write, a process start), whose connections it has
+			// already closed, so it is bounded and never waits on the
+			// network or on a manager lock.
+			if obs := retireObserver.Load(); obs != nil {
+				start := time.Now()
+				old.Retire()
+				(*obs)(statsName, time.Since(start))
+			} else {
+				old.Retire()
+			}
 		}
 	}
 	m.callStats.Drop(statsName)
@@ -226,6 +244,18 @@ func (m *Manager) unregisterLocked(name string) *managed.Client {
 		return nil
 	}
 	return old
+}
+
+// retireObserver is a test seam told how long each Retire in
+// unregisterLocked took (Spec 116 SC-004: the retirement overhead of a
+// commit, measured apart from the rest of the commit). Nil in production.
+var retireObserver atomic.Pointer[func(server string, d time.Duration)]
+
+// SetRetireObserverForTest installs the retirement observer and returns a
+// restore func. Test-only.
+func SetRetireObserverForTest(fn func(server string, d time.Duration)) (restore func()) {
+	prev := retireObserver.Swap(&fn)
+	return func() { retireObserver.Store(prev) }
 }
 
 // installLocked is the ONLY code that adds an instance to m.clients. The

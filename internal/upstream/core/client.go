@@ -24,6 +24,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	proxytransport "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
@@ -163,12 +164,27 @@ type Client struct {
 	// these fields nil — they spawn through mcp-go's stdio transport.
 	launcherHandle  launcher.Handle
 	launcherCIDFile string
+	// launcherProc is the launched child registered with the gate (Spec 116
+	// PR4). Guarded by mu like the two fields above.
+	launcherProc *dialgate.Process
 
 	// Notification callback for tools/list_changed
 	onToolsChanged func(serverName string)
 
 	// Notification callback for prompts/list_changed (F13)
 	onPromptsChanged func(serverName string)
+
+	// gate is the instance's retirement barrier (Spec 116 PR4, FR-022). It is
+	// created with the client and shared by every transport, OAuth helper and
+	// launch the client starts; the managed client retires it when the
+	// upstream manager unregisters the instance. A client that is never
+	// retired (the CLI client, a transient helper without SetGate) keeps an
+	// open gate. Read through Gate(); replaced only by SetGate before use.
+	gate atomic.Pointer[dialgate.Gate]
+
+	// stdioProc is the stdio child registered with the gate (FR-025a), so a
+	// normal Disconnect can hand it back to its own teardown. Guarded by mu.
+	stdioProc *dialgate.Process
 }
 
 // NewClient creates a new core MCP client
@@ -209,6 +225,9 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 	}
 	c.exposePrompts.Store(resolvedServerConfig.ExposePrompts)
 	c.retryAfter.Store(proxytransport.NewRetryAfterRecorder())
+	g := dialgate.New()
+	g.SetLogger(logger, serverConfig.Name)
+	c.gate.Store(g)
 
 	// Create secure environment manager
 	var envConfig *secureenv.EnvConfig
@@ -658,6 +677,9 @@ func (c *Client) httpTransportConfig(serverConfig *config.ServerConfig, oauthCon
 	// with — which is exactly what keeps generations from bleeding into each
 	// other (#1040).
 	cfg.RetryAfter = c.retryAfter.Load()
+	// Spec 116 PR4 (FR-024): every branch builds on the instance's gated
+	// transport and the mcp-go transport is wrapped by the gate.
+	cfg.Gate = c.Gate()
 	// Spec 112 FR-018: the trace transport masks the live allowlisted names.
 	cfg.ForwardNames = func() []string {
 		if pp := c.forwardPolicy.Load(); pp != nil {
@@ -758,7 +780,7 @@ func extractOAuthHandler(mcpClient *client.Client) *transport.OAuthHandler {
 		GetOAuthHandler() *transport.OAuthHandler
 	}
 
-	t := mcpClient.GetTransport()
+	t := innerTransport(mcpClient)
 	if ot, ok := t.(oauthTransport); ok {
 		return ot.GetOAuthHandler()
 	}
@@ -851,7 +873,9 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	// The instance's gated transport (FR-024): a retired instance sends no
+	// refresh token and no client secret.
+	httpClient := c.Gate().HTTPClient(30 * time.Second)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send refresh request: %w", err)

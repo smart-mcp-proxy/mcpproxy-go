@@ -265,7 +265,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 	logger.Debug("🔧 Creating OAuth config with resource auto-detection")
 
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithEnv(c.oauthEnv(ctx), c.config, c.storage, c.oauthLogger())
 
 	c.logger.Debug("OAuth config created",
 		zap.Bool("config_nil", oauthConfig == nil),
@@ -709,7 +709,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 	}
 
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithEnv(c.oauthEnv(ctx), c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
 		c.logger.Error("🚨 Failed to create OAuth config", logSafeErrorField(oauthConfigErr))
 		oauthErr = wrapOAuthConfigError(oauthConfigErr)
@@ -808,7 +808,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 	// Start the client with persistent context so SSE stream keeps running
 	// even if the connect context is short-lived (same as stdio transport).
 	// SSE stream runs in a background goroutine and needs context to stay alive.
-	persistentCtx := context.Background()
+	persistentCtx := c.Gate().Context() // Spec 116 PR4: cancelled when the instance is retired
 	c.logger.Debug("🔍 Starting SSE OAuth client with persistent context",
 		zap.String("server", c.config.Name))
 
@@ -1011,7 +1011,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
 	// Validate metadata BEFORE starting the full OAuth flow to fail fast with clear errors
 	if c.config.URL != "" {
-		_, validationErr := oauth.ValidateOAuthMetadata(c.config.URL, c.config.Name, 5*time.Second)
+		_, validationErr := oauth.ValidateOAuthMetadataWithEnv(c.oauthEnv(ctx), c.config.URL, c.config.Name, 5*time.Second)
 		if validationErr != nil {
 			// Convert OAuthMetadataError to OAuthFlowError for consistent error handling
 			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
@@ -1400,7 +1400,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 
 	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
 	if c.config.URL != "" {
-		_, validationErr := oauth.ValidateOAuthMetadata(c.config.URL, c.config.Name, 5*time.Second)
+		_, validationErr := oauth.ValidateOAuthMetadataWithEnv(c.oauthEnv(ctx), c.config.URL, c.config.Name, 5*time.Second)
 		if validationErr != nil {
 			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
 				c.logger.Warn("⚠️ OAuth metadata validation failed",
@@ -1934,7 +1934,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	}
 
 	// Create OAuth config
-	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithEnv(c.oauthEnv(ctx), c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),
@@ -1945,7 +1945,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 
 	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
 	if c.config.URL != "" {
-		_, validationErr := oauth.ValidateOAuthMetadata(c.config.URL, c.config.Name, 5*time.Second)
+		_, validationErr := oauth.ValidateOAuthMetadataWithEnv(c.oauthEnv(ctx), c.config.URL, c.config.Name, 5*time.Second)
 		if validationErr != nil {
 			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
 				c.logger.Warn("⚠️ OAuth metadata validation failed",
@@ -2454,7 +2454,7 @@ func wrapOAuthConfigError(err error) error {
 // forceHTTPOAuthFlowWithResult forces OAuth flow for HTTP transport and returns auth URL/browser status.
 func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartResult, error) {
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithEnv(c.oauthEnv(ctx), c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),
@@ -2528,7 +2528,7 @@ func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartR
 // forceSSEOAuthFlowWithResult forces OAuth flow for SSE transport and returns auth URL/browser status.
 func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartResult, error) {
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithEnv(c.oauthEnv(ctx), c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),

@@ -8,7 +8,9 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 
 	"go.uber.org/zap"
 )
@@ -232,11 +234,30 @@ func (c *Client) Connect(ctx context.Context) error {
 		c.connecting = false
 	}()
 
+	// Spec 116 PR4: live-QA park point (quickstart L4, -tags qa_hooks only).
+	// It sits after the caller's last registry lookup and before anything is
+	// launched or dialed, the window #1564 describes.
+	if qahooks.ParkDial != nil {
+		qahooks.ParkDial(c.config.Name)
+	}
+	// A retired instance never starts a connection. This is only the early
+	// exit: every launch, dial and write below is refused by the gate itself.
+	if c.Gate().Retired() {
+		return fmt.Errorf("connect refused: %w", dialgate.ErrRetired)
+	}
+
 	// Reset connection state for fresh connection attempt
 	if c.connected {
 		c.logger.Info("🔄 Reconnecting after OAuth completion",
 			zap.String("server", c.config.Name))
 		c.connected = false
+		// Release the old stdio child from the gate before the close
+		// reaps it (Spec 116 PR4, review round 2): its process-group ID
+		// must not stay registered for a retirement to signal.
+		if c.stdioProc != nil {
+			c.stdioProc.Untrack()
+			c.stdioProc = nil
+		}
 		if c.client != nil {
 			c.client.Close()
 			c.client = nil
@@ -369,6 +390,10 @@ func (c *Client) Connect(ctx context.Context) error {
 			}
 			c.processGroupID = 0
 		}
+		if c.stdioProc != nil {
+			c.stdioProc.Untrack()
+			c.stdioProc = nil
+		}
 
 		// Stop any locally-launched upstream child the HTTP/SSE path
 		// started — connectWithLauncher itself only stops it on
@@ -384,9 +409,17 @@ func (c *Client) Connect(ctx context.Context) error {
 		if c.launcherHandle != nil {
 			handle := c.launcherHandle
 			cidFile := c.launcherCIDFile
+			// The child stays tracked by the gate until Stop has reaped
+			// it, so a retirement during the grace period kills it at
+			// once (Spec 116 PR4).
+			proc := c.launcherProc
 			c.launcherHandle = nil
 			c.launcherCIDFile = ""
+			c.launcherProc = nil
 			c.mu.Unlock()
+			if hook := launcherBeforeStopHook; hook != nil {
+				hook()
+			}
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if stopErr := handle.Stop(stopCtx); stopErr != nil {
 				c.logger.Warn("error stopping launcher during connect-failure cleanup",
@@ -394,6 +427,7 @@ func (c *Client) Connect(ctx context.Context) error {
 					zap.Error(stopErr))
 			}
 			stopCancel()
+			proc.Untrack()
 			if cidFile != "" {
 				_ = os.Remove(cidFile)
 			}

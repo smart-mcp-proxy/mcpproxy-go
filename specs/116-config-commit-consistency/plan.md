@@ -315,6 +315,7 @@ in place. This is the guard against the rejected branch's scope creep.
 - **Failing-first tests**: T4.1-T4.17.
 - **Live verification**: L4 (marker-file stdio launcher, an HTTP fixture counting requests and `Authorization` headers, a fake OAuth token endpoint).
 - **Size estimate**: about 600 LOC production code and 800 LOC tests.
+- **As shipped (2026-10-13)**: the gate, the per-instance gated transport on every HTTP/SSE/OAuth branch, the capability-preserving wrapper with `Unwrap`, stdio/Docker-run/launcher admission with process-tree tracking (the launcher through its handle's own kill, so its Windows Job), browser admission without tracking, `oauth.Env` through every preflight, discovery and cache fetch, `Retire` from `unregisterLocked`, refresh and manual OAuth refusing retired instances, retired calls mapped to unavailable, the FR-024a scan and the benchmark. Deviations (no exit polling in `Retire`, Windows suspended creation deferred, Docker CLI diagnostics ungated, stdio sends latch-only) are listed in tasks.md (PR4 implementation note).
 
 ### Review protocol per PR
 

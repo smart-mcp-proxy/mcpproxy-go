@@ -428,6 +428,208 @@ mkdir -p "$r/internal/upstream"
 printf 'func (m *Manager) installLocked(\n\tname string,\n\tc *managed.Client,\n) {\n\tm.clients[name] = c\n}\n\nfunc (m *Manager) unregisterLocked(\n\tname string,\n) *managed.Client {\n\tdelete(m.clients, name)\n\treturn nil\n}\n' > "$r/internal/upstream/manager_generation.go"
 expect "helpers with a multi-line signature keep the exemption for their body" 0 "$r"
 
+# Spec 116 PR4 (FR-024a, T099): ungated upstream HTTP.
+ungated() { # name dir file content expected
+  local r
+  r="$(mkroot "pr4-$1")"
+  mkdir -p "$r/$2"
+  printf '%s\n' "$4" > "$r/$2/$3"
+  expect "FR-024a: $1" "$5" "$r"
+}
+ungated "http.Head in oauth" internal/oauth a.go 'package oauth
+func f() { resp, _ := http.Head(u); _ = resp }' 1
+ungated "http.Get in core" internal/upstream/core a.go 'package core
+func f() { _, _ = http.Get(u) }' 1
+ungated "http.DefaultTransport in transport" internal/transport a.go 'package transport
+var rt = http.DefaultTransport' 1
+ungated "http.DefaultClient in core" internal/upstream/core a.go 'package core
+func f() { _, _ = http.DefaultClient.Do(r) }' 1
+ungated "transport-less http.Client literal" internal/oauth a.go 'package oauth
+func f() { c := &http.Client{Timeout: t}; _ = c }' 1
+ungated "transport-less multi-line http.Client literal" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.Client{
+		Timeout: t,
+	}
+	_ = c
+}' 1
+ungated "http.Client literal with a Transport" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.Client{
+		Timeout:   t,
+		Transport: env.transport(),
+	}
+	_ = c
+}' 0
+ungated "two http.Client literals, only the second has a Transport" internal/oauth a.go 'package oauth
+func f() { pair(&http.Client{}, &http.Client{Transport: t}) }' 1
+ungated "two http.Client literals, only the first has a Transport" internal/oauth a.go 'package oauth
+func f() { pair(&http.Client{Transport: t}, &http.Client{Timeout: d}) }' 1
+ungated "two http.Client literals, both with a Transport" internal/oauth a.go 'package oauth
+func f() { pair(&http.Client{Transport: t}, &http.Client{Transport: u}) }' 0
+ungated "multi-line literal closed before a later Transport" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.Client{
+		Timeout: t,
+	}; d := &http.Client{Transport: u}
+	_, _ = c, d
+}' 1
+ungated "nested client: only the inner literal has a Transport (one line)" internal/oauth a.go 'package oauth
+func f() { c := &http.Client{CheckRedirect: redirectFor(&http.Client{Transport: gated})}; _ = c }' 1
+ungated "nested client: only the inner literal has a Transport (multi-line)" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.Client{
+		CheckRedirect: redirectFor(&http.Client{Transport: gated}),
+		Timeout:       t,
+	}
+	_ = c
+}' 1
+ungated "multi-line gated client with a func literal before Transport" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return nil
+		},
+		Transport: gated,
+	}
+	_ = c
+}' 0
+ungated "one-line gated client with a func literal before Transport" internal/oauth a.go 'package oauth
+func f() { c := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return nil }, Transport: gated}; _ = c }' 0
+ungated "a nested struct field named Transport does not gate the client" internal/oauth a.go 'package oauth
+func f() { c := &http.Client{Jar: jar(opts{Transport: gated})}; _ = c }' 1
+ungated "a comment between http.Client and its brace" internal/oauth a.go 'package oauth
+func f() { c := &http.Client /* x */ {}; _ = c }' 1
+ungated "whitespace between http.Client and its brace" internal/upstream/core a.go 'package core
+func f() { c := &http.Client	 {Timeout: t}; _ = c }' 1
+ungated "a spaced selector http . Client" internal/transport a.go 'package transport
+func f() { c := http . Client{}; _ = c }' 1
+ungated "a gated client with a comment before its brace" internal/oauth a.go 'package oauth
+func f() { c := &http.Client /* gated */ {Transport: gated}; _ = c }' 0
+ungated "a slice of client pointers is not a client literal" internal/oauth a.go 'package oauth
+var cs = []*http.Client {a, b}' 0
+# Slice, array and map literals of clients (Sol review round 5): the outer
+# brace opens the container, and each element brace (type elided) is the
+# client literal whose Transport: key counts.
+ungated "a gated slice literal of clients" internal/oauth a.go 'package oauth
+var cs = []http.Client{{Transport: gated}}' 0
+ungated "a gated array literal of clients" internal/oauth a.go 'package oauth
+var cs = [1]http.Client{{Transport: gated}}' 0
+ungated "a gated [...] array literal of two clients" internal/transport a.go 'package transport
+var cs = [...]http.Client{{Transport: a}, {Transport: b}}' 0
+ungated "a gated multi-line slice literal of clients" internal/upstream/core a.go 'package core
+var cs = []http.Client{
+	{
+		Timeout:   t,
+		Transport: gated,
+	},
+}' 0
+ungated "an empty slice literal of clients" internal/oauth a.go 'package oauth
+var cs = []http.Client{}' 0
+ungated "a slice literal with one transport-less client" internal/oauth a.go 'package oauth
+var cs = []http.Client{{Transport: a}, {Timeout: t}}' 1
+ungated "a transport-less elided client pointer in a slice" internal/oauth a.go 'package oauth
+var cs = []*http.Client{{Timeout: t}}' 1
+ungated "a gated elided client pointer in a slice" internal/oauth a.go 'package oauth
+var cs = []*http.Client{{Transport: gated}}' 0
+ungated "a gated map literal of clients" internal/transport a.go 'package transport
+var cs = map[string]http.Client{"a": {Transport: gated}}' 0
+ungated "a transport-less map literal of client pointers" internal/transport a.go 'package transport
+var cs = map[string]*http.Client{"a": {}}' 1
+ungated "a gated explicit client inside a slice literal" internal/oauth a.go 'package oauth
+var cs = []http.Client{http.Client{Transport: gated}}' 0
+ungated "a transport-less explicit client inside a slice literal" internal/oauth a.go 'package oauth
+var cs = []http.Client{http.Client{}}' 1
+ungated "a gated two-dimensional slice literal of clients" internal/oauth a.go 'package oauth
+var cs = [][]http.Client{{{Transport: gated}}}' 0
+ungated "a transport-less two-dimensional slice literal of clients" internal/oauth a.go 'package oauth
+var cs = [][]http.Client{{{Timeout: t}}}' 1
+ungated "a slice element whose Transport: is only in a nested func body" internal/oauth a.go 'package oauth
+var cs = []http.Client{{CheckRedirect: func(*http.Request, []*http.Request) error { _ = opts{Transport: g}; return nil }}}' 1
+ungated "a []http.Client func result type is not a literal" internal/oauth a.go 'package oauth
+func f() []http.Client {
+	if x {
+		return nil
+	}
+	return nil
+}' 0
+ungated "a slice element built by a call is not an elided client" internal/oauth a.go 'package oauth
+var cs = []http.Client{mk(opts{Timeout: t})}' 0
+ungated "a genuine transport-less http.Client{}" internal/oauth a.go 'package oauth
+var c = http.Client{}' 1
+ungated "a spaced selector http . DefaultTransport" internal/transport a.go 'package transport
+var rt = http . DefaultTransport' 1
+ungated "a spaced helper call http. Get" internal/oauth a.go 'package oauth
+func f() { _, _ = http. Get(u) }' 1
+# A selector split after its dot (gofmt-valid; Go inserts no semicolon after
+# a dot), with blank and comment lines between the parts (Sol review round 4).
+ungated "split helper call http. / Get(u)" internal/oauth a.go 'package oauth
+func f() {
+	_, _ = http.
+		Get(u)
+}' 1
+ungated "split helper call with a blank line and comments between" internal/upstream/core a.go 'package core
+func f() {
+	_, _ = http. // the helper
+'"
+"'
+		// fetch it
+		/* still the helper */
+		Post(u, ct, body)
+}' 1
+ungated "split http. / DefaultClient.Do(req)" internal/transport a.go 'package transport
+func f() {
+	_, _ = http.
+		DefaultClient.Do(req)
+}' 1
+ungated "split transport-less http. / Client{}" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.
+		Client{}
+	_ = c
+}' 1
+ungated "split transport-less multi-line http. / Client{ ... }" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.
+
+		// a client
+		Client{
+		Timeout: t,
+	}
+	_ = c
+}' 1
+ungated "split gated http. / Client{Transport: gated}" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.
+		Client{Transport: gated}
+	_ = c
+}' 0
+ungated "split selector state does not leak into the next file" internal/oauth a.go 'package oauth
+var x = http.' 0
+r="$(mkroot pr4-split-leak)"
+mkdir -p "$r/internal/oauth"
+# Each file starts with a bare Get( call and ends with a dangling http., so
+# whatever order the files are scanned in, a carried state would join them.
+for f in a b; do printf '\tGet(u)\npackage oauth\nvar y = http.\n' > "$r/internal/oauth/$f.go"; done
+expect "FR-024a: a trailing http. at the end of one file does not join the next" 0 "$r"
+ungated "*http.Client return type" internal/transport a.go 'package transport
+func f() *http.Client {
+	return nil
+}' 0
+ungated "GetTransport outside core/gate.go" internal/upstream/core a.go 'package core
+func f() { _ = cl.GetTransport() }' 1
+ungated "GetTransport in core/gate.go" internal/upstream/core gate.go 'package core
+func innerTransport() { _ = cl.GetTransport() }' 0
+ungated "http.Get outside the scoped packages" internal/server a.go 'package server
+func f() { _, _ = http.Get(u) }' 0
+ungated "http.Get in a comment" internal/oauth a.go 'package oauth
+// http.Get(u) is not used here' 0
+r="$(mkroot pr4-allowlisted)"
+mkdir -p "$r/internal/oauth" "$r/scripts"
+printf 'package oauth\nfunc f() { return http.DefaultTransport }\n' > "$r/internal/oauth/env.go"
+echo 'internal/oauth/env.go return http.DefaultTransport' > "$r/scripts/ungated-http-allowlist.txt"
+expect "FR-024a: an allowlisted fallback" 0 "$r"
+
 # An operational failure never reports a clean tree (review rounds 18-20): a
 # failing file discovery or scanner exits 2, whether the tool is shadowed on
 # PATH or by an exported shell function.

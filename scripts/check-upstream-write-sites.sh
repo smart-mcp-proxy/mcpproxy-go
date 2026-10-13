@@ -336,6 +336,149 @@ if [[ ${#pr3_files[@]} -gt 0 ]]; then
   fi
 fi
 
+# Spec 116 PR4 (FR-024a, T099): upstream HTTP never bypasses the instance's
+# dial gate. In internal/oauth, internal/upstream/core and internal/transport
+# (non-test) these are hits:
+#  - the package-level helpers http.Get/Head/Post/PostForm( (they use
+#    http.DefaultClient), http.DefaultClient, http.DefaultTransport;
+#  - an http.Client{ composite literal with no Transport: field before its
+#    closing brace (its zero Transport is http.DefaultTransport).
+# In internal/upstream/** a GetTransport() call outside
+# internal/upstream/core/gate.go is a hit: core asserts transport
+# capabilities only on the unwrapped transport, through innerTransport
+# (FR-023b, review R8.1).
+# scripts/ungated-http-allowlist.txt lists the deliberate exceptions, one
+# `<path> <text>` pair per line: a hit in <path> whose line contains <text>
+# is allowed (the process-default fallbacks used outside an instance).
+allowlist="scripts/ungated-http-allowlist.txt"
+pr4_files=()
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  case "$f" in
+    internal/oauth/*|internal/upstream/core/*|internal/transport/*|internal/upstream/*) pr4_files+=("$f") ;;
+  esac
+done <<<"$listing"
+hits3=""
+if [[ ${#pr4_files[@]} -gt 0 ]]; then
+  [[ -f "$allowlist" ]] || : >/dev/null
+  # shellcheck disable=SC2016 # the awk program is single-quoted on purpose
+  hits3="$(awk -v allowfile="$allowlist" '
+'"$STRIP_AWK"'
+    BEGIN {
+      na = 0
+      while ((getline line < allowfile) > 0) {
+        if (line ~ /^[ \t]*(#|$)/) continue
+        sp = index(line, " ")
+        if (sp == 0) continue
+        na++; apath[na] = substr(line, 1, sp - 1); atext[na] = substr(line, sp + 1)
+      }
+    }
+    function allowed(file, raw,    k) {
+      for (k = 1; k <= na; k++) if (apath[k] == file && index(raw, atext[k]) > 0) return 1
+      return 0
+    }
+    function report(file, n, raw) {
+      if (!allowed(file, raw)) print file ":" n ":" raw
+    }
+    # scan_clients tracks every http.Client{ literal with brace depth
+    # (review rounds 1 and 2): each open literal is on a stack with the depth
+    # of its own body, and a Transport: key counts only at that depth. A
+    # Transport: of a nested literal (another client, a struct, a func body)
+    # never excuses the outer one, and the closing brace of a nested func
+    # literal does not close the client. A literal that closes without a
+    # Transport: key is a hit, reported at its opening line; one still open
+    # at the end of its file too. bd is the brace depth of the file.
+    #
+    # Slice, array and map literals of clients (review round 5):
+    # []http.Client{, [N]http.Client{, [...]http.Client{,
+    # map[K]http.Client{ (and the *http.Client element forms) open a
+    # container, kept on its own stack with its depth and its dimension
+    # count (the bracket groups before the element type). The client
+    # literals are its elements, whose type is elided: a brace at the
+    # container depth plus its dimensions that starts an element (it
+    # follows {, a comma, a key colon, or starts its line). An explicit
+    # http.Client{ element is a client in its own right. A type followed by
+    # its brace right after a closing parenthesis is a func result type
+    # before the body, not a literal.
+    function scan_clients(code, file, n, raw,    i, L, ch, pc, pre, m, dims) {
+      L = length(code)
+      for (i = 1; i <= L; i++) {
+        ch = substr(code, i, 1)
+        if (ch == "{") {
+          bd++
+          pre = substr(code, 1, i - 1)
+          # The type may be spaced from its brace and its selector dot
+          # spaced too (review round 3): `http.Client /* x */ {` (strip
+          # turns the comment into a space) and `http . Client{` are the
+          # same literal. A brace on a later line cannot open it (Go
+          # inserts a semicolon after Client).
+          if (pre ~ /[)][ \t]*((map[ \t]*)?\[[^]]*\][ \t]*)*[*]?[ \t]*http[ \t]*[.][ \t]*Client[ \t]*$/) {
+            # a func result type: the brace opens the body
+          } else if (match(pre, /(^|[^A-Za-z0-9_.])((map[ \t]*)?\[[^]]*\][ \t]*)+[*]?[ \t]*http[ \t]*[.][ \t]*Client[ \t]*$/)) {
+            m = substr(pre, RSTART, RLENGTH)
+            sub(/[*]?[ \t]*http[ \t]*[.][ \t]*Client[ \t]*$/, "", m)
+            dims = gsub(/\[/, "[", m)
+            nc++; cdepth[nc] = bd; cdims[nc] = dims
+          } else if (pre ~ /(^|[^*A-Za-z0-9_.])http[ \t]*[.][ \t]*Client[ \t]*$/ || (nc > 0 && bd == cdepth[nc] + cdims[nc] && pre ~ /(^|[{,:])[ \t]*$/)) {
+            ns++; sdepth[ns] = bd; shas[ns] = 0; sfile[ns] = file; sline[ns] = n; sraw[ns] = raw
+          }
+        } else if (ch == "}") {
+          if (ns > 0 && sdepth[ns] == bd) {
+            if (!shas[ns]) report(sfile[ns], sline[ns], sraw[ns])
+            ns--
+          }
+          if (nc > 0 && cdepth[nc] == bd) nc--
+          bd--
+        } else if (ch == "T" && ns > 0 && bd == sdepth[ns] && substr(code, i, 9) == "Transport") {
+          pc = (i > 1) ? substr(code, i - 1, 1) : ""
+          if (pc !~ /[A-Za-z0-9_.]/ && substr(code, i + 9) ~ /^[ \t]*:/) shas[ns] = 1
+        }
+      }
+    }
+    function flush_clients(    k) {
+      for (k = 1; k <= ns; k++) if (!shas[k]) report(sfile[k], sline[k], sraw[k])
+      ns = 0; nc = 0; bd = 0
+    }
+    FNR == 1 {
+      flush_clients()
+      inblock = 0; inraw = 0
+      hpend = 0
+    }
+    {
+      raw = $0
+      code = strip(raw)
+      http_scope = (FILENAME ~ /^internal\/(oauth|transport|upstream\/core)\//)
+      if (http_scope) {
+        # A selector split after its dot (review round 4): Go inserts no
+        # semicolon after a dot, so `http.` ending a line continues on the
+        # next code line, past blank and comment-only lines (strip blanks
+        # comments). The pending `http.` is prefixed to that line, so the
+        # helper, Default* and Client{ checks see one selector. The state is
+        # reset per file.
+        if (hpend) {
+          if (code ~ /^[ \t]*$/) next
+          code = "http." code
+          hpend = 0
+        }
+        if (code ~ /(^|[^A-Za-z0-9_.])http[ \t]*[.][ \t]*$/) {
+          hpend = 1
+          sub(/http[ \t]*[.][ \t]*$/, "", code)
+        }
+        if (code ~ /(^|[^A-Za-z0-9_.])http[ \t]*[.][ \t]*(Get|Head|Post|PostForm)[ \t]*[(]/ || code ~ /(^|[^A-Za-z0-9_.])http[ \t]*[.][ \t]*Default(Client|Transport)([^A-Za-z0-9_]|$)/)
+          report(FILENAME, FNR, raw)
+        scan_clients(code, FILENAME, FNR, raw)
+      }
+      if (FILENAME ~ /^internal\/upstream\// && FILENAME != "internal/upstream/core/gate.go" && code ~ /GetTransport[ \t]*[(][ \t]*[)]/)
+        report(FILENAME, FNR, raw)
+    }
+    END { flush_clients() }' "${pr4_files[@]}")"
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
+    echo "upstream write sites: ungated-HTTP scanner failed (awk exit $rc)" >&2
+    exit 2
+  fi
+fi
+
 status=0
 if [[ -n "$hits" ]]; then
   echo "Spec 116 FR-009: upstreams rows written outside the config commit (use runtime.Commit):"
@@ -350,5 +493,12 @@ if [[ -n "$hits2" ]]; then
   status=1
 else
   echo "Spec 116 FR-020: every upstream manager registry mutation is generation-bound"
+fi
+if [[ -n "$hits3" ]]; then
+  echo "Spec 116 FR-024a: upstream HTTP outside the instance's dial gate (use the instance transport / oauth.Env; capabilities via core.innerTransport):"
+  echo "$hits3"
+  status=1
+else
+  echo "Spec 116 FR-024a: every upstream HTTP request runs on a gated transport"
 fi
 exit $status

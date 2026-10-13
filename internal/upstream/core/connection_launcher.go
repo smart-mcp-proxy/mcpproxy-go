@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"strings"
@@ -86,7 +87,10 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 		RedactArgs: logSafeArgs,
 	}
 
-	handle, err := launcher.Spawn(ctx, spec, c.logger)
+	// Spec 116 PR4 (FR-023, FR-025a): the spawn and the gate's tracking of
+	// the child are one admitted section, so a retired instance launches
+	// nothing and a launch admitted before retirement is killed by Retire.
+	handle, err := c.spawnLauncherAdmitted(ctx, spec)
 	if err != nil {
 		if cidFile != "" {
 			_ = os.Remove(cidFile)
@@ -122,16 +126,27 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 		zap.String("url", c.logSafeURL()),
 		zap.Duration("timeout", waitTimeout))
 
-	if err := launcher.WaitForURL(ctx, c.config.URL, waitTimeout); err != nil {
+	// The reachability probe dials through the gate (T4.14): a retired
+	// instance stops probing its old endpoint.
+	if err := launcher.WaitForURLWithDial(ctx, c.config.URL, waitTimeout, c.Gate().DialContext(launcherProbeDialer.DialContext)); err != nil {
 		// Tear down the child we just started — caller will see a
 		// failed Connect and the next attempt should start fresh.
 		// Release c.mu around handle.Stop because it blocks until the
 		// child is reaped; the `connecting` flag (set by Connect)
 		// prevents a concurrent Connect from sneaking in. Reacquire
 		// before returning so the caller's deferred Unlock balances.
+		//
+		// The child stays tracked by the gate until Stop has reaped it
+		// (Spec 116 PR4): a retirement during Stop's grace period kills
+		// the group at once instead of finding nothing to kill.
+		proc := c.launcherProc
 		c.launcherHandle = nil
 		c.launcherCIDFile = ""
+		c.launcherProc = nil
 		c.mu.Unlock()
+		if hook := launcherBeforeStopHook; hook != nil {
+			hook()
+		}
 		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if stopErr := handle.Stop(stopCtx); stopErr != nil {
 			c.logger.Warn("failed to stop launcher after wait-for-url failure",
@@ -139,6 +154,7 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 				zap.Error(stopErr))
 		}
 		cancel()
+		proc.Untrack()
 		if cidFile != "" {
 			_ = os.Remove(cidFile)
 		}
@@ -159,9 +175,12 @@ func (c *Client) stopLauncher(ctx context.Context) {
 	c.mu.Lock()
 	handle := c.launcherHandle
 	cidFile := c.launcherCIDFile
+	proc := c.launcherProc
 	c.launcherHandle = nil
 	c.launcherCIDFile = ""
+	c.launcherProc = nil
 	c.mu.Unlock()
+	defer proc.Untrack()
 
 	if handle == nil {
 		return
@@ -384,4 +403,39 @@ func (w *loggerWriter) writeLine(line string) {
 	case w.fallback != nil:
 		w.fallback.Info("launcher", zap.String("message", line), logs.ChildOutputField())
 	}
+}
+
+// launcherBeforeStopHook is a test seam run on a launcher failure path
+// after c.mu is released and before handle.Stop. Nil in production.
+var launcherBeforeStopHook func()
+
+// launcherProbeDialer is the per-attempt dialer of the launcher's
+// reachability probe; the gate wraps it.
+var launcherProbeDialer = &net.Dialer{Timeout: 2 * time.Second}
+
+// spawnLauncherAdmitted spawns the launcher child inside one admitted
+// section of the instance's gate and registers it with the gate there. A
+// child the gate refuses to track (retired during the section) is killed
+// before this returns.
+func (c *Client) spawnLauncherAdmitted(ctx context.Context, spec *launcher.Spec) (launcher.Handle, error) {
+	gate := c.Gate()
+	release, err := gate.Admit(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+	handle, err := launcher.Spawn(ctx, spec, c.logger)
+	if err != nil {
+		return nil, err
+	}
+	observeLaunch(c.config.Name, "launcher")
+	// The handle's Kill reaches the whole tree on every platform: the
+	// process group on Unix and the launcher's own Job Object on Windows
+	// (core's Windows Job registry does not hold launcher children).
+	proc, err := gate.TrackProcess(func() { _ = handle.Kill() })
+	if err != nil {
+		return nil, err
+	}
+	c.launcherProc = proc
+	return handle, nil
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"sync/atomic"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"go.uber.org/zap"
@@ -40,9 +41,44 @@ func (c *Client) openBrowser(authURL string) error {
 		return fmt.Errorf("unsupported operating system: %s", runtime.GOOS)
 	}
 
+	// Spec 116 PR4 (FR-025b): the browser launch is an admitted section of
+	// the instance's gate, so a retired instance opens no login page. The
+	// code exchange and token write it would lead to are gated separately
+	// (the OAuth HTTP client runs on the instance transport).
+	release, err := c.Gate().Admit(context.Background())
+	if err != nil {
+		return fmt.Errorf("browser launch refused: %w", err)
+	}
+	defer release()
+	if hook := browserBeforeStart; hook != nil {
+		hook()
+	}
 	execCmd := exec.Command(cmd, args...)
-	return execCmd.Start()
+	observeLaunch(c.config.Name, "browser")
+	if fn := browserStartOverride.Load(); fn != nil {
+		return (*fn)(execCmd)
+	}
+	return browserStart(execCmd)
 }
+
+// browserStartOverride replaces browserStart for tests outside this package
+// (SetBrowserStartForTest). Nil in production.
+var browserStartOverride atomic.Pointer[func(*exec.Cmd) error]
+
+// SetBrowserStartForTest makes the OAuth browser launch call fn instead of
+// starting a browser, and returns a restore func. Test-only.
+func SetBrowserStartForTest(fn func(*exec.Cmd) error) (restore func()) {
+	prev := browserStartOverride.Swap(&fn)
+	return func() { browserStartOverride.Store(prev) }
+}
+
+// browserStart starts the browser command. A test seam: tests replace it so
+// no real browser opens. Production starts the command.
+var browserStart = func(cmd *exec.Cmd) error { return cmd.Start() }
+
+// browserBeforeStart is a test seam run inside the admitted section, before
+// the browser command starts. Nil in production.
+var browserBeforeStart func()
 
 // hasGUIEnvironment checks if a GUI environment is available on Linux
 func (c *Client) hasGUIEnvironment() bool {

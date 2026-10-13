@@ -48,11 +48,23 @@ func (mc *Client) ListToolsFreshCaptured(ctx context.Context) ([]*config.ToolMet
 }
 
 // Retire marks the client as replaced or removed by the upstream manager
-// (FR-036). A retired client is never current again: its captures are
-// discarded and WithConnectionEpoch reports it as not current. Retirement is
-// an atomic flag, so the manager can set it under its own locks without taking
-// any client lock.
-func (mc *Client) Retire() { mc.retired.Store(true) }
+// (Spec 117 FR-036). A retired client is never current again: its captures
+// are discarded and WithConnectionEpoch reports it as not current.
+//
+// Spec 116 PR4 (FR-022): Retire also closes the instance's dial gate, so
+// from its return the instance launches no process, dials nothing, writes
+// nothing on its connections and runs no OAuth request or browser flow;
+// its tracked connections are closed and its stdio process group killed.
+// The flag is set first, so the capture and call paths see retirement
+// before the gate's barrier runs. Neither step takes a client lock, so the
+// manager can call Retire under its own locks (L3 W + L4 W → L5 is the
+// documented order). Only the manager retires; Disconnect does not.
+func (mc *Client) Retire() {
+	mc.retired.Store(true)
+	if mc.coreClient != nil {
+		mc.coreClient.Retire()
+	}
+}
 
 // Retired reports whether the manager retired the client.
 func (mc *Client) Retired() bool { return mc.retired.Load() }

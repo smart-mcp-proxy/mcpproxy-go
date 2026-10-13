@@ -86,16 +86,16 @@ func TestDiscoverScopesFromProtectedResource(t *testing.T) {
 			expectError:    false,
 		},
 		{
-			name:         "404 response",
-			responseCode: 404,
-			responseBody: `Not Found`,
+			name:           "404 response",
+			responseCode:   404,
+			responseBody:   `Not Found`,
 			expectedScopes: nil,
 			expectError:    true,
 		},
 		{
-			name:         "Invalid JSON",
-			responseCode: 200,
-			responseBody: `{invalid json}`,
+			name:           "Invalid JSON",
+			responseCode:   200,
+			responseBody:   `{invalid json}`,
 			expectedScopes: nil,
 			expectError:    true,
 		},
@@ -202,16 +202,16 @@ func TestDiscoverScopesFromAuthorizationServer(t *testing.T) {
 			expectError:    false,
 		},
 		{
-			name:         "404 response",
-			responseCode: 404,
-			responseBody: `Not Found`,
+			name:           "404 response",
+			responseCode:   404,
+			responseBody:   `Not Found`,
 			expectedScopes: nil,
 			expectError:    true,
 		},
 		{
-			name:         "Invalid JSON",
-			responseCode: 200,
-			responseBody: `{invalid json}`,
+			name:           "Invalid JSON",
+			responseCode:   200,
+			responseBody:   `{invalid json}`,
 			expectedScopes: nil,
 			expectError:    true,
 		},
@@ -431,9 +431,9 @@ func TestDiscoverProtectedResourceMetadata_Timeout(t *testing.T) {
 // Test RFC 8414 URL building for authorization server metadata discovery
 func TestBuildRFC8414MetadataURLs(t *testing.T) {
 	tests := []struct {
-		name         string
+		name          string
 		authServerURL string
-		expectedURLs []string
+		expectedURLs  []string
 	}{
 		{
 			name:          "Simple base URL without path",
@@ -540,7 +540,7 @@ func TestDiscoverAuthServerMetadataWithFallback_SmitheryStyle(t *testing.T) {
 	// Use the server URL with path (simulating auth.smithery.ai/googledrive)
 	authServerURL := server.URL + "/googledrive"
 
-	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(authServerURL, 5*time.Second)
+	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(defaultEnv(), authServerURL, 5*time.Second)
 
 	if err != nil {
 		t.Fatalf("Expected success but got error: %v", err)
@@ -593,7 +593,7 @@ func TestDiscoverAuthServerMetadataWithFallback_LegacyStyle(t *testing.T) {
 
 	authServerURL := server.URL + "/myserver"
 
-	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(authServerURL, 5*time.Second)
+	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(defaultEnv(), authServerURL, 5*time.Second)
 
 	if err != nil {
 		t.Fatalf("Expected success but got error: %v", err)
@@ -623,7 +623,7 @@ func TestDiscoverAuthServerMetadataWithFallback_AllFail(t *testing.T) {
 
 	authServerURL := server.URL + "/myserver"
 
-	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(authServerURL, 5*time.Second)
+	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(defaultEnv(), authServerURL, 5*time.Second)
 
 	if err == nil {
 		t.Fatal("Expected error but got nil")
@@ -656,7 +656,7 @@ func TestDiscoverAuthServerMetadataWithFallback_IncompleteMetadata(t *testing.T)
 	}))
 	defer server.Close()
 
-	metadata, _, err := discoverAuthServerMetadataWithFallback(server.URL, 5*time.Second)
+	metadata, _, err := discoverAuthServerMetadataWithFallback(defaultEnv(), server.URL, 5*time.Second)
 
 	if err == nil {
 		t.Fatal("Expected error for incomplete metadata but got nil")
@@ -690,7 +690,7 @@ func TestDiscoverAuthServerMetadataWithFallback_SimpleURL(t *testing.T) {
 	}))
 	defer server.Close()
 
-	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(server.URL, 5*time.Second)
+	metadata, discoveredURL, err := discoverAuthServerMetadataWithFallback(defaultEnv(), server.URL, 5*time.Second)
 
 	if err != nil {
 		t.Fatalf("Expected success but got error: %v", err)

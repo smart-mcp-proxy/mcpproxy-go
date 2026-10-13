@@ -10,7 +10,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
 
 // Spec 113 (113-a): OAuth refresh serialization. The reactive path (the token
@@ -59,6 +61,16 @@ func (c *Client) extraParamValue(key string) string {
 // client_id.
 func (c *Client) oauthRefreshFunc(handler *transport.OAuthHandler) oauth.RefreshFunc {
 	return func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
+		// Spec 116 PR4: live-QA park point (quickstart L4, -tags qa_hooks
+		// only), then the early exit of a retired instance. The token
+		// request itself runs on the instance's gated transport, which
+		// refuses it too.
+		if qahooks.ParkOAuth != nil {
+			qahooks.ParkOAuth(c.config.Name)
+		}
+		if c.Gate().Retired() {
+			return nil, dialgate.ErrRetired
+		}
 		handlerClientID := handler.GetClientID()
 		switch {
 		case handlerClientID != "" && (c.isStaticOAuthClient() || rec.ClientID == "" || rec.ClientID == handlerClientID),

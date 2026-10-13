@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -14,6 +15,9 @@ import (
 //
 //	MCPPROXY_QA_PARK_WORKER=<server>                  park that server's post-commit workers
 //	MCPPROXY_QA_PARK_SUPERVISOR_DISCONNECT=<server>   park that server's supervisor disconnects
+//	MCPPROXY_QA_PARK_DIAL=<server>[,<server>...]       park those servers' instance connects (Spec 116 PR4)
+//	MCPPROXY_QA_PARK_OAUTH=<server>[,<server>...]      park those servers' OAuth token refreshes (Spec 116 PR4)
+//	MCPPROXY_QA_PARK_LOGIN=<server>[,<server>...]      park those servers' manual OAuth logins (Spec 116 PR4)
 //	MCPPROXY_QA_RELEASE_DIR=<dir>                     (default: the OS temp dir)
 //
 // A parked call writes <dir>/parked-<kind>-<server> and waits until
@@ -32,12 +36,29 @@ func init() {
 	if name := os.Getenv("MCPPROXY_QA_PARK_SUPERVISOR_DISCONNECT"); name != "" {
 		ParkSupervisorDisconnect = parker(dir, "supervisor-disconnect", name)
 	}
+	if name := os.Getenv("MCPPROXY_QA_PARK_DIAL"); name != "" {
+		ParkDial = parker(dir, "dial", name)
+	}
+	if name := os.Getenv("MCPPROXY_QA_PARK_OAUTH"); name != "" {
+		ParkOAuth = parker(dir, "oauth", name)
+	}
+	if name := os.Getenv("MCPPROXY_QA_PARK_LOGIN"); name != "" {
+		ParkLogin = parker(dir, "login", name)
+	}
 }
 
+// parker parks the servers named in target (a comma-separated list). Each
+// server has its own one-call-at-a-time slot.
 func parker(dir, kind, target string) func(server string) {
-	var active atomic.Bool
+	slots := map[string]*atomic.Bool{}
+	for _, name := range strings.Split(target, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			slots[name] = new(atomic.Bool)
+		}
+	}
 	return func(server string) {
-		if server != target {
+		active, ok := slots[server]
+		if !ok {
 			return
 		}
 		release := filepath.Join(dir, "release-"+server)

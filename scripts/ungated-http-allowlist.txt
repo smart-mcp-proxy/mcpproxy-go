@@ -1,0 +1,12 @@
+# Spec 116 PR4 (FR-024a): deliberate ungated-HTTP sites in internal/oauth,
+# internal/upstream/core and internal/transport. Format: `<path> <text>`; a
+# hit in <path> whose source line contains <text> is allowed. Every entry is
+# a process-default fallback used only outside an upstream instance (a nil
+# base, the zero oauth.Env, a transport config without a Gate); an upstream
+# instance always passes its gated transport.
+internal/oauth/env.go return http.DefaultTransport
+internal/transport/http.go return http.DefaultTransport
+internal/transport/retry_after.go base = http.DefaultTransport
+internal/transport/logging.go base = http.DefaultTransport
+internal/transport/call_recorder.go next = http.DefaultTransport
+internal/oauth/transport_wrapper.go transport = http.DefaultTransport

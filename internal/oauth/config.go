@@ -506,6 +506,16 @@ func CreateOAuthConfigWithExtraParams(ctx context.Context, serverConfig *config.
 // and surface the returned error instead of reporting the generic "server may
 // not support OAuth".
 func CreateOAuthConfigWithExtraParamsAndLogger(ctx context.Context, serverConfig *config.ServerConfig, storage *storage.BoltDB, logger *zap.Logger) (*client.OAuthConfig, map[string]string, error) {
+	return CreateOAuthConfigWithEnv(Env{Ctx: ctx}, serverConfig, storage, logger)
+}
+
+// CreateOAuthConfigWithEnv is CreateOAuthConfigWithExtraParamsAndLogger in an
+// upstream instance's environment (Spec 116 PR4, FR-024, FR-024a): the
+// resource auto-detection, the scope and metadata preflights, the discovery
+// cache fetches and the OAuth HTTP client mcp-go uses for registration, code
+// exchange and refresh all run on env.Transport, so a retired instance sends
+// nothing through any of them.
+func CreateOAuthConfigWithEnv(env Env, serverConfig *config.ServerConfig, storage *storage.BoltDB, logger *zap.Logger) (*client.OAuthConfig, map[string]string, error) {
 	logger = namedOAuthLogger(logger)
 
 	// Initialize extraParams map
@@ -525,14 +535,14 @@ func CreateOAuthConfigWithExtraParamsAndLogger(ctx context.Context, serverConfig
 
 	// Priority 2 & 3: Auto-detect resource if not manually specified
 	if _, hasResource := extraParams["resource"]; !hasResource {
-		detectedResource := autoDetectResource(ctx, serverConfig, logger)
+		detectedResource := autoDetectResource(env, serverConfig, logger)
 		if detectedResource != "" {
 			extraParams["resource"] = detectedResource
 		}
 	}
 
 	// Create the base OAuth config, passing extraParams for transport wrapper injection
-	oauthConfig, err := createOAuthConfigInternal(serverConfig, storage, extraParams, logger)
+	oauthConfig, err := createOAuthConfigInternal(env, serverConfig, storage, extraParams, logger)
 
 	return oauthConfig, extraParams, err
 }
@@ -634,8 +644,9 @@ func parseRateLimitWaitWithSource(resp *http.Response, body []byte) (time.Durati
 // This function handles rate limiting (429) by retrying with appropriate backoff,
 // respecting Retry-After headers and JSON body reset_at fields.
 // The context allows cancellation during rate limit waits (e.g., during shutdown).
-func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, logger *zap.Logger) string {
-	httpClient := &http.Client{Timeout: resourceDetectRequestTimeout}
+func autoDetectResource(env Env, serverConfig *config.ServerConfig, logger *zap.Logger) string {
+	ctx := env.ctx()
+	httpClient := env.client(resourceDetectRequestTimeout)
 
 	for attempt := 0; attempt <= resourceDetectMaxRetries; attempt++ {
 		// Check context before making request
@@ -677,7 +688,7 @@ func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, 
 		switch {
 		case resp.StatusCode == http.StatusUnauthorized:
 			// 401 - Normal path: extract resource from metadata
-			return handleUnauthorizedResponse(resp, body, serverConfig, logger)
+			return handleUnauthorizedResponse(env, resp, body, serverConfig, logger)
 
 		case resp.StatusCode == http.StatusTooManyRequests:
 			// 429 - Rate limited: retry with appropriate wait time
@@ -743,7 +754,7 @@ func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, 
 }
 
 // handleUnauthorizedResponse processes a 401 response to extract the resource parameter.
-func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *config.ServerConfig, logger *zap.Logger) string {
+func handleUnauthorizedResponse(env Env, resp *http.Response, body []byte, serverConfig *config.ServerConfig, logger *zap.Logger) string {
 	wwwAuth := resp.Header.Get("WWW-Authenticate")
 	metadataURL := ExtractResourceMetadataURL(wwwAuth)
 
@@ -756,7 +767,7 @@ func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *
 				zap.String("metadata_url", logSafeURL(metadataURL)))
 		}
 		// Try to fetch Protected Resource Metadata (cached)
-		metadata, err := cachedPRM(serverConfig.URL, overridesFromConfig(serverConfig), metadataURL, resourceDetectRequestTimeout)
+		metadata, err := cachedPRM(env, serverConfig.URL, overridesFromConfig(serverConfig), metadataURL, resourceDetectRequestTimeout)
 		if err != nil {
 			logger.Debug("Failed to fetch Protected Resource Metadata",
 				zap.String("server", serverConfig.Name),
@@ -806,7 +817,7 @@ func CreateOAuthConfigWithLogger(serverConfig *config.ServerConfig, storage *sto
 	if serverConfig.OAuth != nil && len(serverConfig.OAuth.ExtraParams) > 0 {
 		extraParams = serverConfig.OAuth.ExtraParams
 	}
-	return createOAuthConfigInternal(serverConfig, storage, extraParams, logger)
+	return createOAuthConfigInternal(defaultEnv(), serverConfig, storage, extraParams, logger)
 }
 
 // clearOAuthCredentials drops a DCR registration so the next login re-registers.
@@ -824,7 +835,7 @@ func clearOAuthCredentials(logger *zap.Logger, storage *storage.BoltDB, serverKe
 // createOAuthConfigInternal is the internal implementation that accepts extraParams
 // for transport wrapper injection. This enables both manual and auto-detected params
 // to be injected into token exchange and refresh requests.
-func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *storage.BoltDB, extraParams map[string]string, logger *zap.Logger) (*client.OAuthConfig, error) {
+func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, storage *storage.BoltDB, extraParams map[string]string, logger *zap.Logger) (*client.OAuthConfig, error) {
 	startTime := time.Now()
 	// Applied exactly once per record: namedOAuthLogger is idempotent, so the
 	// wrappers above may have named it already without producing "oauth.oauth".
@@ -880,7 +891,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("base_url", logSafeURL(baseURL)))
 
 			res, err := cachedDiscover(globalDiscoveryCache, makeDiscoveryKey("prm-scopes", serverConfig.URL, ov), serverConfig.URL,
-				func() (prmScopeResult, error) { return preflightPRMScopes(serverConfig, ov, logger) })
+				func() (prmScopeResult, error) { return preflightPRMScopes(env, serverConfig, ov, logger) })
 			if err == nil && len(res.scopes) > 0 {
 				scopes = append([]string(nil), res.scopes...)
 				scopeSource = "prm"
@@ -896,7 +907,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("server", serverConfig.Name),
 				zap.String("base_url", logSafeURL(baseURL)))
 
-			discoveredScopes, err := discoverASScopesCached(serverConfig, ov, baseURL)
+			discoveredScopes, err := discoverASScopesCached(env, serverConfig, ov, baseURL)
 			if err == nil && len(discoveredScopes) > 0 {
 				scopes = append([]string(nil), discoveredScopes...)
 				scopeSource = "as"
@@ -1184,7 +1195,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		// Spec 113 FR-024: an explicit auth_server_metadata_url replaces discovery.
 		authServerMetadataURL = ov.metadataURL
 		doc, err := cachedASMetadataDoc(globalDiscoveryCache, serverConfig.URL, ov, ov.metadataURL, func() ([]byte, error) {
-			return httpFetchRaw(ov.metadataURL, 10*time.Second)
+			return httpFetchRaw(env, ov.metadataURL, 10*time.Second)
 		})
 		if err != nil {
 			logger.Warn("Configured oauth.auth_server_metadata_url could not be fetched",
@@ -1198,7 +1209,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			zap.String("server", serverConfig.Name),
 			zap.String("metadata_url", logSafeURL(ov.metadataURL)))
 	case serverConfig.URL != "":
-		authServerMetadataURL, asDoc = preflightMetadataURL(serverConfig, ov, logger)
+		authServerMetadataURL, asDoc = preflightMetadataURL(env, serverConfig, ov, logger)
 	default:
 		logger.Info("Skipping OAuth metadata URL - no server URL configured",
 			zap.String("server", serverConfig.Name))
@@ -1265,7 +1276,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			zap.Any("extra_params", masked))
 	}
 
-	wrapper := NewOAuthTransportWrapper(http.DefaultTransport, extraParams, logger)
+	wrapper := NewOAuthTransportWrapper(env.transport(), extraParams, logger)
 	// Effective endpoints: the discovered ones first, then the operator's overrides
 	// on top, so extra_params injection matches the real URLs (FR-025).
 	if asDoc != nil {
@@ -2068,9 +2079,9 @@ type prmScopeResult struct {
 
 // preflightPRMScopes runs the HEAD + Protected Resource Metadata scope discovery
 // once per cache key. It logs only when it actually fetches.
-func preflightPRMScopes(serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (prmScopeResult, error) {
+func preflightPRMScopes(env Env, serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (prmScopeResult, error) {
 	var res prmScopeResult
-	resp, err := http.Head(serverConfig.URL)
+	resp, err := env.client(0).Head(serverConfig.URL)
 	if err != nil {
 		logger.Warn("Preflight request for WWW-Authenticate header failed; OAuth clients may not see login button",
 			zap.String("server", serverConfig.Name),
@@ -2095,7 +2106,7 @@ func preflightPRMScopes(serverConfig *config.ServerConfig, ov discoveryOverrides
 	globalDiscoveryCache.noteResourceMetadataURL(serverConfig.URL, metadataURL)
 	res.prmURL = metadataURL
 
-	prm, err := cachedPRM(serverConfig.URL, ov, metadataURL, 5*time.Second)
+	prm, err := cachedPRM(env, serverConfig.URL, ov, metadataURL, 5*time.Second)
 	if err != nil {
 		logger.Debug("Protected Resource Metadata discovery failed",
 			zap.String("server", serverConfig.Name),
@@ -2118,10 +2129,10 @@ func preflightPRMScopes(serverConfig *config.ServerConfig, ov discoveryOverrides
 
 // discoverASScopesCached is the RFC 8414 scope fallback, read through the cache.
 // With an explicit auth_server_metadata_url that document is the source.
-func discoverASScopesCached(serverConfig *config.ServerConfig, ov discoveryOverrides, baseURL string) ([]string, error) {
+func discoverASScopesCached(env Env, serverConfig *config.ServerConfig, ov discoveryOverrides, baseURL string) ([]string, error) {
 	if ov.metadataURL != "" {
 		doc, err := cachedASMetadataDoc(globalDiscoveryCache, serverConfig.URL, ov, ov.metadataURL, func() ([]byte, error) {
-			return httpFetchRaw(ov.metadataURL, 5*time.Second)
+			return httpFetchRaw(env, ov.metadataURL, 5*time.Second)
 		})
 		if err != nil {
 			return nil, err
@@ -2129,7 +2140,7 @@ func discoverASScopesCached(serverConfig *config.ServerConfig, ov discoveryOverr
 		return doc.meta.ScopesSupported, nil
 	}
 	return cachedDiscover(globalDiscoveryCache, makeDiscoveryKey("as-scopes", serverConfig.URL, ov, baseURL), serverConfig.URL,
-		func() ([]string, error) { return DiscoverScopesFromAuthorizationServer(baseURL, 5*time.Second) })
+		func() ([]string, error) { return discoverScopesFromAuthorizationServer(env, baseURL, 5*time.Second) })
 }
 
 // metadataPreflight is the cached result of auth-server + metadata URL discovery.
@@ -2140,16 +2151,16 @@ type metadataPreflight struct {
 
 // preflightMetadataURL finds the working AS metadata URL (and its document) for
 // the configured server, once per cache key.
-func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (string, *asMetadataDoc) {
+func preflightMetadataURL(env Env, serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (string, *asMetadataDoc) {
 	key := makeDiscoveryKey("metadata-url", serverConfig.URL, ov)
 	v, err := globalDiscoveryCache.doWith(key, serverConfig.URL, func() (any, time.Duration, []discoverySeed, error) {
 		// First, try to discover the auth server URL from Protected Resource Metadata
 		// This is necessary for servers like Smithery that use separate domains
-		authServerURL := discoverAuthServerURL(serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
+		authServerURL := discoverAuthServerURL(env, serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
 			// Record the advertised PRM URL so a later 401 that advertises a
 			// different one invalidates this result (FR-026).
 			globalDiscoveryCache.noteResourceMetadataURL(serverConfig.URL, prmURL)
-			return cachedPRM(serverConfig.URL, ov, prmURL, 5*time.Second)
+			return cachedPRM(env, serverConfig.URL, ov, prmURL, 5*time.Second)
 		})
 		urlToUse := serverConfig.URL
 		if authServerURL != "" {
@@ -2161,7 +2172,7 @@ func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrid
 		}
 
 		// Now find the working metadata URL using the auth server URL (or server URL as fallback)
-		workingURL, doc, err := findWorkingMetadataDoc(urlToUse, 10*time.Second)
+		workingURL, doc, err := findWorkingMetadataDoc(env, urlToUse, 10*time.Second)
 		if err != nil {
 			logger.Warn("Could not find working OAuth metadata URL, will rely on auto-discovery",
 				zap.String("server", serverConfig.Name),

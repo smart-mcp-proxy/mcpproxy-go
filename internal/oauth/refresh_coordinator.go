@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
 
 // RefreshTrigger names what started a refresh flight (Spec 113 FR-011).
@@ -191,13 +192,43 @@ func (c *RefreshCoordinator) waiters(key string) int {
 // rotated the token, or the latch/cooldown answered). A caller whose own ctx
 // ends returns ctx.Err(); the flight continues for the others.
 func (c *RefreshCoordinator) Do(ctx context.Context, req RefreshRequest) (*client.Token, bool, error) {
+	// Spec 116 PR4: a flight that ran on a retired upstream instance (its
+	// gate refused the token request, or closed the connection under the
+	// response) says nothing about the grant. A caller that only joined such
+	// a flight tries again until it gets an answer that is not a retirement
+	// or leads a flight of its own, on its own transport: the retired
+	// initiator may start a new (also refused) flight first, and a single
+	// retry would join that one (review round 1). A retired caller's own
+	// flight is refused at once, so the loop ends; ctx bounds it.
+	//
+	// A nil ctx is normalized here, before the loop reads ctx.Err()
+	// (review round 2).
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	for {
+		tok, skipped, led, err := c.do(ctx, req)
+		if !dialgate.IsRetired(err) || led || ctx.Err() != nil {
+			return tok, skipped, err
+		}
+		if hook := refreshRetiredRetryHook; hook != nil {
+			hook(req)
+		}
+	}
+}
+
+// refreshRetiredRetryHook is a test seam run before a caller that joined a
+// retired instance's flight tries again. Nil in production.
+var refreshRetiredRetryHook func(RefreshRequest)
+
+// do joins the key's flight or starts one. led reports that this call
+// started the flight it returns the result of.
+func (c *RefreshCoordinator) do(ctx context.Context, req RefreshRequest) (tok *client.Token, skipped, led bool, err error) {
 	c.mu.Lock()
 	st := c.stateLocked(req.Key)
 	f := st.flight
 	if f == nil {
+		led = true
 		f = &refreshFlight{done: make(chan struct{})}
 		st.flight = f
 		go c.run(ctx, req, st, f)
@@ -213,9 +244,9 @@ func (c *RefreshCoordinator) Do(ctx context.Context, req RefreshRequest) (*clien
 
 	select {
 	case <-f.done:
-		return f.tok, f.skipped, f.err
+		return f.tok, f.skipped, led, f.err
 	case <-ctx.Done():
-		return nil, false, ctx.Err()
+		return nil, false, led, ctx.Err()
 	}
 }
 
@@ -305,6 +336,13 @@ func (c *RefreshCoordinator) flight(ctx context.Context, req RefreshRequest, st 
 			return tokenFromRecord(cur), false, nil
 		}
 		return tok, false, nil
+	}
+
+	// Spec 116 PR4: the instance that ran the refresh was retired and its
+	// gate refused the request. No token request was sent, so the failure
+	// has no side effects: no latch, no cooldown, no client clear.
+	if dialgate.IsRetired(refreshErr) {
+		return nil, false, refreshErr
 	}
 
 	cls, _ := ClassifyRefreshError(refreshErr)

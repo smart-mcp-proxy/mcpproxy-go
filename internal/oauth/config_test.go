@@ -643,7 +643,7 @@ func TestAutoDetectResource_RateLimitWithRetryAfterHeader(t *testing.T) {
 	}
 
 	// Call autoDetectResource
-	result := autoDetectResource(context.Background(), serverConfig, logger)
+	result := autoDetectResource(Env{Ctx: context.Background()}, serverConfig, logger)
 
 	// Verify resource was detected after retry
 	assert.Equal(t, "https://api.example.com/mcp/v1", result, "Should detect resource after retry")
@@ -697,7 +697,7 @@ func TestAutoDetectResource_RateLimitWithResetAt(t *testing.T) {
 	}
 
 	// Call autoDetectResource
-	result := autoDetectResource(context.Background(), serverConfig, logger)
+	result := autoDetectResource(Env{Ctx: context.Background()}, serverConfig, logger)
 
 	// Verify resource was detected after retry
 	assert.Equal(t, "https://api.example.com/mcp/v1", result, "Should detect resource after retry")
@@ -728,7 +728,7 @@ func TestAutoDetectResource_RateLimitExhausted(t *testing.T) {
 	}
 
 	// Call autoDetectResource
-	result := autoDetectResource(context.Background(), serverConfig, logger)
+	result := autoDetectResource(Env{Ctx: context.Background()}, serverConfig, logger)
 
 	// Verify fallback to server URL after exhausting retries
 	assert.Equal(t, mockServer.URL+"/mcp", result, "Should fallback to server URL after exhausting retries")
@@ -760,7 +760,7 @@ func TestAutoDetectResource_ServerError(t *testing.T) {
 	}
 
 	// Call autoDetectResource
-	result := autoDetectResource(context.Background(), serverConfig, logger)
+	result := autoDetectResource(Env{Ctx: context.Background()}, serverConfig, logger)
 
 	// Verify fallback to server URL (no retry for 5xx)
 	assert.Equal(t, mockServer.URL+"/mcp", result, "Should fallback to server URL on 5xx error")
@@ -796,7 +796,7 @@ func TestAutoDetectResource_ContextCancellation(t *testing.T) {
 	// Start autoDetectResource in a goroutine
 	done := make(chan string)
 	go func() {
-		result := autoDetectResource(ctx, serverConfig, logger)
+		result := autoDetectResource(Env{Ctx: ctx}, serverConfig, logger)
 		done <- result
 	}()
 

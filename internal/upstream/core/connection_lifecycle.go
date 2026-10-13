@@ -306,6 +306,8 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	pgid := c.processGroupID
 	processCmd := c.processCmd
 	serverName := c.config.Name
+	stdioProc := c.stdioProc
+	c.stdioProc = nil
 	c.mu.Unlock()
 
 	c.logger.Info("Disconnecting from upstream MCP server",
@@ -354,6 +356,15 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 			c.killDockerContainerByCommandWithContext(cleanupCtx)
 		}
 	}
+
+	// The stdio child is this teardown's from here: the gate stops
+	// tracking it BEFORE the close below reaps it (Spec 116 PR4, review
+	// round 2). Once reaped, its process-group ID may be handed to an
+	// unrelated process, which a retirement's kill must never signal. A
+	// retirement before this line kills the group itself; after it, the
+	// close and the force-kill below end the child, and the gate already
+	// refuses every write to it.
+	stdioProc.Untrack()
 
 	// Step 4: Try graceful close via MCP client FIRST
 	// This gives the subprocess a chance to exit cleanly via stdin/stdout close
@@ -420,6 +431,10 @@ func (c *Client) DisconnectWithContext(_ context.Context) error {
 	// AFTER closing the MCP client — the child should see the network
 	// transport go away first, giving it a clean shutdown signal before
 	// we send SIGTERM.
+	if hook := disconnectAfterReapHook; hook != nil {
+		hook()
+	}
+
 	stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	c.stopLauncher(stopCtx)
 	stopCancel()
@@ -461,3 +476,7 @@ func (c *Client) closeUpstreamLog() {
 		}
 	}
 }
+
+// disconnectAfterReapHook is a test seam run by DisconnectWithContext after
+// the stdio child was closed (and so reaped) or killed. Nil in production.
+var disconnectAfterReapHook func()
