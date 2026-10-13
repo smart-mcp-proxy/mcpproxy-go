@@ -32,6 +32,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"sync"
@@ -373,6 +374,22 @@ func (c *gatedConn) Write(b []byte) (int, error) {
 		return 0, ErrRetired
 	}
 	return c.Conn.Write(b)
+}
+
+// Read is not gated (a read sends nothing), but a read that fails because
+// retirement closed the connection under it reports ErrRetired, wrapped
+// around the socket error. Callers then tell "the instance was retired
+// mid-response" from a server failure: the discovery cache does not store it,
+// the refresh coordinator charges it to no grant, the managed client answers
+// "unavailable" (review round 1).
+func (c *gatedConn) Read(b []byte) (int, error) {
+	n, err := c.Conn.Read(b)
+	// io.EOF is the peer's orderly close, compared by identity in net/http
+	// and bufio; it is never what a retirement close produces, so it stays.
+	if err != nil && err != io.EOF && c.g.retired.Load() && !errors.Is(err, ErrRetired) {
+		err = fmt.Errorf("%w: %w", ErrRetired, err)
+	}
+	return n, err
 }
 
 // Close untracks and closes the connection.

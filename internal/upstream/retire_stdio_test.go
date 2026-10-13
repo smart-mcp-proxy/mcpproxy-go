@@ -81,6 +81,12 @@ func TestRetire_StdioLaunchInsideSection_ChildKilled(t *testing.T) {
 	inSection := make(chan struct{})
 	resume := make(chan struct{})
 	restore := setStdioLaunchHookForTest(func() {
+		// Hold the section until the child has started its descendant, so
+		// the kill below must reach the whole group.
+		deadline := time.Now().Add(5 * time.Second)
+		for descendants(t, dir) == 0 && time.Now().Before(deadline) {
+			time.Sleep(10 * time.Millisecond)
+		}
 		close(inSection)
 		<-resume
 	})
@@ -88,6 +94,8 @@ func TestRetire_StdioLaunchInsideSection_ChildKilled(t *testing.T) {
 
 	errc := connectAsync(inst)
 	<-inSection
+	require.Equal(t, 1, descendants(t, dir), "the child started its descendant")
+	require.True(t, processAlive(t, dir), "control: the child and its descendant are visible to processAlive")
 
 	removed := make(chan struct{})
 	go func() {
@@ -106,8 +114,9 @@ func TestRetire_StdioLaunchInsideSection_ChildKilled(t *testing.T) {
 
 	err := waitErr(t, errc)
 	require.Error(t, err, "the connect that was admitted before retirement fails")
-	// The child started (its marker may exist) but it is dead: no process
-	// with this run's marker dir in its arguments survives.
+	// The child and its descendant started but are dead: no process with
+	// this run's marker dir in its arguments survives (a kill of the
+	// immediate child alone would leave the descendant running).
 	require.Eventually(t, func() bool { return !processAlive(t, dir) }, 3*time.Second, 50*time.Millisecond,
 		"the launched child is killed by retirement")
 }

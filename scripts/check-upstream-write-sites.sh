@@ -380,6 +380,28 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
     function report(file, n, raw) {
       if (!allowed(file, raw)) print file ":" n ":" raw
     }
+    # scan_clients checks EVERY http.Client{ literal on the line, each within
+    # its own braces (review round 1: a Transport: field of a second literal
+    # must not excuse the first). A literal that closes on the line without a
+    # Transport: field is a hit; one left open is pending until its closing
+    # brace on a later line.
+    function scan_clients(code, file, n, raw,    s, i, depth, ch, lit, closed) {
+      s = code
+      while (match(s, /(^|[^*A-Za-z0-9_.])http[.]Client[{]/)) {
+        s = substr(s, RSTART + RLENGTH)
+        depth = 1; closed = 0
+        for (i = 1; i <= length(s); i++) {
+          ch = substr(s, i, 1)
+          if (ch == "{") depth++
+          else if (ch == "}") { depth--; if (depth == 0) { closed = 1; break } }
+        }
+        lit = substr(s, 1, i - 1)
+        if (lit ~ /Transport[ \t]*:/) { s = substr(s, i + 1); continue }
+        if (closed) { report(file, n, raw); return }
+        pending = raw; pfile = file; pline = n
+        return
+      }
+    }
     FNR == 1 {
       if (pending != "") report(pfile, pline, pending)
       pending = ""; inblock = 0; inraw = 0
@@ -389,19 +411,16 @@ if [[ ${#pr4_files[@]} -gt 0 ]]; then
       code = strip(raw)
       http_scope = (FILENAME ~ /^internal\/(oauth|transport|upstream\/core)\//)
       if (pending != "") {
-        if (code ~ /Transport[ \t]*:/) pending = ""
-        else if (index(code, "}") > 0) { report(pfile, pline, pending); pending = "" }
+        # A Transport: field counts only before the literal closes.
+        tp = match(code, /Transport[ \t]*:/)
+        bp = index(code, "}")
+        if (tp > 0 && (bp == 0 || tp < bp)) pending = ""
+        else if (bp > 0) { report(pfile, pline, pending); pending = "" }
       }
       if (http_scope) {
         if (code ~ /(^|[^A-Za-z0-9_.])http[.](Get|Head|Post|PostForm)[ \t]*[(]/ || code ~ /http[.]Default(Client|Transport)([^A-Za-z0-9_]|$)/)
           report(FILENAME, FNR, raw)
-        if (code ~ /(^|[^*A-Za-z0-9_.])http[.]Client[{]/) {
-          rest = substr(code, index(code, "http.Client"))
-          if (rest !~ /Transport[ \t]*:/) {
-            if (rest ~ /[{][^}]*[}]/) report(FILENAME, FNR, raw)
-            else { pending = raw; pfile = FILENAME; pline = FNR }
-          }
-        }
+        scan_clients(code, FILENAME, FNR, raw)
       }
       if (FILENAME ~ /^internal\/upstream\// && FILENAME != "internal/upstream/core/gate.go" && code ~ /GetTransport[ \t]*[(][ \t]*[)]/)
         report(FILENAME, FNR, raw)

@@ -180,3 +180,21 @@ func killProcessTreeNow(pgid int, cmd *exec.Cmd) {
 		_ = cmd.Process.Kill()
 	}
 }
+
+// startedProcessGroupID is the process group a child started with
+// Setpgid (and Pgid 0) leads: its own pid. It stands in when
+// extractProcessGroupID cannot read the group because the child already
+// died, e.g. retirement cancelled the gate context, and so killed the
+// immediate child, while its launch section was still open (Spec 116 PR4,
+// T4.11). The pid is not reused before the child is reaped, so signalling
+// the group still reaches the descendants it left behind. 0 when the child
+// was not started as a group leader.
+func startedProcessGroupID(cmd *exec.Cmd) int {
+	if cmd == nil || cmd.Process == nil || cmd.SysProcAttr == nil {
+		return 0
+	}
+	if cmd.SysProcAttr.Setpgid && cmd.SysProcAttr.Pgid == 0 {
+		return cmd.Process.Pid
+	}
+	return 0
+}

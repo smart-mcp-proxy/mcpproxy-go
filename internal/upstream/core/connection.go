@@ -402,11 +402,17 @@ func (c *Client) Connect(ctx context.Context) error {
 		if c.launcherHandle != nil {
 			handle := c.launcherHandle
 			cidFile := c.launcherCIDFile
+			// The child stays tracked by the gate until Stop has reaped
+			// it, so a retirement during the grace period kills it at
+			// once (Spec 116 PR4).
+			proc := c.launcherProc
 			c.launcherHandle = nil
 			c.launcherCIDFile = ""
-			c.launcherProc.Untrack()
 			c.launcherProc = nil
 			c.mu.Unlock()
+			if hook := launcherBeforeStopHook; hook != nil {
+				hook()
+			}
 			stopCtx, stopCancel := context.WithTimeout(context.Background(), 10*time.Second)
 			if stopErr := handle.Stop(stopCtx); stopErr != nil {
 				c.logger.Warn("error stopping launcher during connect-failure cleanup",
@@ -414,6 +420,7 @@ func (c *Client) Connect(ctx context.Context) error {
 					zap.Error(stopErr))
 			}
 			stopCancel()
+			proc.Untrack()
 			if cidFile != "" {
 				_ = os.Remove(cidFile)
 			}

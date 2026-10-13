@@ -135,11 +135,18 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 		// child is reaped; the `connecting` flag (set by Connect)
 		// prevents a concurrent Connect from sneaking in. Reacquire
 		// before returning so the caller's deferred Unlock balances.
+		//
+		// The child stays tracked by the gate until Stop has reaped it
+		// (Spec 116 PR4): a retirement during Stop's grace period kills
+		// the group at once instead of finding nothing to kill.
+		proc := c.launcherProc
 		c.launcherHandle = nil
 		c.launcherCIDFile = ""
-		c.launcherProc.Untrack()
 		c.launcherProc = nil
 		c.mu.Unlock()
+		if hook := launcherBeforeStopHook; hook != nil {
+			hook()
+		}
 		stopCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if stopErr := handle.Stop(stopCtx); stopErr != nil {
 			c.logger.Warn("failed to stop launcher after wait-for-url failure",
@@ -147,6 +154,7 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 				zap.Error(stopErr))
 		}
 		cancel()
+		proc.Untrack()
 		if cidFile != "" {
 			_ = os.Remove(cidFile)
 		}
@@ -397,6 +405,10 @@ func (w *loggerWriter) writeLine(line string) {
 	}
 }
 
+// launcherBeforeStopHook is a test seam run on a launcher failure path
+// after c.mu is released and before handle.Stop. Nil in production.
+var launcherBeforeStopHook func()
+
 // launcherProbeDialer is the per-attempt dialer of the launcher's
 // reachability probe; the gate wraps it.
 var launcherProbeDialer = &net.Dialer{Timeout: 2 * time.Second}
@@ -416,8 +428,10 @@ func (c *Client) spawnLauncherAdmitted(ctx context.Context, spec *launcher.Spec)
 	if err != nil {
 		return nil, err
 	}
-	pid, cmd := handle.Pid(), spec.Cmd
-	proc, err := gate.TrackProcess(func() { killProcessTreeNow(pid, cmd) })
+	// The handle's Kill reaches the whole tree on every platform: the
+	// process group on Unix and the launcher's own Job Object on Windows
+	// (core's Windows Job registry does not hold launcher children).
+	proc, err := gate.TrackProcess(func() { _ = handle.Kill() })
 	if err != nil {
 		return nil, err
 	}

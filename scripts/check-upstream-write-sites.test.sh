@@ -461,6 +461,19 @@ func f() {
 	}
 	_ = c
 }' 0
+ungated "two http.Client literals, only the second has a Transport" internal/oauth a.go 'package oauth
+func f() { pair(&http.Client{}, &http.Client{Transport: t}) }' 1
+ungated "two http.Client literals, only the first has a Transport" internal/oauth a.go 'package oauth
+func f() { pair(&http.Client{Transport: t}, &http.Client{Timeout: d}) }' 1
+ungated "two http.Client literals, both with a Transport" internal/oauth a.go 'package oauth
+func f() { pair(&http.Client{Transport: t}, &http.Client{Transport: u}) }' 0
+ungated "multi-line literal closed before a later Transport" internal/oauth a.go 'package oauth
+func f() {
+	c := &http.Client{
+		Timeout: t,
+	}; d := &http.Client{Transport: u}
+	_, _ = c, d
+}' 1
 ungated "*http.Client return type" internal/transport a.go 'package transport
 func f() *http.Client {
 	return nil

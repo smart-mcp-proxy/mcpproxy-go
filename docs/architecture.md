@@ -209,9 +209,10 @@ mutation in `internal/runtime` or `internal/server`, and on any change to
 dial gate (`internal/upstream/dialgate`). Everything the instance sends goes
 through it: every TCP dial of its HTTP, SSE and OAuth traffic and every write
 on a connection it dialed (a per-instance gated `*http.Transport`), every
-process it launches (stdio, Docker `run`, the local launcher, the OAuth
-browser: an admitted section that also registers the process group with the
-gate), every MCP request and notification its mcp-go transport sends (a
+process it launches (stdio, Docker `run` and the local launcher start in an
+admitted section that also registers the process tree with the gate, so
+`Retire` kills it; the OAuth browser opener is only admitted, since the
+browser it hands the URL to is not the instance's process), every MCP request and notification its mcp-go transport sends (a
 capability-preserving `dialgate.WrapTransport`), and every OAuth preflight,
 discovery, registration, code exchange and refresh (`oauth.Env` carries the
 instance transport). `unregisterLocked` retires the instance before it

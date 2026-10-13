@@ -82,6 +82,13 @@ type Handle interface {
 
 	// Pid returns the OS process id, or 0 if the child has exited.
 	Pid() int
+
+	// Kill hard-kills the child and everything it spawned (the process
+	// group on Unix, the Job Object on Windows) at once, without a grace
+	// period and without waiting for the exit. It is the retirement kill
+	// of Spec 116 PR4: safe to call more than once and after the child
+	// exited. Stop (or Wait) still reaps the child.
+	Kill() error
 }
 
 // Spawn starts spec.Cmd and returns a Handle owning its lifecycle.
@@ -216,6 +223,20 @@ type handle struct {
 
 func (h *handle) Pid() int {
 	return int(h.pid.Load())
+}
+
+// Kill implements Handle.Kill: the same hard-kill step stopLocked
+// escalates to, without the SIGTERM and the grace period.
+func (h *handle) Kill() error {
+	select {
+	case <-h.done:
+		return nil
+	default:
+	}
+	if h.cmd.Process == nil {
+		return nil
+	}
+	return h.kill()
 }
 
 func (h *handle) Done() <-chan struct{} {

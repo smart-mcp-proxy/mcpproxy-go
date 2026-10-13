@@ -34,9 +34,10 @@ func replaceParked(t *testing.T, m *Manager, name string, old *managed.Client, r
 		inst, err := m.ReplaceInstanceAt(name, old.Generation(), old, nil)
 		done <- res{inst, err}
 	}()
-	require.Eventually(t, old.Retired, 5*time.Second, time.Millisecond,
-		"the same-generation replacement retires the old instance")
-	require.True(t, old.Gate().Retired())
+	// managed.Client.Retire sets its flag before it latches the gate, so
+	// wait for both (a bare check of the gate right after the flag raced).
+	require.Eventually(t, func() bool { return old.Retired() && old.Gate().Retired() }, 5*time.Second, time.Millisecond,
+		"the same-generation replacement retires the old instance and closes its gate")
 	release()
 	select {
 	case r := <-done:

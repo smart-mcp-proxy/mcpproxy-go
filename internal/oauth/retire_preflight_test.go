@@ -3,9 +3,11 @@ package oauth
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -184,4 +186,63 @@ func TestDiscoveryCache_RetiredFlightNotCached(t *testing.T) {
 	})
 	require.NoError(t, err, "the retired flight's refusal was not cached")
 	assert.Equal(t, []string{"read"}, res.scopes)
+}
+
+// Review round 1: a discovery fetch whose response read is cut off by the
+// instance's retirement (the gate closes the connection under the body read:
+// a socket error, not a refused dial) is not cached as a failure either. A
+// replacement instance with the same discovery key runs its own fetch.
+func TestDiscoveryCache_RetiredMidReadNotCached(t *testing.T) {
+	var hold atomic.Bool
+	hold.Store(true)
+	var full atomic.Int64
+	started := make(chan struct{})
+	var once sync.Once
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if hold.Load() {
+			w.Header().Set("Content-Length", "512")
+			w.WriteHeader(http.StatusOK)
+			_, _ = io.WriteString(w, `{"resource":`)
+			w.(http.Flusher).Flush()
+			once.Do(func() { close(started) })
+			<-r.Context().Done()
+			return
+		}
+		full.Add(1)
+		_, _ = io.WriteString(w, `{"resource":"`+"http://"+r.Host+`/mcp","scopes_supported":["read"]}`)
+	}))
+	defer srv.Close()
+	serverURL := srv.URL + "/mcp"
+	prmURL := srv.URL + "/.well-known/oauth-protected-resource"
+	InvalidateDiscovery(serverURL)
+	t.Cleanup(func() { InvalidateDiscovery(serverURL) })
+	ov := discoveryOverrides{}
+
+	gate := dialgate.New()
+	errc := make(chan error, 1)
+	go func() {
+		_, err := cachedPRM(Env{Transport: gate.HTTPTransport()}, serverURL, ov, prmURL, 10*time.Second)
+		errc <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the PRM fetch never reached the server")
+	}
+	gate.Retire()
+	var err error
+	select {
+	case err = <-errc:
+	case <-time.After(5 * time.Second):
+		t.Fatal("retirement did not end the fetch")
+	}
+	require.Error(t, err)
+	assert.True(t, dialgate.IsRetired(err), "a read cut off by retirement is a retirement, got %v", err)
+
+	hold.Store(false)
+	prm, err := cachedPRM(Env{Transport: dialgate.New().HTTPTransport()}, serverURL, ov, prmURL, 10*time.Second)
+	require.NoError(t, err, "the cut-off fetch was not cached as a failure")
+	assert.Equal(t, []string{"read"}, prm.ScopesSupported)
+	assert.Equal(t, int64(1), full.Load())
 }

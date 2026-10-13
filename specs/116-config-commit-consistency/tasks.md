@@ -399,7 +399,40 @@ each documented in the PR:
   `internal/upstream/core/retire_test.go`, T4.9 and the OAuth-config part of
   T4.4 in `internal/oauth/retire_preflight_test.go`. T4.17 (b)(c) are the
   existing `oauth_refresh_race_test.go` and `per_method_auth_e2e_test.go`,
-  which now run over the wrapped transports.
+  which now run over the wrapped transports (they build the client like
+  `CreateHTTPClient` with a gate: gated OAuth and MCP HTTP clients, a
+  `dialgate.WrapTransport` wrapper, and assert the gate dialed their traffic).
+
+#### PR4 review round 1 (Sol) design notes
+
+- A gated connection's `Read` reports `ErrRetired` (wrapped around the
+  socket error; `io.EOF` stays as is) when the gate is retired. A response
+  cut off by retirement is then a retirement everywhere: the discovery cache
+  does not store it, the refresh coordinator charges it to no grant, and the
+  managed client answers "unavailable".
+- `tools/list` maps any failure on a retired instance (led or coalesced) to
+  `managed.ErrInstanceRetired`, as a tool call does, and moves no state
+  machine (FR-026). T4.5 now retires with a list in flight and a second
+  caller coalesced onto it.
+- The refresh coordinator: a caller that joined a retired instance's flight
+  tries again until it gets an answer that is not a retirement or leads a
+  flight of its own; a leader's refusal is final. One retry was not enough:
+  another call on the retired instance can start a new refused flight first.
+- The launcher child is tracked by the gate until `Stop` has reaped it, and
+  the retirement kill is `launcher.Handle.Kill` (the process group on Unix,
+  the launcher's own Job Object on Windows; core's Windows Job registry never
+  held launcher children).
+- stdio: when the child is already dead at registration (a retirement during
+  the launch section cancelled the gate context, which kills only the
+  immediate child) the process group it led is taken from how it was started
+  (`Setpgid`, pgid = pid), so the group kill still reaches its descendants.
+  The marker fixture now keeps its command line (no `exec`) and starts a
+  descendant; T4.11 waits for it and fails if any survives.
+- The FR-024a scan checks every `http.Client{` literal on a line within its
+  own braces.
+- The OAuth browser launch is admitted only, not tracked: the opener
+  (`open`/`xdg-open`/`rundll32`) hands the URL to a browser that is not the
+  instance's process (docs corrected).
 
 **Checkpoint**: a retired instance cannot launch, dial or write. #1564 is
 closed.

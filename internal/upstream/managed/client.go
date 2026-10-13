@@ -1285,6 +1285,23 @@ func (mc *Client) ListToolsFresh(ctx context.Context) ([]*config.ToolMetadata, e
 // so its result is not accepted. It returns the capture of the flight whose
 // result it returns (Spec 117 PR-3).
 func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([]*config.ToolMetadata, InventoryCapture, error) {
+	tools, capture, err := mc.listToolsUnmapped(ctx, fresh, entrySeq)
+	if err != nil && mc.retired.Load() {
+		// Spec 116 PR4 (FR-026), as for a tool call: the instance was
+		// retired while the list (led or joined) was in flight. Its gate
+		// refused the send or closed the connection under the read, so
+		// the error is dialgate.ErrRetired or a bare transport failure.
+		// Either way the answer is "unavailable", never a failure that
+		// says something about the server.
+		mc.logger.Debug("tools/list failed on a retired instance",
+			zap.String("server", mc.GetConfig().Name),
+			zap.Error(err))
+		return nil, InventoryCapture{}, ErrInstanceRetired
+	}
+	return tools, capture, err
+}
+
+func (mc *Client) listToolsUnmapped(ctx context.Context, fresh bool, entrySeq uint64) ([]*config.ToolMetadata, InventoryCapture, error) {
 	mc.logger.Debug("🔍 ListTools called",
 		zap.String("server", mc.GetConfig().Name),
 		zap.String("state", mc.StateManager.GetState().String()),
@@ -1394,7 +1411,9 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err))
 
-		if mc.isConnectionError(err) {
+		// A retired instance's failure says nothing about the server
+		// (FR-026): it moves no state machine.
+		if !mc.retired.Load() && mc.isConnectionError(err) {
 			mc.logger.Warn("Connection error detected during ListTools, updating server state",
 				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err))

@@ -546,6 +546,12 @@ func (c *Client) startStdioAdmitted(ctx context.Context) error {
 		hook()
 	}
 	c.processGroupID = extractProcessGroupID(c.processCmd, c.logger, c.config.Name)
+	if c.processGroupID <= 0 {
+		// The child may already be dead (a retirement during the section
+		// cancelled the gate context, which kills the immediate child):
+		// its group, and the descendants in it, still need the kill.
+		c.processGroupID = startedProcessGroupID(c.processCmd)
+	}
 	pgid, cmd := c.processGroupID, c.processCmd
 	proc, err := gate.TrackProcess(func() { killProcessTreeNow(pgid, cmd) })
 	if err != nil {

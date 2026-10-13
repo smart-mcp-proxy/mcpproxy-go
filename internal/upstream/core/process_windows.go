@@ -281,3 +281,7 @@ func killProcessTreeNow(pgid int, cmd *exec.Cmd) {
 		_ = cmd.Process.Kill()
 	}
 }
+
+// startedProcessGroupID has no Unix process-group equivalent on Windows: the
+// Job registry is keyed by what extractProcessGroupID registered.
+func startedProcessGroupID(_ *exec.Cmd) int { return 0 }

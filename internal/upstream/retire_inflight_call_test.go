@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,10 +81,13 @@ func TestRetire_InFlightToolCall_UnavailableAndReplacementUnaffected(t *testing.
 	require.NoError(t, err)
 }
 
-// T4.5 (FR-023a): a tools/list on an instance retired mid-request is ended,
-// its capture is not current, and the retired instance's later sends are
-// refused without touching the old endpoint.
-func TestRetire_ListToolsAfterRetire_NoTraffic(t *testing.T) {
+// T4.5 (FR-023a, FR-026): a tools/list in flight on an instance being
+// retired, with a second caller coalesced onto it. Retirement ends the
+// request; the leader and the waiter both get "unavailable" (never the
+// gate's internal error or a bare transport failure), no capture of the
+// retired instance is current, and its later sends are refused without
+// touching the old endpoint.
+func TestRetire_ListToolsInFlight_UnavailableNoTraffic(t *testing.T) {
 	up := newCountingUpstream(t, "http")
 	m := newGenTestManager(t)
 	cfg := httpServerConfig("acme", up.url, "http")
@@ -97,8 +101,53 @@ func TestRetire_ListToolsAfterRetire_NoTraffic(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, inst.CaptureIsCurrent(capture))
 
+	// A tools/list reaches the upstream and is held there; a second caller
+	// coalesces onto it.
+	up.holdList.Store(true)
+	waiting := make(chan struct{})
+	var waitOnce sync.Once
+	inst.SetListToolsObserver(func(ev managed.ListToolsEvent) {
+		if !ev.Leader {
+			waitOnce.Do(func() { close(waiting) })
+		}
+	})
+	leaderErr := make(chan error, 1)
+	go func() {
+		_, _, err := inst.ListToolsCaptured(ctx)
+		leaderErr <- err
+	}()
+	select {
+	case <-up.inList:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the tools/list never reached the upstream")
+	}
+	waiterErr := make(chan error, 1)
+	go func() {
+		_, _, err := inst.ListToolsCaptured(ctx)
+		waiterErr <- err
+	}()
+	select {
+	case <-waiting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the second caller never coalesced onto the in-flight list")
+	}
+
+	start := time.Now()
 	m.AdvanceGenerations([]GenerationChange{{Name: "acme", Gen: 2, Present: true, Reconnect: true, Config: httpServerConfig("acme", "http://127.0.0.1:1/new", "http")}})
+	assert.Less(t, time.Since(start), time.Second, "retiring an instance with a list in flight is bounded")
+	require.True(t, inst.Retired())
 	assert.False(t, inst.CaptureIsCurrent(capture), "a retired instance's capture is never current")
+
+	for name, errc := range map[string]chan error{"leader": leaderErr, "waiter": waiterErr} {
+		select {
+		case err := <-errc:
+			require.Error(t, err, name)
+			assert.ErrorIs(t, err, managed.ErrInstanceRetired, "%s: unavailable, got %v", name, err)
+			assert.False(t, dialgate.IsRetired(err), "%s: the gate's internal error never reaches a caller", name)
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the in-flight list (%s) was not ended by retirement", name)
+		}
+	}
 
 	before, _ := up.counts()
 	_, _, err = inst.ListToolsCaptured(ctx)
