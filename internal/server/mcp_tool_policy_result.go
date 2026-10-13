@@ -54,6 +54,9 @@ func toolPendingApprovalResult(serverName, toolName string, approval *storage.To
 	return toolPolicyJSONResult(response, "pending tool approval")
 }
 
+// toolChangeHoldDocs documents the per-server auto_approve_tool_changes opt-out named in a held-change message.
+const toolChangeHoldDocs = "https://docs.mcpproxy.app/features/security-quarantine"
+
 // toolChangedApprovalResult builds the TOOL_QUARANTINED response for a tool whose
 // description/schema changed since it was last approved (rug-pull detection).
 func toolChangedApprovalResult(serverName, toolName string, approval *storage.ToolApprovalRecord) *mcp.CallToolResult {
@@ -65,7 +68,8 @@ func toolChangedApprovalResult(serverName, toolName string, approval *storage.To
 		"message":              fmt.Sprintf("Tool '%s:%s' description has changed since last approval. Inspect changes before using.", serverName, toolName),
 		"previous_description": approval.PreviousDescription,
 		"current_description":  approval.CurrentDescription,
-		"action":               fmt.Sprintf("Approve via: POST /api/v1/servers/%s/tools/approve or mcpproxy upstream inspect %s", serverName, serverName),
+		"action": fmt.Sprintf("Review the change with: mcpproxy review show %s, then approve via: POST /api/v1/servers/%s/tools/approve. "+
+			"To let a server you trust update its tools without review, set auto_approve_tool_changes: true on it (%s).", serverName, serverName, toolChangeHoldDocs),
 	}
 	return toolPolicyJSONResult(response, "changed tool approval")
 }

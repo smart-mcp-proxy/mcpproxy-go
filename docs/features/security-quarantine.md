@@ -633,6 +633,12 @@ The quarantine banner distinguishes four states: scan running, scan verdict
 blocked automatic approval, scan could not complete (retry offered), and
 awaiting manual review.
 
+### Reviewing a held change {#reviewing-a-held-change}
+
+Every changed tool contract is held, in every trust mode except `auto`. To keep that cheap, the Web review screen and `mcpproxy review show <server>` show what differs from the approved definition: the description, parameters added, removed, retyped or newly required, output schema changes, and flips of the four safety hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). **Approve update (N changed tools)** on the Web review screen approves exactly those tools in one click. The approval is bound to the definitions and the server incarnation on screen, so if a tool changes again, or the server is removed and re-added, between viewing and clicking, the request is refused with 409 and nothing is approved; reload and review again.
+
+A server you trust to update freely can opt out of the hold with `auto_approve_tool_changes: true` on its entry (or `trust_mode: auto`). The hold messages in the Web UI, the CLI and the refusal an MCP client receives name this option.
+
 ### Block (approve + disable)
 
 When reviewing a pending or changed tool you may want to **acknowledge it but

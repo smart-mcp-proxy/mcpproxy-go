@@ -235,3 +235,77 @@ export function expectedHashes(tools: ReviewTool[], review: ReviewTool[] = tools
 export function isStaleReviewError(message: string | undefined | null): boolean {
   return !!message && /out of date/i.test(message)
 }
+
+// ---------------------------------------------------------------------------
+// Held tool changes (maintainer decision 2026-10-11, "Hold all changes, 1-click diff"). Every changed
+// contract is held; the friction is reduced by a readable diff and one approval for the server's update.
+// ---------------------------------------------------------------------------
+
+export const HELD_CHANGE_DOCS = 'https://docs.mcpproxy.app/features/security-quarantine'
+export const HELD_CHANGE_HINT = 'Changed tools stay blocked until you approve the update. To let a server you trust update its tools without review, set auto_approve_tool_changes: true on it.'
+
+export type ChangeKind = 'added' | 'removed' | 'changed'
+export interface ChangeLine { kind: ChangeKind; text: string; before?: string; after?: string }
+export interface ChangeSection { section: 'description' | 'input_schema' | 'output_schema' | 'annotations'; title: string; lines: ChangeLine[] }
+
+const HINTS = ['readOnlyHint', 'destructiveHint', 'idempotentHint', 'openWorldHint'] as const
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === 'object' && !Array.isArray(v)
+const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
+const typeOf = (v: unknown) => isObj(v) && v.type !== undefined ? (Array.isArray(v.type) ? v.type.join('|') : String(v.type)) : 'any'
+
+function schemaLines(before: unknown, after: unknown): ChangeLine[] {
+  if (same(before, after)) return []
+  const lines: ChangeLine[] = []
+  const bp = isObj(before) && isObj(before.properties) ? before.properties : {}
+  const ap = isObj(after) && isObj(after.properties) ? after.properties : {}
+  const has = (o: Record<string, unknown>, k: string) => Object.prototype.hasOwnProperty.call(o, k)
+  for (const key of Object.keys(ap)) if (!has(bp, key)) lines.push({ kind: 'added', text: `Parameter ${key} (${typeOf(ap[key])})` })
+  for (const key of Object.keys(bp)) if (!has(ap, key)) lines.push({ kind: 'removed', text: `Parameter ${key} (${typeOf(bp[key])})` })
+  for (const key of Object.keys(ap)) {
+    if (!has(bp, key) || same(bp[key], ap[key])) continue
+    lines.push({ kind: 'changed', text: typeOf(bp[key]) !== typeOf(ap[key]) ? `Parameter ${key} type ${typeOf(bp[key])} → ${typeOf(ap[key])}` : `Parameter ${key} changed` })
+  }
+  const breq = new Set<string>(isObj(before) && Array.isArray(before.required) ? before.required.map(String) : [])
+  const areq = new Set<string>(isObj(after) && Array.isArray(after.required) ? after.required.map(String) : [])
+  for (const key of areq) if (!breq.has(key)) lines.push({ kind: 'changed', text: `Parameter ${key} is now required` })
+  for (const key of breq) if (!areq.has(key)) lines.push({ kind: 'changed', text: `Parameter ${key} is no longer required` })
+  // Differences outside properties/required (additionalProperties, enum, ...) are reported independently,
+  // so a widened contract is never hidden behind a property line.
+  const rb = isObj(before) ? before : {}; const ra = isObj(after) ? after : {}
+  for (const key of new Set([...Object.keys(rb), ...Object.keys(ra)])) {
+    if (key === 'properties' || key === 'required') continue
+    // An absent key and an explicit null are different contracts (const: null, default: null).
+    if (has(rb, key) === has(ra, key) && same(rb[key], ra[key])) continue
+    lines.push({ kind: 'changed', text: `Schema setting ${key} changed` })
+  }
+  // Nothing recognised at all (e.g. a non-object schema) must not vanish.
+  if (lines.length === 0) lines.push({ kind: 'changed', text: 'Schema changed' })
+  return lines
+}
+
+/** What changed between the approved definition and the current one, section by section; [] when nothing differs or no approved definition is stored. */
+export function summarizeToolChange(tool: ReviewTool): ChangeSection[] {
+  const prev = tool.previous
+  if (!prev) return []
+  const out: ChangeSection[] = []
+  if (prev.description !== tool.description) out.push({ section: 'description', title: 'Description', lines: [{ kind: 'changed', text: 'Description changed', before: prev.description, after: tool.description }] })
+  const input = schemaLines(prev.input_schema, tool.input_schema)
+  if (input.length) out.push({ section: 'input_schema', title: 'Input schema', lines: input })
+  const output = schemaLines(prev.output_schema, tool.output_schema)
+  if (output.length) out.push({ section: 'output_schema', title: 'Output schema', lines: output })
+  const pa = prev.annotations ?? {}; const ca = tool.annotations ?? {}
+  const show = (v: unknown) => v === undefined || v === null ? 'not set' : String(v)
+  const hints: ChangeLine[] = []
+  for (const hint of HINTS) if (!same(pa[hint], ca[hint])) hints.push({ kind: 'changed', text: `${hint}: ${show(pa[hint])} → ${show(ca[hint])}` })
+  if (hints.length) out.push({ section: 'annotations', title: 'Safety hints', lines: hints })
+  return out
+}
+
+/** The tools held as changed since their approval, in review order. */
+export function changedToolNames(tools: ReviewTool[]): string[] {
+  return tools.filter(t => t.approval_status === 'changed').map(t => t.name)
+}
+
+export function approveUpdateLabel(count: number): string {
+  return `Approve update (${count} changed ${count === 1 ? 'tool' : 'tools'})`
+}

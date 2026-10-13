@@ -18,6 +18,10 @@
         <span>{{ banner.text }}</span>
         <button v-if="banner.action !== 'none'" class="btn btn-sm" data-test="review-scan-action" @click="rescan">{{ banner.action === 'scan-now' ? 'Scan now' : 'Rescan' }}</button>
       </div>
+      <div v-if="changedNames.length > 0 && !review.server.quarantined" class="alert alert-warning flex flex-wrap items-center gap-2" data-test="review-held-changes">
+        <p class="min-w-0 flex-1 basis-60 text-sm" data-test="review-held-hint">{{ HELD_CHANGE_HINT }} <a :href="HELD_CHANGE_DOCS" target="_blank" rel="noopener" class="link">Learn more</a></p>
+        <button type="button" class="btn btn-primary btn-sm" :disabled="approving || refreshing" data-test="review-approve-update" @click="approveUpdate">{{ approveUpdateLabel(changedNames.length) }}</button>
+      </div>
       <div class="rounded border border-base-300 p-3 text-sm space-y-1 min-w-0" data-test="review-server-identity">
         <div><span class="font-medium">Transport:</span> {{ review.server.transport }}</div>
         <template v-if="review.server.command">
@@ -91,6 +95,20 @@
           </div>
           <ToolDefinitionText :text="tool.description" />
           <details v-if="tool.annotations || tool.input_schema || tool.output_schema"><summary class="cursor-pointer text-sm">Definition</summary><pre class="mt-2 text-xs whitespace-pre-wrap break-words" v-text="definitionText(tool)"></pre></details>
+          <div v-if="summarizeToolChange(tool).length > 0" class="space-y-2 rounded border border-warning/50 bg-warning/10 p-3 text-sm" data-test="review-change-summary">
+            <div v-for="sec in summarizeToolChange(tool)" :key="sec.section" :data-test="`review-change-${sec.section}`">
+              <div class="font-medium">{{ sec.title }}</div>
+              <ul class="mt-1 space-y-1">
+                <li v-for="(line, i) in sec.lines" :key="i" class="min-w-0">
+                  <span class="badge badge-sm mr-1" :class="line.kind === 'added' ? 'badge-success' : line.kind === 'removed' ? 'badge-error' : 'badge-warning'">{{ line.kind }}</span><span class="break-words">{{ line.text }}</span>
+                  <div v-if="line.before !== undefined" class="mt-1 grid gap-1 sm:grid-cols-2">
+                    <div class="min-w-0 rounded bg-error/10 p-2"><div class="text-xs text-base-content/70">Approved</div><div class="whitespace-pre-wrap break-words" v-text="line.before"></div></div>
+                    <div class="min-w-0 rounded bg-success/10 p-2"><div class="text-xs text-base-content/70">Now</div><div class="whitespace-pre-wrap break-words" v-text="line.after"></div></div>
+                  </div>
+                </li>
+              </ul>
+            </div>
+          </div>
           <details v-if="tool.diff || tool.previous" open data-test="review-tool-diff"><summary class="cursor-pointer text-sm font-medium">Changed definition</summary><pre class="mt-2 text-xs whitespace-pre-wrap break-words" v-text="diffText(tool)"></pre></details>
         </div>
       </article>
@@ -140,7 +158,7 @@ import type { ReviewTool, ServerReviewResponse } from '@/types'
 import ToolDefinitionText from '@/components/ToolDefinitionText.vue'
 import ScanHistory from '@/components/ScanHistory.vue'
 import { scanReportPath } from '@/utils/serverRoute'
-import { APPROVE_ALL_HINT, REVIEW_PAGE_SIZES, REVIEW_SELECTION_HINT, approveAllLabel, approveLabel, clampPage, expectedHashes, filterReviewTools, formatLaunchCommand, hasActiveFilters, isStaleReviewError, mergeSelection, reviewHeadline, scanBanner, toolState, type SelectionChoice } from '@/utils/reviewPresentation'
+import { HELD_CHANGE_DOCS, HELD_CHANGE_HINT, approveUpdateLabel, changedToolNames, summarizeToolChange, APPROVE_ALL_HINT, REVIEW_PAGE_SIZES, REVIEW_SELECTION_HINT, approveAllLabel, approveLabel, clampPage, expectedHashes, filterReviewTools, formatLaunchCommand, hasActiveFilters, isStaleReviewError, mergeSelection, reviewHeadline, scanBanner, toolState, type SelectionChoice } from '@/utils/reviewPresentation'
 
 const props = defineProps<{ serverName: string; change?: string }>()
 const emit = defineEmits<{ approved: []; refreshed: [] }>()
@@ -322,6 +340,25 @@ async function approveTool(name: string) {
   const expected = expectedHashes(tools.filter(t => t.name === name), tools)
   const res = expected ? await api.approveTools(server, [name], inc, expected) : await api.approveTools(server, [name], ...incarnationArgs(inc))
   if (!isCurrent(server, visit)) return
+  if (res && !res.success && isStaleReviewError(res.error)) { await reloadAfterStaleReview(server, visit, res.error as string); return }
+  await load()
+  if (res && !res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Approval failed'
+}
+// One click approves the server's update: exactly the changed tools on screen, bound to their fingerprints (Spec 117 PR-2)
+// and the incarnation (Spec 116 FR-017), so a further change or a replacement answers 409 and approves nothing.
+const changedNames = computed(() => changedToolNames(review.value?.tools ?? []))
+async function approveUpdate() {
+  if (refreshing.value || approving.value) return
+  const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''; notice.value = ''
+  const tools = review.value?.tools ?? []
+  const names = changedToolNames(tools)
+  if (names.length === 0) return
+  const inc = review.value?.server.incarnation
+  const expected = expectedHashes(tools.filter(t => names.includes(t.name)), tools)
+  approving.value = true
+  const res = expected ? await api.approveTools(server, names, inc, expected) : await api.approveTools(server, names, ...incarnationArgs(inc))
+  if (!isCurrent(server, visit)) return
+  approving.value = false
   if (res && !res.success && isStaleReviewError(res.error)) { await reloadAfterStaleReview(server, visit, res.error as string); return }
   await load()
   if (res && !res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Approval failed'

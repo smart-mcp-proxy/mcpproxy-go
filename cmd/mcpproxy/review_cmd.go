@@ -649,7 +649,7 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 				desc += reviewSchemaText("Input schema", tool["input_schema"])
 				desc += reviewSchemaText("Output schema", tool["output_schema"])
 				if diff := tool["diff"]; diff != nil {
-					desc += "\nChanges from the previous approved definition:\n" + fmt.Sprint(diff)
+					desc += "\nChanges from the previous approved definition:\n" + reviewDiffText(diff)
 				}
 			}
 			rows = append(rows, []string{fmt.Sprint(tool["name"]), fmt.Sprint(tool["tier"]), fmt.Sprint(tool["approval_status"]), fmt.Sprint(tool["scan_verdict"]), desc})
@@ -660,7 +660,71 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 		return err
 	}
 	fmt.Print(out)
+	printReviewChangedTools(os.Stdout, value)
 	return nil
+}
+
+// reviewDiffSections is the order and heading of the sections of a changed tool's diff.
+var reviewDiffSections = []struct{ key, heading string }{
+	{"description", "Description"},
+	{"input_schema", "Input schema"},
+	{"output_schema", "Output schema"},
+	{"annotations", "Safety hints"},
+}
+
+// reviewDiffText renders the per-section diff of a changed tool; a section
+// that did not change is left out. A core that sends a single string is
+// printed as it is.
+func reviewDiffText(diff interface{}) string {
+	switch d := diff.(type) {
+	case string:
+		return strings.TrimSpace(d)
+	case map[string]interface{}:
+		var b strings.Builder
+		for _, section := range reviewDiffSections {
+			text, _ := d[section.key].(string)
+			if strings.TrimSpace(text) == "" {
+				continue
+			}
+			fmt.Fprintf(&b, "  %s:\n", section.heading)
+			for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
+				fmt.Fprintf(&b, "    %s\n", line)
+			}
+		}
+		return strings.TrimRight(b.String(), "\n")
+	}
+	return ""
+}
+
+// printReviewChangedTools prints, for every tool held as changed since its
+// approval, what changed against the approved definition, then how to approve
+// the update and the per-server opt-out for servers the operator trusts to
+// update freely (maintainer decision 2026-10-11: scan mode holds every
+// changed contract; the friction is the diff and a one-step approval).
+func printReviewChangedTools(w io.Writer, value map[string]interface{}) {
+	tools, _ := value["tools"].([]interface{})
+	var changed []string
+	server, _ := value["server"].(map[string]interface{})
+	for _, item := range tools {
+		tool, _ := item.(map[string]interface{})
+		if tool["approval_status"] != "changed" {
+			continue
+		}
+		name := fmt.Sprint(tool["name"])
+		changed = append(changed, name)
+		fmt.Fprintf(w, "\nChanged since approval: %s\n", name)
+		if text := reviewDiffText(tool["diff"]); text != "" {
+			fmt.Fprintln(w, text)
+		} else {
+			fmt.Fprintln(w, "  (the approved definition is not stored; compare with 'mcpproxy review show --full')")
+		}
+	}
+	if len(changed) == 0 {
+		return
+	}
+	name := fmt.Sprint(server["name"])
+	fmt.Fprintf(w, "\n%d tool(s) are held until you approve the update: mcpproxy review approve %s --tools %s\n", len(changed), name, strings.Join(changed, ","))
+	fmt.Fprintf(w, "To let a server you trust update its tools without review, set auto_approve_tool_changes: true on it (https://docs.mcpproxy.app/features/security-quarantine).\n")
 }
 
 // reviewScanLine renders the scan coverage of `review show` in the same words
