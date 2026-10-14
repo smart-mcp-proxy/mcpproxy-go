@@ -1636,6 +1636,35 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 	snapshot := stateView.Snapshot()
 	s.logger.Debug("StateView snapshot retrieved", zap.Int("count", len(snapshot.Servers)))
 
+	// Reuse the runtime projection's health (as handleListUpstreams does,
+	// #1525). The input rebuilt below carries no OAuth token status or
+	// expiry, so on its own it reports a connected OAuth server with a valid
+	// stored token as "Authentication required". The projection reads its own
+	// snapshot, so its health is only adopted when its admin state (enabled,
+	// quarantined) matches this snapshot's row; otherwise the row keeps the
+	// locally calculated health and never mixes two admin states.
+	type projectedHealth struct {
+		health      *contracts.HealthStatus
+		enabled     bool
+		quarantined bool
+	}
+	runtimeHealth := make(map[string]projectedHealth)
+	if projected, err := s.runtime.GetAllServers(); err == nil {
+		for _, entry := range projected {
+			name, _ := entry["name"].(string)
+			hs, ok := entry["health"].(*contracts.HealthStatus)
+			if !ok || hs == nil {
+				continue
+			}
+			enabled, enabledOK := entry["enabled"].(bool)
+			quarantined, quarantinedOK := entry["quarantined"].(bool)
+			if !enabledOK || !quarantinedOK {
+				continue
+			}
+			runtimeHealth[name] = projectedHealth{health: hs, enabled: enabled, quarantined: quarantined}
+		}
+	}
+
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
 	for _, serverStatus := range snapshot.Servers {
 		// Convert StateView ServerStatus to API response format
@@ -1728,7 +1757,15 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			healthInput.RefreshNextAttempt = refreshState.NextAttempt
 		}
 
-		healthStatus := health.CalculateHealth(healthInput, health.DefaultHealthConfig())
+		var healthStatus *contracts.HealthStatus
+		if ph, ok := runtimeHealth[serverStatus.Name]; ok &&
+			ph.enabled == serverStatus.Enabled && ph.quarantined == serverStatus.Quarantined {
+			healthStatus = ph.health
+		} else {
+			// No matching runtime projection for this server: keep the
+			// conservative connection-based calculation.
+			healthStatus = health.CalculateHealth(healthInput, health.DefaultHealthConfig())
+		}
 
 		// #1064: quarantined tools are not available -- see the same guard in
 		// Runtime.GetAllServers. GetQuarantinedServers below deliberately keeps
