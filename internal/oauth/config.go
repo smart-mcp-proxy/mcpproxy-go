@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 
@@ -171,20 +172,37 @@ var globalCallbackManager = &CallbackServerManager{
 	logger:  zap.L().Named(oauthCallbackLoggerName),
 }
 
+// oauthCompletion is a recorded login completion and the credential binding
+// of the instance that completed it (zero: unbound, e.g. the CLI process).
+// Spec 116 PR2b review r8 (#1607): the flag is bound like the DB event, so a
+// completion of an instance a commit superseded never reads as recent for a
+// same-name replacement.
+type oauthCompletion struct {
+	at      time.Time
+	binding commitview.CredentialBinding
+}
+
 // Global token store manager to persist tokens across client instances
 type TokenStoreManager struct {
 	stores                  map[string]client.TokenStore
-	completedOAuth          map[string]time.Time // Track successful OAuth completions
+	completedOAuth          map[string]oauthCompletion // Track successful OAuth completions
 	mu                      sync.RWMutex
 	logger                  *zap.Logger
 	oauthCompletionCallback func(serverName string)                      // Callback when OAuth completes
 	oauthFailureCallback    func(serverName string, err error)           // Callback when an unattended OAuth flow fails
 	tokenSavedCallback      func(serverName string, expiresAt time.Time) // Callback when token is saved
+	tokenSavedBoundCallback func(serverName string, expiresAt time.Time, binding commitview.CredentialBinding)
+	// Spec 116 PR2b review r9: the binding-aware completion callback (it
+	// wins over oauthCompletionCallback) and the resolver of the binding of
+	// the instance that serves a name now. A bound completion of a binding
+	// the resolver no longer reports records nothing and calls back nothing.
+	oauthCompletionBoundCallback func(serverName string, binding commitview.CredentialBinding)
+	completionBindingResolver    func(serverName string) (commitview.CredentialBinding, bool)
 }
 
 var globalTokenStoreManager = &TokenStoreManager{
 	stores:         make(map[string]client.TokenStore),
-	completedOAuth: make(map[string]time.Time),
+	completedOAuth: make(map[string]oauthCompletion),
 	logger:         zap.L().Named("oauth-tokens"),
 }
 
@@ -226,12 +244,18 @@ func (m *TokenStoreManager) HasTokenStore(serverName string) bool {
 // valid token is on disk. This mirrors HasValidToken (see below), which already treats
 // IsZero() as "never expires".
 func HasPersistedToken(serverName, serverURL string, boltStorage *storage.BoltDB) (hasToken bool, hasRefreshToken bool, isExpired bool) {
+	return HasPersistedTokenBound(serverName, serverURL, boltStorage, commitview.CredentialBinding{})
+}
+
+// HasPersistedTokenBound is HasPersistedToken for an upstream instance bound
+// to b (Spec 116 PR2b): a record written under another binding is absent.
+func HasPersistedTokenBound(serverName, serverURL string, boltStorage *storage.BoltDB, b commitview.CredentialBinding) (hasToken bool, hasRefreshToken bool, isExpired bool) {
 	if boltStorage == nil {
 		return false, false, false
 	}
 
 	serverKey := GenerateServerKey(serverName, serverURL)
-	record, err := boltStorage.GetOAuthToken(serverKey)
+	record, err := boltStorage.GetOAuthTokenBound(serverKey, b)
 	if err != nil || record == nil {
 		return false, false, false
 	}
@@ -299,6 +323,25 @@ func (m *TokenStoreManager) SetOAuthCompletionCallback(callback func(serverName 
 	m.oauthCompletionCallback = callback
 }
 
+// SetOAuthCompletionBoundCallback sets the binding-aware completion callback
+// (Spec 116 PR2b review r9). When set it is called instead of the name-only
+// callback, with the binding of the instance that completed the login (zero
+// for an unbound completion, e.g. the CLI process).
+func (m *TokenStoreManager) SetOAuthCompletionBoundCallback(callback func(serverName string, binding commitview.CredentialBinding)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.oauthCompletionBoundCallback = callback
+}
+
+// SetCompletionBindingResolver sets the resolver of the credential binding of
+// the instance that serves a name now (Spec 116 PR2b review r9). nil keeps the
+// pre-PR2b behaviour: every bound completion is recorded and called back.
+func (m *TokenStoreManager) SetCompletionBindingResolver(resolve func(serverName string) (commitview.CredentialBinding, bool)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.completionBindingResolver = resolve
+}
+
 // SetOAuthFailureCallback sets a callback invoked when an OAuth flow fails in a
 // place that has no caller to return the error to — a callback that could not
 // be delivered, a state mismatch, or a background token exchange that failed.
@@ -314,6 +357,13 @@ func (m *TokenStoreManager) SetOAuthFailureCallback(callback func(serverName str
 // RecordOAuthFailure reports an OAuth failure that nobody is waiting on.
 func (m *TokenStoreManager) RecordOAuthFailure(serverName string, err error) {
 	if err == nil {
+		return
+	}
+	// Spec 116 PR2b: a result discarded because the server was removed,
+	// replaced or reconfigured belongs to no current server.
+	if errors.Is(err, ErrCredentialBindingStale) {
+		m.logger.Debug("OAuth failure of a superseded server instance not recorded",
+			zap.String("server", serverName), zap.Error(err))
 		return
 	}
 
@@ -338,14 +388,34 @@ func (m *TokenStoreManager) SetTokenSavedCallback(callback func(serverName strin
 	m.tokenSavedCallback = callback
 }
 
-// NotifyTokenSaved triggers the token saved callback if set.
-// Called by PersistentTokenStore.SaveToken() to notify the RefreshManager.
+// SetTokenSavedBoundCallback sets the binding-aware token saved callback
+// (Spec 116 PR2b). When set it is called instead of the plain callback, with
+// the credential binding the token was saved under (zero when unbound).
+func (m *TokenStoreManager) SetTokenSavedBoundCallback(callback func(serverName string, expiresAt time.Time, binding commitview.CredentialBinding)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokenSavedBoundCallback = callback
+}
+
+// NotifyTokenSaved triggers the token saved callback if set, for a token
+// saved without a credential binding.
 func (m *TokenStoreManager) NotifyTokenSaved(serverName string, expiresAt time.Time) {
+	m.NotifyTokenSavedFor(serverName, expiresAt, commitview.CredentialBinding{})
+}
+
+// NotifyTokenSavedFor triggers the token saved callback for a token saved
+// under binding. Called by PersistentTokenStore.SaveToken() and the stored-DCR
+// refresh to notify the RefreshManager.
+func (m *TokenStoreManager) NotifyTokenSavedFor(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) {
 	m.mu.RLock()
 	callback := m.tokenSavedCallback
+	bound := m.tokenSavedBoundCallback
 	m.mu.RUnlock()
 
-	if callback != nil {
+	switch {
+	case bound != nil:
+		bound(serverName, expiresAt, binding)
+	case callback != nil:
 		callback(serverName, expiresAt)
 	}
 }
@@ -353,11 +423,43 @@ func (m *TokenStoreManager) NotifyTokenSaved(serverName string, expiresAt time.T
 // MarkOAuthCompleted records that OAuth was successfully completed for a server
 // This method is used by CLI processes to notify server processes about OAuth completion
 func (m *TokenStoreManager) MarkOAuthCompleted(serverName string) {
+	m.MarkOAuthCompletedBound(serverName, commitview.CredentialBinding{})
+}
+
+// MarkOAuthCompletedBound is MarkOAuthCompleted for an upstream instance bound
+// to binding: the recorded completion reads as recent only for readers with
+// the same binding (or unbound readers), never for a same-name replacement.
+//
+// Review r9: a bound completion of an instance a commit superseded (the
+// resolver reports another binding, or no instance, for the name) records
+// nothing and invokes no completion callback, so it can neither retry nor
+// disconnect a same-name replacement.
+func (m *TokenStoreManager) MarkOAuthCompletedBound(serverName string, binding commitview.CredentialBinding) {
+	m.mu.RLock()
+	resolve := m.completionBindingResolver
+	m.mu.RUnlock()
+	if !binding.IsZero() && resolve != nil {
+		if cur, ok := resolve(serverName); !ok || cur != binding {
+			m.logger.Debug("OAuth completion of a superseded server instance not recorded",
+				zap.String("server", serverName),
+				zap.String("binding", binding.String()))
+			return
+		}
+	}
+
 	m.mu.Lock()
 	callback := m.oauthCompletionCallback
+	boundCallback := m.oauthCompletionBoundCallback
 	completionTime := time.Now()
-	m.completedOAuth[serverName] = completionTime
+	m.completedOAuth[serverName] = oauthCompletion{at: completionTime, binding: binding}
 	m.mu.Unlock()
+
+	if boundCallback != nil {
+		m.logger.Info("Triggering in-process OAuth completion callback",
+			zap.String("server", serverName))
+		boundCallback(serverName, binding)
+		return
+	}
 
 	m.logger.Info("OAuth completion recorded",
 		zap.String("server", serverName),
@@ -379,7 +481,7 @@ func (m *TokenStoreManager) MarkOAuthCompleted(serverName string) {
 func (m *TokenStoreManager) MarkOAuthCompletedWithDB(serverName string, storage DatabaseOAuthNotifier) error {
 	m.mu.Lock()
 	completionTime := time.Now()
-	m.completedOAuth[serverName] = completionTime
+	m.completedOAuth[serverName] = oauthCompletion{at: completionTime}
 	m.mu.Unlock()
 
 	// Save to database for cross-process notification
@@ -407,18 +509,70 @@ type DatabaseOAuthNotifier interface {
 	SaveOAuthCompletionEvent(event *CompletionEvent) error
 }
 
+// BoundOAuthNotifier records a completion event bound to the credential
+// binding of the instance that completed the login (Spec 116 PR2b, T055c).
+type BoundOAuthNotifier interface {
+	SaveOAuthCompletionEventIfBound(event *CompletionEvent, binding commitview.CredentialBinding) (bool, error)
+}
+
+// MarkOAuthCompletedWithDBBound is MarkOAuthCompletedWithDB for an upstream
+// instance bound to binding: the event is written only while the server's
+// row still carries the binding, and carries it, so the consumer never
+// retries a replacement for a login an instance the commit superseded
+// completed. A refused write is not an error, and records nothing in memory
+// either: the in-memory recent-completion flag is set (bound to binding) only
+// once the bound DB write landed (review r8), so a superseded instance's login
+// cannot make a replacement skip its automatic OAuth deferral.
+func (m *TokenStoreManager) MarkOAuthCompletedWithDBBound(serverName string, storage BoundOAuthNotifier, binding commitview.CredentialBinding) error {
+	completionTime := time.Now()
+	event := &CompletionEvent{ServerName: serverName, CompletedAt: completionTime}
+	written, err := storage.SaveOAuthCompletionEventIfBound(event, binding)
+	if err != nil {
+		m.logger.Error("Failed to save OAuth completion event to database",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return err
+	}
+	if !written {
+		m.logger.Debug("OAuth completion event skipped: binding mismatch",
+			zap.String("server", serverName),
+			zap.String("binding", binding.String()))
+		return nil
+	}
+	m.mu.Lock()
+	m.completedOAuth[serverName] = oauthCompletion{at: completionTime, binding: binding}
+	m.mu.Unlock()
+	m.logger.Info("OAuth completion saved to database for cross-process notification",
+		zap.String("server", serverName),
+		zap.Time("completion_time", completionTime))
+	return nil
+}
+
 // OAuthCompletionEvent represents an OAuth completion event (re-exported from storage)
 type CompletionEvent = storage.OAuthCompletionEvent
 
 // HasRecentOAuthCompletion checks if OAuth was recently completed for a server
 func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
+	return m.HasRecentOAuthCompletionBound(serverName, commitview.CredentialBinding{})
+}
+
+// HasRecentOAuthCompletionBound is HasRecentOAuthCompletion for an upstream
+// instance bound to binding: a completion recorded for another binding (an
+// old incarnation, or an OAuth epoch a commit superseded) is not recent for
+// it. An unbound reader, or an unbound record (the CLI process), keeps the
+// name-only semantics.
+func (m *TokenStoreManager) HasRecentOAuthCompletionBound(serverName string, binding commitview.CredentialBinding) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	completionTime, exists := m.completedOAuth[serverName]
+	rec, exists := m.completedOAuth[serverName]
 	if !exists {
 		return false
 	}
+	if !binding.IsZero() && !rec.binding.IsZero() && rec.binding != binding {
+		return false
+	}
+	completionTime := rec.at
 
 	// Consider OAuth recent if completed within last 5 minutes
 	isRecent := time.Since(completionTime) < 5*time.Minute
@@ -820,15 +974,30 @@ func CreateOAuthConfigWithLogger(serverConfig *config.ServerConfig, storage *sto
 	return createOAuthConfigInternal(defaultEnv(), serverConfig, storage, extraParams, logger)
 }
 
-// clearOAuthCredentials drops a DCR registration so the next login re-registers.
-func clearOAuthCredentials(logger *zap.Logger, storage *storage.BoltDB, serverKey, serverName string) {
+// clearOAuthCredentials drops a DCR registration so the next login
+// re-registers. It is bound (Spec 116 PR2b, review R6.2, R9.4): it clears
+// only the registration fields of the record at revision observedRev, the one
+// the hygiene check read, and only while the server's row still carries the
+// instance's binding, so a config build of an instance a commit superseded
+// never erases its replacement's registration.
+func clearOAuthCredentials(logger *zap.Logger, storage *storage.BoltDB, env Env, serverKey, serverName string, observedRev uint64) {
 	if storage == nil {
 		return
 	}
-	if err := storage.ClearOAuthClientCredentials(serverKey); err != nil {
+	if hook := oauthBeforeClearHook; hook != nil {
+		hook(serverName, env.Binding, "dcr_client")
+	}
+	cleared, err := storage.ClearOAuthClientIfBound(serverKey, serverName, env.Binding, observedRev)
+	if err != nil {
 		logger.Warn("Failed to clear DCR credentials",
 			zap.String("server", serverName),
 			zap.Error(err))
+		return
+	}
+	if !cleared {
+		logger.Debug("oauth clear skipped: binding mismatch or record changed since it was read",
+			zap.String("server", serverName),
+			zap.String("binding", env.Binding.String()))
 	}
 }
 
@@ -992,12 +1161,13 @@ func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, stora
 	var storedClientID string
 	var storedPort int
 	var storedRedirectURI string
+	var storedRev uint64
 	if storage != nil {
 		serverKey = GenerateServerKey(serverConfig.Name, serverConfig.URL)
 		var storedErr error
-		storedClientID, _, storedPort, storedRedirectURI, storedErr = storage.GetOAuthClientCredentials(serverKey)
+		storedClientID, _, storedPort, storedRedirectURI, storedRev, storedErr = storage.GetOAuthClientCredentialsBound(serverKey, env.Binding)
 		if storedErr != nil {
-			storedClientID, storedPort, storedRedirectURI = "", 0, ""
+			storedClientID, storedPort, storedRedirectURI, storedRev = "", 0, "", 0
 		}
 	}
 
@@ -1046,7 +1216,7 @@ func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, stora
 			logger.Warn("⚠️ Legacy DCR credentials found without stored port, clearing for re-registration",
 				zap.String("server", serverConfig.Name),
 				zap.String("client_id", storedClientID))
-			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
+			clearOAuthCredentials(logger, storage, env, serverKey, serverConfig.Name, storedRev)
 		case storedRedirectURI == "" && (pinnedPort > 0 || remoteRedirectURI != ""):
 			// A legacy record (predates persisting the exact redirect_uri, or
 			// was never pinned before) is about to be used under a pin. Whether
@@ -1063,7 +1233,7 @@ func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, stora
 				zap.String("server", serverConfig.Name),
 				zap.String("client_id", storedClientID),
 				zap.String("pinned_redirect_uri", pinnedRedirectURI))
-			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
+			clearOAuthCredentials(logger, storage, env, serverKey, serverConfig.Name, storedRev)
 		case storedRedirectURI != "" && storedRedirectURI != expectedRedirectURI:
 			// The registration was created for a different redirect_uri than
 			// the one about to be used, so the provider will reject it. This is
@@ -1077,7 +1247,7 @@ func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, stora
 				zap.String("client_id", storedClientID),
 				zap.String("stored_redirect_uri", storedRedirectURI),
 				zap.String("expected_redirect_uri", expectedRedirectURI))
-			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
+			clearOAuthCredentials(logger, storage, env, serverKey, serverConfig.Name, storedRev)
 			// NOT handled here, deliberately: storedRedirectURI == "" (legacy)
 			// while pinnedPort == 0 (currently unpinned). Cross-model review
 			// flagged that such a record could theoretically have been pinned
@@ -1155,7 +1325,7 @@ func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, stora
 				zap.String("server", serverConfig.Name),
 				zap.Int("stored_port", preferredPort),
 				zap.Int("new_port", callbackServer.Port))
-			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
+			clearOAuthCredentials(logger, storage, env, serverKey, serverConfig.Name, storedRev)
 		}
 	}
 
@@ -1242,7 +1412,7 @@ func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, stora
 	// Use persistent token store to persist tokens across daemon restarts if storage is available
 	var tokenStore client.TokenStore
 	if storage != nil {
-		tokenStore = NewPersistentTokenStore(serverConfig.Name, serverConfig.URL, storage)
+		tokenStore = NewBoundPersistentTokenStore(serverConfig.Name, serverConfig.URL, storage, env.Binding)
 		logger.Info("🔧 Using persistent token store for OAuth tokens",
 			zap.String("server", serverConfig.Name),
 			zap.String("storage", "BBolt database"))
@@ -1313,7 +1483,7 @@ func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, stora
 		// above may have just cleared a registration that is no longer valid for
 		// this callback port.
 		if storage != nil {
-			persistedClientID, persistedClientSecret, _, _, err := storage.GetOAuthClientCredentials(serverKey)
+			persistedClientID, persistedClientSecret, _, _, _, err := storage.GetOAuthClientCredentialsBound(serverKey, env.Binding)
 			if err == nil && persistedClientID != "" {
 				clientID = persistedClientID
 				clientSecret = persistedClientSecret

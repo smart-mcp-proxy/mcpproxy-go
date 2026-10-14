@@ -923,11 +923,7 @@ func (b *BoltDB) SaveOAuthToken(record *OAuthTokenRecord) error {
 
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		data, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(record.ServerName), data)
+		return putOAuthRecord(bucket, record.ServerName, record)
 	})
 }
 
@@ -994,11 +990,7 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 			}
 		}
 
-		newData, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(serverKey), newData)
+		return putOAuthRecord(bucket, serverKey, record)
 	})
 }
 
@@ -1047,12 +1039,8 @@ func (b *BoltDB) saveOAuthClientCredentialsIf(serverKey, clientID, clientSecret 
 		record.CallbackPort = callbackPort
 		record.RedirectURI = redirectURI
 		record.Updated = time.Now()
-		newData, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
 		saved = true
-		return bucket.Put([]byte(serverKey), newData)
+		return putOAuthRecord(bucket, serverKey, record)
 	})
 	return saved && err == nil, err
 }
@@ -1104,11 +1092,7 @@ func (b *BoltDB) ClearOAuthClientCredentials(serverKey string) error {
 		record.RedirectURI = ""
 		record.Updated = time.Now()
 
-		newData, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(serverKey), newData)
+		return putOAuthRecord(bucket, serverKey, record)
 	})
 }
 
@@ -1146,11 +1130,7 @@ func (b *BoltDB) UpdateOAuthToken(serverKey string, mutate func(rec *OAuthTokenR
 			record.Created = now
 		}
 		record.Updated = now
-		newData, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(serverKey), newData)
+		return putOAuthRecord(bucket, serverKey, record)
 	})
 	if stderrors.Is(err, ErrSkipOAuthTokenUpdate) {
 		return nil
@@ -1208,12 +1188,8 @@ func (b *BoltDB) clearOAuthClientCredentialsWhere(serverKey string, match func(r
 		record.CallbackPort = 0
 		record.RedirectURI = ""
 		record.Updated = time.Now()
-		newData, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
 		cleared = true
-		return bucket.Put([]byte(serverKey), newData)
+		return putOAuthRecord(bucket, serverKey, record)
 	})
 	return cleared, err
 }

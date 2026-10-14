@@ -123,7 +123,7 @@ func (m *Manager) ApplyServerCommitWithReport(b *ServerCommitBatch) (map[string]
 		if s.Stamp.Gen <= 0 || s.Stamp.Incarnation <= 0 {
 			return nil, fmt.Errorf("%w: %q has a zero stamp %+v", ErrInvariant, name, s.Stamp)
 		}
-		if s.Stamp.Gen > b.Generation || s.Stamp.Incarnation > b.Generation {
+		if s.Stamp.Gen > b.Generation || s.Stamp.Incarnation > b.Generation || s.Stamp.OAuthEpoch > b.Generation || s.Stamp.OAuthEpoch < 0 {
 			return nil, fmt.Errorf("%w: %q stamp %+v is above the commit generation %d", ErrInvariant, name, s.Stamp, b.Generation)
 		}
 	}
@@ -183,6 +183,7 @@ func (m *Manager) ApplyServerCommitWithReport(b *ServerCommitBatch) (map[string]
 			record.Updated = now
 			record.Generation = s.Stamp.Gen
 			record.Incarnation = s.Stamp.Incarnation
+			record.OAuthEpoch = s.Stamp.OAuthEpoch
 			if !replaced[record.ID] {
 				// The SaveUpstreamKeepingQuarantine invariant. The commit's
 				// admission step has already put the kept value into the
@@ -234,7 +235,7 @@ func (m *Manager) ListStoredServers() (map[string]*StoredServer, error) {
 	for _, rec := range records {
 		out[rec.Name] = &StoredServer{
 			Config: serverConfigFromRecord(rec),
-			Stamp:  commitview.ServerGen{Gen: rec.Generation, Incarnation: rec.Incarnation},
+			Stamp:  commitview.ServerGen{Gen: rec.Generation, Incarnation: rec.Incarnation, OAuthEpoch: rec.OAuthEpoch},
 		}
 	}
 	return out, nil
@@ -250,7 +251,7 @@ func (m *Manager) GetStoredServer(name string) (*StoredServer, error) {
 	}
 	return &StoredServer{
 		Config: serverConfigFromRecord(rec),
-		Stamp:  commitview.ServerGen{Gen: rec.Generation, Incarnation: rec.Incarnation},
+		Stamp:  commitview.ServerGen{Gen: rec.Generation, Incarnation: rec.Incarnation, OAuthEpoch: rec.OAuthEpoch},
 	}, nil
 }
 

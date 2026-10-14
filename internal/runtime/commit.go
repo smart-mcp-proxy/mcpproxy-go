@@ -17,6 +17,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -677,9 +678,17 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	if reason == commitReasonFileReload {
 		updateType = configsvc.UpdateTypeReload
 	}
+	// Spec 116 PR2b: the servers whose OAuth state this commit clears get a
+	// new OAuth epoch in the prepared snapshot, so the snapshot, the rows and
+	// the commit result carry one committed credential binding.
+	var oauthCleared map[string]bool
+	if r.storageManager != nil && storageOK {
+		oauthCleared = r.commitOAuthClearSet(tx, stored, replaced)
+	}
 	prepared, err := r.configSvc.Prepare(configsvc.PrepareInput{
 		Config: tx.next, Source: reason, Type: updateType,
 		Replaced: replaced, Seed: seed, Path: tx.path,
+		OAuthCleared: oauthCleared,
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("%w: %v", ErrCommitInvariant, err)
@@ -732,7 +741,7 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 		// empty never wipes the trust state of every server.
 		batch.RowOnlyRemoves = len(tx.next.Servers) == 0 &&
 			(reason == commitReasonBoot || reason == commitReasonAdmissionGate)
-		batch.OAuthClears = r.commitOAuthClears(tx, changes, stored, replaced, batch.Saves)
+		batch.OAuthClears = r.commitOAuthClears(oauthCleared, batch.Saves)
 		qe := tx.next.IsQuarantineEnabled()
 		if enabled, ok, _ := r.storageManager.StoredQuarantineEnabled(); !ok || enabled != qe {
 			batch.QuarantineEnabled = &qe
@@ -908,6 +917,9 @@ func (r *Runtime) commitLocked(reason string, fn func(tx *CommitTx) error) (*Com
 	}
 	releaseLocks()
 	exemptionsDropped := r.commitDropPurgedSchedules(purgeReports)
+	if batch != nil {
+		r.commitForgetRefreshState(tx, purgeReports, batch.OAuthClears)
+	}
 	if tx.reconcile {
 		if h := hooks.reconcileExit; h != nil {
 			h()
@@ -1132,41 +1144,79 @@ func baseEntry(cfg *config.Config, name string) *config.ServerConfig {
 	return nil
 }
 
-// commitOAuthClears returns the servers whose cached OAuth state (tokens and
-// DCR client credentials) the storage step deletes in the row transaction
-// (data-model §1, review round 3), because their OAuth configuration changed:
+// commitOAuthClearSet returns the servers whose cached OAuth state (tokens
+// and DCR client credentials) the storage step deletes in the row
+// transaction (data-model §1, review round 3), because their OAuth
+// configuration changed:
 //
 //   - relative to the base snapshot (an edit through any writer), and
 //   - relative to the stored row (as main's reconcile did): an OAuth-only file
 //     edit made while the daemon was stopped is already in the boot commit's
 //     base, so only the stored row still holds the old OAuth config.
 //
-// Only names whose row this commit writes qualify; a replaced name is a new
-// server whose whole purge set the storage step deletes. The result is sorted.
-func (r *Runtime) commitOAuthClears(tx *CommitTx, changes map[string]ServerChange, stored map[string]*storage.StoredServer, replaced map[string]bool, saves []storage.ServerSave) []string {
-	var names []string
-	for _, s := range saves {
-		name := s.Config.Name
-		if replaced[name] {
+// A replaced name is a new server whose whole purge set the storage step
+// deletes. It runs before Prepare, which raises the OAuth epoch of every name
+// in the set (Spec 116 PR2b).
+func (r *Runtime) commitOAuthClearSet(tx *CommitTx, stored map[string]*storage.StoredServer, replaced map[string]bool) map[string]bool {
+	set := map[string]bool{}
+	for _, next := range tx.next.Servers {
+		if next == nil || replaced[next.Name] {
 			continue
 		}
-		next := s.Config
+		name := next.Name
 		clear := false
-		if ch, ok := changes[name]; ok && ch.Kind == configsvc.ChangeUpdated {
-			if prev := baseEntry(tx.base.Config, name); prev != nil && config.OAuthConfigChanged(prev.OAuth, next.OAuth) {
-				clear = true
-			}
+		if prev := baseEntry(tx.base.Config, name); prev != nil && config.OAuthConfigChanged(prev.OAuth, next.OAuth) {
+			clear = true
 		}
 		if row, ok := stored[name]; ok && row.Config != nil && config.OAuthConfigChanged(row.Config.OAuth, next.OAuth) {
 			clear = true
 		}
 		if clear {
+			set[name] = true
+		}
+	}
+	return set
+}
+
+// commitOAuthClears returns the sorted names of set whose row this commit
+// writes (an OAuth config difference always makes the row differ, so this is
+// all of them in practice; ApplyServerCommit refuses a clear without a save).
+func (r *Runtime) commitOAuthClears(set map[string]bool, saves []storage.ServerSave) []string {
+	var names []string
+	for _, s := range saves {
+		if name := s.Config.Name; set[name] {
 			r.logger.Info("OAuth config changed, clearing cached OAuth state in the config commit", zap.String("server", name))
 			names = append(names, name)
 		}
 	}
 	sort.Strings(names)
 	return names
+}
+
+// commitForgetRefreshState runs in commit step 6 next to
+// commitDropPurgedSchedules (under configCommitMu, after the approval locks):
+// for every purged server and every server whose OAuth state the commit
+// cleared, it drops the refresh coordinator's flights, latch and cooldown of
+// the old credential (Spec 116 PR2b, review R7.1), and cancels the refresh
+// schedule of an OAuth-cleared server (the purge already did for removed
+// ones). The coordinator's mutex is a leaf, so this adds no lock edge. The
+// replacement's binding has no state yet: its instance is built after the
+// commit publishes.
+func (r *Runtime) commitForgetRefreshState(tx *CommitTx, purged map[string]storage.PurgeReport, oauthCleared []string) {
+	forget := func(name string) {
+		if prev := baseEntry(tx.base.Config, name); prev != nil {
+			oauth.DefaultRefreshCoordinator().ForgetServer(oauth.GenerateServerKey(name, prev.URL))
+		}
+	}
+	for name := range purged {
+		forget(name)
+	}
+	for _, name := range oauthCleared {
+		forget(name)
+		if r.refreshManager != nil {
+			r.refreshManager.OnTokenCleared(name)
+		}
+	}
 }
 
 // commitOrphanGC drops tool-approval records and call history of servers that
@@ -1281,6 +1331,7 @@ func generationChanges(tx *CommitTx, changes map[string]ServerChange, snap *conf
 			Reconnect: ch.Reconnect,
 			Replaced:  ch.Kind == configsvc.ChangeReplaced,
 			Config:    sc,
+			Binding:   sg.Binding(),
 		})
 	}
 	for name, ch := range changes {

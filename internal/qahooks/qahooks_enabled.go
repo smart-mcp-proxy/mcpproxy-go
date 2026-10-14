@@ -18,6 +18,7 @@ import (
 //	MCPPROXY_QA_PARK_DIAL=<server>[,<server>...]       park those servers' instance connects (Spec 116 PR4)
 //	MCPPROXY_QA_PARK_OAUTH=<server>[,<server>...]      park those servers' OAuth token refreshes (Spec 116 PR4)
 //	MCPPROXY_QA_PARK_LOGIN=<server>[,<server>...]      park those servers' manual OAuth logins (Spec 116 PR4)
+//	MCPPROXY_QA_PARK_OAUTH_PERSIST=<server>[,...]      park those servers' OAuth token saves after the network response (Spec 116 PR2b)
 //	MCPPROXY_QA_RELEASE_DIR=<dir>                     (default: the OS temp dir)
 //
 // A parked call writes <dir>/parked-<kind>-<server> and waits until
@@ -44,6 +45,9 @@ func init() {
 	}
 	if name := os.Getenv("MCPPROXY_QA_PARK_LOGIN"); name != "" {
 		ParkLogin = parker(dir, "login", name)
+	}
+	if name := os.Getenv("MCPPROXY_QA_PARK_OAUTH_PERSIST"); name != "" {
+		ParkOAuthPersist = parker(dir, "oauth-persist", name)
 	}
 }
 

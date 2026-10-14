@@ -77,6 +77,12 @@ type PrepareInput struct {
 	// Seed carries stored stamps for servers whose base snapshot has no
 	// generation, so generations survive a restart (data-model §2, D13).
 	Seed map[string]SeedStamp
+	// OAuthCleared names the servers whose cached OAuth state this commit
+	// clears because their OAuth configuration changed (Spec 116 PR2b,
+	// data-model §2): their OAuthEpoch moves to G, so an instance built for
+	// the previous OAuth configuration holds a stale credential binding and
+	// none of its OAuth writes can land after the clear.
+	OAuthCleared map[string]bool
 	// Path, when non-empty, is the config file path the snapshot publishes
 	// with. It moves only when Publish succeeds (Spec 116 PR1 review round 3:
 	// a failed commit must not leave a new path published).
@@ -115,15 +121,18 @@ func (p *PreparedSnapshot) ChangedNames() []string {
 
 // computeGenerations applies the generation rule of data-model §2:
 //
-//	replaced (checked first)        → {G, G}
-//	absent in base (created)        → {G, G}
+//	replaced (checked first)        → {G, G, G}
+//	absent in base (created)        → {G, G, G}
 //	present, ServerEntryEqual       → base value (kept)
-//	present, not equal              → {G, base.Incarnation}
+//	present, not equal              → {G, base.Incarnation, epoch}
 //	absent in next                  → dropped
 //
-// A base entry without a generation (the initial snapshot) takes its stored
-// stamp when the stored row matches, keeps the stored incarnation otherwise,
-// and is stamped {G, G} when nothing was ever stored for it.
+// where epoch (Spec 116 PR2b) is G when in.OAuthCleared names the server and
+// base.OAuthEpoch otherwise. A base entry without a generation (the initial
+// snapshot) takes its stored stamp when the stored row matches, keeps the
+// stored incarnation and epoch otherwise, and is stamped {G, G, 0} when
+// nothing was ever stored for it (epoch 0 is the epoch of OAuth records
+// written before PR2b, so an upgrade keeps them readable).
 func computeGenerations(base *Snapshot, in PrepareInput, g int64) (map[string]ServerGen, map[string]ServerChange, error) {
 	baseByName := map[string]*config.ServerConfig{}
 	if base != nil && base.Config != nil {
@@ -163,13 +172,13 @@ func computeGenerations(base *Snapshot, in PrepareInput, g int64) (map[string]Se
 		switch {
 		case in.Replaced[name]:
 			old, _ := baseGen(name)
-			gens[name] = ServerGen{Gen: g, Incarnation: g}
+			gens[name] = ServerGen{Gen: g, Incarnation: g, OAuthEpoch: g}
 			changes[name] = ServerChange{
 				Kind: ChangeReplaced, Old: old, New: gens[name], Reconnect: true,
 				QuarantineRaised: next.Quarantined && !prev.Quarantined,
 			}
 		case prev == nil:
-			gens[name] = ServerGen{Gen: g, Incarnation: g}
+			gens[name] = ServerGen{Gen: g, Incarnation: g, OAuthEpoch: g}
 			changes[name] = ServerChange{
 				Kind: ChangeCreated, New: gens[name], Reconnect: true,
 				QuarantineRaised: next.Quarantined,
@@ -182,9 +191,22 @@ func computeGenerations(base *Snapshot, in PrepareInput, g int64) (map[string]Se
 					if seed.Matches && equal {
 						old = seed.Stamp
 					} else {
-						old = ServerGen{Incarnation: seed.Stamp.Incarnation}
+						old = ServerGen{Incarnation: seed.Stamp.Incarnation, OAuthEpoch: seed.Stamp.OAuthEpoch}
 					}
 				}
+			}
+			// The OAuth epoch moves with an OAuth clear (PR2b). A server
+			// never stamped with an incarnation (a row written before Spec
+			// 116, or none) gets one now and keeps epoch 0, the epoch of
+			// every OAuth record written before PR2b, so an upgrade does
+			// not sign it out. An unchanged, stamped entry keeps its whole
+			// stamp even when the commit clears its OAuth state because only
+			// the stored row differed (projection repair): the instance
+			// serving it already runs this configuration and keeps its
+			// binding.
+			epoch := old.OAuthEpoch
+			if in.OAuthCleared[name] {
+				epoch = g
 			}
 			switch {
 			case equal && old.Gen != 0:
@@ -196,13 +218,13 @@ func computeGenerations(base *Snapshot, in PrepareInput, g int64) (map[string]Se
 				if inc == 0 {
 					inc = g
 				}
-				gens[name] = ServerGen{Gen: g, Incarnation: inc}
+				gens[name] = ServerGen{Gen: g, Incarnation: inc, OAuthEpoch: epoch}
 			default:
 				inc := old.Incarnation
 				if inc == 0 {
 					inc = g
 				}
-				gens[name] = ServerGen{Gen: g, Incarnation: inc}
+				gens[name] = ServerGen{Gen: g, Incarnation: inc, OAuthEpoch: epoch}
 				changes[name] = ServerChange{
 					Kind: ChangeUpdated, Old: old, New: gens[name],
 					Reconnect:        !config.ConnectionEquivalent(prev, next),

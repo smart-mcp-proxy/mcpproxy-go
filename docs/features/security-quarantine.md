@@ -402,12 +402,13 @@ it is admitted per that setting, and tool discovery can record a fresh
 approved baseline for it. Removal purges the inherited records; it does not
 override the admission policy.
 
-One gap remains for OAuth: credential writes are not yet bound to the
-server's incarnation. If the removed server's connection was saving a token
-or registering a DCR client at the moment of removal, that write can still
-land afterwards, and a server re-added under the same name right away may
-find it. Sign the server out to clear it. Binding OAuth writes to the
-incarnation is a planned follow-up (Spec 116 PR2b).
+OAuth credential writes are bound to the server's incarnation too (Spec 116
+PR2b). If the removed server's connection was saving a token, completing a
+login or registering a DCR client at the moment of removal, that write is
+discarded when it lands: nothing is written for the name afterwards, and a
+server re-added under the same name starts signed out. The same holds when a
+server's OAuth configuration changes: credentials of the old configuration
+are cleared and never come back.
 
 An approval made on the old server cannot land on the new one. Each server
 has an `incarnation` (in `GET /api/v1/servers` and the review payload) that

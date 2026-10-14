@@ -115,7 +115,7 @@ func (m *MockTokenStore) DeleteToken(ctx context.Context) error {
 func TestTokenStoreManager_HasValidToken_NoStore(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -128,7 +128,7 @@ func TestTokenStoreManager_HasValidToken_NoStore(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_InMemoryStore(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -145,7 +145,7 @@ func TestTokenStoreManager_HasValidToken_InMemoryStore(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_MockStore_NoToken(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -174,7 +174,7 @@ func TestTokenStoreManager_HasValidToken_MockStore_NoToken(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_MockStore_ValidToken(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -208,7 +208,7 @@ func TestTokenStoreManager_HasValidToken_MockStore_ValidToken(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_MockStore_ExpiredToken(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -243,7 +243,7 @@ func TestTokenStoreManager_HasValidToken_MockStore_ExpiredToken(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_PersistentStore_NoExpiration(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -347,7 +347,7 @@ func TestHasPersistedToken_PastExpiresAt(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_NilStorage(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 

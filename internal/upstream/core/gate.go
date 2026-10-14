@@ -6,6 +6,7 @@ import (
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
@@ -62,5 +63,25 @@ func innerTransport(cl *client.Client) transport.Interface {
 // the OAuth HTTP client mcp-go uses for registration, code exchange and
 // refresh, run on the instance's gated transport.
 func (c *Client) oauthEnv(ctx context.Context) oauth.Env {
-	return oauth.Env{Ctx: ctx, Transport: c.Gate().HTTPTransport()}
+	return oauth.Env{Ctx: ctx, Transport: c.Gate().HTTPTransport(), Binding: c.CredentialBinding()}
+}
+
+// SetCredentialBinding binds the instance's OAuth state to b, the committed
+// credential binding of the view it was built for (Spec 116 PR2b, #1607).
+// The upstream manager sets it before the instance becomes reachable, and on
+// the transient clients of a manual OAuth flow (the registered instance's
+// binding), so every token, client registration and completion record the
+// instance writes, reads or clears is bound to it. Call it before the client
+// is used.
+func (c *Client) SetCredentialBinding(b commitview.CredentialBinding) {
+	c.binding.Store(&b)
+}
+
+// CredentialBinding returns the instance's credential binding (zero: unbound,
+// the CLI and hand-built test clients).
+func (c *Client) CredentialBinding() commitview.CredentialBinding {
+	if b := c.binding.Load(); b != nil {
+		return *b
+	}
+	return commitview.CredentialBinding{}
 }

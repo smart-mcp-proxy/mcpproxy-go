@@ -241,6 +241,60 @@ Lock order: the gate's lock is innermost (`captureMu` → `Manager.mu` →
 `Gate.mu` → `Gate.connsMu`) and is held only around one dial, one write or
 one process start.
 
+**OAuth credential binding** (Spec 116 PR2b, #1607). Each committed server
+view carries an OAuth epoch next to its incarnation: the generation of the
+commit that created the name or last cleared its OAuth state because its OAuth
+configuration changed. `{Incarnation, OAuthEpoch}` is the server's credential
+binding. The commit stamps it on the snapshot, the `upstreams` row and the
+manager's desired view in one pass, and the manager binds every instance it
+builds to the binding of the generation it was built for (never read from the
+row). Every OAuth write and clear an instance makes goes through a storage
+method that checks the row's binding in the same bbolt transaction: token
+saves (a login's code exchange with its paired client, a refresh), DCR client
+saves, completion events, the 5xx token clear, the config-build DCR hygiene
+clears and the clears after a rejected refresh or login. The removal purge
+deletes the row and the OAuth-config clear raises the row's epoch in the
+transaction that deletes the credentials, so an old instance's write that was
+already past its network round-trip either committed first (and was deleted)
+or finds the row gone or re-bound and writes nothing; a same-name re-add never
+sees the old server's tokens. Reads are epoch-filtered only: a bound read
+treats a record of another epoch as absent, but does not check the row, so a
+removed name stays unreadable because its removal purges the records. Every
+write to the `oauth_tokens` bucket takes a new `Revision` from the bucket
+sequence, and a binding-conditional clear acts only on the revision its
+caller inspected, so a parked clear never erases what a same-binding
+replacement (a restart) rewrote. The one exception is the login flow's
+stale-DCR clear (`ClearOAuthClientIfBoundAndClientID`): it holds the client
+id it sent, not a record it read, so it checks the binding and that client
+id; a parked login-path clear can still erase a same-binding rewrite that
+kept the same client id. Refresh flights, the terminal latch, the cooldown
+and the re-registration state are keyed by `(server key, binding)`, so an
+old instance never joins the flight of a replacement with a different
+binding (a removal and re-add, or an OAuth-config change) or receives its
+token. A same-binding replacement (a restart) shares the key and can join
+the old instance's flight; a joiner whose flight failed because its
+initiator was retired retries on its own transport rather than taking that
+answer. A refresh schedule built from a token save records the binding the
+token was saved under, and a reactive flight's terminal outcome is applied
+only to a schedule of the flight's binding, checked when that schedule is
+selected. A late save notification from an older binding (bindings are
+commit generations, so older is known) does not replace the schedule of a
+newer one. The exception is a schedule loaded from storage at startup: it
+carries the zero binding, so no binding comparison is made for it, and a
+terminal outcome of any flight for the server applies to it (the resolver
+check that the flight ran under the server's current binding still
+applies). Its first token save replaces it with a bound schedule. A token
+store guards its 5xx-recovery clear with the revision the refresh flight
+itself wrote or read, never a later re-read, so a same-binding rewrite with
+the same access token survives the clear. Before it builds an instance the manager also checks that the
+stored row still carries exactly the committed view it holds (one bbolt
+`View`), so a stale worker builds no OAuth config at all. Logout and the
+standalone CLI logout (`ClearOAuthTokenForStandaloneLogout`, one exact key)
+stay current-state clears. `scripts/check-upstream-write-sites.sh` fails on an
+unconditional OAuth mutator in `internal/upstream` or `internal/oauth`. No
+lock edge is added: the checks are bbolt leaves taken with no runtime lock
+held, and the coordinator's mutex stays a leaf.
+
 **Incarnation-bound approvals** (Spec 116 PR2). Each server has an
 incarnation that changes only when its name is removed and created again.
 Every approval writer (tool approve/block/toggle, the unquarantine baseline

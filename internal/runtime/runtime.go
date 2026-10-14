@@ -24,6 +24,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -435,6 +436,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	secretResolver := secret.NewResolver()
 
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
+	// Spec 116 PR2b (review R6.1): no instance is built for a committed view
+	// the stored row has already moved past.
+	upstreamManager.SetCommittedViewChecker(storageManager.CheckCommittedView)
 	if cfg.Logging != nil {
 		upstreamManager.SetLogConfig(cfg.Logging)
 	}
@@ -3497,6 +3501,17 @@ func (r *Runtime) TriggerOAuthLogout(serverName string) error {
 	}
 
 	return nil
+}
+
+// CurrentCredentialBinding reports the credential binding of the instance
+// that serves serverName now (Spec 116 PR2b). It implements
+// oauth.RefreshBindingResolver: the RefreshManager ignores the outcome of a
+// refresh flight that ran under another binding.
+func (r *Runtime) CurrentCredentialBinding(serverName string) (commitview.CredentialBinding, bool) {
+	if r.upstreamManager == nil {
+		return commitview.CredentialBinding{}, false
+	}
+	return r.upstreamManager.CurrentCredentialBinding(serverName)
 }
 
 // RefreshOAuthToken implements RuntimeOperations interface for management service.
