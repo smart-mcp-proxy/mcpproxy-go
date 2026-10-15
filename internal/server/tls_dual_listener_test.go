@@ -61,9 +61,12 @@ func TestTLSEnabledKeepsTraySocketPlainHTTP(t *testing.T) {
 	}
 
 	httpSrv := &http.Server{
+		// Echo what net/http and the source-tagging hook saw, so the test can
+		// assert TCP is real TLS (r.TLS set, HTTP/2 via ALPN) and that each
+		// connection keeps its source tag (tray connections get admin auth).
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
-			_, _ = io.WriteString(w, "ok")
+			_, _ = fmt.Fprintf(w, "proto=%s tls=%t source=%s", r.Proto, r.TLS != nil, GetConnectionSource(r.Context()))
 		}),
 		// Short header timeout so a plain-HTTP probe against the TLS TCP port
 		// does not pin a server goroutine through test cleanup.
@@ -103,25 +106,33 @@ func TestTLSEnabledKeepsTraySocketPlainHTTP(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode, "plain HTTP over tray socket: %s", body)
+	require.Equal(t, "proto=HTTP/1.1 tls=false source=tray", string(body))
 
-	// TCP without TLS must fail (server expects a TLS handshake).
+	// TCP without TLS must not be served: net/http sees the failed handshake
+	// on the *tls.Conn and answers 400 "Client sent an HTTP request to an
+	// HTTPS server" (a transport error is equally acceptable).
 	plainTCPClient := &http.Client{
 		Timeout: 2 * time.Second,
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
 		},
 	}
-	_, err = plainTCPClient.Get(fmt.Sprintf("http://%s/ready", tcpAddr))
-	require.Error(t, err, "plain HTTP over TLS TCP listener should fail")
+	resp, err = plainTCPClient.Get(fmt.Sprintf("http://%s/ready", tcpAddr))
+	if err == nil {
+		body, _ = io.ReadAll(resp.Body)
+		_ = resp.Body.Close()
+		require.Equal(t, http.StatusBadRequest, resp.StatusCode, "plain HTTP over TLS TCP listener: %s", body)
+		require.Contains(t, string(body), "HTTPS server")
+	}
 
-	// Give the mis-spoken TCP conn time to hit ReadHeaderTimeout and leave.
-	time.Sleep(700 * time.Millisecond)
-
-	// TCP with TLS must succeed.
+	// TCP with TLS must succeed. ForceAttemptHTTP2 makes the client offer h2
+	// over ALPN the way browsers do; the server advertises h2, so net/http must
+	// see the *tls.Conn to dispatch the connection to its HTTP/2 server.
 	tlsClient := &http.Client{
 		Timeout: 5 * time.Second,
 		Transport: &http.Transport{
 			DisableKeepAlives: true,
+			ForceAttemptHTTP2: true,
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: true, // local ephemeral CA
 				MinVersion:         tls.VersionTLS12,
@@ -133,4 +144,5 @@ func TestTLSEnabledKeepsTraySocketPlainHTTP(t *testing.T) {
 	body, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode, "HTTPS over TCP: %s", body)
+	require.Equal(t, "proto=HTTP/2.0 tls=true source=tcp", string(body))
 }
