@@ -3,6 +3,7 @@ package runtime
 import (
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -50,4 +51,30 @@ func TestUpdateTelemetry_NoChangeIsNoCommit(t *testing.T) {
 	before := rt.ConfigSnapshot().Version
 	require.NoError(t, rt.UpdateTelemetry("noop", func(*config.TelemetryConfig) bool { return false }))
 	assert.Equal(t, before, rt.ConfigSnapshot().Version)
+}
+
+// #1592: the anonymous id / rotation reach the on-disk config when written by
+// the telemetry service through the real commit (the service shares the
+// runtime's published config pointer).
+func TestTelemetryService_RotationPersistsThroughCommit(t *testing.T) {
+	rt, cfgPath := newSpec116Runtime(t, nil, disabledStdio("a"))
+	old := time.Now().UTC().Add(-400 * 24 * time.Hour).Format(time.RFC3339)
+	require.NoError(t, rt.UpdateTelemetry("seed", func(tc *config.TelemetryConfig) bool {
+		tc.AnonymousID = "old-id"
+		tc.AnonymousIDCreatedAt = old
+		return true
+	}))
+
+	rt.SetTelemetry("v1.2.3", "personal")
+	_ = rt.telemetryService.BuildPayload()
+
+	live, err := rt.GetConfig()
+	require.NoError(t, err)
+	require.NotNil(t, live.Telemetry)
+	assert.NotEqual(t, "old-id", live.Telemetry.AnonymousID)
+
+	onDisk, err := config.DecodeConfigFile(cfgPath)
+	require.NoError(t, err)
+	require.NotNil(t, onDisk.Telemetry)
+	assert.Equal(t, live.Telemetry.AnonymousID, onDisk.Telemetry.AnonymousID)
 }
