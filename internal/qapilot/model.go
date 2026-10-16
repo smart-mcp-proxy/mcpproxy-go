@@ -373,6 +373,11 @@ type Snapshot struct {
 	Tools           map[string]Status        `json:"tools"`
 	ToolsDisabled   map[string]bool          `json:"tools_disabled,omitempty"`
 	Dispatch        map[string]DispatchClass `json:"dispatch"`
+	// Current and Approved are the contract Keys the tool's stored record
+	// presents / has approved. Approved is empty unless the status is
+	// approved or changed.
+	Current  map[string]string `json:"current,omitempty"`
+	Approved map[string]string `json:"approved,omitempty"`
 }
 
 // Snapshot projects the model state.
@@ -385,9 +390,15 @@ func (s *Server) Snapshot() Snapshot {
 		Tools:           map[string]Status{},
 		ToolsDisabled:   map[string]bool{},
 		Dispatch:        map[string]DispatchClass{},
+		Current:         map[string]string{},
+		Approved:        map[string]string{},
 	}
 	for name, t := range s.Tools {
 		snap.Tools[name] = t.Status
+		snap.Current[name] = t.Current.Key
+		if t.Status == StatusApproved || t.Status == StatusChanged {
+			snap.Approved[name] = t.Approved.Key
+		}
 		if t.Disabled {
 			snap.ToolsDisabled[name] = true
 		}
@@ -435,6 +446,12 @@ func Diff(expected, actual Snapshot) []string {
 		}
 		if expected.ToolsDisabled[n] != actual.ToolsDisabled[n] {
 			out = append(out, fmt.Sprintf("tool %q: expected disabled=%v, actual %v", n, expected.ToolsDisabled[n], actual.ToolsDisabled[n]))
+		}
+		if ec, ac := expected.Current[n], actual.Current[n]; ec != ac {
+			out = append(out, fmt.Sprintf("tool %q: expected current contract %q, actual %q", n, ec, ac))
+		}
+		if ea, aa := expected.Approved[n], actual.Approved[n]; ea != aa {
+			out = append(out, fmt.Sprintf("tool %q: expected approved contract %q, actual %q", n, ea, aa))
 		}
 		if ed, ad := expected.Dispatch[n], actual.Dispatch[n]; ed != ad {
 			out = append(out, fmt.Sprintf("tool %q: expected dispatch %q, actual %q", n, ed, ad))

@@ -200,12 +200,24 @@ jobs:
           go-version: ${{ env.GO_VERSION }}
           cache: true
 
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Warm the tiktoken vocabulary cache
+        run: go run ./bench/cmd/warmtiktoken
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
       - name: Randomized exploration (rapid)
+        # The package path must come BEFORE -rapid.checks: a flag the go
+        # command does not know ends package parsing, so a trailing package
+        # is handed to the test binary and the repository root is tested.
         run: |
           go test -race -count=1 -timeout 110m -run 'TestQAPilot_Explore|TestRapidQuarantineStateMachine' \
-            -rapid.checks="${{ github.event.inputs.explore_checks || '200' }}" ./internal/runtime/
+            ./internal/runtime/ -args -rapid.checks="${{ github.event.inputs.explore_checks || '200' }}"
         env:
           QAPILOT_EXPLORE: "1"
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
       - name: Upload rapid failure traces
         if: failure()
