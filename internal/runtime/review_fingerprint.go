@@ -25,12 +25,14 @@ import (
 // (unset, false, true), so a hint change is always visible to a review even
 // where the rug-pull hash treats an unset hint and its spelled-out default
 // alike. Each field is encoded on its own (length-prefixed, Sol r2 P1): the
-// rug-pull hash joins description and schemas with an unescaped '|' and
-// leaves out an absent output schema, so (D, I, O) and ("D|I", O, none) share
-// one CurrentHash, but never one fingerprint. Schemas are JSON-normalized, as
+// v4 rug-pull hash, still stored on records a v4 binary wrote, joins
+// description and schemas with an unescaped '|' and leaves out an absent
+// output schema, so (D, I, O) and ("D|I", O, none) share one v4 CurrentHash,
+// but never one fingerprint. Schemas are JSON-normalized, as
 // the rug-pull hash does, so a key-order-only difference is not a change.
 // title, status, disabled, timestamps and scan evidence are not part of it.
-// The rug-pull hash (calculateToolApprovalHash*) is unchanged.
+// The rug-pull hash (calculateToolApprovalHash*) is separate; since hash
+// schema v5 (issue #1606) it is length-prefixed too.
 
 // reviewFingerprintVersion prefixes every fingerprint. A fingerprint of
 // another version never matches, which only makes the client reload. rv1

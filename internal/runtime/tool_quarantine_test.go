@@ -586,15 +586,18 @@ func TestCalculateToolApprovalHash(t *testing.T) {
 	})
 	assert.Equal(t, h1, h6, "Annotations should NOT change the hash (excluded by design)")
 
-	// Nil annotations produce same hash as legacy formula
+	// The v4 formula with nil annotations is the legacy formula; the current
+	// (v5, issue #1606) formula is a different, length-prefixed encoding.
 	legacy := calculateLegacyToolApprovalHash("tool_a", "desc A", `{"type":"object"}`)
-	assert.Equal(t, h1, legacy, "Nil annotations hash should match legacy hash")
+	assert.Equal(t, calculateToolApprovalHashV4("tool_a", "desc A", `{"type":"object"}`, "", nil), legacy, "Nil annotations v4 hash should match legacy hash")
+	assert.NotEqual(t, h1, legacy, "the v5 hash is a new encoding")
 }
 
-// TestCalculateToolApprovalHash_Stability ensures that hash values remain stable across releases.
-// Annotations are excluded from hash (they caused false change detection spam).
-// The hash now matches calculateLegacyToolApprovalHash — same formula.
-func TestCalculateToolApprovalHash_Stability(t *testing.T) {
+// TestCalculateToolApprovalHashV4_Stability pins the v4 (pipe-joined) formula:
+// the v4 → v5 migration recomputes it to check stored approvals, so it must stay
+// byte-identical to what v4 binaries wrote. Annotations other than the four
+// safety hints are excluded (they caused false change detection spam).
+func TestCalculateToolApprovalHashV4_Stability(t *testing.T) {
 	// Golden hashes: annotations do NOT affect the hash (intentionally excluded).
 	// This means "with annotations" hashes match "nil annotations" hashes for same name+desc+schema.
 	tests := []struct {
@@ -635,7 +638,7 @@ func TestCalculateToolApprovalHash_Stability(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			hash := calculateToolApprovalHash(tt.toolName, tt.description, tt.schema, tt.annotations)
+			hash := calculateToolApprovalHashV4(tt.toolName, tt.description, tt.schema, "", tt.annotations)
 			assert.Equal(t, tt.expected, hash,
 				"Hash changed! This will invalidate ALL existing tool approvals in user databases. "+
 					"If intentional, add backward-compatible migration logic before updating expected values.")
