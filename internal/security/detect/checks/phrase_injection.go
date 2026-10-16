@@ -1323,7 +1323,7 @@ var metadataLabelTailRe = regexp.MustCompile(`^\s+(?:` + secretMetadataAlt + `)\
 
 // metadataMoveContinuesRe finds a conjunct after a metadata move; its word
 // is captured (group 2) after its key qualifier (group 1).
-var metadataMoveContinuesRe = regexp.MustCompile(`^\s*(?:,|and|plus|&)\s*(?:(?:its|the|their|a)\s+)?((?:(?:private|public|ssh|api|secret)\s+)?key\s+)?([\w-]+)`)
+var metadataMoveContinuesRe = regexp.MustCompile(`^\s*(?:,\s*(?:and|plus)|,|and|plus|&)\s*(?:(?:its|the|their|a)\s+)?((?:(?:private|public|ssh|api|secret)\s+)?key\s+)?([\w-]+)`)
 
 // publicKeyQualifierRe is the "public key " qualifier of a conjunct.
 var publicKeyQualifierRe = regexp.MustCompile(`^public\s+key\s+$`)
