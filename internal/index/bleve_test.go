@@ -707,6 +707,41 @@ func TestBleveIndex_DeleteAll_BeyondPageCap(t *testing.T) {
 	assert.Equal(t, uint64(0), count, "DeleteAll must remove every document across all pages")
 }
 
+func TestBleveIndex_DeleteServerTools_BeyondPageCap(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "bleve_test_*")
+	require.NoError(t, err)
+	defer os.RemoveAll(tmpDir)
+
+	bleveIndex, err := NewBleveIndex(tmpDir, zap.NewNop())
+	require.NoError(t, err)
+	defer bleveIndex.Close()
+
+	bleveIndex.searchPageSize = 100
+
+	const total = 1001
+	tools := make([]*config.ToolMetadata, 0, total+1)
+	for i := 0; i < total; i++ {
+		tools = append(tools, &config.ToolMetadata{
+			Name:       fmt.Sprintf("large:tool_%04d", i),
+			ServerName: "large",
+			Hash:       fmt.Sprintf("large_%04d", i),
+		})
+	}
+	tools = append(tools, &config.ToolMetadata{
+		Name: "other:tool", ServerName: "other", Hash: "other",
+	})
+	require.NoError(t, bleveIndex.BatchIndex(tools))
+
+	require.NoError(t, bleveIndex.DeleteServerTools("large"))
+
+	got, err := bleveIndex.GetToolsByServer("large")
+	require.NoError(t, err)
+	assert.Empty(t, got, "every page of the removed server's tools must be purged")
+	other, err := bleveIndex.GetToolsByServer("other")
+	require.NoError(t, err)
+	assert.Len(t, other, 1, "purging one server must preserve unrelated tools")
+}
+
 // TestBleveIndex_CanonicalToolName verifies that both index read seams return a
 // canonical "server:tool" identity even when discovery stored a BARE tool name
 // (the real live path: ToolMetadata{ServerName:"github", Name:"create_issue"}),

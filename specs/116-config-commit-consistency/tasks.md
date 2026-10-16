@@ -478,8 +478,8 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [x] T096 [US4] A retired-instance call or probe maps to the existing unavailable error and does not feed call-stats or health for the replacement
 - [x] T097 [US4] Live fixtures `counting_http_fixture.py` and the marker launcher; `qa_hooks` `MCPPROXY_QA_PARK_DIAL` / `MCPPROXY_QA_PARK_OAUTH`; live L4; evidence `s116-pr4`
 - [x] T099 [US4] Extend `check-upstream-write-sites.sh` with the FR-024a ungated-HTTP grep (allowlist file `scripts/ungated-http-allowlist.txt`)
-- [ ] T098 [US4] The race/lint/e2e matrix; SC-004 measurements recorded; Sol review (transport + OAuth chunk separately); docs (`docs/architecture.md` "Retirement barrier")
-  - Status (review round 4, 2026-10-13): open. The race/lint/e2e matrix, the Sol review rounds and the docs are done. SC-004 is now measured with the specified workloads by `internal/runtime/spec116_sc004_test.go` (`MCPPROXY_SC004_MEASURE=1`, in-process, 25 servers): a commit with no index work has p99 20.0 ms (n=300, budget 50 ms), and the Retire of one connected instance has p99 42 µs (n=40, budget 100 ms; the whole removal commit has p99 39.8 ms). **A removal with a 320-tool index purge has p99 6.26 s (n=40, budget 500 ms) and misses the budget.** The cause predates this PR: `BleveIndex.DeleteServerTools` deletes one document per bleve transaction. It is tracked in #1617. Tick T098 once #1617 lands and the measurement passes.
+- [x] T098 [US4] The race/lint/e2e matrix; SC-004 measurements recorded; Sol review (transport + OAuth chunk separately); docs (`docs/architecture.md` "Retirement barrier")
+  - Status (2026-10-16): #1617 changes `BleveIndex.DeleteServerTools` to batch and page purges. `MCPPROXY_SC004_MEASURE=1 go test ./internal/runtime -run '^TestSC004_CommitLatencyBudgets$' -count=1 -v` passes on Linux: no-index commit p99 2.43 ms, 320-tool purge p99 5.21 ms, and Retire p99 178 µs (n=300/40/40; budgets 50 ms/500 ms/100 ms). The issue's original 6.26 s Apple M-series baseline is recorded above.
 
 
 ### PR4 implementation note (as shipped, 2026-10-13)
