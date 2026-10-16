@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fsnotify/fsnotify"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -476,4 +477,32 @@ func TestConfigWatcher_BackToBackSelfWritesBothSuppressed(t *testing.T) {
 	time.Sleep(1200 * time.Millisecond)
 	require.Equal(t, listenBefore, rt.ConfigSnapshot().Config.Listen,
 		"watcher must not hot-apply restart-required save B either")
+}
+
+// TestConfigWatcher_PollRecoversMissedFsEvent: fsnotify's kqueue backend can
+// drop the event for a config replace (seen on macOS CI as an external revert
+// that never reloaded). Simulate total event loss by pointing the fsnotify
+// watch at an unrelated directory; the poll safety net must still reload.
+func TestConfigWatcher_PollRecoversMissedFsEvent(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "mcp_config.json")
+	initialCfg := config.DefaultConfig()
+	initialCfg.Listen = "127.0.0.1:0"
+	initialCfg.DataDir = tmpDir
+	require.NoError(t, config.SaveConfig(initialCfg, cfgPath))
+	rt, err := New(initialCfg, cfgPath, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	watcher, err := fsnotify.NewWatcher()
+	require.NoError(t, err)
+	require.NoError(t, watcher.Add(t.TempDir())) // never sees cfgPath events
+	before, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	go rt.runConfigWatchLoop(rt.AppContext(), watcher, cfgPath, before, 100*time.Millisecond)
+
+	require.NoError(t, config.SaveConfig(editedConfig(initialCfg, 24680), cfgPath))
+	require.Eventually(t, func() bool {
+		return rt.ConfigSnapshot().Config.ToolResponseLimit == 24680
+	}, 5*time.Second, 25*time.Millisecond, "poll must reload an edit whose fs event was lost")
 }

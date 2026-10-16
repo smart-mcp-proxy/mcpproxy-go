@@ -19,6 +19,16 @@ import (
 // editors time to finish writing before we read the file.
 const configWatchDebounce = 500 * time.Millisecond
 
+// configWatchPollInterval is the safety-net poll period. fsnotify's kqueue
+// backend (macOS/BSD) can drop the event for a rename-over-config that lands
+// right after a previous one has been handled (observed on CI: an external
+// revert to previously self-written bytes produced no event at all, so the
+// running config stayed stale until restart). The loop therefore also compares
+// the file's bytes with the last content it processed every interval and runs
+// the normal debounce -> reloadFromDiskIfChanged path when they differ. A
+// the loop takes it as a parameter so tests can shorten it.
+const configWatchPollInterval = 2 * time.Second
+
 // startConfigFileWatcher watches the config file for external edits and
 // hot-reloads them through Runtime.ReloadConfiguration — the same canonical
 // disk-reload path used by manual reloads (events, telemetry and update-check
@@ -55,14 +65,17 @@ func (r *Runtime) startConfigFileWatcher(ctx context.Context, cfgPath string) er
 	}
 
 	r.logger.Info("Config file watcher started", zap.String("path", absPath))
-	go r.runConfigWatchLoop(ctx, watcher, absPath)
+	// Snapshot the content synchronously, with the watch already armed, so an
+	// edit racing the goroutine start is seen by either the event or the poll.
+	initial, _ := os.ReadFile(absPath)
+	go r.runConfigWatchLoop(ctx, watcher, absPath, initial, configWatchPollInterval)
 	return nil
 }
 
 // runConfigWatchLoop is the watcher event loop: it filters events down to the
 // config file, debounces them, and triggers reloadFromDiskIfChanged when the
 // debounce window closes.
-func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watcher, absPath string) {
+func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watcher, absPath string, lastSeen []byte, pollEvery time.Duration) {
 	defer func() { _ = watcher.Close() }()
 
 	// Debounce timer, created stopped. Go 1.23+ timer semantics make
@@ -72,6 +85,13 @@ func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watc
 		<-debounce.C
 	}
 	defer debounce.Stop()
+
+	// lastSeen (initially the caller's snapshot) is the content the loop last
+	// evaluated; the poll only reacts to a file that differs from it, so quiet
+	// files cost one small read.
+	pending := false // debounce armed and not yet fired
+	poll := time.NewTicker(pollEvery)
+	defer poll.Stop()
 
 	// Create catches mv/rename-in; Write catches in-place truncate writes;
 	// Rename/Remove re-arm the debounce so the follow-up recreate isn't
@@ -97,8 +117,21 @@ func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watc
 				continue
 			}
 			debounce.Reset(configWatchDebounce)
+			pending = true
+
+		case <-poll.C:
+			// Missed-event safety net (see configWatchPollInterval). An
+			// unreadable file (rename window) is left to the next tick.
+			if b, err := os.ReadFile(absPath); err == nil && !pending && !bytes.Equal(b, lastSeen) {
+				debounce.Reset(configWatchDebounce)
+				pending = true
+			}
 
 		case <-debounce.C:
+			pending = false
+			if b, err := os.ReadFile(absPath); err == nil {
+				lastSeen = b
+			}
 			r.reloadFromDiskIfChanged(absPath)
 		}
 	}
