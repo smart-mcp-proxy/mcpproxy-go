@@ -312,8 +312,32 @@ func TestStagedSource_ScanDeadlineCoversStaging(t *testing.T) {
 		return "", "", 0, nil
 	}
 	req := ScanRequest{ServerName: "dl", SourceDir: source, ToolDefinitions: snapshot}
-	plugin := &ScannerPlugin{ID: "mcp-scan", DockerImage: "example/mcp-scan:test", Command: []string{"scan"}, Timeout: "-1s"}
+	plugin := &ScannerPlugin{ID: "mcp-scan", DockerImage: "example/mcp-scan:test", Command: []string{"scan"}, Timeout: "1ns"}
 	_, _, err = engine.runSingleScanner(context.Background(), plugin, req)
 	require.Error(t, err, "an already-expired scan deadline stops staging")
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
+}
+
+// TestStagedSource_NonPositiveTimeoutMeansNoLimit: a "0s"/negative plugin
+// timeout keeps its pre-#1602 meaning (no limit) instead of expiring the scan.
+func TestStagedSource_NonPositiveTimeoutMeansNoLimit(t *testing.T) {
+	for _, tmo := range []string{"0s", "-1s"} {
+		t.Run(tmo, func(t *testing.T) {
+			source := writeToolsJSON(t, []map[string]interface{}{rt06Tool(rt06Poisoned)})
+			snapshot, err := os.ReadFile(filepath.Join(source, "tools.json"))
+			require.NoError(t, err)
+			logger := zap.NewNop()
+			engine := NewEngine(NewDockerRunner(logger), NewRegistry(t.TempDir(), logger), t.TempDir(), logger)
+			engine.runScannerContainer = func(ctx context.Context, cfg ScannerRunConfig) (string, string, int, error) {
+				_, ok := ctx.Deadline()
+				assert.False(t, ok, "non-positive timeout adds no deadline")
+				require.NoError(t, os.WriteFile(filepath.Join(cfg.ReportDir, "results.json"), []byte(genericCleanReport), 0o644))
+				return "", "", 0, nil
+			}
+			req := ScanRequest{ServerName: "nl", SourceDir: source, ToolDefinitions: snapshot}
+			plugin := &ScannerPlugin{ID: "mcp-scan", DockerImage: "example/mcp-scan:test", Command: []string{"scan"}, Timeout: tmo}
+			_, _, err = engine.runSingleScanner(context.Background(), plugin, req)
+			require.NoError(t, err)
+		})
+	}
 }

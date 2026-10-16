@@ -787,8 +787,13 @@ func (e *Engine) runSingleScanner(ctx context.Context, s *ScannerPlugin, req Sca
 	}
 	// The scan deadline starts before source staging so staging runs under it
 	// (#1602); RunScanner derives its own, no-later timeout from this ctx.
-	ctx, cancelScan := context.WithTimeout(ctx, timeout)
-	defer cancelScan()
+	// A non-positive timeout means "no limit" (as in DockerRunner.RunScanner),
+	// so it must not produce an already-expired context.
+	if timeout > 0 {
+		var cancelScan context.CancelFunc
+		ctx, cancelScan = context.WithTimeout(ctx, timeout)
+		defer cancelScan()
+	}
 
 	// Prepare report directory
 	jobID := fmt.Sprintf("scan-%s-%d", req.ServerName, time.Now().UnixNano())
