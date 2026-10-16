@@ -1534,6 +1534,11 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
 		return nil, ErrConnectionGenerationChanged
 	}
+	// The same window for the caller's own policy verdicts (Spec 117
+	// FR-018): a gate snapshot read before the queue wait is re-read here.
+	if err := runDispatchRecheck(ctx); err != nil {
+		return nil, err
+	}
 
 	invoker := mc.toolInvoker
 	if invoker == nil {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // toolGate is ONE evaluation of the shared per-tool policy gates, consumed by
@@ -130,6 +132,28 @@ func (p *MCPProxyServer) toolReviewDirty(serverName string) bool {
 		return rt.ToolReviewDirty(serverName)
 	}
 	return false
+}
+
+// withReviewDirtyRecheck attaches the FR-018 verdict to a dispatch context as
+// a pre-transport re-check. The gate's reviewDirty is a snapshot read before
+// dispatch; a call that then waits in admission control (or behind a session
+// re-init) while a concurrent capture fails persistence would otherwise go
+// upstream on the stale clean verdict. The managed client re-reads it after
+// every wait, immediately before the transport, and refuses with zero
+// upstream calls (see isReviewNotRecordedRefusal).
+func (p *MCPProxyServer) withReviewDirtyRecheck(ctx context.Context, serverName string) context.Context {
+	return managed.WithDispatchRecheck(ctx, func() error {
+		if p.toolReviewDirty(serverName) {
+			return fmt.Errorf("server '%s': %w", serverName, toolreview.ErrReviewNotRecorded)
+		}
+		return nil
+	})
+}
+
+// isReviewNotRecordedRefusal reports withReviewDirtyRecheck's refusal: the
+// call was not sent; the caller answers with reviewNotRecordedMessage.
+func isReviewNotRecordedRefusal(err error) bool {
+	return errors.Is(err, managed.ErrDispatchRecheckRefused) && errors.Is(err, toolreview.ErrReviewNotRecorded)
 }
 
 // evaluateToolGate reads the local policy state for one tool exactly once and

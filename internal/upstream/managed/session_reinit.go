@@ -314,6 +314,11 @@ func (mc *Client) callToolWithSession(ctx context.Context, invoker toolCaller, t
 	if refusal := mc.identityRefusal(toolName, pre, preKnown, expectedEpoch); refusal != nil {
 		return nil, refusal
 	}
+	// joinGap may have waited on a re-init flight; re-read the caller's
+	// policy verdicts after it, as callTool does after the admission wait.
+	if err := runDispatchRecheck(ctx); err != nil {
+		return nil, err
+	}
 
 	cur, known, ok := mc.sessionState()
 	stale := cur
@@ -341,6 +346,11 @@ func (mc *Client) callToolWithSession(ctx context.Context, invoker toolCaller, t
 	}
 	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
 		return nil, ErrConnectionGenerationChanged
+	}
+	// The re-initialize re-listed the toolset; the caller's policy verdicts
+	// are re-read before the retry is sent, as before the first send.
+	if err := runDispatchRecheck(ctx); err != nil {
+		return nil, err
 	}
 	return invoker.CallTool(ctx, toolName, args)
 }
