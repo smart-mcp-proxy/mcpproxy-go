@@ -1,8 +1,10 @@
 package telemetry
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -97,10 +99,11 @@ func TestConfigUpdater_RotationPersistsToDisk(t *testing.T) {
 	c := &commitLikeUpdater{svc: svc, published: cfg}
 	svc.SetConfigUpdater(c.update)
 
-	svc.maybeRotateAnonymousID(cfg, time.Now().UTC())
+	id, _ := svc.maybeRotateAnonymousID(cfg, time.Now().UTC())
 	assert.NotEmpty(t, c.disk.AnonymousID)
 	assert.NotEqual(t, "old-id", c.disk.AnonymousID)
-	assert.Equal(t, c.disk.AnonymousID, cfg.Telemetry.AnonymousID, "payload snapshot reports the committed id")
+	assert.Equal(t, c.disk.AnonymousID, id, "payload reports the committed id")
+	assert.Equal(t, "old-id", cfg.Telemetry.AnonymousID, "published config must not be mutated")
 }
 
 // A heartbeat holding config A must not overwrite the identity a reload
@@ -114,8 +117,69 @@ func TestConfigUpdater_StaleRotationDoesNotOverwriteNewerIdentity(t *testing.T) 
 	c := &commitLikeUpdater{svc: svc, published: live, disk: *live.Telemetry}
 	svc.SetConfigUpdater(c.update)
 
-	svc.maybeRotateAnonymousID(stale, time.Now().UTC())
+	id, _ := svc.maybeRotateAnonymousID(stale, time.Now().UTC())
+	assert.Equal(t, "newer-id", id)
+	assert.Equal(t, "old-id", stale.Telemetry.AnonymousID, "stale snapshot must not be written")
 	assert.Equal(t, "newer-id", c.disk.AnonymousID)
 	assert.Equal(t, fresh, c.disk.AnonymousIDCreatedAt)
 	assert.Equal(t, "newer-id", c.published.Telemetry.AnonymousID)
+}
+
+// Finding 1: building heartbeats must never write into the shared published
+// config; run under -race with concurrent readers of the published block.
+func TestConfigUpdater_HeartbeatBuildDoesNotMutatePublishedConfig(t *testing.T) {
+	old := time.Now().UTC().Add(-400 * 24 * time.Hour).Format(time.RFC3339)
+	cfg := &config.Config{Telemetry: &config.TelemetryConfig{AnonymousID: "old-id", AnonymousIDCreatedAt: old}}
+	svc := New(cfg, "", "v1.2.3", "personal", zap.NewNop())
+	var mu sync.Mutex
+	c := &commitLikeUpdater{svc: svc, published: cfg}
+	svc.SetConfigUpdater(func(r string, fn func(*config.TelemetryConfig) bool) error {
+		mu.Lock()
+		defer mu.Unlock()
+		return c.update(r, fn)
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			_ = cfg.Telemetry.AnonymousID // the old published pointer, read like Commit's clone does
+			_ = cfg.Telemetry.AnonymousIDCreatedAt
+		}
+	}()
+	p := svc.buildHeartbeat()
+	<-done
+	assert.Equal(t, "old-id", cfg.Telemetry.AnonymousID)
+	assert.NotEqual(t, "old-id", p.AnonymousID)
+	assert.Equal(t, c.disk.AnonymousID, p.AnonymousID)
+}
+
+// Finding 2: a transient commit failure must not leave heartbeats with an empty
+// id for the life of the process, and a later pass must persist the same id.
+func TestConfigUpdater_CommitFailureKeepsIDAndRecovers(t *testing.T) {
+	cfg := &config.Config{Telemetry: &config.TelemetryConfig{}}
+	svc := New(cfg, "", "v1.2.3", "personal", zap.NewNop())
+	c := &commitLikeUpdater{svc: svc, published: cfg}
+	fail := true
+	svc.SetConfigUpdater(func(r string, fn func(*config.TelemetryConfig) bool) error {
+		if fail {
+			tc := config.TelemetryConfig{}
+			fn(&tc) // fn ran on a clone but the write failed
+			return errors.New("disk full")
+		}
+		return c.update(r, fn)
+	})
+
+	svc.ensureAnonymousID()
+	p := svc.buildHeartbeat()
+	require.NotEmpty(t, p.AnonymousID, "heartbeat must carry an id despite the failed commit")
+	first := p.AnonymousID
+	assert.Empty(t, c.disk.AnonymousID)
+
+	fail = false
+	p = svc.buildHeartbeat()
+	assert.Equal(t, first, p.AnonymousID, "identity stays stable across recovery")
+	assert.Equal(t, first, c.disk.AnonymousID, "recovered commit persists the same id")
+	p = svc.buildHeartbeat()
+	assert.Equal(t, first, p.AnonymousID)
 }
