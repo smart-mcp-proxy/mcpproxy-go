@@ -3,10 +3,12 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"slices"
 	"strings"
@@ -32,14 +34,56 @@ import (
 // on reconnects when the whole annotations object was hashed. The hints are
 // compared by their EFFECTIVE value (an omitted hint means its MCP default), so
 // a server that omits annotations and one that spells out the defaults hash
-// identically, and a tool whose effective hints are the defaults keeps the
-// pre-RT-03 hash byte-for-byte. A flip such as destructive → readOnly-lying
-// changes the hash and lands on the rug-pull gate like any contract change.
+// identically. A flip such as destructive → readOnly-lying changes the hash
+// and lands on the rug-pull gate like any contract change. Every field is
+// length-prefixed (issue #1606, storage.UnambiguousHashSchemaVersion); the
+// older pipe-joined formula is calculateToolApprovalHashV4.
 func calculateToolApprovalHash(toolName, description, schemaJSON string, annotations *config.ToolAnnotations) string {
 	return calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON, "", annotations)
 }
 
 func calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations) string {
+	// HashSchemaVersion 5 (storage.UnambiguousHashSchemaVersion, issue #1606):
+	// every field is length-prefixed and an absent output schema has its own
+	// marker, so no two different contracts share an encoding. Schemas are
+	// JSON-normalized so a key-order-only difference is not a change; the
+	// safety hints are their effective fingerprint (RT-03), "" for the MCP
+	// defaults.
+	h := sha256.New()
+	writeApprovalHashField(h, toolApprovalHashTag)
+	writeApprovalHashField(h, toolName)
+	writeApprovalHashField(h, description)
+	writeApprovalHashField(h, normalizeJSON(schemaJSON))
+	if normalized := normalizeJSON(outputSchemaJSON); normalized != "" {
+		writeApprovalHashField(h, "output:present")
+		writeApprovalHashField(h, normalized)
+	} else {
+		writeApprovalHashField(h, "output:absent")
+	}
+	writeApprovalHashField(h, safetyHintsFingerprint(annotations))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// toolApprovalHashTag domain-separates the v5 approval hash from every older
+// formula and from the review fingerprint.
+const toolApprovalHashTag = "mcpproxy-tool-approval-v5"
+
+// writeApprovalHashField writes one length-prefixed field (8-byte big-endian
+// length, then the bytes).
+func writeApprovalHashField(w io.Writer, field string) {
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], uint64(len(field)))
+	_, _ = w.Write(n[:])
+	_, _ = w.Write([]byte(field))
+}
+
+// calculateToolApprovalHashV4 is the approval hash formula of
+// HashSchemaVersion 4 (storage.AnnotationHashSchemaVersion) and below, kept
+// byte-identical so the v4 → v5 migration can check that a stored ApprovedHash
+// covers its stored contract. It is ambiguous (issue #1606): the fields are
+// joined with an unescaped '|' and an absent output schema is left out, so it
+// must never be the hash a record is approved under.
+func calculateToolApprovalHashV4(toolName, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations) string {
 	h := sha256.New()
 	h.Write([]byte(toolName))
 	h.Write([]byte("|"))
@@ -349,9 +393,10 @@ func (r *Runtime) refreshHeldContractSnapshot(serverName, toolName string, exist
 		return
 	}
 	// The live contract is the recorded one only when the hash AND each
-	// definition field match (Spec 117 PR-2 Sol r2): the rug-pull hash joins
-	// the fields with an unescaped '|', so two different contracts can share
-	// a CurrentHash, and the review fingerprint must still follow the live one.
+	// definition field match (Spec 117 PR-2 Sol r2): a CurrentHash a v4
+	// binary computed joins the fields with an unescaped '|', so two
+	// different contracts can share it (issue #1606), and the review
+	// fingerprint must still follow the live one.
 	sameDefinition := existing.CurrentHash == currentHash &&
 		existing.CurrentDescription == tool.Description &&
 		normalizeJSON(existing.CurrentSchema) == normalizeJSON(schemaJSON) &&
@@ -1022,7 +1067,8 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			// we overwrite CurrentHash — the baseline migration (MCP-2931 #4)
 			// only promotes a stranded pending record that is unchanged since it
 			// was recorded.
-			priorHashMatches := existing.CurrentHash == currentHash
+			priorHashMatches := existing.CurrentHash == currentHash ||
+				v4PendingHashMatchesLive(existing, toolName, tool, schemaJSON, outputSchemaJSON)
 
 			// Update current info to the live snapshot.
 			existing.CurrentHash = currentHash
@@ -1249,7 +1295,16 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			legacyHash := calculateLegacyToolApprovalHash(toolName, tool.Description, schemaJSON)
 			annotationsHash := calculateHashWithAnnotations(toolName, tool.Description, schemaJSON, tool.Annotations)
 
-			isFormulaChange := rehashedFromStored == currentHash
+			// A v4 record (issue #1606) is re-baselined under the v5 formula
+			// only when its pipe-joined ApprovedHash covers the stored
+			// contract: the stored contract is then the approved one, and the
+			// checks below compare it field by field with the live contract.
+			// A v4 hash that does not cover the stored snapshot proves nothing
+			// (another contract may collide with it), so every no-review
+			// shortcut below is closed and the record is held as changed.
+			storedApprovalProven := v4ApprovedHashCoversStored(existing, toolName)
+
+			isFormulaChange := storedApprovalProven && rehashedFromStored == currentHash
 			if existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion && hintsMatch {
 				// The legacy formulas are hashed from the LIVE contract and carry
 				// no (or raw, unnormalized) hints: they only prove a formula
@@ -1316,7 +1371,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			} else {
 				outputSchemaMatch = normalizeJSON(outputSchemaJSON) == normalizeJSON(existing.CurrentOutputSchema)
 			}
-			if descMatch && schemaMatch && outputSchemaMatch && hintsMatch {
+			if storedApprovalProven && descMatch && schemaMatch && outputSchemaMatch && hintsMatch {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonContentMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1370,7 +1425,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			// that normalizeJSON does not absorb, such as the order of the
 			// "required" list, may differ). Any structural difference falls
 			// through to the change gate below and is held for review.
-			if descMatch && outputSchemaMatch && hintsMatch && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
+			if storedApprovalProven && descMatch && outputSchemaMatch && hintsMatch && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1485,6 +1540,18 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			}
 			existing.PreviousSchema = oldSchema
 			existing.PreviousOutputSchema = oldOutputSchema
+			if !storedApprovalProven {
+				// The stored snapshot is not proven to be the approved
+				// contract (a v4 ApprovedHash that does not cover it, issue
+				// #1606), so it is no before-evidence either: recorded as
+				// Previous*, a later pass would "revert" to it and approve
+				// it. Without Previous* the record stays changed until an
+				// operator confirms it (revertedToPreviousContract).
+				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
+				existing.PreviousSchema = ""
+				existing.PreviousOutputSchema = ""
+			}
 			existing.CurrentHash = currentHash
 			existing.CurrentHashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 			existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
@@ -1550,6 +1617,40 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 	return result, nil
 }
 
+// v4ApprovedHashCoversStored reports whether a record approved under the
+// pipe-joined v4 formula (HashSchemaVersion storage.AnnotationHashSchemaVersion)
+// has an ApprovedHash that is the v4 hash of its stored contract. Only then is
+// the stored snapshot evidence of what was approved, which the v4 → v5
+// migration needs before it re-baselines the record (issue #1606). Records of
+// any other version are not judged here and report true: older ones keep
+// their own migration rules, current ones carry an unambiguous hash.
+func v4ApprovedHashCoversStored(existing *storage.ToolApprovalRecord, toolName string) bool {
+	if existing.HashSchemaVersion != storage.AnnotationHashSchemaVersion {
+		return true
+	}
+	return existing.ApprovedHash == calculateToolApprovalHashV4(toolName,
+		existing.CurrentDescription, existing.CurrentSchema, existing.CurrentOutputSchema, existing.CurrentAnnotations)
+}
+
+// v4PendingHashMatchesLive reports whether a pending record whose CurrentHash
+// was computed with the v4 formula recorded exactly the live contract: every
+// stored field equals the live one and CurrentHash is the v4 hash of it. The
+// baseline migration (MCP-2931 #4) then still promotes a stranded pending
+// record across the v4 → v5 upgrade; a colliding contract never matches,
+// because the fields are compared one by one (issue #1606).
+func v4PendingHashMatchesLive(existing *storage.ToolApprovalRecord, toolName string, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON string) bool {
+	if existing.CurrentHashSchemaVersion != storage.AnnotationHashSchemaVersion || existing.CurrentHash == "" {
+		return false
+	}
+	if existing.CurrentDescription != tool.Description ||
+		normalizeJSON(existing.CurrentSchema) != normalizeJSON(schemaJSON) ||
+		normalizeJSON(existing.CurrentOutputSchema) != normalizeJSON(outputSchemaJSON) ||
+		safetyHintsFingerprint(existing.CurrentAnnotations) != safetyHintsFingerprint(tool.Annotations) {
+		return false
+	}
+	return existing.CurrentHash == calculateToolApprovalHashV4(toolName, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations)
+}
+
 // revertedToPreviousContract reports whether a changed record's live contract
 // is the one it was approved for BEFORE the change: description AND
 // input/output schemas (astra r1 P1). A schema-only change keeps the
@@ -1563,7 +1664,10 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 // proven only when the live contract hashes, under the current formula, to
 // the record's ApprovedHash; otherwise the record stays held for an operator.
 func revertedToPreviousContract(existing *storage.ToolApprovalRecord, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations, currentHash string) bool {
-	if existing.PreviousDescription == "" || description != existing.PreviousDescription {
+	if description != existing.PreviousDescription {
+		return false
+	}
+	if existing.PreviousDescription == "" && !approvedHashProvesEmptyDescription(existing) {
 		return false
 	}
 	// RT-03: an annotation-only flip keeps description and schemas equal, so
@@ -1595,6 +1699,23 @@ func revertedToPreviousContract(existing *storage.ToolApprovalRecord, descriptio
 	// live output schema is the approved one, so a tool that GAINED an output
 	// schema is never "reverted" by it (Sol r4 P1); an operator confirms it.
 	return normalizeJSON(existing.PreviousOutputSchema) == normalizeJSON(outputSchemaJSON)
+}
+
+// approvedHashProvesEmptyDescription reports whether a changed record's EMPTY
+// PreviousDescription is the approved contract's declared description rather
+// than an unrecorded one: its ApprovedHash must be the hash, under the v5 or
+// the v4 formula, of the recorded previous contract. Without this a tool
+// approved with no description under v4 could never be reverted after the
+// v5 upgrade, because its v4 ApprovedHash no longer equals the live hash (Sol
+// r2 P2, issue #1606). The previous fields are still compared one by one with
+// the live contract below, so a colliding contract never qualifies.
+func approvedHashProvesEmptyDescription(existing *storage.ToolApprovalRecord) bool {
+	if existing.ApprovedHash == "" || existing.PreviousSchema == "" {
+		return false
+	}
+	name, schema, output, hints := existing.ToolName, existing.PreviousSchema, existing.PreviousOutputSchema, existing.PreviousAnnotations
+	return existing.ApprovedHash == calculateToolApprovalHashWithOutputSchema(name, "", schema, output, hints) ||
+		existing.ApprovedHash == calculateToolApprovalHashV4(name, "", schema, output, hints)
 }
 
 // previousHintsProveRevert reports whether a changed record's live safety
@@ -2143,20 +2264,6 @@ func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *co
 	if sibling.ApprovedHash == calculateToolApprovalHashWithOutputSchema(collapsed, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations) {
 		return true
 	}
-	if sibling.HashSchemaVersion < storage.AnnotationHashSchemaVersion &&
-		sibling.ApprovedHash == calculateToolApprovalHashWithOutputSchema(collapsed, tool.Description, schemaJSON, outputSchemaJSON, nil) {
-		// Pre-RT-03 hash (no annotation hints) with unchanged or unknown hints.
-		return true
-	}
-	if sibling.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
-		if sibling.ApprovedHash == calculateLegacyToolApprovalHash(collapsed, tool.Description, schemaJSON) ||
-			sibling.ApprovedHash == calculateHashWithAnnotations(collapsed, tool.Description, schemaJSON, tool.Annotations) {
-			return true
-		}
-	}
-	if sibling.ApprovedHash != sibling.CurrentHash || sibling.CurrentDescription == "" {
-		return false
-	}
 	// An empty stored schema is a wildcard only on a sibling that predates
 	// complete contract capture, exactly as in the main gate's formula
 	// migration: from storage.OutputSchemaHashSchemaVersion on an empty
@@ -2167,6 +2274,33 @@ func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *co
 	schemaMatch := (sibling.CurrentSchema == "" && uncaptured) || normalizeJSON(sibling.CurrentSchema) == normalizeJSON(schemaJSON)
 	outputMatch := (sibling.CurrentOutputSchema == "" && uncaptured) || normalizeJSON(sibling.CurrentOutputSchema) == normalizeJSON(outputSchemaJSON)
 	hintsMatch := storedSafetyHintsMatch(sibling.CurrentAnnotations, sibling.HashSchemaVersion, tool.Annotations)
+	// Every older formula is pipe-joined and ambiguous (issue #1606): a
+	// different contract can hash to the sibling's approved value. A legacy
+	// hash match therefore only counts when the sibling's stored contract
+	// does not contradict the live one (an uncaptured empty field is the
+	// one wildcard).
+	storedAgrees := (descMatch || (sibling.CurrentDescription == "" && uncaptured)) && schemaMatch && outputMatch
+	if sibling.HashSchemaVersion < storage.AnnotationHashSchemaVersion && storedAgrees &&
+		sibling.ApprovedHash == calculateToolApprovalHashV4(collapsed, tool.Description, schemaJSON, outputSchemaJSON, nil) {
+		// Pre-RT-03 hash (no annotation hints) with unchanged or unknown hints.
+		return true
+	}
+	if sibling.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion && storedAgrees {
+		if sibling.ApprovedHash == calculateLegacyToolApprovalHash(collapsed, tool.Description, schemaJSON) ||
+			sibling.ApprovedHash == calculateHashWithAnnotations(collapsed, tool.Description, schemaJSON, tool.Annotations) {
+			return true
+		}
+	}
+	if sibling.HashSchemaVersion == storage.AnnotationHashSchemaVersion {
+		// A v4 sibling captured the full contract (an empty description is
+		// declared, not unknown). Its approval covers the live contract only
+		// when its v4 ApprovedHash is the hash of its stored contract and
+		// that contract is exactly the live one (issue #1606).
+		return v4ApprovedHashCoversStored(sibling, collapsed) && descMatch && schemaMatch && outputMatch && hintsMatch
+	}
+	if sibling.ApprovedHash != sibling.CurrentHash || sibling.CurrentDescription == "" {
+		return false
+	}
 	return descMatch && schemaMatch && outputMatch && hintsMatch
 }
 
