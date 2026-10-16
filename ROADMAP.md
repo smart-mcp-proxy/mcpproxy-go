@@ -1040,7 +1040,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [110-catalog-popularity](./specs/110-catalog-popularity/) | `in-flight` | 19/23 (83%) |
 | [111-personal-docker-image](./specs/111-personal-docker-image/) | — | — |
 | [112-client-header-forwarding](./specs/112-client-header-forwarding/) | `shipped` | 38/40 (95%) |
-| [113-upstream-resilience](./specs/113-upstream-resilience/) | `drafted` | 0/100 (0%) |
+| [113-upstream-resilience](./specs/113-upstream-resilience/) | `in-flight` | 40/100 (40%) |
 | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | `shipped` | 86/87 (99%) |
 | [116-config-commit-consistency](./specs/116-config-commit-consistency/) | `in-flight` | 78/124 (63%) |
 | [117-review-bound-approvals](./specs/117-review-bound-approvals/) | `in-flight` | 44/50 (88%) |
