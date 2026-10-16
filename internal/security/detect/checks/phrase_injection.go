@@ -1159,7 +1159,9 @@ func negatedBefore(text string, start int) bool {
 
 // secretMetadataWords describe a secret without being it: its expiry, its
 // count, its name (Sol r18 P2). Normalized (lowercased, lightly stemmed).
-var secretMetadataWords = regexp.MustCompile(`^(?:expir\w*|expires?|ttl|lifetime|age|count|counts|number|numbers|length|size|name|names|type|types|format|timestamp|date|dates|scope\w*|status|version|owner|creat\w*|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+)$`)
+const secretMetadataAlt = `expir\w*|expires?|ttl|lifetime|age|count|counts|number|numbers|length|size|name|names|type|types|format|timestamp|date|dates|scope\w*|status|version|owner|creat\w*|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+`
+
+var secretMetadataWords = regexp.MustCompile(`^(?:` + secretMetadataAlt + `)$`)
 
 // secretDeterminers may sit between "<metadata> of" and the secret noun ("the
 // expiry of the API key").
@@ -1314,7 +1316,11 @@ var credentialSourceRe = regexp.MustCompile(`(?:` + secretFiles + `|` + configSe
 
 // metadataMoveRe finds a placement verb moving a metadata value ("save its
 // fingerprint", "write its length"): not a credential transfer (#1601).
-var metadataMoveRe = regexp.MustCompile(`\b(?:` + credentialPlacementVerbs + `)\s+(?:(?:its|the|their|a)\s+)?(?:expir\w*|ttl|lifetime|age|count|number|length|size|name|type|format|timestamp|date|scope\w*|status|version|owner|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+)\b`)
+var metadataMoveRe = regexp.MustCompile(`\b(?:` + credentialPlacementVerbs + `)\s+(?:(?:its|the|their|a)\s+)?(?:(?:(?:private|public|ssh|api|secret)\s+)?key\s+)?(?:public\s+key|(?:` + secretMetadataAlt + `))\b`)
+
+// metadataMoveContinuesRe finds a conjunct after a metadata move; its word
+// is captured.
+var metadataMoveContinuesRe = regexp.MustCompile(`^\s*(?:,|and|plus|&)\s*(?:(?:its|the|their|a)\s+)?([\w-]+)`)
 
 // maskKeyFileFamily is the mask of the direct key-file family: public key
 // files, then a placement verb moving only metadata, then metadata nouns.
@@ -1323,6 +1329,11 @@ func maskKeyFileFamily(t string) string {
 	if ls := metadataMoveRe.FindAllStringIndex(t, -1); len(ls) > 0 {
 		b := []byte(t)
 		for _, l := range ls {
+			// "save its fingerprint and its contents to …" still moves the
+			// key: keep the verb when a non-metadata conjunct follows.
+			if m := metadataMoveContinuesRe.FindStringSubmatch(t[l[1]:]); m != nil && !secretMetadataWords.MatchString(strings.ToLower(m[1])) && m[1] != "public" {
+				continue
+			}
 			for i := l[0]; i < l[1]; i++ {
 				b[i] = '#'
 			}
