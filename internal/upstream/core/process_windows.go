@@ -39,13 +39,18 @@ var (
 )
 
 // createProcessGroupCommandFunc creates a custom CommandFunc for Windows systems.
-// Job Object assignment happens later, in extractProcessGroupID, once the
-// process actually exists (a Job Object is assigned to a PID after start,
-// not configured via SysProcAttr before start).
+// The command starts suspended (CREATE_SUSPENDED); Job Object assignment
+// and the resume happen later, in assignProcessTree, once the process exists
+// (a Job Object is assigned to a PID after start, not configured via
+// SysProcAttr before start).
 func createProcessGroupCommandFunc(client *Client, workingDir string, logger *zap.Logger) func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
 	return func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
 		cmd := exec.CommandContext(ctx, command, args...)
 		cmd.Env = env
+		// Start suspended: the child runs no code until it is in its Job
+		// Object (assignProcessTree resumes it), so it cannot fork a
+		// descendant outside the Job (Spec 116 PR4, T093b).
+		winjob.MarkSuspended(cmd)
 
 		if workingDir != "" {
 			cmd.Dir = workingDir
@@ -137,6 +142,10 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 			zap.String("server", serverName),
 			zap.Int("pid", cmd.Process.Pid),
 			zap.Error(err))
+		if winjob.IsSuspended(cmd) {
+			// Never resumed, so it would hang forever.
+			_ = cmd.Process.Kill()
+		}
 		return cmd.Process.Pid
 	}
 	return pid
@@ -162,7 +171,15 @@ func assignProcessTree(cmd *exec.Cmd, logger *zap.Logger, serverName string) (in
 	if err != nil {
 		return 0, fmt.Errorf("create Windows Job Object for pid %d: %w", pid, err)
 	}
-	if err := job.Assign(pid); err != nil {
+	if winjob.IsSuspended(cmd) {
+		// Assign while suspended, then resume: no user code has run, so no
+		// descendant exists outside the Job. On failure Close terminates
+		// the Job (and the suspended child with it, if it was assigned).
+		if err := job.AssignAndResume(pid); err != nil {
+			_ = job.Close()
+			return 0, fmt.Errorf("contain suspended pid %d in a Windows Job Object: %w", pid, err)
+		}
+	} else if err := job.Assign(pid); err != nil {
 		_ = job.Close()
 		return 0, fmt.Errorf("assign pid %d to a Windows Job Object: %w", pid, err)
 	}

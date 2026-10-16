@@ -12,11 +12,12 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/winjob"
 )
 
-// applyProcAttrs is a no-op on Windows. Job Object assignment (createJob,
-// below) is what does the equivalent work here, and it has to happen AFTER
-// Start() — a Job Object is assigned to a live PID, there's no SysProcAttr
-// field to pre-configure the way Setpgid works on Unix.
-func applyProcAttrs(_ *exec.Cmd) {}
+// applyProcAttrs starts the child suspended. A Job Object is assigned to a
+// live PID (there is no SysProcAttr field for it the way Setpgid works on
+// Unix), so the child must not run until createJob has assigned it and
+// resumed it; otherwise it could fork a descendant outside the Job
+// (Spec 116 PR4, T093b).
+func applyProcAttrs(cmd *exec.Cmd) { winjob.MarkSuspended(cmd) }
 
 // createJob assigns the just-started process to a fresh Windows Job Object
 // (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) so that everything it spawns
@@ -39,9 +40,10 @@ func createJob(cmd *exec.Cmd) (io.Closer, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Windows Job Object for pid %d: %w", cmd.Process.Pid, err)
 	}
-	if err := job.Assign(cmd.Process.Pid); err != nil {
+	// The child is suspended (applyProcAttrs): assign it, then let it run.
+	if err := job.AssignAndResume(cmd.Process.Pid); err != nil {
 		_ = job.Close()
-		return nil, fmt.Errorf("assign pid %d to a Windows Job Object: %w", cmd.Process.Pid, err)
+		return nil, fmt.Errorf("contain suspended pid %d in a Windows Job Object: %w", cmd.Process.Pid, err)
 	}
 	return job, nil
 }
