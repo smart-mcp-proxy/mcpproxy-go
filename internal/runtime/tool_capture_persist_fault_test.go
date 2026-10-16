@@ -439,3 +439,28 @@ func TestCaptureFault_QuarantinedPruneFailureMarksServerDirty(t *testing.T) {
 	assert.False(t, rt.ToolReviewDirty(baselineServer))
 	assert.Nil(t, approvalOf(t, rt, "b"))
 }
+
+// Review r2: a removal whose tool-hash delete failed keeps the approval
+// record, so the next complete capture retries the whole removal instead of
+// losing its workset.
+func TestCaptureFault_FailedHashDeleteKeepsRecordAsRetrySource(t *testing.T) {
+	rt := newBaselineRuntime(t, t.TempDir(), false)
+	_, err := captureAt(t, rt, 1, noteTool("x"), noteTool("y"))
+	require.NoError(t, err)
+	full := baselineServer + ":x"
+	require.NoError(t, rt.storageManager.SaveToolHash(full, "h"))
+
+	failWrites(rt, "x", "delete-hash")
+	_, err = captureAt(t, rt, 2, noteTool("y"))
+	require.ErrorIs(t, err, errCaptureIncomplete)
+	require.NotNil(t, approvalOf(t, rt, "x"), "the record stays as the retry source")
+	assert.NotContains(t, indexedNames(t, rt), "x")
+
+	healWrites(rt)
+	_, err = captureAt(t, rt, 3, noteTool("y"))
+	require.NoError(t, err)
+	assert.Nil(t, approvalOf(t, rt, "x"))
+	h, _ := rt.storageManager.GetToolHash(full)
+	assert.Empty(t, h, "the retried removal deletes the tool hash")
+	assert.False(t, rt.ToolReviewDirty(baselineServer))
+}

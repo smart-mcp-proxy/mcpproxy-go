@@ -99,18 +99,18 @@ func (r *Runtime) markReviewDirtyHeld(serverName string, seq uint64, cause error
 // clearReviewDirtyHeld clears serverName's dirty mark when the complete
 // capture seq is newer than the one that set it. seq 0 (an unordered capture,
 // fixtures without a managed client) clears only a mark set at seq 0. Caller
-// holds the server's approval lock.
-func (r *Runtime) clearReviewDirtyHeld(serverName string, seq uint64) {
+// holds the server's approval lock. It reports whether a mark was cleared.
+func (r *Runtime) clearReviewDirtyHeld(serverName string, seq uint64) bool {
 	v, ok := r.toolApprovalLocks.Load(serverName)
 	if !ok {
-		return
+		return false
 	}
 	st := v.(*toolApprovalServerLock)
 	if !st.dirty {
-		return
+		return false
 	}
 	if (seq != 0 && seq <= st.dirtyAt) || (seq == 0 && st.dirtyAt != 0) {
-		return
+		return false
 	}
 	st.dirty = false
 	st.dirtyAt = 0
@@ -118,6 +118,7 @@ func (r *Runtime) clearReviewDirtyHeld(serverName string, seq uint64) {
 	st.dirtyMirror.Store(false)
 	r.logger.Info("Tool capture complete: tool calls for the server are allowed again",
 		zap.String("server", serverName), zap.Uint64("capture_seq", seq))
+	return true
 }
 
 // dropReviewDirtyHeld forgets serverName's dirty mark when the server is

@@ -219,7 +219,7 @@ func (r *Runtime) MarkToolReviewDirtyForTest(serverName string, seq uint64) {
 // capture newer than seq would. Test-only.
 func (r *Runtime) ClearToolReviewDirtyForTest(serverName string, seq uint64) {
 	defer r.lockToolApprovals(serverName)()
-	r.clearReviewDirtyHeld(serverName, seq)
+	_ = r.clearReviewDirtyHeld(serverName, seq)
 }
 
 var errTestReviewDirty = errors.New("test: capture marked incomplete")

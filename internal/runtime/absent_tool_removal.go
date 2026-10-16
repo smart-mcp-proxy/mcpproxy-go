@@ -66,8 +66,10 @@ func (r *Runtime) absentApprovedRecords(serverName string, live, indexed map[str
 
 // removeAbsentTool deletes toolName's index document and tool hash and, when
 // deleteRecord is set, its approval record (only while cond holds for the
-// stored value; nil deletes unconditionally). Every step runs even when an
-// earlier one fails, and all of them are idempotent, so the next pass
+// stored value; nil deletes unconditionally). The index and hash deletes both
+// run; the record is deleted only after both succeeded, so a removal that
+// failed part-way keeps its record as the next pass's retry source (the
+// record-derived workset). Every delete is idempotent, so the next pass
 // converges; the first error is returned.
 func (r *Runtime) removeAbsentTool(serverName, toolName string, deleteRecord bool, cond func(*storage.ToolApprovalRecord) bool) error {
 	var first error
@@ -106,7 +108,7 @@ func (r *Runtime) removeAbsentTool(serverName, toolName string, deleteRecord boo
 	if err != nil {
 		note(fmt.Errorf("delete tool hash %s: %w", fullToolName, err))
 	}
-	if !deleteRecord {
+	if !deleteRecord || first != nil {
 		return first
 	}
 	err = fault("delete-record")

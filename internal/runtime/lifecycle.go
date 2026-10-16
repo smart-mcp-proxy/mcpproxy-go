@@ -1068,7 +1068,7 @@ func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*confi
 	r.lastGoodToolsMu.Lock()
 	r.storeLastGoodLocked(serverName, tools, inv, instanceGen)
 	r.lastGoodToolsMu.Unlock()
-	r.clearReviewDirtyHeld(serverName, inv.Seq)
+	_ = r.clearReviewDirtyHeld(serverName, inv.Seq)
 	return true, nil
 }
 
@@ -1681,6 +1681,11 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 	// complete publishes the capture (held) and, for a fresh capture, clears
 	// an older dirty mark. A reconciliation re-applies retained definitions
 	// and never clears it (it is not admitted while dirty, admitInventoryHeld).
+	// recovered reports that this capture cleared a dirty mark: an earlier
+	// failed pass may have changed the shared index without refreshing the
+	// profile indexes that depend on it, so they are refreshed now even when
+	// this pass's own diff is empty.
+	recovered := false
 	complete := func() error {
 		if held != nil {
 			if err := held(); err != nil {
@@ -1688,7 +1693,7 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 			}
 		}
 		if inv.mode == inventoryDefinitions {
-			r.clearReviewDirtyHeld(serverName, inv.capture.Seq)
+			recovered = r.clearReviewDirtyHeld(serverName, inv.capture.Seq)
 		}
 		return nil
 	}
@@ -1989,7 +1994,7 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 	// that include it (Profiles v2, Spec 057). Profiles without this server are
 	// untouched. Skipped when nothing changed to avoid churn on idle sweeps.
 	changed := len(addedTools) > 0 || len(modifiedTools) > 0 || len(removedTools) > 0 ||
-		len(annotationsOnlyTools) > 0 || len(approvalResult.BlockedTools) > 0
+		len(annotationsOnlyTools) > 0 || len(approvalResult.BlockedTools) > 0 || recovered
 	if changed {
 		r.reindexAffectedProfiles(serverName)
 		// Evict signature-cache entries orphaned by removed/redefined tools —
