@@ -16,7 +16,16 @@ import (
 var (
 	stagedSourceMaxBytes   int64 = 1 << 30 // 1 GiB of regular-file content
 	stagedSourceMaxEntries       = 100_000 // files, dirs and symlinks
+	stagedSourceReadBatch        = 1024    // directory entries read per ReadDir call
 )
+
+// stagingAfterReadBatch, when set by a test, runs after each batch of
+// directory entries is read, with the batch size.
+var stagingAfterReadBatch func(n int)
+
+// copyChunkSize bounds each read of a file copy so the context is checked
+// between chunks.
+const copyChunkSize = 256 << 10
 
 var errStagedSourceTooLarge = errors.New("source dir is too large to stage for a scanner that reads tool metadata")
 
@@ -109,21 +118,42 @@ func copySourceTree(ctx context.Context, src, dst string, skip os.FileInfo) erro
 			_ = d.Close()
 			return err
 		}
-		list, err := d.ReadDir(-1)
-		_ = d.Close()
-		if err != nil {
-			return err
+		// Read in bounded batches and charge the entry budget as entries
+		// arrive, so a directory with millions of entries fails closed at
+		// the cap without being fully allocated (#1602).
+		var list []os.DirEntry
+		for {
+			if err := ctx.Err(); err != nil {
+				_ = d.Close()
+				return err
+			}
+			batch, rerr := d.ReadDir(stagedSourceReadBatch)
+			if stagingAfterReadBatch != nil {
+				stagingAfterReadBatch(len(batch))
+			}
+			for _, de := range batch {
+				if rel == "" && de.Name() == "tools.json" {
+					continue
+				}
+				entries++
+				if entries > stagedSourceMaxEntries {
+					_ = d.Close()
+					return fmt.Errorf("%w (more than %d entries)", errStagedSourceTooLarge, stagedSourceMaxEntries)
+				}
+				list = append(list, de)
+			}
+			if rerr == io.EOF {
+				break
+			}
+			if rerr != nil {
+				_ = d.Close()
+				return rerr
+			}
 		}
+		_ = d.Close()
 		for _, de := range list {
 			if err := ctx.Err(); err != nil {
 				return err
-			}
-			if rel == "" && de.Name() == "tools.json" {
-				continue
-			}
-			entries++
-			if entries > stagedSourceMaxEntries {
-				return fmt.Errorf("%w (more than %d entries)", errStagedSourceTooLarge, stagedSourceMaxEntries)
 			}
 			child := filepath.Join(rel, de.Name())
 			target := filepath.Join(dst, child)
@@ -157,7 +187,7 @@ func copySourceTree(ctx context.Context, src, dst string, skip os.FileInfo) erro
 				// without the privilege) scans without them.
 				_ = os.Symlink(link, target)
 			case mode.IsRegular():
-				if err := copyRegularFromRoot(root, child, target, mode.Perm(), &budget); err != nil {
+				if err := copyRegularFromRoot(ctx, root, child, target, mode.Perm(), &budget); err != nil {
 					return err
 				}
 			}
@@ -170,7 +200,7 @@ func copySourceTree(ctx context.Context, src, dst string, skip os.FileInfo) erro
 // copyRegularFromRoot copies one regular file out of root, charging its size
 // to budget. The file is opened non-blocking and re-checked after open, so a
 // FIFO swapped in after the Lstat is skipped instead of blocking the copy.
-func copyRegularFromRoot(root *os.Root, name, target string, perm os.FileMode, budget *int64) error {
+func copyRegularFromRoot(ctx context.Context, root *os.Root, name, target string, perm os.FileMode, budget *int64) error {
 	f, err := root.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -190,7 +220,7 @@ func copyRegularFromRoot(root *os.Root, name, target string, perm os.FileMode, b
 	if err != nil {
 		return err
 	}
-	n, err := io.Copy(out, io.LimitReader(f, *budget+1))
+	n, err := copyWithContext(ctx, out, io.LimitReader(f, *budget+1))
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}
@@ -202,4 +232,33 @@ func copyRegularFromRoot(root *os.Root, name, target string, perm os.FileMode, b
 		return fmt.Errorf("%w (more than %d bytes)", errStagedSourceTooLarge, stagedSourceMaxBytes)
 	}
 	return nil
+}
+
+// copyWithContext copies src to dst in bounded chunks, checking ctx between
+// chunks so a huge or slow file cannot outlive the scan deadline.
+func copyWithContext(ctx context.Context, dst io.Writer, src io.Reader) (int64, error) {
+	buf := make([]byte, copyChunkSize)
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		nr, rerr := src.Read(buf)
+		if nr > 0 {
+			nw, werr := dst.Write(buf[:nr])
+			total += int64(nw)
+			if werr != nil {
+				return total, werr
+			}
+			if nw < nr {
+				return total, io.ErrShortWrite
+			}
+		}
+		if rerr == io.EOF {
+			return total, nil
+		}
+		if rerr != nil {
+			return total, rerr
+		}
+	}
 }

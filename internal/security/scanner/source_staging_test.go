@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -260,4 +261,59 @@ func TestRT06_StagedSource_SourceContainingDataDir(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "the staging area is not copied into the staged source")
 	_, err = os.Lstat(filepath.Join(dir, ".mcpproxy", "mcp_config.json"))
 	assert.NoError(t, err, "the rest of the data dir is copied as ordinary source")
+}
+
+// TestStagedSource_EntryCapEnforcedMidEnumeration (#1602): a directory far
+// over the cap fails closed after reading only a bounded number of entries.
+func TestStagedSource_EntryCapEnforcedMidEnumeration(t *testing.T) {
+	src := t.TempDir()
+	for i := 0; i < 200; i++ {
+		require.NoError(t, os.WriteFile(filepath.Join(src, fmt.Sprintf("f%03d", i)), nil, 0o644))
+	}
+	oldE, oldB := stagedSourceMaxEntries, stagedSourceReadBatch
+	t.Cleanup(func() { stagedSourceMaxEntries, stagedSourceReadBatch, stagingAfterReadBatch = oldE, oldB, nil })
+	stagedSourceMaxEntries, stagedSourceReadBatch = 5, 4
+	read := 0
+	stagingAfterReadBatch = func(n int) { read += n }
+
+	err := copySourceTree(context.Background(), src, t.TempDir(), nil)
+	require.ErrorIs(t, err, errStagedSourceTooLarge)
+	assert.LessOrEqual(t, read, stagedSourceMaxEntries+stagedSourceReadBatch, "entries read stay bounded by cap plus one batch")
+}
+
+// TestStagedSource_CopyCancelledByDeadline (#1602): staging stops when the
+// context is done instead of copying on.
+func TestStagedSource_CopyCancelledByDeadline(t *testing.T) {
+	src := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(src, "big.bin"), make([]byte, 2*copyChunkSize), 0o644))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	root, err := os.OpenRoot(src)
+	require.NoError(t, err)
+	defer root.Close()
+	budget := int64(1 << 30)
+	err = copyRegularFromRoot(ctx, root, "big.bin", filepath.Join(t.TempDir(), "out"), 0o644, &budget)
+	require.ErrorIs(t, err, context.Canceled)
+}
+
+// TestStagedSource_ScanDeadlineCoversStaging (#1602): runSingleScanner
+// applies the scan timeout before staging, so staging sees a deadline even
+// when the caller passed context.Background().
+func TestStagedSource_ScanDeadlineCoversStaging(t *testing.T) {
+	source := writeToolsJSON(t, []map[string]interface{}{rt06Tool(rt06Poisoned)})
+	snapshot, err := os.ReadFile(filepath.Join(source, "tools.json"))
+	require.NoError(t, err)
+	logger := zap.NewNop()
+	engine := NewEngine(NewDockerRunner(logger), NewRegistry(t.TempDir(), logger), t.TempDir(), logger)
+	engine.runScannerContainer = func(ctx context.Context, cfg ScannerRunConfig) (string, string, int, error) {
+		_, ok := ctx.Deadline()
+		assert.True(t, ok, "scan context carries a deadline")
+		require.NoError(t, os.WriteFile(filepath.Join(cfg.ReportDir, "results.json"), []byte(genericCleanReport), 0o644))
+		return "", "", 0, nil
+	}
+	req := ScanRequest{ServerName: "dl", SourceDir: source, ToolDefinitions: snapshot}
+	plugin := &ScannerPlugin{ID: "mcp-scan", DockerImage: "example/mcp-scan:test", Command: []string{"scan"}, Timeout: "-1s"}
+	_, _, err = engine.runSingleScanner(context.Background(), plugin, req)
+	require.Error(t, err, "an already-expired scan deadline stops staging")
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
