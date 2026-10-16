@@ -1419,6 +1419,18 @@ func (s *Server) SetListenAddress(addr string, persist bool) error {
 	return nil
 }
 
+// RecordStartupOutcome stores the Spec 042 last startup outcome in the telemetry
+// block through the runtime's config commit (#1592).
+func (s *Server) RecordStartupOutcome(outcome string) error {
+	return s.runtime.UpdateTelemetry("startup_outcome", func(tc *config.TelemetryConfig) bool {
+		if tc.LastStartupOutcome == outcome {
+			return false
+		}
+		tc.LastStartupOutcome = outcome
+		return true
+	})
+}
+
 const defaultPortSuggestionAttempts = 20
 
 // SuggestAlternateListen attempts to find an available listen address near baseAddr.

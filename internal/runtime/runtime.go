@@ -827,6 +827,28 @@ func (r *Runtime) UpdateListenAddress(addr string) error {
 	return err
 }
 
+// UpdateTelemetry applies fn to the telemetry block through one config commit
+// (#1592). fn edits a private copy (a fresh block when none is configured) and
+// reports whether it changed anything; false makes the call a no-op. Routing
+// the startup outcome and first-run notice flag through the commit keeps the
+// live config and the file consistent, so a concurrent disk-writing commit
+// cannot drop them.
+func (r *Runtime) UpdateTelemetry(reason string, fn func(tc *config.TelemetryConfig) bool) error {
+	_, err := r.Commit(reason, func(tx *CommitTx) error {
+		return tx.MutateGlobal(func(cfg *config.Config) error {
+			tc := cfg.Telemetry
+			if tc == nil {
+				tc = &config.TelemetryConfig{}
+			}
+			if fn(tc) {
+				cfg.Telemetry = tc
+			}
+			return nil
+		})
+	})
+	return err
+}
+
 // SetRunning records whether the server HTTP layer is active.
 func (r *Runtime) SetRunning(running bool) {
 	r.mu.Lock()
@@ -3655,6 +3677,7 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 
 	r.telemetryService = telemetry.New(r.cfg, r.cfgPath, version, edition, r.logger)
 	r.telemetryService.SetRuntimeStats(r)
+	r.telemetryService.SetConfigUpdater(r.UpdateTelemetry)
 
 	// Spec 044: wire the activation store onto the shared BBolt DB. The
 	// bucket is created lazily on first write, but we proactively ensure it
