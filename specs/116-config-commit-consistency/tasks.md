@@ -478,8 +478,9 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [x] T096 [US4] A retired-instance call or probe maps to the existing unavailable error and does not feed call-stats or health for the replacement
 - [x] T097 [US4] Live fixtures `counting_http_fixture.py` and the marker launcher; `qa_hooks` `MCPPROXY_QA_PARK_DIAL` / `MCPPROXY_QA_PARK_OAUTH`; live L4; evidence `s116-pr4`
 - [x] T099 [US4] Extend `check-upstream-write-sites.sh` with the FR-024a ungated-HTTP grep (allowlist file `scripts/ungated-http-allowlist.txt`)
-- [ ] T098 [US4] The race/lint/e2e matrix; SC-004 measurements recorded; Sol review (transport + OAuth chunk separately); docs (`docs/architecture.md` "Retirement barrier")
+- [x] T098 [US4] The race/lint/e2e matrix; SC-004 measurements recorded; Sol review (transport + OAuth chunk separately); docs (`docs/architecture.md` "Retirement barrier")
   - Status (review round 4, 2026-10-13): open. The race/lint/e2e matrix, the Sol review rounds and the docs are done. SC-004 is now measured with the specified workloads by `internal/runtime/spec116_sc004_test.go` (`MCPPROXY_SC004_MEASURE=1`, in-process, 25 servers): a commit with no index work has p99 20.0 ms (n=300, budget 50 ms), and the Retire of one connected instance has p99 42 µs (n=40, budget 100 ms; the whole removal commit has p99 39.8 ms). **A removal with a 320-tool index purge has p99 6.26 s (n=40, budget 500 ms) and misses the budget.** The cause predates this PR: `BleveIndex.DeleteServerTools` deletes one document per bleve transaction. It is tracked in #1617. Tick T098 once #1617 lands and the measurement passes.
+  - Status (2026-10-16): done. #1627 (#1617) batches and pages the purge; re-measured on main: removal with a 320-tool index purge p50 14.1 ms, p99 30.1 ms (n=40, budget 500 ms); commit with no index work p99 1.26 ms; Retire p99 65 µs.
 
 
 ### PR4 implementation note (as shipped, 2026-10-13)
@@ -655,7 +656,8 @@ each documented in the PR:
   lines. The state resets for each file.
 - SC-004 is measured by `internal/runtime/spec116_sc004_test.go`
   (`MCPPROXY_SC004_MEASURE=1`). The 320-tool purge misses its budget for a
-  reason that predates this PR, tracked in #1617, so T098 stays open.
+  reason that predated this PR, tracked in #1617; fixed by #1627, so T098 is
+  now ticked.
 
 #### PR4 review round 5 (Sol) design notes
 

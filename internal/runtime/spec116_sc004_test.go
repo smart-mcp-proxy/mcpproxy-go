@@ -25,9 +25,9 @@ import (
 //     < 100 ms (p99 of the Retire call itself, timed in unregisterLocked).
 //
 // It is a measurement, not a unit test: it runs only with
-// MCPPROXY_SC004_MEASURE=1 and prints the percentiles it asserts. As of
-// review round 4 the 320-tool purge misses its budget (about 5.5 s: one
-// bleve transaction per deleted tool, which predates this PR); see #1617.
+// MCPPROXY_SC004_MEASURE=1 and prints the percentiles it asserts. The 320-tool
+// purge missed its budget until #1617 (one bleve transaction per deleted tool)
+// was fixed by batching the delete; it now runs in tens of milliseconds.
 func TestSC004_CommitLatencyBudgets(t *testing.T) {
 	if os.Getenv("MCPPROXY_SC004_MEASURE") != "1" {
 		t.Skip("SC-004 measurement: set MCPPROXY_SC004_MEASURE=1")
