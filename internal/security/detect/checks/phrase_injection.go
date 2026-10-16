@@ -323,7 +323,7 @@ var phraseFamilies = []phraseFamily{
 		base:      0.88,
 		threat:    detect.ThreatExfiltration,
 		what:      "credential-file-to-argument directive",
-		mask:      maskPublicKeyFiles,
+		mask:      maskKeyFileFamily,
 		negatable: true,
 	},
 	{ // A config file that may hold secrets, smuggled into a tool argument
@@ -382,7 +382,7 @@ var phraseFamilies = []phraseFamily{
 		// field comes first, so the placement families above, which need
 		// "<verb> <payload> in <field>", never see it. A possessive owning
 		// metadata ("with its fingerprint") is masked first.
-		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + secretFiles + `)` + sentenceSpan + `{0,120}?` + invertedPlacementLead + `(?:(?:its|the|their|all) )?(?:content\w*|everyth\w*|(?:entire|whole|full|raw|complete) (?:file|content\w*|text|thing|body|dump|copy|key)|key)\b`),
+		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + secretFiles + `)` + sentenceSpan + `{0,120}?` + invertedPlacementLead + `(?:(?:its|the|their|all) )?(?:content\w*|everyth\w*|(?:entire|whole|full|raw|complete) (?:file|content\w*|text|thing|body|dump|copy|key)|(?:(?:private|secret|ssh|api) )?key)\b`),
 		base:      0.88,
 		threat:    detect.ThreatExfiltration,
 		what:      "credential-file-to-argument directive",
@@ -1159,7 +1159,7 @@ func negatedBefore(text string, start int) bool {
 
 // secretMetadataWords describe a secret without being it: its expiry, its
 // count, its name (Sol r18 P2). Normalized (lowercased, lightly stemmed).
-var secretMetadataWords = regexp.MustCompile(`^(?:expir\w*|expires?|ttl|lifetime|age|count|counts|number|numbers|length|size|name|names|type|types|format|timestamp|date|dates|scope\w*|status|version|owner|creat\w*|rotation|fingerprint|location|path)$`)
+var secretMetadataWords = regexp.MustCompile(`^(?:expir\w*|expires?|ttl|lifetime|age|count|counts|number|numbers|length|size|name|names|type|types|format|timestamp|date|dates|scope\w*|status|version|owner|creat\w*|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+)$`)
 
 // secretDeterminers may sit between "<metadata> of" and the secret noun ("the
 // expiry of the API key").
@@ -1280,6 +1280,13 @@ func maskSecretMetadataNouns(t string) string {
 			spans = append(spans, l)
 		}
 	}
+	for _, m := range foreignContentsRe.FindAllStringSubmatchIndex(t, -1) {
+		// "the contents of README.md": the payload is another file, not the
+		// credential source (#1601).
+		if !credentialSourceRe.MatchString(t[m[2]:m[3]]) {
+			spans = append(spans, []int{m[0], m[1]})
+		}
+	}
 	for _, l := range possessivePronounRe.FindAllStringIndex(t, -1) {
 		after := phraseWords(sentenceHead(t[l[1]:min(len(t), l[1]+40)]))
 		if len(after) > 0 && secretMetadataWords.MatchString(after[0]) {
@@ -1296,6 +1303,33 @@ func maskSecretMetadataNouns(t string) string {
 		}
 	}
 	return string(b)
+}
+
+// foreignContentsRe finds "contents of <other>.<ext>"; group 1 is the named
+// file (a name with an extension, not a leading dot).
+var foreignContentsRe = regexp.MustCompile(`\bcontents?\s+of\s+(?:the\s+)?((?:[\w~./-]*/)?[\w-]+\.[a-z0-9]{1,5})\b`)
+
+// credentialSourceRe matches any credential file or config secret source.
+var credentialSourceRe = regexp.MustCompile(`(?:` + secretFiles + `|` + configSecretSources + `)`)
+
+// metadataMoveRe finds a placement verb moving a metadata value ("save its
+// fingerprint", "write its length"): not a credential transfer (#1601).
+var metadataMoveRe = regexp.MustCompile(`\b(?:` + credentialPlacementVerbs + `)\s+(?:(?:its|the|their|a)\s+)?(?:expir\w*|ttl|lifetime|age|count|number|length|size|name|type|format|timestamp|date|scope\w*|status|version|owner|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+)\b`)
+
+// maskKeyFileFamily is the mask of the direct key-file family: public key
+// files, then a placement verb moving only metadata, then metadata nouns.
+func maskKeyFileFamily(t string) string {
+	t = maskPublicKeyFiles(t)
+	if ls := metadataMoveRe.FindAllStringIndex(t, -1); len(ls) > 0 {
+		b := []byte(t)
+		for _, l := range ls {
+			for i := l[0]; i < l[1]; i++ {
+				b[i] = '#'
+			}
+		}
+		t = string(b)
+	}
+	return maskSecretMetadataNouns(t)
 }
 
 // maskConfigSecretFamilies is the mask of the config-secret families: public
