@@ -631,18 +631,20 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		defer func() { _ = auditSink.Close() }()
 	}
 
+	// Spec 042: print the one-time first-run telemetry notice on stderr (if
+	// the user has not already seen it). Persist the flag so we never nag
+	// twice. This runs BEFORE the runtime exists (#1592): there is no config
+	// commit yet, so the direct save cannot race one, and the runtime is built
+	// from a cfg that already carries notice_shown.
+	if telemetry.MaybePrintFirstRunNotice(cfg, os.Stderr) {
+		_ = saver.save(cfg, actualConfigPath)
+	}
+
 	srv, err := server.NewServerWithConfigPath(cfg, actualConfigPath, logger, server.WithAuditSink(auditSink))
 	if err != nil {
 		// Spec 042: classify the failure into a startup outcome enum.
 		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err), saver.save)
 		return fmt.Errorf("failed to create server: %w", err)
-	}
-
-	// Spec 042: print the one-time first-run telemetry notice on stderr (if
-	// the user has not already seen it). Persist the flag so we never nag
-	// twice.
-	if telemetry.MaybePrintFirstRunNotice(cfg, os.Stderr) {
-		_ = saver.save(cfg, actualConfigPath)
 	}
 
 	// Setup signal handling for graceful shutdown
@@ -680,11 +682,11 @@ func runServer(cmd *cobra.Command, _ []string) error {
 	logger.Info("Starting mcpproxy server")
 	if err := srv.StartServer(ctx); err != nil {
 		// Spec 042: classify the failure into a startup outcome enum.
-		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err), saver.save)
+		recordStartupOutcomeLive(srv, classifyStartupError(err))
 		return fmt.Errorf("failed to start server: %w", err)
 	}
 	// Spec 042: clean start.
-	recordStartupOutcome(cfg, actualConfigPath, "success", saver.save)
+	recordStartupOutcomeLive(srv, "success")
 
 	// Wait for context cancellation (signal) or a fatal serve failure
 	select {
@@ -705,7 +707,7 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		// conflicts) and can react via its state machine.
 		logger.Error("Server failed, shutting down", zap.Error(err))
 		// Spec 042: overwrite the optimistic "success" outcome recorded above.
-		recordStartupOutcome(cfg, actualConfigPath, classifyStartupError(err), saver.save)
+		recordStartupOutcomeLive(srv, classifyStartupError(err))
 		srv.SetShutdownInfo("error", "")
 		if shutdownErr := srv.Shutdown(); shutdownErr != nil {
 			logger.Error("Error shutting down server", zap.Error(shutdownErr))
