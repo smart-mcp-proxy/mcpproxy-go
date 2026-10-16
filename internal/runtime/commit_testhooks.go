@@ -37,6 +37,9 @@ type commitTestHooks struct {
 	// toolIndexWriteFault injects a failure into a discovery pass's index
 	// writes (BatchIndexTools), for Spec 117 FR-018 tests.
 	toolIndexWriteFault func(serverName string) error
+	// toolIndexReadFault injects a failure into a discovery pass's read of
+	// the server's indexed tools (the full-reindex fallback).
+	toolIndexReadFault func(serverName string) error
 	// discoveryPublishFault replaces the StateView publish result of a
 	// discovery pass (FR-018 publication failure or rejection).
 	discoveryPublishFault func(serverName string) (published bool, err error)

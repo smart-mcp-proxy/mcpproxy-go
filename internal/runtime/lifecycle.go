@@ -962,9 +962,9 @@ func (r *Runtime) captureQuarantinedToolDefinitionsFromCurrentClient(serverName 
 // the upstream no longer lists, so a quarantined capture reflects the live
 // toolset rather than the union of every past capture. Operator decisions are
 // kept: approved and changed (rug-pull) records and operator-blocked (Disabled) records survive.
-func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*config.ToolMetadata) {
+func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*config.ToolMetadata) error {
 	if r.storageManager == nil {
-		return
+		return nil
 	}
 	live := make(map[string]struct{}, len(tools))
 	for _, tool := range tools {
@@ -972,8 +972,7 @@ func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*conf
 	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
-		r.logger.Debug("Skipping review record prune", zap.String("server", serverName), zap.Error(err))
-		return
+		return fmt.Errorf("%w: list review records of %s for prune: %v", errCaptureIncomplete, serverName, err)
 	}
 	undecidedAbsent := func(rec *storage.ToolApprovalRecord) bool {
 		if _, ok := live[rec.ToolName]; ok {
@@ -981,6 +980,7 @@ func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*conf
 		}
 		return !rec.Disabled && rec.Status == storage.ToolApprovalStatusPending
 	}
+	var first error
 	for _, rec := range records {
 		if !undecidedAbsent(rec) {
 			continue
@@ -991,10 +991,23 @@ func (r *Runtime) pruneAbsentUndecidedApprovals(serverName string, tools []*conf
 		if hook := r.pruneAfterSnapshot; hook != nil {
 			hook(rec.ToolName)
 		}
-		if _, err := r.storageManager.DeleteToolApprovalIf(serverName, rec.ToolName, undecidedAbsent); err != nil {
-			r.logger.Debug("Failed to prune review record for absent tool", zap.String("server", serverName), zap.String("tool", rec.ToolName), zap.Error(err))
+		var derr error
+		if f := r.testHooks.toolApprovalWriteFault; f != nil {
+			derr = f(serverName, rec.ToolName, "delete-record")
+		}
+		if derr == nil {
+			_, derr = r.storageManager.DeleteToolApprovalIf(serverName, rec.ToolName, undecidedAbsent)
+		}
+		if derr != nil {
+			r.noteFailedTool(serverName, rec.ToolName)
+			if first == nil {
+				// Spec 117 FR-018: a review capture whose prune did not
+				// complete is incomplete; the caller marks the server dirty.
+				first = fmt.Errorf("%w: prune review record %s:%s: %v", errCaptureIncomplete, serverName, rec.ToolName, derr)
+			}
 		}
 	}
+	return first
 }
 
 // persistQuarantinedToolDefinitionsAt is persistQuarantinedToolDefinitions
@@ -1045,7 +1058,10 @@ func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*confi
 		r.markReviewDirtyHeld(serverName, inv.Seq, err)
 		return false, fmt.Errorf("capture review definitions for %s: %w", serverName, err)
 	}
-	r.pruneAbsentUndecidedApprovals(serverName, tools)
+	if err := r.pruneAbsentUndecidedApprovals(serverName, tools); err != nil {
+		r.markReviewDirtyHeld(serverName, inv.Seq, err)
+		return false, fmt.Errorf("capture review definitions for %s: %w", serverName, err)
+	}
 	if hook := r.captureAfterPrune; hook != nil {
 		hook()
 	}
@@ -1700,25 +1716,27 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 	}
 
 	// Query existing tools from the index
-	existingTools, err := r.indexManager.GetToolsByServer(serverName)
+	existingTools, err := r.indexedToolsOf(serverName)
 	if err != nil {
 		r.logger.Warn("Failed to query existing tools, performing full re-index",
 			zap.String("server", serverName),
 			zap.Error(err))
 		// Filter out blocked tools before full batch index
 		allowedTools := filterBlockedTools(newTools, approvalResult.BlockedTools)
-		if err := r.batchIndexTools(serverName, allowedTools); err != nil {
-			return incomplete(err)
+		if berr := r.batchIndexTools(serverName, allowedTools); berr != nil {
+			return incomplete(berr)
 		}
 		r.warmSignatureCache(allowedTools)
-		if err := complete(); err != nil {
-			return err
-		}
+		// FR-018: without the indexed set this pass could neither remove
+		// absent tools nor evict blocked ones, so it is not a complete
+		// capture: nothing is published and the server stays (or becomes)
+		// dirty until a pass that can diff the index runs.
+		ierr := incomplete(fmt.Errorf("%w: query indexed tools of %s: %v", errCaptureIncomplete, serverName, err))
 		release()
 		// The shared index changed for this server; refresh dependent profiles.
 		r.reindexAffectedProfiles(serverName)
 		r.reconcileSignatureCache()
-		return nil
+		return ierr
 	}
 
 	// Build maps for efficient lookup, keyed by the tool's RAW upstream name
@@ -1855,7 +1873,12 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 				zap.String("server", serverName),
 				zap.String("legacy_key", toolName))
 		}
-		noteRemoval(r.removeAbsentTool(serverName, toolName, !keepRecord, nil))
+		// Only an approved, enabled record is removed (FR-032a retention):
+		// a pending, changed or user-disabled record whose stale index
+		// document survived an earlier failed removal keeps the decision.
+		noteRemoval(r.removeAbsentTool(serverName, toolName, !keepRecord, func(rec *storage.ToolApprovalRecord) bool {
+			return absentApprovedRemovable(rec, newToolsMap)
+		}))
 	}
 	for _, toolName := range recordOnlyRemoved {
 		r.logger.Info("Removing approval record of a tool the server no longer lists",

@@ -37,7 +37,7 @@ func TestPruneAbsentUndecidedApprovals_KeepsDecisionSavedAfterSnapshot(t *testin
 					mutate(t, rt)
 				}
 			}
-			rt.pruneAbsentUndecidedApprovals("srv", []*config.ToolMetadata{})
+			_ = rt.pruneAbsentUndecidedApprovals("srv", []*config.ToolMetadata{})
 
 			rec, err := rt.storageManager.GetToolApproval("srv", "gone")
 			require.NoError(t, err, "the operator decision must survive the prune")
@@ -56,7 +56,7 @@ func TestPruneAbsentUndecidedApprovals_StillDropsUndecidedAbsent(t *testing.T) {
 	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 		ServerName: "srv", ToolName: "gone", Status: storage.ToolApprovalStatusPending, CurrentHash: "h",
 	}))
-	rt.pruneAbsentUndecidedApprovals("srv", []*config.ToolMetadata{})
+	_ = rt.pruneAbsentUndecidedApprovals("srv", []*config.ToolMetadata{})
 	_, err := rt.storageManager.GetToolApproval("srv", "gone")
 	require.Error(t, err)
 }

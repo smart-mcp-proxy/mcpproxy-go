@@ -38,6 +38,7 @@ func failWrites(rt *Runtime, tool, op string) {
 func healWrites(rt *Runtime) {
 	rt.testHooks.toolApprovalWriteFault = nil
 	rt.testHooks.toolIndexWriteFault = nil
+	rt.testHooks.toolIndexReadFault = nil
 	rt.testHooks.discoveryPublishFault = nil
 }
 
@@ -159,9 +160,16 @@ func TestCaptureFault_ApprovalOfPendingToolRefusedWhileDirty(t *testing.T) {
 	requireNotRecorded(t, rt.ApproveTools(baselineServer, []string{"wipe_all_notes"}, "operator"), "ApproveTools")
 	_, err = rt.ApproveAllTools(baselineServer, "operator")
 	requireNotRecorded(t, err, "ApproveAllTools")
+	// A bound approval carrying the (stale) stored fingerprint answers the
+	// out-of-date error naming the tool whose write failed.
 	rec := approvalOf(t, rt, "wipe_all_notes")
-	_, err = rt.ApproveToolsReviewed(baselineServer, []string{"wipe_all_notes"}, map[string]string{"wipe_all_notes": reviewFingerprint(rec)}, "operator")
-	requireNotRecorded(t, err, "bound approval")
+	expected := map[string]string{"wipe_all_notes": reviewFingerprint(rec)}
+	_, err = rt.ApproveToolsReviewed(baselineServer, []string{"wipe_all_notes"}, expected, "operator")
+	var stale *toolreview.StaleToolReviewError
+	require.ErrorAs(t, err, &stale, "bound approval")
+	assert.Equal(t, []string{"wipe_all_notes"}, stale.Changed)
+	_, err = rt.ApproveAllToolsReviewed(baselineServer, expected, "operator")
+	require.ErrorAs(t, err, &stale, "bound approve-all")
 	assert.Equal(t, storage.ToolApprovalStatusPending, approvalOf(t, rt, "wipe_all_notes").Status, "nothing promoted")
 
 	_, err = captureAt(t, rt, 4, readNote(), baselineTool("wipe_all_notes", "Delete every note forever", true))
@@ -363,4 +371,71 @@ func TestCaptureFault_MarkerAbortMarksServerDirty(t *testing.T) {
 	assert.False(t, rt.ToolReviewDirty(baselineServer))
 	_, ok := baselineDecision(t, rt)
 	assert.True(t, ok, "the healed capture writes the marker")
+}
+
+// Review r1 (A1): when the indexed set cannot be read the pass re-indexes
+// everything but cannot remove or evict, so it is not complete.
+func TestCaptureFault_IndexReadFailureIsNotComplete(t *testing.T) {
+	rt := seedApproved(t)
+	rt.MarkToolReviewDirtyForTest(baselineServer, 2)
+	rt.testHooks.toolIndexReadFault = func(string) error { return errInjectedWrite }
+	_, err := captureAt(t, rt, 3, readNote())
+	require.ErrorIs(t, err, errCaptureIncomplete)
+	applied, dirtyAt, dirty := lockState(rt)
+	assert.Equal(t, uint64(3), applied)
+	assert.True(t, dirty, "the full-reindex fallback does not clear dirty")
+	assert.Equal(t, uint64(3), dirtyAt)
+
+	healWrites(rt)
+	_, err = captureAt(t, rt, 4, readNote())
+	require.NoError(t, err)
+	assert.False(t, rt.ToolReviewDirty(baselineServer))
+}
+
+// Review r1 (A2): an index-derived removal keeps a user-disabled record whose
+// stale index document survived an earlier failed removal.
+func TestCaptureFault_IndexDerivedRemovalRetainsDisabledRecord(t *testing.T) {
+	rt := newBaselineRuntime(t, t.TempDir(), false)
+	_, err := captureAt(t, rt, 1, noteTool("x"), noteTool("y"))
+	require.NoError(t, err)
+
+	rt.testHooks.toolApprovalWriteFault = func(_, tool, op string) error {
+		if tool == "x" && (op == "delete-index" || op == "delete-record") {
+			return errInjectedWrite
+		}
+		return nil
+	}
+	_, err = captureAt(t, rt, 2, noteTool("y"))
+	require.ErrorIs(t, err, errCaptureIncomplete)
+	require.Contains(t, indexedNames(t, rt), "x", "the failed index delete left x indexed")
+	healWrites(rt)
+
+	require.NoError(t, rt.SetToolEnabled(baselineServer, "x", false, "operator"), "disable stays available while dirty")
+	_, err = captureAt(t, rt, 3, noteTool("y"))
+	require.NoError(t, err)
+	assert.NotContains(t, indexedNames(t, rt), "x")
+	rec := approvalOf(t, rt, "x")
+	require.NotNil(t, rec, "the operator's disable survives the removal")
+	assert.True(t, rec.Disabled)
+}
+
+// Review r1 (A3): a review capture whose prune of an absent pending record
+// fails is incomplete.
+func TestCaptureFault_QuarantinedPruneFailureMarksServerDirty(t *testing.T) {
+	rt := newBaselineRuntime(t, t.TempDir(), true)
+	gen := rt.committedGenForTest(baselineServer)
+	_, err := rt.persistInventoryDefinitions(baselineServer, []*config.ToolMetadata{noteTool("a"), noteTool("b")}, gen, managed.InventoryCapture{Seq: 1})
+	require.NoError(t, err)
+
+	failWrites(rt, "b", "delete-record")
+	_, err = rt.persistInventoryDefinitions(baselineServer, []*config.ToolMetadata{noteTool("a")}, gen, managed.InventoryCapture{Seq: 2})
+	require.ErrorIs(t, err, errCaptureIncomplete)
+	assert.True(t, rt.ToolReviewDirty(baselineServer))
+	assert.NotNil(t, approvalOf(t, rt, "b"))
+
+	healWrites(rt)
+	_, err = rt.persistInventoryDefinitions(baselineServer, []*config.ToolMetadata{noteTool("a")}, gen, managed.InventoryCapture{Seq: 3})
+	require.NoError(t, err)
+	assert.False(t, rt.ToolReviewDirty(baselineServer))
+	assert.Nil(t, approvalOf(t, rt, "b"))
 }

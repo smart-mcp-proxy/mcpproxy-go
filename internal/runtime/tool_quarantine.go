@@ -1640,7 +1640,7 @@ func (r *Runtime) persistToolApproval(record *storage.ToolApprovalRecord) error 
 		err = r.storageManager.SaveToolApproval(record)
 	}
 	if err != nil {
-		r.noteApprovalWriteFailure(record.ServerName)
+		r.noteApprovalWriteFailure(record.ServerName, record.ToolName)
 	}
 	return err
 }

@@ -72,8 +72,11 @@ func (r *Runtime) absentApprovedRecords(serverName string, live, indexed map[str
 func (r *Runtime) removeAbsentTool(serverName, toolName string, deleteRecord bool, cond func(*storage.ToolApprovalRecord) bool) error {
 	var first error
 	note := func(err error) {
-		if err != nil && first == nil {
-			first = err
+		if err != nil {
+			r.noteFailedTool(serverName, toolName)
+			if first == nil {
+				first = err
+			}
 		}
 	}
 	fault := func(op string) error {
@@ -118,6 +121,17 @@ func (r *Runtime) removeAbsentTool(serverName, toolName string, deleteRecord boo
 		note(fmt.Errorf("delete approval record %s: %w", fullToolName, err))
 	}
 	return first
+}
+
+// indexedToolsOf is the discovery pass's read of the server's indexed tools,
+// with the FR-018 test fault seam in front of it.
+func (r *Runtime) indexedToolsOf(serverName string) ([]*config.ToolMetadata, error) {
+	if f := r.testHooks.toolIndexReadFault; f != nil {
+		if err := f(serverName); err != nil {
+			return nil, err
+		}
+	}
+	return r.indexManager.GetToolsByServer(serverName)
 }
 
 // batchIndexTools is the discovery pass's index write, with the FR-018 test

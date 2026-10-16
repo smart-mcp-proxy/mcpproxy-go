@@ -72,8 +72,14 @@ type toolApprovalServerLock struct {
 
 	dirty         bool
 	dirtyAt       uint64
+	dirtyTools    map[string]struct{}
 	dirtyMirror   atomic.Bool
 	writeFailures atomic.Int64
+
+	// failedMu guards passFailed: the tools whose writes failed in the
+	// current pass, folded into dirtyTools when the pass is marked dirty.
+	failedMu   sync.Mutex
+	passFailed map[string]struct{}
 }
 
 // toolApprovalServerState returns serverName's lock state, creating it.

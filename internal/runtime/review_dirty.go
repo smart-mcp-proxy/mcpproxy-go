@@ -3,6 +3,7 @@ package runtime
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	"go.uber.org/zap"
 
@@ -41,13 +42,30 @@ var errCaptureIncomplete = errors.New("tool capture incomplete: not every write 
 // beginApprovalPassHeld resets serverName's per-pass write-failure counter.
 // Caller holds the server's approval lock.
 func (r *Runtime) beginApprovalPassHeld(serverName string) {
-	r.toolApprovalServerState(serverName).writeFailures.Store(0)
+	st := r.toolApprovalServerState(serverName)
+	st.writeFailures.Store(0)
+	st.failedMu.Lock()
+	st.passFailed = nil
+	st.failedMu.Unlock()
 }
 
-// noteApprovalWriteFailure counts a failed approval-record write of the pass
-// that holds serverName's approval lock.
-func (r *Runtime) noteApprovalWriteFailure(serverName string) {
+// noteApprovalWriteFailure counts a failed approval-record write of
+// toolName in the pass that holds serverName's approval lock.
+func (r *Runtime) noteApprovalWriteFailure(serverName, toolName string) {
 	r.toolApprovalServerState(serverName).writeFailures.Add(1)
+	r.noteFailedTool(serverName, toolName)
+}
+
+// noteFailedTool records that a write for toolName failed in the current
+// pass; a bound approval while dirty lists these as changed (FR-018).
+func (r *Runtime) noteFailedTool(serverName, toolName string) {
+	st := r.toolApprovalServerState(serverName)
+	st.failedMu.Lock()
+	if st.passFailed == nil {
+		st.passFailed = make(map[string]struct{})
+	}
+	st.passFailed[toolName] = struct{}{}
+	st.failedMu.Unlock()
 }
 
 // approvalPassWriteFailures reports how many record writes of the current
@@ -64,6 +82,15 @@ func (r *Runtime) markReviewDirtyHeld(serverName string, seq uint64, cause error
 		st.dirtyAt = seq
 	}
 	st.dirty = true
+	st.failedMu.Lock()
+	for name := range st.passFailed {
+		if st.dirtyTools == nil {
+			st.dirtyTools = make(map[string]struct{})
+		}
+		st.dirtyTools[name] = struct{}{}
+	}
+	st.passFailed = nil
+	st.failedMu.Unlock()
 	st.dirtyMirror.Store(true)
 	r.logger.Warn("Tool capture incomplete: tool calls for the server are refused until a complete capture is applied",
 		zap.String("server", serverName), zap.Uint64("capture_seq", seq), zap.Error(cause))
@@ -87,6 +114,7 @@ func (r *Runtime) clearReviewDirtyHeld(serverName string, seq uint64) {
 	}
 	st.dirty = false
 	st.dirtyAt = 0
+	st.dirtyTools = nil
 	st.dirtyMirror.Store(false)
 	r.logger.Info("Tool capture complete: tool calls for the server are allowed again",
 		zap.String("server", serverName), zap.Uint64("capture_seq", seq))
@@ -99,6 +127,7 @@ func (r *Runtime) dropReviewDirtyHeld(serverName string) {
 		st := v.(*toolApprovalServerLock)
 		st.dirty = false
 		st.dirtyAt = 0
+		st.dirtyTools = nil
 		st.dirtyMirror.Store(false)
 	}
 }
@@ -129,4 +158,25 @@ func (r *Runtime) reviewNotRecordedHeld(serverName string) error {
 		return nil
 	}
 	return fmt.Errorf("server '%s': %w", serverName, toolreview.ErrReviewNotRecorded)
+}
+
+// reviewBindingDirtyHeld is reviewNotRecordedHeld for a review-bound request
+// (FR-018): while dirty it answers the 409 out-of-date error listing the
+// tools whose writes failed as changed, so the client reloads its review.
+// A failure that names no tool (an index or publish failure) answers
+// ErrReviewNotRecorded. Caller holds the server's approval lock.
+func (r *Runtime) reviewBindingDirtyHeld(serverName string) error {
+	if !r.reviewDirtyHeld(serverName) {
+		return nil
+	}
+	st := r.toolApprovalServerState(serverName)
+	names := make([]string, 0, len(st.dirtyTools))
+	for name := range st.dirtyTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if stale := toolreview.NewStaleToolReviewError(serverName, names, nil, nil); stale != nil {
+		return stale
+	}
+	return r.reviewNotRecordedHeld(serverName)
 }
