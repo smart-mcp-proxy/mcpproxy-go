@@ -22,6 +22,12 @@ type directCallabilityDecision struct {
 	approvalStatus string
 	configDenied   bool
 	storageErr     error
+	// reviewDirty is the Spec 117 FR-018 dispatch verdict. It MUST NOT feed
+	// callable, which is listing eligibility (the scoped direct listing, the
+	// call-time tool filter, describe_tool visibility): a review-dirty
+	// server's tools stay listed and describable, and only the dispatch
+	// block (directToolCallabilityBlockWithReason) refuses on it.
+	reviewDirty bool
 }
 
 type directCallabilityEvaluator struct {
@@ -176,6 +182,11 @@ func (p *MCPProxyServer) directToolCallabilityBlockWithReason(ctx context.Contex
 
 	decision := newDirectCallabilityEvaluator(p).evaluate(serverName, toolName)
 	if decision.callable {
+		if decision.reviewDirty {
+			// Spec 117 FR-018: the tool reaches the handler (it stays listed)
+			// and the call is refused with no upstream call.
+			return mcp.NewToolResultError(reviewNotRecordedMessage(serverName)), telemetry.BlockReasonToolNotCallable
+		}
 		return nil, ""
 	}
 
@@ -267,6 +278,7 @@ func (e *directCallabilityEvaluator) evaluate(serverName, toolName string) direc
 		return decision
 	}
 	decision.serverConfig = serverConfig
+	decision.reviewDirty = e.proxy.toolReviewDirty(serverName)
 	configDenied := e.proxy.isToolConfigDenied(serverName, toolName, serverConfig)
 	// The server-level gates own the response when they fire, so the fields that
 	// SELECT a more specific refusal — the config-denial wording and the

@@ -21,6 +21,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
 
 // calculateToolApprovalHash computes a stable SHA-256 hash for tool-level quarantine.
@@ -584,6 +585,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 	if r.storageManager == nil {
 		return &ToolApprovalResult{BlockedTools: make(map[string]bool)}, nil
 	}
+	r.beginApprovalPassHeld(serverName)
 
 	// Determine if quarantine is enforced for this server. Storage is
 	// consulted too (fail closed): QuarantineServer flips it under this lock
@@ -1547,6 +1549,12 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 		r.emitReviewChanged(serverName)
 	}
 
+	// Spec 117 FR-018: a pass whose record writes did not all land is an
+	// incomplete capture. The records may still describe an older definition
+	// than the one listed, so the caller must not publish this capture.
+	if failed := r.approvalPassWriteFailures(serverName); failed > 0 {
+		return result, fmt.Errorf("%w: %d approval record write(s) failed for server %s", errCaptureIncomplete, failed, serverName)
+	}
 	return result, nil
 }
 
@@ -1616,7 +1624,25 @@ func previousHintsProveRevert(previous, live *config.ToolAnnotations) bool {
 // than a pre-105 collapsed one.
 func (r *Runtime) saveToolApproval(record *storage.ToolApprovalRecord) error {
 	record.IdentityKeyed = true
-	return r.storageManager.SaveToolApproval(record)
+	return r.persistToolApproval(record)
+}
+
+// persistToolApproval is the storage write behind both save helpers. A
+// failure is counted for the pass that holds the server's approval lock, so a
+// discovery pass whose record writes did not all land reports an incomplete
+// capture (Spec 117 FR-018) instead of a logged and ignored error.
+func (r *Runtime) persistToolApproval(record *storage.ToolApprovalRecord) error {
+	var err error
+	if f := r.testHooks.toolApprovalWriteFault; f != nil {
+		err = f(record.ServerName, record.ToolName, "save")
+	}
+	if err == nil {
+		err = r.storageManager.SaveToolApproval(record)
+	}
+	if err != nil {
+		r.noteApprovalWriteFailure(record.ServerName)
+	}
+	return err
 }
 
 // cloneToolAnnotations preserves a point-in-time upstream snapshot. Annotation
@@ -1679,7 +1705,7 @@ func capturedToolAnnotations(annotations *config.ToolAnnotations) *config.ToolAn
 func (r *Runtime) saveReadToolApproval(record *storage.ToolApprovalRecord, wasUnstamped bool) error {
 	if wasUnstamped && record.Restricts() {
 		record.IdentityKeyed = false
-		return r.storageManager.SaveToolApproval(record)
+		return r.persistToolApproval(record)
 	}
 	return r.saveToolApproval(record)
 }
@@ -2386,6 +2412,12 @@ func (r *Runtime) approveToolsAndNotify(serverName string, toolNames []string, a
 // for explicit review, and approved records are not rewritten. Missing
 // records are skipped. Returns the number of records written approved.
 func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, approvedBy string, pendingOnly bool) (int, error) {
+	// Spec 117 FR-018: while the server's latest capture is incomplete the
+	// stored definitions may be older than the live ones; approving them
+	// would approve a definition nobody reviewed.
+	if err := r.reviewNotRecordedHeld(serverName); err != nil {
+		return 0, err
+	}
 	approved := 0
 	for _, toolName := range toolNames {
 		record, err := r.storageManager.GetToolApproval(serverName, toolName)
@@ -2536,6 +2568,14 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 		// Matches the prior bulk-path pre-check; lifted here so single-toggle
 		// also avoids no-op BBolt writes.
 		return false, nil
+	}
+	// Spec 117 FR-018: enabling an approved record makes it reachable; not
+	// while the server's latest capture is incomplete. Disabling stays
+	// available.
+	if enabled && record.Status == storage.ToolApprovalStatusApproved {
+		if err := r.reviewNotRecordedHeld(serverName); err != nil {
+			return false, err
+		}
 	}
 
 	record.Disabled = !enabled
@@ -2760,7 +2800,7 @@ func (r *Runtime) SetAllToolsEnabledAt(serverName string, enabled bool, updatedB
 		}
 		attempted++
 		flipped, setErr := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy, inc)
-		if errors.Is(setErr, ErrServerReplaced) {
+		if errors.Is(setErr, ErrServerReplaced) || errors.Is(setErr, toolreview.ErrReviewNotRecorded) {
 			return changed, setErr
 		}
 		if setErr != nil {
@@ -2931,6 +2971,13 @@ func (r *Runtime) approveBaselineToolsForServerCountAt(serverName string, incarn
 		}
 	}
 	approved := 0
+	if len(pendingTools) > 0 && r.reviewDirtyHeld(serverName) {
+		// Spec 117 FR-018: a non-review unquarantine leaves pending tools
+		// pending while the server's latest capture is incomplete.
+		r.logger.Warn("Baseline promotion after unquarantine skipped: the server's latest tool capture is incomplete",
+			zap.String("server", serverName), zap.Int("pending", len(pendingTools)))
+		pendingTools = nil
+	}
 	if len(pendingTools) > 0 {
 		// approveToolsLocked sets ApprovedHash=CurrentHash and runs
 		// enforceInvariant (pending→approved is permitted).

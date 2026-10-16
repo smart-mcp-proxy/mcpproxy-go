@@ -94,6 +94,14 @@ func (r *Runtime) admitInventoryHeld(serverName string, ref inventoryRef) invent
 		return inventoryNotCurrent
 	}
 	if ref.mode == inventoryReconcile {
+		if st.dirty {
+			// FR-018: the records may be partly written by a newer, failed
+			// capture; re-applying older retained definitions over them
+			// could revert a hold. The caller re-lists instead.
+			r.logger.Info("Retained tool snapshot not re-applied: the server's latest capture is incomplete",
+				zap.String("server", serverName), zap.Uint64("dirty_seq", st.dirtyAt))
+			return inventoryNotCurrent
+		}
 		if c.Seq != st.definitions {
 			r.logger.Info("Retained tool snapshot not re-applied: a newer capture superseded it",
 				zap.String("server", serverName), zap.Uint64("snapshot_seq", c.Seq),

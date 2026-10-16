@@ -1039,6 +1039,10 @@ func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*confi
 		return false, nil
 	}
 	if _, err := r.checkToolApprovalsHeld(serverName, tools); err != nil {
+		// Spec 117 FR-018: an incomplete review capture marks the server
+		// review-dirty, so neither a server approval nor a tool approval can
+		// act on records older than what the upstream now serves.
+		r.markReviewDirtyHeld(serverName, inv.Seq, err)
 		return false, fmt.Errorf("capture review definitions for %s: %w", serverName, err)
 	}
 	r.pruneAbsentUndecidedApprovals(serverName, tools)
@@ -1048,6 +1052,7 @@ func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*confi
 	r.lastGoodToolsMu.Lock()
 	r.storeLastGoodLocked(serverName, tools, inv, instanceGen)
 	r.lastGoodToolsMu.Unlock()
+	r.clearReviewDirtyHeld(serverName, inv.Seq)
 	return true, nil
 }
 
@@ -1111,27 +1116,38 @@ func (r *Runtime) commitInventoryAt(ctx context.Context, serverName string, tool
 		return false, false, nil
 	}
 	published = true
-	held := func() {
-		r.lastGoodToolsMu.Lock()
-		r.storeLastGoodLocked(serverName, tools, inv.capture, instanceGen)
-		r.lastGoodToolsMu.Unlock()
+	// held runs after every write of the pass landed (FR-018): it stores the
+	// last-good snapshot and capture stamp and publishes the StateView, and
+	// reports a failed or rejected publication, which leaves the capture
+	// incomplete. The snapshot and stamp are stored only after the
+	// publication was accepted, so a rejected one leaves both at the prior
+	// capture.
+	held := func() error {
 		if capture != nil && r.supervisor != nil {
 			// The per-server variant stamps the server's discovery as
 			// completed even when the result is EMPTY, so a tool-less
 			// server is not left in the connect→discovery window (Spec 105
 			// FR-009, research D4). The supervisor never calls back into
 			// the runtime (plan.md lock rule 5), so this adds no edge.
-			ok, rerr := r.supervisor.RefreshServerToolsFromDiscovery(serverName, tools, *capture)
+			ok, rerr := r.publishDiscoveredTools(serverName, tools, *capture)
 			if rerr != nil {
 				r.logger.Warn("Failed to refresh tools in StateView for server",
 					zap.String("server", serverName), zap.Error(rerr))
-			} else {
-				published = ok
+				published = false
+				return fmt.Errorf("%w: publish tools of %s: %v", errCaptureIncomplete, serverName, rerr)
+			}
+			if !ok {
+				published = false
+				return errPublishRejected
 			}
 		}
+		r.lastGoodToolsMu.Lock()
+		r.storeLastGoodLocked(serverName, tools, inv.capture, instanceGen)
+		r.lastGoodToolsMu.Unlock()
 		if hook := r.discoveryAfterPublish; hook != nil {
 			hook()
 		}
+		return nil
 	}
 	if err := r.applyInventoryGuarded(ctx, serverName, tools, instanceGen, inv, nil, held); err != nil {
 		if errors.Is(err, errDiscoveryIneligible) {
@@ -1142,7 +1158,7 @@ func (r *Runtime) commitInventoryAt(ctx context.Context, serverName string, tool
 			// stands, and nothing of this one was written.
 			return true, true, nil
 		}
-		if errors.Is(err, errDiscoveryStaleGeneration) || errors.Is(err, errInventoryNotCurrent) {
+		if errors.Is(err, errDiscoveryStaleGeneration) || errors.Is(err, errInventoryNotCurrent) || errors.Is(err, errPublishRejected) {
 			// Eligible but not published: the caller re-lists the
 			// current instance (review round 7).
 			return true, false, nil
@@ -1152,9 +1168,24 @@ func (r *Runtime) commitInventoryAt(ctx context.Context, serverName string, tool
 			// this capture was published.
 			return true, false, err
 		}
-		return true, published, err
+		return true, false, err
 	}
 	return true, published, nil
+}
+
+// errPublishRejected reports a StateView publication the supervisor dropped
+// because the server's connection changed while its tools were listed. The
+// capture is incomplete (FR-018) and the caller re-lists the current
+// connection, as before.
+var errPublishRejected = errors.New("tool inventory publication rejected: the connection changed while it was listed")
+
+// publishDiscoveredTools is the supervisor's per-server StateView publish,
+// with the FR-018 test fault seam in front of it.
+func (r *Runtime) publishDiscoveredTools(serverName string, tools []*config.ToolMetadata, capture supervisor.DiscoveryCapture) (bool, error) {
+	if f := r.testHooks.discoveryPublishFault; f != nil {
+		return f(serverName)
+	}
+	return r.supervisor.RefreshServerToolsFromDiscovery(serverName, tools, capture)
 }
 
 func (r *Runtime) discoverAndIndexToolsForServer(ctx context.Context, serverName string, authoritative bool) error {
@@ -1565,7 +1596,7 @@ func (r *Runtime) applyDifferentialToolUpdateAt(ctx context.Context, serverName 
 // which runs inside the same approval-lock hold right after the final
 // eligibility check passed and before any index write (the discovery pass's
 // last-good and StateView publish, D15). It never runs for a rejected pass.
-func (r *Runtime) applyDifferentialToolUpdateHeld(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, held func()) error {
+func (r *Runtime) applyDifferentialToolUpdateHeld(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, held func() error) error {
 	return r.applyDifferentialToolUpdateGuarded(ctx, serverName, newTools, instanceGen, nil, held)
 }
 
@@ -1579,7 +1610,7 @@ var errLocalSnapshotPurged = errors.New("last-good snapshot was purged by a remo
 // and before held and any write: when it reports true the update writes
 // nothing and returns errLocalSnapshotPurged. The local reindex paths pass a
 // purge-sequence check, because their tools carry no instance generation.
-func (r *Runtime) applyDifferentialToolUpdateGuarded(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, stale func() bool, held func()) error {
+func (r *Runtime) applyDifferentialToolUpdateGuarded(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, stale func() bool, held func() error) error {
 	return r.applyInventoryGuarded(ctx, serverName, newTools, instanceGen, inventoryRef{}, stale, held)
 }
 
@@ -1588,7 +1619,16 @@ func (r *Runtime) applyDifferentialToolUpdateGuarded(ctx context.Context, server
 // check, still before held and any write, the capture is admitted in capture
 // order (admitInventoryHeld): a refused capture writes nothing and returns
 // errInventoryStale or errInventoryNotCurrent.
-func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, inv inventoryRef, stale func() bool, held func()) error {
+//
+// Spec 117 FR-018 (#1610): once admitted, every write of the pass — approval
+// records, the absent-tool removal (FR-032a), blocked eviction, the index
+// writes — runs before held, which stores the last-good snapshot and capture
+// stamp and publishes the StateView, and held reports whether that
+// publication was accepted. Any failure on the way marks the server
+// review-dirty at the capture's sequence and returns before held, so a failed
+// capture publishes no snapshot, stamp or StateView entry. A fresh capture
+// that ran through held clears an older dirty mark.
+func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, newTools []*config.ToolMetadata, instanceGen int64, inv inventoryRef, stale func() bool, held func() error) error {
 	unlock := r.lockToolApprovals(serverName)
 	locked := true
 	release := func() {
@@ -1617,6 +1657,25 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 	if err := inventoryVerdictErr(r.admitInventoryHeld(serverName, inv)); err != nil {
 		return err
 	}
+	// FR-018: from here on a failure leaves the capture incomplete.
+	incomplete := func(err error) error {
+		r.markReviewDirtyHeld(serverName, inv.capture.Seq, err)
+		return err
+	}
+	// complete publishes the capture (held) and, for a fresh capture, clears
+	// an older dirty mark. A reconciliation re-applies retained definitions
+	// and never clears it (it is not admitted while dirty, admitInventoryHeld).
+	complete := func() error {
+		if held != nil {
+			if err := held(); err != nil {
+				return incomplete(err)
+			}
+		}
+		if inv.mode == inventoryDefinitions {
+			r.clearReviewDirtyHeld(serverName, inv.capture.Seq)
+		}
+		return nil
+	}
 	// Spec 117 PR-1 (FR-027, FR-027a): the server's tool baseline is resolved
 	// (and an older store's marker back-filled) BEFORE anything of this pass
 	// is published or written. If it cannot be, the pass aborts here: no
@@ -1626,25 +1685,15 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 	// holds computed then stay in force; the next pass retries.
 	baseline, err := r.resolveToolBaselineHeld(serverName)
 	if err != nil {
-		return err
+		return incomplete(err)
 	}
 
-	if held != nil {
-		held()
-	}
-
-	// Check tool-level quarantine approvals before indexing
+	// Check tool-level quarantine approvals before indexing. Any error
+	// (errCaptureIncomplete: a record write failed; errBaselineMarker) leaves
+	// the capture incomplete: nothing below runs and nothing is published.
 	approvalResult, err := r.checkToolApprovalsResolved(serverName, newTools, baseline)
 	if err != nil {
-		if errors.Is(err, errBaselineMarker) {
-			// Unreachable after the resolve above (the baseline is passed
-			// in); kept fail-closed for any future error of that kind.
-			return err
-		}
-		r.logger.Warn("Failed to check tool approvals, proceeding without quarantine",
-			zap.String("server", serverName),
-			zap.Error(err))
-		approvalResult = &ToolApprovalResult{BlockedTools: make(map[string]bool)}
+		return incomplete(err)
 	}
 	if h := r.testHooks.discoveryBeforeIndex; h != nil {
 		h(serverName)
@@ -1658,10 +1707,13 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 			zap.Error(err))
 		// Filter out blocked tools before full batch index
 		allowedTools := filterBlockedTools(newTools, approvalResult.BlockedTools)
-		if err := r.indexManager.BatchIndexTools(allowedTools); err != nil {
-			return err
+		if err := r.batchIndexTools(serverName, allowedTools); err != nil {
+			return incomplete(err)
 		}
 		r.warmSignatureCache(allowedTools)
+		if err := complete(); err != nil {
+			return err
+		}
 		release()
 		// The shared index changed for this server; refresh dependent profiles.
 		r.reindexAffectedProfiles(serverName)
@@ -1756,13 +1808,24 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 		}
 	}
 
+	// Spec 117 FR-032a: the removal workset also covers approved, enabled
+	// records of tools this capture does not list, not only the index
+	// documents the previous pass left. A pass whose index delete landed and
+	// whose record delete failed leaves a record no index diff ever revisits
+	// again; deriving it from storage also survives a restart.
+	recordOnlyRemoved, err := r.absentApprovedRecords(serverName, newToolsMap, oldToolsMap, migrationAliasOfServed)
+	if err != nil {
+		return incomplete(err)
+	}
+
 	// Log the changes
-	if len(addedTools) > 0 || len(modifiedTools) > 0 || len(removedTools) > 0 {
+	if len(addedTools) > 0 || len(modifiedTools) > 0 || len(removedTools) > 0 || len(recordOnlyRemoved) > 0 {
 		r.logger.Info("Tool changes detected for server",
 			zap.String("server", serverName),
 			zap.Int("added", len(addedTools)),
 			zap.Int("modified", len(modifiedTools)),
-			zap.Int("removed", len(removedTools)))
+			zap.Int("removed", len(removedTools)),
+			zap.Int("removed_records", len(recordOnlyRemoved)))
 	} else {
 		r.logger.Debug("No tool changes detected for server",
 			zap.String("server", serverName),
@@ -1771,43 +1834,39 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 
 	// Apply changes
 
-	// 1. Delete removed tools
+	// 1. Delete removed tools. Every delete is idempotent, so a retry after a
+	// partial failure converges; any failure leaves the capture incomplete
+	// (FR-018) instead of a logged and ignored error.
+	var removalErr error
+	noteRemoval := func(err error) {
+		if err != nil && removalErr == nil {
+			removalErr = err
+		}
+	}
 	for _, toolName := range removedTools {
 		r.logger.Info("Removing tool from index",
 			zap.String("server", serverName),
 			zap.String("tool", toolName))
-
-		if err := r.indexManager.DeleteTool(serverName, toolName); err != nil {
-			r.logger.Error("Failed to delete tool from index",
+		// The record is kept when the key is a pre-105 collapsed alias of a
+		// namespaced tool still served (see migrationAliasOfServed above).
+		keepRecord := migrationAliasOfServed[toolName]
+		if keepRecord {
+			r.logger.Info("Keeping approval record for a pre-105 collapsed docID whose namespaced tool is still served (Spec 105 FR-009)",
 				zap.String("server", serverName),
-				zap.String("tool", toolName),
-				zap.Error(err))
+				zap.String("legacy_key", toolName))
 		}
-
-		// Clean up hash storage
-		fullToolName := fmt.Sprintf("%s:%s", serverName, toolName)
-		if r.storageManager != nil {
-			if err := r.storageManager.DeleteToolHash(fullToolName); err != nil {
-				r.logger.Debug("Failed to delete tool hash",
-					zap.String("tool", fullToolName),
-					zap.Error(err))
-			}
-		}
-
-		// Clean up tool approval records for removed tools — unless the key
-		// is a pre-105 collapsed alias of a namespaced tool still served
-		// (see migrationAliasOfServed above).
-		if r.storageManager != nil {
-			if migrationAliasOfServed[toolName] {
-				r.logger.Info("Keeping approval record for a pre-105 collapsed docID whose namespaced tool is still served (Spec 105 FR-009)",
-					zap.String("server", serverName),
-					zap.String("legacy_key", toolName))
-			} else if err := r.storageManager.DeleteToolApproval(serverName, toolName); err != nil {
-				r.logger.Debug("Failed to delete tool approval for removed tool",
-					zap.String("tool", fullToolName),
-					zap.Error(err))
-			}
-		}
+		noteRemoval(r.removeAbsentTool(serverName, toolName, !keepRecord, nil))
+	}
+	for _, toolName := range recordOnlyRemoved {
+		r.logger.Info("Removing approval record of a tool the server no longer lists",
+			zap.String("server", serverName),
+			zap.String("tool", toolName))
+		noteRemoval(r.removeAbsentTool(serverName, toolName, true, func(rec *storage.ToolApprovalRecord) bool {
+			return absentApprovedRemovable(rec, newToolsMap)
+		}))
+	}
+	if removalErr != nil {
+		return incomplete(fmt.Errorf("%w: remove absent tools of %s: %v", errCaptureIncomplete, serverName, removalErr))
 	}
 
 	// 2. Remove blocked tools from index if previously indexed
@@ -1821,6 +1880,7 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 					zap.String("server", serverName),
 					zap.String("tool", blockedToolName),
 					zap.Error(err))
+				return incomplete(fmt.Errorf("%w: evict blocked tool %s:%s: %v", errCaptureIncomplete, serverName, blockedToolName, err))
 			}
 		}
 	}
@@ -1833,8 +1893,8 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 			zap.Int("count", len(allowedAddedTools)),
 			zap.Int("blocked", len(addedTools)-len(allowedAddedTools)))
 
-		if err := r.indexManager.BatchIndexTools(allowedAddedTools); err != nil {
-			return fmt.Errorf("failed to index added tools: %w", err)
+		if err := r.batchIndexTools(serverName, allowedAddedTools); err != nil {
+			return incomplete(fmt.Errorf("failed to index added tools: %w", err))
 		}
 	}
 
@@ -1854,8 +1914,8 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 				zap.String("new_hash", tool.Hash))
 		}
 
-		if err := r.indexManager.BatchIndexTools(allowedModifiedTools); err != nil {
-			return fmt.Errorf("failed to re-index modified tools: %w", err)
+		if err := r.batchIndexTools(serverName, allowedModifiedTools); err != nil {
+			return incomplete(fmt.Errorf("failed to re-index modified tools: %w", err))
 		}
 	}
 
@@ -1869,8 +1929,8 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 			zap.String("server", serverName),
 			zap.Int("count", len(allowedAnnotationsOnlyTools)))
 
-		if err := r.indexManager.BatchIndexTools(allowedAnnotationsOnlyTools); err != nil {
-			return fmt.Errorf("failed to refresh tool annotations: %w", err)
+		if err := r.batchIndexTools(serverName, allowedAnnotationsOnlyTools); err != nil {
+			return incomplete(fmt.Errorf("failed to refresh tool annotations: %w", err))
 		}
 	}
 
@@ -1891,6 +1951,12 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 	// Idempotent and cheap: Warm returns on the first cache hit, so the steady
 	// state is one map lookup per tool per discovery.
 	r.warmSignatureCache(filterBlockedTools(newTools, approvalResult.BlockedTools))
+
+	// 6. Publish: last-good snapshot, capture stamp and StateView (held),
+	// only now that every write of the pass landed (FR-018).
+	if err := complete(); err != nil {
+		return err
+	}
 
 	// Index and approval writes are done; the per-profile rebuild and the
 	// events below must not run under the approval lock (D15).
@@ -1930,7 +1996,7 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 			"server":   serverName,
 			"added":    len(addedTools),
 			"modified": len(modifiedTools),
-			"removed":  len(removedTools),
+			"removed":  len(removedTools) + len(recordOnlyRemoved),
 		})
 	}
 

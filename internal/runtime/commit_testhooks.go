@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"sync"
 	"sync/atomic"
 )
@@ -28,6 +29,17 @@ type commitTestHooks struct {
 	// baseline step of a discovery pass: op is "list" (the prior-record
 	// listing), "read" (the marker read) or "write" (the marker write).
 	toolBaselineFault func(serverName, op string) error
+	// toolApprovalWriteFault injects a storage failure into an approval
+	// record write of the runtime's write seam (op "save") or into a delete
+	// of the absent-tool removal (op "delete-record", "delete-hash",
+	// "delete-index"), for Spec 117 FR-018/FR-032a tests.
+	toolApprovalWriteFault func(serverName, toolName, op string) error
+	// toolIndexWriteFault injects a failure into a discovery pass's index
+	// writes (BatchIndexTools), for Spec 117 FR-018 tests.
+	toolIndexWriteFault func(serverName string) error
+	// discoveryPublishFault replaces the StateView publish result of a
+	// discovery pass (FR-018 publication failure or rejection).
+	discoveryPublishFault func(serverName string) (published bool, err error)
 	// reviewBindingValidated runs in a review-bound tool approval
 	// (ApproveToolsReviewed, ApproveAllToolsReviewed) after the binding
 	// validated and before the approval writes, with the server's
@@ -191,3 +203,20 @@ func (r *Runtime) ApprovalLockWaitersForTest(serverName string) int {
 func (r *Runtime) SetApprovalAfterCaptureHookForTest(fn func(serverName string, incarnation int64)) {
 	r.testHooks.approvalAfterCapture = fn
 }
+
+// MarkToolReviewDirtyForTest marks serverName review-dirty at seq, as a
+// capture whose writes failed would (Spec 117 FR-018). Test-only: packages
+// outside runtime (internal/server) assert the dispatch refusal with it.
+func (r *Runtime) MarkToolReviewDirtyForTest(serverName string, seq uint64) {
+	defer r.lockToolApprovals(serverName)()
+	r.markReviewDirtyHeld(serverName, seq, errTestReviewDirty)
+}
+
+// ClearToolReviewDirtyForTest clears serverName's dirty mark as a complete
+// capture newer than seq would. Test-only.
+func (r *Runtime) ClearToolReviewDirtyForTest(serverName string, seq uint64) {
+	defer r.lockToolApprovals(serverName)()
+	r.clearReviewDirtyHeld(serverName, seq)
+}
+
+var errTestReviewDirty = errors.New("test: capture marked incomplete")

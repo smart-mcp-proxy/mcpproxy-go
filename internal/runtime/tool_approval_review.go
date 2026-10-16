@@ -314,6 +314,11 @@ func (r *Runtime) commitServerApprovalHeld(serverName string, blocks []string, e
 		}
 		return 0, commit()
 	}
+	// Spec 117 FR-018: no server approval while the server's latest capture
+	// is incomplete; the server stays quarantined.
+	if err := r.reviewNotRecordedHeld(serverName); err != nil {
+		return 0, err
+	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
 		return 0, fmt.Errorf("read tool approvals for %s: %w", serverName, err)

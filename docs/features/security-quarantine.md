@@ -534,6 +534,33 @@ tool list the old connection returned. A list that came back empty and was
 ignored as a transient blip (connect and `tools/list_changed`) still counts as
 the newest list: an older non-empty one is dropped after it.
 
+### When a tool list cannot be fully recorded {#capture-incomplete}
+
+Applying a tool list writes several things: the review records, the removal of
+tools the server no longer lists, the search index and the tool hints that
+decide which `call_tool_*` variant may run a tool. If one of those writes fails
+(for example the database or the index cannot be written), the list counts as
+not recorded. MCPProxy then:
+
+- keeps the server's tools listed and describable, but refuses every call to
+  them with `tool definitions could not be recorded; retry the capture`, so a
+  tool that became destructive cannot run under its old read-only hints;
+- refuses to approve or enable tools of that server, and to approve the server
+  itself (REST answers `503` with the same text). Disabling and blocking still
+  work;
+- does not publish anything from the failed list.
+
+The next tool list that is recorded completely (the next refresh, reconnect or
+sweep) lifts this. A transient empty list does not. The state is kept in memory
+only: after a restart the server is listed again before any of its tools can be
+called.
+
+Tools a server stopped listing are removed from its approved records even when
+an earlier removal failed part-way, or failed before a restart. Pending,
+changed and disabled records of such tools are kept. A disabled or quarantined
+server keeps no tool list in memory, so re-enabling it shows its tools only
+after they are listed again.
+
 ### Trust modes (auto | scan | manual)
 
 Since spec 086, each server carries a **trust mode** that governs both

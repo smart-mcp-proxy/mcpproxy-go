@@ -1,6 +1,7 @@
 package toolreview
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -9,6 +10,19 @@ import (
 // ErrorCodeReviewOutOfDate is the stable error_code of the HTTP 409 an
 // approval bound to an out-of-date review answers (Spec 117 FR-008).
 const ErrorCodeReviewOutOfDate = "review_out_of_date"
+
+// ErrorCodeReviewNotRecorded is the stable error_code of the HTTP 503 a
+// transition answers while the server's last capture could not be fully
+// recorded (Spec 117 FR-018).
+const ErrorCodeReviewNotRecorded = "review_not_recorded"
+
+// ErrReviewNotRecorded reports that a server's latest tool capture could not
+// be fully recorded (a storage or index write failed part-way through the
+// pass), so the stored definitions may be older than what the upstream now
+// serves (Spec 117 FR-018). While a server is in this state its tools are not
+// dispatched and nothing is approved or enabled for it; the next complete
+// capture clears it. HTTP maps it to 503, MCP to a tool error with this text.
+var ErrReviewNotRecorded = errors.New("tool definitions could not be recorded; retry the capture")
 
 // StaleToolReviewError reports that a review-bound approval (Spec 117 PR-2,
 // issue #1566) no longer matches the tool definitions the core holds: a tool
