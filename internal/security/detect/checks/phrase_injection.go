@@ -662,6 +662,20 @@ func breakWord(field string) string {
 	return w
 }
 
+// breakWords is breakWord for a raw field that may normalize to several words
+// (a contraction: "doesn't" -> "does not"), so the raw word stream stays
+// aligned with the whitespace words of the normalized phrase text. A field
+// that normalizes to nothing contributes no word.
+func breakWords(field string) []string {
+	var out []string
+	for _, w := range strings.Fields(detect.Normalize(field)) {
+		if bw := breakWord(w); bw != "" {
+			out = append(out, bw)
+		}
+	}
+	return out
+}
+
 // capitalizedBreakPairs returns the word indexes (into the whitespace-split
 // word stream of the raw text) of every word that ends a line whose next
 // non-empty line starts with an upper-case letter: index i means words i and
@@ -685,7 +699,7 @@ func capitalizedBreakPairs(raw string) (map[int]bool, []string) {
 			}
 		}
 		for _, f := range fields {
-			words = append(words, breakWord(f))
+			words = append(words, breakWords(f)...)
 		}
 		prevEnd = len(words) - 1
 	}
@@ -1093,6 +1107,11 @@ func secretNounIsMetadata(text string, s, e int) bool {
 // configSecretNounRe finds the secret nouns of the config-secret families.
 var configSecretNounRe = regexp.MustCompile(`\b(?:` + configSecretNouns + `)\b`)
 
+// bareKeyRe finds a bare "key", which is not a config secret noun but is the
+// payload word of the inverted credential-file family; masked when qualified
+// as metadata ("the key length", "the length of the key").
+var bareKeyRe = regexp.MustCompile(`\bkey\b`)
+
 // possessivePronounRe finds the possessive pronouns the named-secret pronoun
 // family accepts.
 var possessivePronounRe = regexp.MustCompile(`\b(?:its|their)\b`)
@@ -1145,6 +1164,11 @@ func maskSecretMetadataNouns(t string) string {
 	var spans [][]int
 	for _, l := range configSecretNounRe.FindAllStringIndex(t, -1) {
 		if secretNounIsMetadata(t, l[0], l[1]) || secretNounIsExcluded(t, l[0]) {
+			spans = append(spans, l)
+		}
+	}
+	for _, l := range bareKeyRe.FindAllStringIndex(t, -1) {
+		if secretNounIsMetadata(t, l[0], l[1]) {
 			spans = append(spans, l)
 		}
 	}
