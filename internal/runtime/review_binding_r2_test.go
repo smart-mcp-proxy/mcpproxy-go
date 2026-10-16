@@ -13,10 +13,11 @@ import (
 
 // Spec 117 PR-2, Sol review round 2.
 
-// collidingContracts returns two different contracts whose storage
-// CurrentHash is identical: the rug-pull hash joins description and schemas
-// with an unescaped '|' and leaves out an absent output schema, so
-// (D, I, O) and ("D|I", O, none) hash the same.
+// collidingContracts returns two different contracts whose v4 rug-pull hash
+// (calculateToolApprovalHashV4, still stored on records a v4 binary wrote) is
+// identical: it joins description and schemas with an unescaped '|' and leaves
+// out an absent output schema, so (D, I, O) and ("D|I", O, none) hash the
+// same. The v5 hash tells them apart (issue #1606).
 func collidingContracts() (a, b *config.ToolMetadata) {
 	a = rvTool("t", "Read a note", readOnlyHints())
 	a.ParamsJSON = `{"type":"object"}`
@@ -30,9 +31,9 @@ func collidingContracts() (a, b *config.ToolMetadata) {
 // r2 P1: the fingerprint encodes each definition field on its own.
 func TestReviewFingerprint_FieldBoundaryCollision(t *testing.T) {
 	a, b := collidingContracts()
-	hashA := calculateToolApprovalHashWithOutputSchema("t", a.Description, a.ParamsJSON, a.OutputSchemaJSON, a.Annotations)
-	hashB := calculateToolApprovalHashWithOutputSchema("t", b.Description, b.ParamsJSON, b.OutputSchemaJSON, b.Annotations)
-	require.Equal(t, hashA, hashB, "precondition: the rug-pull hash collides (it is left unchanged)")
+	hashA := calculateToolApprovalHashV4("t", a.Description, a.ParamsJSON, a.OutputSchemaJSON, a.Annotations)
+	hashB := calculateToolApprovalHashV4("t", b.Description, b.ParamsJSON, b.OutputSchemaJSON, b.Annotations)
+	require.Equal(t, hashA, hashB, "precondition: the v4 rug-pull hash collides")
 
 	recA := &storage.ToolApprovalRecord{ServerName: rvServer, ToolName: "t", CurrentHash: hashA,
 		CurrentDescription: a.Description, CurrentSchema: a.ParamsJSON, CurrentOutputSchema: a.OutputSchemaJSON, CurrentAnnotations: a.Annotations}

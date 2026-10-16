@@ -199,9 +199,19 @@ const OutputSchemaHashSchemaVersion = 3
 // still matches.
 const AnnotationHashSchemaVersion = 4
 
+// UnambiguousHashSchemaVersion is the per-record HashSchemaVersion whose tool
+// approval hash encodes every field length-prefixed, with an explicit marker
+// for an absent output schema (issue #1606). The v4 formula joined the fields
+// with an unescaped '|' and left an absent output schema out, so
+// (D, I, O) and (D+"|"+I, O, none) shared one hash. Records below this version
+// are re-baselined by the formula-migration path in runtime.checkToolApprovals
+// only when their v4 ApprovedHash covers the stored contract and that contract
+// is still the one the server serves; any other contract is marked changed.
+const UnambiguousHashSchemaVersion = 5
+
 // ToolApprovalHashSchemaVersion is the HashSchemaVersion stamped on every tool
 // approval record whose hashes this binary computes.
-const ToolApprovalHashSchemaVersion = AnnotationHashSchemaVersion
+const ToolApprovalHashSchemaVersion = UnambiguousHashSchemaVersion
 
 // UpstreamRecord represents an upstream server record in storage
 type UpstreamRecord struct {
