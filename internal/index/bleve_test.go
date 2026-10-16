@@ -1,17 +1,43 @@
 package index
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"testing"
 	"time"
 
+	"github.com/blevesearch/bleve/v2"
+	"github.com/blevesearch/bleve/v2/search"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
+
+type bleveIndexBase interface {
+	bleve.Index
+}
+
+type purgeFailureIndex struct {
+	bleveIndexBase
+	searchErr error
+	batchErr  error
+}
+
+func (i purgeFailureIndex) Search(*bleve.SearchRequest) (*bleve.SearchResult, error) {
+	if i.searchErr != nil {
+		return nil, i.searchErr
+	}
+	return &bleve.SearchResult{
+		Hits: search.DocumentMatchCollection{{ID: "tool-1"}},
+	}, nil
+}
+
+func (i purgeFailureIndex) Batch(*bleve.Batch) error {
+	return i.batchErr
+}
 
 func TestBleveIndex_IndexAndSearch_DeFiLlamaTools(t *testing.T) {
 	// Create test DeFiLlama tools based on the user's data
@@ -740,6 +766,50 @@ func TestBleveIndex_DeleteServerTools_BeyondPageCap(t *testing.T) {
 	other, err := bleveIndex.GetToolsByServer("other")
 	require.NoError(t, err)
 	assert.Len(t, other, 1, "purging one server must preserve unrelated tools")
+}
+
+func TestBleveIndex_DeleteServerTools_PropagatesSearchAndBatchErrors(t *testing.T) {
+	searchErr := errors.New("search failed")
+	batchErr := errors.New("batch failed")
+
+	tests := []struct {
+		name        string
+		searchErr   error
+		batchErr    error
+		wantErr     error
+		wantMessage string
+	}{
+		{
+			name:        "search error",
+			searchErr:   searchErr,
+			wantErr:     searchErr,
+			wantMessage: "failed to search for server tools",
+		},
+		{
+			name:        "batch error",
+			batchErr:    batchErr,
+			wantErr:     batchErr,
+			wantMessage: "failed to delete server tools",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base, err := NewBleveIndex(t.TempDir(), zap.NewNop())
+			require.NoError(t, err)
+			defer base.Close()
+
+			index := &BleveIndex{
+				index:          purgeFailureIndex{bleveIndexBase: base.index, searchErr: tt.searchErr, batchErr: tt.batchErr},
+				logger:         zap.NewNop(),
+				searchPageSize: 10,
+			}
+
+			err = index.DeleteServerTools("server")
+			require.ErrorIs(t, err, tt.wantErr)
+			assert.Contains(t, err.Error(), tt.wantMessage)
+		})
+	}
 }
 
 // TestBleveIndex_CanonicalToolName verifies that both index read seams return a
