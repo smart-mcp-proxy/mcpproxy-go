@@ -714,18 +714,32 @@ func matchJoinsBreak(t string, start, end int, breaks map[int]bool, words []stri
 	if len(breaks) == 0 {
 		return false
 	}
-	first := len(strings.Fields(t[:start]))
-	mw := strings.Fields(t[start:end])
+	// Punctuation-only tokens ("-", "##") normalize to no word and are absent
+	// from the raw word stream, so they must not be counted here either.
+	first := len(bareWords(t[:start]))
+	mw := bareWords(t[start:end])
 	for j := 0; j+1 < len(mw); j++ {
 		i := first + j
 		if i+1 >= len(words) || !breaks[i] {
 			continue
 		}
-		if breakWord(mw[j]) == words[i] && breakWord(mw[j+1]) == words[i+1] {
+		if mw[j] == words[i] && mw[j+1] == words[i+1] {
 			return true
 		}
 	}
 	return false
+}
+
+// bareWords splits normalized text on whitespace and reduces each token with
+// breakWord, dropping tokens that reduce to nothing.
+func bareWords(t string) []string {
+	var out []string
+	for _, f := range strings.Fields(t) {
+		if bw := breakWord(f); bw != "" {
+			out = append(out, bw)
+		}
+	}
+	return out
 }
 
 // allPhraseFamilies is the English curated set followed by the non-English
