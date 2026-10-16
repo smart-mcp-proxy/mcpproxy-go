@@ -144,6 +144,7 @@ var numericOmitemptyAllowlist = map[string]string{
 	"Config.TopK":                        "deprecated and inert; superseded by ToolsLimit",
 	"Config.OAuthExpiryWarningHours":     "0 and absent both fall back to the 1.0h default",
 	"Config.ToonMinSavingsPct":           "documented as '0/unset -> 15' — the two are the same value by design",
+	"Config.ToolOutputMaxBytes":          "Validate() resolves 0 to the same 50 MiB default an absent key gets (Spec 076); a negative value is rejected",
 
 	// Durations whose own doc comments say zero and unset are the same value.
 	"Config.Servers.LauncherWaitTimeout": "doc comment: 'Zero or unset -> 30s default'",

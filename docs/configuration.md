@@ -155,6 +155,103 @@ Environment overrides: `MCPPROXY_HTTP_READ_TIMEOUT`, `MCPPROXY_HTTP_WRITE_TIMEOU
 
 Per-server override: set `toon_output` on a server entry to override the global for that server's tools (precedence: per-server > global > default `off`). See [Server Fields](#server-fields) and [TOON Output](features/toon-output.md) for the full feature description (marker contract, safety chain, decision metadata).
 
+### Save Tool Output to File
+
+`call_tool_read` / `call_tool_write` / `call_tool_destructive` accept an
+optional `save_to_file` parameter: instead of returning the (possibly
+`tool_response_limit`-truncated) response body, mcpproxy writes the **full,
+untruncated** upstream response to a file and returns a short JSON envelope
+(`saved_to`, `bytes`, `sha256`, `format`, `content_blocks`, `non_text_blocks`,
+`preview`, `truncated_preview`) instead. This is disabled by default —
+`save_to_file` requests are rejected until `tool_output_roots` is configured.
+
+```json
+{
+  "tool_output_roots": ["/Users/me/mcpproxy-out"],
+  "tool_output_max_bytes": 52428800
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tool_output_roots` | array of strings | `[]` (disabled) | Absolute directory paths `save_to_file` is allowed to write under. Each path must be absolute — a relative entry fails config validation. Symlinked roots are resolved once at request time, so pointing a root at (e.g.) a symlinked temp directory works as expected. Configured in the JSON config file only — there is no Settings-UI field for it, since the UI's free-text controls bind a plain string with no array coercion and would corrupt the list on save. The matched root directory (and any missing ancestor directories) is created `0700` on first use as soon as a request matches it, even if that request is ultimately rejected for an unrelated reason (e.g. the response is too large) — a rejected request can still leave an empty root directory behind. |
+| `tool_output_max_bytes` | integer | `52428800` (50 MiB) | Maximum size, in bytes, of a single `save_to_file` write. A request that would exceed this is rejected and no file is left behind. |
+
+**Security notes:**
+- Every `save_to_file` path is resolved against `tool_output_roots` with
+  symlink-safe, separator-bounded prefix matching — `/root/proj` cannot be
+  satisfied by a sibling path like `/root/proj-evil`, and a symlink that
+  would walk the resolved path back outside every configured root is
+  rejected (`ErrOutsideRoots`), as is a symlink sitting at the final target
+  path itself (`ErrInvalidPath`). The write itself is then confined to the
+  matched root via a single `*os.Root` handle opened once, immediately after
+  the root is resolved — every filesystem operation the write performs
+  (creating parent directories, writing the temp file, renaming into place)
+  goes through that one handle, never through a path string again. This
+  closes a symlink or rename planted **inside** the root between the
+  resolve step and the write, and any replacement of the root directory (or
+  its ancestors) **after** the handle is open — once the handle is open, a
+  later swap of the root's own path cannot move it. It does **not** close a
+  race that replaces an **ancestor** of a configured root in the
+  microseconds between mcpproxy resolving that ancestor's symlinks and
+  opening the root — ancestors of a configured root are admin-controlled,
+  and a same-user process able to win that race could already write
+  anywhere the mcpproxy process can.
+- Directory components under a root must be real directories — if any path
+  component `save_to_file` would need to create or traverse is itself a
+  symlink, the write fails (surfaced as a plain filesystem error, e.g.
+  `mkdirat sub: file exists`) rather than following it. This is a byproduct
+  of the same `os.Root`-based confinement, not a separate check.
+- Root matching is **case-sensitive**, independent of the underlying
+  filesystem's own case sensitivity — on a case-insensitive filesystem (e.g.
+  default macOS/Windows volumes), configure `tool_output_roots` using the
+  same casing your `save_to_file` requests will use, since `/Root/proj` and
+  `/root/proj` are treated as different, non-matching prefixes even though
+  the filesystem itself would resolve them to the same directory.
+- Saved files are written `0600` (owner read/write only) and any directories
+  `save_to_file` creates under a root are `0700` (owner-only).
+- Writes are atomic (temp file in the destination directory, `fsync`d, then
+  renamed into place) and default to **not overwriting** an existing file —
+  pass `"save_overwrite": true` explicitly to replace one.
+- `tool_output_roots` entries must not be equal to or nested inside each
+  other (config validation rejects it, and a save fails closed with a
+  "root unavailable" error if two roots overlap after symlink resolution):
+  with nested roots, anything that can write inside the outer root could
+  plant a symlink at the inner root's path and redirect saves elsewhere.
+- On Unix, the path to a root may only pass through symlinks owned by
+  `root` or by the mcpproxy user, and the root directory itself must be
+  owned by the mcpproxy user and not world-writable. This stops another
+  local user from pre-creating a root under a shared directory such as
+  `/tmp` as a symlink into your home directory. On Windows, a UNC or
+  device path (`\\host\share\...`, `\\.\pipe\...`) is refused before any
+  filesystem access unless a configured root is on the same volume.
+- A `save_to_file` request against an upstream response that itself came
+  back as an error is never honored — errors are always returned inline so
+  they stay visible to the caller.
+- The save target is checked **before** the upstream tool is called: a
+  request with `save_to_file` while the feature is disabled, with an
+  invalid or outside-roots path, or naming an existing file without
+  `save_overwrite` is refused without executing the tool (recorded as a
+  blocked policy decision). A save failure that can only be detected later
+  — a response over `tool_output_max_bytes`, a write error, or a file
+  created in the meantime — occurs **after** the upstream tool has already
+  executed, and by design the response body is then not returned inline as
+  a fallback; the caller explicitly asked for a file, so the failure is
+  always reported as a tool error, never silently forwarded inline.
+- The redaction pipeline (`applyOutputSanitisation`, secret-stripping) still
+  runs on the response **before** it is saved, so a saved file never contains
+  a secret that redaction would otherwise have stripped. Output-schema
+  validation also runs before the save, so in strict mode a result that
+  violates the tool's declared output schema is blocked and never written.
+  Spotlighting applies to the returned envelope (its `preview` is upstream
+  text), but the file on disk holds the full, un-spotlighted upstream text
+  as redaction left it. An agent that reads a saved file back must treat
+  its contents as untrusted data, the same as any other tool output.
+- Saving to file does not remove the response body from tool-call history —
+  the full upstream response is still persisted to the tool-call record
+  (BoltDB) on a saved call exactly as it is for any other call, so the
+  existing history retention/redaction rules apply unchanged.
+
 ### Discovery & Health Checks
 
 mcpproxy keeps each upstream connection alive and its tool index fresh with two
@@ -1743,6 +1840,8 @@ Here's a complete configuration example with all major sections:
   "api_key": "",
   "tools_limit": 15,
   "tool_response_limit": 20000,
+  "tool_output_roots": [],
+  "tool_output_max_bytes": 52428800,
   "call_tool_timeout": "2m",
   "debug_search": false,
   "enable_prompts": true,

@@ -380,6 +380,27 @@ components:
           type: integer
         tool_discovery_interval:
           type: string
+        tool_output_max_bytes:
+          description: |-
+            ToolOutputMaxBytes caps the size of a single save_to_file write. 0 (the
+            default) means "use the built-in default" (50 MiB); negative values are
+            a config error. See internal/outputfile.Write.
+          type: integer
+        tool_output_roots:
+          description: |-
+            ToolOutputRoots is the whitelist of absolute directory prefixes the
+            `save_to_file` parameter on call_tool_read/write/destructive is allowed
+            to write under (Spec 076).
+            Empty (the default) disables the feature entirely — call_tool_* returns
+            a "save_to_file is disabled" error for any save_to_file request. Each
+            entry must be an absolute path (validated in ValidateDetailed) and is
+            stored filepath.Clean'ed; entries need not exist at startup — they are
+            resolved (including symlinks) at the time of each save_to_file call, in
+            internal/outputfile.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         tool_response_limit:
           type: integer
         tool_response_mode:

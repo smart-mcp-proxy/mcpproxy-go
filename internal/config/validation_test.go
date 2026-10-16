@@ -294,6 +294,54 @@ func TestValidateDetailed(t *testing.T) {
 			expectedErrors: 0,
 			errorFields:    []string{},
 		},
+		{
+			name: "tool_output_roots relative path rejected",
+			config: &Config{
+				Listen:            ":8080",
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				ToolOutputRoots:   []string{"relative/path"},
+			},
+			expectedErrors: 1,
+			errorFields:    []string{"tool_output_roots"},
+		},
+		{
+			name: "tool_output_roots absolute path is valid",
+			config: &Config{
+				Listen:            ":8080",
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				ToolOutputRoots:   []string{testAbsPath("/tmp/mcpproxy-out")},
+			},
+			expectedErrors: 0,
+			errorFields:    []string{},
+		},
+		{
+			name: "tool_output_roots filesystem root rejected",
+			config: &Config{
+				Listen:            ":8080",
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				ToolOutputRoots:   []string{testAbsPath("/")},
+			},
+			expectedErrors: 1,
+			errorFields:    []string{"tool_output_roots"},
+		},
+		{
+			name: "tool_output_max_bytes negative rejected",
+			config: &Config{
+				Listen:             ":8080",
+				ToolsLimit:         15,
+				ToolResponseLimit:  1000,
+				CallToolTimeout:    Duration(60000000000),
+				ToolOutputMaxBytes: -1,
+			},
+			expectedErrors: 1,
+			errorFields:    []string{"tool_output_max_bytes"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -363,4 +411,89 @@ func TestValidateWithDefaults(t *testing.T) {
 	assert.Equal(t, 15, cfg.ToolsLimit)
 	assert.Equal(t, 0, cfg.ToolResponseLimit)
 	assert.Greater(t, cfg.CallToolTimeout.Duration().Seconds(), 0.0)
+}
+
+func TestValidate_ToolOutputMaxBytesDefaultsWhenZero(t *testing.T) {
+	cfg := &Config{
+		ToolsLimit:         15,
+		ToolResponseLimit:  1000,
+		CallToolTimeout:    Duration(60000000000),
+		ToolOutputMaxBytes: 0, // unset -> should become the built-in default, NOT stay 0
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.EqualValues(t, defaultToolOutputMaxBytes, cfg.ToolOutputMaxBytes)
+}
+
+func TestValidate_ToolOutputRootsCleaned(t *testing.T) {
+	cfg := &Config{
+		ToolsLimit:        15,
+		ToolResponseLimit: 1000,
+		CallToolTimeout:   Duration(60000000000),
+		ToolOutputRoots:   []string{testAbsPath("/tmp/a/../b/")},
+	}
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.Equal(t, []string{testAbsPath("/tmp/b")}, cfg.ToolOutputRoots)
+}
+
+func TestValidate_ToolOutputRootsFilesystemRootIsLoadError(t *testing.T) {
+	cfg := &Config{
+		ToolsLimit:        15,
+		ToolResponseLimit: 1000,
+		CallToolTimeout:   Duration(60000000000),
+		ToolOutputRoots:   []string{testAbsPath("/")},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_output_roots")
+	assert.Contains(t, err.Error(), "filesystem root")
+}
+
+func TestValidate_ToolOutputRootsRelativeIsLoadError(t *testing.T) {
+	cfg := &Config{
+		ToolsLimit:        15,
+		ToolResponseLimit: 1000,
+		CallToolTimeout:   Duration(60000000000),
+		ToolOutputRoots:   []string{"relative/dir"},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "tool_output_roots")
+}
+
+// TestValidate_ToolOutputRootsOverlapIsLoadError: nested or duplicate roots
+// are rejected (Spec 076 security review: a symlink planted at an inner
+// root's path would redirect saves outside every root). Roots that only
+// share a string prefix stay valid.
+func TestValidate_ToolOutputRootsOverlapIsLoadError(t *testing.T) {
+	cases := []struct {
+		name    string
+		roots   []string
+		wantErr bool
+	}{
+		{"nested", []string{testAbsPath("/data/out"), testAbsPath("/data/out/sub")}, true},
+		{"nested reversed", []string{testAbsPath("/data/out/sub"), testAbsPath("/data/out")}, true},
+		{"duplicate after clean", []string{testAbsPath("/data/out"), testAbsPath("/data/x/../out/")}, true},
+		{"string prefix only", []string{testAbsPath("/data/out"), testAbsPath("/data/out2")}, false},
+		{"disjoint", []string{testAbsPath("/data/a"), testAbsPath("/data/b")}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := &Config{
+				ToolsLimit:        15,
+				ToolResponseLimit: 1000,
+				CallToolTimeout:   Duration(60000000000),
+				ToolOutputRoots:   c.roots,
+			}
+			err := cfg.Validate()
+			if !c.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "tool_output_roots")
+			assert.Contains(t, err.Error(), "overlap")
+		})
+	}
 }

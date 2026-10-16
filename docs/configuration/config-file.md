@@ -34,6 +34,8 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
   "http_idle_timeout": "180s",
   "tools_limit": 15,
   "tool_response_limit": 20000,
+  "tool_output_roots": [],
+  "tool_output_max_bytes": 52428800,
   "enable_code_execution": true,
   "code_execution_timeout_ms": 120000,
   "code_execution_max_tool_calls": 0,
@@ -115,6 +117,8 @@ the read timeout — see its row). Valid range: `1s`–`24h`, or `0s`.
 |--------|------|---------|-------------|
 | `tools_limit` | integer | `15` | Maximum tools to return in a single request |
 | `tool_response_limit` | integer | `20000` | Maximum characters in tool response |
+| `tool_output_roots` | array of strings | `[]` (disabled) | Absolute directory paths the `save_to_file` param of `call_tool_read`/`call_tool_write`/`call_tool_destructive` may write under. Empty disables the feature. See [Save Tool Output to File](../configuration.md#save-tool-output-to-file). |
+| `tool_output_max_bytes` | integer | `52428800` | Maximum bytes a single `save_to_file` write may produce. |
 | `instructions` | string | _(built-in)_ | Custom text for the MCP `initialize` response, sent verbatim to every client. Do not put server names or secrets in it. A per-caller access block is always appended; see [Agent Instructions](/features/agent-instructions). |
 | `advertise_upstream_servers` | boolean | `true` | Name the caller's reachable upstream servers in the initialize instructions and the `retrieve_tools` description, filtered to its profile and agent-token scope. Set `false` to keep server names out of client context. Hot-reloadable. See [Agent Instructions](/features/agent-instructions). |
 
