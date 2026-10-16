@@ -319,7 +319,7 @@ var phraseFamilies = []phraseFamily{
 		// poisoning payload and needs no URL: the argument itself is the
 		// channel. Requires a concrete credential FILE (not the word "secret")
 		// and an explicit field/parameter/argument target.
-		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + secretFiles + `)` + sentenceSpan + `{0,120}?\b(?P<place>` + credentialPlacementVerbs + `)\b[^.!?]{0,40}?` + credentialArgumentTarget),
+		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + secretFiles + `)` + sentenceSpan + `{0,120}?\b(?P<place>` + credentialPlacementVerbs + `)\b[^.!?]{0,80}?` + credentialArgumentTarget),
 		base:      0.88,
 		threat:    detect.ThreatExfiltration,
 		what:      "credential-file-to-argument directive",
@@ -1309,7 +1309,7 @@ func maskSecretMetadataNouns(t string) string {
 
 // foreignContentsRe finds "contents of <other>.<ext>"; group 1 is the named
 // file (a name with an extension, not a leading dot).
-var foreignContentsRe = regexp.MustCompile(`\bcontents?\s+of\s+(?:the\s+)?((?:[\w~./-]*/)?[\w-]+\.[a-z0-9]{1,5})\b`)
+var foreignContentsRe = regexp.MustCompile(`\bcontents?\s+of\s+(?:the\s+)?((?:[\w~./-]*/)?(?:[\w-]+\.[a-z0-9]{1,5}|license|readme|changelog|makefile|dockerfile|notice|authors))\b`)
 
 // credentialSourceRe matches any credential file or config secret source.
 var credentialSourceRe = regexp.MustCompile(`(?:` + secretFiles + `|` + configSecretSources + `)`)
@@ -1320,7 +1320,7 @@ var metadataMoveRe = regexp.MustCompile(`\b(?:` + credentialPlacementVerbs + `)\
 
 // metadataMoveContinuesRe finds a conjunct after a metadata move; its word
 // is captured.
-var metadataMoveContinuesRe = regexp.MustCompile(`^\s*(?:,|and|plus|&)\s*(?:(?:its|the|their|a)\s+)?([\w-]+)`)
+var metadataMoveContinuesRe = regexp.MustCompile(`^\s*(?:,|and|plus|&)\s*(?:(?:its|the|their|a)\s+)?(?:(?:(?:private|public|ssh|api|secret)\s+)?key\s+)?([\w-]+)`)
 
 // maskKeyFileFamily is the mask of the direct key-file family: public key
 // files, then a placement verb moving only metadata, then metadata nouns.
@@ -1330,8 +1330,20 @@ func maskKeyFileFamily(t string) string {
 		b := []byte(t)
 		for _, l := range ls {
 			// "save its fingerprint and its contents to …" still moves the
-			// key: keep the verb when a non-metadata conjunct follows.
-			if m := metadataMoveContinuesRe.FindStringSubmatch(t[l[1]:]); m != nil && !secretMetadataWords.MatchString(strings.ToLower(m[1])) && m[1] != "public" {
+			// key: keep the verb when any non-metadata conjunct follows.
+			carried := false
+			for pos := l[1]; ; {
+				m := metadataMoveContinuesRe.FindStringSubmatch(t[pos:])
+				if m == nil {
+					break
+				}
+				if !secretMetadataWords.MatchString(strings.ToLower(m[1])) {
+					carried = true
+					break
+				}
+				pos += len(m[0])
+			}
+			if carried {
 				continue
 			}
 			for i := l[0]; i < l[1]; i++ {
