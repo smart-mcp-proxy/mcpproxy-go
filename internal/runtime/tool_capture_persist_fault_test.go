@@ -476,3 +476,24 @@ func TestCaptureFault_FailedIndexDeleteKeepsRecord(t *testing.T) {
 	assert.NotContains(t, indexedNames(t, rt), "x")
 	assert.False(t, rt.ToolReviewDirty(baselineServer))
 }
+
+// Review r4: a review capture still in flight when the server became
+// eligible records definitions but does not clear a dirty mark set by the
+// eligible server's own failed pass: it neither indexes nor publishes.
+func TestCaptureFault_ReviewCaptureOfEligibleServerDoesNotClearDirty(t *testing.T) {
+	rt := seedApproved(t)
+	rt.testHooks.toolIndexWriteFault = func(string) error { return errInjectedWrite }
+	_, err := captureAt(t, rt, 2, baselineTool("read_note", "Read a note", true))
+	require.Error(t, err)
+	require.True(t, rt.ToolReviewDirty(baselineServer))
+	healWrites(rt)
+
+	_, err = rt.persistInventoryDefinitions(baselineServer, []*config.ToolMetadata{baselineTool("read_note", "Read a note", true)},
+		rt.committedGenForTest(baselineServer), managed.InventoryCapture{Seq: 3})
+	require.NoError(t, err)
+	assert.True(t, rt.ToolReviewDirty(baselineServer), "a review capture of an eligible server does not clear dirty")
+
+	_, err = captureAt(t, rt, 4, baselineTool("read_note", "Read a note", true))
+	require.NoError(t, err)
+	assert.False(t, rt.ToolReviewDirty(baselineServer))
+}

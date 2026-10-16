@@ -1068,8 +1068,25 @@ func (r *Runtime) persistToolDefinitionsLocked(serverName string, tools []*confi
 	r.lastGoodToolsMu.Lock()
 	r.storeLastGoodLocked(serverName, tools, inv, instanceGen)
 	r.lastGoodToolsMu.Unlock()
-	_ = r.clearReviewDirtyHeld(serverName, inv.Seq)
+	// A review capture completes only an INELIGIBLE server's capture: it
+	// writes no index entries and publishes no StateView, so for a server
+	// that became eligible meanwhile (an unquarantine while this capture was
+	// in flight) it must not end the dispatch refusal; that server's own
+	// discovery pass clears it once it indexed and published (review r4).
+	if r.reviewCaptureIneligibleHeld(serverName, instanceGen) {
+		_ = r.clearReviewDirtyHeld(serverName, inv.Seq)
+	}
 	return true, nil
+}
+
+// reviewCaptureIneligibleHeld reports whether serverName is still ineligible
+// for indexing (disabled or quarantined) in the committed row, the config or
+// storage. Caller holds the server's approval lock.
+func (r *Runtime) reviewCaptureIneligibleHeld(serverName string, instanceGen int64) bool {
+	if r.discoveryVerdictHeld(serverName, instanceGen) == discoveryIneligible {
+		return true
+	}
+	return !r.serverEligibleForIndexing(serverName) || r.serverQuarantinedInStorage(serverName)
 }
 
 // noteCaptureLocked stamps a fresh capture for the review payload. Caller
