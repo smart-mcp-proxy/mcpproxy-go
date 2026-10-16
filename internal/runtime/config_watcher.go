@@ -129,10 +129,11 @@ func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watc
 
 		case <-debounce.C:
 			pending = false
-			if b, err := os.ReadFile(absPath); err == nil {
+			// The baseline is exactly what the reload evaluated; an
+			// unreadable file leaves it unchanged so the poll retries.
+			if b := r.reloadFromDiskIfChanged(absPath); b != nil {
 				lastSeen = b
 			}
-			r.reloadFromDiskIfChanged(absPath)
 		}
 	}
 }
@@ -292,14 +293,16 @@ func (r *Runtime) pruneExpiredSelfWritesLocked(now time.Time) {
 // must not echo back into a redundant reload, which would re-trigger
 // ConnectAll + reindex churn — or, for restart-required applies, hot-apply a
 // change the API just reported as deferred until restart).
-func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
+//
+// It returns the file bytes it evaluated (nil when the file was unreadable).
+func (r *Runtime) reloadFromDiskIfChanged(absPath string) []byte {
 	diskBytes, err := os.ReadFile(absPath)
 	if err != nil {
 		// Rename window — the file may be briefly absent; the follow-up
 		// Create event re-arms the debounce and we retry then.
 		r.logger.Debug("Config file not readable after change event; waiting for next event",
 			zap.String("path", absPath), zap.Error(err))
-		return
+		return nil
 	}
 
 	// Self-write suppression: marshal the current snapshot exactly as
@@ -324,7 +327,7 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 			}
 			r.logger.Debug("Config file event matches in-memory config; skipping reload",
 				zap.String("path", absPath))
-			return
+			return diskBytes
 		}
 	}
 
@@ -334,7 +337,7 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 	if r.matchesRecentSelfWrite(trimmedDisk) {
 		r.logger.Debug("Config file event matches one of mcpproxy's own recent saves; skipping reload",
 			zap.String("path", absPath))
-		return
+		return diskBytes
 	}
 
 	// Genuine external change: the file no longer descends from our saves,
@@ -349,4 +352,5 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 		r.logger.Warn("Config hot-reload failed; keeping previous configuration",
 			zap.String("path", absPath), zap.Error(err))
 	}
+	return diskBytes
 }

@@ -506,3 +506,26 @@ func TestConfigWatcher_PollRecoversMissedFsEvent(t *testing.T) {
 		return rt.ConfigSnapshot().Config.ToolResponseLimit == 24680
 	}, 5*time.Second, 25*time.Millisecond, "poll must reload an edit whose fs event was lost")
 }
+
+// TestConfigWatcher_ReloadReportsEvaluatedBytes: the poll baseline must be the
+// bytes reloadFromDiskIfChanged actually evaluated, never a separate read
+// (review round 1): an unreadable file reports nil so the poll retries, a
+// readable one reports exactly what was evaluated.
+func TestConfigWatcher_ReloadReportsEvaluatedBytes(t *testing.T) {
+	tmpDir := t.TempDir()
+	cfgPath := filepath.Join(tmpDir, "mcp_config.json")
+	initialCfg := config.DefaultConfig()
+	initialCfg.Listen = "127.0.0.1:0"
+	initialCfg.DataDir = tmpDir
+	require.NoError(t, config.SaveConfig(initialCfg, cfgPath))
+	rt, err := New(initialCfg, cfgPath, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = rt.Close() })
+
+	disk, err := os.ReadFile(cfgPath)
+	require.NoError(t, err)
+	require.Equal(t, disk, rt.reloadFromDiskIfChanged(cfgPath))
+
+	require.NoError(t, os.Remove(cfgPath))
+	require.Nil(t, rt.reloadFromDiskIfChanged(cfgPath))
+}
