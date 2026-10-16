@@ -25,8 +25,8 @@ const configWatchDebounce = 500 * time.Millisecond
 // revert to previously self-written bytes produced no event at all, so the
 // running config stayed stale until restart). The loop therefore also compares
 // the file's bytes with the last content it processed every interval and runs
-// the normal debounce -> reloadFromDiskIfChanged path when they differ. A
-// the loop takes it as a parameter so tests can shorten it.
+// the normal debounce -> reloadFromDiskIfChanged path when they differ. The
+// loop takes the interval as a parameter so tests can shorten it.
 const configWatchPollInterval = 2 * time.Second
 
 // startConfigFileWatcher watches the config file for external edits and
