@@ -3677,6 +3677,7 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 
 	r.telemetryService = telemetry.New(r.cfg, r.cfgPath, version, edition, r.logger)
 	r.telemetryService.SetRuntimeStats(r)
+	r.telemetryService.SetConfigUpdater(r.UpdateTelemetry)
 
 	// Spec 044: wire the activation store onto the shared BBolt DB. The
 	// bucket is created lazily on first write, but we proactively ensure it

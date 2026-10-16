@@ -439,15 +439,18 @@ type RuntimeStats interface {
 
 // Service manages anonymous telemetry heartbeats and feedback submission.
 type Service struct {
-	config    *config.Config
-	cfgPath   string
-	version   string
-	edition   string
-	endpoint  string
-	logger    *zap.Logger
-	stats     RuntimeStats
-	startTime time.Time
-	client    *http.Client
+	config  *config.Config
+	cfgPath string
+	// configUpdater, when set, routes every config write through the daemon's
+	// config commit (#1592) instead of config.SaveConfig. Guarded by mu.
+	configUpdater ConfigUpdater
+	version       string
+	edition       string
+	endpoint      string
+	logger        *zap.Logger
+	stats         RuntimeStats
+	startTime     time.Time
+	client        *http.Client
 
 	// Feedback rate limiter (max 5 per hour)
 	feedbackLimiter *RateLimiter
@@ -1263,7 +1266,7 @@ func (s *Service) advanceUpgradeFunnelOnce() bool {
 		return true
 	}
 	cfg.Telemetry.LastReportedVersion = s.version
-	return s.persistConfigLocked(cfg, "Advanced last_reported_version")
+	return s.persistConfigLocked(cfg, "Advanced last_reported_version", persistVersion)
 }
 
 // BuildPayload renders the heartbeat payload at the current point in time.
@@ -1696,7 +1699,7 @@ func (s *Service) ensureAnonymousIDOnce() bool {
 			return true
 		}
 		cfg.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
-		if !s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at for legacy install") && s.config != cfg {
+		if !s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at for legacy install", persistAnonID) && s.config != cfg {
 			cfg.Telemetry.AnonymousIDCreatedAt = ""
 			return false
 		}
@@ -1707,7 +1710,7 @@ func (s *Service) ensureAnonymousIDOnce() bool {
 	cfg.Telemetry.AnonymousID = newID
 	cfg.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	if s.persistConfigLocked(cfg, "Generated anonymous telemetry ID") {
+	if s.persistConfigLocked(cfg, "Generated anonymous telemetry ID", persistAnonID) {
 		s.logger.Info("Generated and persisted anonymous telemetry ID",
 			zap.String("id", newID))
 		return true
@@ -1763,14 +1766,14 @@ func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
 	if createdAtStr == "" {
 		// Legacy install — initialize without rotating.
 		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at")
+		s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at", persistAnonID)
 		return
 	}
 	createdAt, err := time.Parse(time.RFC3339, createdAtStr)
 	if err != nil {
 		// Corrupt timestamp: reset to now without rotating.
 		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfigLocked(cfg, "Reset corrupt anonymous_id_created_at")
+		s.persistConfigLocked(cfg, "Reset corrupt anonymous_id_created_at", persistAnonID)
 		return
 	}
 	if !createdAt.Before(now) {
@@ -1791,7 +1794,7 @@ func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
 	prevCreatedAt := cfg.Telemetry.AnonymousIDCreatedAt
 	cfg.Telemetry.AnonymousID = uuid.New().String()
 	cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-	if !s.persistConfigLocked(cfg, "Rotated anonymous_id (annual)") {
+	if !s.persistConfigLocked(cfg, "Rotated anonymous_id (annual)", persistAnonID) {
 		// The live config was swapped out from under this snapshot, so the new
 		// id is not on disk. Put the snapshot back the way we found it and let
 		// the next heartbeat rotate the live config instead.
@@ -1821,7 +1824,7 @@ func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
 func (s *Service) persistConfig(cfg *config.Config, reason string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.persistConfigLocked(cfg, reason)
+	return s.persistConfigLocked(cfg, reason, persistAnonID|persistVersion)
 }
 
 // persistConfigLocked is persistConfig's body. The caller MUST already hold
@@ -1829,9 +1832,12 @@ func (s *Service) persistConfig(cfg *config.Config, reason string) bool {
 // be atomic — maybeRotateAnonymousID, which must not interleave with another
 // rotation — can hold the lock across all of it instead of reacquiring here
 // (s.mu is not reentrant).
-func (s *Service) persistConfigLocked(cfg *config.Config, reason string) bool {
+func (s *Service) persistConfigLocked(cfg *config.Config, reason string, fields persistFields) bool {
 	if cfg == nil {
 		return false
+	}
+	if upd := s.configUpdater; upd != nil {
+		return s.persistViaUpdaterLocked(cfg, reason, fields, upd)
 	}
 	if s.cfgPath == "" {
 		// No config FILE backs this service (in-memory/CLI use). There is no
@@ -1850,6 +1856,59 @@ func (s *Service) persistConfigLocked(cfg *config.Config, reason string) bool {
 		return false
 	}
 	s.logger.Debug("Persisted telemetry config", zap.String("reason", reason))
+	return true
+}
+
+// persistFields selects which telemetry fields a persist writes through the
+// config commit, so a stale snapshot cannot overwrite unrelated live fields.
+type persistFields int
+
+const (
+	persistAnonID  persistFields = 1 << iota // anonymous_id + anonymous_id_created_at
+	persistVersion                           // last_reported_version
+)
+
+// ConfigUpdater applies fn to the telemetry block through the daemon's config
+// commit (runtime.UpdateTelemetry) and reports fn's result as an error.
+type ConfigUpdater func(reason string, fn func(tc *config.TelemetryConfig) bool) error
+
+// SetConfigUpdater routes this service's config writes (anonymous id, annual
+// rotation, upgrade cursor) through the daemon's config commit instead of a
+// direct config.SaveConfig, so they cannot race or clobber a commit (#1592).
+func (s *Service) SetConfigUpdater(u ConfigUpdater) {
+	s.mu.Lock()
+	s.configUpdater = u
+	s.mu.Unlock()
+}
+
+// persistViaUpdaterLocked writes the selected fields of cfg.Telemetry through
+// the commit. The caller holds s.mu, but Commit ends in NotifyConfigChanged,
+// which takes s.mu, so s.mu is released around the call. The commit targets the
+// live config, so the snapshot-liveness check is not needed here.
+func (s *Service) persistViaUpdaterLocked(cfg *config.Config, reason string, fields persistFields, upd ConfigUpdater) bool {
+	if cfg.Telemetry == nil {
+		return true
+	}
+	want := *cfg.Telemetry
+	s.mu.Unlock()
+	err := upd(reason, func(tc *config.TelemetryConfig) bool {
+		changed := false
+		if fields&persistAnonID != 0 && (tc.AnonymousID != want.AnonymousID || tc.AnonymousIDCreatedAt != want.AnonymousIDCreatedAt) {
+			tc.AnonymousID = want.AnonymousID
+			tc.AnonymousIDCreatedAt = want.AnonymousIDCreatedAt
+			changed = true
+		}
+		if fields&persistVersion != 0 && tc.LastReportedVersion != want.LastReportedVersion {
+			tc.LastReportedVersion = want.LastReportedVersion
+			changed = true
+		}
+		return changed
+	})
+	s.mu.Lock()
+	if err != nil {
+		s.logger.Debug("Failed to commit telemetry config", zap.String("reason", reason), zap.Error(err))
+		return false
+	}
 	return true
 }
 
