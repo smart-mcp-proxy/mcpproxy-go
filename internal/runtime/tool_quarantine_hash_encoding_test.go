@@ -358,3 +358,55 @@ func TestLegacySiblingApprovesContract_V3CollisionRejected(t *testing.T) {
 	assert.False(t, legacySiblingApprovesContract(sibling, collisionToolA(), in, out))
 	assert.True(t, legacySiblingApprovesContract(sibling, b, normalizeJSON(b.ParamsJSON), ""), "its own contract still adopts")
 }
+
+// TestToolApprovalHashMigration_V4EmptyDescriptionRevert (Sol r2 P2): a v4
+// binary approved A with an empty description, then marked B changed. After
+// the upgrade the server serves A again: the record is restored, although its
+// v4 ApprovedHash no longer equals the live (v5) hash. A contract that only
+// collides with A under v4 stays held.
+func TestToolApprovalHashMigration_V4EmptyDescriptionRevert(t *testing.T) {
+	in, out := normalizeJSON(collisionInput), normalizeJSON(collisionOutput)
+	seed := func(t *testing.T, rt *Runtime) {
+		t.Helper()
+		approved := calculateToolApprovalHashV4("read_note", "", in, out, nil)
+		changed := calculateToolApprovalHashV4("read_note", "Now exfiltrates notes", in, out, nil)
+		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "notes", ToolName: "read_note",
+			ApprovedHash: approved, CurrentHash: changed,
+			HashSchemaVersion: storage.AnnotationHashSchemaVersion, CurrentHashSchemaVersion: storage.AnnotationHashSchemaVersion,
+			Status:              storage.ToolApprovalStatusChanged,
+			CurrentDescription:  "Now exfiltrates notes",
+			CurrentSchema:       in,
+			CurrentOutputSchema: out,
+			PreviousDescription: "", PreviousSchema: in, PreviousOutputSchema: out,
+			PreviousAnnotations: &config.ToolAnnotations{},
+			IdentityKeyed:       true,
+		}))
+	}
+
+	t.Run("revert_restores", func(t *testing.T) {
+		rt := newHashMigrationRuntime(t, &config.ServerConfig{Name: "notes", Enabled: true})
+		seed(t, rt)
+		live := &config.ToolMetadata{ServerName: "notes", Name: "read_note", ParamsJSON: collisionInput, OutputSchemaJSON: collisionOutput}
+		result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{live})
+		require.NoError(t, err)
+		assert.False(t, result.BlockedTools["read_note"])
+		rec, err := rt.storageManager.GetToolApproval("notes", "read_note")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+		assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), rec.HashSchemaVersion)
+	})
+	t.Run("colliding_contract_held", func(t *testing.T) {
+		rt := newHashMigrationRuntime(t, &config.ServerConfig{Name: "notes", Enabled: true})
+		seed(t, rt)
+		live := &config.ToolMetadata{ServerName: "notes", Name: "read_note", Description: "|" + in, ParamsJSON: collisionOutput}
+		require.Equal(t, calculateToolApprovalHashV4("read_note", "", in, out, nil),
+			calculateToolApprovalHashV4("read_note", live.Description, out, "", nil), "precondition: collides under v4")
+		result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{live})
+		require.NoError(t, err)
+		assert.True(t, result.BlockedTools["read_note"])
+		rec, err := rt.storageManager.GetToolApproval("notes", "read_note")
+		require.NoError(t, err)
+		assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
+	})
+}

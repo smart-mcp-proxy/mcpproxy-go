@@ -1664,7 +1664,10 @@ func v4PendingHashMatchesLive(existing *storage.ToolApprovalRecord, toolName str
 // proven only when the live contract hashes, under the current formula, to
 // the record's ApprovedHash; otherwise the record stays held for an operator.
 func revertedToPreviousContract(existing *storage.ToolApprovalRecord, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations, currentHash string) bool {
-	if existing.PreviousDescription == "" || description != existing.PreviousDescription {
+	if description != existing.PreviousDescription {
+		return false
+	}
+	if existing.PreviousDescription == "" && !approvedHashProvesEmptyDescription(existing) {
 		return false
 	}
 	// RT-03: an annotation-only flip keeps description and schemas equal, so
@@ -1696,6 +1699,23 @@ func revertedToPreviousContract(existing *storage.ToolApprovalRecord, descriptio
 	// live output schema is the approved one, so a tool that GAINED an output
 	// schema is never "reverted" by it (Sol r4 P1); an operator confirms it.
 	return normalizeJSON(existing.PreviousOutputSchema) == normalizeJSON(outputSchemaJSON)
+}
+
+// approvedHashProvesEmptyDescription reports whether a changed record's EMPTY
+// PreviousDescription is the approved contract's declared description rather
+// than an unrecorded one: its ApprovedHash must be the hash, under the v5 or
+// the v4 formula, of the recorded previous contract. Without this a tool
+// approved with no description under v4 could never be reverted after the
+// v5 upgrade, because its v4 ApprovedHash no longer equals the live hash (Sol
+// r2 P2, issue #1606). The previous fields are still compared one by one with
+// the live contract below, so a colliding contract never qualifies.
+func approvedHashProvesEmptyDescription(existing *storage.ToolApprovalRecord) bool {
+	if existing.ApprovedHash == "" || existing.PreviousSchema == "" {
+		return false
+	}
+	name, schema, output, hints := existing.ToolName, existing.PreviousSchema, existing.PreviousOutputSchema, existing.PreviousAnnotations
+	return existing.ApprovedHash == calculateToolApprovalHashWithOutputSchema(name, "", schema, output, hints) ||
+		existing.ApprovedHash == calculateToolApprovalHashV4(name, "", schema, output, hints)
 }
 
 // previousHintsProveRevert reports whether a changed record's live safety
