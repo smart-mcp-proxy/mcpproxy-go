@@ -171,7 +171,7 @@ const configSecretSources = `~/\.ssh|/\.ssh/|\.ssh/|~/\.aws|/\.aws/|\.env\b|env 
 // whole thing" are the file; "the full hostname" and "the entire host list"
 // are ordinary values. A qualified secret ("the full API key") still matches
 // through configSecretNouns.
-const configSecretPayload = `\b(?:content|contents|everyth\w*|(?:entire|whole|full|raw|complete)\s+(?:file|content\w*|text|thing|body|dump|copy|config\w*)|` + configSecretNouns + `)\b`
+const configSecretPayload = `\b(?:content|contents|everyth\w*|(?:entire|whole|full|raw|complete)\s+(?:file|content\w*|text|thing|body|dump|copy|config\w*)|file\s+content\w*|` + configSecretNouns + `)\b`
 
 // configSecretNouns are the secret-shaped values a config file may hold.
 const configSecretNouns = `credential|api key|access key|secret|token|password|passphras|private key|ssh key|key material|key file|keys`
@@ -1291,7 +1291,7 @@ func maskSecretMetadataNouns(t string) string {
 	}
 	for _, l := range possessivePronounRe.FindAllStringIndex(t, -1) {
 		after := phraseWords(sentenceHead(t[l[1]:min(len(t), l[1]+40)]))
-		if len(after) > 0 && secretMetadataWords.MatchString(after[0]) {
+		if len(after) > 0 && (secretMetadataWords.MatchString(after[0]) || (after[0] == "public" && len(after) > 1 && after[1] == "key")) {
 			spans = append(spans, l)
 		}
 	}
@@ -1318,6 +1318,9 @@ var credentialSourceRe = regexp.MustCompile(`(?:` + secretFiles + `|` + configSe
 // fingerprint", "write its length"): not a credential transfer (#1601).
 var metadataMoveRe = regexp.MustCompile(`\b(?:` + credentialPlacementVerbs + `)\s+(?:(?:its|the|their|a)\s+)?(?:(?:(?:private|public|ssh|api|secret)\s+)?key\s+)?(?:public\s+key|(?:` + secretMetadataAlt + `))\b`)
 
+// metadataLabelTailRe finds a further metadata word right after one.
+var metadataLabelTailRe = regexp.MustCompile(`^\s+(?:` + secretMetadataAlt + `)\b`)
+
 // metadataMoveContinuesRe finds a conjunct after a metadata move; its word
 // is captured.
 var metadataMoveContinuesRe = regexp.MustCompile(`^\s*(?:,|and|plus|&)\s*(?:(?:its|the|their|a)\s+)?(?:(?:(?:private|public|ssh|api|secret)\s+)?key\s+)?([\w-]+)`)
@@ -1332,7 +1335,16 @@ func maskKeyFileFamily(t string) string {
 			// "save its fingerprint and its contents to …" still moves the
 			// key: keep the verb when any non-metadata conjunct follows.
 			carried := false
-			for pos := l[1]; ; {
+			pos := l[1]
+			// a compound label ("creation date", "SHA256 hash") is one value
+			for {
+				m := metadataLabelTailRe.FindString(t[pos:])
+				if m == "" {
+					break
+				}
+				pos += len(m)
+			}
+			for {
 				m := metadataMoveContinuesRe.FindStringSubmatch(t[pos:])
 				if m == nil {
 					break
