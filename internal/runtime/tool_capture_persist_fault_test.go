@@ -497,3 +497,31 @@ func TestCaptureFault_ReviewCaptureOfEligibleServerDoesNotClearDirty(t *testing.
 	require.NoError(t, err)
 	assert.False(t, rt.ToolReviewDirty(baselineServer))
 }
+
+// A sweep result for a server with no connection generation captured before
+// the list is indexed but not published into the StateView (the server is
+// re-listed). That pass must not clear a dirty mark: dispatch would otherwise
+// read the StateView's stale safety hints as current until the re-list.
+func TestCaptureFault_UnpublishedSweepCaptureDoesNotClearDirty(t *testing.T) {
+	rt := seedApproved(t)
+	require.NotNil(t, rt.supervisor, "the fixture publishes into a StateView")
+	svBefore, _, _ := stateViewTools(t, rt)
+	rt.testHooks.toolIndexWriteFault = func(string) error { return errInjectedWrite }
+	_, err := captureAt(t, rt, 2, baselineTool("read_note", "Read a note", true))
+	require.Error(t, err)
+	require.True(t, rt.ToolReviewDirty(baselineServer))
+	healWrites(rt)
+
+	// The sweep's no-generation case: capture == nil.
+	_, _, err = rt.commitInventoryAt(context.Background(), baselineServer, []*config.ToolMetadata{baselineTool("read_note", "Read a note", true)},
+		rt.committedGenForTest(baselineServer), nil, inventoryRef{capture: managed.InventoryCapture{Seq: 3}})
+	require.NoError(t, err)
+	svAfter, _, _ := stateViewTools(t, rt)
+	require.Equal(t, svBefore, svAfter, "the pass published nothing into the StateView")
+	assert.True(t, rt.ToolReviewDirty(baselineServer), "an unpublished capture does not clear dirty")
+
+	published, err := captureAt(t, rt, 4, baselineTool("read_note", "Read a note", true))
+	require.NoError(t, err)
+	require.True(t, published)
+	assert.False(t, rt.ToolReviewDirty(baselineServer), "the published re-list clears it")
+}

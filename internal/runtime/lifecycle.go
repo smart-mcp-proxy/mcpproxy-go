@@ -1149,6 +1149,11 @@ func (r *Runtime) commitInventoryAt(ctx context.Context, serverName string, tool
 		return false, false, nil
 	}
 	published = true
+	// Without a capture nothing is published into the StateView, so the pass
+	// cannot clear a dirty mark (FR-018); the caller re-lists the server.
+	if capture == nil && r.supervisor != nil {
+		inv.unpublished = true
+	}
 	// held runs after every write of the pass landed (FR-018): it stores the
 	// last-good snapshot and capture stamp and publishes the StateView, and
 	// reports a failed or rejected publication, which leaves the capture
@@ -1709,7 +1714,7 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 				return incomplete(err)
 			}
 		}
-		if inv.mode == inventoryDefinitions {
+		if inv.mode == inventoryDefinitions && !inv.unpublished {
 			recovered = r.clearReviewDirtyHeld(serverName, inv.capture.Seq)
 		}
 		return nil

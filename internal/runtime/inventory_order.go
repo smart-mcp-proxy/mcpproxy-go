@@ -60,6 +60,12 @@ const (
 type inventoryRef struct {
 	capture managed.InventoryCapture
 	mode    inventoryMode
+	// unpublished marks a pass that publishes no StateView entry (a sweep
+	// result with no connection generation captured before the list; the
+	// server is re-listed). Such a pass never clears a review-dirty mark
+	// (Spec 117 FR-018): dispatch reads its safety hints from the StateView,
+	// which still holds the entry published before the failed capture.
+	unpublished bool
 }
 
 // inventoryVerdict is the outcome of admitInventoryHeld.
