@@ -274,3 +274,87 @@ func TestCalculateToolApprovalHash_V5Stability(t *testing.T) {
 		})
 	}
 }
+
+// TestToolApprovalHashMigration_V4UnprovenSnapshotNotRevertedLater (Sol r1
+// P1): a v4 record whose ApprovedHash does not cover its stored snapshot is
+// held on the first pass. The unproven snapshot must not become before-evidence
+// that a later pass "reverts" to and approves.
+func TestToolApprovalHashMigration_V4UnprovenSnapshotNotRevertedLater(t *testing.T) {
+	for _, srv := range []*config.ServerConfig{
+		{Name: "notes", Enabled: true},
+		scanServer("notes"),
+	} {
+		t.Run("trust_mode="+srv.TrustMode, func(t *testing.T) {
+			rt := newHashMigrationRuntime(t, srv)
+			tool := collisionToolA()
+			rec := seedV4ApprovedRecord(t, rt, tool)
+			rec.ApprovedHash = calculateToolApprovalHashV4(tool.Name, "Something else entirely", normalizeJSON(tool.ParamsJSON), "", nil)
+			require.NoError(t, rt.storageManager.SaveToolApproval(rec))
+
+			for pass := 1; pass <= 3; pass++ {
+				result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{tool})
+				require.NoError(t, err)
+				assert.True(t, result.BlockedTools["read_note"], "pass %d", pass)
+				got, err := rt.storageManager.GetToolApproval("notes", "read_note")
+				require.NoError(t, err)
+				assert.Equal(t, storage.ToolApprovalStatusChanged, got.Status, "pass %d: stays held for an operator", pass)
+			}
+		})
+	}
+}
+
+// v4Sibling builds an unstamped, approved v4 collapsed sibling whose stored
+// contract is (desc, schema, output) and whose hashes are approvedHash.
+func v4Sibling(desc, schema, output, approvedHash string) *storage.ToolApprovalRecord {
+	return &storage.ToolApprovalRecord{
+		ToolName: "read_note", ApprovedHash: approvedHash, CurrentHash: approvedHash,
+		HashSchemaVersion: storage.AnnotationHashSchemaVersion, CurrentHashSchemaVersion: storage.AnnotationHashSchemaVersion,
+		Status:             storage.ToolApprovalStatusApproved,
+		CurrentDescription: desc, CurrentSchema: schema, CurrentOutputSchema: output,
+	}
+}
+
+// TestLegacySiblingApprovesContract_V4 (Sol r1 P1/P2): a v4 sibling approves
+// the live contract only when its v4 hash covers its stored contract and that
+// contract is exactly the live one. An empty description is declared on v4,
+// so an unchanged empty-description tool still adopts.
+func TestLegacySiblingApprovesContract_V4(t *testing.T) {
+	in, out := normalizeJSON(collisionInput), normalizeJSON(collisionOutput)
+	a := collisionToolA()
+
+	proven := v4Sibling(collisionDesc, in, out, calculateToolApprovalHashV4("read_note", collisionDesc, in, out, nil))
+	assert.True(t, legacySiblingApprovesContract(proven, a, in, out), "proven and unchanged")
+
+	b := collisionToolB()
+	assert.False(t, legacySiblingApprovesContract(proven, b, normalizeJSON(b.ParamsJSON), ""), "colliding live contract")
+
+	// Stored C, hashes for A (C does not collide with A): the stored snapshot
+	// is not what was approved. (A stored B that collides with A cannot be
+	// told apart from an approved B: that state is what a v4 binary wrote
+	// after the pre-upgrade bypass.)
+	c := &config.ToolMetadata{ServerName: "notes", Name: "read_note", Description: "Reads and forwards a note", ParamsJSON: collisionInput}
+	drift := v4Sibling(c.Description, in, "", calculateToolApprovalHashV4("read_note", collisionDesc, in, out, nil))
+	assert.False(t, legacySiblingApprovesContract(drift, c, in, ""), "unproven stored snapshot")
+
+	empty := &config.ToolMetadata{ServerName: "notes", Name: "read_note", ParamsJSON: collisionInput}
+	emptySib := v4Sibling("", in, "", calculateToolApprovalHashV4("read_note", "", in, "", nil))
+	assert.True(t, legacySiblingApprovesContract(emptySib, empty, in, ""), "unchanged empty-description tool")
+}
+
+// TestLegacySiblingApprovesContract_V3CollisionRejected (Sol r1 P1): a v3
+// sibling approved for (D|I, O, none) has the same pipe-joined hash as the
+// live (D, I, O). The stored contract contradicts the live one, so the hash
+// match is not an approval, and the added output schema is never adopted.
+func TestLegacySiblingApprovesContract_V3CollisionRejected(t *testing.T) {
+	in, out := normalizeJSON(collisionInput), normalizeJSON(collisionOutput)
+	b := collisionToolB()
+	h := calculateToolApprovalHashV4("read_note", b.Description, normalizeJSON(b.ParamsJSON), "", nil)
+	sibling := &storage.ToolApprovalRecord{
+		ToolName: "read_note", ApprovedHash: h, CurrentHash: h,
+		HashSchemaVersion: storage.OutputSchemaHashSchemaVersion, Status: storage.ToolApprovalStatusApproved,
+		CurrentDescription: b.Description, CurrentSchema: normalizeJSON(b.ParamsJSON),
+	}
+	require.Equal(t, h, calculateToolApprovalHashV4("read_note", collisionDesc, in, out, nil), "precondition: v4 formula collides")
+	assert.False(t, legacySiblingApprovesContract(sibling, collisionToolA(), in, out))
+	assert.True(t, legacySiblingApprovesContract(sibling, b, normalizeJSON(b.ParamsJSON), ""), "its own contract still adopts")
+}

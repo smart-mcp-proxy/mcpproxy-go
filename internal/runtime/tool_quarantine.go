@@ -1540,6 +1540,18 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			}
 			existing.PreviousSchema = oldSchema
 			existing.PreviousOutputSchema = oldOutputSchema
+			if !storedApprovalProven {
+				// The stored snapshot is not proven to be the approved
+				// contract (a v4 ApprovedHash that does not cover it, issue
+				// #1606), so it is no before-evidence either: recorded as
+				// Previous*, a later pass would "revert" to it and approve
+				// it. Without Previous* the record stays changed until an
+				// operator confirms it (revertedToPreviousContract).
+				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
+				existing.PreviousSchema = ""
+				existing.PreviousOutputSchema = ""
+			}
 			existing.CurrentHash = currentHash
 			existing.CurrentHashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 			existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
@@ -2232,20 +2244,6 @@ func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *co
 	if sibling.ApprovedHash == calculateToolApprovalHashWithOutputSchema(collapsed, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations) {
 		return true
 	}
-	if sibling.HashSchemaVersion < storage.AnnotationHashSchemaVersion &&
-		sibling.ApprovedHash == calculateToolApprovalHashV4(collapsed, tool.Description, schemaJSON, outputSchemaJSON, nil) {
-		// Pre-RT-03 hash (no annotation hints) with unchanged or unknown hints.
-		return true
-	}
-	if sibling.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
-		if sibling.ApprovedHash == calculateLegacyToolApprovalHash(collapsed, tool.Description, schemaJSON) ||
-			sibling.ApprovedHash == calculateHashWithAnnotations(collapsed, tool.Description, schemaJSON, tool.Annotations) {
-			return true
-		}
-	}
-	if sibling.ApprovedHash != sibling.CurrentHash || sibling.CurrentDescription == "" {
-		return false
-	}
 	// An empty stored schema is a wildcard only on a sibling that predates
 	// complete contract capture, exactly as in the main gate's formula
 	// migration: from storage.OutputSchemaHashSchemaVersion on an empty
@@ -2256,6 +2254,33 @@ func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *co
 	schemaMatch := (sibling.CurrentSchema == "" && uncaptured) || normalizeJSON(sibling.CurrentSchema) == normalizeJSON(schemaJSON)
 	outputMatch := (sibling.CurrentOutputSchema == "" && uncaptured) || normalizeJSON(sibling.CurrentOutputSchema) == normalizeJSON(outputSchemaJSON)
 	hintsMatch := storedSafetyHintsMatch(sibling.CurrentAnnotations, sibling.HashSchemaVersion, tool.Annotations)
+	// Every older formula is pipe-joined and ambiguous (issue #1606): a
+	// different contract can hash to the sibling's approved value. A legacy
+	// hash match therefore only counts when the sibling's stored contract
+	// does not contradict the live one (an uncaptured empty field is the
+	// one wildcard).
+	storedAgrees := (descMatch || (sibling.CurrentDescription == "" && uncaptured)) && schemaMatch && outputMatch
+	if sibling.HashSchemaVersion < storage.AnnotationHashSchemaVersion && storedAgrees &&
+		sibling.ApprovedHash == calculateToolApprovalHashV4(collapsed, tool.Description, schemaJSON, outputSchemaJSON, nil) {
+		// Pre-RT-03 hash (no annotation hints) with unchanged or unknown hints.
+		return true
+	}
+	if sibling.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion && storedAgrees {
+		if sibling.ApprovedHash == calculateLegacyToolApprovalHash(collapsed, tool.Description, schemaJSON) ||
+			sibling.ApprovedHash == calculateHashWithAnnotations(collapsed, tool.Description, schemaJSON, tool.Annotations) {
+			return true
+		}
+	}
+	if sibling.HashSchemaVersion == storage.AnnotationHashSchemaVersion {
+		// A v4 sibling captured the full contract (an empty description is
+		// declared, not unknown). Its approval covers the live contract only
+		// when its v4 ApprovedHash is the hash of its stored contract and
+		// that contract is exactly the live one (issue #1606).
+		return v4ApprovedHashCoversStored(sibling, collapsed) && descMatch && schemaMatch && outputMatch && hintsMatch
+	}
+	if sibling.ApprovedHash != sibling.CurrentHash || sibling.CurrentDescription == "" {
+		return false
+	}
 	return descMatch && schemaMatch && outputMatch && hintsMatch
 }
 
