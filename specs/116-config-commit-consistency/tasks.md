@@ -457,7 +457,7 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [x] T081a [P] [US4] `internal/upstream/core/retire_stdio_write_test.go`: T4.8 (a launched stdio instance; `Retire` returns; a parked `SendRequest`/`SendNotification` resumes → `ErrRetired`, the child's stdin receives nothing, and the process group is dead when `Retire` returns)
 - [x] T084a [P] [US4] `internal/oauth/retire_preflight_test.go`: T4.9 (park `preflightPRMScopes`, `autoDetectResource` and `httpFetchRaw` before sending; retire; zero hits on the counter)
 - [x] T085a [P] [US4] `internal/upstream/dialgate/nesting_test.go` + `internal/upstream/core/retire_launch_registration_test.go`: T4.10, T4.11
-- [ ] **(deferred: Windows follow-up)** T085b [P] [US4] `internal/upstream/core/process_windows_job_test.go` (windows build tag, T4.12) and `internal/upstream/core/retire_browser_test.go` (T4.13)
+- [x] T085b [P] [US4] `internal/upstream/core/process_windows_job_test.go` (windows build tag, T4.12; suspended child runs only after Job assignment, retirement kills the grandchild), `internal/winjob/suspended_test.go` and `internal/upstream/core/retire_browser_test.go` (T4.13)
 - [x] T085c [P] [US4] `internal/upstream/retire_same_generation_test.go`: T4.15 (old instance parked before its stdio launch and before its HTTP/OAuth send; `RestartServer`, `ForceReconnectAll` and Docker recovery replace it at the same generation; release → no launch, no request; replacement unaffected; review R5.4)
 - [x] T085d [P] [US4] `internal/upstream/dialgate/late_register_test.go`: T4.16 (dial parked before `track`; sweep finishes; register + blocking write → closed, `ErrRetired`, `Retire` ≤ 1 s; review R5.1)
 - [x] T085e [P] [US4] `internal/upstream/dialgate/capability_parity_test.go` (`TestWrapTransportCapabilityParity`, `TestMCPGoTransportMethodSetPinned`), `internal/upstream/dialgate/wrap_forwarding_test.go` (server-to-client ping over stdio and Streamable HTTP, SSE connection loss, retired request handler; review round 2) and `internal/upstream/core/retire_test.go` (`TestWrappedTransportConsumers`): T4.17 (a)-(f) with the production wrapped transports: OAuth handler extraction, concurrent reactive + proactive refresh, per-method-auth manual login, Streamable HTTP 404 session re-init, protocol header, server-to-client ping over stdio and Streamable HTTP, SSE connection loss, retired request handler (review R8.1)
@@ -470,7 +470,7 @@ Branch `116-pr4-retirement-barrier` from `main` after PR3 merges.
 - [x] T092 [US4] `core`: stdio `client.Start`, Docker launch and launcher spawn under `gate.Admit` (makes T081 pass)
 - [x] T093 [US4] `transport/http.go`: every branch builds on `gate.Transport(base)` instead of `http.DefaultTransport` (trace, plain, headers, OAuth, SSE) (makes T082 and T083 pass)
 - [x] T093a [US4] Lock-free, capability-preserving `dialgate.WrapTransport` around every core-built mcp-go transport (`gatedStdio`/`gatedStreamableHTTP`/`gatedSSE` forwarding exactly their inner kind's capability rows, `Unwrap()`, retired-aware `SetRequestHandler`); `core.innerTransport` in `core/transport_unwrap.go` used by `extractOAuthHandler` and `SessionSnapshot`; T099 forbids `GetTransport()` elsewhere in `internal/upstream/**` (makes T085e pass; review R8.1); stdio `cmd.Start` + group/Job registration + `TrackProcess` in one admitted section, with a kill on a Job assignment failure; `Retire` kills before and after its barrier (makes T081a, T085a pass)
-- [ ] **(deferred: Windows follow-up; `openBrowser` under `gate.Admit` is done)** T093b [US4] Windows: `CREATE_SUSPENDED` → `AssignProcessToJobObject` → `NtResumeProcess` inside the admitted section (stdio, Docker, launcher); `openBrowser` under `gate.Admit` (makes T085b pass)
+- [x] T093b [US4] Windows: `CREATE_SUSPENDED` → `AssignProcessToJobObject` → `NtResumeProcess` inside the admitted section (stdio, Docker, launcher; `winjob.MarkSuspended`/`AssignAndResume`); `openBrowser` under `gate.Admit` (makes T085b pass)
 - [x] T093c [US4] `launcher.WaitForURL` takes the gate dialer; Docker diagnostic/recovery execs under `gate.Admit`; teardown exemption documented (T4.14, `internal/upstream/core/retire_launcher_probe_test.go` written first)
 - [x] T094a [US4] `oauth.Env{Transport, Ctx}` threaded through `preflightPRMScopes`, `autoDetectResource`, the discovery cache fetch and `CreateOAuthConfig*` (makes T084a pass)
 - [x] T094 [US4] `oauth`: `WithBaseTransport` on `CreateOAuthConfig*` and the transport wrapper `inner`; the core OAuth strategy and manual OAuth pass the instance transport; `Manager.RefreshOAuthToken`/`StartManualOAuth*` refuse an unregistered or retired instance (makes T084 pass)
@@ -589,8 +589,8 @@ each documented in the PR:
 - FR-025a's "a failed Job assignment kills the child inside the section":
   Windows `assignProcessTree` now fails when the Job cannot be created or
   assigned, and the stdio launch section kills the child and fails the start
-  (it used to log and carry on with the PID). `CREATE_SUSPENDED` (T093b)
-  stays deferred.
+  (it used to log and carry on with the PID). `CREATE_SUSPENDED` (T093b,
+  #1618) now starts the child suspended and resumes it after Job assignment.
 - A probe (background health ping or the post-cancellation liveness probe)
   that was in flight when the instance was retired produces no verdict and
   no accounting: `setErrorIfCurrentConnection` and the ambiguous-probe
