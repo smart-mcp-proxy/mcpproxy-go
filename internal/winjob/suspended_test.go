@@ -12,11 +12,33 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// markerHelperEnv makes the test binary act as a child that writes a marker
+// file and exits. Re-executing the test binary avoids cmd.exe quoting rules,
+// which do not understand the \" escaping exec.Command applies.
+const markerHelperEnv = "MCPPROXY_WINJOB_MARKER"
+
+func TestMain(m *testing.M) {
+	if path := os.Getenv(markerHelperEnv); path != "" {
+		if err := os.WriteFile(path, []byte("ran"), 0o600); err != nil {
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+	os.Exit(m.Run())
+}
+
+func markerChild(t *testing.T, marker string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^$") //nolint:gosec // re-executes the test binary
+	cmd.Env = append(os.Environ(), markerHelperEnv+"="+marker)
+	return cmd
+}
+
 // A CREATE_SUSPENDED child runs no code until it is resumed, and once
 // assigned-and-resumed everything it spawns is inside the job.
 func TestAssignAndResume_ChildRunsOnlyAfterAssignment(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ran.txt")
-	cmd := exec.Command("cmd.exe", "/c", "echo ran> \""+marker+"\"")
+	cmd := markerChild(t, marker)
 	MarkSuspended(cmd)
 	require.True(t, IsSuspended(cmd))
 	require.NoError(t, cmd.Start())
@@ -49,7 +71,7 @@ func TestMarkSuspended_KeepsExistingAttrs(t *testing.T) {
 // the still-suspended child instead of resuming it.
 func TestAssignAndResume_ClosedJobLeavesChildSuspended(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ran.txt")
-	cmd := exec.Command("cmd.exe", "/c", "echo ran> \""+marker+"\"")
+	cmd := markerChild(t, marker)
 	MarkSuspended(cmd)
 	require.NoError(t, cmd.Start())
 	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
