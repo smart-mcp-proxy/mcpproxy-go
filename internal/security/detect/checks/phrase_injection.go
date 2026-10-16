@@ -3,6 +3,7 @@ package checks
 import (
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -508,6 +509,8 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 
 	var breakSet map[int]bool // lazily built, see lineBreakSoft
 	var breakWords []string
+	var startsText string // the text variant wordStarts was built for
+	var wordStarts []int
 	matched := false
 	bestConf := 0.0
 	bestMatch := ""
@@ -587,7 +590,10 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 					if breakSet == nil {
 						breakSet, breakWords = capitalizedBreakPairs(tool.RawText())
 					}
-					if matchJoinsBreak(t, start, loc[1], breakSet, breakWords) {
+					if wordStarts == nil || startsText != t {
+						startsText, wordStarts = t, bareWordStarts(t)
+					}
+					if matchJoinsBreak(t, start, loc[1], breakSet, breakWords, wordStarts) {
 						conf = deobfuscatedMaxConfidence
 						softReason = "the match joins a line that ends with the start of a new sentence on the next line"
 					}
@@ -710,24 +716,66 @@ func capitalizedBreakPairs(raw string) (map[int]bool, []string) {
 // recorded line breaks, located by word position so that an unrelated break
 // elsewhere in the text does not count. The word stream of t must agree with
 // the raw word stream at the match, otherwise nothing is reported.
-func matchJoinsBreak(t string, start, end int, breaks map[int]bool, words []string) bool {
+func matchJoinsBreak(t string, start, end int, breaks map[int]bool, words []string, starts []int) bool {
 	if len(breaks) == 0 {
 		return false
 	}
 	// Punctuation-only tokens ("-", "##") normalize to no word and are absent
 	// from the raw word stream, so they must not be counted here either.
-	first := len(bareWords(t[:start]))
+	// starts holds the offset of every counted token in t, so the number of
+	// words before the match is a binary search, not a rescan of t[:start].
+	first := sort.SearchInts(starts, start)
+	if start > 0 {
+		if r, _ := utf8.DecodeLastRuneInString(t[:start]); !unicode.IsSpace(r) {
+			// The match begins inside a token: that token is the match's
+			// first word (compared by suffix below), not a word before it.
+			first--
+		}
+	}
 	mw := bareWords(t[start:end])
 	for j := 0; j+1 < len(mw); j++ {
 		i := first + j
-		if i+1 >= len(words) || !breaks[i] {
+		if i < 0 || i+1 >= len(words) || !breaks[i] {
 			continue
 		}
-		if mw[j] == words[i] && mw[j+1] == words[i+1] {
+		// The regex may cover only part of a raw token ("Prompts" matched as
+		// "prompt"): the first match word may be a suffix and the last a
+		// prefix of its raw word; interior words must be equal.
+		okFirst := mw[j] == words[i] || (j == 0 && strings.HasSuffix(words[i], mw[j]))
+		okLast := mw[j+1] == words[i+1] || (j+1 == len(mw)-1 && strings.HasPrefix(words[i+1], mw[j+1]))
+		if okFirst && okLast {
 			return true
 		}
 	}
 	return false
+}
+
+// bareWordStarts returns the byte offset in t of every whitespace-delimited
+// token that bareWords counts as a word, in order.
+func bareWordStarts(t string) []int {
+	out := []int{}
+	i := 0
+	for i < len(t) {
+		for i < len(t) {
+			r, sz := utf8.DecodeRuneInString(t[i:])
+			if !unicode.IsSpace(r) {
+				break
+			}
+			i += sz
+		}
+		st := i
+		for i < len(t) {
+			r, sz := utf8.DecodeRuneInString(t[i:])
+			if unicode.IsSpace(r) {
+				break
+			}
+			i += sz
+		}
+		if i > st && breakWord(t[st:i]) != "" {
+			out = append(out, st)
+		}
+	}
+	return out
 }
 
 // bareWords splits normalized text on whitespace and reduces each token with
