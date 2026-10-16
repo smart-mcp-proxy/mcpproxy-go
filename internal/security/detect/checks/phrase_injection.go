@@ -382,7 +382,7 @@ var phraseFamilies = []phraseFamily{
 		// field comes first, so the placement families above, which need
 		// "<verb> <payload> in <field>", never see it. A possessive owning
 		// metadata ("with its fingerprint") is masked first.
-		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + secretFiles + `)` + sentenceSpan + `{0,120}?` + invertedPlacementLead + `(?:(?:its|the|their|all) )?(?:content\w*|everyth\w*|(?:entire|whole|full|raw|complete) (?:file|content\w*|text|thing|body|dump|copy|key)|(?:(?:private|secret|ssh|api) )?key)\b`),
+		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + secretFiles + `)` + sentenceSpan + `{0,120}?` + invertedPlacementLead + `(?:(?:its|the|their|all) )?(?:content\w*|file content\w*|everyth\w*|(?:entire|whole|full|raw|complete) (?:file|content\w*|text|thing|body|dump|copy|key)|(?:(?:private|secret|ssh|api) )?key)\b`),
 		base:      0.88,
 		threat:    detect.ThreatExfiltration,
 		what:      "credential-file-to-argument directive",
@@ -1322,8 +1322,11 @@ var metadataMoveRe = regexp.MustCompile(`\b(?:` + credentialPlacementVerbs + `)\
 var metadataLabelTailRe = regexp.MustCompile(`^\s+(?:` + secretMetadataAlt + `)\b`)
 
 // metadataMoveContinuesRe finds a conjunct after a metadata move; its word
-// is captured.
-var metadataMoveContinuesRe = regexp.MustCompile(`^\s*(?:,|and|plus|&)\s*(?:(?:its|the|their|a)\s+)?(?:(?:(?:private|public|ssh|api|secret)\s+)?key\s+)?([\w-]+)`)
+// is captured (group 2) after its key qualifier (group 1).
+var metadataMoveContinuesRe = regexp.MustCompile(`^\s*(?:,|and|plus|&)\s*(?:(?:its|the|their|a)\s+)?((?:(?:private|public|ssh|api|secret)\s+)?key\s+)?([\w-]+)`)
+
+// publicKeyQualifierRe is the "public key " qualifier of a conjunct.
+var publicKeyQualifierRe = regexp.MustCompile(`^public\s+key\s+$`)
 
 // maskKeyFileFamily is the mask of the direct key-file family: public key
 // files, then a placement verb moving only metadata, then metadata nouns.
@@ -1337,23 +1340,33 @@ func maskKeyFileFamily(t string) string {
 			carried := false
 			pos := l[1]
 			// a compound label ("creation date", "SHA256 hash") is one value
-			for {
-				m := metadataLabelTailRe.FindString(t[pos:])
-				if m == "" {
-					break
+			skipLabelTail := func() {
+				for {
+					m := metadataLabelTailRe.FindString(t[pos:])
+					if m == "" {
+						return
+					}
+					pos += len(m)
 				}
-				pos += len(m)
 			}
+			skipLabelTail()
 			for {
 				m := metadataMoveContinuesRe.FindStringSubmatch(t[pos:])
 				if m == nil {
 					break
 				}
-				if !secretMetadataWords.MatchString(strings.ToLower(m[1])) {
+				if publicKeyQualifierRe.MatchString(m[1]) {
+					// "and its public key to …": the conjunct is the public
+					// key, the next word belongs to the rest of the sentence
+					pos += len(m[0]) - len(m[2])
+					continue
+				}
+				if !secretMetadataWords.MatchString(strings.ToLower(m[2])) {
 					carried = true
 					break
 				}
 				pos += len(m[0])
+				skipLabelTail()
 			}
 			if carried {
 				continue
