@@ -425,6 +425,10 @@ var launcherProbeDialer = &net.Dialer{Timeout: 2 * time.Second}
 // section of the instance's gate and registers it with the gate there. A
 // child the gate refuses to track (retired during the section) is killed
 // before this returns.
+// launcherHandleWrapHook lets tests wrap the freshly spawned handle (to
+// observe or fail Stop/Kill). Nil in production.
+var launcherHandleWrapHook func(launcher.Handle) launcher.Handle
+
 func (c *Client) spawnLauncherAdmitted(ctx context.Context, spec *launcher.Spec) (launcher.Handle, error) {
 	gate := c.Gate()
 	release, err := gate.Admit(ctx)
@@ -437,6 +441,9 @@ func (c *Client) spawnLauncherAdmitted(ctx context.Context, spec *launcher.Spec)
 		return nil, err
 	}
 	observeLaunch(c.config.Name, "launcher")
+	if wrap := launcherHandleWrapHook; wrap != nil {
+		handle = wrap(handle)
+	}
 	// The handle's Kill reaches the whole tree on every platform: the
 	// process group on Unix and the launcher's own Job Object on Windows
 	// (core's Windows Job registry does not hold launcher children).

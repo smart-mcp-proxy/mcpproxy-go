@@ -9,10 +9,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
@@ -53,20 +55,60 @@ func alive(pid int) bool {
 	return st != "" && !strings.HasPrefix(st, "Z")
 }
 
-// stopLauncher must take down a descendant left behind when the launcher
-// leader exited first, even when the Stop context is already expired.
-func TestStopLauncher_LeaderExitedFirst_KillsDescendant(t *testing.T) {
+// giveUpHandle simulates Stop giving up (expired context) without taking the
+// group down; Kill is counted and delegated so the test cleans up.
+type giveUpHandle struct {
+	launcher.Handle
+	kills atomic.Int32
+}
+
+func (h *giveUpHandle) Stop(context.Context) error { return context.DeadlineExceeded }
+func (h *giveUpHandle) Kill() error {
+	h.kills.Add(1)
+	return h.Handle.Kill()
+}
+
+// When Stop gives up, stopLauncher must hard-kill the group (#1614).
+func TestStopLauncher_StopGivesUp_KillsGroup(t *testing.T) {
 	h, pid := spawnBackgroundingLauncher(t)
-	require.True(t, alive(pid), "control: descendant runs")
+	fake := &giveUpHandle{Handle: h}
 
 	c := newStrategyTestClient()
 	c.logger = zap.NewNop()
-	c.launcherHandle = h
+	c.launcherHandle = fake
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	c.stopLauncher(ctx)
+	c.stopLauncher(context.Background())
 
+	require.Equal(t, int32(1), fake.kills.Load(), "stopLauncher must Kill after Stop fails")
 	require.Eventually(t, func() bool { return !alive(pid) },
 		5*time.Second, 20*time.Millisecond, "descendant must not outlive launcher teardown")
+}
+
+// The wait-for-URL failure path must hard-kill the group when Stop gives up.
+func TestConnectWithLauncher_WaitForURLFailure_StopGivesUp_Kills(t *testing.T) {
+	fake := &giveUpHandle{}
+	prev := launcherHandleWrapHook
+	launcherHandleWrapHook = func(h launcher.Handle) launcher.Handle {
+		fake.Handle = h
+		return fake
+	}
+	defer func() { launcherHandleWrapHook = prev }()
+
+	c := newRetireCoreClient(t, &config.ServerConfig{
+		Name:                "launcher-waiturl-kill",
+		URL:                 "http://" + closedPort(t) + "/mcp",
+		Protocol:            "http",
+		Command:             "/bin/sh",
+		Args:                []string{"-c", "exec sleep 300"},
+		LauncherWaitTimeout: config.Duration(300 * time.Millisecond),
+		Enabled:             true,
+	}, nil)
+
+	c.mu.Lock()
+	err := c.connectWithLauncher(context.Background())
+	c.mu.Unlock()
+	require.Error(t, err)
+	require.Equal(t, int32(1), fake.kills.Load(), "wait-for-URL failure must Kill after Stop fails")
+	require.Eventually(t, func() bool { return !alive(fake.Pid()) || fake.Pid() == 0 },
+		5*time.Second, 20*time.Millisecond)
 }
