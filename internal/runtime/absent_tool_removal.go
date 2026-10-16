@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"sort"
 
+	"go.uber.org/zap"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -66,11 +68,17 @@ func (r *Runtime) absentApprovedRecords(serverName string, live, indexed map[str
 
 // removeAbsentTool deletes toolName's index document and tool hash and, when
 // deleteRecord is set, its approval record (only while cond holds for the
-// stored value; nil deletes unconditionally). The index and hash deletes both
-// run; the record is deleted only after both succeeded, so a removal that
-// failed part-way keeps its record as the next pass's retry source (the
-// record-derived workset). Every delete is idempotent, so the next pass
-// converges; the first error is returned.
+// stored value; nil deletes unconditionally). The record is deleted only
+// after the index delete succeeded, so a removal that failed part-way keeps
+// a retry source (the index diff, and the record-derived workset). Every
+// delete is idempotent, so the next pass converges; the first error is
+// returned.
+//
+// A tool-hash delete failure is logged and does not fail the removal: no
+// dispatch, approval or review path reads the tool-hash bucket (it is purged
+// with the server), so a leftover hash cannot make a stale definition
+// reachable, and tying the capture's completeness to it would refuse the
+// server's tools over inert data with no record left to retry from.
 func (r *Runtime) removeAbsentTool(serverName, toolName string, deleteRecord bool, cond func(*storage.ToolApprovalRecord) bool) error {
 	var first error
 	note := func(err error) {
@@ -106,7 +114,8 @@ func (r *Runtime) removeAbsentTool(serverName, toolName string, deleteRecord boo
 		err = r.storageManager.DeleteToolHash(fullToolName)
 	}
 	if err != nil {
-		note(fmt.Errorf("delete tool hash %s: %w", fullToolName, err))
+		r.logger.Warn("Failed to delete the tool hash of a removed tool",
+			zap.String("tool", fullToolName), zap.Error(err))
 	}
 	if !deleteRecord || first != nil {
 		return first
