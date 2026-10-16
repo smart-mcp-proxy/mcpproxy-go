@@ -74,6 +74,9 @@ type Gaps struct {
 	SkippedStandalone      []string `json:"skipped_standalone_checks"`
 	FailedStandalone       []string `json:"failed_standalone_checks"`
 	SurvivingMutations     []string `json:"surviving_mutations"`
+	// MissingMutations lists required mutations of the versioned set that
+	// the mutation report does not carry, or carries as skipped.
+	MissingMutations       []string `json:"missing_required_mutations"`
 	MutationInfrastructure []string `json:"mutation_infrastructure_failures"`
 	LedgerEmpty            bool     `json:"ledger_empty"`
 }
@@ -82,6 +85,7 @@ func runReport(args []string) error {
 	fs := flag.NewFlagSet("report", flag.ContinueOnError)
 	dir := fs.String("dir", "", "ledger directory (QAPILOT_REPORT_DIR)")
 	mutFile := fs.String("mutation-report", "", "mutation report JSON to merge")
+	setFile := fs.String("mutations", "tests/qapilot/mutations.json", "versioned mutation set; with --mutation-report every required mutation in it must be present and detected")
 	out := fs.String("out", "", "write the coverage report to this file (default stdout)")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -94,7 +98,24 @@ func runReport(args []string) error {
 		return err
 	}
 	var mut *MutationReport
+	var requiredMutations []string
 	if *mutFile != "" {
+		setData, err := os.ReadFile(*setFile)
+		if err != nil {
+			return fmt.Errorf("mutation set: %w", err)
+		}
+		var set MutationSet
+		if err := json.Unmarshal(setData, &set); err != nil {
+			return fmt.Errorf("mutation set: %w", err)
+		}
+		for _, m := range set.Mutations {
+			if m.Required {
+				requiredMutations = append(requiredMutations, m.ID)
+			}
+		}
+		if len(requiredMutations) == 0 {
+			return fmt.Errorf("mutation set %s declares no required mutations", *setFile)
+		}
 		data, err := os.ReadFile(*mutFile)
 		if err != nil {
 			return fmt.Errorf("mutation report: %w", err)
@@ -104,7 +125,7 @@ func runReport(args []string) error {
 			return fmt.Errorf("mutation report: %w", err)
 		}
 	}
-	rep := buildReport(checks, mut)
+	rep := buildReport(checks, mut, requiredMutations)
 	data, _ := json.MarshalIndent(rep, "", "  ")
 	if *out != "" {
 		if err := os.WriteFile(*out, data, 0o644); err != nil {
@@ -120,8 +141,11 @@ func runReport(args []string) error {
 	return nil
 }
 
-// buildReport is pure so it can be unit-tested.
-func buildReport(checks []qapilot.Check, mut *MutationReport) CoverageReport {
+// buildReport is pure so it can be unit-tested. requiredMutations are the ids
+// of the required mutations in the versioned set; when a mutation report is
+// merged, each must appear in it and must not be skipped (an empty, partial
+// or --only-filtered report is incomplete evidence, not a pass).
+func buildReport(checks []qapilot.Check, mut *MutationReport, requiredMutations []string) CoverageReport {
 	rep := CoverageReport{GeneratedAt: time.Now().UTC(), TotalChecks: len(checks)}
 	rep.Gaps.LedgerEmpty = len(checks) == 0
 	// Index checks by id; a check that ran more than once (several packages
@@ -259,7 +283,20 @@ func buildReport(checks []qapilot.Check, mut *MutationReport) CoverageReport {
 				rep.Gaps.MutationInfrastructure = append(rep.Gaps.MutationInfrastructure, m.ID+": "+string(m.Outcome))
 			}
 		}
-		if mut.BaselineOutcome != "" && mut.BaselineOutcome != "passed" {
+		seen := map[string]Outcome{}
+		for _, m := range mut.Results {
+			seen[m.ID] = m.Outcome
+		}
+		for _, id := range requiredMutations {
+			out, ok := seen[id]
+			switch {
+			case !ok:
+				rep.Gaps.MissingMutations = append(rep.Gaps.MissingMutations, id+": absent")
+			case out == OutcomeSkipped:
+				rep.Gaps.MissingMutations = append(rep.Gaps.MissingMutations, id+": skipped")
+			}
+		}
+		if mut.BaselineOutcome != "passed" {
 			rep.Gaps.MutationInfrastructure = append(rep.Gaps.MutationInfrastructure, "baseline: "+mut.BaselineOutcome)
 		}
 	}
@@ -270,7 +307,7 @@ func buildReport(checks []qapilot.Check, mut *MutationReport) CoverageReport {
 		len(g.MissingScenarios) > 0 || len(g.FailedScenarios) > 0 || len(g.SkippedScenarios) > 0 ||
 		g.MissingDecisionCells > 0 || len(rep.DecisionCells.Failed) > 0 ||
 		len(g.MissingStandalone) > 0 || len(g.SkippedStandalone) > 0 || len(g.FailedStandalone) > 0 ||
-		len(g.SurvivingMutations) > 0 || len(g.MutationInfrastructure) > 0 {
+		len(g.SurvivingMutations) > 0 || len(g.MissingMutations) > 0 || len(g.MutationInfrastructure) > 0 {
 		rep.Verdict = "fail"
 	}
 	return rep
@@ -300,8 +337,8 @@ func printSummary(rep CoverageReport) {
 	fmt.Fprintf(os.Stderr, "  decision cells: %d/%d passed\n", rep.DecisionCells.Passed, rep.DecisionCells.Total)
 	g := rep.Gaps
 	if rep.Verdict != "pass" {
-		fmt.Fprintf(os.Stderr, "  GAPS: ledger_empty=%v unexecuted_req=%v failed_req=%v missing_scn=%v failed_scn=%v skipped_scn=%v missing_cells=%d missing_checks=%v skipped_checks=%v failed_checks=%v surviving_mutations=%v mutation_infra=%v\n",
-			g.LedgerEmpty, g.UnexecutedRequirements, g.FailedRequirements, g.MissingScenarios, g.FailedScenarios, g.SkippedScenarios, g.MissingDecisionCells, g.MissingStandalone, g.SkippedStandalone, g.FailedStandalone, g.SurvivingMutations, g.MutationInfrastructure)
+		fmt.Fprintf(os.Stderr, "  GAPS: ledger_empty=%v unexecuted_req=%v failed_req=%v missing_scn=%v failed_scn=%v skipped_scn=%v missing_cells=%d missing_checks=%v skipped_checks=%v failed_checks=%v surviving_mutations=%v missing_mutations=%v mutation_infra=%v\n",
+			g.LedgerEmpty, g.UnexecutedRequirements, g.FailedRequirements, g.MissingScenarios, g.FailedScenarios, g.SkippedScenarios, g.MissingDecisionCells, g.MissingStandalone, g.SkippedStandalone, g.FailedStandalone, g.SurvivingMutations, g.MissingMutations, g.MutationInfrastructure)
 	}
 	if rep.Mutation != nil {
 		fmt.Fprintf(os.Stderr, "  mutations: baseline=%s", rep.Mutation.BaselineOutcome)

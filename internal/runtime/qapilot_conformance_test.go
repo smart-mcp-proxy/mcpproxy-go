@@ -195,10 +195,19 @@ func (h *qapilotHarness) actual() (qapilot.Snapshot, []string) {
 		Tools:           map[string]qapilot.Status{},
 		ToolsDisabled:   map[string]bool{},
 		Dispatch:        map[string]qapilot.DispatchClass{},
+		Current:         map[string]string{},
+		Approved:        map[string]string{},
 	}
 	quarantineEnabled := rt.Config().IsQuarantineEnabled()
 	for _, rec := range records {
 		snap.Tools[rec.ToolName] = qapilot.Status(rec.Status)
+		// Stored contract state: map each stored hash back to the fixture
+		// contract that produces it for this tool, so a regression that
+		// fails to update (or wrongly rewrites) a contract is a disagreement.
+		snap.Current[rec.ToolName] = qapilotContractKey(rec.ToolName, rec.CurrentHash)
+		if rec.Status == storage.ToolApprovalStatusApproved || rec.Status == storage.ToolApprovalStatusChanged {
+			snap.Approved[rec.ToolName] = qapilotContractKey(rec.ToolName, rec.ApprovedHash)
+		}
 		if rec.Disabled {
 			snap.ToolsDisabled[rec.ToolName] = true
 		}
@@ -227,6 +236,19 @@ func (h *qapilotHarness) actual() (qapilot.Snapshot, []string) {
 		snap.ToolsDisabled = nil
 	}
 	return snap, problems
+}
+
+// qapilotContractKey names the fixture contract whose approval hash for
+// toolName equals hash, or "?<hash>" when none matches (a contract the model
+// never presented).
+func qapilotContractKey(toolName, hash string) string {
+	for _, c := range qapilot.FixtureContracts() {
+		h := calculateToolApprovalHashWithOutputSchema(toolName, qapilot.ContractText[c.Key], normalizeJSON(`{"type":"object"}`), normalizeJSON(""), nil)
+		if h == hash {
+			return c.Key
+		}
+	}
+	return "?" + hash
 }
 
 // persistedState is the full persisted approval state of the pilot server:
@@ -470,9 +492,15 @@ func TestQAPilot_KnownDeviations(t *testing.T) {
 			require.NotEmpty(t, diff, "%s: the recorded deviation no longer reproduces — the implementation now matches the policy; move this sequence into qapilot.Scenarios", sc.ID)
 			switch sc.ID {
 			case "D01":
-				// Record status differs (changed vs approved); callability does
-				// not (both ready). Anything else is a NEW deviation.
-				require.Equal(t, []string{`tool "t1": expected status "approved", actual "changed"`}, diff)
+				// Record status differs (changed vs approved), and with it the
+				// approved contract (the implementation keeps the original
+				// approval; the policy would have re-approved the new one);
+				// callability does not differ (both ready). Anything else is a
+				// NEW deviation.
+				require.Equal(t, []string{
+					`tool "t1": expected status "approved", actual "changed"`,
+					`tool "t1": expected approved contract "malicious-v1", actual "benign-v1"`,
+				}, diff)
 				require.Equal(t, qapilot.DispatchReady, actual.Dispatch["t1"], "the gate is off, so the tool must still be callable")
 			default:
 				t.Fatalf("deviation %s has no recorded shape", sc.ID)

@@ -30,7 +30,7 @@ func fullLedger(status string) []qapilot.Check {
 }
 
 func TestBuildReport_AllPassed(t *testing.T) {
-	rep := buildReport(fullLedger("passed"), nil)
+	rep := buildReport(fullLedger("passed"), nil, nil)
 	if rep.Verdict != "pass" {
 		t.Fatalf("verdict: want pass, got %s: %+v", rep.Verdict, rep.Gaps)
 	}
@@ -45,7 +45,7 @@ func TestBuildReport_AllPassed(t *testing.T) {
 }
 
 func TestBuildReport_EmptyLedgerFails(t *testing.T) {
-	rep := buildReport(nil, nil)
+	rep := buildReport(nil, nil, nil)
 	if rep.Verdict != "fail" || !rep.Gaps.LedgerEmpty {
 		t.Fatalf("an empty ledger must fail: %+v", rep.Gaps)
 	}
@@ -61,7 +61,7 @@ func TestBuildReport_SkippedScenarioFails(t *testing.T) {
 			checks[i].Status = "skipped"
 		}
 	}
-	rep := buildReport(checks, nil)
+	rep := buildReport(checks, nil, nil)
 	if rep.Verdict != "fail" || len(rep.Gaps.SkippedScenarios) != 1 {
 		t.Fatalf("a skipped mandatory scenario must fail the gate: %+v", rep.Gaps)
 	}
@@ -76,7 +76,7 @@ func TestBuildReport_MissingCellFails(t *testing.T) {
 		}
 		kept = append(kept, c)
 	}
-	rep := buildReport(kept, nil)
+	rep := buildReport(kept, nil, nil)
 	if rep.Verdict != "fail" || rep.Gaps.MissingDecisionCells != 1 {
 		t.Fatalf("a missing decision cell must fail the gate: %+v", rep.Gaps)
 	}
@@ -89,7 +89,7 @@ func TestBuildReport_MutationAccounting(t *testing.T) {
 		{ID: "M03", Required: false, Outcome: OutcomeSurvived},
 		{ID: "M04", Required: true, Outcome: OutcomeBuildError},
 	}}
-	rep := buildReport(fullLedger("passed"), mut)
+	rep := buildReport(fullLedger("passed"), mut, nil)
 	if rep.Verdict != "fail" {
 		t.Fatal("a surviving required mutation must fail the gate")
 	}
@@ -101,11 +101,37 @@ func TestBuildReport_MutationAccounting(t *testing.T) {
 	}
 	mut.Results[1].Outcome = OutcomeDetected
 	mut.Results[3].Outcome = OutcomeDetected
-	if rep := buildReport(fullLedger("passed"), mut); rep.Verdict != "pass" {
+	if rep := buildReport(fullLedger("passed"), mut, nil); rep.Verdict != "pass" {
 		t.Fatalf("all required detected must pass: %+v", rep.Gaps)
 	}
 	mut.BaselineOutcome = "baseline_failed"
-	if rep := buildReport(fullLedger("passed"), mut); rep.Verdict != "fail" {
+	if rep := buildReport(fullLedger("passed"), mut, nil); rep.Verdict != "fail" {
 		t.Fatal("a failed baseline must fail the gate")
+	}
+}
+
+func TestBuildReport_IncompleteMutationReportFails(t *testing.T) {
+	required := []string{"M01", "M02"}
+	detected := func(id string) MutationResult {
+		return MutationResult{ID: id, Required: true, Outcome: OutcomeDetected}
+	}
+
+	cases := map[string]*MutationReport{
+		"empty report":     {BaselineOutcome: "passed"},
+		"partial report":   {BaselineOutcome: "passed", Results: []MutationResult{detected("M01")}},
+		"required skipped": {BaselineOutcome: "passed", Results: []MutationResult{detected("M01"), {ID: "M02", Required: true, Outcome: OutcomeSkipped}}},
+		"missing baseline": {Results: []MutationResult{detected("M01"), detected("M02")}},
+	}
+	for name, mut := range cases {
+		t.Run(name, func(t *testing.T) {
+			if rep := buildReport(fullLedger("passed"), mut, required); rep.Verdict != "fail" {
+				t.Fatalf("%s must fail the gate: %+v", name, rep.Gaps)
+			}
+		})
+	}
+
+	full := &MutationReport{BaselineOutcome: "passed", Results: []MutationResult{detected("M01"), detected("M02"), {ID: "M03", Outcome: OutcomeSkipped}}}
+	if rep := buildReport(fullLedger("passed"), full, required); rep.Verdict != "pass" {
+		t.Fatalf("every required mutation detected (optional one skipped) must pass: %+v", rep.Gaps)
 	}
 }
