@@ -393,7 +393,7 @@ var phraseFamilies = []phraseFamily{
 		// contents". The payload must be the file itself or a secret
 		// (configSecretPayload); a bare pronoun counts only in the two families
 		// after this one.
-		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + configSecretSources + `)` + sentenceSpan + `{0,120}?` + invertedPlacementLead + `[^.!?]{0,20}?` + configSecretPayload),
+		re:        regexp.MustCompile(`\b(?:` + credentialReadVerbs + `)\b` + sentenceSpan + `{0,40}?(?:` + configSecretSources + `)` + sentenceSpan + `{0,120}?` + invertedPlacementLead + `(?:(?:the|its|their|all|any|my|your|our|this|that|actual|real|raw|full|complete|exact|current|entire|whole|value|values|content|contents|of) ){0,4}` + configSecretPayload),
 		base:      0.88,
 		threat:    detect.ThreatExfiltration,
 		what:      "credential-file-to-argument directive",
@@ -506,7 +506,8 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		}
 	}
 
-	var breakPairs []string // lazily built, see lineBreakSoft
+	var breakSet map[int]bool // lazily built, see lineBreakSoft
+	var breakWords []string
 	matched := false
 	bestConf := 0.0
 	bestMatch := ""
@@ -583,10 +584,10 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				// (#1589) is two sentences, not one directive. PhraseText has
 				// collapsed the line break, so it is recovered from the raw text.
 				if fam.lineBreakSoft && !deobfuscated && conf > deobfuscatedMaxConfidence {
-					if breakPairs == nil {
-						breakPairs = capitalizedBreakPairs(tool.RawText())
+					if breakSet == nil {
+						breakSet, breakWords = capitalizedBreakPairs(tool.RawText())
 					}
-					if matchJoinsBreak(t[start:loc[1]], breakPairs) {
+					if matchJoinsBreak(t, start, loc[1], breakSet, breakWords) {
 						conf = deobfuscatedMaxConfidence
 						softReason = "the match joins a line that ends with the start of a new sentence on the next line"
 					}
@@ -651,38 +652,62 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	}}
 }
 
-// capitalizedBreakPairs returns, for every line break in raw text whose next
-// non-empty line starts with an upper-case letter, the normalized word pair
-// "<last word of the line> <first word of the next line>". Escaped line breaks
-// inside serialized schema JSON count as line breaks. The result is never nil
-// (a text without such a break yields an empty, non-nil slice).
-func capitalizedBreakPairs(raw string) []string {
-	pairs := []string{}
+// breakWord reduces a whitespace-delimited field to the bare word used to
+// compare raw text with the normalized phrase text: normalized, with
+// surrounding punctuation removed.
+func breakWord(field string) string {
+	w := strings.TrimFunc(detect.Normalize(field), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	})
+	return w
+}
+
+// capitalizedBreakPairs returns the word indexes (into the whitespace-split
+// word stream of the raw text) of every word that ends a line whose next
+// non-empty line starts with an upper-case letter: index i means words i and
+// i+1 sit on either side of such a break. Escaped line breaks inside
+// serialized schema JSON count as line breaks. The second result is the word
+// stream, normalized and stripped of punctuation. The set is never nil.
+func capitalizedBreakPairs(raw string) (map[int]bool, []string) {
+	breaks := map[int]bool{}
+	words := []string{}
 	text := unicodeLineBreaks.Replace(unescapeJSONLineBreaks(raw))
 	text = strings.ReplaceAll(strings.ReplaceAll(text, "\r\n", "\n"), "\r", "\n")
-	lines := strings.Split(text, "\n")
-	prev := ""
-	for _, line := range lines {
+	prevEnd := -1
+	for _, line := range strings.Split(text, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
 		}
-		if prev != "" {
+		if prevEnd >= 0 {
 			if first, _ := utf8.DecodeRuneInString(fields[0]); unicode.IsUpper(first) {
-				pairs = append(pairs, detect.Normalize(prev+" "+fields[0]))
+				breaks[prevEnd] = true
 			}
 		}
-		prev = fields[len(fields)-1]
+		for _, f := range fields {
+			words = append(words, breakWord(f))
+		}
+		prevEnd = len(words) - 1
 	}
-	return pairs
+	return breaks, words
 }
 
-// matchJoinsBreak reports whether the normalized match contains one of the
-// word pairs recorded by capitalizedBreakPairs.
-func matchJoinsBreak(match string, pairs []string) bool {
-	padded := " " + match + " "
-	for _, p := range pairs {
-		if p != "" && strings.Contains(padded, " "+p+" ") {
+// matchJoinsBreak reports whether the match t[start:end] spans one of the
+// recorded line breaks, located by word position so that an unrelated break
+// elsewhere in the text does not count. The word stream of t must agree with
+// the raw word stream at the match, otherwise nothing is reported.
+func matchJoinsBreak(t string, start, end int, breaks map[int]bool, words []string) bool {
+	if len(breaks) == 0 {
+		return false
+	}
+	first := len(strings.Fields(t[:start]))
+	mw := strings.Fields(t[start:end])
+	for j := 0; j+1 < len(mw); j++ {
+		i := first + j
+		if i+1 >= len(words) || !breaks[i] {
+			continue
+		}
+		if breakWord(mw[j]) == words[i] && breakWord(mw[j+1]) == words[i+1] {
 			return true
 		}
 	}
