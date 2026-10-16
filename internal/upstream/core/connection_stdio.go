@@ -558,7 +558,7 @@ func (c *Client) startStdioAdmitted(ctx context.Context) error {
 		// the start fails. Left running, its descendants would survive a
 		// retirement that can only reach the immediate process. On Windows
 		// a grandchild forked before this point is outside reach either
-		// way; CREATE_SUSPENDED (T093b, deferred) closes that window.
+		// way; CREATE_SUSPENDED (T093b) closes that window.
 		cmd := c.processCmd
 		killProcessTreeNow(startedProcessGroupID(cmd), cmd)
 		c.processGroupID = 0
