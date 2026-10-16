@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"sync"
@@ -74,12 +75,17 @@ func (m *multiplexListener) acceptLoop(ln *Listener) {
 		}
 
 		// Wrap connection with source tag
-		taggedConn := &taggedConn{
+		var tagged net.Conn = &taggedConn{
 			Conn:   conn,
 			source: ln.Source,
 		}
+		// TLS goes outside the tag so net/http sees a *tls.Conn (r.TLS, h2).
+		// The handshake runs lazily in the connection's own goroutine.
+		if ln.tlsConfig != nil {
+			tagged = tls.Server(tagged, ln.tlsConfig)
+		}
 
-		m.connCh <- taggedConn
+		m.connCh <- tagged
 	}
 }
 
@@ -134,6 +140,10 @@ type taggedConn struct {
 // can serve the real handler over a real socket through the exact production
 // tagging, instead of a look-alike copy that could drift from it.
 func taggedConnContext(ctx context.Context, c net.Conn) context.Context {
+	// A TLS listener wraps the tagged connection; look through it.
+	if tlsConn, ok := c.(*tls.Conn); ok {
+		c = tlsConn.NetConn()
+	}
 	// Extract source from tagged connection
 	if tc, ok := c.(*taggedConn); ok {
 		return TagConnectionContext(ctx, tc.source)

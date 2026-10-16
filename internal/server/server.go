@@ -3524,15 +3524,23 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			s.httpServer.Handler = handler
 		}
 
+		// Issue #1623: wrap ONLY the TCP listener. The tray/Unix socket stays
+		// plain HTTP so the tray and CLI (which speak cleartext over local IPC)
+		// keep working when tls.enabled=true. Serving TLS over the multiplex
+		// listener previously broke /ready on the socket with HTTP 400.
+		wrapTCPListenerWithTLS(tcpListener, tlsCfg)
+
 		s.logger.Info("Starting HTTPS server with TLS configuration",
 			zap.String("certs_dir", certsDir),
 			zap.Bool("require_client_cert", cfg.TLS.RequireClientCert),
 			zap.Bool("hsts", cfg.TLS.HSTS),
+			zap.Bool("tray_plain_http", trayListener != nil),
 		)
 
-		// Run the HTTPS server in a goroutine to enable graceful shutdown
+		// Run the HTTPS server in a goroutine to enable graceful shutdown.
+		// TCP is already TLS-wrapped; tray remains cleartext — use plain Serve.
 		go func() {
-			if err := tlslocal.ServeWithTLS(s.httpServer, muxListener, tlsCfg); err != nil && err != http.ErrServerClosed {
+			if err := s.httpServer.Serve(muxListener); err != nil && err != http.ErrServerClosed {
 				s.logger.Error("HTTPS server error", zap.Error(err))
 				s.mu.Lock()
 				s.running = false
