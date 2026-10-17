@@ -334,19 +334,23 @@ Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/)
 
 > Shipped 2026-09-26..10-05 as PRs 108-a..l. Left open: T126 live run of the six audit acceptance checks on one isolated instance across all surfaces (task below), and issue #1449 (macOS review follow-ups).
 
-Spec: [108-profiles-v3](./specs/108-profiles-v3/) · PR: #1380 #1411 #1430 #1436 #1441 #1442 #1443 #1444 #1448 #1456 #1500
+Spec: [108-profiles-v3](./specs/108-profiles-v3/)
 
 ```mermaid
 graph LR
+  profiles_v3_impl["PRs 108-a..l: policy fields, enforcement, bin…"]
   profiles_v3_live_acceptance["Live run of the six Spec 108 audit acceptance…"]
 
 
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class profiles_v3_impl done;
   class profiles_v3_live_acceptance todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
+| PRs 108-a..l: policy fields, enforcement, bindings, CLI, MCP admin tool, Web UI, macOS, parity docs | 🟢 Done | #1380 #1411 #1430 #1436 #1441 #1442 #1443 #1444 #1448 #1456 #1500 |
 | Live run of the six Spec 108 audit acceptance checks on one isolated instance (Web UI, macOS, CLI, MCP) — tasks.md T126 | ⚪ Todo | — |
 
 </details>
@@ -356,19 +360,23 @@ graph LR
 
 > Shipped 2026-09-26..10-02 as PRs 109-a..m. Left open: T150 live run of every user story's independent test across surfaces (task below).
 
-Spec: [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) · PR: #1376 #1377 #1382 #1399 #1400 #1409 #1412 #1424 #1425 #1427 #1428 #1461
+Spec: [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/)
 
 ```mermaid
 graph LR
+  ux_navigation_impl["PRs 109-a..m: attention list, review queue, c…"]
   ux_navigation_live_acceptance["Live run of every Spec 109 user story's indep…"]
 
 
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class ux_navigation_impl done;
   class ux_navigation_live_acceptance todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
+| PRs 109-a..m: attention list, review queue, catalog-first Add, grouped navigation, parity docs | 🟢 Done | #1376 #1377 #1382 #1399 #1400 #1409 #1412 #1424 #1425 #1427 #1428 #1461 |
 | Live run of every Spec 109 user story's independent test on one isolated instance — tasks.md T150 | ⚪ Todo | — |
 
 </details>
@@ -1002,8 +1010,8 @@ graph LR
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 21/81 (26%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
-| Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability | In progress | P1 | 194/195 (99%) | [108-profiles-v3](./specs/108-profiles-v3/) | #1380 #1411 #1430 #1436 #1441 #1442 #1443 #1444 #1448 #1456 #1500 |
-| Spec 109 navigation, scope filters and cross-surface UX consistency | In progress | P1 | 257/258 (100%) | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) | #1376 #1377 #1382 #1399 #1400 #1409 #1412 #1424 #1425 #1427 #1428 #1461 |
+| Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability | In progress | P1 | 194/195 (99%) | [108-profiles-v3](./specs/108-profiles-v3/) |  |
+| Spec 109 navigation, scope filters and cross-surface UX consistency | In progress | P1 | 257/258 (100%) | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls | In review | P2 | — |  | #1536 |

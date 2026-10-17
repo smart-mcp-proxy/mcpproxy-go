@@ -900,10 +900,14 @@ epics:
     status: in_progress
     priority: P1
     spec: specs/108-profiles-v3
-    pr: ["#1380", "#1411", "#1430", "#1436", "#1441", "#1442", "#1443", "#1444", "#1448", "#1456", "#1500"]
     depends_on: []
     note: "Shipped 2026-09-26..10-05 as PRs 108-a..l. Left open: T126 live run of the six audit acceptance checks on one isolated instance across all surfaces (task below), and issue #1449 (macOS review follow-ups)."
     tasks:
+      - id: profiles-v3-impl
+        title: "PRs 108-a..l: policy fields, enforcement, bindings, CLI, MCP admin tool, Web UI, macOS, parity docs"
+        status: done
+        pr: ["#1380", "#1411", "#1430", "#1436", "#1441", "#1442", "#1443", "#1444", "#1448", "#1456", "#1500"]
+        depends_on: []
       - id: profiles-v3-live-acceptance
         title: "Live run of the six Spec 108 audit acceptance checks on one isolated instance (Web UI, macOS, CLI, MCP) — tasks.md T126"
         status: todo
@@ -914,10 +918,14 @@ epics:
     status: in_progress
     priority: P1
     spec: specs/109-ux-navigation-consistency
-    pr: ["#1376", "#1377", "#1382", "#1399", "#1400", "#1409", "#1412", "#1424", "#1425", "#1427", "#1428", "#1461"]
     depends_on: []
     note: "Shipped 2026-09-26..10-02 as PRs 109-a..m. Left open: T150 live run of every user story's independent test across surfaces (task below)."
     tasks:
+      - id: ux-navigation-impl
+        title: "PRs 109-a..m: attention list, review queue, catalog-first Add, grouped navigation, parity docs"
+        status: done
+        pr: ["#1376", "#1377", "#1382", "#1399", "#1400", "#1409", "#1412", "#1424", "#1425", "#1427", "#1428", "#1461"]
+        depends_on: []
       - id: ux-navigation-live-acceptance
         title: "Live run of every Spec 109 user story's independent test on one isolated instance — tasks.md T150"
         status: todo
