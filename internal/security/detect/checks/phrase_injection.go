@@ -1159,7 +1159,7 @@ func negatedBefore(text string, start int) bool {
 
 // secretMetadataWords describe a secret without being it: its expiry, its
 // count, its name (Sol r18 P2). Normalized (lowercased, lightly stemmed).
-const secretMetadataAlt = `expir\w*|expires?|ttl|lifetime|age|count|counts|number|numbers|length|size|name|names|nam|type|types|format|timestamp|date|dates|scope\w*|status|version|owner|creat\w*|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+|time|times|stamp|stamps|modif\w*|algorithm\w*|bits?|ids?|comment\w*|encod\w*|error\w*|permission\w*|mode|uid|gid|mtime|ctime|atime`
+const secretMetadataAlt = `expir\w*|expires?|ttl|lifetime|age|count|counts|number|numbers|length|size|name|names|nam|type|types|format|timestamp|date|dates|scope\w*|status|version|owner|creat\w*|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+|time|times|stamp|stamps|modif\w*|algorithm\w*|bits?|ids?|comment\w*|error\w*|permission\w*|mode|uid|gid|mtime|ctime|atime`
 
 var secretMetadataWords = regexp.MustCompile(`^(?:` + secretMetadataAlt + `)$`)
 

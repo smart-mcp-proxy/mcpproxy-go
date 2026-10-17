@@ -230,6 +230,12 @@ func (p *placementToks) skippableExemplifier(k int, w string) (last int, ok bool
 		if !more || p.t[s] == ',' || p.t[s] == ';' || placementDestRe.MatchString(p.t[s:]) {
 			break
 		}
+		if cw := p.word(n); placementConjunctions[cw] || cw == "then" {
+			// a further item after the example ends it
+			if nj, nw := p.nextWord(n); nj >= 0 && p.startsItem(nj, nw) {
+				break
+			}
+		}
 		if spanStart < 0 {
 			spanStart = s
 		}
@@ -617,6 +623,14 @@ var outputTargetRe = regexp.MustCompile(`(?i)\b(?:to|into)\s+(?:the |a |an |its 
 // outputSecretNounRe finds the nouns that make an output clause carry a secret.
 var outputSecretNounRe = regexp.MustCompile(`(?i)\b(?:contents?|text|data|body|values?|secrets?|tokens?|passwords?|passphras\w*|credentials?|keys?|private key|raw bytes|everyth\w*|file|it)\b`)
 
+// encodingHeadRe is "encoding"/"encoded" (stemmed "encod"); a metadata head in
+// the output-clause rule only.
+var encodingHeadRe = regexp.MustCompile(`(?i)^encod\w*$`)
+
+// outputQualifierNounRe are the nouns that are the payload themselves, so a
+// following "encoded" describes the payload rather than naming metadata.
+var outputQualifierNounRe = regexp.MustCompile(`(?i)^(?:contents?|keys?|file|tokens?|secrets?|values?|data)$`)
+
 // genericOutputNounRe are the generic nouns a preceding metadata word can
 // qualify ("error text", "status data").
 var genericOutputNounRe = regexp.MustCompile(`(?i)^(?:text|data|body|values?)$`)
@@ -654,10 +668,16 @@ func outputClauseNamesSecret(t string, from int) bool {
 				break // the lookahead stops at a conjunction
 			}
 			meta = meta || secretMetadataWords.MatchString(w)
+			// "text encoding": a head only after a noun that is not itself a
+			// qualifier ("contents encoded" is the contents)
+			if n == 0 && encodingHeadRe.MatchString(w) && !outputQualifierNounRe.MatchString(before[l[0]:l[1]]) {
+				meta = true
+			}
 		}
-		if !meta && genericOutputNounRe.MatchString(before[l[0]:l[1]]) {
+		if !meta && genericOutputNounRe.MatchString(before[l[0]:l[1]]) &&
+			!strings.HasSuffix(strings.TrimRight(before[:l[0]], " "), ",") {
 			// "the error text": a metadata word right before a generic noun
-			// qualifies it
+			// qualifies it (not across a comma)
 			prev := phraseWords(before[:l[0]])
 			meta = len(prev) > 0 && secretMetadataWords.MatchString(strings.ToLower(prev[len(prev)-1]))
 		}
