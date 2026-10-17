@@ -1154,7 +1154,7 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 			// The ORIGINATING job's incarnation (review round 1): a late
 			// Pass 1 of a removed server must not bind Pass 2 to a
 			// same-name replacement.
-			go a.service.startPass2(job.ServerName, a.serverInfo, job.Incarnation)
+			go a.service.startPass2(job.ServerName, a.serverInfo, job.Incarnation, job.ID)
 		}
 	}
 }
@@ -1453,7 +1453,9 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 // inc is the incarnation of the Pass 1 job that scheduled it: Pass 2 and its
 // failed-source placeholder bind to it, and Pass 2 does not start at all once
 // that incarnation is no longer current (Spec 116 FR-014a, review round 1).
-func (s *Service) startPass2(serverName string, serverInfo *ServerInfo, inc int64) {
+// pass1JobID names the Pass-1 job that scheduled this audit ("" when none):
+// only that job's not-yet-cleared slot is waited on.
+func (s *Service) startPass2(serverName string, serverInfo *ServerInfo, inc int64, pass1JobID string) {
 	if !s.incarnationIsCurrent(serverName, inc) {
 		s.logger.Info("Pass 2 skipped: the server was removed or replaced since Pass 1 started",
 			zap.String("server", serverName), zap.Int64("incarnation", inc))
@@ -1554,14 +1556,47 @@ func (s *Service) startPass2(serverName string, serverInfo *ServerInfo, inc int6
 		scanPass: ScanPassSupplyChainAudit,
 	}
 
-	_, err := s.engine.StartScan(ctx, req, callback)
+	// Pass 1's OnScanCompleted (which spawns this goroutine) runs inside
+	// executeScan BEFORE its deferred clearActiveJob releases the server's
+	// slot, so a quick Pass 2 can find Pass 1's own job still registered and
+	// be rejected with ErrScanInProgress, silently dropping the audit. Wait
+	// (bounded) for that slot to free instead.
+	_, err := s.startScanAfterPass1Slot(ctx, req, callback, pass1JobID)
 	if err != nil {
 		s.logger.Warn("Failed to start Pass 2 scan",
 			zap.String("server", serverName),
 			zap.Error(err),
 		)
-		// If the engine rejected (e.g., scan already in progress for same server),
-		// just log and move on. Pass 2 is best-effort.
+		// The callback only owns the cleanup for an ACCEPTED scan.
+		if resolvedCleanup != nil {
+			resolvedCleanup()
+		}
+		s.saveFailedPass2Job(serverName, "supply chain audit could not start: "+err.Error(), inc)
+	}
+}
+
+// pass2SlotWait bounds how long Pass 2 waits for Pass 1's job to leave the
+// engine's active set (a var so tests can shrink it).
+var pass2SlotWait = 10 * time.Second
+
+// startScanAfterPass1Slot starts req, retrying while the only thing in the way
+// is the originating Pass-1 job (pass1JobID), which has finished its work but
+// not yet been cleared. Any other blocker (a user-triggered scan that started
+// in between, another Pass 2) is not waited on.
+func (s *Service) startScanAfterPass1Slot(ctx context.Context, req ScanRequest, cb ScanCallback, pass1JobID string) (*ScanJob, error) {
+	deadline := time.Now().Add(pass2SlotWait)
+	for {
+		job, err := s.engine.StartScan(ctx, req, cb)
+		if err == nil || !errors.Is(err, ErrScanInProgress) {
+			return job, err
+		}
+		if blocker := s.engine.GetActiveJob(req.ServerName); pass1JobID == "" || (blocker != nil && blocker.ID != pass1JobID) {
+			return job, err // not our Pass 1: do not wait on it
+		}
+		if !time.Now().Before(deadline) {
+			return job, err
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
