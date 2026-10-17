@@ -31,7 +31,7 @@ func TestPass2_R1_UsesOriginatingIncarnation(t *testing.T) {
 	svc.saveFailedPass2Job("acme", "source resolution failed", 1) // A's job was incarnation 1
 	assert.Empty(t, base.jobs, "A's Pass 2 placeholder is not stored under B")
 
-	svc.startPass2("acme", &ServerInfo{Name: "acme", Protocol: "stdio", Command: "true"}, 1)
+	svc.startPass2("acme", &ServerInfo{Name: "acme", Protocol: "stdio", Command: "true"}, 1, "")
 	assert.Nil(t, svc.engine.GetActiveJob("acme"), "no Pass 2 runs for a replaced incarnation")
 	assert.Empty(t, base.jobs)
 	assert.Empty(t, base.reports)

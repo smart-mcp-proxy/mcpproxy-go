@@ -2988,7 +2988,7 @@ func TestStartPass2WaitsForPass1SlotRelease(t *testing.T) {
 		svc.engine.clearActiveJob("srv-slot", pass1)
 	}()
 
-	svc.startPass2("srv-slot", info, 0)
+	svc.startPass2("srv-slot", info, 0, "pass1")
 	waitForPass2Saved(t, store, "srv-slot")
 	jobs, _ := store.ListScanJobs("srv-slot")
 	for _, j := range jobs {
@@ -2997,4 +2997,31 @@ func TestStartPass2WaitsForPass1SlotRelease(t *testing.T) {
 		}
 	}
 	waitForScanIdle(t, svc, "srv-slot")
+}
+
+// TestStartPass2DoesNotWaitOnUnrelatedPass1: when the slot is held by a
+// different Pass-1 job (e.g. a user-triggered rescan that started after the
+// originating Pass 1 was cleared), Pass 2 must not wait out pass2SlotWait on
+// it; it records a failed audit at once.
+func TestStartPass2DoesNotWaitOnUnrelatedPass1(t *testing.T) {
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	store := newMockStorage()
+	svc := NewService(store, NewRegistry(dir, logger), NewDockerRunner(logger), dir, logger)
+	info := &ServerInfo{Name: "srv-other", Protocol: "stdio", Command: "node", Args: []string{"server.js"}, WorkingDir: t.TempDir()}
+	svc.SetServerInfoProvider(&scanSpyProvider{info: info})
+	svc.SetDeepScan(true, nil)
+
+	other := &ScanJob{ID: "user-rescan", ServerName: "srv-other", Status: ScanJobStatusRunning, ScanPass: ScanPassSecurityScan}
+	svc.engine.mu.Lock()
+	svc.engine.activeScans["srv-other"] = other
+	svc.engine.mu.Unlock()
+	t.Cleanup(func() { svc.engine.clearActiveJob("srv-other", other) })
+
+	start := time.Now()
+	svc.startPass2("srv-other", info, 0, "pass1")
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("Pass 2 waited %s on an unrelated Pass-1 job", elapsed)
+	}
+	waitForPass2Saved(t, store, "srv-other")
 }
