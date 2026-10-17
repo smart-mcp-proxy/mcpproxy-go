@@ -1005,8 +1005,18 @@ jobs:
             echo "${SUBMISSION_ID}" > "${FILE_NAME}.submission_id"
 
             echo "Stapling notarization ticket to ${FILE_LABEL}"
-            xcrun stapler staple "${FILE_NAME}"
-            xcrun stapler validate "${FILE_NAME}"
+            # Apple ticket delivery (CloudKit) drops connections intermittently
+            # ("network connection was lost", exit 68); retry with backoff.
+            for attempt in 1 2 3 4 5; do
+              xcrun stapler staple "${FILE_NAME}" && break
+              if [ "$attempt" = 5 ]; then exit 1; fi
+              echo "stapler staple failed (attempt $attempt), retrying"; sleep $((attempt * 15))
+            done
+            for attempt in 1 2 3 4 5; do
+              xcrun stapler validate "${FILE_NAME}" && break
+              if [ "$attempt" = 5 ]; then exit 1; fi
+              echo "stapler validate failed (attempt $attempt), retrying"; sleep $((attempt * 15))
+            done
           }
 
           notarize_and_staple "${PKG_NAME}" "PKG installer"
@@ -1083,8 +1093,18 @@ jobs:
 
           # Staple the BUNDLE, then re-archive it: the ticket must travel inside
           # the .app the user ends up running.
-          xcrun stapler staple "${APP_SRC}"
-          xcrun stapler validate "${APP_SRC}"
+          # Apple ticket delivery (CloudKit) drops connections intermittently
+          # ("network connection was lost", exit 68); retry with backoff.
+          for attempt in 1 2 3 4 5; do
+            xcrun stapler staple "${APP_SRC}" && break
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            echo "stapler staple failed (attempt $attempt), retrying"; sleep $((attempt * 15))
+          done
+          for attempt in 1 2 3 4 5; do
+            xcrun stapler validate "${APP_SRC}" && break
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            echo "stapler validate failed (attempt $attempt), retrying"; sleep $((attempt * 15))
+          done
 
           echo "=== Creating the stapled enclosure ==="
           ditto -c -k --sequesterRsrc --keepParent "${APP_SRC}" "sparkle-enclosure/${ENCLOSURE}"
@@ -1096,7 +1116,13 @@ jobs:
           VERIFY_DIR=$(mktemp -d)
           ditto -x -k "sparkle-enclosure/${ENCLOSURE}" "${VERIFY_DIR}"
           codesign --verify --deep --strict --verbose=2 "${VERIFY_DIR}/mcpproxy.app"
-          xcrun stapler validate "${VERIFY_DIR}/mcpproxy.app"
+          # Apple ticket delivery (CloudKit) drops connections intermittently
+          # ("network connection was lost", exit 68); retry with backoff.
+          for attempt in 1 2 3 4 5; do
+            xcrun stapler validate "${VERIFY_DIR}/mcpproxy.app" && break
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            echo "stapler validate failed (attempt $attempt), retrying"; sleep $((attempt * 15))
+          done
           spctl -a -t exec -vv "${VERIFY_DIR}/MCPProxy.app"
           rm -rf "${VERIFY_DIR}"
 
