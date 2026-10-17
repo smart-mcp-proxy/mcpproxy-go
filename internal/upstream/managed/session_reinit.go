@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 )
 
 // Spec 113-e (G8): when a Streamable HTTP upstream answers HTTP 404 for a
@@ -66,6 +67,17 @@ type sessionReinit struct {
 	flight   *reinitFlight
 	baseline map[string]toolIdentity // raw tool name -> identity from the last good listing
 	count    atomic.Int64
+	// verifiedGen is the core client's session generation whose toolset the
+	// baseline was last verified against (a tools/list on that session). A
+	// re-initialize whose verifying tools/list failed leaves it behind the
+	// current generation, and no tools/call is sent until a listing catches
+	// it up (sendVerified).
+	verifiedGen uint64
+
+	// beforeSend, when set (tests only), runs in sendVerified after the
+	// checks and right before the send, i.e. inside the window a concurrent
+	// re-initialize can overtake.
+	beforeSend func()
 }
 
 // SessionReinitCount reports how many in-place session re-initializations this
@@ -79,10 +91,15 @@ func shortID(id string) string {
 	return id
 }
 
-// recordToolBaseline remembers the identity hash and read-only-ness of every
-// tool in a successful listing, the reference a post-re-init listing is
-// compared with.
-func (mc *Client) recordToolBaseline(tools []*config.ToolMetadata) {
+// publishBaseline remembers the identity hash and read-only-ness of every tool
+// in a successful listing taken on session generation gen, the reference a
+// post-re-init listing is compared with, and marks gen verified. The baseline
+// and its generation are published together under sess.mu, and a listing a
+// re-initialize has overtaken (the generation moved since it started) is
+// dropped without touching either, so an old session's listing can never
+// replace a newer session's verified baseline. changed reports whether the
+// published toolset differs from the previous baseline.
+func (mc *Client) publishBaseline(tools []*config.ToolMetadata, gen uint64) (changed, published bool) {
 	next := make(map[string]toolIdentity, len(tools))
 	for _, t := range tools {
 		if t == nil {
@@ -91,8 +108,27 @@ func (mc *Client) recordToolBaseline(tools []*config.ToolMetadata) {
 		next[t.Name] = toolIdentity{hash: t.Hash, readOnly: isReadOnlyTool(t)}
 	}
 	mc.sess.mu.Lock()
+	defer mc.sess.mu.Unlock()
+	if mc.coreClient != nil && mc.coreClient.SessionGeneration() != gen {
+		return false, false
+	}
+	prev := mc.sess.baseline
+	changed = len(prev) != len(next)
+	for name, id := range next {
+		if p, ok := prev[name]; !ok || p.hash != id.hash {
+			changed = true
+		}
+	}
 	mc.sess.baseline = next
-	mc.sess.mu.Unlock()
+	mc.sess.verifiedGen = gen
+	return changed, true
+}
+
+func (mc *Client) sessionGeneration() uint64 {
+	if mc.coreClient == nil {
+		return 0
+	}
+	return mc.coreClient.SessionGeneration()
 }
 
 func isReadOnlyTool(t *config.ToolMetadata) bool {
@@ -197,24 +233,32 @@ func (mc *Client) runReinit(ctx context.Context) error {
 	if err := mc.coreClient.ReinitializeSession(ctx); err != nil {
 		return err
 	}
-	tools, err := mc.coreClient.ListTools(ctx)
-	if err != nil {
+	if err := mc.verifyToolset(ctx); err != nil {
 		return fmt.Errorf("tools/list after session re-initialize: %w", err)
 	}
-	mc.sess.mu.Lock()
-	prev := mc.sess.baseline
-	mc.sess.mu.Unlock()
-	changed := len(prev) != len(tools)
-	for _, t := range tools {
-		if p, ok := prev[t.Name]; !ok || p.hash != t.Hash {
-			changed = true
-		}
+	return nil
+}
+
+// verifyToolset lists the tools on the current session and publishes the
+// listing as the identity baseline of the generation it ran on (scheduling the
+// discovery path when the toolset changed). A listing overtaken by another
+// re-initialize publishes nothing; the newer session's own listing does.
+func (mc *Client) verifyToolset(ctx context.Context) error {
+	gen := mc.sessionGeneration()
+	tools, err := mc.coreClient.ListTools(ctx)
+	if err != nil {
+		return err
 	}
-	mc.recordToolBaseline(tools)
-	if changed {
+	if changed, _ := mc.publishBaseline(tools, gen); changed {
 		mc.scheduleToolRefresh()
 	}
 	return nil
+}
+
+func (mc *Client) sessionVerified(gen uint64) bool {
+	mc.sess.mu.Lock()
+	defer mc.sess.mu.Unlock()
+	return mc.sess.verifiedGen == gen
 }
 
 func (mc *Client) scheduleToolRefresh() {
@@ -287,13 +331,16 @@ func (mc *Client) probeLiveness(ctx context.Context, p livenessProber) error {
 
 // listToolsUpstream is the upstream tools/list with session recovery.
 func (mc *Client) listToolsUpstream(ctx context.Context) (tools []*config.ToolMetadata, err error) {
+	gen := mc.sessionGeneration()
 	err = mc.withSession(ctx, string(mcp.MethodToolsList), func() error {
 		var e error
 		tools, e = mc.coreClient.ListTools(ctx)
 		return e
 	})
 	if err == nil {
-		mc.recordToolBaseline(tools)
+		// Dropped when a re-initialize overtook this listing (including one
+		// withSession ran for it): that re-init published its own listing.
+		mc.publishBaseline(tools, gen)
 	}
 	return tools, err
 }
@@ -307,46 +354,124 @@ func (mc *Client) callToolWithSession(ctx context.Context, invoker toolCaller, t
 	}
 	// The identity this call is held against, read before anything can re-init.
 	pre, preKnown := mc.toolIdentityOf(toolName)
+	method := string(mcp.MethodToolsCall)
 
-	if err := mc.joinGap(ctx, string(mcp.MethodToolsCall)); err != nil {
-		return nil, err
-	}
-	if refusal := mc.identityRefusal(toolName, pre, preKnown, expectedEpoch); refusal != nil {
-		return nil, refusal
-	}
-
-	cur, known, ok := mc.sessionState()
-	stale := cur
-	if stale == "" {
-		stale = known
-	}
-	result, err := invoker.CallTool(ctx, toolName, args)
-	if err == nil || !ok || stale == "" || !errors.Is(err, transport.ErrSessionTerminated) {
+	// stale is the session the send went out on (or the known id when the
+	// transport had none); sent is false when nothing was sent, in which case
+	// an error is never retried.
+	var stale string
+	var ok, sent bool
+	result, err := mc.sendVerified(ctx, method, toolName, args, func() error {
+		return mc.identityRefusal(toolName, pre, preKnown, expectedEpoch)
+	}, func() {
+		var cur, known string
+		cur, known, ok = mc.sessionState()
+		stale = cur
+		if stale == "" {
+			stale = known
+		}
+		sent = true
+	})
+	if err == nil || !sent || !ok || stale == "" || !errors.Is(err, transport.ErrSessionTerminated) ||
+		errors.Is(err, ErrSessionReestablished) {
 		return result, err
 	}
-	if rerr := mc.reinitSession(ctx, stale, string(mcp.MethodToolsCall)); rerr != nil {
+	if rerr := mc.reinitSession(ctx, stale, method); rerr != nil {
 		return nil, errors.Join(err, rerr)
 	}
-	post, postKnown := mc.toolIdentityOf(toolName)
-	if !preKnown || !postKnown || post.hash != pre.hash {
-		if expectedEpoch != nil {
-			return nil, ErrConnectionGenerationChanged
+	// The retry is held to the re-listed toolset: the tool's identity must be
+	// unchanged and both listings must say read-only (annotations are not part
+	// of the identity hash). sendVerified re-runs these checks if yet another
+	// re-init lands before the retry is sent.
+	return mc.sendVerified(ctx, method, toolName, args, func() error {
+		post, postKnown := mc.toolIdentityOf(toolName)
+		if !preKnown || !postKnown || post.hash != pre.hash {
+			if expectedEpoch != nil {
+				return ErrConnectionGenerationChanged
+			}
+			return &sessionReestablishedError{detail: fmt.Sprintf("tool %q identity not confirmed after re-initialize", toolName)}
 		}
-		return nil, &sessionReestablishedError{detail: fmt.Sprintf("tool %q identity not confirmed after re-initialize", toolName)}
+		if !pre.readOnly || !post.readOnly {
+			return &sessionReestablishedError{detail: fmt.Sprintf("tool %q is not read-only", toolName)}
+		}
+		if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
+			return ErrConnectionGenerationChanged
+		}
+		return nil
+	}, nil)
+}
+
+// maxSessionAdmits bounds how many times one send re-validates after a session
+// re-initialize overtook it. Each round waits for a whole re-init flight, so
+// hitting the bound means the upstream keeps dropping sessions.
+const maxSessionAdmits = 3
+
+// sendVerified sends one tools/call only on a session whose toolset the checks
+// in verify were run against (FR-082, FR-083a). It joins any re-init flight in
+// progress, takes the core client's session generation, and runs verify; the
+// send is pinned to that generation, so if a re-initialize lands between the
+// checks and the send (the call queued behind it on the core client's session
+// gate), the core client refuses it with nothing sent and the checks are run
+// again against the re-listed toolset. observe, when set, runs right before
+// each send to capture the session the send will use.
+//
+// The generation is read BEFORE the flight check: a flight is registered
+// before its Initialize moves the generation and cleared only after its
+// tools/list ran, so seeing no flight after the read means that any later
+// re-initialize changes the generation and is caught at send, and that an
+// earlier one has finished. If that earlier one's tools/list failed, the
+// generation is not verified (verifiedGen) and the toolset is listed again
+// before the checks run.
+func (mc *Client) sendVerified(ctx context.Context, method, toolName string, args map[string]interface{}, verify func() error, observe func()) (*mcp.CallToolResult, error) {
+	for attempt := 1; ; attempt++ {
+		if err := mc.joinGap(ctx, method); err != nil {
+			return nil, err
+		}
+		gen := mc.coreClient.SessionGeneration()
+		mc.sess.mu.Lock()
+		f := mc.sess.flight
+		mc.sess.mu.Unlock()
+		if f != nil {
+			if err := waitFlight(ctx, f); err != nil {
+				return nil, err
+			}
+			if attempt < maxSessionAdmits {
+				continue
+			}
+			return nil, &sessionReestablishedError{detail: "session re-initialized repeatedly before the call could be sent"}
+		}
+		if !mc.sessionVerified(gen) {
+			// A re-initialize installed this session but its verifying
+			// tools/list failed, so the baseline still describes the old
+			// session: list again before any check is run against it.
+			if attempt >= maxSessionAdmits {
+				return nil, &sessionReestablishedError{detail: "toolset of the re-initialized session could not be verified"}
+			}
+			if err := mc.verifyToolset(ctx); err != nil {
+				return nil, fmt.Errorf("tools/list to verify the re-initialized session: %w", err)
+			}
+			continue
+		}
+		if err := verify(); err != nil {
+			return nil, err
+		}
+		if observe != nil {
+			observe()
+		}
+		if hook := mc.sess.beforeSend; hook != nil {
+			hook()
+		}
+		// The caller's WithDispatchRecheck verdicts are re-read by the core
+		// client after it admits the send, so a verdict that flipped during a
+		// re-init refuses it with nothing sent.
+		result, err := mc.coreClient.CallTool(core.WithSessionGeneration(ctx, gen), toolName, args)
+		if !errors.Is(err, core.ErrSessionChanged) {
+			return result, err
+		}
+		if attempt >= maxSessionAdmits {
+			return nil, &sessionReestablishedError{detail: "session re-initialized repeatedly before the call could be sent"}
+		}
 	}
-	// Both the listing the caller was certified against and the re-listed one
-	// must say read-only: annotations are not part of the identity hash.
-	if !pre.readOnly || !post.readOnly {
-		return nil, &sessionReestablishedError{detail: fmt.Sprintf("tool %q is not read-only", toolName)}
-	}
-	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
-		return nil, ErrConnectionGenerationChanged
-	}
-	// The caller's WithDispatchRecheck verdicts are re-read by the core
-	// client immediately before this retry (and before the first send, after
-	// any joinGap wait), so a verdict that flipped during the re-init refuses
-	// it with nothing sent.
-	return invoker.CallTool(ctx, toolName, args)
 }
 
 // identityRefusal re-runs, after waiting on a re-init flight, the generation
