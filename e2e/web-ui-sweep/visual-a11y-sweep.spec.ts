@@ -71,29 +71,32 @@ for (const theme of THEMES) {
   for (const width of [1440, 1280, 820, 390]) {
     test(`Clients credential badge contains its text (${theme}, ${width}px)`, async ({ page }, testInfo) => {
       await page.setViewportSize({ width, height: 900 })
-      await page.route(/\/api\/v1\/clients(?:\?.*)?$/, route => route.fulfill({
-        json: {
-          success: true,
-          data: {
-            clients: ['Claude Desktop', 'Claude Code'].map((display_name, index) => ({
-              id: `badge-layout-${index}`,
-              display_name,
-              kind: 'supported',
-              state: 'installed',
-              installed: true,
-              connected: false,
-              connection_unverified: true,
-              last_seen: null,
-              active_sessions: 0,
-              calls_24h: 0,
-              blocked_24h: 0,
-              credential_state: 'none',
-              display_path: '~/Library/Application Support/Claude/claude_desktop_config.json',
-            })),
-            warnings: [],
+      await page.route(/\/api\/v1\/clients(?:\?.*)?$/, route => {
+        if (route.request().method() !== 'GET') return route.fallback()
+        return route.fulfill({
+          json: {
+            success: true,
+            data: {
+              clients: ['Claude Desktop', 'Claude Code'].map((display_name, index) => ({
+                id: `badge-layout-${index}`,
+                display_name,
+                kind: 'supported',
+                state: 'installed',
+                installed: true,
+                connected: false,
+                connection_unverified: true,
+                last_seen: null,
+                active_sessions: 0,
+                calls_24h: 0,
+                blocked_24h: 0,
+                credential_state: 'none',
+                display_path: '~/Library/Application Support/Claude/claude_desktop_config.json',
+              })),
+              warnings: [],
+            },
           },
-        },
-      }))
+        })
+      })
       await goto(page, '/clients', theme)
       const badges = page.locator('[data-test^="client-credential-badge-"]')
       await expect(badges).toHaveCount(2)
