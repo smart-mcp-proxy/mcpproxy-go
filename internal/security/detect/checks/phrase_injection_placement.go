@@ -238,9 +238,47 @@ var exclusionLeadWords = map[string]bool{
 	"excluding": true, "exclude": true, "neither": true, "nor": true, "but": true,
 }
 
-// notJustButRe is "not just X but " at the start of the text: the part after
-// "but" IS included ("not just its size but its contents").
-var notJustButRe = regexp.MustCompile(`(?i)^not\s+(?:just|only|merely|simply)\b[^.;]*?\bbut\s+`)
+// notButRe is "not X but " at the start of the text: the part after "but" IS
+// included ("not its size but its contents", "not just its size but its
+// contents").
+var notButRe = regexp.MustCompile(`(?i)^not\b[^.;]*?\bbut\s+`)
+
+// notSplitRe is the exclusion head of a parenthetical, up to where the
+// included part starts: "(not X but Y)", "(not X, Y)", "(not X; Y)".
+var notSplitRe = regexp.MustCompile(`(?i)^not\b[^.;,]*?(?:[,;]\s*(?:but\s+)?|\bbut\s+)`)
+
+// parenSecretRe finds the words that make a parenthetical carry a secret.
+var parenSecretRe = regexp.MustCompile(`(?i)\b(?:contents?|values?|secrets?|tokens?|passwords?|passphras\w*|credentials?|body|text|data|api key|ssh key|private key|secret key|key itself|key material|raw bytes|full file|whole file|entire file|everything)\b`)
+
+// keyAlgorithmWords before "key" make it a key TYPE ("RSA 4096 key"), not the
+// key itself.
+var keyAlgorithmWords = regexp.MustCompile(`^(?:rsa|dsa|ecdsa|ecdh|ed25519|ed448|aes|des|hmac|ec|ecc|openssh|pgp|gpg|sha-?\d+|md5|\d+(?:-?bit)?)$`)
+
+// parenNamesSecret reports whether a parenthetical names a secret: a secret
+// word, or a bare "key" ("raw key", "base64-encoded SSH key") that is not a
+// key type ("RSA 4096 key") or followed by a metadata head ("key length").
+func parenNamesSecret(low string) bool {
+	if parenSecretRe.MatchString(low) {
+		return true
+	}
+	words := phraseWords(low)
+	for i, w := range words {
+		if w != "key" && w != "keys" {
+			continue
+		}
+		if i+1 < len(words) && secretMetadataWords.MatchString(words[i+1]) {
+			continue
+		}
+		algo := false
+		for _, p := range words[:i] {
+			algo = algo || keyAlgorithmWords.MatchString(p)
+		}
+		if !algo {
+			return true
+		}
+	}
+	return false
+}
 
 // clauseDestRe finds a destination anywhere in a clause.
 var clauseDestRe = regexp.MustCompile(`(?i)\b(?:in|into|as|via|through|to)\s+(?:the |a |an |its |this )?[\w"'` + "`" + `-]+ (?:field|parameter|param|argument|arg)\b`)
@@ -348,7 +386,7 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 			inner := tok[1 : len(tok)-1]
 			low := strings.ToLower(inner)
 			subFrom := ts + 1
-			if m := notJustButRe.FindStringIndex(low); m != nil {
+			if m := notSplitRe.FindStringIndex(low); m != nil {
 				subFrom += m[1]
 				low = low[m[1]:]
 			} else if _, first := (&placementToks{t: inner}).nextWord(-1); exclusionLeadWords[first] || strings.HasSuffix(first, "n't") {
@@ -356,7 +394,7 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 			}
 			_, first := (&placementToks{t: low}).nextWord(-1)
 			opensItem := placementConjunctions[first] || parenLeadWords[first] || followerStarters[first] || first == "it" || first == "the"
-			if !opensItem && !clauseSecretRe.MatchString(low) {
+			if !opensItem && !parenNamesSecret(low) {
 				continue
 			}
 			sub, _ := parsePlacementItems(t[:te-1], subFrom, true)
@@ -435,7 +473,7 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 				if exclusionLeadWords[w] || w == "nothing" {
 					// "..., not its contents", "..., and nothing else"; but "not
 					// just X but Y" includes Y
-					if m := notJustButRe.FindStringIndex(t[ts:]); m != nil {
+					if m := notButRe.FindStringIndex(t[ts:]); m != nil {
 						for {
 							s, _, ok := toks.at(k + 1)
 							if !ok || s >= ts+m[1] {
@@ -485,10 +523,53 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 	return items, reached && !uncertain
 }
 
+// chainedOutputVerbRe finds "return"/"log" (any inflection the normalizer
+// leaves), which describe tool output ("returns its contents in the data
+// field") and are placement only in the chained form below.
+var chainedOutputVerbRe = regexp.MustCompile(`(?i)\b(return|log)s?\b`)
+
+// chainedOutputTargetRe is the exfil-shaped target of a chained output verb:
+// "to/into the <x> field", never "in/as the <x> field".
+var chainedOutputTargetRe = regexp.MustCompile(`(?i)^[^.!?;]{0,80}?\b(?:to|into)\s+(?:the |a |an |its |this )?[\w"'` + "`" + `-]+ (?:field|parameter|param|argument|arg)\b`)
+
+// rewriteChainedOutputVerbs turns a "return"/"log" that opens a LATER clause of
+// a sentence already holding a placement verb, and whose target is to/into a
+// field, into the placement verb "insert"/"add" (same length), so "save its
+// size to the size field and return its contents to the notes field" is read
+// as the second placement it is. A standalone tool-output description
+// ("returns its contents in the data field") is left alone.
+func rewriteChainedOutputVerbs(t string) string {
+	var out []byte
+	for _, l := range chainedOutputVerbRe.FindAllStringSubmatchIndex(t, -1) {
+		start := 0
+		if i := strings.LastIndexAny(t[:l[0]], ".!?;"); i >= 0 {
+			start = i + 1
+		}
+		if !placementVerbRe.MatchString(t[start:l[0]]) || !chainedOutputTargetRe.MatchString(t[l[1]:]) {
+			continue
+		}
+		if out == nil {
+			out = []byte(t)
+		}
+		repl := "insert"
+		if strings.EqualFold(t[l[2]:l[3]], "log") {
+			repl = "add"
+		}
+		n := l[1] - l[0]
+		rep := repl + strings.Repeat(" ", n-len(repl))
+		copy(out[l[0]:l[1]], rep)
+	}
+	if out == nil {
+		return t
+	}
+	return string(out)
+}
+
 // maskPlacementClauses rewrites placement clauses so the credential families
 // see the secret item of a mixed clause right behind its verb, and never see
 // the verb of a metadata-only clause. The result has the length of t.
 func maskPlacementClauses(t string) string {
+	t = rewriteChainedOutputVerbs(t)
 	var out []byte
 	edited := 0 // nothing before this offset is edited again
 	edit := func() []byte {

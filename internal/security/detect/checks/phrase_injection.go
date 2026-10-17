@@ -210,7 +210,7 @@ func maskPublicKeyFiles(t string) string {
 const credentialArgumentTarget = `\b(?:in|into|as|via|through|to)\s+(?:the |a |an |its |this )?[\w"'` + "`" + `-]+ (?:field|parameter|param|argument|arg)\b`
 
 // credentialPlacementVerbs place a value into a tool argument.
-const credentialPlacementVerbs = `include|put|place|insert|pass|embed|add|append|paste|stuff|supply|provid\w*|send|set|store|save|write|copy|return|log`
+const credentialPlacementVerbs = `include|put|place|insert|pass|embed|add|append|paste|stuff|supply|provid\w*|send|set|store|save|write|copy`
 
 // namedSecretReference is what may stand for a named secret after a placement
 // verb: a pronoun, or a noun phrase that re-refers to the value ("put the key
