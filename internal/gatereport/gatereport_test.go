@@ -36,7 +36,7 @@ func TestMerge_AllBlockingPass_VerdictPass_ReservedNotRun(t *testing.T) {
 		t.Fatalf("expected pass verdict, got %s (failures: %v)", r.Verdict, r.BlockingFailures)
 	}
 	// Reserved slots must be recorded, never silently absent (FR-004).
-	for _, name := range []string{EntryReservedMacOSSmoke, EntryReservedSurfaceConsistency} {
+	for _, name := range []string{EntryReservedMacOSSmoke} {
 		e := entryByName(t, r, name)
 		if e.Status != StatusNotRun || e.Reason != ReasonNotImplemented {
 			t.Errorf("%s: got status=%s reason=%q, want not-run/%s", name, e.Status, e.Reason, ReasonNotImplemented)

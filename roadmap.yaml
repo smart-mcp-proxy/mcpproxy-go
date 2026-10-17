@@ -684,9 +684,10 @@ epics:
         depends_on: [release-qa-gate-matrix]
       - id: release-qa-gate-consistency
         title: "T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states)"
-        status: todo
+        status: in_review
         priority: P3
         depends_on: [release-qa-gate-matrix]
+        note: "BLOCKING gate entry invariant/surface-consistency (job surface-consistency): boots the five-type matrix, adds quarantined/disabled/unhealthy/live servers, and asserts CLI (`upstream list -o json`), MCP (`upstream_servers list`, an independent storage+manager projection) and the RENDERED Web UI (one long-lived Chromium page, e2e/web-ui-sweep/surface-snapshot.mjs) agree with core /api/v1/servers on enabled, quarantined, connection state, health.level/admin_state/status and tool_count. Three phases: settled, live (disable via REST, no page reload — tests the SSE/poll path), reload. Seeded negative: --seed-mismatch / workflow_dispatch seed_consistency_mismatch. Local: scripts/test-surface-consistency.sh. Tray recorded not-compared until T3."
 
   - id: telemetry-v7-churn
     title: "Telemetry v7: honest funnel + churn instrumentation"

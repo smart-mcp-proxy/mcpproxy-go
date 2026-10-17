@@ -33,6 +33,7 @@ fragments against a hardcoded manifest and exits per the verdict.
 | `suite-race` | `suite/unit-race`, `suite/server-race` | 25 min | `go test -race ./internal/...` + `go test -tags server -race ./internal/serveredition/...`. |
 | `suite-scan-eval` | `suite/scan-eval` | 10 min | `go run ./cmd/scan-eval --gate --min-recall 0.90 --max-fp 0.05` over the detect corpus — runs on **every** tag regardless of changed paths (FR-015). |
 | `matrix-invariants` | `matrix/{stdio,http,sse,docker,oauth}`, `invariant/{activity-request-id,counters,quarantine-flow,upgrade-in-place}` | 20 min | Boots the candidate against five local fixture upstreams (connect → list → call → kill/reconnect) and asserts the US2 invariants against the live instance. |
+| `surface-consistency` | `invariant/surface-consistency` (T4) | 20 min | Boots the same matrix, adds quarantined/disabled/unhealthy/live servers and asserts the CLI, MCP and rendered Web UI agree with the core on every server's state — see [Surface consistency](#surface-consistency-t4--blocking). |
 | `web-ui-sweep` | — (advisory `advisory/web-ui-sweep`, T2) | 20 min | Playwright sweep over the Web UI **served by the candidate binary**, with a live stdio fixture upstream. `continue-on-error: true` — see [Web UI sweep](#web-ui-sweep-t2--advisory). |
 | `verdict` | (merges all) | 10 min | `release-gate report` → `gate-report.json` + `$GITHUB_STEP_SUMMARY`; its exit code **is** the gate verdict. |
 
@@ -172,10 +173,56 @@ It is **advisory**, on purpose while the sweep earns its flake record:
 release tags with no flaky or infrastructure failure — the same criterion T3
 uses (FR-021).
 
-## Extension slots (T3 / T4)
+## Surface consistency (T4) — blocking
 
-The manifest reserves two non-blocking slots, recorded as
-`not-run` / `not-implemented-yet` until their stage lands:
+`invariant/surface-consistency` (job `surface-consistency`, US5 / FR-018)
+proves the surfaces do not lie to each other. The job boots the same
+five-type server matrix (stdio/http/sse/docker/oauth), then
+`release-gate consistency` adds four servers so every admin state is on
+screen — `gate-cons-live` (healthy), `gate-cons-quarantined`,
+`gate-cons-disabled` and `gate-cons-broken` (endpoint refuses → unhealthy) —
+and compares every surface against the core's `GET /api/v1/servers`:
+
+| Surface | Read path | Fields compared |
+|---------|-----------|-----------------|
+| CLI | `mcpproxy upstream list -o json --config <gate config>` (daemon client mode) | enabled, quarantined, connected, connection state, `health.level`, `health.admin_state`, `health.status`, `tool_count` |
+| MCP | `/mcp` `upstream_servers` `operation=list` — storage + upstream manager + runtime health, an independent projection | enabled, quarantined, connection state, `health.level`, `health.admin_state`, `health.status` (the row carries no tool count) |
+| Web UI | rendered server cards on `/ui/servers`, read by `e2e/web-ui-sweep/surface-snapshot.mjs` in one long-lived Chromium page | enabled (⋯ menu Enable/Disable), quarantined (⋯ Review), tool count, status chip colour and text — the expected chip is derived from the core row with `ServerCard.vue`'s rules, because the Web UI never prints `health.level` as text |
+| macOS tray | — | not compared; recorded as `not_compared` in the fragment (T3) |
+
+Connection state is compared only for enabled, non-quarantined servers (a
+disabled server is `idle` in the StateView and `disconnected` in the manager,
+which no user sees). It runs three phases, each retried until the surfaces
+agree or `--settle-timeout` (60s) runs out; an attempt counts only when the
+core did not change while the surfaces were being read:
+
+1. **settled** — the mixed state, Web UI freshly loaded;
+2. **live** — `gate-cons-live` is disabled through REST while the page stays
+   open, so the Web UI must follow through its SSE/poll update path;
+3. **reload** — the same state after a page reload. Live failing while reload
+   passes is reported as a stale live view.
+
+A divergence that survives the retries fails the gate with one line per field:
+`webui gate-cons-quarantined webui.chip_class: core=badge-secondary webui=badge-success`.
+The fragment's `details` carry the last captured rows of every surface per
+phase.
+
+**Run it by hand** next to `scripts/test-api-e2e.sh` (needs `make build` for
+an embedded Web UI, Node for the reader):
+
+```bash
+./scripts/test-surface-consistency.sh
+```
+
+**Prove it fails**: pass `--seed-mismatch surface:server:field=value` to the
+script, or dispatch the gate with the `seed_consistency_mismatch` input (read
+only on `workflow_dispatch`, never on a tag's `workflow_call`):
+
+```bash
+./scripts/test-surface-consistency.sh --seed-mismatch cli:gate-cons-live:health.level=degraded
+```
+
+## Extension slot (T3)
 
 - **`reserved/macos-smoke` (T3)** — a macOS-runner job that launches the tray
   against a running core and uses the `mcpproxy-ui-test` accessibility
@@ -185,10 +232,7 @@ The manifest reserves two non-blocking slots, recorded as
   added: *promote to blocking once it has passed on 3 consecutive release tags
   with no flaky or infrastructure failure.* Promotion is a one-line change
   (advisory → blocking on the manifest entry / job status handling).
-- **`reserved/surface-consistency` (T4)** — one comparison over data the other
-  jobs already collect: REST vs CLI (`mcpproxy upstream list -o json`) vs Web UI
-  (vs tray, when T3 ran) agreement on each server's identity, admin state, and
-  health level, per the unified `health` contract (US5, FR-018).
+  When T3 lands, the tray joins the T4 comparison as one more surface.
 
 ## Runtime budget (FR-005 / SC-007)
 

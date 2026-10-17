@@ -46,6 +46,8 @@ func main() {
 		ok, err = cmdMatrix(ctx, os.Args[2:])
 	case "invariants":
 		ok, err = cmdInvariants(ctx, os.Args[2:])
+	case "consistency":
+		ok, err = cmdConsistency(ctx, os.Args[2:])
 	case "run-suite":
 		ok, err = cmdRunSuite(ctx, os.Args[2:])
 	case "report":
