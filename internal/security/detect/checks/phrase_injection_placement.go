@@ -211,6 +211,36 @@ func (p *placementToks) nextWord(i int) (int, string) {
 	}
 }
 
+// skippableExemplifier reports whether token k (the word w) opens an "e g" /
+// "i e" exemplifier (the dots were blanked) whose text, up to the next comma,
+// semicolon or destination, names no secret. last is the index of its last
+// token.
+func (p *placementToks) skippableExemplifier(k int, w string) (last int, ok bool) {
+	if w != "e" && w != "i" {
+		return 0, false
+	}
+	j, nw := p.nextWord(k)
+	if j < 0 || (w == "e" && nw != "g") || (w == "i" && nw != "e") {
+		return 0, false
+	}
+	last = j
+	spanStart, spanEnd := -1, -1
+	for n := j + 1; ; n++ {
+		s, e, more := p.at(n)
+		if !more || p.t[s] == ',' || p.t[s] == ';' || placementDestRe.MatchString(p.t[s:]) {
+			break
+		}
+		if spanStart < 0 {
+			spanStart = s
+		}
+		spanEnd, last = e, n
+	}
+	if spanStart >= 0 && parenNamesSecret(strings.ToLower(p.t[spanStart:spanEnd])) {
+		return 0, false
+	}
+	return last, true
+}
+
 // startsItem reports whether the word w at token k starts a further payload
 // item: "its …"/"their …", or "the" + a secret word.
 func (p *placementToks) startsItem(k int, w string) bool {
@@ -459,7 +489,13 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 			flush()
 			break
 		}
+		exLast, exSkip := toks.skippableExemplifier(k, w)
 		switch {
+		case exSkip:
+			// "e.g. 4096 bytes" / "i.e. the SHA256 hash": an example of the
+			// value, skipped like a qualifier when it names no secret
+			flush()
+			k = exLast
 		case placementConjunctions[w] || (inParen && parenLeadWords[w]):
 			flush()
 			sawConj = true
@@ -581,6 +617,10 @@ var outputTargetRe = regexp.MustCompile(`(?i)\b(?:to|into)\s+(?:the |a |an |its 
 // outputSecretNounRe finds the nouns that make an output clause carry a secret.
 var outputSecretNounRe = regexp.MustCompile(`(?i)\b(?:contents?|text|data|body|values?|secrets?|tokens?|passwords?|passphras\w*|credentials?|keys?|private key|raw bytes|everyth\w*|file|it)\b`)
 
+// genericOutputNounRe are the generic nouns a preceding metadata word can
+// qualify ("error text", "status data").
+var genericOutputNounRe = regexp.MustCompile(`(?i)^(?:text|data|body|values?)$`)
+
 // abbreviationDotRe is the dot of "i.e."/"e.g.", which is not a sentence end.
 var abbreviationDotRe = regexp.MustCompile(`(?i)\b(i\.e|e\.g)\.`)
 
@@ -603,13 +643,23 @@ func outputClauseNamesSecret(t string, from int) bool {
 	}
 	before := rest[:m[0]]
 	for _, l := range outputSecretNounRe.FindAllStringIndex(before, -1) {
-		after := phraseWords(sentenceHead(before[l[1]:]))
-		if len(after) > 2 {
-			after = after[:2]
+		seg := sentenceHead(before[l[1]:])
+		if i := strings.IndexAny(seg, ",;"); i >= 0 {
+			seg = seg[:i]
 		}
 		meta := false
-		for _, w := range after {
-			meta = meta || secretMetadataWords.MatchString(strings.ToLower(w))
+		for n, w := range phraseWords(seg) {
+			w = strings.ToLower(w)
+			if n >= 2 || placementConjunctions[w] || w == "or" || w == "to" || w == "into" {
+				break // the lookahead stops at a conjunction
+			}
+			meta = meta || secretMetadataWords.MatchString(w)
+		}
+		if !meta && genericOutputNounRe.MatchString(before[l[0]:l[1]]) {
+			// "the error text": a metadata word right before a generic noun
+			// qualifies it
+			prev := phraseWords(before[:l[0]])
+			meta = len(prev) > 0 && secretMetadataWords.MatchString(strings.ToLower(prev[len(prev)-1]))
 		}
 		if !meta {
 			return true
