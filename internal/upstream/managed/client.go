@@ -147,7 +147,9 @@ type Client struct {
 	// healthCheckFailureThreshold; one success resets it. Hard failures
 	// (connection refused, no such host, unreachable) bypass the counter
 	// and trigger Error immediately. See recordHealthCheckFailure().
-	consecutiveHealthFailures int
+	// Atomic: the health loop records failures while Connect's reset can run
+	// on whichever goroutine reconnects (ForceReconnect, TryReconnectSync).
+	consecutiveHealthFailures atomic.Int32
 
 	// toolInvoker is the tools/call surface CallTool dispatches through. In
 	// production it is the coreClient; the narrow interface lets tests inject a
@@ -1970,10 +1972,16 @@ func (mc *Client) startBackgroundMonitoring() {
 
 	// Mark that monitoring has been started
 	mc.monitoringStarted = true
+	// Each loop owns the stop channel it was started with. stopBackgroundMonitoring
+	// swaps mc.stopMonitoring for a fresh channel after closing it, so a loop that
+	// re-read the field could miss its own stop (e.g. it was still inside a probe
+	// or reconnect when the 1s stop wait timed out) and keep running next to the
+	// loop a later Connect starts.
+	stop := mc.stopMonitoring
 	mc.monitoringWG.Add(1)
 	go func() {
 		defer mc.monitoringWG.Done()
-		mc.backgroundHealthCheck()
+		mc.backgroundHealthCheck(stop)
 	}()
 }
 
@@ -2055,7 +2063,7 @@ func planHealthCheckCycle(interval, disabledRecheck time.Duration) (probe bool, 
 // backgroundHealthCheck performs periodic health checks. The interval is
 // re-resolved every cycle from config, so a hot-reload changes the cadence (or
 // disables the loop entirely) without restarting the server (spec 074).
-func (mc *Client) backgroundHealthCheck() {
+func (mc *Client) backgroundHealthCheck(stop <-chan struct{}) {
 	for {
 		probe, wait := planHealthCheckCycle(mc.resolveHealthCheckInterval(), healthCheckDisabledRecheckInterval)
 		timer := time.NewTimer(wait)
@@ -2064,7 +2072,7 @@ func (mc *Client) backgroundHealthCheck() {
 			if probe {
 				mc.performHealthCheck()
 			}
-		case <-mc.stopMonitoring:
+		case <-stop:
 			timer.Stop()
 			mc.logger.Debug("Background health monitoring stopped",
 				zap.String("server", mc.GetConfig().Name))
@@ -2219,7 +2227,7 @@ func (mc *Client) performHealthCheck() {
 				if mc.setErrorIfCurrentConnection(err, pingEpoch) {
 					mc.logger.Warn("Health check failed repeatedly, marking as error",
 						zap.String("server", mc.GetConfig().Name),
-						zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
+						zap.Int32("consecutive_failures", mc.consecutiveHealthFailures.Load()),
 						zap.Error(err))
 				} else {
 					mc.logger.Debug("Health check failure belongs to a connection that is already gone; not marking",
@@ -2229,7 +2237,7 @@ func (mc *Client) performHealthCheck() {
 			} else {
 				mc.logger.Info("Health check failed transiently, tolerating below threshold",
 					zap.String("server", mc.GetConfig().Name),
-					zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
+					zap.Int32("consecutive_failures", mc.consecutiveHealthFailures.Load()),
 					zap.Int("threshold", healthCheckFailureThreshold),
 					zap.Error(err))
 			}
@@ -2282,25 +2290,25 @@ func (mc *Client) syncRetryAfterFromTransport() {
 }
 
 func (mc *Client) recordHealthCheckFailure(err error) bool {
-	mc.consecutiveHealthFailures++
+	n := mc.consecutiveHealthFailures.Add(1)
 	if !isTransientHealthCheckError(err) {
 		return true
 	}
-	return mc.consecutiveHealthFailures >= healthCheckFailureThreshold
+	return n >= healthCheckFailureThreshold
 }
 
 // recordHealthCheckSuccess resets the consecutive-failure counter. One good
 // check is enough to wipe the slate — we're not trying to track flap
 // frequency, just preventing single misses from looking like outages.
 func (mc *Client) recordHealthCheckSuccess() {
-	mc.consecutiveHealthFailures = 0
+	mc.consecutiveHealthFailures.Store(0)
 }
 
 // resetHealthCheckFailures clears the counter. Called from the connect
 // success path so a successful reconnect doesn't carry stale failure debt
 // from before the disconnect.
 func (mc *Client) resetHealthCheckFailures() {
-	mc.consecutiveHealthFailures = 0
+	mc.consecutiveHealthFailures.Store(0)
 }
 
 // isTransientHealthCheckError identifies failure modes that warrant
