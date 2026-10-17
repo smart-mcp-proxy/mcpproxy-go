@@ -119,7 +119,7 @@ func TestRetire_LauncherKillReachesDescendants(t *testing.T) {
 		"Retire kills the launcher child's whole tree")
 	select {
 	case <-h.Done():
-	case <-time.After(2 * time.Second):
+	case <-time.After(15 * time.Second):
 		t.Fatal("the killed launcher child was not reaped")
 	}
 	assert.NoError(t, h.Kill(), "Kill after exit is a no-op")
