@@ -30,3 +30,15 @@ func TestWebUIReader_TimeoutIsTerminal(t *testing.T) {
 		t.Fatalf("dead reader answered %q", line)
 	}
 }
+
+// Sol 6.1 round 2: teardown is bounded as a whole, not just its Docker calls.
+func TestBoundedTeardownReturnsOnTime(t *testing.T) {
+	start := time.Now()
+	// A state with nothing to stop finishes immediately.
+	if !boundedTeardown(&gateState{}, time.Second) {
+		t.Fatal("empty teardown reported as abandoned")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("empty teardown took %s", time.Since(start))
+	}
+}

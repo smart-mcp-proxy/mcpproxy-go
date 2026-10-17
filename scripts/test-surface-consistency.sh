@@ -36,11 +36,22 @@ WORK_DIR=$(mktemp -d)
 CORE="${MCPPROXY_BINARY_PATH:-$REPO_ROOT/mcpproxy}"
 SWEEP_DIR="$REPO_ROOT/e2e/web-ui-sweep"
 mkdir -p "$BIN_DIR" "$REPORT_DIR"
+KEEP_CORE=0
+for arg in "$@"; do
+  [[ "$arg" == "--keep-core" ]] && KEEP_CORE=1
+done
+
 cleanup() {
   # The matrix leaves its core + fixtures running for the consistency step,
   # which tears them down itself — unless it never got that far (bad flags,
-  # an early error). Teardown is idempotent, so always run it before the
-  # state file it needs is deleted.
+  # an early error). Teardown is idempotent, so run it before the state file
+  # it needs is deleted. --keep-core means "leave it all up": keep the state
+  # file too, so `release-gate teardown` can stop it later.
+  if [[ $KEEP_CORE -eq 1 && -f "$WORK_DIR/gate-state.json" ]]; then
+    echo "--keep-core: instance left running; stop it with:"
+    echo "  $BIN_DIR/release-gate teardown --state-file $WORK_DIR/gate-state.json"
+    return
+  fi
   if [[ -f "$WORK_DIR/gate-state.json" && -x "$BIN_DIR/release-gate" ]]; then
     "$BIN_DIR/release-gate" teardown --state-file "$WORK_DIR/gate-state.json" >/dev/null 2>&1 || true
   fi

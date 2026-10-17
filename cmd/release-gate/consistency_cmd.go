@@ -90,10 +90,30 @@ func cmdTeardown(args []string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	return boundedTeardown(st, teardownBudget), nil
+}
+
+// teardownBudget caps cleanup. Docker calls take the context, but the PID
+// loops and pgrep do not, so the whole teardown runs in a goroutine and is
+// abandoned (logged) once the budget is spent — the verdict is already on
+// disk by then.
+const teardownBudget = 2 * time.Minute
+
+func boundedTeardown(st *gateState, budget time.Duration) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	teardownState(ctx, st)
-	return true, nil
+	done := make(chan struct{})
+	go func() {
+		teardownState(ctx, st)
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(budget + 10*time.Second):
+		logf("teardown: still running after %s — abandoning it (core pid %d)", budget, st.CorePID)
+		return false
+	}
 }
 
 func runConsistency(ctx context.Context, opts consistencyOpts) (bool, error) {
@@ -112,9 +132,7 @@ func runConsistency(ctx context.Context, opts consistencyOpts) (bool, error) {
 	writeErr := gatereport.WriteFragment(opts.ReportDir, frag)
 	logf("consistency: %s -> %s %s", frag.Name, frag.Status, frag.Reason)
 	if !opts.KeepCore {
-		cctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-		teardownState(cctx, st)
-		cancel()
+		boundedTeardown(st, teardownBudget)
 	}
 	if writeErr != nil {
 		return false, fmt.Errorf("write fragment: %w", writeErr)
