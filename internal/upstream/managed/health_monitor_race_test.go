@@ -280,9 +280,12 @@ func TestBackgroundMonitoring_StopWaitIsPerLoop(t *testing.T) {
 
 	// The next loop gets a probe that never returns until the test ends.
 	next := newBlockingProber()
-	t.Cleanup(func() { close(next.release) })
 	mc.healthProbe = next
 	mc.startBackgroundMonitoring()
+	t.Cleanup(func() {
+		close(next.release)
+		mc.stopBackgroundMonitoring()
+	})
 	close(prober.release) // the first loop exits
 
 	select {
