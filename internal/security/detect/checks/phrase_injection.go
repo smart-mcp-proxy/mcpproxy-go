@@ -1159,7 +1159,7 @@ func negatedBefore(text string, start int) bool {
 
 // secretMetadataWords describe a secret without being it: its expiry, its
 // count, its name (Sol r18 P2). Normalized (lowercased, lightly stemmed).
-const secretMetadataAlt = `expir\w*|expires?|ttl|lifetime|age|count|counts|number|numbers|length|size|name|names|type|types|format|timestamp|date|dates|scope\w*|status|version|owner|creat\w*|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+`
+const secretMetadataAlt = `expir\w*|expires?|ttl|lifetime|age|count|counts|number|numbers|length|size|name|names|type|types|format|timestamp|date|dates|scope\w*|status|version|owner|creat\w*|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+|time|times|stamp|stamps|modif\w*`
 
 var secretMetadataWords = regexp.MustCompile(`^(?:` + secretMetadataAlt + `)$`)
 
@@ -1314,76 +1314,18 @@ var foreignContentsRe = regexp.MustCompile(`\bcontents?\s+of\s+(?:the\s+)?((?:[\
 // credentialSourceRe matches any credential file or config secret source.
 var credentialSourceRe = regexp.MustCompile(`(?:` + secretFiles + `|` + configSecretSources + `)`)
 
-// metadataMoveRe finds a placement verb moving a metadata value ("save its
-// fingerprint", "write its length"): not a credential transfer (#1601).
-var metadataMoveRe = regexp.MustCompile(`\b(?:` + credentialPlacementVerbs + `)\s+(?:(?:its|the|their|a)\s+)?(?:(?:(?:private|public|ssh|api|secret)\s+)?key\s+)?(?:public\s+key|(?:` + secretMetadataAlt + `))\b`)
-
-// metadataLabelTailRe finds a further metadata word right after one.
-var metadataLabelTailRe = regexp.MustCompile(`^\s+(?:` + secretMetadataAlt + `)\b`)
-
-// metadataMoveContinuesRe finds a conjunct after a metadata move; its word
-// is captured (group 2) after its key qualifier (group 1).
-var metadataMoveContinuesRe = regexp.MustCompile(`^\s*(?:,\s*(?:and|plus)|,|and|plus|&)\s*(?:(?:its|the|their|a)\s+)?((?:(?:private|public|ssh|api|secret)\s+)?key\s+)?([\w-]+)`)
-
-// publicKeyQualifierRe is the "public key " qualifier of a conjunct.
-var publicKeyQualifierRe = regexp.MustCompile(`^public\s+key\s+$`)
-
 // maskKeyFileFamily is the mask of the direct key-file family: public key
-// files, then a placement verb moving only metadata, then metadata nouns.
+// files, then the placement-clause parse (maskPlacementClauses), then
+// metadata nouns.
 func maskKeyFileFamily(t string) string {
-	t = maskPublicKeyFiles(t)
-	if ls := metadataMoveRe.FindAllStringIndex(t, -1); len(ls) > 0 {
-		b := []byte(t)
-		for _, l := range ls {
-			// "save its fingerprint and its contents to …" still moves the
-			// key: keep the verb when any non-metadata conjunct follows.
-			carried := false
-			pos := l[1]
-			// a compound label ("creation date", "SHA256 hash") is one value
-			skipLabelTail := func() {
-				for {
-					m := metadataLabelTailRe.FindString(t[pos:])
-					if m == "" {
-						return
-					}
-					pos += len(m)
-				}
-			}
-			skipLabelTail()
-			for {
-				m := metadataMoveContinuesRe.FindStringSubmatch(t[pos:])
-				if m == nil {
-					break
-				}
-				if publicKeyQualifierRe.MatchString(m[1]) {
-					// "and its public key to …": the conjunct is the public
-					// key, the next word belongs to the rest of the sentence
-					pos += len(m[0]) - len(m[2])
-					continue
-				}
-				if !secretMetadataWords.MatchString(strings.ToLower(m[2])) {
-					carried = true
-					break
-				}
-				pos += len(m[0])
-				skipLabelTail()
-			}
-			if carried {
-				continue
-			}
-			for i := l[0]; i < l[1]; i++ {
-				b[i] = '#'
-			}
-		}
-		t = string(b)
-	}
-	return maskSecretMetadataNouns(t)
+	return maskSecretMetadataNouns(maskPlacementClauses(maskPublicKeyFiles(t)))
 }
 
 // maskConfigSecretFamilies is the mask of the config-secret families: public
-// key files and credential basenames, then metadata-qualified secret nouns.
+// key files and credential basenames, the placement-clause parse, then
+// metadata-qualified secret nouns.
 func maskConfigSecretFamilies(t string) string {
-	return maskSecretMetadataNouns(maskPublicKeyFiles(t))
+	return maskSecretMetadataNouns(maskPlacementClauses(maskPublicKeyFiles(t)))
 }
 
 func isNotWordRune(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) }
