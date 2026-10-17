@@ -218,3 +218,90 @@ func TestMismatchReportIsSortedAndNamesBothValues(t *testing.T) {
 		t.Fatalf("formatted diff = %q", s)
 	}
 }
+
+// Sol 6.1 round 1, finding 1: connection state stays compared for disabled
+// and quarantined servers — exactly for the CLI (same projection as core),
+// as connected-vs-not for MCP (whose vocabulary for an inactive server
+// differs: "Not Started"/"Disconnected" vs the StateView's "idle"/"disabled").
+func TestCompareSurfaces_InactiveServerConnectionState(t *testing.T) {
+	core, snaps := mustSnapshots(t, cliFixture, mcpFixture, webuiFixture)
+	if mm := compareSurfaces(core, snaps); len(mm) != 0 {
+		t.Fatalf("vocabulary-only difference flagged: %+v", mm)
+	}
+
+	badCLI := strings.Replace(cliFixture, `"status":"disabled"`, `"status":"Ready"`, 1)
+	core, snaps = mustSnapshots(t, badCLI, mcpFixture, webuiFixture)
+	mm := compareSurfaces(core, snaps)
+	if len(mm) != 1 || mm[0].Surface != surfaceCLI || mm[0].Server != "off" || mm[0].Field != fieldConnection {
+		t.Fatalf("CLI disabled-server state divergence: got %+v", mm)
+	}
+
+	badMCP := strings.Replace(mcpFixture, `"state":"Not Started"`, `"state":"Ready"`, 1)
+	core, snaps = mustSnapshots(t, cliFixture, badMCP, webuiFixture)
+	mm = compareSurfaces(core, snaps)
+	if len(mm) != 1 || mm[0].Surface != surfaceMCP || mm[0].Server != "off" || mm[0].Field != fieldConnection {
+		t.Fatalf("MCP disabled server reported Ready: got %+v", mm)
+	}
+}
+
+// Sol 6.1 round 1, finding 2: the Web UI expectation mirrors ServerCard.vue's
+// no-health branch and healthStatusText's usable=false fallback.
+func TestExpectedWebUIRow_Fallbacks(t *testing.T) {
+	cases := []struct {
+		name           string
+		row            surfaceRow
+		chip, chipText string
+	}{
+		{"no health, connected", surfaceRow{fieldConnected: "true"}, "badge-success", "Connected"},
+		{"no health, connecting", surfaceRow{fieldConnected: "false", hiddenConnecting: "true"}, "badge-warning", "Connecting"},
+		{"no health, down", surfaceRow{fieldConnected: "false"}, "badge-error", "Disconnected"},
+		{"no health, sign-in", surfaceRow{fieldConnected: "false", hiddenDiagnosticCode: "MCPX_OAUTH_LOGIN_REQUIRED"}, "badge-warning", "Sign-in required"},
+		{"health, unusable but connected", surfaceRow{hiddenHasHealth: "true", fieldAdmin: "enabled", fieldLevel: "degraded",
+			fieldConnected: "true", hiddenUsable: "false"}, "badge-warning", "Unavailable"},
+		{"health, empty text, connected", surfaceRow{hiddenHasHealth: "true", fieldAdmin: "enabled", fieldLevel: "healthy",
+			fieldConnected: "true", hiddenUsable: "true"}, "badge-success", "Connected"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := expectedWebUIRow(tc.row)
+			if got[fieldChipClass] != tc.chip || got[fieldChipText] != tc.chipText {
+				t.Fatalf("got chip=%q text=%q, want %q %q", got[fieldChipClass], got[fieldChipText], tc.chip, tc.chipText)
+			}
+		})
+	}
+}
+
+// Sol 6.1 round 1, finding 3: a seed that cannot change the verdict is
+// refused rather than silently passing the "prove it fails" run.
+func TestSeedMismatch_RefusesNoOpSeeds(t *testing.T) {
+	if _, err := parseSeedMismatch("cli:x:health.leveel=degraded"); err == nil {
+		t.Fatal("a field the surface is not compared on was accepted")
+	}
+	if _, err := parseSeedMismatch("mcp:x:tool_count=9"); err == nil {
+		t.Fatal("tool_count is not compared for mcp, seed must be refused")
+	}
+	_, snaps := mustSnapshots(t, cliFixture, mcpFixture, webuiFixture)
+	seed, _ := parseSeedMismatch("cli:no-such-server:health.level=degraded")
+	if applySeed(seed, snaps) {
+		t.Fatal("seed for an absent server reported as applied")
+	}
+	seed, _ = parseSeedMismatch("cli:stdio-ok:health.level=degraded")
+	if !applySeed(seed, snaps) {
+		t.Fatal("valid seed not applied")
+	}
+}
+
+// Sol 6.1 round 1 (livecmd finding 1): the CLI child must not inherit any
+// MCPPROXY_* override that could point it at another daemon (MCPPROXY_DATA
+// selects a socket ahead of the configured TCP endpoint).
+func TestCLIEnvDropsEveryMCPProxyOverride(t *testing.T) {
+	env := cliChildEnv([]string{"PATH=/bin", "MCPPROXY_DATA=/home/u/.mcpproxy", "MCPPROXY_TRAY_ENDPOINT=x", "HOME=/h"})
+	for _, kv := range env {
+		if strings.HasPrefix(kv, "MCPPROXY_") {
+			t.Fatalf("CLI env kept %s", kv)
+		}
+	}
+	if len(env) != 2 {
+		t.Fatalf("non-mcpproxy vars dropped: %v", env)
+	}
+}

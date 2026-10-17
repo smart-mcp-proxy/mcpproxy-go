@@ -79,6 +79,9 @@ const (
 	hiddenSummary        = "_health.summary"
 	hiddenHealthAction   = "_health.action"
 	hiddenDiagnosticCode = "_diagnostic.code"
+	hiddenHasHealth      = "_health.present"
+	hiddenUsable         = "_health.usable"
+	hiddenConnecting     = "_connecting"
 )
 
 // surfaceFields lists what each surface is compared on.
@@ -94,6 +97,7 @@ type rawServer struct {
 	Enabled          *bool  `json:"enabled"`
 	Quarantined      *bool  `json:"quarantined"`
 	Connected        *bool  `json:"connected"`
+	Connecting       *bool  `json:"connecting"`
 	Status           string `json:"status"`
 	ToolCount        *int   `json:"tool_count"`
 	ConnectionStatus *struct {
@@ -105,6 +109,7 @@ type rawServer struct {
 		Status     string `json:"status"`
 		Summary    string `json:"summary"`
 		Action     string `json:"action"`
+		Usable     *bool  `json:"usable"`
 	} `json:"health"`
 	Diagnostic *struct {
 		Code string `json:"code"`
@@ -124,6 +129,9 @@ func (s rawServer) row(connState string, withToolCount, withConnected bool) surf
 	if withConnected && s.Connected != nil {
 		r[fieldConnected] = strconv.FormatBool(*s.Connected)
 	}
+	if s.Connecting != nil {
+		r[hiddenConnecting] = strconv.FormatBool(*s.Connecting)
+	}
 	r[fieldConnection] = normalizeConnState(connState)
 	if withToolCount && s.ToolCount != nil {
 		r[fieldToolCount] = strconv.Itoa(*s.ToolCount)
@@ -134,6 +142,10 @@ func (s rawServer) row(connState string, withToolCount, withConnected bool) surf
 		r[fieldStatus] = s.Health.Status
 		r[hiddenSummary] = s.Health.Summary
 		r[hiddenHealthAction] = s.Health.Action
+		r[hiddenHasHealth] = "true"
+		if s.Health.Usable != nil {
+			r[hiddenUsable] = strconv.FormatBool(*s.Health.Usable)
+		}
 	}
 	if s.Diagnostic != nil {
 		r[hiddenDiagnosticCode] = s.Diagnostic.Code
@@ -257,46 +269,63 @@ var oauthReauthCodes = map[string]bool{
 }
 
 // expectedWebUIRow derives what ServerCard.vue must render for a core row
-// (statusBadgeClass / statusText; oauthSignInState from utils/health.ts).
+// (statusBadgeClass / statusText; oauthSignInState and healthStatusText from
+// utils/health.ts), including the no-health fallback branch.
 func expectedWebUIRow(core surfaceRow) surfaceRow {
 	code := core[hiddenDiagnosticCode]
 	signIn := oauthReauthCodes[code] || core[hiddenHealthAction] == health.ActionLogin ||
 		code == "MCPX_OAUTH_LOGIN_REQUIRED"
+	// admin_state only ever comes from the health object.
+	hasHealth := core[hiddenHasHealth] == "true" || core[fieldAdmin] != ""
 	admin := core[fieldAdmin]
+	connected := core[fieldConnected] == "true"
 
-	var chip string
-	switch {
-	case admin == health.StateDisabled:
-		chip = "badge-neutral"
-	case signIn:
-		chip = "badge-warning"
-	case admin == health.StateQuarantined:
-		chip = "badge-secondary"
-	default:
-		switch core[fieldLevel] {
-		case health.LevelHealthy:
-			chip = "badge-success"
-		case health.LevelDegraded:
+	var chip, text string
+	if hasHealth {
+		switch {
+		case admin == health.StateDisabled:
+			chip = "badge-neutral"
+		case signIn:
 			chip = "badge-warning"
-		case health.LevelUnhealthy:
-			chip = "badge-error"
+		case admin == health.StateQuarantined:
+			chip = "badge-secondary"
 		default:
-			chip = "badge-ghost"
+			switch core[fieldLevel] {
+			case health.LevelHealthy:
+				chip = "badge-success"
+			case health.LevelDegraded:
+				chip = "badge-warning"
+			case health.LevelUnhealthy:
+				chip = "badge-error"
+			default:
+				chip = "badge-ghost"
+			}
 		}
-	}
-
-	var text string
-	switch {
-	case signIn && admin != health.StateDisabled:
-		text = health.StatusLabel(health.StatusSignInRequired)
-	case core[hiddenSummary] != "":
-		text = core[hiddenSummary]
-	case core[fieldStatus] != "":
-		text = health.StatusLabel(core[fieldStatus])
-	case core[fieldConnected] == "true":
-		text = "Connected"
-	default:
-		text = "Disconnected"
+		switch {
+		case signIn && admin != health.StateDisabled:
+			text = health.StatusLabel(health.StatusSignInRequired)
+		case core[hiddenSummary] != "":
+			text = core[hiddenSummary]
+		case core[fieldStatus] != "":
+			text = health.StatusLabel(core[fieldStatus])
+		case core[hiddenUsable] == "false" && connected:
+			text = "Unavailable"
+		case connected:
+			text = "Connected"
+		default:
+			text = "Disconnected"
+		}
+	} else {
+		switch {
+		case signIn:
+			chip, text = "badge-warning", health.StatusLabel(health.StatusSignInRequired)
+		case connected:
+			chip, text = "badge-success", "Connected"
+		case core[hiddenConnecting] == "true":
+			chip, text = "badge-warning", "Connecting"
+		default:
+			chip, text = "badge-error", "Disconnected"
+		}
 	}
 
 	return surfaceRow{
@@ -308,12 +337,23 @@ func expectedWebUIRow(core surfaceRow) surfaceRow {
 	}
 }
 
-// connectionStateMeaningful: a disabled or quarantined server has no live
-// connection both projections are obliged to agree on ("Not Started" in the
-// manager vs "disabled" in the StateView is not a user-visible divergence;
-// the admin state and health fields cover those servers).
+// connectionStateMeaningful: for an enabled, trusted server every surface
+// must report the same connection state. A disabled or quarantined server
+// has no live connection the projections share a word for ("Not Started" /
+// "Disconnected" in the manager vs "idle" / "disabled" in the StateView), so
+// for MCP such a row is compared as connected-vs-not instead (activeState).
+// The CLI prints the core's own rows and is always compared exactly.
 func connectionStateMeaningful(core surfaceRow) bool {
 	return core[fieldEnabled] == "true" && core[fieldQuarantined] == "false"
+}
+
+// activeState buckets a normalized connection state: a surface that reports
+// a disabled server as "ready" disagrees with one that reports it "idle".
+func activeState(state string) string {
+	if state == "ready" || state == "connected" {
+		return "connected"
+	}
+	return "not-connected"
 }
 
 // compareSurfaces compares every surface snapshot against the core rows.
@@ -339,12 +379,13 @@ func compareSurfaces(core map[string]surfaceRow, snaps []surfaceSnapshot) []fiel
 				want = expectedWebUIRow(coreRow)
 			}
 			for _, f := range fields {
-				if f == fieldConnection && !connectionStateMeaningful(coreRow) {
-					continue
+				w, g := want[f], got[f]
+				if f == fieldConnection && snap.Surface == surfaceMCP && !connectionStateMeaningful(coreRow) {
+					w, g = activeState(w), activeState(g)
 				}
-				if want[f] != got[f] {
+				if w != g {
 					out = append(out, fieldMismatch{Surface: snap.Surface, Server: name, Field: f,
-						Core: want[f], Got: got[f]})
+						Core: w, Got: g})
 				}
 			}
 		}
@@ -401,22 +442,31 @@ func parseSeedMismatch(s string) (*seedMismatch, error) {
 	if len(fv) != 2 || fv[0] == "" || parts[1] == "" {
 		return nil, fmt.Errorf("seed %q: want surface:server:field=value", s)
 	}
-	if _, ok := surfaceFields[parts[0]]; !ok {
+	fields, ok := surfaceFields[parts[0]]
+	if !ok {
 		return nil, fmt.Errorf("seed %q: unknown surface %q (cli, mcp, webui)", s, parts[0])
+	}
+	if !containsStr(fields, fv[0]) {
+		return nil, fmt.Errorf("seed %q: %s is not compared on %s (compared: %s)", s, fv[0], parts[0], strings.Join(fields, ", "))
 	}
 	return &seedMismatch{Surface: parts[0], Server: parts[1], Field: fv[0], Value: fv[1]}, nil
 }
 
-func applySeed(seed *seedMismatch, snaps []surfaceSnapshot) {
+// applySeed reports whether the seed landed; a seed for a server the surface
+// does not show cannot change the verdict and must not pass silently.
+func applySeed(seed *seedMismatch, snaps []surfaceSnapshot) bool {
 	if seed == nil {
-		return
+		return false
 	}
+	applied := false
 	for i := range snaps {
 		if snaps[i].Surface != seed.Surface || snaps[i].Rows == nil {
 			continue
 		}
 		if row, ok := snaps[i].Rows[seed.Server]; ok {
 			row[seed.Field] = seed.Value
+			applied = true
 		}
 	}
+	return applied
 }

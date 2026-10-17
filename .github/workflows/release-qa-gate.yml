@@ -495,7 +495,7 @@ jobs:
             --state-file "${WORK}/gate-state.json" \
             --report-dir "${GATE_REPORT_DIR}" \
             --webui-script "${GITHUB_WORKSPACE}/e2e/web-ui-sweep/surface-snapshot.mjs" \
-            "${SEED_ARGS[@]}"
+            ${SEED_ARGS[@]+"${SEED_ARGS[@]}"}
 
       - name: Upload report fragment
         if: always()

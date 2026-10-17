@@ -36,7 +36,17 @@ WORK_DIR=$(mktemp -d)
 CORE="${MCPPROXY_BINARY_PATH:-$REPO_ROOT/mcpproxy}"
 SWEEP_DIR="$REPO_ROOT/e2e/web-ui-sweep"
 mkdir -p "$BIN_DIR" "$REPORT_DIR"
-trap 'rm -rf "$WORK_DIR"' EXIT
+cleanup() {
+  # The matrix leaves its core + fixtures running for the consistency step,
+  # which tears them down itself — unless it never got that far (bad flags,
+  # an early error). Teardown is idempotent, so always run it before the
+  # state file it needs is deleted.
+  if [[ -f "$WORK_DIR/gate-state.json" && -x "$BIN_DIR/release-gate" ]]; then
+    "$BIN_DIR/release-gate" teardown --state-file "$WORK_DIR/gate-state.json" >/dev/null 2>&1 || true
+  fi
+  rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT
 
 NO_WEBUI=0
 for arg in "$@"; do
@@ -96,7 +106,7 @@ fi
 "$BIN_DIR/release-gate" consistency \
   --state-file "$WORK_DIR/gate-state.json" \
   --report-dir "$REPORT_DIR" \
-  "${WEBUI_ARGS[@]}" \
+  ${WEBUI_ARGS[@]+"${WEBUI_ARGS[@]}"} \
   "$@"
 RC=$?
 echo "report fragment: $REPORT_DIR/invariant-surface-consistency.json"

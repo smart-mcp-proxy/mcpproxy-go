@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/gatereport"
@@ -77,6 +78,24 @@ func cmdConsistency(ctx context.Context, args []string) (bool, error) {
 	return runConsistency(ctx, opts)
 }
 
+// cmdTeardown stops the core, fixtures and containers a `matrix
+// --state-file` run left running. Idempotent; used by cleanup traps.
+func cmdTeardown(args []string) (bool, error) {
+	fs := flag.NewFlagSet("teardown", flag.ExitOnError)
+	stateFile := fs.String("state-file", "", "state file written by `matrix --state-file` (required)")
+	if err := fs.Parse(args); err != nil {
+		return false, err
+	}
+	st, err := readState(*stateFile)
+	if err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	teardownState(ctx, st)
+	return true, nil
+}
+
 func runConsistency(ctx context.Context, opts consistencyOpts) (bool, error) {
 	st, err := readState(opts.StateFile)
 	if err != nil {
@@ -88,13 +107,18 @@ func runConsistency(ctx context.Context, opts consistencyOpts) (bool, error) {
 	frag := runTimed(gatereport.EntrySurfaceConsistency, func(frag *gatereport.Fragment) error {
 		return checkSurfaceConsistency(ctx, st, opts, frag)
 	})
-	if !opts.KeepCore {
-		teardownState(ctx, st)
-	}
-	if err := gatereport.WriteFragment(opts.ReportDir, frag); err != nil {
-		return false, fmt.Errorf("write fragment: %w", err)
-	}
+	// Persist the verdict BEFORE teardown: a hung cleanup (an unresponsive
+	// Docker daemon) must not leave the blocking entry without a fragment.
+	writeErr := gatereport.WriteFragment(opts.ReportDir, frag)
 	logf("consistency: %s -> %s %s", frag.Name, frag.Status, frag.Reason)
+	if !opts.KeepCore {
+		cctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		teardownState(cctx, st)
+		cancel()
+	}
+	if writeErr != nil {
+		return false, fmt.Errorf("write fragment: %w", writeErr)
+	}
 	return frag.Status == gatereport.StatusPass, nil
 }
 
@@ -326,7 +350,7 @@ func (c *capturer) cli(ctx context.Context) surfaceSnapshot {
 	defer cancel()
 	cmd := exec.CommandContext(cctx, c.cliBinary, "upstream", "list", "-o", "json", "--config", c.configPath)
 	// Never let the caller's environment point the CLI at another daemon.
-	cmd.Env = filteredEnv(os.Environ(), "MCPPROXY_TRAY_ENDPOINT", "MCPPROXY_API_KEY", "MCPPROXY_OUTPUT", "MCPPROXY_LISTEN")
+	cmd.Env = cliChildEnv(os.Environ())
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	if err := cmd.Run(); err != nil {
@@ -366,29 +390,53 @@ func (c *capturer) webui(ctx context.Context, cmd string) surfaceSnapshot {
 // converge captures every surface until they agree with the core or the
 // budget runs out. An attempt only counts when the core did not move while
 // the surfaces were being read (core-before == core-after) — otherwise a
-// legitimate transition would read as a disagreement. The first Web UI read
-// uses webCmd ("snapshot" or "reload"); later attempts only re-read the page.
+// legitimate transition would read as a disagreement. Every capture runs
+// under the phase deadline, and agreement observed after it does not count.
+// The first Web UI read uses webCmd ("snapshot" or "reload"); later attempts
+// only re-read the page.
 func (c *capturer) converge(ctx context.Context, webCmd string, budget time.Duration) ([]fieldMismatch, error) {
 	deadline := time.Now().Add(budget)
+	pctx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	var last []fieldMismatch
 	stableAttempts := 0
+	expired := func() ([]fieldMismatch, error) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		if stableAttempts == 0 {
+			return nil, fmt.Errorf("no complete, stable capture of every surface within %s", budget)
+		}
+		return last, nil
+	}
 	for attempt := 1; ; attempt++ {
-		before, err := c.core(ctx)
+		before, err := c.core(pctx)
 		if err != nil {
+			if pctx.Err() != nil {
+				return expired()
+			}
 			return nil, &infraError{fmt.Errorf("read core: %w", err)}
 		}
-		snaps := []surfaceSnapshot{c.cli(ctx), c.mcpList(ctx)}
+		snaps := []surfaceSnapshot{c.cli(pctx), c.mcpList(pctx)}
 		if c.web != nil {
-			snaps = append(snaps, c.webui(ctx, webCmd))
+			snaps = append(snaps, c.webui(pctx, webCmd))
 			webCmd = "snapshot"
 		}
-		after, err := c.core(ctx)
+		after, err := c.core(pctx)
 		if err != nil {
+			if pctx.Err() != nil {
+				return expired()
+			}
 			return nil, &infraError{fmt.Errorf("read core: %w", err)}
+		}
+		if time.Now().After(deadline) {
+			return expired()
 		}
 		if reflect.DeepEqual(before, after) {
 			stableAttempts++
-			applySeed(c.seed, snaps)
+			if c.seed != nil && !applySeed(c.seed, snaps) {
+				return nil, fmt.Errorf("--seed-mismatch: surface %s does not show server %q, the seed cannot take effect", c.seed.Surface, c.seed.Server)
+			}
 			c.lastCore, c.lastSnaps = after, snaps
 			last = compareSurfaces(after, snaps)
 			if len(last) == 0 {
@@ -399,45 +447,62 @@ func (c *capturer) converge(ctx context.Context, webCmd string, budget time.Dura
 		} else {
 			logf("consistency: attempt %d: core state moved during capture, retrying", attempt)
 		}
-		if time.Now().After(deadline) {
-			if stableAttempts == 0 {
-				return nil, fmt.Errorf("core state never held still for one capture within %s", budget)
-			}
-			return last, nil
-		}
 		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		case <-pctx.Done():
+			return expired()
 		case <-time.After(3 * time.Second):
 		}
 	}
 }
 
-func filteredEnv(env []string, drop ...string) []string {
+// cliChildEnv strips every MCPPROXY_* variable from the CLI's environment:
+// MCPPROXY_DATA, MCPPROXY_TRAY_ENDPOINT, MCPPROXY_API_KEY, MCPPROXY_LISTEN…
+// can each point the CLI at another daemon than the gate's --config names.
+func cliChildEnv(env []string) []string {
 	out := make([]string, 0, len(env))
 	for _, kv := range env {
-		keep := true
-		for _, d := range drop {
-			if strings.HasPrefix(kv, d+"=") {
-				keep = false
-				break
-			}
-		}
-		if keep {
+		if !strings.HasPrefix(kv, "MCPPROXY_") {
 			out = append(out, kv)
 		}
 	}
 	return out
 }
 
+// lockedBuffer is a bytes.Buffer safe for os/exec's stderr copier and our
+// error paths to use concurrently.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // webuiReader drives e2e/web-ui-sweep/surface-snapshot.mjs: one long-lived
 // headless Chromium page, one JSON line per command on stdin/stdout. Keeping
 // the page open is what lets the live phase test the Web UI's update path.
+//
+// Replies are not tagged, so a command that times out or is cancelled kills
+// the reader for good: a late reply must never be read as the answer to a
+// later command.
 type webuiReader struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	lines  chan []byte
-	stderr *bytes.Buffer
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	lines   chan []byte
+	stderr  *lockedBuffer
+	done    chan struct{}
+	once    sync.Once
+	dead    error
+	timeout time.Duration
 }
 
 func startWebUIReader(ctx context.Context, script, baseURL, apiKey string) (*webuiReader, error) {
@@ -446,8 +511,11 @@ func startWebUIReader(ctx context.Context, script, baseURL, apiKey string) (*web
 	}
 	cmd := exec.CommandContext(ctx, "node", script)
 	cmd.Dir = filepath.Dir(script) // resolves @playwright/test from the sweep's node_modules
-	cmd.Env = append(filteredEnv(os.Environ(), "MCPPROXY_API_KEY", "MCPPROXY_BASE_URL"),
-		"MCPPROXY_BASE_URL="+baseURL, "MCPPROXY_API_KEY="+apiKey)
+	cmd.Env = append(cliChildEnv(os.Environ()), "MCPPROXY_BASE_URL="+baseURL, "MCPPROXY_API_KEY="+apiKey)
+	return startReaderCmd(cmd)
+}
+
+func startReaderCmd(cmd *exec.Cmd) (*webuiReader, error) {
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, err
@@ -456,48 +524,87 @@ func startWebUIReader(ctx context.Context, script, baseURL, apiKey string) (*web
 	if err != nil {
 		return nil, err
 	}
-	stderr := &bytes.Buffer{}
-	cmd.Stderr = stderr
+	r := &webuiReader{stdin: stdin, lines: make(chan []byte, 4), stderr: &lockedBuffer{},
+		done: make(chan struct{}), timeout: 90 * time.Second}
+	cmd.Stderr = r.stderr
+	r.cmd = cmd
 	if err := cmd.Start(); err != nil {
 		return nil, err
 	}
-	r := &webuiReader{cmd: cmd, stdin: stdin, lines: make(chan []byte, 4), stderr: stderr}
 	go func() {
+		defer close(r.lines)
 		sc := bufio.NewScanner(stdout)
 		sc.Buffer(make([]byte, 1<<20), 16<<20)
 		for sc.Scan() {
-			r.lines <- append([]byte(nil), sc.Bytes()...)
+			select {
+			case r.lines <- append([]byte(nil), sc.Bytes()...):
+			case <-r.done:
+				return
+			}
 		}
-		close(r.lines)
 	}()
 	return r, nil
 }
 
+// kill stops the reader for good; later commands fail with reason.
+func (r *webuiReader) kill(reason error) {
+	r.once.Do(func() {
+		r.dead = reason
+		close(r.done)
+		_ = r.stdin.Close()
+		if r.cmd.Process != nil {
+			_ = r.cmd.Process.Kill()
+		}
+		go func() { _ = r.cmd.Wait() }()
+	})
+}
+
 func (r *webuiReader) do(ctx context.Context, command string) ([]byte, error) {
-	if _, err := io.WriteString(r.stdin, command+"\n"); err != nil {
-		return nil, fmt.Errorf("send %q: %w (stderr: %s)", command, err, truncateStr(r.stderr.String(), 400))
+	select {
+	case <-r.done:
+		return nil, fmt.Errorf("web UI reader is gone: %w", r.dead)
+	default:
 	}
+	if _, err := io.WriteString(r.stdin, command+"\n"); err != nil {
+		err = fmt.Errorf("send %q: %w (stderr: %s)", command, err, truncateStr(r.stderr.String(), 400))
+		r.kill(err)
+		return nil, err
+	}
+	timer := time.NewTimer(r.timeout)
+	defer timer.Stop()
 	select {
 	case line, ok := <-r.lines:
 		if !ok {
-			return nil, fmt.Errorf("web UI reader exited (stderr: %s)", truncateStr(r.stderr.String(), 600))
+			err := fmt.Errorf("web UI reader exited (stderr: %s)", truncateStr(r.stderr.String(), 600))
+			r.kill(err)
+			return nil, err
 		}
 		return line, nil
-	case <-time.After(90 * time.Second):
-		return nil, fmt.Errorf("web UI reader: %q timed out", command)
+	case <-timer.C:
+		err := fmt.Errorf("web UI reader: %q timed out after %s", command, r.timeout)
+		r.kill(err)
+		return nil, err
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		err := fmt.Errorf("web UI reader: %q: %w", command, ctx.Err())
+		r.kill(err)
+		return nil, err
 	}
 }
 
 func (r *webuiReader) close() {
+	select {
+	case <-r.done:
+		return
+	default:
+	}
 	_, _ = io.WriteString(r.stdin, "quit\n")
 	_ = r.stdin.Close()
-	done := make(chan struct{})
-	go func() { _ = r.cmd.Wait(); close(done) }()
+	exited := make(chan struct{})
+	go func() { _ = r.cmd.Wait(); close(exited) }()
 	select {
-	case <-done:
+	case <-exited:
 	case <-time.After(10 * time.Second):
 		_ = r.cmd.Process.Kill()
 	}
+	r.once.Do(func() { r.dead = errors.New("closed"); close(r.done) })
 }

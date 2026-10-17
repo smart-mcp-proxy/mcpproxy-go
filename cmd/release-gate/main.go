@@ -9,6 +9,10 @@
 //	            assert FR-011 (activity request-id completeness), FR-012
 //	            (counter movement), FR-013 (quarantine + approval e2e) and
 //	            FR-014 (upgrade-in-place from the latest stable release).
+//	consistency attach to the live instance the matrix left running and
+//	            assert the CLI, MCP and Web UI agree with the core on every
+//	            server's state (T4, FR-018).
+//	teardown    stop everything a matrix --state-file run left running.
 //	run-suite   run an existing suite entry point (FR-003) and record its
 //	            outcome as a report fragment.
 //	report      merge all fragments against the hardcoded manifest into
@@ -48,6 +52,8 @@ func main() {
 		ok, err = cmdInvariants(ctx, os.Args[2:])
 	case "consistency":
 		ok, err = cmdConsistency(ctx, os.Args[2:])
+	case "teardown":
+		ok, err = cmdTeardown(os.Args[2:])
 	case "run-suite":
 		ok, err = cmdRunSuite(ctx, os.Args[2:])
 	case "report":
@@ -78,6 +84,9 @@ usage:
                           [--work-dir DIR] [--cell-timeout 300s]
   release-gate invariants --state-file FILE --report-dir DIR [--prev-binary PATH] [--skip-upgrade] \
                           [--upgrade-repo owner/repo] [--keep-core]
+  release-gate consistency --state-file FILE --report-dir DIR (--webui-script surface-snapshot.mjs | --no-webui) \
+                          [--seed-mismatch surface:server:field=value] [--settle-timeout 60s] [--keep-core]
+  release-gate teardown   --state-file FILE
   release-gate run-suite  --name suite/api-e2e --report-dir DIR [--advisory] -- CMD [ARGS...]
   release-gate report     --report-dir DIR [--out gate-report.json] [--summary summary.md]
 `)
