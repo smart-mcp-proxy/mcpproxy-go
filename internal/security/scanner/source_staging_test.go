@@ -301,6 +301,7 @@ func TestStagedSource_CopyCancelledByDeadline(t *testing.T) {
 // when the caller passed context.Background().
 func TestStagedSource_ScanDeadlineCoversStaging(t *testing.T) {
 	source := writeToolsJSON(t, []map[string]interface{}{rt06Tool(rt06Poisoned)})
+	require.NoError(t, os.WriteFile(filepath.Join(source, "main.js"), []byte("x"), 0o644)) // a non-skipped entry for staging to check ctx on
 	snapshot, err := os.ReadFile(filepath.Join(source, "tools.json"))
 	require.NoError(t, err)
 	logger := zap.NewNop()
@@ -312,9 +313,16 @@ func TestStagedSource_ScanDeadlineCoversStaging(t *testing.T) {
 		return "", "", 0, nil
 	}
 	req := ScanRequest{ServerName: "dl", SourceDir: source, ToolDefinitions: snapshot}
-	plugin := &ScannerPlugin{ID: "mcp-scan", DockerImage: "example/mcp-scan:test", Command: []string{"scan"}, Timeout: "1ns"}
+	// A 1ns timeout is not reliably expired on coarse-clock platforms
+	// (Windows), so staging could finish before the deadline was observable.
+	// Use a short timeout and stall inside staging, after the first directory
+	// batch, until the deadline has certainly passed: the next ctx check in
+	// staging must then fail. This proves staging runs under the scan deadline.
+	t.Cleanup(func() { stagingAfterReadBatch = nil })
+	stagingAfterReadBatch = func(int) { time.Sleep(300 * time.Millisecond) }
+	plugin := &ScannerPlugin{ID: "mcp-scan", DockerImage: "example/mcp-scan:test", Command: []string{"scan"}, Timeout: "20ms"}
 	_, _, err = engine.runSingleScanner(context.Background(), plugin, req)
-	require.Error(t, err, "an already-expired scan deadline stops staging")
+	require.Error(t, err, "an expired scan deadline stops staging")
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
 

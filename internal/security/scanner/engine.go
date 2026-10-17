@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -314,6 +315,10 @@ func (n *NoopCallback) OnScannerFailed(_ *ScanJob, _ string, _ error)          {
 func (n *NoopCallback) OnScanCompleted(_ *ScanJob, _ []*ScanReport)            {}
 func (n *NoopCallback) OnScanFailed(_ *ScanJob, _ error)                       {}
 
+// ErrScanInProgress is returned (wrapped) by StartScan when the server already
+// has a registered scan job.
+var ErrScanInProgress = errors.New("scan already in progress")
+
 // StartScan begins a scan of the specified server
 // Returns the scan job immediately; scanning runs in the background
 func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCallback) (*ScanJob, error) {
@@ -333,7 +338,7 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 		// Snapshot: the running scan keeps writing to the live record.
 		snapshot := existing.clone()
 		e.mu.Unlock()
-		return snapshot, fmt.Errorf("scan already in progress for server %s (job %s)", req.ServerName, snapshot.ID)
+		return snapshot, fmt.Errorf("%w for server %s (job %s)", ErrScanInProgress, req.ServerName, snapshot.ID)
 	}
 	if check := e.registrationCheck; check != nil && !check(req.ServerName, req.Incarnation) {
 		e.mu.Unlock()
