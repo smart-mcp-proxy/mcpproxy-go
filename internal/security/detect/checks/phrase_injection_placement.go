@@ -51,7 +51,7 @@ var placementTerminators = map[string]bool{
 	"but": true, "so": true, "while": true, "when": true, "if": true,
 	"because": true, "since": true, "which": true, "that": true, "where": true,
 	"until": true, "unless": true, "after": true, "before": true, "once": true,
-	"using": true, "via": true, "whereas": true, "although": true, "though": true,
+	"using": true, "whereas": true, "although": true, "though": true,
 }
 
 // placementConjunctions separate payload items.
@@ -81,10 +81,6 @@ var itemUnitWords = map[string]bool{
 	"base64": true, "string": true, "just": true, "alone": true,
 }
 
-// parentheticalNegation marks a parenthetical that excludes what it names:
-// "(not its contents)".
-var parentheticalNegation = regexp.MustCompile(`\b(?:not|never|no|without|except\w*|exclud\w*|neither|nor|n't)\b`)
-
 // followerStarters are the words that start a further item after a
 // destination: "… to the date field and its contents to the notes field". Any
 // other word after a destination ("… and notify the user") ends the clause.
@@ -111,7 +107,7 @@ type placementItem struct {
 // with metadata words followed by "of"/"for" ("the length of the key") or by
 // unit words ("its size in bytes"), or name the public key. A bare qualifier
 // ("the key", "its contents") is the secret itself.
-func payloadWordsAreMetadata(words []string) bool {
+func payloadWordsAreMetadata(words []string, inParen bool) bool {
 	i := 0
 	for i < len(words) && (secretDeterminers[words[i]] || itemSkippedWords[words[i]]) {
 		i++
@@ -119,6 +115,16 @@ func payloadWordsAreMetadata(words []string) bool {
 	words = words[i:]
 	if len(words) == 0 {
 		return false
+	}
+	if inParen {
+		// a qualifier made of unit words only: "(hex)", "(in bytes)"
+		allUnits := true
+		for _, w := range words {
+			allUnits = allUnits && itemUnitWords[w]
+		}
+		if allUnits {
+			return true
+		}
 	}
 	q := 0
 	for q < len(words) && itemQualifierWords[words[q]] {
@@ -195,7 +201,7 @@ func (p *placementToks) nextWord(i int) (int, string) {
 		if !ok {
 			return -1, ""
 		}
-		if p.t[s] == '(' {
+		if p.t[s] == '(' || p.t[s] == ',' {
 			continue
 		}
 		return n, p.word(n)
@@ -215,14 +221,50 @@ func (p *placementToks) startsItem(k int, w string) bool {
 	return followerSecretWords[next]
 }
 
+// parenLeadWords introduce a further item inside a parenthetical ("(including
+// its contents)", "(together with its contents)"); there they act as "and".
+var parenLeadWords = map[string]bool{
+	"including": true, "include": true, "includes": true, "with": true,
+	"together": true, "along": true, "also": true, "as": true, "well": true,
+}
+
+// exclusionLeadWords open a parenthetical or phrase that excludes what it
+// names: "(not its contents)".
+var exclusionLeadWords = map[string]bool{
+	"not": true, "never": true, "no": true, "without": true, "except": true,
+	"excluding": true, "exclude": true, "neither": true, "nor": true, "but": true,
+}
+
+// clauseVerbs open a new, unrelated clause after a destination or a
+// separator ("… to the size field and notify the user"). A word that is not
+// one of these, not an item starter and not a terminator is something the
+// parse cannot place, so the clause is not proven metadata-only.
+var clauseVerbs = func() map[string]bool {
+	m := map[string]bool{}
+	for _, w := range strings.Fields(`notify tell inform return show display log report confirm ask warn
+		remind wait retry otherwise do don't never make ensure verify check validate avoid let keep stay
+		please note stop skip ignore continue proceed finish end repeat update create delete remove
+		put place insert pass embed add append paste stuff supply provid provide send set store save
+		write copy read load cat open pull collect gather grab fetch get obtain retriev retrieve
+		extract dump fill populate`) {
+		m[w] = true
+	}
+	return m
+}()
+
 // parsePlacementItems parses the payload items of the clause that starts at
 // byte offset from of t. The clause ends at a sentence end, ";", a terminator
 // word, or the second non-metadata item: only the first secret item and the
 // metadata around it matter, which also keeps the scan linear.
-func parsePlacementItems(t string, from int) []placementItem {
+//
+// proven reports that the items up to a destination are positively metadata
+// as far as the parse can tell: it is false whenever the parse met something
+// it cannot place (an item longer than placementMaxItemWords, an unrecognized
+// word after a separator) or never reached a destination. Callers blank a
+// verb only when proven; any doubt keeps it.
+func parsePlacementItems(t string, from int, inParen bool) (items []placementItem, proven bool) {
 	toks := &placementToks{t: t, pos: from}
 	var (
-		items      []placementItem
 		words      []string
 		wStart     = -1
 		wEnd       int
@@ -230,6 +272,7 @@ func parsePlacementItems(t string, from int) []placementItem {
 		sawConj    bool
 		stop       bool
 		secretSeen bool
+		uncertain  bool
 	)
 	add := func(it placementItem) {
 		items = append(items, it)
@@ -242,7 +285,7 @@ func parsePlacementItems(t string, from int) []placementItem {
 	}
 	flush := func() {
 		if len(words) > 0 {
-			add(placementItem{start: wStart, end: wEnd, meta: payloadWordsAreMetadata(words), destStart: -1, destEnd: -1})
+			add(placementItem{start: wStart, end: wEnd, meta: payloadWordsAreMetadata(words, inParen), destStart: -1, destEnd: -1})
 		}
 		words, wStart = nil, -1
 	}
@@ -254,17 +297,15 @@ func parsePlacementItems(t string, from int) []placementItem {
 		tok := t[ts:te]
 		switch tok[0] {
 		case '(':
-			// a parenthesized further item ("(and its contents)") counts; a
-			// qualifier ("(SHA256)") and an exclusion ("(not its contents)")
-			// do not
-			inner := strings.ToLower(tok[1 : len(tok)-1])
-			fw := (&placementToks{t: inner})
-			first := fw.word(0)
-			if parentheticalNegation.MatchString(inner) || (!placementConjunctions[first] && !followerStarters[first]) {
+			// a parenthesized item is parsed like the rest of the clause; only
+			// an explicit exclusion ("(not its contents)") is set aside
+			flush()
+			inner := tok[1 : len(tok)-1]
+			if _, first := (&placementToks{t: inner}).nextWord(-1); exclusionLeadWords[first] || strings.HasSuffix(first, "n't") {
 				continue
 			}
-			flush()
-			for _, it := range parsePlacementItems(t[:te-1], ts+1) {
+			sub, _ := parsePlacementItems(t[:te-1], ts+1, true)
+			for _, it := range sub {
 				if !it.meta && !stop {
 					it.destStart, it.destEnd = -1, -1
 					add(it)
@@ -292,7 +333,7 @@ func parsePlacementItems(t string, from int) []placementItem {
 			break
 		}
 		switch {
-		case placementConjunctions[w]:
+		case placementConjunctions[w] || (inParen && parenLeadWords[w]):
 			flush()
 			sawConj = true
 		case w == "then" || (w == "after" && !endsSentence && func() bool { _, n := toks.nextWord(k); return n == "that" }()):
@@ -303,7 +344,8 @@ func parsePlacementItems(t string, from int) []placementItem {
 				at, _ = toks.nextWord(k)
 			}
 			j, nw := toks.nextWord(at)
-			if j < 0 || !toks.startsItem(j, nw) {
+			if j >= 0 && !toks.startsItem(j, nw) {
+				uncertain = uncertain || !clauseVerbs[nw]
 				stop = true
 				continue
 			}
@@ -330,16 +372,26 @@ func parsePlacementItems(t string, from int) []placementItem {
 			if afterDest {
 				// only a conjunction followed by a further payload item
 				// continues the clause past a destination
-				if !sawConj || !toks.startsItem(k, w) {
+				if !sawConj {
+					stop = true
+					continue
+				}
+				if !toks.startsItem(k, w) {
+					uncertain = uncertain || !clauseVerbs[w]
 					stop = true
 					continue
 				}
 				afterDest = false
 			}
 			if len(words) >= placementMaxItemWords {
-				flush()
-				stop = true
-				continue
+				// too long to be a metadata label: close it as a secret and
+				// doubt the clause
+				add(placementItem{start: wStart, end: wEnd, meta: false, destStart: -1, destEnd: -1})
+				words, wStart = nil, -1
+				uncertain = true
+				if stop {
+					continue
+				}
 			}
 			if wStart < 0 {
 				wStart = ts
@@ -353,7 +405,11 @@ func parsePlacementItems(t string, from int) []placementItem {
 		}
 	}
 	flush()
-	return items
+	reached := false
+	for _, it := range items {
+		reached = reached || it.destStart >= 0
+	}
+	return items, reached && !uncertain
 }
 
 // maskPlacementClauses rewrites placement clauses so the credential families
@@ -377,7 +433,7 @@ func maskPlacementClauses(t string) string {
 		if l[0] < edited {
 			continue
 		}
-		items := parsePlacementItems(t, l[1])
+		items, proven := parsePlacementItems(t, l[1], false)
 		if len(items) == 0 {
 			continue
 		}
@@ -389,7 +445,9 @@ func maskPlacementClauses(t string) string {
 			}
 		}
 		if s < 0 {
-			// metadata only: the verb moves no secret
+			if !proven {
+				continue // not proven metadata-only: keep the verb
+			}
 			b := edit()
 			for i := l[0]; i < l[1]; i++ {
 				b[i] = '#'
@@ -446,7 +504,7 @@ func maskPlacementClauses(t string) string {
 		if l[0] < edited {
 			continue
 		}
-		items := parsePlacementItems(t, l[1])
+		items, _ := parsePlacementItems(t, l[1], false)
 		if len(items) == 0 || !items[0].meta {
 			continue
 		}
