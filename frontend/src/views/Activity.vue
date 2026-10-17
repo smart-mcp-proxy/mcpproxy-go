@@ -578,7 +578,7 @@
                 <th class="cursor-pointer hover:bg-base-200" @click="sortBy('timestamp')">
                   Time {{ getSortIndicator('timestamp') }}
                 </th>
-                <th class="hidden sm:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('type')">
+                <th class="cursor-pointer hover:bg-base-200" :class="typeColumnClass" @click="sortBy('type')">
                   Type {{ getSortIndicator('type') }}
                 </th>
                 <th class="hidden sm:table-cell cursor-pointer hover:bg-base-200" @click="sortBy('server_name')">
@@ -586,7 +586,9 @@
                 </th>
                 <!-- Spec 108-j J10: who made the call and under which profile.
                      Folded away below lg (1024px); the detail drawer carries the same
-                     chips in an "Attribution" section. -->
+                     chips in an "Attribution" section. From lg to xl the card is
+                     ~670-790px with the sidebar open, so while Scope shows there,
+                     Type and Duration fold instead (typeColumnClass). -->
                 <th v-if="hasScopeColumn" class="hidden lg:table-cell" data-test="activity-scope-col">Scope</th>
                 <th>Details</th>
                 <th v-if="hasSensitiveColumn" class="hidden lg:table-cell">Sensitive</th>
@@ -613,7 +615,7 @@
                   bug the Status column's min-width above already works
                   around.
                 -->
-                <th class="hidden md:table-cell cursor-pointer hover:bg-base-200 min-w-[4.5rem] whitespace-nowrap" @click="sortBy('duration_ms')">
+                <th class="cursor-pointer hover:bg-base-200 min-w-[4.5rem] whitespace-nowrap" :class="durationColumnClass" @click="sortBy('duration_ms')">
                   Duration {{ getSortIndicator('duration_ms') }}
                 </th>
                 <!-- Row-open chevron. Kept at every width: it is the actual
@@ -654,7 +656,7 @@
                     <span v-if="row.runSpan" class="opacity-70">· {{ row.runSpan }}</span>
                   </div>
                 </td>
-                <td class="hidden sm:table-cell">
+                <td :class="typeColumnClass">
                   <div class="flex flex-col gap-1">
                     <div class="flex items-center gap-2">
                       <span class="text-lg">{{ getTypeIcon(row.activity.type) }}</span>
@@ -703,10 +705,12 @@
                 </td>
                 <td>
                   <div class="max-w-[6rem] sm:max-w-xs truncate flex items-center gap-1.5">
-                    <!-- Below `sm` the Type column folds away (F14), so the row
-                         keeps its type as the glyph in front of the details. -->
+                    <!-- Wherever the Type column folds away (below `sm`, F14; below
+                         `xl` beside Scope), the row keeps its type as the glyph
+                         in front of the details. -->
                     <span
-                      class="sm:hidden text-sm shrink-0"
+                      class="text-sm shrink-0"
+                      :class="typeGlyphClass"
                       :title="formatType(row.activity.type)"
                     >{{ getTypeIcon(row.activity.type) }}</span>
                     <!--
@@ -896,7 +900,7 @@
                     @click.stop="openExplain(row.activity)"
                   >Why?</button>
                 </td>
-                <td class="hidden md:table-cell whitespace-nowrap">
+                <td class="whitespace-nowrap" :class="durationColumnClass">
                   <!-- A run reports the SPAN its members took, not one member's. -->
                   <span v-if="row.runDuration" class="text-sm whitespace-nowrap" :title="`${row.runCount} calls`">
                     {{ row.runDuration }}
@@ -2526,6 +2530,13 @@ watch(scopeKey, () => {
 const hasScopeColumn = computed(() =>
   SCOPE_URL_NAMES.some(name => isScopeParamAvailable(name)) || activities.value.some(hasAttribution)
 )
+
+// The Scope column (lg+) costs ~176px. Between lg and xl the card cannot also
+// hold Type and Duration, so they fold there while Scope shows; the drawer
+// carries both, and Details keeps the type glyph it shows on phones.
+const typeColumnClass = computed(() => (hasScopeColumn.value ? 'hidden xl:table-cell' : 'hidden sm:table-cell'))
+const typeGlyphClass = computed(() => (hasScopeColumn.value ? 'xl:hidden' : 'sm:hidden'))
+const durationColumnClass = computed(() => (hasScopeColumn.value ? 'hidden xl:table-cell' : 'hidden md:table-cell'))
 
 function hasAttribution(record: ActivityRecord): boolean {
   return Boolean(record.profile || record.client_id || record.client_name || record.token_name)
