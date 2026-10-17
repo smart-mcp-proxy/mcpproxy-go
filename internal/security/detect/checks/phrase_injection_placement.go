@@ -245,10 +245,31 @@ var notButRe = regexp.MustCompile(`(?i)^not\b[^.;]*?\bbut\s+`)
 
 // notSplitRe is the exclusion head of a parenthetical, up to where the
 // included part starts: "(not X but Y)", "(not X, Y)", "(not X; Y)".
-var notSplitRe = regexp.MustCompile(`(?i)^not\b[^.;,]*?(?:[,;]\s*(?:but\s+)?|\bbut\s+)`)
+var notSplitRe = regexp.MustCompile(`(?i)^(?:not|nor|no|neither|never|without)\b[^.;,]*?(?:[,;]\s*(?:but\s+)?|\bbut\s+)`)
+
+// includedAfterExclusion returns the offset where the included part of an
+// exclusion parenthetical starts: after "(not X, Y)", "(not X but Y)" or
+// "(not X; Y)". A further ", nor/not/no Z" continues the exclusion. ok is
+// false when nothing is included.
+func includedAfterExclusion(low string) (off int, ok bool) {
+	for {
+		m := notSplitRe.FindStringIndex(low[off:])
+		if m == nil {
+			return 0, false
+		}
+		off += m[1]
+		_, first := (&placementToks{t: low[off:]}).nextWord(-1)
+		if !exclusionLeadWords[first] && !strings.HasSuffix(first, "n't") {
+			return off, true
+		}
+	}
+}
 
 // parenSecretRe finds the words that make a parenthetical carry a secret.
-var parenSecretRe = regexp.MustCompile(`(?i)\b(?:contents?|values?|secrets?|tokens?|passwords?|passphras\w*|credentials?|body|text|data|api key|ssh key|private key|secret key|key itself|key material|raw bytes|full file|whole file|entire file|everything)\b`)
+var parenSecretRe = regexp.MustCompile(`(?i)\b(?:contents?|values?|secrets?|tokens?|passwords?|passphras\w*|credentials?|body|text|data|api key|ssh key|private key|secret key|key itself|key material|raw bytes|everything)\b`)
+
+// fileQualifierWords before "file" make it the whole file.
+var fileQualifierWords = map[string]bool{"full": true, "whole": true, "entire": true, "complete": true}
 
 // keyAlgorithmWords before "key" make it a key TYPE ("RSA 4096 key"), not the
 // key itself.
@@ -263,6 +284,10 @@ func parenNamesSecret(low string) bool {
 	}
 	words := phraseWords(low)
 	for i, w := range words {
+		if w == "file" && i > 0 && fileQualifierWords[words[i-1]] &&
+			(i+1 >= len(words) || !secretMetadataWords.MatchString(words[i+1])) {
+			return true // "(full file)", but not "(full file path)"
+		}
 		if w != "key" && w != "keys" {
 			continue
 		}
@@ -386,11 +411,13 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 			inner := tok[1 : len(tok)-1]
 			low := strings.ToLower(inner)
 			subFrom := ts + 1
-			if m := notSplitRe.FindStringIndex(low); m != nil {
-				subFrom += m[1]
-				low = low[m[1]:]
-			} else if _, first := (&placementToks{t: inner}).nextWord(-1); exclusionLeadWords[first] || strings.HasSuffix(first, "n't") {
-				continue
+			if _, first := (&placementToks{t: low}).nextWord(-1); exclusionLeadWords[first] || strings.HasSuffix(first, "n't") {
+				off, included := includedAfterExclusion(low)
+				if !included {
+					continue
+				}
+				subFrom += off
+				low = low[off:]
 			}
 			_, first := (&placementToks{t: low}).nextWord(-1)
 			opensItem := placementConjunctions[first] || parenLeadWords[first] || followerStarters[first] || first == "it" || first == "the"
@@ -439,7 +466,7 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 			j, nw := toks.nextWord(at)
 			if j >= 0 && !toks.startsItem(j, nw) && !toks.peekMeta(j) {
 				js, _, _ := toks.at(j)
-				uncertain = uncertain || clauseHoldsPlacement(t, js)
+				uncertain = uncertain || (clauseHoldsPlacement(t, js) && !isOutputVerb(nw))
 				stop = true
 				continue
 			}
@@ -488,7 +515,7 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 					continue
 				}
 				if !toks.startsItem(k, w) && !toks.peekMeta(k) {
-					uncertain = uncertain || clauseHoldsPlacement(t, ts)
+					uncertain = uncertain || (clauseHoldsPlacement(t, ts) && !isOutputVerb(w))
 					stop = true
 					continue
 				}
@@ -532,20 +559,33 @@ var chainedOutputVerbRe = regexp.MustCompile(`(?i)\b(return|log)s?\b`)
 // "to/into the <x> field", never "in/as the <x> field".
 var chainedOutputTargetRe = regexp.MustCompile(`(?i)^[^.!?;]{0,80}?\b(?:to|into)\s+(?:the |a |an |its |this )?[\w"'` + "`" + `-]+ (?:field|parameter|param|argument|arg)\b`)
 
-// rewriteChainedOutputVerbs turns a "return"/"log" that opens a LATER clause of
-// a sentence already holding a placement verb, and whose target is to/into a
-// field, into the placement verb "insert"/"add" (same length), so "save its
-// size to the size field and return its contents to the notes field" is read
-// as the second placement it is. A standalone tool-output description
-// ("returns its contents in the data field") is left alone.
+// isOutputVerb reports whether w is "return"/"log" (any inflection). One that
+// reaches the parse was not rewritten into a placement (its object is not
+// secret-shaped or its target is not to/into a field), so its clause is tool
+// output, not a transfer.
+func isOutputVerb(w string) bool {
+	switch w {
+	case "return", "returns", "returned", "returning", "log", "logs", "logged", "logging":
+		return true
+	}
+	return false
+}
+
+// chainedOutputObjectRe is a secret-shaped object right after the verb: "its
+// contents", "the private key", "the whole file", "everything".
+var chainedOutputObjectRe = regexp.MustCompile(`(?i)^\s+(?:(?:its|their|the|this|that|all|any|my|your|raw|actual)\s+)*(?:contents?|keys?|private key|ssh key|api key|values?|secrets?|tokens?|passwords?|credentials?|raw bytes|everything|(?:whole|entire|full|complete)\s+file)\b`)
+
+// rewriteChainedOutputVerbs turns a "return"/"log" whose object is
+// secret-shaped and whose target is to/into a field into the placement verb
+// "insert"/"add" (same length), so "return its contents to the notes field"
+// and "save its size to the size field and log its contents into the notes
+// field" read as the placements they are. A tool-output description
+// ("returns its contents in the data field") or a non-secret object ("log the
+// result to the log field") is left alone.
 func rewriteChainedOutputVerbs(t string) string {
 	var out []byte
 	for _, l := range chainedOutputVerbRe.FindAllStringSubmatchIndex(t, -1) {
-		start := 0
-		if i := strings.LastIndexAny(t[:l[0]], ".!?;"); i >= 0 {
-			start = i + 1
-		}
-		if !placementVerbRe.MatchString(t[start:l[0]]) || !chainedOutputTargetRe.MatchString(t[l[1]:]) {
+		if !chainedOutputObjectRe.MatchString(t[l[1]:]) || !chainedOutputTargetRe.MatchString(t[l[1]:]) {
 			continue
 		}
 		if out == nil {
