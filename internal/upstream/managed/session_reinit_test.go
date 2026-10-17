@@ -34,6 +34,7 @@ type sessUpstream struct {
 	readDesc    string        // description of read_thing; changing it changes its hash
 	rejectAfter bool          // when set, every non-initialize request is 404 (even on a fresh session)
 	notReadOnly bool          // when set, read_thing is listed without readOnlyHint
+	listFail    bool          // when set, tools/list answers HTTP 500 (the session stays live)
 	listEntered chan struct{} // when non-nil, tools/list signals here then blocks on listRelease
 	listRelease chan struct{}
 }
@@ -98,6 +99,7 @@ func (u *sessUpstream) handler() http.Handler {
 		desc := u.readDesc
 		notRO := u.notReadOnly
 		entered, release := u.listEntered, u.listRelease
+		listFail := u.listFail
 		u.mu.Unlock()
 		if !ok {
 			w.WriteHeader(http.StatusNotFound)
@@ -110,6 +112,10 @@ func (u *sessUpstream) handler() http.Handler {
 			u.mu.Unlock()
 			write(map[string]any{"content": []any{map[string]any{"type": "text", "text": "ok"}}})
 		case "tools/list":
+			if listFail {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
 			if entered != nil {
 				entered <- struct{}{}
 				<-release
@@ -353,4 +359,173 @@ func TestSessionReinit_CallerDuringFlightWaits(t *testing.T) {
 	inits, _, executed := up.snapshot()
 	assert.Equal(t, 2, inits)
 	assert.Equal(t, 2, executed["read_thing"])
+}
+
+// A session re-initialize mutates the shared mcp-go client's negotiated
+// protocol state (Initialize -> applyNegotiatedVersion), which every request
+// reads before it is sent (sendRequest -> applyRequestMeta -> isModern) and
+// tools/call reads again on the response. Requests in flight on the same
+// client — tools/call, tools/list, ping — must not run while Initialize does.
+// Under -race this failed with a DATA RACE between ReinitializeSession and
+// each request path before the core client serialized them.
+func TestSessionReinit_RequestsDoNotRaceInitialize(t *testing.T) {
+	mc, _ := newSessionClient(t)
+	ctx := tctx(t)
+	core := mc.coreClient
+
+	const rounds = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, 4*rounds)
+	wg.Add(4)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			if err := core.ReinitializeSession(ctx); err != nil {
+				errs <- fmt.Errorf("reinit: %w", err)
+			}
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			// A request racing a re-init may land on the session the re-init
+			// just replaced; only the data race matters here, not the result.
+			_, _ = core.CallTool(ctx, "read_thing", nil)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			_, _ = core.ListTools(ctx)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < rounds; i++ {
+			_ = core.Ping(ctx)
+		}
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Error(err)
+	}
+}
+
+// FR-083a: a call that passed its identity checks against one session but is
+// overtaken by a re-initialize before it is sent (it queued on the core
+// client's session gate behind Initialize) must not go out on the new session
+// before being re-checked against the re-listed toolset. Here the toolset
+// changed across the re-init, so the pinned call is refused with nothing sent.
+func TestSessionReinit_OvertakenCallRecheckedAgainstNewToolset(t *testing.T) {
+	mc, up := newSessionClient(t)
+	ctx := tctx(t)
+	fired := false
+	mc.sess.beforeSend = func() {
+		if fired {
+			return
+		}
+		fired = true
+		up.mu.Lock()
+		up.readDesc = "reads, but now differently"
+		up.mu.Unlock()
+		up.forget()
+		cur, _, _ := mc.sessionState()
+		require.NoError(t, mc.reinitSession(ctx, cur, "test"))
+	}
+
+	epoch := mc.ConnectionEpoch()
+	_, err := mc.CallToolOnEpoch(ctx, "read_thing", nil, epoch)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrConnectionGenerationChanged), "got %v", err)
+	assert.True(t, fired)
+	_, _, executed := up.snapshot()
+	assert.Zero(t, executed["read_thing"], "the call must not be sent on the unverified session")
+}
+
+// The same overtaken call is sent once the re-listed toolset confirms it.
+func TestSessionReinit_OvertakenCallSentAfterRecheck(t *testing.T) {
+	mc, up := newSessionClient(t)
+	ctx := tctx(t)
+	fired := false
+	mc.sess.beforeSend = func() {
+		if fired {
+			return
+		}
+		fired = true
+		up.forget()
+		cur, _, _ := mc.sessionState()
+		require.NoError(t, mc.reinitSession(ctx, cur, "test"))
+	}
+
+	_, err := mc.CallTool(ctx, "write_thing", nil)
+	require.NoError(t, err)
+	assert.True(t, fired)
+	inits, _, executed := up.snapshot()
+	assert.Equal(t, 2, inits)
+	assert.Equal(t, 1, executed["write_thing"], "nothing was sent before the re-init, so the call is sent exactly once after it")
+}
+
+// An overtaken call whose re-init flight installed a new session but failed to
+// verify its toolset (its tools/list failed with the new session still live)
+// must not be checked against the stale baseline and sent: the toolset is
+// listed again first, and here it changed, so the call is refused with
+// nothing sent.
+func TestSessionReinit_OvertakenCallAfterFailedVerification(t *testing.T) {
+	mc, up := newSessionClient(t)
+	ctx := tctx(t)
+	fired := false
+	mc.sess.beforeSend = func() {
+		if fired {
+			return
+		}
+		fired = true
+		up.forget()
+		up.mu.Lock()
+		up.listFail = true // the flight's verifying tools/list fails; the new session stays live
+		up.mu.Unlock()
+		cur, _, _ := mc.sessionState()
+		require.Error(t, mc.reinitSession(ctx, cur, "test"))
+		up.mu.Lock()
+		up.listFail = false
+		up.readDesc = "reads, but now differently"
+		up.mu.Unlock()
+	}
+
+	_, err := mc.CallTool(ctx, "read_thing", nil)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrConnectionGenerationChanged), "got %v", err)
+	assert.True(t, fired)
+	_, _, executed := up.snapshot()
+	assert.Zero(t, executed["read_thing"], "the call must not be sent against an unverified toolset")
+}
+
+// A tools/list taken on an older session that finishes after a re-initialize
+// published the new session's verified baseline must not replace it: the
+// stale listing is dropped and the current generation keeps its baseline.
+func TestSessionReinit_StaleListingDoesNotReplaceVerifiedBaseline(t *testing.T) {
+	mc, up := newSessionClient(t)
+	ctx := tctx(t)
+
+	gen0 := mc.sessionGeneration()
+	oldTools, err := mc.coreClient.ListTools(ctx) // listed on the old session
+	require.NoError(t, err)
+
+	up.mu.Lock()
+	up.readDesc = "reads, but now differently"
+	up.mu.Unlock()
+	up.forget()
+	cur, _, _ := mc.sessionState()
+	require.NoError(t, mc.reinitSession(ctx, cur, "test"))
+	gen1 := mc.sessionGeneration()
+	require.NotEqual(t, gen0, gen1)
+	newID, ok := mc.toolIdentityOf("read_thing")
+	require.True(t, ok)
+
+	_, published := mc.publishBaseline(oldTools, gen0)
+	assert.False(t, published, "a listing from an overtaken generation must be dropped")
+	got, ok := mc.toolIdentityOf("read_thing")
+	require.True(t, ok)
+	assert.Equal(t, newID.hash, got.hash, "the verified baseline must survive the stale listing")
+	assert.True(t, mc.sessionVerified(gen1))
 }

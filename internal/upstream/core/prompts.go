@@ -74,6 +74,12 @@ func (c *Client) ListPrompts(ctx context.Context) ([]mcp.Prompt, error) {
 	// ListPromptsByPage instead and stop at maxListPromptsPages pages, at
 	// maxListPromptsItems accumulated prompts (aligned with the per-server trim in
 	// Manager.ListPrompts), or on ctx expiry — whichever comes first (Finding F14).
+	release, err := c.beginRequest(ctx, string(mcp.MethodPromptsList))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
 	listReq := mcp.ListPromptsRequest{}
 	var prompts []mcp.Prompt
 	for page := 1; ; page++ {
@@ -152,7 +158,12 @@ func (c *Client) GetPrompt(ctx context.Context, name string, args map[string]str
 	request.Params.Name = name
 	request.Params.Arguments = args
 
+	release, err := c.beginRequest(ctx, string(mcp.MethodPromptsGet))
+	if err != nil {
+		return nil, err
+	}
 	result, err := upstreamClient.GetPrompt(ctx, request)
+	release()
 	if err != nil {
 		return nil, fmt.Errorf("GetPrompt failed for '%s': %w", name, err)
 	}
