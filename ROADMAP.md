@@ -172,10 +172,8 @@ graph LR
   release_qa_gate_matrix --> release_qa_gate_consistency
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class release_qa_gate_matrix,release_qa_gate_playwright done;
-  class release_qa_gate_consistency in_review;
+  class release_qa_gate_matrix,release_qa_gate_playwright,release_qa_gate_consistency done;
   class release_qa_gate_macos todo;
 ```
 
@@ -184,7 +182,7 @@ graph LR
 | T1: tag-blocking release-gate workflow: server-type matrix (stdio/http/sse/docker/oauth) + invariants (activity-log/request-id, token+telemetry counters, quarantine flow, reconnect, upgrade-in-place), publish jobs gated on the verdict, scan-eval unconditional on tags | 🟢 Done | #819 |
 | T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only) | 🟢 Done | #1030 |
 | T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app) | ⚪ Todo | — |
-| T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states) | 🟡 In review | #1655 |
+| T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states) | 🟢 Done | #1655 |
 
 </details>
 
@@ -998,7 +996,7 @@ graph LR
 | Epic | Status | Priority | Progress | Spec | PR |
 | --- | --- | --- | --- | --- | --- |
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
-| Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
+| Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | 3/4 (75%) | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
@@ -1130,7 +1128,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [078-connect-trust-preview](./specs/078-connect-trust-preview/) | — | — |
 | [079-upgrade-nudge](./specs/079-upgrade-nudge/) | — | — |
 | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) | — | — |
-| [081-release-qa-gate](./specs/081-release-qa-gate/) | — | — |
+| [081-release-qa-gate](./specs/081-release-qa-gate/) | `in-flight` | 3/4 (75%) |
 | [082-work-sessions](./specs/082-work-sessions/) | — | — |
 | [083-discovery-profiler](./specs/083-discovery-profiler/) | `in-flight` | 4/41 (10%) |
 | [084-toon-output](./specs/084-toon-output/) | `in-flight` | 40/43 (93%) |
