@@ -246,6 +246,12 @@ type handle struct {
 	reapMu sync.Mutex
 	reaped bool
 
+	// killed is set once a SIGKILL was sent to the group (Unix). A member
+	// forked while that signal was delivered can be missed by it, so the
+	// reaper, while it keeps the exited leader unreaped, repeats the kill
+	// until the leader is reaped (repeatKillUntilReaped).
+	killed atomic.Bool
+
 	stopOnce sync.Once
 	stopErr  error
 
@@ -356,6 +362,7 @@ func (h *handle) reap() {
 	// exec.Cmd doc: "it is thus incorrect to call Wait before all reads from the
 	// pipe have completed." Pumps naturally finish when the child exits and the
 	// kernel propagates EOF — we don't need Wait() to reach that state.
+	stopRepeat := h.repeatKillUntilReaped()
 	h.pumpWG.Wait()
 
 	// Reap the leader under reapMu (review round 4). cmd.Wait releases the
@@ -392,6 +399,7 @@ func (h *handle) reap() {
 	} else {
 		exitCode, err = h.reapUnobserved()
 	}
+	stopRepeat()
 	if hook := afterReapHook.Load(); hook != nil {
 		(*hook)(h)
 	}
