@@ -210,7 +210,7 @@ func maskPublicKeyFiles(t string) string {
 const credentialArgumentTarget = `\b(?:in|into|as|via|through|to)\s+(?:the |a |an |its |this )?[\w"'` + "`" + `-]+ (?:field|parameter|param|argument|arg)\b`
 
 // credentialPlacementVerbs place a value into a tool argument.
-const credentialPlacementVerbs = `include|put|place|insert|pass|embed|add|append|paste|stuff|supply|provid\w*|send|set|store|save|write|copy`
+const credentialPlacementVerbs = `include|put|place|insert|pass|embed|add|append|paste|stuff|supply|provid\w*|send|set|store|save|write|copy|return|log`
 
 // namedSecretReference is what may stand for a named secret after a placement
 // verb: a pronoun, or a noun phrase that re-refers to the value ("put the key
@@ -1159,7 +1159,7 @@ func negatedBefore(text string, start int) bool {
 
 // secretMetadataWords describe a secret without being it: its expiry, its
 // count, its name (Sol r18 P2). Normalized (lowercased, lightly stemmed).
-const secretMetadataAlt = `expir\w*|expires?|ttl|lifetime|age|count|counts|number|numbers|length|size|name|names|type|types|format|timestamp|date|dates|scope\w*|status|version|owner|creat\w*|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+|time|times|stamp|stamps|modif\w*`
+const secretMetadataAlt = `expir\w*|expires?|ttl|lifetime|age|count|counts|number|numbers|length|size|name|names|type|types|format|timestamp|date|dates|scope\w*|status|version|owner|creat\w*|rotation|fingerprint|location|path|hash\w*|digest|checksum|md5|sha-?\d+|time|times|stamp|stamps|modif\w*|permission\w*|mode|uid|gid|mtime|ctime|atime`
 
 var secretMetadataWords = regexp.MustCompile(`^(?:` + secretMetadataAlt + `)$`)
 

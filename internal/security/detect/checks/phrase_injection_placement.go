@@ -64,6 +64,7 @@ var itemQualifierWords = map[string]bool{
 	"private": true, "public": true, "ssh": true, "api": true, "secret": true,
 	"key": true, "keys": true, "file": true, "content": true, "contents": true,
 	"token": true, "password": true, "credential": true, "credentials": true,
+	"line": true, "lines": true, "row": true, "rows": true, "word": true, "words": true,
 }
 
 // itemSkippedWords carry no payload of their own: the "last"/"first" of "last
@@ -191,7 +192,9 @@ func (p *placementToks) word(i int) string {
 	if !ok || p.t[s] == '(' || p.t[s] == ',' || p.t[s] == ';' {
 		return ""
 	}
-	return strings.ToLower(strings.Trim(strings.TrimRight(p.t[s:e], ".!?"), "\"'`"))
+	w := strings.ToLower(strings.Trim(strings.TrimRight(p.t[s:e], ".!?"), "\"'`"))
+	w = strings.TrimSuffix(strings.TrimSuffix(w, "'s"), "\u2019s")
+	return w
 }
 
 // nextWord returns the index and word of the first word token after i.
@@ -235,22 +238,61 @@ var exclusionLeadWords = map[string]bool{
 	"excluding": true, "exclude": true, "neither": true, "nor": true, "but": true,
 }
 
-// clauseVerbs open a new, unrelated clause after a destination or a
-// separator ("… to the size field and notify the user"). A word that is not
-// one of these, not an item starter and not a terminator is something the
-// parse cannot place, so the clause is not proven metadata-only.
-var clauseVerbs = func() map[string]bool {
-	m := map[string]bool{}
-	for _, w := range strings.Fields(`notify tell inform return show display log report confirm ask warn
-		remind wait retry otherwise do don't never make ensure verify check validate avoid let keep stay
-		please note stop skip ignore continue proceed finish end repeat update create delete remove
-		put place insert pass embed add append paste stuff supply provid provide send set store save
-		write copy read load cat open pull collect gather grab fetch get obtain retriev retrieve
-		extract dump fill populate`) {
-		m[w] = true
+// notJustButRe is "not just X but " at the start of the text: the part after
+// "but" IS included ("not just its size but its contents").
+var notJustButRe = regexp.MustCompile(`(?i)^not\s+(?:just|only|merely|simply)\b[^.;]*?\bbut\s+`)
+
+// clauseDestRe finds a destination anywhere in a clause.
+var clauseDestRe = regexp.MustCompile(`(?i)\b(?:in|into|as|via|through|to)\s+(?:the |a |an |its |this )?[\w"'` + "`" + `-]+ (?:field|parameter|param|argument|arg)\b`)
+
+// clauseSecretRe finds the words that make a clause carry a secret.
+var clauseSecretRe = regexp.MustCompile(`(?i)\b(?:contents?|values?|secrets?|tokens?|passwords?|passphras\w*|credentials?|body|text|data|private key|key itself|key material)\b`)
+
+// clauseHoldsPlacement reports whether the clause starting at from places
+// something (a destination) or names a secret. A new clause that does neither
+// ("click submit", "close the file") is a plain action and ends the parse
+// cleanly; one that does is something the parse cannot prove metadata-only.
+func clauseHoldsPlacement(t string, from int) bool {
+	rest := t[from:min(len(t), from+300)]
+	if l := sentenceEnd.FindStringIndex(rest); l != nil {
+		rest = rest[:l[0]]
 	}
-	return m
-}()
+	if i := strings.IndexByte(rest, ';'); i >= 0 {
+		rest = rest[:i]
+	}
+	return clauseDestRe.MatchString(rest) || clauseSecretRe.MatchString(rest)
+}
+
+// peekMeta reports whether the item starting at token k, up to the next
+// separator or destination, is metadata ("the owner", "the number of lines",
+// "the key's fingerprint").
+func (p *placementToks) peekMeta(k int) bool {
+	var words []string
+	for n := k; len(words) < placementMaxItemWords; n++ {
+		s, e, ok := p.at(n)
+		if !ok {
+			break
+		}
+		c := p.t[s]
+		if c == ',' || c == ';' {
+			break
+		}
+		if c == '(' {
+			continue
+		}
+		w := p.word(n)
+		if placementConjunctions[w] || placementTerminators[w] || w == "then" || placementDestRe.MatchString(p.t[s:]) {
+			break
+		}
+		if w != "" {
+			words = append(words, w)
+		}
+		if strings.ContainsAny(p.t[e-1:e], ".!?") {
+			break
+		}
+	}
+	return len(words) > 0 && payloadWordsAreMetadata(words, false)
+}
 
 // parsePlacementItems parses the payload items of the clause that starts at
 // byte offset from of t. The clause ends at a sentence end, ";", a terminator
@@ -297,14 +339,27 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 		tok := t[ts:te]
 		switch tok[0] {
 		case '(':
-			// a parenthesized item is parsed like the rest of the clause; only
-			// an explicit exclusion ("(not its contents)") is set aside
+			// A parenthesized further item is parsed like the rest of the clause.
+			// A qualifier ("(UTC)", "(RSA 4096)") is not an item: it counts only
+			// when it opens with an inclusion word or names a secret. An
+			// exclusion ("(not its contents)") is set aside, except "not just X
+			// but Y", where Y is included.
 			flush()
 			inner := tok[1 : len(tok)-1]
-			if _, first := (&placementToks{t: inner}).nextWord(-1); exclusionLeadWords[first] || strings.HasSuffix(first, "n't") {
+			low := strings.ToLower(inner)
+			subFrom := ts + 1
+			if m := notJustButRe.FindStringIndex(low); m != nil {
+				subFrom += m[1]
+				low = low[m[1]:]
+			} else if _, first := (&placementToks{t: inner}).nextWord(-1); exclusionLeadWords[first] || strings.HasSuffix(first, "n't") {
 				continue
 			}
-			sub, _ := parsePlacementItems(t[:te-1], ts+1, true)
+			_, first := (&placementToks{t: low}).nextWord(-1)
+			opensItem := placementConjunctions[first] || parenLeadWords[first] || followerStarters[first] || first == "it" || first == "the"
+			if !opensItem && !clauseSecretRe.MatchString(low) {
+				continue
+			}
+			sub, _ := parsePlacementItems(t[:te-1], subFrom, true)
 			for _, it := range sub {
 				if !it.meta && !stop {
 					it.destStart, it.destEnd = -1, -1
@@ -344,8 +399,9 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 				at, _ = toks.nextWord(k)
 			}
 			j, nw := toks.nextWord(at)
-			if j >= 0 && !toks.startsItem(j, nw) {
-				uncertain = uncertain || !clauseVerbs[nw]
+			if j >= 0 && !toks.startsItem(j, nw) && !toks.peekMeta(j) {
+				js, _, _ := toks.at(j)
+				uncertain = uncertain || clauseHoldsPlacement(t, js)
 				stop = true
 				continue
 			}
@@ -376,8 +432,25 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 					stop = true
 					continue
 				}
-				if !toks.startsItem(k, w) {
-					uncertain = uncertain || !clauseVerbs[w]
+				if exclusionLeadWords[w] || w == "nothing" {
+					// "..., not its contents", "..., and nothing else"; but "not
+					// just X but Y" includes Y
+					if m := notJustButRe.FindStringIndex(t[ts:]); m != nil {
+						for {
+							s, _, ok := toks.at(k + 1)
+							if !ok || s >= ts+m[1] {
+								break
+							}
+							k++
+						}
+						afterDest = false
+						continue
+					}
+					stop = true
+					continue
+				}
+				if !toks.startsItem(k, w) && !toks.peekMeta(k) {
+					uncertain = uncertain || clauseHoldsPlacement(t, ts)
 					stop = true
 					continue
 				}
