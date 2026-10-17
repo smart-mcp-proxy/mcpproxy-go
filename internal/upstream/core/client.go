@@ -526,6 +526,14 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 			zap.String("server", c.config.Name),
 			zap.String("tool", toolName))
 	}
+	// Spec 117 FR-018: the caller's policy verdicts are re-read here, after
+	// the SSE request lock (a call may have waited behind a long in-flight
+	// call while a capture failure marked the server review-dirty) and before
+	// every send, including a session re-init's retry. Nothing is sent when
+	// a check refuses.
+	if err := RunDispatchRecheck(ctx); err != nil {
+		return nil, err
+	}
 
 	request := mcp.CallToolRequest{}
 	request.Params.Name = toolName

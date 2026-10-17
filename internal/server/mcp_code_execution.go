@@ -1040,6 +1040,9 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	parentFwdSink := headerfwd.SinkFrom(ctx)
 	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
+	if u.proxy != nil {
+		dispatchCtx = u.proxy.withReviewDirtyRecheck(dispatchCtx, serverName)
+	}
 	if certified.certified() {
 		result, err = client.CallToolOnEpoch(dispatchCtx, toolName, args, certified.DiscoveryEpoch)
 	} else {
@@ -1054,8 +1057,12 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// Recorded before sanitisation so a policy block of the RESULT is not
 	// mistaken for an upstream failure.
 	u.upstreamManager.RecordClientCallOutcome(ctx, client, result, err)
-	if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+	// Spec 117 FR-018: the review-dirty re-check after the same wait.
+	if dirty := isReviewNotRecordedRefusal(err); dirty || errors.Is(err, managed.ErrConnectionGenerationChanged) {
 		refusal := errors.New(unresolvedToolIdentityMessage(serverName, toolName, false))
+		if dirty {
+			refusal = errors.New(reviewNotRecordedMessage(serverName))
+		}
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
 		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration, callInc)

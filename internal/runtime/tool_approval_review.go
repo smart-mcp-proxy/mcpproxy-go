@@ -97,6 +97,10 @@ func (r *Runtime) ApproveToolsReviewedAt(serverName string, toolNames []string, 
 		unlock()
 		return 0, err
 	}
+	if err := r.reviewBindingDirtyHeld(serverName); err != nil {
+		unlock()
+		return 0, err
+	}
 	candidates := make([]*storage.ToolApprovalRecord, 0, len(names))
 	for _, name := range names {
 		rec, err := r.storageManager.GetToolApproval(serverName, name)
@@ -145,6 +149,10 @@ func (r *Runtime) ApproveAllToolsReviewedAt(serverName string, expected map[stri
 	}
 	unlock := r.lockToolApprovals(serverName)
 	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
+	if err := r.reviewBindingDirtyHeld(serverName); err != nil {
 		unlock()
 		return 0, err
 	}
@@ -313,6 +321,16 @@ func (r *Runtime) commitServerApprovalHeld(serverName string, blocks []string, e
 			return 0, nil
 		}
 		return 0, commit()
+	}
+	// Spec 117 FR-018: no server approval while the server's latest capture
+	// is incomplete; the server stays quarantined. A bound request answers
+	// the out-of-date error so the client reloads its review.
+	dirtyErr := r.reviewNotRecordedHeld
+	if expected != nil {
+		dirtyErr = r.reviewBindingDirtyHeld
+	}
+	if err := dirtyErr(serverName); err != nil {
+		return 0, err
 	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {

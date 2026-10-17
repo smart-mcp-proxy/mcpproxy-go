@@ -10,6 +10,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
 
 // The access chain (Spec 108 FR-032, FR-035): for one subject and one
@@ -391,6 +392,11 @@ func (ev *AccessEvaluator) Evaluate(server, tool string) profile.AccessVerdict {
 	}
 	if gate.storageErr != nil && approvalStatus == profile.AccessStepPass && stateStatus == profile.AccessStepPass {
 		approvalStatus, approvalDetail = profile.AccessStepFail, "the tool's approval state could not be read"
+	}
+	if gate.refusedForReviewDirty() && approvalStatus == profile.AccessStepPass && stateStatus == profile.AccessStepPass {
+		// Spec 117 FR-018: dispatch is refused while the server's latest
+		// capture is incomplete; visibility verdicts are unchanged.
+		approvalStatus, approvalDetail = profile.AccessStepFail, toolreview.ErrReviewNotRecorded.Error()
 	}
 	if stateStatus == profile.AccessStepPass {
 		if client, exists := p.upstreamManager.GetClient(server); !exists || !client.IsConnected() {

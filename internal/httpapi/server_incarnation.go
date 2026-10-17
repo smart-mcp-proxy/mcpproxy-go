@@ -9,6 +9,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	internalRuntime "github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
 
 // Spec 116 PR2 (FR-017): approval endpoints accept an optional
@@ -80,6 +81,10 @@ func (s *Server) writeApprovalWriteError(w http.ResponseWriter, r *http.Request,
 		s.writeError(w, r, http.StatusConflict, "server_replaced: the server was removed or replaced since it was reviewed")
 	case errors.Is(err, internalRuntime.ErrServerNotFound):
 		s.writeError(w, r, http.StatusNotFound, err.Error())
+	case errors.Is(err, toolreview.ErrReviewNotRecorded):
+		// Spec 117 FR-018: the server's latest capture is incomplete; the
+		// request can succeed once a complete capture is applied.
+		s.writeError(w, r, http.StatusServiceUnavailable, err.Error())
 	default:
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("%s: %v", prefix, err))
 	}

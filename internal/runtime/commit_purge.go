@@ -28,6 +28,9 @@ func (r *Runtime) commitMemoryPurgeHeld(reports map[string]storage.PurgeReport) 
 		r.lastGoodPurgeSeq = make(map[string]uint64)
 	}
 	for name := range reports {
+		// A removed server's records are gone; a same-name re-add starts
+		// clean (Spec 117 FR-018).
+		r.dropReviewDirtyHeld(name)
 		delete(r.lastGoodTools, name)
 		delete(r.lastGoodGen, name)
 		delete(r.lastCaptureAt, name)

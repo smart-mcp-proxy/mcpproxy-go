@@ -793,6 +793,14 @@ func (s *Supervisor) updateSnapshot(configSnapshot *configsvc.Snapshot, actualSt
 		if ok {
 			state.LastSeen = existing.LastSeen
 			state.Tools = existing.Tools // Tools come from background discovery
+			if !srv.Enabled || srv.Quarantined {
+				// Spec 117 FR-034 (#1610): a disabled or quarantined server
+				// keeps no tool list, so neither this snapshot nor the
+				// StateView copy below republishes tools the runtime purged
+				// from the index. Re-enabling restores them only through a
+				// fresh capture (the connect discovery).
+				state.Tools = nil
+			}
 			state.ConnectionGeneration = existing.ConnectionGeneration
 			// Reconcile is authoritative for Connected, so it is authoritative
 			// for the per-connection discovery marker too (astra r1 I4): a
@@ -1630,7 +1638,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 					// servers.changed, health/diagnostics) report 0 tools for a
 					// connected server that has tools (MCP-2094).
 					if len(status.Tools) == 0 {
-						if len(state.Tools) > 0 {
+						if len(state.Tools) > 0 && state.Enabled && !state.Quarantined {
 							status.Tools = toolInfosFromMetadata(state.Tools)
 							status.ToolCount = len(state.Tools)
 							// The restored set is the PREVIOUS connection's

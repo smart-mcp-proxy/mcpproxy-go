@@ -342,6 +342,10 @@ func (mc *Client) callToolWithSession(ctx context.Context, invoker toolCaller, t
 	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
 		return nil, ErrConnectionGenerationChanged
 	}
+	// The caller's WithDispatchRecheck verdicts are re-read by the core
+	// client immediately before this retry (and before the first send, after
+	// any joinGap wait), so a verdict that flipped during the re-init refuses
+	// it with nothing sent.
 	return invoker.CallTool(ctx, toolName, args)
 }
 
