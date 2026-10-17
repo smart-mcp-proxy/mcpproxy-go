@@ -34,7 +34,7 @@ func TestHealthCheck_ProbeInFlightAtRetirement_NoErrorNoAccounting(t *testing.T)
 	<-done
 
 	require.Equal(t, types.StateReady, mc.StateManager.GetState(), "a retired instance's probe failure moves no state")
-	require.Zero(t, mc.consecutiveHealthFailures, "nor counts toward the failure threshold")
+	require.Zero(t, mc.consecutiveHealthFailures.Load(), "nor counts toward the failure threshold")
 	require.Zero(t, mc.StateManager.GetConnectionInfo().RetryCount, "nor burns the retry budget")
 }
 

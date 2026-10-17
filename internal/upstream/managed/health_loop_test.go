@@ -44,7 +44,7 @@ func TestBackgroundHealthCheck_DisabledSkipsProbe(t *testing.T) {
 	mc.SetConfig(cfg)
 
 	done := make(chan struct{})
-	go func() { mc.backgroundHealthCheck(); close(done) }()
+	go func() { mc.backgroundHealthCheck(mc.stopMonitoring); close(done) }()
 	time.Sleep(150 * time.Millisecond)
 	close(mc.stopMonitoring)
 	<-done
@@ -67,7 +67,7 @@ func TestBackgroundHealthCheck_EnabledProbesOnInterval(t *testing.T) {
 	mc.SetConfig(cfg)
 
 	done := make(chan struct{})
-	go func() { mc.backgroundHealthCheck(); close(done) }()
+	go func() { mc.backgroundHealthCheck(mc.stopMonitoring); close(done) }()
 	time.Sleep(300 * time.Millisecond)
 	close(mc.stopMonitoring)
 	<-done

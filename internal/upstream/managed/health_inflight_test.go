@@ -48,7 +48,7 @@ func TestPerformHealthCheck_TransientPingToleratedWhileCallInFlight(t *testing.T
 	assert.Equal(t, healthCheckFailureThreshold*3, fake.pingCalls)
 	assert.Equal(t, types.StateReady, mc.StateManager.GetState(),
 		"a transient ping failure must not evict the server while a tool call is in flight")
-	assert.Equal(t, 0, mc.consecutiveHealthFailures,
+	assert.Equal(t, 0, int(mc.consecutiveHealthFailures.Load()),
 		"the in-flight guard must not accumulate toward the threshold either")
 }
 
@@ -66,7 +66,7 @@ func TestPerformHealthCheck_TransientPingResumesNormalThresholdAfterCallEnds(t *
 	mc.performHealthCheck()
 	mc.performHealthCheck()
 	assert.Equal(t, types.StateReady, mc.StateManager.GetState())
-	assert.Equal(t, 0, mc.consecutiveHealthFailures, "no counting while the call is in flight")
+	assert.Equal(t, 0, int(mc.consecutiveHealthFailures.Load()), "no counting while the call is in flight")
 	endCall() // the call finished (or hit its own timeout)
 
 	for i := 1; i < healthCheckFailureThreshold; i++ {
