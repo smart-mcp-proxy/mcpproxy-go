@@ -103,7 +103,7 @@
     </template>
 
     <div v-if="!noRecord" class="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs">
-      <span class="badge badge-xs badge-outline" :data-test="`client-credential-badge-${client.id}`">{{ credentialLabel(client.credential_state) }}</span>
+      <span class="badge badge-xs badge-outline h-auto min-h-4" :data-test="`client-credential-badge-${client.id}`">{{ credentialLabel(client.credential_state) }}</span>
       <router-link
         v-if="(client.blocked_24h ?? 0) > 0 && clientScopeAvailable"
         class="link"
