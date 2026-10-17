@@ -130,7 +130,7 @@ jobs:
           ls -la dist-bin
 
       - name: Upload candidate artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gate-candidate
           path: dist-bin/
@@ -208,7 +208,7 @@ jobs:
 
       - name: Upload report fragment
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gate-fragment-api-e2e
           path: ${{ env.GATE_REPORT_DIR }}/
@@ -276,7 +276,7 @@ jobs:
 
       - name: Upload report fragment
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gate-fragment-race
           path: ${{ env.GATE_REPORT_DIR }}/
@@ -327,7 +327,7 @@ jobs:
 
       - name: Upload report fragment
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gate-fragment-scan-eval
           path: ${{ env.GATE_REPORT_DIR }}/
@@ -409,7 +409,7 @@ jobs:
 
       - name: Upload report fragment
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gate-fragment-matrix-invariants
           path: ${{ env.GATE_REPORT_DIR }}/
@@ -499,7 +499,7 @@ jobs:
 
       - name: Upload report fragment
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gate-fragment-surface-consistency
           path: ${{ env.GATE_REPORT_DIR }}/
@@ -560,7 +560,7 @@ jobs:
 
       - name: Upload Playwright report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: web-ui-sweep-playwright-report
           path: tmp/web-smoke-artifacts/
@@ -569,7 +569,7 @@ jobs:
 
       - name: Upload report fragment
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gate-fragment-web-ui-sweep
           path: ${{ env.GATE_REPORT_DIR }}/
@@ -624,7 +624,7 @@ jobs:
 
       - name: Upload gate report
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: gate-report
           path: ${{ env.GATE_REPORT_DIR }}/gate-report.json

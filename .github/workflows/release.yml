@@ -183,7 +183,7 @@ jobs:
           echo "notes_file=$NOTES_FILE" >> $GITHUB_OUTPUT
 
       - name: Upload release notes artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: release-notes
           path: RELEASE_NOTES-${{ github.ref_name }}.md
@@ -817,7 +817,7 @@ jobs:
 
       - name: Upload unsigned Windows installer for signing
         if: matrix.goos == 'windows'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         id: upload-unsigned-installer
         with:
           name: unsigned-installer-windows-${{ matrix.goarch }}
@@ -1131,7 +1131,7 @@ jobs:
 
       - name: Upload Sparkle enclosure artifact
         if: matrix.goos == 'darwin' && matrix.edition != 'server'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sparkle-enclosure-${{ matrix.goarch }}
           path: sparkle-enclosure/*
@@ -1155,13 +1155,13 @@ jobs:
           fi
 
       - name: Upload versioned archive artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: versioned-${{ matrix.edition || 'personal' }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
       - name: Upload latest archive artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: latest-${{ matrix.edition || 'personal' }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
@@ -1197,7 +1197,7 @@ jobs:
 
       - name: Upload macOS installers artifact
         if: matrix.goos == 'darwin'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: installers-${{ matrix.goos }}-${{ matrix.goarch }}
           path: installers-artifact/*
@@ -1222,7 +1222,7 @@ jobs:
 
       - name: Re-upload for SignPath
         id: reupload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: signpath-input-windows-${{ matrix.arch }}
           # Upload exe - GitHub Actions will ZIP it for SignPath
@@ -1269,7 +1269,7 @@ jobs:
           fi
 
       - name: Upload signed Windows installer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: installer-windows-${{ matrix.arch }}
           path: signed/mcpproxy-setup-${{ github.ref_name }}-${{ matrix.arch }}.exe
@@ -1789,7 +1789,7 @@ jobs:
           echo "generated=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload appcast artifact for the website repo
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sparkle-appcast
           path: appcast-out/*

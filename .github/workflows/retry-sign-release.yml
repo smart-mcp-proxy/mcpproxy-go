@@ -67,7 +67,7 @@ jobs:
 
       - name: Re-upload for SignPath
         id: reupload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: signpath-input-windows-${{ matrix.arch }}
           path: unsigned/*.exe
@@ -109,7 +109,7 @@ jobs:
           fi
 
       - name: Upload signed Windows installer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: installer-windows-${{ matrix.arch }}
           path: signed/mcpproxy-setup-${{ inputs.tag }}-${{ matrix.arch }}.exe
@@ -862,7 +862,7 @@ jobs:
           echo "generated=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload appcast artifact for the website repo
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sparkle-appcast
           path: appcast-out/*
