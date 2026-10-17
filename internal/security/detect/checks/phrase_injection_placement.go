@@ -247,12 +247,19 @@ var notButRe = regexp.MustCompile(`(?i)^not\b[^.;]*?\bbut\s+`)
 // included part starts: "(not X but Y)", "(not X, Y)", "(not X; Y)".
 var notSplitRe = regexp.MustCompile(`(?i)^(?:not|nor|no|neither|never|without)\b[^.;,]*?(?:[,;]\s*(?:but\s+)?|\bbut\s+)`)
 
+// doubleNegationRe is a negated omission, which includes what follows: "never
+// omit its contents", "do not omit", "not without".
+var doubleNegationRe = regexp.MustCompile(`(?i)^(?:(?:never|not|no|do not|don't|cannot|can't)\s+)+(?:omit\w*|skip\w*|leave out|forget|drop|exclude|without)\b\s*`)
+
 // includedAfterExclusion returns the offset where the included part of an
 // exclusion parenthetical starts: after "(not X, Y)", "(not X but Y)" or
 // "(not X; Y)". A further ", nor/not/no Z" continues the exclusion. ok is
 // false when nothing is included.
 func includedAfterExclusion(low string) (off int, ok bool) {
 	for {
+		if m := doubleNegationRe.FindStringIndex(low[off:]); m != nil {
+			return off + m[1], true
+		}
 		m := notSplitRe.FindStringIndex(low[off:])
 		if m == nil {
 			return 0, false
@@ -555,10 +562,6 @@ func parsePlacementItems(t string, from int, inParen bool) (items []placementIte
 // field") and are placement only in the chained form below.
 var chainedOutputVerbRe = regexp.MustCompile(`(?i)\b(return|log)s?\b`)
 
-// chainedOutputTargetRe is the exfil-shaped target of a chained output verb:
-// "to/into the <x> field", never "in/as the <x> field".
-var chainedOutputTargetRe = regexp.MustCompile(`(?i)^[^.!?;]{0,80}?\b(?:to|into)\s+(?:the |a |an |its |this )?[\w"'` + "`" + `-]+ (?:field|parameter|param|argument|arg)\b`)
-
 // isOutputVerb reports whether w is "return"/"log" (any inflection). One that
 // reaches the parse was not rewritten into a placement (its object is not
 // secret-shaped or its target is not to/into a field), so its clause is tool
@@ -571,9 +574,49 @@ func isOutputVerb(w string) bool {
 	return false
 }
 
-// chainedOutputObjectRe is a secret-shaped object right after the verb: "its
-// contents", "the private key", "the whole file", "everything".
-var chainedOutputObjectRe = regexp.MustCompile(`(?i)^\s+(?:(?:its|their|the|this|that|all|any|my|your|raw|actual)\s+)*(?:contents?|keys?|private key|ssh key|api key|values?|secrets?|tokens?|passwords?|credentials?|raw bytes|everything|(?:whole|entire|full|complete)\s+file)\b`)
+// outputTargetRe is the exfil-shaped target of an output verb: "to/into the
+// <x> field", never "in/as the <x> field".
+var outputTargetRe = regexp.MustCompile(`(?i)\b(?:to|into)\s+(?:the |a |an |its |this )?[\w"'` + "`" + `-]+ (?:field|parameter|param|argument|arg)\b`)
+
+// outputSecretNounRe finds the nouns that make an output clause carry a secret.
+var outputSecretNounRe = regexp.MustCompile(`(?i)\b(?:contents?|text|data|body|values?|secrets?|tokens?|passwords?|passphras\w*|credentials?|keys?|private key|raw bytes|everyth\w*|file|it)\b`)
+
+// abbreviationDotRe is the dot of "i.e."/"e.g.", which is not a sentence end.
+var abbreviationDotRe = regexp.MustCompile(`(?i)\b(i\.e|e\.g)\.`)
+
+// outputClauseNamesSecret reports whether the clause starting at from has a
+// to/into field target and, before it, a secret noun that is not qualified by
+// a metadata head ("key length", "credentials profile names", "file path").
+func outputClauseNamesSecret(t string, from int) bool {
+	rest := abbreviationDotRe.ReplaceAllStringFunc(t[from:min(len(t), from+300)], func(m string) string {
+		return strings.Repeat(" ", len(m))
+	})
+	if l := sentenceEnd.FindStringIndex(rest); l != nil {
+		rest = rest[:l[0]]
+	}
+	if i := strings.IndexByte(rest, ';'); i >= 0 {
+		rest = rest[:i]
+	}
+	m := outputTargetRe.FindStringIndex(rest)
+	if m == nil {
+		return false
+	}
+	before := rest[:m[0]]
+	for _, l := range outputSecretNounRe.FindAllStringIndex(before, -1) {
+		after := phraseWords(sentenceHead(before[l[1]:]))
+		if len(after) > 2 {
+			after = after[:2]
+		}
+		meta := false
+		for _, w := range after {
+			meta = meta || secretMetadataWords.MatchString(strings.ToLower(w))
+		}
+		if !meta {
+			return true
+		}
+	}
+	return false
+}
 
 // rewriteChainedOutputVerbs turns a "return"/"log" whose object is
 // secret-shaped and whose target is to/into a field into the placement verb
@@ -585,7 +628,7 @@ var chainedOutputObjectRe = regexp.MustCompile(`(?i)^\s+(?:(?:its|their|the|this
 func rewriteChainedOutputVerbs(t string) string {
 	var out []byte
 	for _, l := range chainedOutputVerbRe.FindAllStringSubmatchIndex(t, -1) {
-		if !chainedOutputObjectRe.MatchString(t[l[1]:]) || !chainedOutputTargetRe.MatchString(t[l[1]:]) {
+		if !outputClauseNamesSecret(t, l[1]) {
 			continue
 		}
 		if out == nil {
@@ -609,6 +652,8 @@ func rewriteChainedOutputVerbs(t string) string {
 // see the secret item of a mixed clause right behind its verb, and never see
 // the verb of a metadata-only clause. The result has the length of t.
 func maskPlacementClauses(t string) string {
+	// the dots of "i.e."/"e.g." are not sentence ends for the families
+	t = abbreviationDotRe.ReplaceAllStringFunc(t, func(m string) string { return strings.ReplaceAll(m, ".", " ") })
 	t = rewriteChainedOutputVerbs(t)
 	var out []byte
 	edited := 0 // nothing before this offset is edited again
