@@ -38,17 +38,17 @@ var placementDestRe = regexp.MustCompile(`(?i)^` + credentialArgumentTarget)
 // any trailing punctuation) and the two clause separators.
 var placementTokenRe = regexp.MustCompile(`\([^()]*\)|[^\s,;()]+|[,;]`)
 
-const (
-	// placementScanBytes bounds how far a clause is read, keeping the scan
-	// linear in the text however many verbs it holds.
-	placementScanBytes = 600
-	// placementMaxTokens bounds the tokens read per clause.
-	placementMaxTokens = 90
-)
+// placementMaxItemWords is the longest run of words still read as one item; a
+// longer run is not a metadata label, so the item is closed as a secret and
+// the clause ends there. It keeps the scan of a verb that is followed by a
+// wall of words short.
+const placementMaxItemWords = 12
 
-// placementTerminators end a clause: what follows is not payload.
+// placementTerminators end a clause: what follows is not payload. "then" and
+// "after that" are not here: they separate items when a further item follows
+// (placementSequenceWord).
 var placementTerminators = map[string]bool{
-	"then": true, "but": true, "so": true, "while": true, "when": true, "if": true,
+	"but": true, "so": true, "while": true, "when": true, "if": true,
 	"because": true, "since": true, "which": true, "that": true, "where": true,
 	"until": true, "unless": true, "after": true, "before": true, "once": true,
 	"using": true, "via": true, "whereas": true, "although": true, "though": true,
@@ -66,9 +66,24 @@ var itemQualifierWords = map[string]bool{
 	"token": true, "password": true, "credential": true, "credentials": true,
 }
 
-// itemSkippedWords carry no payload of their own: determiners and the
-// "last"/"first" of "last modified time".
+// itemSkippedWords carry no payload of their own: the "last"/"first" of "last
+// modified time".
 var itemSkippedWords = map[string]bool{"last": true, "first": true}
+
+// itemUnitWords may trail a metadata head without making the item a secret:
+// "its size in bytes", "its fingerprint only", "its length in characters".
+var itemUnitWords = map[string]bool{
+	"only": true, "in": true, "as": true, "a": true, "number": true, "value": true,
+	"byt": true, "byte": true, "bytes": true, "bit": true, "bits": true, "char": true, "chars": true,
+	"character": true, "characters": true, "kb": true, "mb": true, "second": true,
+	"seconds": true, "minute": true, "minutes": true, "hour": true, "hours": true,
+	"day": true, "days": true, "ms": true, "hex": true, "hexadecimal": true,
+	"base64": true, "string": true, "just": true, "alone": true,
+}
+
+// parentheticalNegation marks a parenthetical that excludes what it names:
+// "(not its contents)".
+var parentheticalNegation = regexp.MustCompile(`\b(?:not|never|no|without|except\w*|exclud\w*|neither|nor|n't)\b`)
 
 // followerStarters are the words that start a further item after a
 // destination: "… to the date field and its contents to the notes field". Any
@@ -93,9 +108,9 @@ type placementItem struct {
 
 // payloadWordsAreMetadata classifies an item's words: metadata when, past any
 // determiners and key/file qualifiers, they are metadata words only, or open
-// with metadata words followed by "of"/"for" ("the length of the key"), or
-// name the public key. A bare qualifier ("the key", "its contents") is the
-// secret itself.
+// with metadata words followed by "of"/"for" ("the length of the key") or by
+// unit words ("its size in bytes"), or name the public key. A bare qualifier
+// ("the key", "its contents") is the secret itself.
 func payloadWordsAreMetadata(words []string) bool {
 	i := 0
 	for i < len(words) && (secretDeterminers[words[i]] || itemSkippedWords[words[i]]) {
@@ -127,34 +142,134 @@ func payloadWordsAreMetadata(words []string) bool {
 	if j == 0 {
 		return false
 	}
-	return j == len(rest) || rest[j] == "of" || rest[j] == "for"
+	if j == len(rest) || rest[j] == "of" || rest[j] == "for" {
+		return true
+	}
+	for _, w := range rest[j:] {
+		if !itemUnitWords[w] {
+			return false
+		}
+	}
+	return true
+}
+
+// placementToks tokenizes a clause lazily, so a verb never pays for the text
+// after the point where its clause ends.
+type placementToks struct {
+	t    string
+	pos  int
+	locs [][2]int
+}
+
+// at returns the absolute span of token i.
+func (p *placementToks) at(i int) (int, int, bool) {
+	for len(p.locs) <= i {
+		if p.pos >= len(p.t) {
+			return 0, 0, false
+		}
+		m := placementTokenRe.FindStringIndex(p.t[p.pos:])
+		if m == nil {
+			p.pos = len(p.t)
+			return 0, 0, false
+		}
+		p.locs = append(p.locs, [2]int{p.pos + m[0], p.pos + m[1]})
+		p.pos += m[1]
+	}
+	return p.locs[i][0], p.locs[i][1], true
+}
+
+// word returns the cleaned lower-case word of token i ("" for a parenthetical
+// or separator).
+func (p *placementToks) word(i int) string {
+	s, e, ok := p.at(i)
+	if !ok || p.t[s] == '(' || p.t[s] == ',' || p.t[s] == ';' {
+		return ""
+	}
+	return strings.ToLower(strings.Trim(strings.TrimRight(p.t[s:e], ".!?"), "\"'`"))
+}
+
+// nextWord returns the index and word of the first word token after i.
+func (p *placementToks) nextWord(i int) (int, string) {
+	for n := i + 1; ; n++ {
+		s, _, ok := p.at(n)
+		if !ok {
+			return -1, ""
+		}
+		if p.t[s] == '(' {
+			continue
+		}
+		return n, p.word(n)
+	}
+}
+
+// startsItem reports whether the word w at token k starts a further payload
+// item: "its …"/"their …", or "the" + a secret word.
+func (p *placementToks) startsItem(k int, w string) bool {
+	if followerStarters[w] {
+		return true
+	}
+	if w != "the" {
+		return false
+	}
+	_, next := p.nextWord(k)
+	return followerSecretWords[next]
 }
 
 // parsePlacementItems parses the payload items of the clause that starts at
-// byte offset from of t.
+// byte offset from of t. The clause ends at a sentence end, ";", a terminator
+// word, or the second non-metadata item: only the first secret item and the
+// metadata around it matter, which also keeps the scan linear.
 func parsePlacementItems(t string, from int) []placementItem {
-	end := min(len(t), from+placementScanBytes)
-	toks := placementTokenRe.FindAllStringIndex(t[from:end], placementMaxTokens)
+	toks := &placementToks{t: t, pos: from}
 	var (
-		items     []placementItem
-		words     []string
-		wStart    = -1
-		wEnd      int
-		afterDest bool
-		sawConj   bool
-		stop      bool
+		items      []placementItem
+		words      []string
+		wStart     = -1
+		wEnd       int
+		afterDest  bool
+		sawConj    bool
+		stop       bool
+		secretSeen bool
 	)
+	add := func(it placementItem) {
+		items = append(items, it)
+		if !it.meta {
+			if secretSeen {
+				stop = true
+			}
+			secretSeen = true
+		}
+	}
 	flush := func() {
 		if len(words) > 0 {
-			items = append(items, placementItem{start: wStart, end: wEnd, meta: payloadWordsAreMetadata(words), destStart: -1, destEnd: -1})
+			add(placementItem{start: wStart, end: wEnd, meta: payloadWordsAreMetadata(words), destStart: -1, destEnd: -1})
 		}
 		words, wStart = nil, -1
 	}
-	for k := 0; k < len(toks) && !stop; k++ {
-		ts, te := from+toks[k][0], from+toks[k][1]
+	for k := 0; !stop; k++ {
+		ts, te, ok := toks.at(k)
+		if !ok {
+			break
+		}
 		tok := t[ts:te]
 		switch tok[0] {
 		case '(':
+			// a parenthesized further item ("(and its contents)") counts; a
+			// qualifier ("(SHA256)") and an exclusion ("(not its contents)")
+			// do not
+			inner := strings.ToLower(tok[1 : len(tok)-1])
+			fw := (&placementToks{t: inner})
+			first := fw.word(0)
+			if parentheticalNegation.MatchString(inner) || (!placementConjunctions[first] && !followerStarters[first]) {
+				continue
+			}
+			flush()
+			for _, it := range parsePlacementItems(t[:te-1], ts+1) {
+				if !it.meta && !stop {
+					it.destStart, it.destEnd = -1, -1
+					add(it)
+				}
+			}
 			continue
 		case ';':
 			flush()
@@ -171,7 +286,7 @@ func parsePlacementItems(t string, from int) []placementItem {
 			raw = strings.TrimRight(raw, ".!?")
 			endsSentence = true
 		}
-		w := strings.ToLower(strings.Trim(raw, "\"'`"))
+		w := toks.word(k)
 		if w == "" {
 			flush()
 			break
@@ -180,15 +295,33 @@ func parsePlacementItems(t string, from int) []placementItem {
 		case placementConjunctions[w]:
 			flush()
 			sawConj = true
+		case w == "then" || (w == "after" && !endsSentence && func() bool { _, n := toks.nextWord(k); return n == "that" }()):
+			// "then"/"after that" separate items when a further one follows
+			flush()
+			at := k
+			if w == "after" {
+				at, _ = toks.nextWord(k)
+			}
+			j, nw := toks.nextWord(at)
+			if j < 0 || !toks.startsItem(j, nw) {
+				stop = true
+				continue
+			}
+			k = at
+			sawConj = true
 		case placementTerminators[w]:
 			flush()
 			stop = true
 		default:
-			if m := placementDestRe.FindStringIndex(t[ts:end]); m != nil && len(words) > 0 && !afterDest {
+			if m := placementDestRe.FindStringIndex(t[ts:]); m != nil && (len(words) > 0 || len(items) > 0) && !afterDest {
 				// a destination: attach it to the item it closes
 				flush()
 				items[len(items)-1].destStart, items[len(items)-1].destEnd = ts, ts+m[1]
-				for k+1 < len(toks) && from+toks[k+1][0] < ts+m[1] {
+				for {
+					s, _, ok := toks.at(k + 1)
+					if !ok || s >= ts+m[1] {
+						break
+					}
 					k++
 				}
 				afterDest, sawConj = true, false
@@ -197,11 +330,16 @@ func parsePlacementItems(t string, from int) []placementItem {
 			if afterDest {
 				// only a conjunction followed by a further payload item
 				// continues the clause past a destination
-				if !sawConj || !followerStartsItem(t, from, toks, k, w) {
+				if !sawConj || !toks.startsItem(k, w) {
 					stop = true
 					continue
 				}
 				afterDest = false
+			}
+			if len(words) >= placementMaxItemWords {
+				flush()
+				stop = true
+				continue
 			}
 			if wStart < 0 {
 				wStart = ts
@@ -216,27 +354,6 @@ func parsePlacementItems(t string, from int) []placementItem {
 	}
 	flush()
 	return items
-}
-
-// followerStartsItem reports whether the word w at token k starts a further
-// payload item after a destination: "its …"/"their …", or "the" + a secret
-// word.
-func followerStartsItem(t string, from int, toks [][]int, k int, w string) bool {
-	if followerStarters[w] {
-		return true
-	}
-	if w != "the" {
-		return false
-	}
-	for n := k + 1; n < len(toks); n++ {
-		tok := t[from+toks[n][0] : from+toks[n][1]]
-		if tok[0] == '(' {
-			continue
-		}
-		next := strings.ToLower(strings.Trim(tok, "\"'`,;.!?"))
-		return followerSecretWords[next]
-	}
-	return false
 }
 
 // maskPlacementClauses rewrites placement clauses so the credential families
