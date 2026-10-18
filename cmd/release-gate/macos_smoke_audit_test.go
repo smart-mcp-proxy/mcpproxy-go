@@ -4,6 +4,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -228,7 +229,8 @@ func TestMacOSSmokeScriptContract(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode()&0o111 == 0 {
+	// Windows has no executable bit; the git index mode is what ships.
+	if runtime.GOOS != "windows" && info.Mode()&0o111 == 0 {
 		t.Error("scripts/test-macos-smoke.sh must be executable")
 	}
 	src := readSmokeScript(t)
