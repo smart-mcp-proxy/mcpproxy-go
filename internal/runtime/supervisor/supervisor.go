@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,11 +19,25 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	transportpkg "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
+
+// maxLastErrorLen bounds the LastError string shown in the UI; very long
+// errors used to hang it.
+const maxLastErrorLen = 500
+
+// truncateLastError caps an upstream error for status.LastError without
+// splitting a multi-byte rune.
+func truncateLastError(msg string) string {
+	if len(msg) > maxLastErrorLen {
+		return stringutil.UTF8Prefix(msg, maxLastErrorLen) + "... (truncated)"
+	}
+	return msg
+}
 
 // classifyAndAttach converts a raw connection error into a DiagnosticError and
 // stores it on the server status. Called from the supervisor's reconcile and
@@ -933,13 +946,7 @@ func (s *Supervisor) updateStateView(name string, state *ServerState) {
 		if state.ConnectionInfo != nil {
 			// Extract LastError from ConnectionInfo and convert to string with limit
 			if state.ConnectionInfo.LastError != nil {
-				errorStr := state.ConnectionInfo.LastError.Error()
-				// Limit error string to 500 characters to prevent UI hangs
-				const maxErrorLen = 500
-				if len(errorStr) > maxErrorLen {
-					errorStr = errorStr[:maxErrorLen] + "... (truncated)"
-				}
-				status.LastError = errorStr
+				status.LastError = truncateLastError(state.ConnectionInfo.LastError.Error())
 
 				// Spec 044: classify raw error into stable diagnostic code.
 				// Use the RESOLVED transport, not the raw Config.Protocol: an
@@ -1673,12 +1680,7 @@ func (s *Supervisor) updateSnapshotFromEvent(event Event) {
 				// Update ConnectionInfo for immediate error propagation to UI
 				if connInfo != nil {
 					if connInfo.LastError != nil {
-						errorStr := connInfo.LastError.Error()
-						const maxErrorLen = 500
-						if len(errorStr) > maxErrorLen {
-							errorStr = errorStr[:maxErrorLen] + "... (truncated)"
-						}
-						status.LastError = errorStr
+						status.LastError = truncateLastError(connInfo.LastError.Error())
 
 						// Spec 044: classify raw error into stable diagnostic code.
 						// Resolved transport (not raw Config.Protocol) so auto-detected
