@@ -65,6 +65,70 @@ async function goto(page: Page, route: string, theme?: string) {
   await page.waitForTimeout(750)
 }
 
+// #1661: a long config path can squeeze the Profile column enough for a
+// credential label to wrap. Measure the actual text, not the badge's classes.
+for (const theme of THEMES) {
+  for (const width of [1440, 1280, 820, 390]) {
+    test(`Clients credential badge contains its text (${theme}, ${width}px)`, async ({ page }, testInfo) => {
+      await page.setViewportSize({ width, height: 900 })
+      await page.route(/\/api\/v1\/clients(?:\?.*)?$/, route => {
+        if (route.request().method() !== 'GET') return route.fallback()
+        return route.fulfill({
+          json: {
+            success: true,
+            data: {
+              clients: ['Claude Desktop', 'Claude Code'].map((display_name, index) => ({
+                id: `badge-layout-${index}`,
+                display_name,
+                kind: 'supported',
+                state: 'installed',
+                installed: true,
+                connected: false,
+                connection_unverified: true,
+                last_seen: null,
+                active_sessions: 0,
+                calls_24h: 0,
+                blocked_24h: 0,
+                credential_state: 'none',
+                rotation_pending: true,
+                display_path: '~/Library/Application Support/Claude/claude_desktop_config.json',
+              })),
+              warnings: [],
+            },
+          },
+        })
+      })
+      await goto(page, '/clients', theme)
+      const badges = page.locator('[data-test^="client-credential-badge-"]')
+      await expect(badges).toHaveCount(2)
+      await expect(badges).toHaveText(['No credential', 'No credential'])
+      // The rotation badge sits in the same narrow column and wraps the same way.
+      const rotationBadges = page.locator('[data-test^="client-rotation-badge-"]')
+      await expect(rotationBadges).toHaveCount(2)
+      await expect(badges.first()).toBeVisible()
+      await badges.first().scrollIntoViewIfNeeded()
+      await page.screenshot({ path: testInfo.outputPath('credential-badges.png'), fullPage: true })
+      for (const badge of [...await badges.all(), ...await rotationBadges.all()]) {
+        const overflow = await badge.evaluate(el => {
+          const box = el.getBoundingClientRect()
+          const range = document.createRange()
+          range.selectNodeContents(el)
+          return Array.from(range.getClientRects()).map(text => ({
+            above: box.top - text.top,
+            below: text.bottom - box.bottom,
+            left: box.left - text.left,
+            right: text.right - box.right,
+          }))
+        })
+        for (const line of overflow) {
+          for (const amount of Object.values(line)) expect(amount).toBeLessThanOrEqual(1)
+        }
+      }
+      expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width)
+    })
+  }
+}
+
 interface ContrastFailure {
   text: string
   ratio: number

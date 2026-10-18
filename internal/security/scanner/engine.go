@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"io"
 	"os"
 	"path/filepath"
@@ -314,6 +316,10 @@ func (n *NoopCallback) OnScannerFailed(_ *ScanJob, _ string, _ error)          {
 func (n *NoopCallback) OnScanCompleted(_ *ScanJob, _ []*ScanReport)            {}
 func (n *NoopCallback) OnScanFailed(_ *ScanJob, _ error)                       {}
 
+// ErrScanInProgress is returned (wrapped) by StartScan when the server already
+// has a registered scan job.
+var ErrScanInProgress = errors.New("scan already in progress")
+
 // StartScan begins a scan of the specified server
 // Returns the scan job immediately; scanning runs in the background
 func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCallback) (*ScanJob, error) {
@@ -333,7 +339,7 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 		// Snapshot: the running scan keeps writing to the live record.
 		snapshot := existing.clone()
 		e.mu.Unlock()
-		return snapshot, fmt.Errorf("scan already in progress for server %s (job %s)", req.ServerName, snapshot.ID)
+		return snapshot, fmt.Errorf("%w for server %s (job %s)", ErrScanInProgress, req.ServerName, snapshot.ID)
 	}
 	if check := e.registrationCheck; check != nil && !check(req.ServerName, req.Incarnation) {
 		e.mu.Unlock()
@@ -1278,7 +1284,7 @@ func parseCiscoScannerOutput(data []byte, scannerID string) []ScanFinding {
 				// Truncate tool description for evidence (max 500 chars)
 				evidence := result.ToolDescription
 				if len(evidence) > 500 {
-					evidence = evidence[:500] + "..."
+					evidence = stringutil.UTF8Prefix(evidence, 500) + "..."
 				}
 				finding := ScanFinding{
 					RuleID:      strings.ToLower(strings.ReplaceAll(threat, " ", "_")),
@@ -1579,7 +1585,7 @@ func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return stringutil.UTF8Prefix(s, maxLen) + "..."
 }
 
 // ciscoScannerID is the single source of truth for the bundled Cisco AI Defense

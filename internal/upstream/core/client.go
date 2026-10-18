@@ -94,6 +94,12 @@ type Client struct {
 	// when multiple requests are in-flight simultaneously
 	sseRequestMu sync.Mutex
 
+	// sessionGate keeps requests off the mcp-go client while a session
+	// re-initialize rewrites its protocol state (see ReinitializeSession).
+	sessionGate sessionGate
+	// sessionGen counts session re-initializes (see SessionGeneration).
+	sessionGen atomic.Uint64
+
 	// retryAfter collects the `Retry-After` hints this upstream's HTTP/SSE
 	// responses carry. mcp-go flattens a 429 into an error string long before
 	// the connection state machine sees it, so the hint is captured by a
@@ -345,6 +351,11 @@ func (c *Client) Ping(ctx context.Context) error {
 	// pin MUST come with an era-aware replacement, or spec 074's health loop
 	// goes blind; that is tracked as a required task of the pin lift, not as
 	// cleanup.
+	release, err := c.beginRequest(ctx, string(mcp.MethodPing))
+	if err != nil {
+		return err
+	}
+	defer release()
 	//nolint:staticcheck // SA1019: valid on the legacy era this client is pinned to; see above.
 	return client.Ping(ctx)
 }
@@ -388,8 +399,13 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	c.logger.Info("Making direct tools list call to upstream server",
 		zap.String("server", c.config.Name))
 
+	release, err := c.beginRequest(ctx, string(mcp.MethodToolsList))
+	if err != nil {
+		return nil, err
+	}
 	listReq := mcp.ListToolsRequest{}
 	toolsResult, err := client.ListTools(ctx, listReq)
+	release()
 	if err != nil {
 		// Debug, not Error: both callers above (managed.Client.ListTools and
 		// upstream.Manager.discoverTools) log this same failure, so logging it
@@ -525,6 +541,24 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		c.logger.Debug("SSE request lock acquired for CallTool",
 			zap.String("server", c.config.Name),
 			zap.String("tool", toolName))
+	}
+	// A session re-initialize in progress on this client finishes before the
+	// call is handed to mcp-go, and none starts until it returns (the gate is
+	// held across the whole mcp-go call, which reads the client's protocol
+	// state on the response too). Waiting here sends nothing.
+	release, err := c.beginRequest(ctx, string(mcp.MethodToolsCall))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	// Spec 117 FR-018: the caller's policy verdicts are re-read here, after
+	// the SSE request lock and the session gate (a call may have waited behind
+	// a long in-flight call while a capture failure marked the server
+	// review-dirty) and before every send, including a session re-init's
+	// retry. Nothing is sent when a check refuses.
+	if err := RunDispatchRecheck(ctx); err != nil {
+		return nil, err
 	}
 
 	request := mcp.CallToolRequest{}

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"io"
 	"regexp"
 	"strings"
@@ -321,7 +322,7 @@ func (c *Client) recordRecentStderr(line string) {
 		return
 	}
 	if len(line) > maxStderrLineLen {
-		line = line[:maxStderrLineLen] + "…"
+		line = stringutil.UTF8Prefix(line, maxStderrLineLen) + "…"
 	}
 	c.recentStderrMu.Lock()
 	defer c.recentStderrMu.Unlock()

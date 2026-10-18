@@ -6,9 +6,8 @@
 // Fragment file into a shared report directory. The merger compares the
 // fragments against a HARDCODED manifest of expected entries: a missing
 // fragment for a blocking entry is a FAIL (no silent skips, FR-004), and
-// reserved extension slots (macos-smoke, surface-consistency — Spec 081
-// T3/T4) are recorded as `not-run` with reason "not-implemented-yet" until
-// their stages land. The T2 Web UI sweep is a live ADVISORY entry: it runs on
+// reserved extension slots (macos-smoke — Spec 081 T3) are recorded as
+// `not-run` with reason "not-implemented-yet" until their stages land. The T2 Web UI sweep is a live ADVISORY entry: it runs on
 // tag builds and its failures are reported without blocking the release.
 package gatereport
 
@@ -116,13 +115,19 @@ const (
 	// listed under advisory_failures) without blocking publication.
 	EntryAdvisoryWebUISweep = "advisory/web-ui-sweep"
 
-	EntryReservedMacOSSmoke         = "reserved/macos-smoke"
-	EntryReservedSurfaceConsistency = "reserved/surface-consistency"
+	EntryReservedMacOSSmoke = "reserved/macos-smoke"
+
+	// EntrySurfaceConsistency is Spec 081 T4 (US5, FR-018): the CLI, MCP and
+	// Web UI surfaces agree with the core's /api/v1/servers on every server's
+	// state across the server-type matrix. Blocking. The macOS tray joins
+	// the comparison with T3; until then it is recorded as not-compared.
+	EntrySurfaceConsistency = "invariant/surface-consistency"
 )
 
 // Manifest returns the hardcoded expected-entries manifest: 5 matrix cells +
-// 4 invariants + 5 assembled suite jobs (FR-003) + 1 advisory entry (the T2
-// Web UI sweep) + 2 reserved slots (T3/T4).
+// 5 invariants (incl. the T4 surface-consistency check) + 5 assembled suite
+// jobs (FR-003) + 1 advisory entry (the T2 Web UI sweep) + 1 reserved slot
+// (T3 macOS smoke).
 func Manifest() []ManifestEntry {
 	return []ManifestEntry{
 		{Name: EntryMatrixStdio, Blocking: true},
@@ -135,6 +140,7 @@ func Manifest() []ManifestEntry {
 		{Name: EntryInvariantCounters, Blocking: true},
 		{Name: EntryInvariantQuarantine, Blocking: true},
 		{Name: EntryInvariantUpgrade, Blocking: true},
+		{Name: EntrySurfaceConsistency, Blocking: true},
 
 		{Name: EntrySuiteAPIE2E, Blocking: true},
 		{Name: EntrySuiteAPIE2ECleanupCheck, Blocking: true},
@@ -145,7 +151,6 @@ func Manifest() []ManifestEntry {
 		{Name: EntryAdvisoryWebUISweep, Blocking: false},
 
 		{Name: EntryReservedMacOSSmoke, Blocking: false, Reserved: true},
-		{Name: EntryReservedSurfaceConsistency, Blocking: false, Reserved: true},
 	}
 }
 

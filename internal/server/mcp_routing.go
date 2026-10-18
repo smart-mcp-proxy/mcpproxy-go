@@ -692,6 +692,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Spec 112 FR-016.3: per-call sink for the recording scrub below.
 		dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 		dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
+		dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
 		if epoch, ok := p.liveConnectionEpoch(serverName); ok {
 			result, err = p.upstreamManager.CallToolOnEpoch(dispatchCtx, qualifiedName, args, epoch)
 		} else {
@@ -721,8 +722,12 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			// The generation moved before the transport: nothing reached
 			// the upstream. Same discovery-window body and telemetry bucket
 			// as the call_tool_* refusal, with the started record closed.
-			if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+			// Spec 117 FR-018: so did the review-dirty re-check.
+			if dirty := isReviewNotRecordedRefusal(err); dirty || errors.Is(err, managed.ErrConnectionGenerationChanged) {
 				errMsg := unresolvedToolIdentityMessage(serverName, toolName, false)
+				if dirty {
+					errMsg = reviewNotRecordedMessage(serverName)
+				}
 				auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
 				p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", errMsg, durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
 				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)

@@ -122,8 +122,11 @@ type Client struct {
 	connectCancel context.CancelFunc
 
 	// Background monitoring
-	stopMonitoring       chan struct{}
-	monitoringWG         sync.WaitGroup
+	stopMonitoring chan struct{}
+	// monitoringDone is closed when the loop the last startBackgroundMonitoring
+	// started exits. Each loop gets its own channel: a stop whose wait timed
+	// out must not end up waiting for (or racing the start of) the next loop.
+	monitoringDone       chan struct{}
 	monitoringCancelFunc context.CancelFunc
 	monitoringStarted    bool
 
@@ -147,7 +150,9 @@ type Client struct {
 	// healthCheckFailureThreshold; one success resets it. Hard failures
 	// (connection refused, no such host, unreachable) bypass the counter
 	// and trigger Error immediately. See recordHealthCheckFailure().
-	consecutiveHealthFailures int
+	// Atomic: the health loop records failures while Connect's reset can run
+	// on whichever goroutine reconnects (ForceReconnect, TryReconnectSync).
+	consecutiveHealthFailures atomic.Int32
 
 	// toolInvoker is the tools/call surface CallTool dispatches through. In
 	// production it is the coreClient; the narrow interface lets tests inject a
@@ -518,6 +523,15 @@ var ErrConnectAborted = errors.New("connect superseded by a concurrent disconnec
 // potentially slow coreClient.Connect() call (which may involve OAuth flows taking minutes).
 // This prevents blocking Disconnect, SetConfig, GetConfig, and other callers.
 func (mc *Client) Connect(ctx context.Context) error {
+	return mc.connectUnlessStopped(ctx, nil)
+}
+
+// connectUnlessStopped is Connect for a health loop's reconnect: it is
+// admitted only while that loop's stop channel is open. Disconnect closes the
+// channel under mc.mu, so an attempt admitted before the Disconnect is
+// superseded by it (see connectSeq) and one admitted after it sees the stop
+// and does nothing. A nil stop never fires.
+func (mc *Client) connectUnlessStopped(ctx context.Context, stop <-chan struct{}) error {
 	// Phase 1: Acquire lock, check state, prepare for connection
 	mc.mu.Lock()
 
@@ -526,6 +540,13 @@ func (mc *Client) Connect(ctx context.Context) error {
 	if mc.unregistered.Load() {
 		mc.mu.Unlock()
 		return ErrInstanceUnregistered
+	}
+
+	// The health loop that asked for this reconnect was stopped by a
+	// Disconnect: the user (or the manager) wants this client down.
+	if monitoringStopped(stop) {
+		mc.mu.Unlock()
+		return ErrConnectAborted
 	}
 
 	// Check if already connecting or connected
@@ -722,8 +743,12 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// TransitionTo deliberately stays OUTSIDE the critical section — it invokes
 	// the state-change callback synchronously (types.go), and epochMu must
 	// never be held across foreign code (GH #965 review, rounds 2-3).
+	// The failure counter is reset in the same epochMu section, so a probe
+	// of the previous connection that fails after this point cannot add debt
+	// to the new one (see recordHealthCheckFailureFor).
 	mc.epochMu.Lock()
 	mc.connectionEpoch.Store(nextConnectionEpoch())
+	mc.resetHealthCheckFailures()
 	mc.epochMu.Unlock()
 
 	// Spec 113-e FR-080: remember the session id this connect obtained, so a
@@ -734,11 +759,6 @@ func (mc *Client) Connect(ctx context.Context) error {
 	if mc.StateManager.GetState() != types.StateReady {
 		mc.StateManager.TransitionTo(types.StateReady)
 	}
-
-	// Wipe any consecutive-failure debt accumulated before reconnect so the
-	// new session starts at zero. Without this, a server that flapped, then
-	// recovered, would carry stale counts into the next health-check window.
-	mc.resetHealthCheckFailures()
 
 	// A fresh connection (e.g. a post-sign-in reconnect that now carries a token)
 	// starts clean: clear any stale call-time OAuth-required flag so the Sign-in
@@ -1534,6 +1554,11 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
 		return nil, ErrConnectionGenerationChanged
 	}
+	// The same window for the caller's own policy verdicts (Spec 117
+	// FR-018): a gate snapshot read before the queue wait is re-read here.
+	if err := runDispatchRecheck(ctx); err != nil {
+		return nil, err
+	}
 
 	invoker := mc.toolInvoker
 	if invoker == nil {
@@ -1861,12 +1886,27 @@ func (mc *Client) cancelInFlightListTools() {
 // superseded (see connectSeq) and discards its result instead of publishing
 // Ready over the closed transport; an attempt admitted after it dials a fresh
 // transport. The caller must not hold mc.mu.
-func (mc *Client) teardownForReconnect(reset func()) error {
+//
+// stop is the stop channel of the health loop asking for the reconnect (nil
+// for the other callers). A Disconnect closes it under mc.mu, so a loop that
+// waited here for a Disconnect to release mc.mu finds it closed and tears
+// nothing down (errReconnectStopped).
+func (mc *Client) teardownForReconnect(reset func(), stop <-chan struct{}) error {
+	mc.mu.Lock()
+	stopped := monitoringStopped(stop)
+	mc.mu.Unlock()
+	if stopped {
+		return errReconnectStopped
+	}
+
 	mc.cancelInFlightConnect()
 	mc.cancelInFlightListTools()
 
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+	if monitoringStopped(stop) {
+		return errReconnectStopped
+	}
 	mc.connectSeq++
 	var err error
 	if mc.coreClient != nil {
@@ -1877,6 +1917,21 @@ func (mc *Client) teardownForReconnect(reset func()) error {
 	}
 	reset()
 	return err
+}
+
+// errReconnectStopped reports that the health loop which asked for a reconnect
+// was stopped (by Disconnect) before the reconnect could start.
+var errReconnectStopped = errors.New("reconnect abandoned: health monitoring was stopped")
+
+// monitoringStopped reports whether a health loop's stop channel is closed.
+// A nil channel (a reconnect that no loop asked for) is never stopped.
+func monitoringStopped(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
 }
 
 // cancelInFlightConnect cancels any in-flight Connect() operation.
@@ -1965,10 +2020,17 @@ func (mc *Client) startBackgroundMonitoring() {
 
 	// Mark that monitoring has been started
 	mc.monitoringStarted = true
-	mc.monitoringWG.Add(1)
+	// Each loop owns the stop channel it was started with. stopBackgroundMonitoring
+	// swaps mc.stopMonitoring for a fresh channel after closing it, so a loop that
+	// re-read the field could miss its own stop (e.g. it was still inside a probe
+	// or reconnect when the 1s stop wait timed out) and keep running next to the
+	// loop a later Connect starts.
+	stop := mc.stopMonitoring
+	done := make(chan struct{})
+	mc.monitoringDone = done
 	go func() {
-		defer mc.monitoringWG.Done()
-		mc.backgroundHealthCheck()
+		defer close(done)
+		mc.backgroundHealthCheck(stop)
 	}()
 }
 
@@ -1983,15 +2045,11 @@ func (mc *Client) stopBackgroundMonitoring() {
 
 	close(mc.stopMonitoring)
 
-	// Use a timeout for the wait to prevent hanging during shutdown
-	done := make(chan struct{})
-	go func() {
-		mc.monitoringWG.Wait()
-		close(done)
-	}()
-
+	// Wait for this loop only, with a timeout to prevent hanging during
+	// shutdown. A loop still inside a probe when the wait times out exits on
+	// its own once the probe returns: it holds the stop channel just closed.
 	select {
-	case <-done:
+	case <-mc.monitoringDone:
 		mc.logger.Debug("Background monitoring stopped successfully",
 			zap.String("server", mc.GetConfig().Name))
 	case <-time.After(1 * time.Second):
@@ -2050,16 +2108,16 @@ func planHealthCheckCycle(interval, disabledRecheck time.Duration) (probe bool, 
 // backgroundHealthCheck performs periodic health checks. The interval is
 // re-resolved every cycle from config, so a hot-reload changes the cadence (or
 // disables the loop entirely) without restarting the server (spec 074).
-func (mc *Client) backgroundHealthCheck() {
+func (mc *Client) backgroundHealthCheck(stop <-chan struct{}) {
 	for {
 		probe, wait := planHealthCheckCycle(mc.resolveHealthCheckInterval(), healthCheckDisabledRecheckInterval)
 		timer := time.NewTimer(wait)
 		select {
 		case <-timer.C:
 			if probe {
-				mc.performHealthCheck()
+				mc.performHealthCheckFor(stop)
 			}
-		case <-mc.stopMonitoring:
+		case <-stop:
 			timer.Stop()
 			mc.logger.Debug("Background health monitoring stopped",
 				zap.String("server", mc.GetConfig().Name))
@@ -2070,6 +2128,12 @@ func (mc *Client) backgroundHealthCheck() {
 
 // performHealthCheck checks if the connection is still healthy and attempts reconnection if needed
 func (mc *Client) performHealthCheck() {
+	mc.performHealthCheckFor(nil)
+}
+
+// performHealthCheckFor is performHealthCheck run by the health loop that owns
+// stop: a reconnect it starts does nothing once that loop is stopped.
+func (mc *Client) performHealthCheckFor(stop <-chan struct{}) {
 	// A retired instance has no health to report (Spec 116 PR4, FR-026):
 	// its probes are refused by its gate, and their failure must not drive
 	// a reconnect or an Error state.
@@ -2091,7 +2155,7 @@ func (mc *Client) performHealthCheck() {
 				zap.String("server", mc.GetConfig().Name),
 				zap.Int("oauth_retry_count", info.OAuthRetryCount),
 				zap.Time("last_oauth_attempt", info.LastOAuthAttempt))
-			mc.tryReconnect()
+			mc.tryReconnectFor(stop)
 		} else {
 			info := mc.StateManager.GetConnectionInfo()
 			mc.logger.Debug("OAuth backoff period not elapsed, skipping reconnection",
@@ -2119,7 +2183,7 @@ func (mc *Client) performHealthCheck() {
 				zap.String("server", mc.GetConfig().Name),
 				zap.Int("retry_count", info.RetryCount))
 
-			mc.tryReconnect()
+			mc.tryReconnectFor(stop)
 			return
 		}
 	}
@@ -2210,11 +2274,18 @@ func (mc *Client) performHealthCheck() {
 			} else {
 				mc.resetInFlightSuppression()
 			}
-			if mc.recordHealthCheckFailure(err) {
+			trip, current := mc.recordHealthCheckFailureFor(err, pingEpoch)
+			if !current {
+				mc.logger.Debug("Health check failure belongs to a previous connection; not counting it",
+					zap.String("server", mc.GetConfig().Name),
+					zap.Error(err))
+				return
+			}
+			if trip {
 				if mc.setErrorIfCurrentConnection(err, pingEpoch) {
 					mc.logger.Warn("Health check failed repeatedly, marking as error",
 						zap.String("server", mc.GetConfig().Name),
-						zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
+						zap.Int32("consecutive_failures", mc.consecutiveHealthFailures.Load()),
 						zap.Error(err))
 				} else {
 					mc.logger.Debug("Health check failure belongs to a connection that is already gone; not marking",
@@ -2224,7 +2295,7 @@ func (mc *Client) performHealthCheck() {
 			} else {
 				mc.logger.Info("Health check failed transiently, tolerating below threshold",
 					zap.String("server", mc.GetConfig().Name),
-					zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
+					zap.Int32("consecutive_failures", mc.consecutiveHealthFailures.Load()),
 					zap.Int("threshold", healthCheckFailureThreshold),
 					zap.Error(err))
 			}
@@ -2277,25 +2348,38 @@ func (mc *Client) syncRetryAfterFromTransport() {
 }
 
 func (mc *Client) recordHealthCheckFailure(err error) bool {
-	mc.consecutiveHealthFailures++
+	n := mc.consecutiveHealthFailures.Add(1)
 	if !isTransientHealthCheckError(err) {
 		return true
 	}
-	return mc.consecutiveHealthFailures >= healthCheckFailureThreshold
+	return n >= healthCheckFailureThreshold
+}
+
+// recordHealthCheckFailureFor is recordHealthCheckFailure for a probe that ran
+// on connection generation epoch. A probe of a previous connection that fails
+// after Connect opened a new one (and reset the counter in the same epochMu
+// section) counts nothing: current is false.
+func (mc *Client) recordHealthCheckFailureFor(err error, epoch int64) (trip, current bool) {
+	mc.epochMu.Lock()
+	defer mc.epochMu.Unlock()
+	if mc.connectionEpoch.Load() != epoch {
+		return false, false
+	}
+	return mc.recordHealthCheckFailure(err), true
 }
 
 // recordHealthCheckSuccess resets the consecutive-failure counter. One good
 // check is enough to wipe the slate — we're not trying to track flap
 // frequency, just preventing single misses from looking like outages.
 func (mc *Client) recordHealthCheckSuccess() {
-	mc.consecutiveHealthFailures = 0
+	mc.consecutiveHealthFailures.Store(0)
 }
 
 // resetHealthCheckFailures clears the counter. Called from the connect
 // success path so a successful reconnect doesn't carry stale failure debt
 // from before the disconnect.
 func (mc *Client) resetHealthCheckFailures() {
-	mc.consecutiveHealthFailures = 0
+	mc.consecutiveHealthFailures.Store(0)
 }
 
 // isTransientHealthCheckError identifies failure modes that warrant
@@ -2421,6 +2505,14 @@ func (mc *Client) ForceReconnect(reason string) {
 
 // tryReconnect attempts to reconnect the client with proper error handling
 func (mc *Client) tryReconnect() {
+	mc.tryReconnectFor(nil)
+}
+
+// tryReconnectFor is tryReconnect for the health loop that owns stop. That
+// loop may have been waiting for mc.mu while a Disconnect held it; once the
+// Disconnect closed stop, the reconnect tears nothing down and does not
+// Connect, so it cannot bring back a server that was just disconnected.
+func (mc *Client) tryReconnectFor(stop <-chan struct{}) {
 	if mc.IsUserLoggedOut() {
 		mc.logger.Info("Skipping reconnection attempt - user explicitly logged out",
 			zap.String("server", mc.GetConfig().Name))
@@ -2471,7 +2563,12 @@ func (mc *Client) tryReconnect() {
 	// First, disconnect the current client to clean up any broken connections,
 	// cancelling any in-flight connect/listTools, and transition to
 	// disconnected for reconnect, preserving retryCount for backoff.
-	if err := mc.teardownForReconnect(mc.StateManager.ResetForReconnect); err != nil {
+	if err := mc.teardownForReconnect(mc.StateManager.ResetForReconnect, stop); err != nil {
+		if errors.Is(err, errReconnectStopped) {
+			mc.logger.Debug("Skipping reconnection attempt - health monitoring was stopped",
+				zap.String("server", mc.GetConfig().Name))
+			return
+		}
 		mc.logger.Warn("Failed to disconnect during reconnection attempt",
 			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err))
@@ -2482,7 +2579,12 @@ func (mc *Client) tryReconnect() {
 
 	// Attempt to reconnect using the existing Connect method
 	// The Connect method already handles state transitions and error management
-	if err := mc.Connect(ctx); err != nil {
+	if err := mc.connectUnlessStopped(ctx, stop); err != nil {
+		if monitoringStopped(stop) {
+			mc.logger.Debug("Reconnection abandoned - health monitoring was stopped",
+				zap.String("server", mc.GetConfig().Name))
+			return
+		}
 		info := mc.StateManager.GetConnectionInfo()
 
 		// Use different log levels based on error type and retry count
@@ -2589,7 +2691,7 @@ func (mc *Client) TryReconnectSync(ctx context.Context) error {
 
 	// Disconnect stale state first and reset state to disconnected (one
 	// mc.mu section, see teardownForReconnect).
-	if err := mc.teardownForReconnect(mc.StateManager.Reset); err != nil {
+	if err := mc.teardownForReconnect(mc.StateManager.Reset, nil); err != nil {
 		mc.logger.Warn("TryReconnectSync: disconnect during reconnect returned error",
 			zap.String("server", serverName),
 			zap.Error(err))

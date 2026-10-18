@@ -428,3 +428,37 @@ func TestHandle_ObservationFailure_KillNotBlockedAndExitStatusKept(t *testing.T)
 	<-h3.Done()
 	require.NoError(t, h3.Wait())
 }
+
+// A SIGKILL can miss a group member that was being forked while the signal
+// was delivered (#1649). The kill was requested, so the reaper repeats it
+// while it keeps the exited leader unreaped, and Done closes instead of
+// staying open for as long as the missed member runs.
+func TestHandle_KillMissedMember_RepeatedUntilGroupEmpty(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "descendant.pid")
+	cmd := exec.Command("/bin/sh", "-c",
+		`sleep 300 & echo $! > "`+pidFile+`"`)
+	h, err := Spawn(context.Background(), &Spec{Cmd: cmd, Name: "bg-missed"}, zap.NewNop())
+	require.NoError(t, err)
+	hh := h.(*handle)
+	pid := readPid(t, pidFile)
+	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
+	require.Eventually(t, func() bool { return !liveNonZombie(hh.cmd.Process.Pid) },
+		10*time.Second, 20*time.Millisecond, "the launcher leader did not exit")
+	select {
+	case <-h.Done():
+		t.Fatal("control: Done closed while the descendant runs")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// The member keeps the launcher's output pipes, so the pumps cannot finish
+	// either. The kill was requested but its signal missed the descendant.
+	hh.killed.Store(true)
+	select {
+	case <-h.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("a requested kill was not repeated to the member it missed")
+	}
+	require.Eventually(t, func() bool { return !liveNonZombie(pid) },
+		5*time.Second, 20*time.Millisecond, "the missed descendant must be killed")
+}

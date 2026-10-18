@@ -1,7 +1,10 @@
 // Package stringutil provides common string utility functions.
 package stringutil
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // ContainsIgnoreCase checks if s contains substr, ignoring case.
 func ContainsIgnoreCase(s, substr string) bool {
@@ -70,4 +73,22 @@ func isWrapperPhrase(s string) bool {
 		}
 	}
 	return true
+}
+
+// UTF8Prefix returns the longest prefix of s that is at most n bytes long and
+// does not end in the middle of a multi-byte UTF-8 sequence. Slicing a string
+// at a raw byte offset (s[:n]) can leave a partial rune at the end, which is
+// invalid UTF-8 and is rewritten to U+FFFD by JSON encoding.
+func UTF8Prefix(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	if len(s) <= n {
+		return s
+	}
+	// A rune is at most utf8.UTFMax bytes, so the boundary is within 3 bytes.
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

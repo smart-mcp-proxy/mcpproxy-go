@@ -71,11 +71,11 @@ func TestHealthCheck_SuccessResetsCounter(t *testing.T) {
 	for i := 1; i < healthCheckFailureThreshold; i++ {
 		mc.recordHealthCheckFailure(timeoutErr)
 	}
-	require.Equal(t, healthCheckFailureThreshold-1, mc.consecutiveHealthFailures)
+	require.Equal(t, healthCheckFailureThreshold-1, int(mc.consecutiveHealthFailures.Load()))
 
 	// One success wipes the slate.
 	mc.recordHealthCheckSuccess()
-	assert.Equal(t, 0, mc.consecutiveHealthFailures)
+	assert.Equal(t, 0, int(mc.consecutiveHealthFailures.Load()))
 
 	// Now the next transient failure must be back to "tolerated".
 	shouldError := mc.recordHealthCheckFailure(timeoutErr)
@@ -116,10 +116,10 @@ func TestHealthCheck_ResetOnConnect(t *testing.T) {
 
 	mc.recordHealthCheckFailure(timeoutErr)
 	mc.recordHealthCheckFailure(timeoutErr)
-	require.Equal(t, 2, mc.consecutiveHealthFailures)
+	require.Equal(t, 2, int(mc.consecutiveHealthFailures.Load()))
 
 	mc.resetHealthCheckFailures()
-	assert.Equal(t, 0, mc.consecutiveHealthFailures)
+	assert.Equal(t, 0, int(mc.consecutiveHealthFailures.Load()))
 
 	// Use ctx to silence unused import warnings on stripped builds.
 	_ = context.Background()

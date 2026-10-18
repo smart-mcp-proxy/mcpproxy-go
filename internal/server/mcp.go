@@ -3341,6 +3341,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// core.Client.CallTool so every record written below can be scrubbed.
 	dispatchCtx, fwdSink := headerfwd.WithSink(callCtx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
+	dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
 	result, err := p.dispatchOnEpoch(dispatchCtx, certified, toolName, args)
 	p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
 	callerr.Observe(ctx, result, err)
@@ -3449,15 +3450,22 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// gives a name whose generation is not certified, in the same
 		// telemetry bucket, with the started record closed as an error so
 		// the activity funnel sees the call end.
-		if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+		//
+		// Spec 117 FR-018: the review-dirty re-check after the same wait
+		// refused it the same way, with the pre-dispatch dirty body.
+		if dirty := isReviewNotRecordedRefusal(err); dirty || errors.Is(err, managed.ErrConnectionGenerationChanged) {
 			errMsg := unresolvedToolIdentityMessage(serverName, actualToolName, false)
+			if dirty {
+				errMsg = reviewNotRecordedMessage(serverName)
+			}
 			toolCallRecord.Error = errMsg
 			if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 				p.logger.Warn("Failed to record refused tool call", zap.Error(storeErr))
 			}
-			p.logger.Debug("handleCallToolVariant: refusing dispatch, connection generation changed since the identity was certified",
+			p.logger.Debug("handleCallToolVariant: refusing dispatch, the connection generation or review state changed while the call waited",
 				zap.String("server_name", serverName),
-				zap.String("tool_name", actualToolName))
+				zap.String("tool_name", actualToolName),
+				zap.Bool("review_dirty", dirty))
 			var intentMap map[string]interface{}
 			if intent != nil {
 				intentMap = intent.ToMap()
@@ -3871,6 +3879,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// Spec 112 FR-016.3: per-call sink for the recording scrub below.
 	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
+	dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
 	result, err := p.upstreamManager.CallTool(dispatchCtx, toolName, args)
 	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()

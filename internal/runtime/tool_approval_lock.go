@@ -3,6 +3,7 @@ package runtime
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 
@@ -58,10 +59,27 @@ import (
 // Both fields are guarded by mu. Sequences are process-global (managed.
 // InventoryCapture), so a removed and re-added server needs no reset: every
 // capture of the new instance is newer.
+//
+// dirty and dirtyAt are the FR-018 review-dirty state (also guarded by mu):
+// set when a capture admitted at dirtyAt failed part-way through its writes,
+// cleared only by a complete capture with a newer sequence. dirtyMirror is
+// its lock-free copy for dispatch, written only under mu. writeFailures
+// counts approval-record write failures of the pass that holds mu.
 type toolApprovalServerLock struct {
 	mu          sync.Mutex
 	applied     uint64
 	definitions uint64
+
+	dirty         bool
+	dirtyAt       uint64
+	dirtyTools    map[string]struct{}
+	dirtyMirror   atomic.Bool
+	writeFailures atomic.Int64
+
+	// failedMu guards passFailed: the tools whose writes failed in the
+	// current pass, folded into dirtyTools when the pass is marked dirty.
+	failedMu   sync.Mutex
+	passFailed map[string]struct{}
 }
 
 // toolApprovalServerState returns serverName's lock state, creating it.

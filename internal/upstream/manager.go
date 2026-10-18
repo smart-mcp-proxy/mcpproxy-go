@@ -1535,6 +1535,11 @@ func (m *Manager) callTool(ctx context.Context, toolName string, args map[string
 		if errors.Is(err, managed.ErrConnectionGenerationChanged) {
 			return nil, err
 		}
+		// A caller's pre-transport re-check refused the call (nothing was
+		// sent); its error is the caller's own and is returned verbatim.
+		if errors.Is(err, managed.ErrDispatchRecheckRefused) {
+			return nil, err
+		}
 		// Spec 116 PR4 (FR-026, FR-027): the instance was retired (removed,
 		// replaced or quarantined) while the call was on its way. Unavailable,
 		// with no connection or authentication advice.

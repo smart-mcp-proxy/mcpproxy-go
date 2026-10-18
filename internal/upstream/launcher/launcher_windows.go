@@ -133,3 +133,7 @@ func (h *handle) killGroupBeforeReap() {}
 // awaitGroupEmpty is a no-op on Windows (no process group; see
 // killGroupBeforeReap).
 func (h *handle) awaitGroupEmpty() {}
+
+// repeatKillUntilReaped is a no-op on Windows: the Job Object kill reaches
+// every member, including ones created while it was delivered.
+func (h *handle) repeatKillUntilReaped() (stop func()) { return func() {} }

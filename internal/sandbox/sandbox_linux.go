@@ -113,7 +113,7 @@ func Apply(spec Spec) (Report, error) {
 	}
 
 	handled := handledAccessFS(abi)
-	attr := unix.LandlockRulesetAttr{Access_fs: handled}
+	attr := unix.LandlockRulesetAttr{Handled_access_fs: handled}
 	rulesetFD, err := landlockCreateRuleset(&attr)
 	if err != nil {
 		return rep, fmt.Errorf("sandbox: landlock_create_ruleset: %w", err)

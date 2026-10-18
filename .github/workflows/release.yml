@@ -183,7 +183,7 @@ jobs:
           echo "notes_file=$NOTES_FILE" >> $GITHUB_OUTPUT
 
       - name: Upload release notes artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: release-notes
           path: RELEASE_NOTES-${{ github.ref_name }}.md
@@ -284,7 +284,7 @@ jobs:
         run: go mod download
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '22'
 
@@ -817,7 +817,7 @@ jobs:
 
       - name: Upload unsigned Windows installer for signing
         if: matrix.goos == 'windows'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         id: upload-unsigned-installer
         with:
           name: unsigned-installer-windows-${{ matrix.goarch }}
@@ -1005,8 +1005,18 @@ jobs:
             echo "${SUBMISSION_ID}" > "${FILE_NAME}.submission_id"
 
             echo "Stapling notarization ticket to ${FILE_LABEL}"
-            xcrun stapler staple "${FILE_NAME}"
-            xcrun stapler validate "${FILE_NAME}"
+            # Apple ticket delivery (CloudKit) drops connections intermittently
+            # ("network connection was lost", exit 68); retry with backoff.
+            for attempt in 1 2 3 4 5; do
+              xcrun stapler staple "${FILE_NAME}" && break
+              if [ "$attempt" = 5 ]; then exit 1; fi
+              echo "stapler staple failed (attempt $attempt), retrying"; sleep $((attempt * 15))
+            done
+            for attempt in 1 2 3 4 5; do
+              xcrun stapler validate "${FILE_NAME}" && break
+              if [ "$attempt" = 5 ]; then exit 1; fi
+              echo "stapler validate failed (attempt $attempt), retrying"; sleep $((attempt * 15))
+            done
           }
 
           notarize_and_staple "${PKG_NAME}" "PKG installer"
@@ -1083,8 +1093,18 @@ jobs:
 
           # Staple the BUNDLE, then re-archive it: the ticket must travel inside
           # the .app the user ends up running.
-          xcrun stapler staple "${APP_SRC}"
-          xcrun stapler validate "${APP_SRC}"
+          # Apple ticket delivery (CloudKit) drops connections intermittently
+          # ("network connection was lost", exit 68); retry with backoff.
+          for attempt in 1 2 3 4 5; do
+            xcrun stapler staple "${APP_SRC}" && break
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            echo "stapler staple failed (attempt $attempt), retrying"; sleep $((attempt * 15))
+          done
+          for attempt in 1 2 3 4 5; do
+            xcrun stapler validate "${APP_SRC}" && break
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            echo "stapler validate failed (attempt $attempt), retrying"; sleep $((attempt * 15))
+          done
 
           echo "=== Creating the stapled enclosure ==="
           ditto -c -k --sequesterRsrc --keepParent "${APP_SRC}" "sparkle-enclosure/${ENCLOSURE}"
@@ -1096,7 +1116,13 @@ jobs:
           VERIFY_DIR=$(mktemp -d)
           ditto -x -k "sparkle-enclosure/${ENCLOSURE}" "${VERIFY_DIR}"
           codesign --verify --deep --strict --verbose=2 "${VERIFY_DIR}/mcpproxy.app"
-          xcrun stapler validate "${VERIFY_DIR}/mcpproxy.app"
+          # Apple ticket delivery (CloudKit) drops connections intermittently
+          # ("network connection was lost", exit 68); retry with backoff.
+          for attempt in 1 2 3 4 5; do
+            xcrun stapler validate "${VERIFY_DIR}/mcpproxy.app" && break
+            if [ "$attempt" = 5 ]; then exit 1; fi
+            echo "stapler validate failed (attempt $attempt), retrying"; sleep $((attempt * 15))
+          done
           spctl -a -t exec -vv "${VERIFY_DIR}/MCPProxy.app"
           rm -rf "${VERIFY_DIR}"
 
@@ -1105,7 +1131,7 @@ jobs:
 
       - name: Upload Sparkle enclosure artifact
         if: matrix.goos == 'darwin' && matrix.edition != 'server'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sparkle-enclosure-${{ matrix.goarch }}
           path: sparkle-enclosure/*
@@ -1129,13 +1155,13 @@ jobs:
           fi
 
       - name: Upload versioned archive artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: versioned-${{ matrix.edition || 'personal' }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-*-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
 
       - name: Upload latest archive artifact
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: latest-${{ matrix.edition || 'personal' }}-${{ matrix.goos }}-${{ matrix.goarch }}
           path: mcpproxy-latest-${{ matrix.goos }}-${{ matrix.goarch }}.${{ matrix.archive_format }}
@@ -1171,7 +1197,7 @@ jobs:
 
       - name: Upload macOS installers artifact
         if: matrix.goos == 'darwin'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: installers-${{ matrix.goos }}-${{ matrix.goarch }}
           path: installers-artifact/*
@@ -1196,7 +1222,7 @@ jobs:
 
       - name: Re-upload for SignPath
         id: reupload
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: signpath-input-windows-${{ matrix.arch }}
           # Upload exe - GitHub Actions will ZIP it for SignPath
@@ -1243,7 +1269,7 @@ jobs:
           fi
 
       - name: Upload signed Windows installer
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: installer-windows-${{ matrix.arch }}
           path: signed/mcpproxy-setup-${{ github.ref_name }}-${{ matrix.arch }}.exe
@@ -1763,7 +1789,7 @@ jobs:
           echo "generated=true" >> "$GITHUB_OUTPUT"
 
       - name: Upload appcast artifact for the website repo
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: sparkle-appcast
           path: appcast-out/*
@@ -2139,7 +2165,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1  # v7.1.0
         with:
           node-version: '22'
           cache: 'npm'

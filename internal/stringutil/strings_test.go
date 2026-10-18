@@ -2,6 +2,7 @@ package stringutil
 
 import (
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -119,6 +120,38 @@ func TestCollapseRepeatedErrorWrappers(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, CollapseRepeatedErrorWrappers(tt.in))
+		})
+	}
+}
+
+func TestUTF8Prefix(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		n    int
+		want string
+	}{
+		{"ascii shorter than limit", "hello", 10, "hello"},
+		{"ascii exact", "hello", 5, "hello"},
+		{"ascii cut", "hello world", 5, "hello"},
+		{"zero limit", "hello", 0, ""},
+		{"negative limit", "hello", -1, ""},
+		{"cut on 2-byte boundary", "aéb", 3, "aé"},
+		{"cut inside 2-byte rune", "aéb", 2, "a"},
+		{"cut inside 3-byte rune", "a世b", 3, "a"},
+		{"cut inside 3-byte rune tail", "a世b", 2, "a"},
+		{"cut inside 4-byte rune", "a😀b", 4, "a"},
+		{"limit smaller than first rune", "世", 2, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := UTF8Prefix(tc.in, tc.n)
+			if got != tc.want {
+				t.Fatalf("UTF8Prefix(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Fatalf("UTF8Prefix(%q, %d) returned invalid UTF-8: %q", tc.in, tc.n, got)
+			}
 		})
 	}
 }

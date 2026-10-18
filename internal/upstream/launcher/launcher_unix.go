@@ -76,6 +76,9 @@ func (h *handle) signalUnreaped(sig syscall.Signal) error {
 	if h.reaped {
 		return nil
 	}
+	if sig == syscall.SIGKILL {
+		h.killed.Store(true)
+	}
 	return h.signalLocked(sig)
 }
 
@@ -161,6 +164,49 @@ func (h *handle) awaitGroupEmpty() {
 		if delay *= 2; delay > groupScanMaxPoll {
 			delay = groupScanMaxPoll
 		}
+	}
+}
+
+// repeatKillInterval is how often repeatKillUntilReaped re-sends SIGKILL.
+const repeatKillInterval = 50 * time.Millisecond
+
+// repeatKillUntilReaped runs for the whole of reap and returns a stop
+// function. Once a SIGKILL was requested (Kill, Stop's escalation or a
+// retirement) it repeats the signal to the group until the leader is reaped.
+// A member forked while the first signal was delivered is not in the group
+// yet when the kernel walks it, so it survives that kill; without a repeat
+// the exited leader stays unreaped, and Done stays open, for as long as that
+// member runs (forever for a daemon). It must run beside the reaper's pump
+// drain too: the missed member holds the output pipes, so the pumps (and
+// with them awaitGroupEmpty) cannot finish until it dies. Every signal is
+// sent under reapMu with the leader not reaped, so the leader, alive or a
+// zombie, still pins the group ID.
+func (h *handle) repeatKillUntilReaped() (stop func()) {
+	quit := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		t := time.NewTicker(repeatKillInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-quit:
+				return
+			case <-t.C:
+			}
+			if !h.killed.Load() {
+				continue
+			}
+			h.reapMu.Lock()
+			if !h.reaped {
+				_ = h.signalLocked(syscall.SIGKILL)
+			}
+			h.reapMu.Unlock()
+		}
+	}()
+	return func() {
+		close(quit)
+		<-finished
 	}
 }
 

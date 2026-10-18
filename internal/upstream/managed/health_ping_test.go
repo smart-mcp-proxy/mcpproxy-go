@@ -38,7 +38,7 @@ func TestPerformHealthCheck_UsesPingNotListTools(t *testing.T) {
 	assert.Equal(t, 1, fake.pingCalls, "health check must issue exactly one ping")
 	assert.Equal(t, types.StateReady, mc.StateManager.GetState(),
 		"a successful ping must leave the server Ready")
-	assert.Equal(t, 0, mc.consecutiveHealthFailures,
+	assert.Equal(t, 0, int(mc.consecutiveHealthFailures.Load()),
 		"a successful ping must reset the failure counter")
 }
 
@@ -70,5 +70,5 @@ func TestPerformHealthCheck_PingTransientErrorToleratedBelowThreshold(t *testing
 	assert.Equal(t, 1, fake.pingCalls)
 	assert.Equal(t, types.StateReady, mc.StateManager.GetState(),
 		"a single transient ping failure must be tolerated below threshold")
-	assert.Equal(t, 1, mc.consecutiveHealthFailures)
+	assert.Equal(t, 1, int(mc.consecutiveHealthFailures.Load()))
 }

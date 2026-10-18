@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -10,6 +11,8 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // toolGate is ONE evaluation of the shared per-tool policy gates, consumed by
@@ -74,6 +77,12 @@ type toolGate struct {
 	// instead of recreating the removed server's identity and history under
 	// the replacement's incarnation (review round 4). 0 when unbound.
 	incarnation int64
+	// reviewDirty is the Spec 117 FR-018 verdict: the server's latest tool
+	// capture could not be fully recorded, so the StateView and the stored
+	// records may describe an older definition than the upstream serves. It
+	// is orthogonal to class: listing and description are unchanged, only
+	// dispatch (callable) refuses, with toolreview.ErrReviewNotRecorded.
+	reviewDirty bool
 }
 
 // serverDisabled reports the server-level disabled gate as the classifier
@@ -82,9 +91,16 @@ func (g toolGate) serverDisabled() bool {
 	return g.class == preflight.ToolClassServerDisabled
 }
 
-// callable reports whether dispatch may proceed.
+// callable reports whether dispatch may proceed. It is a dispatch-only
+// predicate: no listing or visibility path reads it (Spec 117 FR-018).
 func (g toolGate) callable() bool {
-	return g.class.Callable() && g.storageErr == nil
+	return g.class.Callable() && g.storageErr == nil && !g.reviewDirty
+}
+
+// refusedForReviewDirty reports a tool that is callable by every other gate
+// and refused only because its server's latest capture is incomplete.
+func (g toolGate) refusedForReviewDirty() bool {
+	return g.reviewDirty && g.class.Callable() && g.storageErr == nil
 }
 
 // serverQuarantined reports the server-level quarantine gate, which every
@@ -97,7 +113,47 @@ func (g toolGate) serverQuarantined() bool {
 // blockedMessage is the agent-actionable refusal text for a non-callable tool
 // that is neither quarantined nor approval-locked.
 func (g toolGate) blockedMessage() string {
+	if g.refusedForReviewDirty() {
+		return reviewNotRecordedMessage(g.serverName)
+	}
 	return blockedToolMessageFor(g.configDenied)
+}
+
+// reviewNotRecordedMessage is the dispatch refusal of a review-dirty server
+// (Spec 117 FR-018).
+func reviewNotRecordedMessage(serverName string) string {
+	return fmt.Sprintf("server '%s': %s", serverName, toolreview.ErrReviewNotRecorded.Error())
+}
+
+// toolReviewDirty reports the runtime's FR-018 verdict for serverName (false
+// without a runtime: unit fixtures).
+func (p *MCPProxyServer) toolReviewDirty(serverName string) bool {
+	if rt := p.promptApprovalRuntime(); rt != nil {
+		return rt.ToolReviewDirty(serverName)
+	}
+	return false
+}
+
+// withReviewDirtyRecheck attaches the FR-018 verdict to a dispatch context as
+// a pre-transport re-check. The gate's reviewDirty is a snapshot read before
+// dispatch; a call that then waits in admission control (or behind a session
+// re-init) while a concurrent capture fails persistence would otherwise go
+// upstream on the stale clean verdict. The managed client re-reads it after
+// every wait, immediately before the transport, and refuses with zero
+// upstream calls (see isReviewNotRecordedRefusal).
+func (p *MCPProxyServer) withReviewDirtyRecheck(ctx context.Context, serverName string) context.Context {
+	return managed.WithDispatchRecheck(ctx, func() error {
+		if p.toolReviewDirty(serverName) {
+			return fmt.Errorf("server '%s': %w", serverName, toolreview.ErrReviewNotRecorded)
+		}
+		return nil
+	})
+}
+
+// isReviewNotRecordedRefusal reports withReviewDirtyRecheck's refusal: the
+// call was not sent; the caller answers with reviewNotRecordedMessage.
+func isReviewNotRecordedRefusal(err error) bool {
+	return errors.Is(err, managed.ErrDispatchRecheckRefused) && errors.Is(err, toolreview.ErrReviewNotRecorded)
 }
 
 // evaluateToolGate reads the local policy state for one tool exactly once and
@@ -153,6 +209,7 @@ func (p *MCPProxyServer) evaluateExactToolGate(serverName, toolName string) tool
 	}
 	gate.serverConfig = serverConfig
 	gate.configDenied = p.isToolConfigDenied(serverName, toolName, serverConfig)
+	gate.reviewDirty = p.toolReviewDirty(serverName)
 
 	cfg := p.currentConfig()
 	quarantineEnabled := cfg == nil || cfg.IsQuarantineEnabled()
