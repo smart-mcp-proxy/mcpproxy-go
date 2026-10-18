@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"io"
 	"os"
 	"path/filepath"
@@ -1283,7 +1284,7 @@ func parseCiscoScannerOutput(data []byte, scannerID string) []ScanFinding {
 				// Truncate tool description for evidence (max 500 chars)
 				evidence := result.ToolDescription
 				if len(evidence) > 500 {
-					evidence = evidence[:500] + "..."
+					evidence = stringutil.UTF8Prefix(evidence, 500) + "..."
 				}
 				finding := ScanFinding{
 					RuleID:      strings.ToLower(strings.ReplaceAll(threat, " ", "_")),
@@ -1584,7 +1585,7 @@ func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return stringutil.UTF8Prefix(s, maxLen) + "..."
 }
 
 // ciscoScannerID is the single source of truth for the bundled Cisco AI Defense

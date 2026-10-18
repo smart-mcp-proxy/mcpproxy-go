@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -45,7 +46,7 @@ func classifyAndAttach(status *stateview.ServerStatus, err error, hints diagnost
 	msg := err.Error()
 	const maxCause = 256
 	if len(msg) > maxCause {
-		msg = msg[:maxCause] + "..."
+		msg = stringutil.UTF8Prefix(msg, maxCause) + "..."
 	}
 	status.Diagnostic = &diagnostics.DiagnosticError{
 		Code:     code,
