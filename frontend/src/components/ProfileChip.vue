@@ -111,7 +111,7 @@
         :to="scope.linkTo('activity', { client: client.id, status: 'blocked' })"
       >{{ client.blocked_24h }} blocked (24h)</router-link>
       <span v-else-if="(client.blocked_24h ?? 0) > 0">{{ client.blocked_24h }} blocked (24h)</span>
-      <span v-if="client.rotation_pending" class="badge badge-xs badge-info" :data-test="`client-rotation-badge-${client.id}`">Rotation pending</span>
+      <span v-if="client.rotation_pending" class="badge badge-xs badge-info h-auto min-h-4" :data-test="`client-rotation-badge-${client.id}`">Rotation pending</span>
     </div>
   </div>
 </template>

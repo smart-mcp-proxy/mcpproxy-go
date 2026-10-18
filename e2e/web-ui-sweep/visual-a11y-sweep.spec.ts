@@ -90,6 +90,7 @@ for (const theme of THEMES) {
                 calls_24h: 0,
                 blocked_24h: 0,
                 credential_state: 'none',
+                rotation_pending: true,
                 display_path: '~/Library/Application Support/Claude/claude_desktop_config.json',
               })),
               warnings: [],
@@ -101,10 +102,13 @@ for (const theme of THEMES) {
       const badges = page.locator('[data-test^="client-credential-badge-"]')
       await expect(badges).toHaveCount(2)
       await expect(badges).toHaveText(['No credential', 'No credential'])
+      // The rotation badge sits in the same narrow column and wraps the same way.
+      const rotationBadges = page.locator('[data-test^="client-rotation-badge-"]')
+      await expect(rotationBadges).toHaveCount(2)
       await expect(badges.first()).toBeVisible()
       await badges.first().scrollIntoViewIfNeeded()
       await page.screenshot({ path: testInfo.outputPath('credential-badges.png'), fullPage: true })
-      for (const badge of await badges.all()) {
+      for (const badge of [...await badges.all(), ...await rotationBadges.all()]) {
         const overflow = await badge.evaluate(el => {
           const box = el.getBoundingClientRect()
           const range = document.createRange()
