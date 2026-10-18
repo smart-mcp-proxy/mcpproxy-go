@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -281,19 +282,54 @@ func TestBuildToolEntry_CompactPreservesExplicitCallRoute(t *testing.T) {
 				status.ToolsDiscovered = true
 				status.Tools = []stateview.ToolInfo{{Name: "PowerShell", Annotations: tc.annotations}}
 			})
-			result := &config.SearchResult{Tool: &config.ToolMetadata{
-				Name: "windows:PowerShell", ServerName: "windows",
-				Description: "Run a PowerShell command.",
-				ParamsJSON:  `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`,
-				Hash:        "hash-powershell-route",
-			}}
+			for _, identity := range []struct {
+				name       string
+				toolName   string
+				serverName string
+			}{
+				{name: "canonical id with server", toolName: "windows:PowerShell", serverName: "windows"},
+				{name: "server inferred from canonical id", toolName: "windows:PowerShell"},
+				{name: "bare name with server", toolName: "PowerShell", serverName: "windows"},
+			} {
+				t.Run(identity.name, func(t *testing.T) {
+					result := &config.SearchResult{Tool: &config.ToolMetadata{
+						Name: identity.toolName, ServerName: identity.serverName,
+						Description: "Run a PowerShell command.",
+						ParamsJSON:  `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`,
+						Hash:        "hash-powershell-route",
+					}}
 
-			compact := proxy.buildToolEntry(result, config.ToolResponseModeCompact, toolEntryOpts{})
-			full := proxy.buildToolEntry(result, config.ToolResponseModeFull, toolEntryOpts{})
-			assert.Equal(t, tc.want, compact["call_with"])
-			assert.Equal(t, full["call_with"], compact["call_with"], "compact and full routes must match")
-			assert.NotContains(t, compact, "annotations")
-			assert.NotContains(t, compact, "inputSchema")
+					compact := proxy.buildToolEntry(result, config.ToolResponseModeCompact, toolEntryOpts{})
+					full := proxy.buildToolEntry(result, config.ToolResponseModeFull, toolEntryOpts{})
+					assert.Equal(t, tc.want, compact["call_with"])
+					assert.Equal(t, full["call_with"], compact["call_with"], "compact and full routes must match")
+					assert.NotContains(t, compact, "annotations")
+					assert.NotContains(t, compact, "inputSchema")
+				})
+			}
+		})
+	}
+}
+
+func TestCompactToolCallWith_MissingIdentityFallsBackToRead(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	for _, tc := range []struct {
+		name   string
+		result *config.SearchResult
+	}{
+		{name: "missing result"},
+		{name: "missing tool", result: &config.SearchResult{}},
+		{name: "empty identity", result: &config.SearchResult{Tool: &config.ToolMetadata{}}},
+		{name: "bare name without server", result: &config.SearchResult{Tool: &config.ToolMetadata{Name: "PowerShell"}}},
+		{name: "unknown server", result: &config.SearchResult{Tool: &config.ToolMetadata{Name: "unknown:PowerShell"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, contracts.ToolVariantRead, proxy.compactToolCallWith(tc.result))
+			if tc.result != nil && tc.result.Tool != nil {
+				full := proxy.buildToolEntry(tc.result, config.ToolResponseModeFull, toolEntryOpts{})
+				compact := proxy.buildToolEntry(tc.result, config.ToolResponseModeCompact, toolEntryOpts{})
+				assert.Equal(t, full["call_with"], compact["call_with"])
+			}
 		})
 	}
 }
