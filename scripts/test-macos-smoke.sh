@@ -138,12 +138,15 @@ done
 log "core up: version=${CORE_VERSION}, socket=${SOCK}"
 
 # ---- 4. launch the tray against it; assert the socket handshake ---------------
+# A fresh runner has no prefs, so the modal first-run dialog would block the main
+# thread forever. `-MCPProxy.firstRunCompleted YES` sets it in the process-local
+# NSUserDefaults argument domain only: nothing is written to the prefs domain.
 log "stage 4: launching the tray (external-core attach, scratch instance root)"
 HOME="${SCRATCH}/home" \
 MCPPROXY_TRAY_SKIP_CORE=1 \
 MCPPROXY_HOME="$ROOT" \
 MCPPROXY_SOCKET_PATH="$SOCK" \
-  "$APP_BIN" > "${SCRATCH}/tray.log" 2>&1 &
+  "$APP_BIN" -MCPProxy.firstRunCompleted YES > "${SCRATCH}/tray.log" 2>&1 &
 TRAY_PID=$!
 
 ready=0
