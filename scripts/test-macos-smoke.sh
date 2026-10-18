@@ -158,6 +158,15 @@ for _ in $(seq 1 "$ATTACH_TIMEOUT"); do
 done
 if [[ "$ready" != "1" ]]; then
   tail -40 "${SCRATCH}/tray.log"
+  # Evidence for a hang (e.g. a GUI-session service the runner lacks): where is
+  # the main thread, and is there a login/GUI session at all?
+  {
+    echo "--- launchctl managername: $(launchctl managername 2>&1)"
+    echo "--- console owner: $(stat -f%Su /dev/console 2>&1)"
+    echo "--- sample of the tray (main thread):"
+    sample "$TRAY_PID" 2 -file "$ARTIFACT_DIR/tray-sample.txt" > /dev/null 2>&1 \
+      && head -60 "$ARTIFACT_DIR/tray-sample.txt" || echo "(sample unavailable)"
+  } 2>&1 | tee "$ARTIFACT_DIR/tray-hang-diagnostics.log"
   fail "tray never reported 'connectToCore: core is ready' + 'got version=${CORE_VERSION}' within ${ATTACH_TIMEOUT}s"
 fi
 log "handshake ok: tray attached over ${SOCK} and read core version ${CORE_VERSION}"
