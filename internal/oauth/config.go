@@ -1892,29 +1892,6 @@ func (c *CallbackServer) dropAllWaiters() int {
 	return dropped
 }
 
-// callbackPage renders the page the user's browser lands on. Success is only
-// ever reported when the authorization code was actually delivered to the flow
-// that asked for it (issue #975).
-func callbackPage(title, message string) string {
-	closeScript := ""
-	if title == "Authorization Successful" {
-		closeScript = `
-				<script>
-					setTimeout(function() {
-						window.close();
-					}, 2000);
-				</script>`
-	}
-	return fmt.Sprintf(`
-		<html>
-			<body>
-				<h1>%s</h1>
-				<p>%s</p>%s
-			</body>
-		</html>
-	`, html.EscapeString(title), html.EscapeString(message), closeScript)
-}
-
 // handleRequest is the callback listener's only handler: it logs the request,
 // then either delivers a real callback or renders the debug page. A method
 // rather than a closure in StartCallbackServerOnHost so the log fields it
@@ -1943,7 +1920,7 @@ func (c *CallbackServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	debugPage := fmt.Sprintf(`
 		<html>
 			<body>
@@ -2017,7 +1994,7 @@ func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWr
 		}
 
 		c.writePage(w, http.StatusBadRequest, callbackPage(
-			"Authorization Failed",
+			callbackTitleFailed,
 			fmt.Sprintf("mcpproxy is not waiting for this sign-in (unknown or expired state). "+
 				"Nothing was signed in. Start the login again from mcpproxy for '%s'.", c.ServerName)))
 		return
@@ -2034,19 +2011,19 @@ func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWr
 			message = providerErr + ": " + desc
 		}
 		c.writePage(w, http.StatusBadRequest, callbackPage(
-			"Authorization Failed",
+			callbackTitleFailed,
 			fmt.Sprintf("The authorization server rejected the request (%s). You can close this window and try again.", message)))
 		return
 	}
 
 	c.writePage(w, http.StatusOK, callbackPage(
-		"Authorization Successful",
+		callbackTitleSuccess,
 		"You can now close this window and return to the application."))
 }
 
 // writePage writes an HTML response for the callback browser window.
 func (c *CallbackServer) writePage(w http.ResponseWriter, status int, page string) {
-	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	if _, err := w.Write([]byte(page)); err != nil {
 		c.logger.Error("Error writing OAuth callback response", zap.Error(err))
