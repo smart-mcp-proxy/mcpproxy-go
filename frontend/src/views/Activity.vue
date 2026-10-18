@@ -1485,6 +1485,7 @@
 </template>
 
 <script setup lang="ts">
+import { activityColumnClasses } from '@/utils/activityColumns'
 import { serverDetailPath } from '@/utils/serverRoute'
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute } from 'vue-router'
@@ -2531,12 +2532,11 @@ const hasScopeColumn = computed(() =>
   SCOPE_URL_NAMES.some(name => isScopeParamAvailable(name)) || activities.value.some(hasAttribution)
 )
 
-// The Scope column (lg+) costs ~176px. Between lg and xl the card cannot also
-// hold Type and Duration, so they fold there while Scope shows; the drawer
-// carries both, and Details keeps the type glyph it shows on phones.
-const typeColumnClass = computed(() => (hasScopeColumn.value ? 'hidden xl:table-cell' : 'hidden sm:table-cell'))
-const typeGlyphClass = computed(() => (hasScopeColumn.value ? 'xl:hidden' : 'sm:hidden'))
-const durationColumnClass = computed(() => (hasScopeColumn.value ? 'hidden xl:table-cell' : 'hidden md:table-cell'))
+// Type/Duration fold only between lg and xl while Scope shows (see activityColumns.ts).
+const columnClasses = computed(() => activityColumnClasses(hasScopeColumn.value))
+const typeColumnClass = computed(() => columnClasses.value.type)
+const typeGlyphClass = computed(() => columnClasses.value.typeGlyph)
+const durationColumnClass = computed(() => columnClasses.value.duration)
 
 function hasAttribution(record: ActivityRecord): boolean {
   return Boolean(record.profile || record.client_id || record.client_name || record.token_name)
