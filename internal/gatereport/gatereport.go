@@ -6,9 +6,10 @@
 // Fragment file into a shared report directory. The merger compares the
 // fragments against a HARDCODED manifest of expected entries: a missing
 // fragment for a blocking entry is a FAIL (no silent skips, FR-004), and
-// reserved extension slots (macos-smoke — Spec 081 T3) are recorded as
-// `not-run` with reason "not-implemented-yet" until their stages land. The T2 Web UI sweep is a live ADVISORY entry: it runs on
-// tag builds and its failures are reported without blocking the release.
+// reserved extension slots (none today) are recorded as `not-run` with reason
+// "not-implemented-yet" until their stages land. The T2 Web UI sweep and the
+// T3 macOS smoke are live ADVISORY entries: they run on tag builds and their
+// failures are reported without blocking the release.
 package gatereport
 
 import (
@@ -115,7 +116,10 @@ const (
 	// listed under advisory_failures) without blocking publication.
 	EntryAdvisoryWebUISweep = "advisory/web-ui-sweep"
 
-	EntryReservedMacOSSmoke = "reserved/macos-smoke"
+	// EntryAdvisoryMacOSSmoke is the Spec 081 T3 macOS tray smoke (US4,
+	// FR-019/FR-020). ADVISORY until it has passed on 3 consecutive release
+	// tags (FR-021); a failure lands in advisory_failures and never blocks.
+	EntryAdvisoryMacOSSmoke = "advisory/macos-smoke"
 
 	// EntrySurfaceConsistency is Spec 081 T4 (US5, FR-018): the CLI, MCP and
 	// Web UI surfaces agree with the core's /api/v1/servers on every server's
@@ -126,8 +130,7 @@ const (
 
 // Manifest returns the hardcoded expected-entries manifest: 5 matrix cells +
 // 5 invariants (incl. the T4 surface-consistency check) + 5 assembled suite
-// jobs (FR-003) + 1 advisory entry (the T2 Web UI sweep) + 1 reserved slot
-// (T3 macOS smoke).
+// jobs (FR-003) + 2 advisory entries (the T2 Web UI sweep, the T3 macOS smoke).
 func Manifest() []ManifestEntry {
 	return []ManifestEntry{
 		{Name: EntryMatrixStdio, Blocking: true},
@@ -150,7 +153,7 @@ func Manifest() []ManifestEntry {
 
 		{Name: EntryAdvisoryWebUISweep, Blocking: false},
 
-		{Name: EntryReservedMacOSSmoke, Blocking: false, Reserved: true},
+		{Name: EntryAdvisoryMacOSSmoke, Blocking: false},
 	}
 }
 
