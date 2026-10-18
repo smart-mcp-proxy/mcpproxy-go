@@ -87,6 +87,10 @@ mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Frameworks"
 cp "$TRAY_BIN" "${APP}/Contents/MacOS/MCPProxy"
 cp "${SWIFT_DIR}/MCPProxy/Info.plist" "${APP}/Contents/Info.plist"
 cp -R "$(dirname "$TRAY_BIN")/Sparkle.framework" "${APP}/Contents/Frameworks/"
+# A distinct bundle id keeps the app's NSUserDefaults writes (e.g. the
+# NSAutomatic* text-substitution keys) out of the REAL app's preferences domain
+# on a developer Mac. Rewritten BEFORE codesign, which seals Info.plist.
+/usr/libexec/PlistBuddy -c "Set :CFBundleIdentifier com.smartmcpproxy.mcpproxy.smoke" "${APP}/Contents/Info.plist"
 install_name_tool -add_rpath "@executable_path/../Frameworks" "${APP}/Contents/MacOS/MCPProxy"
 codesign --force --deep --sign - "$APP" 2> "$ARTIFACT_DIR/codesign.log" \
   || { cat "$ARTIFACT_DIR/codesign.log"; fail "ad-hoc codesign of the scratch bundle failed"; }
