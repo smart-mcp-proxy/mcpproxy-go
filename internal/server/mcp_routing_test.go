@@ -804,6 +804,9 @@ func TestRetrieveToolsInstructions_RetrieveToolsMode(t *testing.T) {
 		"retrieve_tools mode should mention call_tool_destructive")
 	assert.Contains(t, instructions, "INTENT TRACKING",
 		"retrieve_tools mode should mention intent tracking")
+	assert.Contains(t, instructions, "upstream annotations")
+	assert.Contains(t, instructions, "existing read fallback")
+	assert.NotContains(t, instructions, "DECISION RULES BY TOOL NAME")
 }
 
 // TestRetrieveToolsInstructions_DefaultMode verifies that handleRetrieveToolsWithMode

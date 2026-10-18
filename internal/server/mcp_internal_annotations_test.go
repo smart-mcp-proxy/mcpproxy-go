@@ -1,6 +1,7 @@
 package server
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -82,6 +83,22 @@ func TestCallToolVariantAnnotations(t *testing.T) {
 			assert.Equal(t, tc.variant, tool.Name)
 			assertExplicitHints(t, tool, tc.want)
 		})
+	}
+}
+
+func TestCallToolVariantDescriptionsHonorRouteAnnotations(t *testing.T) {
+	for _, variant := range []string{
+		contracts.ToolVariantRead,
+		contracts.ToolVariantWrite,
+		contracts.ToolVariantDestructive,
+	} {
+		description := buildCallToolVariantTool(variant).Description
+		assert.Contains(t, description, "call_with="+variant)
+		assert.Contains(t, description, "upstream annotations")
+		assert.Contains(t, description, "describe_tool")
+		assert.Contains(t, description, "requested outcome")
+		assert.NotContains(t, strings.ToLower(description), "default choice when unsure")
+		assert.NotContains(t, strings.ToLower(description), "decision rule")
 	}
 }
 

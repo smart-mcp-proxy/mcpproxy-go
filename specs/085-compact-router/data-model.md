@@ -112,10 +112,14 @@ Produced by `buildToolEntry(result, mode, opts)` (new `internal/server/mcp_entry
 ```json
 { "id": "digitalocean:cdn_create", "score": 0.94, "lossy": false,
   "sig": "(origin*:str, ttl:int=3600, certificate_id:str)",
-  "desc": "Create a CDN for a Spaces bucket" }
+  "desc": "Create a CDN for a Spaces bucket",
+  "call_with": "call_tool_write" }
 ```
 - `id` = `server:tool` (`result.Tool.ServerName` + `result.Tool.Name`, normalized to
   `server:tool` exactly as today's `name`). Ranking order preserved (SC-002).
+- `call_with` preserves the same route as full mode, including the existing `call_tool_read`
+  fallback when upstream tier annotations are unavailable. Agents must follow this field instead
+  of inferring a route from tool names, descriptions, command text, or requested outcome.
 - No `inputSchema`, no `description` (full), no `annotations` block — those move to
   `describe_tool` / self-healing errors.
 - Compact response adds top-level `hint` (FR-009): a single deterministic line explaining the
