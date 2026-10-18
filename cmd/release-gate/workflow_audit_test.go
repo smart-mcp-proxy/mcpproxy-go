@@ -70,6 +70,7 @@ type job struct {
 	Uses            string    `yaml:"uses"`
 	If              yaml.Node `yaml:"if"`
 	ContinueOnError yaml.Node `yaml:"continue-on-error"`
+	RunsOn          yaml.Node `yaml:"runs-on"`
 	Steps           []step    `yaml:"steps"`
 }
 

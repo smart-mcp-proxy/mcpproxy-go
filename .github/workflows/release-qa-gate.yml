@@ -25,9 +25,13 @@ name: Release QA Gate
 #   invariant/surface-consistency — CLI / MCP / Web UI agree with the core's
 #                                   /api/v1/servers on every server's state
 #
-# T3 extension slot (reserved manifest entry, recorded as
-# not-run/"not-implemented-yet" until its stage lands):
-#   reserved/macos-smoke         — T3 macOS tray smoke (advisory, FR-019/020)
+# T3 landed as an ADVISORY entry on a macOS runner:
+#   advisory/macos-smoke         — builds the Swift tray + runs its unit tests,
+#                                  boots a core with an isolated data dir, runs
+#                                  the tray against it and asserts the socket
+#                                  handshake + a clean exit (FR-019/020).
+#                                  No Accessibility grant on hosted runners, so
+#                                  no mcpproxy-ui-test menu assertions yet.
 # See docs/development/release-gate.md.
 
 on:
@@ -577,6 +581,79 @@ jobs:
           if-no-files-found: warn
 
   # ---------------------------------------------------------------------------
+  # T3 (US4, FR-019/FR-020): macOS tray smoke on a hosted macOS runner.
+  #
+  # ADVISORY, deliberately, exactly like web-ui-sweep: `continue-on-error: true`
+  # keeps a red smoke out of this reusable workflow's conclusion (so a publisher
+  # whose job `needs:` the gate still publishes), and `release-gate run-suite
+  # --advisory` records `advisory/macos-smoke` as `advisory-fail`, which the
+  # verdict job lists under advisory_failures.
+  #
+  # PROMOTION CRITERION (FR-021): promote to blocking once this job has passed on
+  # 3 consecutive release tags with no flaky or infrastructure failure. Promotion
+  # is a one-line change per place: Blocking:true on the advisory/macos-smoke
+  # manifest entry (internal/gatereport) and drop `continue-on-error` here.
+  #
+  # It builds its own core and the Swift tray on the macOS runner (the shared
+  # build-candidate artifact is a linux binary), then runs the same script used
+  # by hand: scripts/test-macos-smoke.sh. No signing secrets, no notarization —
+  # the scratch .app is ad-hoc signed.
+  # ---------------------------------------------------------------------------
+  macos-smoke:
+    name: macOS tray smoke (advisory)
+    # macos-latest, like native-tests.yml: the native suite needs the newer Swift
+    # toolchain (macos-15 ships Swift 6.1, which cannot type-check
+    # ReviewPresentationTests.swift:132 in reasonable time).
+    runs-on: macos-latest
+    timeout-minutes: 30
+    continue-on-error: true  # advisory: never blocks the tag (FR-020)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Show Swift toolchain
+        run: swift --version
+
+      - name: Build gate driver (macOS)
+        run: |
+          mkdir -p dist-bin
+          go build -o dist-bin/release-gate ./cmd/release-gate
+
+      - name: Run macOS tray smoke
+        env:
+          SMOKE_ARTIFACT_DIR: ${{ github.workspace }}/tmp/macos-smoke-artifacts
+        run: |
+          ./dist-bin/release-gate run-suite \
+            --name advisory/macos-smoke --advisory --report-dir "${GATE_REPORT_DIR}" \
+            -- bash scripts/test-macos-smoke.sh
+
+      - name: Upload smoke logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: macos-smoke-logs
+          path: tmp/macos-smoke-artifacts/
+          retention-days: 14
+          if-no-files-found: warn
+
+      - name: Upload report fragment
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: gate-fragment-macos-smoke
+          path: ${{ env.GATE_REPORT_DIR }}/
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------------
   # Merge every fragment against the hardcoded gatereport manifest → one
   # verdict. Runs even if upstream jobs failed (if: always()) so a missing
   # blocking fragment is recorded as a FAIL (FR-004, fail-closed) rather than
@@ -585,7 +662,7 @@ jobs:
   # ---------------------------------------------------------------------------
   verdict:
     name: Gate verdict
-    needs: [build-candidate, suite-api-e2e, suite-race, suite-scan-eval, matrix-invariants, surface-consistency, web-ui-sweep]
+    needs: [build-candidate, suite-api-e2e, suite-race, suite-scan-eval, matrix-invariants, surface-consistency, web-ui-sweep, macos-smoke]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 10
