@@ -225,7 +225,8 @@ only on `workflow_dispatch`, never on a tag's `workflow_call`):
 ## macOS tray smoke (T3) — advisory
 
 `advisory/macos-smoke` (job `macos-smoke`, US4 / FR-019–FR-021) runs on a hosted
-`macos-15` runner. It is **advisory**: `continue-on-error: true` on the job plus
+`macos-latest` runner (the toolchain `native-tests.yml` uses; `macos-15`'s
+Swift 6.1 cannot compile the native test suite). It is **advisory**: `continue-on-error: true` on the job plus
 `release-gate run-suite --advisory`, so a failure is listed under
 `advisory_failures` and never blocks publication. A missing fragment (runner
 never scheduled, job died before upload) is reported the same way.

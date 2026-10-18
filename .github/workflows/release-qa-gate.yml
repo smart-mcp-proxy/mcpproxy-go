@@ -601,7 +601,10 @@ jobs:
   # ---------------------------------------------------------------------------
   macos-smoke:
     name: macOS tray smoke (advisory)
-    runs-on: macos-15
+    # macos-latest, like native-tests.yml: the native suite needs the newer Swift
+    # toolchain (macos-15 ships Swift 6.1, which cannot type-check
+    # ReviewPresentationTests.swift:132 in reasonable time).
+    runs-on: macos-latest
     timeout-minutes: 30
     continue-on-error: true  # advisory: never blocks the tag (FR-020)
     steps:
