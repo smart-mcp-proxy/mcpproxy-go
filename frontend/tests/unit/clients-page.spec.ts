@@ -55,6 +55,8 @@ describe('Clients page', () => {
   })
 
   it('loads counts first, expands details on demand, and separates observed clients from the manual snippet', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     const router = makeRouter()
     await router.push('/clients')
     await router.isReady()
@@ -70,8 +72,11 @@ describe('Clients page', () => {
     expect(wrapper.text()).toContain('Zed')
     expect(wrapper.find('[data-test="other-client-snippet"]').exists()).toBe(true)
     const snippet = wrapper.find('[data-test="other-client-snippet"] code').text()
-    expect(snippet).toContain('127.0.0.1:18081/mcp')
+    expect(snippet).toContain(window.location.origin + '/mcp')
     expect(snippet).not.toContain('api_key')
+    await wrapper.get('[data-test="copy-other-client-snippet"]').trigger('click')
+    await flushPromises()
+    expect(writeText).toHaveBeenCalledWith(JSON.stringify({ mcpServers: { mcpproxy: { url: `${window.location.origin}/mcp` } } }, null, 2))
 
     await wrapper.findAll('tbody tr')[0].trigger('click')
     await flushPromises()
@@ -146,7 +151,7 @@ describe('Clients page', () => {
 
     await wrapper.get('[data-test="copy-endpoint-direct"]').trigger('click')
     await flushPromises()
-    expect(writeText).toHaveBeenCalledWith('http://127.0.0.1:18081/mcp/all')
+    expect(writeText).toHaveBeenCalledWith(window.location.origin + '/mcp/all')
   })
 
   it('checks an installed hand-configured client only after the explicit action', async () => {
