@@ -36,8 +36,13 @@ export async function seedProfiles(): Promise<void> {
  * A client bound to a profile that is then deleted with force: its pin dangles, so the
  * row shows `profile_missing` (deny-all, never wider) and the Clients page a warning.
  * Needs seedProfiles() first (the binding guard compares against anonymous_profile).
+ *
+ * A dangling pin is bypassable whenever anonymous access grants anything (Spec 115
+ * FR-012b), so the force delete is refused while require_mcp_auth is off. Auth is
+ * turned on first and stays on until cleanupProfiles() has removed the client.
  */
 export async function seedMissingProfile(): Promise<void> {
+  await api('PATCH', '/config', { require_mcp_auth: true })
   await api('POST', '/profiles', { name: 'e2e-gone', title: 'E2E gone', servers: [SERVER], max_tier: 'read' })
   await api('POST', '/clients', { id: ORPHAN_ID, profile: 'e2e-gone', mode: 'locked' })
   await api('DELETE', '/profiles/e2e-gone?force=true')
@@ -53,6 +58,8 @@ export async function cleanupProfiles(extraProfiles: string[] = [], tokens: stri
   await quiet(() => api('DELETE', `/clients/${CLIENT_ID}`))
   await quiet(() => api('DELETE', `/clients/${ORPHAN_ID}`))
   await quiet(() => api('PATCH', '/config', { anonymous_profile: '' }))
+  // seedMissingProfile() turns auth on; the sweep instance runs with it off.
+  await quiet(() => api('PATCH', '/config', { require_mcp_auth: false }))
   for (const name of [RO_PROFILE, 'e2e-gone', ...extraProfiles]) {
     await quiet(() => api('DELETE', `/profiles/${encodeURIComponent(name)}?force=true`))
   }
