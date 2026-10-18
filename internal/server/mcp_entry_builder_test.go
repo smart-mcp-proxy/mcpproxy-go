@@ -19,10 +19,10 @@ import (
 
 // Spec 085 T011 — full-mode byte-identity golden (FR-006/SC-003).
 //
-// The golden files under testdata/ were captured from the retrieve_tools
-// handler BEFORE the entry-builder extraction (T012) and the shared-visibility
-// rewiring (T010), so any post-refactor byte difference in the full-mode
-// response is a regression. Regenerate ONLY when a deliberate, spec-approved
+// The golden files under testdata/ began as captures of the retrieve_tools
+// handler BEFORE the entry-builder extraction (T012) and shared-visibility
+// rewiring (T010). They pin the current full-mode bytes, including approved
+// routing-guidance updates. Regenerate ONLY when a deliberate, spec-approved
 // response change lands: UPDATE_GOLDEN=1 go test ./internal/server -run
 // TestRetrieveToolsFullMode_GoldenByteIdentity
 //
@@ -111,7 +111,7 @@ func compareGolden(t *testing.T, goldenPath, got string) {
 	assert.Equal(t,
 		strings.TrimRight(string(want), "\n"),
 		strings.TrimRight(got, "\n"),
-		"full-mode retrieve_tools response must be byte-identical to the pre-refactor capture (FR-006/SC-003)")
+		"full-mode retrieve_tools response must be byte-identical to its committed golden (FR-006/SC-003)")
 }
 
 func TestRetrieveToolsFullMode_GoldenByteIdentity(t *testing.T) {
