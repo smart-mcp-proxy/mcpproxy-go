@@ -447,22 +447,39 @@ func (m *Manager) AddNotificationHandler(handler NotificationHandler) {
 
 // SetToolDiscoveryCallback sets the callback for triggering tool re-indexing when
 // upstream servers send notifications/tools/list_changed notifications.
-// This callback will be passed to all new clients created by the manager.
+// It is applied to every client that already exists and to all clients created
+// later: the supervisor can add (and connect) clients before the runtime
+// registers this callback, and a client without it silently drops
+// list_changed notifications. Applying under m.mu (the same m.mu → mc.mu order
+// AddServerConfig uses) keeps concurrent setters from leaving a stale callback.
 func (m *Manager) SetToolDiscoveryCallback(callback func(ctx context.Context, serverName string) error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.toolDiscoveryCallback = callback
-	m.logger.Debug("Tool discovery callback set on manager")
+	for _, client := range m.clients {
+		if client != nil {
+			client.SetToolDiscoveryCallback(callback)
+		}
+	}
+	m.logger.Debug("Tool discovery callback set on manager",
+		zap.Int("existing_clients", len(m.clients)))
 }
 
 // SetPromptsChangedCallback sets the callback for triggering aggregated-prompt
 // refresh when an upstream sends notifications/prompts/list_changed (F13). It is
-// passed to all new clients created by the manager.
+// applied to existing clients and to all clients created later (see
+// SetToolDiscoveryCallback for why).
 func (m *Manager) SetPromptsChangedCallback(callback func(serverName string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.promptsChangedCallback = callback
-	m.logger.Debug("Prompts-changed callback set on manager")
+	for _, client := range m.clients {
+		if client != nil {
+			client.SetPromptsChangedCallback(callback)
+		}
+	}
+	m.logger.Debug("Prompts-changed callback set on manager",
+		zap.Int("existing_clients", len(m.clients)))
 }
 
 // ShutdownAll disconnects all clients and ensures all Docker containers are stopped
