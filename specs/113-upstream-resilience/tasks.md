@@ -70,24 +70,24 @@ Format: `[ID] [P?] [Story] Description (files) — FR`. `[P]` = can run in paral
 - [x] T167 [US3] Add fields (`internal/storage/activity_models.go`) — FR-043
 - [x] T168 [US3] Stamp fields at every tool-call activity write path (direct, `call_tool_*`, `code_execution` sub-calls, REST `/api/v1/tools/call`); recorder ctx installed at those dispatch sites (`internal/server/mcp.go`, `mcp_routing.go`, `mcp_code_execution.go`, `server.go`) — FR-044, FR-048
 - [x] T169 [P] [US3] Failing integration test (SC-004): `httptest` Streamable HTTP upstream producing isError, 502 HTML, JSON-RPC -32001, reset, timeout, 404 session, 401; assert persisted record and `GET /api/v1/activity` JSON per class (`internal/server/call_error_taxonomy_test.go`) — SC-004
-- [ ] T170 [US3] REST + SSE + contracts + `cmd/generate-types`; `ActivityFilter` `error_class`/`fault_domain`; `make swagger`, commit `oas/` (`internal/contracts/activity.go`, `internal/httpapi/activity.go`, `internal/runtime/activity_service.go`, `event_bus.go`) — FR-045, FR-046
-- [ ] T171 [US3] CLI: `activity list|show -o json|yaml` fields; `--error-class`, `--fault-domain`; `activity show` table line (`cmd/mcpproxy/activity_cmd.go` + tests) — FR-045, FR-046
-- [ ] T172 Docs: `docs/features/activity-log.md` + `docs/cli/activity-commands.md` (class table, fault domains, filters)
+- [x] T170 [US3] REST + SSE + contracts + `cmd/generate-types`; `ActivityFilter` `error_class`/`fault_domain`; `make swagger`, commit `oas/` (`internal/contracts/activity.go`, `internal/httpapi/activity.go`, `internal/runtime/activity_service.go`, `event_bus.go`) — FR-045, FR-046
+- [x] T171 [US3] CLI: `activity list|show -o json|yaml` fields; `--error-class`, `--fault-domain`; `activity show` table line (`cmd/mcpproxy/activity_cmd.go` + tests) — FR-045, FR-046
+- [x] T172 Docs: `docs/features/activity-log.md` + `docs/cli/activity-commands.md` (class table, fault domains, filters)
 - [ ] T173 Gates (as T117)
 - [ ] T174 Cross-model review (opencode harness, gpt-6.1-sol), ≤10 rounds
 - T175–T189 reserved for 113-c follow-ups
 
 ## Slice 113-d — health-call-failure-rate (US4, G7) — T190–T219
 
-- [ ] T190 [P] [US4] Failing test: `callstats.Window` with injected clock — bucket rotation, 5 min expiry, counted vs uncounted, dominant kind, concurrent `Record` under `-race` (`internal/upstream/callstats/window_test.go`) — FR-060, FR-066
+- [x] T190 [P] [US4] Failing test: `callstats.Window` with injected clock — bucket rotation, 5 min expiry, counted vs uncounted, dominant kind, concurrent `Record` under `-race` (`internal/upstream/callstats/window_test.go`) — FR-060, FR-066
 - [ ] T191 [US4] Implement `Window`, `Registry` (drop on remove/rename) (`internal/upstream/callstats/`) — FR-060, FR-066
-- [ ] T192 [P] [US4] Failing test: local predicate table (or 113-c classifier if merged) — isError, policy refusal, limiter, generation refusal, validation, cancel, auth → uncounted; network, post-dispatch timeout, 5xx, JSON-RPC error → failure; success → counted ok (`internal/upstream/callstats/classify_test.go`) — FR-061
-- [ ] T193 [US4] Implement predicate (`internal/upstream/callstats/classify.go`) — FR-061
-- [ ] T194 [P] [US4] Failing test: both choke points record — `Manager.CallTool`/`CallToolOnEpoch` and `code_execution` dispatch (`internal/upstream/manager_callstats_test.go`, `internal/server/mcp_code_execution_callstats_test.go`) — FR-062
-- [ ] T195 [US4] Record in `Manager.callTool` and after `CallToolOnEpoch` in `mcp_code_execution.go`; expose `Manager.CallStats(server)` and `RecordCallOutcome` (`internal/upstream/manager.go`, `internal/server/mcp_code_execution.go`) — FR-062
-- [ ] T196 [P] [US4] Failing test: calculator precedence and boundaries table (quarantined, disabled, disconnected, error, OAuth expired, refresh failed, missing secret, retry stopped each win; 4/4 → healthy; 5 @ 50% → healthy; 5 @ 60% → degraded; summary text) (`internal/health/calculator_test.go`) — FR-063, FR-064, FR-067
-- [ ] T197 [US4] Add `CallsInWindow`, `CallFailuresInWindow` and the degraded branch with constants (`internal/health/calculator.go`) — FR-063, FR-064, FR-065
-- [ ] T198 [US4] Fill the inputs at all three construction sites from `Manager.CallStats` (`internal/runtime/runtime.go`, `internal/server/server.go`, `internal/server/mcp.go`) + a test that the three agree — FR-063
+- [x] T192 [P] [US4] Failing test: local predicate table (or 113-c classifier if merged) — isError, policy refusal, limiter, generation refusal, validation, cancel, auth → uncounted; network, post-dispatch timeout, 5xx, JSON-RPC error → failure; success → counted ok (`internal/upstream/callstats/classify_test.go`) — FR-061
+- [x] T193 [US4] Implement predicate (`internal/upstream/callstats/classify.go`) — FR-061
+- [x] T194 [P] [US4] Failing test: both choke points record — `Manager.CallTool`/`CallToolOnEpoch` and `code_execution` dispatch (`internal/upstream/manager_callstats_test.go`, `internal/server/mcp_code_execution_callstats_test.go`) — FR-062
+- [x] T195 [US4] Record in `Manager.callTool` and after `CallToolOnEpoch` in `mcp_code_execution.go`; expose `Manager.CallStats(server)` and `RecordCallOutcome` (`internal/upstream/manager.go`, `internal/server/mcp_code_execution.go`) — FR-062
+- [x] T196 [P] [US4] Failing test: calculator precedence and boundaries table (quarantined, disabled, disconnected, error, OAuth expired, refresh failed, missing secret, retry stopped each win; 4/4 → healthy; 5 @ 50% → healthy; 5 @ 60% → degraded; summary text) (`internal/health/calculator_test.go`) — FR-063, FR-064, FR-067
+- [x] T197 [US4] Add `CallsInWindow`, `CallFailuresInWindow` and the degraded branch with constants (`internal/health/calculator.go`) — FR-063, FR-064, FR-065
+- [x] T198 [US4] Fill the inputs at all three construction sites from `Manager.CallStats` (`internal/runtime/runtime.go`, `internal/server/server.go`, `internal/server/mcp.go`) + a test that the three agree — FR-063
 - [ ] T199 [US4] Health-change SSE: verify the existing poll/diff emits on a failure-rate change; add debounce only if a push path is needed (record which in the PR) — FR-068
 - [ ] T200 [P] [US4] Integration test (SC-005): `httptest` upstream failing 6/10 → `/api/v1/servers` health degraded; advance clock past window → healthy — SC-005
 - [ ] T201 Docs: health status page (`docs/` health section) — new degraded reason, thresholds
@@ -97,14 +97,14 @@ Format: `[ID] [P?] [Story] Description (files) — FR`. `[P]` = can run in paral
 
 ## Slice 113-e — session-terminated-reinit (US5, G8) — T220–T239
 
-- [ ] T220 [P] [US5] Failing test pinning mcp-go v1.0.0 behaviour: 404 on a non-initialize POST → `ErrSessionTerminated` and session id cleared; 404 with no session id → also `ErrSessionTerminated`; a second `Initialize` on the same client/transport stores the new session id (or document that it cannot) (`internal/upstream/core/session_reinit_mcpgo_test.go`) — FR-088
-- [ ] T221 [US5] Implement `core.Client.SessionSnapshot()` and `ReinitializeSession(ctx)` without touching `connectionEpoch` (`internal/upstream/core/session_reinit.go`) — FR-080, FR-081, FR-083
-- [ ] T222 [P] [US5] Failing test (SC-006): `httptest` Streamable HTTP server that forgets the session once; single call → 1 initialize, call succeeds, state stays Ready, counter = 1 (`internal/upstream/managed/session_reinit_test.go`) — FR-080, FR-084, FR-085
+- [x] T220 [P] [US5] Failing test pinning mcp-go v1.0.0 behaviour: 404 on a non-initialize POST → `ErrSessionTerminated` and session id cleared; 404 with no session id → also `ErrSessionTerminated`; a second `Initialize` on the same client/transport stores the new session id (or document that it cannot) (`internal/upstream/core/session_reinit_mcpgo_test.go`) — FR-088
+- [x] T221 [US5] Implement `core.Client.SessionSnapshot()` and `ReinitializeSession(ctx)` without touching `connectionEpoch` (`internal/upstream/core/session_reinit.go`) — FR-080, FR-081, FR-083
+- [x] T222 [P] [US5] Failing test (SC-006): `httptest` Streamable HTTP server that forgets the session once; single call → 1 initialize, call succeeds, state stays Ready, counter = 1 (`internal/upstream/managed/session_reinit_test.go`) — FR-080, FR-084, FR-085
 - [ ] T223 [P] [US5] Failing test: 10 concurrent calls on the same terminated session → exactly 1 initialize, 10 retries, all succeed; callers seeing a newer session id retry without re-init (`session_reinit_test.go`) — FR-082
-- [ ] T231 [P] [US5] Failing test: write/destructive tool after 404 → re-init, no repeat, `session_terminated` error, next call succeeds; changed tool hash after re-init → no retry, differential update runs; health `Ping` 404 first → following call joins the re-init (no request sent without a session id); cached-tool-count `ListTools` 404 → re-init, no `Error` state (`internal/upstream/managed/session_reinit_test.go`) — FR-080–FR-083
-- [ ] T232 [P] [US5] Failing test: a pinned call waiting on the re-init gate is refused with `ErrConnectionGenerationChanged` when the re-list shows its tool changed; after a re-init the upstream's `notifications/tools/list_changed` on the GET stream is still received (or, if the listener cannot be restarted, the full reconnect path runs and no retry happens) (`internal/upstream/managed/session_reinit_test.go`) — FR-083a
+- [x] T231 [P] [US5] Failing test: write/destructive tool after 404 → re-init, no repeat, `session_terminated` error, next call succeeds; changed tool hash after re-init → no retry, differential update runs; health `Ping` 404 first → following call joins the re-init (no request sent without a session id); cached-tool-count `ListTools` 404 → re-init, no `Error` state (`internal/upstream/managed/session_reinit_test.go`) — FR-080–FR-083
+- [x] T232 [P] [US5] Failing test: a pinned call waiting on the re-init gate is refused with `ErrConnectionGenerationChanged` when the re-list shows its tool changed; after a re-init the upstream's `notifications/tools/list_changed` on the GET stream is still received (or, if the listener cannot be restarted, the full reconnect path runs and no retry happens) (`internal/upstream/managed/session_reinit_test.go`) — FR-083a
 - [ ] T224 [P] [US5] Failing test: retry also 404 → call fails and existing error path runs; re-initialize fails → original path; modern protocol or empty pre-call session id → no retry; non-404 errors → no retry (`session_reinit_test.go`) — FR-080, FR-084, FR-086
-- [ ] T225 [US5] Implement single-flight re-init + retry-once in `managed.Client` call, `ListTools` leader and prompt paths; only the final error reaches `isConnectionError`; schedule async tool refresh after re-init (`internal/upstream/managed/client.go`, `prompts.go`) — FR-080–FR-084
+- [x] T225 [US5] Implement single-flight re-init + retry-once in `managed.Client` call, `ListTools` leader and prompt paths; only the final error reaches `isConnectionError`; schedule async tool refresh after re-init (`internal/upstream/managed/client.go`, `prompts.go`) — FR-080–FR-084
 - [ ] T226 [US5] Info log + per-client counter in diagnostics JSON (Prometheus counter if a seam exists) — FR-085
 - [ ] T227 [P] [US5] Test: `CallToolOnEpoch` pinned call succeeds after re-init (epoch unchanged) — FR-083
 - [ ] T228 Docs: troubleshooting note on session loss behaviour
@@ -114,10 +114,10 @@ Format: `[ID] [P?] [Story] Description (files) — FR`. `[P]` = can run in paral
 
 ## Slice 113-f — mcp-cache-hints (US6, G9) — T240–T249
 
-- [ ] T240 [P] [US6] Failing test: modern (2026-07-28) `tools/list` and `prompts/list` on `/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<slug>` carry `ttlMs:0`, `cacheScope:"private"`; legacy responses carry neither (`internal/server/cache_hints_test.go`) — FR-090, FR-092, SC-007
-- [ ] T241 [US6] Add `mcpserver.WithCacheHints(0, mcp.CacheScopePrivate)` to the four `NewMCPServer` calls (`internal/server/mcp.go`, `mcp_routing.go`) — FR-090, FR-091
+- [x] T240 [P] [US6] Failing test: modern (2026-07-28) `tools/list` and `prompts/list` on `/mcp`, `/mcp/all`, `/mcp/code`, `/mcp/call`, `/mcp/p/<slug>` carry `ttlMs:0`, `cacheScope:"private"`; legacy responses carry neither (`internal/server/cache_hints_test.go`) — FR-090, FR-092, SC-007
+- [x] T241 [US6] Add `mcpserver.WithCacheHints(0, mcp.CacheScopePrivate)` to the four `NewMCPServer` calls (`internal/server/mcp.go`, `mcp_routing.go`) — FR-090, FR-091
 - [ ] T242 [US6] Re-run the three frozen tool-surface golden tests; confirm unchanged — FR-094
-- [ ] T243 [US6] Tick T063/T064 in `specs/058-mcp-2026-upgrade/tasks.md` — FR-093
+- [x] T243 [US6] Tick T063/T064 in `specs/058-mcp-2026-upgrade/tasks.md` — FR-093
 - [ ] T244 Gates (as T117)
 - [ ] T245 Cross-model review (opencode harness, gpt-6.1-sol), ≤10 rounds
 - T246–T249 reserved
