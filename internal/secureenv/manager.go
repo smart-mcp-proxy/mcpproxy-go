@@ -238,11 +238,11 @@ func (m *Manager) discoverWindowsPaths() []string {
 
 	if homeDir != "" {
 		commonPaths = append(commonPaths,
-			homeDir+`\.cargo\bin`,          // Rust tools (cargo, uv)
-			homeDir+`\.local\bin`,          // Python user scripts
-			homeDir+`\go\bin`,              // Go binaries
-			homeDir+`\AppData\Roaming\npm`, // npm globals
-			homeDir+`\scoop\shims`,         // Scoop packages
+			homeDir+`\.cargo\bin`,                                      // Rust tools (cargo, uv)
+			homeDir+`\.local\bin`,                                      // Python user scripts
+			homeDir+`\go\bin`,                                          // Go binaries
+			homeDir+`\AppData\Roaming\npm`,                             // npm globals
+			homeDir+`\scoop\shims`,                                     // Scoop packages
 			homeDir+`\AppData\Local\Programs\Python\Python313\Scripts`, // Python 3.13
 			homeDir+`\AppData\Local\Programs\Python\Python312\Scripts`, // Python 3.12
 			homeDir+`\AppData\Local\Programs\Python\Python311\Scripts`, // Python 3.11

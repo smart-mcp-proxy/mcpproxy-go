@@ -7,8 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
-"slices"
-	"strings"RD 🔒)
+	"slices"
 	"time"
 )
 
@@ -304,23 +303,6 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 			}
 		}
 		merged.Headers = newHeaders
-	}
-
-	annotationRemovalKeys := opts.GetRemoveMarkersForMap("annotation_overrides")
-	if patch.AnnotationOverrides != nil || len(annotationRemovalKeys) > 0 || opts.ShouldRemove("annotation_overrides") {
-		newOverrides := MergeAnnotationOverrides(base.AnnotationOverrides, patch.AnnotationOverrides, opts)
-		if diff != nil && !reflect.DeepEqual(base.AnnotationOverrides, newOverrides) {
-			diff.Modified["annotation_overrides"] = FieldChange{Path: "annotation_overrides", From: base.AnnotationOverrides, To: newOverrides}
-			for _, key := range annotationRemovalKeys {
-				if _, existed := base.AnnotationOverrides[key]; existed {
-					diff.Removed = append(diff.Removed, "annotation_overrides."+key)
-				}
-			}
-			if opts.ShouldRemove("annotation_overrides") && base.AnnotationOverrides != nil {
-				diff.Removed = append(diff.Removed, "annotation_overrides")
-			}
-		}
-		merged.AnnotationOverrides = newOverrides
 	}
 
 	// Nested struct fields - deep merge or remove
@@ -761,10 +743,12 @@ func MergeAnnotationOverrides(base, patch map[string]*ToolAnnotations, opts Merg
 }
 
 func indexDot(s string) int {
-	// Tool names may contain '.' and ':' (IsValidToolNameForOverride allows
-	// A-Za-z0-9._:-), so split at the LAST dot to separate tool from hint.
-	// e.g. "tool.with.dots.readOnlyHint" -> ("tool.with.dots", "readOnlyHint")
-	return strings.LastIndex(s, ".")
+	for i, c := range s {
+		if c == '.' {
+			return i
+		}
+	}
+	return -1
 }
 
 // Helper functions to copy configs (avoiding pointer aliasing)

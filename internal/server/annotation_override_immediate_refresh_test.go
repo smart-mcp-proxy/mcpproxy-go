@@ -30,6 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
@@ -107,6 +108,18 @@ func TestUpdateServer_AnnotationOverrides_RefreshStateViewImmediately(t *testing
 		client, ok := rt.UpstreamManager().GetClient("ao-srv")
 		return ok && client.IsConnected()
 	}, 10*time.Second, 50*time.Millisecond, "stub upstream must connect")
+
+	// Stamp the fixture instance with the credential binding the first real
+	// config commit assigns to this server (Spec 116 PR2b, server never
+	// OAuth-cleared): {Incarnation: 1, OAuthEpoch: 0}. AdvanceGenerations
+	// unregisters an instance whose binding differs from the committed one, so
+	// a legacy unstamped AddServerConfig fixture would lose its client on the
+	// PATCH commit below (Reconnect=false schedules no replacement worker).
+	// With the stamp PrimeGenerations restamps the live instance in place
+	// instead — the production behavior for a hot annotation change.
+	if client, ok := rt.UpstreamManager().GetClient("ao-srv"); ok {
+		client.SetCredentialBinding(commitview.CredentialBinding{Incarnation: 1})
+	}
 
 	// Seed the served snapshot with upstream truth.
 	require.NoError(t, rt.RefreshServerTools(ctx, "ao-srv"))

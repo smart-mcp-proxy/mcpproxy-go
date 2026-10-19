@@ -65,9 +65,9 @@ func TestValidateOAuthExtraParams(t *testing.T) {
 		{
 			name: "invalid - attempts to override multiple reserved params",
 			params: map[string]string{
-				"client_id":      "malicious",
-				"client_secret":  "secret",
-				"response_type":  "code",
+				"client_id":     "malicious",
+				"client_secret": "secret",
+				"response_type": "code",
 			},
 			wantErr:     true,
 			errContains: "reserved OAuth 2.0 parameters",
@@ -152,14 +152,14 @@ func TestOAuthConfig_Validate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "empty config",
-			config: &OAuthConfig{},
+			name:    "empty config",
+			config:  &OAuthConfig{},
 			wantErr: false,
 		},
 		{
 			name: "valid config with extra params",
 			config: &OAuthConfig{
-				ClientID:    "test-client",
+				ClientID: "test-client",
 				ExtraParams: map[string]string{
 					"resource": "https://example.com/mcp",
 				},

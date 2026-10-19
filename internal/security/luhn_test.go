@@ -122,39 +122,39 @@ func TestLuhnValid(t *testing.T) {
 
 func TestNormalizeCardNumber(t *testing.T) {
 	tests := []struct {
-		name   string
-		input  string
-		want   string
+		name  string
+		input string
+		want  string
 	}{
 		{
-			name:   "already normalized",
-			input:  "4111111111111111",
-			want:   "4111111111111111",
+			name:  "already normalized",
+			input: "4111111111111111",
+			want:  "4111111111111111",
 		},
 		{
-			name:   "spaces",
-			input:  "4111 1111 1111 1111",
-			want:   "4111111111111111",
+			name:  "spaces",
+			input: "4111 1111 1111 1111",
+			want:  "4111111111111111",
 		},
 		{
-			name:   "dashes",
-			input:  "4111-1111-1111-1111",
-			want:   "4111111111111111",
+			name:  "dashes",
+			input: "4111-1111-1111-1111",
+			want:  "4111111111111111",
 		},
 		{
-			name:   "mixed separators",
-			input:  "4111-1111 1111.1111",
-			want:   "4111111111111111",
+			name:  "mixed separators",
+			input: "4111-1111 1111.1111",
+			want:  "4111111111111111",
 		},
 		{
-			name:   "leading/trailing spaces",
-			input:  "  4111111111111111  ",
-			want:   "4111111111111111",
+			name:  "leading/trailing spaces",
+			input: "  4111111111111111  ",
+			want:  "4111111111111111",
 		},
 		{
-			name:   "empty string",
-			input:  "",
-			want:   "",
+			name:  "empty string",
+			input: "",
+			want:  "",
 		},
 	}
 

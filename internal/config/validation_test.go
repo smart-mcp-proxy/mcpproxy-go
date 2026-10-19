@@ -245,10 +245,10 @@ func TestValidateDetailed(t *testing.T) {
 				CallToolTimeout:   Duration(60000000000),
 				Servers: []*ServerConfig{
 					{
-						Name:         "test",
-						Protocol:     "http",
-						URL:          "https://api.example.com/mcp",
-						EnabledTools: []string{"read_file"},
+						Name:          "test",
+						Protocol:      "http",
+						URL:           "https://api.example.com/mcp",
+						EnabledTools:  []string{"read_file"},
 						DisabledTools: []string{"write_file"},
 					},
 				},

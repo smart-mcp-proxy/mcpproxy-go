@@ -40,10 +40,10 @@ func TestConfigFileRaceCondition(t *testing.T) {
 	)
 
 	var (
-		successfulReads  int32
-		corruptedReads   int32
-		parseErrors      int32
-		readAttempts     int32
+		successfulReads int32
+		corruptedReads  int32
+		parseErrors     int32
+		readAttempts    int32
 	)
 
 	t.Logf("Running %d iterations with %d concurrent readers", iterations, concurrentReads)
@@ -123,10 +123,10 @@ func TestConfigFileRaceCondition(t *testing.T) {
 	parseErrs := atomic.LoadInt32(&parseErrors)
 	failures := corrupted + parseErrs
 
-	t.Logf("\n" +
-		"==============================================\n" +
-		"Race Condition Test Results\n" +
-		"==============================================\n" +
+	t.Logf("\n"+
+		"==============================================\n"+
+		"Race Condition Test Results\n"+
+		"==============================================\n"+
 		"Total read attempts:    %d\n"+
 		"Successful reads:       %d (%.1f%%)\n"+
 		"Corrupted/partial reads: %d\n"+
@@ -243,10 +243,10 @@ func TestAtomicConfigWrite(t *testing.T) {
 	successful := atomic.LoadInt32(&successfulReads)
 	parseErrs := atomic.LoadInt32(&parseErrors)
 
-	t.Logf("\n" +
-		"==============================================\n" +
-		"Atomic Write Test Results\n" +
-		"==============================================\n" +
+	t.Logf("\n"+
+		"==============================================\n"+
+		"Atomic Write Test Results\n"+
+		"==============================================\n"+
 		"Platform:             %s\n"+
 		"Total read attempts:  %d\n"+
 		"Successful reads:     %d (%.1f%%)\n"+

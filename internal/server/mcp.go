@@ -5965,7 +5965,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		}
 	}
 
-// Spec 112: optional forward_headers allowlist on add, validated at write time.
+	// Spec 112: optional forward_headers allowlist on add, validated at write time.
 	if fhJSON := request.GetString("forward_headers_json", ""); fhJSON != "" {
 		names, ferr := parseForwardHeadersJSON(fhJSON)
 		if ferr != nil {
@@ -6213,14 +6213,17 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 // keeps config-only fields (Shared, AuthBroker) and a newer concurrent write
 // is never reverted by values read earlier (#1560). It returns the merged
 // entry, the resolved diff and the server's committed generation (0 when the
-// commit left the server unchanged), or a tool error result to return as-is.
-func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolRequest) (*config.ServerConfig, *config.ConfigDiff, int64, *mcp.CallToolResult) {
+// commit left the server unchanged), together with the pre-commit
+// annotation_overrides snapshot for the audit emit, or a tool error result to
+// return as-is.
+func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolRequest) (*config.ServerConfig, *config.ConfigDiff, int64, map[string]*config.ToolAnnotations, *mcp.CallToolResult) {
 	w := p.writer()
 	if w == nil {
-		return nil, nil, 0, mcp.NewToolResultError(errNoUpstreamWriter.Error())
+		return nil, nil, 0, nil, mcp.NewToolResultError(errNoUpstreamWriter.Error())
 	}
 	var merged *config.ServerConfig
 	var configDiff *config.ConfigDiff
+	var aoBefore map[string]*config.ToolAnnotations
 	gen, err := w.updateServer(name, func(cur *config.ServerConfig) error {
 		// Build patch config from request parameters
 		patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, cur)
@@ -6241,6 +6244,7 @@ func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolReq
 			}
 		}
 		m.Name = cur.Name
+		aoBefore = config.CloneAnnotationOverrides(cur.AnnotationOverrides)
 		*cur = *m
 		merged = config.CopyServerConfig(m)
 		configDiff = diff
@@ -6250,14 +6254,14 @@ func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolReq
 		var userErr *mcpUserError
 		switch {
 		case errors.As(err, &userErr):
-			return nil, nil, 0, mcp.NewToolResultError(userErr.msg)
+			return nil, nil, 0, nil, mcp.NewToolResultError(userErr.msg)
 		case errors.Is(err, errUpstreamNotFound):
-			return nil, nil, 0, mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
+			return nil, nil, 0, nil, mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
 		default:
-			return nil, nil, 0, mcp.NewToolResultError(scrubUpstreamText(fmt.Sprintf("Failed to update upstream: %v", err)))
+			return nil, nil, 0, nil, mcp.NewToolResultError(scrubUpstreamText(fmt.Sprintf("Failed to update upstream: %v", err)))
 		}
 	}
-	return merged, configDiff, gen, nil
+	return merged, configDiff, gen, aoBefore, nil
 }
 
 // handleUpdateUpstream returns the resolved config diff alongside the result so
@@ -6270,7 +6274,7 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
 	}
 
-	mergedServer, configDiff, committedGen, errResult := p.mergeUpstreamPatch(name, request)
+	mergedServer, configDiff, committedGen, aoBefore, errResult := p.mergeUpstreamPatch(name, request)
 	if errResult != nil {
 		return errResult, nil, nil
 	}
@@ -6287,18 +6291,10 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 			zap.Strings("removed", configDiff.Removed))
 	}
 
-	// The commit reconnects the server when its connection settings changed
-	// and updates the running instance in place otherwise (Spec 116); report
-	// the connection the way the update left it. The reconnect runs after the
-	// commit returns, so the status must come from an instance stamped with
-	// this commit's generation or a later one (tasks.md T029, review round 6):
-	// the previous instance's ready or error state describes the old settings.
-
-	// Update in storage
-	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil, nil
-	}
-	if p.auditSink != nil && !annotationOverridesEqualForAudit(existingServer.AnnotationOverrides, mergedServer.AnnotationOverrides) {
+	// Per-server annotation overrides changed via the MCP door: emit an audit
+	// record with the before/after override maps, masked, only when the
+	// override map actually differs from the pre-commit snapshot.
+	if p.auditSink != nil && !annotationOverridesEqualForAudit(aoBefore, mergedServer.AnnotationOverrides) {
 		if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
 			Ts:        time.Now(),
 			RequestID: reqcontext.GetRequestID(ctx),
@@ -6307,7 +6303,7 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 			Caller:    auditCallerFromContext(ctx),
 			Server:    name,
 			Action:    "annotation_override",
-			Before:    annotationOverridesToAuditMap(existingServer.AnnotationOverrides),
+			Before:    annotationOverridesToAuditMap(aoBefore),
 			After:     annotationOverridesToAuditMap(mergedServer.AnnotationOverrides),
 		}); lerr == nil {
 			if raw, jerr := line.JSON(); jerr == nil {
@@ -6316,8 +6312,12 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 		}
 	}
 
-	// Update in upstream manager with connection monitoring
-	p.upstreamManager.RemoveServer(serverID)RD 🔒)
+	// The commit reconnects the server when its connection settings changed
+	// and updates the running instance in place otherwise (Spec 116); report
+	// the connection the way the update left it. The reconnect runs after the
+	// commit returns, so the status must come from an instance stamped with
+	// this commit's generation or a later one (tasks.md T029, review round 6):
+	// the previous instance's ready or error state describes the old settings.
 	var connectionStatus, connectionMessage string
 	if mergedServer.Enabled {
 		connectionStatus, connectionMessage = p.monitorConnectionStatusAt(ctx, name, 1*time.Minute, committedGen)
@@ -6370,7 +6370,7 @@ func (p *MCPProxyServer) handlePatchUpstream(ctx context.Context, request mcp.Ca
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
 	}
 
-	mergedServer, configDiff, _, errResult := p.mergeUpstreamPatch(name, request)
+	mergedServer, configDiff, _, aoBefore, errResult := p.mergeUpstreamPatch(name, request)
 	if errResult != nil {
 		return errResult, nil, nil
 	}
@@ -6384,13 +6384,10 @@ func (p *MCPProxyServer) handlePatchUpstream(ctx context.Context, request mcp.Ca
 			zap.Strings("removed", configDiff.Removed))
 	}
 
-<<<<<<< HEAD
-=======
-	// Update in storage
-	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil, nil
-	}
-	if p.auditSink != nil && !annotationOverridesEqualForAudit(existingServer.AnnotationOverrides, mergedServer.AnnotationOverrides) {
+	// Per-server annotation overrides changed via the MCP door: emit an audit
+	// record with the before/after override maps, masked, only when the
+	// override map actually differs from the pre-commit snapshot.
+	if p.auditSink != nil && !annotationOverridesEqualForAudit(aoBefore, mergedServer.AnnotationOverrides) {
 		if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
 			Ts:        time.Now(),
 			RequestID: reqcontext.GetRequestID(ctx),
@@ -6399,7 +6396,7 @@ func (p *MCPProxyServer) handlePatchUpstream(ctx context.Context, request mcp.Ca
 			Caller:    auditCallerFromContext(ctx),
 			Server:    name,
 			Action:    "annotation_override",
-			Before:    annotationOverridesToAuditMap(existingServer.AnnotationOverrides),
+			Before:    annotationOverridesToAuditMap(aoBefore),
 			After:     annotationOverridesToAuditMap(mergedServer.AnnotationOverrides),
 		}); lerr == nil {
 			if raw, jerr := line.JSON(); jerr == nil {
@@ -6408,16 +6405,6 @@ func (p *MCPProxyServer) handlePatchUpstream(ctx context.Context, request mcp.Ca
 		}
 	}
 
-	// Update in upstream manager
-	p.upstreamManager.RemoveServer(serverID)
-	if mergedServer.Enabled {
-		if err := p.upstreamManager.AddServer(serverID, mergedServer); err != nil {
-			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
-		}
-	}
-
-	// Trigger configuration save and update
->>>>>>> 920d2d89 (✨ FIX: 🛡️ CRITIC BLOCKERS — NIL-PRESERVE + AUDIT EMIT + DIRECT CATALOG + OAUTH GUARD 🔒)
 	if p.mainServer != nil {
 		p.mainServer.OnUpstreamServerChange()
 	}

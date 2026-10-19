@@ -1213,9 +1213,9 @@ func TestPatchServer_AnnotationOverrides_AdminOnly(t *testing.T) {
 	// When an agent token attempts the PATCH, Then it must be forbidden
 	t.Run("agent token is forbidden", func(t *testing.T) {
 		mock := &mockPatchServerController{
-			apiKey: "admin-secret",
+			apiKey:         "admin-secret",
 			existingServer: existing,
-			allServers: []map[string]interface{}{{"name": "browseros", "id": "browseros"}},
+			allServers:     []map[string]interface{}{{"name": "browseros", "id": "browseros"}},
 		}
 		srv, agentToken := agentTokenServer(t, mock)
 		req := httptest.NewRequest(http.MethodPatch, "/api/v1/servers/browseros", bytes.NewReader(body))
@@ -1248,7 +1248,7 @@ func TestPatchServer_AnnotationOverrides_AdminOnly(t *testing.T) {
 		require.NotNil(t, mock.capturedUpdates.AnnotationOverrides["act"].DestructiveHint)
 		assert.True(t, *mock.capturedUpdates.AnnotationOverrides["act"].DestructiveHint)
 	})
-}}
+}
 
 func TestPatchServer_AnnotationOverrides_DeleteToEmptyPersistsClear(t *testing.T) {
 	bFalse := false

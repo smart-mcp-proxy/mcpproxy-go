@@ -2797,7 +2797,15 @@ type ServerPatcher interface {
 // isolation and forward-header validation are all resolved against it, so
 // running it inside the commit means a PATCH can never revert a newer write
 // with values it read earlier (#1560).
-func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *config.ServerConfig, opts config.MergeOptions) (*config.ServerConfig, error) {
+// patchAOFlags reports whether the PATCH touched annotation_overrides and
+// whether that touch is hot (no restart required), for the audit emit and
+// restart_required hint in handlePatchServer.
+type patchAOFlags struct {
+	hasUpdate bool
+	hot       bool
+}
+
+func (s *Server) resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *config.ServerConfig, opts config.MergeOptions, aoFlags *patchAOFlags) (*config.ServerConfig, error) {
 	// Build partial update config - only set fields that were provided
 	updates := &config.ServerConfig{Name: serverName}
 	hasUpdates := false
@@ -3040,12 +3048,23 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 			baseAO = existingSrv.AnnotationOverrides
 		}
 		merged := config.MergeAnnotationOverrides(baseAO, req.AnnotationOverrides, opts)
+		if merged == nil {
+			// A PATCH that carried the field at all (whole-map null, per-tool
+			// null or per-hint null) that empties the map must persist an
+			// explicit EMPTY map: nil is read back as "preserve existing"
+			// (nil-as-preserve), so the deletion would not survive a restart.
+			merged = map[string]*config.ToolAnnotations{}
+		}
 		updates.AnnotationOverrides = merged
 		hasUpdates = true
 	} else if existingSrv != nil {
 		updates.AnnotationOverrides = existingSrv.AnnotationOverrides
 	}
 	onlyAnnotationOverrideHot := hasAnnotationOverrideUpdate && !hadOtherUpdates
+	if aoFlags != nil {
+		aoFlags.hasUpdate = hasAnnotationOverrideUpdate
+		aoFlags.hot = onlyAnnotationOverrideHot
+	}
 
 	if !hasUpdates {
 		return nil, &patchError{status: http.StatusBadRequest, msg: "No fields to update"}
@@ -3070,8 +3089,7 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 			if errs := tmpCfg.ValidateDetailed(); len(errs) > 0 {
 				for _, e := range errs {
 					if strings.Contains(e.Field, "annotation_overrides") {
-						s.writeError(w, r, http.StatusBadRequest, e.Error())
-						return
+						return nil, &patchError{status: http.StatusBadRequest, msg: e.Error()}
 					}
 				}
 			}
@@ -3177,10 +3195,15 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		h(serverName)
 	}
 
+	var aoFlags patchAOFlags
+	var resolvedExisting, resolvedUpdates *config.ServerConfig
 	resolve := func(existingSrv *config.ServerConfig) (*config.ServerConfig, error) {
-		return resolveServerPatch(serverName, &req, existingSrv, opts)
+		resolvedExisting = existingSrv
+		ups, rerr := s.resolveServerPatch(serverName, &req, existingSrv, opts, &aoFlags)
+		resolvedUpdates = ups
+		return ups, rerr
+	}
 
-	var err error
 	if patcher, ok := s.controller.(ServerPatcher); ok {
 		// Spec 116: resolved inside the config commit, on the live entry.
 		err = patcher.PatchServer(r.Context(), serverName, resolve)
@@ -3189,14 +3212,17 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		// configuration (test doubles).
 		var existingSrv *config.ServerConfig
 		if cfg, cerr := s.controller.GetConfig(); cerr == nil && cfg != nil {
-			for _, sc := range cfg.Servers { sc.Name == serverName {
+			for _, sc := range cfg.Servers {
+				if sc != nil && sc.Name == serverName {
 					existingSrv = sc
 					break
 				}
 			}
 		}
-		var updates *config.ServerConfig
-		if updates, err = resolve(existingSrv); err == nil {
+		updates, rerr := resolve(existingSrv)
+		if rerr != nil {
+			err = rerr
+		} else {
 			err = s.controller.UpdateServer(r.Context(), serverName, updates)
 		}
 	}
@@ -3223,12 +3249,15 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	logger.Infow("Server updated successfully", "server", serverName)
-	if s.auditSink != nil && hasAnnotationOverrideUpdate {
+	if s.auditSink != nil && aoFlags.hasUpdate {
 		beforeMap := httpAnnotationOverridesToAuditMap(nil)
-		if existingSrv != nil {
-			beforeMap = httpAnnotationOverridesToAuditMap(existingSrv.AnnotationOverrides)
+		if resolvedExisting != nil {
+			beforeMap = httpAnnotationOverridesToAuditMap(resolvedExisting.AnnotationOverrides)
 		}
-		afterMap := httpAnnotationOverridesToAuditMap(updates.AnnotationOverrides)
+		if resolvedUpdates == nil {
+			resolvedUpdates = &config.ServerConfig{}
+		}
+		afterMap := httpAnnotationOverridesToAuditMap(resolvedUpdates.AnnotationOverrides)
 		// Only emit when actually changed (whole-map delete, per-tool delete, or hint change)
 		changed := !httpAnnotationOverridesEqual(beforeMap, afterMap)
 		if changed {
@@ -3249,7 +3278,7 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	restartRequired := !onlyAnnotationOverrideHot
+	restartRequired := !aoFlags.hot
 	s.writeSuccess(w, map[string]interface{}{
 		"message":          fmt.Sprintf("Server '%s' updated successfully", serverName),
 		"restart_required": restartRequired,

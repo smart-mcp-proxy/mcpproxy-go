@@ -18,14 +18,14 @@ func TestExpandPath(t *testing.T) {
 		exact    string // Check for exact match if non-empty
 	}{
 		{
-			name:     "empty path",
-			input:    "",
-			exact:    "",
+			name:  "empty path",
+			input: "",
+			exact: "",
 		},
 		{
-			name:     "tilde expands to home",
-			input:    "~",
-			exact:    homeDir,
+			name:  "tilde expands to home",
+			input: "~",
+			exact: homeDir,
 		},
 		{
 			name:     "tilde with path",
@@ -38,9 +38,9 @@ func TestExpandPath(t *testing.T) {
 			contains: "/path/to/~",
 		},
 		{
-			name:     "no expansion needed",
-			input:    "/usr/local/bin",
-			exact:    "/usr/local/bin",
+			name:  "no expansion needed",
+			input: "/usr/local/bin",
+			exact: "/usr/local/bin",
 		},
 	}
 
@@ -169,10 +169,10 @@ func TestNormalizePath(t *testing.T) {
 
 func TestExtractPaths(t *testing.T) {
 	tests := []struct {
-		name       string
-		content    string
-		wantPaths  []string
-		dontWant   []string
+		name      string
+		content   string
+		wantPaths []string
+		dontWant  []string
 	}{
 		{
 			name:      "unix absolute path",
@@ -215,8 +215,8 @@ func TestExtractPaths(t *testing.T) {
 			wantPaths: []string{"config.env"},
 		},
 		{
-			name:     "empty content",
-			content:  "",
+			name:      "empty content",
+			content:   "",
 			wantPaths: nil,
 		},
 		{

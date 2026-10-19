@@ -300,6 +300,7 @@ type UpstreamRecord struct {
 	// client and completion writes bound to {Incarnation, OAuthEpoch} land
 	// only while the row still carries both. 0 on a row written before PR2b.
 	OAuthEpoch int64 `json:"oauth_epoch,omitempty"`
+}
 
 // ToolStatRecord represents tool usage statistics
 type ToolStatRecord struct {

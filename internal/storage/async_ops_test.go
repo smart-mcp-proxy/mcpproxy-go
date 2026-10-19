@@ -378,7 +378,7 @@ func TestSaveServerSyncFieldCoverage(t *testing.T) {
 		"quarantineExplicitlySet": true,
 		"ExposePrompts":           true, // persisted to BBolt so the per-server override survives restarts
 		"ForwardHeaders":          true, // Spec 112: persisted to BBolt so the header-forwarding allowlist survives restarts and SaveConfiguration rebuilds
-		"AnnotationOverrides":     true, // per-server per-tool hint fixes; persisted to BBolt so REST/UI/MCP-set overrides survive save/restartFRESH 🔒)
+		"AnnotationOverrides":     true, // per-server per-tool hint fixes; persisted to BBolt so REST/UI/MCP-set overrides survive save/restart
 	}
 
 	// Get all fields from ServerConfig

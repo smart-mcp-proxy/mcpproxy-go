@@ -69,6 +69,112 @@ func calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON
 // formula and from the review fingerprint.
 const toolApprovalHashTag = "mcpproxy-tool-approval-v5"
 
+// annotationOverrideApprovedBy labels a ToolApprovalRecord the pass
+// re-baselined because the operator's committed annotation_overrides — not the
+// upstream — changed the effective safety hints. Re-baselining an override
+// delta must never masquerade as an upstream-content approval, so the label
+// survives on the record and the override-cleared pass above consults it.
+const annotationOverrideApprovedBy = "annotation-override"
+
+// committedAnnotationOverrides returns a deep copy of the server's committed
+// annotation_overrides (nil when absent).
+func (r *Runtime) committedAnnotationOverrides(serverName string) map[string]*config.ToolAnnotations {
+	cfg := r.Config()
+	if cfg == nil {
+		return nil
+	}
+	for _, sc := range cfg.Servers {
+		if sc != nil && sc.Name == serverName {
+			return config.CloneAnnotationOverrides(sc.AnnotationOverrides)
+		}
+	}
+	return nil
+}
+
+// hintSlotExplained reports whether one safety-hint slot agrees with the
+// effective merge. A slot the override pins (exact key first, then wildcard)
+// must show exactly the override's value; an unpinned slot must still show the
+// stored upstream-truth value, so a genuine upstream hint flip riding along
+// under an override can never ride through (RT-03).
+func hintSlotExplained(wildPin, exactPin, storedTruth, live *bool) bool {
+	pin := exactPin
+	if pin == nil {
+		pin = wildPin
+	}
+	want := storedTruth
+	if pin != nil {
+		want = pin
+	}
+	if (want == nil) != (live == nil) {
+		return false
+	}
+	return want == nil || *want == *live
+}
+
+// overrideExplainsHintDelta reports whether the safety-hint delta from the
+// stored upstream-truth annotations to the live (merged) annotations is
+// exactly what the server's committed annotation_overrides produce for this
+// tool. False overrides nothing.
+func overrideExplainsHintDelta(overrides map[string]*config.ToolAnnotations, toolName string, stored, live *config.ToolAnnotations) bool {
+	if len(overrides) == 0 {
+		return false
+	}
+	wild, exact := overrides["*"], overrides[toolName]
+	if wild == nil && exact == nil {
+		return false
+	}
+	var zero config.ToolAnnotations
+	wildRef, exactRef := &zero, &zero
+	if wild != nil {
+		wildRef = wild
+	}
+	if exact != nil {
+		exactRef = exact
+	}
+	if stored == nil {
+		stored = &zero
+	}
+	if live == nil {
+		live = &zero
+	}
+	return hintSlotExplained(wildRef.ReadOnlyHint, exactRef.ReadOnlyHint, stored.ReadOnlyHint, live.ReadOnlyHint) &&
+		hintSlotExplained(wildRef.DestructiveHint, exactRef.DestructiveHint, stored.DestructiveHint, live.DestructiveHint) &&
+		hintSlotExplained(wildRef.IdempotentHint, exactRef.IdempotentHint, stored.IdempotentHint, live.IdempotentHint) &&
+		hintSlotExplained(wildRef.OpenWorldHint, exactRef.OpenWorldHint, stored.OpenWorldHint, live.OpenWorldHint)
+}
+
+// annotationOverrideExplainsHashChange applies the annotation-override
+// re-baseline to the record when the live hash delta is operator config
+// (ReasonAnnotationOverride) and returns true when the caller must re-baseline
+// without review: (1) the description, input schema and output schema are
+// unchanged — overrides never gloss over an upstream contract change; and
+// (2) either the committed overrides merge onto the stored hints to exactly
+// the live hints, or a prior re-baseline's stashed upstream-truth snapshot
+// (PreviousAnnotations) matches the live hints — the override was cleared, so
+// the live tool IS the approved upstream truth again. Caller holds the server's
+// approval lock, after the stored contract snapshot was resolved.
+func (r *Runtime) annotationOverrideExplainsHashChange(serverName, toolName string, record *storage.ToolApprovalRecord, liveDesc, liveSchema, liveOutSchema string, liveAnn *config.ToolAnnotations) bool {
+	if record.CurrentDescription != liveDesc && !legacyHintsKnownToDiffer(record.CurrentAnnotations, record.HashSchemaVersion, liveAnn) {
+		return false
+	}
+	if record.CurrentSchema != liveSchema && !legacyHintsKnownToDiffer(record.CurrentAnnotations, record.HashSchemaVersion, liveAnn) {
+		return false
+	}
+	if record.CurrentOutputSchema != liveOutSchema && !legacyHintsKnownToDiffer(record.CurrentAnnotations, record.HashSchemaVersion, liveAnn) {
+		return false
+	}
+	if safetyHintsFingerprint(record.CurrentAnnotations) == safetyHintsFingerprint(liveAnn) {
+		return false // nothing changed — not this path's business
+	}
+	if record.ApprovedBy == annotationOverrideApprovedBy &&
+		storedSafetyHintsMatch(record.PreviousAnnotations, record.HashSchemaVersion, liveAnn) {
+		// The override was cleared (or re-pinned to the upstream value):
+		// live is upstream truth again, so re-baseline and retire the label.
+		return true
+	}
+	return overrideExplainsHintDelta(r.committedAnnotationOverrides(serverName), toolName, record.CurrentAnnotations, liveAnn)
+}
+
 // writeApprovalHashField writes one length-prefixed field (8-byte big-endian
 // length, then the bytes).
 func writeApprovalHashField(w io.Writer, field string) {
@@ -231,6 +337,13 @@ const (
 	// changed (rug-pull) record (RT-02): a clean verdict is not proof a changed
 	// contract is safe, so changed→approved needs an operator.
 	ReasonScanApproved TransitionReason = "scan_approved"
+	// ReasonAnnotationOverride marks a re-baseline driven by the server's
+	// committed annotation_overrides (operator config, audited — not an
+	// upstream contract change, RT-03): the hash delta is exactly the merge of
+	// those overrides, so the record is re-approved without review. It applies
+	// both to applying the overrides (hash reflects the merged contract) and
+	// to clearing them (the record reverts to the upstream truth).
+	ReasonAnnotationOverride TransitionReason = "annotation_override"
 )
 
 // assertToolApprovalInvariant checks that a state transition is valid according
@@ -252,7 +365,7 @@ func assertToolApprovalInvariant(oldStatus, newStatus string, reason TransitionR
 		switch reason {
 		case ReasonHashMatch, ReasonDescriptionRevert, ReasonFormulaMigration,
 			ReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,
-			ReasonAutoApproveChanges:
+			ReasonAutoApproveChanges, ReasonAnnotationOverride:
 			return nil
 		default:
 			return fmt.Errorf("invariant violation: changed→approved with reason %q "+
@@ -1261,6 +1374,50 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 		}
 
 		if existing.ApprovedHash != "" && !hashMatches {
+			// Annotation-override delta (spec-AnO): an operator-committed
+			// annotation_overrides change is serving config, not an upstream
+			// contract change. When the contract outside the safety hints is
+			// untouched and the hint delta is exactly what the committed
+			// overrides merge onto the stored upstream-truth hints (or the
+			// override was cleared and live is upstream truth again),
+			// re-baseline the record without review instead of holding an
+			// operator-config change as a rug pull.
+			if r.annotationOverrideExplainsHashChange(serverName, toolName, existing, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations) {
+				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonAnnotationOverride); err == nil {
+					existing.Status = storage.ToolApprovalStatusApproved
+					existing.ApprovedHash = currentHash
+					existing.CurrentHash = currentHash
+					existing.CurrentHashSchemaVersion = storage.ToolApprovalHashSchemaVersion
+					existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
+					existing.ApprovedAt = time.Now().UTC()
+					existing.ApprovedBy = annotationOverrideApprovedBy
+					existing.CurrentDescription = tool.Description
+					existing.CurrentSchema = schemaJSON
+					existing.CurrentOutputSchema = outputSchemaJSON
+					// Stash the last upstream-truth snapshot (pre-merge) so the
+					// pass that sees the override cleared can recognise
+					// live == upstream truth without trusting the merged one.
+					existing.PreviousAnnotations = cloneToolAnnotations(existing.CurrentAnnotations)
+					existing.CurrentAnnotations = cloneToolAnnotations(tool.Annotations)
+					existing.PreviousDescription = ""
+					existing.PreviousSchema = ""
+					existing.PreviousOutputSchema = ""
+					existing.ClearScanHold()
+					if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
+						r.logger.Error("Failed to save annotation-override re-baseline",
+							zap.String("server", serverName),
+							zap.String("tool", toolName),
+							zap.Error(saveErr))
+						continue
+					}
+					r.logger.Info("Tool re-baselined on annotation override",
+						zap.String("server", serverName),
+						zap.String("tool", toolName))
+					r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
+						"", tool.Description, "", schemaJSON)
+					continue
+				}
+			}
 			// Before marking as changed, check if this is a hash formula migration.
 			// Recompute what the approved hash WOULD be using the STORED description+schema
 			// with the CURRENT formula. If it matches the current hash, the tool hasn't

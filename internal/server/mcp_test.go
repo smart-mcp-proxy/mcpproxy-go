@@ -485,8 +485,8 @@ func TestBuildPatchConfig_AnnotationOverrides_Marker(t *testing.T) {
 	// MCP request with per-tool null: {"annotation_overrides":{"tool":null}}
 	req := mcp.CallToolRequest{Params: mcp.CallToolParams{
 		Arguments: map[string]interface{}{
-			"operation": "patch",
-			"name": "browseros",
+			"operation":            "patch",
+			"name":                 "browseros",
 			"annotation_overrides": map[string]interface{}{"tool": nil},
 		},
 	}}
@@ -497,8 +497,8 @@ func TestBuildPatchConfig_AnnotationOverrides_Marker(t *testing.T) {
 	// whole-map null variant via annotation_overrides_json
 	req3 := mcp.CallToolRequest{Params: mcp.CallToolParams{
 		Arguments: map[string]interface{}{
-			"operation": "patch",
-			"name": "browseros",
+			"operation":                 "patch",
+			"name":                      "browseros",
 			"annotation_overrides_json": "null",
 		},
 	}}

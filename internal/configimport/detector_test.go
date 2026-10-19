@@ -304,9 +304,9 @@ func TestTryDetectJSON(t *testing.T) {
 			want:    nil,
 		},
 		{
-			name: "json_with_mcpservers_not_object",
+			name:    "json_with_mcpservers_not_object",
 			content: `{"mcpServers": "not an object"}`,
-			want: nil,
+			want:    nil,
 		},
 	}
 

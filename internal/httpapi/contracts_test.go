@@ -35,26 +35,26 @@ type mockManagementService struct{ management.Service }
 
 func (m *mockManagementService) ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error) {
 	return []*contracts.Server{
-			{
-				ID:             "test-server",
-				Name:           "test-server",
-				Protocol:       "stdio",
-				Command:        "echo",
-				Args:           []string{"hello"},
-				Enabled:        true,
-				Quarantined:    false,
-				Connected:      true,
-				Status:         "Ready",
-				ToolCount:      5,
-				ReconnectCount: 0,
-				Authenticated:  false,
-			},
-		}, &contracts.ServerStats{
-			TotalServers:       1,
-			ConnectedServers:   1,
-			QuarantinedServers: 0,
-			TotalTools:         5,
-		}, nil
+		{
+			ID:             "test-server",
+			Name:           "test-server",
+			Protocol:       "stdio",
+			Command:        "echo",
+			Args:           []string{"hello"},
+			Enabled:        true,
+			Quarantined:    false,
+			Connected:      true,
+			Status:         "Ready",
+			ToolCount:      5,
+			ReconnectCount: 0,
+			Authenticated:  false,
+		},
+	}, &contracts.ServerStats{
+		TotalServers:       1,
+		ConnectedServers:   1,
+		QuarantinedServers: 0,
+		TotalTools:         5,
+	}, nil
 }
 
 func (m *mockManagementService) EnableServer(ctx context.Context, name string, enabled bool) error {

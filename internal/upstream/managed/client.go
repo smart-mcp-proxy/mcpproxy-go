@@ -988,7 +988,8 @@ func (mc *Client) SetConfigAt(cfg *config.ServerConfig, gen int64) bool {
 // time and never reassigned, so without this a hot-reloaded expose_prompts
 // or annotation_overrides value would stay frozen at whatever was in effect
 // when the connection was created, until the next reconnect-forcing change
-// or restart.nc (mc *Client) SetConfig(config *config.ServerConfig) {
+// or restart.
+func (mc *Client) SetConfig(config *config.ServerConfig) {
 	for {
 		cur := mc.cfg.Load()
 		next := &stampedConfig{cfg: config}

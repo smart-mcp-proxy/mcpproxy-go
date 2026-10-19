@@ -2074,7 +2074,6 @@ func (s *Server) grantNewServerInspectionExemption(serverConfig *config.ServerCo
 	s.logger.Info("Granted inspection exemption for new quarantined server — tools will be discoverable for review",
 		zap.String("server", serverConfig.Name))
 }
-	beforeAOForAudit := copyAnnotationOverridesForAudit(existing.AnnotationOverrides)RD 🔒)
 
 // applyServerUpdates applies a partial update to existing in place: the
 // non-zero/non-nil fields of updates, plus the always-applied Enabled and
@@ -2132,6 +2131,14 @@ func applyServerUpdates(existing, updates *config.ServerConfig) {
 		existing.ForwardHeaders = append([]string{}, updates.ForwardHeaders...)
 	}
 
+	// AnnotationOverrides (nil-preserve): nil means "leave unchanged" — the
+	// REST PATCH handler resolves overrides against the live entry (merge +
+	// explicit empty-clear sentinel), so a present map is applied wholesale:
+	// per-tool nil entries and the empty map are meaningful RFC7396 deletes.
+	if updates.AnnotationOverrides != nil {
+		existing.AnnotationOverrides = config.CloneAnnotationOverrides(updates.AnnotationOverrides)
+	}
+
 	// TrustMode (spec 086) is a plain string: empty means "leave unchanged"; a
 	// non-empty value is applied. The PATCH handler preserves the existing value
 	// when the request omits the field, so this empty-guard is the second half of
@@ -2178,7 +2185,6 @@ func applyServerUpdates(existing, updates *config.ServerConfig) {
 	}
 }
 
-<<<<<<< HEAD
 // UpdateServer applies partial updates to an existing upstream server
 // configuration. Spec 116: one config commit, applied to the LIVE entry read
 // inside the commit lock (so config-only fields such as Shared and AuthBroker
@@ -2198,28 +2204,17 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 func (s *Server) PatchServer(ctx context.Context, serverName string, resolve func(cur *config.ServerConfig) (*config.ServerConfig, error)) error {
 	s.logger.Info("Updating upstream server", zap.String("name", serverName))
 
+	var aoBefore, aoAfter map[string]*config.ToolAnnotations
 	_, err := s.runtime.Commit("update_server", func(tx *runtime.CommitTx) error {
 		return tx.UpdateServer(serverName, func(cur *config.ServerConfig) error {
 			updates, err := resolve(config.CopyServerConfig(cur))
 			if err != nil {
 				return err
-=======
-	// AnnotationOverrides (per-server per-tool hint fixes) — hot, no restart.
-	// The REST handler pre-merges via MergeAnnotationOverrides; the MCP patch
-	// path goes through MergeServerConfig. Here we persist what the caller
-	// computed. A nil patch preserves existing (delete-all only via explicit
-	// {"annotation_overrides":null} marker handled by the merge layer).
-	if updates.AnnotationOverrides != nil {
-		existing.AnnotationOverrides = make(map[string]*config.ToolAnnotations, len(updates.AnnotationOverrides))
-		for k, v := range updates.AnnotationOverrides {
-			if v == nil {
-				existing.AnnotationOverrides[k] = nil
-				continue
->>>>>>> 920d2d89 (✨ FIX: 🛡️ CRITIC BLOCKERS — NIL-PRESERVE + AUDIT EMIT + DIRECT CATALOG + OAUTH GUARD 🔒)
 			}
 			if updates == nil {
 				return nil
 			}
+			aoBefore = config.CloneAnnotationOverrides(cur.AnnotationOverrides)
 			applyServerUpdates(cur, updates)
 			// Spec 116 review R2.1: the concurrency overrides are validated
 			// against the LIVE global defaults before anything is persisted,
@@ -2227,7 +2222,7 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 			if errs := tx.Config().ValidateServerConcurrency(cur); len(errs) > 0 {
 				return &config.InvalidServerUpdateError{Server: serverName, Errors: errs}
 			}
-<<<<<<< HEAD
+			aoAfter = config.CloneAnnotationOverrides(cur.AnnotationOverrides)
 			return nil
 		})
 	})
@@ -2236,107 +2231,100 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 			return fmt.Errorf("server '%s' not found", serverName)
 		}
 		return err
-=======
-			if v.IdempotentHint != nil {
-				b := *v.IdempotentHint
-				cp.IdempotentHint = &b
-			}
-			if v.OpenWorldHint != nil {
-				b := *v.OpenWorldHint
-				cp.OpenWorldHint = &b
-			}
-			if v.Title != "" {
-				cp.Title = v.Title
-			}
-			existing.AnnotationOverrides[k] = &cp
-		}
-	}
-	// nil patch preserves existing (delete only via explicit marker handled by
-	// MergeServerConfig/MergeAnnotationOverrides and the REST handler's pre-merge).
-	// This matches the nil-preserve contract for AutoApproveToolChanges/TrustMode/InitTimeout.
-
-	// Save to storage
-	if err := storageManager.SaveUpstreamServer(existing); err != nil {
-		return fmt.Errorf("failed to save server: %w", err)
-	}
-	if s.auditSink != nil && updates.AnnotationOverrides != nil && auditSourceFromContext(ctx) != "api" {
-		afterAOForAudit := existing.AnnotationOverrides
-		if !annotationOverridesEqualForAudit(beforeAOForAudit, afterAOForAudit) {
-			beforeMap := annotationOverridesToAuditMap(beforeAOForAudit)
-			afterMap := annotationOverridesToAuditMap(afterAOForAudit)
-			if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
-				Ts:        time.Now(),
-				RequestID: reqcontext.GetRequestID(ctx),
-				Origin:    auditOriginFromContext(ctx),
-				Source:    auditSourceFromContext(ctx),
-				Caller:    auditCallerFromContext(ctx),
-				Server:    serverName,
-				Action:    "annotation_override",
-				Before:    beforeMap,
-				After:     afterMap,
-			}); lerr == nil {
-				if raw, jerr := line.JSON(); jerr == nil {
-					_ = s.auditSink.Write(raw)
-				}
-			}
-		}
 	}
 
-	// Update runtime config — copy-on-write: Config() is the published
-	// snapshot that DiscoverAndIndexTools and others range over without a
-	// lock, so mutating its Servers slice in place is a DATA RACE.
-	if currentConfig := s.runtime.Config(); currentConfig != nil {
-		updated := *currentConfig
-		updated.Servers = append([]*config.ServerConfig(nil), currentConfig.Servers...)
-		for i, sc := range updated.Servers {
-			if sc.Name == serverName {
-				updated.Servers[i] = existing
-				break
+	// REST PATCH emits its own audit record with handler-known context; this
+	// seam covers the non-API doors (MCP tool-less callers, config-to-secret).
+	if s.auditSink != nil && auditSourceFromContext(ctx) != "api" &&
+		!annotationOverridesEqualForAudit(aoBefore, aoAfter) {
+		if line, lerr := audit.NewConfigChange(audit.ConfigChangeInput{
+			Ts:        time.Now(),
+			RequestID: reqcontext.GetRequestID(ctx),
+			Origin:    auditOriginFromContext(ctx),
+			Source:    auditSourceFromContext(ctx),
+			Caller:    auditCallerFromContext(ctx),
+			Server:    serverName,
+			Action:    "annotation_override",
+			Before:    annotationOverridesToAuditMap(aoBefore),
+			After:     annotationOverridesToAuditMap(aoAfter),
+		}); lerr == nil {
+			if raw, jerr := line.JSON(); jerr == nil {
+				_ = s.auditSink.Write(raw)
 			}
-		}
-		s.runtime.UpdateConfig(&updated, "")
-	}
-
-	// Push the refreshed config to the live manager client so hot-reloadable
-	// fields (notably annotation_overrides) take effect on the next ListTools
-	// without a reconnect. Transport-affecting changes are handled by the
-	// manager's own AddServerConfig comparison on the next sync; here we only
-	// refresh the pointer both managed and core clients read (SetConfig also
-	// pushes overrides down to core, mirroring the ExposePrompts pattern).
-	// Discovery is re-triggered by OnUpstreamServerChange below.
-	if um := s.runtime.UpstreamManager(); um != nil {
-		if client, exists := um.GetClient(serverName); exists {
-			client.SetConfig(existing)
 		}
 	}
 
 	// Annotation-override immediacy: the served tools list (GET
 	// /api/v1/servers/{id}/tools) is the StateView snapshot, refreshed only by
-	// discovery. SetConfig above makes the NEXT ListTools return effective
+	// discovery. The hot push above makes the NEXT ListTools return effective
 	// annotations, but without this the PATCH 200 races the background sweep
 	// (OnUpstreamServerChange → async DiscoverAndIndexTools) and serves stale
 	// hints for ~one re-list. Re-list THIS server synchronously via the
-	// author's existing authoritative single-server hook, so the next GET
-	// after PATCH converges with no fleet sweep, reconnect, or restart.
-	// Best-effort: on failure only log; the background sweep below still
-	// converges eventually.
-	if !annotationOverridesEqualForAudit(beforeAOForAudit, existing.AnnotationOverrides) {
+	// authoritative single-server hook, so the next GET after PATCH converges
+	// with no fleet sweep, reconnect, or restart. Best-effort: on failure only
+	// log; the background sweep below still converges eventually.
+	// Annotation-override immediacy: the served tools list (GET
+	// /api/v1/servers/{id}/tools) is the StateView snapshot, refreshed only by
+	// discovery. The commit pipeline hot-reloads hot-reloadable fields on the
+	// next ListTools (AdvanceGenerations restamp), but the POST 200 may race
+	// the background sweep (OnUpstreamServerChange → async DiscoverAndIndexTools)
+	// and serve stale hints for ~one re-list. Re-list THIS server synchronously
+	// via the authoritative single-server hook, so the next GET after PATCH
+	// converges with no fleet sweep, reconnect, or restart. The commit's
+	// reconcile worker can swap the registered instance (a connection-affecting
+	// concurrent write), so the client lookup retried briefly before the sync
+	// re-list; if the worker never lands one, only log — the background sweep
+	// below still converges eventually.
+	if !annotationOverridesEqualForAudit(aoBefore, aoAfter) {
 		rctx := ctx
 		if rctx == nil {
 			rctx = context.Background()
 		}
 		rctx, cancel := context.WithTimeout(rctx, 30*time.Second)
+		defer cancel()
+		if um := s.runtime.UpstreamManager(); um != nil {
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				if _, ok := um.GetClient(serverName); ok {
+					break
+				}
+				if time.Now().After(deadline) {
+					break
+				}
+				select {
+				case <-rctx.Done():
+				case <-time.After(20 * time.Millisecond):
+				}
+			}
+		}
 		if rerr := s.runtime.RefreshServerTools(rctx, serverName); rerr != nil {
 			s.logger.Warn("Annotation-override refresh failed; background sweep will converge",
 				zap.String("server", serverName), zap.Error(rerr))
 		}
-		cancel()
-	}
-
-	// Save configuration to file
-	if err := s.SaveConfiguration(); err != nil {
-		s.logger.Warn("Failed to save configuration after updating server", zap.Error(err))
->>>>>>> 920d2d89 (✨ FIX: 🛡️ CRITIC BLOCKERS — NIL-PRESERVE + AUDIT EMIT + DIRECT CATALOG + OAUTH GUARD 🔒)
+		// Convergence wait: the commit's reconcile can rebuild the StateView
+		// for a changed server (wiping the tool set it holds and re-listing it
+		// through the actor pool), so the sync refresh's publication above may
+		// be replaced by a partial or empty view until that re-list lands.
+		// The PATCH contract is convergence by the next GET: bound-wait until
+		// the served tools carry the committed override. A genuinely tool-less
+		// upstream can never satisfy the predicate — the loop runs out of the
+		// deadline and PATCH still returns 200, converging via sweep.
+		deadline := time.Now().Add(3 * time.Second)
+		for {
+			tools, terr := s.runtime.GetServerTools(serverName)
+			if terr == nil && len(tools) > 0 && annotationOverridesConverged(aoAfter, tools) {
+				break
+			}
+			if time.Now().After(deadline) {
+				s.logger.Warn("Annotation-override refresh did not converge within deadline; background sweep will converge",
+					zap.String("server", serverName))
+				break
+			}
+			select {
+			case <-rctx.Done():
+			case <-time.After(25 * time.Millisecond):
+			}
+		}
 	}
 
 	// Notify about change
@@ -2347,36 +2335,46 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 	return nil
 }
 
-func copyAnnotationOverridesForAudit(m map[string]*config.ToolAnnotations) map[string]*config.ToolAnnotations {
-	if m == nil {
-		return nil
+// annotationOverridesEqualForAudit reports whether two annotation_overrides
+// maps emit the same audit before/after record: identical keys and per-hint
+// values. Nil and empty are equal distinct — nil keys collapse to JSON null
+// entries via annotationOverridesToAuditMap, empty maps emit a nil map, so
+// len() equality plus per-entry comparison is exact for the audit path.
+// annotationOverridesConverged reports whether the served tools list already
+// reflects the committed overrides aoAfter: for every overridden tool the
+// served entry exists and carries the committed values on the fields the
+// override pins (a nil field defers to upstream truth and is not checked).
+func annotationOverridesConverged(aoAfter map[string]*config.ToolAnnotations, tools []map[string]interface{}) bool {
+	if len(aoAfter) == 0 {
+		return len(tools) > 0
 	}
-	out := make(map[string]*config.ToolAnnotations, len(m))
-	for k, v := range m {
-		if v == nil {
-			out[k] = nil
-			continue
+	for name, oa := range aoAfter {
+		var served *config.ToolAnnotations
+		for _, tm := range tools {
+			if s, _ := tm["name"].(string); s == name {
+				if ann, ok := tm["annotations"].(*config.ToolAnnotations); ok {
+					served = ann
+				}
+				break
+			}
 		}
-		cp := *v
-		if v.ReadOnlyHint != nil {
-			b := *v.ReadOnlyHint
-			cp.ReadOnlyHint = &b
+		if served == nil {
+			return false
 		}
-		if v.DestructiveHint != nil {
-			b := *v.DestructiveHint
-			cp.DestructiveHint = &b
+		if oa.DestructiveHint != nil && (served.DestructiveHint == nil || *served.DestructiveHint != *oa.DestructiveHint) {
+			return false
 		}
-		if v.IdempotentHint != nil {
-			b := *v.IdempotentHint
-			cp.IdempotentHint = &b
+		if oa.ReadOnlyHint != nil && (served.ReadOnlyHint == nil || *served.ReadOnlyHint != *oa.ReadOnlyHint) {
+			return false
 		}
-		if v.OpenWorldHint != nil {
-			b := *v.OpenWorldHint
-			cp.OpenWorldHint = &b
+		if oa.IdempotentHint != nil && (served.IdempotentHint == nil || *served.IdempotentHint != *oa.IdempotentHint) {
+			return false
 		}
-		out[k] = &cp
+		if oa.OpenWorldHint != nil && (served.OpenWorldHint == nil || *served.OpenWorldHint != *oa.OpenWorldHint) {
+			return false
+		}
 	}
-	return out
+	return true
 }
 
 func annotationOverridesEqualForAudit(a, b map[string]*config.ToolAnnotations) bool {
@@ -3370,18 +3368,12 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	// MCP-32: pass the observability manager so /metrics is served (and HTTP
 	// request metrics/tracing middleware applied) when enabled.
 	httpAPIServer := httpapi.NewServer(s, s.logger.Sugar(), s.observability)
-<<<<<<< HEAD
 	// Spec 108-f: the profiles service behind /profiles and /access/explain
 	// (both editions: profiles are admin-owned config in either).
 	httpAPIServer.SetProfilesService(s.runtime.ProfilesService())
 	// Spec 108-h: the `profiles` admin MCP tool reads the same admin views the
 	// REST routes do (one implementation, FR-037).
 	s.mcpProxy.SetAdminViews(httpAPIServer)
-=======
-	if s.auditSink != nil {
-		httpAPIServer.SetAuditSink(s.auditSink)
-	}
->>>>>>> 920d2d89 (✨ FIX: 🛡️ CRITIC BLOCKERS — NIL-PRESERVE + AUDIT EMIT + DIRECT CATALOG + OAUTH GUARD 🔒)
 	// Wire agent token management (Spec 028)
 	if sm := s.runtime.StorageManager(); sm != nil {
 		cfg := s.runtime.Config()

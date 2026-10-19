@@ -67,7 +67,7 @@ func TestEffectiveAnnotations_PerHintMerge(t *testing.T) {
 	bFalse := false
 	upstream := &ToolAnnotations{ReadOnlyHint: &bTrue}
 	overrides := map[string]*ToolAnnotations{
-		"*":   {DestructiveHint: &bFalse},
+		"*":    {DestructiveHint: &bFalse},
 		"tool": {OpenWorldHint: &bTrue},
 	}
 	eff := EffectiveAnnotationsForTool(overrides, "tool", upstream)

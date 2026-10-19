@@ -2051,7 +2051,7 @@ func TestCopyServerConfig_DeepCopyOverrides(t *testing.T) {
 	src := &ServerConfig{
 		Name: "s",
 		AnnotationOverrides: map[string]*ToolAnnotations{
-			"*":  {DestructiveHint: &bTrue, Title: "T"},
+			"*":   {DestructiveHint: &bTrue, Title: "T"},
 			"act": {ReadOnlyHint: &bFalse},
 		},
 	}

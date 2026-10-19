@@ -17,15 +17,15 @@ func TestValidServerName(t *testing.T) {
 		{"server-name_123", false},
 
 		// Invalid names
-		{"", true},                                                                // Empty
-		{"server name", true},                                                     // Space
-		{"server.name", true},                                                     // Dot
-		{"server/name", true},                                                     // Slash
-		{"server\\name", true},                                                    // Backslash
-		{"server@name", true},                                                     // Special char
-		{"server!name", true},                                                     // Special char
-		{string(make([]byte, 65)), true},                                          // Too long (65 chars)
-		{"server\tname", true},                                                    // Tab
+		{"", true},                       // Empty
+		{"server name", true},            // Space
+		{"server.name", true},            // Dot
+		{"server/name", true},            // Slash
+		{"server\\name", true},           // Backslash
+		{"server@name", true},            // Special char
+		{"server!name", true},            // Special char
+		{string(make([]byte, 65)), true}, // Too long (65 chars)
+		{"server\tname", true},           // Tab
 		{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true}, // 65 chars
 	}
 

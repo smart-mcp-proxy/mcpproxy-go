@@ -191,6 +191,7 @@ func serverConfigFromRecord(record *UpstreamRecord) *config.ServerConfig {
 		QueueSize:                record.QueueSize,
 		QueueTimeout:             record.QueueTimeout,
 		ExposePrompts:            record.ExposePrompts,
+		AnnotationOverrides:      config.CloneAnnotationOverrides(record.AnnotationOverrides),
 	}
 }
 
@@ -239,10 +240,6 @@ func (m *Manager) GetUpstreamServer(name string) (*config.ServerConfig, error) {
 	}
 
 	return serverConfigFromRecord(record), nil
-		AnnotationOverrides:      config.CloneAnnotationOverrides(record.AnnotationOverrides),
-	}, nil
-}FRESH 🔒)
-	}, nil
 }
 
 // ListUpstreamServers returns all upstream servers
@@ -257,44 +254,7 @@ func (m *Manager) ListUpstreamServers() ([]*config.ServerConfig, error) {
 
 	var servers []*config.ServerConfig
 	for _, record := range records {
-<<<<<<< HEAD
 		servers = append(servers, serverConfigFromRecord(record))
-=======
-		servers = append(servers, &config.ServerConfig{
-			Name:                   record.Name,
-			URL:                    record.URL,
-			Protocol:               record.Protocol,
-			Command:                record.Command,
-			Args:                   record.Args,
-			WorkingDir:             record.WorkingDir,
-			Env:                    record.Env,
-			Headers:                record.Headers,
-			OAuth:                  record.OAuth,
-			Enabled:                record.Enabled,
-			Quarantined:            record.Quarantined,
-			Created:                record.Created,
-			Updated:                record.Updated,
-			Isolation:              record.Isolation,
-			ReconnectOnUse:         record.ReconnectOnUse,
-			AutoApproveToolChanges: record.AutoApproveToolChanges,
-			TrustMode:              record.TrustMode,
-			LauncherWaitTimeout:    record.LauncherWaitTimeout,
-			EnabledTools:           record.EnabledTools,
-			DisabledTools:          record.DisabledTools,
-
-			SourceRegistryID:         record.SourceRegistryID,
-			SourceRegistryProvenance: record.SourceRegistryProvenance,
-			HealthCheckInterval:      record.HealthCheckInterval,
-			ToolDiscoveryInterval:    record.ToolDiscoveryInterval,
-			InitTimeout:              record.InitTimeout,
-			ToonOutput:               record.ToonOutput,
-			MaxConcurrentRequests:    record.MaxConcurrentRequests,
-			QueueSize:                record.QueueSize,
-			QueueTimeout:             record.QueueTimeout,
-			ExposePrompts:            record.ExposePrompts,
-			AnnotationOverrides:      config.CloneAnnotationOverrides(record.AnnotationOverrides),
-		})
->>>>>>> 551e326e (✨ FIX: 🔥 HOT-RELOAD + 💾 PERSISTENCE + 🎨 EXPLICIT-FALSE BADGES FOR OVERRIDES 🛡️)
 	}
 
 	return servers, nil

@@ -277,8 +277,8 @@ type ConfigChangeInput struct {
 	Origin    string
 	Source    string
 	Caller    Caller
-	Server    string // affected server name
-	Action    string // e.g., "annotation_override"
+	Server    string                 // affected server name
+	Action    string                 // e.g., "annotation_override"
 	Before    map[string]interface{} // previous annotation_overrides snapshot (JSON-marshalable)
 	After     map[string]interface{} // new annotation_overrides snapshot (JSON-marshalable)
 }

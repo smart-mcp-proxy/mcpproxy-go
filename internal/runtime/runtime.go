@@ -3073,7 +3073,6 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			zap.String("admin_state", healthStatus.AdminState),
 			zap.String("summary", healthStatus.Summary),
 		)
-
 		result = append(result, serverMap)
 	}
 
