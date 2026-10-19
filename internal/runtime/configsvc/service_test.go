@@ -403,18 +403,15 @@ func TestService_Close(t *testing.T) {
 // TestService_PrePublishObserverSeesTheConfigBeforePublication pins the
 // contract AddPrePublishObserver offers a derived-index builder (Spec 105
 // PR D, the profile index): the observer runs on the exact *config.Config
-// about to be published — after the pre-publish hook has produced it —
-// while Current() still answers the previous snapshot and before any
-// subscriber has been notified. A builder keyed on that pointer therefore
-// has its index ready before a single reader can capture the snapshot.
+// about to be published while Current() still answers the previous snapshot
+// and before any subscriber has been notified. A builder keyed on that
+// pointer therefore has its index ready before a single reader can capture
+// the snapshot. (Spec 116 removed the pre-publish hook that used to replace
+// the incoming config; admission now runs before Prepare.)
 func TestService_PrePublishObserverSeesTheConfigBeforePublication(t *testing.T) {
 	initial := &config.Config{Listen: "127.0.0.1:8080"}
 	svc := NewService(initial, "/tmp/config.json", zap.NewNop())
-
-	// The #937 admission gate replaces the incoming config; the observer must
-	// see the gated one, never the caller's.
 	gated := &config.Config{Listen: "127.0.0.1:9090"}
-	svc.SetPrePublishHook(func(*config.Config) *config.Config { return gated })
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -436,11 +433,11 @@ func TestService_PrePublishObserverSeesTheConfigBeforePublication(t *testing.T) 
 		observed <- o
 	})
 
-	require.NoError(t, svc.Update(&config.Config{Listen: "incoming"}, UpdateTypeModify, "test"))
+	require.NoError(t, svc.Update(gated, UpdateTypeModify, "test"))
 
 	select {
 	case o := <-observed:
-		require.Same(t, gated, o.seen, "the observer must see the config the gate hook produced")
+		require.Same(t, gated, o.seen, "the observer must see the config being published")
 		require.Same(t, initial, o.current, "the observer must run before Current() moves to the new snapshot")
 		require.False(t, o.notified, "the observer must run before subscribers are notified")
 	default:

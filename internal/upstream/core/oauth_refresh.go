@@ -10,7 +10,9 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
 
 // Spec 113 (113-a): OAuth refresh serialization. The reactive path (the token
@@ -52,6 +54,10 @@ func (c *Client) extraParamValue(key string) string {
 	return ""
 }
 
+// afterStoredDCRPersistHook, when set (tests only), runs after the stored-DCR
+// refresh persisted its token and before the flight's final read.
+var afterStoredDCRPersistHook func(server string)
+
 // oauthRefreshFunc returns the one refresh function both triggers use (FR-003):
 // mcp-go's handler.RefreshToken when the live handler has a client id (static
 // clients, and DCR clients whose stored registration matches or is unknown),
@@ -59,6 +65,16 @@ func (c *Client) extraParamValue(key string) string {
 // client_id.
 func (c *Client) oauthRefreshFunc(handler *transport.OAuthHandler) oauth.RefreshFunc {
 	return func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
+		// Spec 116 PR4: live-QA park point (quickstart L4, -tags qa_hooks
+		// only), then the early exit of a retired instance. The token
+		// request itself runs on the instance's gated transport, which
+		// refuses it too.
+		if qahooks.ParkOAuth != nil {
+			qahooks.ParkOAuth(c.config.Name)
+		}
+		if c.Gate().Retired() {
+			return nil, dialgate.ErrRetired
+		}
 		handlerClientID := handler.GetClientID()
 		switch {
 		case handlerClientID != "" && (c.isStaticOAuthClient() || rec.ClientID == "" || rec.ClientID == handlerClientID),
@@ -107,7 +123,16 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 	gen, inFlight := oauth.FlightGeneration(ctx)
 	discarded := false
-	err = c.storage.UpdateOAuthToken(serverKey, func(cur *storage.OAuthTokenRecord) error {
+	binding := c.CredentialBinding()
+	// Spec 116 PR2b: bound to the instance's credential binding, so a
+	// refresh of an instance a commit superseded persists nothing.
+	oauth.BeforePersistHook(c.config.Name, binding)
+	if qahooks.ParkOAuthPersist != nil {
+		qahooks.ParkOAuthPersist(c.config.Name)
+	}
+	var savedRec *storage.OAuthTokenRecord
+	written, err := c.storage.UpdateOAuthTokenIfBound(serverKey, c.config.Name, binding, func(cur *storage.OAuthTokenRecord) error {
+		savedRec = cur
 		if inFlight && !oauth.GenerationMatches(cur, gen) {
 			discarded = true
 			return storage.ErrSkipOAuthTokenUpdate
@@ -146,9 +171,24 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 			zap.String("server", c.config.Name))
 		return tok, nil
 	}
+	if !written {
+		c.logger.Info("Discarded a refreshed OAuth token for a server instance that was removed, replaced or reconfigured",
+			zap.String("server", c.config.Name),
+			zap.String("binding", binding.String()))
+		return nil, fmt.Errorf("failed to save refreshed token for %s: %w", c.config.Name, oauth.ErrCredentialBindingStale)
+	}
 
-	oauth.DefaultRefreshCoordinator().NoteTokenSaved(serverKey)
-	oauth.GetTokenStoreManager().NotifyTokenSaved(c.config.Name, newToken.ExpiresAt)
+	// Sol r4 (#1621): report the revision this persist wrote (the record
+	// passed to mutate carries it once written), so the flight serves this
+	// record and a later same-access-token rewrite is not adopted.
+	if savedRec != nil {
+		oauth.NoteFlightSavedRevision(ctx, savedRec.Revision)
+	}
+	oauth.DefaultRefreshCoordinator().NoteTokenSavedFor(serverKey, binding)
+	oauth.GetTokenStoreManager().NotifyTokenSavedFor(c.config.Name, newToken.ExpiresAt, binding)
+	if hook := afterStoredDCRPersistHook; hook != nil {
+		hook(c.config.Name)
+	}
 	c.logger.Info("OAuth token refreshed via stored DCR credentials",
 		zap.String("server", c.config.Name),
 		zap.Time("new_expiry", newToken.ExpiresAt))
@@ -157,15 +197,21 @@ func (c *Client) refreshWithStoredCredentials(ctx context.Context, handler *tran
 
 // oauthRefreshRequest builds the coordinator request for this server; the
 // caller sets ObservedRefreshToken and Trigger.
+//
+// Spec 116 PR2b: the request carries the instance's credential binding, so
+// it joins only flights of the same binding, loads only records written
+// under it, and clears only the exact record the flight read.
 func (c *Client) oauthRefreshRequest(serverKey string, handler *transport.OAuthHandler) oauth.RefreshRequest {
+	binding := c.CredentialBinding()
 	return oauth.RefreshRequest{
 		Key:          serverKey,
+		Binding:      binding,
 		ServerName:   c.config.Name,
-		Load:         func() (*storage.OAuthTokenRecord, error) { return c.storage.GetOAuthToken(serverKey) },
+		Load:         func() (*storage.OAuthTokenRecord, error) { return c.storage.GetOAuthTokenBound(serverKey, binding) },
 		Refresh:      c.oauthRefreshFunc(handler),
 		StaticClient: c.isStaticOAuthClient(),
-		ClearClient: func(expectedClientID, expectedRefreshToken string) (bool, error) {
-			return c.storage.ClearOAuthClientCredentialsIf(serverKey, expectedClientID, expectedRefreshToken)
+		ClearClientAt: func(rec *storage.OAuthTokenRecord) (bool, error) {
+			return oauth.ClearClientIfBound(c.storage, serverKey, c.config.Name, binding, rec)
 		},
 	}
 }
@@ -200,6 +246,6 @@ func (c *Client) annotateCodeExchangeError(handler *transport.OAuthHandler, err 
 	if handler != nil {
 		clientID = handler.GetClientID()
 	}
-	return oauth.DefaultRefreshCoordinator().AnnotateCodeExchangeError(
-		oauth.GenerateServerKey(c.config.Name, c.config.URL), c.isStaticOAuthClient(), clientID, err)
+	return oauth.DefaultRefreshCoordinator().AnnotateCodeExchangeErrorFor(
+		oauth.GenerateServerKey(c.config.Name, c.config.URL), c.CredentialBinding(), c.isStaticOAuthClient(), clientID, err)
 }

@@ -209,14 +209,16 @@ Manage held prompts with the `quarantine_security` MCP tool:
 What it does, with quarantine enabled (the default):
 
 - **Withholds unapproved servers and tools.** A quarantined server's tools are not indexed, not returned by `retrieve_tools`, and calls to them are refused (the refusal carries a security analysis of the tool). A new or changed tool on a trusted server is held separately until approved.
-- **Holds most changed definitions for review.** Each tool's name, description and input schema are hashed. A different hash after approval is normally held as "changed" instead of being silently trusted (see [Tool-Level Quarantine](./tool-quarantine.md)). There is one known exception: outside `scan` mode, if the hash differs but the top-level description and the output schema are unchanged, the change is treated as input-schema normalisation and auto-approved without a hold, even under `manual` trust (`internal/runtime/tool_quarantine.go`, "LAST RESORT" branch). Under `manual` trust (and `auto`, which admits everything), a change confined to an input-property description or other input-schema text can therefore be admitted without review, so treat input-schema-only edits as not covered by the hold there until that behaviour is changed. In `scan` mode this fallback is disabled: an input-schema-only change is scanned, and held unless the scan is clean (a detector miss is still admitted). A second, separate exception: if the approved tool had no output schema, the formula-migration check substitutes the live output schema into the rehash, so a newly added output schema (top-level description and input schema unchanged) is classified as a hash-formula migration and approved without a hold or a scan, under both `manual` and `scan` trust. Output-schema changes on a tool that already had an approved output schema are held. A third, same-mechanism exception: if the approved tool's stored description was empty, the rehash substitutes the live description, so a description added to a tool that was approved with none (input and output schemas unchanged) is approved without a hold or a scan, under both `manual` and `scan` trust, with a current approval record. Treat a tool approved with an empty description as not covered against a later injected description. This is independent of the upgrade backfill of older records.
+- **Holds changed definitions for review.** Each tool's name, description, input schema, output schema (when declared) and safety-relevant annotation hints are hashed. A different hash after approval is held as "changed" instead of being silently trusted (see [Tool-Level Quarantine](./tool-quarantine.md)), in every trust mode except `auto`. Only serialization noise is absorbed without a hold: an input schema that differs from the approved one only in key order or the order of its `required` list (same properties, types, constraints and required set) is re-baselined, while any structural input-schema difference (an added, removed or retyped parameter) is held. An output schema or description added to a tool approved without one is held as a change too: the empty stored value is the declared contract, not a wildcard. Two upgrade wildcards remain, both for approval records written by older releases. A record written before complete contract capture treats an empty stored field as "never captured", and the live value stands in once during the upgrade migration. Separately, any record approved before annotation hints joined the hash (hash schema below v4, including records that did capture the full description and schemas) and that never stored an annotation snapshot has unknown hints: the first discovery under the new release accepts and baselines the live hints instead of holding them, so a hint flip that lands before that first pass is not held. After that pass, hint flips are held like any other change. In `scan` mode a changed contract is also held: the scan runs and its findings are recorded as hold evidence, but a clean verdict does not approve the change.
+
+  Since hash schema v5 every hashed field is length-prefixed and a missing output schema is encoded explicitly. Under v4, fields were joined with `|`, so moving text between the description and a schema could produce another contract with the same hash. On upgrade, a v4 approval is re-hashed without review only when its stored v4 hash covers the stored definition and that definition is exactly what the server serves now. Any other definition is held as "changed". `mcpproxy tools preflight --pin` values (`sha256/v<N>:…`) carry the schema version, so pins taken before the upgrade report `hash_mismatch` until re-pinned.
 - **Keeps server release in human hands.** There is no server-level approve over MCP, so an agent cannot release a quarantined server. This applies to server admission only. Tool approval is different: an MCP client with admin access (for example the main `/mcp` connection with the API key, not a scoped agent token) can call `quarantine_security` with `approve_tool` or `approve_all_tools` and release a pending or changed tool on an already-admitted server, with no human confirmation step. Agent tokens are refused ("Agent tokens cannot perform quarantine security operations"). Treat any admin-level MCP client as able to approve tool changes.
 
 What it does not do:
 
 - **It is not proof of safety.** Review is only as good as the reviewer, and the offline scanners can miss attacks. A clean scan means the checks found nothing in the captured definitions; it is not evidence that a server or tool is safe. Manual review, scanner-assisted review and agent-assisted inspection (`inspect_quarantined`) are inputs to your decision. None of them approves anything by itself.
-- **It does not see behavior outside the definition.** The hash covers name, description and schema. A server whose implementation or backend changes while its definitions stay identical is not detected, and neither is a malicious tool result returned at call time.
-- **Trust modes change the guarantee.** `manual` (default) holds every new server and most tool changes until they are approved: changes to the top-level description or to an existing output schema are held, while input-schema-only changes, an output schema added to a tool that had none, and a description added to a tool approved with none are the exceptions described above (the first applies outside `scan` mode): server release needs a person, while tool approval can also come from an admin-access MCP client. `scan` admits a server or change automatically when the offline scan is clean, so a detector miss is admitted; input-schema-only changes are scanned in `scan` mode, and only the absent-to-present output-schema and empty-to-present description exceptions above bypass the scan. `auto` admits without scanning or holding at all and trusts tool changes (rug-pull risk). Server admission and tool-change review are separate controls: `"quarantined": false` on a server entry only releases the server-level quarantine, and under `manual` trust a new or changed tool on that server is still held after its baseline. Tool-change holds are removed by `trust_mode: auto`, the legacy `auto_approve_tool_changes: true` (which an explicit `trust_mode` overrides), or `quarantine_enabled: false` globally. See [Trust modes](#trust-modes-auto--scan--manual).
+- **It does not see behavior outside the definition.** The hash covers name, description, schemas and the safety-relevant annotation hints. A server whose implementation or backend changes while its definitions stay identical is not detected, and neither is a malicious tool result returned at call time.
+- **Trust modes change the guarantee.** `manual` (default) holds every new server and every tool contract change until it is approved: server release needs a person, while tool approval can also come from an admin-access MCP client. `scan` admits a new server or a new tool automatically when the offline scan is clean, so a detector miss is admitted at that point; a changed contract is always held, whatever the verdict. `auto` admits without scanning or holding at all and trusts tool changes (rug-pull risk). Server admission and tool-change review are separate controls: `"quarantined": false` on a server entry only releases the server-level quarantine, and under `manual` trust a new or changed tool on that server is still held after its baseline. Tool-change holds are removed by `trust_mode: auto`, the legacy `auto_approve_tool_changes: true` (which an explicit `trust_mode` overrides), or `quarantine_enabled: false` globally. See [Trust modes](#trust-modes-auto--scan--manual).
 - **It is not data-loss prevention.** See [Sensitive Data Detection](./sensitive-data-detection.md) and [Output Sanitisation](./output-sanitisation.md) for what is flagged and what, if anything, is blocked.
 
 ## Managing Quarantine
@@ -317,7 +319,19 @@ mcpproxy review show github [--full]
    allows every pending or changed tool (tools you blocked earlier on a
    re-quarantined server stay blocked). If no tool definitions have been captured, the button
    reads "Approve without seeing tools" and the UI asks for a separate
-   confirmation before a blind approval can proceed.
+   confirmation before a blind approval can proceed. A blind or empty-review
+   approval still records the server's tool baseline (see
+   [Durable tool baseline](#durable-tool-baseline)), so any tool the server
+   lists later waits for review instead of being trusted automatically.
+
+**The approval is bound to the review on screen.** The Web UI, the CLI and
+the macOS tray send the review fingerprint of every tool they showed. If a
+tool's definition or safety hints changed, or a new tool appeared, after the
+review was loaded, nothing is approved: the server stays quarantined, the
+review reloads and shows "The review is out of date ...". Approve again after
+checking the reloaded list. A server approval promotes only the tools that were
+pending when it was committed; a tool the server lists afterwards waits for
+review. See [Review-bound approvals](/api/rest-api#review-bound-approvals).
 
 The review controls are deliberate: **Fetch tool definitions** (CLI: `mcpproxy review fetch`) uses the
 inspection-only `discover-tools` capture to store current upstream metadata
@@ -338,9 +352,11 @@ curl -H "X-API-Key: your-key" \
   http://127.0.0.1:8080/api/v1/servers/server-name/review
 
 # Submit the scan-gated approval. Omit block[] or list only the tools to keep
-# disabled; direct unquarantine is legacy-only.
+# disabled; direct unquarantine is legacy-only. expected_hashes binds the
+# approval to the review you read (each tool's current_hash; {} for an empty
+# review): a tool that changed since answers 409 review_out_of_date.
 curl -X POST -H "X-API-Key: your-key" -H "Content-Type: application/json" \
-  -d '{"block":["tool-to-keep-disabled"]}' \
+  -d '{"block":["tool-to-keep-disabled"],"expected_hashes":{"read_note":"rv2-...","tool-to-keep-disabled":"rv2-..."}}' \
   http://127.0.0.1:8080/api/v1/servers/server-name/security/approve
 ```
 
@@ -353,6 +369,10 @@ mcpproxy review approve github [--all | --tools a,b] [--except a,b] [--force] [-
 
 # Trusted server: approve only the listed new or changed tools
 mcpproxy review approve github --tools create_issue
+
+# Bind the approval to a review you saved and read first
+mcpproxy review show github -o json > review.json
+mcpproxy review approve github --from-review review.json --yes
 ```
 
 See [Review Commands](/cli/review-commands) for every flag.
@@ -363,6 +383,41 @@ Leave a new server quarantined until the review flow has captured its tool
 definitions and the scan-gated approval is complete. Do not edit
 `quarantined: false` into the configuration file as an approval shortcut:
 that bypasses the informed-review record and its baseline check.
+
+### Removing a server purges its security state
+
+Removing a server (REST `DELETE /api/v1/servers/{id}`, MCP `upstream_servers
+remove`, the Web UI, or a config edit that drops it) deletes everything
+MCPProxy stored under its name in the same commit, before the call returns:
+approved tool and prompt hashes, OAuth tokens and the DCR client
+registration, scan reports and jobs, the integrity baseline, call history and
+tool hashes, plus its search-index entries and refresh schedule. OAuth state
+is matched exactly, so removing `foo` never signs out `foo_bar`.
+
+A server added again under the same name is therefore a new server that
+inherits none of the old one's records: an unforced scanner approval needs a
+new scan, and it needs a new OAuth sign-in. Admission policy applies to it as
+to any new server. Under the default manual trust it starts quarantined and
+every tool and prompt it exposes is pending review, even when the definitions
+are identical. With `trust_mode: "auto"` or an explicit `quarantined: false`
+it is admitted per that setting, and tool discovery can record a fresh
+approved baseline for it. Removal purges the inherited records; it does not
+override the admission policy.
+
+OAuth credential writes are bound to the server's incarnation too (Spec 116
+PR2b). If the removed server's connection was saving a token, completing a
+login or registering a DCR client at the moment of removal, that write is
+discarded when it lands: nothing is written for the name afterwards, and a
+server re-added under the same name starts signed out. The same holds when a
+server's OAuth configuration changes: credentials of the old configuration
+are cleared and never come back.
+
+An approval made on the old server cannot land on the new one. Each server
+has an `incarnation` (in `GET /api/v1/servers` and the review payload) that
+changes only on remove and re-create; approvals are bound to it, and the
+REST approval routes accept it as `expected_incarnation`. A decision bound to
+a removed incarnation writes nothing and answers `409 server_replaced`. See
+[REST API: Removal and incarnation](../api/rest-api.md#removal-and-incarnation).
 
 ### Re-quarantine a Server
 
@@ -423,6 +478,91 @@ See [Tool Quarantine](./tool-quarantine.md) for complete documentation on:
 - Configuration: `quarantine_enabled` (global) and `auto_approve_tool_changes` (per-server; deprecates `skip_quarantine`)
 - REST API endpoints for tool approval management
 
+### Durable tool baseline {#durable-tool-baseline}
+
+A trusted (non-quarantined) server whose tools were never approved treats its
+first non-empty tool list as its **baseline**: those tools are approved
+automatically (`approved_by: auto-baseline`). From then on, under `manual`
+trust, every new or replaced tool waits for review.
+
+MCPProxy records that the baseline was decided in its database, per server
+(bucket `tool_baseline_decisions`), so the decision survives everything that
+removes the approved tool records:
+
+- the server replaces its whole tool list (for example `read_note` disappears
+  and `wipe_all_notes` appears): the new tool stays **pending**, on every
+  later discovery and after a restart, and cannot be called until approved;
+- an explicit refresh that returns zero tools, followed by new tools: the same;
+- a quarantined server approved from an empty review, or approved "without
+  seeing tools": tools it lists after the approval are **pending**.
+
+The record is written by the first trusted discovery that approves a tool, by
+every server approval from the review screen, CLI, tray or
+`POST /api/v1/servers/{id}/security/approve`, and back-filled on the first
+discovery after an upgrade for servers that already have approved tools. It is
+removed only when the server itself is removed (or pruned from the config), so
+a server removed and added again under the same name starts with a fresh
+baseline. A server whose first tool list is empty gets no record; its first
+non-empty list is still its baseline. If the record cannot be read, or the
+server's earlier approval records cannot be listed, or the record cannot be
+written for a server that already has approved tools (the back-fill), the
+discovery pass is skipped before it writes anything: nothing is removed,
+nothing new is indexed, no approval record changes, and the server keeps the
+tool list of its last applied discovery until the next pass retries. A failed
+write on a server's first trusted discovery (no approved tools yet) does not
+skip the pass: its tools are approved and indexed as usual, and those approved
+tools are themselves the baseline, so the next pass writes the record before it
+can remove or auto-approve anything.
+
+### Tool lists are applied in the order they were captured {#capture-order}
+
+Several things re-list a server's tools: its connection, a
+`notifications/tools/list_changed`, the periodic sweep, an explicit refresh,
+the reindex after an approval or block, and the review capture of a quarantined
+server. They can finish in any order. MCPProxy numbers every upstream
+`tools/list` when it is sent, and applies a server's tool list only if no newer
+one was applied before it. An older list that arrives late changes nothing:
+not the review records, not the search index, not the tool hints that decide
+which `call_tool_*` variant may run a tool, and not the stored tool list the
+next reindex starts from. For example, a sweep that listed `read_note` as
+read-only cannot undo a later refresh that found it destructive and held it for
+review.
+
+The same rule covers a list that came from a connection that is gone: when a
+server's endpoint is replaced or the server is removed, or it reconnects, a
+list still in flight from the old connection is dropped. After a reconnect the
+reindex that follows an approval lists the server again instead of reusing the
+tool list the old connection returned. A list that came back empty and was
+ignored as a transient blip (connect and `tools/list_changed`) still counts as
+the newest list: an older non-empty one is dropped after it.
+
+### When a tool list cannot be fully recorded {#capture-incomplete}
+
+Applying a tool list writes several things: the review records, the removal of
+tools the server no longer lists, the search index and the tool hints that
+decide which `call_tool_*` variant may run a tool. If one of those writes fails
+(for example the database or the index cannot be written), the list counts as
+not recorded. MCPProxy then:
+
+- keeps the server's tools listed and describable, but refuses every call to
+  them with `tool definitions could not be recorded; retry the capture`, so a
+  tool that became destructive cannot run under its old read-only hints;
+- refuses to approve or enable tools of that server, and to approve the server
+  itself (REST answers `503` with the same text). Disabling and blocking still
+  work;
+- does not publish anything from the failed list.
+
+The next tool list that is recorded completely (the next refresh, reconnect or
+sweep) lifts this. A transient empty list does not. The state is kept in memory
+only: after a restart the server is listed again before any of its tools can be
+called.
+
+Tools a server stopped listing are removed from its approved records even when
+an earlier removal failed part-way, or failed before a restart. Pending,
+changed and disabled records of such tools are kept. A disabled or quarantined
+server keeps no tool list in memory, so re-enabling it shows its tools only
+after they are listed again.
+
 ### Trust modes (auto | scan | manual)
 
 Since spec 086, each server carries a **trust mode** that governs both
@@ -432,8 +572,8 @@ new-server admission and tool-change approval (superseding the binary
 | Mode | Add time | Tool changes |
 |------|----------|--------------|
 | `auto` | Admitted without quarantine or scanning | Trusted without scanning (rug-pull risk) |
-| `scan` | Quarantined, then a fail-closed automatic TPA scan admits it on a clean verdict | Auto-approved only when the offline scan verdict is clean; otherwise held for review (input-schema-only changes are scanned; only an output schema added to a tool that had none, or a description added to a tool approved with none, skips the scan; see [What quarantine does and does not cover](#what-quarantine-does-and-does-not-cover)) |
-| `manual` (default) | Quarantined for human review | Most changes held for review; input-schema-only changes, an output schema added to a tool that had none, and a description added to a tool approved with none are admitted without a hold (see [What quarantine does and does not cover](#what-quarantine-does-and-does-not-cover)) |
+| `scan` | Quarantined, then a fail-closed automatic TPA scan admits it on a clean verdict | New tools are auto-approved only when the offline scan verdict is clean. A **changed** tool contract (rug pull) is always held for review: the scan still runs and records its findings as hold evidence, but a clean verdict does not approve the change, because paraphrased poisoning can scan clean |
+| `manual` (default) | Quarantined for human review | Every change held for review, including input-schema-only changes, an added output schema, an added description and annotation-hint flips (see [What quarantine does and does not cover](#what-quarantine-does-and-does-not-cover)) |
 
 Config field: per-server `trust_mode`; REST: `trust_mode` on
 `POST/PATCH/GET /api/v1/servers`; CLI: `mcpproxy upstream add --trust-mode`.
@@ -522,6 +662,12 @@ link into the server's latest scan report highlighting matching findings.
 The quarantine banner distinguishes four states: scan running, scan verdict
 blocked automatic approval, scan could not complete (retry offered), and
 awaiting manual review.
+
+### Reviewing a held change {#reviewing-a-held-change}
+
+Every changed tool contract is held, in every trust mode except `auto`. To keep that cheap, the Web review screen and `mcpproxy review show <server>` show what differs from the approved definition: the description, parameters added, removed, retyped or newly required, output schema changes, and flips of the four safety hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). **Approve update (N changed tools)** on the Web review screen approves exactly those tools in one click. The approval is bound to the definitions and the server incarnation on screen, so if a tool changes again, or the server is removed and re-added, between viewing and clicking, the request is refused with 409 and nothing is approved; reload and review again.
+
+A server you trust to update freely can opt out of the hold with `auto_approve_tool_changes: true` on its entry (or `trust_mode: auto`). The hold messages in the Web UI, the CLI and the refusal an MCP client receives name this option.
 
 ### Block (approve + disable)
 

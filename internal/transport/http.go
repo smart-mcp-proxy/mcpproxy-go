@@ -11,6 +11,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/client/transport"
@@ -158,6 +159,51 @@ type HTTPTransportConfig struct {
 	// The trace transport masks those header names (request and response) even
 	// when a given request carries no forwarded set (FR-018). May be nil.
 	ForwardNames func() []string
+
+	// Gate is the upstream instance's retirement barrier (Spec 116 PR4,
+	// FR-024). When set, every branch builds on a gated *http.Transport (its
+	// dials and connection writes stop when the instance is retired) and the
+	// returned client's mcp-go transport is wrapped by dialgate.WrapTransport.
+	// nil keeps the ungated transports (tests, tools outside the daemon).
+	Gate *dialgate.Gate
+}
+
+// baseTransport returns the http.RoundTripper a branch builds on: the
+// instance's gated transport over tuned (or over the default settings when
+// tuned is nil), or the historical ungated one without a gate.
+func (cfg *HTTPTransportConfig) baseTransport(tuned *http.Transport) http.RoundTripper {
+	if cfg.Gate != nil {
+		if tuned == nil {
+			return cfg.Gate.HTTPTransport()
+		}
+		return cfg.Gate.Transport(tuned)
+	}
+	if tuned == nil {
+		return http.DefaultTransport
+	}
+	return tuned
+}
+
+// oauthConfigForGate returns the OAuth config handed to mcp-go. With a gate,
+// an OAuth config that carries no HTTP client of its own gets the instance's
+// gated one, so mcp-go's metadata, registration, token and refresh requests
+// never fall back to an ungated default client (FR-024).
+func (cfg *HTTPTransportConfig) oauthConfigForGate() client.OAuthConfig {
+	oc := *cfg.OAuthConfig
+	if cfg.Gate != nil && oc.HTTPClient == nil {
+		oc.HTTPClient = cfg.Gate.HTTPClient(30 * time.Second)
+	}
+	return oc
+}
+
+// wrapClient re-creates the mcp-go client over the gated transport wrapper
+// (FR-023a). mcp-go's constructors used here pass no client option, so the
+// rebuilt client is equivalent apart from the gate.
+func (cfg *HTTPTransportConfig) wrapClient(c *client.Client) *client.Client {
+	if cfg.Gate == nil || c == nil {
+		return c
+	}
+	return client.NewClient(dialgate.WrapTransport(cfg.Gate, c.GetTransport()))
 }
 
 // upstreamRoundTripper composes the outbound transport wrappers for an upstream
@@ -168,7 +214,7 @@ type HTTPTransportConfig struct {
 func (cfg *HTTPTransportConfig) upstreamRoundTripper(base http.RoundTripper, logger *zap.Logger) http.RoundTripper {
 	rt := base
 	if rt == nil {
-		rt = http.DefaultTransport
+		rt = cfg.baseTransport(nil)
 	}
 	if cfg.TraceEnabled {
 		lt := NewLoggingTransport(rt, logger)
@@ -243,16 +289,16 @@ func forwardedRedirectFilter(req *http.Request, via []*http.Request) error {
 //
 // Trace and the Retry-After recorder wrap the base as before.
 func (cfg *HTTPTransportConfig) streamableHTTPClient(oauthBranch bool, logger *zap.Logger) *http.Client {
-	base := http.RoundTripper(http.DefaultTransport)
+	base := cfg.baseTransport(nil)
 	timeout := time.Duration(0)
 	if !oauthBranch {
 		if cfg.TraceEnabled {
 			logger.Info("🔍 HTTP TRACE MODE ENABLED - All HTTP traffic will be logged")
-			base = &http.Transport{
+			base = cfg.baseTransport(&http.Transport{
 				MaxIdleConns:          10,
 				IdleConnTimeout:       90 * time.Second,
 				ResponseHeaderTimeout: 30 * time.Second,
-			}
+			})
 			timeout = 180 * time.Second
 		} else if len(cfg.Headers) == 0 {
 			timeout = 180 * time.Second
@@ -351,7 +397,7 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			oauthOpts = append(oauthOpts, transport.WithHTTPHeaders(cfg.Headers))
 		}
 
-		client, err := client.NewOAuthStreamableHttpClient(cfg.URL, *cfg.OAuthConfig, oauthOpts...)
+		client, err := client.NewOAuthStreamableHttpClient(cfg.URL, cfg.oauthConfigForGate(), oauthOpts...)
 		if err != nil {
 			// #1148 round 4: mcp-go builds this error from url.Parse, and
 			// *url.Error quotes the raw URL it was handed.
@@ -360,7 +406,7 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		}
 
 		logger.Info("✅ OAuth-enabled HTTP client created successfully")
-		return client, nil
+		return cfg.wrapClient(client), nil
 	}
 
 	logger.Debug("Creating regular HTTP client", zap.String("url", cfg.logSafeURL()))
@@ -385,7 +431,7 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP transport: %w", err)
 	}
-	return client.NewClient(httpTransport), nil
+	return cfg.wrapClient(client.NewClient(httpTransport)), nil
 }
 
 // CreateSSEClient creates a new MCP client using SSE transport
@@ -441,7 +487,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		// tools/call response, whether or not tracing or Retry-After is on.
 		var oauthOpts []transport.ClientOption
 		oauthOpts = append(oauthOpts, client.WithHTTPClient(&http.Client{
-			Transport: cfg.upstreamRoundTripper(http.DefaultTransport, logger),
+			Transport: cfg.upstreamRoundTripper(cfg.baseTransport(nil), logger),
 		}))
 		// GH #1271: see the streamable-HTTP twin above.
 		if len(cfg.Headers) > 0 {
@@ -449,7 +495,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 			oauthOpts = append(oauthOpts, client.WithHeaders(cfg.Headers))
 		}
 
-		client, err := client.NewOAuthSSEClient(cfg.URL, *cfg.OAuthConfig, oauthOpts...)
+		client, err := client.NewOAuthSSEClient(cfg.URL, cfg.oauthConfigForGate(), oauthOpts...)
 		if err != nil {
 			// #1148 round 4: see the streamable-HTTP twin above.
 			logger.Error("Failed to create OAuth SSE client", logSafeErrorField(err))
@@ -457,7 +503,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		}
 
 		logger.Info("✅ OAuth-enabled SSE client created successfully")
-		return client, nil
+		return cfg.wrapClient(client), nil
 	}
 
 	logger.Debug("Creating regular SSE client", zap.String("url", cfg.logSafeURL()))
@@ -467,7 +513,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	// Create custom HTTP client for SSE - NO Timeout field to allow indefinite streaming
 	// The Timeout field covers the entire request duration, which kills long-lived SSE streams
 	// Instead, we rely on IdleConnTimeout to detect dead connections
-	baseTransport := &http.Transport{
+	baseTransport := cfg.baseTransport(&http.Transport{
 		MaxIdleConns:        10,
 		IdleConnTimeout:     300 * time.Second, // 5 minutes idle before closing
 		DisableCompression:  false,
@@ -475,7 +521,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		MaxIdleConnsPerHost: 5,
 		// ResponseHeaderTimeout can be used to timeout initial connection, but not ongoing stream
 		ResponseHeaderTimeout: 30 * time.Second,
-	}
+	})
 
 	if cfg.TraceEnabled {
 		logger.Info("🔍 SSE TRACE MODE ENABLED - All HTTP traffic and SSE frames will be logged")
@@ -515,7 +561,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create SSE client: %w", err)
 	}
-	return sseClient, nil
+	return cfg.wrapClient(sseClient), nil
 }
 
 // CreateHTTPTransportConfig creates an HTTP transport config from server config

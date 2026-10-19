@@ -886,6 +886,14 @@ func (u *upstreamToolCaller) CallToolWithGate(ctx context.Context, serverName, t
 // callTool is the dispatch proper, over an already-evaluated gate.
 func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName string, args map[string]interface{}, gate toolGate, gated bool) (interface{}, error) {
 	startTime := time.Now()
+	// Spec 116 FR-014c: bind the nested history write to the incarnation the
+	// sub-call started on.
+	// The gate's incarnation was read before its record (review round 4); a
+	// bridge without a gate reads it here.
+	callInc := gate.incarnation
+	if !gated && u.proxy != nil {
+		callInc = u.proxy.toolCallIncarnation(serverName)
+	}
 	// One correlation id per sub-call: the sanitisation policy decision and
 	// the activity record must carry the same id, and mintCorrelationIDAt
 	// bumps a sequence on every call, so minting twice would never match.
@@ -950,7 +958,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	if refusal := policyRefusalFor(gate, gated); refusal != nil {
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
-		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
+		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration, callInc)
 		if u.proxy != nil {
 			u.proxy.auditAuthz(ctx, "deny", policyRefusalReasonKey(gate))
 		}
@@ -967,7 +975,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 		err := fmt.Errorf("server not found: %s", serverName)
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, err.Error())
-		u.storeToolCallInHistory(serverName, toolName, args, nil, err, startTime, duration)
+		u.storeToolCallInHistory(serverName, toolName, args, nil, err, startTime, duration, callInc)
 		auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
 		callerr.NoteOutcome(ctx, callerr.UnavailableOutcome())
 		u.emitSubCallActivity(ctx, serverName, toolName, requestID, args, nil, err, startTime, duration)
@@ -999,7 +1007,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 			refusal := errors.New(msg)
 			duration := time.Since(startTime)
 			u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
-			u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
+			u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration, callInc)
 			u.proxy.auditAuthz(ctx, "deny", telemetry.BlockReasonToolNotCallable)
 			u.emitSubCallRefused(ctx, serverName, toolName, requestID, args, refusal, startTime, duration, "")
 			return nil, refusal
@@ -1032,6 +1040,9 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	parentFwdSink := headerfwd.SinkFrom(ctx)
 	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
+	if u.proxy != nil {
+		dispatchCtx = u.proxy.withReviewDirtyRecheck(dispatchCtx, serverName)
+	}
 	if certified.certified() {
 		result, err = client.CallToolOnEpoch(dispatchCtx, toolName, args, certified.DiscoveryEpoch)
 	} else {
@@ -1046,11 +1057,15 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// Recorded before sanitisation so a policy block of the RESULT is not
 	// mistaken for an upstream failure.
 	u.upstreamManager.RecordClientCallOutcome(ctx, client, result, err)
-	if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+	// Spec 117 FR-018: the review-dirty re-check after the same wait.
+	if dirty := isReviewNotRecordedRefusal(err); dirty || errors.Is(err, managed.ErrConnectionGenerationChanged) {
 		refusal := errors.New(unresolvedToolIdentityMessage(serverName, toolName, false))
+		if dirty {
+			refusal = errors.New(reviewNotRecordedMessage(serverName))
+		}
 		duration := time.Since(startTime)
 		u.recordToolCall(serverName, toolName, startTime, duration, false, refusal.Error())
-		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration)
+		u.storeToolCallInHistory(serverName, toolName, args, nil, refusal, startTime, duration, callInc)
 		// Post-allow refusal (the managed client refused to send): the
 		// attempt's authz line is already written, so this is its tool_call
 		// — an error nothing reached the upstream for.
@@ -1090,7 +1105,7 @@ func (u *upstreamToolCaller) callTool(ctx context.Context, serverName, toolName 
 	// record written from it sees the scrubbed copy.
 	recResult := scrubResultForRecord(result, fwdOut)
 	u.recordUpstreamCall(serverName, toolName, startTime, duration, recResult, err)
-	u.storeToolCallInHistory(serverName, toolName, args, recResult, err, startTime, duration)
+	u.storeToolCallInHistory(serverName, toolName, args, recResult, err, startTime, duration, callInc)
 	if err != nil {
 		auditNoteError(ctx, err)
 	}
@@ -1467,7 +1482,7 @@ func (u *upstreamToolCaller) getToolCalls() []toolCallRecord {
 }
 
 // storeToolCallInHistory stores a nested tool call in the database for history tracking
-func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string, args map[string]interface{}, result interface{}, callErr error, startTime time.Time, duration time.Duration) {
+func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string, args map[string]interface{}, result interface{}, callErr error, startTime time.Time, duration time.Duration, callInc int64) {
 	// Skip if storage is not available
 	if u.storage == nil {
 		return
@@ -1564,7 +1579,7 @@ func (u *upstreamToolCaller) storeToolCallInHistory(serverName, toolName string,
 	}
 
 	// Store in database
-	if err := u.storage.RecordToolCall(record); err != nil {
+	if _, err := u.storage.RecordToolCallIfIncarnation(record, callInc); err != nil {
 		u.logger.Warn("failed to store nested tool call in history",
 			zap.String("server", serverName),
 			zap.String("tool", toolName),

@@ -77,7 +77,10 @@ func stripFormatRunes(s string) string {
 
 // stem applies light suffix stripping so plural/gerund forms match their base.
 // Conservative by design: it never strips a trailing "s" preceded by s/i/u/e to
-// protect words like "previous", "this", "address", and "does".
+// protect words like "previous", "this", "address", and "does", nor the "s" of
+// a possessive "'s": "user's" stays "user's", so the apostrophe stays inside
+// the word and position classification cannot mistake it for a closing quote
+// (Sol r12 P2: "user'" read as a quote boundary inside a quoted example).
 func stem(w string) string {
 	if len(w) <= 3 {
 		return w
@@ -89,7 +92,7 @@ func stem(w string) string {
 		return w[:len(w)-2]
 	case strings.HasSuffix(w, "es") && len(w)-2 >= 3:
 		return w[:len(w)-2]
-	case strings.HasSuffix(w, "s") && len(w)-1 >= 3 && !strings.ContainsRune("siue", rune(w[len(w)-2])):
+	case strings.HasSuffix(w, "s") && len(w)-1 >= 3 && !strings.ContainsRune("siue'", rune(w[len(w)-2])):
 		return w[:len(w)-1]
 	}
 	return w

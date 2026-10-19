@@ -295,11 +295,12 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	// oauth, leaf by leaf. UnmaskLiveOAuth binds a revert to the field NAME for
 	// the four leaves that have one; everything else — including any leaf added
 	// later — is refused by the residual net that closes UnmaskLiveOAuth.
-	"oauth.client_secret": MaskDecisionRevertByKey,
-	"oauth.client_id":     MaskDecisionRevertByKey,
-	"oauth.redirect_uri":  MaskDecisionRevertByKey,
-	"oauth.extra_params":  MaskDecisionRevertByKey, // bound per parameter name
-	"oauth.scopes":        MaskDecisionRefuse,      // a scope slot has no key, exactly as an argv slot has none
+	"oauth.client_secret":     MaskDecisionRevertByKey,
+	"oauth.client_id":         MaskDecisionRevertByKey,
+	"oauth.redirect_uri":      MaskDecisionRevertByKey,
+	"oauth.callback_base_url": MaskDecisionRefuse,
+	"oauth.extra_params":      MaskDecisionRevertByKey, // bound per parameter name
+	"oauth.scopes":            MaskDecisionRefuse,      // a scope slot has no key, exactly as an argv slot has none
 	// auth_url / token_url are DISCOVERED endpoints that exist only on the
 	// contracts projection; nothing writes back through them, and a mask
 	// arriving in one is refused rather than bound.

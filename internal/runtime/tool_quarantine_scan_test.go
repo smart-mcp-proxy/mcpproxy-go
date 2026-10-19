@@ -28,10 +28,12 @@ func seedApprovedBaseline(t *testing.T, rt *Runtime, server, tool, desc, schema 
 	require.Equal(t, storage.ToolApprovalStatusApproved, rec.Status, "baseline must be approved before change")
 }
 
-// TestScanMode_BenignChange_AutoApprovesWithScanReason: a trust_mode: scan server
-// whose approved tool changes to a still-benign description auto-approves via the
-// scan verdict, recording ApprovedBy=scan-approved.
-func TestScanMode_BenignChange_AutoApprovesWithScanReason(t *testing.T) {
+// TestScanMode_BenignChange_HeldForOperatorConfirmation: a trust_mode: scan
+// server whose approved tool changes to a description that scans CLEAN is still
+// held (changed + blocked) for operator confirmation — RT-02: paraphrased rug
+// pulls scan clean, so a green verdict never re-approves a changed contract.
+// The hold carries no scan evidence (there is nothing to show).
+func TestScanMode_BenignChange_HeldForOperatorConfirmation(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{scanServer("github")})
 	seedApprovedBaseline(t, rt, "github", "create_issue", "Creates issues", `{"type":"object"}`)
 
@@ -41,14 +43,24 @@ func TestScanMode_BenignChange_AutoApprovesWithScanReason(t *testing.T) {
 	}
 	result, err := rt.checkToolApprovals("github", changed)
 	require.NoError(t, err)
-	assert.Equal(t, 0, result.ChangedCount, "benign change must not be flagged changed under scan mode")
-	assert.Equal(t, 0, len(result.BlockedTools), "benign change must not be blocked")
+	assert.Equal(t, 1, result.ChangedCount, "a changed contract is held even on a clean scan")
+	assert.True(t, result.BlockedTools["create_issue"], "held changes are blocked until confirmed")
 
 	rec, err := rt.storageManager.GetToolApproval("github", "create_issue")
 	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
+	assert.NotEqual(t, "scan-approved", rec.ApprovedBy, "a clean scan must not re-approve a changed contract")
+	assert.NotEqual(t, rec.CurrentHash, rec.ApprovedHash, "the approved baseline is not moved")
+	assert.Empty(t, rec.HeldReason, "a clean verdict leaves no scan evidence on the hold")
+
+	// The operator confirms the change: it is approved and stays approved.
+	require.NoError(t, rt.ApproveTools("github", []string{"create_issue"}, "operator"))
+	result, err = rt.checkToolApprovals("github", changed)
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.ChangedCount)
+	rec, err = rt.storageManager.GetToolApproval("github", "create_issue")
+	require.NoError(t, err)
 	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-	assert.Equal(t, "scan-approved", rec.ApprovedBy, "provenance must record the scan approval")
-	assert.Equal(t, rec.CurrentHash, rec.ApprovedHash, "re-baseline to current snapshot")
 }
 
 // TestScanMode_MaliciousChange_HeldForReview: a trust_mode: scan server whose
@@ -102,9 +114,10 @@ func TestScanMode_StillChanged_MaliciousStaysHeld(t *testing.T) {
 	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
 }
 
-// TestScanMode_StillChanged_BenignNowScanApproved: a record already in the changed
-// state whose live tool is now benign is re-baselined via the scan verdict.
-func TestScanMode_StillChanged_BenignNowScanApproved(t *testing.T) {
+// TestScanMode_StillChanged_BenignStaysHeld: a record already in the changed
+// state whose live tool scans clean is NOT re-baselined by the scan (RT-02); it
+// stays changed until an operator confirms it.
+func TestScanMode_StillChanged_BenignStaysHeld(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{scanServer("github")})
 
 	desc := "Creates issues with labels"
@@ -123,13 +136,13 @@ func TestScanMode_StillChanged_BenignNowScanApproved(t *testing.T) {
 	tools := []*config.ToolMetadata{{ServerName: "github", Name: "create_issue", Description: desc, ParamsJSON: `{"type":"object"}`}}
 	result, err := rt.checkToolApprovals("github", tools)
 	require.NoError(t, err)
-	assert.Equal(t, 0, len(result.BlockedTools), "benign changed tool clears under scan mode")
+	assert.True(t, result.BlockedTools["create_issue"], "a still-changed tool stays blocked on a clean scan")
 
 	rec, err := rt.storageManager.GetToolApproval("github", "create_issue")
 	require.NoError(t, err)
-	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-	assert.Equal(t, "scan-approved", rec.ApprovedBy)
-	assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
+	assert.NotEqual(t, "scan-approved", rec.ApprovedBy)
+	assert.Equal(t, "old-approved-hash", rec.ApprovedHash)
 }
 
 // TestScanMode_InputSchemaOnlyChange_IsScanned: a scan-mode tool whose
@@ -159,11 +172,11 @@ func TestScanMode_InputSchemaOnlyChange_IsScanned(t *testing.T) {
 	assert.NotEqual(t, "scan-approved", rec.ApprovedBy)
 }
 
-// TestScanMode_BenignInputSchemaChange_ScanApproved: the companion to the above —
-// a benign input-schema-only change is scanned and (being clean) auto-approved via
-// the scan verdict, confirming the !scanMode guard on the description-match
-// fallback does not strand benign input-schema edits.
-func TestScanMode_BenignInputSchemaChange_ScanApproved(t *testing.T) {
+// TestScanMode_BenignInputSchemaChange_Held: the companion to the above — a
+// benign input-schema-only change is a structural contract change (RT-01), so
+// it never rides the description-match fallback, and a clean scan does not
+// re-approve it either (RT-02): it is held for operator confirmation.
+func TestScanMode_BenignInputSchemaChange_Held(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{scanServer("github")})
 	seedApprovedBaseline(t, rt, "github", "create_issue", "Creates issues", `{"type":"object","properties":{"title":{"type":"string"}}}`)
 
@@ -173,12 +186,12 @@ func TestScanMode_BenignInputSchemaChange_ScanApproved(t *testing.T) {
 	}
 	result, err := rt.checkToolApprovals("github", changed)
 	require.NoError(t, err)
-	assert.Equal(t, 0, len(result.BlockedTools), "benign input-schema change clears under scan mode")
+	assert.True(t, result.BlockedTools["create_issue"], "structural input-schema change is held under scan mode")
 
 	rec, err := rt.storageManager.GetToolApproval("github", "create_issue")
 	require.NoError(t, err)
-	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-	assert.Equal(t, "scan-approved", rec.ApprovedBy)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
+	assert.NotEqual(t, "scan-approved", rec.ApprovedBy)
 }
 
 // TestManualMode_ChangeAlwaysHeld: trust_mode: manual (the default) never
@@ -202,13 +215,11 @@ func TestManualMode_ChangeAlwaysHeld(t *testing.T) {
 	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
 }
 
-// TestManualMode_InputSchemaOnlyChange_KnownGapNotHeld pins the behavior the
-// docs describe as a known exception (docs/features/security-quarantine.md):
-// under manual trust, a change confined to input-schema text, with the top-level
-// description and output schema unchanged, is auto-approved by the
-// description-match fallback instead of being held. If the runtime is later
-// fixed to hold it, this test must flip and the docs be updated together.
-func TestManualMode_InputSchemaOnlyChange_KnownGapNotHeld(t *testing.T) {
+// TestManualMode_InputSchemaOnlyChange_Held: under manual trust, a change
+// confined to input-schema text (top-level description and output schema
+// unchanged) is a structural input-schema difference and is held for review
+// (RT-01 closed the description-match fallback that used to approve it).
+func TestManualMode_InputSchemaOnlyChange_Held(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
 		{Name: "github", Enabled: true, TrustMode: string(config.TrustModeManual)},
 	})
@@ -220,21 +231,18 @@ func TestManualMode_InputSchemaOnlyChange_KnownGapNotHeld(t *testing.T) {
 	}
 	result, err := rt.checkToolApprovals("github", changed)
 	require.NoError(t, err)
-	assert.Equal(t, 0, len(result.BlockedTools), "documented gap: input-schema-only change is not held under manual")
+	assert.True(t, result.BlockedTools["create_issue"], "input-schema-only change must be held under manual")
 
 	rec, err := rt.storageManager.GetToolApproval("github", "create_issue")
 	require.NoError(t, err)
-	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
 }
 
-// TestAbsentToPresentOutputSchema_KnownGapNotHeld pins documented behavior: when
-// the approved tool had NO output schema, the formula-migration rehash
-// substitutes the live output schema, so adding an output schema (with the
-// description and input schema unchanged) is treated as a hash-formula
-// migration and approved without a hold, under both manual and scan trust.
-// If the runtime is later fixed to hold it, flip this test and the docs
-// (docs/features/security-quarantine.md) together.
-func TestAbsentToPresentOutputSchema_KnownGapNotHeld(t *testing.T) {
+// TestAbsentToPresentOutputSchema_Held: when the approved tool (captured under
+// the current contract format) had NO output schema, adding one is a contract
+// change and is held under both manual and scan trust; the empty stored value
+// is the declared contract, not a migration wildcard.
+func TestAbsentToPresentOutputSchema_Held(t *testing.T) {
 	for _, mode := range []string{string(config.TrustModeManual), string(config.TrustModeScan)} {
 		t.Run(mode, func(t *testing.T) {
 			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
@@ -249,22 +257,19 @@ func TestAbsentToPresentOutputSchema_KnownGapNotHeld(t *testing.T) {
 			}
 			result, err := rt.checkToolApprovals("github", changed)
 			require.NoError(t, err)
-			assert.Equal(t, 0, len(result.BlockedTools), "documented gap: absent-to-present output schema is not held")
+			assert.True(t, result.BlockedTools["create_issue"], "absent-to-present output schema must be held")
 
 			rec, err := rt.storageManager.GetToolApproval("github", "create_issue")
 			require.NoError(t, err)
-			assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
 		})
 	}
 }
 
-// TestEmptyApprovedDescription_NewDescriptionNotHeld pins documented behavior:
-// when the approved tool's stored description is empty, the formula-migration
-// rehash substitutes the live description, so a newly added (injection-bearing)
-// description with unchanged schemas is approved without a hold or a scan,
-// under both manual and scan trust. If the runtime is later fixed to hold it,
-// flip this test and the docs (docs/features/security-quarantine.md) together.
-func TestEmptyApprovedDescription_NewDescriptionNotHeld(t *testing.T) {
+// TestEmptyApprovedDescription_NewDescriptionHeld: a description added to a
+// tool approved (under the current contract format) with none is a contract
+// change and is held under both manual and scan trust.
+func TestEmptyApprovedDescription_NewDescriptionHeld(t *testing.T) {
 	for _, mode := range []string{string(config.TrustModeManual), string(config.TrustModeScan)} {
 		t.Run(mode, func(t *testing.T) {
 			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
@@ -279,11 +284,11 @@ func TestEmptyApprovedDescription_NewDescriptionNotHeld(t *testing.T) {
 			}
 			result, err := rt.checkToolApprovals("github", changed)
 			require.NoError(t, err)
-			assert.Equal(t, 0, len(result.BlockedTools), "documented gap: empty-to-present description is not held")
+			assert.True(t, result.BlockedTools["create_issue"], "empty-to-present description must be held")
 
 			rec, err := rt.storageManager.GetToolApproval("github", "create_issue")
 			require.NoError(t, err)
-			assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
 		})
 	}
 }
@@ -420,10 +425,10 @@ func TestScanMode_HeldNewTool_CarriesTPAEvidence(t *testing.T) {
 		"pending hold must name the matched TPA signature, got %v", rec.HeldSignals)
 }
 
-// TestScanMode_HeldEvidenceClearedOnScanApproval: once the tool goes benign and
-// the scan gate re-baselines it, the stale hold evidence must not linger on the
-// approved record (it would render as a phantom TPA badge).
-func TestScanMode_HeldEvidenceClearedOnScanApproval(t *testing.T) {
+// TestScanMode_HeldEvidenceClearedOnCleanRescan: once the held tool goes benign
+// the scan gate returns green; the record stays held (RT-02) but the stale TPA
+// evidence must not linger on it (it would render as a phantom TPA badge).
+func TestScanMode_HeldEvidenceClearedOnCleanRescan(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{scanServer("github")})
 	seedApprovedBaseline(t, rt, "github", "create_issue", "Creates issues", `{"type":"object"}`)
 
@@ -447,8 +452,8 @@ func TestScanMode_HeldEvidenceClearedOnScanApproval(t *testing.T) {
 
 	rec, err = rt.storageManager.GetToolApproval("github", "create_issue")
 	require.NoError(t, err)
-	require.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-	assert.Empty(t, rec.HeldSignals, "scan-approved record must not keep stale hold evidence")
+	require.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "a clean rescan does not re-approve a changed contract")
+	assert.Empty(t, rec.HeldSignals, "a clean rescan must clear stale hold evidence")
 	assert.Empty(t, rec.HeldReason)
 	assert.Empty(t, rec.HeldVerdict)
 }

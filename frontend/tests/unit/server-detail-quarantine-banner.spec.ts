@@ -165,6 +165,10 @@ describe('ServerDetail — quarantine banner actions (Spec 088 T020, FR-014/FR-0
     const { wrapper } = await mountDetail()
     const approve = wrapper.find('[data-test="quarantine-action-approve"]')
     expect(approve.exists()).toBe(true)
+    // The button opens the review; it does not approve by itself, so it must
+    // not read like the final action (operators clicked it, saw the tab
+    // switch, and concluded approval was broken).
+    expect(approve.text()).toBe('Review & approve')
     await approve.trigger('click')
     await flushPromises()
     expect(wrapper.find('[data-test="review-screen"]').exists()).toBe(true)

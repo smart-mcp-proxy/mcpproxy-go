@@ -11,6 +11,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // blockingUpstream is a test double whose ConnectServer blocks until released,
@@ -175,4 +176,17 @@ func TestSupervisor_Stop_DrainsInFlightConnectBeforeClose(t *testing.T) {
 
 	require.False(t, up.sawOverlap(),
 		"upstream.Close() overlapped an in-flight Connect — drain-before-disconnect failed")
+}
+
+// Spec 116 PR3 generation-bound adapter methods: this fixture has no
+// generations, so they delegate to the unbound methods above.
+func (b *blockingUpstream) AddServerAt(name string, cfg *config.ServerConfig, _ int64) error {
+	return b.AddServer(name, cfg)
+}
+func (b *blockingUpstream) RemoveServerAt(name string, _ int64) error { return b.RemoveServer(name) }
+func (b *blockingUpstream) ConnectServerAt(ctx context.Context, name string, _ int64) error {
+	return b.ConnectServer(ctx, name)
+}
+func (b *blockingUpstream) DisconnectServerAt(name string, _ int64, _ managed.InstanceID) error {
+	return b.DisconnectServer(name)
 }

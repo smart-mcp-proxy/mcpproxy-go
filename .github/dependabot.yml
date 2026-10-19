@@ -45,6 +45,11 @@ updates:
       # vue-tsc fails on TS 7's package exports (see PR #869).
       - dependency-name: "typescript"
         versions: ["7.x"]
+      # vue-tsc 3.3.12/3.3.13 mis-type the props bound to the inline
+      # FunctionalComponent ClientRow in OnboardingWizard.vue (28 bogus TS7053/
+      # TS18047 errors; 3.3.11 is clean). Drop this once a release fixes it.
+      - dependency-name: "vue-tsc"
+        versions: ["3.3.12", "3.3.13"]
     groups:
       frontend-dependencies:
         patterns:

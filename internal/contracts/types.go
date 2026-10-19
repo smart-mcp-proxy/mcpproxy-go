@@ -82,6 +82,13 @@ type Server struct {
 	// an explicit false. Read-only on the GET path; PATCH/POST accept it via
 	// AddServerRequest.
 	AutoApproveToolChanges *bool `json:"auto_approve_tool_changes,omitempty"`
+	// Generation is the server's committed config generation (Spec 116
+	// FR-017): it changes whenever the server's configuration changes.
+	Generation int64 `json:"generation,omitempty"`
+	// Incarnation changes only when the name is removed and created again
+	// (Spec 116 FR-017). Approval endpoints accept it back as
+	// expected_incarnation and answer 409 server_replaced on a mismatch.
+	Incarnation int64 `json:"incarnation,omitempty"`
 	// TrustMode mirrors config.ServerConfig.TrustMode (spec 086): the per-server
 	// trust tier ("auto"/"scan"/"manual"). Surfaced on the GET path so clients can
 	// read back the persisted mode; PATCH/POST accept it via AddServerRequest.
@@ -393,6 +400,12 @@ type Tool struct {
 	HeldReason  string   `json:"held_reason,omitempty"`
 	HeldVerdict string   `json:"held_verdict,omitempty"`
 	HeldSignals []string `json:"held_signals,omitempty"`
+	// ServerIncarnation is the committed incarnation of the server this row
+	// was read for (Spec 116 FR-017), captured before the tools were fetched.
+	// A client echoes it as expected_incarnation on a per-tool decision, so a
+	// stale row is refused (409 server_replaced) after a same-name re-add.
+	// Omitted when the server has no committed incarnation.
+	ServerIncarnation int64 `json:"server_incarnation,omitempty"`
 	// Hash is the tool's current stored hash rendered in the preflight pin
 	// format "sha256/v{N}:{hex}" (Spec 098 FR-011), where N is the approval
 	// record's HashSchemaVersion. It is the authoring surface for
@@ -645,6 +658,10 @@ type GetServerToolsResponse struct {
 	ServerName string `json:"server_name"`
 	Tools      []Tool `json:"tools"`
 	Count      int    `json:"count"`
+	// Incarnation is the committed incarnation of the server the tools were
+	// read for (Spec 116 FR-017), captured before they were fetched; omitted
+	// when unknown.
+	Incarnation int64 `json:"incarnation,omitempty"`
 }
 
 // GlobalToolsStats is the aggregate rollup shown on the global tools page

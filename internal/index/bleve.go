@@ -763,28 +763,16 @@ func (b *BleveIndex) DeleteTool(serverName, toolName string) error {
 
 // DeleteServerTools removes all tools from a specific server
 func (b *BleveIndex) DeleteServerTools(serverName string) error {
-	// Search for all tools from this server
 	query := bleve.NewTermQuery(serverName)
 	query.SetField("server_name")
 
-	searchReq := bleve.NewSearchRequest(query)
-	searchReq.Size = 1000 // Assume max 1000 tools per server
-	searchReq.Fields = []string{"tool_name", "server_name"}
-
-	searchResult, err := b.index.Search(searchReq)
+	deleted, err := b.deleteMatching(query, "failed to search for server tools", "failed to delete server tools")
 	if err != nil {
-		return fmt.Errorf("failed to search for server tools: %w", err)
-	}
-
-	// Delete each tool
-	for _, hit := range searchResult.Hits {
-		if err := b.index.Delete(hit.ID); err != nil {
-			b.logger.Warn("Failed to delete tool", zap.String("tool_id", hit.ID), zap.Error(err))
-		}
+		return err
 	}
 
 	b.logger.Info("Deleted tools from server",
-		zap.Int("count", len(searchResult.Hits)),
+		zap.Int("count", deleted),
 		zap.String("server", serverName))
 	return nil
 }
@@ -1216,20 +1204,21 @@ func (b *BleveIndex) GetDocumentCount() (uint64, error) {
 // place. Used to rebuild a per-profile index from scratch without recreating
 // its on-disk directory.
 func (b *BleveIndex) DeleteAll() error {
-	query := bleve.NewMatchAllQuery()
-	// Delete in pages until the index is empty. Each iteration enumerates a
-	// page from offset 0 and deletes exactly those docs, so the next search
-	// surfaces the following page — no From offset bookkeeping, and coverage is
-	// not bounded by a single search page (MCP-3319).
+	_, err := b.deleteMatching(bleve.NewMatchAllQuery(), "failed to enumerate documents for delete-all", "failed to delete documents for delete-all")
+	return err
+}
+
+func (b *BleveIndex) deleteMatching(query bquery.Query, searchFailure, deleteFailure string) (int, error) {
+	deleted := 0
 	for {
 		searchReq := bleve.NewSearchRequest(query)
 		searchReq.Size = b.searchPageSize
 		searchResult, err := b.index.Search(searchReq)
 		if err != nil {
-			return fmt.Errorf("failed to enumerate documents for delete-all: %w", err)
+			return deleted, fmt.Errorf("%s: %w", searchFailure, err)
 		}
 		if len(searchResult.Hits) == 0 {
-			return nil
+			return deleted, nil
 		}
 
 		batch := b.index.NewBatch()
@@ -1237,8 +1226,9 @@ func (b *BleveIndex) DeleteAll() error {
 			batch.Delete(hit.ID)
 		}
 		if err := b.index.Batch(batch); err != nil {
-			return fmt.Errorf("failed to delete documents for delete-all: %w", err)
+			return deleted, fmt.Errorf("%s: %w", deleteFailure, err)
 		}
+		deleted += len(searchResult.Hits)
 	}
 }
 

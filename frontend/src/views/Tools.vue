@@ -723,6 +723,7 @@ import { accessReasonLabel, accessStateLabel } from '@/utils/accessReason'
 import { tierPhrase } from '@/utils/profiles'
 import { pickScopeParams, scopeParamsKey } from '@/utils/scopeParams'
 import api from '@/services/api'
+import { incarnationArgs } from '@/utils/incarnation'
 import { useAuthStore } from '@/stores/auth'
 import { useClientsStore } from '@/stores/clients'
 import { useProfilesStore } from '@/stores/profiles'
@@ -984,8 +985,22 @@ const pageSize = ref(25)
 // ---- Selection ----
 const selectedKeys = ref(new Set<string>())
 
+// A selection is bound to the incarnation its row was listed for (Spec 116
+// FR-017, review round 2): after a remove and re-add, a same-named row of the
+// replacement has a different key, so a refresh never carries the old
+// server's selection over to it.
 function toolKey(tool: GlobalTool): string {
-  return `${tool.server_name}\x00${tool.name}`
+  const base = `${tool.server_name}\x00${tool.name}`
+  return tool.server_incarnation ? `${base}\x00${tool.server_incarnation}` : base
+}
+
+// After a reload, keep only the selections whose row (same incarnation) is
+// still listed.
+function pruneSelection() {
+  const present = new Set(allTools.value.map(toolKey))
+  for (const k of [...selectedKeys.value]) {
+    if (!present.has(k)) selectedKeys.value.delete(k)
+  }
 }
 
 const allPageSelected = computed(() =>
@@ -1029,7 +1044,9 @@ async function batchEnable(enabled: boolean) {
 
   for (const tool of targets) {
     try {
-      const resp = await api.setToolEnabled(tool.server_name, tool.name, enabled)
+      // Spec 116 FR-017: bound to the incarnation the row was listed for, so a
+      // stale selection is refused (409 server_replaced) after a same-name re-add.
+      const resp = await api.setToolEnabled(tool.server_name, tool.name, enabled, ...incarnationArgs(tool.server_incarnation))
       if (resp.success) {
         succeeded++
         // Update local state immediately so row reflects change
@@ -1073,11 +1090,15 @@ async function batchApproval(action: 'approve' | 'reject') {
   // call per server — the page spans multiple servers but each approve/block
   // endpoint is per-server.
   const byServer = new Map<string, string[]>()
+  // Spec 116 FR-017: each server's decision is bound to the incarnation its
+  // rows were listed for (one listing reads one incarnation per server).
+  const incarnationOf = new Map<string, number | undefined>()
   for (const tool of allTools.value) {
     if (!selectedKeys.value.has(toolKey(tool)) || !isApprovable(tool)) continue
     const names = byServer.get(tool.server_name) || []
     names.push(tool.name)
     byServer.set(tool.server_name, names)
+    if (!incarnationOf.has(tool.server_name)) incarnationOf.set(tool.server_name, tool.server_incarnation)
   }
 
   let toolCount = 0
@@ -1087,9 +1108,10 @@ async function batchApproval(action: 'approve' | 'reject') {
   await Promise.all(
     Array.from(byServer.entries()).map(async ([server, names]) => {
       try {
+        const bound = incarnationArgs(incarnationOf.get(server))
         const resp = action === 'approve'
-          ? await api.approveTools(server, names)
-          : await api.blockTools(server, names)
+          ? await api.approveTools(server, names, ...bound)
+          : await api.blockTools(server, names, ...bound)
         if (!resp.success) {
           failedServers.push(`${server} (${resp.error || 'failed'})`)
         }
@@ -1436,6 +1458,7 @@ async function loadTools() {
     if (seq !== loadSeq) return
     if (resp.success && resp.data) {
       allTools.value = resp.data.tools || []
+      pruneSelection()
       stats.value = resp.data.stats
       partial.value = resp.data.partial || false
       failedServers.value = resp.data.failed_servers || []

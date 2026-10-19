@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -429,6 +430,26 @@ func parseUpstreamServer(upstream string, cfg *Config) error {
 // approach is still much safer than truncate+write (reduces race window from
 // ~50ms to <1ms).
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileMode(path, data, perm, false)
+}
+
+// skipWriteSync drops the fsync from atomicWriteFileMode. Only tests set it,
+// through DisableWriteSyncForTesting; production writes always sync.
+var skipWriteSync atomic.Bool
+
+// DisableWriteSyncForTesting makes config file writes skip the fsync before
+// the atomic rename for the rest of the process. The written bytes are still
+// visible to every reader in the process; only crash durability is lost, which
+// no unit test exercises. Call it from TestMain in packages whose tests write
+// configs heavily: FlushFileBuffers on the Windows CI runner costs tens of
+// milliseconds per write and dominated internal/runtime's test time. Never
+// call it from production code.
+func DisableWriteSyncForTesting() { skipWriteSync.Store(true) }
+
+// atomicWriteFileMode is atomicWriteFile; with exactMode the temp file is
+// chmod-ed to perm before the rename, so the result carries perm itself and
+// not perm filtered by the process umask (which OpenFile applies).
+func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode bool) error {
 	// Generate random suffix for temp file
 	randBytes := make([]byte, 8)
 	if _, err := rand.Read(randBytes); err != nil {
@@ -459,9 +480,17 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
+	if exactMode {
+		if err := tmpFile.Chmod(perm); err != nil {
+			return fmt.Errorf("failed to set temp file mode: %w", err)
+		}
+	}
+
 	// Fsync to ensure data is on disk
-	if err := tmpFile.Sync(); err != nil {
-		return fmt.Errorf("failed to sync temp file: %w", err)
+	if !skipWriteSync.Load() {
+		if err := tmpFile.Sync(); err != nil {
+			return fmt.Errorf("failed to sync temp file: %w", err)
+		}
 	}
 
 	// Close temp file
@@ -518,6 +547,20 @@ var saveConfigMu sync.Mutex
 // saveConfigTestHook, when set, runs between a save's base read and its write
 // (under saveConfigMu). Tests only.
 var saveConfigTestHook func()
+
+// RestoreConfigFileBytes writes raw bytes back to the config file atomically
+// with exactly the given permission bits (the process umask does not apply,
+// and 0000 is a mode like any other), under the same lock as every in-process
+// save (Spec 116 commit compensation: the pre-commit file is restored byte for
+// byte and mode, never rebuilt from memory).
+func RestoreConfigFileBytes(path string, data []byte, perm os.FileMode) error {
+	saveConfigMu.Lock()
+	defer saveConfigMu.Unlock()
+	if err := atomicWriteFileMode(path, data, perm.Perm(), true); err != nil {
+		return fmt.Errorf("failed to restore config file: %w", err)
+	}
+	return nil
+}
 
 // writeConfigFile marshals cfg exactly as given and writes it atomically.
 func writeConfigFile(cfg *Config, path string) error {

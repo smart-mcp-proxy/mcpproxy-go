@@ -154,7 +154,7 @@ func TestReviewApproveAllFlag(t *testing.T) {
 		newMemoryReviewDaemon(t, recorder)
 		_, err := runReviewApprove(t, "table", nil, "trusted", "--all", "--yes")
 		require.NoError(t, err)
-		assertReviewRequest(t, recorder.requests, "POST", "/api/v1/servers/trusted/tools/approve", map[string]any{"approve_all": true})
+		assertReviewRequest(t, recorder.requests, "POST", "/api/v1/servers/trusted/tools/approve", map[string]any{"approve_all": true, "expected_hashes": map[string]any{}})
 	})
 	t.Run("--except stays rejected on a trusted server", func(t *testing.T) {
 		recorder := &reviewRecorder{}
@@ -231,7 +231,7 @@ func TestReviewApprovePromptNamesCount(t *testing.T) {
 		var prompt string
 		_, err := runReviewApprove(t, "table", func(message string) (bool, error) { prompt = message; return false, nil }, "bare")
 		require.NoError(t, err)
-		require.Equal(t, "Approve server 'bare' without seeing tools?", prompt)
+		require.Equal(t, "Approve server 'bare' without seeing tools? Tools the server lists later will wait for review.", prompt)
 		require.Empty(t, recorder.writes())
 	})
 	t.Run("confirming sends the write", func(t *testing.T) {

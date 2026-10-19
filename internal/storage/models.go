@@ -65,6 +65,12 @@ const (
 	ScanReportsBucket        = "security_reports"
 	IntegrityBaselinesBucket = "integrity_baselines"
 
+	// ToolBaselineDecisionsBucket holds one marker per server stating that the
+	// server's tool baseline has been decided (Spec 117 FR-020, #1567). Created
+	// on first write; removed per server only together with its tool-approval
+	// records.
+	ToolBaselineDecisionsBucket = "tool_baseline_decisions"
+
 	// Onboarding wizard bucket (Spec 046)
 	OnboardingBucket = "onboarding"
 )
@@ -183,6 +189,30 @@ const CurrentSchemaVersion = 3
 // MCP outputSchema in the tool approval hash baseline.
 const OutputSchemaHashSchemaVersion = 3
 
+// AnnotationHashSchemaVersion is the per-record HashSchemaVersion that starts
+// folding the safety-relevant tool annotation hints (readOnlyHint,
+// destructiveHint, idempotentHint, openWorldHint) into the tool approval hash
+// (red-team RT-03). Tools whose effective hints are the MCP defaults keep a
+// byte-identical hash, so only tools with non-default hints get a new hash;
+// records below this version are migrated by the formula-change path in
+// runtime.checkToolApprovals without re-review when their stored contract
+// still matches.
+const AnnotationHashSchemaVersion = 4
+
+// UnambiguousHashSchemaVersion is the per-record HashSchemaVersion whose tool
+// approval hash encodes every field length-prefixed, with an explicit marker
+// for an absent output schema (issue #1606). The v4 formula joined the fields
+// with an unescaped '|' and left an absent output schema out, so
+// (D, I, O) and (D+"|"+I, O, none) shared one hash. Records below this version
+// are re-baselined by the formula-migration path in runtime.checkToolApprovals
+// only when their v4 ApprovedHash covers the stored contract and that contract
+// is still the one the server serves; any other contract is marked changed.
+const UnambiguousHashSchemaVersion = 5
+
+// ToolApprovalHashSchemaVersion is the HashSchemaVersion stamped on every tool
+// approval record whose hashes this binary computes.
+const ToolApprovalHashSchemaVersion = UnambiguousHashSchemaVersion
+
 // UpstreamRecord represents an upstream server record in storage
 type UpstreamRecord struct {
 	ID             string                  `json:"id"`
@@ -250,6 +280,17 @@ type UpstreamRecord struct {
 	// Persisted here because SaveConfiguration rebuilds the JSON server list
 	// from these records: a field absent here is wiped on the next mutation.
 	ForwardHeaders []string `json:"forward_headers,omitempty"`
+
+	// Generation and Incarnation are the committed ServerGen of the config
+	// commit that last wrote this row (Spec 116). A row written before Spec
+	// 116 reads as zero; the next commit that writes it stamps it.
+	Generation  int64 `json:"generation,omitempty"`
+	Incarnation int64 `json:"incarnation,omitempty"`
+	// OAuthEpoch is the generation of the commit that created the row or
+	// last cleared its OAuth state (Spec 116 PR2b, #1607). OAuth token,
+	// client and completion writes bound to {Incarnation, OAuthEpoch} land
+	// only while the row still carries both. 0 on a row written before PR2b.
+	OAuthEpoch int64 `json:"oauth_epoch,omitempty"`
 }
 
 // ToolStatRecord represents tool usage statistics
@@ -298,23 +339,30 @@ const MaxToolHeldSignals = 16
 // When a tool is first discovered, it starts as "pending". Once approved, it becomes "approved".
 // If the tool's description or schema changes after approval, it becomes "changed".
 type ToolApprovalRecord struct {
-	ServerName           string                  `json:"server_name"`
-	ToolName             string                  `json:"tool_name"`
-	ApprovedHash         string                  `json:"approved_hash"`
-	CurrentHash          string                  `json:"current_hash"`
-	HashSchemaVersion    uint64                  `json:"hash_schema_version,omitempty"`
-	Status               string                  `json:"status"` // "approved", "pending", "changed"
-	ApprovedAt           time.Time               `json:"approved_at"`
-	ApprovedBy           string                  `json:"approved_by"`
-	PreviousDescription  string                  `json:"previous_description,omitempty"`
-	CurrentDescription   string                  `json:"current_description,omitempty"`
-	PreviousAnnotations  *config.ToolAnnotations `json:"previous_annotations,omitempty"`
-	CurrentAnnotations   *config.ToolAnnotations `json:"current_annotations,omitempty"`
-	PreviousSchema       string                  `json:"previous_schema,omitempty"`
-	CurrentSchema        string                  `json:"current_schema,omitempty"`
-	PreviousOutputSchema string                  `json:"previous_output_schema,omitempty"`
-	CurrentOutputSchema  string                  `json:"current_output_schema,omitempty"`
-	Disabled             bool                    `json:"disabled,omitempty"`
+	ServerName        string `json:"server_name"`
+	ToolName          string `json:"tool_name"`
+	ApprovedHash      string `json:"approved_hash"`
+	CurrentHash       string `json:"current_hash"`
+	HashSchemaVersion uint64 `json:"hash_schema_version,omitempty"`
+	// CurrentHashSchemaVersion is the hash formula version CurrentHash was
+	// computed with, stamped by every runtime write that recomputes
+	// CurrentHash. Zero means unknown (a record written before this field
+	// existed). ApproveCurrentHash uses it so an approval that copies
+	// CurrentHash into ApprovedHash carries the version of the hash it copied
+	// (red-team RT-03, Sol r4 P1). Additive and omitted when zero.
+	CurrentHashSchemaVersion uint64                  `json:"current_hash_schema_version,omitempty"`
+	Status                   string                  `json:"status"` // "approved", "pending", "changed"
+	ApprovedAt               time.Time               `json:"approved_at"`
+	ApprovedBy               string                  `json:"approved_by"`
+	PreviousDescription      string                  `json:"previous_description,omitempty"`
+	CurrentDescription       string                  `json:"current_description,omitempty"`
+	PreviousAnnotations      *config.ToolAnnotations `json:"previous_annotations,omitempty"`
+	CurrentAnnotations       *config.ToolAnnotations `json:"current_annotations,omitempty"`
+	PreviousSchema           string                  `json:"previous_schema,omitempty"`
+	CurrentSchema            string                  `json:"current_schema,omitempty"`
+	PreviousOutputSchema     string                  `json:"previous_output_schema,omitempty"`
+	CurrentOutputSchema      string                  `json:"current_output_schema,omitempty"`
+	Disabled                 bool                    `json:"disabled,omitempty"`
 
 	// DefinitionChangedAt is when the stored CurrentDescription,
 	// CurrentSchema or CurrentOutputSchema last differed from the prior
@@ -423,6 +471,19 @@ func (r *ToolApprovalRecord) SetScanHold(reason, verdict string, signals []strin
 	r.HeldSignals = out
 }
 
+// ApproveCurrentHash copies CurrentHash into ApprovedHash. HashSchemaVersion
+// follows the copied hash: it takes CurrentHashSchemaVersion when that is known
+// and is kept otherwise. A legacy hint-free CurrentHash must not be stamped as
+// the hint-aware version (Sol r2 P1), and a CurrentHash this binary recomputed
+// must not keep a legacy version whose unknown-hints wildcard would let a later
+// annotation flip match it unchecked (Sol r4 P1).
+func (r *ToolApprovalRecord) ApproveCurrentHash() {
+	r.ApprovedHash = r.CurrentHash
+	if r.CurrentHashSchemaVersion != 0 {
+		r.HashSchemaVersion = r.CurrentHashSchemaVersion
+	}
+}
+
 // ClearScanHold drops any scan-hold evidence. Called on every transition out of
 // the held state so an approved record never renders a stale TPA badge.
 func (r *ToolApprovalRecord) ClearScanHold() {
@@ -521,6 +582,17 @@ type OAuthTokenRecord struct {
 	// These ensure re-authentication uses the same port registered during DCR
 	CallbackPort int    `json:"callback_port,omitempty"` // Port used during DCR for redirect_uri
 	RedirectURI  string `json:"redirect_uri,omitempty"`  // Full redirect URI registered with DCR
+	// OAuthEpoch is the credential binding epoch the record was written
+	// under (Spec 116 PR2b, #1607): the OAuthEpoch of the server's row when a
+	// bound writer saved it. A bound reader ignores a record of another
+	// epoch. 0 on a record written before PR2b, which only a binding with
+	// epoch 0 reads.
+	OAuthEpoch int64 `json:"oauth_epoch,omitempty"`
+	// Revision is set from the oauth_tokens bucket's sequence on every write
+	// of the record (review R7.3). A binding-conditional clear acts only on
+	// the exact revision its caller inspected, so a parked clear never
+	// erases a record somebody rewrote meanwhile.
+	Revision uint64 `json:"revision,omitempty"`
 }
 
 // GetServerName returns the actual server name for RefreshManager lookup.
@@ -537,6 +609,12 @@ type OAuthCompletionEvent struct {
 	ServerName  string     `json:"server_name"`
 	CompletedAt time.Time  `json:"completed_at"`
 	ProcessedAt *time.Time `json:"processed_at,omitempty"` // Nil if not yet processed by server
+	// Incarnation and OAuthEpoch are the credential binding of the instance
+	// that completed the login (Spec 116 PR2b, T055c). The consumer drops
+	// an event whose binding is not the registered instance's. Zero on an
+	// event written by an unbound caller or before PR2b.
+	Incarnation int64 `json:"incarnation,omitempty"`
+	OAuthEpoch  int64 `json:"oauth_epoch,omitempty"`
 }
 
 // DockerRecoveryState represents the persistent state of Docker recovery

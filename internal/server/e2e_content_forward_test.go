@@ -127,7 +127,7 @@ func TestE2E_ImageContentPreservation(t *testing.T) {
 	require.NoError(t, err)
 	cfg := env.proxyServer.runtime.Config()
 	cfg.Servers = servers
-	err = env.proxyServer.runtime.LoadConfiguredServers(cfg)
+	err = env.proxyServer.runtime.CommitConfig(cfg)
 	require.NoError(t, err)
 
 	time.Sleep(3 * time.Second)

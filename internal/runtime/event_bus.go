@@ -245,6 +245,9 @@ func eventWithoutDetectorPayload(evt Event) Event {
 // The no-coalescer branch (some tests, shutdown paths) builds and publishes
 // synchronously to preserve the prior semantics.
 func (r *Runtime) emitServersChanged(reason string, extra map[string]any) {
+	if hook := r.serversChangedHook.Load(); hook != nil {
+		(*hook)(reason, extra)
+	}
 	if r.coalescer != nil {
 		r.coalescer.submit(reason, extra)
 		return
@@ -875,6 +878,25 @@ func (r *Runtime) EmitActivityConfigChange(action, affectedEntity, source string
 	}
 	if newValues != nil {
 		payload["new_values"] = newValues
+	}
+	r.publishEvent(newEvent(EventTypeActivityConfigChange, payload))
+}
+
+// EmitActivityServerRemoved records a server removal as a config change. purged
+// is the removal's purge summary ({bucket: count}, Spec 116 PR2); the activity
+// record carries it in metadata["purged"] (additive).
+func (r *Runtime) EmitActivityServerRemoved(name, source string, purged map[string]int) {
+	payload := map[string]any{
+		"action":          "server_removed",
+		"affected_entity": name,
+		"source":          source,
+	}
+	if len(purged) > 0 {
+		summary := make(map[string]any, len(purged))
+		for bucket, n := range purged {
+			summary[bucket] = n
+		}
+		payload["purged"] = summary
 	}
 	r.publishEvent(newEvent(EventTypeActivityConfigChange, payload))
 }

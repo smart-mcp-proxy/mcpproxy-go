@@ -18,6 +18,10 @@
         <span>{{ banner.text }}</span>
         <button v-if="banner.action !== 'none'" class="btn btn-sm" data-test="review-scan-action" @click="rescan">{{ banner.action === 'scan-now' ? 'Scan now' : 'Rescan' }}</button>
       </div>
+      <div v-if="changedNames.length > 0 && !review.server.quarantined" class="alert alert-warning flex flex-wrap items-center gap-2" data-test="review-held-changes">
+        <p class="min-w-0 flex-1 basis-60 text-sm" data-test="review-held-hint">{{ HELD_CHANGE_HINT }} <a :href="HELD_CHANGE_DOCS" target="_blank" rel="noopener" class="link">Learn more</a></p>
+        <button type="button" class="btn btn-primary btn-sm" :disabled="approving || refreshing" data-test="review-approve-update" @click="approveUpdate">{{ approveUpdateLabel(changedNames.length) }}</button>
+      </div>
       <div class="rounded border border-base-300 p-3 text-sm space-y-1 min-w-0" data-test="review-server-identity">
         <div><span class="font-medium">Transport:</span> {{ review.server.transport }}</div>
         <template v-if="review.server.command">
@@ -75,6 +79,8 @@
         </div>
         <p class="text-sm text-base-content/70" data-test="review-range" aria-live="polite">{{ rangeText }}</p>
       </div>
+      <p v-if="notice && !review.server.quarantined" class="text-sm text-warning" role="status" data-test="review-stale-notice">{{ notice }}</p>
+      <p v-if="toolNotice" class="text-sm text-error" role="alert" data-test="review-tool-notice">{{ toolNotice }}</p>
       <div v-if="review.tools.length > 0 && filteredTools.length === 0" class="rounded border border-base-300 p-4 text-sm" data-test="review-no-match">
         No tools match. <button type="button" class="link" @click="clearFilters">Clear filters</button>
       </div>
@@ -89,6 +95,20 @@
           </div>
           <ToolDefinitionText :text="tool.description" />
           <details v-if="tool.annotations || tool.input_schema || tool.output_schema"><summary class="cursor-pointer text-sm">Definition</summary><pre class="mt-2 text-xs whitespace-pre-wrap break-words" v-text="definitionText(tool)"></pre></details>
+          <div v-if="summarizeToolChange(tool).length > 0" class="space-y-2 rounded border border-warning/50 bg-warning/10 p-3 text-sm" data-test="review-change-summary">
+            <div v-for="sec in summarizeToolChange(tool)" :key="sec.section" :data-test="`review-change-${sec.section}`">
+              <div class="font-medium">{{ sec.title }}</div>
+              <ul class="mt-1 space-y-1">
+                <li v-for="(line, i) in sec.lines" :key="i" class="min-w-0">
+                  <span class="badge badge-sm mr-1" :class="line.kind === 'added' ? 'badge-success' : line.kind === 'removed' ? 'badge-error' : 'badge-warning'">{{ line.kind }}</span><span class="break-words">{{ line.text }}</span>
+                  <div v-if="line.before !== undefined" class="mt-1 grid gap-1 sm:grid-cols-2">
+                    <div class="min-w-0 rounded bg-error/10 p-2"><div class="text-xs text-base-content/70">Approved</div><div class="whitespace-pre-wrap break-words" v-text="line.before"></div></div>
+                    <div class="min-w-0 rounded bg-success/10 p-2"><div class="text-xs text-base-content/70">Now</div><div class="whitespace-pre-wrap break-words" v-text="line.after"></div></div>
+                  </div>
+                </li>
+              </ul>
+            </div>
+          </div>
           <details v-if="tool.diff || tool.previous" open data-test="review-tool-diff"><summary class="cursor-pointer text-sm font-medium">Changed definition</summary><pre class="mt-2 text-xs whitespace-pre-wrap break-words" v-text="diffText(tool)"></pre></details>
         </div>
       </article>
@@ -124,7 +144,7 @@
       <ScanHistory />
     </template>
 
-    <dialog ref="confirmDialog" class="modal" @close="confirmOpen = false"><div class="modal-box"><h3 class="font-bold text-lg">Approve without seeing tools?</h3><p class="py-3">No tool definitions were captured. Fetch them before approval whenever possible.</p><div class="modal-action"><button class="btn" @click="closeConfirm">Cancel</button><button class="btn btn-warning" @click="confirmBlindApprove">Approve without seeing tools</button></div></div></dialog>
+    <dialog ref="confirmDialog" class="modal" @close="confirmOpen = false"><div class="modal-box"><h3 class="font-bold text-lg">Approve without seeing tools?</h3><p class="py-3">No tool definitions were captured. Fetch them before approval whenever possible. Any tools the server lists later will wait for review.</p><div class="modal-action"><button class="btn" @click="closeConfirm">Cancel</button><button class="btn btn-warning" @click="confirmBlindApprove">Approve without seeing tools</button></div></div></dialog>
     <dialog ref="forceDialog" class="modal"><div class="modal-box"><h3 class="font-bold text-lg">Dangerous findings detected</h3><p class="py-3">The baseline scan found dangerous findings. Force approval activates this server despite that warning.</p><div class="modal-action"><button class="btn" @click="forceDialog?.close()">Cancel</button><button class="btn btn-error" @click="approve(true)">Force approve server</button></div></div></dialog>
       <dialog ref="requarantineDialog" class="modal" data-test="review-requarantine-dialog"><div class="modal-box"><h3 class="font-bold text-lg">Quarantine {{ serverName }} to review again?</h3><p class="py-3">Agents lose access to every tool on {{ serverName }} until you approve it again.</p><div class="modal-action"><button class="btn" data-test="review-requarantine-cancel" @click="requarantineDialog?.close?.()">Cancel</button><button class="btn btn-warning" :disabled="requarantining" data-test="review-requarantine-confirm" @click="requarantine">Quarantine</button></div></div></dialog>
   </section>
@@ -133,11 +153,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import api from '@/services/api'
+import { incarnationArgs } from '@/utils/incarnation'
 import type { ReviewTool, ServerReviewResponse } from '@/types'
 import ToolDefinitionText from '@/components/ToolDefinitionText.vue'
 import ScanHistory from '@/components/ScanHistory.vue'
 import { scanReportPath } from '@/utils/serverRoute'
-import { APPROVE_ALL_HINT, REVIEW_PAGE_SIZES, REVIEW_SELECTION_HINT, approveAllLabel, approveLabel, clampPage, filterReviewTools, formatLaunchCommand, hasActiveFilters, mergeSelection, reviewHeadline, scanBanner, toolState, type SelectionChoice } from '@/utils/reviewPresentation'
+import { HELD_CHANGE_DOCS, HELD_CHANGE_HINT, approveUpdateLabel, changedToolNames, summarizeToolChange, APPROVE_ALL_HINT, REVIEW_PAGE_SIZES, REVIEW_SELECTION_HINT, approveAllLabel, approveLabel, clampPage, expectedHashes, filterReviewTools, formatLaunchCommand, hasActiveFilters, isStaleReviewError, mergeSelection, reviewHeadline, scanBanner, toolState, type SelectionChoice } from '@/utils/reviewPresentation'
 
 const props = defineProps<{ serverName: string; change?: string }>()
 const emit = defineEmits<{ approved: []; refreshed: [] }>()
@@ -146,9 +167,15 @@ const review = ref<ServerReviewResponse | null>(null)
 // block list is the complement of what is on screen, so approval waits for the newest load to settle.
 const STALE_FORCE_NOTICE = 'The review changed after the approval attempt. Review the updated list and approve again.'
 const notice = ref('')
+// A failed per-tool approve or reject (e.g. 409 server_replaced). Rendered above
+// the tool list on every server, quarantined or not: `notice` lives in the
+// decision bar, which only a quarantined server shows.
+const toolNotice = ref('')
 const loading = ref(false); const refreshing = ref(false); const scanning = ref(false); const approving = ref(false); const error = ref('')
 const rescanning = ref(false); const requarantining = ref(false); const requarantineDialog = ref<HTMLDialogElement | null>(null)
 const allowedTools = ref<string[]>([]); const choices = new Map<string, SelectionChoice>(); const lastBlock = ref<string[] | null>(null); const confirmDialog = ref<HTMLDialogElement | null>(null); const forceDialog = ref<HTMLDialogElement | null>(null); const confirmOpen = ref(false)
+// The review binding (Spec 117 PR-2) of the attempt the force retry belongs to: the retry re-sends it with lastBlock.
+let lastExpected: Record<string, string> | undefined
 // The blind confirmation is bound to the (empty) review that opened it and to the choice made at click time.
 let blindReview: ServerReviewResponse | null = null; let blindEverything = false
 const tiers = ['read', 'write', 'destructive', 'unannotated', 'unknown']
@@ -213,11 +240,12 @@ function definitionText(tool: ReviewTool) { return JSON.stringify({ input_schema
 function diffText(tool: ReviewTool) { return Object.values(tool.diff ?? {}).filter(Boolean).join('\n\n') || JSON.stringify(tool.previous, null, 2) }
 // A force retry is bound to the snapshot its failed attempt reviewed. Once the review is replaced the block list no longer describes it, so the retry is dropped and a fresh approval decision is required.
 function invalidateForceRetry() { if (lastBlock.value === null) return; lastBlock.value = null; if (forceDialog.value?.open) { forceDialog.value.close?.(); notice.value = STALE_FORCE_NOTICE } }
+// Explicit choices are bound to the reviewed incarnation (Spec 116 FR-017, review round 2): a refresh onto a same-name replacement drops them, so the replacement starts from its own defaults.
 // Each load takes a generation; only the newest response may replace the review, so an older refresh that resolves late cannot resurrect an allow the newer definitions invalidated.
 let loadGeneration = 0
 // Each visit (a serverName change) takes a generation too: a response that started in an earlier visit is dropped even when the screen is back on the same server name (A -> B -> A).
 let visitGeneration = 0
-async function load() { if (typeof api.getServerReview !== 'function') return; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); if (confirmOpen.value) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); if (confirmOpen.value && blindReview !== res.data) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; emit('refreshed') }
+async function load() { if (typeof api.getServerReview !== 'function') return; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); if (confirmOpen.value) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; if (review.value && review.value.server.incarnation !== res.data.server.incarnation) choices.clear(); review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); if (confirmOpen.value && blindReview !== res.data) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; emit('refreshed') }
 async function rescan() {
   const server = props.serverName
   const visit = visitGeneration
@@ -264,14 +292,27 @@ async function approve(force: boolean, block?: string[]) {
   const server = props.serverName // a response for a server the screen no longer shows is dropped below
   const visit = visitGeneration
   closeConfirm(); forceDialog.value?.close?.(); approving.value = true; notice.value = ''
-  const all = review.value?.tools.map(t => t.name) ?? []
-  const blocked = block ?? (force && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
+  const tools = review.value?.tools ?? []
+  const all = tools.map(t => t.name)
+  const retry = force && lastBlock.value !== null
+  const blocked = block ?? (retry && lastBlock.value ? lastBlock.value : all.filter(name => !allowedTools.value.includes(name)))
+  // Spec 117 PR-2 (#1566): bind the approval to the review on screen at click time (every reviewed tool's
+  // fingerprint, {} for an empty review); a force retry re-sends the binding of the attempt that triggered it.
+  const expected = retry ? lastExpected : expectedHashes(tools)
   lastBlock.value = blocked
-  const res = await api.securityApprove(server, force, blocked)
+  lastExpected = expected
+  // Both bindings travel together: the incarnation of the review on screen (Spec 116 FR-017: a remove and
+  // re-add of the name since it rendered answers 409 server_replaced) and, unless the review has no
+  // fingerprints (an older core), the reviewed definitions (Spec 117 PR-2: 409 review_out_of_date).
+  const inc = review.value?.server.incarnation
+  const res = expected ? await api.securityApprove(server, force, blocked, inc, expected) : await api.securityApprove(server, force, blocked, ...incarnationArgs(inc))
   if (!isCurrent(server, visit)) return // the watcher on serverName already reset approving and the force state
   approving.value = false
   if (!res.success) {
     const message = res.error || 'Approval failed'
+    // The review changed since it was shown: nothing was approved. Reload it (explicit choices that still apply are
+    // kept by mergeSelection) and show the core's message beside the controls, never the error panel or the force dialog.
+    if (isStaleReviewError(message)) { lastBlock.value = null; lastExpected = undefined; await reloadAfterStaleReview(server, visit, message); return }
     // A refresh that began while this attempt was in flight dropped its block list (lastBlock was cleared): the force retry is bound to a snapshot that is gone, so do not offer it and do not replace the refreshed review with an error panel; show the stale notice beside the fresh approval controls instead.
     if (!force && /dangerous/i.test(message) && lastBlock.value === null) { notice.value = STALE_FORCE_NOTICE; return }
     error.value = message
@@ -288,8 +329,45 @@ async function rejectServer() {
   approving.value = false
   if (!res.success) error.value = res.error || 'Reject failed'; else await load()
 }
-async function approveTool(name: string) { const server = props.serverName; const visit = visitGeneration; await api.approveTools(server, [name]); if (isCurrent(server, visit)) await load() }
-async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; await api.blockTools(server, [name]); if (isCurrent(server, visit)) await load() }
+// Per-tool decisions are bound to the incarnation of the review on screen (Spec 116 FR-017) and, for an approve,
+// to that tool's fingerprint (Spec 117 PR-2). A stale review (409 review_out_of_date) reloads and says why in the
+// stale notice; any other refusal (409 server_replaced) reloads and says why beside the tool list.
+async function approveTool(name: string) {
+  const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''
+  const tools = review.value?.tools ?? []
+  const inc = review.value?.server.incarnation
+  // A per-tool approve sends that tool's fingerprint ({} when it has none in a fingerprinted review).
+  const expected = expectedHashes(tools.filter(t => t.name === name), tools)
+  const res = expected ? await api.approveTools(server, [name], inc, expected) : await api.approveTools(server, [name], ...incarnationArgs(inc))
+  if (!isCurrent(server, visit)) return
+  if (res && !res.success && isStaleReviewError(res.error)) { await reloadAfterStaleReview(server, visit, res.error as string); return }
+  await load()
+  if (res && !res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Approval failed'
+}
+// One click approves the server's update: exactly the changed tools on screen, bound to their fingerprints (Spec 117 PR-2)
+// and the incarnation (Spec 116 FR-017), so a further change or a replacement answers 409 and approves nothing.
+const changedNames = computed(() => changedToolNames(review.value?.tools ?? []))
+async function approveUpdate() {
+  if (refreshing.value || approving.value) return
+  const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''; notice.value = ''
+  const tools = review.value?.tools ?? []
+  const names = changedToolNames(tools)
+  if (names.length === 0) return
+  const inc = review.value?.server.incarnation
+  const expected = expectedHashes(tools.filter(t => names.includes(t.name)), tools)
+  approving.value = true
+  const res = expected ? await api.approveTools(server, names, inc, expected) : await api.approveTools(server, names, ...incarnationArgs(inc))
+  if (!isCurrent(server, visit)) return
+  approving.value = false
+  if (res && !res.success && isStaleReviewError(res.error)) { await reloadAfterStaleReview(server, visit, res.error as string); return }
+  await load()
+  if (res && !res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Approval failed'
+}
+async function reloadAfterStaleReview(server: string, visit: number, message: string) {
+  await load()
+  if (isCurrent(server, visit)) notice.value = message
+}
+async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''; const res = await api.blockTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Block failed' }
 function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
 async function refreshAfterScanSettled(event: Event) {
   const serverName = (event as CustomEvent<{ server_name?: string }>).detail?.server_name
@@ -299,7 +377,7 @@ async function refreshAfterScanSettled(event: Event) {
   void load()
 }
 // Component reuse across /review/A -> /review/B: scan state and any pending force retry belong to the old server.
-watch(() => props.serverName, () => { visitGeneration++; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
+watch(() => props.serverName, () => { visitGeneration++; choices.clear(); review.value = null; allowedTools.value = []; clearFilters(); stateFilter.value = initialStateFilter(props.change); lastBlock.value = null; notice.value = ''; toolNotice.value = ''; approving.value = false; requarantining.value = false; refreshing.value = false; forceDialog.value?.close?.(); closeConfirm(); scanning.value = false; rescanning.value = false; error.value = ''; void load() })
 onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)

@@ -166,6 +166,16 @@ actionable **Sign-in** state:
   is quarantined, but its tools stay blocked until you **Approve** the server.
   The panel makes both gates explicit.
 
+### Switching accounts and retrying sign-in
+
+To switch accounts or recover an OAuth error, use **Sign in again** in the
+server card’s **More actions** menu or the detail page’s **Actions** menu.
+For an OAuth-capable upstream this remains available during reconnect attempts
+and generic timeout errors, even when the health panel does not suggest login.
+After logout it is labelled **Sign in**. Select the intended account/workspace
+at the provider; if the provider reuses its own browser session, switch that
+account before starting sign-in again.
+
 ## CLI Commands
 
 ### Start Authentication
@@ -284,6 +294,48 @@ mcpproxy upstream logs github-server --tail 50
 ```
 
 ## Troubleshooting
+
+### Signing in through a remote Web UI
+
+When MCPProxy runs on a headless host, the Web UI opens the authorization URL
+in the browser where you clicked **Log in**. A blocked popup leaves a clickable
+sign-in link; the proxy's API key is never placed in that URL.
+
+OAuth's default loopback callback reaches the browser's machine, which may be
+different from the proxy host. To finish sign-in without an SSH port forward,
+serve MCPProxy's HTTP listener through an HTTPS reverse proxy (including
+Tailscale Serve), and set the upstream's `oauth.callback_base_url` to that
+external origin:
+
+```json
+{
+  "name": "linear",
+  "url": "https://mcp.linear.app/mcp",
+  "protocol": "http",
+  "oauth": {
+    "callback_base_url": "https://proxy.example.ts.net:8447"
+  }
+}
+```
+
+The provider receives `https://proxy.example.ts.net:8447/oauth/callback/linear`
+as its redirect URI. Forward that path to the main MCPProxy HTTP listener, just
+like `/ui/` and `/api/`. Static OAuth clients must register this exact callback
+URL with their provider; dynamically registered clients are re-registered when
+their saved redirect URI changes. The provider must permit HTTPS callbacks.
+
+`callback_base_url` accepts an HTTPS origin with no credentials, path, query or
+fragment. It is explicit configuration, never inferred from request headers.
+Only upstreams opting into it accept remote callbacks, validated against their
+existing single-use state and PKCE flow. The callback needs no API key and does
+not start an OAuth flow; missing, expired, reused and cross-server states fail.
+Callback responses disable caching and referrer disclosure.
+
+Leave `HEADLESS=true` on a remote host: the Web UI opens the user's browser;
+turning off headless mode only attempts to open a browser on the proxy host.
+Without `callback_base_url`, loopback callbacks behave as before. A configured
+`redirect_uri` continues to pin the private loopback listener; the external
+callback takes precedence for provider registration and token exchange.
 
 ### Browser Doesn't Open
 

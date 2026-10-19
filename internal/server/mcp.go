@@ -298,6 +298,13 @@ type MCPProxyServer struct {
 	// between them answered a verdict neither read alone selects.
 	sandboxPreflightPause func(serverName, toolName string)
 
+	// toolGateAfterRecordRead, when non-nil, runs in evaluateExactToolGate
+	// right after the gate read the persisted server record. Nil in
+	// production; the only writer is a test (Spec 116 review round 4: a
+	// remove and re-add landing after the record read must leave the gate
+	// bound to the removed incarnation).
+	toolGateAfterRecordRead func(serverName string)
+
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
 	includeDisabledCalls atomic.Int64
@@ -3324,10 +3331,17 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// tool-call latency/outcome metrics. No-ops when observability is disabled.
 	callCtx, toolSpan := p.startToolCallSpan(ctx, serverName, actualToolName, profileSlug)
 	startTime := time.Now()
+	// Spec 116 FR-014c: the history write is bound to the incarnation the
+	// gate read together with the record the history is built from (review
+	// round 4), so a call that outlives a removal — or a remove and re-add
+	// that lands after the gate — leaves no history for the removed server
+	// or its replacement.
+	callInc := gate.incarnation
 	// Spec 112 FR-016.3: a per-call sink receives this call's outbound set from
 	// core.Client.CallTool so every record written below can be scrubbed.
 	dispatchCtx, fwdSink := headerfwd.WithSink(callCtx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
+	dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
 	result, err := p.dispatchOnEpoch(dispatchCtx, certified, toolName, args)
 	p.noteUpstreamDispatched(dispatchCtx) // one attempt per request that reached the transport
 	callerr.Observe(ctx, result, err)
@@ -3404,7 +3418,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		if limitErr, isShed := asShed(err); isShed {
 			shedMsg := shedMessage(limitErr)
 			toolCallRecord.Error = shedMsg
-			if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+			if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 				p.logger.Warn("Failed to record shed tool call", zap.Error(storeErr))
 			}
 			p.logger.Info("Tool call shed by concurrency limiter",
@@ -3436,15 +3450,22 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		// gives a name whose generation is not certified, in the same
 		// telemetry bucket, with the started record closed as an error so
 		// the activity funnel sees the call end.
-		if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+		//
+		// Spec 117 FR-018: the review-dirty re-check after the same wait
+		// refused it the same way, with the pre-dispatch dirty body.
+		if dirty := isReviewNotRecordedRefusal(err); dirty || errors.Is(err, managed.ErrConnectionGenerationChanged) {
 			errMsg := unresolvedToolIdentityMessage(serverName, actualToolName, false)
+			if dirty {
+				errMsg = reviewNotRecordedMessage(serverName)
+			}
 			toolCallRecord.Error = errMsg
-			if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+			if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 				p.logger.Warn("Failed to record refused tool call", zap.Error(storeErr))
 			}
-			p.logger.Debug("handleCallToolVariant: refusing dispatch, connection generation changed since the identity was certified",
+			p.logger.Debug("handleCallToolVariant: refusing dispatch, the connection generation or review state changed while the call waited",
 				zap.String("server_name", serverName),
-				zap.String("tool_name", actualToolName))
+				zap.String("tool_name", actualToolName),
+				zap.Bool("review_dirty", dirty))
 			var intentMap map[string]interface{}
 			if intent != nil {
 				intentMap = intent.ToMap()
@@ -3467,7 +3488,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			zap.String("error_type", "upstream_failure"))
 
 		// Store error tool call
-		if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+		if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 			p.logger.Warn("Failed to record failed tool call", zap.Error(storeErr))
 		}
 
@@ -3603,7 +3624,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	}
 
 	// Store successful tool call in history
-	if err := p.storage.RecordToolCall(toolCallRecord); err != nil {
+	if err := p.recordToolCallAt(toolCallRecord, callInc); err != nil {
 		p.logger.Warn("Failed to record successful tool call", zap.Error(err))
 	}
 
@@ -3854,9 +3875,11 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 
 	// Call tool via upstream manager with circuit breaker pattern
 	startTime := time.Now()
+	callInc := gate.incarnation // Spec 116 FR-014c: read with the gate's record
 	// Spec 112 FR-016.3: per-call sink for the recording scrub below.
 	dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 	dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
+	dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
 	result, err := p.upstreamManager.CallTool(dispatchCtx, toolName, args)
 	callerr.Observe(ctx, result, err)
 	fwdOut := fwdSink.Outbound()
@@ -3944,7 +3967,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		if limitErr, isShed := asShed(err); isShed {
 			shedMsg := shedMessage(limitErr)
 			toolCallRecord.Error = shedMsg
-			if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+			if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 				p.logger.Warn("Failed to record shed tool call", zap.Error(storeErr))
 			}
 			recordShed(ctx, limitErr)
@@ -3971,7 +3994,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 			zap.String("actual_tool", actualToolName))
 
 		// Store error tool call
-		if storeErr := p.storage.RecordToolCall(toolCallRecord); storeErr != nil {
+		if storeErr := p.recordToolCallAt(toolCallRecord, callInc); storeErr != nil {
 			p.logger.Warn("Failed to record failed tool call", zap.Error(storeErr))
 		}
 
@@ -4075,7 +4098,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	}
 
 	// Store successful tool call in history
-	if err := p.storage.RecordToolCall(toolCallRecord); err != nil {
+	if err := p.recordToolCallAt(toolCallRecord, callInc); err != nil {
 		p.logger.Warn("Failed to record successful tool call", zap.Error(err))
 	}
 
@@ -4091,6 +4114,28 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityStatus, activityErrMsg, duration.Milliseconds(), activityArgs, scrubForRecord(response, fwdOut), responseTruncated, "", nil, "", "", legacyRequestBytes, legacyResponseBytes, "", nil, "")
 
 	return forwarded, nil
+}
+
+// toolCallIncarnation returns serverName's committed incarnation when a call
+// starts (0 when unbound: no runtime, or the server is not configured).
+func (p *MCPProxyServer) toolCallIncarnation(serverName string) int64 {
+	if rt := p.promptApprovalRuntime(); rt != nil {
+		if inc, ok := rt.ServerIncarnation(serverName); ok {
+			return inc
+		}
+	}
+	return 0
+}
+
+// recordToolCallAt records a call's history only while its server still has
+// the incarnation the call started on (Spec 116 FR-014c).
+func (p *MCPProxyServer) recordToolCallAt(rec *storage.ToolCallRecord, inc int64) error {
+	written, err := p.storage.RecordToolCallIfIncarnation(rec, inc)
+	if err == nil && !written {
+		p.logger.Debug("Tool call history dropped: the server was removed or replaced during the call",
+			zap.String("server", rec.ServerName), zap.String("tool", rec.ToolName))
+	}
+	return err
 }
 
 // handleQuarantinedToolCall handles tool calls to quarantined servers with security analysis
@@ -5686,43 +5731,27 @@ func (p *MCPProxyServer) handleQuarantineUpstream(_ context.Context, request mcp
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
 	}
 
-	// Find server by name first
-	servers, err := p.storage.ListUpstreams()
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil
+	// Spec 116 (B1): one config commit through the runtime's QuarantineServer,
+	// so the server's tools leave the search index before this returns, exactly
+	// as on the REST door. Writing the storage row directly used to skip the
+	// purge (#1061 bypass).
+	w := p.writer()
+	if w == nil {
+		return mcp.NewToolResultError(errNoUpstreamWriter.Error()), nil
 	}
-
-	var serverID string
-	var existingServer *config.ServerConfig
-	for _, server := range servers {
-		if server.Name == serverName {
-			serverID = server.Name
-			existingServer = server
-			break
+	if err := w.quarantineServer(serverName); err != nil {
+		if errors.Is(err, errUpstreamNotFound) {
+			return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", serverName)), nil
 		}
-	}
-
-	if serverID == "" {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", serverName)), nil
-	}
-
-	// Update in storage
-	existingServer.Quarantined = true
-	if err := p.storage.UpdateUpstream(serverID, existingServer); err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to quarantine upstream: %v", err)), nil
 	}
 
-	// Trigger configuration save and update
 	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after quarantining server", zap.Error(err))
-		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{
-		"id":          serverID,
+		"id":          serverName,
 		"name":        serverName,
 		"quarantined": true,
 	})
@@ -5971,17 +6000,14 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", createErr)), nil
 	}
 
-	// Trigger configuration save which will notify supervisor to reconcile and connect
+	// The create commit already wrote the file and published the config, which
+	// notifies the supervisor to reconcile and connect (Spec 116).
 	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		// This triggers ConfigService update which notifies supervisor to reconcile
-		// Note: SaveConfiguration may fail in test environments without config file - that's OK
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Warn("Failed to save configuration after adding server (may be test environment)",
-				zap.Error(err))
-			// Continue anyway - UpdateConfig above already notified the supervisor
-		}
 		p.mainServer.OnUpstreamServerChange()
+		// Same post-create step as the REST door: a quarantined server needs the
+		// inspection exemption or the supervisor never (or only briefly) connects
+		// it and nothing is captured for review.
+		p.mainServer.grantNewServerInspectionExemption(serverConfig)
 
 		// Spec 024: Emit config change activity for server addition.
 		//
@@ -6074,61 +6100,32 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
 	}
 
-	// Find server by name first
-	servers, err := p.storage.ListUpstreams()
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil
+	// Spec 116: one config commit. The live config, the storage row, the file
+	// and the search index lose the server together, and the manager instance
+	// is unregistered before this returns, so an immediate re-add of the same
+	// name is never refused and no later save can resurrect it (#1559).
+	w := p.writer()
+	if w == nil {
+		return mcp.NewToolResultError(errNoUpstreamWriter.Error()), nil
 	}
-
-	var serverID string
-	for _, server := range servers {
-		if server.Name == name {
-			serverID = server.Name
-			break
+	purged, err := w.removeServer(name)
+	if err != nil {
+		if errors.Is(err, errUpstreamNotFound) {
+			return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
 		}
-	}
-
-	if serverID == "" {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil
-	}
-
-	// Remove from storage
-	removeStorage := func() error { return p.storage.RemoveUpstream(serverID) }
-	if p.mainServer != nil {
-		// Also drops the server from the runtime config synchronously so an
-		// immediate re-add of the same name is not refused as a duplicate.
-		err = p.mainServer.removeServerStorage(serverID, removeStorage)
-	} else {
-		err = removeStorage()
-	}
-	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to remove upstream: %v", err)), nil
 	}
 
-	// Remove from upstream manager
-	p.upstreamManager.RemoveServer(serverID)
-
-	// Remove tools from search index
-	if err := p.index.DeleteServerTools(serverID); err != nil {
-		p.logger.Error("Failed to remove server tools from index", zap.String("server", serverID), zap.Error(err))
-	} else {
-		p.logger.Info("Removed server tools from search index", zap.String("server", serverID))
-	}
-
-	// Trigger configuration save and update
 	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after removing server", zap.Error(err))
-		}
 		p.mainServer.OnUpstreamServerChange()
 
-		// Spec 024: Emit config change activity for server removal
-		p.mainServer.runtime.EmitActivityConfigChange("server_removed", name, "mcp", nil, nil, nil)
+		// Spec 024: Emit config change activity for server removal. Spec 116
+		// PR2: the record carries what the removal purged ({bucket: count}).
+		p.mainServer.runtime.EmitActivityServerRemoved(name, "mcp", purged.Deleted)
 	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{
-		"id":      serverID,
+		"id":      name,
 		"name":    name,
 		"removed": true,
 	})
@@ -6143,49 +6140,72 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 // handleUpstreamServers can record what actually changed in the activity log
 // (issue #1146). The diff is returned RAW — every rendering seam below and in
 // the caller passes it through redactedConfigDiff first.
+// mergeUpstreamPatch applies an update/patch request to the named server
+// inside one config commit (Spec 116 FR-006): the patch is built and merged
+// against a copy of the LIVE entry read inside the commit lock, so the merge
+// keeps config-only fields (Shared, AuthBroker) and a newer concurrent write
+// is never reverted by values read earlier (#1560). It returns the merged
+// entry, the resolved diff and the server's committed generation (0 when the
+// commit left the server unchanged), or a tool error result to return as-is.
+func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolRequest) (*config.ServerConfig, *config.ConfigDiff, int64, *mcp.CallToolResult) {
+	w := p.writer()
+	if w == nil {
+		return nil, nil, 0, mcp.NewToolResultError(errNoUpstreamWriter.Error())
+	}
+	var merged *config.ServerConfig
+	var configDiff *config.ConfigDiff
+	gen, err := w.updateServer(name, func(cur *config.ServerConfig) error {
+		// Build patch config from request parameters
+		patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, cur)
+		if err != nil {
+			return &mcpUserError{msg: err.Error()}
+		}
+		// Use smart merge to preserve existing config fields (Fix for #239, #240)
+		m, diff, err := config.MergeServerConfig(cur, patch, mergeOpts)
+		if err != nil {
+			return newMCPUserError("Failed to merge config: %v", err)
+		}
+		// Spec 112 FR-005a: validate the resulting allowlist against the
+		// resulting static headers, so a headers change cannot introduce a
+		// collision either.
+		if patch.ForwardHeaders != nil || patch.Headers != nil {
+			if err := forwardHeadersWriteError(m.ForwardHeaders, m.Headers); err != nil {
+				return &mcpUserError{msg: err.Error()}
+			}
+		}
+		m.Name = cur.Name
+		*cur = *m
+		merged = config.CopyServerConfig(m)
+		configDiff = diff
+		return nil
+	})
+	if err != nil {
+		var userErr *mcpUserError
+		switch {
+		case errors.As(err, &userErr):
+			return nil, nil, 0, mcp.NewToolResultError(userErr.msg)
+		case errors.Is(err, errUpstreamNotFound):
+			return nil, nil, 0, mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
+		default:
+			return nil, nil, 0, mcp.NewToolResultError(scrubUpstreamText(fmt.Sprintf("Failed to update upstream: %v", err)))
+		}
+	}
+	return merged, configDiff, gen, nil
+}
+
+// handleUpdateUpstream returns the resolved config diff alongside the result so
+// handleUpstreamServers can record what actually changed in the activity log
+// (issue #1146). The diff is returned RAW — every rendering seam below and in
+// the caller passes it through redactedConfigDiff first.
 func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, *config.ConfigDiff, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
 	}
 
-	// Find server by name first
-	servers, err := p.storage.ListUpstreams()
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil, nil
-	}
-
-	var serverID string
-	var existingServer *config.ServerConfig
-	for _, server := range servers {
-		if server.Name == name {
-			serverID = server.Name
-			existingServer = server
-			break
-		}
-	}
-
-	if serverID == "" {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil, nil
-	}
-
-	// Build patch config from request parameters
-	patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, existingServer)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil, nil
-	}
-
-	// Use smart merge to preserve existing config fields (Fix for #239, #240)
-	mergedServer, configDiff, err := config.MergeServerConfig(existingServer, patch, mergeOpts)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil, nil
-	}
-	// Spec 112 FR-005a: validate the resulting allowlist against the resulting
-	// static headers, so a headers change cannot introduce a collision either.
-	if patch.ForwardHeaders != nil || patch.Headers != nil {
-		if err := forwardHeadersWriteError(mergedServer.ForwardHeaders, mergedServer.Headers); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil, nil
-		}
+	mergedServer, configDiff, committedGen, errResult := p.mergeUpstreamPatch(name, request)
+	if errResult != nil {
+		return errResult, nil, nil
 	}
 
 	// Log the config diff for audit trail (FR-006). Issue #1146: config.FieldChange
@@ -6200,40 +6220,29 @@ func (p *MCPProxyServer) handleUpdateUpstream(ctx context.Context, request mcp.C
 			zap.Strings("removed", configDiff.Removed))
 	}
 
-	// Update in storage
-	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil, nil
-	}
-
-	// Update in upstream manager with connection monitoring
-	p.upstreamManager.RemoveServer(serverID)
+	// The commit reconnects the server when its connection settings changed
+	// and updates the running instance in place otherwise (Spec 116); report
+	// the connection the way the update left it. The reconnect runs after the
+	// commit returns, so the status must come from an instance stamped with
+	// this commit's generation or a later one (tasks.md T029, review round 6):
+	// the previous instance's ready or error state describes the old settings.
 	var connectionStatus, connectionMessage string
 	if mergedServer.Enabled {
-		if err := p.upstreamManager.AddServer(serverID, mergedServer); err != nil {
-			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
-			connectionStatus = statusError
-			connectionMessage = scrubUpstreamText(fmt.Sprintf("Failed to update server config: %v", err))
-		} else {
-			// Monitor connection status for 1 minute
-			connectionStatus, connectionMessage = p.monitorConnectionStatus(ctx, name, 1*time.Minute)
-		}
+		connectionStatus, connectionMessage = p.monitorConnectionStatusAt(ctx, name, 1*time.Minute, committedGen)
+		// Issue #1148: the connection message can carry the upstream URL.
+		connectionMessage = scrubUpstreamText(connectionMessage)
 	} else {
 		connectionStatus = statusDisabled
 		connectionMessage = messageServerDisabled
 	}
 
-	// Trigger configuration save and update
 	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after updating server", zap.Error(err))
-		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
 	// Build response with diff for LLM transparency
 	responseMap := map[string]interface{}{
-		"id":                 serverID,
+		"id":                 name,
 		"name":               name,
 		"updated":            true,
 		"enabled":            mergedServer.Enabled,
@@ -6269,43 +6278,9 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil, nil
 	}
 
-	// Find server by name first
-	servers, err := p.storage.ListUpstreams()
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to list upstreams: %v", err)), nil, nil
-	}
-
-	var serverID string
-	var existingServer *config.ServerConfig
-	for _, server := range servers {
-		if server.Name == name {
-			serverID = server.Name
-			existingServer = server
-			break
-		}
-	}
-
-	if serverID == "" {
-		return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name)), nil, nil
-	}
-
-	// Build patch config from request parameters
-	patch, mergeOpts, err := p.buildPatchConfigFromRequest(request, existingServer)
-	if err != nil {
-		return mcp.NewToolResultError(err.Error()), nil, nil
-	}
-
-	// Use smart merge to preserve existing config fields (Fix for #239, #240)
-	mergedServer, configDiff, err := config.MergeServerConfig(existingServer, patch, mergeOpts)
-	if err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to merge config: %v", err)), nil, nil
-	}
-	// Spec 112 FR-005a: validate the resulting allowlist against the resulting
-	// static headers, so a headers change cannot introduce a collision either.
-	if patch.ForwardHeaders != nil || patch.Headers != nil {
-		if err := forwardHeadersWriteError(mergedServer.ForwardHeaders, mergedServer.Headers); err != nil {
-			return mcp.NewToolResultError(err.Error()), nil, nil
-		}
+	mergedServer, configDiff, _, errResult := p.mergeUpstreamPatch(name, request)
+	if errResult != nil {
+		return errResult, nil, nil
 	}
 
 	// Log the config diff for audit trail (FR-006), values masked (issue #1146).
@@ -6317,31 +6292,13 @@ func (p *MCPProxyServer) handlePatchUpstream(_ context.Context, request mcp.Call
 			zap.Strings("removed", configDiff.Removed))
 	}
 
-	// Update in storage
-	if err := p.storage.UpdateUpstream(serverID, mergedServer); err != nil {
-		return mcp.NewToolResultError(fmt.Sprintf("Failed to update upstream: %v", err)), nil, nil
-	}
-
-	// Update in upstream manager
-	p.upstreamManager.RemoveServer(serverID)
-	if mergedServer.Enabled {
-		if err := p.upstreamManager.AddServer(serverID, mergedServer); err != nil {
-			p.logger.Warn("Failed to connect to updated upstream", zap.String("id", serverID), zap.Error(err))
-		}
-	}
-
-	// Trigger configuration save and update
 	if p.mainServer != nil {
-		// Save configuration first to ensure servers are persisted to config file
-		if err := p.mainServer.SaveConfiguration(); err != nil {
-			p.logger.Error("Failed to save configuration after patching server", zap.Error(err))
-		}
 		p.mainServer.OnUpstreamServerChange()
 	}
 
 	// Build response with diff for LLM transparency
 	responseMap := map[string]interface{}{
-		"id":      serverID,
+		"id":      name,
 		"name":    name,
 		"updated": true,
 		"enabled": mergedServer.Enabled,
@@ -7184,6 +7141,14 @@ func (p *MCPProxyServer) CallBuiltInTool(ctx context.Context, toolName string, a
 
 // monitorConnectionStatus waits for a server to connect with a timeout
 func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName string, timeout time.Duration) (status, message string) {
+	return p.monitorConnectionStatusAt(ctx, serverName, timeout, 0)
+}
+
+// monitorConnectionStatusAt is monitorConnectionStatus for a config committed
+// at Spec 116 server generation minGen: an instance stamped with an older
+// generation is the one the commit is replacing, so its state is skipped as
+// if no client were registered yet. minGen 0 accepts any instance.
+func (p *MCPProxyServer) monitorConnectionStatusAt(ctx context.Context, serverName string, timeout time.Duration, minGen int64) (status, message string) {
 	monitorCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
@@ -7218,7 +7183,12 @@ func (p *MCPProxyServer) monitorConnectionStatus(ctx context.Context, serverName
 			}
 
 			// Check connection status from upstream manager
-			if clientInfo, exists := p.upstreamManager.GetClient(serverName); exists {
+			if clientInfo, exists := p.upstreamManager.GetClient(serverName); exists && minGen > 0 && clientInfo.Generation() < minGen {
+				p.logger.Debug("Previous instance still registered, waiting for the committed one",
+					zap.String("server", serverName),
+					zap.Int64("instance_generation", clientInfo.Generation()),
+					zap.Int64("committed_generation", minGen))
+			} else if exists {
 				connectionInfo := clientInfo.GetConnectionInfo()
 				switch connectionInfo.State {
 				case types.StateReady:
@@ -8513,19 +8483,12 @@ func cacheHintServerOptions() []mcpserver.ServerOption {
 	return opts
 }
 
-// createUpstreamServer is handleAddUpstream's create-only write. With a main
-// server it shares Server.createServer (runtime-config check, atomic storage
-// create and copy-on-write publish under one mutex); a bare proxy (tests) only
-// has storage and uses the atomic create directly.
+// createUpstreamServer is handleAddUpstream's create-only write: the runtime's
+// create commit (Server.createServer) in the daemon.
 func (p *MCPProxyServer) createUpstreamServer(sc *config.ServerConfig) error {
-	if p.mainServer != nil && p.mainServer.runtime != nil {
-		return p.mainServer.createServer(sc)
+	w := p.writer()
+	if w == nil {
+		return errNoUpstreamWriter
 	}
-	if err := p.storage.CreateUpstreamServer(sc); err != nil {
-		if errors.Is(err, storage.ErrUpstreamExists) {
-			return &ServerExistsError{Name: sc.Name}
-		}
-		return err
-	}
-	return nil
+	return w.createServer(sc)
 }

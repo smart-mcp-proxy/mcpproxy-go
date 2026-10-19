@@ -41,7 +41,7 @@ func TestOutputSchemaHashMigration_ApprovedToolStaysApproved(t *testing.T) {
 	assert.Equal(t, storage.ToolApprovalStatusApproved, record.Status)
 	assert.NotEqual(t, legacyHash, record.ApprovedHash)
 	assert.Equal(t, record.ApprovedHash, record.CurrentHash)
-	assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), record.HashSchemaVersion)
+	assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), record.HashSchemaVersion)
 	assert.Equal(t, `{"properties":{"url":{"type":"string"}},"type":"object"}`, record.CurrentOutputSchema)
 
 	version, err := rt.storageManager.GetSchemaVersion()

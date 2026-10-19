@@ -106,7 +106,7 @@ func TestEnsureAnonymousIDDoesNotSaveStaleConfig(t *testing.T) {
 	// Simulate the stale-snapshot write directly: persistConfigLocked must
 	// refuse it because `stale` is not s.config.
 	s.mu.Lock()
-	wrote := s.persistConfigLocked(stale, "stale snapshot")
+	wrote := s.persistConfigLocked(stale, "stale snapshot", persistAnonID|persistVersion)
 	s.mu.Unlock()
 	if wrote {
 		t.Fatal("persistConfigLocked wrote a config that is not the live one")

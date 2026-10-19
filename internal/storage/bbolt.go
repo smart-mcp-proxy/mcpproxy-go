@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -36,6 +37,19 @@ type BoltDB struct {
 	logger *zap.SugaredLogger
 }
 
+// noSync opens databases with bbolt's NoSync. Only tests set it, through
+// DisableSyncForTesting; production databases always sync their commits.
+var noSync atomic.Bool
+
+// DisableSyncForTesting makes every database opened afterwards in this
+// process skip the fsync on commit (bbolt Options.NoSync). Committed data is
+// still visible to every reader of the open database; only crash durability is
+// lost, which no unit test exercises. Call it from TestMain in packages whose
+// tests open many databases or commit heavily: an fsync per commit on the
+// Windows CI runner dominated internal/runtime's test time. Never call it from
+// production code.
+func DisableSyncForTesting() { noSync.Store(true) }
+
 // NewBoltDB creates a new BoltDB instance
 func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	dbPath := filepath.Join(dataDir, "config.db")
@@ -45,6 +59,7 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	// owner-only (0600).
 	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{
 		Timeout: 10 * time.Second,
+		NoSync:  noSync.Load(),
 	})
 	if err != nil {
 		logger.Warnf("Failed to open database on first attempt: %v", err)
@@ -678,7 +693,9 @@ func (b *BoltDB) DeleteServerToolApprovals(serverName string) error {
 				return err
 			}
 		}
-		return nil
+		// Spec 117 FR-024: the baseline marker goes with the records, in the
+		// same transaction, so a removed and re-added server starts fresh.
+		return deleteToolBaselineDecisionsTx(tx, []string{serverName}, nil)
 	})
 }
 
@@ -693,7 +710,7 @@ func (b *BoltDB) PruneToolApprovalsNotIn(keep map[string]bool) (int, error) {
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(ToolApprovalBucket))
 		if bucket == nil {
-			return nil
+			return deleteToolBaselineDecisionsTx(tx, nil, keep)
 		}
 		var keysToDelete [][]byte
 		scanErr := bucket.ForEach(func(k, v []byte) error {
@@ -716,7 +733,10 @@ func (b *BoltDB) PruneToolApprovalsNotIn(keep map[string]bool) (int, error) {
 			}
 			removed++
 		}
-		return nil
+		// Spec 117 FR-024: orphaned baseline markers are pruned in the same
+		// transaction (including a server approved with an empty review,
+		// which has a marker and no records).
+		return deleteToolBaselineDecisionsTx(tx, nil, keep)
 	})
 	return removed, err
 }
@@ -903,11 +923,7 @@ func (b *BoltDB) SaveOAuthToken(record *OAuthTokenRecord) error {
 
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		data, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(record.ServerName), data)
+		return putOAuthRecord(bucket, record.ServerName, record)
 	})
 }
 
@@ -974,11 +990,7 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 			}
 		}
 
-		newData, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(serverKey), newData)
+		return putOAuthRecord(bucket, serverKey, record)
 	})
 }
 
@@ -1027,12 +1039,8 @@ func (b *BoltDB) saveOAuthClientCredentialsIf(serverKey, clientID, clientSecret 
 		record.CallbackPort = callbackPort
 		record.RedirectURI = redirectURI
 		record.Updated = time.Now()
-		newData, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
 		saved = true
-		return bucket.Put([]byte(serverKey), newData)
+		return putOAuthRecord(bucket, serverKey, record)
 	})
 	return saved && err == nil, err
 }
@@ -1084,11 +1092,7 @@ func (b *BoltDB) ClearOAuthClientCredentials(serverKey string) error {
 		record.RedirectURI = ""
 		record.Updated = time.Now()
 
-		newData, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(serverKey), newData)
+		return putOAuthRecord(bucket, serverKey, record)
 	})
 }
 
@@ -1126,11 +1130,7 @@ func (b *BoltDB) UpdateOAuthToken(serverKey string, mutate func(rec *OAuthTokenR
 			record.Created = now
 		}
 		record.Updated = now
-		newData, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
-		return bucket.Put([]byte(serverKey), newData)
+		return putOAuthRecord(bucket, serverKey, record)
 	})
 	if stderrors.Is(err, ErrSkipOAuthTokenUpdate) {
 		return nil
@@ -1188,12 +1188,8 @@ func (b *BoltDB) clearOAuthClientCredentialsWhere(serverKey string, match func(r
 		record.CallbackPort = 0
 		record.RedirectURI = ""
 		record.Updated = time.Now()
-		newData, err := record.MarshalBinary()
-		if err != nil {
-			return err
-		}
 		cleared = true
-		return bucket.Put([]byte(serverKey), newData)
+		return putOAuthRecord(bucket, serverKey, record)
 	})
 	return cleared, err
 }

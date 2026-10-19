@@ -115,6 +115,213 @@ The event bus enables real-time communication between runtime and UI components:
 - Automatic connection management with proper cleanup
 - JSON-formatted event payloads for easy consumption
 
+### Config Commit (Spec 116)
+
+Every change to the server set, or to any server's fields, is one **config
+commit** (`Runtime.Commit`, `internal/runtime/commit.go`). The live
+configuration is the only source of server membership and fields; the
+`upstreams` rows in `config.db` are its projection, written by the commit.
+`SaveConfiguration` never rebuilds the server list from storage, so a removed
+server cannot be resurrected by a later save.
+
+A commit holds `configCommitMu` from reading the live config until the new
+config is published and runs one pipeline:
+
+1. **Build**: clone the live config; the caller mutates the copy through a
+   `CommitTx` (`CreateServer`, `UpdateServer`, `SetEnabled`, `SetQuarantined`,
+   `RemoveServer`, `ReplaceConfig`, `ReconcileLive`, `MutateGlobal`).
+2. **Gate**: the #937 admission gate, against the stored view.
+3. **Prepare**: `configsvc.Prepare` assigns the commit generation `G` and
+   per-server generations (`ServerGen{Gen, Incarnation}`; an unchanged entry
+   keeps its generation, a re-created name gets a new incarnation).
+4. **Locks**: the approval lock of every server step 6 writes, sorted:
+   changed servers, servers with an `UnderApprovalLock` hook, removals,
+   replacements, OAuth-state clears and projection-repair saves of a server
+   the commit did not change (a repair can rewrite the stored trust and
+   quarantine policy a discovery pass reads under that lock). A global
+   approval-policy change (`quarantine_enabled`) takes every configured
+   server's lock. Dropping the lock for an unchanged server whose row is
+   repaired reopens the discovery-versus-repair race (#1571).
+5. **Disk** (only when a path is set and the commit writes the file): the raw
+   file is captured, then the new file is written. A file reload
+   (`ReloadConfiguration`) never writes the file, so it skips this step.
+6. **Storage**: one bbolt transaction (rows with their stamps, deletions,
+   `meta.config_commit_generation`), then the index purge for removed,
+   quarantined and disabled servers, then the in-memory purge (last-good tool
+   snapshot, capture stamp). A removed or replaced server loses its whole
+   **purge set** in that transaction (`internal/storage/purge.go`): tool and
+   prompt approvals, OAuth tokens and DCR client (exact `name` or
+   `name_<16 hex>` key), OAuth completion events, scan reports and jobs, the
+   integrity baseline, tool-call history and identities, and tool hashes.
+   The in-memory purge also bumps the server's last-good purge sequence, so a
+   local reindex that copied the snapshot before the removal drops its copy
+   (it re-checks the sequence under the approval lock).
+   The approval locks are released, then — still under the commit lock — the
+   purged servers' OAuth refresh schedules are cancelled and their inspection
+   exemptions revoked (leaf locks only), so no later commit's same-name
+   replacement can lose a fresh schedule or exemption to a name-keyed clear.
+   On a
+   storage failure nothing is published; when step 5 wrote the file, the
+   captured file is restored byte for byte (or removed if it did not exist).
+   A failed reload wrote nothing, so the file keeps the operator's edit
+   unapplied: the next reload applies it, but the next disk-writing commit
+   (`SaveConfiguration`, a server mutation, `ApplyConfig`) writes the live
+   config over it.
+7. **Advance**: `Manager.AdvanceGenerations` records every configured
+   server's committed generation in the upstream manager (and a tombstone
+   for a removed one), unregisters the instance of every removed or replaced
+   server and of every server whose connection settings, `enabled` or
+   `quarantined` changed, and restamps the retained instances with their new
+   config and generation (Spec 116 PR3).
+8. **Publish**: `configsvc.Publish` and the legacy `r.cfg` swap.
+
+After the lock is released the commit disconnects the instances step 7
+unregistered, reconciles the supervisor when an exemption was revoked, drops
+cached scan verdicts (purge observers; the scanner's verdict cache is also
+keyed by incarnation, so a replacement is never served the old entry before
+the observer runs), schedules connect workers, requests discovery for
+restamped instances and sends its events once.
+
+**Generation-bound workers and supervisor actions** (Spec 116 PR3, #1563).
+Everything that changes the manager's registry or connects an instance
+asynchronously is bound to the commit generation it was scheduled for: the
+commit's connect/disconnect workers (`AddServerAt`, `RemoveServerAt`), the
+supervisor's actions (generation from the snapshot they were planned from),
+`RestartServer`, `ForceReconnectAll` and Docker recovery. The manager
+re-checks the generation against its desired view under `captureMu` +
+`Manager.mu`, in the same critical section as the change, and a stale call
+returns `ErrStaleGeneration` and does nothing (logged at debug level). An
+action on an existing instance (a supervisor disconnect, an OAuth logout's
+disconnect, a restart or reconnect replacement through `ReplaceInstanceAt`)
+is also bound to that instance's `InstanceID`, because a restart installs a
+new instance at the same generation. Every instance leaves the registry
+through one `unregisterLocked`, which marks it unregistered so it never
+connects again and retires it (the retirement barrier below).
+Discovery and review captures carry the generation of the instance they
+listed and are dropped when it is not the stored row's; a last-good tool
+snapshot carries it too, so an approval-driven reindex never reapplies an
+old endpoint's tools after an endpoint change (it re-lists instead).
+`scripts/check-upstream-write-sites.sh` also fails on an unbound manager
+mutation in `internal/runtime` or `internal/server`, and on any change to
+`Manager.clients` outside `unregisterLocked`/`installLocked`.
+
+**Retirement barrier** (Spec 116 PR4, #1564). Each upstream instance owns a
+dial gate (`internal/upstream/dialgate`). Everything the instance sends goes
+through it: every TCP dial of its HTTP, SSE and OAuth traffic and every write
+on a connection it dialed (a per-instance gated `*http.Transport`), every
+process it launches (stdio, Docker `run` and the local launcher start in an
+admitted section that also registers the process tree with the gate, so
+`Retire` kills it; the OAuth browser opener is only admitted, since the
+browser it hands the URL to is not the instance's process), every MCP request and notification its mcp-go transport sends (a
+capability-preserving `dialgate.WrapTransport`), and every OAuth preflight,
+discovery, registration, code exchange and refresh (`oauth.Env` carries the
+instance transport). `unregisterLocked` retires the instance before it
+returns, so a commit retires a removed, replaced or quarantined instance
+before it publishes, and a restart, `ForceReconnectAll` or Docker recovery
+retires the old instance before it installs the new one. `Retire` sets the
+latch, cancels the gate context, closes tracked connections, kills tracked
+process groups, waits for admitted sections that began before the latch (a
+write-lock barrier; each section is one leaf operation whose connection it
+has already closed, so the wait is bounded), and sweeps again. After it
+returns nothing new is launched, dialed or written: a dial, a launch or a
+write fails with `ErrRetired` without touching the network, and a tool call
+on the retired instance fails as "server unavailable" without marking the
+replacement unhealthy. Teardown (the MCP close, the process-group kill,
+`docker stop`) still runs; the manual OAuth flow and token refresh refuse a
+retired instance and report it as "server not found". A launched process
+whose tree cannot be contained (a Windows Job Object that cannot be created
+or assigned) is killed and its start fails. On Windows the child is
+created `CREATE_SUSPENDED`, assigned to its Job Object and only then resumed
+(`NtResumeProcess`), so it cannot fork a descendant outside the Job. On Unix the launcher keeps an
+exited leader unreaped while a descendant it left in its process group runs,
+so the group ID stays pinned and the retirement kill (or `Stop`) reaches that
+descendant; a group whose leader was reaped is never signalled, since its ID
+may have been reused. `scripts/check-upstream-write-sites.sh` also fails on
+ungated HTTP in `internal/oauth`, `internal/upstream/core` and
+`internal/transport` (allowlist: `scripts/ungated-http-allowlist.txt`).
+Lock order: the gate's lock is innermost (`captureMu` → `Manager.mu` →
+`Gate.mu` → `Gate.connsMu`) and is held only around one dial, one write or
+one process start.
+
+**OAuth credential binding** (Spec 116 PR2b, #1607). Each committed server
+view carries an OAuth epoch next to its incarnation: the generation of the
+commit that created the name or last cleared its OAuth state because its OAuth
+configuration changed. `{Incarnation, OAuthEpoch}` is the server's credential
+binding. The commit stamps it on the snapshot, the `upstreams` row and the
+manager's desired view in one pass, and the manager binds every instance it
+builds to the binding of the generation it was built for (never read from the
+row). Every OAuth write and clear an instance makes goes through a storage
+method that checks the row's binding in the same bbolt transaction: token
+saves (a login's code exchange with its paired client, a refresh), DCR client
+saves, completion events, the 5xx token clear, the config-build DCR hygiene
+clears and the clears after a rejected refresh or login. The removal purge
+deletes the row and the OAuth-config clear raises the row's epoch in the
+transaction that deletes the credentials, so an old instance's write that was
+already past its network round-trip either committed first (and was deleted)
+or finds the row gone or re-bound and writes nothing; a same-name re-add never
+sees the old server's tokens. Reads are epoch-filtered only: a bound read
+treats a record of another epoch as absent, but does not check the row, so a
+removed name stays unreadable because its removal purges the records. Every
+write to the `oauth_tokens` bucket takes a new `Revision` from the bucket
+sequence, and a binding-conditional clear acts only on the revision its
+caller inspected, so a parked clear never erases what a same-binding
+replacement (a restart) rewrote. The one exception is the login flow's
+stale-DCR clear (`ClearOAuthClientIfBoundAndClientID`): it holds the client
+id it sent, not a record it read, so it checks the binding and that client
+id; a parked login-path clear can still erase a same-binding rewrite that
+kept the same client id. Refresh flights, the terminal latch, the cooldown
+and the re-registration state are keyed by `(server key, binding)`, so an
+old instance never joins the flight of a replacement with a different
+binding (a removal and re-add, or an OAuth-config change) or receives its
+token. A same-binding replacement (a restart) shares the key and can join
+the old instance's flight; a joiner whose flight failed because its
+initiator was retired retries on its own transport rather than taking that
+answer. A refresh schedule built from a token save records the binding the
+token was saved under, and a reactive flight's terminal outcome is applied
+only to a schedule of the flight's binding, checked when that schedule is
+selected. A late save notification from an older binding (bindings are
+commit generations, so older is known) does not replace the schedule of a
+newer one. The exception is a schedule loaded from storage at startup: it
+carries the zero binding, so no binding comparison is made for it, and a
+terminal outcome of any flight for the server applies to it (the resolver
+check that the flight ran under the server's current binding still
+applies). Its first token save replaces it with a bound schedule. A token
+store guards its 5xx-recovery clear with the revision the refresh flight
+itself wrote or read, never a later re-read, so a same-binding rewrite with
+the same access token survives the clear. Before it builds an instance the manager also checks that the
+stored row still carries exactly the committed view it holds (one bbolt
+`View`), so a stale worker builds no OAuth config at all. Logout and the
+standalone CLI logout (`ClearOAuthTokenForStandaloneLogout`, one exact key)
+stay current-state clears. `scripts/check-upstream-write-sites.sh` fails on an
+unconditional OAuth mutator in `internal/upstream` or `internal/oauth`. No
+lock edge is added: the checks are bbolt leaves taken with no runtime lock
+held, and the coordinator's mutex stays a leaf.
+
+**Incarnation-bound approvals** (Spec 116 PR2). Each server has an
+incarnation that changes only when its name is removed and created again.
+Every approval writer (tool approve/block/toggle, the unquarantine baseline
+promotion, prompt approvals, the scanner's baseline and blocks) captures the
+incarnation when it starts — or takes the client's `expected_incarnation` —
+and re-checks it against the stored row under the server's approval lock,
+the lock the removal purges under. A mismatch writes nothing and returns
+`ErrServerReplaced` (REST 409 `server_replaced`). Scanner approval
+unquarantines through a commit with `ExpectIncarnation`. Asynchronous
+writers that can outlive a removal (scan job and report saves, identity
+registration, tool-call history) use storage methods that check the row's
+incarnation in the same bbolt transaction as the write. A discovery pass makes its final eligibility check (stored row
+present, enabled, not quarantined, generation unchanged) and its index writes
+in one hold of the server's approval lock, and approval policy is read from
+storage, so a pass can never re-index a server a commit has just quarantined
+or removed.
+
+**Lock order** (outermost first): `configCommitMu` → server approval locks
+(sorted; released before step 7) → `storage.Manager.mu`/bbolt; `configCommitMu`
+→ `upstream.Manager.captureMu` (W) → `Manager.mu` in step 7; `configCommitMu`
+→ `configsvc` update lock → `Runtime.mu`. Code holding any of the inner locks
+must never call `Commit`. `scripts/check-upstream-write-sites.sh` (CI) fails
+when an `upstreams` row is written anywhere but the storage package and
+`internal/runtime/commit*.go`.
+
 ### Runtime Lifecycle
 
 **Initialization**:

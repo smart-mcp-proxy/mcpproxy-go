@@ -809,12 +809,13 @@ type ServerConfig struct {
 
 // OAuthConfig represents OAuth configuration for a server
 type OAuthConfig struct {
-	ClientID     string            `json:"client_id,omitempty" mapstructure:"client_id"`
-	ClientSecret string            `json:"client_secret,omitempty" mapstructure:"client_secret"`
-	RedirectURI  string            `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
-	Scopes       []string          `json:"scopes,omitempty" mapstructure:"scopes"`
-	PKCEEnabled  bool              `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
-	ExtraParams  map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"` // Additional OAuth parameters (e.g., RFC 8707 resource)
+	ClientID        string            `json:"client_id,omitempty" mapstructure:"client_id"`
+	ClientSecret    string            `json:"client_secret,omitempty" mapstructure:"client_secret"`
+	RedirectURI     string            `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
+	CallbackBaseURL string            `json:"callback_base_url,omitempty" mapstructure:"callback_base_url"`
+	Scopes          []string          `json:"scopes,omitempty" mapstructure:"scopes"`
+	PKCEEnabled     bool              `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
+	ExtraParams     map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"` // Additional OAuth parameters (e.g., RFC 8707 resource)
 
 	// Spec 113-b: optional per-server discovery overrides. Each is an absolute
 	// https URL (http only on a loopback host) with no query, fragment or
@@ -2379,6 +2380,11 @@ func (c *Config) oauthRedirectURIErrors() []ValidationError {
 		if server == nil || server.OAuth == nil {
 			continue
 		}
+		if err := ValidateOAuthCallbackBaseURL(server.OAuth.CallbackBaseURL); err != nil {
+			errors = append(errors, ValidationError{
+				Field: fmt.Sprintf("mcpServers[%d].oauth.callback_base_url", i), Message: err.Error(),
+			})
+		}
 		if strings.TrimSpace(server.OAuth.RedirectURI) == "" {
 			continue
 		}
@@ -3058,6 +3064,7 @@ func OAuthConfigChanged(old, new *OAuthConfig) bool {
 	if old.ClientID != new.ClientID ||
 		old.ClientSecret != new.ClientSecret ||
 		old.RedirectURI != new.RedirectURI ||
+		old.CallbackBaseURL != new.CallbackBaseURL ||
 		old.PKCEEnabled != new.PKCEEnabled ||
 		old.AuthorizationEndpoint != new.AuthorizationEndpoint ||
 		old.TokenEndpoint != new.TokenEndpoint ||

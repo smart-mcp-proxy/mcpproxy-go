@@ -439,15 +439,23 @@ type RuntimeStats interface {
 
 // Service manages anonymous telemetry heartbeats and feedback submission.
 type Service struct {
-	config    *config.Config
-	cfgPath   string
-	version   string
-	edition   string
-	endpoint  string
-	logger    *zap.Logger
-	stats     RuntimeStats
-	startTime time.Time
-	client    *http.Client
+	config  *config.Config
+	cfgPath string
+	// configUpdater, when set, routes every config write through the daemon's
+	// config commit (#1592) instead of config.SaveConfig. Guarded by mu.
+	configUpdater ConfigUpdater
+	// fallbackAnonID/fallbackAnonCreatedAt hold an identity whose commit failed
+	// (transient disk/storage error) so heartbeats still report one stable id;
+	// the next rotation pass retries persisting it. Guarded by mu.
+	fallbackAnonID        string
+	fallbackAnonCreatedAt string
+	version               string
+	edition               string
+	endpoint              string
+	logger                *zap.Logger
+	stats                 RuntimeStats
+	startTime             time.Time
+	client                *http.Client
 
 	// Feedback rate limiter (max 5 per hour)
 	feedbackLimiter *RateLimiter
@@ -1256,6 +1264,20 @@ func (s *Service) advanceUpgradeFunnelOnce() bool {
 	if cfg == nil {
 		return true
 	}
+	if upd := s.configUpdater; upd != nil {
+		// Decide and apply inside the commit, on the commit's clone: mutating
+		// the published config first would make the commit see no difference
+		// and skip the disk write (#1592).
+		version := s.version
+		s.commitLocked("Advanced last_reported_version", upd, func(tc *config.TelemetryConfig) bool {
+			if tc.LastReportedVersion == version {
+				return false
+			}
+			tc.LastReportedVersion = version
+			return true
+		})
+		return true
+	}
 	if cfg.Telemetry == nil {
 		cfg.Telemetry = &config.TelemetryConfig{}
 	}
@@ -1263,7 +1285,7 @@ func (s *Service) advanceUpgradeFunnelOnce() bool {
 		return true
 	}
 	cfg.Telemetry.LastReportedVersion = s.version
-	return s.persistConfigLocked(cfg, "Advanced last_reported_version")
+	return s.persistConfigLocked(cfg, "Advanced last_reported_version", persistVersion)
 }
 
 // BuildPayload renders the heartbeat payload at the current point in time.
@@ -1378,6 +1400,12 @@ func (s *Service) telemetryCursor(cfg *config.Config) (anonID, createdAt, previo
 		cfg.Telemetry.LastStartupOutcome
 }
 
+func (s *Service) fallbackIdentity() (string, string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.fallbackAnonID, s.fallbackAnonCreatedAt
+}
+
 func (s *Service) buildHeartbeat() HeartbeatPayload {
 	return s.buildHeartbeatWithOneShots(true)
 }
@@ -1408,8 +1436,9 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 
 	// Spec 042: rotate the anonymous ID if it's older than 365 days. Runs on the
 	// snapshot, so the rotated ID is the one this payload reports.
+	var resolvedID, resolvedCreatedAt string
 	if consumeOneShots {
-		s.maybeRotateAnonymousID(cfg, time.Now().UTC())
+		resolvedID, resolvedCreatedAt = s.maybeRotateAnonymousID(cfg, time.Now().UTC())
 	}
 
 	// Read every cfg.Telemetry-derived scalar in ONE locked pass. These four
@@ -1418,6 +1447,14 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 	// which can run on another goroutine while this payload is being built —
 	// reading them unlocked is a data race, not merely a torn view.
 	anonID, anonCreatedAt, prevVersion, lastStartupOutcome := s.telemetryCursor(cfg)
+	// With a config updater the committed identity is returned, never written
+	// into the shared published config; it wins over the snapshot's.
+	if resolvedID != "" {
+		anonID, anonCreatedAt = resolvedID, resolvedCreatedAt
+	}
+	if anonID == "" {
+		anonID, anonCreatedAt = s.fallbackIdentity()
+	}
 
 	payload := HeartbeatPayload{
 		AnonymousID:    anonID,
@@ -1686,6 +1723,45 @@ func (s *Service) ensureAnonymousIDOnce() bool {
 	if cfg == nil {
 		return true
 	}
+	if upd := s.configUpdater; upd != nil {
+		// Generate inside the commit, on the commit's clone (see
+		// advanceUpgradeFunnelOnce): the published config is never mutated
+		// before the commit, so the disk write cannot be skipped as a no-op.
+		generated, createdAt := "", ""
+		seed := s.fallbackAnonID
+		ok := s.commitLocked("Generated anonymous telemetry ID", upd, func(tc *config.TelemetryConfig) bool {
+			if tc.AnonymousID != "" {
+				if tc.AnonymousIDCreatedAt != "" {
+					return false
+				}
+				tc.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
+				return true
+			}
+			generated = seed
+			if generated == "" {
+				generated = uuid.New().String()
+			}
+			createdAt = time.Now().UTC().Format(time.RFC3339)
+			tc.AnonymousID = generated
+			tc.AnonymousIDCreatedAt = createdAt
+			return true
+		})
+		if ok {
+			s.fallbackAnonID, s.fallbackAnonCreatedAt = "", ""
+			if generated != "" {
+				s.logger.Info("Generated and persisted anonymous telemetry ID", zap.String("id", generated))
+			}
+			return true
+		}
+		if generated != "" {
+			// Commit failed: keep the id in memory (pre-updater behaviour) so
+			// this process reports one identity; the next rotation pass retries.
+			s.fallbackAnonID, s.fallbackAnonCreatedAt = generated, createdAt
+			s.logger.Warn("Failed to persist anonymous telemetry ID; continuing with in-memory id",
+				zap.String("id", generated))
+		}
+		return true
+	}
 	if cfg.Telemetry == nil {
 		cfg.Telemetry = &config.TelemetryConfig{}
 	}
@@ -1696,7 +1772,7 @@ func (s *Service) ensureAnonymousIDOnce() bool {
 			return true
 		}
 		cfg.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
-		if !s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at for legacy install") && s.config != cfg {
+		if !s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at for legacy install", persistAnonID) && s.config != cfg {
 			cfg.Telemetry.AnonymousIDCreatedAt = ""
 			return false
 		}
@@ -1707,7 +1783,7 @@ func (s *Service) ensureAnonymousIDOnce() bool {
 	cfg.Telemetry.AnonymousID = newID
 	cfg.Telemetry.AnonymousIDCreatedAt = time.Now().UTC().Format(time.RFC3339)
 
-	if s.persistConfigLocked(cfg, "Generated anonymous telemetry ID") {
+	if s.persistConfigLocked(cfg, "Generated anonymous telemetry ID", persistAnonID) {
 		s.logger.Info("Generated and persisted anonymous telemetry ID",
 			zap.String("id", newID))
 		return true
@@ -1749,36 +1825,44 @@ func (s *Service) ensureAnonymousIDOnce() bool {
 // never-persisted id in the config the payload then transmits — exactly the
 // identity fragmentation the rollback exists to prevent. Serializing makes the
 // loser observe the winner's refreshed created_at and do nothing.
-func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
+//
+// With a config updater the resolved (committed) identity is RETURNED and cfg is
+// never written: cfg is the shared published config. Without one, the legacy
+// path mutates cfg in place and returns empty strings.
+func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) (string, string) {
 	if cfg == nil {
-		return
+		return "", ""
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if upd := s.configUpdater; upd != nil {
+		return s.rotateViaUpdaterLocked(now, upd)
+	}
+
 	if cfg.Telemetry == nil || cfg.Telemetry.AnonymousID == "" {
-		return
+		return "", ""
 	}
 	createdAtStr := cfg.Telemetry.AnonymousIDCreatedAt
 	if createdAtStr == "" {
 		// Legacy install — initialize without rotating.
 		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at")
-		return
+		s.persistConfigLocked(cfg, "Initialized anonymous_id_created_at", persistAnonID)
+		return "", ""
 	}
 	createdAt, err := time.Parse(time.RFC3339, createdAtStr)
 	if err != nil {
 		// Corrupt timestamp: reset to now without rotating.
 		cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-		s.persistConfigLocked(cfg, "Reset corrupt anonymous_id_created_at")
-		return
+		s.persistConfigLocked(cfg, "Reset corrupt anonymous_id_created_at", persistAnonID)
+		return "", ""
 	}
 	if !createdAt.Before(now) {
 		// Future timestamp (clock skew) — do not rotate.
-		return
+		return "", ""
 	}
 	if now.Sub(createdAt) <= 365*24*time.Hour {
-		return
+		return "", ""
 	}
 
 	// Rotate. The caller reports cfg's anonymous_id in the payload it is
@@ -1791,13 +1875,14 @@ func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
 	prevCreatedAt := cfg.Telemetry.AnonymousIDCreatedAt
 	cfg.Telemetry.AnonymousID = uuid.New().String()
 	cfg.Telemetry.AnonymousIDCreatedAt = now.Format(time.RFC3339)
-	if !s.persistConfigLocked(cfg, "Rotated anonymous_id (annual)") {
+	if !s.persistConfigLocked(cfg, "Rotated anonymous_id (annual)", persistAnonID) {
 		// The live config was swapped out from under this snapshot, so the new
 		// id is not on disk. Put the snapshot back the way we found it and let
 		// the next heartbeat rotate the live config instead.
 		cfg.Telemetry.AnonymousID = prevID
 		cfg.Telemetry.AnonymousIDCreatedAt = prevCreatedAt
 	}
+	return "", ""
 }
 
 // persistConfig writes cfg to disk, but ONLY while cfg is still the service's
@@ -1821,7 +1906,7 @@ func (s *Service) maybeRotateAnonymousID(cfg *config.Config, now time.Time) {
 func (s *Service) persistConfig(cfg *config.Config, reason string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.persistConfigLocked(cfg, reason)
+	return s.persistConfigLocked(cfg, reason, persistAnonID|persistVersion)
 }
 
 // persistConfigLocked is persistConfig's body. The caller MUST already hold
@@ -1829,7 +1914,7 @@ func (s *Service) persistConfig(cfg *config.Config, reason string) bool {
 // be atomic — maybeRotateAnonymousID, which must not interleave with another
 // rotation — can hold the lock across all of it instead of reacquiring here
 // (s.mu is not reentrant).
-func (s *Service) persistConfigLocked(cfg *config.Config, reason string) bool {
+func (s *Service) persistConfigLocked(cfg *config.Config, reason string, _ persistFields) bool {
 	if cfg == nil {
 		return false
 	}
@@ -1851,6 +1936,114 @@ func (s *Service) persistConfigLocked(cfg *config.Config, reason string) bool {
 	}
 	s.logger.Debug("Persisted telemetry config", zap.String("reason", reason))
 	return true
+}
+
+// persistFields selects which telemetry fields a persist writes through the
+// config commit, so a stale snapshot cannot overwrite unrelated live fields.
+type persistFields int
+
+const (
+	persistAnonID  persistFields = 1 << iota // anonymous_id + anonymous_id_created_at
+	persistVersion                           // last_reported_version
+)
+
+// ConfigUpdater applies fn to the telemetry block through the daemon's config
+// commit (runtime.UpdateTelemetry) and reports fn's result as an error.
+type ConfigUpdater func(reason string, fn func(tc *config.TelemetryConfig) bool) error
+
+// SetConfigUpdater routes this service's config writes (anonymous id, annual
+// rotation, upgrade cursor) through the daemon's config commit instead of a
+// direct config.SaveConfig, so they cannot race or clobber a commit (#1592).
+func (s *Service) SetConfigUpdater(u ConfigUpdater) {
+	s.mu.Lock()
+	s.configUpdater = u
+	s.mu.Unlock()
+}
+
+// commitLocked applies fn to the live telemetry block through the config
+// commit. The caller holds s.mu, but Commit ends in NotifyConfigChanged, which
+// takes s.mu, so s.mu is released around the call. fn runs on the commit's
+// clone of the live block, so it sees (and must re-validate against) the
+// CURRENT values, never a stale snapshot's.
+func (s *Service) commitLocked(reason string, upd ConfigUpdater, fn func(tc *config.TelemetryConfig) bool) bool {
+	s.mu.Unlock()
+	err := upd(reason, fn)
+	s.mu.Lock()
+	if err != nil {
+		s.logger.Debug("Failed to commit telemetry config", zap.String("reason", reason), zap.Error(err))
+		return false
+	}
+	return true
+}
+
+// rotateDecision evaluates the annual-rotation rules against tc and applies
+// them in place. It reports a human reason when tc changed.
+func rotateDecision(tc *config.TelemetryConfig, now time.Time) (string, bool) {
+	if tc.AnonymousID == "" {
+		return "", false
+	}
+	if tc.AnonymousIDCreatedAt == "" {
+		tc.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+		return "Initialized anonymous_id_created_at", true
+	}
+	createdAt, err := time.Parse(time.RFC3339, tc.AnonymousIDCreatedAt)
+	if err != nil {
+		tc.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+		return "Reset corrupt anonymous_id_created_at", true
+	}
+	if !createdAt.Before(now) || now.Sub(createdAt) <= 365*24*time.Hour {
+		return "", false
+	}
+	tc.AnonymousID = uuid.New().String()
+	tc.AnonymousIDCreatedAt = now.Format(time.RFC3339)
+	return "Rotated anonymous_id (annual)", true
+}
+
+// rotateViaUpdaterLocked re-evaluates rotation inside the commit against the
+// live block, so a stale snapshot (a reload installed a newer identity while a
+// heartbeat held the old config) cannot overwrite the current identity. The
+// published config is never mutated: the identity that is actually committed
+// is RETURNED for the payload being built. When the live block has no id yet
+// (initial commit failed) the commit also retries creating one, reusing the
+// in-memory fallback id so the identity stays stable. If the commit fails, the
+// id is kept in memory as the fallback and still returned.
+func (s *Service) rotateViaUpdaterLocked(now time.Time, upd ConfigUpdater) (string, string) {
+	var gotID, gotCreatedAt string
+	seedID, seedCreatedAt := s.fallbackAnonID, s.fallbackAnonCreatedAt
+	called, fresh := false, false
+	ok := s.commitLocked("Rotated anonymous_id (annual)", upd, func(tc *config.TelemetryConfig) bool {
+		called = true
+		changed := false
+		if tc.AnonymousID == "" {
+			id, created := seedID, seedCreatedAt
+			if id == "" {
+				id = uuid.New().String()
+			}
+			if created == "" {
+				created = now.Format(time.RFC3339)
+			}
+			tc.AnonymousID, tc.AnonymousIDCreatedAt = id, created
+			changed, fresh = true, true
+		} else {
+			_, changed = rotateDecision(tc, now)
+		}
+		gotID, gotCreatedAt = tc.AnonymousID, tc.AnonymousIDCreatedAt
+		return changed
+	})
+	if ok {
+		s.fallbackAnonID, s.fallbackAnonCreatedAt = "", ""
+		if !called {
+			return "", ""
+		}
+		return gotID, gotCreatedAt
+	}
+	// A failed ANNUAL rotation must not transmit the never-persisted new id
+	// (it would fragment continuity); only a first-time id is kept in memory.
+	if called && fresh && gotID != "" {
+		s.fallbackAnonID, s.fallbackAnonCreatedAt = gotID, gotCreatedAt
+		return gotID, gotCreatedAt
+	}
+	return "", ""
 }
 
 // IsValidSemverVersion reports whether a build version is a released (semver)

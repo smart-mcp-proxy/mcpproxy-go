@@ -50,6 +50,13 @@ graph LR
   tool_graph["Tool co-occurrence graph (experimental,…"]
   telemetry_identity["Telemetry identity & data quality (mach…"]
   telemetry_v7_churn["Telemetry v7: honest funnel + churn ins…"]
+  profiles_v3["Spec 108 profiles v3: scoped profiles,…"]
+  upstream_resilience["Spec 113 upstream resilience: OAuth ref…"]
+  pending_call_outcome["Spec 114 typed pending-call outcome + c…"]
+  mcp_credential_lifecycle["Spec 115 admin MCP credentials tool: cl…"]
+  config_commit_consistency["Spec 116 config commit consistency: one…"]
+  review_bound_approvals["Spec 117 review-bound approvals: durabl…"]
+  quarantine_approval_pilot["Quarantine/approval testing pilot: inde…"]
 
   scanner_v2 --> sandbox_isolation
   ux_audit --> action_log_transparency
@@ -66,19 +73,26 @@ graph LR
   schema_deferred --> token_bench
   analytics_dashboard --> tool_graph
   telemetry_identity --> telemetry_v7_churn
+  upstream_resilience --> pending_call_outcome
+  profiles_v3 --> mcp_credential_lifecycle
+  config_commit_consistency --> review_bound_approvals
+  review_bound_approvals --> quarantine_approval_pilot
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef in_progress fill:#1f6feb,stroke:#0b3d91,color:#ffffff;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,agent_scope_hardening done;
-  class ux_audit,action_log_transparency,token_bench,telemetry_identity,telemetry_v7_churn in_progress;
+  class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,agent_scope_hardening,upstream_resilience,mcp_credential_lifecycle,config_commit_consistency,review_bound_approvals,quarantine_approval_pilot done;
+  class ux_audit,action_log_transparency,token_bench,telemetry_identity,telemetry_v7_churn,profiles_v3 in_progress;
+  class pending_call_outcome in_review;
   class tpa_db,remote_access_tunnel,auto_routing_mode,tool_graph todo;
 ```
 
-**Independent epics** (15) — no cross-epic prerequisites; each stands alone:
+**Independent epics** (16) — no cross-epic prerequisites; each stands alone:
 
 - 🔵 **Release qualification gate (auto-QA matrix blocks the tag)** — In progress · P0
 - 🔵 **MCP protocol upgrade to 2026-07-28 revision** — In progress · P1
+- 🔵 **Spec 109 navigation, scope filters and cross-surface UX consistency** — In progress · P1
 - 🔵 **Planning/docs truth automation** — In progress · P2
 - 🔵 **Discovery-quality eval harness (Spec 065 second half)** — In progress · P3
 - ⚪ **Windows native tray app** — Todo · P2
@@ -158,17 +172,17 @@ graph LR
   release_qa_gate_matrix --> release_qa_gate_consistency
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class release_qa_gate_matrix,release_qa_gate_playwright done;
-  class release_qa_gate_macos,release_qa_gate_consistency todo;
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
+  class release_qa_gate_matrix,release_qa_gate_playwright,release_qa_gate_consistency done;
+  class release_qa_gate_macos in_review;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | T1: tag-blocking release-gate workflow: server-type matrix (stdio/http/sse/docker/oauth) + invariants (activity-log/request-id, token+telemetry counters, quarantine flow, reconnect, upgrade-in-place), publish jobs gated on the verdict, scan-eval unconditional on tags | 🟢 Done | #819 |
 | T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only) | 🟢 Done | #1030 |
-| T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app) | ⚪ Todo | — |
-| T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states) | ⚪ Todo | — |
+| T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app) | 🟡 In review | #1669 |
+| T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states) | 🟢 Done | #1655 |
 
 </details>
 
@@ -316,6 +330,58 @@ Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/)
 </details>
 
 <details>
+<summary>🔵 Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability — In progress · P1</summary>
+
+> Shipped 2026-09-26..10-05 as PRs 108-a..l. Left open: T126 live run of the six audit acceptance checks on one isolated instance across all surfaces (task below), and issue #1449 (macOS review follow-ups).
+
+Spec: [108-profiles-v3](./specs/108-profiles-v3/)
+
+```mermaid
+graph LR
+  profiles_v3_impl["PRs 108-a..l: policy fields, enforcement, bin…"]
+  profiles_v3_live_acceptance["Live run of the six Spec 108 audit acceptance…"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class profiles_v3_impl done;
+  class profiles_v3_live_acceptance todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| PRs 108-a..l: policy fields, enforcement, bindings, CLI, MCP admin tool, Web UI, macOS, parity docs | 🟢 Done | #1380 #1411 #1430 #1436 #1441 #1442 #1443 #1444 #1448 #1456 #1500 |
+| Live run of the six Spec 108 audit acceptance checks on one isolated instance (Web UI, macOS, CLI, MCP) — tasks.md T126 | ⚪ Todo | — |
+
+</details>
+
+<details>
+<summary>🔵 Spec 109 navigation, scope filters and cross-surface UX consistency — In progress · P1</summary>
+
+> Shipped 2026-09-26..10-02 as PRs 109-a..m. Left open: T150 live run of every user story's independent test across surfaces (task below).
+
+Spec: [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/)
+
+```mermaid
+graph LR
+  ux_navigation_impl["PRs 109-a..m: attention list, review queue, c…"]
+  ux_navigation_live_acceptance["Live run of every Spec 109 user story's indep…"]
+
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class ux_navigation_impl done;
+  class ux_navigation_live_acceptance todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| PRs 109-a..m: attention list, review queue, catalog-first Add, grouped navigation, parity docs | 🟢 Done | #1376 #1377 #1382 #1399 #1400 #1409 #1412 #1424 #1425 #1427 #1428 #1461 |
+| Live run of every Spec 109 user story's independent test on one isolated instance — tasks.md T150 | ⚪ Todo | — |
+
+</details>
+
+<details>
 <summary>🔵 Planning/docs truth automation — In progress · P2</summary>
 
 > Automate the consistency checks this very audit had to do by hand: roadmap vs GitHub PR state, tasks.md updates on implementation PRs, volatile CLAUDE.md/README facts, and quickstart contract tests.
@@ -367,6 +433,15 @@ graph LR
 | Task | Status | Refs |
 | --- | --- | --- |
 | Promote retrieval-D1 from report-only to PR-blocking (spec 065 FR-009/SC-005), and adjudicate the CN-002 frozen-corpus question | ⚪ Todo | `MCP-742` |
+
+</details>
+
+<details>
+<summary>🟡 Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls — In review · P2</summary>
+
+> Spec-only PR #1536 open; implementation follows the spec review. Tracks issue #1321 (follow-up to #1317).
+
+PR: #1536
 
 </details>
 
@@ -606,6 +681,24 @@ graph LR
 </details>
 
 <details>
+<summary>🟢 Spec 116 config commit consistency: one commit section, atomic removal, upstream retirement — Done · P0</summary>
+
+> Shipped 2026-10-12..10-14. Unticked tasks.md boxes are stale (the work merged); spec-gardener #1594 syncs them.
+
+Spec: [116-config-commit-consistency](./specs/116-config-commit-consistency/) · PR: #1590 #1600 #1608 #1612 #1621
+
+</details>
+
+<details>
+<summary>🟢 Spec 117 review-bound approvals: durable baselines, hash-bound approvals, ordered tool inventories — Done · P0</summary>
+
+> Shipped 2026-10-12..10-13 (PR-1..3).
+
+Spec: [117-review-bound-approvals](./specs/117-review-bound-approvals/) · PR: #1604 #1605 #1609
+
+</details>
+
+<details>
 <summary>🟢 Non-Docker sandbox isolation (Landlock) — Done · P1 · MCP-34</summary>
 
 > Landlock LSM + setrlimit native sandbox for stdio upstreams; no userns (Ubuntu 24.04 safe). Originated from roadmap item #11 (no dedicated spec — 054 is the unrelated security-gateway spec). Code in internal/sandbox/; PRs #754/#759/#768/#781/#782.
@@ -826,6 +919,33 @@ graph LR
 </details>
 
 <details>
+<summary>🟢 Spec 113 upstream resilience: OAuth refresh, discovery, call-error taxonomy, session re-init — Done · P1</summary>
+
+> Shipped 2026-10-06..10-17 (113-a..f, plus #1650 serializing session re-init with in-flight requests). tasks.md checkboxes were never ticked (0/100); spec-gardener #1594 syncs them.
+
+Spec: [113-upstream-resilience](./specs/113-upstream-resilience/) · PR: #1495 #1498 #1499 #1501 #1502 #1504 #1510 #1650
+
+</details>
+
+<details>
+<summary>🟢 Spec 115 admin MCP credentials tool: client credentials + agent token lifecycle — Done · P1</summary>
+
+> Shipped 2026-10-10. #1579 (activity table fold + orphan seed honouring the Spec 115 guard) is an open follow-up fix.
+
+Spec: [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) · PR: #1557
+
+</details>
+
+<details>
+<summary>🟢 Quarantine/approval testing pilot: independent policy model, scenario inventory, mutation gate — Done · P1</summary>
+
+> Shipped 2026-10-13..10-16: internal/qapilot model, S01-S26 scenarios, check ledger + mutation set run by quarantine-pilot.yml; #1634 fixed an approval-hash collision the pilot found. Docs: docs/development/quarantine-approval-pilot.md.
+
+PR: #1619 #1631 #1634
+
+</details>
+
+<details>
 <summary>🟢 Tray↔core decoupling: socket/REST API only, no config-file reads — Done · P2</summary>
 
 > Architecture rule (CLAUDE.md): the tray holds no state and talks to the core only via socket/REST + SSE. 2026-07-11 source-of-truth re-audit + fix: Swift tray was already clean (MCPProxyApp.swift opens the config in an external editor, never parses it); the Go tray's update-check gate was already reworked to core-API gating (#805). The last violation — config.LoadFromFile in the Go tray's OAuth login path, live since ff03db92 (2026-05-18, #477) — turned out to be FUNCTIONALLY DEAD: the loaded config fed only two debug log lines, while the actual trigger was already the core-API TriggerOAuthLogin. Deleted rather than ported to REST. Bootstrap reads (socket path, config PATH without parsing, CA cert) are allowed and remain. Now enforced by a test so the rule cannot silently rot.
@@ -884,14 +1004,17 @@ graph LR
 | Epic | Status | Priority | Progress | Spec | PR |
 | --- | --- | --- | --- | --- | --- |
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
-| Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | — | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
+| Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | 4/4 (100%) | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
 | MCP protocol upgrade to 2026-07-28 revision | In progress | P1 | 21/81 (26%) | [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/) |  |
+| Spec 108 profiles v3: scoped profiles, client binding, scope-aware observability | In progress | P1 | 194/195 (99%) | [108-profiles-v3](./specs/108-profiles-v3/) |  |
+| Spec 109 navigation, scope filters and cross-surface UX consistency | In progress | P1 | 257/258 (100%) | [109-ux-navigation-consistency](./specs/109-ux-navigation-consistency/) |  |
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
+| Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls | In review | P2 | — |  | #1536 |
 | tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
@@ -904,6 +1027,8 @@ graph LR
 | SDK v1 migration | Todo (parked) | P3 | — |  |  |
 | Upgrade awareness & guided update | Done | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
 | Connect step trust: preview, visible backup, one-click undo | Done | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
+| Spec 116 config commit consistency: one commit section, atomic removal, upstream retirement | Done | P0 | 81/124 (65%) | [116-config-commit-consistency](./specs/116-config-commit-consistency/) | #1590 #1600 #1608 #1612 #1621 |
+| Spec 117 review-bound approvals: durable baselines, hash-bound approvals, ordered tool inventories | Done | P0 | 46/50 (92%) | [117-review-bound-approvals](./specs/117-review-bound-approvals/) | #1604 #1605 #1609 |
 | Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | P1 | — |  |  |
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
 | Analytics dashboard as default page | Done | P1 | 25/26 (96%) | [069-observability-usage-graphs](./specs/069-observability-usage-graphs/) |  |
@@ -911,6 +1036,9 @@ graph LR
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Deferred-schema serialization for the direct tools/list surface (spec 102) | Done | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) | #1063 |
 | Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | Done | P1 | 111/113 (98%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
+| Spec 113 upstream resilience: OAuth refresh, discovery, call-error taxonomy, session re-init | Done | P1 | 0/100 (0%) | [113-upstream-resilience](./specs/113-upstream-resilience/) | #1495 #1498 #1499 #1501 #1502 #1504 #1510 #1650 |
+| Spec 115 admin MCP credentials tool: client credentials + agent token lifecycle | Done | P1 | 86/87 (99%) | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | #1557 |
+| Quarantine/approval testing pilot: independent policy model, scenario inventory, mutation gate | Done | P1 | — |  | #1619 #1631 #1634 |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
 | Spec 107 server edition SSO front door hardened for real IdPs | Done | P2 | 126/126 (100%) | [107-server-edition-sso-hardening](./specs/107-server-edition-sso-hardening/) |  |
 
@@ -1008,7 +1136,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [078-connect-trust-preview](./specs/078-connect-trust-preview/) | — | — |
 | [079-upgrade-nudge](./specs/079-upgrade-nudge/) | — | — |
 | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) | — | — |
-| [081-release-qa-gate](./specs/081-release-qa-gate/) | — | — |
+| [081-release-qa-gate](./specs/081-release-qa-gate/) | `shipped` | 4/4 (100%) |
 | [082-work-sessions](./specs/082-work-sessions/) | — | — |
 | [083-discovery-profiler](./specs/083-discovery-profiler/) | `in-flight` | 4/41 (10%) |
 | [084-toon-output](./specs/084-toon-output/) | `in-flight` | 40/43 (93%) |
@@ -1042,3 +1170,5 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [112-client-header-forwarding](./specs/112-client-header-forwarding/) | `shipped` | 38/40 (95%) |
 | [113-upstream-resilience](./specs/113-upstream-resilience/) | `in-flight` | 40/100 (40%) |
 | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | `shipped` | 86/87 (99%) |
+| [116-config-commit-consistency](./specs/116-config-commit-consistency/) | `in-flight` | 81/124 (65%) |
+| [117-review-bound-approvals](./specs/117-review-bound-approvals/) | `in-flight` | 46/50 (92%) |

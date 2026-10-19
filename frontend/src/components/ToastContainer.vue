@@ -70,6 +70,7 @@
             v-if="toast.message"
             class="text-sm opacity-90 whitespace-pre-wrap break-words max-w-md max-h-60 overflow-y-auto"
           >{{ toast.message }}</div>
+          <a v-if="toast.link" :href="toast.link.url" target="_blank" rel="noopener noreferrer" class="link font-semibold">{{ toast.link.label }}</a>
         </div>
 
         <!-- Close button -->

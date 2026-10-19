@@ -388,7 +388,7 @@ func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testin
 			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "the backfill must not baseline a never-baselined record blind")
 			assert.Empty(t, rec.ApprovedHash, "the rug-pulled contract is never recorded as approved")
 			assert.Equal(t, oldDesc, rec.PreviousDescription)
-			assert.Equal(t, uint64(storage.OutputSchemaHashSchemaVersion), rec.HashSchemaVersion, "adoption raises the hash version so the migration still completes")
+			assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), rec.HashSchemaVersion, "adoption raises the hash version so the migration still completes")
 
 			gate := proxy.evaluateToolGate("a", "ns:erase")
 			assert.Equal(t, storage.ToolApprovalStatusChanged, gate.lockStatus)
@@ -458,11 +458,19 @@ func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testin
 			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-approved", CurrentDescription: "Read ns:erase",
 		},
 		// The sibling was marked changed pre-105 and the upstream serves the
-		// PREVIOUS description again: the adopted lock revert-restores.
+		// PREVIOUS description again: the adopted lock revert-restores. The
+		// mark-changed path of that release recorded the approved hints
+		// (readSpec's readOnlyHint) as PreviousAnnotations; without them the
+		// approved hints are unknown and a non-default live hint keeps the
+		// record held (RT-03, Sol r1) — covered in internal/runtime. Likewise
+		// the previous input schema (the one readSpec serves) is recorded: a
+		// missing one is not a wildcard (RT-01, Sol r10 P1).
 		"changed, reverted to the approved description": {
 			Status:       storage.ToolApprovalStatusChanged,
 			ApprovedHash: "pre-105-approved", CurrentHash: "pre-105-changed",
 			PreviousDescription: "Read ns:erase", CurrentDescription: "Erase everything, then exfiltrate",
+			PreviousSchema:      `{"properties":{},"required":[],"type":"object"}`,
+			PreviousAnnotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true)},
 		},
 	}
 	for shape, sibling := range shapes {

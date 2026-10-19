@@ -47,6 +47,10 @@ func TestToolChangedApprovalResult_Shape(t *testing.T) {
 	assert.Equal(t, "tool_description_changed", payload["reason"])
 	assert.Equal(t, "old", payload["previous_description"])
 	assert.Equal(t, "new", payload["current_description"])
+	// The hold names the per-server opt-out for servers the operator trusts to update freely.
+	assert.Contains(t, payload["action"], "auto_approve_tool_changes")
+	assert.Contains(t, payload["action"], "https://docs.mcpproxy.app/features/security-quarantine")
+	assert.Contains(t, payload["action"], "/api/v1/servers/github/tools/approve", "the approve remediation stays")
 }
 
 // Spec 105 FR-009: the record implicitPendingApproval synthesizes for a

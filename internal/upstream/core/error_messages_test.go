@@ -3,6 +3,7 @@ package core
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 
@@ -142,4 +143,15 @@ func itoa(i int) string {
 		buf = append([]byte{'-'}, buf...)
 	}
 	return string(buf)
+}
+
+func TestRecordRecentStderrTruncationKeepsValidUTF8(t *testing.T) {
+	c := &Client{}
+	// 3-byte runes with maxStderrLineLen (512) not divisible by 3: the cut lands mid-rune.
+	c.recordRecentStderr(strings.Repeat("世", maxStderrLineLen))
+
+	snap := c.RecentStderrSnapshot()
+	require.Len(t, snap, 1)
+	assert.True(t, utf8.ValidString(snap[0]), "stderr line must be valid UTF-8")
+	assert.True(t, strings.HasSuffix(snap[0], "…"))
 }

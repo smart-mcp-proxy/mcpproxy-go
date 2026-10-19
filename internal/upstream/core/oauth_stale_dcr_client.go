@@ -12,12 +12,23 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // authorizeProbeHTTPClient is the HTTP client recoverStaleDCRClient probes
-// the authorization endpoint with; nil uses a default client. Tests override
-// it.
+// the authorization endpoint with; nil uses the instance's gated client.
+// Tests override it.
 var authorizeProbeHTTPClient *http.Client
+
+// authorizeProbeClient is the authorization-endpoint probe client: the test
+// override, else a client on the instance's gated transport (Spec 116 PR4,
+// FR-024a) with the probe's redirect policy left to ProbeAuthorizationClient.
+func (c *Client) authorizeProbeClient() *http.Client {
+	if authorizeProbeHTTPClient != nil {
+		return authorizeProbeHTTPClient
+	}
+	return &http.Client{Transport: c.Gate().HTTPTransport()}
+}
 
 // applyExtraParamsToAuthURL appends the extra OAuth parameters (RFC 8707
 // resource, oauth.extra_params, ...) to an authorization URL. extraParams holds
@@ -64,9 +75,10 @@ func (c *Client) persistDCRRegistration(clientID, clientSecret string) (int, err
 	var redirectURI string
 	if callbackServer, exists := oauth.GetCallbackServer(c.config.Name); exists {
 		callbackPort = callbackServer.Port
-		redirectURI = callbackServer.RedirectURI
+		redirectURI = callbackServer.EffectiveRedirectURI()
 	}
-	saved, err := c.storage.SaveOAuthClientCredentialsIfUnsetOrSame(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+	oauth.BeforePersistHook(c.config.Name, c.CredentialBinding())
+	saved, err := c.storage.SaveOAuthClientIfBound(serverKey, c.config.Name, c.CredentialBinding(), storage.OAuthClientSaveIfUnsetOrSame, clientID, clientSecret, callbackPort, redirectURI)
 	if err != nil {
 		return callbackPort, err
 	}
@@ -174,7 +186,7 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 		return authURL, nil
 	}
 
-	probe := oauth.ProbeAuthorizationClient(ctx, authorizeProbeHTTPClient, authURL)
+	probe := oauth.ProbeAuthorizationClient(ctx, c.authorizeProbeClient(), authURL)
 	if !probe.ClientRejected {
 		if probe.Err != nil {
 			c.logger.Debug("Authorization endpoint probe failed - proceeding with the persisted DCR client_id",
@@ -193,7 +205,8 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 	if c.storage != nil {
-		cleared, clearErr := c.storage.ClearOAuthClientCredentialsIfClientID(serverKey, persistedClientID)
+		oauth.BeforeClearHook(c.config.Name, c.CredentialBinding(), "dcr_client")
+		cleared, clearErr := c.storage.ClearOAuthClientIfBoundAndClientID(serverKey, c.config.Name, c.CredentialBinding(), persistedClientID)
 		if clearErr != nil {
 			c.logger.Warn("Failed to clear the rejected DCR client registration",
 				zap.String("server", c.config.Name),
@@ -309,7 +322,7 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 
 	// Exactly one re-registration per attempt: probe the fresh client once
 	// and stop if it is rejected too.
-	second := oauth.ProbeAuthorizationClient(ctx, authorizeProbeHTTPClient, newURL)
+	second := oauth.ProbeAuthorizationClient(ctx, c.authorizeProbeClient(), newURL)
 	if second.ClientRejected {
 		secondRejection := oauth.ScrubUpstreamText(second.Summary())
 		c.logger.Error("❌ Authorization server rejected the freshly registered OAuth client too - not retrying",
@@ -319,7 +332,7 @@ func (c *Client) recoverStaleDCRClient(ctx context.Context, oauthHandler *uptran
 			zap.String("new_client_id", newClientID),
 			zap.String("authorize_response", secondRejection))
 		if c.storage != nil {
-			if _, clearErr := c.storage.ClearOAuthClientCredentialsIfClientID(serverKey, newClientID); clearErr != nil {
+			if _, clearErr := c.storage.ClearOAuthClientIfBoundAndClientID(serverKey, c.config.Name, c.CredentialBinding(), newClientID); clearErr != nil {
 				c.logger.Warn("Failed to clear the rejected fresh DCR client registration",
 					zap.String("server", c.config.Name),
 					logSafeErrorField(clearErr))

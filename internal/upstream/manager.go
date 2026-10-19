@@ -18,14 +18,17 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/qahooks"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/callstats"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
@@ -103,6 +106,12 @@ func getDockerRetryInterval(attempt int) time.Duration {
 // Manager manages connections to multiple upstream MCP servers
 type Manager struct {
 	clients map[string]*managed.Client
+	// desired is the committed generation of every server name (Spec 116
+	// PR3): written by AdvanceGenerations (commit step 7) and the unbound
+	// legacy methods, under captureMu W + mu W; read under mu. A bound (*At)
+	// action acts only when its generation matches. Removed names keep a
+	// tombstone (present=false).
+	desired map[string]desiredGen
 	mu      sync.RWMutex
 	// captureMu serializes a bounded quarantined-review persistence against
 	// client replacement/removal. It is deliberately separate from mu: approval
@@ -110,8 +119,18 @@ type Manager struct {
 	// deadlock behind a queued AddServerConfig writer. Lock order is captureMu
 	// then mu; mutation releases both before disconnecting or invoking callbacks.
 	captureMu sync.RWMutex
-	logger    *zap.Logger
-	logConfig *config.LogConfig
+	// limiterPubMu serializes limiter publication (Spec 093 SetServer /
+	// RetireServer / Apply) in the order of the registry critical sections
+	// that decided it (Spec 116 PR3, Sol round 2). Every registry mutation
+	// takes it hand over hand: it is acquired while mu is still held and
+	// released after the publication, so a newer commit's publication can
+	// never be overtaken by an older action that validated its generation and
+	// then lost the CPU after the unlock. Lock order: captureMu → mu →
+	// limiterPubMu → limiter.Registry.mu (leaf). Nothing that holds it takes
+	// captureMu or mu, connects, disconnects or calls back into the runtime.
+	limiterPubMu sync.Mutex
+	logger       *zap.Logger
+	logConfig    *config.LogConfig
 	// globalConfig holds the proxy-wide config as an atomic pointer so a config
 	// hot-reload (SetGlobalConfig) can swap it lock-free while the construction
 	// paths and the Docker-recovery goroutine read it concurrently (spec 074:
@@ -157,6 +176,20 @@ type Manager struct {
 	dockerRecoveryState  *storage.DockerRecoveryState
 	dockerRecoveryCancel context.CancelFunc
 	storageMgr           *storage.Manager // Reference to storage manager for Docker state persistence
+
+	// forceReconnectBeforeReplace is a Spec 116 PR3 test seam (T3.8): it runs
+	// in ForceReconnectAll after the clients were captured and before the
+	// captured instance is replaced. Nil in production.
+	forceReconnectBeforeReplace atomic.Pointer[func(id string)]
+
+	// limiterPublishHook is a Spec 116 PR3 test seam (Sol round 2): it runs
+	// with the server name right before a registry mutation publishes that
+	// server's limiter. Nil in production.
+	limiterPublishHook atomic.Pointer[func(name string)]
+
+	// committedViewCheck is the construction-time committed-view check
+	// (Spec 116 PR2b, SetCommittedViewChecker); nil skips it.
+	committedViewCheck atomic.Pointer[func(name string, sg commitview.ServerGen) error]
 
 	// Tool discovery callback for notifications/tools/list_changed handling
 	toolDiscoveryCallback func(ctx context.Context, serverName string) error
@@ -227,6 +260,7 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	manager := &Manager{
 		clients:           make(map[string]*managed.Client),
+		desired:           make(map[string]desiredGen),
 		logger:            logger,
 		storage:           boltStorage,
 		notificationMgr:   NewNotificationManager(),
@@ -247,15 +281,7 @@ func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *st
 
 	// Set up OAuth completion callback to trigger connection retries (in-process)
 	tokenManager := oauth.GetTokenStoreManager()
-	tokenManager.SetOAuthCompletionCallback(func(serverName string) {
-		logger.Info("OAuth completion callback triggered, attempting connection retry",
-			zap.String("server", serverName))
-		if err := manager.RetryConnection(serverName); err != nil {
-			logger.Warn("Failed to trigger connection retry after OAuth completion",
-				zap.String("server", serverName),
-				zap.Error(err))
-		}
-	})
+	manager.installOAuthCompletionHandlers(tokenManager)
 
 	// Surface OAuth failures that have no caller to return an error to — an
 	// undeliverable callback, a state mismatch, a background token exchange
@@ -421,281 +447,39 @@ func (m *Manager) AddNotificationHandler(handler NotificationHandler) {
 
 // SetToolDiscoveryCallback sets the callback for triggering tool re-indexing when
 // upstream servers send notifications/tools/list_changed notifications.
-// This callback will be passed to all new clients created by the manager.
+// It is applied to every client that already exists and to all clients created
+// later: the supervisor can add (and connect) clients before the runtime
+// registers this callback, and a client without it silently drops
+// list_changed notifications. Applying under m.mu (the same m.mu → mc.mu order
+// AddServerConfig uses) keeps concurrent setters from leaving a stale callback.
 func (m *Manager) SetToolDiscoveryCallback(callback func(ctx context.Context, serverName string) error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.toolDiscoveryCallback = callback
-	m.logger.Debug("Tool discovery callback set on manager")
+	for _, client := range m.clients {
+		if client != nil {
+			client.SetToolDiscoveryCallback(callback)
+		}
+	}
+	m.logger.Debug("Tool discovery callback set on manager",
+		zap.Int("existing_clients", len(m.clients)))
 }
 
 // SetPromptsChangedCallback sets the callback for triggering aggregated-prompt
 // refresh when an upstream sends notifications/prompts/list_changed (F13). It is
-// passed to all new clients created by the manager.
+// applied to existing clients and to all clients created later (see
+// SetToolDiscoveryCallback for why).
 func (m *Manager) SetPromptsChangedCallback(callback func(serverName string)) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.promptsChangedCallback = callback
-	m.logger.Debug("Prompts-changed callback set on manager")
-}
-
-// AddServerConfig adds a server configuration without connecting
-func (m *Manager) AddServerConfig(id string, serverConfig *config.ServerConfig) error {
-	m.captureMu.Lock()
-	m.mu.Lock()
-
-	// Check if existing client exists and if config has changed
-	var clientToDisconnect *managed.Client
-	if existingClient, exists := m.clients[id]; exists {
-		existingConfig := existingClient.GetConfig()
-
-		// Compare configurations to determine if reconnection is needed
-		configChanged := existingConfig.URL != serverConfig.URL ||
-			existingConfig.Protocol != serverConfig.Protocol ||
-			existingConfig.Command != serverConfig.Command ||
-			!equalStringSlices(existingConfig.Args, serverConfig.Args) ||
-			!equalStringMaps(existingConfig.Env, serverConfig.Env) ||
-			!equalStringMaps(existingConfig.Headers, serverConfig.Headers) ||
-			existingConfig.Enabled != serverConfig.Enabled ||
-			existingConfig.Quarantined != serverConfig.Quarantined
-
-		if configChanged {
-			m.logger.Info("Server configuration changed, disconnecting existing client",
-				zap.String("id", id),
-				zap.String("name", serverConfig.Name),
-				zap.String("current_state", existingClient.GetState().String()),
-				zap.Bool("is_connected", existingClient.IsConnected()))
-
-			// Remove from map immediately to prevent new operations
-			delete(m.clients, id)
-			// Spec 113-d FR-066: the replacement connects to a different
-			// endpoint/command/credentials, so the old client's failure
-			// history must not degrade it. Same critical section as the
-			// delete, mirroring RemoveServer.
-			statsName := id
-			if existingConfig != nil && existingConfig.Name != "" {
-				statsName = existingConfig.Name
-			}
-			m.callStats.Drop(statsName)
-			m.dropCallHealth(statsName)
-			// Save reference to disconnect outside lock
-			clientToDisconnect = existingClient
-		} else {
-			m.logger.Debug("Server configuration unchanged, keeping existing client",
-				zap.String("id", id),
-				zap.String("name", serverConfig.Name),
-				zap.String("current_state", existingClient.GetState().String()),
-				zap.Bool("is_connected", existingClient.IsConnected()))
-			// Update the client's config reference to the new config but don't recreate the client
-			// Use thread-safe setter to avoid race with GetServerState()
-			m.mu.Unlock()
-			m.captureMu.Unlock()
-			existingClient.SetConfig(serverConfig)
-			// Spec 093: the per-server limits may have changed even though the
-			// transport config did not.
-			m.applyServerConcurrency(serverConfig)
-			return nil
-		}
-	}
-
-	// Create new client but don't connect yet
-	client, err := managed.NewClient(id, serverConfig, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, m.secretResolver)
-	if err != nil {
-		m.mu.Unlock()
-		m.captureMu.Unlock()
-		// Disconnect old client if we failed to create new one
-		if clientToDisconnect != nil {
-			_ = clientToDisconnect.Disconnect()
-		}
-		return fmt.Errorf("failed to create client for server %s: %w", serverConfig.Name, err)
-	}
-
-	// Set up notification callback for state changes
-	if m.notificationMgr != nil {
-		notifierCallback := StateChangeNotifier(m.notificationMgr, serverConfig.Name)
-		// Combine with existing callback if present
-		existingCallback := client.StateManager.GetStateChangeCallback()
-		client.StateManager.SetStateChangeCallback(func(oldState, newState types.ConnectionState, info *types.ConnectionInfo) {
-			// Call existing callback first (for logging)
-			if existingCallback != nil {
-				existingCallback(oldState, newState, info)
-			}
-			// Then call notification callback
-			notifierCallback(oldState, newState, info)
-		})
-	}
-
-	// Set up tool discovery callback for notifications/tools/list_changed handling
-	if m.toolDiscoveryCallback != nil {
-		client.SetToolDiscoveryCallback(m.toolDiscoveryCallback)
-	}
-
-	// Set up prompts-changed callback for notifications/prompts/list_changed (F13)
-	if m.promptsChangedCallback != nil {
-		client.SetPromptsChangedCallback(m.promptsChangedCallback)
-	}
-
-	// Spec 093: install admission control before the client becomes reachable,
-	// so no dispatch can ever see a client without its limiter wiring.
-	client.SetAdmissionControl(m.limiters, m.currentRejectObserver())
-
-	m.clients[id] = client
-	m.logger.Info("Added upstream server configuration",
-		zap.String("id", id),
-		zap.String("name", serverConfig.Name))
-
-	// IMPORTANT: Release lock before disconnecting to prevent deadlock
-	m.mu.Unlock()
-	m.captureMu.Unlock()
-
-	// Spec 093: publish this server's limits (or retire them when the server is
-	// disabled/quarantined, FR-009). Done off the lock — Retire wakes queued
-	// callers.
-	m.applyServerConcurrency(serverConfig)
-
-	// Disconnect old client outside lock to avoid blocking other operations
-	if clientToDisconnect != nil {
-		_ = clientToDisconnect.Disconnect()
-	}
-
-	return nil
-}
-
-// Helper functions for comparing slices and maps
-func equalStringSlices(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func equalStringMaps(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
-}
-
-// AddServer adds a new upstream server and connects to it (legacy method)
-func (m *Manager) AddServer(id string, serverConfig *config.ServerConfig) error {
-	if err := m.AddServerConfig(id, serverConfig); err != nil {
-		return err
-	}
-
-	if !serverConfig.Enabled {
-		m.logger.Debug("Skipping connection for disabled server",
-			zap.String("id", id),
-			zap.String("name", serverConfig.Name))
-		return nil
-	}
-
-	// Check if client exists and is already connected
-	if client, exists := m.GetClient(id); exists {
-		if client.IsConnected() {
-			m.logger.Debug("Server is already connected, skipping connection attempt",
-				zap.String("id", id),
-				zap.String("name", serverConfig.Name))
-			return nil
-		}
-
-		// Connect to server with the resolved init_timeout (MCP-3322) to prevent
-		// hanging while still honoring a per-server/global handshake deadline.
-		ctx, cancel := context.WithTimeout(context.Background(), m.resolveConnectTimeout(serverConfig, client.DependsOnDocker()))
-		defer cancel()
-		if err := client.Connect(ctx); err != nil {
-			// The supervisor's reconcile usually owns the connect at startup;
-			// LoadConfiguredServers' AddServer for the same unchanged server then
-			// hits the in-flight guard. Nothing failed.
-			if errors.Is(err, managed.ErrConnectAlreadyActive) {
-				m.logger.Debug("Connect already in progress or established, not starting another",
-					zap.String("id", id),
-					zap.String("name", serverConfig.Name),
-					zap.String("state", client.GetState().String()))
-				return nil
-			}
-			// Check if this is an OAuth error - don't fail AddServer for OAuth
-			errStr := err.Error()
-			isOAuthError := strings.Contains(errStr, "OAuth") ||
-				strings.Contains(errStr, "oauth") ||
-				strings.Contains(errStr, "authorization required")
-
-			if isOAuthError {
-				m.logger.Info("Server requires OAuth authorization - connection will complete after OAuth login",
-					zap.String("id", id),
-					zap.String("name", serverConfig.Name),
-					zap.Error(err))
-				// Don't return error - server is added successfully, just needs OAuth
-				return nil
-			}
-
-			// For non-OAuth errors, still return error
-			return fmt.Errorf("failed to connect to server %s: %w", serverConfig.Name, err)
-		}
-	} else {
-		m.logger.Error("Client not found after AddServerConfig - this should not happen",
-			zap.String("id", id),
-			zap.String("name", serverConfig.Name))
-	}
-
-	return nil
-}
-
-// RemoveServer removes an upstream server
-func (m *Manager) RemoveServer(id string) {
-	// Get client reference while holding lock briefly
-	m.captureMu.Lock()
-	m.mu.Lock()
-	client, exists := m.clients[id]
-	callStatsName := id
-	if exists {
-		// Remove from map immediately to prevent new operations
-		delete(m.clients, id)
+	for _, client := range m.clients {
 		if client != nil {
-			if cfg := client.GetConfig(); cfg != nil && cfg.Name != "" {
-				callStatsName = cfg.Name
-			}
+			client.SetPromptsChangedCallback(callback)
 		}
 	}
-	// Spec 113-d FR-066: a removed (or renamed — remove + add) server must not
-	// carry its failure history into whatever reuses the name. Dropped in the
-	// SAME critical section as the delete: RecordClientCallOutcome records
-	// under m.mu.RLock, so a replacement registered after this unlock cannot
-	// have its first samples wiped by a late drop, and the old client's
-	// in-flight completions fail the registered check.
-	m.callStats.Drop(callStatsName)
-	m.dropCallHealth(callStatsName)
-	m.mu.Unlock()
-	m.captureMu.Unlock()
-
-	// Spec 093 FR-009: tombstone the limiter first so queued calls fail
-	// immediately with the server-unavailable semantics instead of waiting out
-	// their queue deadline against a server that no longer exists.
-	name := id
-	if exists && client != nil {
-		if cfg := client.GetConfig(); cfg != nil && cfg.Name != "" {
-			name = cfg.Name
-		}
-	}
-	m.retireServerConcurrency(name)
-
-	// Disconnect outside the lock to avoid blocking other operations
-	if exists {
-		m.logger.Info("Removing upstream server",
-			zap.String("id", id),
-			zap.String("state", client.GetState().String()))
-		_ = client.Disconnect()
-		m.logger.Debug("upstream.Manager.RemoveServer: disconnect completed", zap.String("id", id))
-	}
+	m.logger.Debug("Prompts-changed callback set on manager",
+		zap.Int("existing_clients", len(m.clients)))
 }
 
 // ShutdownAll disconnects all clients and ensures all Docker containers are stopped
@@ -1378,7 +1162,7 @@ func (m *Manager) pruneSweptState(known map[string]struct{}) {
 // Security: Tools from quarantined servers are NOT discovered to prevent
 // Tool Poisoning Attacks (TPA) from exposing potentially malicious tool descriptions.
 func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, error) {
-	tools, _, err := m.discoverTools(ctx, false)
+	tools, _, _, err := m.discoverTools(ctx, false)
 	return tools, err
 }
 
@@ -1389,6 +1173,15 @@ func (m *Manager) DiscoverTools(ctx context.Context) ([]*config.ToolMetadata, er
 // FR-009: the discovery-completed marker must be stamped for the former and
 // left alone for the latter).
 func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
+	tools, listed, _, err := m.discoverTools(ctx, dueOnly)
+	return tools, listed, err
+}
+
+// DiscoverToolsReportCaptured is DiscoverToolsReport that also returns, per
+// listed server, the capture of that server's own tools/list (Spec 117 PR-3,
+// FR-031): the sweep applies each server's inventory in capture order, not
+// under one ticket for the whole sweep.
+func (m *Manager) DiscoverToolsReportCaptured(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, map[string]managed.InventoryCapture, error) {
 	return m.discoverTools(ctx, dueOnly)
 }
 
@@ -1399,11 +1192,11 @@ func (m *Manager) DiscoverToolsReport(ctx context.Context, dueOnly bool) ([]*con
 // event-driven callers (connect, reload, manual refresh) use DiscoverTools for a
 // full sweep (spec 074, US3/SC-006/FR-005).
 func (m *Manager) DiscoverToolsDue(ctx context.Context) ([]*config.ToolMetadata, error) {
-	tools, _, err := m.discoverTools(ctx, true)
+	tools, _, _, err := m.discoverTools(ctx, true)
 	return tools, err
 }
 
-func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, error) {
+func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, map[string]managed.InventoryCapture, error) {
 	type clientSnapshot struct {
 		id          string
 		name        string
@@ -1450,6 +1243,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 
 	var allTools []*config.ToolMetadata
 	var listed []string
+	captures := make(map[string]managed.InventoryCapture)
 	connectedCount := 0
 	skippedNotDue := 0
 	known := make(map[string]struct{}, len(snapshots))
@@ -1500,7 +1294,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 
 		connectedCount++
 
-		tools, err := client.ListTools(ctx)
+		tools, capture, err := client.ListToolsCaptured(ctx)
 		if err != nil {
 			// Warn, not Error: markSwept below is deliberately skipped so the
 			// next sweep retries this server. A failure the code already plans
@@ -1519,6 +1313,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		m.markSwept(snapshot.name, now)
 		if snapshot.name != "" {
 			listed = append(listed, snapshot.name)
+			captures[snapshot.name] = capture
 		}
 
 		if tools != nil {
@@ -1535,7 +1330,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		zap.Bool("due_only", dueOnly),
 		zap.Int("skipped_not_due", skippedNotDue))
 
-	return allTools, listed, nil
+	return allTools, listed, captures, nil
 }
 
 // tryReconnectOnUse attempts a single synchronous reconnect for a disconnected
@@ -1757,6 +1552,17 @@ func (m *Manager) callTool(ctx context.Context, toolName string, args map[string
 		if errors.Is(err, managed.ErrConnectionGenerationChanged) {
 			return nil, err
 		}
+		// A caller's pre-transport re-check refused the call (nothing was
+		// sent); its error is the caller's own and is returned verbatim.
+		if errors.Is(err, managed.ErrDispatchRecheckRefused) {
+			return nil, err
+		}
+		// Spec 116 PR4 (FR-026, FR-027): the instance was retired (removed,
+		// replaced or quarantined) while the call was on its way. Unavailable,
+		// with no connection or authentication advice.
+		if errors.Is(err, managed.ErrInstanceRetired) {
+			return nil, fmt.Errorf("server '%s' is unavailable: it was removed, replaced or quarantined while tool '%s' was being called: %w", serverName, actualToolName, err)
+		}
 
 		// Enrich errors at source with server context
 		errStr := err.Error()
@@ -1865,6 +1671,12 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 	}
 	clients := make(map[string]*managed.Client)
 	for id, client := range m.clients {
+		// Spec 116 PR3 (FR-020): connect only an instance that runs its
+		// server's committed generation. An instance a commit has not
+		// restamped or replaced yet is left to that commit's worker.
+		if d, ok := m.desired[id]; ok && (!d.present || (d.gen != 0 && client.Generation() != d.gen)) {
+			continue
+		}
 		clients[id] = client
 	}
 	m.mu.RUnlock()
@@ -1967,7 +1779,10 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			connectCtx, cancel := context.WithTimeout(ctx, m.resolveConnectTimeout(c.GetConfig(), c.DependsOnDocker()))
 			defer cancel()
 
-			if err := c.Connect(connectCtx); err != nil {
+			if err := c.Connect(connectCtx); errors.Is(err, managed.ErrInstanceUnregistered) || errors.Is(err, managed.ErrConnectAborted) {
+				m.logger.Debug("Connect skipped: the instance was superseded while ConnectAll ran",
+					zap.String("id", id), zap.Error(err))
+			} else if err != nil {
 				m.logger.Error("Failed to connect to upstream server",
 					zap.String("id", id),
 					zap.String("name", c.GetConfig().Name),
@@ -2324,9 +2139,50 @@ func (m *Manager) recordOAuthFailure(serverName string, cause error) {
 	client.StateManager.SetOAuthError(cause)
 }
 
+// installOAuthCompletionHandlers wires the in-process OAuth completion
+// callback (Spec 116 PR2b review r9): it is binding-checked, so the login
+// completion of an instance a commit removed, replaced or re-bound never
+// retries (disconnects and reconnects) the instance that serves the name now.
+func (m *Manager) installOAuthCompletionHandlers(tm *oauth.TokenStoreManager) {
+	tm.SetCompletionBindingResolver(m.CurrentCredentialBinding)
+	tm.SetOAuthCompletionBoundCallback(m.onOAuthCompleted)
+}
+
+// afterOAuthCompletionBindingCheckHook is a test seam (Spec 116 PR2b review
+// r10): it runs right after the completion's binding check passed and the
+// retry target was selected, before the retry acts. Nil in production.
+var afterOAuthCompletionBindingCheckHook atomic.Pointer[func(serverName string)]
+
+// onOAuthCompleted retries the connection of serverName after an OAuth login
+// completed, only when the completing instance's binding (zero: unbound, e.g.
+// the CLI process) is still the registered instance's. The binding check and
+// the selection of the retry target are one registry critical section
+// (review r10), and the retry acts on that captured instance: a removal and
+// same-name re-add landing after the check cannot redirect the old
+// instance's completion onto the replacement.
+func (m *Manager) onOAuthCompleted(serverName string, binding commitview.CredentialBinding) {
+	m.logger.Info("OAuth completion callback triggered, attempting connection retry",
+		zap.String("server", serverName))
+	if err := m.retryConnection(serverName, binding, !binding.IsZero()); err != nil {
+		m.logger.Warn("Failed to trigger connection retry after OAuth completion",
+			zap.String("server", serverName),
+			zap.Error(err))
+	}
+}
+
 // RetryConnection triggers a connection retry for a specific server
 // This is typically called after OAuth completion to immediately use new tokens
 func (m *Manager) RetryConnection(serverName string) error {
+	return m.retryConnection(serverName, commitview.CredentialBinding{}, false)
+}
+
+// retryConnection is RetryConnection with an optional binding check: when
+// checkBinding is set, the instance registered under serverName is selected
+// and its binding compared to want under the same m.mu read lock, and a
+// mismatch (removed, replaced or re-bound) is a no-op. Everything after acts
+// on the captured instance only, never on a later lookup of the name; an
+// instance unregistered or retired after the check never connects again.
+func (m *Manager) retryConnection(serverName string, want commitview.CredentialBinding, checkBinding bool) error {
 	m.mu.RLock()
 	// Check if we're shutting down - prevent reconnections during shutdown
 	if m.shuttingDown {
@@ -2336,10 +2192,26 @@ func (m *Manager) RetryConnection(serverName string) error {
 		return nil
 	}
 	client, exists := m.clients[serverName]
+	if exists && client != nil && checkBinding && client.CredentialBinding() != want {
+		m.mu.RUnlock()
+		m.logger.Debug("Ignoring the OAuth completion of a superseded server instance",
+			zap.String("server", serverName),
+			zap.String("binding", want.String()))
+		return nil
+	}
 	m.mu.RUnlock()
 
-	if !exists {
+	if !exists || client == nil {
+		if checkBinding {
+			m.logger.Debug("Ignoring the OAuth completion of a removed server instance",
+				zap.String("server", serverName),
+				zap.String("binding", want.String()))
+			return nil
+		}
 		return fmt.Errorf("server not found: %s", serverName)
+	}
+	if h := afterOAuthCompletionBindingCheckHook.Load(); h != nil {
+		(*h)(serverName)
 	}
 
 	// If the client is already connected or connecting, do not force a
@@ -2369,7 +2241,7 @@ func (m *Manager) RetryConnection(serverName string) error {
 	var hasToken bool
 	var tokenExpires time.Time
 	if m.storage != nil {
-		ts := oauth.NewPersistentTokenStore(client.GetConfig().Name, client.GetConfig().URL, m.storage)
+		ts := oauth.NewBoundPersistentTokenStore(client.GetConfig().Name, client.GetConfig().URL, m.storage, client.CredentialBinding())
 		if tok, err := ts.GetToken(context.Background()); err == nil && tok != nil {
 			hasToken = true
 			tokenExpires = tok.ExpiresAt
@@ -2589,7 +2461,12 @@ func (m *Manager) ForceReconnectAll(reason string) *ReconnectResult {
 			continue
 		}
 
-		cfg := cloneServerConfig(client.GetConfig())
+		// Spec 116 PR3 (review R4.1, R5.4, Sol round 1): the config and the
+		// generation are read from ONE atomic load, so a non-connection commit
+		// that restamps the instance in between cannot pair the old config
+		// with the new generation.
+		capturedCfg, gen := client.ConfigAt()
+		cfg := cloneServerConfig(capturedCfg)
 		if cfg == nil {
 			result.SkippedServers[id] = "failed to clone config"
 			continue
@@ -2609,12 +2486,46 @@ func (m *Manager) ForceReconnectAll(reason string) *ReconnectResult {
 			zap.String("id", id),
 			zap.String("reason", reason))
 
-		m.RemoveServer(id)
+		// Replace exactly the instance captured above, at its generation. A
+		// server a commit removed or replaced since the capture is left alone
+		// (ErrStaleGeneration): a removed one is not re-created and a
+		// replacement is not torn down. When the SAME instance is still
+		// registered (a commit only restamped it with a non-connection edit),
+		// the recovery re-reads its (config, generation) pair and retries, so
+		// it installs the latest committed config.
+		var fresh *managed.Client
+		var err error
+		for attempt := 0; ; attempt++ {
+			if hook := m.forceReconnectBeforeReplace.Load(); hook != nil {
+				(*hook)(id)
+			}
+			fresh, err = m.ReplaceInstanceAt(id, gen, client, cfg)
+			if !errors.Is(err, ErrStaleGeneration) || attempt >= 2 {
+				break
+			}
+			if cur, ok := m.GetClient(id); !ok || cur != client {
+				break
+			}
+			capturedCfg, gen = client.ConfigAt()
+			if cfg = cloneServerConfig(capturedCfg); cfg == nil || !cfg.Enabled {
+				break
+			}
+		}
+		if errors.Is(err, ErrStaleGeneration) || cfg == nil || !cfg.Enabled {
+			result.AttemptedServers--
+			result.SkippedServers[id] = "replaced or removed since the reconnect started"
+			m.logger.Debug("ForceReconnectAll: skipping a server a newer commit or replacement superseded",
+				zap.String("server", id))
+			continue
+		}
 
 		// Small delay to allow container/process cleanup before restart
 		time.Sleep(200 * time.Millisecond)
 
-		if err := m.AddServer(id, cfg); err != nil {
+		if err == nil {
+			err = m.connectInstance(id, fresh)
+		}
+		if err != nil {
 			result.FailedServers[id] = err
 			m.logger.Error("ForceReconnectAll: failed to rebuild client",
 				zap.String("server", cfg.Name),
@@ -2701,7 +2612,16 @@ func (m *Manager) processOAuthEvents() error {
 		m.mu.RLock()
 		c, exists := m.clients[event.ServerName]
 		m.mu.RUnlock()
-		if exists && (c.IsConnected() || c.IsConnecting()) {
+		// Spec 116 PR2b (T055c): an event a bound instance wrote names its
+		// credential binding. One that is not the registered instance's
+		// came from an instance a commit removed, replaced or re-bound: its
+		// login says nothing about the server that holds the name now.
+		stale := exists && c != nil && (event.Incarnation != 0 || event.OAuthEpoch != 0) &&
+			(commitview.CredentialBinding{Incarnation: event.Incarnation, OAuthEpoch: event.OAuthEpoch}) != c.CredentialBinding()
+		if stale {
+			m.logger.Debug("Dropping an OAuth completion event of a superseded server instance",
+				zap.String("server", event.ServerName))
+		} else if exists && (c.IsConnected() || c.IsConnecting()) {
 			m.logger.Info("Skipping retry for OAuth event: client already connected/connecting",
 				zap.String("server", event.ServerName),
 				zap.String("state", c.GetState().String()))
@@ -2772,7 +2692,7 @@ func (m *Manager) scanForNewTokens() {
 		}
 
 		// Check for a persisted token
-		ts := oauth.NewPersistentTokenStore(cfg.Name, cfg.URL, m.storage)
+		ts := oauth.NewBoundPersistentTokenStore(cfg.Name, cfg.URL, m.storage, c.CredentialBinding())
 		tok, err := ts.GetToken(context.Background())
 		if err != nil || tok == nil {
 			continue
@@ -2791,7 +2711,7 @@ func (m *Manager) scanForNewTokens() {
 		// and for a CLI login that could not persist its completion event, this
 		// scan is the only one left.
 		var writtenAt time.Time
-		if rec, recErr := m.storage.GetOAuthToken(oauth.GenerateServerKey(cfg.Name, cfg.URL)); recErr == nil && rec != nil {
+		if rec, recErr := m.storage.GetOAuthTokenBound(oauth.GenerateServerKey(cfg.Name, cfg.URL), c.CredentialBinding()); recErr == nil && rec != nil {
 			writtenAt = rec.Updated
 		}
 		fingerprint := tokenFingerprint(tok, writtenAt)
@@ -2834,7 +2754,7 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 	m.mu.RLock()
 	client, exists := m.clients[serverName]
 	m.mu.RUnlock()
-	if !exists {
+	if !exists || client.Retired() {
 		return fmt.Errorf("server not found: %s", serverName)
 	}
 
@@ -2853,6 +2773,14 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 
 	// Create a transient core client that uses the daemon's storage
 	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
+	if err == nil {
+		// Spec 116 PR4 (FR-024): the login runs behind the registered
+		// instance's gate, so retiring the instance (removal, replacement,
+		// quarantine) stops it: no browser, no registration, no code
+		// exchange, no token request.
+		coreClient.SetGate(client.Gate())
+		coreClient.SetCredentialBinding(client.CredentialBinding())
+	}
 	if err != nil {
 		return fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
@@ -2877,6 +2805,8 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 				m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
 				testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 				if err2 == nil {
+					testClient.SetGate(client.Gate())
+					testClient.SetCredentialBinding(client.CredentialBinding())
 					tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
 					_ = testClient.Connect(tctx)
 					tcancel()
@@ -2917,7 +2847,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	m.mu.RLock()
 	client, exists := m.clients[serverName]
 	m.mu.RUnlock()
-	if !exists {
+	if !exists || client.Retired() {
 		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
@@ -2936,6 +2866,12 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
+	// Spec 116 PR4 (FR-024): behind the registered instance's gate.
+	coreClient.SetGate(client.Gate())
+	coreClient.SetCredentialBinding(client.CredentialBinding())
+	if qahooks.ParkLogin != nil {
+		qahooks.ParkLogin(cfg.Name)
+	}
 
 	// Use a long-running context for the OAuth callback (30 minutes)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
@@ -2945,10 +2881,18 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 
 	// Snapshot BEFORE the flow starts so a completion can never precede it
 	// (the watcher below detects completion as a change from this value).
-	before := m.storedAccessToken(cfg)
+	before := m.storedAccessToken(cfg, client.CredentialBinding())
 
 	// Start the quick OAuth flow - this returns immediately with browser status
 	result, err := coreClient.StartOAuthFlowQuick(ctx)
+	if client.Retired() || dialgate.IsRetired(err) {
+		// Spec 116 PR4 (FR-027, review round 3): retired (removed,
+		// replaced, quarantined) while the login was starting. The gate
+		// refused its requests and browser launch; the caller sees the
+		// unavailable server, never the internal retirement error.
+		cancel()
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
 	if err != nil {
 		cancel()
 		return result, err
@@ -2977,7 +2921,7 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 				return
 			case <-ticker.C:
 			}
-			if tok := m.storedAccessToken(cfg); tok != "" && tok != before {
+			if tok := m.storedAccessToken(cfg, client.CredentialBinding()); tok != "" && tok != before {
 				m.logger.Info("OAuth token obtained, triggering reconnect",
 					zap.String("server", cfg.Name))
 				if err := m.RetryConnection(cfg.Name); err != nil {
@@ -2995,11 +2939,11 @@ func (m *Manager) StartManualOAuthQuick(serverName string) (*core.OAuthStartResu
 
 // storedAccessToken returns the access token persisted for the server, or ""
 // when there is none (or no storage).
-func (m *Manager) storedAccessToken(cfg *config.ServerConfig) string {
+func (m *Manager) storedAccessToken(cfg *config.ServerConfig, b commitview.CredentialBinding) string {
 	if m.storage == nil {
 		return ""
 	}
-	record, err := m.storage.GetOAuthToken(oauth.GenerateServerKey(cfg.Name, cfg.URL))
+	record, err := m.storage.GetOAuthTokenBound(oauth.GenerateServerKey(cfg.Name, cfg.URL), b)
 	if err != nil || record == nil {
 		return ""
 	}
@@ -3013,7 +2957,7 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 	m.mu.RLock()
 	client, exists := m.clients[serverName]
 	m.mu.RUnlock()
-	if !exists {
+	if !exists || client.Retired() {
 		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
@@ -3030,10 +2974,21 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 
 	// Create a transient core client that uses the daemon's storage
 	coreClient, err := core.NewClientWithOptions(cfg.Name, cfg, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
+	if err == nil {
+		// Spec 116 PR4 (FR-024): the login runs behind the registered
+		// instance's gate, so retiring the instance (removal, replacement,
+		// quarantine) stops it: no browser, no registration, no code
+		// exchange, no token request.
+		coreClient.SetGate(client.Gate())
+		coreClient.SetCredentialBinding(client.CredentialBinding())
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
 
+	if qahooks.ParkLogin != nil {
+		qahooks.ParkLogin(cfg.Name)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 
 	if force {
@@ -3049,6 +3004,8 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 			m.logger.Info("Running preflight no-auth initialize to check OAuth requirement", zap.String("server", cfg.Name))
 			testClient, err2 := core.NewClientWithOptions(cfg.Name, &cpy, m.logger, m.logConfig, m.globalConfig.Load(), m.storage, false, m.secretResolver)
 			if err2 == nil {
+				testClient.SetGate(client.Gate())
+				testClient.SetCredentialBinding(client.CredentialBinding())
 				tctx, tcancel := context.WithTimeout(ctx, 10*time.Second)
 				_ = testClient.Connect(tctx)
 				tcancel()
@@ -3070,6 +3027,11 @@ func (m *Manager) StartManualOAuthWithInfo(serverName string, force bool) (*core
 	result, err := coreClient.ForceOAuthFlowWithResult(ctx)
 	cancel()
 
+	if client.Retired() || dialgate.IsRetired(err) {
+		// Spec 116 PR4 (FR-027, review round 3): retired during the login;
+		// mapped like RefreshOAuthToken, and no reconnect.
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
 	if err != nil {
 		m.logger.Warn("In-process OAuth flow failed",
 			zap.String("server", cfg.Name),
@@ -3430,6 +3392,13 @@ func (m *Manager) ClearOAuthToken(serverName string) error {
 			// Continue - storage might not have the token
 		}
 	}
+	// A logout clears the credential whatever binding wrote it (an operator
+	// action on the current state, data-model §3): drop the refresh
+	// coordinator's latch, cooldown and re-registration state of every
+	// binding of the key, so the next sign-in starts clean (Spec 116 PR2b).
+	if serverConfig != nil {
+		oauth.DefaultRefreshCoordinator().ForgetServer(oauth.GenerateServerKey(serverName, serverConfig.URL))
+	}
 
 	// Note: We don't need to clear in-memory OAuth state on the managed client
 	// because the managed client will pick up the cleared state from storage
@@ -3487,6 +3456,11 @@ func (m *Manager) SetUserLoggedOut(serverName string, loggedOut bool) error {
 	return nil
 }
 
+// refreshOAuthAfterLookupHook is a test seam run by RefreshOAuthToken after
+// it looked the instance up and before the refresh (T4.4). Nil in
+// production.
+var refreshOAuthAfterLookupHook func()
+
 // RefreshOAuthToken triggers a token refresh for a specific server.
 // This is called by the RefreshManager for proactive token refresh.
 //
@@ -3498,7 +3472,9 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 	client, exists := m.clients[serverName]
 	m.mu.RUnlock()
 
-	if !exists {
+	// Spec 116 PR4 (FR-024): an unregistered or retired instance runs no
+	// refresh; the gate refuses its token request in any case.
+	if !exists || client.Retired() {
 		return fmt.Errorf("server not found: %s", serverName)
 	}
 
@@ -3514,7 +3490,7 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 		// IMPORTANT: Use GenerateServerKey to match how PersistentTokenStore stores tokens.
 		// Tokens are stored with key = SHA256(serverName|serverURL)[:16], not just serverName.
 		serverKey := oauth.GenerateServerKey(serverName, serverConfig.URL)
-		token, err := m.storage.GetOAuthToken(serverKey)
+		token, err := m.storage.GetOAuthTokenBound(serverKey, client.CredentialBinding())
 		if err == nil && token != nil && token.RefreshToken != "" {
 			hasStoredTokens = true
 			m.logger.Debug("Found OAuth token in database for dynamic OAuth server",
@@ -3528,6 +3504,10 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 		return fmt.Errorf("server does not use OAuth: %s", serverName)
 	}
 
+	if hook := refreshOAuthAfterLookupHook; hook != nil {
+		hook()
+	}
+
 	// Use direct token refresh to bypass ForceReconnect's early return when connected.
 	// ForceReconnect returns early if client is already connected, but we need to
 	// refresh the token proactively before it expires.
@@ -3535,6 +3515,10 @@ func (m *Manager) RefreshOAuthToken(serverName string) error {
 	defer cancel()
 
 	err := client.RefreshOAuthTokenDirect(ctx)
+	if err != nil && client.Retired() {
+		// Retired while the refresh was on its way: nothing to reconnect.
+		return fmt.Errorf("server not found: %s", serverName)
+	}
 	if err != nil {
 		m.logger.Warn("Direct OAuth refresh failed, falling back to reconnect",
 			zap.String("server", serverName),

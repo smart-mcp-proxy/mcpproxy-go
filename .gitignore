@@ -175,3 +175,6 @@ scripts/demo/node_modules
 # codex CLI local config + Go build cache
 .codex/
 .gocache/
+
+# TPA lab / quarantine QA runtime state
+test-data-*/

@@ -20,6 +20,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 func captureTestServer(name, tool string) *mcpserver.StreamableHTTPServer {
@@ -105,6 +106,10 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
+	// This test blocks the FIRST tools/list it sees and expects it to be the
+	// explicit capture's; the RT-05 connect-time verification would list A
+	// first, so it is turned off here (covered by lifecycle_quarantine_verify_test.go).
+	rt.skipQuarantinedContractVerify = true
 	// Registered after rt.Close so LIFO cleanup releases the blocked handler
 	// before closing the runtime or either httptest server.
 	t.Cleanup(unblockFirst)
@@ -135,7 +140,10 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	require.Len(t, desired.Servers, 1)
 	desired.Servers[0] = &cfgB
 	rt.UpdateConfig(desired, "")
-	require.NoError(t, rt.UpstreamManager().AddServerConfig("quarantined", &cfgB))
+	// Spec 116 PR3: registry changes are bound to the committed generation.
+	sgB, ok := rt.configSvc.Current().ServerGeneration("quarantined")
+	require.True(t, ok)
+	require.NoError(t, rt.UpstreamManager().AddServerConfigAt("quarantined", &cfgB, sgB.Gen))
 	clientB, ok := rt.UpstreamManager().GetClient("quarantined")
 	require.True(t, ok)
 	require.Equal(t, second.URL, clientB.GetConfig().URL)
@@ -190,6 +198,9 @@ func TestCaptureQuarantinedToolDefinitions_DropsReplacementBeforePersist(t *test
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
+	// The interleaving hooks below target the explicit capture only; keep the
+	// RT-05 connect-time verification (which shares the persist path) out.
+	rt.skipQuarantinedContractVerify = true
 	rt.StartBackgroundInitialization()
 	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
 
@@ -233,6 +244,9 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
+	// The interleaving hooks below target the explicit capture only; keep the
+	// RT-05 connect-time verification (which shares the persist path) out.
+	rt.skipQuarantinedContractVerify = true
 	rt.StartBackgroundInitialization()
 	settleQuarantinedCapture(t, rt, "quarantined", first.URL)
 
@@ -247,17 +261,21 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 			close(replaceStarted)
 			cfgB := *cfgA
 			cfgB.URL = second.URL
-			replaceDone <- rt.UpstreamManager().AddServerConfig("quarantined", &cfgB)
+			// Spec 116 PR3: a registry change is bound to the server's
+			// committed generation (a manager-only swap at that generation,
+			// as before).
+			sg, _ := rt.configSvc.Current().ServerGeneration("quarantined")
+			replaceDone <- rt.UpstreamManager().AddServerConfigAt("quarantined", &cfgB, sg.Gen)
 		}()
 		<-replaceStarted
 		deadline := time.Now().Add(time.Second)
 		for !rt.UpstreamManager().CaptureReplacementQueued() && time.Now().Before(deadline) {
 			stdruntime.Gosched()
 		}
-		require.True(t, rt.UpstreamManager().CaptureReplacementQueued(), "AddServerConfig writer must be queued behind capture persistence")
+		require.True(t, rt.UpstreamManager().CaptureReplacementQueued(), "the AddServerConfigAt writer must be queued behind capture persistence")
 		select {
 		case err := <-replaceDone:
-			t.Fatalf("AddServerConfig replaced the client before capture committed: %v", err)
+			t.Fatalf("AddServerConfigAt replaced the client before capture committed: %v", err)
 		default:
 		}
 	}
@@ -267,16 +285,27 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 	record, err := rt.storageManager.GetToolApproval("quarantined", "old_definition")
 	require.NoError(t, err)
 	assert.Equal(t, storage.ToolApprovalStatusPending, record.Status)
-	client, ok := rt.UpstreamManager().GetClient("quarantined")
-	require.True(t, ok)
-	assert.Equal(t, second.URL, client.GetConfig().URL, "the replacement becomes current only after A's review capture commits")
-	require.NoError(t, client.Connect(context.Background()))
+	var client *managed.Client
+	require.Eventually(t, func() bool {
+		c, ok := rt.UpstreamManager().GetClient("quarantined")
+		if !ok || c.GetConfig().URL != second.URL {
+			return false
+		}
+		client = c
+		return true
+	}, 10*time.Second, 10*time.Millisecond, "the replacement becomes current only after A's review capture commits")
+	if err := client.Connect(context.Background()); err != nil {
+		require.ErrorIs(t, err, managed.ErrConnectAlreadyActive)
+	}
+	require.Eventually(t, client.IsConnected, 10*time.Second, 10*time.Millisecond)
 	require.Eventually(t, func() bool {
 		return rt.discoveryGeneration("quarantined").Epoch == client.ConnectionEpoch()
 	}, 5*time.Second, 10*time.Millisecond, "supervisor must bind the replacement client before its review capture")
-	tools, err := client.ListTools(context.Background())
+	// Spec 117 PR-3: the capture carries its order; an unordered (seq 0)
+	// capture is no longer applied once an ordered one was.
+	tools, inv, err := client.ListToolsCaptured(context.Background())
 	require.NoError(t, err)
-	published, err := rt.captureQuarantinedToolDefinitionsFromCurrentClient("quarantined", client, rt.discoveryGeneration("quarantined"), tools)
+	published, err := rt.captureQuarantinedToolDefinitionsFromCurrentClient("quarantined", client, rt.discoveryGeneration("quarantined"), client.Generation(), tools, inv)
 	require.NoError(t, err)
 	require.True(t, published)
 	current, err := rt.storageManager.GetToolApproval("quarantined", "current_definition")

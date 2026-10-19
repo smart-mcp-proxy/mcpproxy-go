@@ -34,7 +34,7 @@ func newInformationalTestServer(t *testing.T, fake securityScannerService, sec *
 			require.NoError(t, rt.StorageManager().SaveUpstreamServer(sc))
 		}
 	}
-	return &Server{
+	s := &Server{
 		logger:                zap.NewNop(),
 		runtime:               rt,
 		securityScanner:       fake,
@@ -43,6 +43,8 @@ func newInformationalTestServer(t *testing.T, fake securityScannerService, sec *
 		infoScanQueued:        make(map[string]bool),
 		infoScanSettleTimeout: 2 * time.Second,
 	}
+	s.forgetInformationalScansOnPurge()
+	return s
 }
 
 func enabledServer(name string, mode config.TrustMode) *config.ServerConfig {
@@ -592,4 +594,133 @@ func TestIsTerminalScanStatus(t *testing.T) {
 	for _, status := range []string{"", "scanning", "not_scanned", "queued"} {
 		assert.False(t, isTerminalScanStatus(status), status)
 	}
+}
+
+// A server removed and added again under the same name is a NEW admission and
+// must get its informational baseline scan again. Without forgetting the name
+// on removal, infoScanKnown keeps it "seen" for the rest of the process and the
+// re-added server never gets a badge (observed 2026-10-13 while reproducing the
+// Roblox add on a scratch core: REST add → remove → MCP add was never scanned).
+func TestInformationalScan_ReaddAfterRemoveIsScannedAgain(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	acme := enabledServer("acme", config.TrustModeManual)
+	s := newInformationalTestServer(t, fake, nil, acme)
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+
+	require.NoError(t, s.RemoveServer(context.Background(), "acme"))
+	fake = newFakeSecurityScanner()
+	s.securityScanner = fake
+
+	require.NoError(t, s.AddServer(context.Background(), enabledServer("acme", config.TrustModeManual)))
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+}
+
+// The MCP `upstream_servers remove` door does not go through Server.RemoveServer:
+// it calls the commit writer, which is removeServerFromConfig. The claim must be
+// forgotten on that path too, or MCP remove + add under one name skips the scan.
+func TestInformationalScan_ReaddAfterWriterRemoveIsScannedAgain(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s := newInformationalTestServer(t, fake, nil, enabledServer("acme", config.TrustModeManual))
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+
+	_, err := commitUpstreamWriter{s: s}.removeServer("acme")
+	require.NoError(t, err)
+	fake = newFakeSecurityScanner()
+	s.securityScanner = fake
+
+	require.NoError(t, s.AddServer(context.Background(), enabledServer("acme", config.TrustModeManual)))
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+}
+
+// A replacement must not inherit the removed server's exhausted retry budget:
+// after the old server was retired at the cap, one transient start failure on
+// the re-added server must still be retried on the next servers.changed.
+func TestInformationalScan_ReaddDoesNotInheritRetiredAttempts(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	fake.startScanErr = errors.New("server is disconnected")
+	s := newInformationalTestServer(t, fake, nil, enabledServer("acme", config.TrustModeManual))
+	for i := 0; i < maxInformationalScanAttempts; i++ {
+		s.maybeStartInformationalScans(context.Background())
+		require.Eventually(t, func() bool {
+			s.infoScanMu.Lock()
+			defer s.infoScanMu.Unlock()
+			return !s.infoScanQueued["acme"]
+		}, 2*time.Second, 5*time.Millisecond)
+	}
+	require.Len(t, fake.startScanAttempts(), maxInformationalScanAttempts, "old server retired at the cap")
+
+	require.NoError(t, s.RemoveServer(context.Background(), "acme"))
+	fake = newFakeSecurityScanner()
+	fake.startScanErr = errors.New("transient")
+	s.securityScanner = fake
+	require.NoError(t, s.AddServer(context.Background(), enabledServer("acme", config.TrustModeManual)))
+
+	// First attempt on the replacement fails...
+	s.maybeStartInformationalScans(context.Background())
+	require.Eventually(t, func() bool {
+		s.infoScanMu.Lock()
+		defer s.infoScanMu.Unlock()
+		return !s.infoScanQueued["acme"]
+	}, 2*time.Second, 5*time.Millisecond)
+	fake.mu.Lock()
+	fake.startScanErr = nil
+	fake.mu.Unlock()
+
+	// ...and must be retried, not retired on the old server's budget.
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+}
+
+// Forgetting must follow a SUCCESSFUL removal only. A removal whose commit
+// fails to persist leaves the server configured; its scan bookkeeping (known
+// mark, claim, retry budget) must survive, or every failed removal would hand a
+// retired server a fresh retry budget.
+func TestInformationalScan_FailedRemovalKeepsBookkeeping(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s := newInformationalTestServer(t, fake, nil, enabledServer("acme", config.TrustModeManual))
+	s.maybeStartInformationalScans(context.Background())
+	waitForStartedScans(t, fake, []string{"acme"})
+	s.infoScanMu.Lock()
+	s.infoScanAttempts = map[string]int{"acme": maxInformationalScanAttempts}
+	s.infoScanMu.Unlock()
+
+	// Closing the store makes the commit fail after the transaction callback ran.
+	require.NoError(t, s.runtime.StorageManager().Close())
+	_, err := s.removeServerFromConfig("acme")
+	require.Error(t, err)
+
+	s.infoScanMu.Lock()
+	defer s.infoScanMu.Unlock()
+	assert.True(t, s.infoScanKnown["acme"], "known mark must survive a failed removal")
+	assert.Equal(t, maxInformationalScanAttempts, s.infoScanAttempts["acme"], "retry budget must survive a failed removal")
+}
+
+// The forget-on-purge observer must exist from construction, not from HTTP
+// startup: the config watcher and background initialization start in the
+// constructor, so a removal can commit before the HTTP server ever starts. A
+// startup-known name removed and re-added in that window must be a fresh
+// admission.
+func TestInformationalScan_PurgeObserverRegisteredAtConstruction(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.Servers = []*config.ServerConfig{enabledServer("acme", config.TrustModeManual)}
+	srv, err := NewServer(cfg, zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	srv.infoScanMu.Lock()
+	known := srv.infoScanKnown["acme"]
+	srv.infoScanMu.Unlock()
+	require.True(t, known, "a startup server is seeded as known")
+
+	_, err = srv.removeServerFromConfig("acme")
+	require.NoError(t, err)
+
+	srv.infoScanMu.Lock()
+	defer srv.infoScanMu.Unlock()
+	assert.False(t, srv.infoScanKnown["acme"], "removal before HTTP startup must forget the known mark")
 }

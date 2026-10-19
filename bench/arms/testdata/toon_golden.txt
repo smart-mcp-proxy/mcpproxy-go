@@ -42,7 +42,7 @@
     inputSchema:
       properties:
         excludePatterns:
-          default[0]:
+          default: []
           items:
             type: string
           type: array

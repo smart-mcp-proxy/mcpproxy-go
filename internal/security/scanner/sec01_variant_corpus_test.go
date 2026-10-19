@@ -21,6 +21,9 @@ import (
 //
 // Corpus contract (testdata/sec01_injection_variants.json):
 //   - label=malicious, expect=held   → verdict must NOT be "clean" (held for review).
+//   - label=malicious, expect=dangerous → verdict must be "dangerous" (RT-04/RT-07
+//     hard-tier families: mixed-script homoglyphs, destination-anchored and
+//     credential-file-to-argument exfiltration, temporal-clause position fix).
 //   - label=benign,    expect=clean  → verdict must be "clean" (stays auto-approvable).
 //   - label=benign,    expect=not_dangerous → quoted/described examples: they may
 //     surface for review (never-fully-suppress), but must never be hard-blocked.
@@ -108,6 +111,11 @@ func TestSEC01_VariantCorpus_ScanGateOutcomes(t *testing.T) {
 		switch {
 		case e.KnownGap:
 			// Reported in the table, deliberately not asserted.
+		case e.Label == "malicious" && e.Expect == "dangerous":
+			// RT-04/RT-07: must reach the HARD tier, not only be held.
+			if verdict != "dangerous" {
+				t.Errorf("%s (%s/%s): want a hard-tier dangerous verdict, got %s signals=%v", e.ID, e.Class, e.Split, verdict, sigs)
+			}
 		case e.Label == "malicious" && e.Expect == "held":
 			if verdict == "clean" {
 				t.Errorf("%s (%s/%s): hostile variant scanned clean and would be scan-approved", e.ID, e.Class, e.Split)

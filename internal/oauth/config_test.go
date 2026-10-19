@@ -115,7 +115,7 @@ func (m *MockTokenStore) DeleteToken(ctx context.Context) error {
 func TestTokenStoreManager_HasValidToken_NoStore(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -128,7 +128,7 @@ func TestTokenStoreManager_HasValidToken_NoStore(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_InMemoryStore(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -145,7 +145,7 @@ func TestTokenStoreManager_HasValidToken_InMemoryStore(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_MockStore_NoToken(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -174,7 +174,7 @@ func TestTokenStoreManager_HasValidToken_MockStore_NoToken(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_MockStore_ValidToken(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -208,7 +208,7 @@ func TestTokenStoreManager_HasValidToken_MockStore_ValidToken(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_MockStore_ExpiredToken(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -243,7 +243,7 @@ func TestTokenStoreManager_HasValidToken_MockStore_ExpiredToken(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_PersistentStore_NoExpiration(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -347,7 +347,7 @@ func TestHasPersistedToken_PastExpiresAt(t *testing.T) {
 func TestTokenStoreManager_HasValidToken_NilStorage(t *testing.T) {
 	manager := &TokenStoreManager{
 		stores:         make(map[string]client.TokenStore),
-		completedOAuth: make(map[string]time.Time),
+		completedOAuth: make(map[string]oauthCompletion),
 		logger:         zap.NewNop().Named("test"),
 	}
 
@@ -643,7 +643,7 @@ func TestAutoDetectResource_RateLimitWithRetryAfterHeader(t *testing.T) {
 	}
 
 	// Call autoDetectResource
-	result := autoDetectResource(context.Background(), serverConfig, logger)
+	result := autoDetectResource(Env{Ctx: context.Background()}, serverConfig, logger)
 
 	// Verify resource was detected after retry
 	assert.Equal(t, "https://api.example.com/mcp/v1", result, "Should detect resource after retry")
@@ -697,7 +697,7 @@ func TestAutoDetectResource_RateLimitWithResetAt(t *testing.T) {
 	}
 
 	// Call autoDetectResource
-	result := autoDetectResource(context.Background(), serverConfig, logger)
+	result := autoDetectResource(Env{Ctx: context.Background()}, serverConfig, logger)
 
 	// Verify resource was detected after retry
 	assert.Equal(t, "https://api.example.com/mcp/v1", result, "Should detect resource after retry")
@@ -728,7 +728,7 @@ func TestAutoDetectResource_RateLimitExhausted(t *testing.T) {
 	}
 
 	// Call autoDetectResource
-	result := autoDetectResource(context.Background(), serverConfig, logger)
+	result := autoDetectResource(Env{Ctx: context.Background()}, serverConfig, logger)
 
 	// Verify fallback to server URL after exhausting retries
 	assert.Equal(t, mockServer.URL+"/mcp", result, "Should fallback to server URL after exhausting retries")
@@ -760,7 +760,7 @@ func TestAutoDetectResource_ServerError(t *testing.T) {
 	}
 
 	// Call autoDetectResource
-	result := autoDetectResource(context.Background(), serverConfig, logger)
+	result := autoDetectResource(Env{Ctx: context.Background()}, serverConfig, logger)
 
 	// Verify fallback to server URL (no retry for 5xx)
 	assert.Equal(t, mockServer.URL+"/mcp", result, "Should fallback to server URL on 5xx error")
@@ -796,7 +796,7 @@ func TestAutoDetectResource_ContextCancellation(t *testing.T) {
 	// Start autoDetectResource in a goroutine
 	done := make(chan string)
 	go func() {
-		result := autoDetectResource(ctx, serverConfig, logger)
+		result := autoDetectResource(Env{Ctx: ctx}, serverConfig, logger)
 		done <- result
 	}()
 
