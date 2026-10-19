@@ -1027,7 +1027,7 @@ graph LR
 | SDK v1 migration | Todo (parked) | P3 | — |  |  |
 | Upgrade awareness & guided update | Done | P0 | — | [079-upgrade-nudge](./specs/079-upgrade-nudge/) |  |
 | Connect step trust: preview, visible backup, one-click undo | Done | P0 | — | [078-connect-trust-preview](./specs/078-connect-trust-preview/) |  |
-| Spec 116 config commit consistency: one commit section, atomic removal, upstream retirement | Done | P0 | 81/124 (65%) | [116-config-commit-consistency](./specs/116-config-commit-consistency/) | #1590 #1600 #1608 #1612 #1621 |
+| Spec 116 config commit consistency: one commit section, atomic removal, upstream retirement | Done | P0 | 89/124 (72%) | [116-config-commit-consistency](./specs/116-config-commit-consistency/) | #1590 #1600 #1608 #1612 #1621 |
 | Spec 117 review-bound approvals: durable baselines, hash-bound approvals, ordered tool inventories | Done | P0 | 46/50 (92%) | [117-review-bound-approvals](./specs/117-review-bound-approvals/) | #1604 #1605 #1609 |
 | Non-Docker sandbox isolation (Landlock) `MCP-34` | Done | P1 | — |  |  |
 | Spec 076 deterministic offline tool-scanner `MCP-3574` | Done | P1 | 22/24 (92%) | [076-deterministic-tool-scanner](./specs/076-deterministic-tool-scanner/) |  |
@@ -1036,7 +1036,7 @@ graph LR
 | Scanner simplification (deterministic default, opt-in deep scan) | Done | P1 | 38/42 (90%) | [077-scanner-simplification](./specs/077-scanner-simplification/) |  |
 | Deferred-schema serialization for the direct tools/list surface (spec 102) | Done | P1 | 89/89 (100%) | [102-schema-deferred](./specs/102-schema-deferred/) | #1063 |
 | Agent-token scope hardening: every MCP request authorized by its own scope (spec 105) | Done | P1 | 111/113 (98%) | [105-agent-scope-hardening](./specs/105-agent-scope-hardening/) |  |
-| Spec 113 upstream resilience: OAuth refresh, discovery, call-error taxonomy, session re-init | Done | P1 | 0/100 (0%) | [113-upstream-resilience](./specs/113-upstream-resilience/) | #1495 #1498 #1499 #1501 #1502 #1504 #1510 #1650 |
+| Spec 113 upstream resilience: OAuth refresh, discovery, call-error taxonomy, session re-init | Done | P1 | 60/100 (60%) | [113-upstream-resilience](./specs/113-upstream-resilience/) | #1495 #1498 #1499 #1501 #1502 #1504 #1510 #1650 |
 | Spec 115 admin MCP credentials tool: client credentials + agent token lifecycle | Done | P1 | 86/87 (99%) | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | #1557 |
 | Quarantine/approval testing pilot: independent policy model, scenario inventory, mutation gate | Done | P1 | — |  | #1619 #1631 #1634 |
 | Tray↔core decoupling: socket/REST API only, no config-file reads | Done | P2 | — |  |  |
@@ -1168,7 +1168,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [110-catalog-popularity](./specs/110-catalog-popularity/) | `in-flight` | 19/23 (83%) |
 | [111-personal-docker-image](./specs/111-personal-docker-image/) | — | — |
 | [112-client-header-forwarding](./specs/112-client-header-forwarding/) | `shipped` | 38/40 (95%) |
-| [113-upstream-resilience](./specs/113-upstream-resilience/) | `in-flight` | 40/100 (40%) |
+| [113-upstream-resilience](./specs/113-upstream-resilience/) | `in-flight` | 60/100 (60%) |
 | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | `shipped` | 86/87 (99%) |
-| [116-config-commit-consistency](./specs/116-config-commit-consistency/) | `in-flight` | 81/124 (65%) |
+| [116-config-commit-consistency](./specs/116-config-commit-consistency/) | `in-flight` | 89/124 (72%) |
 | [117-review-bound-approvals](./specs/117-review-bound-approvals/) | `in-flight` | 46/50 (92%) |
