@@ -251,7 +251,7 @@ If an operator private key may have leaked:
 3. Author and sign a new bundle with the new `key_id`, `trust_epoch` equal to the new epoch, and a sequence above the new baseline.
 4. Drop it and run `mcpproxy security bundle reload`.
 
-After the epoch change, anything signed under the old epoch is `stale_epoch_replay`, and anything signed by the old key is `key_not_trusted`, so an attacker holding the old key can replay nothing. The operator watermark restarts from the baseline, and pins and deny-list entries from the earlier epoch are retired (logged at WARN).
+After the epoch change, anything signed under the old epoch is `stale_epoch_replay`, and anything signed by the old key is `key_not_trusted`, so an attacker holding the old key can replay nothing. The operator watermark restarts from the baseline, and pins and deny-list entries from the earlier epoch are retired (logged at WARN). Until you activate a bundle signed in the new epoch, the old operator bundle counts as lost: the embedded default serves and status reports `operator_bundle_missing` (degraded coverage).
 
 Publisher epoch bumps are different: they arrive only with a new MCPProxy binary. A bundle with a higher epoch than your binary knows is refused `epoch_ahead` until you update.
 

@@ -61,14 +61,84 @@ func TestReadCandidateFile_CeilingBoundary(t *testing.T) {
 	require.Contains(t, ce.Detail, "65")
 }
 
+// growingDescriptor stands in for the raw descriptor of a file that keeps
+// growing after the fstat: it delivers the real descriptor's bytes, then
+// `extra` more 'z' bytes. It counts every byte it
+// hands to the consumer so a test can prove the loader's own limiter, not the
+// end of the stream, stops the read.
+type growingDescriptor struct {
+	inner     io.Reader
+	extra     int64
+	innerDone bool
+	delivered atomic.Int64
+}
+
+func (g *growingDescriptor) Read(p []byte) (int, error) {
+	if !g.innerDone {
+		n, err := g.inner.Read(p)
+		g.delivered.Add(int64(n))
+		if err == io.EOF {
+			g.innerDone, err = true, nil
+		}
+		if n > 0 || err != nil {
+			return n, err
+		}
+	}
+	if g.extra == 0 {
+		return 0, io.EOF
+	}
+	n := int64(len(p))
+	if g.extra > 0 && n > g.extra {
+		n = g.extra
+	}
+	for i := int64(0); i < n; i++ {
+		p[i] = 'z'
+	}
+	if g.extra > 0 {
+		g.extra -= n
+	}
+	g.delivered.Add(n)
+	return int(n), nil
+}
+
 func TestReadCandidateFile_GrowthPastCeilingDuringRead(t *testing.T) {
-	// The descriptor's size passes the fstat check, but the reader then
-	// delivers more than max bytes (the file grew). The read is bounded to
-	// max+1 and refused as ceiling_exceeded.
+	// The descriptor's size passes the fstat check, but the descriptor then
+	// delivers a megabyte more (the file grew, or a /proc-style file lied
+	// about its size). The loader's own limiter must stop the read at max+1
+	// bytes.
 	const max = 32
 	p := writeCandidate(t, "small", []byte("tiny"))
+	gd := make(chan *growingDescriptor, 1)
 	candidateReaderWrap = func(r io.Reader) io.Reader {
-		return io.MultiReader(r, bytes.NewReader(bytes.Repeat([]byte{'z'}, 4*max)))
+		g := &growingDescriptor{inner: r, extra: 1 << 20}
+		gd <- g
+		return g
+	}
+	t.Cleanup(func() { candidateReaderWrap = nil })
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := readCandidateFile(context.Background(), p, max)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		requireCandidateErr(t, err, RejectCeilingExceeded)
+	case <-time.After(3 * time.Second):
+		t.Fatal("the read of a growing descriptor was not bounded by the loader")
+	}
+	g := <-gd
+	require.LessOrEqual(t, g.delivered.Load(), int64(max+1), "the loader reads at most max+1 bytes")
+}
+
+func TestReadCandidateFile_GrowthByOneByteIsNotTruncated(t *testing.T) {
+	// A file of exactly max bytes at fstat time that grows by a single byte
+	// before the read must be refused, not silently truncated to max bytes and
+	// returned as a successful read (the +1 in the bound).
+	const max = 32
+	p := writeCandidate(t, "exact", bytes.Repeat([]byte{'a'}, max))
+	candidateReaderWrap = func(r io.Reader) io.Reader {
+		return &growingDescriptor{inner: r, extra: 1}
 	}
 	t.Cleanup(func() { candidateReaderWrap = nil })
 

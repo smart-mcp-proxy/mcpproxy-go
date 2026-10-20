@@ -43,7 +43,7 @@ func TestCrash_AfterLKGWriteBeforeCommit(t *testing.T) {
 		assert.Equal(t, "6", info.Sequence)
 		assert.Equal(t, uint64(6), f.store.persisted(t).Authorities[AuthorityPublisher].Watermark)
 		assert.Len(t, f.store.historyRows(), 2)
-		assert.ElementsMatch(t, []string{digestOf(b.Bundle) + ".json", digestOf(b.Bundle) + ".json.sig"}, f.lkgFiles())
+		assert.ElementsMatch(t, []string{digestOf(b.Bundle) + ".json", digestOf(b.Bundle) + "." + digestOf(b.Sidecar) + ".sig"}, f.lkgFiles())
 	})
 }
 
@@ -145,10 +145,11 @@ func TestLKG_StartupReconcilesOrphans(t *testing.T) {
 	outside := filepath.Join(t.TempDir(), "outside.json")
 	require.NoError(t, os.WriteFile(outside, []byte("precious"), 0o600))
 	for name, content := range map[string]string{
-		orphan + ".json":     "orphan bundle",
-		orphan + ".json.sig": "orphan sidecar",
-		".tmp-12345":         "interrupted write",
-		"README.txt":         "not ours, left alone",
+		orphan + ".json":               "orphan bundle",
+		orphan + ".json.sig":           "legacy-named orphan sidecar",
+		orphan + "." + orphan + ".sig": "orphan sidecar",
+		".tmp-12345":                   "interrupted write",
+		"README.txt":                   "not ours, left alone",
 	} {
 		require.NoError(t, os.WriteFile(filepath.Join(lkg, name), []byte(content), 0o600))
 	}
@@ -164,6 +165,7 @@ func TestLKG_StartupReconcilesOrphans(t *testing.T) {
 	files := f.lkgFiles()
 	assert.NotContains(t, files, orphan+".json")
 	assert.NotContains(t, files, orphan+".json.sig")
+	assert.NotContains(t, files, orphan+"."+orphan+".sig")
 	assert.NotContains(t, files, ".tmp-12345")
 	assert.Contains(t, files, "README.txt", "files that are not LKG entries are never touched")
 	if linkName != "" {

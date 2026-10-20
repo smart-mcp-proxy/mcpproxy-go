@@ -42,9 +42,10 @@ var (
 	// before the open syscall (after path resolution), so a test can swap the
 	// path for a FIFO or symlink in the check-to-open window (SC-011a).
 	candidateOpenHook func(path string)
-	// candidateReaderWrap, when non-nil, wraps the bounded reader of the open
-	// descriptor, so a test can inject a reader that blocks like a stalled
-	// network filesystem.
+	// candidateReaderWrap, when non-nil, wraps the raw reader of the open
+	// descriptor (before the loader's size limiter), so a test can inject a
+	// reader that blocks like a stalled network filesystem or that keeps
+	// delivering after the fstat.
 	candidateReaderWrap func(io.Reader) io.Reader
 )
 
@@ -176,11 +177,13 @@ func loadCandidate(path string, limit int64, hook func(string), wrap func(io.Rea
 	if readMax < math.MaxInt64 {
 		readMax++
 	}
-	r := io.LimitReader(f, readMax)
+	// The seam wraps the RAW descriptor, so the limiter below bounds whatever
+	// the descriptor delivers.
+	var src io.Reader = f
 	if wrap != nil {
-		r = wrap(r)
+		src = wrap(src)
 	}
-	data, err := io.ReadAll(r)
+	data, err := io.ReadAll(io.LimitReader(src, readMax))
 	if err != nil {
 		return nil, &candidateReadError{Reason: RejectReadError, Detail: "read: " + err.Error(), Err: err}
 	}

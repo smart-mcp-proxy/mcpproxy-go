@@ -243,6 +243,9 @@ type selection struct {
 	// files): the embedded default serves for this run, but the committed active
 	// record and its files are kept so the release comes back once reads work.
 	keepActive bool
+	// restored is the Active record put back from the active root's rollback
+	// pin (restorePinLocked); serving is then that pin's bundle.
+	restored *TPABundleActiveRecord
 }
 
 // runLocked is one pipeline run (design §6). The caller holds rt.mu.
@@ -268,12 +271,19 @@ func (rt *bundleRuntime) runLocked(policy *bundlePolicy, log *zap.Logger, opts r
 	}
 
 	sel := rt.chooseLocked(policy, nst, cand, readRej, log)
+	rt.restorePinLocked(policy, nst, &sel, log, now)
 
 	st := nst
 	var row *TPABundleActivation
 	activation := false
 	needCommit := len(normLogs) > 0
 	switch {
+	case sel.restored != nil:
+		// A restoration is not a new activation: no history row, no watermark
+		// movement; only the Active record is put back.
+		st = cloneState(nst)
+		st.Active = sel.restored
+		needCommit = true
 	case sel.fromPath && !sameActive(nst.Active, sel.serving):
 		activation = true
 		sel.serving.acc.Meta.GeneratedAt = sel.serving.generatedAt
@@ -492,6 +502,67 @@ func (rt *bundleRuntime) fallbackLocked(policy *bundlePolicy, nst *TPABundleStat
 		return
 	}
 	sel.serving = embeddedServing(e, policy)
+}
+
+// restorePinLocked is the last external fallback, tried only when nothing
+// external was chosen: when the ACTIVE root's rollback pin binds and names a
+// file target, its content-addressed last-known-good files are re-validated in
+// LKG mode (the pin allow-rule admits the target below the watermark) and, if
+// they pass, serve again and are recorded as the Active record.
+//
+// This is what makes FR-004b/FR-010 true across a root round trip: switching the
+// active root away deactivates the pinned bundle (it no longer belongs to the
+// active authority) and clears Active, but the pin is only SUSPENDED, so
+// switching back must restore the pinned bundle unchanged rather than leave the
+// install on the embedded default while the pin still binds.
+func (rt *bundleRuntime) restorePinLocked(policy *bundlePolicy, nst *TPABundleState, sel *selection, log *zap.Logger, now time.Time) {
+	if policy.Path == "" || rt.dataDir == "" || rt.loadFailed || sel.keepActive || sel.serving == nil || !sel.serving.embedded {
+		return
+	}
+	a := nst.Authorities[policy.ActiveRoot]
+	if !pinBinds(a) || a.Pin.Embedded || a.Pin.FullDigest == sel.deactivatedDigest {
+		return
+	}
+	pin := a.Pin
+	source := pin.Source
+	if source == "" {
+		source = BundleSourceFile
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), bundleReadBudget)
+	defer cancel()
+	cand, err := lkgReadPair(ctx, rt.dataDir, pin.FullDigest, pin.SidecarDigest, pin.SidecarDigest != "", source, pin.Path)
+	if err != nil {
+		log.Warn("rollback-pinned TPA bundle cannot be restored: its last-known-good files are unavailable",
+			zap.String("full_digest", pin.FullDigest), zap.Error(err))
+		return
+	}
+	acc, rej := evaluateCandidate(cand, evalEnv{Policy: policy, State: nst, Mode: evalLKG})
+	if rej != nil {
+		log.Warn("rollback-pinned TPA bundle cannot be restored: it no longer passes validation",
+			zap.String("full_digest", pin.FullDigest), zap.String("reason", rej.Reason), zap.String("detail", rej.Detail))
+		return
+	}
+	sv := newExternalServing(cand, acc)
+	sv.generatedAt = acc.Meta.GeneratedAt
+	sel.serving = sv
+	sel.fromPath = false
+	sel.restored = &TPABundleActiveRecord{
+		Authority:         acc.Authority,
+		TrustEpoch:        acc.TrustEpoch,
+		Sequence:          acc.Sequence,
+		FullDigest:        acc.FullDigest,
+		SidecarDigest:     acc.SidecarDigest,
+		SignatureVerified: acc.Verified,
+		Source:            cand.Source,
+		Path:              cand.Path,
+		GeneratedAt:       acc.Meta.GeneratedAt,
+		ActivatedAt:       now,
+		Rollback:          true,
+	}
+	log.Warn("TPA scanner bundle restored from its rollback pin",
+		zap.String("authority", acc.Authority),
+		zap.String("full_digest", acc.FullDigest),
+		zap.Uint64("sequence", acc.Sequence))
 }
 
 // restoreFromLKGLocked re-validates the state's Active record from its LKG

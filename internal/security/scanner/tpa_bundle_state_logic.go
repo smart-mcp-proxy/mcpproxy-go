@@ -83,7 +83,14 @@ func normalizeState(st *TPABundleState, policy *bundlePolicy) (*TPABundleState, 
 			logs = append(logs, fmt.Sprintf(
 				"trust epoch for %s changed %d→%d: watermark re-baselined to %d, %d pin/deny entries retired",
 				auth, rec.Epoch, cur, base, retired))
-			out.Authorities[auth] = &TPAAuthorityState{Epoch: cur, Watermark: base}
+			// ExternalEverActivated survives the re-scope: it records that this
+			// authority once had a serving corpus on this install, and an epoch
+			// bump is exactly what makes that corpus "no longer valid"
+			// (FR-009a(b)). Only a bundle newly activated in the new epoch —
+			// which serves externally — makes the condition moot. Pins,
+			// deny-list and the watermark setter are retired as FR-005a/FR-010
+			// require.
+			out.Authorities[auth] = &TPAAuthorityState{Epoch: cur, Watermark: base, ExternalEverActivated: rec.ExternalEverActivated}
 		case rec.Watermark < base:
 			// The baseline only ever raises the floor. The floor is now the
 			// baseline, not a bundle, so the recorded setter no longer applies.
@@ -320,6 +327,10 @@ func applyRollback(st *TPABundleState, policy *bundlePolicy, target rollbackTarg
 			FullDigest: target.FullDigest,
 			Embedded:   target.Embedded,
 			PinnedAt:   now,
+		}
+		if !target.Embedded {
+			pin := out.Authorities[root].Pin
+			pin.SidecarDigest, pin.Source, pin.Path = target.SidecarDigest, target.Source, target.Path
 		}
 	}
 
