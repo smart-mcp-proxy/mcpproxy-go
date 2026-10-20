@@ -811,7 +811,6 @@ func implicitDataDirConfigPath() string {
 func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 	var cfg *config.Config
 	var err error
-	loadedPath := configFile
 
 	// A --data-dir (or MCPPROXY_DATA_DIR) names where this instance keeps its
 	// state, config included: every management command already reads
@@ -822,6 +821,7 @@ func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 	if configPath == "" {
 		configPath = implicitDataDirConfigPath()
 	}
+	loadedPath := configPath
 
 	// Load configuration - use LoadFromFile if config file specified, otherwise use Load
 	if configPath != "" {
@@ -835,7 +835,6 @@ func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 			return nil, nil, ensureErr
 		}
 		cfg, err = config.LoadFromFile(configPath)
-		loadedPath = configPath
 	} else {
 		cfg, loadedPath, err = config.LoadWithPath()
 	}
