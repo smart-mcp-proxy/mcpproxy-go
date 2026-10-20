@@ -374,6 +374,14 @@ func (m *quarantineModel) checkInvariant(t *rapid.T) {
 			t.Fatalf("INVARIANT VIOLATION: pending→approved without user action")
 		}
 	}
+	// 3. The implementation's status must be the model's status exactly: a
+	//    tool the model expects approved that the implementation holds, or
+	//    the reverse, is a conformance failure even when it is not one of
+	//    the two forbidden promotions above.
+	if record.Status != m.status {
+		t.Fatalf("STATUS MISMATCH: model expects %q, storage holds %q (currentDesc=%q approvedDesc=%q userApproved=%v)",
+			m.status, record.Status, m.currentDesc, m.approvedDesc, m.userApproved)
+	}
 }
 
 // TestRapidQuarantineStateMachine runs a property-based state machine test
@@ -462,17 +470,13 @@ func TestRapidQuarantineStateMachine(t *testing.T) {
 						model.userApproved = false
 					}
 				}
-				// If changed tool reverts to the approved (previous) description
-				if model.status == storage.ToolApprovalStatusChanged {
-					record, err := model.rt.storageManager.GetToolApproval(model.serverName, model.toolName)
-					if err == nil {
-						if record.Status == storage.ToolApprovalStatusApproved {
-							model.status = storage.ToolApprovalStatusApproved
-							model.approvedDesc = model.currentDesc
-						} else {
-							model.status = record.Status
-						}
-					}
+				// A changed tool returns to approved ONLY when the live
+				// description is the approved one again (spec 041 US2). The
+				// expectation is computed here from the model's own state;
+				// it used to be copied from storage, which made the oracle
+				// agree with whatever the implementation did (pilot finding).
+				if model.status == storage.ToolApprovalStatusChanged && model.currentDesc == model.approvedDesc {
+					model.status = storage.ToolApprovalStatusApproved
 				}
 				_ = result
 
@@ -484,14 +488,11 @@ func TestRapidQuarantineStateMachine(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				// Sync model status with actual storage after reconnect
-				record, recErr := model.rt.storageManager.GetToolApproval(model.serverName, model.toolName)
-				if recErr == nil {
-					model.status = record.Status
-					if record.Status == storage.ToolApprovalStatusApproved {
-						model.approvedDesc = model.currentDesc
-					}
-				}
+				// A reconnect with an unchanged description changes nothing
+				// in the model: pending stays pending, changed stays changed,
+				// approved stays approved (spec 041 US1/US2). It used to copy
+				// the stored status into the model here, so a wrong promotion
+				// on reconnect could never be detected (pilot finding).
 				_ = result
 
 			case 3: // userApprove

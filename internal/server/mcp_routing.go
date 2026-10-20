@@ -692,6 +692,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// Spec 112 FR-016.3: per-call sink for the recording scrub below.
 		dispatchCtx, fwdSink := headerfwd.WithSink(ctx)
 		dispatchCtx = callerr.BeginDispatch(dispatchCtx) // Spec 113-c FR-042
+		dispatchCtx = p.withReviewDirtyRecheck(dispatchCtx, serverName)
 		if epoch, ok := p.liveConnectionEpoch(serverName); ok {
 			result, err = p.upstreamManager.CallToolOnEpoch(dispatchCtx, qualifiedName, args, epoch)
 		} else {
@@ -721,8 +722,12 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			// The generation moved before the transport: nothing reached
 			// the upstream. Same discovery-window body and telemetry bucket
 			// as the call_tool_* refusal, with the started record closed.
-			if errors.Is(err, managed.ErrConnectionGenerationChanged) {
+			// Spec 117 FR-018: so did the review-dirty re-check.
+			if dirty := isReviewNotRecordedRefusal(err); dirty || errors.Is(err, managed.ErrConnectionGenerationChanged) {
 				errMsg := unresolvedToolIdentityMessage(serverName, toolName, false)
+				if dirty {
+					errMsg = reviewNotRecordedMessage(serverName)
+				}
 				auditNoteErrorClass(ctx, audit.ErrorClassUpstreamUnavailable)
 				p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", errMsg, durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
 				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", errMsg, telemetry.BlockReasonToolNotCallable)
@@ -732,6 +737,15 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			auditNoteError(ctx, err)
 			p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
+		}
+
+		// Spec 054 Track B (pre-forward): redact secrets, strip control sequences
+		// or block on a critical detection, exactly as the call_tool_* handlers
+		// do. Direct mode previously skipped this, so output_sanitisation never
+		// applied to /mcp/all. Applied to the RAW result before the activity
+		// classification and truncation below; a non-nil result means blocked.
+		if blockResult := p.applyOutputSanitisation(ctx, serverName, toolName, requestID, directContentTrust, result); blockResult != nil {
+			return blockResult, nil
 		}
 
 		// Determine tool variant for activity logging
@@ -806,6 +820,13 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			}
 			forwarded = mcp.NewToolResultText(responseText)
 		}
+
+		// Spec 054 Track B (post-forward): spotlight untrusted text in
+		// source-identifying delimiters. Lossless, applied after truncation;
+		// responseText is refreshed so the activity record matches what the
+		// agent receives.
+		p.spotlightForwarded(serverName, toolName, directContentTrust, forwarded)
+		responseText = forwardedText(forwarded, responseText)
 
 		// Emit completion activity (success, or error when the upstream itself
 		// reported one — issue #935).
@@ -1796,6 +1817,10 @@ func (p *MCPProxyServer) RefreshPrompts() {
 	if cfg.AggregateUpstreamPrompts {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
+		// Spec 116 FR-014: bind the approval pass to the incarnations current
+		// BEFORE the listing, so prompts listed from a server that is removed
+		// and re-added meanwhile are never recorded for the replacement.
+		incs := p.capturePromptIncarnations()
 		upstreamPrompts, err := p.upstreamManager.ListPrompts(ctx)
 		if err != nil {
 			p.logger.Error("failed to list upstream prompts for refresh", zap.Error(err))
@@ -1810,7 +1835,7 @@ func (p *MCPProxyServer) RefreshPrompts() {
 		// in series after the TPA scan — scan detects poison, baseline detects
 		// change). A withheld prompt is absent from prompts/list and fails
 		// prompts/get natively; there is no runtime get-time gate.
-		approval := p.checkPromptApprovals(upstreamPrompts)
+		approval := p.checkPromptApprovalsAt(upstreamPrompts, incs)
 		upstreamPrompts = filterBlockedPrompts(upstreamPrompts, approval.blocked)
 		all = buildAggregatedServerPrompts(builtins, upstreamPrompts, p.getPromptAggregated, p.authorizeAggregatedPromptServer, p.logger)
 		p.logger.Info("refreshed prompts",

@@ -356,6 +356,9 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// synchronously) rather than from the first servers.changed, so the very
 	// first server a fresh install adds still counts as new.
 	server.seedKnownServers(cfg.Servers)
+	// Registered here, before the config watcher and background initialization
+	// start below, so no removal can commit without forgetting its scan state.
+	server.forgetInformationalScansOnPurge()
 
 	// Replace the diagnostics package's placeholder fixers with the real,
 	// runtime-backed ones (see diagnostics_fixers.go). builtin_fixers.go has
@@ -1416,6 +1419,18 @@ func (s *Server) SetListenAddress(addr string, persist bool) error {
 	return nil
 }
 
+// RecordStartupOutcome stores the Spec 042 last startup outcome in the telemetry
+// block through the runtime's config commit (#1592).
+func (s *Server) RecordStartupOutcome(outcome string) error {
+	return s.runtime.UpdateTelemetry("startup_outcome", func(tc *config.TelemetryConfig) bool {
+		if tc.LastStartupOutcome == outcome {
+			return false
+		}
+		tc.LastStartupOutcome = outcome
+		return true
+	})
+}
+
 const defaultPortSuggestionAttempts = 20
 
 // SuggestAlternateListen attempts to find an available listen address near baseAddr.
@@ -1633,6 +1648,35 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 	snapshot := stateView.Snapshot()
 	s.logger.Debug("StateView snapshot retrieved", zap.Int("count", len(snapshot.Servers)))
 
+	// Reuse the runtime projection's health (as handleListUpstreams does,
+	// #1525). The input rebuilt below carries no OAuth token status or
+	// expiry, so on its own it reports a connected OAuth server with a valid
+	// stored token as "Authentication required". The projection reads its own
+	// snapshot, so its health is only adopted when its admin state (enabled,
+	// quarantined) matches this snapshot's row; otherwise the row keeps the
+	// locally calculated health and never mixes two admin states.
+	type projectedHealth struct {
+		health      *contracts.HealthStatus
+		enabled     bool
+		quarantined bool
+	}
+	runtimeHealth := make(map[string]projectedHealth)
+	if projected, err := s.runtime.GetAllServers(); err == nil {
+		for _, entry := range projected {
+			name, _ := entry["name"].(string)
+			hs, ok := entry["health"].(*contracts.HealthStatus)
+			if !ok || hs == nil {
+				continue
+			}
+			enabled, enabledOK := entry["enabled"].(bool)
+			quarantined, quarantinedOK := entry["quarantined"].(bool)
+			if !enabledOK || !quarantinedOK {
+				continue
+			}
+			runtimeHealth[name] = projectedHealth{health: hs, enabled: enabled, quarantined: quarantined}
+		}
+	}
+
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
 	for _, serverStatus := range snapshot.Servers {
 		// Convert StateView ServerStatus to API response format
@@ -1725,7 +1769,15 @@ func (s *Server) GetAllServers() ([]map[string]interface{}, error) {
 			healthInput.RefreshNextAttempt = refreshState.NextAttempt
 		}
 
-		healthStatus := health.CalculateHealth(healthInput, health.DefaultHealthConfig())
+		var healthStatus *contracts.HealthStatus
+		if ph, ok := runtimeHealth[serverStatus.Name]; ok &&
+			ph.enabled == serverStatus.Enabled && ph.quarantined == serverStatus.Quarantined {
+			healthStatus = ph.health
+		} else {
+			// No matching runtime projection for this server: keep the
+			// conservative connection-based calculation.
+			healthStatus = health.CalculateHealth(healthInput, health.DefaultHealthConfig())
+		}
 
 		// #1064: quarantined tools are not available -- see the same guard in
 		// Runtime.GetAllServers. GetQuarantinedServers below deliberately keeps
@@ -1990,25 +2042,37 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 	// Notify about upstream server change
 	s.OnUpstreamServerChange()
 
-	// If quarantined, grant inspection exemption so tools can be discovered and reviewed
-	if serverConfig.Quarantined {
-		if supervisor := s.runtime.Supervisor(); supervisor != nil {
-			// Grant 1 hour exemption for initial tool review
-			if err := supervisor.RequestInspectionExemption(serverConfig.Name, 1*time.Hour); err != nil {
-				s.logger.Warn("Failed to grant inspection exemption for new quarantined server",
-					zap.String("server", serverConfig.Name),
-					zap.Error(err))
-			} else {
-				s.logger.Info("Granted inspection exemption for new quarantined server — tools will be discoverable for review",
-					zap.String("server", serverConfig.Name))
-			}
-		}
-	}
+	s.grantNewServerInspectionExemption(serverConfig)
 
 	s.logger.Info("Server added successfully",
 		zap.String("name", serverConfig.Name))
 
 	return nil
+}
+
+// grantNewServerInspectionExemption lets a newly admitted quarantined server be
+// connected for review. Without it the supervisor's quarantine policy keeps the
+// server disconnected (or tears down the connection the add just made), so no
+// tool definition is captured and the admission scan churns through restarts.
+// Every create door (REST, MCP `upstream_servers add`, registry add) must call
+// it after the create commit.
+func (s *Server) grantNewServerInspectionExemption(serverConfig *config.ServerConfig) {
+	if serverConfig == nil || !serverConfig.Quarantined {
+		return
+	}
+	supervisor := s.runtime.Supervisor()
+	if supervisor == nil {
+		return
+	}
+	// 1 hour covers the initial tool review.
+	if err := supervisor.RequestInspectionExemption(serverConfig.Name, 1*time.Hour); err != nil {
+		s.logger.Warn("Failed to grant inspection exemption for new quarantined server",
+			zap.String("server", serverConfig.Name),
+			zap.Error(err))
+		return
+	}
+	s.logger.Info("Granted inspection exemption for new quarantined server — tools will be discoverable for review",
+		zap.String("server", serverConfig.Name))
 }
 
 // applyServerUpdates applies a partial update to existing in place: the
@@ -2170,51 +2234,30 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 // This stops the server if running and removes it from storage.
 //
 // Spec 116: the removal is one config commit — the live config, the storage
-// row and call history, the file and the search index lose the server
-// together, and the manager instance is unregistered before this returns.
+// row and its whole purge set (PR2: tool and prompt approvals, OAuth state,
+// scan results, baseline, history), the file and the search index lose the
+// server together, the refresh schedule and other in-memory state are dropped,
+// and the manager instance is unregistered before this returns. There is no
+// cleanup after the commit for a crash or a concurrent writer to skip.
 func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 	s.logger.Info("Removing upstream server", zap.String("name", serverName))
 
-	if err := s.removeServerFromConfig(serverName); err != nil {
+	purged, err := s.removeServerFromConfig(serverName)
+	if err != nil {
 		if errors.Is(err, runtime.ErrServerNotFound) {
 			return fmt.Errorf("server '%s' not found", serverName)
 		}
 		return fmt.Errorf("failed to remove server from storage: %w", err)
 	}
 
-	storageManager := s.runtime.StorageManager()
-
-	// Clear OAuth state (tokens, client registration) for the removed server
-	// This prevents orphaned tokens from accumulating in the database.
-	// (Spec 116 PR2 moves this into the removal commit's purge.)
-	if err := storageManager.ClearOAuthState(serverName); err != nil {
-		s.logger.Warn("Failed to clear OAuth state for removed server",
-			zap.String("server", serverName),
-			zap.Error(err))
-		// Continue - this is cleanup, not critical for removal
-	}
-
-	// Notify RefreshManager to stop tracking this server's token refresh
-	if refreshManager := s.runtime.RefreshManager(); refreshManager != nil {
-		refreshManager.OnTokenCleared(serverName)
-	}
-
-	// Clean up tool approval records for the removed server
-	// This prevents orphaned approval records from accumulating
-	if err := storageManager.DeleteServerToolApprovals(serverName); err != nil {
-		s.logger.Warn("Failed to clear tool approvals for removed server",
-			zap.String("server", serverName),
-			zap.Error(err))
-	}
-
 	// Notify about upstream server change
 	s.OnUpstreamServerChange()
 
 	s.logger.Info("Server removed successfully",
-		zap.String("name", serverName))
+		zap.String("name", serverName),
+		zap.Int("purged_records", purged.Total()))
 
 	return nil
-
 }
 
 // EnableServer enables/disables a server and ensures all state is synchronized.
@@ -3257,6 +3300,14 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			server:     s,
 		})
 		secService.SetServerUnquarantiner(&serverUnquarantinerAdapter{server: s})
+		// Spec 116 PR2: a removal purged the server's scan jobs, reports and
+		// baseline in its commit; drop the cached verdict too, so a re-added
+		// server never shows the old one's.
+		s.runtime.AddServerPurgeObserver(func(names []string) {
+			for _, name := range names {
+				secService.InvalidateServerState(name)
+			}
+		})
 		secService.SetSecretStore(&keyringSecretStore{resolver: secret.NewResolver()})
 		secService.CleanupStaleJobs()
 		httpAPIServer.SetSecurityController(secService)
@@ -3326,6 +3377,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 	s.logger.Info("Registered Swagger UI endpoint", zap.String("swagger_endpoint", "/swagger/*"))
 
 	// Web UI endpoints (serves embedded Vue.js frontend) with selective API key protection.
+	// Explicit HTTPS reverse-proxy callbacks reuse OAuth's state/PKCE flow.
+	// Providers cannot attach an API key; the callback dispatcher requires a
+	// live, single-use state and never initiates a sign-in itself.
+	mux.HandleFunc(config.OAuthRemoteCallbackPrefix, oauth.GetGlobalCallbackManager().RemoteCallbackHandler)
+
 	// Spec 080 (FR-006): every serve of the UI entrypoint (index document)
 	// increments the persistent web_ui_opened funnel counter — independent of
 	// the X-MCPProxy-Client-header surface_requests.webui counting. nil-safe
@@ -3480,15 +3536,23 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 			s.httpServer.Handler = handler
 		}
 
+		// Issue #1623: wrap ONLY the TCP listener. The tray/Unix socket stays
+		// plain HTTP so the tray and CLI (which speak cleartext over local IPC)
+		// keep working when tls.enabled=true. Serving TLS over the multiplex
+		// listener previously broke /ready on the socket with HTTP 400.
+		wrapTCPListenerWithTLS(tcpListener, tlsCfg)
+
 		s.logger.Info("Starting HTTPS server with TLS configuration",
 			zap.String("certs_dir", certsDir),
 			zap.Bool("require_client_cert", cfg.TLS.RequireClientCert),
 			zap.Bool("hsts", cfg.TLS.HSTS),
+			zap.Bool("tray_plain_http", trayListener != nil),
 		)
 
-		// Run the HTTPS server in a goroutine to enable graceful shutdown
+		// Run the HTTPS server in a goroutine to enable graceful shutdown.
+		// TCP is already TLS-wrapped; tray remains cleartext — use plain Serve.
 		go func() {
-			if err := tlslocal.ServeWithTLS(s.httpServer, muxListener, tlsCfg); err != nil && err != http.ErrServerClosed {
+			if err := s.httpServer.Serve(muxListener); err != nil && err != http.ErrServerClosed {
 				s.logger.Error("HTTPS server error", zap.Error(err))
 				s.mu.Lock()
 				s.running = false
@@ -4363,9 +4427,74 @@ func (s *Server) ApproveTools(serverName string, toolNames []string, approvedBy 
 	return s.runtime.ApproveTools(serverName, toolNames, approvedBy)
 }
 
+// The *At variants bind an approval to the incarnation the caller reviewed
+// (Spec 116 FR-017: the REST expected_incarnation; 0 binds to the incarnation
+// current when the call starts). A mismatch returns runtime.ErrServerReplaced
+// and writes nothing.
+
+// ApproveToolsAt is ApproveTools bound to expectedIncarnation.
+func (s *Server) ApproveToolsAt(serverName string, toolNames []string, approvedBy string, expectedIncarnation int64) error {
+	return s.runtime.ApproveToolsAt(serverName, toolNames, approvedBy, expectedIncarnation)
+}
+
+// ApproveAllToolsAt is ApproveAllTools bound to expectedIncarnation.
+func (s *Server) ApproveAllToolsAt(serverName string, approvedBy string, expectedIncarnation int64) (int, error) {
+	return s.runtime.ApproveAllToolsAt(serverName, approvedBy, expectedIncarnation)
+}
+
+// BlockToolsAt is BlockTools bound to expectedIncarnation.
+func (s *Server) BlockToolsAt(serverName string, toolNames []string, blockedBy string, expectedIncarnation int64) (int, error) {
+	return s.runtime.BlockToolsAt(serverName, toolNames, blockedBy, expectedIncarnation)
+}
+
+// BlockAllToolsAt is BlockAllTools bound to expectedIncarnation.
+func (s *Server) BlockAllToolsAt(serverName string, blockedBy string, expectedIncarnation int64) (int, error) {
+	return s.runtime.BlockAllToolsAt(serverName, blockedBy, expectedIncarnation)
+}
+
+// SetToolEnabledAt is SetToolEnabled bound to expectedIncarnation.
+func (s *Server) SetToolEnabledAt(serverName, toolName string, enabled bool, updatedBy string, expectedIncarnation int64) error {
+	return s.runtime.SetToolEnabledAt(serverName, toolName, enabled, updatedBy, expectedIncarnation)
+}
+
+// SetAllToolsEnabledAt is SetAllToolsEnabled bound to expectedIncarnation.
+func (s *Server) SetAllToolsEnabledAt(serverName string, enabled bool, updatedBy string, expectedIncarnation int64) (int, error) {
+	return s.runtime.SetAllToolsEnabledAt(serverName, enabled, updatedBy, expectedIncarnation)
+}
+
+// QuarantineServerAt is QuarantineServer bound to expectedIncarnation (the
+// unquarantine endpoint's expected_incarnation).
+func (s *Server) QuarantineServerAt(serverName string, quarantined bool, expectedIncarnation int64) error {
+	return s.runtime.QuarantineServerAt(serverName, quarantined, expectedIncarnation)
+}
+
 // ApproveAllTools approves all pending/changed tools for a server (Spec 032).
 func (s *Server) ApproveAllTools(serverName string, approvedBy string) (int, error) {
 	return s.runtime.ApproveAllTools(serverName, approvedBy)
+}
+
+// ApproveToolsReviewed approves the named tools bound to the reviewed
+// fingerprints (Spec 117 PR-2); expected == nil is ApproveTools.
+func (s *Server) ApproveToolsReviewed(serverName string, toolNames []string, expected map[string]string, approvedBy string) (int, error) {
+	return s.runtime.ApproveToolsReviewed(serverName, toolNames, expected, approvedBy)
+}
+
+// ApproveAllToolsReviewed approves every pending/changed tool bound to the
+// reviewed fingerprints (Spec 117 PR-2); expected == nil is ApproveAllTools.
+func (s *Server) ApproveAllToolsReviewed(serverName string, expected map[string]string, approvedBy string) (int, error) {
+	return s.runtime.ApproveAllToolsReviewed(serverName, expected, approvedBy)
+}
+
+// ApproveToolsReviewedAt is ApproveToolsReviewed also bound to the reviewed
+// server incarnation (Spec 116 + Spec 117 PR-2).
+func (s *Server) ApproveToolsReviewedAt(serverName string, toolNames []string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error) {
+	return s.runtime.ApproveToolsReviewedAt(serverName, toolNames, expected, approvedBy, expectedIncarnation)
+}
+
+// ApproveAllToolsReviewedAt is ApproveAllToolsReviewed also bound to the
+// reviewed server incarnation.
+func (s *Server) ApproveAllToolsReviewedAt(serverName string, expected map[string]string, approvedBy string, expectedIncarnation int64) (int, error) {
+	return s.runtime.ApproveAllToolsReviewedAt(serverName, expected, approvedBy, expectedIncarnation)
 }
 
 // BlockTools atomically blocks (approve+disable) specific tools (MCP-2198).
@@ -4452,6 +4581,44 @@ func (a *serverUnquarantinerAdapter) UnquarantineServer(serverName string) error
 	return a.server.UnquarantineServer(serverName)
 }
 
+// UnquarantineServerAt unquarantines through one config commit that expects
+// incarnation inc (Spec 116 FR-015): a remove and re-add after the scanner
+// approval was captured fails it with server_replaced and leaves the
+// replacement quarantined.
+func (a *serverUnquarantinerAdapter) UnquarantineServerAt(serverName string, inc int64) error {
+	if a.server == nil || a.server.runtime == nil {
+		return fmt.Errorf("server unavailable")
+	}
+	return a.server.runtime.QuarantineServerAt(serverName, false, inc)
+}
+
+// CaptureApprovalIncarnation returns the incarnation a scanner approval binds
+// to (Spec 116 FR-014).
+func (a *serverUnquarantinerAdapter) CaptureApprovalIncarnation(serverName string, expected int64) (int64, error) {
+	if a.server == nil || a.server.runtime == nil {
+		return expected, nil
+	}
+	return a.server.runtime.CaptureApprovalIncarnation(serverName, expected)
+}
+
+// ServerIncarnation returns the server's current incarnation (0, false when
+// it is not configured): scan jobs and reports record it (FR-014a).
+func (a *serverUnquarantinerAdapter) ServerIncarnation(serverName string) (int64, bool) {
+	if a.server == nil || a.server.runtime == nil {
+		return 0, false
+	}
+	return a.server.runtime.ServerIncarnation(serverName)
+}
+
+// WithServerApprovalLockAt runs fn under the server's approval lock after
+// checking the stored row still has incarnation inc (Spec 116 FR-014).
+func (a *serverUnquarantinerAdapter) WithServerApprovalLockAt(serverName string, inc int64, fn func() error) error {
+	if a.server == nil || a.server.runtime == nil {
+		return fn()
+	}
+	return a.server.runtime.WithServerApprovalLockAt(serverName, inc, fn)
+}
+
 // RecordToolBlocksForSecurityApproval publishes audit events for blocks that
 // the scanner service committed atomically with the approved baseline.
 func (a *serverUnquarantinerAdapter) RecordToolBlocksForSecurityApproval(serverName string, toolNames []string, blockedBy string) {
@@ -4470,8 +4637,49 @@ func (a *serverUnquarantinerAdapter) WithToolApprovalLock(serverName string, fn 
 	return a.server.runtime.WithToolApprovalLock(serverName, fn)
 }
 
+// CommitServerApproval runs the scanner's approval commit under the
+// runtime's per-server tool-approval lock after recording the server's
+// durable tool baseline decision (Spec 117 PR-1, #1567).
+func (a *serverUnquarantinerAdapter) CommitServerApproval(serverName string, blocks []string, expected map[string]string, by string, commit func() error) (int, error) {
+	if a.server == nil || a.server.runtime == nil {
+		// No runtime: no discovery can auto-baseline either (as
+		// WithToolApprovalLock above). A binding cannot be checked, so a
+		// bound approval fails closed.
+		if expected != nil {
+			return 0, fmt.Errorf("review-bound approval unavailable: runtime not initialized")
+		}
+		return 0, commit()
+	}
+	return a.server.runtime.CommitServerApproval(serverName, blocks, expected, by, commit)
+}
+
+// FinishServerApproval runs the unlocked tail of a security approval after
+// CommitServerApproval (Spec 117 PR-2): activity record and upstream/index
+// refresh, with no promotion of tools filed after the commit.
+func (a *serverUnquarantinerAdapter) FinishServerApproval(serverName string) error {
+	if a.server == nil || a.server.runtime == nil {
+		return fmt.Errorf("server unavailable")
+	}
+	return a.server.runtime.FinishServerApproval(serverName)
+}
+
+// CommitServerApprovalAt is CommitServerApproval bound to the reviewed server
+// incarnation (Spec 116 FR-014).
+func (a *serverUnquarantinerAdapter) CommitServerApprovalAt(serverName string, inc int64, blocks []string, expected map[string]string, by string, commit func() error) (int, error) {
+	if a.server == nil || a.server.runtime == nil {
+		if expected != nil {
+			return 0, fmt.Errorf("review-bound approval unavailable: runtime not initialized")
+		}
+		return 0, commit()
+	}
+	return a.server.runtime.CommitServerApprovalAt(serverName, inc, blocks, expected, by, commit)
+}
+
+var _ scanner.IncarnationServerApprovalCommitter = (*serverUnquarantinerAdapter)(nil)
 var _ scanner.ToolBlockRecorder = (*serverUnquarantinerAdapter)(nil)
 var _ scanner.ToolApprovalLocker = (*serverUnquarantinerAdapter)(nil)
+var _ scanner.ServerApprovalCommitter = (*serverUnquarantinerAdapter)(nil)
+var _ scanner.ReviewedServerApprover = (*serverUnquarantinerAdapter)(nil)
 
 // scanSummaryEnricherAdapter bridges scanner.Service.GetScanSummary (which
 // returns the scanner-internal *scanner.ScanSummary type) to
@@ -4955,4 +5163,13 @@ func (s *Server) mcpLoggingHandler(handler http.Handler) http.Handler {
 			)
 		}
 	})
+}
+
+// ServerIncarnation returns serverName's committed incarnation (Spec 116
+// FR-017); the REST tool listings stamp it on their rows.
+func (s *Server) ServerIncarnation(serverName string) (int64, bool) {
+	if s.runtime == nil {
+		return 0, false
+	}
+	return s.runtime.ServerIncarnation(serverName)
 }

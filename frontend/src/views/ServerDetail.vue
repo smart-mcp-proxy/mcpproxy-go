@@ -76,10 +76,10 @@
                   {{ isHttpProtocol ? 'Reconnect' : 'Restart' }}
                 </button>
               </li>
-              <li v-if="healthAction === 'login'">
-                <button @click="triggerOAuth" :disabled="actionLoading">
+              <li v-if="canSignIn">
+                <button @click="triggerOAuth" :disabled="actionLoading" data-test="server-detail-menu-login">
                   <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-                  Login
+                  {{ server.authenticated || server.connected ? 'Sign in again' : 'Sign in' }}
                 </button>
               </li>
               <li v-if="server.enabled && server.connected">
@@ -300,7 +300,7 @@
               class="btn btn-sm btn-warning"
             >
               <span v-if="actionLoading" class="loading loading-spinner loading-xs"></span>
-              Approve
+              Review &amp; approve
             </button>
           </div>
         </div>
@@ -1579,7 +1579,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted, watch, toRaw } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useServersStore } from '@/stores/servers'
 import { useSystemStore } from '@/stores/system'
@@ -1598,12 +1598,14 @@ import ReviewScreen from '@/components/ReviewScreen.vue'
 import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { Server, Tool, ToolApproval, SecurityScanReport, HealthStatus } from '@/types'
 import api from '@/services/api'
+import { incarnationArgs } from '@/utils/incarnation'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDisplayName, scanReportPath } from '@/utils/serverRoute'
 import { refName } from '@/utils/secretRef'
 import { isTerminalScanStatus, decideScanReconcile, finalizeToastKind } from '@/utils/scanState'
 import { selectQuarantinedTools } from '@/utils/toolQuarantine'
 import { oauthSignInState, healthStatusLabel, healthActionLabel, healthStatusText } from '@/utils/health'
+import { canStartOAuthLogin } from '@/utils/oauthActions'
 import type { HealthStatusValue } from '@/types/contracts'
 import { describeIsolation } from '@/utils/isolationState'
 import { computeToolDiffSections } from '@/utils/toolDiff'
@@ -1759,6 +1761,43 @@ const toolsEmptyBody = computed(() => {
 
 // Tool quarantine (Spec 032)
 const toolApprovals = ref<ToolApproval[]>([])
+// Spec 116 FR-017 (review round 1): the incarnation of the server the displayed
+// tool list and approval rows were read for (the backend reads it before the
+// rows). Per-tool decisions are bound to THESE, not to the live store: a
+// same-name replacement arriving over SSE must not make the old rows act on it.
+const toolsIncarnation = ref<number | undefined>()
+const approvalsIncarnation = ref<number | undefined>()
+
+// displayedIncarnation is the incarnation the rows on screen belong to, or
+// null when they are stale: the two lists disagree, or the live server is
+// already a different incarnation whose rows have not arrived yet.
+function displayedIncarnation(): number | undefined | null {
+  const t = toolsIncarnation.value
+  const a = approvalsIncarnation.value
+  if (t !== undefined && a !== undefined && t !== a) return null
+  const shown = a ?? t
+  const live = server.value?.incarnation
+  if (shown !== undefined && live !== undefined && live !== shown) return null
+  return shown
+}
+
+// decisionIncarnation is the expected_incarnation argument of a per-tool
+// decision. On stale rows it refuses the decision, says why, and reloads the
+// rows instead (null).
+function decisionIncarnation(): [] | [number] | null {
+  const inc = displayedIncarnation()
+  if (inc === null) {
+    systemStore.addToast({
+      type: 'warning',
+      title: 'Server replaced',
+      message: `${props.serverName} was removed and added again. Its tools are reloading; review them before deciding.`,
+    })
+    void loadToolApprovals()
+    void refreshToolsSilently()
+    return null
+  }
+  return incarnationArgs(inc)
+}
 const approvalLoading = ref(false)
 // MCP-2917: the Tool-Quarantine banner carries a one-line hint about how to
 // auto-approve pending tools; let the operator dismiss it for the session.
@@ -1824,6 +1863,7 @@ const logTail = ref(100)
 const isHttpProtocol = computed(() => {
   return server.value?.protocol === 'http' || server.value?.protocol === 'streamable-http'
 })
+const canSignIn = computed(() => !!server.value && canStartOAuthLogin(server.value))
 
 // Suggested action from unified health status
 const healthAction = computed(() => {
@@ -2274,6 +2314,8 @@ watch(
   (next, prev) => {
     if (next === prev) return
     serverTools.value = []
+    toolsIncarnation.value = undefined
+    approvalsIncarnation.value = undefined
     toolsLoadedKey = ''
     toolsError.value = null
     selectedToolSchema.value = null
@@ -2489,10 +2531,12 @@ function refreshToolsSilently() {
 // The server fields the tool list depends on. A quarantined stdio server is
 // already connected with its tools withheld, so approval changes `quarantined`
 // and `tool_count` but neither of the flags the connected/enabled watch keys on.
-type ToolsStateFields = Pick<Server, 'quarantined' | 'connected' | 'enabled' | 'tool_count'>
+// The incarnation is part of the key (Spec 116 FR-017): a same-name replacement
+// can carry identical state fields, and the old list must not stay on screen.
+type ToolsStateFields = Pick<Server, 'quarantined' | 'connected' | 'enabled' | 'tool_count' | 'incarnation'>
 function toolsStateKey(s: Partial<ToolsStateFields> | null | undefined): string {
   if (!s) return ''
-  return [s.quarantined, s.connected, s.enabled, s.tool_count].join('|')
+  return [s.quarantined, s.connected, s.enabled, s.tool_count, s.incarnation ?? ''].join('|')
 }
 // Key of the server state the displayed tool list was requested under. It only
 // advances when a response is committed, so a failed refetch leaves it behind
@@ -2519,6 +2563,7 @@ async function _loadToolsWithGen(gen: number, silent = false) {
     if (gen !== loadGeneration || mySeq < toolsAppliedSeq) return
     if (response.success && response.data) {
       serverTools.value = response.data.tools || []
+      toolsIncarnation.value = response.data.incarnation || undefined
       toolsError.value = null
       toolsAppliedSeq = mySeq
       toolsLoadedKey = myKey
@@ -2588,6 +2633,7 @@ async function _loadToolApprovalsWithGen(gen: number) {
       }
 
       toolApprovals.value = approvals
+      approvalsIncarnation.value = response.data.incarnation || undefined
     }
   } catch {
     // Silently fail - tool approvals are supplementary info
@@ -2607,9 +2653,11 @@ function approveAllTools() {
 // no destructive-confirm modal. Mirrors approveTool, reusing approvalLoading.
 async function blockTool(toolName: string) {
   if (!server.value) return
+  const bound = decisionIncarnation()
+  if (bound === null) return
   approvalLoading.value = true
   try {
-    const response = await api.blockTools(server.value.name, [toolName])
+    const response = await api.blockTools(server.value.name, [toolName], ...bound)
     if (response.success) {
       systemStore.addToast({
         type: 'success',
@@ -2642,9 +2690,13 @@ async function blockTool(toolName: string) {
 
 async function blockAllTools() {
   if (!server.value) return
+  const bound = decisionIncarnation()
+  if (bound === null) return
   approvalLoading.value = true
   try {
-    const response = await api.blockTools(server.value.name)
+    const response = await (bound.length > 0
+      ? api.blockTools(server.value.name, undefined, ...bound)
+      : api.blockTools(server.value.name))
     if (response.success) {
       systemStore.addToast({
         type: 'success',
@@ -2677,17 +2729,36 @@ async function blockAllTools() {
 
 async function toggleToolEnabled(toolName: string, enabled: boolean) {
   if (!server.value) return
+  const bound = decisionIncarnation()
+  if (bound === null) return
   toolToggleLoading.value = { ...toolToggleLoading.value, [toolName]: true }
+  const stillSameReview = captureToggleReview()
 
   // optimistic local UI update
   const idx = toolApprovals.value.findIndex(t => t.tool_name === toolName)
   const prev = idx >= 0 ? { ...toolApprovals.value[idx] } : null
+  let optimistic: ToolApproval | null = null
   if (idx >= 0) {
-    toolApprovals.value[idx] = {
+    optimistic = {
       ...toolApprovals.value[idx],
       enabled,
       disabled: !enabled,
     }
+    toolApprovals.value[idx] = optimistic
+  }
+  // Review round 5 (Sol): roll back only the row this toggle replaced, found
+  // by identity, and only while the screen still shows the review the toggle
+  // started on. A late failure (409 server_replaced) for a removed server must
+  // not write its saved row or quarantine counts into a same-name
+  // replacement's view, which would hide the replacement's pending or changed
+  // tool and its evidence.
+  const rollback = () => {
+    if (!stillSameReview()) return
+    if (prev && optimistic) {
+      const at = toolApprovals.value.findIndex(t => toRaw(t) === optimistic)
+      if (at >= 0) toolApprovals.value[at] = prev
+    }
+    restoreStoreQuarantine(prevQuarantine)
   }
   // Optimistically bump the local quarantine.blocked_count so the
   // "N disabled" stat-desc pill responds the instant the user flips the
@@ -2699,7 +2770,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
   bumpStoreBlockedCount(enabled ? -1 : 1)
 
   try {
-    const response = await api.setToolEnabled(server.value.name, toolName, enabled)
+    const response = await api.setToolEnabled(server.value.name, toolName, enabled, ...bound)
     if (response.success) {
       systemStore.addToast({
         type: 'success',
@@ -2712,8 +2783,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
       // Enable toggle leaves the stat-desc pill stuck on "N disabled".
       await syncAfterToolToggle()
     } else {
-      if (idx >= 0 && prev) toolApprovals.value[idx] = prev
-      restoreStoreQuarantine(prevQuarantine)
+      rollback()
       systemStore.addToast({
         type: 'error',
         title: 'Update Failed',
@@ -2721,8 +2791,7 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
       })
     }
   } catch (err) {
-    if (idx >= 0 && prev) toolApprovals.value[idx] = prev
-    restoreStoreQuarantine(prevQuarantine)
+    rollback()
     systemStore.addToast({
       type: 'error',
       title: 'Update Failed',
@@ -2733,6 +2802,23 @@ async function toggleToolEnabled(toolName: string, enabled: boolean) {
     delete next[toolName]
     toolToggleLoading.value = next
   }
+}
+
+// captureToggleReview records which review an optimistic tool toggle started
+// on: this visit's load generation, the server name, the incarnation of the
+// rows on screen and of the store entry. The returned predicate is true only
+// while all of them are unchanged, so a late failure rolls back nothing once
+// the server was removed and re-added (review round 5).
+function captureToggleReview(): () => boolean {
+  const gen = loadGeneration
+  const name = props.serverName
+  const rowsInc = approvalsIncarnation.value
+  const liveInc = server.value?.incarnation
+  return () =>
+    gen === loadGeneration &&
+    name === props.serverName &&
+    rowsInc === approvalsIncarnation.value &&
+    liveInc === server.value?.incarnation
 }
 
 // bumpStoreBlockedCount adjusts the store server's quarantine.blocked_count
@@ -2791,7 +2877,10 @@ async function syncAfterToolToggle() {
 // disabled-flags immediately (instead of waiting for the SSE event).
 async function bulkToggleAllTools(enabled: boolean) {
   if (!server.value || bulkToolToggleLoading.value) return
+  const bound = decisionIncarnation()
+  if (bound === null) return
   bulkToolToggleLoading.value = true
+  const stillSameReview = captureToggleReview()
 
   // Optimistic store mutation — same idea as the single-tool path, but
   // we drive blocked_count straight to 0 (Enable All) or the count of
@@ -2819,7 +2908,7 @@ async function bulkToggleAllTools(enabled: boolean) {
   })
 
   try {
-    const response = await api.setAllToolsEnabled(server.value.name, enabled)
+    const response = await api.setAllToolsEnabled(server.value.name, enabled, ...bound)
     if (response.success && response.data) {
       const changed = response.data.changed ?? 0
       // "Enable All" intentionally skips tools the server config denies
@@ -2843,7 +2932,7 @@ async function bulkToggleAllTools(enabled: boolean) {
       // "N disabled" pill, and the Server List both lose any staleness.
       await syncAfterToolToggle()
     } else {
-      restoreStoreQuarantine(prevQuarantine)
+      if (stillSameReview()) restoreStoreQuarantine(prevQuarantine)
       systemStore.addToast({
         type: 'error',
         title: 'Bulk Update Failed',
@@ -2851,7 +2940,7 @@ async function bulkToggleAllTools(enabled: boolean) {
       })
     }
   } catch (err) {
-    restoreStoreQuarantine(prevQuarantine)
+    if (stillSameReview()) restoreStoreQuarantine(prevQuarantine)
     systemStore.addToast({
       type: 'error',
       title: 'Bulk Update Failed',
@@ -2965,11 +3054,13 @@ async function triggerOAuth() {
 
   actionLoading.value = true
   try {
-    await serversStore.triggerOAuthLogin(server.value.name)
+    const result = await serversStore.triggerOAuthLogin(server.value.name)
     systemStore.addToast({
-      type: 'success',
-      title: 'OAuth Login Triggered',
-      message: `Check your browser for ${server.value.name} login`,
+      type: result.browser_opened ? 'info' : 'warning',
+      title: result.browser_opened ? 'Sign-in opened' : 'Open the sign-in page',
+      message: result.browser_opened ? `Finish signing in to ${server.value.name} in your browser.` : 'Your browser blocked the new tab. Use the link below to continue.',
+      link: result.auth_url ? { url: result.auth_url, label: `Sign in to ${server.value.name}` } : undefined,
+      duration: result.browser_opened ? 10000 : 0,
     })
   } catch (error) {
     systemStore.addToast({

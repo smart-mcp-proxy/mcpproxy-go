@@ -24,6 +24,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
@@ -36,6 +37,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/registries"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/configsvc"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
@@ -50,6 +52,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // Status captures high-level state for API consumers.
@@ -120,6 +123,8 @@ type Runtime struct {
 	commitWaitState
 	// Spec 116 commit bookkeeping (commit.go).
 	commitState
+	// purgeObserverState: Spec 116 PR2 purge observers (commit_purge.go).
+	purgeObserverState
 
 	// Config-watcher self-write suppression (config_watcher.go): marshaled
 	// bytes of the configs mcpproxy itself recently saved to disk. Needed on
@@ -254,7 +259,8 @@ type Runtime struct {
 	// tool-approval records (UX-02): discovery passes (checkToolApprovals),
 	// operator approve/block/toggle, server-approval baseline promotion, the
 	// quarantine flip and the scanner's baseline+blocks write. Key: server
-	// name, value: *sync.Mutex. See lockToolApprovals.
+	// name, value: *toolApprovalServerLock (the mutex plus the Spec 117
+	// PR-3 capture-order state it guards). See lockToolApprovals.
 	toolApprovalLocks sync.Map
 
 	// toolApprovalReadHook, when set (tests only), runs inside
@@ -269,6 +275,23 @@ type Runtime struct {
 	// lastCaptureAt (guarded by lastGoodToolsMu) records when each server's
 	// toolset was last captured, for the review payload's fresh-capture proof.
 	lastCaptureAt map[string]time.Time
+	// lastGoodPurgeSeq (guarded by lastGoodToolsMu) counts the removal purges
+	// of each server's last-good snapshot (Spec 116 PR2 review round 3). A
+	// local reindex reads it together with the snapshot and re-checks it under
+	// the approval lock — the lock the purge runs under — so a snapshot
+	// selected before a remove and re-add is never applied to the replacement.
+	lastGoodPurgeSeq map[string]uint64
+	// lastGoodGen (guarded by lastGoodToolsMu) is the Spec 116 commit
+	// generation of the instance each last-good snapshot was listed from
+	// (PR3, FR-021b). A local reindex hands it to the final D15 check, so a
+	// snapshot from an instance an endpoint change superseded is never
+	// reapplied; the caller re-lists the current instance instead.
+	lastGoodGen map[string]int64
+	// lastGoodCapture (guarded by lastGoodToolsMu) is the capture each
+	// last-good snapshot came from (Spec 117 PR-3, FR-037): a snapshot is
+	// replaced only by a newer-or-equal capture, and operator reconciliation
+	// re-applies it only while that capture is still current.
+	lastGoodCapture map[string]managed.InventoryCapture
 	// pruneAfterSnapshot is a test hook run after the prune snapshot.
 	pruneAfterSnapshot func(toolName string)
 	// captureSnapMu makes "records persisted + pruned + stamp published" one
@@ -286,6 +309,9 @@ type Runtime struct {
 	// localReindexAfterSnapshot is a test hook run by the local-snapshot
 	// reindex paths right after they selected their snapshot (lock held).
 	localReindexAfterSnapshot func()
+	// replayAfterOriginalRead is a test hook run by ReplayToolCall right after
+	// it read the original call record (Spec 116 PR2 review round 5).
+	replayAfterOriginalRead func()
 
 	// legacyStampBeforeWrite is a test-only interleaving seam for
 	// stampRemainingLegacyToolApprovals (Spec 105 FR-009, astra r1 P4): when
@@ -410,6 +436,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	secretResolver := secret.NewResolver()
 
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
+	// Spec 116 PR2b (review R6.1): no instance is built for a committed view
+	// the stored row has already moved past.
+	upstreamManager.SetCommittedViewChecker(storageManager.CheckCommittedView)
 	if cfg.Logging != nil {
 		upstreamManager.SetLogConfig(cfg.Logging)
 	}
@@ -792,6 +821,28 @@ func (r *Runtime) UpdateListenAddress(addr string) error {
 	_, err := r.Commit("update_listen", func(tx *CommitTx) error {
 		return tx.MutateGlobal(func(cfg *config.Config) error {
 			cfg.Listen = addr
+			return nil
+		})
+	})
+	return err
+}
+
+// UpdateTelemetry applies fn to the telemetry block through one config commit
+// (#1592). fn edits a private copy (a fresh block when none is configured) and
+// reports whether it changed anything; false makes the call a no-op. Routing
+// the startup outcome and first-run notice flag through the commit keeps the
+// live config and the file consistent, so a concurrent disk-writing commit
+// cannot drop them.
+func (r *Runtime) UpdateTelemetry(reason string, fn func(tc *config.TelemetryConfig) bool) error {
+	_, err := r.Commit(reason, func(tx *CommitTx) error {
+		return tx.MutateGlobal(func(cfg *config.Config) error {
+			tc := cfg.Telemetry
+			if tc == nil {
+				tc = &config.TelemetryConfig{}
+			}
+			if fn(tc) {
+				cfg.Telemetry = tc
+			}
 			return nil
 		})
 	})
@@ -1597,6 +1648,9 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	if originalCall == nil {
 		return nil, fmt.Errorf("tool call not found: %s", id)
 	}
+	if hook := r.replayAfterOriginalRead; hook != nil {
+		hook()
+	}
 
 	// Use modified arguments if provided, otherwise use original.
 	//
@@ -1613,6 +1667,40 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 					"so they are a placeholder rather than the original input; supply arguments explicitly to replay it", id)
 		}
 		callArgs = originalCall.Arguments
+	}
+
+	// Spec 116 FR-014c (review round 1): bind the history write to the
+	// server's incarnation, captured BEFORE the client is resolved. A removal
+	// or same-name replacement completing in between then makes the write
+	// drop instead of recording the old client's call under the replacement;
+	// a server with no committed identity is not replayed at all.
+	callInc, incOK := r.ServerIncarnation(originalCall.ServerName)
+	if !incOK && r.approvalBindingEnforced() {
+		return nil, fmt.Errorf("server not found: %s", originalCall.ServerName)
+	}
+	// Review round 5: the original call was read BEFORE the incarnation was
+	// captured, so a removal and same-name re-add in between leaves callInc
+	// naming the replacement while originalCall still names the removed
+	// server's identity. The removal commit purged that identity together with
+	// its history, so its absence now means the call belongs to a server that
+	// no longer exists: the replay is refused before it dispatches anything to
+	// the replacement. A removal after this point changes the row's
+	// incarnation away from callInc, and the write below re-checks the
+	// identity in its own transaction (RecordReplayedToolCallIfIncarnation).
+	//
+	// Review round 6: the identity id is a configuration hash that excludes
+	// the incarnation, so a same-config replacement registers the SAME
+	// identity and the identity check alone passes. The original call record
+	// itself is the proof: the removal purged it with the history bucket and
+	// nothing recreates it, so the replay is refused unless the record is
+	// still there. The write re-checks both in its transaction.
+	if originalCall.ServerID != "" {
+		if identity, idErr := storageManager.GetServerIdentityByID(originalCall.ServerID); idErr != nil || identity == nil || identity.ServerName != originalCall.ServerName {
+			return nil, fmt.Errorf("tool call not found: %s", id)
+		}
+		if present, exErr := storageManager.ToolCallRecordExists(originalCall.ServerID, originalCall.ID); exErr != nil || !present {
+			return nil, fmt.Errorf("tool call not found: %s", id)
+		}
 	}
 
 	// Get the upstream client
@@ -1663,7 +1751,7 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	}
 
 	// Store the new tool call
-	if err := storageManager.RecordToolCall(newCall); err != nil {
+	if _, err := storageManager.RecordReplayedToolCallIfIncarnation(newCall, callInc, originalCall.ID); err != nil {
 		r.logger.Warn("Failed to record replayed tool call", zap.Error(err))
 	}
 
@@ -2559,6 +2647,15 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		return r.getAllServersLegacy()
 	}
 
+	// Spec 116 FR-017 (review round 1): the committed snapshot supplies BOTH
+	// the displayed configuration and the generation/incarnation of each
+	// server. The StateView lags commits, so pairing its config with the
+	// snapshot's incarnation could show the old server's command or URL with
+	// a same-name replacement's incarnation, which the client echoes back as
+	// expected_incarnation. Read it before the StateView: the view then never
+	// shows a server newer than the identity it carries.
+	committed := r.committedSnapshot()
+
 	// Get snapshot - this is lock-free and instant
 	snapshot := stateView.Snapshot()
 	r.logger.Debug("StateView snapshot retrieved", zap.Int("count", len(snapshot.Servers)))
@@ -2575,8 +2672,19 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		oauthExpiryWarningHours = cfg.OAuthExpiryWarningHours
 	}
 
+	if hook := r.testHooks.serverViewAfterRead; hook != nil {
+		hook()
+	}
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
+	snapGens := committed.gens()
 	for _, serverStatus := range snapshot.Servers {
+		// Spec 116 PR2 review round 7: a server the committed snapshot no
+		// longer configures is a removed server the view has not caught up
+		// with; listing it would offer unbound rows (no incarnation).
+		if serverStatus == nil || committed.absent(serverStatus.Name) {
+			continue
+		}
+		serverStatus = committed.pairStatus(serverStatus)
 		// Convert StateView ServerStatus to API response format
 		connected := serverStatus.Connected
 		connecting := strings.EqualFold(serverStatus.State, "connecting")
@@ -2793,6 +2901,11 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["reconnect_on_use"] = true
 		}
 
+		// Spec 116 FR-017: the committed generation and incarnation, so a
+		// client can bind an approval to the server identity it rendered
+		// (expected_incarnation).
+		addServerGenerationFields(serverMap, snapGens, serverStatus.Name)
+
 		// MCP-2940: surface the per-server auto-approve intent so the REST GET
 		// payload (and SSE servers.changed embed) can drive the Web UI toggle.
 		// Tri-state *bool — only emit the key when set so the projection stays
@@ -2978,6 +3091,77 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	return result, nil
 }
 
+// committedView is one committed configuration snapshot that a server list
+// reads both the displayed configuration and the incarnation from (Spec 116
+// FR-017, review round 1). A nil view (no config service) pairs nothing and
+// offers no generation.
+type committedView struct{ snap *configsvc.Snapshot }
+
+func (r *Runtime) committedSnapshot() committedView {
+	if r.configSvc == nil {
+		return committedView{}
+	}
+	return committedView{snap: r.configSvc.Current()}
+}
+
+func (v committedView) gens() map[string]configsvc.ServerGen {
+	if v.snap == nil {
+		return nil
+	}
+	return v.snap.ServerGenerations
+}
+
+// pairConfig returns the committed configuration of sc's server when the
+// snapshot has it, else sc unchanged (a row the snapshot does not carry gets
+// no generation either).
+func (v committedView) pairConfig(sc *config.ServerConfig) *config.ServerConfig {
+	if v.snap == nil || sc == nil {
+		return sc
+	}
+	if cs := v.snap.GetServer(sc.Name); cs != nil {
+		return cs
+	}
+	return sc
+}
+
+// absent reports whether the committed snapshot authoritatively has no server
+// named name: a snapshot a commit published (it carries generations) that does
+// not configure it. Between a removal and a same-name re-add the StateView can
+// still hold the removed server's row and tools, and there is no incarnation
+// to bind a decision on them to (Spec 116 PR2 review round 7), so readers
+// serve nothing for an absent server. A snapshot without generations (a
+// fixture or pre-boot state) is not authoritative and reports nothing absent.
+func (v committedView) absent(name string) bool {
+	return v.snap != nil && v.snap.Config != nil && v.snap.ServerGenerations != nil && v.snap.GetServer(name) == nil
+}
+
+// pairStatus returns a copy of st whose configuration (and the enabled and
+// quarantined flags projected from it) is the committed one, so the row's
+// command, URL and quarantine state belong to the incarnation it carries.
+func (v committedView) pairStatus(st *stateview.ServerStatus) *stateview.ServerStatus {
+	if v.snap == nil || st == nil {
+		return st
+	}
+	cs := v.snap.GetServer(st.Name)
+	if cs == nil {
+		return st
+	}
+	paired := *st
+	paired.Config = cs
+	paired.Enabled = cs.Enabled
+	paired.Quarantined = cs.Quarantined
+	return &paired
+}
+
+// addServerGenerationFields adds "generation" and "incarnation" (Spec 116
+// FR-017) to a server payload when the server has a committed stamp.
+func addServerGenerationFields(m map[string]interface{}, gens map[string]configsvc.ServerGen, name string) {
+	if g, ok := gens[name]; ok {
+		m["generation"] = g.Gen
+		m["incarnation"] = g.Incarnation
+	}
+}
+
 // getAllServersLegacy is the storage-based fallback implementation.
 func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 	r.logger.Warn("Using legacy storage-based GetAllServers (slow path)")
@@ -2988,15 +3172,22 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		return []map[string]interface{}{}, nil
 	}
 
+	committed := r.committedSnapshot()
+
 	// Get all configured servers from storage
 	servers, err := r.storageManager.ListUpstreamServers()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get servers from storage: %w", err)
 	}
 
+	if hook := r.testHooks.serverViewAfterRead; hook != nil {
+		hook()
+	}
 	// Get connection status from upstream manager
 	result := make([]map[string]interface{}, 0, len(servers))
+	snapGens := committed.gens()
 	for _, srv := range servers {
+		srv = committed.pairConfig(srv)
 		serverInfo := map[string]interface{}{
 			"id":          srv.Name,
 			"name":        srv.Name,
@@ -3019,6 +3210,10 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		if srv.SourceRegistryProvenance != "" {
 			serverInfo["source_registry_provenance"] = srv.SourceRegistryProvenance
 		}
+
+		// Spec 116 FR-017: generation and incarnation in parity with the
+		// StateView path.
+		addServerGenerationFields(serverInfo, snapGens, srv.Name)
 
 		// MCP-2940: per-server auto-approve intent in parity with the
 		// StateView path. Tri-state *bool — only emit when set.
@@ -3073,6 +3268,15 @@ func (r *Runtime) GetServerTools(serverName string) ([]map[string]interface{}, e
 		return nil, fmt.Errorf("StateView not available")
 	}
 
+	// Spec 116 PR2 review round 7: read the committed snapshot before the
+	// view. A server it does not configure was removed (and not yet re-added):
+	// the view may still hold its tools, but they have no incarnation a
+	// decision could bind to, so the read answers not found rather than
+	// serving them unbound.
+	if r.committedSnapshot().absent(serverName) {
+		return nil, fmt.Errorf("server not found: %s", serverName)
+	}
+
 	// Get snapshot - this is lock-free and instant
 	snapshot := stateView.Snapshot()
 	serverStatus, exists := snapshot.Servers[serverName]
@@ -3080,9 +3284,26 @@ func (r *Runtime) GetServerTools(serverName string) ([]map[string]interface{}, e
 		return nil, fmt.Errorf("server not found: %s", serverName)
 	}
 
+	// Spec 116 PR2 review round 6 (FR-017): the REST listings stamp these
+	// tools with the server's COMMITTED incarnation, read before this call.
+	// The StateView lags the commit, and a remove + same-name re-add leaves
+	// it holding the removed server's definitions until reconcile catches up.
+	// Its tools are served only when the view was reconciled from the
+	// committed incarnation; otherwise they belong to a server that no longer
+	// exists, and the listing falls through to the index below, which the
+	// removal commit purged and which holds only the replacement's tools.
+	viewTools := serverStatus.Tools
+	if committedInc, ok := r.ServerIncarnation(serverName); ok && serverStatus.Incarnation != committedInc {
+		r.logger.Debug("GetServerTools: StateView lags the committed incarnation; not serving its tools",
+			zap.String("server", serverName),
+			zap.Int64("view_incarnation", serverStatus.Incarnation),
+			zap.Int64("committed_incarnation", committedInc))
+		viewTools = nil
+	}
+
 	// Convert []stateview.ToolInfo to []map[string]interface{}
-	tools := make([]map[string]interface{}, 0, len(serverStatus.Tools))
-	for _, tool := range serverStatus.Tools {
+	tools := make([]map[string]interface{}, 0, len(viewTools))
+	for _, tool := range viewTools {
 		toolMap := map[string]interface{}{
 			"name":        tool.Name,
 			"description": tool.Description,
@@ -3254,14 +3475,25 @@ func (r *Runtime) TriggerOAuthLogout(serverName string) error {
 		return fmt.Errorf("upstream manager not available")
 	}
 
-	// IMPORTANT: Set user logged out flag FIRST before any other operations
-	// This prevents race conditions where reconnection logic kicks in
-	// during ClearOAuthToken or DisconnectServer operations
-	if err := r.upstreamManager.SetUserLoggedOut(serverName, true); err != nil {
+	// Spec 116 PR3 (#1563): resolve the instance ONCE and run the logged-out
+	// flag and the disconnect against that instance, bound to its
+	// (generation, instance). A replacement installed in between (an
+	// OAuth-config change, a remove and re-add, a restart) is not touched by
+	// a logout aimed at the instance it replaced.
+	client, hasClient := r.upstreamManager.GetClient(serverName)
+	var gen int64
+	var inst managed.InstanceID
+	if hasClient && client != nil {
+		gen, inst = client.Generation(), client.InstanceID()
+		// IMPORTANT: Set user logged out flag FIRST before any other
+		// operations. This prevents race conditions where reconnection
+		// logic kicks in during ClearOAuthToken or the disconnect.
+		client.SetUserLoggedOut(true)
+	} else {
 		r.logger.Warn("Failed to set user logged out state",
 			zap.String("server", serverName),
-			zap.Error(err))
-		// Continue - still try to clear token and disconnect
+			zap.Error(fmt.Errorf("server not found: %s", serverName)))
+		// Continue - still try to clear token
 	}
 
 	// Clear OAuth token from persistent storage
@@ -3277,15 +3509,31 @@ func (r *Runtime) TriggerOAuthLogout(serverName string) error {
 		r.refreshManager.OnTokenCleared(serverName)
 	}
 
-	// Disconnect the server to force re-authentication
-	if err := r.upstreamManager.DisconnectServer(serverName); err != nil {
-		r.logger.Warn("Failed to disconnect server after OAuth logout",
-			zap.String("server", serverName),
-			zap.Error(err))
-		// Continue - token was cleared which is the primary goal
+	// Disconnect the instance logged out above to force re-authentication.
+	if hasClient && client != nil {
+		if err := r.upstreamManager.DisconnectServerAt(serverName, gen, inst); errors.Is(err, upstream.ErrStaleGeneration) {
+			r.logger.Debug("OAuth logout: the instance was replaced meanwhile; not disconnecting its replacement",
+				zap.String("server", serverName))
+		} else if err != nil {
+			r.logger.Warn("Failed to disconnect server after OAuth logout",
+				zap.String("server", serverName),
+				zap.Error(err))
+			// Continue - token was cleared which is the primary goal
+		}
 	}
 
 	return nil
+}
+
+// CurrentCredentialBinding reports the credential binding of the instance
+// that serves serverName now (Spec 116 PR2b). It implements
+// oauth.RefreshBindingResolver: the RefreshManager ignores the outcome of a
+// refresh flight that ran under another binding.
+func (r *Runtime) CurrentCredentialBinding(serverName string) (commitview.CredentialBinding, bool) {
+	if r.upstreamManager == nil {
+		return commitview.CredentialBinding{}, false
+	}
+	return r.upstreamManager.CurrentCredentialBinding(serverName)
 }
 
 // RefreshOAuthToken implements RuntimeOperations interface for management service.
@@ -3429,6 +3677,7 @@ func (r *Runtime) SetTelemetry(version, edition string) {
 
 	r.telemetryService = telemetry.New(r.cfg, r.cfgPath, version, edition, r.logger)
 	r.telemetryService.SetRuntimeStats(r)
+	r.telemetryService.SetConfigUpdater(r.UpdateTelemetry)
 
 	// Spec 044: wire the activation store onto the shared BBolt DB. The
 	// bucket is created lazily on first write, but we proactively ensure it

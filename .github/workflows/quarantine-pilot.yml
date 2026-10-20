@@ -1,0 +1,229 @@
+# Quarantine/approval testing pilot.
+#
+# Three bounded PR checks (docs/development/quarantine-approval-pilot.md):
+#   1. "Quarantine Pilot: Conformance" — the independent policy model
+#      (internal/qapilot) against the real implementation: the deterministic
+#      scenario inventory, the decision tables, the REST authorization table,
+#      the counting-upstream dispatch check and the negative (denial) checks,
+#      under -race, with the check ledger uploaded.
+#   2. "Quarantine Pilot: Coverage" — `qapilot report` over that ledger: every
+#      mandatory requirement, scenario and decision cell must have run and
+#      passed; a skip or a missing check fails the job.
+#   3. "Quarantine Pilot: Mutation" — the versioned mutation set
+#      (tests/qapilot/mutations.json) in disposable worktrees; a surviving
+#      required mutation, a failed baseline or any infrastructure outcome
+#      fails the job.
+#
+# No step uses continue-on-error. A zero-test run fails the coverage job
+# (empty ledger). The randomized exploration lane (TestQAPilot_Explore,
+# QAPILOT_EXPLORE=1) runs on the schedule and on dispatch only.
+#
+# Branch protection must list the three job names above as required status
+# checks for the pilot to block a merge; the workflow alone does not.
+name: Quarantine Pilot
+
+on:
+  pull_request:
+    branches: ["*"]
+  push:
+    branches: [main]
+  schedule:
+    - cron: "15 3 * * *"
+  workflow_dispatch:
+    inputs:
+      explore_checks:
+        description: "rapid checks for the exploration lane"
+        default: "200"
+        required: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quarantine-pilot-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+
+jobs:
+  conformance:
+    name: "Quarantine Pilot: Conformance"
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Warm the tiktoken vocabulary cache
+        run: go run ./bench/cmd/warmtiktoken
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+      - name: Model self-tests and report-gate tests
+        run: go test -race -count=1 ./internal/qapilot/ ./cmd/qapilot/
+
+      - name: Conformance (model vs implementation, with ledger)
+        run: |
+          mkdir -p "$QAPILOT_REPORT_DIR"
+          go test -race -count=1 -timeout 20m -run 'TestQAPilot_' \
+            ./internal/preflight/ ./internal/config/ ./internal/httpapi/ ./internal/runtime/ ./internal/server/
+        env:
+          QAPILOT_REPORT_DIR: ${{ runner.temp }}/qapilot-ledger
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+      - name: Upload check ledger
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: quarantine-pilot-ledger
+          path: ${{ runner.temp }}/qapilot-ledger
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload rapid failure traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: quarantine-pilot-failure-traces
+          path: |
+            internal/runtime/testdata/rapid
+          if-no-files-found: ignore
+          retention-days: 14
+
+  coverage:
+    name: "Quarantine Pilot: Coverage"
+    # Runs after conformance even when it FAILED, so the coverage report names
+    # the failed/missing scenarios instead of being skipped with it.
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'push') }}
+    needs: conformance
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download check ledger
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: quarantine-pilot-ledger
+          path: ${{ runner.temp }}/qapilot-ledger
+
+      - name: Requirement and scenario coverage gate
+        run: |
+          go run ./cmd/qapilot report --dir "${{ runner.temp }}/qapilot-ledger" \
+            --out "${{ runner.temp }}/quarantine-pilot-coverage.json"
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: quarantine-pilot-coverage
+          path: ${{ runner.temp }}/quarantine-pilot-coverage.json
+          if-no-files-found: error
+          retention-days: 14
+
+  mutation:
+    name: "Quarantine Pilot: Mutation"
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          # The harness mutates `git worktree add HEAD`; on a PR, HEAD is the
+          # merge commit the checkout produced, which is what the other jobs
+          # test too.
+          fetch-depth: 1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Warm the tiktoken vocabulary cache
+        run: go run ./bench/cmd/warmtiktoken
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+      - name: Run the versioned mutation set
+        run: |
+          git config --global user.email "ci@mcpproxy.app"
+          git config --global user.name "ci"
+          go run ./cmd/qapilot mutate --repo . --mutations tests/qapilot/mutations.json \
+            --out "${{ runner.temp }}/quarantine-pilot-mutation.json" --timeout 15m
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+      - name: Upload mutation report
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: quarantine-pilot-mutation
+          path: ${{ runner.temp }}/quarantine-pilot-mutation.json
+          if-no-files-found: error
+          retention-days: 14
+
+  explore:
+    name: "Quarantine Pilot: Exploration (scheduled)"
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Warm the tiktoken vocabulary cache
+        run: go run ./bench/cmd/warmtiktoken
+        env:
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+      - name: Randomized exploration (rapid)
+        # The package path must come BEFORE -rapid.checks: a flag the go
+        # command does not know ends package parsing, so a trailing package
+        # is handed to the test binary and the repository root is tested.
+        run: |
+          go test -race -count=1 -timeout 110m -run 'TestQAPilot_Explore|TestRapidQuarantineStateMachine' \
+            ./internal/runtime/ -args -rapid.checks="${{ github.event.inputs.explore_checks || '200' }}"
+        env:
+          QAPILOT_EXPLORE: "1"
+          TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
+
+      - name: Upload rapid failure traces
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: quarantine-pilot-exploration-traces
+          path: internal/runtime/testdata/rapid
+          if-no-files-found: ignore
+          retention-days: 30

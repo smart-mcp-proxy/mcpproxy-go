@@ -11,11 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 
 	"github.com/mark3labs/mcp-go/client"
 	uptransport "github.com/mark3labs/mcp-go/client/transport"
@@ -224,13 +226,13 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 	skipBrowserFlow := false
 
 	// First check for valid persisted token directly (handles cross-process OAuth)
-	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	if hasTokenPrecheck && !tokenExpiredPrecheck {
 		logger.Info("🔄 Valid OAuth token found in persistent storage - will skip browser flow if OAuth error occurs",
 			zap.String("server", c.config.Name),
 			zap.Bool("has_refresh_token", hasRefreshPrecheck))
 		skipBrowserFlow = true
-	} else if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
+	} else if tokenManager.HasRecentOAuthCompletionBound(c.config.Name, c.CredentialBinding()) {
 		// Also check in-memory completion flag (same-process OAuth)
 		logger.Info("🔄 OAuth was recently completed in this process but token may be stale",
 			zap.String("server", c.config.Name),
@@ -246,7 +248,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 
 	// Check if tokens already exist for this server (both in-memory and persisted)
 	hasInMemoryTokens := tokenManager.HasTokenStore(c.config.Name)
-	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	logger.Info("🔍 HTTP OAuth strategy token status",
 		zap.Bool("has_in_memory_token_store", hasInMemoryTokens),
 		zap.Bool("has_persisted_token", hasPersistedToken),
@@ -265,7 +267,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 	logger.Debug("🔧 Creating OAuth config with resource auto-detection")
 
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithEnv(c.oauthEnv(ctx), c.config, c.storage, c.oauthLogger())
 
 	c.logger.Debug("OAuth config created",
 		zap.Bool("config_nil", oauthConfig == nil),
@@ -670,13 +672,13 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 	skipBrowserFlow := false
 
 	// First check for valid persisted token directly (handles cross-process OAuth)
-	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	if hasTokenPrecheck && !tokenExpiredPrecheck {
 		logger.Info("🔄 Valid OAuth token found in persistent storage - will skip browser flow if OAuth error occurs",
 			zap.String("server", c.config.Name),
 			zap.Bool("has_refresh_token", hasRefreshPrecheck))
 		skipBrowserFlow = true
-	} else if tokenManager.HasRecentOAuthCompletion(c.config.Name) {
+	} else if tokenManager.HasRecentOAuthCompletionBound(c.config.Name, c.CredentialBinding()) {
 		// Also check in-memory completion flag (same-process OAuth)
 		logger.Info("🔄 SSE OAuth was recently completed in this process but token may be stale",
 			zap.String("server", c.config.Name),
@@ -692,7 +694,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 
 	// Check if tokens already exist for this server (both in-memory and persisted)
 	hasInMemoryTokens := tokenManager.HasTokenStore(c.config.Name)
-	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedToken(c.config.Name, c.config.URL, c.storage)
+	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	logger.Info("🔍 SSE OAuth strategy token status",
 		zap.Bool("has_in_memory_token_store", hasInMemoryTokens),
 		zap.Bool("has_persisted_token", hasPersistedToken),
@@ -709,7 +711,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 	}
 
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithEnv(c.oauthEnv(ctx), c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
 		c.logger.Error("🚨 Failed to create OAuth config", logSafeErrorField(oauthConfigErr))
 		oauthErr = wrapOAuthConfigError(oauthConfigErr)
@@ -808,7 +810,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 	// Start the client with persistent context so SSE stream keeps running
 	// even if the connect context is short-lived (same as stdio transport).
 	// SSE stream runs in a background goroutine and needs context to stay alive.
-	persistentCtx := context.Background()
+	persistentCtx := c.Gate().Context() // Spec 116 PR4: cancelled when the instance is retired
 	c.logger.Debug("🔍 Starting SSE OAuth client with persistent context",
 		zap.String("server", c.config.Name))
 
@@ -1011,7 +1013,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
 	// Validate metadata BEFORE starting the full OAuth flow to fail fast with clear errors
 	if c.config.URL != "" {
-		_, validationErr := oauth.ValidateOAuthMetadata(c.config.URL, c.config.Name, 5*time.Second)
+		_, validationErr := oauth.ValidateOAuthMetadataWithEnv(c.oauthEnv(ctx), c.config.URL, c.config.Name, 5*time.Second)
 		if validationErr != nil {
 			// Convert OAuthMetadataError to OAuthFlowError for consistent error handling
 			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
@@ -1354,7 +1356,7 @@ func (c *Client) handleOAuthAuthorization(ctx context.Context, authErr error, oa
 
 		// Record OAuth completion in global token manager for other clients
 		tokenManager := oauth.GetTokenStoreManager()
-		tokenManager.MarkOAuthCompleted(c.config.Name)
+		tokenManager.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 
 		return nil
 
@@ -1400,7 +1402,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 
 	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
 	if c.config.URL != "" {
-		_, validationErr := oauth.ValidateOAuthMetadata(c.config.URL, c.config.Name, 5*time.Second)
+		_, validationErr := oauth.ValidateOAuthMetadataWithEnv(c.oauthEnv(ctx), c.config.URL, c.config.Name, 5*time.Second)
 		if validationErr != nil {
 			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
 				c.logger.Warn("⚠️ OAuth metadata validation failed",
@@ -1619,7 +1621,7 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 		// Mark OAuth as complete
 		c.finishOAuth(!clientStored)
 		tokenManager := oauth.GetTokenStoreManager()
-		tokenManager.MarkOAuthCompleted(c.config.Name)
+		tokenManager.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 
 		return result, nil
 
@@ -1638,7 +1640,8 @@ func (c *Client) handleOAuthAuthorizationWithResult(ctx context.Context, authErr
 // storage transaction (oauth.WithLoginClient): saving the token alone kept
 // whatever client was stored, so a login whose save was delayed past another
 // login's completion paired its refresh token with that login's client_id.
-// The callback port and redirect URI come from cb, the callback server this
+// The callback port and the EFFECTIVE redirect URI (the HTTPS one under
+// oauth.callback_base_url) come from cb, the callback server this
 // login registered its state on (not whichever one the registry holds by the
 // time the exchange runs); with no cb the stored values are kept.
 // With oauth.extra_params.client_id the token request is sent with that id
@@ -1654,7 +1657,7 @@ func (c *Client) exchangeAuthorizationCode(ctx context.Context, h *uptransport.O
 		login = oauth.LoginClient{ClientID: h.GetClientID(), ClientSecret: h.GetClientSecret()}
 		if cb != nil && cb.Port > 0 {
 			login.CallbackPort = cb.Port
-			login.RedirectURI = cb.RedirectURI
+			login.RedirectURI = cb.EffectiveRedirectURI()
 		}
 		ctx = oauth.WithLoginClient(ctx, login)
 	}
@@ -1713,17 +1716,17 @@ func (c *Client) finishOAuth(persistClient bool) {
 	// processes can detect completion without polling.
 	tm := oauth.GetTokenStoreManager()
 	if c.storage != nil {
-		if err := tm.MarkOAuthCompletedWithDB(c.config.Name, c.storage); err != nil {
+		if err := tm.MarkOAuthCompletedWithDBBound(c.config.Name, c.storage, c.CredentialBinding()); err != nil {
 			c.logger.Warn("Failed to persist OAuth completion event to DB; using in-memory notification",
 				zap.String("server", c.config.Name),
 				logSafeErrorField(err))
-			tm.MarkOAuthCompleted(c.config.Name)
+			tm.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 		} else {
 			c.logger.Info("📢 OAuth completion recorded to DB for cross-process notification",
 				zap.String("server", c.config.Name))
 		}
 	} else {
-		tm.MarkOAuthCompleted(c.config.Name)
+		tm.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 		c.logger.Info("📢 OAuth completion recorded in-memory (no DB available)",
 			zap.String("server", c.config.Name))
 	}
@@ -1779,8 +1782,9 @@ func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
 	// to record a port, so a static-client login persisted port 0 and the next
 	// login allocated a fresh loopback port — breaking providers that require an
 	// exact, unchanging callback URL (issue #975).
-	callbackPort := resolveCallbackPortForPersistence(c.config.Name, serverKey, c.storage)
-	redirectURI := resolveCallbackRedirectURIForPersistence(c.config.Name, serverKey, c.storage)
+	binding := c.CredentialBinding()
+	callbackPort := resolveCallbackPortForPersistence(c.config.Name, serverKey, c.storage, binding)
+	redirectURI := resolveCallbackRedirectURIForPersistence(c.config.Name, serverKey, c.storage, binding)
 
 	// An operator static client_id is written as before. A DCR client is
 	// written only while storage holds this same client, or neither a client
@@ -1789,13 +1793,15 @@ func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
 	// paused before this point must not overwrite a registration another login
 	// stored in the meantime, nor attach its client to another login's refresh
 	// token left behind when a refresh failure cleared that login's client.
-	var err error
-	saved := true
+	//
+	// Spec 116 PR2b: both writes are bound to the instance's credential
+	// binding; a login of an instance a commit superseded stores nothing.
+	mode := storage.OAuthClientSaveIfSameOrEmpty
 	if c.config.OAuth != nil && c.config.OAuth.ClientID != "" {
-		err = c.storage.UpdateOAuthClientCredentials(serverKey, clientID, clientSecret, callbackPort, redirectURI)
-	} else {
-		saved, err = c.storage.SaveOAuthClientCredentialsIfSameOrEmpty(serverKey, clientID, clientSecret, callbackPort, redirectURI)
+		mode = storage.OAuthClientSaveAlways
 	}
+	oauth.BeforePersistHook(c.config.Name, binding)
+	saved, err := c.storage.SaveOAuthClientIfBound(serverKey, c.config.Name, binding, mode, clientID, clientSecret, callbackPort, redirectURI)
 	if err != nil {
 		c.logger.Error("Failed to persist DCR credentials",
 			zap.String("server", c.config.Name),
@@ -1803,7 +1809,7 @@ func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
 		return
 	}
 	if !saved {
-		c.logger.Warn("Another login stored a different OAuth client registration - leaving it in place",
+		c.logger.Warn("Another login stored a different OAuth client registration, or the server was removed or reconfigured - leaving storage as it is",
 			zap.String("server", c.config.Name),
 			zap.String("client_id_prefix", clientID[:min(8, len(clientID))]+"..."))
 		return
@@ -1824,7 +1830,7 @@ func (c *Client) persistCompletedDCRCredentials(clientID, clientSecret string) {
 // bind the same port and reuse the identical redirect_uri. Only when no callback
 // server is running do we fall back to whatever was stored previously, so a
 // refresh-only code path never downgrades a known port to 0.
-func resolveCallbackPortForPersistence(serverName, serverKey string, store *storage.BoltDB) int {
+func resolveCallbackPortForPersistence(serverName, serverKey string, store *storage.BoltDB, binding commitview.CredentialBinding) int {
 	if callbackServer, exists := oauth.GetCallbackServer(serverName); exists && callbackServer.Port > 0 {
 		return callbackServer.Port
 	}
@@ -1832,7 +1838,7 @@ func resolveCallbackPortForPersistence(serverName, serverKey string, store *stor
 	if store == nil {
 		return 0
 	}
-	if record, err := store.GetOAuthToken(serverKey); err == nil && record != nil {
+	if record, err := store.GetOAuthTokenBound(serverKey, binding); err == nil && record != nil {
 		return record.CallbackPort
 	}
 	return 0
@@ -1843,15 +1849,15 @@ func resolveCallbackPortForPersistence(serverName, serverKey string, store *stor
 // hygiene check in CreateOAuthConfig can detect a pin whose PATH changed while its
 // port stayed the same (issue #1304) — comparing port alone would miss that and
 // reuse a client_id the provider registered for the old path.
-func resolveCallbackRedirectURIForPersistence(serverName, serverKey string, store *storage.BoltDB) string {
+func resolveCallbackRedirectURIForPersistence(serverName, serverKey string, store *storage.BoltDB, binding commitview.CredentialBinding) string {
 	if callbackServer, exists := oauth.GetCallbackServer(serverName); exists && callbackServer.RedirectURI != "" {
-		return callbackServer.RedirectURI
+		return callbackServer.EffectiveRedirectURI()
 	}
 
 	if store == nil {
 		return ""
 	}
-	if record, err := store.GetOAuthToken(serverKey); err == nil && record != nil {
+	if record, err := store.GetOAuthTokenBound(serverKey, binding); err == nil && record != nil {
 		return record.RedirectURI
 	}
 	return ""
@@ -1933,7 +1939,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 	}
 
 	// Create OAuth config
-	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithEnv(c.oauthEnv(ctx), c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),
@@ -1944,7 +1950,7 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 
 	// Phase 2 (Spec 020): Pre-flight OAuth metadata validation
 	if c.config.URL != "" {
-		_, validationErr := oauth.ValidateOAuthMetadata(c.config.URL, c.config.Name, 5*time.Second)
+		_, validationErr := oauth.ValidateOAuthMetadataWithEnv(c.oauthEnv(ctx), c.config.URL, c.config.Name, 5*time.Second)
 		if validationErr != nil {
 			if metadataErr, ok := validationErr.(*oauth.OAuthMetadataError); ok {
 				c.logger.Warn("⚠️ OAuth metadata validation failed",
@@ -2355,7 +2361,7 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		// Mark OAuth as complete
 		c.finishOAuth(!clientStored)
 		tokenManager := oauth.GetTokenStoreManager()
-		tokenManager.MarkOAuthCompleted(c.config.Name)
+		tokenManager.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 
 	case <-ctx.Done():
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -2391,8 +2397,19 @@ func oauthCallbackWaitContext(ctx context.Context) (context.Context, context.Can
 // reportOAuthFailure records an OAuth failure that has no caller to return an
 // error to (the background callback waiter), so the operator sees it on the
 // server's status instead of only in the log (issue #975).
+//
+// Spec 116 PR2b: the failure of a flow whose instance a commit retired, or
+// whose result storage refused because the server was removed, replaced or
+// reconfigured meanwhile, belongs to no server that exists now. Recording it
+// by name would mark the replacement as failed, so it is only logged.
 func (c *Client) reportOAuthFailure(err error) {
 	if err == nil {
+		return
+	}
+	if c.Retired() || errors.Is(err, oauth.ErrCredentialBindingStale) || dialgate.IsRetired(err) {
+		c.logger.Debug("OAuth failure of a superseded server instance not recorded on the server status",
+			zap.String("server", c.config.Name),
+			logSafeErrorField(err))
 		return
 	}
 	oauth.GetTokenStoreManager().RecordOAuthFailure(c.config.Name, err)
@@ -2453,7 +2470,7 @@ func wrapOAuthConfigError(err error) error {
 // forceHTTPOAuthFlowWithResult forces OAuth flow for HTTP transport and returns auth URL/browser status.
 func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartResult, error) {
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithEnv(c.oauthEnv(ctx), c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),
@@ -2527,7 +2544,7 @@ func (c *Client) forceHTTPOAuthFlowWithResult(ctx context.Context) (*OAuthStartR
 // forceSSEOAuthFlowWithResult forces OAuth flow for SSE transport and returns auth URL/browser status.
 func (c *Client) forceSSEOAuthFlowWithResult(ctx context.Context) (*OAuthStartResult, error) {
 	// Create OAuth config with auto-detected extra params (RFC 8707 resource)
-	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithExtraParamsAndLogger(ctx, c.config, c.storage, c.oauthLogger())
+	oauthConfig, extraParams, oauthConfigErr := oauth.CreateOAuthConfigWithEnv(c.oauthEnv(ctx), c.config, c.storage, c.oauthLogger())
 	if oauthConfig == nil {
 		c.logger.Error("❌ Failed to create OAuth config",
 			zap.String("server", c.config.Name),

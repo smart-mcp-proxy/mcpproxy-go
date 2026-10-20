@@ -3,10 +3,12 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"reflect"
 	"slices"
 	"strings"
@@ -17,9 +19,11 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
 
 // calculateToolApprovalHash computes a stable SHA-256 hash for tool-level quarantine.
@@ -31,14 +35,56 @@ import (
 // on reconnects when the whole annotations object was hashed. The hints are
 // compared by their EFFECTIVE value (an omitted hint means its MCP default), so
 // a server that omits annotations and one that spells out the defaults hash
-// identically, and a tool whose effective hints are the defaults keeps the
-// pre-RT-03 hash byte-for-byte. A flip such as destructive → readOnly-lying
-// changes the hash and lands on the rug-pull gate like any contract change.
+// identically. A flip such as destructive → readOnly-lying changes the hash
+// and lands on the rug-pull gate like any contract change. Every field is
+// length-prefixed (issue #1606, storage.UnambiguousHashSchemaVersion); the
+// older pipe-joined formula is calculateToolApprovalHashV4.
 func calculateToolApprovalHash(toolName, description, schemaJSON string, annotations *config.ToolAnnotations) string {
 	return calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON, "", annotations)
 }
 
 func calculateToolApprovalHashWithOutputSchema(toolName, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations) string {
+	// HashSchemaVersion 5 (storage.UnambiguousHashSchemaVersion, issue #1606):
+	// every field is length-prefixed and an absent output schema has its own
+	// marker, so no two different contracts share an encoding. Schemas are
+	// JSON-normalized so a key-order-only difference is not a change; the
+	// safety hints are their effective fingerprint (RT-03), "" for the MCP
+	// defaults.
+	h := sha256.New()
+	writeApprovalHashField(h, toolApprovalHashTag)
+	writeApprovalHashField(h, toolName)
+	writeApprovalHashField(h, description)
+	writeApprovalHashField(h, normalizeJSON(schemaJSON))
+	if normalized := normalizeJSON(outputSchemaJSON); normalized != "" {
+		writeApprovalHashField(h, "output:present")
+		writeApprovalHashField(h, normalized)
+	} else {
+		writeApprovalHashField(h, "output:absent")
+	}
+	writeApprovalHashField(h, safetyHintsFingerprint(annotations))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// toolApprovalHashTag domain-separates the v5 approval hash from every older
+// formula and from the review fingerprint.
+const toolApprovalHashTag = "mcpproxy-tool-approval-v5"
+
+// writeApprovalHashField writes one length-prefixed field (8-byte big-endian
+// length, then the bytes).
+func writeApprovalHashField(w io.Writer, field string) {
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], uint64(len(field)))
+	_, _ = w.Write(n[:])
+	_, _ = w.Write([]byte(field))
+}
+
+// calculateToolApprovalHashV4 is the approval hash formula of
+// HashSchemaVersion 4 (storage.AnnotationHashSchemaVersion) and below, kept
+// byte-identical so the v4 → v5 migration can check that a stored ApprovedHash
+// covers its stored contract. It is ambiguous (issue #1606): the fields are
+// joined with an unescaped '|' and an absent output schema is left out, so it
+// must never be the hash a record is approved under.
+func calculateToolApprovalHashV4(toolName, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations) string {
 	h := sha256.New()
 	h.Write([]byte(toolName))
 	h.Write([]byte("|"))
@@ -347,11 +393,23 @@ func (r *Runtime) refreshHeldContractSnapshot(serverName, toolName string, exist
 	if existing == nil {
 		return
 	}
-	if existing.CurrentHash == currentHash {
+	// The live contract is the recorded one only when the hash AND each
+	// definition field match (Spec 117 PR-2 Sol r2): a CurrentHash a v4
+	// binary computed joins the fields with an unescaped '|', so two
+	// different contracts can share it (issue #1606), and the review
+	// fingerprint must still follow the live one.
+	sameDefinition := existing.CurrentHash == currentHash &&
+		existing.CurrentDescription == tool.Description &&
+		normalizeJSON(existing.CurrentSchema) == normalizeJSON(schemaJSON) &&
+		normalizeJSON(existing.CurrentOutputSchema) == normalizeJSON(outputSchemaJSON)
+	if sameDefinition {
 		captured := capturedToolAnnotations(tool.Annotations)
+		// RAW hints (Sol r2 P2, FR-017): an unset hint and its spelled-out
+		// default hash alike, but the review fingerprint tells them apart, so
+		// the recorded snapshot must follow the raw value.
 		if existing.CurrentHashSchemaVersion >= storage.ToolApprovalHashSchemaVersion &&
 			existing.CurrentAnnotations != nil &&
-			safetyHintsFingerprint(existing.CurrentAnnotations) == safetyHintsFingerprint(captured) {
+			reviewHintString(existing.CurrentAnnotations) == reviewHintString(captured) {
 			return
 		}
 		existing.CurrentHashSchemaVersion = storage.ToolApprovalHashSchemaVersion
@@ -561,9 +619,18 @@ func (r *Runtime) checkToolApprovals(serverName string, tools []*config.ToolMeta
 // serverName's approval lock (Spec 116 D15: the discovery pass makes its final
 // eligibility check, the approval decisions and its index writes in one hold).
 func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.ToolMetadata) (*ToolApprovalResult, error) {
+	return r.checkToolApprovalsResolved(serverName, tools, nil)
+}
+
+// checkToolApprovalsResolved is checkToolApprovalsHeld with the server's
+// baseline already resolved under the same lock hold (resolveToolBaselineHeld),
+// so a caller that must abort BEFORE publishing anything can run the baseline
+// step first (Spec 117 FR-027a). A nil baseline is resolved here.
+func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.ToolMetadata, baseline *toolBaseline) (*ToolApprovalResult, error) {
 	if r.storageManager == nil {
 		return &ToolApprovalResult{BlockedTools: make(map[string]bool)}, nil
 	}
+	r.beginApprovalPassHeld(serverName)
 
 	// Determine if quarantine is enforced for this server. Storage is
 	// consulted too (fail closed): QuarantineServer flips it under this lock
@@ -596,16 +663,22 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 	// which "erase" and "ns:erase" are processed cannot change the outcome —
 	// processing "erase" first re-saves (and stamps) its record, which would
 	// otherwise hide it from "ns:erase" on the very pass that migrates it.
-	serverHasBaseline := false
-	priorByName := make(map[string]*storage.ToolApprovalRecord)
-	if priorRecords, listErr := r.storageManager.ListToolApprovals(serverName); listErr == nil {
-		for _, rec := range priorRecords {
-			priorByName[rec.ToolName] = rec
-			if rec.Status == storage.ToolApprovalStatusApproved || rec.Status == storage.ToolApprovalStatusChanged {
-				serverHasBaseline = true
-			}
+	//
+	// Spec 117 PR-1 (#1567): the decision is no longer inferred from the
+	// records alone. A durable per-server marker records that the baseline
+	// was decided, so a replaced inventory or an authoritative empty refresh
+	// (which delete the approved records) never makes the server "new" again.
+	// The marker step runs before the first record write of this pass and
+	// fails closed (resolveToolBaselineHeld).
+	if baseline == nil {
+		resolved, err := r.resolveToolBaselineHeld(serverName)
+		if err != nil {
+			return nil, err
 		}
+		baseline = resolved
 	}
+	priorByName := baseline.prior
+	serverHasBaseline := baseline.hasBaseline
 	isBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline
 
 	result := &ToolApprovalResult{
@@ -996,7 +1069,8 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 			// we overwrite CurrentHash — the baseline migration (MCP-2931 #4)
 			// only promotes a stranded pending record that is unchanged since it
 			// was recorded.
-			priorHashMatches := existing.CurrentHash == currentHash
+			priorHashMatches := existing.CurrentHash == currentHash ||
+				v4PendingHashMatchesLive(existing, toolName, tool, schemaJSON, outputSchemaJSON)
 
 			// Update current info to the live snapshot.
 			existing.CurrentHash = currentHash
@@ -1223,7 +1297,16 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 			legacyHash := calculateLegacyToolApprovalHash(toolName, tool.Description, schemaJSON)
 			annotationsHash := calculateHashWithAnnotations(toolName, tool.Description, schemaJSON, tool.Annotations)
 
-			isFormulaChange := rehashedFromStored == currentHash
+			// A v4 record (issue #1606) is re-baselined under the v5 formula
+			// only when its pipe-joined ApprovedHash covers the stored
+			// contract: the stored contract is then the approved one, and the
+			// checks below compare it field by field with the live contract.
+			// A v4 hash that does not cover the stored snapshot proves nothing
+			// (another contract may collide with it), so every no-review
+			// shortcut below is closed and the record is held as changed.
+			storedApprovalProven := v4ApprovedHashCoversStored(existing, toolName)
+
+			isFormulaChange := storedApprovalProven && rehashedFromStored == currentHash
 			if existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion && hintsMatch {
 				// The legacy formulas are hashed from the LIVE contract and carry
 				// no (or raw, unnormalized) hints: they only prove a formula
@@ -1290,7 +1373,7 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 			} else {
 				outputSchemaMatch = normalizeJSON(outputSchemaJSON) == normalizeJSON(existing.CurrentOutputSchema)
 			}
-			if descMatch && schemaMatch && outputSchemaMatch && hintsMatch {
+			if storedApprovalProven && descMatch && schemaMatch && outputSchemaMatch && hintsMatch {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonContentMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1344,7 +1427,7 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 			// that normalizeJSON does not absorb, such as the order of the
 			// "required" list, may differ). Any structural difference falls
 			// through to the change gate below and is held for review.
-			if descMatch && outputSchemaMatch && hintsMatch && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
+			if storedApprovalProven && descMatch && outputSchemaMatch && hintsMatch && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1459,6 +1542,18 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 			}
 			existing.PreviousSchema = oldSchema
 			existing.PreviousOutputSchema = oldOutputSchema
+			if !storedApprovalProven {
+				// The stored snapshot is not proven to be the approved
+				// contract (a v4 ApprovedHash that does not cover it, issue
+				// #1606), so it is no before-evidence either: recorded as
+				// Previous*, a later pass would "revert" to it and approve
+				// it. Without Previous* the record stays changed until an
+				// operator confirms it (revertedToPreviousContract).
+				existing.PreviousDescription = ""
+				existing.PreviousAnnotations = nil
+				existing.PreviousSchema = ""
+				existing.PreviousOutputSchema = ""
+			}
 			existing.CurrentHash = currentHash
 			existing.CurrentHashSchemaVersion = storage.ToolApprovalHashSchemaVersion
 			existing.HashSchemaVersion = storage.ToolApprovalHashSchemaVersion
@@ -1506,6 +1601,10 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 
 	r.stampRemainingLegacyToolApprovals(serverName)
 
+	if !serverHasBaseline {
+		r.markDiscoveryToolBaselineHeld(serverName)
+	}
+
 	if len(result.BlockedTools) > 0 {
 		r.logger.Info("Tool-level quarantine: tools blocked",
 			zap.String("server", serverName),
@@ -1517,7 +1616,47 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 		r.emitReviewChanged(serverName)
 	}
 
+	// Spec 117 FR-018: a pass whose record writes did not all land is an
+	// incomplete capture. The records may still describe an older definition
+	// than the one listed, so the caller must not publish this capture.
+	if failed := r.approvalPassWriteFailures(serverName); failed > 0 {
+		return result, fmt.Errorf("%w: %d approval record write(s) failed for server %s", errCaptureIncomplete, failed, serverName)
+	}
 	return result, nil
+}
+
+// v4ApprovedHashCoversStored reports whether a record approved under the
+// pipe-joined v4 formula (HashSchemaVersion storage.AnnotationHashSchemaVersion)
+// has an ApprovedHash that is the v4 hash of its stored contract. Only then is
+// the stored snapshot evidence of what was approved, which the v4 → v5
+// migration needs before it re-baselines the record (issue #1606). Records of
+// any other version are not judged here and report true: older ones keep
+// their own migration rules, current ones carry an unambiguous hash.
+func v4ApprovedHashCoversStored(existing *storage.ToolApprovalRecord, toolName string) bool {
+	if existing.HashSchemaVersion != storage.AnnotationHashSchemaVersion {
+		return true
+	}
+	return existing.ApprovedHash == calculateToolApprovalHashV4(toolName,
+		existing.CurrentDescription, existing.CurrentSchema, existing.CurrentOutputSchema, existing.CurrentAnnotations)
+}
+
+// v4PendingHashMatchesLive reports whether a pending record whose CurrentHash
+// was computed with the v4 formula recorded exactly the live contract: every
+// stored field equals the live one and CurrentHash is the v4 hash of it. The
+// baseline migration (MCP-2931 #4) then still promotes a stranded pending
+// record across the v4 → v5 upgrade; a colliding contract never matches,
+// because the fields are compared one by one (issue #1606).
+func v4PendingHashMatchesLive(existing *storage.ToolApprovalRecord, toolName string, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON string) bool {
+	if existing.CurrentHashSchemaVersion != storage.AnnotationHashSchemaVersion || existing.CurrentHash == "" {
+		return false
+	}
+	if existing.CurrentDescription != tool.Description ||
+		normalizeJSON(existing.CurrentSchema) != normalizeJSON(schemaJSON) ||
+		normalizeJSON(existing.CurrentOutputSchema) != normalizeJSON(outputSchemaJSON) ||
+		safetyHintsFingerprint(existing.CurrentAnnotations) != safetyHintsFingerprint(tool.Annotations) {
+		return false
+	}
+	return existing.CurrentHash == calculateToolApprovalHashV4(toolName, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations)
 }
 
 // revertedToPreviousContract reports whether a changed record's live contract
@@ -1533,7 +1672,10 @@ func (r *Runtime) checkToolApprovalsHeld(serverName string, tools []*config.Tool
 // proven only when the live contract hashes, under the current formula, to
 // the record's ApprovedHash; otherwise the record stays held for an operator.
 func revertedToPreviousContract(existing *storage.ToolApprovalRecord, description, schemaJSON, outputSchemaJSON string, annotations *config.ToolAnnotations, currentHash string) bool {
-	if existing.PreviousDescription == "" || description != existing.PreviousDescription {
+	if description != existing.PreviousDescription {
+		return false
+	}
+	if existing.PreviousDescription == "" && !approvedHashProvesEmptyDescription(existing) {
 		return false
 	}
 	// RT-03: an annotation-only flip keeps description and schemas equal, so
@@ -1567,6 +1709,23 @@ func revertedToPreviousContract(existing *storage.ToolApprovalRecord, descriptio
 	return normalizeJSON(existing.PreviousOutputSchema) == normalizeJSON(outputSchemaJSON)
 }
 
+// approvedHashProvesEmptyDescription reports whether a changed record's EMPTY
+// PreviousDescription is the approved contract's declared description rather
+// than an unrecorded one: its ApprovedHash must be the hash, under the v5 or
+// the v4 formula, of the recorded previous contract. Without this a tool
+// approved with no description under v4 could never be reverted after the
+// v5 upgrade, because its v4 ApprovedHash no longer equals the live hash (Sol
+// r2 P2, issue #1606). The previous fields are still compared one by one with
+// the live contract below, so a colliding contract never qualifies.
+func approvedHashProvesEmptyDescription(existing *storage.ToolApprovalRecord) bool {
+	if existing.ApprovedHash == "" || existing.PreviousSchema == "" {
+		return false
+	}
+	name, schema, output, hints := existing.ToolName, existing.PreviousSchema, existing.PreviousOutputSchema, existing.PreviousAnnotations
+	return existing.ApprovedHash == calculateToolApprovalHashWithOutputSchema(name, "", schema, output, hints) ||
+		existing.ApprovedHash == calculateToolApprovalHashV4(name, "", schema, output, hints)
+}
+
 // previousHintsProveRevert reports whether a changed record's live safety
 // hints are the approved ones it changed from. A nil previous snapshot means
 // the approved hints are unknown; only the MCP defaults (the most conservative
@@ -1586,7 +1745,25 @@ func previousHintsProveRevert(previous, live *config.ToolAnnotations) bool {
 // than a pre-105 collapsed one.
 func (r *Runtime) saveToolApproval(record *storage.ToolApprovalRecord) error {
 	record.IdentityKeyed = true
-	return r.storageManager.SaveToolApproval(record)
+	return r.persistToolApproval(record)
+}
+
+// persistToolApproval is the storage write behind both save helpers. A
+// failure is counted for the pass that holds the server's approval lock, so a
+// discovery pass whose record writes did not all land reports an incomplete
+// capture (Spec 117 FR-018) instead of a logged and ignored error.
+func (r *Runtime) persistToolApproval(record *storage.ToolApprovalRecord) error {
+	var err error
+	if f := r.testHooks.toolApprovalWriteFault; f != nil {
+		err = f(record.ServerName, record.ToolName, "save")
+	}
+	if err == nil {
+		err = r.storageManager.SaveToolApproval(record)
+	}
+	if err != nil {
+		r.noteApprovalWriteFailure(record.ServerName, record.ToolName)
+	}
+	return err
 }
 
 // cloneToolAnnotations preserves a point-in-time upstream snapshot. Annotation
@@ -1649,7 +1826,7 @@ func capturedToolAnnotations(annotations *config.ToolAnnotations) *config.ToolAn
 func (r *Runtime) saveReadToolApproval(record *storage.ToolApprovalRecord, wasUnstamped bool) error {
 	if wasUnstamped && record.Restricts() {
 		record.IdentityKeyed = false
-		return r.storageManager.SaveToolApproval(record)
+		return r.persistToolApproval(record)
 	}
 	return r.saveToolApproval(record)
 }
@@ -2113,20 +2290,6 @@ func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *co
 	if sibling.ApprovedHash == calculateToolApprovalHashWithOutputSchema(collapsed, tool.Description, schemaJSON, outputSchemaJSON, tool.Annotations) {
 		return true
 	}
-	if sibling.HashSchemaVersion < storage.AnnotationHashSchemaVersion &&
-		sibling.ApprovedHash == calculateToolApprovalHashWithOutputSchema(collapsed, tool.Description, schemaJSON, outputSchemaJSON, nil) {
-		// Pre-RT-03 hash (no annotation hints) with unchanged or unknown hints.
-		return true
-	}
-	if sibling.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion {
-		if sibling.ApprovedHash == calculateLegacyToolApprovalHash(collapsed, tool.Description, schemaJSON) ||
-			sibling.ApprovedHash == calculateHashWithAnnotations(collapsed, tool.Description, schemaJSON, tool.Annotations) {
-			return true
-		}
-	}
-	if sibling.ApprovedHash != sibling.CurrentHash || sibling.CurrentDescription == "" {
-		return false
-	}
 	// An empty stored schema is a wildcard only on a sibling that predates
 	// complete contract capture, exactly as in the main gate's formula
 	// migration: from storage.OutputSchemaHashSchemaVersion on an empty
@@ -2137,6 +2300,33 @@ func legacySiblingApprovesContract(sibling *storage.ToolApprovalRecord, tool *co
 	schemaMatch := (sibling.CurrentSchema == "" && uncaptured) || normalizeJSON(sibling.CurrentSchema) == normalizeJSON(schemaJSON)
 	outputMatch := (sibling.CurrentOutputSchema == "" && uncaptured) || normalizeJSON(sibling.CurrentOutputSchema) == normalizeJSON(outputSchemaJSON)
 	hintsMatch := storedSafetyHintsMatch(sibling.CurrentAnnotations, sibling.HashSchemaVersion, tool.Annotations)
+	// Every older formula is pipe-joined and ambiguous (issue #1606): a
+	// different contract can hash to the sibling's approved value. A legacy
+	// hash match therefore only counts when the sibling's stored contract
+	// does not contradict the live one (an uncaptured empty field is the
+	// one wildcard).
+	storedAgrees := (descMatch || (sibling.CurrentDescription == "" && uncaptured)) && schemaMatch && outputMatch
+	if sibling.HashSchemaVersion < storage.AnnotationHashSchemaVersion && storedAgrees &&
+		sibling.ApprovedHash == calculateToolApprovalHashV4(collapsed, tool.Description, schemaJSON, outputSchemaJSON, nil) {
+		// Pre-RT-03 hash (no annotation hints) with unchanged or unknown hints.
+		return true
+	}
+	if sibling.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion && storedAgrees {
+		if sibling.ApprovedHash == calculateLegacyToolApprovalHash(collapsed, tool.Description, schemaJSON) ||
+			sibling.ApprovedHash == calculateHashWithAnnotations(collapsed, tool.Description, schemaJSON, tool.Annotations) {
+			return true
+		}
+	}
+	if sibling.HashSchemaVersion == storage.AnnotationHashSchemaVersion {
+		// A v4 sibling captured the full contract (an empty description is
+		// declared, not unknown). Its approval covers the live contract only
+		// when its v4 ApprovedHash is the hash of its stored contract and
+		// that contract is exactly the live one (issue #1606).
+		return v4ApprovedHashCoversStored(sibling, collapsed) && descMatch && schemaMatch && outputMatch && hintsMatch
+	}
+	if sibling.ApprovedHash != sibling.CurrentHash || sibling.CurrentDescription == "" {
+		return false
+	}
 	return descMatch && schemaMatch && outputMatch && hintsMatch
 }
 
@@ -2193,12 +2383,23 @@ func (r *Runtime) serverEligibleForIndexing(serverName string) bool {
 // last-good snapshot for a since-quarantined server) — is never (re)indexed.
 // Returns true only when the differential update actually ran.
 func (r *Runtime) applyServerDiffIfEligible(ctx context.Context, serverName string, tools []*config.ToolMetadata) bool {
+	return r.applyServerDiffIfEligibleGuarded(ctx, serverName, tools, 0, inventoryRef{}, nil)
+}
+
+// applyServerDiffIfEligibleGuarded is applyServerDiffIfEligible for the
+// inventory inv, with the under-lock stale check of
+// applyDifferentialToolUpdateGuarded. An inventory the capture-order gate
+// refuses (Spec 117 PR-3) writes nothing and reports false.
+func (r *Runtime) applyServerDiffIfEligibleGuarded(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64, inv inventoryRef, stale func() bool) bool {
 	if !r.serverEligibleForIndexing(serverName) {
 		r.logger.Info("Skipping sweep index write for ineligible server (disabled or quarantined)",
 			zap.String("server", serverName))
 		return false
 	}
-	if err := r.applyDifferentialToolUpdate(ctx, serverName, tools); err != nil {
+	if err := r.applyInventoryGuarded(ctx, serverName, tools, instanceGen, inv, stale, nil); err != nil {
+		if errors.Is(err, errLocalSnapshotPurged) || errors.Is(err, errDiscoveryStaleGeneration) || errors.Is(err, errDiscoveryIneligible) || errors.Is(err, errInventoryStale) || errors.Is(err, errInventoryNotCurrent) {
+			return false
+		}
 		r.logger.Error("Failed to apply differential update for server during sweep",
 			zap.String("server", serverName),
 			zap.Error(err))
@@ -2250,12 +2451,15 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 
 // reindexFromLastGoodSnapshot re-runs the differential update from the
 // last-good snapshot under captureSnapMu. It reports false when no snapshot
-// exists yet.
+// exists yet, or (Spec 117 PR-3, FR-037) when the snapshot no longer
+// describes the live connection — its client was replaced, retired or
+// reconnected, or a newer capture with definitions was applied — so the caller
+// re-lists the server instead of re-applying older definitions.
 func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
 	r.captureSnapMu.Lock()
 	defer r.captureSnapMu.Unlock()
 
-	snapshot := r.lastGoodToolsSnapshot(serverName)
+	snapshot, inv, seq, snapshotGen := r.lastGoodSnapshotWithCaptureGen(serverName)
 	if len(snapshot) == 0 {
 		return false
 	}
@@ -2272,7 +2476,22 @@ func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
 	// Re-run the differential update against the current approval records.
 	// Rug-pull safety is preserved: if the tool mutated after approval,
 	// checkToolApprovals re-flags it changed and it stays blocked.
-	if err := r.applyDifferentialToolUpdate(r.AppContext(), serverName, snapshot); err != nil {
+	// Spec 116 PR3 (FR-021b): the snapshot is bound to the commit generation
+	// of the instance it was listed from. After an endpoint change it is
+	// rejected by the final check, and the caller re-lists the current
+	// instance instead of reapplying the old endpoint's tools.
+	stale := func() bool { return r.lastGoodPurgedSince(serverName, seq) }
+	err := r.applyInventoryGuarded(r.AppContext(), serverName, snapshot, snapshotGen, inventoryRef{capture: inv, mode: inventoryReconcile}, stale, nil)
+	switch {
+	case errors.Is(err, errDiscoveryStaleGeneration):
+		r.logger.Info("Last-good snapshot belongs to a superseded instance generation; re-listing the server",
+			zap.String("server", serverName), zap.Int64("snapshot_generation", snapshotGen))
+		return false
+	case errors.Is(err, errInventoryNotCurrent), errors.Is(err, errInventoryStale):
+		r.logger.Info("Approval reindex re-lists the server: its last-good snapshot no longer describes the live connection",
+			zap.String("server", serverName))
+		return false
+	case err != nil && !errors.Is(err, errLocalSnapshotPurged) && !errors.Is(err, errDiscoveryIneligible):
 		r.logger.Warn("Failed to reindex tools after approval change",
 			zap.String("server", serverName), zap.Error(err))
 	}
@@ -2280,20 +2499,39 @@ func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
 }
 
 // ApproveTools approves specific tools for a server, updating their status to approved.
+// It is bound to the server's incarnation when it starts (Spec 116 FR-014):
+// if the server is removed or replaced before the write, it writes nothing and
+// returns ErrServerReplaced.
 func (r *Runtime) ApproveTools(serverName string, toolNames []string, approvedBy string) error {
-	_, err := r.approveToolsAndNotify(serverName, toolNames, approvedBy, false)
+	return r.ApproveToolsAt(serverName, toolNames, approvedBy, 0)
+}
+
+// ApproveToolsAt is ApproveTools bound to expectedIncarnation, the incarnation
+// the caller reviewed (the REST expected_incarnation). 0 binds to the
+// incarnation current when the call starts.
+func (r *Runtime) ApproveToolsAt(serverName string, toolNames []string, approvedBy string, expectedIncarnation int64) error {
+	_, err := r.approveToolsAndNotify(serverName, toolNames, approvedBy, false, expectedIncarnation)
 	return err
 }
 
 // approveToolsAndNotify runs approveToolsLocked under the server's
-// tool-approval lock, then — with the lock released — emits the SSE events
-// and spawns the reindex (which re-enters checkToolApprovals and takes the
-// lock itself). Returns the number of records actually approved.
-func (r *Runtime) approveToolsAndNotify(serverName string, toolNames []string, approvedBy string, pendingOnly bool) (int, error) {
+// tool-approval lock, after the incarnation check, then — with the lock
+// released — emits the SSE events and spawns the reindex (which re-enters
+// checkToolApprovals and takes the lock itself). Returns the number of
+// records actually approved.
+func (r *Runtime) approveToolsAndNotify(serverName string, toolNames []string, approvedBy string, pendingOnly bool, expectedIncarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
+	}
 	unlock := r.lockToolApprovals(serverName)
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
 	approved, err := r.approveToolsLocked(serverName, toolNames, approvedBy, pendingOnly)
 	unlock()
 	r.notifyToolsApproved(serverName, approved, approvedBy)
@@ -2308,6 +2546,12 @@ func (r *Runtime) approveToolsAndNotify(serverName string, toolNames []string, a
 // for explicit review, and approved records are not rewritten. Missing
 // records are skipped. Returns the number of records written approved.
 func (r *Runtime) approveToolsLocked(serverName string, toolNames []string, approvedBy string, pendingOnly bool) (int, error) {
+	// Spec 117 FR-018: while the server's latest capture is incomplete the
+	// stored definitions may be older than the live ones; approving them
+	// would approve a definition nobody reviewed.
+	if err := r.reviewNotRecordedHeld(serverName); err != nil {
+		return 0, err
+	}
 	approved := 0
 	for _, toolName := range toolNames {
 		record, err := r.storageManager.GetToolApproval(serverName, toolName)
@@ -2419,11 +2663,18 @@ func (r *Runtime) notifyToolsApproved(serverName string, approved int, approvedB
 // compaction, …) is propagated to the caller. Without this check, a transient
 // I/O / unmarshal error could silently demote a `pending`/`changed` record to
 // `approved` — exactly the rug-pull bypass Spec 032 was designed to prevent.
-func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool, updatedBy string) (bool, error) {
+//
+// inc is the incarnation the caller captured (Spec 116 FR-014); a record is
+// never written, or synthesized, for a server that was removed or replaced
+// since.
+func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool, updatedBy string, inc int64) (bool, error) {
 	if r.storageManager == nil {
 		return false, nil
 	}
 	defer r.lockToolApprovals(serverName)()
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		return false, err
+	}
 
 	record, err := r.storageManager.GetToolApproval(serverName, toolName)
 	// Spec 105 FR-009: a pre-105 record the operator toggles between the
@@ -2440,7 +2691,7 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 		// First time we've seen this tool: synthesize the record the
 		// discovery producer would have filed for it under this server's
 		// gate (see the function comment).
-		record = r.newToggleSynthesizedRecord(serverName, toolName, updatedBy)
+		record = r.newToggleSynthesizedRecord(serverName, toolName, updatedBy, inc)
 	default:
 		// Real read error — refuse to write. See comment above for rationale.
 		return false, fmt.Errorf("read tool approval %s:%s: %w", serverName, toolName, err)
@@ -2451,6 +2702,14 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 		// Matches the prior bulk-path pre-check; lifted here so single-toggle
 		// also avoids no-op BBolt writes.
 		return false, nil
+	}
+	// Spec 117 FR-018: enabling an approved record makes it reachable; not
+	// while the server's latest capture is incomplete. Disabling stays
+	// available.
+	if enabled && record.Status == storage.ToolApprovalStatusApproved {
+		if err := r.reviewNotRecordedHeld(serverName); err != nil {
+			return false, err
+		}
 	}
 
 	record.Disabled = !enabled
@@ -2476,13 +2735,13 @@ func (r *Runtime) setToolEnabledNoEmit(serverName, toolName string, enabled bool
 // a record-less tool (see its function comment): pending under an active
 // tool-level quarantine gate, approved and baselined to the snapshot's current
 // contract under a lifted one. The caller sets Disabled.
-func (r *Runtime) newToggleSynthesizedRecord(serverName, toolName, updatedBy string) *storage.ToolApprovalRecord {
+func (r *Runtime) newToggleSynthesizedRecord(serverName, toolName, updatedBy string, inc int64) *storage.ToolApprovalRecord {
 	record := &storage.ToolApprovalRecord{
 		ServerName: serverName,
 		ToolName:   toolName,
 	}
 	// The snapshot's current contract, when the StateView lists the raw name.
-	if tool := r.snapshotToolMetadata(serverName, toolName); tool != nil {
+	if tool := r.snapshotToolMetadata(serverName, toolName, inc); tool != nil {
 		schemaJSON := tool.ParamsJSON
 		if schemaJSON == "" {
 			schemaJSON = "{}"
@@ -2517,11 +2776,15 @@ func (r *Runtime) newToggleSynthesizedRecord(serverName, toolName, updatedBy str
 	return record
 }
 
-// snapshotToolMetadata returns the StateView's current contract for a raw
-// tool name on a server — the same fields the discovery producer hashes —
-// or nil when the snapshot does not list the exact name. The StateView holds
-// raw names verbatim (Spec 105 FR-009), so only the exact name matches.
-func (r *Runtime) snapshotToolMetadata(serverName, toolName string) *config.ToolMetadata {
+// viewToolsAt returns the StateView's tools for serverName when the view was
+// reconciled from incarnation inc, and nil otherwise (Spec 116 PR2 review
+// round 8, FR-014/FR-017). The StateView lags the commit: after a remove and
+// same-name re-add it can still hold the removed server's tools under the
+// removed incarnation, and an approval writer bound to the replacement must
+// never persist those definitions as the replacement's records. inc == 0 is
+// an unbound capture (a database no Spec 116 commit has written) and accepts
+// the view as before.
+func (r *Runtime) viewToolsAt(serverName string, inc int64) []stateview.ToolInfo {
 	if r.supervisor == nil {
 		return nil
 	}
@@ -2533,8 +2796,26 @@ func (r *Runtime) snapshotToolMetadata(serverName, toolName string) *config.Tool
 	if !ok || status == nil {
 		return nil
 	}
-	for i := range status.Tools {
-		info := status.Tools[i]
+	if inc != 0 && status.Incarnation != inc {
+		r.logger.Debug("StateView lags the bound incarnation; not reading its tools for an approval write",
+			zap.String("server", serverName),
+			zap.Int64("view_incarnation", status.Incarnation),
+			zap.Int64("bound_incarnation", inc))
+		return nil
+	}
+	return status.Tools
+}
+
+// snapshotToolMetadata returns the StateView's current contract for a raw
+// tool name on a server — the same fields the discovery producer hashes —
+// or nil when the snapshot does not list the exact name. The StateView holds
+// raw names verbatim (Spec 105 FR-009), so only the exact name matches.
+// inc is the incarnation the writer is bound to: a view reconciled from any
+// other incarnation is not consulted (see viewToolsAt).
+func (r *Runtime) snapshotToolMetadata(serverName, toolName string, inc int64) *config.ToolMetadata {
+	viewTools := r.viewToolsAt(serverName, inc)
+	for i := range viewTools {
+		info := viewTools[i]
 		if info.Name != toolName {
 			continue
 		}
@@ -2563,7 +2844,20 @@ func (r *Runtime) snapshotToolMetadata(serverName, toolName string) *config.Tool
 // transition without polling. The emit is skipped when the call was a
 // no-op (already in the desired state) to avoid wasted SSE traffic.
 func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, updatedBy string) error {
-	changed, err := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy)
+	return r.SetToolEnabledAt(serverName, toolName, enabled, updatedBy, 0)
+}
+
+// SetToolEnabledAt is SetToolEnabled bound to expectedIncarnation (0 binds to
+// the incarnation current when the call starts; Spec 116 FR-014).
+func (r *Runtime) SetToolEnabledAt(serverName, toolName string, enabled bool, updatedBy string, expectedIncarnation int64) error {
+	if r.storageManager == nil {
+		return nil
+	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return err
+	}
+	changed, err := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy, inc)
 	if err != nil {
 		return err
 	}
@@ -2606,22 +2900,31 @@ func (r *Runtime) SetToolEnabled(serverName, toolName string, enabled bool, upda
 // PR #463) the bulk operation pays exactly one payload build no matter how
 // many tools changed.
 func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy string) (int, error) {
+	return r.SetAllToolsEnabledAt(serverName, enabled, updatedBy, 0)
+}
+
+// SetAllToolsEnabledAt is SetAllToolsEnabled bound to expectedIncarnation (0
+// binds to the incarnation current when the call starts; Spec 116 FR-014).
+// Every per-tool write re-checks it, so a remove and re-add midway stops the
+// loop's writes on the replacement.
+func (r *Runtime) SetAllToolsEnabledAt(serverName string, enabled bool, updatedBy string, expectedIncarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
 	if serverName == "" {
 		return 0, fmt.Errorf("server name required")
 	}
-
-	toolNames, err := r.collectKnownToolNames(serverName)
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
 	if err != nil {
 		return 0, err
 	}
-	if len(toolNames) == 0 {
-		return 0, nil
+
+	toolNames, err := r.collectKnownToolNames(serverName, inc)
+	if err != nil {
+		return 0, err
 	}
 
-	changed := 0
+	changed, attempted := 0, 0
 	for _, toolName := range toolNames {
 		// Never enable a tool the config denies — user-owned Disabled flag is
 		// irrelevant here; enforcement is in isToolCallable, but we avoid a
@@ -2629,7 +2932,11 @@ func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy 
 		if enabled && r.IsToolConfigDenied(serverName, toolName) {
 			continue
 		}
-		flipped, setErr := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy)
+		attempted++
+		flipped, setErr := r.setToolEnabledNoEmit(serverName, toolName, enabled, updatedBy, inc)
+		if errors.Is(setErr, ErrServerReplaced) || errors.Is(setErr, toolreview.ErrReviewNotRecorded) {
+			return changed, setErr
+		}
 		if setErr != nil {
 			r.logger.Warn("Failed to toggle tool in bulk operation",
 				zap.String("server", serverName),
@@ -2641,6 +2948,15 @@ func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy 
 		if flipped {
 			changed++
 		}
+	}
+	if attempted == 0 {
+		// No per-tool write ran, so no write checked the incarnation: an
+		// empty or all-config-denied inventory must still refuse a request
+		// bound to a removed or replaced server (review round 3).
+		if err := r.WithServerApprovalLockAt(serverName, inc, func() error { return nil }); err != nil {
+			return 0, err
+		}
+		return 0, nil
 	}
 
 	if changed > 0 {
@@ -2670,7 +2986,13 @@ func (r *Runtime) SetAllToolsEnabled(serverName string, enabled bool, updatedBy 
 // already exist for the server. Stripping everything before the first colon
 // here would collapse a namespaced tool onto its sibling's key and leave the
 // namespaced tool itself untoggled by disable_all / block_all.
-func (r *Runtime) collectKnownToolNames(serverName string) ([]string, error) {
+//
+// inc is the incarnation the bulk writer is bound to (Spec 116 FR-014): the
+// StateView lags the commit, so after a remove + same-name re-add it can
+// still list the removed server's tools; it is consulted only when it was
+// reconciled from inc (review round 8). The index and the approval records
+// need no such check — the removal commit purged both.
+func (r *Runtime) collectKnownToolNames(serverName string, inc int64) ([]string, error) {
 	seen := make(map[string]struct{})
 	add := func(name string) {
 		if name == "" {
@@ -2679,13 +3001,8 @@ func (r *Runtime) collectKnownToolNames(serverName string) ([]string, error) {
 		seen[name] = struct{}{}
 	}
 
-	if r.supervisor != nil {
-		snapshot := r.supervisor.StateView().Snapshot()
-		if status, ok := snapshot.Servers[serverName]; ok {
-			for _, tool := range status.Tools {
-				add(tool.Name)
-			}
-		}
+	for _, tool := range r.viewToolsAt(serverName, inc) {
+		add(tool.Name)
 	}
 
 	if r.indexManager != nil {
@@ -2730,14 +3047,19 @@ func (r *Runtime) approveBaselineToolsForServer(serverName string) error {
 
 // approveBaselineToolsForServerAt is the unquarantine baseline promotion bound
 // to the incarnation of the commit that unquarantined the server (Spec 116
-// FR-014i): the caller passes the incarnation from that commit's result and
-// never recaptures it by name. PR1 records the binding; Spec 116 PR2 adds the
-// under-lock check that the row still has that incarnation and is still
-// unquarantined, and writes nothing otherwise.
+// FR-014i, review R9.5): the caller passes the incarnation from that commit's
+// result (or the request's expected_incarnation) and never recaptures it by
+// name. Under the server's approval lock it requires the stored row to carry
+// that incarnation and to be unquarantined; otherwise it promotes nothing and
+// returns ErrServerReplaced (the replacement's pending records stay pending)
+// or nil (the server was re-quarantined meanwhile).
 func (r *Runtime) approveBaselineToolsForServerAt(serverName string, incarnation int64) error {
-	r.logger.Debug("Baseline promotion after unquarantine",
-		zap.String("server", serverName), zap.Int64("incarnation", incarnation))
-	return r.approveBaselineToolsForServer(serverName)
+	_, err := r.approveBaselineToolsForServerCountAt(serverName, incarnation)
+	if errors.Is(err, ErrServerReplaced) {
+		r.logger.Debug("Baseline promotion after unquarantine skipped: the server was removed or replaced",
+			zap.String("server", serverName), zap.Int64("incarnation", incarnation), zap.Error(err))
+	}
+	return err
 }
 
 // approveBaselineToolsForServerCount is approveBaselineToolsForServer
@@ -2746,12 +3068,31 @@ func (r *Runtime) approveBaselineToolsForServerAt(serverName string, incarnation
 // each record (pendingOnly), so a record that became "changed" is never
 // promoted and no concurrent pass can revert the promotion.
 func (r *Runtime) approveBaselineToolsForServerCount(serverName string) (int, error) {
+	return r.approveBaselineToolsForServerCountAt(serverName, 0)
+}
+
+// approveBaselineToolsForServerCountAt is approveBaselineToolsForServerCount
+// bound to incarnation (0: unbound, the legacy callers). A bound promotion
+// also requires the stored row to be unquarantined under the lock.
+func (r *Runtime) approveBaselineToolsForServerCountAt(serverName string, incarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
 	const approvedBy = "system:server-approval-baseline"
 
 	unlock := r.lockToolApprovals(serverName)
+	if incarnation != 0 {
+		if err := r.checkApprovalIncarnationHeld(serverName, incarnation); err != nil {
+			unlock()
+			return 0, err
+		}
+		if r.approvalBindingEnforced() && r.serverQuarantinedInStorage(serverName) {
+			unlock()
+			r.logger.Debug("Baseline promotion after unquarantine skipped: the server is quarantined again",
+				zap.String("server", serverName), zap.Int64("incarnation", incarnation))
+			return 0, nil
+		}
+	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
 		unlock()
@@ -2764,6 +3105,13 @@ func (r *Runtime) approveBaselineToolsForServerCount(serverName string) (int, er
 		}
 	}
 	approved := 0
+	if len(pendingTools) > 0 && r.reviewDirtyHeld(serverName) {
+		// Spec 117 FR-018: a non-review unquarantine leaves pending tools
+		// pending while the server's latest capture is incomplete.
+		r.logger.Warn("Baseline promotion after unquarantine skipped: the server's latest tool capture is incomplete",
+			zap.String("server", serverName), zap.Int("pending", len(pendingTools)))
+		pendingTools = nil
+	}
 	if len(pendingTools) > 0 {
 		// approveToolsLocked sets ApprovedHash=CurrentHash and runs
 		// enforceInvariant (pending→approved is permitted).
@@ -2786,11 +3134,25 @@ func (r *Runtime) approveBaselineToolsForServerCount(serverName string) (int, er
 // and approval run under one hold of the server's tool-approval lock; the
 // count is the number of records actually approved.
 func (r *Runtime) ApproveAllTools(serverName string, approvedBy string) (int, error) {
+	return r.ApproveAllToolsAt(serverName, approvedBy, 0)
+}
+
+// ApproveAllToolsAt is ApproveAllTools bound to expectedIncarnation (0 binds
+// to the incarnation current when the call starts; Spec 116 FR-014).
+func (r *Runtime) ApproveAllToolsAt(serverName string, approvedBy string, expectedIncarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
+	}
 
 	unlock := r.lockToolApprovals(serverName)
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
 		unlock()
@@ -2831,10 +3193,24 @@ func (r *Runtime) ApproveAllTools(serverName string, approvedBy string) (int, er
 // Returns the number of tools actually blocked. Missing approval records are
 // skipped with a warning (mirrors ApproveTools), not treated as a hard error.
 func (r *Runtime) BlockTools(serverName string, toolNames []string, blockedBy string) (int, error) {
+	return r.BlockToolsAt(serverName, toolNames, blockedBy, 0)
+}
+
+// BlockToolsAt is BlockTools bound to expectedIncarnation (0 binds to the
+// incarnation current when the call starts; Spec 116 FR-014).
+func (r *Runtime) BlockToolsAt(serverName string, toolNames []string, blockedBy string, expectedIncarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
+	}
 	unlock := r.lockToolApprovals(serverName)
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
 	blocked, err := r.blockToolsLocked(serverName, toolNames, blockedBy)
 	unlock()
 	r.notifyToolsBlocked(serverName, blocked, blockedBy)
@@ -2921,11 +3297,25 @@ func (r *Runtime) notifyToolsBlocked(serverName string, blocked int, blockedBy s
 // dismiss the same quarantine queue — approve keeps tools visible, block hides
 // them. Returns the number of tools blocked.
 func (r *Runtime) BlockAllTools(serverName string, blockedBy string) (int, error) {
+	return r.BlockAllToolsAt(serverName, blockedBy, 0)
+}
+
+// BlockAllToolsAt is BlockAllTools bound to expectedIncarnation (0 binds to
+// the incarnation current when the call starts; Spec 116 FR-014).
+func (r *Runtime) BlockAllToolsAt(serverName string, blockedBy string, expectedIncarnation int64) (int, error) {
 	if r.storageManager == nil {
 		return 0, nil
 	}
+	inc, err := r.CaptureApprovalIncarnation(serverName, expectedIncarnation)
+	if err != nil {
+		return 0, err
+	}
 
 	unlock := r.lockToolApprovals(serverName)
+	if err := r.checkApprovalIncarnationHeld(serverName, inc); err != nil {
+		unlock()
+		return 0, err
+	}
 	records, err := r.storageManager.ListToolApprovals(serverName)
 	if err != nil {
 		unlock()

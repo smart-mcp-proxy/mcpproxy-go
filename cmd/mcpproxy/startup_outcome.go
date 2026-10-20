@@ -51,3 +51,22 @@ func recordStartupOutcome(cfg *config.Config, configPath, outcome string, save f
 			zap.Error(err))
 	}
 }
+
+// startupOutcomeRecorder is the slice of *server.Server recordStartupOutcomeLive
+// needs; it lets a test substitute the recorder.
+type startupOutcomeRecorder interface {
+	RecordStartupOutcome(outcome string) error
+}
+
+// recordStartupOutcomeLive records the outcome once the runtime exists. It goes
+// through the runtime's config commit (#1592) so the live config and the file
+// stay consistent and a concurrent disk-writing commit cannot drop it.
+// recordStartupOutcome is for failures before the runtime is constructed.
+func recordStartupOutcomeLive(rec startupOutcomeRecorder, outcome string) {
+	if err := rec.RecordStartupOutcome(outcome); err != nil {
+		// Best-effort; telemetry must never block startup.
+		zap.L().Debug("Failed to persist last_startup_outcome",
+			zap.String("outcome", outcome),
+			zap.Error(err))
+	}
+}

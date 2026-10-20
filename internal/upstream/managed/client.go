@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics/hints"
@@ -22,6 +23,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
 	mcptransport "github.com/mark3labs/mcp-go/client/transport"
@@ -43,8 +45,22 @@ type Client struct {
 	// Spec 116: the config and the commit generation it belongs to are one
 	// atomic pair, so a reader never sees a config with another commit's
 	// generation (Generation, SetConfigAt).
-	cfg          atomic.Pointer[stampedConfig]
-	coreClient   *core.Client
+	cfg        atomic.Pointer[stampedConfig]
+	coreClient *core.Client
+
+	// instanceID identifies this instance (Spec 116 PR3, review R5.2): a
+	// process-wide counter assigned at construction and never reused. A
+	// commit generation identifies a config; a restart, ForceReconnectAll or
+	// Docker recovery installs a new instance at the SAME generation, so an
+	// action that targets an existing instance binds to its InstanceID too.
+	instanceID InstanceID
+	// unregistered is set by upstream.Manager when it removes this instance
+	// from its registry (unregisterLocked, under the manager's locks). From
+	// then on Connect refuses (ErrInstanceUnregistered), so a worker, the
+	// reconnect loop or a sweep that still holds the pointer cannot bring an
+	// instance the manager no longer serves back online. Spec 116 PR4
+	// extends this to a byte-level retirement barrier (dial gate).
+	unregistered atomic.Bool
 	logger       *zap.Logger
 	StateManager *types.StateManager // Public field for callback access
 
@@ -81,6 +97,24 @@ type Client struct {
 	// reading its call's result, instead of sleeping. Nil in production.
 	listToolsObserver         atomic.Pointer[func(ListToolsEvent)]
 	listToolsBeforeWaiterRead atomic.Pointer[func(seq uint64)]
+	// connectAfterDial is a test seam run by Connect after the transport
+	// connected and before Connect re-acquires mc.mu, the window in which a
+	// concurrent Disconnect can land. Nil in production.
+	connectAfterDial atomic.Pointer[func()]
+
+	// connectSeq identifies the current connect attempt. Guarded by mu. Every
+	// Connect takes a new value when it starts and every Disconnect advances
+	// it, so a Connect that re-acquires mu after its unlocked dial and finds
+	// a different value knows a Disconnect, or a newer attempt, superseded it
+	// and must not publish its result.
+	connectSeq uint64
+	// reconnectAfterTeardown is a test seam run by tryReconnect and
+	// TryReconnectSync after they tore the connection down and before their
+	// replacement Connect starts. Nil in production.
+	reconnectAfterTeardown atomic.Pointer[func()]
+	// reconnectMidTeardown is a test seam run inside teardownForReconnect
+	// between the transport close and the state reset. Nil in production.
+	reconnectMidTeardown atomic.Pointer[func()]
 
 	// Connect cancellation - allows Disconnect() to cancel an in-flight Connect()
 	// without waiting for mc.mu (which Connect holds during the entire OAuth flow)
@@ -88,8 +122,11 @@ type Client struct {
 	connectCancel context.CancelFunc
 
 	// Background monitoring
-	stopMonitoring       chan struct{}
-	monitoringWG         sync.WaitGroup
+	stopMonitoring chan struct{}
+	// monitoringDone is closed when the loop the last startBackgroundMonitoring
+	// started exits. Each loop gets its own channel: a stop whose wait timed
+	// out must not end up waiting for (or racing the start of) the next loop.
+	monitoringDone       chan struct{}
 	monitoringCancelFunc context.CancelFunc
 	monitoringStarted    bool
 
@@ -113,7 +150,9 @@ type Client struct {
 	// healthCheckFailureThreshold; one success resets it. Hard failures
 	// (connection refused, no such host, unreachable) bypass the counter
 	// and trigger Error immediately. See recordHealthCheckFailure().
-	consecutiveHealthFailures int
+	// Atomic: the health loop records failures while Connect's reset can run
+	// on whichever goroutine reconnects (ForceReconnect, TryReconnectSync).
+	consecutiveHealthFailures atomic.Int32
 
 	// toolInvoker is the tools/call surface CallTool dispatches through. In
 	// production it is the coreClient; the narrow interface lets tests inject a
@@ -177,6 +216,11 @@ type Client struct {
 	// stay outside; SetError dispatches its callback in a goroutine, so the
 	// probe may call it under epochMu.
 	epochMu sync.Mutex
+
+	// retired is set by the upstream manager when it replaces or removes this
+	// client (Spec 117 PR-3, FR-036): its tool captures are discarded and it
+	// is never current on any epoch again.
+	retired atomic.Bool
 
 	// admission carries the spec-093 concurrency limiter registry and the
 	// rejection observer installed by the manager. Nil (the default) means no
@@ -358,8 +402,16 @@ const ambiguousProbeTimeout = 5 * time.Second
 // request doesn't paint the UI red and clear the tools list.
 const healthCheckFailureThreshold = 3
 
-// NewClient creates a new managed client with state management
+// NewClient creates a new managed client with state management. The instance
+// holds no commit generation (0); the daemon builds instances with
+// NewClientAt.
 func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) (*Client, error) {
+	return NewClientAt(id, serverConfig, 0, logger, logConfig, globalConfig, storage, secretResolver)
+}
+
+// NewClientAt creates a managed client stamped, from construction, with the
+// Spec 116 commit generation gen of serverConfig (Generation).
+func NewClientAt(id string, serverConfig *config.ServerConfig, gen int64, logger *zap.Logger, logConfig *config.LogConfig, globalConfig *config.Config, storage *storage.BoltDB, secretResolver *secret.Resolver) (*Client, error) {
 	// Create core client
 	coreClient, err := core.NewClient(id, serverConfig, logger, logConfig, globalConfig, storage, secretResolver)
 	if err != nil {
@@ -378,7 +430,8 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 		healthProbe:    coreClient,
 		toolInvoker:    coreClient,
 	}
-	mc.cfg.Store(&stampedConfig{cfg: serverConfig})
+	mc.instanceID = InstanceID(instanceIDCounter.Add(1))
+	mc.cfg.Store(&stampedConfig{cfg: serverConfig, gen: gen})
 	mc.globalConfig.Store(globalConfig)
 
 	// Spec 112 R6: coreClient is created once and never replaced, so installing
@@ -446,13 +499,55 @@ func NewClient(id string, serverConfig *config.ServerConfig, logger *zap.Logger,
 // is in flight or the client is already Ready. It is a guard, not a failure.
 var ErrConnectAlreadyActive = errors.New("connection already in progress or established")
 
+// ErrInstanceUnregistered is returned by Connect on an instance the upstream
+// manager has unregistered (Spec 116 PR3): a newer config commit, a removal or
+// a same-generation replacement superseded it, so it must not connect.
+var ErrInstanceUnregistered = errors.New("instance unregistered: superseded by a newer config commit or replacement")
+
+// ErrInstanceRetired is returned by a tool call, tools/list or probe on an
+// instance the upstream manager retired (Spec 116 PR4, FR-026): the server
+// was removed, replaced or quarantined while the request was on its way. It
+// is the "server unavailable" answer; the internal dialgate.ErrRetired never
+// reaches a surface (FR-027). It is not a connection failure: it marks
+// nothing unhealthy and is not charged to the replacement instance.
+var ErrInstanceRetired = errors.New("server unavailable: it was removed, replaced or quarantined while the request was in flight")
+
+// ErrConnectAborted is returned by Connect when a Disconnect, or a newer
+// connect attempt, ran while the transport was being established. The dial's
+// result (success or failure) is discarded; the client keeps the state the
+// superseding operation left.
+var ErrConnectAborted = errors.New("connect superseded by a concurrent disconnect or a newer attempt")
+
 // Connect establishes connection with state management.
 // IMPORTANT: mc.mu is only held briefly for state checks/transitions, NOT during the
 // potentially slow coreClient.Connect() call (which may involve OAuth flows taking minutes).
 // This prevents blocking Disconnect, SetConfig, GetConfig, and other callers.
 func (mc *Client) Connect(ctx context.Context) error {
+	return mc.connectUnlessStopped(ctx, nil)
+}
+
+// connectUnlessStopped is Connect for a health loop's reconnect: it is
+// admitted only while that loop's stop channel is open. Disconnect closes the
+// channel under mc.mu, so an attempt admitted before the Disconnect is
+// superseded by it (see connectSeq) and one admitted after it sees the stop
+// and does nothing. A nil stop never fires.
+func (mc *Client) connectUnlessStopped(ctx context.Context, stop <-chan struct{}) error {
 	// Phase 1: Acquire lock, check state, prepare for connection
 	mc.mu.Lock()
+
+	// An instance the manager unregistered never connects again: whoever
+	// still holds this pointer acts for a superseded config or instance.
+	if mc.unregistered.Load() {
+		mc.mu.Unlock()
+		return ErrInstanceUnregistered
+	}
+
+	// The health loop that asked for this reconnect was stopped by a
+	// Disconnect: the user (or the manager) wants this client down.
+	if monitoringStopped(stop) {
+		mc.mu.Unlock()
+		return ErrConnectAborted
+	}
 
 	// Check if already connecting or connected
 	if mc.StateManager.IsConnecting() || mc.StateManager.IsReady() {
@@ -502,6 +597,8 @@ func (mc *Client) Connect(ctx context.Context) error {
 	}
 
 	// Transition to connecting state
+	mc.connectSeq++
+	attempt := mc.connectSeq
 	mc.StateManager.TransitionTo(types.StateConnecting)
 
 	// Release lock BEFORE the slow coreClient.Connect() call
@@ -524,10 +621,51 @@ func (mc *Client) Connect(ctx context.Context) error {
 	mc.logger.Debug("Invoking core client Connect for managed client",
 		zap.String("server", serverName))
 	connectErr := mc.coreClient.Connect(connectCtx)
+	if hook := mc.connectAfterDial.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Phase 4: Re-acquire lock to update state based on result
 	mc.mu.Lock()
 	defer mc.mu.Unlock()
+
+	// A Disconnect, or a newer attempt, that ran while this attempt was
+	// dialing (mc.mu is not held in phase 3) owns the client's state now.
+	// Publishing this attempt's result would undo it: reporting Ready over
+	// the transport the Disconnect closed (the stuck re-enable after Spec 116
+	// PR1: every call fails with "client not connected", and since the client
+	// looks connected nothing reconnects it), or overwriting the reset state
+	// with Error/PendingAuth for a dial the Disconnect cancelled.
+	// Unregistered while dialing, before the manager's asynchronous
+	// Disconnect landed: discard the result and close what this dial opened.
+	if mc.connectSeq == attempt && mc.unregistered.Load() {
+		mc.connectSeq++
+		if connectErr == nil && mc.coreClient != nil {
+			_ = mc.coreClient.Disconnect()
+		}
+		mc.StateManager.Reset()
+		mc.logger.Info("Connect finished on an unregistered instance; discarding its result",
+			zap.String("server", serverName),
+			zap.NamedError("dial_error", connectErr))
+		return ErrInstanceUnregistered
+	}
+	if mc.connectSeq != attempt {
+		// Only Disconnects ran since (a newer attempt would have left
+		// Connecting, Ready or a failure state): close what this dial opened,
+		// because a Disconnect that landed before connectCancel was
+		// registered could not abort it. A newer attempt shares the core
+		// client, so its transport is left alone.
+		if connectErr == nil && mc.coreClient != nil && mc.StateManager.GetState() == types.StateDisconnected {
+			_ = mc.coreClient.Disconnect()
+		}
+		mc.logger.Info("Connect superseded by a concurrent disconnect or a newer attempt; discarding its result",
+			zap.String("server", serverName),
+			zap.NamedError("dial_error", connectErr))
+		if connectErr != nil {
+			return fmt.Errorf("%w: %v", ErrConnectAborted, connectErr)
+		}
+		return ErrConnectAborted
+	}
 
 	if connectErr != nil {
 		// A rate-limited upstream (429, or 503 with a hint) told us when to come
@@ -605,8 +743,12 @@ func (mc *Client) Connect(ctx context.Context) error {
 	// TransitionTo deliberately stays OUTSIDE the critical section — it invokes
 	// the state-change callback synchronously (types.go), and epochMu must
 	// never be held across foreign code (GH #965 review, rounds 2-3).
+	// The failure counter is reset in the same epochMu section, so a probe
+	// of the previous connection that fails after this point cannot add debt
+	// to the new one (see recordHealthCheckFailureFor).
 	mc.epochMu.Lock()
 	mc.connectionEpoch.Store(nextConnectionEpoch())
+	mc.resetHealthCheckFailures()
 	mc.epochMu.Unlock()
 
 	// Spec 113-e FR-080: remember the session id this connect obtained, so a
@@ -617,11 +759,6 @@ func (mc *Client) Connect(ctx context.Context) error {
 	if mc.StateManager.GetState() != types.StateReady {
 		mc.StateManager.TransitionTo(types.StateReady)
 	}
-
-	// Wipe any consecutive-failure debt accumulated before reconnect so the
-	// new session starts at zero. Without this, a server that flapped, then
-	// recovered, would carry stale counts into the next health-check window.
-	mc.resetHealthCheckFailures()
 
 	// A fresh connection (e.g. a post-sign-in reconnect that now carries a token)
 	// starts clean: clear any stale call-time OAuth-required flag so the Sign-in
@@ -673,6 +810,9 @@ func (mc *Client) Disconnect() error {
 	defer mc.mu.Unlock()
 
 	mc.logger.Info("Disconnecting managed client", zap.String("server", mc.GetConfig().Name))
+
+	// Supersede any connect attempt still dialing (see connectSeq).
+	mc.connectSeq++
 
 	// Ensure no ListTools operations remain after acquiring the lock
 	mc.cancelInFlightListTools()
@@ -758,7 +898,7 @@ func (mc *Client) ConnectionEpoch() int64 {
 func (mc *Client) WithConnectionEpoch(expectedEpoch int64, fn func() error) (current bool, err error) {
 	mc.epochMu.Lock()
 	defer mc.epochMu.Unlock()
-	if mc.connectionEpoch.Load() != expectedEpoch {
+	if mc.retired.Load() || mc.connectionEpoch.Load() != expectedEpoch {
 		return false, nil
 	}
 	if err := fn(); err != nil {
@@ -808,6 +948,19 @@ func (mc *Client) Generation() int64 {
 		return p.gen
 	}
 	return 0
+}
+
+// ConfigAt returns the config this instance holds together with the commit
+// generation it was stamped with, read from ONE atomic load. A caller that
+// binds an action to (config, generation) must use it instead of separate
+// GetConfig and Generation calls: a restamp (SetConfigAt) between those two
+// reads would pair the OLD config with the NEW generation (Spec 116 PR3 Sol
+// round 1).
+func (mc *Client) ConfigAt() (*config.ServerConfig, int64) {
+	if p := mc.cfg.Load(); p != nil {
+		return p.cfg, p.gen
+	}
+	return nil, 0
 }
 
 // SetConfigAt stores cfg together with its commit generation gen as one atomic
@@ -1071,6 +1224,10 @@ type listToolsCall struct {
 	tools     []*config.ToolMetadata
 	err       error
 	published bool
+	// capture is the flight's inventory capture (Spec 117 PR-3, FR-030),
+	// stamped when the leader acquires the list and before the upstream
+	// request. Immutable after acquisition.
+	capture InventoryCapture
 }
 
 // acquireListToolsContext claims the in-progress flag for an upstream ListTools
@@ -1087,7 +1244,7 @@ func (mc *Client) acquireListToolsContext(ctx context.Context, timeout time.Dura
 
 	mc.listToolsInProgress = true
 	mc.listToolsLeaderSeq++
-	call := &listToolsCall{done: make(chan struct{}), seq: mc.listToolsLeaderSeq}
+	call := &listToolsCall{done: make(chan struct{}), seq: mc.listToolsLeaderSeq, capture: mc.newCapture()}
 	mc.listToolsCur = call
 	listCtx, cancel := context.WithTimeout(ctx, timeout)
 	mc.listToolsCancel = cancel
@@ -1128,7 +1285,8 @@ func (mc *Client) publishListToolsResult(tools []*config.ToolMetadata, err error
 // ListTools retrieves tools with concurrency control and coalesces concurrent
 // callers onto a single in-flight upstream call.
 func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) {
-	return mc.listTools(ctx, false, 0)
+	tools, _, err := mc.listTools(ctx, false, 0)
+	return tools, err
 }
 
 // ListToolsFresh is ListTools for a caller that must see the tools as they
@@ -1139,26 +1297,45 @@ func (mc *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error)
 // announces): it waits for such a request to finish and then lists again,
 // joining only a request that started after the call.
 func (mc *Client) ListToolsFresh(ctx context.Context) ([]*config.ToolMetadata, error) {
-	mc.listToolsMu.Lock()
-	entrySeq := mc.listToolsLeaderSeq
-	mc.listToolsMu.Unlock()
-	return mc.listTools(ctx, true, entrySeq)
+	tools, _, err := mc.ListToolsFreshCaptured(ctx)
+	return tools, err
 }
 
 // listTools implements ListTools and ListToolsFresh. With fresh set, an
 // in-flight leader numbered at or below entrySeq started before the caller,
-// so its result is not accepted.
-func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([]*config.ToolMetadata, error) {
+// so its result is not accepted. It returns the capture of the flight whose
+// result it returns (Spec 117 PR-3).
+func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([]*config.ToolMetadata, InventoryCapture, error) {
+	tools, capture, err := mc.listToolsUnmapped(ctx, fresh, entrySeq)
+	if err != nil && mc.retired.Load() {
+		// Spec 116 PR4 (FR-026), as for a tool call: the instance was
+		// retired while the list (led or joined) was in flight. Its gate
+		// refused the send or closed the connection under the read, so
+		// the error is dialgate.ErrRetired or a bare transport failure.
+		// Either way the answer is "unavailable", never a failure that
+		// says something about the server.
+		mc.logger.Debug("tools/list failed on a retired instance",
+			zap.String("server", mc.GetConfig().Name),
+			zap.Error(err))
+		return nil, InventoryCapture{}, ErrInstanceRetired
+	}
+	return tools, capture, err
+}
+
+func (mc *Client) listToolsUnmapped(ctx context.Context, fresh bool, entrySeq uint64) ([]*config.ToolMetadata, InventoryCapture, error) {
 	mc.logger.Debug("🔍 ListTools called",
 		zap.String("server", mc.GetConfig().Name),
 		zap.String("state", mc.StateManager.GetState().String()),
 		zap.Bool("connected", mc.IsConnected()))
 
+	if mc.retired.Load() {
+		return nil, InventoryCapture{}, ErrInstanceRetired
+	}
 	if !mc.IsConnected() {
 		mc.logger.Debug("🔍 ListTools rejected - client not connected",
 			zap.String("server", mc.GetConfig().Name),
 			zap.String("state", mc.StateManager.GetState().String()))
-		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
+		return nil, InventoryCapture{}, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
 
 	for {
@@ -1170,7 +1347,14 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 				mc.listToolsMu.Unlock()
 				mc.observeListTools(ListToolsEvent{Seq: seq, Leader: true, Fresh: fresh})
 			}
-			return mc.runListToolsAsLeader(listCtx, release)
+			mc.listToolsMu.Lock()
+			capture := mc.listToolsCur.capture
+			mc.listToolsMu.Unlock()
+			tools, err := mc.runListToolsAsLeader(listCtx, release)
+			if err != nil {
+				return nil, InventoryCapture{}, err
+			}
+			return tools, capture, nil
 		}
 
 		mc.listToolsMu.Lock()
@@ -1187,7 +1371,7 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 			// Defensive fallback: every leader path is supposed to allocate a
 			// call via acquireListToolsContext, so this should be unreachable.
 			// Fail fast rather than block forever.
-			return nil, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
+			return nil, InventoryCapture{}, fmt.Errorf("ListTools operation already in progress for server %s", mc.GetConfig().Name)
 		}
 
 		mc.logger.Debug("🔍 ListTools already in progress, waiting for shared result",
@@ -1196,7 +1380,7 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, InventoryCapture{}, ctx.Err()
 		case <-call.done:
 			if fresh && call.seq <= entrySeq {
 				// That request predates the caller: list again.
@@ -1206,7 +1390,7 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 				(*hook)(call.seq)
 			}
 			mc.listToolsMu.Lock()
-			res, err, published := call.tools, call.err, call.published
+			res, err, published, capture := call.tools, call.err, call.published, call.capture
 			mc.listToolsMu.Unlock()
 			if !published {
 				// The leader ended without a result (it never reached the
@@ -1214,9 +1398,9 @@ func (mc *Client) listTools(ctx context.Context, fresh bool, entrySeq uint64) ([
 				continue
 			}
 			if err != nil {
-				return nil, fmt.Errorf("ListTools failed: %w", err)
+				return nil, InventoryCapture{}, fmt.Errorf("ListTools failed: %w", err)
 			}
-			return res, nil
+			return res, capture, nil
 		}
 	}
 }
@@ -1248,7 +1432,9 @@ func (mc *Client) runListToolsAsLeader(listCtx context.Context, release func() b
 			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err))
 
-		if mc.isConnectionError(err) {
+		// A retired instance's failure says nothing about the server
+		// (FR-026): it moves no state machine.
+		if !mc.retired.Load() && mc.isConnectionError(err) {
 			mc.logger.Warn("Connection error detected during ListTools, updating server state",
 				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err))
@@ -1315,6 +1501,9 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
 		return nil, ErrConnectionGenerationChanged
 	}
+	if mc.retired.Load() {
+		return nil, ErrInstanceRetired
+	}
 	if !mc.IsConnected() {
 		return nil, fmt.Errorf("client not connected (state: %s)", mc.StateManager.GetState().String())
 	}
@@ -1365,6 +1554,11 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	if expectedEpoch != nil && !mc.generationIs(*expectedEpoch) {
 		return nil, ErrConnectionGenerationChanged
 	}
+	// The same window for the caller's own policy verdicts (Spec 117
+	// FR-018): a gate snapshot read before the queue wait is re-read here.
+	if err := runDispatchRecheck(ctx); err != nil {
+		return nil, err
+	}
 
 	invoker := mc.toolInvoker
 	if invoker == nil {
@@ -1376,6 +1570,17 @@ func (mc *Client) callTool(ctx context.Context, toolName string, args map[string
 	// only ever charged to the session that produced it (RC4-STDIO-001).
 	callEpoch := mc.connectionEpoch.Load()
 	result, err := mc.callToolWithSession(core.WithConnectionGeneration(ctx, callEpoch), invoker, toolName, args, expectedEpoch)
+	if err != nil && mc.retired.Load() {
+		// Spec 116 PR4 (FR-026): the instance was retired while the call
+		// was in flight; its gate closed the connection or refused the
+		// send. Unavailable, and nothing to classify: a retired instance's
+		// failure says nothing about the server's health.
+		mc.logger.Debug("Tool call failed on a retired instance",
+			zap.String("server", mc.GetConfig().Name),
+			zap.String("tool", toolName),
+			zap.Error(err))
+		return nil, ErrInstanceRetired
+	}
 	if err != nil {
 		if errors.Is(err, ErrSessionReestablished) || errors.Is(err, ErrConnectionGenerationChanged) {
 			// Spec 113-e: the session was re-established and the call was
@@ -1488,7 +1693,10 @@ func (mc *Client) recordDeadConnection(toolName string, err error, callEpoch int
 func (mc *Client) setErrorIfCurrentConnection(err error, epoch int64) bool {
 	mc.epochMu.Lock()
 	defer mc.epochMu.Unlock()
-	if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
+	// A retired instance's failure says nothing about the server (Spec 116
+	// PR4, FR-026; review round 2): retirement kills its transport under any
+	// request in flight, and the epoch does not move until a teardown runs.
+	if mc.retired.Load() || !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
 		return false
 	}
 	mc.StateManager.SetError(err)
@@ -1563,6 +1771,9 @@ func isAmbiguousCancellationError(err error) bool {
 // disconnect+reconnect completing mid-probe: a verdict about a superseded
 // session is dropped rather than applied to the fresh one.
 func (mc *Client) probeAfterAmbiguousCallError(cause error) {
+	if mc.retired.Load() {
+		return
+	}
 	if !mc.ambiguousProbeInFlight.CompareAndSwap(false, true) {
 		return
 	}
@@ -1617,7 +1828,9 @@ func (mc *Client) probeAfterAmbiguousCallError(cause error) {
 		// round 2).
 		mc.epochMu.Lock()
 		defer mc.epochMu.Unlock()
-		if !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
+		// A retirement while the probe was in flight (Spec 116 PR4,
+		// FR-026; review round 2) closed its transport: no verdict.
+		if mc.retired.Load() || !mc.IsConnected() || mc.connectionEpoch.Load() != epoch {
 			mc.logger.Debug("Liveness probe after canceled tool call failed, but the connection it observed is gone; skipping",
 				zap.String("server", mc.GetConfig().Name),
 				zap.Error(err))
@@ -1663,6 +1876,62 @@ func (mc *Client) cancelInFlightListTools() {
 
 	mc.logger.Debug("Timed out waiting for ListTools operation to cancel",
 		zap.String("server", mc.GetConfig().Name))
+}
+
+// teardownForReconnect closes the transport and resets the state for the
+// reconnect helpers (tryReconnect, TryReconnectSync), which then start their
+// own Connect. The sequence bump, the transport close and the reset form one
+// mc.mu section, as in Disconnect, so Connect admission (phase 1, under mc.mu)
+// is ordered against the whole teardown: an attempt admitted before it is
+// superseded (see connectSeq) and discards its result instead of publishing
+// Ready over the closed transport; an attempt admitted after it dials a fresh
+// transport. The caller must not hold mc.mu.
+//
+// stop is the stop channel of the health loop asking for the reconnect (nil
+// for the other callers). A Disconnect closes it under mc.mu, so a loop that
+// waited here for a Disconnect to release mc.mu finds it closed and tears
+// nothing down (errReconnectStopped).
+func (mc *Client) teardownForReconnect(reset func(), stop <-chan struct{}) error {
+	mc.mu.Lock()
+	stopped := monitoringStopped(stop)
+	mc.mu.Unlock()
+	if stopped {
+		return errReconnectStopped
+	}
+
+	mc.cancelInFlightConnect()
+	mc.cancelInFlightListTools()
+
+	mc.mu.Lock()
+	defer mc.mu.Unlock()
+	if monitoringStopped(stop) {
+		return errReconnectStopped
+	}
+	mc.connectSeq++
+	var err error
+	if mc.coreClient != nil {
+		err = mc.coreClient.Disconnect()
+	}
+	if hook := mc.reconnectMidTeardown.Load(); hook != nil {
+		(*hook)()
+	}
+	reset()
+	return err
+}
+
+// errReconnectStopped reports that the health loop which asked for a reconnect
+// was stopped (by Disconnect) before the reconnect could start.
+var errReconnectStopped = errors.New("reconnect abandoned: health monitoring was stopped")
+
+// monitoringStopped reports whether a health loop's stop channel is closed.
+// A nil channel (a reconnect that no loop asked for) is never stopped.
+func monitoringStopped(stop <-chan struct{}) bool {
+	select {
+	case <-stop:
+		return true
+	default:
+		return false
+	}
 }
 
 // cancelInFlightConnect cancels any in-flight Connect() operation.
@@ -1751,10 +2020,17 @@ func (mc *Client) startBackgroundMonitoring() {
 
 	// Mark that monitoring has been started
 	mc.monitoringStarted = true
-	mc.monitoringWG.Add(1)
+	// Each loop owns the stop channel it was started with. stopBackgroundMonitoring
+	// swaps mc.stopMonitoring for a fresh channel after closing it, so a loop that
+	// re-read the field could miss its own stop (e.g. it was still inside a probe
+	// or reconnect when the 1s stop wait timed out) and keep running next to the
+	// loop a later Connect starts.
+	stop := mc.stopMonitoring
+	done := make(chan struct{})
+	mc.monitoringDone = done
 	go func() {
-		defer mc.monitoringWG.Done()
-		mc.backgroundHealthCheck()
+		defer close(done)
+		mc.backgroundHealthCheck(stop)
 	}()
 }
 
@@ -1769,15 +2045,11 @@ func (mc *Client) stopBackgroundMonitoring() {
 
 	close(mc.stopMonitoring)
 
-	// Use a timeout for the wait to prevent hanging during shutdown
-	done := make(chan struct{})
-	go func() {
-		mc.monitoringWG.Wait()
-		close(done)
-	}()
-
+	// Wait for this loop only, with a timeout to prevent hanging during
+	// shutdown. A loop still inside a probe when the wait times out exits on
+	// its own once the probe returns: it holds the stop channel just closed.
 	select {
-	case <-done:
+	case <-mc.monitoringDone:
 		mc.logger.Debug("Background monitoring stopped successfully",
 			zap.String("server", mc.GetConfig().Name))
 	case <-time.After(1 * time.Second):
@@ -1836,16 +2108,16 @@ func planHealthCheckCycle(interval, disabledRecheck time.Duration) (probe bool, 
 // backgroundHealthCheck performs periodic health checks. The interval is
 // re-resolved every cycle from config, so a hot-reload changes the cadence (or
 // disables the loop entirely) without restarting the server (spec 074).
-func (mc *Client) backgroundHealthCheck() {
+func (mc *Client) backgroundHealthCheck(stop <-chan struct{}) {
 	for {
 		probe, wait := planHealthCheckCycle(mc.resolveHealthCheckInterval(), healthCheckDisabledRecheckInterval)
 		timer := time.NewTimer(wait)
 		select {
 		case <-timer.C:
 			if probe {
-				mc.performHealthCheck()
+				mc.performHealthCheckFor(stop)
 			}
-		case <-mc.stopMonitoring:
+		case <-stop:
 			timer.Stop()
 			mc.logger.Debug("Background health monitoring stopped",
 				zap.String("server", mc.GetConfig().Name))
@@ -1856,6 +2128,18 @@ func (mc *Client) backgroundHealthCheck() {
 
 // performHealthCheck checks if the connection is still healthy and attempts reconnection if needed
 func (mc *Client) performHealthCheck() {
+	mc.performHealthCheckFor(nil)
+}
+
+// performHealthCheckFor is performHealthCheck run by the health loop that owns
+// stop: a reconnect it starts does nothing once that loop is stopped.
+func (mc *Client) performHealthCheckFor(stop <-chan struct{}) {
+	// A retired instance has no health to report (Spec 116 PR4, FR-026):
+	// its probes are refused by its gate, and their failure must not drive
+	// a reconnect or an Error state.
+	if mc.retired.Load() {
+		return
+	}
 	// Skip all health/reconnect work when user explicitly logged out
 	if mc.IsUserLoggedOut() {
 		mc.logger.Debug("Health check skipped - user explicitly logged out",
@@ -1871,7 +2155,7 @@ func (mc *Client) performHealthCheck() {
 				zap.String("server", mc.GetConfig().Name),
 				zap.Int("oauth_retry_count", info.OAuthRetryCount),
 				zap.Time("last_oauth_attempt", info.LastOAuthAttempt))
-			mc.tryReconnect()
+			mc.tryReconnectFor(stop)
 		} else {
 			info := mc.StateManager.GetConnectionInfo()
 			mc.logger.Debug("OAuth backoff period not elapsed, skipping reconnection",
@@ -1899,7 +2183,7 @@ func (mc *Client) performHealthCheck() {
 				zap.String("server", mc.GetConfig().Name),
 				zap.Int("retry_count", info.RetryCount))
 
-			mc.tryReconnect()
+			mc.tryReconnectFor(stop)
 			return
 		}
 	}
@@ -1936,6 +2220,13 @@ func (mc *Client) performHealthCheck() {
 	// bumps the epoch, so the verdict below must land on this generation only.
 	pingEpoch := mc.connectionEpoch.Load()
 	err := mc.probeLiveness(ctx, prober)
+
+	// Retired while the ping was in flight (Spec 116 PR4, FR-026; review
+	// round 2): its failure (the retirement closed the transport) is no
+	// health evidence, and neither is a success. No accounting either way.
+	if mc.retired.Load() {
+		return
+	}
 
 	if err != nil {
 		// Pick up any rate-limit hint this ping's response carried, BEFORE the
@@ -1983,11 +2274,18 @@ func (mc *Client) performHealthCheck() {
 			} else {
 				mc.resetInFlightSuppression()
 			}
-			if mc.recordHealthCheckFailure(err) {
+			trip, current := mc.recordHealthCheckFailureFor(err, pingEpoch)
+			if !current {
+				mc.logger.Debug("Health check failure belongs to a previous connection; not counting it",
+					zap.String("server", mc.GetConfig().Name),
+					zap.Error(err))
+				return
+			}
+			if trip {
 				if mc.setErrorIfCurrentConnection(err, pingEpoch) {
 					mc.logger.Warn("Health check failed repeatedly, marking as error",
 						zap.String("server", mc.GetConfig().Name),
-						zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
+						zap.Int32("consecutive_failures", mc.consecutiveHealthFailures.Load()),
 						zap.Error(err))
 				} else {
 					mc.logger.Debug("Health check failure belongs to a connection that is already gone; not marking",
@@ -1997,7 +2295,7 @@ func (mc *Client) performHealthCheck() {
 			} else {
 				mc.logger.Info("Health check failed transiently, tolerating below threshold",
 					zap.String("server", mc.GetConfig().Name),
-					zap.Int("consecutive_failures", mc.consecutiveHealthFailures),
+					zap.Int32("consecutive_failures", mc.consecutiveHealthFailures.Load()),
 					zap.Int("threshold", healthCheckFailureThreshold),
 					zap.Error(err))
 			}
@@ -2050,25 +2348,38 @@ func (mc *Client) syncRetryAfterFromTransport() {
 }
 
 func (mc *Client) recordHealthCheckFailure(err error) bool {
-	mc.consecutiveHealthFailures++
+	n := mc.consecutiveHealthFailures.Add(1)
 	if !isTransientHealthCheckError(err) {
 		return true
 	}
-	return mc.consecutiveHealthFailures >= healthCheckFailureThreshold
+	return n >= healthCheckFailureThreshold
+}
+
+// recordHealthCheckFailureFor is recordHealthCheckFailure for a probe that ran
+// on connection generation epoch. A probe of a previous connection that fails
+// after Connect opened a new one (and reset the counter in the same epochMu
+// section) counts nothing: current is false.
+func (mc *Client) recordHealthCheckFailureFor(err error, epoch int64) (trip, current bool) {
+	mc.epochMu.Lock()
+	defer mc.epochMu.Unlock()
+	if mc.connectionEpoch.Load() != epoch {
+		return false, false
+	}
+	return mc.recordHealthCheckFailure(err), true
 }
 
 // recordHealthCheckSuccess resets the consecutive-failure counter. One good
 // check is enough to wipe the slate — we're not trying to track flap
 // frequency, just preventing single misses from looking like outages.
 func (mc *Client) recordHealthCheckSuccess() {
-	mc.consecutiveHealthFailures = 0
+	mc.consecutiveHealthFailures.Store(0)
 }
 
 // resetHealthCheckFailures clears the counter. Called from the connect
 // success path so a successful reconnect doesn't carry stale failure debt
 // from before the disconnect.
 func (mc *Client) resetHealthCheckFailures() {
-	mc.consecutiveHealthFailures = 0
+	mc.consecutiveHealthFailures.Store(0)
 }
 
 // isTransientHealthCheckError identifies failure modes that warrant
@@ -2115,7 +2426,39 @@ func (mc *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 	if mc == nil || mc.coreClient == nil {
 		return fmt.Errorf("client not initialized")
 	}
+	// Spec 116 PR4 (FR-024): a retired instance runs no refresh.
+	if mc.retired.Load() || mc.unregistered.Load() {
+		return ErrInstanceRetired
+	}
 	return mc.coreClient.RefreshOAuthTokenDirect(ctx)
+}
+
+// SetCredentialBinding binds the instance's OAuth state to the committed
+// credential binding b of the view it was built for (Spec 116 PR2b). The
+// upstream manager calls it before the instance becomes reachable.
+func (mc *Client) SetCredentialBinding(b commitview.CredentialBinding) {
+	if mc == nil || mc.coreClient == nil {
+		return
+	}
+	mc.coreClient.SetCredentialBinding(b)
+}
+
+// CredentialBinding returns the instance's credential binding (zero when
+// unbound).
+func (mc *Client) CredentialBinding() commitview.CredentialBinding {
+	if mc == nil || mc.coreClient == nil {
+		return commitview.CredentialBinding{}
+	}
+	return mc.coreClient.CredentialBinding()
+}
+
+// Gate returns the instance's retirement barrier (Spec 116 PR4). The upstream
+// manager shares it with the transient clients of a manual OAuth flow.
+func (mc *Client) Gate() *dialgate.Gate {
+	if mc == nil || mc.coreClient == nil {
+		return nil
+	}
+	return mc.coreClient.Gate()
 }
 
 // ForceReconnect triggers an immediate reconnection attempt regardless of backoff state.
@@ -2162,6 +2505,14 @@ func (mc *Client) ForceReconnect(reason string) {
 
 // tryReconnect attempts to reconnect the client with proper error handling
 func (mc *Client) tryReconnect() {
+	mc.tryReconnectFor(nil)
+}
+
+// tryReconnectFor is tryReconnect for the health loop that owns stop. That
+// loop may have been waiting for mc.mu while a Disconnect held it; once the
+// Disconnect closed stop, the reconnect tears nothing down and does not
+// Connect, so it cannot bring back a server that was just disconnected.
+func (mc *Client) tryReconnectFor(stop <-chan struct{}) {
 	if mc.IsUserLoggedOut() {
 		mc.logger.Info("Skipping reconnection attempt - user explicitly logged out",
 			zap.String("server", mc.GetConfig().Name))
@@ -2209,22 +2560,31 @@ func (mc *Client) tryReconnect() {
 		return
 	}
 
-	// First, disconnect the current client to clean up any broken connections
-	// Cancel any in-flight connect/listTools before attempting reconnection
-	mc.cancelInFlightConnect()
-	mc.cancelInFlightListTools()
-	if err := mc.coreClient.Disconnect(); err != nil {
+	// First, disconnect the current client to clean up any broken connections,
+	// cancelling any in-flight connect/listTools, and transition to
+	// disconnected for reconnect, preserving retryCount for backoff.
+	if err := mc.teardownForReconnect(mc.StateManager.ResetForReconnect, stop); err != nil {
+		if errors.Is(err, errReconnectStopped) {
+			mc.logger.Debug("Skipping reconnection attempt - health monitoring was stopped",
+				zap.String("server", mc.GetConfig().Name))
+			return
+		}
 		mc.logger.Warn("Failed to disconnect during reconnection attempt",
 			zap.String("server", mc.GetConfig().Name),
 			zap.Error(err))
 	}
-
-	// Transition to disconnected for reconnect, preserving retryCount for backoff
-	mc.StateManager.ResetForReconnect()
+	if hook := mc.reconnectAfterTeardown.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Attempt to reconnect using the existing Connect method
 	// The Connect method already handles state transitions and error management
-	if err := mc.Connect(ctx); err != nil {
+	if err := mc.connectUnlessStopped(ctx, stop); err != nil {
+		if monitoringStopped(stop) {
+			mc.logger.Debug("Reconnection abandoned - health monitoring was stopped",
+				zap.String("server", mc.GetConfig().Name))
+			return
+		}
 		info := mc.StateManager.GetConnectionInfo()
 
 		// Use different log levels based on error type and retry count
@@ -2329,17 +2689,16 @@ func (mc *Client) TryReconnectSync(ctx context.Context) error {
 		return fmt.Errorf("reconnect deferred: a tool call is still in flight")
 	}
 
-	// Disconnect stale state first
-	mc.cancelInFlightConnect()
-	mc.cancelInFlightListTools()
-	if err := mc.coreClient.Disconnect(); err != nil {
+	// Disconnect stale state first and reset state to disconnected (one
+	// mc.mu section, see teardownForReconnect).
+	if err := mc.teardownForReconnect(mc.StateManager.Reset, nil); err != nil {
 		mc.logger.Warn("TryReconnectSync: disconnect during reconnect returned error",
 			zap.String("server", serverName),
 			zap.Error(err))
 	}
-
-	// Reset state to disconnected
-	mc.StateManager.Reset()
+	if hook := mc.reconnectAfterTeardown.Load(); hook != nil {
+		(*hook)()
+	}
 
 	// Attempt synchronous connect with the provided context
 	if err := mc.Connect(ctx); err != nil {
@@ -2772,6 +3131,27 @@ func (mc *Client) setToolCountCache(count int) {
 func (mc *Client) isDockerServer() bool {
 	return containsString(mc.GetConfig().Command, "docker")
 }
+
+// InstanceID identifies one managed client instance (Spec 116 PR3). Zero is
+// never assigned by NewClient.
+type InstanceID uint64
+
+// instanceIDCounter hands out instance ids to every managed client in the
+// process; an id is never reused.
+var instanceIDCounter atomic.Uint64
+
+// InstanceID returns this instance's process-unique id (0 for a client that
+// was not built by NewClient).
+func (mc *Client) InstanceID() InstanceID { return mc.instanceID }
+
+// MarkUnregistered records that the upstream manager removed this instance
+// from its registry. Called only by upstream.Manager, under its registry
+// locks; from then on Connect refuses with ErrInstanceUnregistered.
+func (mc *Client) MarkUnregistered() { mc.unregistered.Store(true) }
+
+// Unregistered reports whether the upstream manager removed this instance
+// from its registry.
+func (mc *Client) Unregistered() bool { return mc.unregistered.Load() }
 
 // connectionEpochCounter hands out connection epochs to every managed client
 // in the process. It is process-wide so an epoch never repeats across client

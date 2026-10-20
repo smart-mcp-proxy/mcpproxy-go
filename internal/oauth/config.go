@@ -16,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 
@@ -161,8 +162,9 @@ type CallbackServer struct {
 	Path   string
 	logger *zap.Logger
 
-	waitersMu sync.Mutex
-	waiters   map[string]chan map[string]string
+	waitersMu         sync.Mutex
+	waiters           map[string]chan map[string]string
+	remoteCallbackURL string // protected by waitersMu
 }
 
 var globalCallbackManager = &CallbackServerManager{
@@ -170,20 +172,37 @@ var globalCallbackManager = &CallbackServerManager{
 	logger:  zap.L().Named(oauthCallbackLoggerName),
 }
 
+// oauthCompletion is a recorded login completion and the credential binding
+// of the instance that completed it (zero: unbound, e.g. the CLI process).
+// Spec 116 PR2b review r8 (#1607): the flag is bound like the DB event, so a
+// completion of an instance a commit superseded never reads as recent for a
+// same-name replacement.
+type oauthCompletion struct {
+	at      time.Time
+	binding commitview.CredentialBinding
+}
+
 // Global token store manager to persist tokens across client instances
 type TokenStoreManager struct {
 	stores                  map[string]client.TokenStore
-	completedOAuth          map[string]time.Time // Track successful OAuth completions
+	completedOAuth          map[string]oauthCompletion // Track successful OAuth completions
 	mu                      sync.RWMutex
 	logger                  *zap.Logger
 	oauthCompletionCallback func(serverName string)                      // Callback when OAuth completes
 	oauthFailureCallback    func(serverName string, err error)           // Callback when an unattended OAuth flow fails
 	tokenSavedCallback      func(serverName string, expiresAt time.Time) // Callback when token is saved
+	tokenSavedBoundCallback func(serverName string, expiresAt time.Time, binding commitview.CredentialBinding)
+	// Spec 116 PR2b review r9: the binding-aware completion callback (it
+	// wins over oauthCompletionCallback) and the resolver of the binding of
+	// the instance that serves a name now. A bound completion of a binding
+	// the resolver no longer reports records nothing and calls back nothing.
+	oauthCompletionBoundCallback func(serverName string, binding commitview.CredentialBinding)
+	completionBindingResolver    func(serverName string) (commitview.CredentialBinding, bool)
 }
 
 var globalTokenStoreManager = &TokenStoreManager{
 	stores:         make(map[string]client.TokenStore),
-	completedOAuth: make(map[string]time.Time),
+	completedOAuth: make(map[string]oauthCompletion),
 	logger:         zap.L().Named("oauth-tokens"),
 }
 
@@ -225,12 +244,18 @@ func (m *TokenStoreManager) HasTokenStore(serverName string) bool {
 // valid token is on disk. This mirrors HasValidToken (see below), which already treats
 // IsZero() as "never expires".
 func HasPersistedToken(serverName, serverURL string, boltStorage *storage.BoltDB) (hasToken bool, hasRefreshToken bool, isExpired bool) {
+	return HasPersistedTokenBound(serverName, serverURL, boltStorage, commitview.CredentialBinding{})
+}
+
+// HasPersistedTokenBound is HasPersistedToken for an upstream instance bound
+// to b (Spec 116 PR2b): a record written under another binding is absent.
+func HasPersistedTokenBound(serverName, serverURL string, boltStorage *storage.BoltDB, b commitview.CredentialBinding) (hasToken bool, hasRefreshToken bool, isExpired bool) {
 	if boltStorage == nil {
 		return false, false, false
 	}
 
 	serverKey := GenerateServerKey(serverName, serverURL)
-	record, err := boltStorage.GetOAuthToken(serverKey)
+	record, err := boltStorage.GetOAuthTokenBound(serverKey, b)
 	if err != nil || record == nil {
 		return false, false, false
 	}
@@ -298,6 +323,25 @@ func (m *TokenStoreManager) SetOAuthCompletionCallback(callback func(serverName 
 	m.oauthCompletionCallback = callback
 }
 
+// SetOAuthCompletionBoundCallback sets the binding-aware completion callback
+// (Spec 116 PR2b review r9). When set it is called instead of the name-only
+// callback, with the binding of the instance that completed the login (zero
+// for an unbound completion, e.g. the CLI process).
+func (m *TokenStoreManager) SetOAuthCompletionBoundCallback(callback func(serverName string, binding commitview.CredentialBinding)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.oauthCompletionBoundCallback = callback
+}
+
+// SetCompletionBindingResolver sets the resolver of the credential binding of
+// the instance that serves a name now (Spec 116 PR2b review r9). nil keeps the
+// pre-PR2b behaviour: every bound completion is recorded and called back.
+func (m *TokenStoreManager) SetCompletionBindingResolver(resolve func(serverName string) (commitview.CredentialBinding, bool)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.completionBindingResolver = resolve
+}
+
 // SetOAuthFailureCallback sets a callback invoked when an OAuth flow fails in a
 // place that has no caller to return the error to — a callback that could not
 // be delivered, a state mismatch, or a background token exchange that failed.
@@ -313,6 +357,13 @@ func (m *TokenStoreManager) SetOAuthFailureCallback(callback func(serverName str
 // RecordOAuthFailure reports an OAuth failure that nobody is waiting on.
 func (m *TokenStoreManager) RecordOAuthFailure(serverName string, err error) {
 	if err == nil {
+		return
+	}
+	// Spec 116 PR2b: a result discarded because the server was removed,
+	// replaced or reconfigured belongs to no current server.
+	if errors.Is(err, ErrCredentialBindingStale) {
+		m.logger.Debug("OAuth failure of a superseded server instance not recorded",
+			zap.String("server", serverName), zap.Error(err))
 		return
 	}
 
@@ -337,14 +388,34 @@ func (m *TokenStoreManager) SetTokenSavedCallback(callback func(serverName strin
 	m.tokenSavedCallback = callback
 }
 
-// NotifyTokenSaved triggers the token saved callback if set.
-// Called by PersistentTokenStore.SaveToken() to notify the RefreshManager.
+// SetTokenSavedBoundCallback sets the binding-aware token saved callback
+// (Spec 116 PR2b). When set it is called instead of the plain callback, with
+// the credential binding the token was saved under (zero when unbound).
+func (m *TokenStoreManager) SetTokenSavedBoundCallback(callback func(serverName string, expiresAt time.Time, binding commitview.CredentialBinding)) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tokenSavedBoundCallback = callback
+}
+
+// NotifyTokenSaved triggers the token saved callback if set, for a token
+// saved without a credential binding.
 func (m *TokenStoreManager) NotifyTokenSaved(serverName string, expiresAt time.Time) {
+	m.NotifyTokenSavedFor(serverName, expiresAt, commitview.CredentialBinding{})
+}
+
+// NotifyTokenSavedFor triggers the token saved callback for a token saved
+// under binding. Called by PersistentTokenStore.SaveToken() and the stored-DCR
+// refresh to notify the RefreshManager.
+func (m *TokenStoreManager) NotifyTokenSavedFor(serverName string, expiresAt time.Time, binding commitview.CredentialBinding) {
 	m.mu.RLock()
 	callback := m.tokenSavedCallback
+	bound := m.tokenSavedBoundCallback
 	m.mu.RUnlock()
 
-	if callback != nil {
+	switch {
+	case bound != nil:
+		bound(serverName, expiresAt, binding)
+	case callback != nil:
 		callback(serverName, expiresAt)
 	}
 }
@@ -352,11 +423,43 @@ func (m *TokenStoreManager) NotifyTokenSaved(serverName string, expiresAt time.T
 // MarkOAuthCompleted records that OAuth was successfully completed for a server
 // This method is used by CLI processes to notify server processes about OAuth completion
 func (m *TokenStoreManager) MarkOAuthCompleted(serverName string) {
+	m.MarkOAuthCompletedBound(serverName, commitview.CredentialBinding{})
+}
+
+// MarkOAuthCompletedBound is MarkOAuthCompleted for an upstream instance bound
+// to binding: the recorded completion reads as recent only for readers with
+// the same binding (or unbound readers), never for a same-name replacement.
+//
+// Review r9: a bound completion of an instance a commit superseded (the
+// resolver reports another binding, or no instance, for the name) records
+// nothing and invokes no completion callback, so it can neither retry nor
+// disconnect a same-name replacement.
+func (m *TokenStoreManager) MarkOAuthCompletedBound(serverName string, binding commitview.CredentialBinding) {
+	m.mu.RLock()
+	resolve := m.completionBindingResolver
+	m.mu.RUnlock()
+	if !binding.IsZero() && resolve != nil {
+		if cur, ok := resolve(serverName); !ok || cur != binding {
+			m.logger.Debug("OAuth completion of a superseded server instance not recorded",
+				zap.String("server", serverName),
+				zap.String("binding", binding.String()))
+			return
+		}
+	}
+
 	m.mu.Lock()
 	callback := m.oauthCompletionCallback
+	boundCallback := m.oauthCompletionBoundCallback
 	completionTime := time.Now()
-	m.completedOAuth[serverName] = completionTime
+	m.completedOAuth[serverName] = oauthCompletion{at: completionTime, binding: binding}
 	m.mu.Unlock()
+
+	if boundCallback != nil {
+		m.logger.Info("Triggering in-process OAuth completion callback",
+			zap.String("server", serverName))
+		boundCallback(serverName, binding)
+		return
+	}
 
 	m.logger.Info("OAuth completion recorded",
 		zap.String("server", serverName),
@@ -378,7 +481,7 @@ func (m *TokenStoreManager) MarkOAuthCompleted(serverName string) {
 func (m *TokenStoreManager) MarkOAuthCompletedWithDB(serverName string, storage DatabaseOAuthNotifier) error {
 	m.mu.Lock()
 	completionTime := time.Now()
-	m.completedOAuth[serverName] = completionTime
+	m.completedOAuth[serverName] = oauthCompletion{at: completionTime}
 	m.mu.Unlock()
 
 	// Save to database for cross-process notification
@@ -406,18 +509,70 @@ type DatabaseOAuthNotifier interface {
 	SaveOAuthCompletionEvent(event *CompletionEvent) error
 }
 
+// BoundOAuthNotifier records a completion event bound to the credential
+// binding of the instance that completed the login (Spec 116 PR2b, T055c).
+type BoundOAuthNotifier interface {
+	SaveOAuthCompletionEventIfBound(event *CompletionEvent, binding commitview.CredentialBinding) (bool, error)
+}
+
+// MarkOAuthCompletedWithDBBound is MarkOAuthCompletedWithDB for an upstream
+// instance bound to binding: the event is written only while the server's
+// row still carries the binding, and carries it, so the consumer never
+// retries a replacement for a login an instance the commit superseded
+// completed. A refused write is not an error, and records nothing in memory
+// either: the in-memory recent-completion flag is set (bound to binding) only
+// once the bound DB write landed (review r8), so a superseded instance's login
+// cannot make a replacement skip its automatic OAuth deferral.
+func (m *TokenStoreManager) MarkOAuthCompletedWithDBBound(serverName string, storage BoundOAuthNotifier, binding commitview.CredentialBinding) error {
+	completionTime := time.Now()
+	event := &CompletionEvent{ServerName: serverName, CompletedAt: completionTime}
+	written, err := storage.SaveOAuthCompletionEventIfBound(event, binding)
+	if err != nil {
+		m.logger.Error("Failed to save OAuth completion event to database",
+			zap.String("server", serverName),
+			zap.Error(err))
+		return err
+	}
+	if !written {
+		m.logger.Debug("OAuth completion event skipped: binding mismatch",
+			zap.String("server", serverName),
+			zap.String("binding", binding.String()))
+		return nil
+	}
+	m.mu.Lock()
+	m.completedOAuth[serverName] = oauthCompletion{at: completionTime, binding: binding}
+	m.mu.Unlock()
+	m.logger.Info("OAuth completion saved to database for cross-process notification",
+		zap.String("server", serverName),
+		zap.Time("completion_time", completionTime))
+	return nil
+}
+
 // OAuthCompletionEvent represents an OAuth completion event (re-exported from storage)
 type CompletionEvent = storage.OAuthCompletionEvent
 
 // HasRecentOAuthCompletion checks if OAuth was recently completed for a server
 func (m *TokenStoreManager) HasRecentOAuthCompletion(serverName string) bool {
+	return m.HasRecentOAuthCompletionBound(serverName, commitview.CredentialBinding{})
+}
+
+// HasRecentOAuthCompletionBound is HasRecentOAuthCompletion for an upstream
+// instance bound to binding: a completion recorded for another binding (an
+// old incarnation, or an OAuth epoch a commit superseded) is not recent for
+// it. An unbound reader, or an unbound record (the CLI process), keeps the
+// name-only semantics.
+func (m *TokenStoreManager) HasRecentOAuthCompletionBound(serverName string, binding commitview.CredentialBinding) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	completionTime, exists := m.completedOAuth[serverName]
+	rec, exists := m.completedOAuth[serverName]
 	if !exists {
 		return false
 	}
+	if !binding.IsZero() && !rec.binding.IsZero() && rec.binding != binding {
+		return false
+	}
+	completionTime := rec.at
 
 	// Consider OAuth recent if completed within last 5 minutes
 	isRecent := time.Since(completionTime) < 5*time.Minute
@@ -505,6 +660,16 @@ func CreateOAuthConfigWithExtraParams(ctx context.Context, serverConfig *config.
 // and surface the returned error instead of reporting the generic "server may
 // not support OAuth".
 func CreateOAuthConfigWithExtraParamsAndLogger(ctx context.Context, serverConfig *config.ServerConfig, storage *storage.BoltDB, logger *zap.Logger) (*client.OAuthConfig, map[string]string, error) {
+	return CreateOAuthConfigWithEnv(Env{Ctx: ctx}, serverConfig, storage, logger)
+}
+
+// CreateOAuthConfigWithEnv is CreateOAuthConfigWithExtraParamsAndLogger in an
+// upstream instance's environment (Spec 116 PR4, FR-024, FR-024a): the
+// resource auto-detection, the scope and metadata preflights, the discovery
+// cache fetches and the OAuth HTTP client mcp-go uses for registration, code
+// exchange and refresh all run on env.Transport, so a retired instance sends
+// nothing through any of them.
+func CreateOAuthConfigWithEnv(env Env, serverConfig *config.ServerConfig, storage *storage.BoltDB, logger *zap.Logger) (*client.OAuthConfig, map[string]string, error) {
 	logger = namedOAuthLogger(logger)
 
 	// Initialize extraParams map
@@ -524,14 +689,14 @@ func CreateOAuthConfigWithExtraParamsAndLogger(ctx context.Context, serverConfig
 
 	// Priority 2 & 3: Auto-detect resource if not manually specified
 	if _, hasResource := extraParams["resource"]; !hasResource {
-		detectedResource := autoDetectResource(ctx, serverConfig, logger)
+		detectedResource := autoDetectResource(env, serverConfig, logger)
 		if detectedResource != "" {
 			extraParams["resource"] = detectedResource
 		}
 	}
 
 	// Create the base OAuth config, passing extraParams for transport wrapper injection
-	oauthConfig, err := createOAuthConfigInternal(serverConfig, storage, extraParams, logger)
+	oauthConfig, err := createOAuthConfigInternal(env, serverConfig, storage, extraParams, logger)
 
 	return oauthConfig, extraParams, err
 }
@@ -633,8 +798,9 @@ func parseRateLimitWaitWithSource(resp *http.Response, body []byte) (time.Durati
 // This function handles rate limiting (429) by retrying with appropriate backoff,
 // respecting Retry-After headers and JSON body reset_at fields.
 // The context allows cancellation during rate limit waits (e.g., during shutdown).
-func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, logger *zap.Logger) string {
-	httpClient := &http.Client{Timeout: resourceDetectRequestTimeout}
+func autoDetectResource(env Env, serverConfig *config.ServerConfig, logger *zap.Logger) string {
+	ctx := env.ctx()
+	httpClient := env.client(resourceDetectRequestTimeout)
 
 	for attempt := 0; attempt <= resourceDetectMaxRetries; attempt++ {
 		// Check context before making request
@@ -676,7 +842,7 @@ func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, 
 		switch {
 		case resp.StatusCode == http.StatusUnauthorized:
 			// 401 - Normal path: extract resource from metadata
-			return handleUnauthorizedResponse(resp, body, serverConfig, logger)
+			return handleUnauthorizedResponse(env, resp, body, serverConfig, logger)
 
 		case resp.StatusCode == http.StatusTooManyRequests:
 			// 429 - Rate limited: retry with appropriate wait time
@@ -742,7 +908,7 @@ func autoDetectResource(ctx context.Context, serverConfig *config.ServerConfig, 
 }
 
 // handleUnauthorizedResponse processes a 401 response to extract the resource parameter.
-func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *config.ServerConfig, logger *zap.Logger) string {
+func handleUnauthorizedResponse(env Env, resp *http.Response, body []byte, serverConfig *config.ServerConfig, logger *zap.Logger) string {
 	wwwAuth := resp.Header.Get("WWW-Authenticate")
 	metadataURL := ExtractResourceMetadataURL(wwwAuth)
 
@@ -755,7 +921,7 @@ func handleUnauthorizedResponse(resp *http.Response, body []byte, serverConfig *
 				zap.String("metadata_url", logSafeURL(metadataURL)))
 		}
 		// Try to fetch Protected Resource Metadata (cached)
-		metadata, err := cachedPRM(serverConfig.URL, overridesFromConfig(serverConfig), metadataURL, resourceDetectRequestTimeout)
+		metadata, err := cachedPRM(env, serverConfig.URL, overridesFromConfig(serverConfig), metadataURL, resourceDetectRequestTimeout)
 		if err != nil {
 			logger.Debug("Failed to fetch Protected Resource Metadata",
 				zap.String("server", serverConfig.Name),
@@ -805,25 +971,40 @@ func CreateOAuthConfigWithLogger(serverConfig *config.ServerConfig, storage *sto
 	if serverConfig.OAuth != nil && len(serverConfig.OAuth.ExtraParams) > 0 {
 		extraParams = serverConfig.OAuth.ExtraParams
 	}
-	return createOAuthConfigInternal(serverConfig, storage, extraParams, logger)
+	return createOAuthConfigInternal(defaultEnv(), serverConfig, storage, extraParams, logger)
 }
 
-// clearOAuthCredentials drops a DCR registration so the next login re-registers.
-func clearOAuthCredentials(logger *zap.Logger, storage *storage.BoltDB, serverKey, serverName string) {
+// clearOAuthCredentials drops a DCR registration so the next login
+// re-registers. It is bound (Spec 116 PR2b, review R6.2, R9.4): it clears
+// only the registration fields of the record at revision observedRev, the one
+// the hygiene check read, and only while the server's row still carries the
+// instance's binding, so a config build of an instance a commit superseded
+// never erases its replacement's registration.
+func clearOAuthCredentials(logger *zap.Logger, storage *storage.BoltDB, env Env, serverKey, serverName string, observedRev uint64) {
 	if storage == nil {
 		return
 	}
-	if err := storage.ClearOAuthClientCredentials(serverKey); err != nil {
+	if hook := oauthBeforeClearHook; hook != nil {
+		hook(serverName, env.Binding, "dcr_client")
+	}
+	cleared, err := storage.ClearOAuthClientIfBound(serverKey, serverName, env.Binding, observedRev)
+	if err != nil {
 		logger.Warn("Failed to clear DCR credentials",
 			zap.String("server", serverName),
 			zap.Error(err))
+		return
+	}
+	if !cleared {
+		logger.Debug("oauth clear skipped: binding mismatch or record changed since it was read",
+			zap.String("server", serverName),
+			zap.String("binding", env.Binding.String()))
 	}
 }
 
 // createOAuthConfigInternal is the internal implementation that accepts extraParams
 // for transport wrapper injection. This enables both manual and auto-detected params
 // to be injected into token exchange and refresh requests.
-func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *storage.BoltDB, extraParams map[string]string, logger *zap.Logger) (*client.OAuthConfig, error) {
+func createOAuthConfigInternal(env Env, serverConfig *config.ServerConfig, storage *storage.BoltDB, extraParams map[string]string, logger *zap.Logger) (*client.OAuthConfig, error) {
 	startTime := time.Now()
 	// Applied exactly once per record: namedOAuthLogger is idempotent, so the
 	// wrappers above may have named it already without producing "oauth.oauth".
@@ -879,7 +1060,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("base_url", logSafeURL(baseURL)))
 
 			res, err := cachedDiscover(globalDiscoveryCache, makeDiscoveryKey("prm-scopes", serverConfig.URL, ov), serverConfig.URL,
-				func() (prmScopeResult, error) { return preflightPRMScopes(serverConfig, ov, logger) })
+				func() (prmScopeResult, error) { return preflightPRMScopes(env, serverConfig, ov, logger) })
 			if err == nil && len(res.scopes) > 0 {
 				scopes = append([]string(nil), res.scopes...)
 				scopeSource = "prm"
@@ -895,7 +1076,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("server", serverConfig.Name),
 				zap.String("base_url", logSafeURL(baseURL)))
 
-			discoveredScopes, err := discoverASScopesCached(serverConfig, ov, baseURL)
+			discoveredScopes, err := discoverASScopesCached(env, serverConfig, ov, baseURL)
 			if err == nil && len(discoveredScopes) > 0 {
 				scopes = append([]string(nil), discoveredScopes...)
 				scopeSource = "as"
@@ -927,6 +1108,14 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	// It is never obtained from — nor refreshable by — Dynamic Client Registration,
 	// so the DCR "clear and re-register" recovery paths below must never wipe it.
 	hasStaticClientID := serverConfig.OAuth != nil && serverConfig.OAuth.ClientID != ""
+	var remoteRedirectURI string
+	if serverConfig.OAuth != nil {
+		var err error
+		remoteRedirectURI, err = config.OAuthRemoteCallbackURL(serverConfig.OAuth.CallbackBaseURL, serverConfig.Name)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	// An explicit `oauth.redirect_uri` pins the loopback callback port. Providers
 	// such as GitHub OAuth Apps match the callback URL exactly and reject
@@ -972,12 +1161,13 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	var storedClientID string
 	var storedPort int
 	var storedRedirectURI string
+	var storedRev uint64
 	if storage != nil {
 		serverKey = GenerateServerKey(serverConfig.Name, serverConfig.URL)
 		var storedErr error
-		storedClientID, _, storedPort, storedRedirectURI, storedErr = storage.GetOAuthClientCredentials(serverKey)
+		storedClientID, _, storedPort, storedRedirectURI, storedRev, storedErr = storage.GetOAuthClientCredentialsBound(serverKey, env.Binding)
 		if storedErr != nil {
-			storedClientID, storedPort, storedRedirectURI = "", 0, ""
+			storedClientID, storedPort, storedRedirectURI, storedRev = "", 0, "", 0
 		}
 	}
 
@@ -1015,6 +1205,9 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			// what StartCallbackServerOnHost will try first.
 			expectedRedirectURI = fmt.Sprintf("http://%s%s", net.JoinHostPort(config.LoopbackIPv4Host, strconv.Itoa(storedPort)), DefaultRedirectPath)
 		}
+		if remoteRedirectURI != "" {
+			expectedRedirectURI = remoteRedirectURI
+		}
 
 		switch {
 		case storedPort == 0:
@@ -1023,8 +1216,8 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			logger.Warn("⚠️ Legacy DCR credentials found without stored port, clearing for re-registration",
 				zap.String("server", serverConfig.Name),
 				zap.String("client_id", storedClientID))
-			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
-		case storedRedirectURI == "" && pinnedPort > 0:
+			clearOAuthCredentials(logger, storage, env, serverKey, serverConfig.Name, storedRev)
+		case storedRedirectURI == "" && (pinnedPort > 0 || remoteRedirectURI != ""):
 			// A legacy record (predates persisting the exact redirect_uri, or
 			// was never pinned before) is about to be used under a pin. Whether
 			// it still matches cannot be verified from a port number alone —
@@ -1040,7 +1233,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("server", serverConfig.Name),
 				zap.String("client_id", storedClientID),
 				zap.String("pinned_redirect_uri", pinnedRedirectURI))
-			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
+			clearOAuthCredentials(logger, storage, env, serverKey, serverConfig.Name, storedRev)
 		case storedRedirectURI != "" && storedRedirectURI != expectedRedirectURI:
 			// The registration was created for a different redirect_uri than
 			// the one about to be used, so the provider will reject it. This is
@@ -1054,7 +1247,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("client_id", storedClientID),
 				zap.String("stored_redirect_uri", storedRedirectURI),
 				zap.String("expected_redirect_uri", expectedRedirectURI))
-			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
+			clearOAuthCredentials(logger, storage, env, serverKey, serverConfig.Name, storedRev)
 			// NOT handled here, deliberately: storedRedirectURI == "" (legacy)
 			// while pinnedPort == 0 (currently unpinned). Cross-model review
 			// flagged that such a record could theoretically have been pinned
@@ -1100,7 +1293,8 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 
 	// Spec 022: Detect port conflict and clear DCR credentials if port changed
 	// This forces fresh DCR with the new port
-	if preferredPort > 0 && callbackServer.Port != preferredPort {
+	// An unpinned private listener moving does not change an HTTPS redirect.
+	if preferredPort > 0 && callbackServer.Port != preferredPort && (remoteRedirectURI == "" || pinnedPort > 0) {
 		switch {
 		case pinnedPort > 0:
 			// The operator pinned this port; any other port produces a
@@ -1131,7 +1325,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 				zap.String("server", serverConfig.Name),
 				zap.Int("stored_port", preferredPort),
 				zap.Int("new_port", callbackServer.Port))
-			clearOAuthCredentials(logger, storage, serverKey, serverConfig.Name)
+			clearOAuthCredentials(logger, storage, env, serverKey, serverConfig.Name, storedRev)
 		}
 	}
 
@@ -1140,6 +1334,12 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	redirectURI := callbackServer.RedirectURI
 	if pinnedRedirectURI != "" {
 		redirectURI = pinnedRedirectURI
+	}
+	if remoteRedirectURI != "" {
+		redirectURI = remoteRedirectURI
+	}
+	if err := callbackServer.configureRemoteCallback(remoteRedirectURI); err != nil {
+		return nil, err
 	}
 
 	logger.Info("Using exact redirect URI from allocated callback server",
@@ -1165,7 +1365,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		// Spec 113 FR-024: an explicit auth_server_metadata_url replaces discovery.
 		authServerMetadataURL = ov.metadataURL
 		doc, err := cachedASMetadataDoc(globalDiscoveryCache, serverConfig.URL, ov, ov.metadataURL, func() ([]byte, error) {
-			return httpFetchRaw(ov.metadataURL, 10*time.Second)
+			return httpFetchRaw(env, ov.metadataURL, 10*time.Second)
 		})
 		if err != nil {
 			logger.Warn("Configured oauth.auth_server_metadata_url could not be fetched",
@@ -1179,7 +1379,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			zap.String("server", serverConfig.Name),
 			zap.String("metadata_url", logSafeURL(ov.metadataURL)))
 	case serverConfig.URL != "":
-		authServerMetadataURL, asDoc = preflightMetadataURL(serverConfig, ov, logger)
+		authServerMetadataURL, asDoc = preflightMetadataURL(env, serverConfig, ov, logger)
 	default:
 		logger.Info("Skipping OAuth metadata URL - no server URL configured",
 			zap.String("server", serverConfig.Name))
@@ -1212,7 +1412,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 	// Use persistent token store to persist tokens across daemon restarts if storage is available
 	var tokenStore client.TokenStore
 	if storage != nil {
-		tokenStore = NewPersistentTokenStore(serverConfig.Name, serverConfig.URL, storage)
+		tokenStore = NewBoundPersistentTokenStore(serverConfig.Name, serverConfig.URL, storage, env.Binding)
 		logger.Info("🔧 Using persistent token store for OAuth tokens",
 			zap.String("server", serverConfig.Name),
 			zap.String("storage", "BBolt database"))
@@ -1246,7 +1446,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 			zap.Any("extra_params", masked))
 	}
 
-	wrapper := NewOAuthTransportWrapper(http.DefaultTransport, extraParams, logger)
+	wrapper := NewOAuthTransportWrapper(env.transport(), extraParams, logger)
 	// Effective endpoints: the discovered ones first, then the operator's overrides
 	// on top, so extra_params injection matches the real URLs (FR-025).
 	if asDoc != nil {
@@ -1283,7 +1483,7 @@ func createOAuthConfigInternal(serverConfig *config.ServerConfig, storage *stora
 		// above may have just cleared a registration that is no longer valid for
 		// this callback port.
 		if storage != nil {
-			persistedClientID, persistedClientSecret, _, _, err := storage.GetOAuthClientCredentials(serverKey)
+			persistedClientID, persistedClientSecret, _, _, _, err := storage.GetOAuthClientCredentialsBound(serverKey, env.Binding)
 			if err == nil && persistedClientID != "" {
 				clientID = persistedClientID
 				clientSecret = persistedClientSecret
@@ -1762,6 +1962,10 @@ func (c *CallbackServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 // handleCallback handles OAuth callback requests
 func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) {
+	c.handleCallbackWithFailureNotification(w, r, true)
+}
+
+func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWriter, r *http.Request, notifyFailure bool) {
 	c.logger.Info("🎯 OAuth callback received",
 		zap.String("method", r.Method),
 		zap.String("path", LogSafeRequestPath(r.URL.Path)),
@@ -1808,7 +2012,9 @@ func (c *CallbackServer) handleCallback(w http.ResponseWriter, r *http.Request) 
 			zap.String("error", ScrubUpstreamText(params["error"])))
 
 		// Surface it to the operator instead of burying it in the log (issue #975).
-		GetTokenStoreManager().RecordOAuthFailure(c.ServerName, reason)
+		if notifyFailure {
+			GetTokenStoreManager().RecordOAuthFailure(c.ServerName, reason)
+		}
 
 		c.writePage(w, http.StatusBadRequest, callbackPage(
 			"Authorization Failed",
@@ -2043,9 +2249,9 @@ type prmScopeResult struct {
 
 // preflightPRMScopes runs the HEAD + Protected Resource Metadata scope discovery
 // once per cache key. It logs only when it actually fetches.
-func preflightPRMScopes(serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (prmScopeResult, error) {
+func preflightPRMScopes(env Env, serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (prmScopeResult, error) {
 	var res prmScopeResult
-	resp, err := http.Head(serverConfig.URL)
+	resp, err := env.client(0).Head(serverConfig.URL)
 	if err != nil {
 		logger.Warn("Preflight request for WWW-Authenticate header failed; OAuth clients may not see login button",
 			zap.String("server", serverConfig.Name),
@@ -2070,7 +2276,7 @@ func preflightPRMScopes(serverConfig *config.ServerConfig, ov discoveryOverrides
 	globalDiscoveryCache.noteResourceMetadataURL(serverConfig.URL, metadataURL)
 	res.prmURL = metadataURL
 
-	prm, err := cachedPRM(serverConfig.URL, ov, metadataURL, 5*time.Second)
+	prm, err := cachedPRM(env, serverConfig.URL, ov, metadataURL, 5*time.Second)
 	if err != nil {
 		logger.Debug("Protected Resource Metadata discovery failed",
 			zap.String("server", serverConfig.Name),
@@ -2093,10 +2299,10 @@ func preflightPRMScopes(serverConfig *config.ServerConfig, ov discoveryOverrides
 
 // discoverASScopesCached is the RFC 8414 scope fallback, read through the cache.
 // With an explicit auth_server_metadata_url that document is the source.
-func discoverASScopesCached(serverConfig *config.ServerConfig, ov discoveryOverrides, baseURL string) ([]string, error) {
+func discoverASScopesCached(env Env, serverConfig *config.ServerConfig, ov discoveryOverrides, baseURL string) ([]string, error) {
 	if ov.metadataURL != "" {
 		doc, err := cachedASMetadataDoc(globalDiscoveryCache, serverConfig.URL, ov, ov.metadataURL, func() ([]byte, error) {
-			return httpFetchRaw(ov.metadataURL, 5*time.Second)
+			return httpFetchRaw(env, ov.metadataURL, 5*time.Second)
 		})
 		if err != nil {
 			return nil, err
@@ -2104,7 +2310,7 @@ func discoverASScopesCached(serverConfig *config.ServerConfig, ov discoveryOverr
 		return doc.meta.ScopesSupported, nil
 	}
 	return cachedDiscover(globalDiscoveryCache, makeDiscoveryKey("as-scopes", serverConfig.URL, ov, baseURL), serverConfig.URL,
-		func() ([]string, error) { return DiscoverScopesFromAuthorizationServer(baseURL, 5*time.Second) })
+		func() ([]string, error) { return discoverScopesFromAuthorizationServer(env, baseURL, 5*time.Second) })
 }
 
 // metadataPreflight is the cached result of auth-server + metadata URL discovery.
@@ -2115,16 +2321,16 @@ type metadataPreflight struct {
 
 // preflightMetadataURL finds the working AS metadata URL (and its document) for
 // the configured server, once per cache key.
-func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (string, *asMetadataDoc) {
+func preflightMetadataURL(env Env, serverConfig *config.ServerConfig, ov discoveryOverrides, logger *zap.Logger) (string, *asMetadataDoc) {
 	key := makeDiscoveryKey("metadata-url", serverConfig.URL, ov)
 	v, err := globalDiscoveryCache.doWith(key, serverConfig.URL, func() (any, time.Duration, []discoverySeed, error) {
 		// First, try to discover the auth server URL from Protected Resource Metadata
 		// This is necessary for servers like Smithery that use separate domains
-		authServerURL := discoverAuthServerURL(serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
+		authServerURL := discoverAuthServerURL(env, serverConfig.URL, 5*time.Second, func(prmURL string) (*ProtectedResourceMetadata, error) {
 			// Record the advertised PRM URL so a later 401 that advertises a
 			// different one invalidates this result (FR-026).
 			globalDiscoveryCache.noteResourceMetadataURL(serverConfig.URL, prmURL)
-			return cachedPRM(serverConfig.URL, ov, prmURL, 5*time.Second)
+			return cachedPRM(env, serverConfig.URL, ov, prmURL, 5*time.Second)
 		})
 		urlToUse := serverConfig.URL
 		if authServerURL != "" {
@@ -2136,7 +2342,7 @@ func preflightMetadataURL(serverConfig *config.ServerConfig, ov discoveryOverrid
 		}
 
 		// Now find the working metadata URL using the auth server URL (or server URL as fallback)
-		workingURL, doc, err := findWorkingMetadataDoc(urlToUse, 10*time.Second)
+		workingURL, doc, err := findWorkingMetadataDoc(env, urlToUse, 10*time.Second)
 		if err != nil {
 			logger.Warn("Could not find working OAuth metadata URL, will rely on auto-discovery",
 				zap.String("server", serverConfig.Name),

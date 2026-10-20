@@ -19,6 +19,16 @@ import (
 // editors time to finish writing before we read the file.
 const configWatchDebounce = 500 * time.Millisecond
 
+// configWatchPollInterval is the safety-net poll period. fsnotify's kqueue
+// backend (macOS/BSD) can drop the event for a rename-over-config that lands
+// right after a previous one has been handled (observed on CI: an external
+// revert to previously self-written bytes produced no event at all, so the
+// running config stayed stale until restart). The loop therefore also compares
+// the file's bytes with the last content it processed every interval and runs
+// the normal debounce -> reloadFromDiskIfChanged path when they differ. The
+// loop takes the interval as a parameter so tests can shorten it.
+const configWatchPollInterval = 2 * time.Second
+
 // startConfigFileWatcher watches the config file for external edits and
 // hot-reloads them through Runtime.ReloadConfiguration — the same canonical
 // disk-reload path used by manual reloads (events, telemetry and update-check
@@ -55,14 +65,17 @@ func (r *Runtime) startConfigFileWatcher(ctx context.Context, cfgPath string) er
 	}
 
 	r.logger.Info("Config file watcher started", zap.String("path", absPath))
-	go r.runConfigWatchLoop(ctx, watcher, absPath)
+	// Snapshot the content synchronously, with the watch already armed, so an
+	// edit racing the goroutine start is seen by either the event or the poll.
+	initial, _ := os.ReadFile(absPath)
+	go r.runConfigWatchLoop(ctx, watcher, absPath, initial, configWatchPollInterval)
 	return nil
 }
 
 // runConfigWatchLoop is the watcher event loop: it filters events down to the
 // config file, debounces them, and triggers reloadFromDiskIfChanged when the
 // debounce window closes.
-func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watcher, absPath string) {
+func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watcher, absPath string, lastSeen []byte, pollEvery time.Duration) {
 	defer func() { _ = watcher.Close() }()
 
 	// Debounce timer, created stopped. Go 1.23+ timer semantics make
@@ -72,6 +85,13 @@ func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watc
 		<-debounce.C
 	}
 	defer debounce.Stop()
+
+	// lastSeen (initially the caller's snapshot) is the content the loop last
+	// evaluated; the poll only reacts to a file that differs from it, so quiet
+	// files cost one small read.
+	pending := false // debounce armed and not yet fired
+	poll := time.NewTicker(pollEvery)
+	defer poll.Stop()
 
 	// Create catches mv/rename-in; Write catches in-place truncate writes;
 	// Rename/Remove re-arm the debounce so the follow-up recreate isn't
@@ -97,9 +117,23 @@ func (r *Runtime) runConfigWatchLoop(ctx context.Context, watcher *fsnotify.Watc
 				continue
 			}
 			debounce.Reset(configWatchDebounce)
+			pending = true
+
+		case <-poll.C:
+			// Missed-event safety net (see configWatchPollInterval). An
+			// unreadable file (rename window) is left to the next tick.
+			if b, err := os.ReadFile(absPath); err == nil && !pending && !bytes.Equal(b, lastSeen) {
+				debounce.Reset(configWatchDebounce)
+				pending = true
+			}
 
 		case <-debounce.C:
-			r.reloadFromDiskIfChanged(absPath)
+			pending = false
+			// The baseline is exactly what the reload evaluated; an
+			// unreadable file leaves it unchanged so the poll retries.
+			if b := r.reloadFromDiskIfChanged(absPath); b != nil {
+				lastSeen = b
+			}
 		}
 	}
 }
@@ -259,14 +293,16 @@ func (r *Runtime) pruneExpiredSelfWritesLocked(now time.Time) {
 // must not echo back into a redundant reload, which would re-trigger
 // ConnectAll + reindex churn — or, for restart-required applies, hot-apply a
 // change the API just reported as deferred until restart).
-func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
+//
+// It returns the file bytes it evaluated (nil when the file was unreadable).
+func (r *Runtime) reloadFromDiskIfChanged(absPath string) []byte {
 	diskBytes, err := os.ReadFile(absPath)
 	if err != nil {
 		// Rename window — the file may be briefly absent; the follow-up
 		// Create event re-arms the debounce and we retry then.
 		r.logger.Debug("Config file not readable after change event; waiting for next event",
 			zap.String("path", absPath), zap.Error(err))
-		return
+		return nil
 	}
 
 	// Self-write suppression: marshal the current snapshot exactly as
@@ -291,7 +327,7 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 			}
 			r.logger.Debug("Config file event matches in-memory config; skipping reload",
 				zap.String("path", absPath))
-			return
+			return diskBytes
 		}
 	}
 
@@ -301,7 +337,7 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 	if r.matchesRecentSelfWrite(trimmedDisk) {
 		r.logger.Debug("Config file event matches one of mcpproxy's own recent saves; skipping reload",
 			zap.String("path", absPath))
-		return
+		return diskBytes
 	}
 
 	// Genuine external change: the file no longer descends from our saves,
@@ -316,4 +352,5 @@ func (r *Runtime) reloadFromDiskIfChanged(absPath string) {
 		r.logger.Warn("Config hot-reload failed; keeping previous configuration",
 			zap.String("path", absPath), zap.Error(err))
 	}
+	return diskBytes
 }

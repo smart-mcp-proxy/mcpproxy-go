@@ -45,6 +45,7 @@ swagger:
 	@[ -x "$(SWAGGER_BIN)" ] || { echo "⚠️  swag binary not found at $(SWAGGER_BIN). Run 'go install github.com/swaggo/swag/v2/cmd/swag@v2.0.0-rc4'"; exit 1; }
 	@mkdir -p $(SWAGGER_OUT)
 	$(SWAGGER_BIN) init -g $(SWAGGER_ENTRY) --output $(SWAGGER_OUT) --outputTypes go,yaml --v3.1 --exclude specs
+	go run ./cmd/oas-nullable $(SWAGGER_OUT)/swagger.yaml $(SWAGGER_OUT)/docs.go
 	@echo "✅ OpenAPI 3.1 spec generated: $(SWAGGER_OUT)/swagger.yaml and $(SWAGGER_OUT)/docs.go"
 
 swagger-verify: swagger

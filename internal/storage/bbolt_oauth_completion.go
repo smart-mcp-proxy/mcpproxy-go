@@ -10,19 +10,23 @@ import (
 // SaveOAuthCompletionEvent saves an OAuth completion event to the database
 func (s *BoltDB) SaveOAuthCompletionEvent(event *OAuthCompletionEvent) error {
 	return s.db.Update(func(tx *bbolt.Tx) error {
-		bucket, err := tx.CreateBucketIfNotExists([]byte(OAuthCompletionBucket))
-		if err != nil {
-			return fmt.Errorf("failed to create oauth completion bucket: %w", err)
-		}
-
-		key := fmt.Sprintf("%s_%d", event.ServerName, event.CompletedAt.Unix())
-		data, err := event.MarshalBinary()
-		if err != nil {
-			return fmt.Errorf("failed to marshal oauth completion event: %w", err)
-		}
-
-		return bucket.Put([]byte(key), data)
+		return putOAuthCompletionEventTx(tx, event)
 	})
+}
+
+func putOAuthCompletionEventTx(tx *bbolt.Tx, event *OAuthCompletionEvent) error {
+	bucket, err := tx.CreateBucketIfNotExists([]byte(OAuthCompletionBucket))
+	if err != nil {
+		return fmt.Errorf("failed to create oauth completion bucket: %w", err)
+	}
+
+	key := fmt.Sprintf("%s_%d", event.ServerName, event.CompletedAt.Unix())
+	data, err := event.MarshalBinary()
+	if err != nil {
+		return fmt.Errorf("failed to marshal oauth completion event: %w", err)
+	}
+
+	return bucket.Put([]byte(key), data)
 }
 
 // GetUnprocessedOAuthCompletionEvents returns all unprocessed OAuth completion events

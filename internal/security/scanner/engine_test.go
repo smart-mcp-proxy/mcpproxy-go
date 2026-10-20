@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"go.uber.org/zap"
 )
@@ -1391,4 +1392,15 @@ func TestAggregateReportsVerdictBaselineOnly(t *testing.T) {
 			t.Errorf("expected 'clean' for empty findings, got %q", agg.Verdict)
 		}
 	})
+}
+
+func TestTruncate_KeepsValidUTF8(t *testing.T) {
+	// "世" is 3 bytes; a 4-byte limit would otherwise cut inside the second rune.
+	got := truncate("世世世", 4)
+	if got != "世..." {
+		t.Errorf("expected %q, got %q", "世...", got)
+	}
+	if !utf8.ValidString(got) {
+		t.Errorf("truncate produced invalid UTF-8: %q", got)
+	}
 }

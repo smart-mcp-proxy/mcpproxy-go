@@ -75,7 +75,7 @@ func TestOAuthEndpointOverrides_EndToEndWithMCPGoHandler(t *testing.T) {
 			RegistrationEndpoint:  idp.URL + "/real/register",
 		},
 	}
-	cfg, err := createOAuthConfigInternal(sc, nil, map[string]string{"resource": "https://mcp.example.com/mcp"}, zap.NewNop())
+	cfg, err := createOAuthConfigInternal(defaultEnv(), sc, nil, map[string]string{"resource": "https://mcp.example.com/mcp"}, zap.NewNop())
 	require.NoError(t, err)
 
 	h := transport.NewOAuthHandler(*cfg)
@@ -146,7 +146,7 @@ func TestOAuthEndpointOverrides_UnreachableMetadataNeverHitsDefaults(t *testing.
 			RegistrationEndpoint:  idp.URL + "/o2/register",
 		},
 	}
-	cfg, err := createOAuthConfigInternal(sc, nil, nil, zap.NewNop())
+	cfg, err := createOAuthConfigInternal(defaultEnv(), sc, nil, nil, zap.NewNop())
 	require.NoError(t, err)
 	h := transport.NewOAuthHandler(*cfg)
 	require.NoError(t, h.RegisterClient(context.Background(), "mcpproxy-go"))

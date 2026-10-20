@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
 )
@@ -315,12 +316,12 @@ func (t *Truncator) simpleTruncate(content string) string {
 		// The limit is the contract; when the notice itself cannot fit under
 		// it, a bare content prefix wins over an over-limit response.
 		if t.limit <= len(notice) {
-			return content[:t.limit]
+			return utf8Prefix(content, t.limit)
 		}
 		truncatePoint = t.limit - len(notice)
 	}
 
-	return content[:truncatePoint] + notice
+	return utf8Prefix(content, truncatePoint) + notice
 }
 
 // createTruncatedWithCache creates a truncated response with cache instructions
@@ -346,7 +347,7 @@ Returns: {"records": [...], "meta": {"total_records": %d, "total_size": %d}}`,
 		availableSize = len(content)
 	}
 
-	truncated := content[:availableSize]
+	truncated := utf8Prefix(content, availableSize)
 
 	// Try to find a good breaking point (end of JSON object/array)
 	if availableSize > 0 && availableSize < len(content) {
@@ -374,7 +375,8 @@ func (t *Truncator) ShouldTruncate(content string) bool {
 // (messageSpace = 200, or limit/2 when limit < 200, and the limit itself is a
 // hard ceiling: when the notice cannot fit under it the notice is dropped and
 // a bare limit-sized prefix is kept). This mirrors simpleTruncate exactly;
-// keep the two in sync.
+// keep the two in sync. When the cut falls inside a multi-byte rune,
+// simpleTruncate backs off to the rune boundary and keeps up to 3 bytes fewer.
 func (t *Truncator) SimpleTruncateBudget() int {
 	if t.limit == 0 {
 		return 0
@@ -394,4 +396,16 @@ func (t *Truncator) SimpleTruncateBudget() int {
 		return t.limit - len(simpleTruncateNotice)
 	}
 	return budget
+}
+
+// utf8Prefix returns the longest prefix of s that is at most n bytes and does
+// not end in the middle of a multi-byte rune.
+func utf8Prefix(s string, n int) string {
+	if n >= len(s) {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }

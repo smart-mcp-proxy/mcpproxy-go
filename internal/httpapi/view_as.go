@@ -233,6 +233,32 @@ func (s *Server) limitServersToProfile(ctx context.Context, servers []contracts.
 	return out
 }
 
+// pinOnlyEvaluator admits every tool: it lets limitServersToProfile apply only
+// the caller's own pin (via filterProfileToolRows) when no profile was asked for.
+type pinOnlyEvaluator struct{}
+
+func (pinOnlyEvaluator) Evaluate(_, _ string) profile.AccessVerdict {
+	return profile.AccessVerdict{Visible: true, Callable: true}
+}
+
+// limitServersToCallerPin holds a profile-pinned agent token to its own pin on a
+// bare GET /servers (no ?profile=), the same way GET /tools already does. A
+// pinned token takes its scope from the profile, so its AllowedServers is
+// usually "*" and visibleServers alone would list every configured server. The
+// result equals GET /servers?profile=<the caller's own pin>. ok is false (and
+// servers is untouched) for callers without a pin, so admins and legacy-scoped
+// tokens behave exactly as before.
+func (s *Server) limitServersToCallerPin(ctx context.Context, servers []contracts.Server) (limited []contracts.Server, ok bool) {
+	if !callerHasProfilePin(ctx) {
+		return servers, false
+	}
+	req := &viewAsRequest{subject: profile.AccessSubject{
+		Kind:    profile.AccessSubjectProfile,
+		Profile: auth.AuthContextFromContext(ctx).ProfilePin,
+	}}
+	return s.limitServersToProfile(ctx, servers, req, pinOnlyEvaluator{}), true
+}
+
 // callerHasProfilePin reports whether the request's caller is a
 // non-administrator bound to a profile (an agent token with a pin).
 func callerHasProfilePin(ctx context.Context) bool {

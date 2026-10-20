@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import type { Server, LoadingState } from '@/types'
 import api from '@/services/api'
 import { isServerConnected } from '@/utils/health'
+import { openOAuthLogin } from '@/utils/oauthLogin'
 
 export const useServersStore = defineStore('servers', () => {
   // State
@@ -276,17 +277,7 @@ export const useServersStore = defineStore('servers', () => {
   }
 
   async function triggerOAuthLogin(serverName: string) {
-    try {
-      const response = await api.triggerOAuthLogin(serverName)
-      if (response.success) {
-        return true
-      } else {
-        throw new Error(response.error || 'Failed to trigger OAuth login')
-      }
-    } catch (error) {
-      console.error('Failed to trigger OAuth login:', error)
-      throw error
-    }
+    return openOAuthLogin(() => api.triggerOAuthLogin(serverName))
   }
 
   async function triggerOAuthLogout(serverName: string) {
@@ -346,7 +337,10 @@ export const useServersStore = defineStore('servers', () => {
     // user-facing "Approve" buttons.
   async function securityApproveServer(serverName: string, force = false) {
     try {
-      const response = await api.securityApprove(serverName, force)
+      const incarnation = servers.value.find(s => s.name === serverName)?.incarnation
+      const response = incarnation
+        ? await api.securityApprove(serverName, force, [], incarnation)
+        : await api.securityApprove(serverName, force)
       if (response.success) {
         // Optimistic update: the backend will also unquarantine the server
         // on a successful approve, so reflect that in local state. SSE

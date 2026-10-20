@@ -27,6 +27,12 @@ export default defineConfig({
         target: 'http://localhost:8085',
         changeOrigin: true,
       },
+      // Copied MCP endpoints use the page origin, so the dev server must
+      // forward MCP traffic to the core as well.
+      '/mcp': {
+        target: 'http://localhost:8085',
+        changeOrigin: true,
+      },
       '/events': {
         target: 'http://localhost:8085',
         changeOrigin: true,

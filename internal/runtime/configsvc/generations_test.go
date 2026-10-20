@@ -26,7 +26,7 @@ func TestGenerations_RuleTable(t *testing.T) {
 	require.NoError(t, svc.Update(cfgWith(srvEntry("a"), srvEntry("b")), UpdateTypeModify, "create"))
 	s1 := svc.Current()
 	ga, _ := s1.ServerGeneration("a")
-	assert.Equal(t, ServerGen{Gen: s1.Version, Incarnation: s1.Version}, ga, "created: {G, G}")
+	assert.Equal(t, ServerGen{Gen: s1.Version, Incarnation: s1.Version, OAuthEpoch: s1.Version}, ga, "created: {G, G, G}")
 
 	// Unrelated change to b keeps a's generation; b keeps its incarnation.
 	p, err := svc.Prepare(PrepareInput{Config: cfgWith(srvEntry("a"), srvEntry("b", "x"))})
@@ -76,7 +76,7 @@ func TestGenerations_ReplacedSameName(t *testing.T) {
 		ch := p.Changes["acme"]
 		assert.Equal(t, ChangeReplaced, ch.Kind, "changed=%v", changed)
 		assert.Equal(t, old, ch.Old)
-		assert.Equal(t, ServerGen{Gen: p.Generation(), Incarnation: p.Generation()}, ch.New)
+		assert.Equal(t, ServerGen{Gen: p.Generation(), Incarnation: p.Generation(), OAuthEpoch: p.Generation()}, ch.New)
 		assert.NotEqual(t, old.Incarnation, ch.New.Incarnation)
 		assert.True(t, ch.Reconnect)
 		got, _ := p.Snapshot().ServerGeneration("acme")

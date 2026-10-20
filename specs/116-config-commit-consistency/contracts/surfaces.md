@@ -17,6 +17,9 @@ and one error code. Everything else stays byte-compatible.
 | `PATCH /api/v1/config`, `POST /api/v1/config/apply` | publishes, then async reconcile | publishes the reconciled state. `ConfigApplyResult` unchanged | PR1 |
 | `DELETE /api/v1/servers/{id}` | partial purge, then save | one commit with the full purge set. A follow-up `POST` of the same name succeeds immediately | PR2 |
 | `GET /api/v1/servers[/{id}]` | — | adds `"generation"` and `"incarnation"` (int64) | PR2 |
+| `GET /api/v1/servers/{id}/tools`, `GET /api/v1/tools` | — | the per-server listing adds `"incarnation"`, and every tool row `"server_incarnation"`: the incarnation read BEFORE the rows, so a client binds a per-tool decision to the data it shows (review round 1) | PR2 |
+| `GET /api/v1/servers/{id}/tools/export` | — | the JSON export adds the envelope-level `"incarnation"` (read before the rows) only; its rows carry no per-row incarnation, since every row belongs to the one exported server (review round 2) | PR2 |
+| `POST /api/v1/servers/{id}/scan` | — | **404** `cannot scan server <name>: server is not configured` for a name the committed view does not know (review round 1, FR-014a) | PR2 |
 | Tool and prompt approve, block and unblock endpoints, security approve | — | accept optional `"expected_incarnation"`. Mismatch → **409** `{"success":false,"error":"server_replaced: server '<name>' was removed or replaced since it was reviewed"}` | PR2 |
 
 `oas/swagger.yaml` and `docs/api/rest-api.md` are updated in PR2.

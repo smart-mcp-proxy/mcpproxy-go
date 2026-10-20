@@ -158,6 +158,9 @@ func Classify(result *mcp.CallToolResult, err error, f Facts) (Outcome, bool) {
 	if errors.Is(err, managed.ErrConnectionGenerationChanged) {
 		return Outcome{Class: ClassProxyPolicy, Domain: DomainProxy, audit: audit.ErrorClassUpstreamUnavailable}, true
 	}
+	if errors.Is(err, managed.ErrDispatchRecheckRefused) {
+		return Outcome{Class: ClassProxyPolicy, Domain: DomainProxy}, true
+	}
 	var blocked *profile.ToolBlockedError
 	if errors.As(err, &blocked) ||
 		errors.Is(err, profile.ErrToolOutsideProfile) ||

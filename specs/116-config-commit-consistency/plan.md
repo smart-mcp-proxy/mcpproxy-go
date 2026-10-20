@@ -204,13 +204,14 @@ L1 server approval lock(name)  [sorted when >1]     (runtime.toolApprovalLocks; 
 L2 storage.Manager.mu → bbolt tx                    (leaf)
 L1' index (bleve) writes                            (taken under L1 in step 6; leaf w.r.t. L0-L2)
 L3 upstream.Manager.captureMu (W in commit step 7: RestampRetained in PR1, AdvanceGenerations from PR3; R in capture) → L4 Manager.mu
+L4' upstream.Manager.limiterPubMu (PR3: taken hand over hand before L4 is released, held across the Spec 093 limiter publication → limiter.Registry.mu leaf)
 L5 dialgate.Gate.mu (W only in Retire; R per admitted section / conn Write)
 L5' dialgate.Gate.connsMu (leaf: track/sweep; taken under L5 R in a dial section, and without L5 in Retire)
 L6 configsvc.updateMu (leaf observers only; the pre-publish hook is removed, review R1.7)
 L7 Runtime.mu                                        (leaf: field swaps only)
 ```
 
-**Allowed nestings**: L0→L1→{L2, L1'}; L0→L3→L4→L5→L5'; dial section L5(R)→L5'; L0→L6; L0→L7;
+**Allowed nestings**: L0→L1→{L2, L1'}; L0→L3→L4→L5→L5'; L3→L4→L4' and L4(R)→L4' (hand over hand: every registry mutation and the hot-reload limit republication acquire L4' before releasing L4, so limiter publications happen in the order of the registry critical sections that decided them — an action that validated generation G and lost the CPU after the unlock cannot retire or overwrite the limiter a newer commit published; L4' never takes L3/L4, connects, disconnects or calls the runtime); dial section L5(R)→L5'; L0→L6; L0→L7;
 capture path: L3(R)→L1(one)→L2 on `main`, or L1(one)→L3(R)→`epochMu` after Spec 117 PR-3 (either is compatible, because the commit never holds L1 and L3 together); L1(one)→L2 / L1' / L4(R) (discovery, approvals). Spec 117's global `captureSnapMu` sits above L1, and `Commit` never takes it.
 
 **Forbidden** (each one has a test in PR1/PR2/PR3/PR4, `TestLockOrder_*`):
@@ -293,6 +294,8 @@ in place. This is the guard against the rejected branch's scope creep.
 
 - **Scope**: `PurgeServer` in the commit transaction (data-model §PurgeSet), the exact OAuth key match (B2), the in-memory purge, all three removal paths on one `CommitTx.RemoveServer` (the removal goroutines deleted), the `OAuthEpoch` stamp and `CredentialBinding`-conditional OAuth writes, reads and deletes (review R5.3, R6.2), `ServerGen.OAuthEpoch` and the construction-time `CheckCommittedView` (review R6.1), the `oauth_tokens` record `Revision` behind every binding-conditional delete (review R7.3), refresh-coordinator flights keyed by credential binding (review R7.1), the full purge for a same-commit replacement (review R8.2), the standalone CLI logout converted to `BoltDB.ClearOAuthTokenForStandaloneLogout` with a one-file write-site exception (review R8.3), incarnation capture and re-check in every approval writer, prompt approvals under L1, scanner `ExpectIncarnation` unquarantine, REST `incarnation`/`expected_incarnation` with 409 `server_replaced`, and the Web UI sending it. From design review round 9: the unquarantine baseline promotion bound to the incarnation of the commit that unquarantined (R9.5), and `ClearOAuthClientIfBound` as a field-clearing rewrite that keeps the tokens (R9.4).
 - **Depends on**: PR1.
+- **As shipped (2026-10-12)**: everything above except the OAuth credential binding (the `OAuthEpoch` stamp, `CredentialBinding`-conditional OAuth writes, reads and clears, `CheckCommittedView`, the record `Revision`, binding-keyed refresh flights and the standalone-logout primitive), which moves to a follow-up **PR2b** after PR3: it threads the committed `ServerGen` through the manager/managed/core/oauth constructors PR3 rewrites. The purge (exact key) removes every OAuth record a removed or replaced name has stored when the removal commits, in the row's transaction; that closes the at-rest half of #1562. An old instance's OAuth write still in flight (`SaveToken` has no incarnation check) can recreate a record after the purge, so the credential half of #1562 stays open until PR2b and its parked-save test T2.9 (tasks.md PR2 note, review round 1).
+- **As shipped, PR2b (2026-10-13, #1607)**: the OAuth credential binding on top of PR3 and PR4: `ServerGen.OAuthEpoch` and `CredentialBinding` in `commitview`, the epoch computed in `Prepare` from the commit's OAuth-clear set, stamped on the row and recorded in the manager's desired view, every instance bound at construction (and the transient manual-OAuth clients bound like their gate), binding-conditional token, DCR and completion writes, bound reads, revision-checked bound clears, the bucket `Revision`, refresh-coordinator state keyed by `(server key, binding)`, `CheckCommittedView` before construction, the standalone logout primitive and the write-site rule. Deviations are listed in tasks.md (PR2b implementation note).
 - **Failing-first tests**: T2.1-T2.20, plus T048e (record revision). Both editions of `./cmd/mcpproxy` build.
 - **Live verification**: L2 (remove and re-add `acme` under manual trust through REST, MCP and a config edit; OAuth fixture; `foo`/`foo_bar`).
 - **Size estimate**: about 700 LOC production code and 900 LOC tests, plus a small frontend change.
@@ -304,6 +307,7 @@ in place. This is the guard against the rejected branch's scope creep.
 - **Failing-first tests**: T3.1-T3.10.
 - **Live verification**: L3 (parked worker via a debug-only hook build tag `qa_hooks`, or the timing variant in quickstart).
 - **Size estimate**: about 500 LOC production code and 700 LOC tests.
+- **As shipped (2026-10-13)**: everything above. `unregisterLocked` also marks the instance unregistered so `Connect` on it refuses (a connect-level latch ahead of PR4's `Retire`); `AdvanceGenerations` takes the whole committed server set so the desired view is complete after the boot commit; `ReplaceInstanceAt` returns the new instance and callers connect that exact instance; the OAuth logout disconnect is instance-bound. Deviations are listed in tasks.md (PR3 implementation note).
 
 ### PR4: Retirement barrier, OAuth included (#1564)
 
@@ -312,6 +316,7 @@ in place. This is the guard against the rejected branch's scope creep.
 - **Failing-first tests**: T4.1-T4.17.
 - **Live verification**: L4 (marker-file stdio launcher, an HTTP fixture counting requests and `Authorization` headers, a fake OAuth token endpoint).
 - **Size estimate**: about 600 LOC production code and 800 LOC tests.
+- **As shipped (2026-10-13)**: the gate, the per-instance gated transport on every HTTP/SSE/OAuth branch, the capability-preserving wrapper with `Unwrap`, stdio/Docker-run/launcher admission with process-tree tracking (the launcher through its handle's own kill, so its Windows Job), browser admission without tracking, `oauth.Env` through every preflight, discovery and cache fetch, `Retire` from `unregisterLocked`, refresh and manual OAuth refusing retired instances, retired calls mapped to unavailable, the FR-024a scan and the benchmark. Deviations (no exit polling in `Retire`, Windows suspended creation deferred, Docker CLI diagnostics ungated, stdio sends latch-only) are listed in tasks.md (PR4 implementation note).
 
 ### Review protocol per PR
 

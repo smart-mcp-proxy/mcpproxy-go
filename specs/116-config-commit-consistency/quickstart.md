@@ -123,6 +123,7 @@ tokens.
 | T3.5 | (a) capture parked **before** `WithCurrentClientOnEpoch`; (b) capture parked inside it | (a) replace the endpoint, commit returns, release capture; (b) start the commit, assert `CaptureReplacementQueued()`, release capture, await commit | (a) the capture finds the instance unregistered and persists nothing; (b) the capture completed before the replacement (the old definitions are recorded under the old incarnation and then superseded). No `review.changed` for old definitions after the commit |
 | T3.7 | approval reindex with a cached snapshot stamped with an old `Gen` | the endpoint changes | reapply rejected; re-list instead (FR-021b) |
 | T3.8 | `ForceReconnectAll` parked after capturing clients | remove A; replace B | A not re-created, B's replacement not removed (R4.1) |
+| T3.8b | `ForceReconnectAll` parked after capturing a client's `(config, generation)` | a non-connection edit restamps the same instance | recovery never installs the pre-restamp config at the new generation; it re-reads the pair from one atomic load (`managed.Client.ConfigAt`) and installs the latest config (Sol PR3 round 1) |
 | T3.9 | a real `ActionDisconnect` (and the disconnect leg of `ActionReconnect`) captured for instance I1 at `beforeExecuteAction` | `RestartServer(s)` without a config change installs I2 at the **same** generation; I2 connects | release: `DisconnectServerAt` returns `ErrStaleGeneration` (InstanceID mismatch), I2 stays connected. Parent (generation-only check): I2 is disconnected (review R5.2) |
 | T3.10 | none | one-commit remove and re-create of a connected `acme` (equal entry) | `AdvanceGenerations` unregistered the old instance: the `InstanceID` changed, `desired["acme"] == {G, present}`, and the new instance connects. With PR4, the old instance's gate is `Retired()` before the commit publishes. Parent (equal entry treated as unchanged): the old instance stays registered (review R8.2) |
 | T3.6 | old `ActionDisconnect` at `beforeExecuteAction` | the newer commit installs and connects the replacement | release: `DisconnectServerAt` returns `ErrStaleGeneration`, the replacement stays connected (R1.5) |
@@ -252,19 +253,41 @@ because other sessions share the harness. Evidence goes to
 ### L3 (PR3)
 
 Built with `-tags qa_hooks`, which exposes `MCPPROXY_QA_PARK_WORKER=<server>`
-so the named server's post-commit worker blocks until
-`$QA_RUN/release-<server>` appears.
-1. Park `trusted-library`'s worker (enable toggle). Remove the server. Release.
-   `upstream list` has no `trusted-library`, and no process with its fixture
-   args is running (`pgrep -f`).
-2. Park, re-add with another tool count (fixture arg), release. `tool_count`
-   matches the **new** arg.
-3. **Same-generation restart**: note the fixture PID of `trusted-library`,
-   run `$CLI upstream restart trusted-library`, and check that the old PID is
-   gone and that exactly one fixture process with its args remains. Then, with
-   `MCPPROXY_QA_PARK_SUPERVISOR_DISCONNECT=trusted-library`, park a supervisor
-   disconnect, restart again, release: `upstream list` shows it connected
-   (review R5.2).
+(the named server's post-commit worker) and
+`MCPPROXY_QA_PARK_SUPERVISOR_DISCONNECT=<server>` (the supervisor's
+ActionDisconnect for that server). A parked call writes
+`$QA_RUN/parked-<kind>-<server>` (`worker` or `supervisor-disconnect`) and
+blocks until `$QA_RUN/release-<server>` appears (`MCPPROXY_QA_RELEASE_DIR=$QA_RUN`);
+only one call per park point is parked at a time. The shipped script
+(`docs/qa/.../evidence/116pr3/l3.sh`) starts the daemon with
+`MCPPROXY_QA_PARK_WORKER=l3-target MCPPROXY_QA_PARK_SUPERVISOR_DISCONNECT=large-review`
+and uses its own fixture copies and servers (`l3-target`, `l3-quar`, `l3-slow`
+with a slow-`initialize` fixture), so process counts are not confused with
+other runs on the shared harness. Fixture PIDs are counted only among the
+daemon's descendants.
+
+1. Add `l3-target` (fixture, 30 tools), disable it, remove
+   `release-l3-target`, enable it (the enable worker parks:
+   `parked-worker-l3-target`), remove the server, then create
+   `release-l3-target`. `upstream list` has no `l3-target`, and no process with
+   its fixture args is running (`pgrep -f`).
+2. Re-add `l3-target` with 30 tools, remove `release-l3-target`, edit its args
+   to 40 tools (that worker parks), edit them to 50 tools and wait until the
+   50-tool process runs, then release. No 40-tool process runs, one 50-tool
+   process runs, and `upstream list` shows it connected with the 50-tool args.
+3. **Same-generation restart vs a parked supervisor disconnect** (review
+   R5.2): the boot-configured quarantined `large-review` (no inspection
+   exemption) gets a supervisor disconnect, which parks
+   (`parked-supervisor-disconnect-large-review`) holding instance I1. Note the
+   daemon's `fixture.py 180` PIDs, run `$CLI upstream restart large-review`
+   (REST `POST /servers/large-review/restart`), which installs I2 at the same
+   generation, then create `release-large-review`. The parked disconnect is
+   bound to I1, so it does not touch I2: the restarted instance's fixture
+   process is still running after the release.
+4. **Rapid edits with slow connects**: 15 arg edits of `l3-slow` (a fixture
+   whose `initialize` takes 1.5 s), with a disable/enable every 4th and a
+   restart every 5th, then a final edit. After settling, exactly one fixture
+   process runs with the final args, and its PID is unchanged 30 s later.
 
 ### L4 (PR4)
 

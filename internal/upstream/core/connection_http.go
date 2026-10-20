@@ -258,7 +258,7 @@ func (c *Client) trySSEHeadersAuth(ctx context.Context) error {
 	// Start the client with persistent context so SSE stream keeps running
 	// even if the connect context is short-lived (same as stdio transport).
 	// SSE stream runs in a background goroutine and needs context to stay alive.
-	persistentCtx := context.Background()
+	persistentCtx := c.Gate().Context() // Spec 116 PR4: cancelled when the instance is retired
 	if err := c.client.Start(persistentCtx); err != nil {
 		return err
 	}
@@ -300,7 +300,7 @@ func (c *Client) trySSENoAuth(ctx context.Context) error {
 	// Start the client with persistent context so SSE stream keeps running
 	// even if the connect context is short-lived (same as stdio transport).
 	// SSE stream runs in a background goroutine and needs context to stay alive.
-	persistentCtx := context.Background()
+	persistentCtx := c.Gate().Context() // Spec 116 PR4: cancelled when the instance is retired
 	if err := c.client.Start(persistentCtx); err != nil {
 		return err
 	}

@@ -1,8 +1,10 @@
 package health
 
 import (
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 
@@ -1081,4 +1083,19 @@ func TestCalculateHealth_RetryStoppedControl(t *testing.T) {
 	assert.Equal(t, ActionRestart, result.Action)
 	assert.Equal(t, "connection reset by peer", result.Detail)
 	assert.NotContains(t, result.Summary, "Automatic reconnection stopped")
+}
+
+func TestFormatErrorSummary_TruncationKeepsValidUTF8(t *testing.T) {
+	// 60 bytes of 3-byte runes: the 47-byte cut lands inside a rune.
+	got := formatErrorSummary(strings.Repeat("世", 20))
+	assert.True(t, utf8.ValidString(got), "summary must be valid UTF-8: %q", got)
+	assert.True(t, strings.HasSuffix(got, "..."))
+	assert.LessOrEqual(t, len(got), 50)
+}
+
+func TestFormatRefreshRetryDetail_TruncationKeepsValidUTF8(t *testing.T) {
+	// 300 bytes of 3-byte runes: the 97-byte cut lands inside a rune.
+	got := formatRefreshRetryDetail(1, nil, strings.Repeat("世", 100))
+	assert.True(t, utf8.ValidString(got), "detail must be valid UTF-8: %q", got)
+	assert.Contains(t, got, "...")
 }

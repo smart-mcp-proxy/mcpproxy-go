@@ -329,7 +329,7 @@ func TestRT03_DefaultHintsKeepPreRT03Hash(t *testing.T) {
 func seedPreRT03Approval(t *testing.T, rt *Runtime, stored *config.ToolAnnotations) {
 	t.Helper()
 	schema := normalizeJSON(rt03Schema)
-	v3Hash := calculateToolApprovalHashWithOutputSchema("notes_export", rt03Desc, schema, "", nil)
+	v3Hash := calculateToolApprovalHashV4("notes_export", rt03Desc, schema, "", nil)
 	require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 		ServerName: "notes", ToolName: "notes_export",
 		ApprovedHash: v3Hash, CurrentHash: v3Hash,
@@ -366,7 +366,7 @@ func TestRT03_Migration_ExistingApprovalsSurviveUpgrade(t *testing.T) {
 				rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
 				require.NoError(t, err)
 				assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-				assert.Equal(t, uint64(storage.AnnotationHashSchemaVersion), rec.HashSchemaVersion)
+				assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), rec.HashSchemaVersion)
 				assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
 				assert.Equal(t, "operator", rec.ApprovedBy, "migration keeps the original provenance")
 			}
@@ -395,8 +395,8 @@ func TestRT03_Migration_FlipAcrossUpgradeIsHeld(t *testing.T) {
 }
 
 // TestRT03_Migration_DefaultHintToolsUntouched: a pre-RT-03 approval of a tool
-// with default hints has an unchanged hash; it stays approved and is simply
-// re-stamped at the new version.
+// with default hints stays approved without review and is re-hashed under the
+// current (v5, issue #1606) formula and re-stamped at the current version.
 func TestRT03_Migration_DefaultHintToolsUntouched(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
 	seedPreRT03Approval(t, rt, nil)
@@ -409,8 +409,11 @@ func TestRT03_Migration_DefaultHintToolsUntouched(t *testing.T) {
 	rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
 	require.NoError(t, err)
 	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-	assert.Equal(t, before.ApprovedHash, rec.ApprovedHash, "default-hint hashes are byte-identical across the upgrade")
-	assert.Equal(t, uint64(storage.AnnotationHashSchemaVersion), rec.HashSchemaVersion)
+	assert.Equal(t, calculateToolApprovalHashV4("notes_export", rt03Desc, normalizeJSON(rt03Schema), "", &config.ToolAnnotations{}), before.ApprovedHash,
+		"default-hint v4 hashes are byte-identical to the pre-RT-03 hash")
+	assert.Equal(t, calculateToolApprovalHashWithOutputSchema("notes_export", rt03Desc, normalizeJSON(rt03Schema), "", nil), rec.ApprovedHash,
+		"the migration re-hashes under the current formula")
+	assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), rec.HashSchemaVersion)
 }
 
 // TestRT03_FlipFromOmittedHints_StaysHeld: an upstream that omitted its hints
@@ -533,7 +536,7 @@ func TestRT03_Migration_FlipToDefaultsAcrossUpgradeIsHeld(t *testing.T) {
 
 func TestRT03_LegacySiblingWithKnownHintDrift_DoesNotApprove(t *testing.T) {
 	schema := normalizeJSON(rt03Schema)
-	v3Hash := calculateToolApprovalHashWithOutputSchema("notes_export", rt03Desc, schema, "", nil)
+	v3Hash := calculateToolApprovalHashV4("notes_export", rt03Desc, schema, "", nil)
 	sibling := &storage.ToolApprovalRecord{
 		ToolName: "notes_export", ApprovedHash: v3Hash, CurrentHash: v3Hash,
 		HashSchemaVersion: storage.OutputSchemaHashSchemaVersion, Status: storage.ToolApprovalStatusApproved,
@@ -552,7 +555,7 @@ func TestRT03_RevertWithUnknownPreviousHints(t *testing.T) {
 	seedLegacyChanged := func(t *testing.T, rt *Runtime) {
 		t.Helper()
 		schema := normalizeJSON(rt03Schema)
-		v3Hash := calculateToolApprovalHashWithOutputSchema("notes_export", rt03Desc, schema, "", nil)
+		v3Hash := calculateToolApprovalHashV4("notes_export", rt03Desc, schema, "", nil)
 		pulledHash := calculateToolApprovalHashWithOutputSchema("notes_export", "armed", schema, "", nil)
 		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 			ServerName: "notes", ToolName: "notes_export",
@@ -673,7 +676,7 @@ func TestRT03_ApproveOrBlockBeforeFirstDiscovery_KeepsLegacyVersion(t *testing.T
 	seedPending := func(t *testing.T, rt *Runtime) {
 		t.Helper()
 		schema := normalizeJSON(rt03Schema)
-		v3Hash := calculateToolApprovalHashWithOutputSchema("notes_export", rt03Desc, schema, "", nil)
+		v3Hash := calculateToolApprovalHashV4("notes_export", rt03Desc, schema, "", nil)
 		require.NoError(t, rt.storageManager.SaveToolApproval(&storage.ToolApprovalRecord{
 			ServerName: "notes", ToolName: "notes_export",
 			CurrentHash:        v3Hash,
@@ -740,7 +743,7 @@ func TestRT03_ApproveOrBlockBeforeFirstDiscovery_KeepsLegacyVersion(t *testing.T
 		rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
 		require.NoError(t, err)
 		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-		assert.Equal(t, uint64(storage.AnnotationHashSchemaVersion), rec.HashSchemaVersion, "discovery re-hashes and re-stamps")
+		assert.Equal(t, uint64(storage.ToolApprovalHashSchemaVersion), rec.HashSchemaVersion, "discovery re-hashes and re-stamps")
 		assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
 	})
 }

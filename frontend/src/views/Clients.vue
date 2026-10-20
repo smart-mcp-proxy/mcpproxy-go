@@ -77,6 +77,7 @@ import ModeSwitcher from '@/components/ModeSwitcher.vue'
 import AgentTokens from '@/views/AgentTokens.vue'
 import { useSystemStore } from '@/stores/system'
 import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
+import { browserMcpEndpoint } from '@/utils/mcpEndpoint'
 
 const route = useRoute(); const router = useRouter(); const store = useClientsStore(); const profilesStore = useProfilesStore(); const bindings = useClientBindingsStore(); const rowErrors = bindings.rowErrors; const authStore = useAuthStore(); const systemStore = useSystemStore()
 const tabs = [{ id: 'clients', label: 'Clients' }, { id: 'endpoint', label: 'Endpoint & mode' }, { id: 'tokens', label: 'Agent tokens' }]
@@ -116,7 +117,7 @@ function endpointDescription(name: string | number): string {
 }
 async function copyEndpoint(name: string | number, path: string) {
   try {
-    await navigator.clipboard.writeText(`http://${systemStore.listenAddr}${path}`)
+    await navigator.clipboard.writeText(browserMcpEndpoint(path))
     copiedEndpoint.value = String(name)
     window.setTimeout(() => { if (copiedEndpoint.value === String(name)) copiedEndpoint.value = '' }, 2000)
   } catch {
@@ -124,8 +125,7 @@ async function copyEndpoint(name: string | number, path: string) {
   }
 }
 const otherClientSnippet = computed(() => {
-  if (!systemStore.listenAddr) return ''
-  return JSON.stringify({ mcpServers: { mcpproxy: { url: `http://${systemStore.listenAddr}/mcp` } } }, null, 2)
+  return JSON.stringify({ mcpServers: { mcpproxy: { url: browserMcpEndpoint() } } }, null, 2)
 })
 async function copyOtherClientSnippet() {
   try {

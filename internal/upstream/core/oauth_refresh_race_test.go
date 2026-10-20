@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 )
 
 // rotatingAuthServer issues one-time refresh tokens. Reusing a refresh token
@@ -144,11 +145,11 @@ func TestOAuthRefreshRace_OneTokenRequestPerExpiry(t *testing.T) {
 				PKCEEnabled:           true,
 				AuthServerMetadataURL: as.srv.URL + "/.well-known/oauth-authorization-server",
 			}
-			tr, err := transport.NewStreamableHTTP(mcpSrv.URL, transport.WithHTTPOAuth(*oauthCfg))
-			require.NoError(t, err)
-			mcpClient := client.NewClient(tr)
+			gate, gatedDials := countingGate()
+			mcpClient := gatedOAuthClient(t, gate, mcpSrv.URL, oauthCfg)
 
 			c := &Client{config: cfg, storage: db, logger: zap.NewNop()}
+			c.gate.Store(gate)
 			c.client = mcpClient
 			c.bindOAuthRefresher(oauthCfg)
 
@@ -196,6 +197,7 @@ func TestOAuthRefreshRace_OneTokenRequestPerExpiry(t *testing.T) {
 				assert.NoError(t, e, "caller %d", i)
 			}
 			assert.Equal(t, int32(1), as.tokenRequests.Load(), "exactly one refresh request per expiry")
+			assert.Positive(t, gatedDials.Load(), "the MCP and token traffic ran on the gated transport")
 			as.mu.Lock()
 			assert.False(t, as.revoked, "the grant was never replayed")
 			assert.Equal(t, []string{tc.wantClientID}, as.clientIDs, "never an empty client_id")
@@ -248,10 +250,10 @@ func TestOAuthRefreshRace_LateProactiveAfterReactiveFlight(t *testing.T) {
 				PKCEEnabled:           true,
 				AuthServerMetadataURL: as.srv.URL + "/.well-known/oauth-authorization-server",
 			}
-			tr, err := transport.NewStreamableHTTP(mcpSrv.URL, transport.WithHTTPOAuth(*oauthCfg))
-			require.NoError(t, err)
-			mcpClient := client.NewClient(tr)
+			gate, gatedDials := countingGate()
+			mcpClient := gatedOAuthClient(t, gate, mcpSrv.URL, oauthCfg)
 			c := &Client{config: cfg, storage: db, logger: zap.NewNop()}
+			c.gate.Store(gate)
 			c.client = mcpClient
 			c.bindOAuthRefresher(oauthCfg)
 
@@ -267,6 +269,7 @@ func TestOAuthRefreshRace_LateProactiveAfterReactiveFlight(t *testing.T) {
 			// The proactive timer for the old expiry lands afterwards.
 			require.NoError(t, c.RefreshOAuthTokenDirect(ctx))
 			assert.Equal(t, int32(1), as.tokenRequests.Load(), "exactly one refresh request per expiry")
+			assert.Positive(t, gatedDials.Load(), "the token request ran on the gated transport")
 
 			rec, err := db.GetOAuthToken(key)
 			require.NoError(t, err)
@@ -377,4 +380,90 @@ func TestRefreshWithStoredCredentials_CodeRedactedAndLongBodyClassified(t *testi
 	_, err = c.refreshTokenWithStoredCredentials(context.Background(), srv.URL, rec)
 	cls, _ = oauth.ClassifyRefreshError(err)
 	assert.Equal(t, oauth.RefreshClassServerError, cls)
+}
+
+// countingGate returns an open dial gate and a count of the connections it
+// dialed (Spec 116 PR4, T4.17 (b)): the race tests run over the production
+// wrapped transports, so their MCP and token traffic must be gated.
+func countingGate() (*dialgate.Gate, *atomic.Int64) {
+	g := dialgate.New()
+	var n atomic.Int64
+	g.SetHooks(&dialgate.Hooks{BeforeTrack: func() { n.Add(1) }})
+	return g, &n
+}
+
+// gatedOAuthClient builds the mcp-go client the way
+// transport.CreateHTTPClient does for an OAuth streamable-HTTP upstream with
+// a gate: the OAuth HTTP client and the MCP HTTP client run on the gate's
+// transport, and the mcp-go transport is wrapped by dialgate.WrapTransport.
+func gatedOAuthClient(t *testing.T, g *dialgate.Gate, url string, oauthCfg *client.OAuthConfig) *client.Client {
+	t.Helper()
+	oc := *oauthCfg
+	oc.HTTPClient = g.HTTPClient(30 * time.Second)
+	tr, err := transport.NewStreamableHTTP(url, transport.WithHTTPOAuth(oc), transport.WithHTTPBasicClient(g.HTTPClient(0)))
+	require.NoError(t, err)
+	return client.NewClient(dialgate.WrapTransport(g, tr))
+}
+
+// Sol r4 (#1621): the stored-DCR refresh persists through
+// UpdateOAuthTokenIfBound and must report the revision it wrote to the
+// flight. A same-binding replacement that rewrites the record with the SAME
+// access token between that persist and the coordinator's final read is a
+// later write: the old store must not adopt its revision, so the old store's
+// 5xx-recovery ClearToken erases nothing.
+func TestRefreshWithStoredCredentials_ClearKeepsSameAccessTokenReplacement(t *testing.T) {
+	as := newRotatingAuthServer(t)
+	db, err := storage.NewBoltDB(t.TempDir(), zap.NewNop().Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	name := strings.ReplaceAll(t.Name(), "/", "_")
+	srvURL := "https://mcp.example.invalid/mcp"
+	cfg := &config.ServerConfig{Name: name, URL: srvURL, Protocol: "streamable-http"}
+	key := oauth.GenerateServerKey(cfg.Name, cfg.URL)
+	require.NoError(t, db.SaveOAuthToken(&storage.OAuthTokenRecord{
+		ServerName: key, DisplayName: cfg.Name, AccessToken: "at-0", RefreshToken: "rt-0",
+		TokenType: "Bearer", ExpiresAt: time.Now().Add(-time.Second), ClientID: "dcr-client",
+	}))
+	store := oauth.NewPersistentTokenStore(cfg.Name, cfg.URL, db)
+	oauthCfg := &client.OAuthConfig{
+		TokenStore:            store,
+		PKCEEnabled:           true,
+		AuthServerMetadataURL: as.srv.URL + "/.well-known/oauth-authorization-server",
+	}
+	tr, err := transport.NewStreamableHTTP(srvURL, transport.WithHTTPOAuth(*oauthCfg))
+	require.NoError(t, err)
+	c := &Client{config: cfg, storage: db, logger: zap.NewNop()}
+	c.client = client.NewClient(tr)
+	c.bindOAuthRefresher(oauthCfg)
+
+	var replacedRev uint64
+	afterStoredDCRPersistHook = func(server string) {
+		if server != name {
+			return
+		}
+		require.NoError(t, db.UpdateOAuthToken(key, func(r *storage.OAuthTokenRecord) error {
+			r.RefreshToken = "rt-replacement"
+			return nil
+		}))
+		rec, err := db.GetOAuthToken(key)
+		require.NoError(t, err)
+		require.Equal(t, "at-1", rec.AccessToken, "the replacement keeps the access token")
+		replacedRev = rec.Revision
+	}
+	t.Cleanup(func() { afterStoredDCRPersistHook = nil })
+
+	tok, err := store.GetToken(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "at-1", tok.AccessToken)
+	require.NotZero(t, replacedRev)
+	as.mu.Lock()
+	require.Equal(t, []string{"dcr-client"}, as.clientIDs, "the stored-DCR branch ran")
+	as.mu.Unlock()
+
+	require.NoError(t, store.(*oauth.PersistentTokenStore).ClearToken())
+	rec, err := db.GetOAuthToken(key)
+	require.NoError(t, err, "the replacement's record must survive the old store's clear")
+	assert.Equal(t, "rt-replacement", rec.RefreshToken)
+	assert.Equal(t, replacedRev, rec.Revision)
 }

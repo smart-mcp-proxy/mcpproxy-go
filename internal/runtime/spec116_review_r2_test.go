@@ -12,6 +12,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 )
 
 // Spec 116 PR1, review round 2 (Sol) regressions.
@@ -108,9 +109,9 @@ func TestCommit_R2_StaleEmptyDiscoveryDoesNotMarkDiscovered(t *testing.T) {
 			mark := func(instanceGen int64) {
 				if path == "sweep" {
 					rt.markZeroToolServersDiscovered([]string{"omega"}, nil,
-						map[string]supervisor.DiscoveryCapture{"omega": gen}, map[string]int64{"omega": instanceGen})
+						map[string]supervisor.DiscoveryCapture{"omega": gen}, map[string]int64{"omega": instanceGen}, nil)
 				} else {
-					rt.markServerZeroToolsDiscovered("omega", gen, instanceGen)
+					rt.markServerZeroToolsDiscovered("omega", gen, instanceGen, managed.InventoryCapture{})
 				}
 			}
 			discovered := func() bool {

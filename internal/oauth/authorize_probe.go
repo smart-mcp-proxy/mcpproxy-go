@@ -137,7 +137,7 @@ func ProbeAuthorizationClient(ctx context.Context, httpClient *http.Client, auth
 		return AuthorizeProbeResult{Err: fmt.Errorf("authorization URL scheme %q is not probed", u.Scheme)}
 	}
 
-	hc := &http.Client{}
+	hc := defaultEnv().client(0)
 	if httpClient != nil {
 		copied := *httpClient
 		hc = &copied

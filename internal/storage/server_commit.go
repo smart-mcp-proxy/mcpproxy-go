@@ -47,10 +47,12 @@ type ServerCommitBatch struct {
 	Generation int64
 	// Saves are the rows the commit creates, changes or repairs.
 	Saves []ServerSave
-	// Removes are names whose row and tool-call history are deleted.
+	// Removes are names whose row and whole purge set (purge.go, Spec 116
+	// PR2) are deleted in this transaction.
 	Removes []string
 	// Replaces are names removed and re-created in this commit (review
-	// R8.2): the old row and history are deleted before the new row is saved.
+	// R8.2): the old row and its whole purge set are deleted before the new
+	// row is saved.
 	Replaces []string
 	// QuarantineEnabled, when non-nil, is written to
 	// meta.quarantine_enabled in the same transaction (D16).
@@ -61,6 +63,12 @@ type ServerCommitBatch struct {
 	// review round 3): the new OAuth config and the removal of the old
 	// credentials commit or roll back together.
 	OAuthClears []string
+	// RowOnlyRemoves limits Removes to the row and its tool-call history,
+	// keeping the rest of the purge set. The startup commits set it when the
+	// configuration they load lists no server at all: the same guard as the
+	// boot-time orphan GC (a config that came up empty must not wipe every
+	// approval and credential). Replaces always purge.
+	RowOnlyRemoves bool
 }
 
 // StoredServer is one upstreams row as a config entry plus its stamp.
@@ -69,16 +77,23 @@ type StoredServer struct {
 	Stamp  commitview.ServerGen
 }
 
-// ApplyServerCommit writes one commit's batch in a single bbolt Update
-// transaction: deletions (Removes and Replaces) first, then the saves with
-// their stamps, then the meta keys. Any invariant violation aborts the whole
-// transaction and nothing changes.
+// ApplyServerCommit is ApplyServerCommitWithReport without the purge report.
 func (m *Manager) ApplyServerCommit(b *ServerCommitBatch) error {
+	_, err := m.ApplyServerCommitWithReport(b)
+	return err
+}
+
+// ApplyServerCommitWithReport writes one commit's batch in a single bbolt
+// Update transaction: the purges of Removes and Replaces first, then the OAuth
+// clears, then the saves with their stamps, then the meta keys. Any invariant
+// violation or write error aborts the whole transaction and nothing changes.
+// It returns one PurgeReport per removed or replaced name.
+func (m *Manager) ApplyServerCommitWithReport(b *ServerCommitBatch) (map[string]PurgeReport, error) {
 	if b == nil {
-		return fmt.Errorf("%w: nil batch", ErrInvariant)
+		return nil, fmt.Errorf("%w: nil batch", ErrInvariant)
 	}
 	if b.Generation <= 0 {
-		return fmt.Errorf("%w: generation %d", ErrInvariant, b.Generation)
+		return nil, fmt.Errorf("%w: generation %d", ErrInvariant, b.Generation)
 	}
 	deleted := make(map[string]bool, len(b.Removes)+len(b.Replaces))
 	replaced := make(map[string]bool, len(b.Replaces))
@@ -88,56 +103,69 @@ func (m *Manager) ApplyServerCommit(b *ServerCommitBatch) error {
 	}
 	for _, n := range b.Removes {
 		if replaced[n] {
-			return fmt.Errorf("%w: %q is both removed and replaced", ErrInvariant, n)
+			return nil, fmt.Errorf("%w: %q is both removed and replaced", ErrInvariant, n)
 		}
 		deleted[n] = true
 	}
 	saved := make(map[string]bool, len(b.Saves))
 	for _, s := range b.Saves {
 		if s.Config == nil || s.Config.Name == "" {
-			return fmt.Errorf("%w: save without a server name", ErrInvariant)
+			return nil, fmt.Errorf("%w: save without a server name", ErrInvariant)
 		}
 		name := s.Config.Name
 		if saved[name] {
-			return fmt.Errorf("%w: %q is saved twice", ErrInvariant, name)
+			return nil, fmt.Errorf("%w: %q is saved twice", ErrInvariant, name)
 		}
 		saved[name] = true
 		if deleted[name] && !replaced[name] {
-			return fmt.Errorf("%w: %q is both removed and saved", ErrInvariant, name)
+			return nil, fmt.Errorf("%w: %q is both removed and saved", ErrInvariant, name)
 		}
 		if s.Stamp.Gen <= 0 || s.Stamp.Incarnation <= 0 {
-			return fmt.Errorf("%w: %q has a zero stamp %+v", ErrInvariant, name, s.Stamp)
+			return nil, fmt.Errorf("%w: %q has a zero stamp %+v", ErrInvariant, name, s.Stamp)
 		}
-		if s.Stamp.Gen > b.Generation || s.Stamp.Incarnation > b.Generation {
-			return fmt.Errorf("%w: %q stamp %+v is above the commit generation %d", ErrInvariant, name, s.Stamp, b.Generation)
+		if s.Stamp.Gen > b.Generation || s.Stamp.Incarnation > b.Generation || s.Stamp.OAuthEpoch > b.Generation || s.Stamp.OAuthEpoch < 0 {
+			return nil, fmt.Errorf("%w: %q stamp %+v is above the commit generation %d", ErrInvariant, name, s.Stamp, b.Generation)
 		}
 	}
 	for n := range replaced {
 		if !saved[n] {
-			return fmt.Errorf("%w: replaced %q has no new row", ErrInvariant, n)
+			return nil, fmt.Errorf("%w: replaced %q has no new row", ErrInvariant, n)
 		}
 	}
 	for _, n := range b.OAuthClears {
 		if !saved[n] {
-			return fmt.Errorf("%w: OAuth clear for %q without a row save", ErrInvariant, n)
+			return nil, fmt.Errorf("%w: OAuth clear for %q without a row save", ErrInvariant, n)
 		}
 	}
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	now := time.Now()
-	return m.db.db.Update(func(tx *bbolt.Tx) error {
+	var reports map[string]PurgeReport
+	err := m.db.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(UpstreamsBucket))
 		if bucket == nil {
 			return fmt.Errorf("upstreams bucket not found")
 		}
-		for name := range deleted {
-			if err := bucket.Delete([]byte(name)); err != nil {
-				return err
+		// Spec 116 PR2: a removed or replaced name loses its whole purge set
+		// in this transaction, so a removal never commits without its purge
+		// and a re-add (in this commit or later) inherits nothing.
+		reports = make(map[string]PurgeReport, len(deleted))
+		for _, name := range sortedPurgeNames(b) {
+			if b.RowOnlyRemoves && !replaced[name] {
+				if err := bucket.Delete([]byte(name)); err != nil {
+					return err
+				}
+				if err := deleteToolCallHistoryForNameTx(tx, name); err != nil {
+					return fmt.Errorf("delete tool call history for %s: %w", name, err)
+				}
+				continue
 			}
-			if err := deleteToolCallHistoryForNameTx(tx, name); err != nil {
-				return fmt.Errorf("delete tool call history for %s: %w", name, err)
+			rep, err := purgeServerTx(tx, name)
+			if err != nil {
+				return fmt.Errorf("purge %s: %w", name, err)
 			}
+			reports[name] = rep
 		}
 		// Before the saves, so any later failure in this transaction rolls
 		// the clear back together with the rows.
@@ -155,6 +183,7 @@ func (m *Manager) ApplyServerCommit(b *ServerCommitBatch) error {
 			record.Updated = now
 			record.Generation = s.Stamp.Gen
 			record.Incarnation = s.Stamp.Incarnation
+			record.OAuthEpoch = s.Stamp.OAuthEpoch
 			if !replaced[record.ID] {
 				// The SaveUpstreamKeepingQuarantine invariant. The commit's
 				// admission step has already put the kept value into the
@@ -188,6 +217,10 @@ func (m *Manager) ApplyServerCommit(b *ServerCommitBatch) error {
 		}
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return reports, nil
 }
 
 // ListStoredServers returns every upstreams row with its stamp, keyed by name.
@@ -202,7 +235,7 @@ func (m *Manager) ListStoredServers() (map[string]*StoredServer, error) {
 	for _, rec := range records {
 		out[rec.Name] = &StoredServer{
 			Config: serverConfigFromRecord(rec),
-			Stamp:  commitview.ServerGen{Gen: rec.Generation, Incarnation: rec.Incarnation},
+			Stamp:  commitview.ServerGen{Gen: rec.Generation, Incarnation: rec.Incarnation, OAuthEpoch: rec.OAuthEpoch},
 		}
 	}
 	return out, nil
@@ -218,7 +251,7 @@ func (m *Manager) GetStoredServer(name string) (*StoredServer, error) {
 	}
 	return &StoredServer{
 		Config: serverConfigFromRecord(rec),
-		Stamp:  commitview.ServerGen{Gen: rec.Generation, Incarnation: rec.Incarnation},
+		Stamp:  commitview.ServerGen{Gen: rec.Generation, Incarnation: rec.Incarnation, OAuthEpoch: rec.OAuthEpoch},
 	}, nil
 }
 

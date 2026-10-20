@@ -110,6 +110,9 @@
             <li v-if="canLogout">
               <button type="button" @click="triggerLogout" :disabled="loading" data-test="server-card-menu-logout">Logout</button>
             </li>
+            <li v-if="canSignIn">
+              <button type="button" @click="triggerOAuth" :disabled="loading" data-test="server-card-menu-login">{{ server.authenticated || server.connected ? 'Sign in again' : 'Sign in' }}</button>
+            </li>
             <li>
               <button
                 type="button"
@@ -229,6 +232,7 @@ import { useSystemStore } from '@/stores/system'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { serverDetailPath, serverDisplayName, reviewPath } from '@/utils/serverRoute'
 import { oauthSignInState, healthStatusText, healthActionLabel } from '@/utils/health'
+import { canStartOAuthLogin } from '@/utils/oauthActions'
 import { deriveTrustModeState, TRUST_MODES } from '@/utils/trustMode'
 
 interface Props {
@@ -259,6 +263,7 @@ const isHttpProtocol = computed(() => {
 // the status line reads a calm amber "Sign-in required" instead of red
 // "Disconnected"/"Unhealthy", matching the ServerDetail Sign-in CTA.
 const signInState = computed(() => oauthSignInState(props.server))
+const canSignIn = computed(() => canStartOAuthLogin(props.server))
 
 // Trust-mode badge (spec 088 FR-007 / FR-001). Display only — the mode is
 // changed from the server detail Configuration tab.
@@ -690,11 +695,13 @@ async function restart() {
 async function triggerOAuth() {
   loading.value = true
   try {
-    await serversStore.triggerOAuthLogin(props.server.name)
+    const result = await serversStore.triggerOAuthLogin(props.server.name)
     systemStore.addToast({
-      type: 'success',
-      title: 'OAuth Login Triggered',
-      message: `Check your browser for ${props.server.name} login`,
+      type: result.browser_opened ? 'info' : 'warning',
+      title: result.browser_opened ? 'Sign-in opened' : 'Open the sign-in page',
+      message: result.browser_opened ? `Finish signing in to ${props.server.name} in your browser.` : 'Your browser blocked the new tab. Use the link below to continue.',
+      link: result.auth_url ? { url: result.auth_url, label: `Sign in to ${props.server.name}` } : undefined,
+      duration: result.browser_opened ? 10000 : 0,
     })
   } catch (error) {
     systemStore.addToast({

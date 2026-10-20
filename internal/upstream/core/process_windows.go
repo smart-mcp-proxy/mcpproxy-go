@@ -5,6 +5,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"sync"
@@ -38,13 +39,18 @@ var (
 )
 
 // createProcessGroupCommandFunc creates a custom CommandFunc for Windows systems.
-// Job Object assignment happens later, in extractProcessGroupID, once the
-// process actually exists (a Job Object is assigned to a PID after start,
-// not configured via SysProcAttr before start).
+// The command starts suspended (CREATE_SUSPENDED); Job Object assignment
+// and the resume happen later, in assignProcessTree, once the process exists
+// (a Job Object is assigned to a PID after start, not configured via
+// SysProcAttr before start).
 func createProcessGroupCommandFunc(client *Client, workingDir string, logger *zap.Logger) func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
 	return func(ctx context.Context, command string, env []string, args []string) (*exec.Cmd, error) {
 		cmd := exec.CommandContext(ctx, command, args...)
 		cmd.Env = env
+		// Start suspended: the child runs no code until it is in its Job
+		// Object (assignProcessTree resumes it), so it cannot fork a
+		// descendant outside the Job (Spec 116 PR4, T093b).
+		winjob.MarkSuspended(cmd)
 
 		if workingDir != "" {
 			cmd.Dir = workingDir
@@ -130,23 +136,52 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 	if cmd == nil || cmd.Process == nil {
 		return 0
 	}
+	pid, err := assignProcessTree(cmd, logger, serverName)
+	if err != nil {
+		logger.Warn("Failed to place process in a Windows Job Object; child processes spawned by this server will not be cleaned up on restart/disconnect",
+			zap.String("server", serverName),
+			zap.Int("pid", cmd.Process.Pid),
+			zap.Error(err))
+		if winjob.IsSuspended(cmd) {
+			// Never resumed, so it would hang forever.
+			_ = cmd.Process.Kill()
+		}
+		return cmd.Process.Pid
+	}
+	return pid
+}
+
+// newWindowsJob creates the Job Object a stdio child is contained in. A
+// variable so a Windows test can make creation fail.
+var newWindowsJob = winjob.New
+
+// assignProcessTree assigns the just-started process to a fresh Job Object
+// (JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE) and registers it, returning the PID as
+// the "process group ID". It FAILS when the Job cannot be created or the
+// process cannot be assigned: the stdio launch section then kills the child
+// and fails the start, because a child outside a Job would leave its
+// grandchildren alive on retirement (Spec 116 PR4, FR-025a, review round 2).
+func assignProcessTree(cmd *exec.Cmd, logger *zap.Logger, serverName string) (int, error) {
+	if cmd == nil || cmd.Process == nil {
+		return 0, nil
+	}
 	pid := cmd.Process.Pid
 
-	job, err := winjob.New()
+	job, err := newWindowsJob()
 	if err != nil {
-		logger.Warn("Failed to create Windows Job Object; child processes spawned by this server will not be cleaned up on restart/disconnect",
-			zap.String("server", serverName),
-			zap.Int("pid", pid),
-			zap.Error(err))
-		return pid
+		return 0, fmt.Errorf("create Windows Job Object for pid %d: %w", pid, err)
 	}
-	if err := job.Assign(pid); err != nil {
-		logger.Warn("Failed to assign process to Windows Job Object; child processes spawned by this server will not be cleaned up on restart/disconnect",
-			zap.String("server", serverName),
-			zap.Int("pid", pid),
-			zap.Error(err))
+	if winjob.IsSuspended(cmd) {
+		// Assign while suspended, then resume: no user code has run, so no
+		// descendant exists outside the Job. On failure Close terminates
+		// the Job (and the suspended child with it, if it was assigned).
+		if err := job.AssignAndResume(pid); err != nil {
+			_ = job.Close()
+			return 0, fmt.Errorf("contain suspended pid %d in a Windows Job Object: %w", pid, err)
+		}
+	} else if err := job.Assign(pid); err != nil {
 		_ = job.Close()
-		return pid
+		return 0, fmt.Errorf("assign pid %d to a Windows Job Object: %w", pid, err)
 	}
 
 	registerWindowsJob(pid, cmd, job, logger, serverName)
@@ -155,7 +190,7 @@ func extractProcessGroupID(cmd *exec.Cmd, logger *zap.Logger, serverName string)
 		zap.String("server", serverName),
 		zap.Int("pid", pid))
 
-	return pid
+	return pid, nil
 }
 
 // releaseProcessGroup is the platform hook DisconnectWithContext calls on
@@ -266,3 +301,22 @@ func registerWindowsJob(pid int, cmd *exec.Cmd, job *winjob.Job, logger *zap.Log
 		_ = prev.job.Close()
 	}
 }
+
+// killProcessTreeNow is the retirement kill (Spec 116 PR4, FR-023a): it
+// terminates the process's Job Object (the whole tree) at once, or the
+// immediate process when no Job was recorded. Safe to call more than once.
+func killProcessTreeNow(pgid int, cmd *exec.Cmd) {
+	if pgid > 0 {
+		if job := takeWindowsJob(pgid, cmd); job != nil {
+			_ = job.Close()
+			return
+		}
+	}
+	if cmd != nil && cmd.Process != nil {
+		_ = cmd.Process.Kill()
+	}
+}
+
+// startedProcessGroupID has no Unix process-group equivalent on Windows: the
+// Job registry is keyed by what extractProcessGroupID registered.
+func startedProcessGroupID(_ *exec.Cmd) int { return 0 }

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
@@ -44,6 +45,10 @@ type Listener struct {
 	net.Listener
 	Source  ConnectionSource
 	Address string // Display address for logging
+
+	// tlsConfig, when set, makes the multiplex listener serve TLS on this
+	// listener's connections only (see wrapTCPListenerWithTLS).
+	tlsConfig *tls.Config
 }
 
 // ListenerManager manages multiple listeners (TCP + Tray socket/pipe)

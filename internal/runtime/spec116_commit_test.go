@@ -64,7 +64,7 @@ func TestCommit_T1_17_SameNameReplacement(t *testing.T) {
 		ch := res.Changes["acme"]
 		assert.Equal(t, configsvc.ChangeReplaced, ch.Kind, "changed=%v", changed)
 		assert.Equal(t, old, ch.Old)
-		assert.Equal(t, configsvc.ServerGen{Gen: res.Generation, Incarnation: res.Generation}, ch.New)
+		assert.Equal(t, configsvc.ServerGen{Gen: res.Generation, Incarnation: res.Generation, OAuthEpoch: res.Generation}, ch.New, "T2.17 (PR2b): a replacement also gets a new OAuth epoch")
 		assert.NotEqual(t, old.Incarnation, ch.New.Incarnation, "a replacement always gets a new incarnation")
 		snap, _ := res.Snapshot.ServerGeneration("acme")
 		assert.Equal(t, ch.New, snap)
@@ -533,7 +533,7 @@ func TestLockOrder_PR1(t *testing.T) {
 	t.Run("commit_vs_capture", func(t *testing.T) {
 		client, ok := rt.upstreamManager.GetClient("lo")
 		if !ok {
-			require.NoError(t, rt.upstreamManager.AddServerConfigAt("lo", spec116Live(rt, "lo"), 1))
+			require.NoError(t, rt.upstreamManager.AddServerConfigAt("lo", spec116Live(rt, "lo"), storedStamp(t, rt, "lo").Stamp.Gen))
 			client, _ = rt.upstreamManager.GetClient("lo")
 		}
 		var wg sync.WaitGroup

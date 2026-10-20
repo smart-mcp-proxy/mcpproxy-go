@@ -738,7 +738,7 @@ func formatErrorSummary(lastError string) string {
 
 	// Truncate if too long (max 50 chars for summary)
 	if len(lastError) > 50 {
-		return lastError[:47] + "..."
+		return stringutil.UTF8Prefix(lastError, 47) + "..."
 	}
 	return lastError
 }
@@ -778,7 +778,7 @@ func formatRefreshRetryDetail(retryCount int, nextAttempt *time.Time, lastError 
 		// Truncate error if too long
 		errorMsg := lastError
 		if len(errorMsg) > 100 {
-			errorMsg = errorMsg[:97] + "..."
+			errorMsg = stringutil.UTF8Prefix(errorMsg, 97) + "..."
 		}
 		detail = fmt.Sprintf("%s: %s", detail, errorMsg)
 	}

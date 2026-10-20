@@ -469,8 +469,10 @@ func (c *Client) ClearOAuthToken(_ context.Context) error {
 	// Generate the server key using the same method as PersistentTokenStore
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
 
-	// Delete the OAuth token from storage
-	if err := c.storage.DeleteOAuthToken(serverKey); err != nil {
+	// Delete the OAuth token from storage. Standalone mode only: the CLI
+	// opened config.db itself, so no daemon instance shares it, and the
+	// clear acts on the current state (Spec 116 PR2b, review R8.3).
+	if err := c.storage.ClearOAuthTokenForStandaloneLogout(serverKey); err != nil {
 		c.logger.Error("❌ Failed to clear OAuth token",
 			zap.String("server", c.config.Name),
 			zap.String("server_key", serverKey),

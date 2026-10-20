@@ -23,7 +23,7 @@ func TestLocalReindexPaths_DoNotUndoNewerCaptureHold(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "srv", Enabled: true}})
 			ctx := context.Background()
-			_, err := rt.commitDiscoveredTools(ctx, "srv", []*config.ToolMetadata{descTool("srv", "v1")}, 0)
+			_, err := rt.commitDiscoveredTools(ctx, "srv", []*config.ToolMetadata{descTool("srv", "v1")}, rt.committedGenForTest("srv"))
 			require.NoError(t, err)
 			rec, err := rt.storageManager.GetToolApproval("srv", "t")
 			require.NoError(t, err)
@@ -36,7 +36,7 @@ func TestLocalReindexPaths_DoNotUndoNewerCaptureHold(t *testing.T) {
 				// Snapshot V1 is selected. Start a V2 discovery and give it
 				// time to finish if nothing serializes it behind this path.
 				go func() {
-					_, err := rt.commitDiscoveredTools(ctx, "srv", []*config.ToolMetadata{descTool("srv", "v2")}, 0)
+					_, err := rt.commitDiscoveredTools(ctx, "srv", []*config.ToolMetadata{descTool("srv", "v2")}, rt.committedGenForTest("srv"))
 					v2Done <- err
 				}()
 				select {

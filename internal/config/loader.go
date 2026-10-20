@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
@@ -432,6 +433,19 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	return atomicWriteFileMode(path, data, perm, false)
 }
 
+// skipWriteSync drops the fsync from atomicWriteFileMode. Only tests set it,
+// through DisableWriteSyncForTesting; production writes always sync.
+var skipWriteSync atomic.Bool
+
+// DisableWriteSyncForTesting makes config file writes skip the fsync before
+// the atomic rename for the rest of the process. The written bytes are still
+// visible to every reader in the process; only crash durability is lost, which
+// no unit test exercises. Call it from TestMain in packages whose tests write
+// configs heavily: FlushFileBuffers on the Windows CI runner costs tens of
+// milliseconds per write and dominated internal/runtime's test time. Never
+// call it from production code.
+func DisableWriteSyncForTesting() { skipWriteSync.Store(true) }
+
 // atomicWriteFileMode is atomicWriteFile; with exactMode the temp file is
 // chmod-ed to perm before the rename, so the result carries perm itself and
 // not perm filtered by the process umask (which OpenFile applies).
@@ -473,8 +487,10 @@ func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode b
 	}
 
 	// Fsync to ensure data is on disk
-	if err := tmpFile.Sync(); err != nil {
-		return fmt.Errorf("failed to sync temp file: %w", err)
+	if !skipWriteSync.Load() {
+		if err := tmpFile.Sync(); err != nil {
+			return fmt.Errorf("failed to sync temp file: %w", err)
+		}
 	}
 
 	// Close temp file

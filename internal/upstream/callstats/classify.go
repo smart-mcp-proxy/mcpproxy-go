@@ -33,6 +33,7 @@ func Classify(ctx context.Context, result *mcp.CallToolResult, err error) (count
 	var limitErr *limiter.LimitError
 	if errors.As(err, &limitErr) ||
 		errors.Is(err, managed.ErrConnectionGenerationChanged) ||
+		errors.Is(err, managed.ErrDispatchRecheckRefused) ||
 		errors.Is(err, context.Canceled) {
 		return false, false, KindNone
 	}

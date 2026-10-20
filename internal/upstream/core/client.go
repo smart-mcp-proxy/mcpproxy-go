@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/hash"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/headerfwd"
@@ -24,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secureenv"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	proxytransport "github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/dialgate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/launcher"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 
@@ -91,6 +93,12 @@ type Client struct {
 	// SSE transport has limitations with concurrent requests - responses can get lost
 	// when multiple requests are in-flight simultaneously
 	sseRequestMu sync.Mutex
+
+	// sessionGate keeps requests off the mcp-go client while a session
+	// re-initialize rewrites its protocol state (see ReinitializeSession).
+	sessionGate sessionGate
+	// sessionGen counts session re-initializes (see SessionGeneration).
+	sessionGen atomic.Uint64
 
 	// retryAfter collects the `Retry-After` hints this upstream's HTTP/SSE
 	// responses carry. mcp-go flattens a 429 into an error string long before
@@ -163,12 +171,32 @@ type Client struct {
 	// these fields nil — they spawn through mcp-go's stdio transport.
 	launcherHandle  launcher.Handle
 	launcherCIDFile string
+	// launcherProc is the launched child registered with the gate (Spec 116
+	// PR4). Guarded by mu like the two fields above.
+	launcherProc *dialgate.Process
 
 	// Notification callback for tools/list_changed
 	onToolsChanged func(serverName string)
 
 	// Notification callback for prompts/list_changed (F13)
 	onPromptsChanged func(serverName string)
+
+	// gate is the instance's retirement barrier (Spec 116 PR4, FR-022). It is
+	// created with the client and shared by every transport, OAuth helper and
+	// launch the client starts; the managed client retires it when the
+	// upstream manager unregisters the instance. A client that is never
+	// retired (the CLI client, a transient helper without SetGate) keeps an
+	// open gate. Read through Gate(); replaced only by SetGate before use.
+	gate atomic.Pointer[dialgate.Gate]
+
+	// binding is the committed credential binding of the view this instance
+	// was built for (Spec 116 PR2b). Read through CredentialBinding(); set
+	// only by SetCredentialBinding before use.
+	binding atomic.Pointer[commitview.CredentialBinding]
+
+	// stdioProc is the stdio child registered with the gate (FR-025a), so a
+	// normal Disconnect can hand it back to its own teardown. Guarded by mu.
+	stdioProc *dialgate.Process
 }
 
 // NewClient creates a new core MCP client
@@ -209,6 +237,9 @@ func NewClientWithOptions(id string, serverConfig *config.ServerConfig, logger *
 	}
 	c.exposePrompts.Store(resolvedServerConfig.ExposePrompts)
 	c.retryAfter.Store(proxytransport.NewRetryAfterRecorder())
+	g := dialgate.New()
+	g.SetLogger(logger, serverConfig.Name)
+	c.gate.Store(g)
 
 	// Create secure environment manager
 	var envConfig *secureenv.EnvConfig
@@ -320,6 +351,11 @@ func (c *Client) Ping(ctx context.Context) error {
 	// pin MUST come with an era-aware replacement, or spec 074's health loop
 	// goes blind; that is tracked as a required task of the pin lift, not as
 	// cleanup.
+	release, err := c.beginRequest(ctx, string(mcp.MethodPing))
+	if err != nil {
+		return err
+	}
+	defer release()
 	//nolint:staticcheck // SA1019: valid on the legacy era this client is pinned to; see above.
 	return client.Ping(ctx)
 }
@@ -363,8 +399,13 @@ func (c *Client) ListTools(ctx context.Context) ([]*config.ToolMetadata, error) 
 	c.logger.Info("Making direct tools list call to upstream server",
 		zap.String("server", c.config.Name))
 
+	release, err := c.beginRequest(ctx, string(mcp.MethodToolsList))
+	if err != nil {
+		return nil, err
+	}
 	listReq := mcp.ListToolsRequest{}
 	toolsResult, err := client.ListTools(ctx, listReq)
+	release()
 	if err != nil {
 		// Debug, not Error: both callers above (managed.Client.ListTools and
 		// upstream.Manager.discoverTools) log this same failure, so logging it
@@ -500,6 +541,24 @@ func (c *Client) CallTool(ctx context.Context, toolName string, args map[string]
 		c.logger.Debug("SSE request lock acquired for CallTool",
 			zap.String("server", c.config.Name),
 			zap.String("tool", toolName))
+	}
+	// A session re-initialize in progress on this client finishes before the
+	// call is handed to mcp-go, and none starts until it returns (the gate is
+	// held across the whole mcp-go call, which reads the client's protocol
+	// state on the response too). Waiting here sends nothing.
+	release, err := c.beginRequest(ctx, string(mcp.MethodToolsCall))
+	if err != nil {
+		return nil, err
+	}
+	defer release()
+
+	// Spec 117 FR-018: the caller's policy verdicts are re-read here, after
+	// the SSE request lock and the session gate (a call may have waited behind
+	// a long in-flight call while a capture failure marked the server
+	// review-dirty) and before every send, including a session re-init's
+	// retry. Nothing is sent when a check refuses.
+	if err := RunDispatchRecheck(ctx); err != nil {
+		return nil, err
 	}
 
 	request := mcp.CallToolRequest{}
@@ -658,6 +717,9 @@ func (c *Client) httpTransportConfig(serverConfig *config.ServerConfig, oauthCon
 	// with — which is exactly what keeps generations from bleeding into each
 	// other (#1040).
 	cfg.RetryAfter = c.retryAfter.Load()
+	// Spec 116 PR4 (FR-024): every branch builds on the instance's gated
+	// transport and the mcp-go transport is wrapped by the gate.
+	cfg.Gate = c.Gate()
 	// Spec 112 FR-018: the trace transport masks the live allowlisted names.
 	cfg.ForwardNames = func() []string {
 		if pp := c.forwardPolicy.Load(); pp != nil {
@@ -758,7 +820,7 @@ func extractOAuthHandler(mcpClient *client.Client) *transport.OAuthHandler {
 		GetOAuthHandler() *transport.OAuthHandler
 	}
 
-	t := mcpClient.GetTransport()
+	t := innerTransport(mcpClient)
 	if ot, ok := t.(oauthTransport); ok {
 		return ot.GetOAuthHandler()
 	}
@@ -787,7 +849,7 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 	}
 
 	serverKey := oauth.GenerateServerKey(c.config.Name, c.config.URL)
-	record, err := c.storage.GetOAuthToken(serverKey)
+	record, err := c.storage.GetOAuthTokenBound(serverKey, c.CredentialBinding())
 	if err != nil {
 		return fmt.Errorf("failed to get stored token for %s: %w", c.config.Name, err)
 	}
@@ -804,6 +866,7 @@ func (c *Client) RefreshOAuthTokenDirect(ctx context.Context) error {
 	req := c.oauthRefreshRequest(serverKey, handler)
 	req.ObservedRefreshToken = record.RefreshToken
 	req.Trigger = oauth.RefreshTriggerProactive
+	oauth.BeforeRefreshDoHook(c.config.Name, req.Binding)
 	_, skipped, err := oauth.DefaultRefreshCoordinator().Do(ctx, req)
 	if err != nil {
 		c.logger.Error("Direct OAuth token refresh failed",
@@ -851,7 +914,9 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	// The instance's gated transport (FR-024): a retired instance sends no
+	// refresh token and no client secret.
+	httpClient := c.Gate().HTTPClient(30 * time.Second)
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to send refresh request: %w", err)
