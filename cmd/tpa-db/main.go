@@ -268,6 +268,10 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	// it (FR-008): it is the input verification depends on.
 	raw, err := readBounded(*bundlePath+".sig", bundlesig.MaxSidecarBytes)
 	if err != nil {
+		if errors.Is(err, errTooLarge) {
+			// Contract row 1: report the code, as for any other rejection.
+			return fail(&bundlesig.Error{Code: bundlesig.CodeSidecarTooLarge, Detail: err.Error()})
+		}
 		fmt.Fprintf(stderr, "verify: %v\n", err)
 		return 1
 	}
@@ -298,6 +302,10 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	fmt.Fprintln(stdout, "OK")
 	return 0
 }
+
+// errTooLarge marks a readBounded refusal for size, so verify can still print
+// the contract code for an oversized sidecar.
+var errTooLarge = errors.New("over the size limit")
 
 // beforeOpenHook is a test-only seam called between readBounded's lstat and
 // its open, so a test can swap the path in that window.
@@ -336,7 +344,7 @@ func readBounded(path string, limit int64) ([]byte, error) {
 		return nil, err
 	}
 	if int64(len(data)) > limit {
-		return nil, fmt.Errorf("%s exceeds the %d-byte limit", path, limit)
+		return nil, fmt.Errorf("%s exceeds the %d-byte limit: %w", path, limit, errTooLarge)
 	}
 	return data, nil
 }

@@ -264,6 +264,11 @@ func TestVerifyBoundsItsReads(t *testing.T) {
 	if code != 1 || !strings.Contains(errs, "exceeds") {
 		t.Fatalf("oversized sidecar: exit %d, stderr %q", code, errs)
 	}
+	// The machine-readable contract code is still printed (row 1).
+	_, out, _ := runCLI(t, "verify", "--bundle", bundle, "--signer", pub)
+	if strings.TrimSpace(out) != bundlesig.CodeSidecarTooLarge {
+		t.Fatalf("oversized sidecar: stdout %q, want %q", out, bundlesig.CodeSidecarTooLarge)
+	}
 
 	if err := os.Remove(bundle + ".sig"); err != nil {
 		t.Fatal(err)
