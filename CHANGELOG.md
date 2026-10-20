@@ -79,6 +79,8 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Features
 
+- **`mcp_reject_query_apikey` keeps credentials out of MCP URLs.** Set it to `true` and every `/mcp*` endpoint answers a request carrying `?apikey=` with a 401 instead of honouring it, so an agent token or the API key never lands in an access log, a proxy log or browser history; clients send `Authorization: Bearer` or `X-API-Key`. The refusal is explicit rather than "no credential" because, with `require_mcp_auth` off, an unrecognised credential would otherwise be served as the anonymous administrator. Default `false`, so nothing changes unless you opt in; the Web UI and its `/events` stream are not affected. Live, no restart.
+
 - **catalog:** a catalog source whose live search times out or fails is now answered from the listing
   the daemon last saw from it (at most 24 hours old, kept in memory). Those results are marked
   `from_cache` ("From cached list" in the Web UI and macOS, `(cached)` in the CLI) and the source

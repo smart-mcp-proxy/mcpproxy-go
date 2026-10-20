@@ -745,6 +745,7 @@ curl -X POST http://localhost:8080/api/v1/tokens \
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `require_mcp_auth` | bool | `false` | Require authentication on `/mcp` endpoint |
+| `mcp_reject_query_apikey` | bool | `false` | Refuse a `?apikey=` query parameter on every `/mcp*` endpoint with a 401, so a token is never carried in a URL (access logs, proxy logs, browser history). Send `Authorization: Bearer <token>` or `X-API-Key` instead. Applies to MCP endpoints only; the Web UI and its `/events` stream keep using the query form. Takes effect without a restart |
 | `api_key` | string | auto-generated | Admin API key for full access |
 
 ### CLI Flags
