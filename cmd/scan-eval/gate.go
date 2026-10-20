@@ -9,6 +9,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect/checks"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
 // exitGateBreach is returned when --gate fails its recall/FP thresholds. It is
@@ -71,17 +72,80 @@ var categoryCheck = map[string]string{
 	"capability_mismatch": "capability.mismatch", // US2 (T016) — not yet registered
 }
 
-// gateChecks is the canonical set of detect checks the gate runs. It MUST mirror
-// the checks registered in the live scanner (internal/security/scanner/
-// inprocess.go); when a soft check (US2) or any new check is registered there,
-// add it here too so the gate measures the same detector the product ships.
-func gateChecks() []detect.Check {
+// builtinGateChecks is the four built-in hard detect checks the live scanner
+// registers (internal/security/scanner/inprocess.go).
+func builtinGateChecks() []detect.Check {
 	return []detect.Check{
 		&checks.UnicodeHidden{},
 		&checks.Shadowing{},
 		&checks.PayloadDecoded{},
 		&checks.PhraseInjection{}, // Spec 077 US1 — curated hard injection/exfil check
 	}
+}
+
+// gateChecks is the canonical set of detect checks the gate runs. It MUST mirror
+// the production HARD surface: the built-in hard checks plus the signature
+// bundle's BundleCheck (nil means "built-ins only", used by tests that isolate
+// the built-ins). The soft checks are unscored by design — the gate measures the
+// auto-quarantine decision only (see scanEntryFlagged). When a hard check is
+// registered in inprocess.go, add it to builtinGateChecks too.
+func gateChecks(bundle *scanner.BundleCheck) []detect.Check {
+	list := builtinGateChecks()
+	if bundle != nil {
+		list = append(list, bundle)
+	}
+	return list
+}
+
+// gateBundle is a loaded candidate (or embedded) signature bundle: the check to
+// score plus the identity reported in the metrics.
+type gateBundle struct {
+	check *scanner.BundleCheck
+	block bundleBlock
+}
+
+// bundleBlock is the metrics "bundle" section: which corpus was scored.
+type bundleBlock struct {
+	Fingerprint    string `json:"fingerprint"`
+	BundleVersion  string `json:"bundle_version"`
+	RunnableRules  int    `json:"runnable_rules"`
+	SignatureCount int    `json:"signature_count"`
+}
+
+// loadGateBundle compiles the bundle at path through the production loader; an
+// empty path means the corpus embedded in this build. Any failure is returned,
+// never papered over with the embedded default — scoring a different corpus
+// than the one asked for would make the gate lie.
+func loadGateBundle(path string) (*gateBundle, error) {
+	var data []byte
+	if path == "" {
+		data = scanner.EmbeddedBundle()
+	} else {
+		var err error
+		if data, err = os.ReadFile(path); err != nil {
+			return nil, fmt.Errorf("reading bundle %q: %w", path, err)
+		}
+	}
+	check, info, err := scanner.LoadBundleCheck(data)
+	if err != nil {
+		if path == "" {
+			return nil, fmt.Errorf("loading embedded bundle: %w", err)
+		}
+		return nil, fmt.Errorf("loading bundle %q: %w", path, err)
+	}
+	sigs, err := scanner.ParseBundleSignatures(data)
+	if err != nil {
+		return nil, fmt.Errorf("loading bundle %q: %w", path, err)
+	}
+	return &gateBundle{
+		check: check,
+		block: bundleBlock{
+			Fingerprint:    info.Fingerprint,
+			BundleVersion:  info.BundleVersion,
+			RunnableRules:  info.RunnableRules,
+			SignatureCount: len(sigs),
+		},
+	}, nil
 }
 
 // categoryMetric is one category's per-run scorecard (T018: per-category
@@ -105,6 +169,7 @@ type categoryMetric struct {
 type gateMetrics struct {
 	Corpus         string           `json:"corpus_version"`
 	Checks         []string         `json:"checks"`
+	Bundle         *bundleBlock     `json:"bundle,omitempty"` // the scored signature corpus; nil when only built-ins were scored
 	Categories     []categoryMetric `json:"categories"`
 	GatedMalicious int              `json:"gated_malicious"`
 	GatedDetected  int              `json:"gated_detected"`
@@ -292,8 +357,16 @@ func (m gateMetrics) decide(minRecall, maxFP float64) (ok bool, reasons []string
 
 // runGate evaluates the corpus, prints the metrics JSON, and returns the process
 // exit code: exitOK on pass, exitGateBreach on a recall/FP breach.
-func runGate(c *gateCorpus, minRecall, maxFP float64, stdout, stderr io.Writer) int {
-	m := evaluateGateCorpus(c, gateChecks())
+func runGate(c *gateCorpus, gb *gateBundle, minRecall, maxFP float64, stdout, stderr io.Writer) int {
+	var bundle *scanner.BundleCheck
+	if gb != nil {
+		bundle = gb.check
+	}
+	m := evaluateGateCorpus(c, gateChecks(bundle))
+	if gb != nil {
+		blk := gb.block
+		m.Bundle = &blk
+	}
 
 	out, err := json.MarshalIndent(m, "", "  ")
 	if err != nil {
