@@ -40,6 +40,10 @@ const (
 	// authority labels the single operator root inside the one-key trust set
 	// that verify builds; this tool has no notion of a second root.
 	authority = "operator"
+	// maxBundleBytes mirrors the loader's FR-011 bundle ceiling
+	// (scanner.MaxBundleBytes); a bundle the proxy would refuse is not worth
+	// signing or verifying here either.
+	maxBundleBytes = 8 << 20
 )
 
 func main() {
@@ -195,7 +199,7 @@ func cmdSign(args []string, stdout, stderr io.Writer) int {
 		return 2
 	}
 
-	bundle, err := os.ReadFile(*bundlePath)
+	bundle, err := readBounded(*bundlePath, maxBundleBytes)
 	if err != nil {
 		fmt.Fprintf(stderr, "sign: %v\n", err)
 		return 1
@@ -222,12 +226,12 @@ func cmdSign(args []string, stdout, stderr io.Writer) int {
 	dest := *bundlePath
 	if *outPath != "" && *outPath != *bundlePath {
 		dest = *outPath
-		if err := os.WriteFile(dest, bundle, 0o644); err != nil {
+		if err := writeReplace(dest, bundle, 0o644); err != nil {
 			fmt.Fprintf(stderr, "sign: %v\n", err)
 			return 1
 		}
 	}
-	if err := os.WriteFile(dest+".sig", bundlesig.SignSidecar(priv, bundle), 0o644); err != nil {
+	if err := writeReplace(dest+".sig", bundlesig.SignSidecar(priv, bundle), 0o644); err != nil {
 		fmt.Fprintf(stderr, "sign: %v\n", err)
 		return 1
 	}
@@ -260,12 +264,9 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "verify: --signer: %v\n", err)
 		return 2
 	}
-	bundle, err := os.ReadFile(*bundlePath)
-	if err != nil {
-		fmt.Fprintf(stderr, "verify: %v\n", err)
-		return 1
-	}
-	raw, err := os.ReadFile(*bundlePath + ".sig")
+	// Sidecar first, through its own small cap, exactly as the loader orders
+	// it (FR-008): it is the input verification depends on.
+	raw, err := readBounded(*bundlePath+".sig", bundlesig.MaxSidecarBytes)
 	if err != nil {
 		fmt.Fprintf(stderr, "verify: %v\n", err)
 		return 1
@@ -273,6 +274,11 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	sc, err := bundlesig.ParseSidecar(raw)
 	if err != nil {
 		return fail(err)
+	}
+	bundle, err := readBounded(*bundlePath, maxBundleBytes)
+	if err != nil {
+		fmt.Fprintf(stderr, "verify: %v\n", err)
+		return 1
 	}
 	ts, err := bundlesig.NewTrustSet(bundlesig.Key{ID: bundlesig.KeyID(pub), Public: pub, Authority: authority})
 	if err != nil {
@@ -291,4 +297,76 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	}
 	fmt.Fprintln(stdout, "OK")
 	return 0
+}
+
+// readBounded reads a regular file of at most limit bytes. The bundle and its
+// sidecar may sit in a directory someone else can write, so a symlink, FIFO or
+// device is refused outright (a FIFO would block the read forever) and the
+// read is capped rather than trusting the size. The open is checked against
+// the pre-open lstat with os.SameFile so a swap between the two is refused.
+func readBounded(path string, limit int64) ([]byte, error) {
+	pre, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !pre.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	f, err := os.Open(path) //nolint:gosec // operator-supplied path; type-checked above and re-checked on the descriptor below
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	post, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !post.Mode().IsRegular() || !os.SameFile(pre, post) {
+		return nil, fmt.Errorf("%s is not a regular file (changed while opening)", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, fmt.Errorf("%s exceeds the %d-byte limit", path, limit)
+	}
+	return data, nil
+}
+
+// writeReplace writes data to a fresh temporary file beside dest and renames
+// it over dest. Renaming replaces the directory entry itself, so a symlink
+// planted at dest is replaced rather than followed — writing through it would
+// let whoever can write the bundle directory make the operator overwrite a
+// file of the attacker's choosing (the private key, mcp_config.json).
+func writeReplace(dest string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(dest), "."+filepath.Base(dest)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	cleanup := func() { _ = os.Remove(name) }
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Chmod(name, perm); err != nil {
+		cleanup()
+		return err
+	}
+	if err := os.Rename(name, dest); err != nil {
+		cleanup()
+		return err
+	}
+	return nil
 }

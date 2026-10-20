@@ -225,3 +225,54 @@ func TestUsage(t *testing.T) {
 		t.Fatalf("sign without flags: exit %d, want 2", code)
 	}
 }
+
+// TestSignDoesNotWriteThroughASidecarSymlink: someone who can write the bundle
+// directory plants <bundle>.sig as a symlink to a file they cannot write
+// themselves (the operator key, mcp_config.json). The operator's next sign must
+// replace the directory entry, never truncate the symlink's target.
+func TestSignDoesNotWriteThroughASidecarSymlink(t *testing.T) {
+	dir, _, keyID := keygen(t)
+	bundle := writeBundle(t, keyID)
+	victim := filepath.Join(t.TempDir(), "victim.json")
+	if err := os.WriteFile(victim, []byte("precious"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(victim, bundle+".sig"); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if code, _, errs := runCLI(t, "sign", "--bundle", bundle, "--key", filepath.Join(dir, "operator.key")); code != 0 {
+		t.Fatalf("sign exit %d: %s", code, errs)
+	}
+	if got, _ := os.ReadFile(victim); string(got) != "precious" {
+		t.Fatalf("sign wrote through the planted symlink: victim now %q", got)
+	}
+	st, err := os.Lstat(bundle + ".sig")
+	if err != nil || !st.Mode().IsRegular() {
+		t.Fatalf("sidecar should now be a regular file: %v %v", st, err)
+	}
+}
+
+// TestVerifyBoundsItsReads: verify reads the sidecar first through the 4 KiB
+// cap and refuses non-regular files instead of reading them unbounded.
+func TestVerifyBoundsItsReads(t *testing.T) {
+	_, pub, keyID := keygen(t)
+	bundle := writeBundle(t, keyID)
+	if err := os.WriteFile(bundle+".sig", bytes.Repeat([]byte(" "), bundlesig.MaxSidecarBytes+1), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errs := runCLI(t, "verify", "--bundle", bundle, "--signer", pub)
+	if code != 1 || !strings.Contains(errs, "exceeds") {
+		t.Fatalf("oversized sidecar: exit %d, stderr %q", code, errs)
+	}
+
+	if err := os.Remove(bundle + ".sig"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(bundle, bundle+".sig"); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	code, _, errs = runCLI(t, "verify", "--bundle", bundle, "--signer", pub)
+	if code != 1 || !strings.Contains(errs, "not a regular file") {
+		t.Fatalf("symlinked sidecar: exit %d, stderr %q", code, errs)
+	}
+}
