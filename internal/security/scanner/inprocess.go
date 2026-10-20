@@ -105,7 +105,12 @@ func ScanToolMetadataVerdict(serverName string, tools []*config.ToolMetadata, pe
 
 	engineChecks := baselineEngineChecks()
 	bundlePresent := false
-	if bundleCheck := defaultBundleCheck(); bundleCheck != nil {
+	// ONE snapshot: the check that scans and the coverage verdict that gates
+	// auto-approval must describe the same corpus, so they are never taken from
+	// two lock acquisitions (a reload in between could pair a fresh check with
+	// a stale coverage flag).
+	bundleCheck, bundleInfo := activeBundleSnapshot()
+	if bundleCheck != nil {
 		engineChecks = append(engineChecks, bundleCheck)
 		bundlePresent = true
 	}
@@ -127,8 +132,12 @@ func ScanToolMetadataVerdict(serverName string, tools []*config.ToolMetadata, pe
 
 	verdict, _ = deriveBaselineVerdict(out)
 	// Fail closed on degraded coverage or a missing bundle: only a fully-covered,
-	// bundle-backed scan may yield an auto-approvable verdict (FR-014).
-	coverageOK = bundlePresent && result.Coverage.ChecksFailed == 0
+	// bundle-backed scan may yield an auto-approvable verdict (FR-014). A bundle
+	// that is present but demoted (unsigned external, embedded below the
+	// retained watermark, a lost operator bundle, an unbaselined operator
+	// authority: spec 101 FR-007/FR-009a/FR-009b) is NOT full coverage either --
+	// the verdict itself is unchanged, the caller just must not auto-approve it.
+	coverageOK = bundlePresent && !bundleInfo.CoverageDegraded && result.Coverage.ChecksFailed == 0
 	return verdict, out, coverageOK
 }
 
