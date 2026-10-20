@@ -152,6 +152,9 @@ func TestPolicyFingerprint(t *testing.T) {
 		"operator baseline 1":   func(s *config.SecurityConfig) { s.TPAOperatorBaseline = u64p(1) },
 		"operator epoch":        func(s *config.SecurityConfig) { s.TPAOperatorEpoch = u64p(2) },
 		"extra operator signer": func(s *config.SecurityConfig) { s.TPAOperatorSigners = append(s.TPAOperatorSigners, keyUntrusted.b64) },
+		// Same cardinality, different key: only the per-key ids tell these
+		// apart (an operator rotating or revoking one signer).
+		"swapped operator signer": func(s *config.SecurityConfig) { s.TPAOperatorSigners = []string{keyUntrusted.b64} },
 	}
 	seen := map[string]string{"ref": ref}
 	for name, mut := range differs {

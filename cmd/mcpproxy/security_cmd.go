@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -2475,7 +2476,7 @@ Examples:
 		},
 	}
 	cmd.Flags().BoolVar(&embedded, "embedded", false, "Roll back to the bundle compiled into this binary")
-	cmd.Flags().StringVar(&path, "path", "", "Path to the target bundle file (a hint for where to find the bytes)")
+	cmd.Flags().StringVar(&path, "path", "", "Path to the target bundle file (a hint for where to find the bytes; a relative path is resolved against the current directory)")
 	cmd.Flags().StringVar(&digest, "digest", "", "Full SHA-256 of the target as 64 lowercase hex characters (required)")
 	return cmd
 }
@@ -2640,6 +2641,15 @@ func runSecurityBundleHistory(_ *cobra.Command, _ []string) error {
 }
 
 func runSecurityBundleRollback(embedded bool, path, digest string) error {
+	// The daemon is another process with its own working directory, so a
+	// relative path is resolved here, against the shell the operator typed it in.
+	if path != "" {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("resolve --path %q: %w", path, err)
+		}
+		path = abs
+	}
 	reqBody, err := json.Marshal(map[string]interface{}{"embedded": embedded, "path": path, "digest": digest})
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)

@@ -88,9 +88,11 @@ type TPAAuthorityState struct {
 	// the watermark is only the seeded baseline).
 	WatermarkSetBy string `json:"watermark_set_by,omitempty"`
 	// ExternalEverActivated records that an external bundle of this authority
-	// has activated in this epoch — FR-009a(b) (`operator_bundle_missing`) needs
-	// it to tell "operator bundle lost" from "operator root declared, nothing
-	// ever activated".
+	// has ever activated on this install. It SURVIVES a trust-epoch re-scope:
+	// the bump is what makes that corpus "no longer valid", so FR-009a(b)
+	// (`operator_bundle_missing`) must still tell "operator bundle lost or
+	// invalidated" from "operator root declared, nothing ever activated". Only
+	// a newly activated bundle (which serves externally) makes it moot.
 	ExternalEverActivated bool `json:"external_ever_activated,omitempty"`
 	// Pin is the FR-010 rollback pin. It binds only while this authority is the
 	// active root and Epoch equals the current trusted epoch; switching roots
@@ -107,6 +109,13 @@ type TPABundlePin struct {
 	// Embedded is true when the pin is the embedded default.
 	Embedded bool      `json:"embedded,omitempty"`
 	PinnedAt time.Time `json:"pinned_at"`
+	// SidecarDigest, Source and Path identify the exact (bundle, sidecar) pair
+	// kept in the last-known-good store for this target, so the pin can restore
+	// it after the active root was switched away and back (FR-004b). Empty for
+	// the embedded default and for an unsigned target.
+	SidecarDigest string `json:"sidecar_digest,omitempty"`
+	Source        string `json:"source,omitempty"`
+	Path          string `json:"path,omitempty"`
 }
 
 // TPABundleDenyEntry is one deny-listed release, keyed (authority, epoch,

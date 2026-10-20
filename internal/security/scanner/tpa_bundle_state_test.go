@@ -75,7 +75,7 @@ func TestNormalizeState_EpochChangeRescopesAndRetiresPinsAndDenyEntries(t *testi
 	assert.Equal(t, uint64(1), pub.Epoch)
 	assert.Equal(t, uint64(100), pub.Watermark, "re-baselined from the binary's own corpus, not zero")
 	assert.Equal(t, "", pub.WatermarkSetBy)
-	assert.False(t, pub.ExternalEverActivated)
+	assert.True(t, pub.ExternalEverActivated, "an epoch re-scope keeps the record that the authority once served a corpus (FR-009a(b))")
 	assert.Nil(t, pub.Pin)
 	assert.Empty(t, pub.DenyList)
 	assert.True(t, out.SignatureRatchet, "the ratchet is install-wide and survives an epoch bump")

@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -125,10 +127,29 @@ func TestSecurityBundleRollback_SendsRequestAndReportsResult(t *testing.T) {
 	req := rec.only(t)
 	assert.Equal(t, http.MethodPost, req.Method)
 	body := req.jsonBody(t)
-	assert.Equal(t, "/tmp/good.json", body["path"])
+	wantPath, absErr := filepath.Abs("/tmp/good.json")
+	require.NoError(t, absErr)
+	assert.Equal(t, wantPath, body["path"])
 	assert.Equal(t, bundleCLIDigest, body["digest"])
 	assert.NotEqual(t, true, body["embedded"])
 	assert.Contains(t, out, bundleCLIDigest)
+}
+
+// The daemon is another process with its own working directory (a tray-started
+// core, a service), so a relative --path must reach it already resolved
+// against the CLI's cwd.
+func TestSecurityBundleRollback_RelativePathIsSentAbsolute(t *testing.T) {
+	rec := newRESTRecorder(t, map[string]cannedResponse{"POST /api/v1/security/bundle/rollback": okResp(bundleCLIStatusBody())})
+	t.Chdir(t.TempDir())
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
+	_, _, err = runCLI(t, GetSecurityCommand, "table", "bundle", "rollback", "--path", "./known-good.json", "--digest", bundleCLIDigest)
+	require.NoError(t, err)
+
+	got, _ := rec.only(t).jsonBody(t)["path"].(string)
+	assert.True(t, filepath.IsAbs(got), "the daemon must not resolve the path against its own cwd: %q", got)
+	assert.Equal(t, filepath.Join(cwd, "known-good.json"), got)
 }
 
 func TestSecurityBundleRollback_EmbeddedSendsEmbedded(t *testing.T) {

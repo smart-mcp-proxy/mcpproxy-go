@@ -56,7 +56,7 @@ func TestRuntime_SignedBundleActivates(t *testing.T) {
 	assert.Equal(t, BundleSourceFile, rows[0].Source)
 	assert.Equal(t, 1, f.store.commitCount())
 
-	assert.ElementsMatch(t, []string{digestOf(c.Bundle) + ".json", digestOf(c.Bundle) + ".json.sig"}, f.lkgFiles(),
+	assert.ElementsMatch(t, []string{digestOf(c.Bundle) + ".json", digestOf(c.Bundle) + "." + digestOf(c.Sidecar) + ".sig"}, f.lkgFiles(),
 		"the activated release is durable in the content-addressed LKG store")
 }
 

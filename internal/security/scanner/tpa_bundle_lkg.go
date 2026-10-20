@@ -17,10 +17,14 @@ import (
 // restart can recover the (bundle, watermark) pair the persisted state names
 // even when the operator-configured file has since changed or vanished.
 //
-// Files are named by the SHA-256 of their bytes: <digest>.json for the bundle
-// and <digest>.json.sig for the sidecar. A file whose bytes do not hash to its
-// name is treated as missing, so substituting an LKG file can only downgrade
-// the install to the embedded default, never put attacker bytes into service.
+// Files are named by the SHA-256 of their bytes: <bundleDigest>.json for the
+// bundle and <bundleDigest>.<sidecarDigest>.sig for the sidecar. The sidecar is
+// addressed by its OWN digest as well because its bytes are not a function of
+// the bundle's (the same signature can arrive in differently formatted JSON):
+// a re-formatted sidecar for the same bundle must never overwrite the file the
+// committed state still names. A file whose bytes do not hash to its name is
+// treated as missing, so substituting an LKG file can only downgrade the
+// install to the embedded default, never put attacker bytes into service.
 //
 // Everything here is best-effort against an attacker who controls the data
 // directory (the spec's threat-model boundary, SC-012); what it guarantees is
@@ -50,6 +54,16 @@ var digestHexPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 func lkgDirPath(dataDir string) string { return filepath.Join(dataDir, lkgDirName) }
 
+// lkgSidecarName is the file name of one (bundle, sidecar) pair's sidecar.
+func lkgSidecarName(bundleDigest, sidecarDigest string) string {
+	return bundleDigest + "." + sidecarDigest + ".sig"
+}
+
+// lkgSidecarKey is the reconcile key of one (bundle, sidecar) pair.
+func lkgSidecarKey(bundleDigest, sidecarDigest string) string {
+	return bundleDigest + "." + sidecarDigest
+}
+
 // errLKGSubstituted marks an LKG file whose bytes do not hash to the digest the
 // state recorded for it.
 var errLKGSubstituted = errors.New("last-known-good file does not match its recorded digest")
@@ -73,13 +87,10 @@ func lkgWrite(dataDir, digest string, bundle, sidecar []byte, signed bool) error
 	if err := lkgWriteFile(dir, digest+".json", bundle); err != nil {
 		return err
 	}
-	sigPath := filepath.Join(dir, digest+".json.sig")
 	if signed {
-		if err := lkgWriteFile(dir, digest+".json.sig", sidecar); err != nil {
+		if err := lkgWriteFile(dir, lkgSidecarName(digest, digestHex(sidecar)), sidecar); err != nil {
 			return err
 		}
-	} else if err := os.Remove(sigPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
 	}
 	return lkgSyncDir(dir)
 }
@@ -142,24 +153,33 @@ func lkgSyncDir(dir string) error {
 // the same descriptor-first, ceiling-bounded reader as a file drop, and checked
 // against the recorded digests.
 func lkgRead(ctx context.Context, dataDir string, rec *TPABundleActiveRecord) (Candidate, error) {
-	if !digestHexPattern.MatchString(rec.FullDigest) {
+	return lkgReadPair(ctx, dataDir, rec.FullDigest, rec.SidecarDigest, rec.SignatureVerified, rec.Source, rec.Path)
+}
+
+// lkgReadPair reads the bundle (and, when signed, the sidecar) the digests
+// name and verifies the bytes hash to them.
+func lkgReadPair(ctx context.Context, dataDir, bundleDigest, sidecarDigest string, signed bool, source, path string) (Candidate, error) {
+	if !digestHexPattern.MatchString(bundleDigest) {
 		return Candidate{}, errLKGSubstituted
 	}
 	dir := lkgDirPath(dataDir)
-	bundle, err := readCandidateFile(ctx, filepath.Join(dir, rec.FullDigest+".json"), MaxBundleBytes)
+	bundle, err := readCandidateFile(ctx, filepath.Join(dir, bundleDigest+".json"), MaxBundleBytes)
 	if err != nil {
 		return Candidate{}, err
 	}
-	if digestHex(bundle) != rec.FullDigest {
+	if digestHex(bundle) != bundleDigest {
 		return Candidate{}, errLKGSubstituted
 	}
-	c := Candidate{Bundle: bundle, Source: rec.Source, Path: rec.Path}
-	if rec.SignatureVerified {
-		sidecar, err := readCandidateFile(ctx, filepath.Join(dir, rec.FullDigest+".json.sig"), MaxSidecarBytes)
+	c := Candidate{Bundle: bundle, Source: source, Path: path}
+	if signed {
+		if !digestHexPattern.MatchString(sidecarDigest) {
+			return Candidate{}, errLKGSubstituted
+		}
+		sidecar, err := readCandidateFile(ctx, filepath.Join(dir, lkgSidecarName(bundleDigest, sidecarDigest)), MaxSidecarBytes)
 		if err != nil {
 			return Candidate{}, err
 		}
-		if digestHex(sidecar) != rec.SidecarDigest {
+		if digestHex(sidecar) != sidecarDigest {
 			return Candidate{}, errLKGSubstituted
 		}
 		c.Sidecar, c.SidecarPresent = sidecar, true
@@ -167,19 +187,31 @@ func lkgRead(ctx context.Context, dataDir string, rec *TPABundleActiveRecord) (C
 	return c, nil
 }
 
-// lkgReferenced is the set of digests the state still needs on disk: the
-// serving record and every authority's rollback pin.
-func lkgReferenced(st *TPABundleState) map[string]struct{} {
-	keep := map[string]struct{}{}
+// lkgRefs is what the state still needs on disk.
+type lkgRefs struct {
+	bundles  map[string]struct{} // bundle digests
+	sidecars map[string]struct{} // lkgSidecarKey(bundle, sidecar) pairs
+}
+
+// lkgReferenced is the set of files the state still needs: the serving record
+// and every authority's rollback pin, each as the exact (bundle, sidecar) pair.
+func lkgReferenced(st *TPABundleState) lkgRefs {
+	keep := lkgRefs{bundles: map[string]struct{}{}, sidecars: map[string]struct{}{}}
 	if st == nil {
 		return keep
 	}
+	add := func(bundleDigest, sidecarDigest string) {
+		keep.bundles[bundleDigest] = struct{}{}
+		if sidecarDigest != "" {
+			keep.sidecars[lkgSidecarKey(bundleDigest, sidecarDigest)] = struct{}{}
+		}
+	}
 	if st.Active != nil {
-		keep[st.Active.FullDigest] = struct{}{}
+		add(st.Active.FullDigest, st.Active.SidecarDigest)
 	}
 	for _, a := range st.Authorities {
 		if a != nil && a.Pin != nil {
-			keep[a.Pin.FullDigest] = struct{}{}
+			add(a.Pin.FullDigest, a.Pin.SidecarDigest)
 		}
 	}
 	return keep
@@ -212,9 +244,20 @@ func lkgReconcile(dataDir string, st *TPABundleState) ([]string, error) {
 		case strings.HasPrefix(name, lkgTempPrefix):
 			remove = true
 		case strings.HasSuffix(name, ".json.sig"):
-			remove = lkgOrphan(strings.TrimSuffix(name, ".json.sig"), keep)
+			// The pre-content-addressed sidecar name: never read, always debris.
+			remove = digestHexPattern.MatchString(strings.TrimSuffix(name, ".json.sig"))
+		case strings.HasSuffix(name, ".sig"):
+			stem := strings.TrimSuffix(name, ".sig")
+			if b, sc, ok := strings.Cut(stem, "."); ok && digestHexPattern.MatchString(b) && digestHexPattern.MatchString(sc) {
+				_, referenced := keep.sidecars[stem]
+				remove = !referenced
+			}
 		case strings.HasSuffix(name, ".json"):
-			remove = lkgOrphan(strings.TrimSuffix(name, ".json"), keep)
+			stem := strings.TrimSuffix(name, ".json")
+			if digestHexPattern.MatchString(stem) {
+				_, referenced := keep.bundles[stem]
+				remove = !referenced
+			}
 		}
 		if !remove {
 			continue
@@ -228,13 +271,4 @@ func lkgReconcile(dataDir string, st *TPABundleState) ([]string, error) {
 		removed = append(removed, name)
 	}
 	return removed, firstErr
-}
-
-// lkgOrphan reports whether stem is a well-formed digest nothing references.
-func lkgOrphan(stem string, keep map[string]struct{}) bool {
-	if !digestHexPattern.MatchString(stem) {
-		return false
-	}
-	_, referenced := keep[stem]
-	return !referenced
 }
