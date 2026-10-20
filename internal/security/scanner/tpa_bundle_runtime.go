@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"sync"
 	"time"
@@ -846,10 +845,8 @@ func newExternalServing(cand Candidate, acc *acceptedBundle) *servingBundle {
 		// the next-best freshness signal for an unsigned drop and is strictly
 		// better than nothing. A signed bundle's freshness comes from its
 		// signed manifest only.
-		if !acc.Verified {
-			if st, err := os.Stat(cand.Path); err == nil {
-				sv.generatedAt = st.ModTime().UTC().Format(time.RFC3339)
-			}
+		if !acc.Verified && !cand.ModTime.IsZero() {
+			sv.generatedAt = cand.ModTime.UTC().Format(time.RFC3339)
 		}
 	}
 	return sv
@@ -881,7 +878,7 @@ func readFileCandidate(path string) (*Candidate, *BundleRejection) {
 			return nil, readRejection(serr, "sidecar")
 		}
 	}
-	data, berr := readCandidateFile(ctx, path, MaxBundleBytes)
+	data, modTime, berr := readCandidateFileStat(ctx, path, MaxBundleBytes)
 	if berr != nil {
 		if present {
 			// FR-008 stage order: the sidecar's grammar outranks the bundle's byte
@@ -894,7 +891,7 @@ func readFileCandidate(path string) (*Candidate, *BundleRejection) {
 		}
 		return nil, readRejection(berr, "bundle")
 	}
-	return &Candidate{Bundle: data, Sidecar: sidecar, SidecarPresent: present, Source: BundleSourceFile, Path: path}, nil
+	return &Candidate{Bundle: data, Sidecar: sidecar, SidecarPresent: present, Source: BundleSourceFile, Path: path, ModTime: modTime}, nil
 }
 
 // readRejection turns a candidate read failure into a recorded rejection.

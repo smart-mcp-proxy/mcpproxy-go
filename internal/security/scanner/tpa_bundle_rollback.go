@@ -3,6 +3,8 @@ package scanner
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"go.uber.org/zap"
@@ -51,6 +53,31 @@ func validateRollbackRequest(req BundleRollbackRequest) error {
 		return fmt.Errorf("%w: digest must be the full SHA-256 as 64 lowercase hex characters (the 12-character fingerprint is a label, not an authorization)", ErrBundleRollbackUsage)
 	}
 	return nil
+}
+
+// confineRollbackPath resolves a rollback target path from an admin request and
+// requires it to sit inside the directory of the configured bundle
+// (security.tpa_bundle_path), where an operator keeps the releases they may
+// roll back to. Anything else is a usage error and is never opened: without the
+// confinement the rollback door would let a caller probe the existence, type
+// and digest of any file the proxy can read.
+func confineRollbackPath(configured, requested string) (string, error) {
+	if configured == "" {
+		return "", fmt.Errorf("%w: rollback by path needs security.tpa_bundle_path; the target must live in that directory (or roll back to the embedded default)", ErrBundleRollbackUsage)
+	}
+	if !filepath.IsAbs(requested) {
+		return "", fmt.Errorf("%w: the rollback path must be absolute", ErrBundleRollbackUsage)
+	}
+	dirAbs, err := filepath.Abs(filepath.Dir(configured))
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", ErrBundleRollbackUsage, err)
+	}
+	dir := filepath.Clean(dirAbs)
+	target := filepath.Clean(requested)
+	if !strings.HasPrefix(target, dir+string(filepath.Separator)) || filepath.Dir(target) != dir {
+		return "", fmt.Errorf("%w: the rollback target must be a file directly in the bundle directory %s", ErrBundleRollbackUsage, dir)
+	}
+	return target, nil
 }
 
 // RollbackBundle performs the explicit rollback of FR-010. On success the
@@ -119,7 +146,11 @@ func (rt *bundleRuntime) rollbackLocked(req BundleRollbackRequest, log *zap.Logg
 		target = embeddedRollbackTarget(policy, e.digest, seq, e.meta.GeneratedAt)
 		sv = embeddedServing(e, policy)
 	} else {
-		cand, rej := readFileCandidate(req.Path)
+		targetPath, err := confineRollbackPath(policy.Path, req.Path)
+		if err != nil {
+			return err
+		}
+		cand, rej := readFileCandidate(targetPath)
 		if rej != nil {
 			return refuse(rej, "")
 		}

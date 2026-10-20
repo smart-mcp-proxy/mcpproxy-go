@@ -2476,7 +2476,7 @@ Examples:
 		},
 	}
 	cmd.Flags().BoolVar(&embedded, "embedded", false, "Roll back to the bundle compiled into this binary")
-	cmd.Flags().StringVar(&path, "path", "", "Path to the target bundle file (a hint for where to find the bytes; a relative path is resolved against the current directory)")
+	cmd.Flags().StringVar(&path, "path", "", "Path to the target bundle file (a hint for where to find the bytes; a relative path is resolved against the current directory; it must sit directly in the directory of security.tpa_bundle_path)")
 	cmd.Flags().StringVar(&digest, "digest", "", "Full SHA-256 of the target as 64 lowercase hex characters (required)")
 	return cmd
 }

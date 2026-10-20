@@ -43,6 +43,7 @@ func TestRollback_ToAnUnactivatedSignedTargetArmsTheRatchet(t *testing.T) {
 	target := signedCandidate(t, keyPublisher, bundleOpts{Seq: 7, Tag: "never-activated"})
 	targetPath := f.drop + "/target.json"
 	f.putAt(targetPath, target)
+	f.run() // the server always configures the bundle policy before any rollback
 
 	info, err := RollbackBundle(BundleRollbackRequest{Path: targetPath, Digest: digestOf(target.Bundle)}, f.log)
 	require.NoError(t, err)

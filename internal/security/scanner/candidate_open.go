@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"sync"
+	"time"
 )
 
 // candidateReadError is the classified failure of readCandidateFile. Reason is
@@ -61,8 +62,9 @@ var candidateParked = struct {
 
 // candidateResult is what the reader goroutine hands back.
 type candidateResult struct {
-	data []byte
-	err  error
+	data    []byte
+	modTime time.Time
+	err     error
 }
 
 // readCandidateFile reads a TPA bundle candidate (or its sidecar) of at most
@@ -88,14 +90,22 @@ type candidateResult struct {
 // closes it whenever its read finally returns. While such an abandoned reader
 // is parked the path is refused fast (see candidateParked).
 func readCandidateFile(ctx context.Context, path string, limit int64) ([]byte, error) {
+	data, _, err := readCandidateFileStat(ctx, path, limit)
+	return data, err
+}
+
+// readCandidateFileStat is readCandidateFile that also returns the modification
+// time of the descriptor the bytes were read from (never a second stat of the
+// path, which could name a different file by then).
+func readCandidateFileStat(ctx context.Context, path string, limit int64) ([]byte, time.Time, error) {
 	if err := ctx.Err(); err != nil {
-		return nil, &candidateReadError{Reason: RejectReadTimeout, Detail: "read budget expired before open: " + err.Error(), Err: err}
+		return nil, time.Time{}, &candidateReadError{Reason: RejectReadTimeout, Detail: "read budget expired before open: " + err.Error(), Err: err}
 	}
 
 	candidateParked.mu.Lock()
 	if _, parked := candidateParked.paths[path]; parked {
 		candidateParked.mu.Unlock()
-		return nil, &candidateReadError{Reason: RejectReadTimeout, Detail: "previous read still blocked"}
+		return nil, time.Time{}, &candidateReadError{Reason: RejectReadTimeout, Detail: "previous read still blocked"}
 	}
 	candidateParked.mu.Unlock()
 
@@ -110,7 +120,7 @@ func readCandidateFile(ctx context.Context, path string, limit int64) ([]byte, e
 	)
 	resCh := make(chan candidateResult, 1)
 	go func() {
-		data, err := loadCandidate(path, limit, hook, wrap)
+		data, modTime, err := loadCandidate(path, limit, hook, wrap)
 		mu.Lock()
 		done = true
 		wasAbandoned := abandoned
@@ -121,12 +131,12 @@ func readCandidateFile(ctx context.Context, path string, limit int64) ([]byte, e
 			candidateParked.mu.Unlock()
 			return
 		}
-		resCh <- candidateResult{data: data, err: err}
+		resCh <- candidateResult{data: data, modTime: modTime, err: err}
 	}()
 
 	select {
 	case r := <-resCh:
-		return r.data, r.err
+		return r.data, r.modTime, r.err
 	case <-ctx.Done():
 		mu.Lock()
 		if done {
@@ -134,21 +144,21 @@ func readCandidateFile(ctx context.Context, path string, limit int64) ([]byte, e
 			// in the channel (it does not send when abandoned, but it was not).
 			mu.Unlock()
 			r := <-resCh
-			return r.data, r.err
+			return r.data, r.modTime, r.err
 		}
 		abandoned = true
 		candidateParked.mu.Lock()
 		candidateParked.paths[path] = struct{}{}
 		candidateParked.mu.Unlock()
 		mu.Unlock()
-		return nil, &candidateReadError{Reason: RejectReadTimeout, Detail: fmt.Sprintf("read budget expired: %v", ctx.Err()), Err: ctx.Err()}
+		return nil, time.Time{}, &candidateReadError{Reason: RejectReadTimeout, Detail: fmt.Sprintf("read budget expired: %v", ctx.Err()), Err: ctx.Err()}
 	}
 }
 
 // loadCandidate is the body of the reader goroutine: open, classify the
 // descriptor, size-check it, read it bounded. It owns and always closes the
 // descriptor.
-func loadCandidate(path string, limit int64, hook func(string), wrap func(io.Reader) io.Reader) ([]byte, error) {
+func loadCandidate(path string, limit int64, hook func(string), wrap func(io.Reader) io.Reader) ([]byte, time.Time, error) {
 	if hook != nil {
 		hook(path)
 	}
@@ -156,9 +166,9 @@ func loadCandidate(path string, limit int64, hook func(string), wrap func(io.Rea
 	if err != nil {
 		var ce *candidateReadError
 		if errors.As(err, &ce) {
-			return nil, ce
+			return nil, time.Time{}, ce
 		}
-		return nil, &candidateReadError{
+		return nil, time.Time{}, &candidateReadError{
 			Reason:   RejectReadError,
 			Detail:   "open: " + err.Error(),
 			NotExist: errors.Is(err, fs.ErrNotExist),
@@ -166,9 +176,13 @@ func loadCandidate(path string, limit int64, hook func(string), wrap func(io.Rea
 		}
 	}
 	defer f.Close()
+	var modTime time.Time
+	if st, serr := f.Stat(); serr == nil {
+		modTime = st.ModTime()
+	}
 
 	if size > limit {
-		return nil, &candidateReadError{Reason: RejectCeilingExceeded, Detail: fmt.Sprintf("limit %d bytes, observed %d bytes", limit, size)}
+		return nil, time.Time{}, &candidateReadError{Reason: RejectCeilingExceeded, Detail: fmt.Sprintf("limit %d bytes, observed %d bytes", limit, size)}
 	}
 
 	// Read at most limit+1 bytes from the SAME descriptor: one extra byte is
@@ -185,12 +199,12 @@ func loadCandidate(path string, limit int64, hook func(string), wrap func(io.Rea
 	}
 	data, err := io.ReadAll(io.LimitReader(src, readMax))
 	if err != nil {
-		return nil, &candidateReadError{Reason: RejectReadError, Detail: "read: " + err.Error(), Err: err}
+		return nil, time.Time{}, &candidateReadError{Reason: RejectReadError, Detail: "read: " + err.Error(), Err: err}
 	}
 	if int64(len(data)) > limit {
-		return nil, &candidateReadError{Reason: RejectCeilingExceeded, Detail: fmt.Sprintf("limit %d bytes, observed more than %d bytes while reading", limit, limit)}
+		return nil, time.Time{}, &candidateReadError{Reason: RejectCeilingExceeded, Detail: fmt.Sprintf("limit %d bytes, observed more than %d bytes while reading", limit, limit)}
 	}
-	return data, nil
+	return data, modTime, nil
 }
 
 // notRegularError builds the refusal for a candidate that is not a plain file.

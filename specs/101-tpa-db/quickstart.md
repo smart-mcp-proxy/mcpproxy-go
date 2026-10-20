@@ -136,16 +136,19 @@ Read the history to learn the digest you want:
 The history only lists releases that activated, so it will not contain the sequence-1 file. Take its digest from the file you hold, which is fine here because you made it; in an incident, take it from the history or from your release record, never from the file under suspicion:
 
 ```bash
-V1=$(shasum -a 256 "$SCRATCH/v1/scanner-bundle.json" | cut -d' ' -f1)
-./mcpproxy security bundle rollback --path "$SCRATCH/v1/scanner-bundle.json" --digest "$V1" \
+# A rollback target must sit directly in the directory of tpa_bundle_path.
+cp "$SCRATCH/v1/scanner-bundle.json" "$SCRATCH/scanner-bundle.v1.json"
+cp "$SCRATCH/v1/scanner-bundle.json.sig" "$SCRATCH/scanner-bundle.v1.json.sig"
+V1=$(shasum -a 256 "$SCRATCH/scanner-bundle.v1.json" | cut -d' ' -f1)
+./mcpproxy security bundle rollback --path "$SCRATCH/scanner-bundle.v1.json" --digest "$V1" \
   --config "$SCRATCH/config.json" --data-dir "$SCRATCH/data"
 # or, to go back to the corpus compiled into the binary: rollback --embedded --digest <embedded full_digest>
 ```
 
-Give **exactly one** of `--embedded` or `--path`. The path is a *hint about where to find those bytes*; the digest is the authorization. Rollback is the one path that deliberately bypasses the watermark, so identifying its target by an attacker-writable path would hand the attacker the choice of what the bypass lands on. A target below your operator baseline is refused. Supply the wrong digest and it is refused `rollback_target_mismatch` — try it, it is one command:
+Give **exactly one** of `--embedded` or `--path`. The path must be a file directly in the directory of `tpa_bundle_path` (anything else is refused before it is opened, so the rollback door cannot probe other files). The path is a *hint about where to find those bytes*; the digest is the authorization. Rollback is the one path that deliberately bypasses the watermark, so identifying its target by an attacker-writable path would hand the attacker the choice of what the bypass lands on. A target below your operator baseline is refused. Supply the wrong digest and it is refused `rollback_target_mismatch` — try it, it is one command:
 
 ```bash
-./mcpproxy security bundle rollback --path "$SCRATCH/v1/scanner-bundle.json" \
+./mcpproxy security bundle rollback --path "$SCRATCH/scanner-bundle.v1.json" \
   --digest 0000000000000000000000000000000000000000000000000000000000000000 …   # refused (409)
 ```
 

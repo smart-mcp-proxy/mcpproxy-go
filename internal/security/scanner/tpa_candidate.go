@@ -26,6 +26,10 @@ type Candidate struct {
 	// Source is the BundleSource* label; Path is informational only.
 	Source string
 	Path   string
+	// ModTime is the modification time of the descriptor the bundle was read
+	// from (zero when unknown); the freshness fallback for an unsigned drop
+	// without generated_at. Never re-read from the path.
+	ModTime time.Time
 }
 
 // evalMode says how the anti-downgrade rules treat a candidate.

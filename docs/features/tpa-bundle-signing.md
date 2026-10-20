@@ -213,12 +213,15 @@ The history is how you learn a known-good digest without reading it from the fil
 Then roll back, naming exactly one target:
 
 ```bash
-# to a bundle file (its sidecar is PATH.sig)
+# to a bundle file (its sidecar is PATH.sig); it must sit directly in the
+# directory of tpa_bundle_path, e.g. next to /var/lib/tpa/scanner-bundle.json
 mcpproxy security bundle rollback --path /var/lib/tpa/scanner-bundle.v1.json --digest <64-hex>
 
 # to the corpus compiled into the binary
 mcpproxy security bundle rollback --embedded --digest <64-hex of the embedded corpus>
 ```
+
+A `--path` outside the directory of `tpa_bundle_path` (another directory, a `..` escape, a relative path) is refused as a usage error before the file is opened. Rollback is an admin action, but it should not double as a way to learn whether, or with which digest, an arbitrary file exists on the host. Keep the releases you may roll back to next to the configured bundle.
 
 The embedded corpus's digest is the `full_digest` shown by `mcpproxy security bundle` while the embedded corpus is serving.
 
