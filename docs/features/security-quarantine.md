@@ -636,8 +636,33 @@ Which corpus is live is visible in:
 
 - `mcpproxy security overview` — source, version, freshness stamp, fingerprint,
   and the runnable / skipped / declared-skipped rule split;
+- `mcpproxy security bundle` / `GET /api/v1/security/bundle` — the full status:
+  full digest, sequence, signing authority, trust epoch, whether the signature
+  verified, staleness, degraded coverage, and the last refused candidate;
 - `GET /api/v1/security/overview` → `signature_bundle`;
 - the Web UI **Security** tab ("Signatures (runnable)" stat).
+
+**Signed bundles (Spec 101).** A bundle can carry a detached Ed25519 signature
+(`<bundle>.sig`). A signed bundle is checked against the keys you trust
+(`tpa_operator_signers`) and against a per-install anti-downgrade watermark, so
+an older genuinely signed corpus cannot be put back. Rejections keep the
+previous corpus serving and are reported as `last_rejection`. Unsigned bundles
+still load unless `require_signed_bundle` is on, but they always run with
+degraded coverage. The bundle is **not** watched: it activates on config
+reload, restart, or `mcpproxy security bundle reload`.
+
+**Degraded coverage suspends `scan`-mode auto-approval.** When MCPProxy cannot
+vouch for the corpus that is scanning (an unsigned external bundle, an operator
+bundle with no baseline, a lost operator bundle, or an embedded corpus older
+than a bundle seen before), new and changed tools are held for human review
+with held reason `scan_coverage` instead of being approved on a clean verdict.
+The reason is always shown in the status. An ordinary fresh install on the
+embedded corpus is not degraded.
+
+Rollback is by the full SHA-256 digest, not a path or the 12-character
+fingerprint (`mcpproxy security bundle rollback`). The operator lifecycle,
+every rejection and degraded reason, key compromise and the threat-model
+boundary are in [Signed TPA Bundles](/features/tpa-bundle-signing).
 
 The "Add time" column applies to every admission path — the `upstream_servers`
 tool, the REST API, a registry add, and (since issue #937) a first-seen server

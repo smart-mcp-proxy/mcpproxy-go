@@ -686,6 +686,24 @@ mcpproxy security overview -o json \
 
 ---
 
+## security bundle
+
+Show and manage the offline TPA signature corpus (Spec 101): which bundle is live, whether its signature verified, whether coverage is degraded, and the last candidate that was refused. Full operator guide: [Signed TPA Bundles](/features/tpa-bundle-signing).
+
+### Usage
+
+```bash
+mcpproxy security bundle [-o json|yaml]                    # status
+mcpproxy security bundle history                           # every activation, oldest first
+mcpproxy security bundle rollback (--embedded | --path P) --digest <64-hex>
+mcpproxy security bundle unpin                             # clear the rollback pin
+mcpproxy security bundle reload                            # re-run the load pipeline now
+```
+
+The status prints the full digest in full, because `rollback` accepts only the complete 64-character SHA-256 (the 12-character fingerprint is refused). When coverage is degraded it prints `DEGRADED: <reason>`, and while it is degraded `scan`-mode auto-approval is suspended. `rollback`, `unpin` and `reload` need the admin API key and are refused for agent tokens.
+
+---
+
 ## security cancel-all
 
 Cancel an in-progress batch scan (started with `security scan --all`). Individual per-scanner containers may still complete, but pending servers are skipped and the batch transitions to `cancelled`.
@@ -779,5 +797,6 @@ mcpproxy security report my-server -o sarif > my-server.sarif
 - [Security Scanner Plugin System](/features/security-scanner-plugins) — architecture and feature overview
 - [Scanner Images](/features/scanner-images) — which image each scanner uses and why
 - [Security Quarantine](/features/security-quarantine) — the underlying quarantine mechanism
+- [Signed TPA Bundles](/features/tpa-bundle-signing) — signing, rollback and status of the signature corpus
 - [Activity Commands](/cli/activity-commands) — correlate scans with the activity log
 - [Command Reference](/cli/command-reference) — top-level CLI index
