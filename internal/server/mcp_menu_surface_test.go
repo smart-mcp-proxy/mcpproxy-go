@@ -21,6 +21,8 @@ import (
 //  3. the FR-014 description updates on retrieve_tools and the call_tool_*
 //     variants (referencing compact signatures + describe_tool instead of
 //     instructing agents to read inputSchema from retrieve_tools).
+//  4. (Spec 076) the three optional save_to_file / save_format /
+//     save_overwrite parameters on every call_tool_* variant.
 //
 // Everything else — tool names, counts, schemas, annotations — must be
 // byte-identical to the pre-feature snapshot. No renames, no removals.
@@ -618,6 +620,20 @@ func assertCallToolVariantDelta(t *testing.T, surface, name string, preM, curM m
 		"surface %s: %s args must not carry an empty properties map (#1364)", surface, name)
 	delete(preNormArgs, "properties")
 	delete(curNormArgs, "additionalProperties")
+	// Spec 076: exactly three OPTIONAL proxy-side save_to_file parameters are
+	// added to every call_tool_* variant. Pin their types and that none of
+	// them is required, then normalise them away.
+	curSchemaProps := schemaOf(curNorm)
+	wantSaveTypes := map[string]string{"save_to_file": "string", "save_format": "string", "save_overwrite": "boolean"}
+	for param, typ := range wantSaveTypes {
+		prop, ok := curSchemaProps[param].(map[string]interface{})
+		if assert.True(t, ok, "surface %s: %s must expose optional %s (Spec 076)", surface, name, param) {
+			assert.Equal(t, typ, prop["type"], "surface %s: %s.%s type", surface, name, param)
+		}
+		assert.NotContains(t, curNorm["inputSchema"].(map[string]interface{})["required"], param,
+			"surface %s: %s.%s must be optional (Spec 076)", surface, name, param)
+		delete(curSchemaProps, param)
+	}
 	assert.Equal(t, preNorm, curNorm,
 		"surface %s: %s may differ from pre-feature ONLY in description texts (SC-003)", surface, name)
 }

@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -16,6 +18,10 @@ import (
 
 const (
 	defaultPort = "127.0.0.1:8080" // Localhost-only binding by default for security
+
+	// defaultToolOutputMaxBytes is the save_to_file write-size cap applied
+	// when ToolOutputMaxBytes is unset (0). 50 MiB.
+	defaultToolOutputMaxBytes int64 = 52428800
 
 	// Routing mode constants (Spec 031)
 	RoutingModeRetrieveTools = "retrieve_tools" // Default: BM25 search via retrieve_tools + call_tool_read/write/destructive
@@ -308,6 +314,21 @@ type Config struct {
 	// payload class; the spec-083 profiler reports true token deltas.
 	// Global-only (no per-server override, FR-001).
 	ToonMinSavingsPct int `json:"toon_min_savings_pct,omitempty" mapstructure:"toon-min-savings-pct"`
+
+	// ToolOutputRoots is the whitelist of absolute directory prefixes the
+	// `save_to_file` parameter on call_tool_read/write/destructive is allowed
+	// to write under (Spec 076).
+	// Empty (the default) disables the feature entirely — call_tool_* returns
+	// a "save_to_file is disabled" error for any save_to_file request. Each
+	// entry must be an absolute path (validated in ValidateDetailed) and is
+	// stored filepath.Clean'ed; entries need not exist at startup — they are
+	// resolved (including symlinks) at the time of each save_to_file call, in
+	// internal/outputfile.
+	ToolOutputRoots []string `json:"tool_output_roots,omitempty" mapstructure:"tool-output-roots"`
+	// ToolOutputMaxBytes caps the size of a single save_to_file write. 0 (the
+	// default) means "use the built-in default" (50 MiB); negative values are
+	// a config error. See internal/outputfile.Write.
+	ToolOutputMaxBytes int64 `json:"tool_output_max_bytes,omitempty" mapstructure:"tool-output-max-bytes"`
 
 	// Discovery & health-check cadence (spec 074, #608). Both are *Duration
 	// tri-state pointers: nil = inherit the built-in default; a pointer to 0s =
@@ -1804,6 +1825,11 @@ func DefaultConfig() *Config {
 		ToonOutput:        "off",
 		ToonMinSavingsPct: 15,
 
+		// save_to_file (Spec 076): disabled by default (no whitelisted roots);
+		// when enabled via config, writes default-cap at 50 MiB per file.
+		ToolOutputRoots:    nil,
+		ToolOutputMaxBytes: defaultToolOutputMaxBytes,
+
 		// Default secure environment configuration
 		Environment: secureenv.DefaultEnvConfig(),
 
@@ -2526,6 +2552,69 @@ func (c *Config) validateDetailedCore() []ValidationError {
 		})
 	}
 
+	// Validate ToolOutputRoots (save_to_file whitelist, Spec 076): every
+	// configured root must be an absolute path, and not the filesystem root
+	// itself. Roots are not required to exist yet.
+	//
+	// A root of "/" (or any OS's equivalent fixed point, e.g. "C:\" on
+	// Windows) would in principle whitelist the entire filesystem — but
+	// outputfile.Resolve's prefix-matching would in practice reject every
+	// requested path under it anyway, because Resolve requires
+	// strings.HasPrefix(target, root+separator), and a root of "/" cleans to
+	// exactly "/" with nothing after the separator to compare against ("/"+
+	// "/" doubles the separator, which no cleaned target path ever starts
+	// with). So "/" is not a privilege-escalation risk today, but it IS a
+	// silently-useless config value that matches nothing — reject it here
+	// with an explicit message rather than let the admin discover the dead
+	// entry only when every save_to_file call against it mysteriously fails.
+	for _, root := range c.ToolOutputRoots {
+		if !filepath.IsAbs(root) {
+			errors = append(errors, ValidationError{
+				Field:   "tool_output_roots",
+				Message: fmt.Sprintf("root %q must be an absolute path", root),
+			})
+			continue
+		}
+		cleaned := filepath.Clean(root)
+		if filepath.Dir(cleaned) == cleaned {
+			errors = append(errors, ValidationError{
+				Field:   "tool_output_roots",
+				Message: fmt.Sprintf("root %q must not be the filesystem root itself — it matches no save_to_file target", root),
+			})
+		}
+	}
+	// Roots must not nest or repeat. A nested root ("/data/out" plus
+	// "/data/out/sub") lets anything that can write inside the outer root
+	// plant a symlink at the inner root's path and redirect save_to_file
+	// writes outside every configured root; a duplicate is a no-op that hides
+	// the same overlap. outputfile.Resolve also fails closed on overlapping
+	// roots at call time (after symlink resolution), this check reports the
+	// literal overlap up front.
+	for i, a := range c.ToolOutputRoots {
+		if !filepath.IsAbs(a) {
+			continue
+		}
+		for _, b := range c.ToolOutputRoots[i+1:] {
+			if !filepath.IsAbs(b) {
+				continue
+			}
+			if toolOutputRootsOverlap(filepath.Clean(a), filepath.Clean(b)) {
+				errors = append(errors, ValidationError{
+					Field:   "tool_output_roots",
+					Message: fmt.Sprintf("roots %q and %q overlap — tool_output_roots entries must not be equal or nested inside each other", a, b),
+				})
+			}
+		}
+	}
+
+	// Validate ToolOutputMaxBytes
+	if c.ToolOutputMaxBytes < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "tool_output_max_bytes",
+			Message: "cannot be negative",
+		})
+	}
+
 	// Validate timeout
 	if c.CallToolTimeout.Duration() <= 0 {
 		errors = append(errors, ValidationError{
@@ -2899,6 +2988,20 @@ func (c *Config) Validate() error {
 	}
 	if c.CallToolTimeout.Duration() <= 0 {
 		c.CallToolTimeout = Duration(2 * time.Minute) // Default to 2 minutes
+	}
+	// save_to_file (Spec 076): 0 means "use the built-in default", NOT disabled
+	// (unlike ToolResponseLimit above) — the feature's on/off switch is
+	// ToolOutputRoots being empty, not this cap. Negative values are caught
+	// by ValidateDetailed below and never reach here as a successful Validate().
+	if c.ToolOutputMaxBytes == 0 {
+		c.ToolOutputMaxBytes = defaultToolOutputMaxBytes
+	}
+	if len(c.ToolOutputRoots) > 0 {
+		cleaned := make([]string, len(c.ToolOutputRoots))
+		for i, root := range c.ToolOutputRoots {
+			cleaned[i] = filepath.Clean(root)
+		}
+		c.ToolOutputRoots = cleaned
 	}
 	// Apply code execution defaults
 	if c.CodeExecutionTimeoutMs <= 0 {
@@ -3392,4 +3495,18 @@ func migrateDeepScanConfig(cfg *Config) {
 // advertise_upstream_servers value (default true when unset).
 func (c *Config) AdvertiseUpstreamServersEnabled() bool {
 	return c == nil || c.AdvertiseUpstreamServers == nil || *c.AdvertiseUpstreamServers
+}
+
+// toolOutputRootsOverlap reports whether two cleaned absolute roots are equal
+// or one is a separator-bounded descendant of the other. Windows and macOS
+// paths are compared case-insensitively (their default filesystems are).
+func toolOutputRootsOverlap(a, b string) bool {
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		a, b = strings.ToLower(a), strings.ToLower(b)
+	}
+	if a == b {
+		return true
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(a, strings.TrimSuffix(b, sep)+sep) || strings.HasPrefix(b, strings.TrimSuffix(a, sep)+sep)
 }

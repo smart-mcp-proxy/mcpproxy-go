@@ -1235,6 +1235,16 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 		mcp.WithString("intent_reason",
 			mcp.Description(reasonDesc),
 		),
+		mcp.WithString("save_to_file",
+			mcp.Description("Absolute path under a configured tool_output_roots entry. Writes the full untruncated response there and returns a short JSON envelope instead. See docs/configuration.md#save-tool-output-to-file."),
+		),
+		mcp.WithString("save_format",
+			mcp.Enum("text", "json"),
+			mcp.Description("Only used with save_to_file. 'text' (default) writes the concatenated text content blocks — the same blocks the response-limit truncator would otherwise truncate one at a time — untruncated; 'json' writes the full result including non-text content. See docs/configuration.md#save-tool-output-to-file."),
+		),
+		mcp.WithBoolean("save_overwrite",
+			mcp.Description("Only used with save_to_file. Default false rejects an existing target file; set true to replace it. See docs/configuration.md#save-tool-output-to-file."),
+		),
 	)
 
 	return mcp.NewTool(variant, allOpts...)
@@ -1249,6 +1259,11 @@ var callToolMetaKeys = map[string]struct{}{
 	"args_json":               {},
 	"intent_data_sensitivity": {},
 	"intent_reason":           {},
+	// Spec 076: save_to_file options are proxy-side only; a flattened call
+	// must never forward a local filesystem path to the upstream tool.
+	"save_to_file":   {},
+	"save_format":    {},
+	"save_overwrite": {},
 }
 
 // flattenedCallToolArgs recovers upstream-tool arguments a caller placed as
@@ -2908,6 +2923,28 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(argsErrMsg), nil
 	}
 
+	// save_to_file (Spec 076): parsed here (rather than deep in the response
+	// handling below) so it lives right next to the other request-parameter
+	// extraction. An empty Path means the feature was not requested for this
+	// call — see maybeSaveToFile in content_forward.go.
+	// request.GetString/GetBool are lenient: a wrong-typed argument (e.g. a
+	// JSON number for save_to_file) silently falls back to the default
+	// ("" / false) rather than erroring, which would make save_to_file
+	// silently not happen instead of surfacing the caller's mistake. Check
+	// the raw argument types explicitly before parsing.
+	if errResult := validateSaveToFileArgTypes(request); errResult != nil {
+		// Same audit treatment as a malformed args_json above: the
+		// authorization gates never ran, so this is an `authz deny`.
+		p.auditAuthz(ctx, "deny", telemetry.BlockReasonOther)
+		return errResult, nil
+	}
+
+	saveParams := saveToFileParams{
+		Path:      request.GetString("save_to_file", ""),
+		Format:    request.GetString("save_format", ""),
+		Overwrite: request.GetBool("save_overwrite", false),
+	}
+
 	// Handle upstream tools via upstream manager (requires server:tool format)
 	if !strings.Contains(toolName, ":") {
 		return mcp.NewToolResultError(fmt.Sprintf("Invalid tool name format: %s (expected server:tool)", toolName)), nil
@@ -3323,6 +3360,17 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		return mcp.NewToolResultError(errMsg), nil
 	}
 
+	// save_to_file (Spec 076) pre-flight: the last pre-dispatch gate. A save
+	// that cannot succeed (feature disabled, invalid or outside-roots path,
+	// existing file without save_overwrite) is refused BEFORE the upstream
+	// call, so a destructive tool never runs only for its result to be
+	// discarded. See preflightSaveToFile.
+	if errResult := preflightSaveToFile(saveParams, p.currentSaveToFileConfig()); errResult != nil {
+		p.auditAuthz(ctx, "deny", telemetry.BlockReasonOther)
+		p.emitActivityPolicyDecision(ctx, serverName, actualToolName, sessionID, requestID, "blocked", forwardedText(errResult, ""), telemetry.BlockReasonOther)
+		return errResult, nil
+	}
+
 	// Emit activity started event with determined source
 	p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 
@@ -3578,52 +3626,102 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	activityResponseBytes := rawByteSize(result)
 	activityRequestBytes := rawByteSize(activityArgs)
 
-	// Spec 084: adaptive TOON encoding of result text blocks. Positioned AFTER
-	// applyOutputSanitisation (the encoder input is the sanitised result,
-	// FR-007a) and AFTER the Spec 069 raw-byte measurement above (which must
-	// stay pre-encoding, research D-SEAM), and BEFORE forwardContentResult so
-	// truncation applies to the final rendered payload and the marker/hint at
-	// the head of the block survive it (FR-008). When the resolved mode is off
-	// this returns ("", nil) and the path is byte-identical to pre-feature
-	// behavior (FR-002): the detector then falls back to scanning response.
-	var toonDetectionText string
-	var toonDecisions []toonenc.Decision
-	if ctr, ok := result.(*mcp.CallToolResult); ok {
-		toonDetectionText, toonDecisions = p.encodeToonBlocks(serverName, actualToolName, contentTrust, args, ctr)
-	}
+	// save_to_file (Spec 076): must run BEFORE TOON encoding and
+	// forwardContentResult's truncation so the file it writes is always the
+	// complete, untruncated, un-re-encoded response. It runs AFTER
+	// applyOutputSanitisation above (redact/strip/block), so a saved file never
+	// contains an unredacted secret, and it never intercepts an upstream error
+	// result (maybeSaveToFile returns handled=false for those — see its doc
+	// comment), so an isError answer keeps flowing through the normal path.
+	//
+	saveCfg := p.currentSaveToFileConfig()
 
-	forwarded, response, wasTruncated := forwardContentResult(result, p.currentTruncator(), p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
-
-	// Spec 056: output-schema validation. Strict mode blocks a violating result
-	// (returns an error); warn mode forwards unchanged after recording a
-	// policy_decision. No-op when disabled / no schema / error result.
-	if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded, fwdOut); blockResult != nil {
-		return blockResult, nil
-	}
-
-	// Spec 054 Track B (post-forward): spotlight untrusted text in
-	// source-identifying delimiters. Lossless and non-cacheable, so it runs
-	// after truncation. response is refreshed so logs/metrics match agent output.
-	p.spotlightForwarded(serverName, actualToolName, contentTrust, forwarded)
-	response = forwardedText(forwarded, response)
-
-	// Track truncation and TOON re-encoding in token metrics: both change the
-	// agent-facing payload, so OutputTokens must reflect the final response
-	// (the count above measured the pre-encoding result — Spec 084 FR-010).
-	if (wasTruncated || toonEncodedAny(toonDecisions)) && tokenMetrics != nil && p.mainServer != nil && p.mainServer.runtime != nil {
-		tokenizer := p.mainServer.runtime.Tokenizer()
-		if tokenizer != nil {
-			finalTokens, err := tokenizer.CountTokensForModel(response, tokenMetrics.Model)
-			if err == nil {
-				tokenMetrics.WasTruncated = wasTruncated
-				tokenMetrics.OutputTokens = finalTokens
-				tokenMetrics.TotalTokens = tokenMetrics.InputTokens + tokenMetrics.OutputTokens
-				toolCallRecord.Metrics = tokenMetrics
+	// Spec 056 output-schema validation runs on the result BEFORE it is saved:
+	// strict mode must block a violating result from reaching the caller via
+	// the file (and the envelope preview) exactly as it would inline, and warn
+	// mode must still record its policy_decision. The non-save path validates
+	// the forwarded result below.
+	if saveParams.Path != "" {
+		if ctr, ok := result.(*mcp.CallToolResult); ok {
+			if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, ctr, fwdOut); blockResult != nil {
+				return blockResult, nil
 			}
 		}
 	}
 
-	// Store successful tool call in history
+	var toonDetectionText string
+	var toonDecisions []toonenc.Decision
+	var forwarded *mcp.CallToolResult
+	var response string
+	var wasTruncated bool
+	var savedToFile bool
+	if saveResult, saveHandled := maybeSaveToFile(result, saveParams, saveCfg); saveHandled {
+		// A failed save_to_file (invalid/outside-roots path, write error, ...)
+		// still already executed the upstream call, so it must NOT skip the
+		// audit trail below (recordToolCallAt/UpdateSessionStats/emitActivity*)
+		// — it falls through exactly like a successful save, but is classified
+		// as an error: the upstream call ran, yet the caller did not get the
+		// file it asked for.
+		savedToFile = true
+		forwarded = saveResult
+		response = forwardedText(forwarded, "")
+		if saveResult.IsError {
+			activityStatus = "error"
+			activityErrMsg = response
+			toolCallRecord.Error = response
+		}
+		// The envelope/error text IS the response — skip TOON encoding and
+		// forwardContentResult (no truncation or read_cache entry applies to
+		// it). Output-schema validation already ran on the saved result
+		// above. The envelope's preview is upstream text, so it is spotlighted
+		// like any other untrusted output (spotlightForwarded is a no-op for
+		// trusted servers, when spotlighting is off, and for error results).
+		p.spotlightForwarded(serverName, actualToolName, contentTrust, forwarded)
+		response = forwardedText(forwarded, response)
+	} else {
+		// Spec 084: adaptive TOON encoding of result text blocks. Positioned AFTER
+		// applyOutputSanitisation (the encoder input is the sanitised result,
+		// FR-007a) and AFTER the Spec 069 raw-byte measurement above (which must
+		// stay pre-encoding, research D-SEAM), and BEFORE forwardContentResult so
+		// truncation applies to the final rendered payload and the marker/hint at
+		// the head of the block survive it (FR-008). When the resolved mode is off
+		// this returns ("", nil) and the path is byte-identical to pre-feature
+		// behavior (FR-002): the detector then falls back to scanning response.
+		if ctr, ok := result.(*mcp.CallToolResult); ok {
+			toonDetectionText, toonDecisions = p.encodeToonBlocks(serverName, actualToolName, contentTrust, args, ctr)
+		}
+
+		forwarded, response, wasTruncated = forwardContentResult(result, p.currentTruncator(), p.cacheStoreAsForwarded(producer, fwdOut, serverName), p.logger, toolName, args)
+
+		// Spec 056: output-schema validation. Strict mode blocks a violating result
+		// (returns an error); warn mode forwards unchanged after recording a
+		// policy_decision. No-op when disabled / no schema / error result.
+		if blockResult := p.applyOutputValidation(ctx, serverName, actualToolName, requestID, forwarded, fwdOut); blockResult != nil {
+			return blockResult, nil
+		}
+
+		// Spec 054 Track B (post-forward): spotlight untrusted text in
+		// source-identifying delimiters. Lossless and non-cacheable, so it runs
+		// after truncation. response is refreshed so logs/metrics match agent output.
+		p.spotlightForwarded(serverName, actualToolName, contentTrust, forwarded)
+		response = forwardedText(forwarded, response)
+	}
+
+	// Track truncation, TOON re-encoding and save_to_file diversion in token
+	// metrics: each changes the agent-facing payload, so OutputTokens must
+	// reflect the final response (the count above measured the raw result —
+	// Spec 084 FR-010). See recountSaveOrTruncateTokenMetrics's doc comment.
+	var tokenizerForRecount tokens.Tokenizer
+	if p.mainServer != nil && p.mainServer.runtime != nil {
+		tokenizerForRecount = p.mainServer.runtime.Tokenizer()
+	}
+	if recountSaveOrTruncateTokenMetrics(tokenMetrics, wasTruncated, toonEncodedAny(toonDecisions), savedToFile, response, tokenizerForRecount) {
+		toolCallRecord.Metrics = tokenMetrics
+	}
+
+	// Store the tool call in history — a failed save_to_file still recorded an
+	// upstream call (toolCallRecord.Error is set above for that case), so this
+	// runs for every path (success, save success, save failure).
 	if err := p.recordToolCallAt(toolCallRecord, callInc); err != nil {
 		p.logger.Warn("Failed to record successful tool call", zap.Error(err))
 	}
@@ -3634,7 +3732,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		p.sessionStore.UpdateSessionStats(sessionID, tokenMetrics.TotalTokens)
 	}
 
-	// Emit activity completed event for success (with intent metadata for Spec 018)
+	// Emit activity completed event (with intent metadata for Spec 018)
 	responseTruncated := tokenMetrics != nil && tokenMetrics.WasTruncated
 	var intentMap map[string]interface{}
 	if intent != nil {
@@ -3650,8 +3748,8 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	p.emitActivityInternalToolCall(ctx, internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, activityStatus, activityErrMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, recResult, intentMap, "")
 
 	// Activation: only a usable result counts. Reached after the upstream
-	// error branch, the isError classification (activityStatus) and both output
-	// policy gates (sanitisation, output validation) above.
+	// error branch, the isError classification (activityStatus), both output
+	// policy gates (sanitisation, output validation) and save_to_file above.
 	if activityStatus == "success" {
 		p.recordRealToolCallSuccess()
 	}
