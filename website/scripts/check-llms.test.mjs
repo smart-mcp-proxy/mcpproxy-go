@@ -34,6 +34,10 @@ test('oversized llms-full fails', () => {
   const dir = fixture({ links: [`${S}/getting-started/agent-install`], pages: ['getting-started/agent-install'], full: 'x'.repeat(MAX_FULL_BYTES + 1) });
   assert.match(checkLlms(dir).join('\n'), /budget/);
 });
+test('an unpublished document in the full bundle fails', () => {
+  const dir = fixture({ links: [`${S}/getting-started/agent-install`], pages: ['getting-started/agent-install'], full: '## Tray Glance Implementation Plan\nx' });
+  assert.match(checkLlms(dir).join('\n'), /unpublished document/);
+});
 test('missing files fail', () => {
   const dir = mkdtempSync(path.join(tmpdir(), 'llms-'));
   assert.match(checkLlms(dir).join('\n'), /not generated/);

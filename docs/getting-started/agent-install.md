@@ -44,10 +44,10 @@ RULES
    Prefer the macOS desktop app? Tell me; it is: brew install --cask smart-mcp-proxy/mcpproxy/mcpproxy
 
 3. START IT
-   mcpproxy serve --listen 127.0.0.1:8080 > ~/.mcpproxy/serve.log 2>&1 &     # Windows: Start-Process mcpproxy -ArgumentList serve -WindowStyle Hidden
+   mkdir -p ~/.mcpproxy && mcpproxy serve --listen 127.0.0.1:8080 > ~/.mcpproxy/serve.log 2>&1 &     # Windows: Start-Process mcpproxy -ArgumentList serve -WindowStyle Hidden
    If port 8080 is taken, use another, e.g. --listen 127.0.0.1:18080.
    It must keep running after your command returns: start it with your tool's background/long-running mode rather than relying on a trailing `&`, which some agent shells kill when the call ends.
-   Wait until `mcpproxy status` reports it is running (retry for up to 30 seconds).
+   Wait until `mcpproxy status` reports it is running (retry for up to 30 seconds). Never run `mcpproxy status --show-key` or `--web-url`: they print the admin key.
 
 4. VERIFY (these commands print masked output)
    mcpproxy status
@@ -57,11 +57,11 @@ RULES
    Claude Code: mcpproxy connect claude-code
    Codex:       mcpproxy connect codex
    Others (cursor, windsurf, vscode, gemini, opencode): mcpproxy connect <client>
-   Claude Desktop is not in this list: tell me to open the Connect wizard in the MCPProxy Web UI (the URL printed by `mcpproxy status --web-url`).
+   Claude Desktop is not in this list: tell me to open the Connect wizard in the MCPProxy Web UI at http://127.0.0.1:<port>/ui/ (I can get my sign-in link by running `mcpproxy status --web-url` myself in a terminal; do NOT run that command, it prints the admin key).
    Then run: mcpproxy connect --list   and confirm the client shows as connected.
 
 6. TELL ME WHAT HAPPENED
-   - What you installed and how, and the Web UI URL from `mcpproxy status --web-url`.
+   - What you installed and how, and the Web UI address http://127.0.0.1:<port>/ui/ (never include an API key or a URL containing `apikey=`).
    - That the client needs a reload or restart before it sees MCPProxy (Claude Code: start a new session or run /mcp; Codex: restart it). Do not claim it is connected until I have done that.
    - MCPProxy sends anonymous usage telemetry. To turn it off: set MCPPROXY_TELEMETRY=false before starting it, or toggle it in Settings. Details: https://docs.mcpproxy.app/features/telemetry
 ```

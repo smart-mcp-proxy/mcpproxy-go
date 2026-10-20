@@ -33,3 +33,20 @@
 | 11 | P2 | OpenAPI regeneration missing | Fixed: `make swagger` |
 | 12 | P3 | Declaration acceptance rules inconsistent | Fixed: data-model/tests/docs now source-specific |
 | 13 | P3 | Receiver compat unverified | Verified by reading `mcpproxy-telemetry/src/validation.ts` (known fields only, unknown top-level fields not rejected); listed as follow-up |
+
+## Round 2 — final diff (Go part, CI/packaging/docs part) — verdict: CHANGES REQUIRED → 5 of 6 applied, 1 documented
+
+Both chunks reviewed read-only by Sol; no read refused. (Reviewer also confirmed no deadlock: both heartbeat entry points hold `deliveryMu`, not `s.mu`, so `telemetryEnabledLive()` is safe.)
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| 1 | P1 | Agent prompt ran `mcpproxy status --web-url`, which prints the admin key | Fixed + verified (`--web-url` prints `?apikey=<full key>`); prompt now forbids `--web-url`/`--show-key` |
+| 2 | P2 | `serve > ~/.mcpproxy/serve.log` fails on a fresh brew install | Fixed: `mkdir -p ~/.mcpproxy &&` |
+| 3 | P2 | Re-running an older release could downgrade the scoop bucket | Fixed: version compare, skip with notice |
+| 4 | P3 | `llms-full.txt` exclusions unenforced | Fixed as a canary check (full bundle has no per-doc URLs to audit; both bundles share one generator run) |
+| 5 | P2 | Scoop custom-root detection needs `scoop-install.json` (current name) | Fixed: both names accepted, test |
+| 6 | P2 | Global scoop install gets `scoop update mcpproxy` (needs `--global`) | Documented as a known limitation (install is still protected from self-update); docs note the flag |
+
+## Isolated agent-prompt run (FR-024)
+
+A fresh `claude -p` (Sonnet) session ran the prompt verbatim plus a harness notice that routed every shell command through a wrapper (scratch HOME, PATH without Homebrew or the real mcpproxy; the live tray core owned :8080). Observed end state (credentials redacted): the real v0.71.1 darwin-arm64 release archive was installed to `$HOME/.local/bin` (checksum path), `~/.mcpproxy/install-channel` = `curl`, `mcpproxy serve` started on **127.0.0.1:18080** after the 8080 conflict, and `mcpproxy connect claude-code` wrote a per-client `mcp_cli_…` credential entry (`connect --list`: Claude Code `yes`). The live instance and the real `~/.claude.json` were untouched. Findings that changed the prompt: the `--web-url` key leak (above), and the serve process did not survive the end of the agent session, so the prompt now tells the agent to use its tool's background mode. The agent's final summary message was replaced by a user-level Stop hook, so conclusions rest on the end state above, not on the transcript. Codex was not exercised.

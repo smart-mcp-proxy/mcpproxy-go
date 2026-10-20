@@ -123,7 +123,7 @@ scoop uninstall mcpproxy
 Scoop installs the release archive for your user (no administrator rights),
 puts `mcpproxy` on your PATH and adds a Start-menu shortcut for the tray app.
 Update with scoop: `mcpproxy update` points you at `scoop update mcpproxy`
-rather than replacing a scoop-managed file.
+rather than replacing a scoop-managed file (for a global scoop install, run `scoop update mcpproxy --global`).
 
 ### Manual Installation
 

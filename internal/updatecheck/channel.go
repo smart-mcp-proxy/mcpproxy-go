@@ -330,9 +330,14 @@ func (d *channelDetector) isGoInstall() bool {
 // Two independent signals, either of which suffices:
 //   - the default layout <root>/scoop/apps/mcpproxy/..., or
 //   - a custom root ($SCOOP / $SCOOP_GLOBAL): <root>/apps/mcpproxy/<ver>/ with
-//     scoop's own install.json beside the executable (scoop writes it into
+//     scoop's own scoop-install.json (legacy: install.json) beside the executable (scoop writes it into
 //     every version directory; `current` is a junction that EvalSymlinks has
 //     already resolved to that directory).
+//
+// Known limitation: the update command is always the per-user
+// `scoop update mcpproxy`; a global install (C:\ProgramData\scoop) needs
+// `--global`, which the channel identifier does not carry. The install is still
+// protected from self-update, which is the safety property that matters.
 //
 // Windows paths are normalised so the check also works when the detector is
 // exercised on another OS. A bare apps/mcpproxy directory without that
@@ -347,5 +352,6 @@ func (d *channelDetector) isScoopInstall(path string) bool {
 		return false
 	}
 	dir := path[:strings.LastIndexAny(path, `\/`)+1]
-	return d.statFile(dir+"install.json") == nil
+	// scoop-install.json is the current name; install.json is the legacy one.
+	return d.statFile(dir+"scoop-install.json") == nil || d.statFile(dir+"install.json") == nil
 }

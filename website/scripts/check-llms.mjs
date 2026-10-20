@@ -16,6 +16,14 @@ import { fileURLToPath } from 'node:url';
 export const MAX_FULL_BYTES = 2 * 1024 * 1024; // 2 MiB (was ~3 MB with unpublished pages)
 export const FIRST_PAGE = '/getting-started/agent-install';
 const SITE = 'https://docs.mcpproxy.app';
+// llms-full.txt carries no per-document URLs, so its document set cannot be
+// audited directly; both bundles are produced by the same plugin run with the
+// same ignore patterns, and every llms.txt link is verified above. As a canary
+// for the full bundle, none of these unpublished documents may appear in it.
+export const FORBIDDEN_FULL_HEADINGS = [
+  'Tray Glance Implementation Plan',
+  'Spike: non-Docker sandbox mechanism',
+];
 
 /** @returns {string[]} problems; empty when the bundles are healthy. */
 export function checkLlms(buildDir) {
@@ -39,6 +47,10 @@ export function checkLlms(buildDir) {
     if (!candidates.some((c) => existsSync(c))) {
       problems.push(`llms.txt links to ${link}, which is not a built page (404 on the live site)`);
     }
+  }
+  const fullText = readFileSync(full, 'utf8');
+  for (const h of FORBIDDEN_FULL_HEADINGS) {
+    if (new RegExp(`^## ${h}`, 'm').test(fullText)) problems.push(`llms-full.txt contains the unpublished document "${h}"`);
   }
   const size = statSync(full).size;
   if (size > MAX_FULL_BYTES) problems.push(`llms-full.txt is ${size} bytes, over the ${MAX_FULL_BYTES} byte budget`);

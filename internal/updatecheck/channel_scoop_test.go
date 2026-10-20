@@ -23,6 +23,7 @@ func TestDetectChannel_Scoop(t *testing.T) {
 		{"scoop global install", ChannelTarball, `C:\ProgramData\scoop\apps\mcpproxy\current\mcpproxy.exe`, ChannelScoop},
 		{"mixed case and slashes", ChannelTarball, `c:/Users/U/Scoop/Apps/MCPProxy/current/mcpproxy.exe`, ChannelScoop},
 		{"custom SCOOP root with install.json evidence", ChannelTarball, `D:\Tools\apps\mcpproxy\0.71.1\mcpproxy.exe`, ChannelScoop},
+		{"custom SCOOP root with scoop-install.json only", ChannelTarball, `D:\Tools\apps\mcpproxy\0.71.2\mcpproxy.exe`, ChannelScoop},
 		{"apps/mcpproxy without scoop evidence stays tarball", ChannelTarball, `E:\apps\mcpproxy\mcpproxy.exe`, ChannelTarball},
 		{"unstamped build still scoop", "", `C:\Users\u\scoop\apps\mcpproxy\current\mcpproxy.exe`, ChannelScoop},
 		{"other scoop app is not mcpproxy", ChannelTarball, `C:\Users\u\scoop\apps\othertool\current\mcpproxy.exe`, ChannelTarball},
@@ -36,9 +37,13 @@ func TestDetectChannel_Scoop(t *testing.T) {
 			d.marker = tt.marker
 			path := tt.path
 			d.execPath = func() (string, error) { return path, nil }
-			// scoop writes install.json beside the executable in the version dir.
+			// scoop writes scoop-install.json (legacy: install.json) beside the executable in the version dir.
 			d.statFile = func(p string) error {
-				if strings.Contains(tt.name, "install.json evidence") && strings.HasSuffix(filepath.ToSlash(strings.ReplaceAll(p, `\`, "/")), "/0.71.1/install.json") {
+				q := filepath.ToSlash(strings.ReplaceAll(p, `\`, "/"))
+				if strings.Contains(tt.name, "install.json evidence") && strings.HasSuffix(q, "/0.71.1/install.json") {
+					return nil
+				}
+				if strings.Contains(tt.name, "scoop-install.json only") && strings.HasSuffix(q, "/0.71.2/scoop-install.json") {
 					return nil
 				}
 				return os.ErrNotExist

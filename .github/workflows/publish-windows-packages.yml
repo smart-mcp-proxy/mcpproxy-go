@@ -73,6 +73,14 @@ jobs:
             exit 0
           fi
           mkdir -p bucket/bucket
+          # Never move the bucket backwards: re-running an older release (recovery,
+          # manual dispatch) must not make new installs get an older version.
+          CUR="$(jq -r '.version // empty' bucket/bucket/mcpproxy.json 2>/dev/null || true)"
+          NEW="${TAG#v}"
+          if [ -n "${CUR}" ] && [ "${CUR}" != "${NEW}" ] && [ "$(printf '%s\n%s\n' "${CUR}" "${NEW}" | sort -V | tail -1)" = "${CUR}" ]; then
+            echo "::notice::scoop bucket already at ${CUR}, newer than ${NEW}; not downgrading"
+            exit 0
+          fi
           scripts/gen-scoop-manifest.sh "${TAG}" checksums.txt > bucket/bucket/mcpproxy.json
           cd bucket
           if git diff --quiet -- bucket/mcpproxy.json && [ -z "$(git ls-files --others --exclude-standard bucket/mcpproxy.json)" ]; then
