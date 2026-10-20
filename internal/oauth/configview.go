@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"reflect"
 
@@ -42,7 +43,39 @@ func RedactedConfig(cfg *config.Config) *config.Config {
 	if !LiveRedaction.RedactNested("", &masked) {
 		return nil
 	}
+	restorePublicSigners(cfg, &masked)
 	return &masked
+}
+
+// restorePublicSigners puts security.tpa_operator_signers back verbatim after
+// the generic walk masked them. They are Ed25519 PUBLIC keys (spec 101): the
+// value-shaped detector reads a 44-character base64 string as a high-entropy
+// secret, and a masked trust root could neither be read back by the operator
+// nor survive a GET -> PATCH round trip. The exemption lives HERE, in the typed
+// config door, and never in the generic walker, which also redacts audit
+// payloads and request bodies where the same field names are attacker-chosen.
+// Only an entry that IS a canonical 32-byte public key is restored; anything
+// else in the list stays masked like any secret.
+func restorePublicSigners(src, masked *config.Config) {
+	if src.Security == nil || masked.Security == nil || len(src.Security.TPAOperatorSigners) == 0 ||
+		len(masked.Security.TPAOperatorSigners) != len(src.Security.TPAOperatorSigners) {
+		return
+	}
+	sec := *masked.Security
+	sec.TPAOperatorSigners = append([]string(nil), masked.Security.TPAOperatorSigners...)
+	for i, s := range src.Security.TPAOperatorSigners {
+		if isPublicKeyShape(s) {
+			sec.TPAOperatorSigners[i] = s
+		}
+	}
+	masked.Security = &sec
+}
+
+// isPublicKeyShape reports whether s is the canonical standard-base64 encoding
+// of exactly 32 bytes (an Ed25519 public key).
+func isPublicKeyShape(s string) bool {
+	b, err := base64.StdEncoding.Strict().DecodeString(s)
+	return err == nil && len(b) == 32 && base64.StdEncoding.EncodeToString(b) == s
 }
 
 // UnmaskLiveConfigTree is the write twin of RedactedConfig: it reverts every

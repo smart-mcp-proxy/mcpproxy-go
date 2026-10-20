@@ -41,6 +41,7 @@ plan.md was written 2026-08-26 against Go 1.25.5. Re-validated against `main` @ 
 - **A7 "sidecar absent"** means `ENOENT` only; a present-but-invalid sidecar is a rejection, never a fallback to the unsigned path.
 - **A8 the never-written FIFO** of SC-011(c) is refused immediately as `not_regular_file` (the `O_NONBLOCK` open never starts a read); the 5 s budget and the one-parked-reader-per-path cap are proven with an injectable blocking reader.
 - **A9 config**: `require_signed_bundle` (plain bool, default **false**, maintainer decision D2), `tpa_active_root` (`publisher`|`operator`, default publisher), `tpa_operator_signers` (base64 raw Ed25519 public keys), `tpa_operator_baseline` (`*uint64`, absent = unbaselined → degraded), `tpa_operator_epoch` (`*uint64`, absent = 0). Malformed/duplicate signers fail `ValidateDetailed` (write-time) and are dropped with a log at load (never boot-fatal). No env aliases: the trust root is config-resident by design.
+- **A11 baselines are exclusive for activation**: a baseline SEEDS the authority's watermark (FR-009b), so normal activation needs a sequence strictly above it (equal sequence with a different digest is the FR-009 equal-sequence refusal); only an explicit rollback target may sit AT its authority's baseline (FR-010 "at or above"). Quickstart signs sequence 2 against operator baseline 1 for this reason.
 - **A10 no config writes**: all persisted state is BBolt; Spec 116 `Runtime.Commit` is not involved.
 
 ---

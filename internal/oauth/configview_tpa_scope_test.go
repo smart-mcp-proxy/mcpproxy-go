@@ -42,40 +42,41 @@ func TestRedactedConfig_TPASignerExemptionIsScopedToTheSecurityPath(t *testing.T
 	assert.Equal(t, tpaScopeSecret, cfg.Servers[0].Env["tpa_operator_signers"], "the source config is untouched")
 }
 
-func TestRedactionValue_TPASignerExemptionNeedsTheSecurityParent(t *testing.T) {
-	signer := "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
-	list := func() []interface{} { return []interface{}{signer} }
-
-	t.Run("under security: unmasked", func(t *testing.T) {
-		got := LiveRedaction.Value("", map[string]interface{}{
-			"security": map[string]interface{}{"tpa_operator_signers": list()},
+// The generic walker never exempts anything by field name: it also redacts
+// audit payloads and request bodies, where a "security.tpa_operator_signers"
+// shape is attacker-chosen and may carry a real credential (Sol 6.1 review,
+// round 1). The exemption lives only in the typed config read door.
+func TestRedactionValue_NeverExemptsTheSignerPathInGenericPayloads(t *testing.T) {
+	const credential = "mcp_agt_1234567890abcdef1234567890abcdef"
+	payload := func() map[string]interface{} {
+		return map[string]interface{}{
+			"request": map[string]interface{}{
+				"security": map[string]interface{}{"tpa_operator_signers": []interface{}{credential}},
+			},
+			"security": map[string]interface{}{"tpa_operator_signers": []interface{}{credential}},
+		}
+	}
+	for name, r := range map[string]Redaction{"live": LiveRedaction, "audit": AuditRedaction} {
+		t.Run(name, func(t *testing.T) {
+			got := r.Value("", payload()).(map[string]interface{})
+			top := got["security"].(map[string]interface{})["tpa_operator_signers"].([]interface{})
+			nested := got["request"].(map[string]interface{})["security"].(map[string]interface{})["tpa_operator_signers"].([]interface{})
+			assert.NotEqual(t, credential, top[0], "top-level shape is masked in a generic payload")
+			assert.NotEqual(t, credential, nested[0], "nested shape is masked")
 		})
-		assert.Equal(t, map[string]interface{}{
-			"security": map[string]interface{}{"tpa_operator_signers": []interface{}{signer}},
-		}, got)
-	})
+	}
+}
 
-	t.Run("as a free-form string leaf anywhere: masked", func(t *testing.T) {
-		got := LiveRedaction.Value("", map[string]interface{}{
-			"free":                 map[string]interface{}{"tpa_operator_signers": tpaScopeSecret},
-			"tpa_operator_signers": tpaScopeSecret,
-		}).(map[string]interface{})
-		assert.NotEqual(t, tpaScopeSecret, got["tpa_operator_signers"])
-		assert.NotEqual(t, tpaScopeSecret, got["free"].(map[string]interface{})["tpa_operator_signers"])
-	})
-
-	t.Run("a list under a non-security parent: masked", func(t *testing.T) {
-		got := LiveRedaction.Value("", map[string]interface{}{
-			"other": map[string]interface{}{"tpa_operator_signers": []interface{}{tpaScopeSecret}},
-		}).(map[string]interface{})
-		inner := got["other"].(map[string]interface{})["tpa_operator_signers"].([]interface{})
-		assert.NotEqual(t, tpaScopeSecret, inner[0])
-	})
-
-	t.Run("a bare string under security is not the signer list: masked", func(t *testing.T) {
-		got := LiveRedaction.Value("", map[string]interface{}{
-			"security": map[string]interface{}{"tpa_operator_signers": tpaScopeSecret},
-		}).(map[string]interface{})
-		assert.NotEqual(t, tpaScopeSecret, got["security"].(map[string]interface{})["tpa_operator_signers"])
-	})
+// Only values that ARE public keys come back verbatim from the config read
+// door; anything else in the list is masked like any secret.
+func TestRedactedConfig_OnlyPublicKeyShapedSignersAreReadable(t *testing.T) {
+	signer := "AQIDBAUGBwgJCgsMDQ4PEBESExQVFhcYGRobHB0eHyA="
+	cfg := config.DefaultConfig()
+	cfg.Security = &config.SecurityConfig{TPAOperatorSigners: []string{signer, tpaScopeSecret}}
+	masked := RedactedConfig(cfg)
+	require.NotNil(t, masked)
+	require.Len(t, masked.Security.TPAOperatorSigners, 2)
+	assert.Equal(t, signer, masked.Security.TPAOperatorSigners[0])
+	assert.NotEqual(t, tpaScopeSecret, masked.Security.TPAOperatorSigners[1])
+	assert.Equal(t, []string{signer, tpaScopeSecret}, cfg.Security.TPAOperatorSigners, "the source config is untouched")
 }

@@ -750,10 +750,6 @@ func (r Redaction) Value(key string, v interface{}) interface{} {
 					continue
 				}
 			}
-			if list, ok := val.([]interface{}); ok && isPublicKeyListPath(key, k) {
-				out[k] = r.publicKeyList(list)
-				continue
-			}
 			out[k] = r.Value(k, val)
 		}
 		return out
@@ -775,36 +771,6 @@ func (r Redaction) Value(key string, v interface{}) interface{} {
 		// Bools, json.Number and nil carry no secrets and stay verbatim.
 		return v
 	}
-}
-
-// isPublicKeyListPath reports whether the list stored under `child` in a map
-// enclosed by `parent` holds PUBLIC key material that is deliberately readable.
-// Spec 101's security.tpa_operator_signers lists operator Ed25519 public keys
-// as base64; the value-shaped detector reads a 44-character base64 string as a
-// high-entropy secret and would mask it, so an operator could not read back
-// what they configured and a UI round trip would write the mask into the trust
-// root. A public key is not a credential.
-//
-// The exemption is scoped to that config PATH (a list directly under the
-// `security` block), never to the bare key name: the same name elsewhere is a
-// user-chosen key of a free-form map (an env var, a header, an OAuth extra
-// param) whose value must stay masked.
-func isPublicKeyListPath(parent, child string) bool {
-	return strings.EqualFold(parent, "security") && strings.EqualFold(child, "tpa_operator_signers")
-}
-
-// publicKeyList renders a list of public keys: string elements are only
-// length-capped; anything else goes through the ordinary walk.
-func (r Redaction) publicKeyList(list []interface{}) []interface{} {
-	out := make([]interface{}, len(list))
-	for i, el := range list {
-		if s, ok := el.(string); ok {
-			out[i] = r.CapString(s)
-			continue
-		}
-		out[i] = r.Value("", el)
-	}
-	return out
 }
 
 // argvValue masks a command-line argument vector reached through the generic

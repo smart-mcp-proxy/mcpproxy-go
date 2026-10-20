@@ -81,8 +81,18 @@ func lkgWrite(dataDir, digest string, bundle, sidecar []byte, signed bool) error
 		return fmt.Errorf("refusing to name an LKG file after %q", digest)
 	}
 	dir := lkgDirPath(dataDir)
+	_, statErr := os.Lstat(dir)
+	created := errors.Is(statErr, os.ErrNotExist)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
+	}
+	if created {
+		// A new directory's own entry lives in its parent: fsync the parent
+		// too, or a power loss after the state commit could leave an Active
+		// record whose tpa-lkg/ never reached the disk (FR-011a).
+		if err := lkgSyncDirFn(dataDir); err != nil {
+			return err
+		}
 	}
 	if err := lkgWriteFile(dir, digest+".json", bundle); err != nil {
 		return err
@@ -92,16 +102,21 @@ func lkgWrite(dataDir, digest string, bundle, sidecar []byte, signed bool) error
 			return err
 		}
 	}
-	return lkgSyncDir(dir)
+	return lkgSyncDirFn(dir)
 }
 
 // lkgWriteFile writes data to dir/name via a synced temp file and a rename.
 func lkgWriteFile(dir, name string, data []byte) error {
 	final := filepath.Join(dir, name)
-	if st, err := os.Lstat(final); err == nil && st.Mode().IsRegular() {
-		if existing, rerr := os.ReadFile(final); rerr == nil && bytes.Equal(existing, data) { //nolint:gosec // path is dataDir/tpa-lkg/<validated digest>
-			return nil
-		}
+	// The data directory is attacker-writable in the threat model, so an
+	// existing file is compared only through the descriptor-first, bounded,
+	// budgeted reader (a planted FIFO or oversized file is never read raw);
+	// anything that does not read back as exactly these bytes is replaced.
+	ctx, cancel := context.WithTimeout(context.Background(), bundleReadBudget)
+	existing, rerr := readCandidateFile(ctx, final, int64(len(data)))
+	cancel()
+	if rerr == nil && bytes.Equal(existing, data) {
+		return nil
 	}
 	tmp, err := os.CreateTemp(dir, lkgTempPrefix+"*")
 	if err != nil {
@@ -129,6 +144,10 @@ func lkgWriteFile(dir, name string, data []byte) error {
 	}
 	return nil
 }
+
+// lkgSyncDirFn is lkgSyncDir behind a test seam (tests record which
+// directories were made durable).
+var lkgSyncDirFn = lkgSyncDir
 
 // lkgSyncDir fsyncs the directory so the renames are durable. Directory fsync
 // is not supported on Windows (opening a directory handle for sync fails
