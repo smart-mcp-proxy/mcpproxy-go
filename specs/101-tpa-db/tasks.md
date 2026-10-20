@@ -133,31 +133,31 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
 
 ### Foundations
 
-- [ ] T200 [P] Write a failing table test in `internal/security/scanner/tpa_bundle_signatures_test.go`.
+- [x] T200 [P] Write a failing table test in `internal/security/scanner/tpa_bundle_signatures_test.go`.
   - **Reject cases.** One case per rule in D-US2-1, D-US2-2 and D-US2-3. Each asserts its own error substring.
   - **Fail-closed through `ConfigureBundle`.** The last-known-good bundle keeps serving and `LoadError` is set.
   - **Accept cases.**
     - A valid bundle with `signatures[]` loads.
     - A v0.1 bundle without `signatures[]` loads unchanged. Reuse the fixtures in `tpa_bundle_source_test.go` and `tpa_bundle_empty_test.go`.
-- [ ] T201 Implement `internal/security/scanner/tpa_bundle_signatures.go` (`rawSignature`, `rawProvenance`, `validateSignatures`).
+- [x] T201 Implement `internal/security/scanner/tpa_bundle_signatures.go` (`rawSignature`, `rawProvenance`, `validateSignatures`).
   - In `internal/security/scanner/tpa_bundle.go`, add the `Signatures []rawSignature` field to `rawBundle`.
   - Also in `tpa_bundle.go`, add one `validateSignatures` call before the final `return` of `loadBundleCheck`.
   - Makes T200 pass.
-- [ ] T202 [P] Write a failing test, `internal/security/scanner/tpa_bundle_eval_test.go`.
+- [x] T202 [P] Write a failing test, `internal/security/scanner/tpa_bundle_eval_test.go`.
   - `LoadBundleCheck(EmbeddedBundle())` returns the same runnable count and fingerprint as `BundleStatus()`.
   - Calling it on bad bytes leaves `BundleStatus()` unchanged.
   - `EmbeddedBundle()` returns a copy, so mutating the result does not change the embed.
   - `ParseBundleSignatures` round-trips `rule_ids`.
-- [ ] T203 Implement `internal/security/scanner/tpa_bundle_eval.go` (`LoadBundleCheck`, `EmbeddedBundle`, `Signature`, `ParseBundleSignatures`), wrapping `loadBundleWithInfo` without editing it. Coordinate the exported name with US1's `tpa_candidate.go` (D11).
-- [ ] T204 [P] Add a failing case to `internal/security/scanner/tpa_bundle_test.go`: a rule with category `exfiltration` maps to `detect.ThreatExfiltration`. Then add the case to `bundleCategoryToThreatType` in `tpa_bundle.go`.
-- [ ] T205 Amend `specs/101-tpa-db/contracts/bundle-signatures-section.md`:
+- [x] T203 Implement `internal/security/scanner/tpa_bundle_eval.go` (`LoadBundleCheck`, `EmbeddedBundle`, `Signature`, `ParseBundleSignatures`), wrapping `loadBundleWithInfo` without editing it. Coordinate the exported name with US1's `tpa_candidate.go` (D11).
+- [x] T204 [P] Add a failing case to `internal/security/scanner/tpa_bundle_test.go`: a rule with category `exfiltration` maps to `detect.ThreatExfiltration`. Then add the case to `bundleCategoryToThreatType` in `tpa_bundle.go`.
+- [x] T205 Amend `specs/101-tpa-db/contracts/bundle-signatures-section.md`:
   - the `rule_ids` format (D-US2-1);
   - the gating derivation (D-US2-2);
   - the split between the load layer and the policy layer (D-US2-3);
   - the licence allowlist;
   - the `hn_<class>_` naming;
   - §6: `signature_count` is `len(signatures)`, which equals distinct TPA ids. It is not the rule count; today's file holds 6 and 10.
-- [ ] T206 [P] Amend the remaining spec docs:
+- [x] T206 [P] Amend the remaining spec docs:
   - `specs/101-tpa-db/spec.md`: the Assumption that the pipeline is outside the repo becomes "in-repo deterministic builder, signing external/US1". Reword FR-013 and AC-4 to the registered prefix, and FR-013's "frozen dataset" to "extended in place".
   - `specs/101-tpa-db/data-model.md` §7.
   - `specs/101-tpa-db/quickstart.md` §8: `go run ./cmd/tpa-corpus validate`.
@@ -165,14 +165,14 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
 
 ### Corpus
 
-- [ ] T207 Research. Append section "R12 — Seed corpus classes and sources" to `specs/101-tpa-db/research.md`. It must contain:
+- [x] T207 Research. Append section "R12 — Seed corpus classes and sources" to `specs/101-tpa-db/research.md`. It must contain:
   - The final class list (at least 8) and the planned signatures 0007 onward (at least 25 gating in total). Each needs a **verified** public disclosure URL and date. Do not use root or blog-index URLs, and do not invent URLs; unverifiable sources are dropped.
   - The licence for each signature.
   - The control designation (D-US2-7).
   - A pre-check of every planned regex against the hard families in `phrase_injection.go`. The aim is to label each signature as built-in-overlapped or bundle-only, not to avoid overlap except for the control.
   - The note that IoC-literal patterns (`attkr@pwnd.com`, `+13241234123`) are narrow, campaign-specific signatures. New classes use general phrasing.
   - Source material: `tests/tpa-attack-lab/catalog.go` (V01–V19, M01–M06). RT-01..07 are mostly not description classes. Do not mine `docs/research/.../redteam-findings.md` for coverage claims, because it predates `a857dbafe`.
-- [ ] T208 [P] Write a failing test, `internal/security/tpacorpus/build_test.go`, using an `fstest.MapFS`. It must cover:
+- [x] T208 [P] Write a failing test, `internal/security/tpacorpus/build_test.go`, using an `fstest.MapFS`. It must cover:
   - two builds are byte-equal;
   - `SOURCE_DATE_EPOCH` overrides the manifest pin, and `generated_at` is RFC 3339 UTC;
   - `<IMPORTANT>` is not escaped;
@@ -181,47 +181,47 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
   - `Options.Exclude` drops the signature and its rules and fixes `signature_count`;
   - the output passes `scanner.LoadBundleCheck`;
   - the build refuses a source that is missing provenance or a licence, has a licence outside the allowlist, or has an unknown class.
-- [ ] T209 [P] Write a failing test, `internal/security/tpacorpus/policy_test.go`, for `ValidatePolicy(bundle, dataset []byte)`:
+- [x] T209 [P] Write a failing test, `internal/security/tpacorpus/policy_test.go`, for `ValidatePolicy(bundle, dataset []byte)`:
   - each gating signature has at least 1 malicious entry with a matching `tpa_id` and category;
   - each gating signature has at least 1 hard negative with `resembles == category` and prefix `hn_<class>_`;
   - exactly one `canonical` entry per class;
   - every `tpa_id` resolves;
   - no class name is a prefix of another.
-- [ ] T210 Implement `internal/security/tpacorpus/` (`classes.go`: `Classes`, `LicenceAllowlist`; `build.go`: `Build(fs.FS, Options)`; `policy.go`: `ValidatePolicy`). Use stdlib only and add no dependencies. Makes T208 and T209 pass.
-- [ ] T211 Implement `cmd/tpa-corpus/main.go`, with subcommands `build` (writes `internal/security/scanner/bundled/scanner-bundle.json`), `verify` (rebuild and compare, exit non-zero on drift) and `validate --bundle <path> --dataset <path>` (load layer plus policy layer). `cmd/tpa-corpus/main_test.go` covers the exit codes, test first.
-- [ ] T212 Migrate the six existing signatures:
+- [x] T210 Implement `internal/security/tpacorpus/` (`classes.go`: `Classes`, `LicenceAllowlist`; `build.go`: `Build(fs.FS, Options)`; `policy.go`: `ValidatePolicy`). Use stdlib only and add no dependencies. Makes T208 and T209 pass.
+- [x] T211 Implement `cmd/tpa-corpus/main.go`, with subcommands `build` (writes `internal/security/scanner/bundled/scanner-bundle.json`), `verify` (rebuild and compare, exit non-zero on drift) and `validate --bundle <path> --dataset <path>` (load layer plus policy layer). `cmd/tpa-corpus/main_test.go` covers the exit codes, test first.
+- [x] T212 Migrate the six existing signatures:
   - Create `internal/security/tpacorpus/signatures/manifest.json` and `TPA-2026-0001.json` to `TPA-2026-0006.json`.
   - 0002 is `gating:false`.
   - 0003 is re-classed to `tpa_sensitive_file_coaxing` in `signatures[]` only.
   - Existing `rules[]` and `skipped[]` stay byte-identical.
-- [ ] T213 Write a failing test, `internal/security/tpacorpus/embedded_test.go` (`TestEmbeddedCorpus_*`):
+- [x] T213 Write a failing test, `internal/security/tpacorpus/embedded_test.go` (`TestEmbeddedCorpus_*`):
   - rebuilding from `signatures/` with the manifest pin equals `scanner.EmbeddedBundle()` byte for byte;
   - the embedded bundle passes `ValidatePolicy` against `detect_corpus_v1.json`;
   - the 10 v0.1 rules are present unchanged, so the CheckIDs that attack-lab and the runtime tests pin stay stable.
-- [ ] T214 Author the new signature sources `internal/security/tpacorpus/signatures/TPA-2026-0007.json` and onward, per T207, including the control.
+- [x] T214 Author the new signature sources `internal/security/tpacorpus/signatures/TPA-2026-0007.json` and onward, per T207, including the control.
   - Every regex is inline `(?is)`, `regex` × `tool_description`, and RE2-safe.
   - Before committing each regex, run `go test ./internal/security/scanner/ -run 'TestSEC01_RealWorldBenignCorpora_NoNewHolds|TestSEC01_VariantCorpus|TestCoverage_BenignNotHardBlocked'`.
   - If a regex causes a regression, narrow it. **Never re-baseline** `testdata/sec01_realworld_baseline.json`.
-- [ ] T215 [P] Write a failing test by extending `specs/065-evaluation-foundation/datasets/detect_corpus_test.go`:
+- [x] T215 [P] Write a failing test by extending `specs/065-evaluation-foundation/datasets/detect_corpus_test.go`:
   - derive the bundle classes in `validDetectCategory`, `gatedDetectCategories` and `hardNegPrefix` from `tpacorpus.Classes`;
   - schema checks for `tpa_id` and `canonical`;
   - no `hardNegPrefix` value is a prefix of another.
-- [ ] T216 Add the eval pairs to `specs/065-evaluation-foundation/datasets/detect_corpus_v1.json`:
+- [x] T216 Add the eval pairs to `specs/065-evaluation-foundation/datasets/detect_corpus_v1.json`:
   - at least 1 malicious entry per gating signature (`tpa_id`, class category, `self-authored`);
   - at least 2 `hn_<class>_*` hard negatives per class (security tooling, docs that quote attacks);
   - one `canonical` per class.
   - Update `specs/065-evaluation-foundation/datasets/README.md`: the composition table, which is stale (it says 32 and the file has 57), and the in-place-extension note.
-- [ ] T217 Regenerate the bundle with `SOURCE_DATE_EPOCH=<pin> go run ./cmd/tpa-corpus build`, setting `bundle_version` to `0.1.1`. T213 and T215 now pass, and `go run ./cmd/tpa-corpus verify` exits 0.
-- [ ] T218 Write `internal/security/scanner/tpa_corpus_sc004_test.go` (`TestSC004_*`), as specified in D-US2-9.
+- [x] T217 Regenerate the bundle with `SOURCE_DATE_EPOCH=<pin> go run ./cmd/tpa-corpus build`, setting `bundle_version` to `0.1.1`. T213 and T215 now pass, and `go run ./cmd/tpa-corpus verify` exits 0.
+- [x] T218 Write `internal/security/scanner/tpa_corpus_sc004_test.go` (`TestSC004_*`), as specified in D-US2-9.
 
 ### Gate
 
-- [ ] T219 [P] Write a failing test, `cmd/scan-eval/bundle_gate_test.go`. It must cover:
+- [x] T219 [P] Write a failing test, `cmd/scan-eval/bundle_gate_test.go`. It must cover:
   - with no `--bundle`, the metrics `checks` contain `tpa.bundle` and a new `bundle` block carries the fingerprint, runnable rules and signature count;
   - `--bundle <missing>` exits `4`;
   - `--bundle <file that fails validation>` exits `4` and never falls back to the embedded bundle;
   - `TestCategoryCheck_CoversCorpusClasses`: every entry of `tpacorpus.Classes`, and every gating signature category in the embedded bundle, maps to `"tpa.bundle"` in `categoryCheck`.
-- [ ] T220 Implement the gate changes:
+- [x] T220 Implement the gate changes:
   - `cmd/scan-eval/main.go`: the `--bundle` flag, with empty meaning the embedded bundle loaded through `scanner.LoadBundleCheck`.
   - `cmd/scan-eval/gate.go`:
     - `builtinGateChecks()` plus `gateChecks(bundle)`;
@@ -230,16 +230,16 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
     - a `bundle` block in `gateMetrics`;
     - a rewritten "MUST mirror" doc comment (the production surface is the hard built-ins plus `BundleCheck`, and the soft checks are unscored by design).
   - Update the five `evaluateGateCorpus`/`runGate` call sites in `cmd/scan-eval/gate_test.go`.
-- [ ] T221 Write the control corpus `cmd/scan-eval/testdata/bundle_control_corpus.json` (D-US2-7). Its `description` names the control id and why it is the control.
-- [ ] T222 [P] Write `cmd/scan-eval/bundle_control_test.go` with two tests:
+- [x] T221 Write the control corpus `cmd/scan-eval/testdata/bundle_control_corpus.json` (D-US2-7). Its `description` names the control id and why it is the control.
+- [x] T222 [P] Write `cmd/scan-eval/bundle_control_test.go` with two tests:
   - `TestBundleControl_NoOverlap`: with `builtinGateChecks()` only, `Detected == 0`. With the full bundle, the finding's `Signals` hold exactly one `tpa.` id, the control's, and no hard negative is flagged.
   - `TestBundleControl_RemovalBreachesGate`: `run()` with `--bundle <full>` exits `exitOK`. `run()` with `--bundle <tpacorpus.Build Exclude control>` exits exactly `exitGateBreach`, and the test asserts the two recall values, 1.0 and 0.0.
-- [ ] T223 [P] Write `internal/security/scanner/tpa_control_overlap_test.go` (`TestBundleControl_NoProductionBuiltinHardFinding`). It reads `../../../cmd/scan-eval/testdata/bundle_control_corpus.json` and asserts that `baselineEngineChecks()` alone yields no `ThreatLevelDangerous` finding for the control sample.
-- [ ] T224 Run `go run ./cmd/scan-eval --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json --gate --min-recall 0.90 --max-fp 0.05`. It must pass, with every `tpa_*` category listed as `gated: true`. Record the numbers in the PR body.
+- [x] T223 [P] Write `internal/security/scanner/tpa_control_overlap_test.go` (`TestBundleControl_NoProductionBuiltinHardFinding`). It reads `../../../cmd/scan-eval/testdata/bundle_control_corpus.json` and asserts that `baselineEngineChecks()` alone yields no `ThreatLevelDangerous` finding for the control sample.
+- [x] T224 Run `go run ./cmd/scan-eval --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json --gate --min-recall 0.90 --max-fp 0.05`. It must pass, with every `tpa_*` category listed as `gated: true`. Record the numbers in the PR body.
 
 ### CI
 
-- [ ] T225 Edit `.github/workflows/eval.yml` (job `security-d2`):
+- [x] T225 Edit `.github/workflows/eval.yml` (job `security-d2`):
   - add the path filter `cmd/tpa-corpus/**`;
   - add a blocking step after the gate step that runs `go run ./cmd/tpa-corpus verify` and the `go test` line from D-US2-8;
   - update the comment blocks (lines 4–9 and 57–63) to say the gate scores the embedded bundle.
@@ -247,7 +247,7 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
 
 ### Docs
 
-- [ ] T226 [P] New contributor doc `docs/features/tpa-signatures.md`. It covers:
+- [x] T226 [P] New contributor doc `docs/features/tpa-signatures.md`. It covers:
   - the class vocabulary;
   - the source file format;
   - provenance, licence allowlist and FR-012 refusal;
@@ -255,7 +255,7 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
   - the `build`/`verify`/`validate` and `scan-eval --gate --bundle` loop;
   - how the control stops a vacuous gate.
   - Add it to `website/sidebars.js` under the Security category.
-- [ ] T227 [P] Update `docs/features/tool-scanner.md`:
+- [x] T227 [P] Update `docs/features/tool-scanner.md`:
   - add `BundleCheck` to the checks table;
   - add the `--bundle` flag next to the gate command (around line 236);
   - rewrite the forward-compat paragraph (lines 256–271) so that "unmapped is unscored" reads as a hazard closed by `TestCategoryCheck_*`;
@@ -264,10 +264,10 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
 
 ### Fixups (existing tests and goldens affected by bundle growth)
 
-- [ ] T228 Update the tests that pin the bundle's size or version:
+- [x] T228 Update the tests that pin the bundle's size or version:
   - `internal/security/scanner/tpa_bundle_test.go:27-38` (`TestLoadEmbeddedBundle`): replace the pins Runnable 7, Skipped 3, Declared 3 with values derived from `ParseBundleSignatures`, or with the new literals, and keep `ID()=="tpa.bundle"`.
   - `internal/security/scanner/tpa_bundle_source_test.go:57`: `BundleVersion` is now `"0.1.1"`.
-- [ ] T229 Verify that these tests stay green **without editing their expectations**. If one fails, narrow the new regex, not the test:
+- [x] T229 Verify that these tests stay green **without editing their expectations**. If one fails, narrow the new regex, not the test:
   - `internal/security/scanner/tpa_bundle_test.go:61-98` (0001 signal, `ThreatRugPull`, confidence 0.9, clean weather).
   - `internal/security/scanner/tpa_bundle_span_test.go:44,80,95-118`.
   - `internal/security/scanner/inprocess_span_test.go:75`.
@@ -281,7 +281,7 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
   - `internal/runtime/qapilot_conformance_test.go:319` (the benign contracts).
   - `internal/runtime/tool_quarantine_scan_test.go:36,120,179,325,401,424,428`.
   - `cmd/scan-eval/gate_test.go:239` (`TestGate_CommittedCorpusPasses`).
-- [ ] T230 Run the suites:
+- [x] T230 Run the suites:
   - `go test -race ./internal/security/... ./cmd/scan-eval/ ./cmd/tpa-corpus/ ./specs/065-evaluation-foundation/datasets/ ./tests/tpa-attack-lab/ ./internal/runtime/ -run 'Quarantine|Scan'`.
   - `go test -tags server -run Bundle ./internal/server/`, which exercises `tpa_bundle_transport_test.go` (own one-rule bundle, no `signatures[]`).
   - `./scripts/test-api-e2e.sh`.
@@ -289,11 +289,11 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
 
 ### Ship
 
-- [ ] T231 Run lint both ways:
+- [x] T231 Run lint both ways:
   - `/opt/homebrew/bin/golangci-lint run --config .github/.golangci.yml ./...`
   - the same command with `--build-tags server`.
-- [ ] T232 In `roadmap.yaml`, set `tpa-db` → `tpa-db-corpus` to `status: in_review` with the `pr:` link (`done` once merged). Regenerate `ROADMAP.md` with `python3 scripts/gen-roadmap.py`.
-- [ ] T233 Add a Recent Changes line to `CLAUDE.md` (`101-tpa-db US2`): Go 1.26, `internal/security/tpacorpus` + `cmd/tpa-corpus`, `signatures[]` load-layer integrity, `scan-eval --bundle`, the control, and **No new dependencies**.
+- [x] T232 In `roadmap.yaml`, set `tpa-db` → `tpa-db-corpus` to `status: in_review` with the `pr:` link (`done` once merged). Regenerate `ROADMAP.md` with `python3 scripts/gen-roadmap.py`.
+- [x] T233 Add a Recent Changes line to `CLAUDE.md` (`101-tpa-db US2`): Go 1.26, `internal/security/tpacorpus` + `cmd/tpa-corpus`, `signatures[]` load-layer integrity, `scan-eval --bundle`, the control, and **No new dependencies**.
 - [ ] T234 Run an internal review workflow (provenance accuracy, licence compliance, sample safety, gate non-vacuity, determinism; 3-refuter verification), then the cross-model round with opencode `github-copilot/gpt-6.1-sol` (zcode's Z.AI login is expired), split into small file-named chunks, with a cap of 10 rounds. The fallback if Sol 6.1 is down is the app-bundled codex `gpt-5.6-sol`, read-only.
 - [ ] T235 Open the PR against `main`:
   - title `feat(security): Spec 101 US2 TPA seed corpus and eval gate`;
