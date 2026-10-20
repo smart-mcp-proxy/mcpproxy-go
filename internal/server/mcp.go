@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os/exec"
 	"regexp"
 	"sort"
@@ -403,6 +406,67 @@ func (p *MCPProxyServer) currentTruncator() *truncate.Truncator {
 		return nil
 	}
 	return p.truncatorFn()
+}
+
+// modernCancellationGuard closes the cross-client cancellation hole the
+// 2026-07-28 era opens in mcp-go (Spec 058 US3, plan risk R1; upstream issue
+// filed from this task).
+//
+// mcp-go keys in-flight request cancels as "<sessionID>:<requestID>"
+// (server/server.go inflightKey) and registers every request under that key.
+// A modern request is served by an ephemeral session whose id is "", so every
+// modern client shares the key space ":<id>": two clients that both use
+// JSON-RPC id 1 — the common case — collide, and a `notifications/cancelled`
+// from one cancels the other's in-flight call. The notification path runs
+// before any hook (request_handler.go: `if baseMessage.ID == nil { ... }`), so
+// the only place mcpproxy can intervene is the HTTP chain.
+//
+// The guard acknowledges (202, exactly as mcp-go answers a notification) and
+// drops a cancellation notification carried by a MODERN POST. Nothing is lost:
+// that era has no session to correlate a separately posted notification with,
+// so it could never have targeted the right request except by accident, and a
+// client that wants to abandon a call closes its connection, which cancels the
+// handler's context through the transport. Legacy requests, which the session
+// id keys correctly, pass through untouched.
+//
+// The era is read from the Mcp-Protocol-Version header: a modern POST must
+// carry it (mcp-go's validateModernRequest refuses one without it), and a
+// legacy POST never carries a modern value. Only then is the body buffered and
+// inspected — a cancellation notification is a notification with that method
+// — and re-attached for the transport, which reads it in full anyway.
+func modernCancellationGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !mcp.IsModernProtocol(r.Header.Get(mcp.HeaderProtocolVersion)) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		if err != nil {
+			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if isCancelledNotification(body) {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isCancelledNotification reports whether body is a JSON-RPC
+// notifications/cancelled notification (no id, or a null one — mcp-go treats
+// both as a notification).
+func isCancelledNotification(body []byte) bool {
+	var msg struct {
+		Method string          `json:"method"`
+		ID     json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(body, &msg) != nil || msg.Method != string(mcp.MethodNotificationCancelled) {
+		return false
+	}
+	return len(msg.ID) == 0 || bytes.Equal(msg.ID, []byte("null"))
 }
 
 // NewMCPProxyServer creates a new MCP proxy server

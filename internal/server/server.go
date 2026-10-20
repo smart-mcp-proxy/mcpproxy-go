@@ -500,6 +500,10 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 	// Harmless on every endpoint but /mcp/all, whose filters are the only
 	// consumers.
 	next = directRequestKindMiddleware(next)
+	// Spec 058 US3 (R1): drop a modern client's separately posted
+	// notifications/cancelled before mcp-go can match it against another
+	// client's in-flight request — every modern request shares session id "".
+	next = modernCancellationGuard(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		token := httpapi.ExtractToken(r)
 		if token == "" {
