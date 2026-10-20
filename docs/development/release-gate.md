@@ -222,17 +222,43 @@ only on `workflow_dispatch`, never on a tag's `workflow_call`):
 ./scripts/test-surface-consistency.sh --seed-mismatch cli:gate-cons-live:health.level=degraded
 ```
 
-## Extension slot (T3)
+## macOS tray smoke (T3) — advisory
 
-- **`reserved/macos-smoke` (T3)** — a macOS-runner job that launches the tray
-  against a running core and uses the `mcpproxy-ui-test` accessibility
-  primitives to assert presence, menu items, and state agreement (US4,
-  FR-019/020). It **starts advisory** (`advisory-fail` does not block). Its
-  promotion criterion (FR-021), to be stated in the workflow when the job is
-  added: *promote to blocking once it has passed on 3 consecutive release tags
-  with no flaky or infrastructure failure.* Promotion is a one-line change
-  (advisory → blocking on the manifest entry / job status handling).
-  When T3 lands, the tray joins the T4 comparison as one more surface.
+`advisory/macos-smoke` (job `macos-smoke`, US4 / FR-019–FR-021) runs on a hosted
+`macos-latest` runner (the toolchain `native-tests.yml` uses; `macos-15`'s
+Swift 6.1 cannot compile the native test suite). It is **advisory**: `continue-on-error: true` on the job plus
+`release-gate run-suite --advisory`, so a failure is listed under
+`advisory_failures` and never blocks publication. A missing fragment (runner
+never scheduled, job died before upload) is reported the same way.
+
+The job and the by-hand command are the same script, `scripts/test-macos-smoke.sh`:
+
+1. `swift build -c release` the tray (`native/macos/MCPProxy`).
+2. `swift test` the whole native suite (`--skip-unit-tests` skips it locally).
+3. Start a core with an isolated `--data-dir`/`--config`/socket under a short
+   scratch root and scratch `HOME` (never `~/.mcpproxy`).
+4. Assemble a minimal ad-hoc-signed `.app` (the bare SwiftPM binary crashes
+   without a bundle: `UNUserNotificationCenter`), launch it with
+   `MCPPROXY_TRAY_SKIP_CORE=1 MCPPROXY_HOME=… MCPPROXY_SOCKET_PATH=…`, and assert
+   from the tray's own log that it reached the core over the Unix socket
+   (`connectToCore: core is ready`) and read the core's exact version
+   (`got version=<core /api/v1/info version>`).
+5. `SIGTERM` the tray: it must exit 0 within 15 s and leave the external core
+   running.
+
+What it cannot do on a hosted runner: grant Accessibility / Screen Recording to
+the job, so the `mcpproxy-ui-test` primitives (status-bar item, menu items,
+screenshot) are **not** used and the tray is not compared in the T4 surface
+check yet (still `not_compared`). No signing or notarization secrets are
+involved. Logs (`core.log`, `tray.log`, swift build/test output) upload as the
+`macos-smoke-logs` artifact.
+
+**Promotion criterion (FR-021):** promote to blocking once the job has passed on
+3 consecutive release tags with no flaky or infrastructure failure. Promotion is
+`Blocking: true` on the `advisory/macos-smoke` manifest entry plus dropping
+`continue-on-error` from the job. Adding the Accessibility-driven menu
+assertions (TCC grant on the runner) is the follow-up that lets the tray join
+the T4 comparison.
 
 ## Runtime budget (FR-005 / SC-007)
 

@@ -30,23 +30,83 @@ func entryByName(t *testing.T, r *Report, name string) *Entry {
 	return nil
 }
 
-func TestMerge_AllBlockingPass_VerdictPass_ReservedNotRun(t *testing.T) {
+func TestMerge_AllBlockingPass_VerdictPass_NothingSilentlyAbsent(t *testing.T) {
 	r := Merge(passAllBlocking())
 	if !r.Passed() {
 		t.Fatalf("expected pass verdict, got %s (failures: %v)", r.Verdict, r.BlockingFailures)
 	}
-	// Reserved slots must be recorded, never silently absent (FR-004).
-	for _, name := range []string{EntryReservedMacOSSmoke} {
-		e := entryByName(t, r, name)
-		if e.Status != StatusNotRun || e.Reason != ReasonNotImplemented {
-			t.Errorf("%s: got status=%s reason=%q, want not-run/%s", name, e.Status, e.Reason, ReasonNotImplemented)
-		}
-		if e.Blocking {
-			t.Errorf("%s must not be blocking while reserved", name)
-		}
+	// The T3 macOS smoke is no longer a reserved "not-implemented-yet" slot;
+	// every manifest entry is recorded with a real status (FR-004).
+	e := entryByName(t, r, EntryAdvisoryMacOSSmoke)
+	if e.Status != StatusPass {
+		t.Errorf("%s: got status=%s reason=%q, want pass", e.Name, e.Status, e.Reason)
+	}
+	if e.Blocking {
+		t.Errorf("%s must not be blocking while advisory", e.Name)
 	}
 	if len(r.Entries) != len(Manifest()) {
 		t.Errorf("entries=%d want %d", len(r.Entries), len(Manifest()))
+	}
+}
+
+// Spec 081 T3 (US4, FR-019/FR-020): the macOS tray smoke is a real ADVISORY
+// manifest entry, no longer the reserved slot.
+func TestManifest_MacOSSmoke_IsAdvisoryNotReserved(t *testing.T) {
+	if EntryAdvisoryMacOSSmoke != "advisory/macos-smoke" {
+		t.Fatalf("entry name = %q, want advisory/macos-smoke (same advisory/ prefix as the T2 sweep)", EntryAdvisoryMacOSSmoke)
+	}
+	var found bool
+	for _, m := range Manifest() {
+		if m.Name == "reserved/macos-smoke" {
+			t.Errorf("the reserved/macos-smoke slot must be renamed, not kept alongside the real entry")
+		}
+		if m.Name != EntryAdvisoryMacOSSmoke {
+			continue
+		}
+		found = true
+		if m.Blocking {
+			t.Errorf("%s must not block the gate (advisory until 3 consecutive passes, FR-020)", m.Name)
+		}
+		if m.Reserved {
+			t.Errorf("%s must no longer be a reserved slot — the smoke job exists", m.Name)
+		}
+	}
+	if !found {
+		t.Fatalf("manifest is missing the %s entry", EntryAdvisoryMacOSSmoke)
+	}
+}
+
+// Every non-green outcome, including a missing fragment (the macOS job never
+// scheduled or died before upload), is an advisory failure and never blocks.
+func TestMerge_MacOSSmoke_NonGreenIsAdvisoryOnly(t *testing.T) {
+	for _, status := range []Status{StatusFail, StatusAdvisoryFail} {
+		frags := passAllBlocking()
+		for i := range frags {
+			if frags[i].Name == EntryAdvisoryMacOSSmoke {
+				frags[i].Status = status
+				frags[i].Reason = "tray never attached to the core"
+			}
+		}
+		r := Merge(frags)
+		if !r.Passed() {
+			t.Fatalf("macOS smoke %s must not block the gate: %v", status, r.BlockingFailures)
+		}
+		if len(r.AdvisoryFailures) != 1 || !strings.Contains(r.AdvisoryFailures[0], EntryAdvisoryMacOSSmoke) {
+			t.Errorf("macOS smoke %s must be an advisory failure, got %v", status, r.AdvisoryFailures)
+		}
+	}
+	var frags []Fragment
+	for _, f := range passAllBlocking() {
+		if f.Name != EntryAdvisoryMacOSSmoke {
+			frags = append(frags, f)
+		}
+	}
+	r := Merge(frags)
+	if !r.Passed() {
+		t.Fatalf("a missing macOS smoke fragment must not block: %v", r.BlockingFailures)
+	}
+	if len(r.AdvisoryFailures) != 1 || !strings.Contains(r.AdvisoryFailures[0], EntryAdvisoryMacOSSmoke) {
+		t.Errorf("a missing macOS smoke fragment must still be reported, got %v", r.AdvisoryFailures)
 	}
 }
 
@@ -103,10 +163,10 @@ func TestMerge_SkippedAndNotRunBlockingEntries_Block(t *testing.T) {
 	}
 }
 
-func TestMerge_AdvisoryFailOnNonBlockingReservedSlot_DoesNotBlock(t *testing.T) {
+func TestMerge_MacOSSmokeAdvisoryFail_DoesNotBlock(t *testing.T) {
 	frags := passAllBlocking()
 	frags = append(frags, Fragment{
-		Name:   EntryReservedMacOSSmoke,
+		Name:   EntryAdvisoryMacOSSmoke,
 		Status: StatusAdvisoryFail,
 		Reason: "tray did not render",
 	})
@@ -114,7 +174,7 @@ func TestMerge_AdvisoryFailOnNonBlockingReservedSlot_DoesNotBlock(t *testing.T) 
 	if !r.Passed() {
 		t.Fatalf("advisory-fail on non-blocking entry must not block: %v", r.BlockingFailures)
 	}
-	if len(r.AdvisoryFailures) != 1 || !strings.Contains(r.AdvisoryFailures[0], EntryReservedMacOSSmoke) {
+	if len(r.AdvisoryFailures) != 1 || !strings.Contains(r.AdvisoryFailures[0], EntryAdvisoryMacOSSmoke) {
 		t.Errorf("advisory failure must be prominently recorded, got %v", r.AdvisoryFailures)
 	}
 }
@@ -312,7 +372,7 @@ func TestMarkdown_ContainsVerdictAndRows(t *testing.T) {
 	}
 	r := Merge(frags)
 	md := Markdown(r)
-	for _, want := range []string{"# Release QA Gate", "FAIL", EntryMatrixDocker, "infrastructure", "Blocking failures", ReasonNotImplemented} {
+	for _, want := range []string{"# Release QA Gate", "FAIL", EntryMatrixDocker, "infrastructure", "Blocking failures"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown missing %q:\n%s", want, md)
 		}
