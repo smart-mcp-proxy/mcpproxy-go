@@ -957,6 +957,23 @@ components:
             (manual scans keep working). Env override: MCPPROXY_AUTO_BASELINE_SCAN,
             which wins over this field on every path.
           type: boolean
+        auto_rescan_on_change:
+          description: |-
+            AutoRescanOnChange is the finer switch for the automatic, informational
+            rescan that follows a tool-definition hash change: the in-process TPA scan
+            of the changed (or newly pending) tool, recorded as hold evidence, and a
+            debounced informational server rescan that brings the review screen's scan
+            coverage back to "current".
+
+            Evidence and freshness ONLY: a clean verdict never approves a changed
+            contract (RT-02); every change is still held for review in scan and manual
+            trust modes. Runs in every trust mode except "auto".
+
+            Default (nil) is ENABLED. It only takes effect while auto_baseline_scan is
+            also enabled, so a user can keep the admission scan and turn off per-change
+            rescans with this key alone. Env override: MCPPROXY_AUTO_RESCAN_ON_CHANGE,
+            which wins over this field on every path.
+          type: boolean
         deep_scan:
           $ref: '#/components/schemas/config.DeepScanConfig'
         integrity_check_interval:

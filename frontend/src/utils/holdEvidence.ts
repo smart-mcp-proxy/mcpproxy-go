@@ -7,8 +7,12 @@
 //                  verdict) or "scan_coverage" (the scan itself could not be
 //                  trusted, so the gate failed closed). A coverage hold is a
 //                  PRECAUTION and must never be presented as a threat verdict.
+//                  "awaiting_review" (Spec 118) records a CLEAN scan verdict on a
+//                  tool that stays held for your review anyway: evidence, not a
+//                  finding and not a precaution. A clean verdict never approves
+//                  a changed or new tool.
 //   held_verdict — the baseline verdict at hold time (dangerous | warnings |
-//                  clean — "clean" accompanies a coverage hold).
+//                  clean — "clean" accompanies a coverage or awaiting-review hold).
 //   held_signals — matched deterministic check ids, e.g.
 //                  "tpa.TPA-2026-0001.hidden_instruction" or "phrase.injection".
 //
@@ -28,6 +32,7 @@ import type { ToolApproval } from '@/types'
 /** Backend hold-reason constants (internal/storage/models.go). */
 export const HOLD_REASON_SCAN_FINDINGS = 'scan_findings'
 export const HOLD_REASON_SCAN_COVERAGE = 'scan_coverage'
+export const HOLD_REASON_AWAITING_REVIEW = 'awaiting_review'
 
 /** The raw payload fields carrying hold evidence, on any surface that has them. */
 export interface HoldEvidenceFields {
@@ -61,6 +66,8 @@ export interface HoldEvidence {
   isThreat: boolean
   /** The scan could not complete: style as a precaution, never a threat. */
   isPrecaution: boolean
+  /** The scan came back clean; the tool is held only because it awaits review. */
+  isAwaitingReview: boolean
 }
 
 /**
@@ -141,6 +148,7 @@ export function parseHoldEvidence(
     heuristics,
     isThreat: reason === HOLD_REASON_SCAN_FINDINGS,
     isPrecaution: reason === HOLD_REASON_SCAN_COVERAGE,
+    isAwaitingReview: reason === HOLD_REASON_AWAITING_REVIEW,
   }
 }
 
@@ -218,6 +226,15 @@ export function reasonPresentation(
       tone: 'precaution',
       description:
         'The security scan could not be completed, so this change was held as a precaution. This is not a threat verdict — retry the scan or review the change manually.',
+    }
+  }
+
+  if (evidence.isAwaitingReview) {
+    return {
+      label: 'Scan clean, awaiting your review',
+      tone: 'neutral',
+      description:
+        'The offline security scan found nothing in this tool definition. It is still held for your review: a clean scan never approves a changed or new tool.',
     }
   }
 

@@ -452,6 +452,8 @@ func TestFormatToolHold_BackCompat(t *testing.T) {
 	assert.Equal(t, "-", formatToolHold(map[string]interface{}{"name": "create_issue", "approval_status": "changed"}))
 	assert.Equal(t, "-", formatToolHold(map[string]interface{}{"held_signals": []interface{}{}}))
 	assert.Equal(t, "scan_coverage", formatToolHold(map[string]interface{}{"held_reason": "scan_coverage"}))
+	// Spec 118: a clean verdict held only for review shows the verdict.
+	assert.Equal(t, "clean", formatToolHold(map[string]interface{}{"held_reason": "awaiting_review", "held_verdict": "clean"}))
 }
 
 // TestOutputGlobalTools_HeldColumn verifies the global table renders the HELD

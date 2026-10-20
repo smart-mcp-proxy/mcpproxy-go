@@ -609,10 +609,32 @@ so every server ends up with a security verdict instead of an empty badge:
   serialized, never delays startup, is cancelled on shutdown, and a persisted
   marker keeps it one-shot.
 
+- **After a tool definition changes** — when a tool's definition changes, or a
+  tool is added to a server that already has an approved baseline, in every trust
+  mode except `auto`, two things run without a click:
+  - the in-process scan of that tool's *current* definition, recorded on the tool
+    (see [Hold evidence in the Web UI](#hold-evidence-in-the-web-ui-spec-088)).
+    In `scan` mode this scan is the gate's own; in `manual` mode it is run for
+    evidence only. It re-runs each time the held definition changes again.
+  - a debounced (about 5 seconds, coalesced per server) informational rescan of
+    the server, so the review screen's scan line returns to **current** instead
+    of **stale** ("Scan out of date: N tool definitions changed after the last
+    scan"). A change that lands while a scan of that server is queued or running
+    is retried, not dropped. Disabled servers, `trust_mode: "auto"` servers and
+    quarantined `trust_mode: "scan"` servers (the admission gate owns those) are
+    skipped. Failed starts share the per-server retry cap of the admission scan.
+
 These scans are **informational**: the verdict fills in the scan summary and the
-UI badge and never quarantines, approves, or blocks anything. Disable with
-`security.auto_baseline_scan: false` (env: `MCPPROXY_AUTO_BASELINE_SCAN`).
-The `trust_mode: "scan"` gate above is a separate path and is unaffected.
+UI badge and never quarantines, approves, or blocks anything. **A clean verdict
+never approves a changed or new tool**: a changed contract is held for review in
+`scan` and `manual` modes whatever the scan says (RT-02); the scan only adds
+evidence and freshness. Disable everything above with
+`security.auto_baseline_scan: false` (env: `MCPPROXY_AUTO_BASELINE_SCAN`), or
+keep the admission scan and turn off only the per-change rescans with
+`security.auto_rescan_on_change: false` (env: `MCPPROXY_AUTO_RESCAN_ON_CHANGE`).
+Manual scans keep working either way. The `trust_mode: "scan"` gate above is a
+separate path: its admission-time scan of new tools is not switched off by either
+setting.
 
 ### Signature bundle (offline TPA corpus)
 
@@ -667,6 +689,17 @@ link into the server's latest scan report highlighting matching findings.
 The quarantine banner distinguishes four states: scan running, scan verdict
 blocked automatic approval, scan could not complete (retry offered), and
 awaiting manual review.
+
+`held_reason` has a third value, `awaiting_review`, recorded in `manual` and
+`scan` modes when the automatic scan of a changed or newly pending tool's current
+definition came back **clean** (`held_verdict: "clean"`, no signals). It is
+evidence, not a finding and not a precaution: the tool is still `changed` or
+`pending` and stays blocked until you approve it, because a clean verdict never
+approves a changed contract. The Web UI shows it as "Scan clean, awaiting your
+review", the review screen shows the tool's scan verdict as `clean` (the tool still starts
+unchecked there: the in-process verdict never widens what is pre-selected), and `mcpproxy tools list` shows
+`clean` in the HELD column. The server banner is derived from the server scan,
+not from this field, and is unchanged.
 
 ### Reviewing a held change {#reviewing-a-held-change}
 
