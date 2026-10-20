@@ -212,9 +212,11 @@ var trOverrideFamilies = func() []*regexp.Regexp {
 // the bare spelling ("paylas" → "payla").
 var trDisclosureFamily = func() *regexp.Regexp {
 	const (
-		trailing   = `(?:$|[^\p{L}\p{N}])`
-		qualifier  = `(?:sistem|gizli|başlangıç|baslangic)`
-		promptNoun = `(?:istem|prompt)\p{L}*`
+		trailing  = `(?:$|[^\p{L}\p{N}])`
+		qualifier = `(?:sistem|gizli|başlangıç|baslangic)`
+		// "istem" with its case endings only, like the override family:
+		// "istemcisini" (the client) is not a prompt (Sol 6.1 review, finding 2).
+		promptNoun = `(?:istem(?:i|in|ini|ler|leri|lerin|lerini)?|prompt\p{L}*)`
 		broadNoun  = `(?:talimat|komut|yönerge|yonerge|mesaj|yönlendirme|yonlendirme)\p{L}*`
 		gap        = `(?: \p{L}+){0,3} `
 		sfx        = `(?:[ıi]n(?:[ıi]z)?|un(?:uz)?|ün(?:üz)?|y[ıi]n(?:[ıi]z)?)?`
