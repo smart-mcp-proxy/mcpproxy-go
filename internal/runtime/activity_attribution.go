@@ -23,7 +23,13 @@ type ActivityAttribution struct {
 	// ClientName is the self-reported clientInfo.name: advisory, never
 	// authoritative (a client can claim any name).
 	ClientName string
-	TokenName  string
+	// ClientVersion is the self-reported clientInfo.version that travelled
+	// with ClientName when the identity was read off the REQUEST rather than
+	// a session (Spec 058 US3: a 2026-07-28 request never ran initialize, so
+	// the session store cannot supply it). Empty when the session resolver
+	// already stamped metadata.client_version.
+	ClientVersion string
+	TokenName     string
 	// TokenPrefix is the 12-char display prefix of the calling token. It is
 	// INTERNAL: persisted on the storage record as the ownership proof (so a
 	// scoped caller recognises its own policy_decision and prompt_get rows),
@@ -51,6 +57,7 @@ func (a ActivityAttribution) payload() map[string]any {
 	set("profile_source", a.ProfileSource)
 	set("client_id", a.ClientID)
 	set("client_name", a.ClientName)
+	set("client_version", a.ClientVersion)
 	set("token_name", a.TokenName)
 	set("_token_prefix", a.TokenPrefix)
 	return out
@@ -68,6 +75,7 @@ func attributionFromPayload(payload map[string]any) ActivityAttribution {
 		ProfileSource: getStringPayload(m, "profile_source"),
 		ClientID:      getStringPayload(m, "client_id"),
 		ClientName:    getStringPayload(m, "client_name"),
+		ClientVersion: getStringPayload(m, "client_version"),
 		TokenName:     getStringPayload(m, "token_name"),
 		TokenPrefix:   getStringPayload(m, "_token_prefix"),
 	}
@@ -75,7 +83,10 @@ func attributionFromPayload(payload map[string]any) ActivityAttribution {
 
 // applyAttribution copies an attribution onto the first-class record fields.
 // ClientName falls back to the session-resolved metadata.client_name that
-// withClientInfo already wrote, so the two never disagree on a record.
+// withClientInfo already wrote, so the two never disagree on a record. A
+// request-carried ClientVersion lands in metadata.client_version — the key
+// withClientInfo uses — when the session resolver wrote none, so a modern
+// client's record carries the same shape a legacy client's does.
 func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 	rec.Profile = a.Profile
 	rec.ProfileSource = a.ProfileSource
@@ -86,6 +97,14 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 	if rec.ClientName == "" {
 		if name, ok := rec.Metadata["client_name"].(string); ok {
 			rec.ClientName = name
+		}
+	}
+	if a.ClientVersion != "" {
+		if _, ok := rec.Metadata["client_version"]; !ok {
+			if rec.Metadata == nil {
+				rec.Metadata = make(map[string]interface{})
+			}
+			rec.Metadata["client_version"] = a.ClientVersion
 		}
 	}
 }
