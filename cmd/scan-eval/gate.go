@@ -70,6 +70,27 @@ var categoryCheck = map[string]string{
 	"shadowing":           "shadowing.cross_server",
 	"phrase_injection":    "phrase.injection",    // Spec 077 US1 — curated hard check
 	"capability_mismatch": "capability.mismatch", // US2 (T016) — not yet registered
+
+	// Spec 101 US2: every signature class of the bundle (tpacorpus.Classes) is
+	// scored by the one BundleCheck, whose ID is tpa.bundle. The entries are
+	// static on purpose (a class is a reviewed change); TestCategoryCheck_
+	// CoversCorpusClasses fails when Classes and this block drift apart.
+	"tpa_hidden_instruction_block": "tpa.bundle",
+	"tpa_comment_directive":        "tpa.bundle",
+	"tpa_tool_shadowing":           "tpa.bundle",
+	"tpa_cross_server_override":    "tpa.bundle",
+	"tpa_exfil_redirect":           "tpa.bundle",
+	"tpa_sensitive_file_coaxing":   "tpa.bundle",
+	"tpa_credential_harvesting":    "tpa.bundle",
+	"tpa_persistence_implant":      "tpa.bundle",
+	"tpa_rug_pull_phrasing":        "tpa.bundle",
+	"tpa_instruction_override":     "tpa.bundle",
+	"tpa_conversation_exfil":       "tpa.bundle",
+	"tpa_preference_manipulation":  "tpa.bundle",
+	"tpa_concealment_directive":    "tpa.bundle",
+	"tpa_invisible_text":           "tpa.bundle",
+	"tpa_payload_execution":        "tpa.bundle",
+	"tpa_schema_injection":         "tpa.bundle",
 }
 
 // builtinGateChecks is the four built-in hard detect checks the live scanner

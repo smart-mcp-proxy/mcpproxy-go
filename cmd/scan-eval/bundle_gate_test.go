@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/tpacorpus"
 )
 
 const committedDetectCorpus = "../../specs/065-evaluation-foundation/datasets/detect_corpus_v1.json"
@@ -120,6 +121,30 @@ func TestBundleGate_ExplicitEmbeddedCopyMatchesDefault(t *testing.T) {
 		b, _ := json.Marshal(cm[k])
 		if string(a) != string(b) {
 			t.Errorf("%s differs: default=%s copy=%s", k, a, b)
+		}
+	}
+}
+
+// TestCategoryCheck_CoversCorpusClasses: every signature class (the vocabulary
+// every dataset entry and signature draws from) and every gating signature
+// category in the embedded bundle maps to the bundle check. A class missing here
+// would be reported but never gated, so a regression in it could not fail CI.
+func TestCategoryCheck_CoversCorpusClasses(t *testing.T) {
+	for _, class := range tpacorpus.Classes {
+		if got := categoryCheck[class]; got != "tpa.bundle" {
+			t.Errorf("categoryCheck[%q] = %q, want %q", class, got, "tpa.bundle")
+		}
+	}
+	sigs, err := scanner.ParseBundleSignatures(scanner.EmbeddedBundle())
+	if err != nil {
+		t.Fatalf("ParseBundleSignatures: %v", err)
+	}
+	for _, s := range sigs {
+		if !s.Gating {
+			continue
+		}
+		if got := categoryCheck[s.Category]; got != "tpa.bundle" {
+			t.Errorf("gating signature %s: categoryCheck[%q] = %q, want %q", s.ID, s.Category, got, "tpa.bundle")
 		}
 	}
 }
