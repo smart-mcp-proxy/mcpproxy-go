@@ -28,6 +28,13 @@ import (
 //   - letter spacing ("i g n o r e"): a run of three or more single letters
 //     separated by single spaces is joined; a wider gap ends the run, so
 //     "I G N O R E  A L L" yields "ignore all".
+//   - diacritics on Latin letters ("ígnore áll prévious ínstructions", written
+//     either as precomposed letters or as base letter + combining mark): the
+//     marks are dropped so the word folds to its plain spelling (R2-4, round-2
+//     red team). Only marks that sit on a LATIN base letter are stripped; the
+//     breve of Cyrillic й, the diaeresis of ё/ї, Greek tonos and the kana
+//     dakuten are left alone, so the non-English families keep matching their
+//     own spellings.
 //
 // The result is consumed ONLY by the phrase matchers (phrase.injection,
 // directive.imperative) through ToolView.PhraseText. NormalizedText is unchanged,
@@ -60,6 +67,7 @@ func NormalizeForPhraseIn(s string, latinMajority bool) string {
 	}
 	s = norm.NFKC.String(s)
 	s = stripFormatRunes(s)
+	s = stripLatinMarks(s)
 	s = foldConfusables(s, latinMajority, false)
 	s = foldLeetTokens(s)
 	s = joinSeparatedLetters(s)
@@ -78,7 +86,7 @@ func FoldHomoglyphsIn(s string, latinMajority bool) string {
 	if s == "" {
 		return ""
 	}
-	return foldConfusables(stripFormatRunes(norm.NFKC.String(s)), latinMajority, false)
+	return foldConfusables(stripLatinMarks(stripFormatRunes(norm.NFKC.String(s))), latinMajority, false)
 }
 
 // NormalizeMixedScript is Normalize preceded by homoglyph folding of MIXED-script
@@ -89,14 +97,18 @@ func FoldHomoglyphsIn(s string, latinMajority bool) string {
 // letters and does not rewrite leet digits, so word boundaries, punctuation,
 // negations and quotes are exactly those of the plain text and position
 // classification stays truthful. A single word that mixes scripts is not
-// ordinary writing; it is the homoglyph trick itself. changed reports whether
-// any word was folded.
+// ordinary writing; it is the homoglyph trick itself. Diacritics on Latin
+// letters are dropped on this view too (R2-4): the fold is letter-for-letter,
+// so every boundary, negation and quote keeps its place, and an English
+// directive dressed in accents ("ígnore áll prévious ínstructions") is no more
+// ordinary writing than one dressed in Cyrillic look-alikes. changed reports
+// whether any word was folded or any mark dropped.
 func NormalizeMixedScript(s string) (normalized string, changed bool) {
 	if s == "" {
 		return "", false
 	}
 	pre := stripFormatRunes(norm.NFKC.String(s))
-	folded := foldConfusables(pre, LatinMajority(s), true)
+	folded := foldConfusables(stripLatinMarks(pre), LatinMajority(s), true)
 	if folded == pre {
 		return Normalize(s), false
 	}
@@ -115,6 +127,61 @@ func Squash(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// stripLatinMarks removes nonspacing marks (Unicode category Mn) that sit on a
+// Latin base letter, whether the input spelled them as combining characters
+// ("i" + U+0301) or as precomposed letters ("í", which NFKC keeps composed).
+// The text is decomposed (NFD), the marks that follow a Latin letter are
+// dropped, and the rest is recomposed (NFC), so marks on every other script
+// — Cyrillic й/ё/ї, Greek tonos, kana dakuten, Devanagari vowel signs — come
+// back exactly as they went in. Letters that are not decomposable (ł, ø, đ)
+// are untouched. Pure and deterministic.
+func stripLatinMarks(s string) string {
+	if !hasLatinMark(s) {
+		return s
+	}
+	decomposed := norm.NFD.String(s)
+	var b strings.Builder
+	b.Grow(len(decomposed))
+	latinBase := false
+	for _, r := range decomposed {
+		if unicode.Is(unicode.Mn, r) {
+			if latinBase {
+				continue
+			}
+			b.WriteRune(r)
+			continue
+		}
+		latinBase = unicode.Is(unicode.Latin, r)
+		b.WriteRune(r)
+	}
+	return norm.NFC.String(b.String())
+}
+
+// hasLatinMark reports whether s contains a Latin letter that carries a mark —
+// a precomposed letter whose NFD form has a mark, or a combining mark after a
+// Latin letter — so the common all-ASCII case pays no normalization cost.
+func hasLatinMark(s string) bool {
+	latinBase := false
+	for _, r := range s {
+		switch {
+		case r < 0x80:
+			latinBase = unicode.IsLetter(r)
+		case unicode.Is(unicode.Mn, r):
+			if latinBase {
+				return true
+			}
+		case unicode.Is(unicode.Latin, r):
+			latinBase = true
+			if norm.NFD.String(string(r)) != string(r) {
+				return true
+			}
+		default:
+			latinBase = false
+		}
+	}
+	return false
 }
 
 // toLatin maps Cyrillic, Greek and Armenian letters that render like a Latin
