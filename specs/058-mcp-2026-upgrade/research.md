@@ -243,3 +243,5 @@ Phase 3 landed under the FR-028 pin, on an era harness that reaches the modern e
 Reviewer-noted OUT OF SCOPE: `filterProfileV3Tools` (see the residual above) and the fact that `mcpAuthMiddleware` does not accept OAuth bearer JWTs on `/mcp` (server-edition users reach MCP with per-user agent tokens, which is what the new test uses).
 
 **Cross-review, round 2 (incremental, Sol 6.1, 2026-10-20).** One finding, verified: the work-session era assertions in `TestProfileEra_SessionTierSkippedOnModernRequests` passed without the gate, because the bare fixture's session store has no storage manager and `EnsurePersisted` returns `""` regardless. Replaced by `TestProfileEra_ModernRequestDoesNotMarkWork` over the storage-backed `newWorkSessionProxy` with a counting resolver and a legacy control; removing the gate in `markSessionWorked` fails it (proven). Everything else in the round-1 fix diff was examined and found sound.
+
+**Cross-review, round 3 (incremental, Sol 6.1, 2026-10-20).** On the round-2 test fix alone: VERDICT: CLEAN; the reviewer confirmed the new test depends on the `IsModernRequest` gate in `markSessionWorked` and that the legacy control is meaningful.
