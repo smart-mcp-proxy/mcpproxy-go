@@ -64,7 +64,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)(?:^|[.!?:;\\n]\\s*|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|before|after|next|finally|you|to)\\s+)(?:(?:run|execute|eval(?:uate)?|exec|pipe)\\b[^\\n.]{0,40}?\\b(?:following|below|encoded|base64|blob|payload|decoded|this|the\\s+(?:string|value|data|result))\\b|decode\\s+(?:it\\s+)?(?:and|then)\\s+(?:run|execute|eval(?:uate)?)\\b)[^\\n]{0,60}?(?:^|[^A-Za-z0-9+/])(?:Y3VybC|d2dldC|YmFzaCAtYy|L2Jpbi9zaCAt|c2ggLWMg|cG93ZXJzaGVsbC)[A-Za-z0-9+/]{16,}",
+      "pattern": "(?is)(?:^|[.!?:;\\n]\\s*|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:run|execute|eval(?:uate)?|exec|pipe)\\b[^\\n.]{0,40}?\\b(?:following|below|encoded|base64|blob|payload|decoded|this|the\\s+(?:string|value|data|result))\\b|decode\\s+(?:it\\s+)?(?:and|then)\\s+(?:run|execute|eval(?:uate)?)\\b)[^\\n]{0,60}?(?:^|[^A-Za-z0-9+/])(?:Y3VybC|d2dldC|YmFzaCAtYy|L2Jpbi9zaCAt|c2ggLWMg|cG93ZXJzaGVsbC)[A-Za-z0-9+/]{16,}",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -112,7 +112,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)(?:^|[.!?:;\\n]\\s*|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|before|after|next|finally|you|to)\\s+)(?:(?:run|execute|eval(?:uate)?|exec|pipe)\\b[^\\n.]{0,40}?\\b(?:following|below|encoded|hex|blob|payload|decoded|this|the\\s+(?:string|value|data|result))\\b|decode\\s+(?:it\\s+)?(?:and|then)\\s+(?:run|execute|eval(?:uate)?)\\b)[^\\n]{0,60}?(?:^|[^0-9a-fx])(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{16,}",
+      "pattern": "(?is)(?:^|[.!?:;\\n]\\s*|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:run|execute|eval(?:uate)?|exec|pipe)\\b[^\\n.]{0,40}?\\b(?:following|below|encoded|hex|blob|payload|decoded|this|the\\s+(?:string|value|data|result))\\b|decode\\s+(?:it\\s+)?(?:and|then)\\s+(?:run|execute|eval(?:uate)?)\\b)[^\\n]{0,60}?(?:^|[^0-9a-fx])(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{16,}",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

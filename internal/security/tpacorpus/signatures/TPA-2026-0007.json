@@ -70,7 +70,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?(?:(?:[\\]\\.;:!,]|\\band|\\bthen)\\s*(?:(?:always|must|should|just|simply|please)\\s+)*|\\b(?:always|must|just|simply)\\s+)(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b.{0,150}?\\b(?:skip|ignore|bypass|disregard|avoid|never use|do not use|don't use)\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)\\s+(?:(?:\\w+\\s+)?(?:tools?|functions?|calculators?|assistants?|servers?|options?|alternatives?|helpers?|utilities|plugins?|apis?)|\\w+s)\\s*(?:[,.;!]|$)",
+      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?(?:(?:[\\]\\.;:!,]|\\band|\\bthen)\\s*(?:(?:always|must|should|just|simply|please)\\s+)*|\\b(?:always|must|just|simply)\\s+)(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b.{0,150}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:skip|ignore|bypass|disregard|avoid|never use|do not use|don't use)\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)\\s+(?:(?:\\w+\\s+)?(?:tools?|functions?|calculators?|assistants?|servers?|options?|alternatives?|helpers?|utilities|plugins?|apis?)|\\w+s)\\s*(?:[,.;!]|$)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
