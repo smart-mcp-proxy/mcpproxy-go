@@ -284,6 +284,30 @@ transmissible if telemetry is re-enabled later.
 session id, the number of tools in the response, or any part of the suggestion
 string the agent saw.
 
+## Install channel (`install_channel`)
+
+Added without a schema bump (it is purely additive and always present on an enabled heartbeat; consumers detect it by presence). It says **how this install was obtained**, as one value of a closed set:
+
+| Value | Meaning |
+|---|---|
+| `brew` | Homebrew formula or cask |
+| `dmg` | macOS installer / app bundle |
+| `winget` | Windows, installed by winget (installer ran with `/CHANNEL=winget`) |
+| `scoop` | Windows, installed by scoop |
+| `windows-installer` | Windows installer downloaded directly |
+| `deb` / `rpm` | apt / dnf repository packages |
+| `docker` | container image |
+| `registry` | container started from the official MCP registry entry (declared via `MCPPROXY_INSTALL_CHANNEL=registry`) |
+| `curl` | release archive installed by a script or an agent following the [agent install prompt](../getting-started/agent-install.md) |
+| `tarball` / `go-install` | release archive / `go install` |
+| `unknown` | nothing reliable identified |
+
+Resolution order: (1) the `MCPPROXY_INSTALL_CHANNEL` environment variable; (2) an installer-owned `install-channel` marker beside the executable (written only for `winget`); (3) the existing update-channel detector (the same one behind `mcpproxy update` and `/api/v1/info`); (4) a data-directory `install-channel` marker containing `curl`, honoured **only** when step 3 found `tarball`, `go-install` or `unknown`, so a stale hint can never mask a Homebrew, winget or installer install.
+
+Privacy: only the enum token is ever read or sent. Markers are read only when telemetry is enabled, only if they are small regular files, and anything outside the closed set is discarded; paths, file contents and hostnames never reach the payload, and the anonymity scanner rejects any other value before send. The field means the *current* channel, not the original one; count new installs per channel by each machine's first-seen date, not by repeated heartbeats.
+
+Receivers: `install_channel` is a new top-level string. Receivers that ignore unknown fields need no change; storing and charting it requires a column and a dashboard dimension in the telemetry worker and dashboard repositories.
+
 ## One-time opt-out signal
 
 When telemetry transitions from **enabled to disabled** (via the CLI, the config

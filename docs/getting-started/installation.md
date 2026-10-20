@@ -101,11 +101,40 @@ The installer will:
 - Add MCPProxy to your system PATH
 - Create Start Menu shortcuts
 
+### winget
+
+```powershell
+winget install --id smart-mcp-proxy.mcpproxy -e
+winget upgrade --id smart-mcp-proxy.mcpproxy     # update
+winget uninstall --id smart-mcp-proxy.mcpproxy
+```
+
+This runs the same signed installer silently (administrator rights are requested).
+
+### Scoop
+
+```powershell
+scoop bucket add mcpproxy https://github.com/smart-mcp-proxy/scoop-bucket
+scoop install mcpproxy
+scoop update mcpproxy                            # update
+scoop uninstall mcpproxy
+```
+
+Scoop installs the release archive for your user (no administrator rights),
+puts `mcpproxy` on your PATH and adds a Start-menu shortcut for the tray app.
+Update with scoop: `mcpproxy update` points you at `scoop update mcpproxy`
+rather than replacing a scoop-managed file.
+
 ### Manual Installation
 
 1. Download the Windows binary from the releases page
 2. Extract to a directory of your choice
 3. Add the directory to your PATH
+
+## Let your AI agent do it
+
+Prefer to hand the whole thing to Claude Code or Codex? See
+[Install with your AI agent](/getting-started/agent-install).
 
 ## Linux
 

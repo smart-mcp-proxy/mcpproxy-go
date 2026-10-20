@@ -107,17 +107,18 @@ func (j job) disabled() bool {
 // user-facing artifact (GitHub release, docker image, homebrew tap, docs site,
 // package repos, MCP registry, provenance attachment, marketing dispatch).
 var publishSignatures = []string{
-	"action-gh-release",     // create GitHub Release + upload assets
-	"gh release upload",     // upload additional release assets
-	"gh release create",     // create a release
-	"mcp-publisher",         // publish to the MCP registry
-	"pages deploy",          // wrangler pages deploy (docs site)
-	"wrangler-action",       // cloudflare pages deploy
-	"repository-dispatch",   // trigger the marketing site update
-	"build-push-action",     // docker build + push
-	"slsa-github-generator", // SLSA provenance attached to the release
-	"homebrew_tap_token",    // push to the homebrew tap
-	"publish.sh",            // publish apt/rpm repos
+	"action-gh-release",        // create GitHub Release + upload assets
+	"gh release upload",        // upload additional release assets
+	"gh release create",        // create a release
+	"mcp-publisher",            // publish to the MCP registry
+	"pages deploy",             // wrangler pages deploy (docs site)
+	"wrangler-action",          // cloudflare pages deploy
+	"repository-dispatch",      // trigger the marketing site update
+	"build-push-action",        // docker build + push
+	"slsa-github-generator",    // SLSA provenance attached to the release
+	"homebrew_tap_token",       // push to the homebrew tap
+	"publish.sh",               // publish apt/rpm repos
+	"publish-windows-packages", // scoop bucket + winget (reusable workflow, Spec 121)
 }
 
 func (j job) publishes() bool {

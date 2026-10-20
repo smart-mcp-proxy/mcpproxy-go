@@ -1,6 +1,11 @@
 package updatecheck
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // Spec 121 FR-016: a scoop-owned binary must be recognised as its own channel.
 // The Windows release zip scoop installs is stamped "tarball" (weak), which
@@ -17,6 +22,8 @@ func TestDetectChannel_Scoop(t *testing.T) {
 		{"scoop versioned dir", ChannelTarball, `C:\Users\u\scoop\apps\mcpproxy\0.71.1\mcpproxy.exe`, ChannelScoop},
 		{"scoop global install", ChannelTarball, `C:\ProgramData\scoop\apps\mcpproxy\current\mcpproxy.exe`, ChannelScoop},
 		{"mixed case and slashes", ChannelTarball, `c:/Users/U/Scoop/Apps/MCPProxy/current/mcpproxy.exe`, ChannelScoop},
+		{"custom SCOOP root with install.json evidence", ChannelTarball, `D:\Tools\apps\mcpproxy\0.71.1\mcpproxy.exe`, ChannelScoop},
+		{"apps/mcpproxy without scoop evidence stays tarball", ChannelTarball, `E:\apps\mcpproxy\mcpproxy.exe`, ChannelTarball},
 		{"unstamped build still scoop", "", `C:\Users\u\scoop\apps\mcpproxy\current\mcpproxy.exe`, ChannelScoop},
 		{"other scoop app is not mcpproxy", ChannelTarball, `C:\Users\u\scoop\apps\othertool\current\mcpproxy.exe`, ChannelTarball},
 		{"plain extracted zip stays tarball", ChannelTarball, `C:\tools\mcpproxy\mcpproxy.exe`, ChannelTarball},
@@ -29,6 +36,13 @@ func TestDetectChannel_Scoop(t *testing.T) {
 			d.marker = tt.marker
 			path := tt.path
 			d.execPath = func() (string, error) { return path, nil }
+			// scoop writes install.json beside the executable in the version dir.
+			d.statFile = func(p string) error {
+				if strings.Contains(tt.name, "install.json evidence") && strings.HasSuffix(filepath.ToSlash(strings.ReplaceAll(p, `\`, "/")), "/0.71.1/install.json") {
+					return nil
+				}
+				return os.ErrNotExist
+			}
 			if got := d.detect(); got != tt.want {
 				t.Errorf("detect() = %q, want %q", got, tt.want)
 			}

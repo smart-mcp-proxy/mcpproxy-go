@@ -57,6 +57,13 @@ jobs:
           echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Docs version badge: ${VERSION:-<hidden>}"
 
+      # Spec 121: the llms.txt guard (install page first, every link resolves,
+      # size budget) has its own tests; the guard itself runs as the build's
+      # `postbuild` step.
+      - name: Test llms.txt guard
+        working-directory: website
+        run: npm run test:llms
+
       - name: Build documentation
         working-directory: website
         env:

@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 )
@@ -120,6 +121,10 @@ func TestResolveInstallChannel_Precedence(t *testing.T) {
 // The marker reader must cap what it reads so a hostile or corrupt file can
 // never allocate or leak beyond a single short token.
 func TestReadChannelMarker_CapsAndTrims(t *testing.T) {
+	t.Run("regular file ok", func(t *testing.T) { testMarkerBasics(t) })
+}
+
+func testMarkerBasics(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/install-channel"
 	if err := os.WriteFile(path, []byte("  winget \r\n"), 0o600); err != nil {
@@ -131,10 +136,62 @@ func TestReadChannelMarker_CapsAndTrims(t *testing.T) {
 	if err := os.WriteFile(path, []byte(strings.Repeat("a", 1<<20)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := readChannelMarker(path, readCapped); len(got) > markerMaxBytes {
-		t.Errorf("marker read not capped: %d bytes", len(got))
+	if got := readChannelMarker(path, readCapped); got != "" {
+		t.Errorf("oversized marker must be rejected, got %q", got)
+	}
+	// An oversized file that STARTS with a valid token must not be honoured.
+	if err := os.WriteFile(path, []byte("winget"+strings.Repeat(" ", 4096)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got := readChannelMarker(path, readCapped); got != "" {
+		t.Errorf("oversized marker with valid prefix must be rejected, got %q", got)
 	}
 	if got := readChannelMarker(dir+"/absent", readCapped); got != "" {
 		t.Errorf("absent marker = %q, want empty", got)
+	}
+}
+
+// A FIFO must never block payload construction, and a directory is not a marker.
+func TestReadChannelMarker_RejectsNonRegularFiles(t *testing.T) {
+	dir := t.TempDir()
+	if got := readChannelMarker(dir, readCapped); got != "" {
+		t.Errorf("directory marker = %q, want empty", got)
+	}
+	fifo := dir + "/install-channel"
+	if err := mkfifo(fifo); err != nil {
+		t.Skipf("mkfifo unsupported here: %v", err)
+	}
+	done := make(chan string, 1)
+	go func() { done <- readChannelMarker(fifo, readCapped) }()
+	select {
+	case got := <-done:
+		if got != "" {
+			t.Errorf("FIFO marker = %q, want empty", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reading a FIFO marker blocked")
+	}
+}
+
+// A symlink to a regular file is followed; a symlink to a directory is not a marker.
+func TestReadChannelMarker_Symlinks(t *testing.T) {
+	dir := t.TempDir()
+	real := dir + "/real"
+	if err := os.WriteFile(real, []byte("winget"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := dir + "/link"
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	if got := readChannelMarker(link, readCapped); got != "winget" {
+		t.Errorf("symlink to regular file = %q, want winget", got)
+	}
+	dlink := dir + "/dlink"
+	if err := os.Symlink(dir, dlink); err != nil {
+		t.Skip()
+	}
+	if got := readChannelMarker(dlink, readCapped); got != "" {
+		t.Errorf("symlink to directory = %q, want empty", got)
 	}
 }

@@ -1576,7 +1576,10 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 	// Spec 121: install channel. Resolved only when telemetry is effectively
 	// enabled so a disabled install (or a payload preview of one) never reads
 	// a channel marker from disk.
-	if s.envDisabledReason == EnvDisabledNone && EffectiveTelemetryEnabled(cfg) {
+	// Eligibility is read live under s.mu (telemetryEnabledLive), not from the
+	// cfg snapshot taken at the top of this function: a disable that lands
+	// mid-build must stop the marker read, and the snapshot may predate it.
+	if s.envDisabledReason == EnvDisabledNone && s.telemetryEnabledLive() {
 		dataDir := ""
 		if cfg != nil {
 			dataDir = cfg.DataDir

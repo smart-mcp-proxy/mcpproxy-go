@@ -999,6 +999,18 @@ jobs:
           event-type: update-version
           client-payload: '{"version": "${{ inputs.tag }}"}'
 
+  # Spec 121: scoop bucket + winget; same reusable workflow as release.yml.
+  publish-windows-packages:
+    name: Publish Windows packages
+    needs: [release]
+    if: ${{ !cancelled() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish-windows-packages.yml
+    with:
+      tag: ${{ inputs.tag }}
+    secrets: inherit
+
   # Publish to the official MCP Registry. Mirrors release.yml's mcp-registry
   # job; continue-on-error because a registry hiccup must not block a release.
   mcp-registry:

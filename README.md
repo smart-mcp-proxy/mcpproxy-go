@@ -59,6 +59,64 @@ What the repository does measure, as a first-party, deterministic estimate (see 
 
 ## Quick Start
 
+### Fastest: paste this into your agent
+
+Paste the prompt below into Claude Code, Codex or another coding agent. It installs MCPProxy for your OS, starts it, and connects the client it is running in. It stops to ask before touching an existing install and never prints your keys. ([Same prompt on the docs site](https://docs.mcpproxy.app/getting-started/agent-install).)
+
+<!-- agent-install-prompt:start -->
+```text
+Install MCPProxy (https://mcpproxy.app), start it, and connect it to the AI client you are running in. Work step by step and show me each command before you run it.
+
+RULES
+- Do not read, print or paste ~/.mcpproxy/mcp_config.json, any API key, token or credential. Use the commands below, which return masked output.
+- If MCPProxy is already installed or running (step 1), STOP and ask me what to do. Never reinstall over a running instance.
+- Do not use sudo unless a step needs it; tell me first.
+- Install only from the sources listed here and verify checksums where stated.
+
+1. CHECK FOR AN EXISTING INSTALL
+   Run: command -v mcpproxy   (Windows PowerShell: Get-Command mcpproxy)
+   Then: mcpproxy status      (it reports whether an instance is running)
+   If either shows MCPProxy is present or running, report that and ask me before doing anything else.
+
+2. INSTALL (pick the first that applies to this OS)
+   macOS / Linux with Homebrew:   brew install smart-mcp-proxy/mcpproxy/mcpproxy
+   Windows with winget:           winget install --id smart-mcp-proxy.mcpproxy -e
+   Windows with scoop:            scoop bucket add mcpproxy https://github.com/smart-mcp-proxy/scoop-bucket ; scoop install mcpproxy
+   Otherwise (Linux without Homebrew, or no package manager), the release archive:
+     VER=$(curl -fsSL https://api.github.com/repos/smart-mcp-proxy/mcpproxy-go/releases/latest | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' | head -1)
+     OS=linux; ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')    # use OS=darwin on macOS
+     cd "$(mktemp -d)"
+     curl -fsSLO "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${VER}/mcpproxy-${VER}-${OS}-${ARCH}.tar.gz"
+     curl -fsSLO "https://github.com/smart-mcp-proxy/mcpproxy-go/releases/download/v${VER}/checksums.txt"
+     grep " mcpproxy-${VER}-${OS}-${ARCH}.tar.gz\$" checksums.txt | (sha256sum -c - 2>/dev/null || shasum -a 256 -c -)
+     tar xzf "mcpproxy-${VER}-${OS}-${ARCH}.tar.gz" && mkdir -p ~/.local/bin && install -m 0755 mcpproxy ~/.local/bin/mcpproxy
+     mkdir -p ~/.mcpproxy && echo curl > ~/.mcpproxy/install-channel     # records the install channel only
+     (Make sure ~/.local/bin is on PATH; the checksum line must print "OK" or STOP.)
+   Prefer the macOS desktop app? Tell me; it is: brew install --cask smart-mcp-proxy/mcpproxy/mcpproxy
+
+3. START IT
+   mcpproxy serve --listen 127.0.0.1:8080 > ~/.mcpproxy/serve.log 2>&1 &     # Windows: Start-Process mcpproxy -ArgumentList serve -WindowStyle Hidden
+   If port 8080 is taken, use another, e.g. --listen 127.0.0.1:18080.
+   Wait until `mcpproxy status` reports it is running (retry for up to 30 seconds).
+
+4. VERIFY (these commands print masked output)
+   mcpproxy status
+   mcpproxy doctor
+
+5. CONNECT THE CLIENT YOU ARE RUNNING IN
+   Claude Code: mcpproxy connect claude-code
+   Codex:       mcpproxy connect codex
+   Others (cursor, windsurf, vscode, gemini, opencode): mcpproxy connect <client>
+   Claude Desktop is not in this list: tell me to open the Connect wizard in the MCPProxy Web UI (the URL printed by `mcpproxy status --web-url`).
+   Then run: mcpproxy connect --list   and confirm the client shows as connected.
+
+6. TELL ME WHAT HAPPENED
+   - What you installed and how, and the Web UI URL from `mcpproxy status --web-url`.
+   - That the client needs a reload or restart before it sees MCPProxy (Claude Code: start a new session or run /mcp; Codex: restart it). Do not claim it is connected until I have done that.
+   - MCPProxy sends anonymous usage telemetry. To turn it off: set MCPPROXY_TELEMETRY=false before starting it, or toggle it in Settings. Details: https://docs.mcpproxy.app/features/telemetry
+```
+<!-- agent-install-prompt:end -->
+
 ### 1. Install
 
 **macOS (Recommended - DMG Installer):**

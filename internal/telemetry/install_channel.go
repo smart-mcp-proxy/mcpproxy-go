@@ -1,6 +1,7 @@
 package telemetry
 
 import (
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -140,15 +141,42 @@ func resolveInstallChannel(d installChannelDeps) InstallChannel {
 	return detected
 }
 
-// readCapped reads at most max bytes of a regular file.
+// readCapped reads a marker file safely. It only ever opens a REGULAR file
+// (a FIFO or device would block or stall payload construction), follows a
+// symlink only to a regular target, and detects overflow instead of accepting
+// a truncated prefix: a file longer than max is an error, so an oversized file
+// that merely starts with a valid token ("winget" + 4 KB of whitespace) is
+// rejected rather than honoured.
 func readCapped(path string, max int64) ([]byte, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, errNotRegularMarker
+	}
+	if fi.Size() > max {
+		return nil, errMarkerTooLarge
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer f.Close()
-	return io.ReadAll(io.LimitReader(f, max))
+	b, err := io.ReadAll(io.LimitReader(f, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(b)) > max {
+		return nil, errMarkerTooLarge
+	}
+	return b, nil
 }
+
+var (
+	errNotRegularMarker = errors.New("install-channel marker is not a regular file")
+	errMarkerTooLarge   = errors.New("install-channel marker exceeds size cap")
+)
 
 // readChannelMarker returns the trimmed, lower-cased, size-capped marker
 // token, or "" when it is absent, unreadable or empty. Validation against the

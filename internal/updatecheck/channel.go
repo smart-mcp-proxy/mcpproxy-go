@@ -230,7 +230,7 @@ func (d *channelDetector) detect() string {
 	// (version, hash). The apps/<name>/ layout is scoop's own and is checked
 	// on a slash-normalised, lower-cased path so it holds for both the
 	// per-user (~\scoop) and global (C:\ProgramData\scoop) roots.
-	if isScoopPath(path) {
+	if d.isScoopInstall(path) {
 		return ChannelScoop
 	}
 
@@ -326,10 +326,26 @@ func (d *channelDetector) isGoInstall() bool {
 	return semver.IsValid(v)
 }
 
-// isScoopPath reports whether path lies inside scoop's package layout for
-// mcpproxy (<root>/scoop/apps/mcpproxy/...). Windows paths are normalised so
-// the check also works when the detector is exercised on another OS.
-func isScoopPath(path string) bool {
+// isScoopInstall reports whether the resolved executable path is scoop-owned.
+// Two independent signals, either of which suffices:
+//   - the default layout <root>/scoop/apps/mcpproxy/..., or
+//   - a custom root ($SCOOP / $SCOOP_GLOBAL): <root>/apps/mcpproxy/<ver>/ with
+//     scoop's own install.json beside the executable (scoop writes it into
+//     every version directory; `current` is a junction that EvalSymlinks has
+//     already resolved to that directory).
+//
+// Windows paths are normalised so the check also works when the detector is
+// exercised on another OS. A bare apps/mcpproxy directory without that
+// evidence is NOT scoop: guessing would withhold self-update from an
+// unrelated extracted archive (FR-009: never guess).
+func (d *channelDetector) isScoopInstall(path string) bool {
 	p := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
-	return strings.Contains(p, "/scoop/apps/mcpproxy/")
+	if strings.Contains(p, "/scoop/apps/mcpproxy/") {
+		return true
+	}
+	if !strings.Contains(p, "/apps/mcpproxy/") {
+		return false
+	}
+	dir := path[:strings.LastIndexAny(path, `\/`)+1]
+	return d.statFile(dir+"install.json") == nil
 }

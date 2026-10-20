@@ -1,0 +1,160 @@
+name: Publish Windows packages
+
+# Spec 121 (E7): keep the scoop bucket and the winget community repository in
+# step with every STABLE release, with no human in the loop after the one-time
+# setup in docs/release-runbook.md#windows-package-managers-one-time-setup.
+#
+# Reusable: release.yml and retry-sign-release.yml call it after the GitHub
+# Release exists. Also manually dispatchable with a tag to republish a release
+# (idempotent: an unchanged scoop manifest is not recommitted; an existing
+# winget version or open submission is reported and skipped).
+#
+# Both jobs SKIP (notice, success) when their credentials / target repositories
+# are not configured, so an unconfigured fork or a first release never fails.
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag (vX.Y.Z)
+        required: true
+        type: string
+    secrets:
+      SCOOP_BUCKET_TOKEN:
+        required: false
+      WINGET_TOKEN:
+        required: false
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish (vX.Y.Z)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  scoop:
+    name: scoop bucket
+    runs-on: ubuntu-latest
+    # Optional surface: a failure here must never turn a published release red.
+    continue-on-error: true
+    # Stable tags only: an RC must never reach a package manager's default channel.
+    if: ${{ !contains(inputs.tag, '-') }}
+    env:
+      TAG: ${{ inputs.tag }}
+      BUCKET: smart-mcp-proxy/scoop-bucket
+      BUCKET_TOKEN: ${{ secrets.SCOOP_BUCKET_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check configuration
+        id: cfg
+        run: |
+          if [ -z "${BUCKET_TOKEN}" ]; then
+            echo "::notice::SCOOP_BUCKET_TOKEN is not set; skipping scoop publish (see docs/release-runbook.md#windows-package-managers-one-time-setup)"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: steps.cfg.outputs.run == 'true'
+
+      - name: Fetch release checksums
+        if: steps.cfg.outputs.run == 'true'
+        run: gh release download "${TAG}" --repo "${{ github.repository }}" --pattern checksums.txt --dir .
+
+      - name: Generate and push scoop manifest
+        if: steps.cfg.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          if ! git clone --depth 1 "https://x-access-token:${BUCKET_TOKEN}@github.com/${BUCKET}.git" bucket 2>/dev/null; then
+            echo "::notice::${BUCKET} is not reachable with SCOOP_BUCKET_TOKEN; skipping scoop publish"
+            exit 0
+          fi
+          mkdir -p bucket/bucket
+          scripts/gen-scoop-manifest.sh "${TAG}" checksums.txt > bucket/bucket/mcpproxy.json
+          cd bucket
+          if git diff --quiet -- bucket/mcpproxy.json && [ -z "$(git ls-files --others --exclude-standard bucket/mcpproxy.json)" ]; then
+            echo "scoop manifest for ${TAG} already published; nothing to do"
+            exit 0
+          fi
+          git config user.name "mcpproxy-release[bot]"
+          git config user.email "release-bot@mcpproxy.app"
+          git add bucket/mcpproxy.json
+          git commit -m "mcpproxy: update to ${TAG#v}"
+          git push origin HEAD
+
+  winget:
+    name: winget community repository
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    if: ${{ !contains(inputs.tag, '-') }}
+    env:
+      TAG: ${{ inputs.tag }}
+      PKG_ID: smart-mcp-proxy.mcpproxy
+      WINGET_TOKEN: ${{ secrets.WINGET_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Check configuration
+        id: cfg
+        run: |
+          if [ -z "${WINGET_TOKEN}" ]; then
+            echo "::notice::WINGET_TOKEN is not set; skipping winget publish (see docs/release-runbook.md#windows-package-managers-one-time-setup)"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # The first submission of a new package id is manual (moderated by
+          # Microsoft); this job only updates a package that already exists.
+          if ! GH_TOKEN="${WINGET_TOKEN}" gh api "repos/microsoft/winget-pkgs/contents/manifests/s/smart-mcp-proxy/mcpproxy" >/dev/null 2>&1; then
+            echo "::notice::${PKG_ID} does not exist in microsoft/winget-pkgs yet; submit it once by hand first (docs/release-runbook.md#windows-package-managers-one-time-setup)"
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "run=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        if: steps.cfg.outputs.run == 'true'
+
+      - name: Fetch release checksums
+        if: steps.cfg.outputs.run == 'true'
+        run: gh release download "${TAG}" --repo "${{ github.repository }}" --pattern checksums.txt --dir .
+
+      - name: Submit manifest pull request
+        if: steps.cfg.outputs.run == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.WINGET_TOKEN }}
+        run: |
+          set -euo pipefail
+          VER="${TAG#v}"
+          DIR="manifests/s/smart-mcp-proxy/mcpproxy/${VER}"
+          FORK_OWNER="$(gh api user --jq .login)"
+
+          # Idempotence: skip when the version is already merged or a PR is open.
+          if gh api "repos/microsoft/winget-pkgs/contents/${DIR}" >/dev/null 2>&1; then
+            echo "winget ${VER} already exists upstream; nothing to do"; exit 0
+          fi
+          OPEN="$(gh pr list --repo microsoft/winget-pkgs --state open --search "${PKG_ID} version ${VER} in:title" --json number --jq 'length')"
+          if [ "${OPEN}" != "0" ]; then
+            echo "an open winget-pkgs PR for ${PKG_ID} ${VER} already exists; nothing to do"; exit 0
+          fi
+
+          scripts/gen-winget-manifest.sh "${TAG}" checksums.txt out
+
+          # Work on the fork (created once by the maintainer), synced to upstream master.
+          gh repo sync "${FORK_OWNER}/winget-pkgs" --branch master --force >/dev/null
+          git clone --depth 1 --filter=blob:none --sparse "https://x-access-token:${WINGET_TOKEN}@github.com/${FORK_OWNER}/winget-pkgs.git" fork
+          cd fork
+          BRANCH="mcpproxy-${VER}"
+          git checkout -b "${BRANCH}"
+          mkdir -p "${DIR}"
+          cp ../out/*.yaml "${DIR}/"
+          git config user.name "mcpproxy-release[bot]"
+          git config user.email "release-bot@mcpproxy.app"
+          git add --sparse "${DIR}"
+          git commit -m "New version: ${PKG_ID} version ${VER}"
+          git push --force origin "${BRANCH}"
+          gh pr create --repo microsoft/winget-pkgs --base master \
+            --head "${FORK_OWNER}:${BRANCH}" \
+            --title "New version: ${PKG_ID} version ${VER}" \
+            --body "Automated update from https://github.com/${{ github.repository }}/releases/tag/${TAG} (manifest generated by scripts/gen-winget-manifest.sh; installer hashes taken from the release's checksums.txt)."

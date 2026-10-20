@@ -1700,6 +1700,8 @@ triggers a prompt re-check.
 | `MCPPROXY_ALLOW_PRERELEASE_UPDATES=true` | Force-selects the prerelease (`rc`) channel even when `update_check.channel` is `stable`. |
 | `CI=true` / `CI=1` | Suppresses every update nudge and the tray's unattended checks (non-interactive context). Machine-readable fields keep reporting the facts, and a user-initiated "Check for Updates" still runs. |
 
+**Install channel.** `MCPPROXY_INSTALL_CHANNEL=<channel>` declares how this install was obtained, for the anonymous `install_channel` telemetry field only (one of `brew`, `dmg`, `winget`, `scoop`, `windows-installer`, `deb`, `rpm`, `docker`, `registry`, `curl`, `tarball`, `go-install`; anything else is ignored). It never changes update behavior. See [Telemetry](features/telemetry.md#install-channel-install_channel).
+
 Both keys and both switches are reported to the tray as an explicit contract —
 `update_policy` in `GET /api/v1/info` — rather than inferred from missing data.
 The macOS one-click updater, the channel matrix and the release-infrastructure

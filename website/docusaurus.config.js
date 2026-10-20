@@ -1,7 +1,70 @@
 // @ts-check
 // Note: type annotations allow type checking and IDEs autocompletion
 
+const fs = require('fs');
+const path = require('path');
 const {themes: prismThemes} = require('prism-react-renderer');
+
+// Published documentation: the Docusaurus docs plugin serves ONLY these paths.
+// Hoisted into constants so the llms.txt generator below can be restricted to
+// exactly the same set (Spec 121): the llms plugin walks the whole docs
+// directory, so without this it advertised ~70 internal plans/audits/research
+// pages whose URLs 404 on the live site.
+const docsInclude = [
+  'intro.md',
+  'getting-started/**/*.{md,mdx}',
+  'configuration/**/*.{md,mdx}',
+  'cli/**/*.{md,mdx}',
+  'api/**/*.{md,mdx}',
+  'web-ui/**/*.{md,mdx}',
+  'features/**/*.{md,mdx}',
+  'code_execution/**/*.{md,mdx}',
+  'operations/**/*.{md,mdx}',
+  'errors/**/*.{md,mdx}',
+  'development/**/*.{md,mdx}',
+  'contributing.md',
+  // Standalone references with no structured counterpart
+  'cli-client-mode.md',
+  'cli-output-formatting.md',
+  'logging.md',
+  'prerelease-builds.md',
+  'registries.md',
+  'socket-communication.md',
+];
+// Internal working documents that live in the repo but are not published.
+const docsExclude = [
+  'development/sandbox-snap-docker-harness.md',
+  'development/sandbox-spike-mcp-34.md',
+];
+
+const llmsRootContent = [
+  'MCPProxy is a local-first smart proxy for the Model Context Protocol: it indexes every upstream MCP server\'s tools for BM25 discovery, quarantines unreviewed servers and tool changes, and cuts tool-schema token cost.',
+  '',
+  'To install, start and connect it from an agent, follow https://docs.mcpproxy.app/getting-started/agent-install (a paste-ready prompt for Claude Code and Codex). Package managers: Homebrew (`brew install smart-mcp-proxy/mcpproxy/mcpproxy`), winget (`winget install smart-mcp-proxy.mcpproxy`), scoop, apt/dnf, Docker.',
+].join('\n');
+
+/**
+ * ignoreFiles patterns for docusaurus-plugin-llms: every markdown file/dir in
+ * the docs tree that the docs plugin does NOT publish. Derived from
+ * docsInclude by top-level name, so adding a page to the allowlist also adds
+ * it to the llms bundles with no second list to maintain.
+ */
+function unpublishedDocsPatterns() {
+  const docsDir = path.join(__dirname, 'docs');
+  if (!fs.existsSync(docsDir)) return [];
+  const allowedFiles = new Set(docsInclude.filter((g) => !g.includes('/')));
+  const allowedDirs = new Set(docsInclude.filter((g) => g.includes('/')).map((g) => g.split('/')[0]));
+  const out = [];
+  for (const entry of fs.readdirSync(docsDir, {withFileTypes: true})) {
+    if (entry.isDirectory()) {
+      if (!allowedDirs.has(entry.name)) out.push(`${entry.name}/**`);
+    } else if (/\.mdx?$/.test(entry.name) && !allowedFiles.has(entry.name)) {
+      out.push(entry.name);
+    }
+  }
+  // Explicitly excluded pages inside a published directory.
+  return out.concat(docsExclude);
+}
 
 /** @type {import('@docusaurus/types').Config} */
 // Version shown in the navbar badge. Supplied by CI: docs.yml derives it from
@@ -54,32 +117,9 @@ const config = {
           sidebarPath: './sidebars.js',
           editUrl: 'https://github.com/smart-mcp-proxy/mcpproxy-go/edit/main/',
           // Only include structured documentation pages
-          include: [
-            'intro.md',
-            'getting-started/**/*.{md,mdx}',
-            'configuration/**/*.{md,mdx}',
-            'cli/**/*.{md,mdx}',
-            'api/**/*.{md,mdx}',
-            'web-ui/**/*.{md,mdx}',
-            'features/**/*.{md,mdx}',
-            'code_execution/**/*.{md,mdx}',
-            'operations/**/*.{md,mdx}',
-            'errors/**/*.{md,mdx}',
-            'development/**/*.{md,mdx}',
-            'contributing.md',
-            // Standalone references with no structured counterpart
-            'cli-client-mode.md',
-            'cli-output-formatting.md',
-            'logging.md',
-            'prerelease-builds.md',
-            'registries.md',
-            'socket-communication.md',
-          ],
+          include: docsInclude,
           // Internal working documents that live in the repo but are not published
-          exclude: [
-            'development/sandbox-snap-docker-harness.md',
-            'development/sandbox-spike-mcp-34.md',
-          ],
+          exclude: docsExclude,
         },
         blog: false,
         theme: {
@@ -97,7 +137,20 @@ const config = {
         generateLLMsFullTxt: true,
         excludeImports: true,
         removeDuplicateHeadings: true,
+        // Spec 121: bound llms-full.txt for agents. `development/**` holds
+        // contributor plans, audits and research reports (about 2.2 MB of the
+        // old 3 MB file) that no end-user agent task needs; the pages stay
+        // published on the site, only the LLM bundles omit them. The agent
+        // install page sorts first (see includeOrder) and
+        // website/scripts/check-llms.mjs enforces both invariants after build.
+        ignoreFiles: unpublishedDocsPatterns().concat(['intro.md']),
+        // intro.md is served at "/" (slug: /) but the plugin links it as
+        // /docs, which 404s, so it is left out of the index and replaced by
+        // this short, agent-oriented summary that leads with how to install.
+        rootContent: llmsRootContent,
+        fullRootContent: llmsRootContent,
         includeOrder: [
+          'getting-started/agent-install*',
           'getting-started/*',
           'configuration/*',
           'cli/*',
