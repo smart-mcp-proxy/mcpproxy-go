@@ -77,7 +77,7 @@ No migration. Downgrade ignores the new fields.
 | I. Performance at scale | PASS | The digest adds one bounded buffer (error request IDs) to the existing single stream pass. No index-path cost beyond one non-blocking notify after a successful batch. SC-006 has a benchmark (T056). |
 | II. Actor-based concurrency | PASS | One goroutine (`onboardingFactsLoop`) owns every fact write. It is woken by a size-1 channel and a ticker, and never writes under the approval lock. The summary-view debounce uses an atomic per surface. No new mutex. |
 | III. Configuration-driven | PASS | No new config keys. Starter eligibility respects the effective `registries` config (`reference_overridden`) and `quarantine_enabled`. |
-| IV. Security by default | PASS | Quarantine, trust mode and approval semantics are unchanged (FR-003, FR-005, SC-005). The starter is never auto-approved. Informed consent comes before code runs (FR-004). Docker isolation follows the global setting. |
+| IV. Security by default | PASS (with one inherited deviation, see Complexity Tracking) | Quarantine, trust mode and approval semantics are unchanged (FR-003, FR-005, SC-005). The starter is never auto-approved. Informed consent comes before code runs (FR-004). Docker isolation follows the global setting. |
 | V. TDD | PASS | Every task group starts with failing tests (tasks.md). |
 | VI. Documentation hygiene | PASS | `docs/features/telemetry.md`, `docs/cli/activity-commands.md`, `docs/web-ui/dashboard.md`, `docs/features/connect-clients.md`, `docs/features/activity-log.md`, `oas/swagger.yaml`, plus a CLAUDE.md "Recent Changes" line per PR. |
 | Core + tray split | PASS | The tray reads the offer and digest over REST and holds no state. All eligibility logic is in the core (FR-012). |
@@ -269,4 +269,6 @@ Scoped callers already have `filter.AllowedServers` applied to the stream (`inte
 
 ## Complexity Tracking
 
-None.
+| Violation | Why needed | Simpler alternative rejected because |
+|---|---|---|
+| Constitution IV says "stdio MCP servers MUST run in Docker containers by default". The product default is `docker_isolation.enabled: false` (`internal/config/config.go:1644-1646`, "for backward compatibility"), so the starter runs as a host process by default. | **Pre-existing deviation, not introduced here.** The starter follows the global isolation setting, exactly like every catalog add (FR-003). The consent card shows the isolation mode before anything runs (FR-004). Both candidates are audited as pure-computation tools (FR-002). | Forcing Docker for the starter alone would need Docker on a fresh machine. That defeats "no Docker needed" and adds a starter-specific trust path that FR-003 forbids. Flipping the global default is a product decision outside E3; it is filed as follow-up O5 in the PR body. |

@@ -9,7 +9,7 @@ Base struct: `internal/storage/models.go:102`.
 | Field | JSON | Type | Written by | Rules |
 |---|---|---|---|---|
 | `InstallFirstRunAt` | `install_first_run_at` | `time.Time` | `EnsureInstallAnchor` at startup, before any other writer; also the missing-record branch of `UpdateOnboardingState` as a safeguard (research R5) | Set once and never changed. Zero means an upgraded install with no anchor; it is never back-filled. |
-| `StarterEligibility` | `starter_eligibility` | `string` enum | the first starter eligibility evaluation on a fresh install | Set once. Values: `eligible`, `launcher_missing`, `name_taken`, `reference_overridden`, `tools_present`, `held_tools`, `not_fresh`. |
+| `StarterEligibility` | `starter_eligibility` | `string` enum | the first starter eligibility evaluation on a fresh install | Set once. Values: `eligible`, `launcher_missing`, `name_taken`, `reference_overridden`, `already_configured`, `tools_present`, `held_tools`, `not_fresh`. |
 | `StarterLauncher` | `starter_launcher` | `string` enum | every fresh-install evaluation | Values: `uvx`, `npx_only`, `none`. The first value is kept for telemetry (sticky). The live value is recomputed per request and not stored. |
 | `StarterOffered` | `starter_offered` | `bool` | mark endpoint (`starter_offered: true`) | Sticky. Only false → true. |
 | `StarterAdded` | `starter_added` | `bool` | `POST /onboarding/starter` success | Sticky. |

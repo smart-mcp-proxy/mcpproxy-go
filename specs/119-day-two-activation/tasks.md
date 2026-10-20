@@ -21,7 +21,7 @@
 
 ## Phase 1: Setup (PR-A branch `119-pr-a-measure`)
 
-- [ ] T001 Branch from `origin/main`. Record baseline timings for `go test -race ./internal/storage/... ./internal/telemetry/... ./internal/runtime/... ./internal/httpapi/...` in the PR description.
+- [ ] T001 Branch from `origin/main`. Record baseline timings (artifact: the PR-A description) for `go test -race ./internal/storage/... ./internal/telemetry/... ./internal/runtime/... ./internal/httpapi/...` in the PR description.
 - [ ] T002 [P] Create the empty package `internal/onboarding/` (`doc.go` with the package contract: pure domain logic, no storage or HTTP imports). Add an import-boundary test, `internal/onboarding/imports_test.go`, that fails if the package imports `internal/storage`, `internal/httpapi` or `internal/server`.
 
 ---

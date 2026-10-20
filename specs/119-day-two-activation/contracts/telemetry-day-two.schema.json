@@ -16,7 +16,7 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "starter_eligibility": { "enum": ["", "eligible", "launcher_missing", "name_taken", "reference_overridden", "tools_present", "held_tools", "not_fresh"] },
+        "starter_eligibility": { "enum": ["", "eligible", "launcher_missing", "name_taken", "reference_overridden", "already_configured", "tools_present", "held_tools", "not_fresh"] },
         "starter_launcher": { "enum": ["", "uvx", "npx_only", "none"] },
         "starter_offered": { "type": "boolean" },
         "starter_added": { "type": "boolean" },

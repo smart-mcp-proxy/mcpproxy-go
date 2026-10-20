@@ -96,7 +96,7 @@ They click "Add and inspect". MCPProxy adds the server through the normal catalo
 
 **Why this priority**: tools indexed is the funnel step most strongly linked to one-and-done (36% vs 66%). It is the experiment's primary metric.
 
-**Independent Test**: on a scratch instance with an empty config and `uv` on PATH, complete the wizard with defaults. `GET /api/v1/status` reports `tool_count >= 1`. The activity log has the user's approval of `time`. No approval record has `approved_by` of `auto-baseline`.
+**Independent Test**: on a scratch instance with an empty config and `uv` on PATH, complete the wizard with defaults. The summed `tool_count` across `GET /api/v1/servers` is at least 1. The activity log has the user's approval of `time`. No approval record has `approved_by` of `auto-baseline`.
 
 **Acceptance Scenarios**:
 
@@ -307,7 +307,7 @@ The maintainer queries the telemetry store for post-release cohorts. Without any
 
   | Field | Values |
   |---|---|
-  | `starter_eligibility` | Result of the first eligibility check on a fresh install: `"" | eligible | launcher_missing | name_taken | reference_overridden | tools_present | held_tools | not_fresh` |
+  | `starter_eligibility` | Result of the first eligibility check on a fresh install: `"" | eligible | launcher_missing | name_taken | reference_overridden | already_configured | tools_present | held_tools | not_fresh` |
   | `starter_launcher` | Launcher availability, evaluated on every fresh-install eligibility check whatever the other outcomes: `"" (never checked) | uvx | npx_only | none` |
   | `starter_offered`, `starter_added`, `starter_live`, `starter_declined` | bool, sticky |
   | `starter_last_failure` | `"" | connect_failed | capture_timeout | approval_abandoned` |
