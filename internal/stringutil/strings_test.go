@@ -155,3 +155,26 @@ func TestUTF8Prefix(t *testing.T) {
 		})
 	}
 }
+
+func TestUTF8PrefixMalformedInput(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		n    int
+		want string
+	}{
+		// A stray continuation byte after a complete rune must not swallow it.
+		{"stray continuation after ascii", "a\x80b", 1, "a"},
+		{"stray continuation after rune", "é\x80\x80\x80\x80b", 2, "é"},
+		// A run of continuation bytes longer than a rune is malformed; keep the
+		// raw cut rather than discarding the whole prefix.
+		{"long continuation run", "ab\x80\x80\x80\x80\x80", 4, "ab\x80\x80"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := UTF8Prefix(tc.in, tc.n); got != tc.want {
+				t.Fatalf("UTF8Prefix(%q, %d) = %q, want %q", tc.in, tc.n, got, tc.want)
+			}
+		})
+	}
+}
