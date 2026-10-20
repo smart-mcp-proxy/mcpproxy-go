@@ -484,6 +484,34 @@ func TestDirectModeHandler_DestructiveToolNeedsDestructivePermission(t *testing.
 	f.admitted(t, result, "github", "delete_repo")
 }
 
+// Spec 058 T036b (FR-016b on /mcp/all). The proxyResultEnvelope unit tests in
+// content_forward_test.go prove what the envelope helper does; nothing proved
+// the direct-mode handler CALLS it — reaching that handler needs a fully wired
+// proxy with a live upstream, which the directRoutingFixture provides. The
+// upstream answers with a _meta carrying the two hop-scoped keys (serverInfo,
+// protocolVersion) plus a payload key; the forwarded result must keep the
+// payload key and drop the hop-scoped ones. A handler that copied the upstream
+// envelope wholesale would relay all three.
+func TestDirectModeHandler_RelaysResultMetaThroughProxyEnvelope(t *testing.T) {
+	f := newDirectRoutingFixture(t, directServerSpec{server: "github", tools: []toolSpec{readSpec("list_repos")}})
+	f.ups["github"].okMeta.Store(&mcp.Meta{AdditionalFields: map[string]any{
+		mcp.MetaKeyServerInfo:      map[string]any{"name": "upstream-github", "version": "9.9.9"},
+		mcp.MetaKeyProtocolVersion: mcp.LATEST_PROTOCOL_VERSION,
+		"io.example/trace":         "trace-123",
+	}})
+
+	result := f.call(t, adminCtx(), "github", "list_repos")
+	f.admitted(t, result, "github", "list_repos")
+
+	require.NotNil(t, result.Meta, "an upstream _meta payload key must be relayed")
+	assert.Equal(t, "trace-123", result.Meta.AdditionalFields["io.example/trace"])
+	assert.NotContains(t, result.Meta.AdditionalFields, mcp.MetaKeyServerInfo,
+		"relaying the upstream serverInfo would make mcpproxy's answer claim to BE the upstream (research D9)")
+	assert.NotContains(t, result.Meta.AdditionalFields, mcp.MetaKeyProtocolVersion,
+		"the era negotiated upstream is not the era mcpproxy answers on")
+	assert.Empty(t, result.ResultType, "ResultType is left for mcp-go to stamp for the answering era")
+}
+
 func TestRequiredPermissionForDirectTool_MapsAnnotationsToAuthPermissions(t *testing.T) {
 	readOnly := true
 	write := false
