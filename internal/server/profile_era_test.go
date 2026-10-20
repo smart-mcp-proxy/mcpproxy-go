@@ -212,3 +212,55 @@ func TestProfileEra_ModernStdioRequestCannotPersistSelection(t *testing.T) {
 			"FR-011: a modern request must not persist per-connection state, despite stdio's non-empty session id")
 	})
 }
+
+// ─── set_profile on a modern request (T026) ─────────────────────────────────
+
+func setProfileRequest(slug string) mcp.CallToolRequest {
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "set_profile"
+	req.Params.Arguments = map[string]any{"profile": slug}
+	return req
+}
+
+// On a modern request set_profile validates the slug FIRST — an unknown slug
+// gets the same refusal in both eras — and then, instead of binding a
+// selection it has no session for, answers machine-actionable guidance that
+// names the per-request form `/mcp/p/<slug>`. Nothing is stored.
+func TestProfileEra_SetProfileModernRequestGuidance(t *testing.T) {
+	proxy := profileEraProxy(t)
+	// The stdio session id is the hard case: non-empty in both eras.
+	modern := modernRequestCtx(sessionCtx(adminCtx(), "stdio"))
+
+	t.Run("unknown slug is refused as unknown, not as sessionless", func(t *testing.T) {
+		result, err := proxy.handleSetProfile(modern, setProfileRequest("nonexistent"))
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		text := extractText(result)
+		assert.Contains(t, text, "unknown profile 'nonexistent'", "slug validation runs before the session guard: %s", text)
+		assert.NotContains(t, text, "/mcp/p/", "an unknown slug must not be handed a URL it cannot use: %s", text)
+	})
+
+	t.Run("known slug is refused with the /mcp/p/<slug> form", func(t *testing.T) {
+		result, err := proxy.handleSetProfile(modern, setProfileRequest("research"))
+		require.NoError(t, err)
+		require.True(t, result.IsError, "a modern request cannot bind a session selection")
+		text := extractText(result)
+		assert.Contains(t, text, "/mcp/p/research", "guidance must name the exact per-request endpoint: %s", text)
+		assert.Contains(t, text, mcp.LATEST_PROTOCOL_VERSION, "guidance must say which protocol revision has no session: %s", text)
+		assert.Equal(t, "", proxy.sessionStore.GetActiveProfile("stdio"), "nothing may be stored for a modern request")
+	})
+
+	t.Run("clearing is refused with the generic form", func(t *testing.T) {
+		result, err := proxy.handleSetProfile(modern, setProfileRequest(""))
+		require.NoError(t, err)
+		require.True(t, result.IsError)
+		assert.Contains(t, extractText(result), "/mcp/p/<slug>")
+	})
+
+	t.Run("legacy request on the same session still selects", func(t *testing.T) {
+		result, err := proxy.handleSetProfile(sessionCtx(adminCtx(), "stdio"), setProfileRequest("research"))
+		require.NoError(t, err)
+		require.False(t, result.IsError, "%s", extractText(result))
+		assert.Equal(t, "research", proxy.sessionStore.GetActiveProfile("stdio"))
+	})
+}
