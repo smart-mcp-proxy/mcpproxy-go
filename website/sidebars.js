@@ -112,6 +112,7 @@ const sidebars = {
             'features/security-quarantine',
             'features/tool-quarantine',
             'features/tool-scanner',
+            'features/tpa-signatures',
             'features/security-scanner-plugins',
             'features/sensitive-data-detection',
             'features/audit-log',

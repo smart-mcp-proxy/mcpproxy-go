@@ -95,9 +95,9 @@ The embedded-secret check likewise scans **raw** text, because secrets are
 case-sensitive and exact (lowercasing would fold the very bytes the matchers
 key on, e.g. `AKIA…` prefixes).
 
-## The seven checks
+## The checks
 
-Four **hard** checks and three **soft** heuristic checks.
+Four built-in **hard** checks, three **soft** heuristic checks, and the **signature-bundle** hard check (`tpa.bundle`), which is built from the embedded TPA signature corpus rather than hand-written in Go.
 
 ### Hard tier
 
@@ -164,6 +164,21 @@ phrase is not discarded, though — it is downgraded to a **soft** review signal
 behind a framing cue. Broader, lower-confidence phrasing lives in the soft
 `directive.imperative` check instead. Runs over **normalized** text.
 
+#### `tpa.bundle` — TPA signature corpus (`BundleCheck`)
+
+Runs the offline TPA signature corpus (the embedded `scanner-bundle.json`, or the
+file named by `security.tpa_bundle_path`) over each tool's description. Each
+runnable rule is a regex over the `tool_description` target and every match is
+**hard** tier. A match reports the signal `tpa.<TPA-id>.<detector>`, for example
+`tpa.TPA-2026-0004.shadow_directive`, and the id of the known attack is listed
+first in the hold evidence. The embedded corpus currently holds 44 signatures in
+16 classes (42 gating); how signatures are written, sourced, licensed and gated
+is in [TPA Signature Database](/features/tpa-signatures).
+
+Unlike the four built-in hard checks, this check's coverage is data: a bundle
+that cannot be loaded is refused and the last good corpus stays live (see
+[Signature bundle](/features/security-quarantine#signature-bundle-offline-tpa-corpus)).
+
 ### Soft tier
 
 #### `directive.imperative` — prompt-injection directives
@@ -221,6 +236,7 @@ example as easily as a planted one.
 | `shadowing.cross_server` | hard | Impersonation clone (same name + near-duplicate description) or exclusive cross-server reference |
 | `payload.decoded` | hard | base64/hex blob that decodes to a shell/exfil command |
 | `phrase.injection` | hard | Curated instruction-override / exfiltration directives (position-discounted; blocks approval) |
+| `tpa.bundle` | hard | Known-attack regex signatures from the TPA corpus (`tpa.<TPA-id>.<detector>` signals) |
 | `directive.imperative` | soft | Injection directives, secrecy imperatives, instruction overrides (normalized, position-discounted) |
 | `capability.mismatch` | soft | Compute/string tool touching `~/.ssh` etc.; unexplained data-sink param |
 | `secret.embedded` | soft | Hardcoded live credential (confidence-scored, placeholders dropped) |
@@ -235,6 +251,18 @@ unnoticed). A labeled corpus runs as a **blocking CI gate**:
 go run ./cmd/scan-eval \
   --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json \
   --gate --min-recall 0.90 --max-fp 0.05
+```
+
+By default the gate scores the signature corpus embedded in the build, so
+`tpa.bundle` appears in the `checks` list of the metrics. To score a candidate
+corpus instead, add `--bundle <path>`; the file goes through the production
+loader, and a load failure is an error rather than a silent fallback to the
+embedded corpus:
+
+```bash
+go run ./cmd/scan-eval \
+  --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json \
+  --gate --min-recall 0.90 --max-fp 0.05 --bundle path/to/candidate-bundle.json
 ```
 
 - **Recall ≥ 0.90** on malicious entries and **false-positive rate ≤ 0.05** on
@@ -263,12 +291,20 @@ context the detect engine needs). Each entry is labeled `malicious` or
 `shadowing`, `capability_mismatch`), and hard-negatives record which attack
 class they `resemble` so a false positive is attributed to that category.
 
-A category is only **enforced** by the gate when its corresponding check is
-registered in the gate's check list (`gateChecks()` in `cmd/scan-eval/gate.go`).
-This is a forward-compatibility mechanism: a category whose check is not yet in
-the gate list is **measured and reported but never fails the build
-prematurely**. When a new check is wired into the gate list, the gate begins
-enforcing its category.
+A category is only **enforced** by the gate when it has a `categoryCheck` entry
+(`cmd/scan-eval/gate.go`) naming a check that is registered in the gate's check
+list (`gateChecks()`). A category with no entry, or whose check is not
+registered, is **measured and reported but never fails the build**. That is a
+hazard, not a feature: a new category that nobody maps would score as healthy
+while being unenforced. The signature classes are therefore mapped explicitly
+(each to `tpa.bundle`), and `TestCategoryCheck_CoversCorpusClasses` fails when a
+class of the TPA vocabulary, or the category of any gating signature in the
+embedded bundle, is missing from `categoryCheck`. Only a category deliberately
+awaiting its check (for example `capability_mismatch`, whose check is soft and
+not scored by the gate) stays unenforced.
+
+A separate deterministic control signature keeps the bundle half of the gate
+from being vacuous; see [TPA Signature Database](/features/tpa-signatures#how-the-gate-blocks-a-bad-corpus).
 
 ## How it plugs in (unchanged entry points)
 
@@ -287,15 +323,20 @@ It reuses — rather than rebuilds — the Spec-032 quarantine hashing, the
 quarantine state machine, the aggregated-report types, and the
 `internal/security/patterns/` secret matchers (FR-012).
 
-Since Spec 077, `inprocess.go` delegates to the detect engine **exclusively** —
-the duplicated legacy TPA keyword rules and the duplicated legacy embedded-secret
-path have been removed. The engine's two-tier semantics therefore describe the
+Since Spec 077, `inprocess.go` delegates all in-process detection to the detect
+engine — the duplicated legacy TPA keyword rules and the duplicated legacy
+embedded-secret path have been removed. The engine it builds runs the built-in
+checks and, when a signature bundle is available, the `tpa.bundle` check as well
+(a scan with no bundle is reported as degraded coverage and cannot yield an
+auto-approvable verdict). The engine's two-tier semantics therefore describe the
 entire in-process detection behavior, with `phrase.injection` (hard) carrying the
-approval-blocking posture the removed rules used to provide.
+approval-blocking posture the removed rules used to provide and `tpa.bundle`
+adding the known-attack signatures.
 
 ## Related reading
 
 - [Security Scanner Plugins](/features/security-scanner-plugins) — the plugin framework hosting the `tpa-descriptions` scanner
+- [TPA Signature Database](/features/tpa-signatures) — how the `tpa.bundle` corpus is authored, built and gated
 - [Security Quarantine](/features/security-quarantine) — the quarantine mechanism hard-tier findings drive
 - [Tool Quarantine (Spec 032)](/features/tool-quarantine) — per-tool hash-based approval
 - [Sensitive-Data Detection](/features/sensitive-data-detection) — the shared secret matchers the embedded-secret check reuses

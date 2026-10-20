@@ -617,7 +617,12 @@ The `trust_mode: "scan"` gate above is a separate path and is unaffected.
 ### Signature bundle (offline TPA corpus)
 
 The `scan` mode runs an offline TPA signature corpus (the tpa-db
-`scanner-bundle.json`). By default it is the corpus embedded in the build; set
+`scanner-bundle.json`). By default it is the corpus embedded in the build, which
+holds 44 signatures across 16 attack classes (42 of them gating, meaning they
+own a rule that runs offline against tool descriptions and holds a matching tool).
+Every signature carries a public source, a date and a redistributable licence;
+contributors add signatures as described in
+[TPA Signature Database](/features/tpa-signatures). To use a different corpus, set
 `security.tpa_bundle_path` in `mcp_config.json` (env override:
 `MCPPROXY_TPA_BUNDLE_PATH`, which wins over the file value on every path —
 loader, hot-reload, `/api/v1/config/apply`) to run a corpus from disk instead.
