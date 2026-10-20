@@ -50,6 +50,9 @@ type rawBundle struct {
 	GeneratedAt string    `json:"generated_at"`
 	Rules       []rawRule `json:"rules"`
 	Skipped     []rawSkip `json:"skipped"`
+	// Signatures is the OPTIONAL campaign section (spec 101 FR-001a). Absent for
+	// v0.1.0 bundles; when present it is integrity-checked by validateSignatures.
+	Signatures []rawSignature `json:"signatures"`
 }
 
 // bundleMeta is the operator-facing header of a bundle, extracted without
@@ -196,6 +199,8 @@ func bundleCategoryToThreatType(category string) string {
 		return detect.ThreatPromptInjection
 	case "tool-shadowing", "cross-server-shadowing":
 		return detect.ThreatToolPoisoning
+	case "exfiltration":
+		return detect.ThreatExfiltration
 	default:
 		return detect.ThreatUncategorized
 	}
@@ -292,6 +297,10 @@ func loadBundleCheck(data []byte) (*BundleCheck, bundleLoadStats, error) {
 		return nil, bundleLoadStats{}, fmt.Errorf(
 			"scanner bundle: no runnable rules (%d rules declared, %d not runnable offline, %d bundle-declared skipped)",
 			len(b.Rules), stats.Skipped, stats.Declared)
+	}
+
+	if err := validateSignatures(&b); err != nil {
+		return nil, bundleLoadStats{}, err
 	}
 
 	return &BundleCheck{rules: compiled}, stats, nil

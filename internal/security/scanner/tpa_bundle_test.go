@@ -185,3 +185,11 @@ func TestBundleCheckDeterministic(t *testing.T) {
 		t.Errorf("Inspect not deterministic:\n a=%+v\n b=%+v", a, b)
 	}
 }
+
+// TestBundleCategoryToThreatType_Exfiltration pins the exfiltration mapping so
+// exfil signature classes do not fall into uncategorized.
+func TestBundleCategoryToThreatType_Exfiltration(t *testing.T) {
+	if got := bundleCategoryToThreatType("exfiltration"); got != detect.ThreatExfiltration {
+		t.Errorf("bundleCategoryToThreatType(exfiltration) = %q, want %q", got, detect.ThreatExfiltration)
+	}
+}
