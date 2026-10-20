@@ -78,7 +78,10 @@ Seed the activity log with the fixture from task T052 (`internal/storage/testdat
 
 ```bash
 curl -s -H "$K" "$B/activity/summary?period=7d&view=cli" | jq .data.digest
-/tmp/s119/mcpproxy activity summary --since 7d -o json | jq .digest     # identical
+# Pin the CLI to the scratch instance; without these it may query the live daemon via the default socket.
+MCPPROXY_TRAY_ENDPOINT=http://127.0.0.1:18919 MCPPROXY_API_KEY=s119-test-key \
+  /tmp/s119/mcpproxy activity summary --since 7d -o json \
+  --config /tmp/s119/mcp_config.json --data-dir /tmp/s119/data | jq .digest     # identical
 ```
 
 The figures must equal the fixture's expected values (`internal/storage/testdata/digest_expected.json`).
