@@ -1,0 +1,108 @@
+# Quickstart: verifying Spec 119 (Day-Two Activation)
+
+Live checks run on an isolated scratch instance: high port, scratch data dir, own log dir. Never run them against the maintainer's live app. Kill any scratch core before you rebuild, because the core locks the DB.
+
+```bash
+go build -o /tmp/s119/mcpproxy ./cmd/mcpproxy
+mkdir -p /tmp/s119/data /tmp/s119/logs
+echo '{"listen":"127.0.0.1:18919","api_key":"s119-test-key","mcpServers":[]}' > /tmp/s119/mcp_config.json
+# --config is mandatory: --data-dir alone still reads ~/.mcpproxy/mcp_config.json
+MCPPROXY_TELEMETRY=false /tmp/s119/mcpproxy serve --config /tmp/s119/mcp_config.json \
+  --data-dir /tmp/s119/data --log-dir /tmp/s119/logs &
+# Stop only this instance: pkill -f 'mcpproxy serve.*s119'
+K='X-API-Key: s119-test-key'; B=http://127.0.0.1:18919/api/v1
+```
+
+## L1. Starter offer → add → bound approval → indexed (US1, SC-005)
+
+```bash
+curl -s -H "$K" $B/onboarding/starter | jq '{eligible,reason,preselect,launcher,candidate}'
+# expect eligible=true, candidate.kind="time" (uv installed), preselect=true
+
+CMD=$(curl -s -H "$K" $B/onboarding/starter | jq -r .candidate.command)
+curl -s -H "$K" -X POST $B/onboarding/starter \
+  -d "{\"kind\":\"time\",\"surface\":\"wizard\",\"shown_command\":\"$CMD\"}" | jq .server
+# expect quarantined=true
+
+# Before approval: tool_count stays 0 and a call is refused.
+curl -s -H "$K" $B/servers | jq '[.. | .tool_count? // empty] | add'   # 0 (indexed tools)
+sleep 20; R=$(curl -s -H "$K" $B/servers/time/review)
+echo "$R" | jq '.server.definitions_captured, [.tools[].name]'   # true, ["convert_time","get_current_time"]
+
+# Bound approval (Spec 117), as the wizard sends it.
+H=$(echo "$R" | jq -c '[.tools[] | {(.name): .current_hash}] | add')
+I=$(echo "$R" | jq .server.incarnation)
+curl -s -H "$K" -X POST $B/servers/time/security/approve \
+  -d "{\"expected_hashes\":$H,\"expected_incarnation\":$I}" | jq .success
+curl -s -H "$K" $B/servers | jq '[.. | .tool_count? // empty] | add'   # >= 2
+curl -s -H "$K" $B/onboarding/state | jq .day_two     # starter_added/live true, starter_kind "time"
+```
+
+**Negative checks:**
+- Send `"shown_command":"uvx something-else"`: the response is 409 `starter_changed`, and nothing is added.
+- Add `{"registries":[{"id":"reference","protocol":"custom/docker",...}]}` to the config: the offer becomes `reason=reference_overridden`.
+- Put a user server named `time` with a different command in the config: `time` is skipped (`name_taken`), and `sequentialthinking` is offered if `npx` resolves.
+
+## L2. Web wizard and Home (US1, US2, US3)
+
+Run the Playwright sweep (`docs/development/web-ui-verification.md`) against the scratch instance with an empty config:
+1. The wizard auto-opens. The Clients tab, after one fake client connect (use the `MCPPROXY_FIXTURE_PATH` client fixtures), shows "Connect another client".
+2. The Servers tab shows the pre-selected starter card with its command and "Add and inspect".
+3. After the inline approval, the Verify tab shows the tool count and the first prompt.
+4. Dismiss a second fresh instance's wizard without a starter. Home's "Get started" card offers "Add and inspect time", not pre-selected.
+
+Take screenshots for the PR. Check for no console errors.
+
+## L3. Weekly digest (US4)
+
+Seed the activity log with the fixture generator from task T045. It produces 10 days of records: two clients, a refusal pair, quarantine and profile blocks, holds that enter and re-enter, one already-held change, sensitive detections, and a prune that advances the watermark. Then:
+
+```bash
+curl -s -H "$K" "$B/activity/summary?period=7d&view=cli" | jq .digest
+/tmp/s119/mcpproxy activity summary --since 7d -o json | jq .digest     # identical
+```
+
+The figures must equal the fixture's expected values (`internal/storage/testdata/digest_expected.json`).
+
+## L4. Telemetry payload (US5, SC-007)
+
+```bash
+go test ./internal/telemetry -run TestPayloadV15 -v              # T012: asserts and logs a sample schema-15 payload
+go test ./internal/telemetry -run 'TestScanForPII.*DayTwo' -v
+```
+
+## L5. Native (US2, US3, US4)
+
+Use the tray dev-swap recipe (`docs/development/macos-tray.md`, `mcpproxy-ui-test`):
+- the Home empty state shows the starter card;
+- the Connect Client success state lists "Connect another client";
+- the glance block shows "This week: N calls · H held · B blocked".
+
+## Telemetry queries for judging E3 (run by the maintainer on D1)
+
+They use the canonical CI filter and identity keys from the 2026-10-20 telemetry note. `release_v` is the first build carrying PR-B, the starter UI.
+
+**SC-001: tools indexed, heartbeat-sampled, comparable with the 71.5% baseline.**
+
+```sql
+WITH c AS (SELECT cont_id, MIN(created_at) first_seen FROM hb_noci
+           WHERE edition='personal' GROUP BY cont_id
+           HAVING MIN(version_semver) >= :release_v AND MIN(created_at) <= date('now','-14 day'))
+SELECT AVG(ever_tools) FROM (
+  SELECT c.cont_id, MAX(json_extract(payload,'$.tool_count') > 0) ever_tools
+  FROM c JOIN hb_noci h USING (cont_id) GROUP BY c.cont_id);
+```
+
+**SC-001 companion: sticky flag, reported separately.** Use the same query with `MAX(json_extract(payload,'$.activation.first_tool_indexed_ever'))`.
+
+**SC-003: launcher availability and starter conversion.**
+
+```sql
+SELECT json_extract(payload,'$.day_two.starter_launcher') l, COUNT(DISTINCT cont_id)
+FROM hb_noci WHERE schema_version >= 15 AND l != '' GROUP BY l;
+-- conversion: share of cont_ids with any starter_offered=1 that ever have starter_live=1
+```
+
+**SC-004: day-0 clients, same instrument on both sides.** Take the union of `connected_client_ids` over heartbeats with `created_at <= first_seen + 26h`, and compute the share with at least 2 distinct IDs among those with at least 1. Run it for v14 cohorts (baseline) and for schema-15 cohorts.
+
+**SC-002: D7 return on the IP key.** Use the existing retention script (`telemetry_data_method_scripts.py.txt`), restricted to cohorts first seen on version >= `:release_v`.

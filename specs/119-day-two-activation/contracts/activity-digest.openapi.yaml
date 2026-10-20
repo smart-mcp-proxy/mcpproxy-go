@@ -1,0 +1,57 @@
+openapi: 3.0.3
+info:
+  title: MCPProxy Spec 119 - activity summary digest (additive)
+  version: "119"
+paths:
+  /api/v1/activity/summary:
+    get:
+      summary: Existing endpoint. Spec 119 adds `view` (telemetry view counting, FR-032) and the `digest` response section (FR-018). Existing params and fields unchanged.
+      parameters:
+        - { name: period, in: query, schema: { type: string, enum: ["1h", "24h", "7d", "30d"] } }
+        - { name: view, in: query, required: false, schema: { type: string, enum: [web, tray, cli] }, description: "Unknown values ignored (no error). Counted at most once per surface per hour." }
+      responses:
+        "200":
+          description: Summary (existing fields + digest)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  digest: { $ref: "#/components/schemas/ActivityDigest" }
+components:
+  schemas:
+    ActivityDigest:
+      type: object
+      properties:
+        calls_brokered:
+          type: object
+          properties:
+            total: { type: integer }
+            by_client: { type: array, maxItems: 3, items: { type: object, properties: { client: {type: string}, count: {type: integer} } } }
+            other: { type: integer }
+            unknown: { type: integer }
+        held_for_review:
+          type: object
+          description: "null figures + reason=not_attributable when profile/client/token filter is set (FR-023). Scoped callers: only allowed servers."
+          properties:
+            entered: { type: integer, nullable: true }
+            new: { type: integer, nullable: true }
+            changed: { type: integer, nullable: true }
+            currently_awaiting: { type: integer, nullable: true }
+            coverage: { type: string, enum: [complete, partial] }
+            reason: { type: string, nullable: true, enum: [not_attributable] }
+        blocked:
+          type: object
+          properties:
+            total: { type: integer }
+            quarantine: { type: integer }
+            profile: { type: integer }
+            other: { type: integer }
+        sensitive_data:
+          type: object
+          properties: { calls_with_detections: { type: integer } }
+        coverage:
+          type: object
+          properties:
+            state: { type: string, enum: [complete, partial] }
+            complete_since: { type: string, format: date-time }
