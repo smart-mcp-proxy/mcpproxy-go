@@ -1174,3 +1174,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | `shipped` | 86/87 (99%) |
 | [116-config-commit-consistency](./specs/116-config-commit-consistency/) | `in-flight` | 81/124 (65%) |
 | [117-review-bound-approvals](./specs/117-review-bound-approvals/) | `in-flight` | 46/50 (92%) |
+| [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) | — | — |
