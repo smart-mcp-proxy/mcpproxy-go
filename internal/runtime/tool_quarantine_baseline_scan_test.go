@@ -134,8 +134,9 @@ func TestCheckToolApprovals_TrustedServer_AllHeldBaselineIsNotPromotedOnRepeat(t
 
 	// TOCTOU flip (EXP-4): the server now serves a CLEAN contract under the
 	// same name. The poisoned contract is never approved; the clean one is
-	// baselined only once it has been seen unchanged across passes, and the
-	// stale scan evidence is cleared because it no longer describes the record.
+	// baselined only once it has been seen unchanged across passes. The hold
+	// evidence of the flagged first contract stays on the pending record until
+	// promotion clears it, so the review screen still shows what was refused.
 	clean := []*config.ToolMetadata{
 		{ServerName: "tpa-lab-attacker", Name: "summarize_text", Description: "Summarize the given text.", ParamsJSON: `{"type":"object"}`},
 	}
@@ -145,7 +146,7 @@ func TestCheckToolApprovals_TrustedServer_AllHeldBaselineIsNotPromotedOnRepeat(t
 	rec, err := rt.storageManager.GetToolApproval("tpa-lab-attacker", "summarize_text")
 	require.NoError(t, err)
 	assert.Equal(t, storage.ToolApprovalStatusPending, rec.Status)
-	assert.Empty(t, rec.HeldReason, "evidence describes the CURRENT contract, which is clean")
+	assert.Equal(t, storage.ToolHeldReasonScanFindings, rec.HeldReason, "the refused first contract's evidence travels with the pending record")
 	assert.Equal(t, "Summarize the given text.", rec.CurrentDescription)
 
 	result, err = rt.checkToolApprovals("tpa-lab-attacker", clean)
@@ -156,6 +157,7 @@ func TestCheckToolApprovals_TrustedServer_AllHeldBaselineIsNotPromotedOnRepeat(t
 	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status, "the clean contract, unchanged across passes, is the baseline")
 	assert.Equal(t, "auto-baseline", rec.ApprovedBy)
 	assert.Equal(t, "Summarize the given text.", rec.CurrentDescription, "only the clean contract is ever approved")
+	assert.Empty(t, rec.HeldReason, "promotion clears the hold evidence")
 
 	// And a later swap back to the poisoned contract is a rug pull, held.
 	result, err = rt.checkToolApprovals("tpa-lab-attacker", poisoned)

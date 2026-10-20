@@ -1209,10 +1209,12 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			case autoApproveChanges:
 				promote, promoteReason, promoteBy = true, ReasonAutoApproveChanges, "auto-approve-changes"
 			}
-			if isBaselinePass && !promote {
-				// nil clears stale evidence when the live contract scans clean
-				// (it is then promoted by the next unchanged pass); non-nil
-				// records why THIS contract is held.
+			if baselineHold != nil {
+				// Record why the LIVE contract is held. Evidence the record
+				// already carries from elsewhere (a legacy collapsed lock, a
+				// hold from an earlier contract) is left in place when this
+				// scan is clean: it is cleared on promotion (ClearScanHold
+				// below), never by a pass that does not promote.
 				baselineHold.applyTo(existing)
 			}
 
