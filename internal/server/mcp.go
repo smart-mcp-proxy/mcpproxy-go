@@ -409,8 +409,10 @@ func (p *MCPProxyServer) currentTruncator() *truncate.Truncator {
 }
 
 // modernCancellationGuard closes the cross-client cancellation hole the
-// 2026-07-28 era opens in mcp-go (Spec 058 US3, plan risk R1; upstream issue
-// filed from this task).
+// 2026-07-28 era opens in mcp-go (Spec 058 US3, plan risk R1). The upstream
+// report is drafted at specs/058-mcp-2026-upgrade/upstream-issues/
+// mcp-go-inflight-cancel-collision.md — mark3labs/mcp-go restricted
+// interactions to collaborators when this landed, so it could not be filed.
 //
 // mcp-go keys in-flight request cancels as "<sessionID>:<requestID>"
 // (server/server.go inflightKey) and registers every request under that key.
