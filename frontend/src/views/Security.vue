@@ -170,6 +170,53 @@
       </div>
     </div>
 
+    <!-- Spec 101 FR-020: only a degraded bundle needs action, so only that gets
+         an alert. Identity (and the last refusal) live in the quiet panel below. -->
+    <div v-if="signatureBundle?.degraded" class="alert alert-warning" role="alert" data-test="bundle-degraded-alert">
+      <svg class="w-5 h-5 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+      </svg>
+      <div>
+        <div class="font-semibold">Signature coverage degraded<span v-if="signatureBundle.degraded.reason" class="font-mono text-xs font-normal"> ({{ signatureBundle.degraded.reason }})</span></div>
+        <div>{{ signatureBundle.degraded.explanation }}</div>
+      </div>
+    </div>
+
+    <div v-if="signatureBundle" class="text-sm bg-base-100 rounded-box shadow px-4 py-3 space-y-2" data-test="bundle-status-panel">
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1">
+        <span class="font-semibold">Signature bundle</span>
+        <span v-for="row in signatureBundle.identity" :key="row.label" class="text-base-content/70">
+          {{ row.label }}: <span class="text-base-content">{{ row.value }}</span>
+        </span>
+        <span v-if="signatureBundle.pinned" class="badge badge-warning badge-sm">pinned</span>
+        <span v-if="signatureBundle.rollback" class="badge badge-warning badge-sm">rolled back</span>
+      </div>
+      <div v-if="signatureBundle.shortFingerprint" class="flex flex-wrap items-center gap-2">
+        <span class="text-base-content/70">Fingerprint</span>
+        <code class="font-mono">{{ signatureBundle.shortFingerprint }}</code>
+        <button
+          v-if="signatureBundle.fullDigest"
+          type="button"
+          class="btn btn-xs btn-ghost"
+          :aria-expanded="showFullDigest"
+          data-test="bundle-digest-toggle"
+          @click="showFullDigest = !showFullDigest"
+        >{{ showFullDigest ? 'Hide full digest' : 'Show full digest' }}</button>
+      </div>
+      <div v-if="showFullDigest && signatureBundle.fullDigest" class="flex flex-wrap items-center gap-2">
+        <code class="font-mono text-xs break-all" data-test="bundle-full-digest">{{ signatureBundle.fullDigest }}</code>
+        <button type="button" class="btn btn-xs btn-ghost" data-test="bundle-digest-copy" @click="copyFullDigest">
+          {{ digestCopied ? 'Copied' : 'Copy' }}
+        </button>
+      </div>
+      <div v-if="signatureBundle.lastRejection" class="text-base-content/70" data-test="bundle-last-rejection">
+        Last refused candidate: <span class="text-base-content">{{ signatureBundle.lastRejection.label }}</span>
+        <span v-if="signatureBundle.lastRejection.detail"> &mdash; {{ signatureBundle.lastRejection.detail }}</span>
+        <span v-if="signatureBundle.lastRejection.at"> ({{ signatureBundle.lastRejection.at }})</span>.
+        The previous bundle is still serving.
+      </div>
+    </div>
+
     <!-- Docker unavailable warning (only after overview has loaded). Scanning
          still works: only the optional deep scanners need Docker. -->
     <div v-if="overviewLoaded && overview.docker_available === false" class="alert alert-warning" data-test="docker-unavailable-alert">
@@ -616,6 +663,22 @@ const totalFindings = computed(() => overview.value?.findings_by_severity?.total
 // an older daemon that does not report `signature_bundle`, so the stat is
 // simply absent rather than rendering a misleading zero.
 const signatureBundle = computed(() => formatSignatureBundle(overview.value?.signature_bundle))
+
+// Full digest is the rollback input (Spec 101 FR-010), so it is available in
+// full on demand rather than cluttering the default view.
+const showFullDigest = ref(false)
+const digestCopied = ref(false)
+async function copyFullDigest() {
+  const text = signatureBundle.value?.fullDigest || ''
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    digestCopied.value = true
+    setTimeout(() => { digestCopied.value = false }, 1500)
+  } catch {
+    // Clipboard blocked: the digest is already visible and selectable.
+  }
+}
 
 // Docker isolation state — populated from /api/v1/config + /api/v1/servers.
 const isolationEnabled = ref(false)
