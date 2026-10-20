@@ -385,8 +385,10 @@ docker run -d --name mcpproxy \
   on the volume — so mount one before you configure anything.
 - **Relocating state**: `--data-dir` and `MCPPROXY_DATA_DIR` move the data directory and also
   decide where `serve` looks for `mcp_config.json` — `<data-dir>/mcp_config.json` is read when it
-  exists, and seeded there on a first run — so the config and its API key live on the same volume as
-  the database. An explicit `--config` still wins. The legacy `MCPPROXY_DATA` only relocates the data
+  exists, and seeded there on a first run with no config anywhere — so the config and its API key
+  live on the same volume as the database. If the data dir has no config but a legacy one exists in
+  the working directory or `$HOME/.mcpproxy`, `serve` keeps using that legacy file and moves only the
+  data. An explicit `--config` still wins. The legacy `MCPPROXY_DATA` only relocates the data
   directory: with it the config is still looked up in the working directory and `$HOME/.mcpproxy`
   (`/root/.mcpproxy` in this image). Releases before this change ignored `<data-dir>/mcp_config.json`
   under `serve`, so on those, mount the volume at the default `/root/.mcpproxy` path instead.

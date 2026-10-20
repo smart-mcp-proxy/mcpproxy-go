@@ -856,9 +856,11 @@ func applyTLSEnvOverrides(cfg *Config) {
 	// Override data directory from environment. MCPPROXY_DATA_DIR is the
 	// documented name; MCPPROXY_DATA is kept for backward compatibility and
 	// loses when both are set.
-	value = os.Getenv(EnvDataDir)
+	// DataDirFromEnv trims the value, so a whitespace-only MCPPROXY_DATA_DIR
+	// neither relocates the data dir to "   " nor shadows the legacy variable.
+	value = DataDirFromEnv()
 	if value == "" {
-		value = os.Getenv(EnvDataDirLegacy)
+		value = strings.TrimSpace(os.Getenv(EnvDataDirLegacy))
 	}
 	envOverride(b, cfg, FieldDataDir, value != "", value)
 
