@@ -626,9 +626,13 @@ func NewMCPProxyServer(
 		)
 	})
 
-	// Add hook to capture client capabilities after initialize completes
-	// This hook is called for ALL transports (including HTTP POST), and receives the
-	// InitializeRequest with client info and capabilities.
+	// Add hook to capture client capabilities after initialize completes.
+	// It fires for every transport (including HTTP POST) — but only in the
+	// LEGACY protocol era: `initialize` is METHOD_NOT_FOUND under 2026-07-28,
+	// so a modern client never reaches it. Client identity for that era is
+	// read per request in the BeforeAny hook above (Spec 058 US3); everything
+	// else recorded here (capabilities, credential, serving instance) is
+	// session-scoped and has no modern counterpart by design.
 	hooks.AddAfterInitialize(func(ctx context.Context, id any, request *mcp.InitializeRequest, result *mcp.InitializeResult) {
 		// Get session from context
 		session := mcpserver.ClientSessionFromContext(ctx)
