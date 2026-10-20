@@ -295,7 +295,7 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
 - [x] T232 In `roadmap.yaml`, set `tpa-db` → `tpa-db-corpus` to `status: in_review` with the `pr:` link (`done` once merged). Regenerate `ROADMAP.md` with `python3 scripts/gen-roadmap.py`.
 - [x] T233 Add a Recent Changes line to `CLAUDE.md` (`101-tpa-db US2`): Go 1.26, `internal/security/tpacorpus` + `cmd/tpa-corpus`, `signatures[]` load-layer integrity, `scan-eval --bundle`, the control, and **No new dependencies**.
 - [ ] T234 Run an internal review workflow (provenance accuracy, licence compliance, sample safety, gate non-vacuity, determinism; 3-refuter verification), then the cross-model round with opencode `github-copilot/gpt-6.1-sol` (zcode's Z.AI login is expired), split into small file-named chunks, with a cap of 10 rounds. The fallback if Sol 6.1 is down is the app-bundled codex `gpt-5.6-sol`, read-only.
-- [ ] T235 Open the PR against `main`:
+- [x] T235 Open the PR against `main`:
   - title `feat(security): Spec 101 US2 TPA seed corpus and eval gate`;
   - body with `Related #938`, the gate numbers from T224, the class and signature table, the recorded assumptions, and the D-US2-10 conflict hunks with US1;
   - no closing keyword and no QA report.

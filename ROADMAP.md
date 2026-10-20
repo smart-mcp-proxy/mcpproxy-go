@@ -461,14 +461,16 @@ graph LR
   tpa_db_format --> tpa_db_corpus
   tpa_db_format --> tpa_db_refresh
 
+  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class tpa_db_format,tpa_db_corpus,tpa_db_refresh todo;
+  class tpa_db_corpus in_review;
+  class tpa_db_format,tpa_db_refresh todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
-| Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
+| Seed corpus: catalog known public TPA campaigns/patterns into the DB | 🟡 In review | #1702 |
 | Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
 
 </details>
@@ -1015,7 +1017,7 @@ graph LR
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls | In review | P2 | — |  | #1536 |
-| tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | 34/36 (94%) | [101-tpa-db](./specs/101-tpa-db/) |  |
+| tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | 35/36 (97%) | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
@@ -1156,7 +1158,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 28/33 (85%) |
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
-| [101-tpa-db](./specs/101-tpa-db/) | `in-flight` | 34/36 (94%) |
+| [101-tpa-db](./specs/101-tpa-db/) | `shipped` | 35/36 (97%) |
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
