@@ -408,6 +408,35 @@ func (p *MCPProxyServer) currentTruncator() *truncate.Truncator {
 	return p.truncatorFn()
 }
 
+// modernClientRecorder debounces the per-request client identity of modern
+// (2026-07-28) requests, so the activation funnel and the client-seen presence
+// are fed once per distinct client per window rather than once per request.
+// Bounded: an entry per distinct (name, version) ever seen by this process,
+// which is the same cardinality the session store's client names have.
+type modernClientRecorder struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+	now  func() time.Time
+}
+
+func newModernClientRecorder() *modernClientRecorder {
+	return &modernClientRecorder{seen: map[string]time.Time{}, now: time.Now}
+}
+
+// firstSightingWithin reports whether (name, version) has not been recorded in
+// the last window, recording it when so.
+func (r *modernClientRecorder) firstSightingWithin(name, version string, window time.Duration) bool {
+	key := name + "\x00" + version
+	now := r.now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if last, ok := r.seen[key]; ok && now.Sub(last) < window {
+		return false
+	}
+	r.seen[key] = now
+	return true
+}
+
 // modernCancellationGuard closes the cross-client cancellation hole the
 // 2026-07-28 era opens in mcp-go (Spec 058 US3, plan risk R1). The upstream
 // report is drafted at specs/058-mcp-2026-upgrade/upstream-issues/
@@ -530,7 +559,26 @@ func NewMCPProxyServer(
 	// Update session activity on every MCP message to prevent premature cleanup.
 	// Without this, sessions that only do retrieve_tools (not tool calls) would
 	// appear inactive and get closed by the background cleanup.
+	// Spec 058 US3 (T033): a 2026-07-28 request never runs initialize, so the
+	// AfterInitialize hook below — which feeds the Spec 044 activation funnel
+	// and the client-seen presence — never fires for a modern client. The
+	// identity travels on every request instead (research D5), so it is read
+	// here, once per client identity per minute (the same window
+	// RecordClientSeen itself debounces on), never once per request.
+	modernClients := newModernClientRecorder()
 	hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+		if name, version := requestClientInfo(ctx); name != "" && modernClients.firstSightingWithin(name, version, time.Minute) {
+			if mainServer != nil && mainServer.runtime != nil {
+				mainServer.runtime.RecordMCPClientForActivation(name)
+				mainServer.runtime.RecordClientSeen(name)
+			}
+			logger.Info("MCP client identified from request metadata",
+				zap.String("client_name", name),
+				zap.String("client_version", version),
+				zap.String("protocol_version", mcpserver.RequestProtocolVersion(ctx)),
+			)
+		}
+
 		session := mcpserver.ClientSessionFromContext(ctx)
 		if session == nil {
 			return
