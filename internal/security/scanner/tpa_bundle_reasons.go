@@ -57,6 +57,11 @@ const (
 	// manifest field (sequence grammar, trust_epoch), an unsupported version, a
 	// pattern that does not compile, or no runnable rule.
 	RejectInvalidBundle = "invalid_bundle"
+	// RejectStateCommitFailed: the anti-downgrade state could not be durably
+	// committed, so the candidate was NOT activated. Refusing to activate is the
+	// safe outcome: activating without a durable watermark would reopen the
+	// replay window FR-011a exists to close. Last-known-good keeps serving.
+	RejectStateCommitFailed = "state_commit_failed"
 )
 
 // Degraded-coverage reasons (FR-007, FR-009a, FR-009b;
