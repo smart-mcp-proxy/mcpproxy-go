@@ -102,6 +102,9 @@ type countingUpstream struct {
 	// errBody, when set, makes every tool answer an upstream isError result
 	// carrying that text (an approved upstream failing on its own).
 	errBody atomic.Pointer[string]
+	// okBody, when set, replaces the default "ok" text of a successful answer
+	// (for tests that need the upstream to return a particular payload).
+	okBody atomic.Pointer[string]
 }
 
 // serve registers one more tool on the running stub upstream, for tests
@@ -129,6 +132,9 @@ func (u *countingUpstream) serve(spec toolSpec) {
 			u.record(request.Params.Name)
 			if body := u.errBody.Load(); body != nil {
 				return mcp.NewToolResultError(*body), nil
+			}
+			if body := u.okBody.Load(); body != nil {
+				return mcp.NewToolResultText(*body), nil
 			}
 			return mcp.NewToolResultText("ok"), nil
 		})
