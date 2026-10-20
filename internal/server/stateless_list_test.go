@@ -86,10 +86,10 @@ func newRawEraClient(t *testing.T, url string, era protocolEra) *rawEraClient {
 
 func (c *rawEraClient) modern() bool { return mcp.IsModernProtocol(c.era.version) }
 
-// send posts one JSON-RPC message and returns the HTTP response plus the
-// decoded JSON-RPC payload (SSE-framed responses are unwrapped).
-func (c *rawEraClient) send(method string, params map[string]any, withID bool) (*http.Response, []byte) {
-	c.t.Helper()
+// buildRequest renders one JSON-RPC message as an HTTP POST for this client's
+// era. id <= 0 renders a notification (no id member). It asserts nothing, so
+// a test can issue a request on its own goroutine.
+func (c *rawEraClient) buildRequest(method string, params map[string]any, id int) (*http.Request, error) {
 	if params == nil {
 		params = map[string]any{}
 	}
@@ -101,15 +101,18 @@ func (c *rawEraClient) send(method string, params map[string]any, withID bool) (
 		}
 	}
 	msg := map[string]any{"jsonrpc": "2.0", "method": method, "params": params}
-	if withID {
-		msg["id"] = c.nextID
-		c.nextID++
+	if id > 0 {
+		msg["id"] = id
 	}
 	body, err := json.Marshal(msg)
-	require.NoError(c.t, err)
+	if err != nil {
+		return nil, err
+	}
 
 	req, err := http.NewRequest(http.MethodPost, c.url, bytes.NewReader(body))
-	require.NoError(c.t, err)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	if c.modern() {
@@ -123,7 +126,36 @@ func (c *rawEraClient) send(method string, params map[string]any, withID bool) (
 	} else if c.sessionID != "" {
 		req.Header.Set(mcpserver.HeaderKeySessionID, c.sessionID)
 	}
+	return req, nil
+}
 
+// do performs req and returns the status plus the decoded JSON-RPC payload
+// (SSE-framed responses are unwrapped). It asserts nothing.
+func (c *rawEraClient) do(req *http.Request) (int, []byte, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return resp.StatusCode, nil, err
+	}
+	return resp.StatusCode, unwrapJSONRPCBody(resp.Header.Get("Content-Type"), raw), nil
+}
+
+// send posts one JSON-RPC message and returns the HTTP response plus the
+// decoded JSON-RPC payload (SSE-framed responses are unwrapped).
+func (c *rawEraClient) send(method string, params map[string]any, withID bool) (*http.Response, []byte) {
+	c.t.Helper()
+	id := 0
+	if withID {
+		id = c.nextID
+		c.nextID++
+	}
+	req, err := c.buildRequest(method, params, id)
+	require.NoError(c.t, err)
 	client := &http.Client{Timeout: 15 * time.Second}
 	resp, err := client.Do(req)
 	require.NoError(c.t, err)
