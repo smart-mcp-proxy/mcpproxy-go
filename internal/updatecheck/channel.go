@@ -47,6 +47,7 @@ const (
 	ChannelDocker           = "docker"
 	ChannelGoInstall        = "go-install"
 	ChannelWindowsInstaller = "windows-installer"
+	ChannelScoop            = "scoop"
 	ChannelTarball          = "tarball"
 	ChannelUnknown          = "unknown"
 )
@@ -61,6 +62,7 @@ var knownChannels = map[string]bool{
 	ChannelDocker:           true,
 	ChannelGoInstall:        true,
 	ChannelWindowsInstaller: true,
+	ChannelScoop:            true,
 	ChannelTarball:          true,
 	ChannelUnknown:          true,
 }
@@ -221,6 +223,17 @@ func (d *channelDetector) detect() string {
 		return ChannelDMG
 	}
 
+	// (4b) Scoop (Spec 121 FR-016). Scoop installs the very same release zip
+	// that carries the weak "tarball" stamp, so without this branch a
+	// scoop-owned executable would be classified as a self-updatable tarball
+	// install and `mcpproxy update` would overwrite a file scoop tracks
+	// (version, hash). The apps/<name>/ layout is scoop's own and is checked
+	// on a slash-normalised, lower-cased path so it holds for both the
+	// per-user (~\scoop) and global (C:\ProgramData\scoop) roots.
+	if isScoopPath(path) {
+		return ChannelScoop
+	}
+
 	// (5) go install: the Go toolchain stamps the module version into build
 	// info for `go install module@version` builds, while such builds carry no
 	// -X ldflags version (the checker then receives the "development"
@@ -311,4 +324,12 @@ func (d *channelDetector) isGoInstall() bool {
 	// Tagged installs ("v0.47.0") and pseudo-versions
 	// ("v0.0.0-20260701123456-abcdef123456") are both valid semver.
 	return semver.IsValid(v)
+}
+
+// isScoopPath reports whether path lies inside scoop's package layout for
+// mcpproxy (<root>/scoop/apps/mcpproxy/...). Windows paths are normalised so
+// the check also works when the detector is exercised on another OS.
+func isScoopPath(path string) bool {
+	p := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
+	return strings.Contains(p, "/scoop/apps/mcpproxy/")
 }

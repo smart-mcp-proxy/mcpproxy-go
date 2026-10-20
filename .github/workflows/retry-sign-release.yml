@@ -1012,12 +1012,6 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
 
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
-        env:
-          TAG: ${{ inputs.tag }}
-
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
@@ -1025,9 +1019,20 @@ jobs:
       - name: Authenticate to MCP Registry
         run: ./mcp-publisher login github-oidc
 
-      - name: Update version in server.json
+      # Spec 121: same stamping + pre-publish checks as release.yml.
+      - name: Stamp server.json for the tag
         run: |
-          jq --arg v "${{ steps.version.outputs.VERSION }}" '.version = $v' server.json > server.tmp && mv server.tmp server.json
+          scripts/stamp-server-json.sh "${TAG}" server.json > server.tmp && mv server.tmp server.json
+        env:
+          TAG: ${{ inputs.tag }}
+
+      - name: Pre-publish checks (image, label, MCP smoke test)
+        run: scripts/registry-preflight.sh "${TAG}"
+        env:
+          TAG: ${{ inputs.tag }}
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate server.json
 
       - name: Publish to MCP Registry
         run: ./mcp-publisher publish

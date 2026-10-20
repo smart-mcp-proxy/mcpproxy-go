@@ -124,6 +124,12 @@ func TestUpdateCommand_ChannelBranches(t *testing.T) {
 			wantCommand: "go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest",
 		},
 		{
+			name:        "scoop prints the scoop command and never self-updates",
+			channel:     updatecheck.ChannelScoop,
+			wantAction:  actionCommand,
+			wantCommand: "scoop update mcpproxy",
+		},
+		{
 			name:        "docker gets guidance only",
 			channel:     updatecheck.ChannelDocker,
 			wantAction:  actionGuidance,
@@ -199,7 +205,7 @@ func TestUpdateCommand_ChannelBranches(t *testing.T) {
 func TestUpdateCommand_GuidanceChannelsNeverSelfUpdate(t *testing.T) {
 	for _, channel := range []string{
 		updatecheck.ChannelHomebrew, updatecheck.ChannelDeb, updatecheck.ChannelRPM,
-		updatecheck.ChannelGoInstall, updatecheck.ChannelDocker,
+		updatecheck.ChannelGoInstall, updatecheck.ChannelDocker, updatecheck.ChannelScoop,
 		updatecheck.ChannelWindowsInstaller, updatecheck.ChannelDMG, updatecheck.ChannelUnknown,
 	} {
 		t.Run(channel, func(t *testing.T) {
