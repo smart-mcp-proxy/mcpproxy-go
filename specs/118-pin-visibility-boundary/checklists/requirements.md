@@ -32,4 +32,5 @@
 ## Notes
 
 - Validated 2026-10-20 against the issue table (L1 to L7) and the MCP-side resolver, which already applies the pin; parity (FR-013) is the check that REST catches up rather than diverging again.
-- Ready for `/speckit.plan`. Cross-model spec review (zcode) before plan, per repo practice.
+- Amended 2026-10-20 after cross-review (zcode unavailable: Z.AI login expired, needs `zcode login`; findings from a Sonnet reader checked against `origin/main` 4e02c36a8): O1 pinned token may select only its own pin on `?profile=` and the profile doors (MCP parity; FR-009, FR-012, A6); O2 `/profiles/{name}/effective-tools` and `/profiles/active` added (L6); O3 grant-as-filter doors and usage cache (L8, FR-019) and the config seam (FR-020); O4 `/diagnostics`, `/doctor`, `/catalog/search`, security scan routes (L7, L9, L10); O5 FR-005 rewritten from a cost claim to a same-code-path refusal rule; O6 FR-014 demoted to a design note with the `profile_mode` caveat.
+- Ready for `/speckit.plan`.
