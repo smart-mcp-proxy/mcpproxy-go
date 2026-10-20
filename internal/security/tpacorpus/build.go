@@ -258,6 +258,18 @@ func checkSource(d *sourceDoc) error {
 	if len(d.Rules) == 0 {
 		return errors.New("signature has no rules")
 	}
+	// A JSON null decodes to a nil map; later stages stamp ownership into
+	// each entry, which would panic on it.
+	for i, r := range d.Rules {
+		if r == nil {
+			return fmt.Errorf("rules[%d] is null", i)
+		}
+	}
+	for i, s := range d.Skipped {
+		if s == nil {
+			return fmt.Errorf("skipped[%d] is null", i)
+		}
+	}
 	return nil
 }
 

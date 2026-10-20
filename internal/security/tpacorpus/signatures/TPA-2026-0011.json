@@ -25,10 +25,16 @@
           "id": "$prefer",
           "type": "regex",
           "value": "(?:always|only)\\s+(?:prefer|use)\\s+this\\s+tool"
+        },
+        {
+          "context": "tool_description",
+          "id": "$disparage",
+          "type": "regex",
+          "value": "outdated|obsolete|insecure|unsafe|vulnerable|compromised|malicious|untrusted|unreliable|broken|buggy|flawed|never use|do not use|don't use|ignore"
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:always|only)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\b.{0,60}?\\b(?:any|every|all)\\s+other\\b",
+      "pattern": "(?is)\\b(?:always|only)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\b.{0,60}?\\b(?:any|every|all)\\s+other\\b.{0,120}?(?:\\b(?:is|are|was|were)\\s+(?:\\w+\\s+){0,2}?(?:outdated|obsolete|insecure|unsafe|vulnerable|compromised|malicious|untrusted|unreliable|broken|buggy|flawed)\\b|\\b(?:never|do not|don't)\\s+use\\s+(?:any\\s+|the\\s+)?(?:other|alternative)|\\bignore\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)|\\bwithout\\s+(?:telling|informing|notifying|asking)\\s+the\\s+user)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

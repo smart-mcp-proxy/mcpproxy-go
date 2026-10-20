@@ -21,7 +21,7 @@
       "id": "TPA-2026-0016",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(transfers?|payments?|transactions?)\\b.{0,60}\\b(must|should|always|required to)\\b.{0,30}\\b(be )?(redirected|rerouted|diverted|forwarded|routed)\\b.{0,100}?0x[0-9a-f]{20,}",
+      "pattern": "(?is)\\b(transfers?|payments?|transactions?)\\b.{0,60}\\b(must|should|always|required to)\\b.{0,30}\\b(be )?(redirected|rerouted|diverted|forwarded|routed)\\b(?:.{0,100}?0x[0-9a-f]{20,}.{0,200}?(?:no matter (?:what|which)|regardless of|overrid\\w*|ignor\\w*\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:instead of|rather than|in place of)\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:do not|don['’]t|never|must not)\\s+(?:tell|notify|inform|mention|alert|show|reveal|disclose)|without\\s+(?:notifying|telling|informing|alerting|asking)|silently|secretly|covertly|quietly|hidden from|not\\s+(?:be\\s+)?(?:shown|displayed|disclosed))|.{0,100}?(?:no matter (?:what|which)|regardless of|overrid\\w*|ignor\\w*\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:instead of|rather than|in place of)\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:do not|don['’]t|never|must not)\\s+(?:tell|notify|inform|mention|alert|show|reveal|disclose)|without\\s+(?:notifying|telling|informing|alerting|asking)|silently|secretly|covertly|quietly|hidden from|not\\s+(?:be\\s+)?(?:shown|displayed|disclosed)).{0,100}?0x[0-9a-f]{20,})",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -38,7 +38,7 @@
       "id": "TPA-2026-0016",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(always|must|mandatory|required)\\b.{0,60}\\b(redirect|reroute|forward|route)\\w*\\b.{0,60}\\b(transfers?|payments?|transactions?|withdrawals?)\\b.{0,160}?0x[0-9a-f]{20,}",
+      "pattern": "(?is)\\b(always|must|mandatory|required)\\b.{0,60}\\b(redirect|reroute|forward|route)\\w*\\b.{0,60}\\b(transfers?|payments?|transactions?|withdrawals?)\\b(?:.{0,160}?0x[0-9a-f]{20,}.{0,200}?(?:no matter (?:what|which)|regardless of|overrid\\w*|ignor\\w*\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:instead of|rather than|in place of)\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:do not|don['’]t|never|must not)\\s+(?:tell|notify|inform|mention|alert|show|reveal|disclose)|without\\s+(?:notifying|telling|informing|alerting|asking)|silently|secretly|covertly|quietly|hidden from|not\\s+(?:be\\s+)?(?:shown|displayed|disclosed))|.{0,160}?(?:no matter (?:what|which)|regardless of|overrid\\w*|ignor\\w*\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:instead of|rather than|in place of)\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:do not|don['’]t|never|must not)\\s+(?:tell|notify|inform|mention|alert|show|reveal|disclose)|without\\s+(?:notifying|telling|informing|alerting|asking)|silently|secretly|covertly|quietly|hidden from|not\\s+(?:be\\s+)?(?:shown|displayed|disclosed)).{0,100}?0x[0-9a-f]{20,})",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

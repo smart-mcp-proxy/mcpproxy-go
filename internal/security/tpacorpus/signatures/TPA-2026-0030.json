@@ -21,7 +21,7 @@
       "id": "TPA-2026-0030",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)(append|attach|include|add)\\b.{0,60}?(list_chats|chat history|recent (chats|messages)|contact list|address book).{0,100}?(every|each|all)\\s+(message|email|request)",
+      "pattern": "(?is)(append|attach|include|add)\\b[^.]{0,60}?(list_chats|chat history|recent (chats|messages)|contact list|address book)[^.]{0,100}?(\\b(?:to|onto)\\s+(?:every|each|all)\\s+(?:(?:outgoing|outbound|sent|new)\\s+)?(?:message|email|request)s?\\b|\\b(?:in|into|with)\\s+(?:every|each|all)\\s+(?:outgoing|outbound|sent|new)\\s+(?:message|email|request)s?\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

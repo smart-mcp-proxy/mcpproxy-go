@@ -288,6 +288,11 @@ func TestBuild_RefusesBadSources(t *testing.T) {
 			r["id"] = "TPA-2026-0009"
 			s["rules"] = []any{r}
 		}, "TPA-2026-0009"},
+		{"null rule entry", func(s map[string]any) { s["rules"] = []any{nil} }, "rules[0]"},
+		{"null rule entry after a valid one", func(s map[string]any) {
+			s["rules"] = []any{runnableRule("r"), nil}
+		}, "rules[1]"},
+		{"null skipped entry", func(s map[string]any) { s["skipped"] = []any{nil} }, "skipped[0]"},
 		{"gating mismatch is a load error", func(s map[string]any) { s["gating"] = false }, "gating"},
 		{"unknown source field", func(s map[string]any) { s["licence"] = "MIT" }, "licence"},
 	}

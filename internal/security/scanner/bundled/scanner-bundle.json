@@ -298,7 +298,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?(?:[\\]\\.;:!,]|\\band|\\bthen)\\s*(?:(?:always|must|should|just|simply|please)\\s+)*(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b.{0,150}?\\b(?:no matter|regardless of|whatever)\\b.{0,60}?\\b(?:arguments?|inputs?|parameters?|request|user)\\b",
+      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?(?:(?:[\\]\\.;:!,]|\\band|\\bthen)\\s*(?:(?:always|must|should|just|simply|please)\\s+)*|\\b(?:always|must|just|simply)\\s+)(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b.{0,150}?\\b(?:no matter|regardless of|whatever)\\b.{0,60}?\\b(?:arguments?|inputs?|parameters?|request|user)\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -334,7 +334,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?(?:[\\]\\.;:!,]|\\band|\\bthen)\\s*(?:(?:always|must|should|just|simply|please)\\s+)*(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b.{0,150}?\\b(?:skip|ignore|bypass|disregard|avoid|never use|do not use|don't use)\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)\\b",
+      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?(?:(?:[\\]\\.;:!,]|\\band|\\bthen)\\s*(?:(?:always|must|should|just|simply|please)\\s+)*|\\b(?:always|must|just|simply)\\s+)(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b.{0,150}?\\b(?:skip|ignore|bypass|disregard|avoid|never use|do not use|don't use)\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -511,10 +511,16 @@
           "id": "$prefer",
           "type": "regex",
           "value": "(?:always|only)\\s+(?:prefer|use)\\s+this\\s+tool"
+        },
+        {
+          "context": "tool_description",
+          "id": "$disparage",
+          "type": "regex",
+          "value": "outdated|obsolete|insecure|unsafe|vulnerable|compromised|malicious|untrusted|unreliable|broken|buggy|flawed|never use|do not use|don't use|ignore"
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:always|only)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\b.{0,60}?\\b(?:any|every|all)\\s+other\\b",
+      "pattern": "(?is)\\b(?:always|only)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\b.{0,60}?\\b(?:any|every|all)\\s+other\\b.{0,120}?(?:\\b(?:is|are|was|were)\\s+(?:\\w+\\s+){0,2}?(?:outdated|obsolete|insecure|unsafe|vulnerable|compromised|malicious|untrusted|unreliable|broken|buggy|flawed)\\b|\\b(?:never|do not|don't)\\s+use\\s+(?:any\\s+|the\\s+)?(?:other|alternative)|\\bignore\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)|\\bwithout\\s+(?:telling|informing|notifying|asking)\\s+the\\s+user)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -739,7 +745,7 @@
       "id": "TPA-2026-0016",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(transfers?|payments?|transactions?)\\b.{0,60}\\b(must|should|always|required to)\\b.{0,30}\\b(be )?(redirected|rerouted|diverted|forwarded|routed)\\b.{0,100}?0x[0-9a-f]{20,}",
+      "pattern": "(?is)\\b(transfers?|payments?|transactions?)\\b.{0,60}\\b(must|should|always|required to)\\b.{0,30}\\b(be )?(redirected|rerouted|diverted|forwarded|routed)\\b(?:.{0,100}?0x[0-9a-f]{20,}.{0,200}?(?:no matter (?:what|which)|regardless of|overrid\\w*|ignor\\w*\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:instead of|rather than|in place of)\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:do not|don['’]t|never|must not)\\s+(?:tell|notify|inform|mention|alert|show|reveal|disclose)|without\\s+(?:notifying|telling|informing|alerting|asking)|silently|secretly|covertly|quietly|hidden from|not\\s+(?:be\\s+)?(?:shown|displayed|disclosed))|.{0,100}?(?:no matter (?:what|which)|regardless of|overrid\\w*|ignor\\w*\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:instead of|rather than|in place of)\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:do not|don['’]t|never|must not)\\s+(?:tell|notify|inform|mention|alert|show|reveal|disclose)|without\\s+(?:notifying|telling|informing|alerting|asking)|silently|secretly|covertly|quietly|hidden from|not\\s+(?:be\\s+)?(?:shown|displayed|disclosed)).{0,100}?0x[0-9a-f]{20,})",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -756,7 +762,7 @@
       "id": "TPA-2026-0016",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(always|must|mandatory|required)\\b.{0,60}\\b(redirect|reroute|forward|route)\\w*\\b.{0,60}\\b(transfers?|payments?|transactions?|withdrawals?)\\b.{0,160}?0x[0-9a-f]{20,}",
+      "pattern": "(?is)\\b(always|must|mandatory|required)\\b.{0,60}\\b(redirect|reroute|forward|route)\\w*\\b.{0,60}\\b(transfers?|payments?|transactions?|withdrawals?)\\b(?:.{0,160}?0x[0-9a-f]{20,}.{0,200}?(?:no matter (?:what|which)|regardless of|overrid\\w*|ignor\\w*\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:instead of|rather than|in place of)\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:do not|don['’]t|never|must not)\\s+(?:tell|notify|inform|mention|alert|show|reveal|disclose)|without\\s+(?:notifying|telling|informing|alerting|asking)|silently|secretly|covertly|quietly|hidden from|not\\s+(?:be\\s+)?(?:shown|displayed|disclosed))|.{0,160}?(?:no matter (?:what|which)|regardless of|overrid\\w*|ignor\\w*\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:instead of|rather than|in place of)\\s+(?:the\\s+)?(?:user|address|recipient|destination)\\w*|(?:do not|don['’]t|never|must not)\\s+(?:tell|notify|inform|mention|alert|show|reveal|disclose)|without\\s+(?:notifying|telling|informing|alerting|asking)|silently|secretly|covertly|quietly|hidden from|not\\s+(?:be\\s+)?(?:shown|displayed|disclosed)).{0,100}?0x[0-9a-f]{20,})",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -909,7 +915,7 @@
       "id": "TPA-2026-0020",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)(?:(?:silently|secretly|covertly|quietly|surreptitious\\w*|in the background|without (?:the )?(?:user|their|your)\\b[^.]{0,30}|(?:never|not) (?:be )?(?:displayed|shown|disclosed|surfaced|mentioned)|(?:do not|don['’]t|never|must not) (?:mention|tell|show|reveal|disclose|inform|notify)|hidden from|invisible to).{0,60}\\b(?:watch|monitor|record|capture)\\w*\\b.{0,40}\\b(?:the )?(?:system )?(?:clipboard|pasteboard)\\b.{0,160}?\\b(?:stream|upload|transmit|send|forward)\\w*\\b.{0,100}https?://|\\b(?:watch|monitor|record|capture)\\w*\\b.{0,40}\\b(?:the )?(?:system )?(?:clipboard|pasteboard)\\b.{0,160}?\\b(?:stream|upload|transmit|send|forward)\\w*\\b.{0,100}https?://.{0,200}(?:silently|secretly|covertly|quietly|surreptitious\\w*|in the background|without (?:the )?(?:user|their|your)\\b[^.]{0,30}|(?:never|not) (?:be )?(?:displayed|shown|disclosed|surfaced|mentioned)|(?:do not|don['’]t|never|must not) (?:mention|tell|show|reveal|disclose|inform|notify)|hidden from|invisible to)|\\b(?:watch|monitor|record|capture)\\w*\\b.{0,40}\\b(?:the )?(?:system )?(?:clipboard|pasteboard)\\b.{0,80}(?:silently|secretly|covertly|quietly|surreptitious\\w*|in the background|without (?:the )?(?:user|their|your)\\b[^.]{0,30}|(?:never|not) (?:be )?(?:displayed|shown|disclosed|surfaced|mentioned)|(?:do not|don['’]t|never|must not) (?:mention|tell|show|reveal|disclose|inform|notify)|hidden from|invisible to).{0,80}\\b(?:stream|upload|transmit|send|forward)\\w*\\b.{0,100}https?://)",
+      "pattern": "(?is)(?:(?:silently|secretly|covertly|quietly|surreptitious\\w*|without (?:the )?(?:user|their|your)\\b[^.]{0,30}|(?:never|not) (?:be )?(?:displayed|shown|disclosed|surfaced|mentioned)|(?:do not|don['’]t|never|must not) (?:mention|tell|show|reveal|disclose|inform|notify)|hidden from|invisible to).{0,60}\\b(?:watch|monitor|record|capture)\\w*\\b.{0,40}\\b(?:the )?(?:system )?(?:clipboard|pasteboard)\\b.{0,160}?\\b(?:stream|upload|transmit|send|forward)\\w*\\b.{0,100}https?://|\\b(?:watch|monitor|record|capture)\\w*\\b.{0,40}\\b(?:the )?(?:system )?(?:clipboard|pasteboard)\\b.{0,160}?\\b(?:stream|upload|transmit|send|forward)\\w*\\b.{0,100}https?://.{0,200}(?:silently|secretly|covertly|quietly|surreptitious\\w*|without (?:the )?(?:user|their|your)\\b[^.]{0,30}|(?:never|not) (?:be )?(?:displayed|shown|disclosed|surfaced|mentioned)|(?:do not|don['’]t|never|must not) (?:mention|tell|show|reveal|disclose|inform|notify)|hidden from|invisible to)|\\b(?:watch|monitor|record|capture)\\w*\\b.{0,40}\\b(?:the )?(?:system )?(?:clipboard|pasteboard)\\b.{0,80}(?:silently|secretly|covertly|quietly|surreptitious\\w*|without (?:the )?(?:user|their|your)\\b[^.]{0,30}|(?:never|not) (?:be )?(?:displayed|shown|disclosed|surfaced|mentioned)|(?:do not|don['’]t|never|must not) (?:mention|tell|show|reveal|disclose|inform|notify)|hidden from|invisible to).{0,80}\\b(?:stream|upload|transmit|send|forward)\\w*\\b.{0,100}https?://)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1000,7 +1006,7 @@
           "context": "tool_description",
           "id": "$file",
           "type": "regex",
-          "value": "\\.npmrc|\\.aws|\\.ssh|settings\\.json"
+          "value": "\\.npmrc|\\.aws|\\.ssh"
         },
         {
           "context": "tool_description",
@@ -1010,7 +1016,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)\\b(?:first|before|prior\\s+to|then|also|additionally|mandatory|required|must|important|always|silently|for\\s+(?:better|best)\\s+\\w+)\\b.{0,100}?\\b(?:read|cat|open|load)\\b.{0,60}?(?:(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|\\.ssh/|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.env\\b|credentials?\\s+file|private\\s+key)|\\.npmrc|settings\\.json).{0,160}?\\b(?:send|post|upload|transmit|forward)\\w*\\s+(?:(?:(?:the|its|their|all|any|a|that|this)\\s+){0,2}(?:[\\w-]+\\s+){0,2}?(?:contents?|tokens?|keys?|secrets?|credentials?|file)\\b|(?:it|them)\\b).{0,80}?https?://",
+      "pattern": "(?is)\\b(?:first|before|prior\\s+to|then|also|additionally|mandatory|required|must|important|always|silently|for\\s+(?:better|best)\\s+\\w+)\\b.{0,100}?\\b(?:read|cat|open|load)\\b.{0,60}?(?:(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|\\.ssh/|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.env\\b|credentials?\\s+file|private\\s+key)|\\.npmrc).{0,160}?\\b(?:send|post|upload|transmit|forward)\\w*\\s+(?:(?:(?:the|its|their|all|any|a|that|this)\\s+){0,2}(?:[\\w-]+\\s+){0,2}?(?:contents?|tokens?|keys?|secrets?|credentials?|file)\\b|(?:it|them)\\b).{0,80}?https?://",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1225,7 +1231,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)<important>.{0,600}?(credentials?|api[ _-]?keys?|secrets?|tokens?|system configuration).{0,300}?(do not|don't|never)[^.]{0,30}(mention|reveal|disclose|tell|say)",
+      "pattern": "(?is)<important>.{0,600}?\\b(you must|must first|should first|first|before|then|also|always)\\b.{0,80}?\\b(read|access|fetch|open|retrieve|load|include|send|forward|append|attach)\\b.{0,120}?(credentials?|api[ _-]?keys?|secrets?|tokens?|system configuration).{0,300}?(do not|don't|never)[^.]{0,30}(mention|reveal|disclose|tell|say)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1361,7 +1367,7 @@
       "id": "TPA-2026-0030",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)(append|attach|include|add)\\b.{0,60}?(list_chats|chat history|recent (chats|messages)|contact list|address book).{0,100}?(every|each|all)\\s+(message|email|request)",
+      "pattern": "(?is)(append|attach|include|add)\\b[^.]{0,60}?(list_chats|chat history|recent (chats|messages)|contact list|address book)[^.]{0,100}?(\\b(?:to|onto)\\s+(?:every|each|all)\\s+(?:(?:outgoing|outbound|sent|new)\\s+)?(?:message|email|request)s?\\b|\\b(?:in|into|with)\\s+(?:every|each|all)\\s+(?:outgoing|outbound|sent|new)\\s+(?:message|email|request)s?\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1514,7 +1520,7 @@
       "id": "TPA-2026-0034",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(?:always|must|should)\\s+(?:use|prefer|choose|select|pick)\\s+this\\s+tool\\s+(?:instead\\s+of|over|rather\\s+than)\\s+(?:all\\s+|any\\s+)?(?:other|similar|alternative|competing)\\b",
+      "pattern": "(?is)\\b(?:always|must|should)\\s+(?:use|prefer|choose|select|pick)\\s+this\\s+tool\\s+(?:instead\\s+of|over|rather\\s+than)\\s+(?:all\\s+|any\\s+)?(?:other|similar|alternative|competing)\\b(?:\\s+\\w+){0,2}\\s*(?:[.!;,:]|$)",
       "severity": "medium",
       "target": "tool_description",
       "type": "lexical"

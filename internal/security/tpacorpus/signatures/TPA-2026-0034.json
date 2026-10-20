@@ -38,7 +38,7 @@
       "id": "TPA-2026-0034",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(?:always|must|should)\\s+(?:use|prefer|choose|select|pick)\\s+this\\s+tool\\s+(?:instead\\s+of|over|rather\\s+than)\\s+(?:all\\s+|any\\s+)?(?:other|similar|alternative|competing)\\b",
+      "pattern": "(?is)\\b(?:always|must|should)\\s+(?:use|prefer|choose|select|pick)\\s+this\\s+tool\\s+(?:instead\\s+of|over|rather\\s+than)\\s+(?:all\\s+|any\\s+)?(?:other|similar|alternative|competing)\\b(?:\\s+\\w+){0,2}\\s*(?:[.!;,:]|$)",
       "severity": "medium",
       "target": "tool_description",
       "type": "lexical"

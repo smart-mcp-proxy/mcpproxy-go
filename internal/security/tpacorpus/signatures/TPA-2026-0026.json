@@ -28,7 +28,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)<important>.{0,600}?(credentials?|api[ _-]?keys?|secrets?|tokens?|system configuration).{0,300}?(do not|don't|never)[^.]{0,30}(mention|reveal|disclose|tell|say)",
+      "pattern": "(?is)<important>.{0,600}?\\b(you must|must first|should first|first|before|then|also|always)\\b.{0,80}?\\b(read|access|fetch|open|retrieve|load|include|send|forward|append|attach)\\b.{0,120}?(credentials?|api[ _-]?keys?|secrets?|tokens?|system configuration).{0,300}?(do not|don't|never)[^.]{0,30}(mention|reveal|disclose|tell|say)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
