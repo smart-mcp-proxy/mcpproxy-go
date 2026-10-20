@@ -74,8 +74,8 @@ No migration. Downgrade ignores the new fields.
 
 | Principle | Status | Notes |
 |---|---|---|
-| I. Performance at scale | PASS | The digest adds one bounded buffer (error request IDs) to the existing single stream pass. No index-path cost beyond one non-blocking notify after a successful batch. SC-006 has a benchmark (T046). |
-| II. Actor-based concurrency | PASS | The index-hook notify goes over a buffered channel to the activation recorder goroutine (R4), never under the approval lock. The summary-view debounce uses an atomic per surface, with no new mutex. |
+| I. Performance at scale | PASS | The digest adds one bounded buffer (error request IDs) to the existing single stream pass. No index-path cost beyond one non-blocking notify after a successful batch. SC-006 has a benchmark (T056). |
+| II. Actor-based concurrency | PASS | One goroutine (`onboardingFactsLoop`) owns every fact write. It is woken by a size-1 channel and a ticker, and never writes under the approval lock. The summary-view debounce uses an atomic per surface. No new mutex. |
 | III. Configuration-driven | PASS | No new config keys. Starter eligibility respects the effective `registries` config (`reference_overridden`) and `quarantine_enabled`. |
 | IV. Security by default | PASS | Quarantine, trust mode and approval semantics are unchanged (FR-003, FR-005, SC-005). The starter is never auto-approved. Informed consent comes before code runs (FR-004). Docker isolation follows the global setting. |
 | V. TDD | PASS | Every task group starts with failing tests (tasks.md). |
@@ -128,13 +128,15 @@ internal/telemetry/
 ├── day_two.go                       # NEW summary-view counter + bucketing
 └── payload_v15_test.go              # NEW; schema pins moved 14→15 (R11 list)
 internal/runtime/
-├── absent_tool_removal.go           # post-success notify (R4)
+├── absent_tool_removal.go           # post-success non-blocking wake (R4)
+├── onboarding_facts.go              # NEW onboardingFactsLoop: observe clients, reconcile live/indexed, abandonment
 ├── tool_quarantine.go               # entered_hold / hold_kind on emits (R8)
 └── activity_service.go              # metadata passthrough
 internal/server/
-├── server.go                        # providers wiring; starter service (catalog door adapter)
-├── mcp.go                           # typed BlockReason persisted; FaultDomain=proxy on refusals (R6, R7)
-└── onboarding_starter.go            # NEW adapter: resolve entry, AddServerFromRegistryRef, record facts
+├── server.go                        # providers wiring; EnsureInstallAnchor at startup; onboardingFactsLoop start
+├── add_from_registry.go             # split into resolveRegistryEntry + addResolvedRegistryEntry (public door unchanged)
+├── mcp.go                           # typed BlockReason persisted; metadata.dispatched on every tool_call completion (R6, R7)
+└── onboarding_starter.go            # NEW: resolve once, validate snapshot, addResolvedRegistryEntry, record facts
 internal/httpapi/
 ├── onboarding.go                    # GET/POST /onboarding/starter; mark booleans; observe clients; day_two in state
 ├── activity.go                      # digest + view param + scope rules (FR-023)
@@ -172,20 +174,44 @@ GET /onboarding/starter  ───────▶  onboarding.Select(effective r
 render card (command, isolation)
 POST /onboarding/mark {starter_offered}
 click "Add and inspect"
-POST /onboarding/starter {kind, surface, shown_command} ─▶ re-resolve; mismatch → 409 starter_changed
-                                   AddServerFromRegistryRef("reference", id, "", nil, nil)   // unchanged door
-                                   record added/kind/surface/server_name
+POST /onboarding/starter {kind, surface, shown_command} ─▶ requireServerOp(AddFromRegistry)
+                                   entry := resolveRegistryEntry("reference", id)   // once
+                                   validate entry (builtin/reference, audited cmd == shown_command) else 409 starter_changed
+                                   addResolvedRegistryEntry(ctx, entry, {})          // the door's add step, unchanged
+                                   record added/kind/surface/server_name/incarnation; wake facts loop
 poll GET /servers/{name}/review (2 s, ≤90 s or 180 s docker; SSE servers.changed also triggers)
 render captured tools; diff check vs expected_tools (FR-005 notice)
 click "Approve and enable" → POST /servers/{name}/security/approve {expected_hashes, expected_incarnation}
                                    (Spec 117 path; 409 review_out_of_date → reload)
-index commit → notify → starter_live, first_tool_indexed_ever
+index commit → wake → onboardingFactsLoop reconcile → starter_live, first_tool_indexed_ever
 Verify step: tool count + first prompt
 ```
 
-### D2. Index hook (R4) and Spec 117 locks
+### D2. Fact evidence, the facts loop and Spec 117 locks (research R4, R5, R5a)
 
-`Runtime.batchIndexTools` (`absent_tool_removal.go:150-157`) is the only shared-index write seam. Its callers are `lifecycle.go:1753,1946,1967,1982` in the discovery apply, which Spec 117 PR-3 runs under the per-server approval lock; approval reindex re-enters the same apply. The hook therefore only sends `{servers []string}` on a buffered channel (size 64, drop-on-full with a debug log). That loss is acceptable: the flag is sticky, and the next index commit re-sends. A runtime goroutine owns the bbolt writes, `MarkFirstToolIndexed` and `UpdateOnboardingState(starter_live)`. A test with the `commit_testhooks.go` hooks asserts that no storage write happens under the lock.
+**Producers** run at the commit sites and never touch storage:
+- After `Runtime.batchIndexTools` (`absent_tool_removal.go:150-157`) succeeds, the discovery apply passes its own incarnation in, and the producer records `LoadOrStore((index, server, incarnation), now)`. Its callers are `lifecycle.go:1753,1946,1967,1982`, under the Spec 117 per-server approval lock.
+- At capture completion (`lifecycle.go:~1066`, after both failure returns), it records `LoadOrStore((capture, server, incarnation), now)`.
+- Either producer then makes a non-blocking send on a size-1 wake channel.
+
+**`onboardingFactsLoop`** is the only fact writer. It wakes on the channel, after the starter POST, on a 10-minute tick and at startup. On each pass it:
+- copies the evidence map;
+- reads the connect service outside any transaction;
+- applies one pure `UpdateOnboardingState` merge. Inside it, the starter association `(name, incarnation)` is compared with the evidence **in the transaction**;
+- writes activation;
+- deletes the evidence entries only after a successful write. On failure it retries on the next tick.
+
+It runs whatever the telemetry state is and drains once on shutdown, bounded to 2 s.
+
+**Starter identity** comes from the create commit's `CommitResult` incarnation, threaded out of `addResolvedRegistryEntry` (`config_cow.go:70-76` discards it today).
+
+**Tests**:
+- no storage write under the approval lock (`commit_testhooks.go`);
+- index commit then purge before the loop runs: the fact still lands, at the commit time;
+- evidence before registration;
+- interleaved same-name replacement: no false live;
+- partial capture failure: no capture evidence;
+- write failure retries.
 
 ### D3. Digest single pass (R6-R8)
 
@@ -197,7 +223,7 @@ Verify step: tool count + first prompt
 - a legacy-hold flag;
 - sensitive-data and blocked-class counts.
 
-`Finish(scope)` resolves the pending error IDs, which become brokered unless their ID is in the blocked set. It also adds `currently_awaiting` from `Runtime.GetReviewQueue`, filtered by `filter.AllowedServers`, and coverage from the watermark. `extractSensitiveDataInfo` is exported as `SensitiveDataDetected(rec)`.
+Brokered is `tool_call && metadata.dispatched == true` (research R6). A pre-dispatch blocked `policy_decision` counts in `blocked`. A `tool_call` with `dispatched == false` and no decision for its `request_id` counts once, classified by `BlockClass` on its own record, for example a sandbox profile refusal or a limiter shed. This needs a buffered ID set resolved in `Finish`. Post-dispatch blocks (`output_sanitisation`, `output_schema`) count in `responses_blocked`. `Finish(scope)` It also adds `currently_awaiting` from `Runtime.GetReviewQueue`, filtered by `filter.AllowedServers`, and coverage from the watermark. `extractSensitiveDataInfo` is exported as `SensitiveDataDetected(rec)`. `Finish` also fills `window`: nominal start, `effective_start = max(start, install anchor)`, and the label kind and days. Every surface renders the window label from this one source.
 
 ### D4. Scope rules (FR-023)
 
@@ -206,14 +232,15 @@ Scoped callers already have `filter.AllowedServers` applied to the stream (`inte
 ### D5. Web surfaces
 
 - `StarterOfferCard.vue` has two modes. `wizard` is pre-selected, with Skip; `home` has an explicit button and a compact-link variant after a decline. It owns the add → poll review → bound approve state machine (states `idle`, `adding`, `capturing`, `review`, `approving`, `live`, `failed`).
-- The wizard keeps tab completion semantics unchanged. The Servers tab is complete when a server is configured, as today. The starter card is one more way to get there.
-- `SecondClientSection.vue` reuses `ClientConnectList` filtered to `detected_unconnected_clients`. The preview → write → undo flow and the diff and backup notice come from the existing component (memory: connect diff preview UX).
+- Wizard tab completion is **unchanged**. The Servers tab completes only on `hasUsableServer` (`OnboardingWizard.vue:975-981`, backend `onboarding.go:328-336`), so a quarantined or uncaptured starter never completes it. Only an approved, indexed starter does. A vitest covers this.
+- `SecondClientSection.vue` reuses `ClientConnectList` filtered to `detected_unconnected_clients` in a new **`per-client` mode**. This mode hides the bulk-connect footer and its loop (`ClientConnectList.vue:470-486,1275-1286`), so every write needs that client's own preview confirmation (FR-014). The preview → write → undo flow and the diff and backup notice come from the existing component. A vitest asserts that no bulk action renders in this mode.
+- `SecondClientSection` and `WeeklyDigestCard` render only in the personal edition, guarded on the `/api/v1/status` `edition`. The digest endpoint itself is edition-neutral.
 - `WeeklyDigestCard.vue` sits on Home between `AttentionList` and `UsageSummaryStrip`. It sends `view=web` once per mount when visible, then refreshes without `view` on activity SSE.
 
 ### D6. Native surfaces
 
-- `StarterOfferCard.swift` mirrors the Web card's home mode. After the add, it opens the existing native review screen for the server, which already sends a Spec 117 bound approval (#1572).
-- `ConnectClientView` success state: the list comes from `GET /onboarding/state`'s `detected_unconnected_clients`, mapped through the existing connect client list.
+- `StarterOfferCard.swift` mirrors the Web card's home mode. A new `StarterFlowModel` runs the same state machine as the Web card: capture wait, inline captured review, audited-inventory mismatch notice, Retry/Remove and quarantine-off ready. It never offers the blind approval that the ordinary native review allows before capture (`ReviewQueueView.swift:244-254`). The full native review opens only on request. Today that screen sends `expected_hashes` but **no** `expected_incarnation` (`API/APIClient.swift:290-298`). PR-E adds incarnation decoding to the native review model and passes it from `securityApproveServer` (research R3). A remove and re-add before approval must return 409 `server_replaced`.
+- `ConnectClientView` success state: the list comes from `GET /onboarding/state`'s `detected_unconnected_clients`, mapped through the existing connect client list. The success state sends the `second_client_offered`, `second_client_none_detected` and `second_client_skipped` marks through a new `markOnboarding` method on the data-source seam.
 - `GlanceSection` weekly line: `activitySummary(period: "7d", view: nil)` is fetched on the existing glance refresh. `menuWillOpen` sends one `view=tray` request, debounced by the core.
 - The `ActivitySummary` Swift model adds `call_count`, `call_error_count`, `rejected_count`, `other_count` and an optional `digest`. Older cores omit them, so they decode as optional.
 
@@ -221,21 +248,21 @@ Scoped callers already have `filter.AllowedServers` applied to the stream (`inte
 
 | PR | Contains | Depends on | Ships |
 |---|---|---|---|
-| PR-A | T001-T020 (facts, telemetry, docs) | none | first, alone if the calendar allows (R12) |
-| PR-B | T021-T033 (starter core + Web) | PR-A | next release |
-| PR-C | T034-T040 (second client Web) | PR-A | with PR-B |
-| PR-D | T041-T056 (digest core + Web + CLI) | PR-A for view counting; it otherwise stands alone | with PR-B |
-| PR-E | T057-T066 (native) | PR-B, PR-C, PR-D | same release if ready, otherwise the next |
-
-The task IDs are illustrative; tasks.md is authoritative. Merge each PR on its own, with no stacking and at most two reviews in flight (memory: merge early, don't stack). Each PR gets the OpenCode Sol 6.1 review loop, with the 10-round cap.
+| PR-A | facts, facts loop, telemetry, docs (tasks.md Phases 1-2) | none | first, alone if the calendar allows (R12) |
+| PR-B | starter core + Web (tasks.md Phase 3) | PR-A | next release |
+| PR-C | second client Web (tasks.md Phase 4) | PR-A | with PR-B |
+| PR-D | digest core + Web + CLI (tasks.md Phase 5) | PR-A for view counting; it otherwise stands alone | with PR-B |
+| PR-E | native (tasks.md Phase 6) | PR-B, PR-C, PR-D | same release if ready, otherwise the next | Merge each PR on its own, with no stacking and at most two reviews in flight (memory: merge early, don't stack). Each PR gets the OpenCode Sol 6.1 review loop, with the 10-round cap.
 
 ### D8. Risks
 
 | Risk | Mitigation |
 |---|---|
 | New `BlockReason` values break the Spec 108 refusal and label parity contracts or Activity filters | Update the contract JSON and labels in PR-D. Run the profile contract tests and the Activity view vitest. |
-| `FaultDomain=proxy` misses a refusal site, so a refused call counts as brokered | T048 enumerates the refusal sites through the request-ID pairing fixture. The dedupe on blocked request IDs is a second guard. |
-| The index-hook channel drops under burst | The flag is sticky and the next commit re-sends. A test asserts eventual stamping after the drop. |
+| A completion path forgets to set `dispatched` | A table test drives every `tool_call` completion exit in `mcp.go` (pre-dispatch validation, missing client, generation refusal, success, upstream error, both output blocks, strict output schema) and asserts the key. Legacy-only windows report `coverage: partial`. |
+| An index or capture commit happens and its documents are purged before the loop runs | Commit-time evidence is retained in memory until it is persisted (research R4). A purge-before-consume test covers this. |
+| The registry changes between the consent check and the add | One resolved entry snapshot is validated and passed to the add step (research R3). A swap-between-steps test covers it. |
+| The native approval binds to the wrong server incarnation | PR-E sends `expected_incarnation` (research R3). A remove-and-re-add test covers it. |
 | The launcher is resolvable but the first `uvx` download is slow or offline | 90 s/180 s capture timeout, Retry/Remove, and `capture_timeout` recorded (SC-003 diagnostic). |
 | A starter package release adds a tool | FR-005 "differs from reviewed version" notice. The user approves what was captured (Spec 117 binding). |
 | Users never approve (the approval click becomes the new drop-off) | `approval_abandoned` is measured. If it is high, O1/O4 and copy changes are the next experiment. Auto-approval is never added. |

@@ -270,7 +270,7 @@ The maintainer queries the telemetry store for post-release cohorts. Without any
   |---|---|
   | `calls_brokered` | Total brokered calls, plus per-client counts (top 3 + other + unknown) |
   | `held_for_review` | Distinct `(server, tool)` pairs that entered pending or changed in the window, with per-kind counts; `currently_awaiting` from the review queue |
-  | `blocked` | Total refused-before-dispatch attempts, including `rejected`, each counted once, plus per reason class `quarantine`, `profile`, `other` |
+  | `blocked` | Total refused-before-dispatch attempts, including `rejected`, each counted once, plus per reason class `quarantine`, `profile`, `other`; separately `responses_blocked` (post-dispatch output blocks, whose calls stay brokered and are not in the total) |
   | `sensitive_data` | Brokered calls with at least one detection |
   | `coverage` | `complete` or `partial`, plus `complete_since` (the coverage watermark) |
 

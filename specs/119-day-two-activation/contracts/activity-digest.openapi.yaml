@@ -16,8 +16,13 @@ paths:
             application/json:
               schema:
                 type: object
+                description: Standard envelope; existing summary fields and the new digest live under data.
                 properties:
-                  digest: { $ref: "#/components/schemas/ActivityDigest" }
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      digest: { $ref: "#/components/schemas/ActivityDigest" }
 components:
   schemas:
     ActivityDigest:
@@ -30,6 +35,7 @@ components:
             by_client: { type: array, maxItems: 3, items: { type: object, properties: { client: {type: string}, count: {type: integer} } } }
             other: { type: integer }
             unknown: { type: integer }
+            coverage: { type: string, enum: [complete, partial], description: "partial while legacy tool_call records without the dispatched key are in the window" }
         held_for_review:
           type: object
           description: "null figures + reason=not_attributable when profile/client/token filter is set (FR-023). Scoped callers: only allowed servers."
@@ -47,6 +53,7 @@ components:
             quarantine: { type: integer }
             profile: { type: integer }
             other: { type: integer }
+            responses_blocked: { type: integer, description: "post-dispatch output blocks (output_sanitisation, output_schema); not in total; those calls are brokered" }
         sensitive_data:
           type: object
           properties: { calls_with_detections: { type: integer } }
@@ -55,3 +62,11 @@ components:
           properties:
             state: { type: string, enum: [complete, partial] }
             complete_since: { type: string, format: date-time }
+        window:
+          type: object
+          description: "Shared source for the 'this week' vs 'since <date> (N days)' label. effective_start = max(start, install anchor); anchorless installs always label=period."
+          properties:
+            start: { type: string, format: date-time }
+            effective_start: { type: string, format: date-time }
+            label: { type: string, enum: [period, since_install] }
+            days: { type: integer }

@@ -40,67 +40,116 @@ A candidate is selected only if all of these hold:
 - Spawning `uvx --version`: slow, has side effects, and counts as running code before consent.
 - Process PATH only: wrong for Finder-launched cores.
 
-## R3. Starter add door and consent binding
+## R3. Starter add door, authorization and consent binding
 
-**Decision**: a new `POST /api/v1/onboarding/starter` with body `{kind, surface, shown_command}`. The handler:
-1. re-runs candidate resolution (R1);
-2. answers 409 `starter_changed` with a fresh offer if `shown_command` differs from the resolved command;
-3. otherwise calls the existing `Server.AddServerFromRegistryRef(ctx, "reference", catalogID, "", nil, nil)` (`internal/server/add_from_registry.go:150`) with no extra fields;
-4. records `starter_added`, `starter_kind`, `starter_surface`, `starter_added_at` and `starter_server_name`.
+**Decision**:
+- `GET /api/v1/onboarding/starter` is wrapped in `requireAdminRead`.
+- `POST /api/v1/onboarding/starter` is wrapped in the **same** authorization as the catalog door: `requireServerOp(auth.ServerOpAddFromRegistry, …)` (`internal/httpapi/server.go:1258`; agent tokens are denied by `internal/auth/server_ops.go:59-79`).
+- Routed agent-token tests assert 403 with **no** resolution, add or fact write (plan review r1 #1).
 
-Approval uses the existing `POST /api/v1/servers/{id}/security/approve`, with `expected_hashes` and `expected_incarnation` (`internal/httpapi/security_scanner.go:~377`), taken from `GET /api/v1/servers/{id}/review` (`internal/httpapi/review.go:68`).
+**Atomic consent binding** (plan review r1 #2). `AddServerFromRegistry` (`internal/server/add_from_registry.go:88`) is split into two steps:
+1. `resolveRegistryEntry(registryID, serverID) (*registries.ServerEntry, provenance, error)`, the current `:93-99` logic;
+2. `addResolvedRegistryEntry(ctx, entry, req)`, which runs the current `:100-141` build-and-add steps unchanged.
 
-**Rationale**: FR-003 requires the same door, with no override. A dedicated endpoint wraps it so that the consent check (FR-003 re-resolve) and fact recording live in the core (FR-012), never in clients. Approval needs no new code: Spec 117 binding is already in Web (`frontend/src/services/api.ts:1641`) and native.
+The public catalog door calls both in sequence, so its behaviour is unchanged. The starter handler calls `resolveRegistryEntry` **once**, validates that snapshot (`builtin/reference` provenance, audited command equal to `shown_command`), then passes the **same** entry to `addResolvedRegistryEntry`. No second resolution happens, so a registry hot-reload between the check and the add cannot change what runs. A test swaps the `reference` registry between the starter check and the add, through a test hook between the two calls, and asserts that the validated command is what gets configured.
 
-**Alternatives rejected**: clients calling `POST /registries/reference/servers/reference%2Ftime/add` directly. That loses the consent re-check and leaves each surface to record facts.
+- A mismatch with `shown_command` returns 409 `starter_changed` with a fresh offer, and nothing is added.
+- `duplicate_name` from the add passes through as 400.
 
-## R4. When is the starter "live" and when was a tool first indexed
+**Approval** uses the existing `POST /api/v1/servers/{id}/security/approve` with `expected_hashes` **and** `expected_incarnation` (`internal/httpapi/security_scanner.go:~377`), both taken from the displayed `GET /api/v1/servers/{id}/review` (`internal/httpapi/review.go:68`, `data.server.incarnation`).
+- **Web** (`frontend/src/services/api.ts:1641`) already sends both.
+- **Native does not**: `securityApproveServer` sends only the hashes (`native/macos/MCPProxy/MCPProxy/API/APIClient.swift:290-298`), and the core then binds to whatever incarnation is current at call time (`internal/httpapi/security_scanner.go:350-360`). PR-E therefore adds `expectedIncarnation` to `securityApproveServer` and to the native review model. It is captured with the displayed review and tested with a remove and re-add before approval, which must return 409 `server_replaced` (plan review r1 #3).
 
-**Decision**: the only runtime index write wrapper is `internal/runtime/absent_tool_removal.go:156` (`indexManager.BatchIndexTools`). After it returns nil with a non-empty batch, the runtime calls `recordToolsIndexed(serverNames)` **after the per-server approval lock is released** (deferred to the caller's unlock path or a non-blocking channel to the activation recorder). It does two things:
-- marks `activation.first_tool_indexed_ever` and `first_tool_indexed_at`, once;
-- sets `starter_live` when a batch contains a tool of `starter_server_name`.
+**Alternatives rejected**: clients calling `POST /registries/reference/servers/reference%2Ftime/add` directly. That loses the atomic consent check and the core-side fact recording.
 
-**Rationale**: the spec forbids stamping from `GetToolCount()`, which has cache and upstream fallbacks (`internal/runtime/runtime.go:4061-4078`). Spec 117 PR-3 holds the per-server lock across index writes, so a bbolt write must not run inside it, to avoid lock-order growth. The activation bucket write follows `RecordRealToolCallForActivation` (`runtime.go:3946`).
+## R4. "Starter live" and "first tool indexed": commit-time evidence, retained until persisted
+
+**Decision**: "ever" facts come from **evidence captured at the commit that produced them**. The evidence is bound to the server incarnation and kept until it is persisted. A current-index read never derives them, apart from the one supplement noted below (plan review r1 #4/#5, r2 #15/#16).
+
+- **Evidence producers** run at the commit site, which already knows the server and its incarnation:
+  - **Index evidence**: after `Runtime.batchIndexTools` (`absent_tool_removal.go:150-157`) returns nil for a non-empty batch. The discovery apply that calls it (`lifecycle.go:1753,1946,1967,1982`) runs under the Spec 117 per-server approval lock, with Spec 116's incarnation-conditional writes. The apply passes its own incarnation into the hook.
+  - **Capture evidence**: at the point where a quarantined review capture completes, right after `storeLastGoodLocked` on the review-capture path (`lifecycle.go:~1066-1068`). This is past both failure returns (`checkToolApprovalsHeld` and `pruneAbsentUndecidedApprovals`, `:1054-1063`). A partial capture that fails is never evidence (r2 #17).
+- **Retention**: a `sync.Map` keyed by `(kind, server, incarnation)` keeps the **first** commit time per key. It uses `LoadOrStore`, so a later commit never moves the time. Storing is lock-free for producers, nothing is ever dropped, and there is no bbolt write under the approval lock. A non-blocking send on a size-1 wake channel then nudges the facts loop.
+- **Consumer**: `onboardingFactsLoop` (R5a) drains a **copy** of the map and applies one `UpdateOnboardingState` callback plus one activation write. It deletes an entry only after the write succeeds. On a write failure the entry stays and is retried on the next tick. Inside the callback, which is the transaction-current state:
+  - `first_tool_indexed_ever` and `first_tool_indexed_at` come from the **earliest** index evidence of any upstream server, at its commit time.
+  - `starter_live` is set only if index evidence exists for exactly `(StarterServerName, StarterServerIncarnation)` as stored **in the same transaction**.
+  - `starter_captured_at` is set from capture evidence for that same pair.
+  - Evidence that matches no recorded starter is kept for 15 minutes, which covers evidence arriving before the starter POST records its registration (r1 #5). It is then discarded once `first_tool_indexed` has been persisted.
+- **Supplement**: on an upgraded install with tools already indexed before this build, the loop sets `first_tool_indexed_ever = true` from the current index document count, read directly, with `first_tool_indexed_at` unknown. That gives `first_tool_indexed_after = ""`. `GetToolCount()` is never used, because of its cache and upstream fallbacks (`runtime.go:4061-4078`).
+- **Creation identity** (r2 #16): `addResolvedRegistryEntry` returns the `CommitResult` incarnation of the create commit. Today `createServer` discards it (`internal/server/config_cow.go:70-76`), so it is threaded through an internal result type. The starter POST records that incarnation, so a post-add lookup can never pick up a replacement.
+- **Shutdown**: one bounded final drain, at most 2 s. Evidence still in memory at a crash is lost. It is regenerated only if the server indexes again, which is accepted and documented.
+
+**Tests (T007, T026)**:
+- successful indexing, then a purge before the loop runs: the fact still lands, at the commit time;
+- evidence before registration;
+- interleaved remove → same-name re-add → index of B while A is the recorded starter: A is not live;
+- a partial capture failure produces no capture evidence;
+- a write failure retries and keeps the entry.
 
 **Alternatives rejected**:
-- Polling the tool count in the heartbeat: it misses brief indexing between heartbeats and cannot attribute the starter.
+- A buffered event channel with drop-on-full: it loses facts, because discovery skips unchanged tools (`lifecycle.go:1807-1819`).
+- Current-index reconciliation as the source: a purge loses history, and documents carry no incarnation (`internal/index/bleve.go:55-73`).
 - Stamping in `index.Manager`: the index package has no storage dependency.
+
+### R4a. Approval abandonment (plan review r1 #11, r2 #17)
+
+`approval_abandoned` is set only when **all** of these hold:
+- capture evidence for the recorded `(StarterServerName, StarterServerIncarnation)` has been persisted as `starter_captured_at`;
+- `now - starter_captured_at >= 24h`;
+- `!starter_live`;
+- the starter, at the same incarnation, is still quarantined.
+
+A starter that never completed a capture keeps its `connect_failed` / `capture_timeout` and is never reclassified.
 
 ## R5. Install anchor and client observation
 
-**Decision**:
-- `OnboardingState.InstallFirstRunAt` is set by the onboarding store's first `Get` that finds **no** `wizard_state` key (`internal/storage/bbolt.go:1221`), before the first save. If a record exists without the field, this is an upgraded install, and the anchor stays zero forever.
-- `ClientFirstObservedAt map[string]time.Time` is updated by `observeConnectedClients(ids)`, which is called from three places:
-  - `computeOnboardingState` (`internal/httpapi/onboarding.go:276`);
-  - the connect and disconnect handlers (`internal/httpapi/connect.go:332-360`);
-  - the onboarding telemetry provider (`internal/server/server.go:3234`).
+**Decision (anchor, plan review r1 #6)**: `Storage.EnsureInstallAnchor(now)` runs **once at startup**, in a single `Update` transaction, **before** the HTTP server, the connect service or the MCP initialisation can write onboarding state.
+- No record: it creates one with `InstallFirstRunAt = now`.
+- A record exists without the field: the install is an upgrade, and the anchor stays zero forever.
 
-  It adds unseen IDs only and never overwrites an existing entry. The four second-client booleans are derived on write: `second_client_connected` becomes true once `len(ClientFirstObservedAt) >= 2`.
+As a safeguard, the "missing record" branch of `UpdateOnboardingState` (`internal/storage/bbolt.go:1283-1305`) also sets the anchor when it has to create the record. That covers tests and any writer that runs before startup init. The anchor is never back-filled on an existing anchorless record. Tests cover update-before-get, concurrent first writers, and upgrade.
 
-**Rationale**: `anonymous_id` rotates yearly (`internal/telemetry/telemetry.go:1864-1877`). The connect timestamps overwrite (`connect.go:332-360`). `connected_client_ids` is a live read (`internal/connect/connect.go:371-393`), so persistence must happen at observation time.
+**Decision (observation)**: `ClientFirstObservedAt map[string]time.Time` is updated by `observeConnectedClients(ids)`. The IDs are collected **outside** the transaction from `connect.Service.GetConnectedIDs` (`internal/connect/connect.go:371-393`), then merged inside the pure update callback, which never does I/O (`bbolt.go:1272-1276`). Callers:
+- the connect and disconnect handlers (`internal/httpapi/connect.go:332-360`);
+- `computeOnboardingState` (`internal/httpapi/onboarding.go:276`);
+- the facts lifecycle tick (R5a), which does **not** depend on telemetry.
 
-**Caveat**: two clients observed at different times count as "connected" even if never configured at the same time. This is accepted, because the metric is "used a second client with MCPProxy", not concurrency.
+Only unseen IDs are added; existing entries are never overwritten. `second_client_connected` becomes true once there are at least two entries.
 
-## R6. Digest: brokered-call predicate
+**Rationale**: `anonymous_id` rotates yearly (`internal/telemetry/telemetry.go:1864-1877`). Connect timestamps overwrite (`connect.go:332-360`). `connected_client_ids` is a live read.
 
-**Decision**: in one stream pass over the window, a record is a **brokered call** when all of these hold:
-- `Type == tool_call`;
-- `Status == success`, or (`Status == error` **and** `FaultDomain != "proxy"`);
-- `RequestID` is not in the set of request IDs that have a `policy_decision` with `Status == blocked` in the window.
+**Caveat**: two clients observed at different times count as "connected" even if they were never configured at the same time. This is accepted, because the metric is "used a second client with MCPProxy".
 
-That set is collected in the same pass. Records are not sorted by type, so the pass buffers the error tool_calls' request IDs and resolves them at the end. The buffer is bounded by the error count.
+### R5a. Telemetry-independent facts tick (plan review r1 #7)
 
-Every refusal site that records a `tool_call` error without dispatch must set `FaultDomain = "proxy"`. An example is `internal/server/mcp.go:3446-3475`, `isReviewNotRecordedRefusal` / `ErrConnectionGenerationChanged`. A test enumerates the known refusal sites (task T034).
+A runtime background goroutine, `onboardingFactsLoop`, runs at startup (after `EnsureInstallAnchor`) and then every 10 minutes. Each tick runs client observation, `reconcileActivationFacts`, and the abandonment check (R4a). It runs whatever the telemetry state is: opt-out, non-semver dev builds, or before the first heartbeat (`internal/telemetry/telemetry.go:974-1025`). The heartbeat only **reads** the persisted facts.
 
-**Rationale**: `storage.CountsAsCall` (`internal/storage/activity_call_population.go:79`) counts blocked policy decisions as failed calls. That is right for the 24h strip but wrong for "brokered". `FaultDomain` already exists (`internal/storage/activity_models.go:223`).
+## R6. Digest: brokered-call predicate (plan review r1 #8, #9)
 
-**Alternatives rejected**: a new `dispatched` boolean on every tool_call. The existing fault domain plus the request-ID dedupe covers it without a schema change.
+**Decision**: persist an explicit **dispatch fact** and do not infer it from the fault domain.
+- On every `tool_call` completion record, the server sets `Metadata["dispatched"] = true|false`. The value comes from the existing per-request dispatch evidence: `noteUpstreamDispatched` (`internal/server/mcp.go:3346`), and `callerr.Facts.Dispatched` from the transport recorder (`internal/callerr/classify.go:73-80`).
+- Pre-dispatch exits record `dispatched=false`. Examples are argument validation (`mcp.go:3221-3226`), missing or disconnected clients (`:3246-3250,3319-3323`), and the review-not-recorded or generation refusals (`:3446-3475`).
+- **Limiter sheds** (r2 #18) bypass the normal completion emitter (`mcp.go:3412-3417`). Their record is built in `ActivityService.RecordToolCallRejected` (`internal/runtime/activity_service.go:555-576`), which also stamps `dispatched=false`. Direct and sandbox sheds are both tested: each counts once in blocked (`other`), zero in brokered, and causes no legacy-coverage downgrade.
+- **Sandbox sub-call refusals** (`internal/server/audit_funnel.go:517-526`, `mcp_code_execution.go:1289-1299`) record `status=blocked` with a typed profile `BlockReason` and `dispatched=false`.
+- **Brokered call**: `Type == tool_call && Metadata.dispatched == true`, with any status.
+- **Legacy records** without the key are counted with the old heuristic (`status == success`) and set `calls_brokered.coverage = partial` until the window holds only new-format records.
+- **Sensitive data** counts brokered calls only.
+
+**Post-dispatch blocks** (r1 #9). `emitActivityPolicyDecisionWithBlockReason` already distinguishes them (`isPostDispatchBlockKey(reasonKey)`, `internal/server/mcp.go:991-998`: `output_sanitisation`, `output_schema`). R7 persists `reasonKey` as the typed `BlockReason`, so the phase is derivable:
+- a **pre-dispatch** blocked `policy_decision` counts in `blocked.total` and its class;
+- a **post-dispatch** block counts in a new `blocked.responses_blocked` and **not** in `blocked.total`. The call itself stays brokered (`dispatched=true`).
+
+The strict output-schema exit (`mcp.go:3610-3612,3653`) must also emit the canonical `tool_call` completion with `dispatched=true`; a test covers both output-block paths.
+
+Blocked-total dedupe: a pre-dispatch refusal that left both a `tool_call` (`dispatched=false`) and a `policy_decision` counts once, via the `policy_decision`. A `tool_call` with `dispatched=false` and **no** paired decision (same `request_id`) counts once and is classified by `BlockClass(rec)` on its own record: a sandbox profile refusal is `profile`, and a limiter shed is `other`. It defaults to `other` only when the record has no classified reason (r2 #19).
+
+**Alternatives rejected**: `FaultDomain`. Fault ownership is not dispatch: argument rejection is `client` and a missing client is `upstream` (`internal/callerr/classify.go:97-106`).
 
 ## R7. Digest: blocked reason classes
 
-**Decision**: persist a typed reason on every refusal record:
-- `emitActivityPolicyDecision` (`internal/server/mcp.go:989-1009`) today drops the telemetry block-reason key. It now writes it into `ActivityRecord.BlockReason` when that field is empty.
-- The keys come from `internal/telemetry/preflight_counters.go:45-56`: `server_quarantined`, `tool_pending_approval`, `tool_changed_approval`, `tool_not_callable`, `profile_scope`, `token_scope`, `token_permission`.
+**Decision**: persist a typed reason on every refusal record.
+- `emitActivityPolicyDecisionWithBlockReason` (`internal/server/mcp.go:989-1009`) writes `reasonKey` into `ActivityRecord.BlockReason` whenever its `blockReason` argument is empty. Today the key is dropped.
+- **Sandbox quarantine and approval-lock refusals** (plan review r3 #11) compute `policyRefusalReasonKey(gate)` for the audit line but pass an empty reason to `emitSubCallRefused` (`internal/server/mcp_code_execution.go:958-965`). They now pass that key, so a sandbox quarantine refusal classifies as `quarantine` exactly as its direct-call twin does. Fixtures pair direct and sandbox refusals for server quarantine, pending approval and changed approval, and assert the same class. The keys come from `internal/telemetry/preflight_counters.go:45-56` plus the post-dispatch keys `output_sanitisation` and `output_schema`.
 
 Mapping table (`internal/storage/activity_digest.go`, `BlockClass(rec)`):
 
@@ -110,27 +159,33 @@ Mapping table (`internal/storage/activity_digest.go`, `BlockClass(rec)`):
 | `profile_*` (`internal/profile/contract.go:56-64`), `profile_scope` | `profile` |
 | `token_scope`, `token_permission`, `tool_not_callable`, any other value, empty | `other` |
 | `Status == rejected` (limiter) | `other` |
+| `output_sanitisation`, `output_schema` (post-dispatch) | `responses_blocked`, which is not in the total |
 
-**Rationale**: FR-020 forbids matching on free text (`Metadata["reason"]`).
+**Rationale**: FR-020 forbids free-text matching (`Metadata["reason"]`).
 
-**Risk**: new `BlockReason` values become visible in the Activity UI and the Spec 108 refusal and label contracts (`internal/profile/testdata/contract/{labels,refusals}.json`). The plan adds labels for the three quarantine values and `token_*`. Parity tests are updated in the same PR.
+**Risk**: the new `BlockReason` values become visible in the Activity UI and the Spec 108 contracts (`internal/profile/testdata/contract/{labels,refusals}.json`). PR-D adds labels and updates the parity tests in the same PR.
 
-## R8. Digest: held-for-review entries
+## R8. Digest: held-for-review entries (plan review r1 #10)
 
-**Decision**: `emitToolQuarantineEvent` (`internal/runtime/tool_quarantine.go:3363`) gains two parameters, `enteredHold bool` and `holdKind string`, which become activity metadata.
+**Decision**: instrument the actual **not-held → held** transitions.
+- `emitToolQuarantineEvent` (`internal/runtime/tool_quarantine.go:3363`) gains `enteredHold bool, holdKind string`, which become activity metadata. Each call site passes values computed from the record's **previous** and **new** status, plus whether quarantine is in effect for the server.
 
-| Emitting path | Values |
+| Site | Values |
 |---|---|
-| New pending record when quarantine is in effect (`:917-954`) | `entered_hold=true`, `hold_kind=new` |
-| Approved → changed transition (`:1591`, `:2131`, `:2262`) | `entered_hold=true`, `hold_kind=changed`, but only when quarantine is in effect for the server (`:1582-1594` emits even when it is off) |
-| `refreshHeldContractSnapshot` (`:380-386,451-458`), already changed | `entered_hold=false` |
-| The toggle path that synthesises a pending record (`:2721-2765`) | today emits only enable/disable. It emits an additional `tool_discovered` with `entered_hold=true`, `hold_kind=new`, when it creates a pending record |
-| `tool_auto_approved`, `tool_approved`, `tool_blocked` | `entered_hold=false` |
+| New record saved as pending, quarantine in effect (`:917-954`) | `true`, `new` |
+| A status transition approved → changed (the description-change sites), quarantine in effect | `true`, `changed` |
+| The same transition while quarantine is off (`:1582-1594`) | `false` |
+| `refreshHeldContractSnapshot` (`:380-386,451-458`), already changed | `false` |
+| `adoptLegacyLockOrBaseline`, where it **creates** a pending hold in the failed-scan and manual branches (`:2150-2167`). Today these emit nothing; a new emit is added | `true`, `new` |
+| Legacy lock carry-over (`:2177-2194,2211-2225`, including the `:2262` emit), which preserves an existing pending or changed lock | `false` |
+| Toggle path that synthesises a pending record (`:2721-2765`) | adds `tool_discovered` with `true`, `new` when it creates the pending record |
+| `tool_auto_approved`, `tool_approved`, `tool_blocked` | `false` |
 
-Digest coverage for this figure is `partial` while the window still contains `tool_quarantine_change` records without the field.
+- A table-driven test enumerates every `emitToolQuarantineEvent` call site by grep count, so a future site cannot be added without a decision.
+- Fixtures cover both adoption helpers, carry-over, refresh of an already-changed tool, quarantine off, and enter → approve → re-enter.
+- Digest coverage for this figure is `partial` while the window still contains `tool_quarantine_change` records without the field.
 
-**Alternatives rejected**:
-- Deriving from `ToolApprovalRecord.PendingSince` / `DefinitionChangedAt`. These are current-state fields (`internal/storage/bbolt.go:479-501`) and lose history.
+**Alternatives rejected**: deriving from `ToolApprovalRecord.PendingSince` / `DefinitionChangedAt`. These are current-state fields (`internal/storage/bbolt.go:479-501`).
 
 ## R9. Coverage watermark
 

@@ -2,18 +2,23 @@ openapi: 3.0.3
 info:
   title: MCPProxy Spec 119 - starter offer and onboarding marks (additive)
   version: "119"
+  description: All responses use the standard envelope {success, data} (internal/httpapi/server.go writeSuccess); schemas below describe `data`. Errors are {success:false, error, code}.
 paths:
   /api/v1/onboarding/starter:
     get:
-      summary: Starter offer decision (FR-012). Admin read. Personal edition; server edition returns eligible=false reason=server_edition.
+      summary: Starter offer decision (FR-012). Gated by requireAdminRead. Personal edition; server edition returns eligible=false reason=server_edition.
       responses:
         "200":
           description: Offer
           content:
             application/json:
-              schema: { $ref: "#/components/schemas/StarterOffer" }
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: "#/components/schemas/StarterOffer" }
     post:
-      summary: Add the selected starter through the unchanged catalog door after re-resolving it (FR-003). Never approves.
+      summary: Add the selected starter through the catalog door's add step, using ONE resolved entry snapshot that was validated against shown_command (FR-003, research R3). Gated by requireServerOp(ServerOpAddFromRegistry), exactly like the catalog door; agent tokens get 403 with no side effects. Never approves.
       requestBody:
         required: true
         content:
@@ -33,12 +38,18 @@ paths:
               schema:
                 type: object
                 properties:
-                  server: { type: object, properties: { name: {type: string}, quarantined: {type: boolean} } }
-                  offer: { $ref: "#/components/schemas/StarterOffer" }
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      server: { type: object, properties: { name: {type: string}, quarantined: {type: boolean}, incarnation: {type: integer} } }
+                      offer: { $ref: "#/components/schemas/StarterOffer" }
         "409":
           description: "code=starter_changed (resolved command differs from shown_command; nothing added; body carries fresh offer) or code=not_eligible"
         "400":
           description: "code=duplicate_name (passed through from the catalog door) or invalid kind/surface"
+        "403":
+          description: "agent token / insufficient server-op permission; nothing resolved, added or recorded"
   /api/v1/onboarding/mark:
     post:
       summary: Existing endpoint; Spec 119 adds optional sticky booleans and a failure enum.
