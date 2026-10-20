@@ -425,3 +425,43 @@ func TestShouldTerminateCore(t *testing.T) {
 		})
 	}
 }
+
+// With MCPPROXY_API_KEY_FILE the core reads the key from the file itself; the
+// tray must not copy it into the core's environment.
+func TestBuildCoreEnvironmentAPIKey(t *testing.T) {
+	prev := trayAPIKey
+	t.Cleanup(func() { trayAPIKey = prev })
+	trayAPIKey = "tray-key"
+	launcher := &CoreProcessLauncher{}
+
+	count := func(env []string, prefix string) (n int, last string) {
+		for _, e := range env {
+			if strings.HasPrefix(e, prefix) {
+				n++
+				last = e
+			}
+		}
+		return n, last
+	}
+
+	t.Run("key injected when no file is named", func(t *testing.T) {
+		t.Setenv("MCPPROXY_API_KEY_FILE", "")
+		t.Setenv("MCPPROXY_API_KEY", "stale")
+		n, last := count(launcher.buildCoreEnvironment(), "MCPPROXY_API_KEY=")
+		if n != 1 || last != "MCPPROXY_API_KEY=tray-key" {
+			t.Fatalf("want exactly the tray key injected, got %d entries, last %q", n, last)
+		}
+	})
+
+	t.Run("key left in the file when one is named", func(t *testing.T) {
+		t.Setenv("MCPPROXY_API_KEY_FILE", "/run/secrets/mcpproxy_key")
+		t.Setenv("MCPPROXY_API_KEY", "stale")
+		env := launcher.buildCoreEnvironment()
+		if n, _ := count(env, "MCPPROXY_API_KEY="); n != 0 {
+			t.Fatalf("the key must not be copied into the core's environment, found %d entries", n)
+		}
+		if n, _ := count(env, "MCPPROXY_API_KEY_FILE="); n != 1 {
+			t.Fatalf("the core must inherit MCPPROXY_API_KEY_FILE, found %d entries", n)
+		}
+	})
+}

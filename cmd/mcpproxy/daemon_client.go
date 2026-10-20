@@ -12,6 +12,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"os"
 	"strings"
@@ -30,11 +31,20 @@ import (
 const daemonProbeTimeout = 2 * time.Second
 
 // resolveAPIKey returns the API key the daemon would accept, mirroring
-// Config.EnsureAPIKey precedence (env > config file) WITHOUT ever generating
+// Config.EnsureAPIKey precedence (MCPPROXY_API_KEY_FILE > MCPPROXY_API_KEY >
+// config file) WITHOUT ever generating
 // a new key — a fabricated key cannot match a running daemon's.
 func resolveAPIKey(cfg *config.Config) string {
-	if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists && envAPIKey != "" {
-		return envAPIKey
+	envKey, err := config.ResolveEnvAPIKey()
+	if err != nil {
+		// MCPPROXY_API_KEY_FILE names a file that cannot be used. Do not fall
+		// back to another key (it would be the wrong one, or none): say so and
+		// let the command take its no-daemon path.
+		fmt.Fprintf(os.Stderr, "Warning: %v; not using any API key\n", err)
+		return ""
+	}
+	if envKey.Set && envKey.Key != "" {
+		return envKey.Key
 	}
 	if cfg != nil {
 		return cfg.APIKey

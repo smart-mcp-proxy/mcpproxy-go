@@ -159,11 +159,24 @@ func main() {
 	// Setup API key for secure communication between tray and core
 	// Skip API key generation for socket/pipe connections as they're trusted by default
 	if trayAPIKey == "" && !usingSocketCommunication {
-		// Check environment variable first (for consistency with core behavior)
-		if envAPIKey := os.Getenv("MCPPROXY_API_KEY"); envAPIKey != "" {
-			trayAPIKey = envAPIKey
-			logger.Info("Using API key from environment variable for tray-core communication",
-				zap.String("api_key_source", "MCPPROXY_API_KEY environment variable"),
+		// Check the environment first (for consistency with core behavior):
+		// MCPPROXY_API_KEY_FILE, else MCPPROXY_API_KEY. A named file that cannot
+		// be used stops the tray: the core would refuse to start with it, and a
+		// generated key would hide that.
+		envKey, envErr := config.ResolveEnvAPIKey()
+		if envErr != nil {
+			logger.Error("Cannot read the API key named by the environment", zap.Error(envErr))
+			_ = logger.Sync()
+			os.Exit(1)
+		}
+		if envKey.Set && envKey.Key != "" {
+			trayAPIKey = envKey.Key
+			source := "MCPPROXY_API_KEY environment variable"
+			if envKey.FromFile {
+				source = config.EnvAPIKeyFile + " file"
+			}
+			logger.Info("Using API key from environment for tray-core communication",
+				zap.String("api_key_source", source),
 				zap.String("api_key_prefix", maskAPIKey(trayAPIKey)))
 		} else {
 			trayAPIKey = generateAPIKey()
@@ -1935,9 +1948,15 @@ func (cpl *CoreProcessLauncher) buildCoreEnvironment() []string {
 	}
 
 	// Add our environment variables
-	filtered = append(filtered,
-		"MCPPROXY_ENABLE_TRAY=false",
-		fmt.Sprintf("MCPPROXY_API_KEY=%s", trayAPIKey))
+	filtered = append(filtered, "MCPPROXY_ENABLE_TRAY=false")
+	// When the key lives in a file (MCPPROXY_API_KEY_FILE, which the core
+	// inherits), let the core read it from there: injecting it as
+	// MCPPROXY_API_KEY would put it in the core's environment, which is what
+	// the file form exists to avoid. The tray read the same file, so both
+	// sides hold the same key.
+	if os.Getenv(config.EnvAPIKeyFile) == "" {
+		filtered = append(filtered, fmt.Sprintf("MCPPROXY_API_KEY=%s", trayAPIKey))
+	}
 
 	// Tell the core it was launched by the tray, so telemetry's launch_source
 	// can say so. Without this a tray-spawned core is unclassifiable: its parent
