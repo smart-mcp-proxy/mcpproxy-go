@@ -227,3 +227,17 @@ Phase 3 landed under the FR-028 pin, on an era harness that reaches the modern e
 **FR-016b on `/mcp/all` is now asserted (T036b)** over the live direct routing fixture: an upstream `_meta` payload key is relayed while `serverInfo` and `protocolVersion` are dropped.
 
 **T034.** The resolver comment was rewritten with the gate; the `session_store.go` comment D1 named had already been removed by #1497 (its surviving claim — the closed-entry TTL matches the storage inactivity timeout — is true). The `AfterInitialize` hook comment now says it never fires in the modern era.
+
+**Cross-review, round 1 (2026-10-20).** zcode (GLM) could not run: its project token login had expired (`project_token_login_failed`), which only a human `zcode login` fixes. The round ran on opencode `github-copilot/gpt-6.1-sol` instead (the recorded default reviewer), in three file-named chunks with explicit permissions and a no-growth watchdog; every chunk returned a verdict. Seven findings in all, each verified against the tree before acting:
+
+| # | Finding | Action |
+|---|---|---|
+| O1 | `modernClientRecorder` map unbounded on client-supplied names (latent until T041) | fixed: cap 1024 + stale sweep, test |
+| O2 | `recordSessionResolution` / `markSessionWorked` keyed on the raw session id, so a modern stdio request could still write per-connection state (latent until T041) | fixed: era gate, inside `markSessionWorked` so all seven funnels agree; test proven red-then-green |
+| A1 | the modern-stdio selection test accepted any JSON-RPC error | fixed: asserts the stdio guard's exact INVALID_REQUEST refusal |
+| B1 | the cancellation guard buffers an unbounded body before the transport's era rejection | **declined**: mcp-go reads the whole body (`streamable_http.go:410`) before `detectRequestEra` on every POST, pinned or not, so the guard adds no exposure; introducing a body cap is a product decision outside US3 |
+| B2 | the collision test's skip branch was unreachable and accepted any failure as "cancelled" | fixed: bounded window, `context canceled` asserted, release on every path |
+| C1 | modern records lacked `metadata.client_name`, so `UsageAggregate.applyClientCalls` never counted them | fixed in `applyAttribution`, asserted end to end |
+| C2 | the server-edition test used test-local JWT→AuthContext and filter stand-ins | scope stated accurately (package `api` cannot import `internal/server`); production-chain coverage added as `TestStatelessList_AgentTokensScopedPerRequest` (two agent tokens through `mcpAuthMiddleware`, SC-004) |
+
+Reviewer-noted OUT OF SCOPE: `filterProfileV3Tools` (see the residual above) and the fact that `mcpAuthMiddleware` does not accept OAuth bearer JWTs on `/mcp` (server-edition users reach MCP with per-user agent tokens, which is what the new test uses).
