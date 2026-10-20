@@ -74,7 +74,11 @@ func confineRollbackPath(configured, requested string) (string, error) {
 	}
 	dir := filepath.Clean(dirAbs)
 	target := filepath.Clean(requested)
-	if !strings.HasPrefix(target, dir+string(filepath.Separator)) || filepath.Dir(target) != dir {
+	prefix := dir
+	if !strings.HasSuffix(prefix, string(filepath.Separator)) {
+		prefix += string(filepath.Separator) // "/" and "C:\" already end in one
+	}
+	if !strings.HasPrefix(target, prefix) || filepath.Dir(target) != dir {
 		return "", fmt.Errorf("%w: the rollback target must be a file directly in the bundle directory %s", ErrBundleRollbackUsage, dir)
 	}
 	return target, nil

@@ -60,3 +60,18 @@ func TestRollback_PathNeedsAConfiguredBundlePath(t *testing.T) {
 	_, err := RollbackBundle(BundleRollbackRequest{Path: filepath.Join(f.drop, "x.json"), Digest: digestOf([]byte("x"))}, f.log)
 	require.True(t, errors.Is(err, ErrBundleRollbackUsage), "got %v", err)
 }
+
+// A bundle configured directly under the filesystem root still allows its
+// siblings as rollback targets (the directory already ends in a separator).
+func TestConfineRollbackPath_RootDirectory(t *testing.T) {
+	root := string(filepath.Separator)
+	if v := filepath.VolumeName(os.TempDir()); v != "" {
+		root = v + string(filepath.Separator)
+	}
+	got, err := confineRollbackPath(filepath.Join(root, "scanner-bundle.json"), filepath.Join(root, "scanner-bundle.v1.json"))
+	require.NoError(t, err)
+	require.Equal(t, filepath.Join(root, "scanner-bundle.v1.json"), got)
+
+	_, err = confineRollbackPath(filepath.Join(root, "scanner-bundle.json"), filepath.Join(root, "sub", "x.json"))
+	require.True(t, errors.Is(err, ErrBundleRollbackUsage), "a subdirectory is not the bundle directory")
+}
