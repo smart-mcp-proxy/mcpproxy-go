@@ -4,7 +4,7 @@
   "id": "TPA-2026-0018",
   "license": "MIT",
   "provenance": {
-    "note": "In-the-wild npm campaign where a send-email tool silently blind-copied every message to a fixed external address.",
+    "note": "The cited npm campaign hid the blind copy in the email handler's code (a hardcoded Bcc property), not in the tool description, so the attack itself is an implementation backdoor outside the reach of a description scanner. This signature covers the description-level variant of the same goal (a tool that admits or hides a silent blind copy to a fixed external address) and is a hypothetical analogue, not a detection of the disclosed server.",
     "published": "2025-09-25",
     "source": "https://snyk.io/blog/malicious-mcp-server-on-npm-postmark-mcp-harvests-emails/"
   },

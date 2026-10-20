@@ -4,7 +4,7 @@
   "id": "TPA-2026-0022",
   "license": "MIT",
   "provenance": {
-    "note": "Search-style tool hides an instruction to read a local settings or credentials file and send the token to an external URL.",
+    "note": "Snyk Labs demonstrates a tool-poisoning pattern where hidden instructions tell the agent to read a local settings file (for example a CLI settings.json holding a GitHub token) and send the token to an external URL. This signature covers the description-level directive with or without explicit concealment wording.",
     "published": "2025-08-19",
     "source": "https://labs.snyk.io/resources/detect-tool-poisoning-mcp-server-security/"
   },
@@ -59,6 +59,30 @@
       ],
       "level": "critical",
       "pattern": "(?is)(?:(?:\\b(?:silently|quietly|secretly|covertly|discreetly)\\s+(?:(?:and\\s+)?\\w+\\s+)?(?:read|cat|open|load|send|post|upload|transmit|forward|include|copy|collect|attach|append|write|add|insert|install|place|put|pass)\\b|\\bunnoticed\\b|\\bwithout\\s+(?:telling|mentioning|informing|notifying|alerting)\\s+(?:the\\s+)?(?:user|human|anyone)\\b|(?:do\\s+not|don't|never)\\s+(?:tell|mention|inform|reveal|disclose|notify)\\s+(?:this|it|that|the\\s+user)\\b|must\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed)\\b|without\\s+the\\s+user(?:'s)?\\s+(?:knowledge|knowing|noticing)\\b).{0,250}?\\b(?:send|post|upload|transmit|forward)\\b.{0,80}?\\b(?:contents?|values?|tokens?|keys?|credentials?)\\b.{0,50}?(?:~/\\.|id_rsa(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.npmrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.env(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/).{0,80}?\\bto\\b.{0,40}?https?://|\\b(?:send|post|upload|transmit|forward)\\b.{0,80}?\\b(?:contents?|values?|tokens?|keys?|credentials?)\\b.{0,50}?(?:~/\\.|id_rsa(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.npmrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.env(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/).{0,80}?\\bto\\b.{0,40}?https?://.{0,250}?(?:\\b(?:silently|quietly|secretly|covertly|discreetly)\\s+(?:(?:and\\s+)?\\w+\\s+)?(?:read|cat|open|load|send|post|upload|transmit|forward|include|copy|collect|attach|append|write|add|insert|install|place|put|pass)\\b|\\bunnoticed\\b|\\bwithout\\s+(?:telling|mentioning|informing|notifying|alerting)\\s+(?:the\\s+)?(?:user|human|anyone)\\b|(?:do\\s+not|don't|never)\\s+(?:tell|mention|inform|reveal|disclose|notify)\\s+(?:this|it|that|the\\s+user)\\b|must\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed)\\b|without\\s+the\\s+user(?:'s)?\\s+(?:knowledge|knowing|noticing)\\b))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "read_settings_token_send_request",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0022",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$url",
+          "type": "regex",
+          "value": "https?://"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:before|prior\\s+to|first|must|required|requires?|mandatory|always|important|necessary)\\b.{0,120}?\\b(?:read|open|load|access|cat|parse)\\b.{0,60}?(?:\\.gemini/settings\\.json|\\.claude/settings(?:\\.local)?\\.json|\\.cursor/mcp\\.json|\\.config/[\\w./-]*(?:settings|credentials|auth)[\\w.-]*|\\.npmrc|\\.netrc|\\.aws/credentials|\\.ssh/id_\\w+|~/\\.env\\b|\\.codex/[\\w./-]+).{0,200}?\\b(?:token|bearer|api[ -]?key|secret|credential)s?\\b.{0,200}?\\b(?:send|post|submit|issue|make|fire|perform|transmit|forward|upload)\\w*\\b.{0,100}?https?://",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

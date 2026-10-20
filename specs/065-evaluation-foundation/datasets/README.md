@@ -174,7 +174,7 @@ description,input_schema}`, and cross-server `peers` so the `shadowing` check ca
 fire deterministically. Validated by `detect_corpus_test.go` in this directory
 and scored by `cmd/scan-eval --gate`.
 
-**Composition (875 entries):**
+**Composition (904 entries):**
 
 | Label | Category | Count | Mapped check | Gated today? |
 |-------|----------|-------|--------------|--------------|
@@ -183,31 +183,32 @@ and scored by `cmd/scan-eval --gate`.
 | malicious | `shadowing` | 4 | `shadowing.cross_server` | yes (US1) |
 | malicious | `phrase_injection` | 13 | `phrase.injection` | yes (Spec 077 US1) |
 | malicious | `capability_mismatch` | 2 | `capability.mismatch` | **no** — US2 check; reported, not enforced |
-| malicious | `tpa_*` (16 signature classes, one gating signature or more each) | 43 | `tpa.bundle` | yes (Spec 101 US2) |
-| benign | `hard_negative` (attack-resembling) | 796 (21 built-in categories, 775 `tpa_*`) | — | — |
+| malicious | `tpa_*` (16 signature classes, one gating signature or more each) | 51 | `tpa.bundle` | yes (Spec 101 US2) |
+| benign | `hard_negative` (attack-resembling) | 817 (21 built-in categories, 796 `tpa_*`) | — | — |
 | benign | `benign` (clean base rate) | 5 | — | — |
 
-The 43 `tpa_*` malicious entries are at least one self-authored sample per gating
-signature (42; `TPA-2026-0007` carries a second, `tpa_0007_m2`) of the embedded signature bundle (`internal/security/scanner/bundled/scanner-bundle.json`,
+The 51 `tpa_*` malicious entries are at least one self-authored sample per gating
+signature (42; `TPA-2026-0007` carries a second, `tpa_0007_m2`, and review rounds added
+further own-words samples for `0009`, `0013`, `0017`, `0022` (two), `0031`, `0037` and `0044`) of the embedded signature bundle (`internal/security/scanner/bundled/scanner-bundle.json`,
 built from `internal/security/tpacorpus/signatures/`); the classes are the
 vocabulary in `tpacorpus.Classes`:
 
 | Class | Malicious | Hard negatives |
 |-------|-----------|----------------|
 | `tpa_hidden_instruction_block` | 4 | 43 |
-| `tpa_comment_directive` | 1 | 28 |
-| `tpa_tool_shadowing` | 5 | 91 |
+| `tpa_comment_directive` | 2 | 30 |
+| `tpa_tool_shadowing` | 6 | 94 |
 | `tpa_cross_server_override` | 3 | 44 |
-| `tpa_exfil_redirect` | 4 | 71 |
-| `tpa_sensitive_file_coaxing` | 4 | 94 |
+| `tpa_exfil_redirect` | 5 | 73 |
+| `tpa_sensitive_file_coaxing` | 6 | 97 |
 | `tpa_credential_harvesting` | 1 | 32 |
-| `tpa_persistence_implant` | 2 | 50 |
+| `tpa_persistence_implant` | 3 | 55 |
 | `tpa_rug_pull_phrasing` | 2 | 33 |
 | `tpa_instruction_override` | 3 | 36 |
-| `tpa_conversation_exfil` | 3 | 45 |
+| `tpa_conversation_exfil` | 4 | 48 |
 | `tpa_preference_manipulation` | 2 | 27 |
 | `tpa_concealment_directive` | 1 | 15 |
-| `tpa_invisible_text` | 3 | 50 |
+| `tpa_invisible_text` | 4 | 53 |
 | `tpa_payload_execution` | 4 | 93 |
 | `tpa_schema_injection` | 1 | 23 |
 

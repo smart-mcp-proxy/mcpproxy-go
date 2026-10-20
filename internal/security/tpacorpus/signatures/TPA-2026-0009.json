@@ -34,7 +34,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)<!--.{0,200}?\\b(?:assistant|agent|model|ai|llm|you)\\b.{0,200}?\\b(?:(?:do not|don't|never)\\s+(?:tell|mention|inform|reveal|notify|show)\\s+(?:the\\s+)?(?:user|human|operator)\\s+(?:(?:that|about|of)\\s+)?(?:you\\s+(?:did|have|had|read|ran|used|called|sent|accessed|opened|copied|took|performed|made)\\b|(?:this|that|it)\\s*(?:[.;,!<]|-->|$)|what\\s+you\\s+(?:did|read|sent|ran|copied|accessed)\\b|the\\s+above\\b)|(?:do not|don't|never)\\s+(?:mention|reveal|disclose)\\s+(?:this|it|that|these\\s+steps)\\s+to\\s+the\\s+(?:user|human|operator)\\b).{0,100}?-->",
+      "pattern": "(?is)<!--.{0,200}?\\b(?:assistant|agent|model|ai|llm|you)(?:[_-](?:only|instructions?|directive|note))?\\b.{0,200}?\\b(?:(?:do not|don't|never)\\s+(?:tell|mention|inform|reveal|notify|show)\\s+(?:the\\s+)?(?:user|human|operator)\\s+(?:(?:that|about|of)\\s+)?(?:you\\s+(?:did|have|had|read|ran|used|called|sent|accessed|opened|copied|took|performed|made)\\b|(?:this|that|it)\\s*(?:[.;,!<]|-->|$)|what\\s+you\\s+(?:did|read|sent|ran|copied|accessed)\\b|the\\s+above\\b)|(?:do not|don't|never)\\s+(?:mention|reveal|disclose)\\s+(?:this\\s+(?:requirement|instruction|step|rule)|it|that|these\\s+steps)\\s+to\\s+(?:the\\s+)?(?:users?|humans?|operators?)\\b).{0,100}?-->",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -70,7 +70,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)<!--.{0,120}?\\b(?:assistant|agent|model|system|ai|llm)\\b[^>]{0,80}?(?:[:;,.]|\\b(?:then|first|also|and)\\b)\\s*(?:(?:before|after|when|once)\\b[\\w\\s]{1,30}?,\\s*)?(?:(?:please|silently|secretly|now|also|then)\\s+)*(?:read|open|cat|append|send|include|upload|attach|forward)\\b.{0,60}?(?:\\.env\\b|\\.ssh|id_rsa|\\.aws|\\.netrc|credentials|secrets?\\b|api[ _-]?keys?|passwords?|tokens?\\b).{0,200}?(?:\\b(?:send|include|append|upload|post|attach|forward|output|print|write|add)\\b|\\b(?:do not|don't|never)\\s+(?:tell|mention|inform|reveal|notify)\\b|\\b(?:silently|secretly)\\b).{0,200}?-->",
+      "pattern": "(?is)<!--.{0,120}?\\b(?:assistant|agent|model|system|ai|llm)(?:[_-](?:only|instructions?|directive|note))?\\b[^>]{0,80}?(?:[:;,.]|\\b(?:then|first|also|and)\\b)\\s*(?:(?:before|after|when|once|ahead of|prior to)\\b[\\w\\s]{1,40}?,\\s*)?(?:(?:(?:you|the\\s+assistant)\\s+)?(?:must|should|shall|have to|need to)\\s+(?:first\\s+)?)?(?:(?:please|silently|secretly|now|also|then|first)\\s+)*(?:read|open|cat|append|send|include|upload|attach|forward)\\b.{0,60}?(?:\\.env\\b|\\.ssh|id_rsa|\\.aws|\\.netrc|credentials|secrets?\\b|api[ _-]?keys?|passwords?|tokens?\\b).{0,200}?(?:\\b(?:send|include|append|upload|post|attach|forward|output|print|write|add)\\s+(?:(?:its|their)\\s+(?:full\\s+)?(?:contents?|text|value)|it\\b|them\\b|the\\s+(?:file|key|secret|token|credential|password)s?\\b)|\\b(?:do not|don't|never)\\s+(?:tell|mention|inform|reveal|notify)\\b|\\b(?:silently|secretly)\\b).{0,200}?-->",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

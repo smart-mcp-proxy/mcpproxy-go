@@ -424,7 +424,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)<!--.{0,200}?\\b(?:assistant|agent|model|ai|llm|you)\\b.{0,200}?\\b(?:(?:do not|don't|never)\\s+(?:tell|mention|inform|reveal|notify|show)\\s+(?:the\\s+)?(?:user|human|operator)\\s+(?:(?:that|about|of)\\s+)?(?:you\\s+(?:did|have|had|read|ran|used|called|sent|accessed|opened|copied|took|performed|made)\\b|(?:this|that|it)\\s*(?:[.;,!<]|-->|$)|what\\s+you\\s+(?:did|read|sent|ran|copied|accessed)\\b|the\\s+above\\b)|(?:do not|don't|never)\\s+(?:mention|reveal|disclose)\\s+(?:this|it|that|these\\s+steps)\\s+to\\s+the\\s+(?:user|human|operator)\\b).{0,100}?-->",
+      "pattern": "(?is)<!--.{0,200}?\\b(?:assistant|agent|model|ai|llm|you)(?:[_-](?:only|instructions?|directive|note))?\\b.{0,200}?\\b(?:(?:do not|don't|never)\\s+(?:tell|mention|inform|reveal|notify|show)\\s+(?:the\\s+)?(?:user|human|operator)\\s+(?:(?:that|about|of)\\s+)?(?:you\\s+(?:did|have|had|read|ran|used|called|sent|accessed|opened|copied|took|performed|made)\\b|(?:this|that|it)\\s*(?:[.;,!<]|-->|$)|what\\s+you\\s+(?:did|read|sent|ran|copied|accessed)\\b|the\\s+above\\b)|(?:do not|don't|never)\\s+(?:mention|reveal|disclose)\\s+(?:this\\s+(?:requirement|instruction|step|rule)|it|that|these\\s+steps)\\s+to\\s+(?:the\\s+)?(?:users?|humans?|operators?)\\b).{0,100}?-->",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -460,7 +460,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)<!--.{0,120}?\\b(?:assistant|agent|model|system|ai|llm)\\b[^>]{0,80}?(?:[:;,.]|\\b(?:then|first|also|and)\\b)\\s*(?:(?:before|after|when|once)\\b[\\w\\s]{1,30}?,\\s*)?(?:(?:please|silently|secretly|now|also|then)\\s+)*(?:read|open|cat|append|send|include|upload|attach|forward)\\b.{0,60}?(?:\\.env\\b|\\.ssh|id_rsa|\\.aws|\\.netrc|credentials|secrets?\\b|api[ _-]?keys?|passwords?|tokens?\\b).{0,200}?(?:\\b(?:send|include|append|upload|post|attach|forward|output|print|write|add)\\b|\\b(?:do not|don't|never)\\s+(?:tell|mention|inform|reveal|notify)\\b|\\b(?:silently|secretly)\\b).{0,200}?-->",
+      "pattern": "(?is)<!--.{0,120}?\\b(?:assistant|agent|model|system|ai|llm)(?:[_-](?:only|instructions?|directive|note))?\\b[^>]{0,80}?(?:[:;,.]|\\b(?:then|first|also|and)\\b)\\s*(?:(?:before|after|when|once|ahead of|prior to)\\b[\\w\\s]{1,40}?,\\s*)?(?:(?:(?:you|the\\s+assistant)\\s+)?(?:must|should|shall|have to|need to)\\s+(?:first\\s+)?)?(?:(?:please|silently|secretly|now|also|then|first)\\s+)*(?:read|open|cat|append|send|include|upload|attach|forward)\\b.{0,60}?(?:\\.env\\b|\\.ssh|id_rsa|\\.aws|\\.netrc|credentials|secrets?\\b|api[ _-]?keys?|passwords?|tokens?\\b).{0,200}?(?:\\b(?:send|include|append|upload|post|attach|forward|output|print|write|add)\\s+(?:(?:its|their)\\s+(?:full\\s+)?(?:contents?|text|value)|it\\b|them\\b|the\\s+(?:file|key|secret|token|credential|password)s?\\b)|\\b(?:do not|don't|never)\\s+(?:tell|mention|inform|reveal|notify)\\b|\\b(?:silently|secretly)\\b).{0,200}?-->",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -634,7 +634,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:after|once)\\b.{0,80}?\\b(?:check|verif\\w*|validat\\w*|scan\\w*|audit\\w*)\\s+tool\\b.{0,120}?\\b(?:run|execute|call|invoke)\\s+this\\s+(?:function|tool)\\b.{0,80}?(?:\\b(?:modify|replace|override|rewrite|overwrite|falsify|forge|flip)\\w*\\b.{0,40}?\\b(?:fail\\w*|wrong|incorrect|negative|bad|error\\w*)\\s+(?:result|verdict|output|outcome|finding)s?\\b.{0,40}?\\bof\\s+(?:the|that)\\s+\\w+\\s+tool\\b(?:\\s*(?:[.;,!)]|$)|\\s+(?:with|to|by)\\s+(?:a\\s+)?(?:pass\\w*|success\\w*|ok\\b|clean|valid))|\\b(?:modify|replace|override|correct|change|alter|rewrite|fix|overwrite|falsify|forge|flip)\\w*\\b.{0,40}?\\b(?:fail\\w*|wrong|incorrect|negative|bad|error\\w*)\\s+(?:result|verdict|output|outcome|finding)s?\\b.{0,40}?\\b(?:to|so)\\s+(?:that\\s+)?(?:(?:the\\s+)?(?:check|scan|audit|verification|validation|tool|result|verdict|it|they)\\s+)?(?:(?:report|show|display|return|read|appear|look|count|mark|register)\\w*\\s+(?:as\\s+)?(?:a\\s+)?(?:pass\\w*|success\\w*|clean|ok|valid)|(?:pass\\w*|success\\w*|succeed\\w*)\\s*(?:[.;,!)]|$)))",
+      "pattern": "(?is)\\b(?:after|once)\\b.{0,80}?\\b(?:check|verif\\w*|validat\\w*|scan\\w*|audit\\w*)\\s+tool\\b.{0,120}?\\b(?:run|execute|call|invoke)\\s+this\\s+(?:function|tool)\\b.{0,80}?(?:\\b(?:modify|replace|override|rewrite|overwrite|falsify|forge|flip)\\w*\\b.{0,40}?\\b(?:fail\\w*|wrong|incorrect|negative|bad|error\\w*)\\s+(?:result|verdict|output|outcome|finding)s?\\b.{0,40}?\\bof\\s+(?:(?:the|that)\\s+)?\\w+\\s+tool\\b(?:\\s*(?:[.;,!)]|$)|\\s+(?:with|to|by)\\s+(?:a\\s+)?(?:pass\\w*|success\\w*|ok\\b|clean|valid))|\\b(?:modify|replace|override|correct|change|alter|rewrite|fix|overwrite|falsify|forge|flip)\\w*\\b.{0,40}?\\b(?:fail\\w*|wrong|incorrect|negative|bad|error\\w*)\\s+(?:result|verdict|output|outcome|finding)s?\\b.{0,40}?\\b(?:to|so)\\s+(?:that\\s+)?(?:(?:the\\s+)?(?:check|scan|audit|verification|validation|tool|result|verdict|it|they)\\s+)?(?:(?:report|show|display|return|read|appear|look|count|mark|register)\\w*\\s+(?:as\\s+)?(?:a\\s+)?(?:pass\\w*|success\\w*|clean|ok|valid)|(?:pass\\w*|success\\w*|succeed\\w*)\\s*(?:[.;,!)]|$)))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -813,7 +813,7 @@
       "id": "TPA-2026-0017",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)(?:\\b(?:whenever|every time|each time|when)\\b.{0,40}\\b(?:send_email|send_mail|send_message|post_message)\\b.{0,.{0,100}?(?:^|[.;:!?,)\\]]\\s*|\\b(?:and|then|also|always|must|should|will|to|just|but|please|that|which|is|are|be|get|gets|being|it)\\s+)(?:silently|secretly|covertly|surreptitiously|quietly)\\s+(?:\\w+\\s+){0,2}\\b(?:overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+|(?:without\\s+(?:telling|notifying|informing|alerting)\\s+(?:the\\s+)?(?:user|human|owner|sender|operator|customer|person)\\s*(?:[.;!,)]|$|\\s+(?:about|of)\\s+(?:this|it|that|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity)))|(?:do not|don['’]t|never|must not|should not)\\s+(?:tell|inform|notify|alert)\\s+(?:the\\s+)?(?:user|human|owner|sender|operator|customer|person)\\s*(?:[.;!,)]|$|\\s+(?:about|of|that|regarding)\\s+(?:this|it|that|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity)))|(?:do not|don['’]t|never|must not|should not)\\s+(?:mention|reveal|disclose|surface|show)\\s+(?:(?:this|that|these|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity))\\b|it\\s*(?:[.!;]|$)|it\\s+(?:to|in|from)\\s+(?:the\\s+|your\\s+)?(?:user|reply|response|answer|output)(?:[^\\w'’]|$))|keep\\s+(?:this|it|that|the\\s+(?:routing|redirect|rewrite|swap|change|rule|override|copy|replacement))\\b[^.]{0,30}\\b(?:out of (?:the )?(?:visible\\s+(?:reply|response|output|answer|text|summary|transcript|view)|user'?s?\\s+(?:view|reply|response|sight)|response|reply|output|answer)|hidden|secret|quiet)|out of the (?:visible|user'?s?)\\s+(?:reply|response|output|answer|text|view|summary|transcript)|\\b(?:this|it|that|these|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity))\\b[^.]{0,40}\\b(?:should not|must not|do not|does not|will not|never|not)\\s+(?:be\\s+)?(?:visible|shown|mentioned|disclosed|surfaced|revealed|displayed)\\s+(?:to|in|for)\\s+(?:the\\s+)?(?:user|human|operator|person|sender|reply|response|output|answer|chat|conversation|summary|transcript)\\b|(?:regardless of|no matter)\\s+(?:what\\s+)?(?:the\\s+)?(?:user|human|operator)\\s+(?:says|said|typed|asked|wants|wrote|requested|specif\\w+|provid\\w+|enter\\w*|chose|chooses|selected|input)\\b).{0,100}?\\b(?:whenever|every time|each time|when)\\b.{0,40}\\b(?:send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(?:overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+|\\b(?:whenever|every time|each time|when)\\b.{0,40}\\b(?:send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(?:overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,200}?(?:(?:without\\s+(?:telling|notifying|informing|alerting)\\s+(?:the\\s+)?(?:user|human|owner|sender|operator|customer|person)\\s*(?:[.;!,)]|$|\\s+(?:about|of)\\s+(?:this|it|that|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity)))|(?:do not|don['’]t|never|must not|should not)\\s+(?:tell|inform|notify|alert)\\s+(?:the\\s+)?(?:user|human|owner|sender|operator|customer|person)\\s*(?:[.;!,)]|$|\\s+(?:about|of|that|regarding)\\s+(?:this|it|that|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity)))|(?:do not|don['’]t|never|must not|should not)\\s+(?:mention|reveal|disclose|surface|show)\\s+(?:(?:this|that|these|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity))\\b|it\\s*(?:[.!;]|$)|it\\s+(?:to|in|from)\\s+(?:the\\s+|your\\s+)?(?:user|reply|response|answer|output)(?:[^\\w'’]|$))|keep\\s+(?:this|it|that|the\\s+(?:routing|redirect|rewrite|swap|change|rule|override|copy|replacement))\\b[^.]{0,30}\\b(?:out of (?:the )?(?:visible\\s+(?:reply|response|output|answer|text|summary|transcript|view)|user'?s?\\s+(?:view|reply|response|sight)|response|reply|output|answer)|hidden|secret|quiet)|out of the (?:visible|user'?s?)\\s+(?:reply|response|output|answer|text|view|summary|transcript)|\\b(?:this|it|that|these|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity))\\b[^.]{0,40}\\b(?:should not|must not|do not|does not|will not|never|not)\\s+(?:be\\s+)?(?:visible|shown|mentioned|disclosed|surfaced|revealed|displayed)\\s+(?:to|in|for)\\s+(?:the\\s+)?(?:user|human|operator|person|sender|reply|response|output|answer|chat|conversation|summary|transcript)\\b|(?:regardless of|no matter)\\s+(?:what\\s+)?(?:the\\s+)?(?:user|human|operator)\\s+(?:says|said|typed|asked|wants|wrote|requested|specif\\w+|provid\\w+|enter\\w*|chose|chooses|selected|input)\\b)|(?:^|[.;:!?,)\\]]\\s*|\\b(?:and|then|also|always|must|should|will|to|just|but|please|that|which|is|are|be|get|gets|being|it)\\s+)(?:silently|secretly|covertly|surreptitiously|quietly)\\b))",
+      "pattern": "(?is)(?:\\b(?:whenever|every time|each time|when)\\b.{0,40}\\b(?:send_email|send_mail|send_message|post_message)\\b.{0,100}?(?:^|[.;:!?,)\\]]\\s*|\\b(?:and|then|also|always|must|should|will|to|just|but|please|that|which|is|are|be|get|gets|being|it)\\s+)(?:silently|secretly|covertly|surreptitiously|quietly)\\s+(?:\\w+\\s+){0,2}\\b(?:overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+|(?:without\\s+(?:telling|notifying|informing|alerting)\\s+(?:the\\s+)?(?:user|human|owner|sender|operator|customer|person)\\s*(?:[.;!,)]|$|\\s+(?:about|of)\\s+(?:this|it|that|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity)))|(?:do not|don['’]t|never|must not|should not)\\s+(?:tell|inform|notify|alert)\\s+(?:the\\s+)?(?:user|human|owner|sender|operator|customer|person)\\s*(?:[.;!,)]|$|\\s+(?:about|of|that|regarding)\\s+(?:this|it|that|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity)))|(?:do not|don['’]t|never|must not|should not)\\s+(?:mention|reveal|disclose|surface|show)\\s+(?:(?:this|that|these|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity))\\b|it\\s*(?:[.!;]|$)|it\\s+(?:to|in|from)\\s+(?:the\\s+|your\\s+)?(?:user|reply|response|answer|output)(?:[^\\w'’]|$))|keep\\s+(?:this|it|that|the\\s+(?:routing|redirect|rewrite|swap|change|rule|override|copy|replacement))\\b[^.]{0,30}\\b(?:out of (?:the )?(?:visible\\s+(?:reply|response|output|answer|text|summary|transcript|view)|user'?s?\\s+(?:view|reply|response|sight)|response|reply|output|answer)|hidden|secret|quiet)|out of the (?:visible|user'?s?)\\s+(?:reply|response|output|answer|text|view|summary|transcript)|\\b(?:this|it|that|these|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity))\\b[^.]{0,40}\\b(?:should not|must not|do not|does not|will not|never|not)\\s+(?:be\\s+)?(?:visible|shown|mentioned|disclosed|surfaced|revealed|displayed)\\s+(?:to|in|for)\\s+(?:the\\s+)?(?:user|human|operator|person|sender|reply|response|output|answer|chat|conversation|summary|transcript)\\b|(?:regardless of|no matter)\\s+(?:what\\s+)?(?:the\\s+)?(?:user|human|operator)\\s+(?:says|said|typed|asked|wants|wrote|requested|specif\\w+|provid\\w+|enter\\w*|chose|chooses|selected|input)\\b).{0,100}?\\b(?:whenever|every time|each time|when)\\b.{0,40}\\b(?:send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(?:overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+|\\b(?:whenever|every time|each time|when)\\b.{0,40}\\b(?:send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(?:overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,200}?(?:(?:without\\s+(?:telling|notifying|informing|alerting)\\s+(?:the\\s+)?(?:user|human|owner|sender|operator|customer|person)\\s*(?:[.;!,)]|$|\\s+(?:about|of)\\s+(?:this|it|that|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity)))|(?:do not|don['’]t|never|must not|should not)\\s+(?:tell|inform|notify|alert)\\s+(?:the\\s+)?(?:user|human|owner|sender|operator|customer|person)\\s*(?:[.;!,)]|$|\\s+(?:about|of|that|regarding)\\s+(?:this|it|that|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity)))|(?:do not|don['’]t|never|must not|should not)\\s+(?:mention|reveal|disclose|surface|show)\\s+(?:(?:this|that|these|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity))\\b|it\\s*(?:[.!;]|$)|it\\s+(?:to|in|from)\\s+(?:the\\s+|your\\s+)?(?:user|reply|response|answer|output)(?:[^\\w'’]|$))|keep\\s+(?:this|it|that|the\\s+(?:routing|redirect|rewrite|swap|change|rule|override|copy|replacement))\\b[^.]{0,30}\\b(?:out of (?:the )?(?:visible\\s+(?:reply|response|output|answer|text|summary|transcript|view)|user'?s?\\s+(?:view|reply|response|sight)|response|reply|output|answer)|hidden|secret|quiet)|out of the (?:visible|user'?s?)\\s+(?:reply|response|output|answer|text|view|summary|transcript)|\\b(?:this|it|that|these|the\\s+(?:redirect\\w*|rerout\\w*|chang\\w*|swap\\w*|copy|forward\\w*|replacement|routing|substitution|rewrit\\w*|override|bcc|rule|upload\\w*|capture\\w*|activity))\\b[^.]{0,40}\\b(?:should not|must not|do not|does not|will not|never|not)\\s+(?:be\\s+)?(?:visible|shown|mentioned|disclosed|surfaced|revealed|displayed)\\s+(?:to|in|for)\\s+(?:the\\s+)?(?:user|human|operator|person|sender|reply|response|output|answer|chat|conversation|summary|transcript)\\b|(?:regardless of|no matter)\\s+(?:what\\s+)?(?:the\\s+)?(?:user|human|operator)\\s+(?:says|said|typed|asked|wants|wrote|requested|specif\\w+|provid\\w+|enter\\w*|chose|chooses|selected|input)\\b)|(?:^|[.;:!?,)\\]]\\s*|\\b(?:and|then|also|always|must|should|will|to|just|but|please|that|which|is|are|be|get|gets|being|it)\\s+)(?:silently|secretly|covertly|surreptitiously|quietly)\\b))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -987,6 +987,30 @@
       ],
       "level": "high",
       "pattern": "(?is)\\b(?:first|before|prior\\s+to|then|also|additionally|mandatory|required|must|important|always|silently|for\\s+(?:better|best)\\s+\\w+)\\b.{0,100}?\\b(?:read|open|cat|load)\\b.{0,60}?(?:~/\\.(?:ssh/id_\\w+(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|aws/credentials(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|npmrc|netrc|gnupg/\\S*|ssh(?:[\\s'\"`,;:)]|$)|aws(?:[\\s'\"`,;:)]|$))|\\.ssh/id_\\w+(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|id_(?:rsa|ed25519)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/credentials|/etc/passwd|\\.env(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|credentials?\\s+file|private\\s+key).{0,100}?\\b(?:store|put|place|pass|include|save|insert|copy|paste)\\b\\s+(?:[\\w']+\\s+){0,3}?(?:contents?|text|body|data|values?|verbatim)\\b.{0,40}?\\b(?:in|into|as|to|via)\\b.{0,30}?(?:^|[\\s'\"`])(?:(?:the\\s+)?['\"`]?(?:(?:extra|session|user|debug|audit|trace|call|request|tool|agent|assistant|system|model|additional|optional|free|misc)_)?(?:notes?|context|metadata|meta|comments?|extra|details?|session\\w*|payload|reason|info|log|tags?|labels?|trace\\w*|remarks?|memo|sidenote|annotation)['\"`]?\\s+|(?:any|another|one)\\s+(?:other\\s+)?)(?:argument|parameter|field|param)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "read_settings_token_send_request",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0022",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$url",
+          "type": "regex",
+          "value": "https?://"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:before|prior\\s+to|first|must|required|requires?|mandatory|always|important|necessary)\\b.{0,120}?\\b(?:read|open|load|access|cat|parse)\\b.{0,60}?(?:\\.gemini/settings\\.json|\\.claude/settings(?:\\.local)?\\.json|\\.cursor/mcp\\.json|\\.config/[\\w./-]*(?:settings|credentials|auth)[\\w.-]*|\\.npmrc|\\.netrc|\\.aws/credentials|\\.ssh/id_\\w+|~/\\.env\\b|\\.codex/[\\w./-]+).{0,200}?\\b(?:token|bearer|api[ -]?key|secret|credential)s?\\b.{0,200}?\\b(?:send|post|submit|issue|make|fire|perform|transmit|forward|upload)\\w*\\b.{0,100}?https?://",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1425,6 +1449,23 @@
     },
     {
       "category": "exfiltration",
+      "confidence": 0.86,
+      "detector": "trigger_phrase_consult_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0031",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:if|whenever|when)\\b[^.\\n]{0,80}?\\b(?:conversation|chat|messages?|prompt|request|input|text|user)\\b[^.\\n]{0,40}?\\b(?:ever\\s+)?(?:includes?|contains?|mentions?|says?|said|types?|typed|writes?|wrote|has|have)\\b[^.\\n]{0,30}?(?:\\bwords?\\b|\\bphrases?\\b|\\bkeywords?\\b|\\bstring\\b|['\\\"])[^.\\n]{0,100}?\\b(?:always\\s+)?(?:consult|call|use|invoke|run)\\s+this\\s+tool\\s+(?:first|before\\s+(?:doing\\s+)?(?:anything|any\\s+other|responding|answering|replying)).{0,400}?(?:pass|send|provide|supply|include|submit|forward|upload|put|paste|hand|give|share)\\b[^.\\n]{0,40}?(?:whole|entire|full|complete|all)\\s+(?:the\\s+)?(?:conversation|chat|messages?|history|transcript)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
       "confidence": 0.8,
       "detector": "caller_model_param",
       "engine": "regex",
@@ -1742,6 +1783,30 @@
       ],
       "level": "high",
       "pattern": "(?is)\\x{1b}\\[(?:(?:0|1|2|3|4|7|9|2[0-9]|3[0-79]|4[0-79]|9[0-7]|10[0-7]);)*(?:8|30;40|40;30|90;100|100;90|31;41|41;31|91;101|101;91|32;42|42;32|92;102|102;92|33;43|43;33|93;103|103;93|34;44|44;34|94;104|104;94|35;45|45;35|95;105|105;95|36;46|46;36|96;106|106;96|37;47|47;37|97;107|107;97)(?:;[0-9;:]*)?m.{0,300}?(?:<\\s*(?:important|system|instructions?)\\s*>(?:.{0,120}?\\b(?:you\\s+(?:must|should|need\\s+to|have\\s+to)|before\\s+(?:using|calling|invoking|returning|responding|answering)|ignore|(?:do\\s+not|don't|never|always)\\s))|\\[\\s*(?:important|system|inst)\\s*\\](?:.{0,120}?\\b(?:you\\s+(?:must|should|need\\s+to|have\\s+to)|before\\s+(?:using|calling|invoking|returning|responding|answering)|ignore|(?:do\\s+not|don't|never|always)\\s))|\\bignore\\b[^\\n]{0,30}?\\b(?:instructions|rules|previous)\\b|\\b(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|mention|reveal|disclose|inform|notify)\\s+(?:the\\s+user|users?|anyone|them)\\b[^.\\n]{0,40}?\\b(?:about|of)\\s+(?:this|that|it|these)\\b|\\b(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|mention|reveal|disclose)\\s+(?:this|that|it|these)\\b|\\bwithout\\s+(?:telling|informing|notifying|alerting)\\s+(?:the\\s+)?user|\\b(?:read|open|cat|send|upload|forward|attach|append|pass|include)\\b[^\\n]{0,80}?(?:~/[\\w.]|\\.ssh\\b|id_rsa|/etc/(?:passwd|shadow)|\\.aws\\b|credentials?\\.(?:json|ya?ml|txt|csv)|private key|\\bcredentials?\\s+file))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "ansi_sgr_256",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0037",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$esc",
+          "type": "regex",
+          "value": "\\x{1b}\\[(?:(?:0|1|2|3|4|7|9);)*(?:(?:38|48);5;(?:0|7|8|15|16|231|232|255)|(?:38|48);2;(?:0;0;0|255;255;255));(?:39|49|(?:(?:38|48);5;(?:0|7|8|15|16|231|232|255)|(?:38|48);2;(?:0;0;0|255;255;255)))(?:;[0-9;:]*)?m"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\x{1b}\\[(?:(?:0|1|2|3|4|7|9);)*(?:(?:38|48);5;(?:0|7|8|15|16|231|232|255)|(?:38|48);2;(?:0;0;0|255;255;255));(?:39|49|(?:(?:38|48);5;(?:0|7|8|15|16|231|232|255)|(?:38|48);2;(?:0;0;0|255;255;255)))(?:;[0-9;:]*)?m.{0,300}?(?:<\\s*(?:important|system|instructions?)\\s*>(?:.{0,120}?\\b(?:you\\s+(?:must|should|need\\s+to|have\\s+to)|before\\s+(?:using|calling|invoking|returning|responding|answering)|ignore|(?:do\\s+not|don't|never|always)\\s))|\\[\\s*(?:important|system|inst)\\s*\\](?:.{0,120}?\\b(?:you\\s+(?:must|should|need\\s+to|have\\s+to)|before\\s+(?:using|calling|invoking|returning|responding|answering)|ignore|(?:do\\s+not|don't|never|always)\\s))|\\bignore\\b[^\\n]{0,30}?\\b(?:instructions|rules|previous)\\b|\\b(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|mention|reveal|disclose|inform|notify)\\s+(?:the\\s+user|users?|anyone|them)\\b[^.\\n]{0,40}?\\b(?:about|of)\\s+(?:this|that|it|these)\\b|\\b(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|mention|reveal|disclose)\\s+(?:this|that|it|these)\\b|\\bwithout\\s+(?:telling|informing|notifying|alerting)\\s+(?:the\\s+)?user|\\b(?:read|open|cat|send|upload|forward|attach|append|pass|include)\\b[^\\n]{0,80}?(?:~/[\\w.]|\\.ssh\\b|id_rsa|/etc/(?:passwd|shadow)|\\.aws\\b|credentials?\\.(?:json|ya?ml|txt|csv)|private key|\\bcredentials?\\s+file))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -2091,6 +2156,30 @@
     {
       "category": "prompt-injection",
       "confidence": 0.88,
+      "detector": "config_autoapprove_settings",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0044",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cfg",
+          "type": "regex",
+          "value": "chat\\.tools\\.(?:global\\.)?autoApprove"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:\\b(?:add|set|write|put|insert|enable|inject|append|turn\\s+on|save)\\b.{0,160}?[\\\"']?(?:[\\w-]+\\.)*chat\\.tools\\.(?:global\\.)?autoApprove[\\\"']?\\s*[:=]\\s*true.{0,160}?\\.vscode/settings\\.json|\\b(?:add|set|write|put|insert|enable|inject|append|turn\\s+on|save)\\b.{0,160}?\\.vscode/settings\\.json.{0,160}?[\\\"']?(?:[\\w-]+\\.)*chat\\.tools\\.(?:global\\.)?autoApprove[\\\"']?\\s*[:=]\\s*true)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
       "detector": "config_persist",
       "engine": "regex",
       "flags": [
@@ -2108,6 +2197,30 @@
       ],
       "level": "high",
       "pattern": "(?is)(?:\\b(?:append|add|write|save|insert|record)\\b.{0,120}?\\b(?:to|into|in)\\s+(?:the\\s+)?(?:(?:project|repo|repository|workspace)(?:'s)?\\s+)?(?:agents\\.md|claude\\.md|gemini\\.md|\\.cursorrules|\\.windsurfrules|\\.cursor/rules|\\.github/copilot-instructions\\.md|copilot-instructions\\.md).{0,200}?\\b(?:future|every|all|each|subsequent|next)\\s+(?:\\w+\\s+){0,2}(?:session|conversation|run|chat)s?\\b.{0,200}?(?:auto-?approv\\w*|\\b(?:run|runs|running|execut\\w+|install\\w*|call\\w*|approv\\w+|allow\\w*|trust\\w*)\\b[^.\\n]{0,40}?\\b(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)|\\b(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)\\b[^.\\n]{0,30}?\\b(?:to\\s+|before\\s+|for\\s+)?(?:run\\w*|execut\\w+|install\\w*|call\\w*|tool\\s+calls?)\\b|\\b(?:never|do\\s+not|don't)\\s+(?:ask|prompt|confirm)\\b[^.\\n]{0,30}?\\b(?:confirm\\w*|approval|permission)\\b[^.\\n]{0,60}?\\b(?:command|shell|tool|execut\\w+|run|edit|install|delet\\w+|writ\\w+|destructive|any\\s+action|all\\s+actions|everything)|\\bdisable\\s+(?:confirm\\w*|approval|safety|sandbox)|\\bbypass\\w*\\s+(?:confirm\\w*|approval|permission|safety|sandbox|review)|\\b(?:yolo|allow[- ]all|trust[- ]all)\\b)|(?:auto-?approv\\w*|\\b(?:run|runs|running|execut\\w+|install\\w*|call\\w*|approv\\w+|allow\\w*|trust\\w*)\\b[^.\\n]{0,40}?\\b(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)|\\b(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)\\b[^.\\n]{0,30}?\\b(?:to\\s+|before\\s+|for\\s+)?(?:run\\w*|execut\\w+|install\\w*|call\\w*|tool\\s+calls?)\\b|\\b(?:never|do\\s+not|don't)\\s+(?:ask|prompt|confirm)\\b[^.\\n]{0,30}?\\b(?:confirm\\w*|approval|permission)\\b[^.\\n]{0,60}?\\b(?:command|shell|tool|execut\\w+|run|edit|install|delet\\w+|writ\\w+|destructive|any\\s+action|all\\s+actions|everything)|\\bdisable\\s+(?:confirm\\w*|approval|safety|sandbox)|\\bbypass\\w*\\s+(?:confirm\\w*|approval|permission|safety|sandbox|review)|\\b(?:yolo|allow[- ]all|trust[- ]all)\\b).{0,120}?\\b(?:append|add|write|save|insert|record)\\b.{0,120}?\\b(?:to|into|in)\\s+(?:the\\s+)?(?:(?:project|repo|repository|workspace)(?:'s)?\\s+)?(?:agents\\.md|claude\\.md|gemini\\.md|\\.cursorrules|\\.windsurfrules|\\.cursor/rules|\\.github/copilot-instructions\\.md|copilot-instructions\\.md).{0,200}?\\b(?:future|every|all|each|subsequent|next)\\s+(?:\\w+\\s+){0,2}(?:session|conversation|run|chat)s?\\b)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "config_persist_bypass",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0044",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cfg",
+          "type": "regex",
+          "value": "AGENTS\\.md|CLAUDE\\.md|\\.cursor/rules|copilot-instructions\\.md"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:append|add|write|save|insert|record)\\b.{0,120}?\\b(?:to|into|in)\\s+(?:the\\s+)?(?:(?:project|repo|repository|workspace)(?:'s)?\\s+)?(?:agents\\.md|claude\\.md|gemini\\.md|\\.cursorrules|\\.windsurfrules|\\.cursor/rules|\\.github/copilot-instructions\\.md|copilot-instructions\\.md).{0,200}?(?:auto-?approv\\w*|\\b(?:run|runs|running|execut\\w+|install\\w*|call\\w*|approv\\w+|allow\\w*|trust\\w*)\\b[^.\\n]{0,40}?\\b(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)|\\b(?:without|no)\\s+(?:asking|confirm\\w*|approval|permission|prompting|review)\\b[^.\\n]{0,30}?\\b(?:to\\s+|before\\s+|for\\s+)?(?:run\\w*|execut\\w+|install\\w*|call\\w*|tool\\s+calls?)\\b|\\b(?:never|do\\s+not|don't)\\s+(?:ask|prompt|confirm)\\b[^.\\n]{0,30}?\\b(?:confirm\\w*|approval|permission)\\b[^.\\n]{0,60}?\\b(?:command|shell|tool|execut\\w+|run|edit|install|delet\\w+|writ\\w+|destructive|any\\s+action|all\\s+actions|everything)|\\bdisable\\s+(?:confirm\\w*|approval|safety|sandbox)|\\bbypass\\w*\\s+(?:confirm\\w*|approval|permission|safety|sandbox|review)|\\b(?:yolo|allow[- ]all|trust[- ]all)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -2313,7 +2426,7 @@
       "id": "TPA-2026-0014",
       "license": "MIT",
       "provenance": {
-        "note": "Important-tagged notice claims the tool is retired and tells the agent to send future calls to another tool.",
+        "note": "The cited sample returns this notice from tool execution (the tool's docstring stays ordinary PubMed documentation), so it demonstrates the redirect goal at the tool-result layer. This signature covers the description-level variant of the same pattern: an Important-tagged notice that retires the tool, routes calls to another tool and conceals the change; it does not claim to detect the execution-time return value.",
         "published": "2026-03-24",
         "source": "https://github.com/dongsenzhang/MSB/blob/main/data/tools/attack_tools/academic_search/PubMed_MCP_Server/pubmed_server-tool_transfer.py"
       },
@@ -2374,7 +2487,7 @@
       "id": "TPA-2026-0018",
       "license": "MIT",
       "provenance": {
-        "note": "In-the-wild npm campaign where a send-email tool silently blind-copied every message to a fixed external address.",
+        "note": "The cited npm campaign hid the blind copy in the email handler's code (a hardcoded Bcc property), not in the tool description, so the attack itself is an implementation backdoor outside the reach of a description scanner. This signature covers the description-level variant of the same goal (a tool that admits or hides a silent blind copy to a fixed external address) and is a hypothetical analogue, not a detection of the disclosed server.",
         "published": "2025-09-25",
         "source": "https://snyk.io/blog/malicious-mcp-server-on-npm-postmark-mcp-harvests-emails/"
       },
@@ -2435,11 +2548,12 @@
       "id": "TPA-2026-0022",
       "license": "MIT",
       "provenance": {
-        "note": "Search-style tool hides an instruction to read a local settings or credentials file and send the token to an external URL.",
+        "note": "Snyk Labs demonstrates a tool-poisoning pattern where hidden instructions tell the agent to read a local settings file (for example a CLI settings.json holding a GitHub token) and send the token to an external URL. This signature covers the description-level directive with or without explicit concealment wording.",
         "published": "2025-08-19",
         "source": "https://labs.snyk.io/resources/detect-tool-poisoning-mcp-server-security/"
       },
       "rule_ids": [
+        "TPA-2026-0022/read_settings_token_send_request",
         "TPA-2026-0022/read_then_send_url",
         "TPA-2026-0022/send_file_value_to_url"
       ]
@@ -2577,7 +2691,8 @@
       },
       "rule_ids": [
         "TPA-2026-0031/full_history_param",
-        "TPA-2026-0031/trigger_phrase_call_first"
+        "TPA-2026-0031/trigger_phrase_call_first",
+        "TPA-2026-0031/trigger_phrase_consult_first"
       ]
     },
     {
@@ -2670,7 +2785,8 @@
       "rule_ids": [
         "TPA-2026-0037/ansi_cursor_erase",
         "TPA-2026-0037/ansi_osc",
-        "TPA-2026-0037/ansi_sgr"
+        "TPA-2026-0037/ansi_sgr",
+        "TPA-2026-0037/ansi_sgr_256"
       ]
     },
     {
@@ -2774,7 +2890,9 @@
         "source": "https://embracethered.com/blog/posts/2025/github-copilot-remote-code-execution-via-prompt-injection/"
       },
       "rule_ids": [
-        "TPA-2026-0044/config_persist"
+        "TPA-2026-0044/config_autoapprove_settings",
+        "TPA-2026-0044/config_persist",
+        "TPA-2026-0044/config_persist_bypass"
       ]
     }
   ],

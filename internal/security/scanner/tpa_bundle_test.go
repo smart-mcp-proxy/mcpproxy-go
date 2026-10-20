@@ -20,14 +20,14 @@ func TestLoadEmbeddedBundle(t *testing.T) {
 	if check == nil {
 		t.Fatal("loadEmbeddedBundleCheck() returned nil check")
 	}
-	// Bundle v0.1.1 (spec 101 US2): 89 rules over 44 signatures. 85 are
+	// Bundle v0.1.1 (spec 101 US2): 94 rules over 44 signatures. 90 are
 	// engine==regex AND target==tool_description (runnable offline); 4 rules[]
 	// entries are not-runnable (2 structural_diff/server_manifest from the v0.1
 	// migration + 2 regex/resource_content: TPA-2026-0002 and the non-gating
 	// TPA-2026-0010). The bundle also declares 3 skipped[] LLM/jsonpath
 	// detectors separately.
-	if stats.Runnable != 85 {
-		t.Errorf("Runnable = %d, want 85", stats.Runnable)
+	if stats.Runnable != 90 {
+		t.Errorf("Runnable = %d, want 90", stats.Runnable)
 	}
 	if stats.Skipped != 4 {
 		t.Errorf("Skipped (not-runnable rules) = %d, want 4", stats.Skipped)

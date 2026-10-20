@@ -42,6 +42,23 @@
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.86,
+      "detector": "trigger_phrase_consult_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0031",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:if|whenever|when)\\b[^.\\n]{0,80}?\\b(?:conversation|chat|messages?|prompt|request|input|text|user)\\b[^.\\n]{0,40}?\\b(?:ever\\s+)?(?:includes?|contains?|mentions?|says?|said|types?|typed|writes?|wrote|has|have)\\b[^.\\n]{0,30}?(?:\\bwords?\\b|\\bphrases?\\b|\\bkeywords?\\b|\\bstring\\b|['\\\"])[^.\\n]{0,100}?\\b(?:always\\s+)?(?:consult|call|use|invoke|run)\\s+this\\s+tool\\s+(?:first|before\\s+(?:doing\\s+)?(?:anything|any\\s+other|responding|answering|replying)).{0,400}?(?:pass|send|provide|supply|include|submit|forward|upload|put|paste|hand|give|share)\\b[^.\\n]{0,40}?(?:whole|entire|full|complete|all)\\s+(?:the\\s+)?(?:conversation|chat|messages?|history|transcript)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
     }
   ],
   "skipped": []

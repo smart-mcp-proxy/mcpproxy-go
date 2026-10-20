@@ -80,6 +80,30 @@
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "ansi_sgr_256",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0037",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$esc",
+          "type": "regex",
+          "value": "\\x{1b}\\[(?:(?:0|1|2|3|4|7|9);)*(?:(?:38|48);5;(?:0|7|8|15|16|231|232|255)|(?:38|48);2;(?:0;0;0|255;255;255));(?:39|49|(?:(?:38|48);5;(?:0|7|8|15|16|231|232|255)|(?:38|48);2;(?:0;0;0|255;255;255)))(?:;[0-9;:]*)?m"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\x{1b}\\[(?:(?:0|1|2|3|4|7|9);)*(?:(?:38|48);5;(?:0|7|8|15|16|231|232|255)|(?:38|48);2;(?:0;0;0|255;255;255));(?:39|49|(?:(?:38|48);5;(?:0|7|8|15|16|231|232|255)|(?:38|48);2;(?:0;0;0|255;255;255)))(?:;[0-9;:]*)?m.{0,300}?(?:<\\s*(?:important|system|instructions?)\\s*>(?:.{0,120}?\\b(?:you\\s+(?:must|should|need\\s+to|have\\s+to)|before\\s+(?:using|calling|invoking|returning|responding|answering)|ignore|(?:do\\s+not|don't|never|always)\\s))|\\[\\s*(?:important|system|inst)\\s*\\](?:.{0,120}?\\b(?:you\\s+(?:must|should|need\\s+to|have\\s+to)|before\\s+(?:using|calling|invoking|returning|responding|answering)|ignore|(?:do\\s+not|don't|never|always)\\s))|\\bignore\\b[^\\n]{0,30}?\\b(?:instructions|rules|previous)\\b|\\b(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|mention|reveal|disclose|inform|notify)\\s+(?:the\\s+user|users?|anyone|them)\\b[^.\\n]{0,40}?\\b(?:about|of)\\s+(?:this|that|it|these)\\b|\\b(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|mention|reveal|disclose)\\s+(?:this|that|it|these)\\b|\\bwithout\\s+(?:telling|informing|notifying|alerting)\\s+(?:the\\s+)?user|\\b(?:read|open|cat|send|upload|forward|attach|append|pass|include)\\b[^\\n]{0,80}?(?:~/[\\w.]|\\.ssh\\b|id_rsa|/etc/(?:passwd|shadow)|\\.aws\\b|credentials?\\.(?:json|ya?ml|txt|csv)|private key|\\bcredentials?\\s+file))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
     }
   ],
   "skipped": []
