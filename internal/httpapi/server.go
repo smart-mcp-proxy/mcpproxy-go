@@ -2012,6 +2012,9 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		if viewAsEval != nil {
 			serverValues = s.limitServersToProfile(r.Context(), serverValues, viewAs, viewAsEval)
 			statsValue = statsForServers(serverValues)
+		} else if limited, ok := s.limitServersToCallerPin(r.Context(), serverValues); ok {
+			serverValues = limited
+			statsValue = statsForServers(serverValues)
 		}
 
 		response := contracts.GetServersResponse{
@@ -2049,6 +2052,9 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	stats := contracts.ConvertUpstreamStatsToServerStats(filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats()))
 	if viewAsEval != nil {
 		servers = s.limitServersToProfile(r.Context(), servers, viewAs, viewAsEval)
+		stats = statsForServers(servers)
+	} else if limited, ok := s.limitServersToCallerPin(r.Context(), servers); ok {
+		servers = limited
 		stats = statsForServers(servers)
 	}
 
