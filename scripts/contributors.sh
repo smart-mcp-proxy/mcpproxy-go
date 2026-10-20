@@ -65,18 +65,20 @@ cmd_thanks() {
   [[ "$merged" == "true" ]] || { echo "skip: PR #$pr is not merged"; return 0; }
   is_external "$login" "$utype" "$assoc" || { echo "skip: $login ($utype, $assoc) is not an external contributor"; return 0; }
 
-  # Read all comments first: piping into `grep -q` can SIGPIPE gh and, under
+  # Only the bot's own comments count (a commenter cannot suppress the thanks by
+  # pasting the marker). Read all comments first: piping into `grep -q` can SIGPIPE gh and, under
   # pipefail, look like "marker not found" (a duplicate comment).
-  existing="$(gh api --paginate "repos/$REPO/issues/$pr/comments" --jq '.[].body')"
+  existing="$(gh api --paginate "repos/$REPO/issues/$pr/comments" --jq '.[] | select(.user.login == "github-actions[bot]") | .body')"
   if grep -qF "$MARKER" <<<"$existing"; then
     echo "skip: PR #$pr already has a thank-you comment"; return 0
   fi
 
   # First contribution = no OTHER merged PR by this author. Counting "others"
   # (instead of total == 1) keeps this right while the search index lags behind
-  # the merge we are reacting to. A failed search degrades to "not first".
+  # the merge we are reacting to. A failed or incomplete search degrades to "not first". Known
+  # limit: two first-timer PRs merged within the index lag may both claim "first".
   others="$(gh api -X GET search/issues -f q="repo:$REPO is:pr is:merged author:$login" -f per_page=5 \
-    --jq "[.items[].number | select(. != $pr)] | length" 2>/dev/null)" || others=-1
+    --jq "if .incomplete_results then -1 else [.items[].number | select(. != $pr)] | length end" 2>/dev/null)" || others=-1
   first=false; [[ "$others" == "0" ]] && first=true
 
   body="$(render_comment "$login" "$title" "$url" "$first")"
