@@ -766,11 +766,26 @@ func (r Redaction) Value(key string, v interface{}) interface{} {
 		if strings.EqualFold(key, "command") {
 			return r.CapString(r.CommandString(typed))
 		}
+		if isPublicKeyMaterialField(key) {
+			return r.CapString(typed)
+		}
 		return r.CapString(r.Leaf(key, typed))
 	default:
 		// Bools, json.Number and nil carry no secrets and stay verbatim.
 		return v
 	}
+}
+
+// isPublicKeyMaterialField reports whether a leaf's enclosing field holds PUBLIC
+// key material that is deliberately readable. Spec 101's
+// security.tpa_operator_signers lists operator Ed25519 public keys as base64;
+// the value-shaped detector reads a 44-character base64 string as a
+// high-entropy secret and would mask it, so an operator could not read back
+// what they configured and a UI round trip would write the mask into the trust
+// root. A public key is not a credential. Name-matched, not shape-matched, so
+// the exemption cannot spread to an arbitrary base64 value.
+func isPublicKeyMaterialField(key string) bool {
+	return strings.EqualFold(key, "tpa_operator_signers")
 }
 
 // argvValue masks a command-line argument vector reached through the generic
