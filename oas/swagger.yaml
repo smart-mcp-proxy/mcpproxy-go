@@ -963,6 +963,13 @@ components:
           type: string
         integrity_check_on_restart:
           type: boolean
+        require_signed_bundle:
+          description: |-
+            RequireSignedBundle makes the detached signature sidecar mandatory for
+            file-dropped bundles (FR-007). Default false (maintainer decision D2):
+            existing unsigned drops keep working, but an unsigned external bundle
+            always runs with DEGRADED coverage (scan-mode auto-approval suspended).
+          type: boolean
         runtime_read_only:
           type: boolean
         runtime_tmpfs_size:
@@ -1022,6 +1029,14 @@ components:
           type: boolean
         scanner_registry_url:
           type: string
+        tpa_active_root:
+          description: |-
+            TPAActiveRoot declares which signing authority's bundles may activate
+            (FR-004b): "publisher" (default, the keys embedded in this binary) or
+            "operator" (TPAOperatorSigners). A bundle verified by the other root is
+            refused as authority_not_active, so whoever can write the bundle path
+            cannot choose the authority.
+          type: string
         tpa_bundle_path:
           description: |-
             TPABundlePath is the filesystem path to the tpa-db scanner-bundle.json
@@ -1037,6 +1052,30 @@ components:
             fail-empty); the reason is logged and surfaced in the security overview's
             signature_bundle.load_error.
           type: string
+        tpa_operator_baseline:
+          description: |-
+            TPAOperatorBaseline seeds the operator authority's anti-downgrade
+            watermark (FR-009b): an operator-signed bundle must carry a sequence
+            ABOVE it (a rollback target may sit at it). It survives a data-directory
+            wipe because it lives here. Absent means the operator authority has no
+            anti-downgrade floor and an active operator bundle runs DEGRADED.
+          type: integer
+        tpa_operator_epoch:
+          description: |-
+            TPAOperatorEpoch is the operator authority's trust epoch (FR-005a).
+            Bumping it (after an operator key compromise) re-baselines the operator
+            watermark and retires prior-epoch pins. Absent means 0.
+          type: integer
+        tpa_operator_signers:
+          description: |-
+            TPAOperatorSigners lists operator Ed25519 public keys, each the standard
+            base64 encoding of the 32 raw key bytes (FR-004). Their key ids are the
+            lowercase-hex SHA-256 of those bytes. Malformed or duplicate entries are
+            rejected on write and dropped (with a log) on load.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
       type: object
     config.SensitiveDataDetectionConfig:
       description: Sensitive data detection settings (Spec 026)
@@ -3807,6 +3846,19 @@ components:
         error:
           type: string
       type: object
+    httpapi.BundleRollbackRefusedResponse:
+      properties:
+        error:
+          type: string
+        error_code:
+          type: string
+        rejection:
+          $ref: '#/components/schemas/scanner.BundleRejection'
+        request_id:
+          type: string
+        success:
+          type: boolean
+      type: object
     httpapi.CanonicalConfigPath:
       properties:
         description:
@@ -4689,6 +4741,19 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.bundleRollbackRequest:
+      properties:
+        digest:
+          description: Digest is the full 64-character lowercase hex SHA-256 of the
+            target.
+          type: string
+        embedded:
+          description: Embedded rolls back to the corpus compiled into this binary.
+          type: boolean
+        path:
+          description: Path is where to find the target bundle (a hint only).
+          type: string
+      type: object
     httpapi.clientPresence:
       properties:
         active_sessions:
@@ -5177,6 +5242,20 @@ components:
         kind:
           type: string
         target:
+          type: string
+      type: object
+    scanner.BundleRejection:
+      properties:
+        at:
+          type: string
+        detail:
+          description: |-
+            Detail is a short human string (which ceiling, which key id, which
+            epoch, the bundlesig contract code). Never parsed.
+          type: string
+        reason:
+          description: Reason is one of the Reject* constants; the only field to branch
+            on.
           type: string
       type: object
     secureenv.EnvConfig:
@@ -8798,6 +8877,198 @@ paths:
       summary: Delete a secret from OS keyring
       tags:
       - secrets
+  /api/v1/security/bundle:
+    get:
+      description: 'Reports the offline TPA signature corpus this install is serving:
+        full SHA-256 digest, sequence, authority, trust epoch, signature verification,
+        staleness, degraded coverage with its reason, rollback pin, and the last refused
+        candidate. Admin only.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Bundle status (data is the BundleInfo object)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the TPA signature bundle status
+      tags:
+      - security
+  /api/v1/security/bundle/history:
+    get:
+      description: Append-only list of bundle activations, oldest first, each with
+        its full SHA-256 digest. It is the trustworthy source of the digest to name
+        in a rollback. Admin only.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Activation history (data is an array of TPABundleActivation)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: History could not be read
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the TPA signature bundle activation history
+      tags:
+      - security
+  /api/v1/security/bundle/reload:
+    post:
+      description: Re-runs the single-flight bundle pipeline against the configured
+        source and current policy. A refused candidate leaves last-known-good serving
+        and is reported as last_rejection in the returned status. Admin API key only.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Updated bundle status
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Reload the TPA signature bundle
+      tags:
+      - security
+  /api/v1/security/bundle/rollback:
+    post:
+      description: The one operator override of the downgrade watermark. Exactly one
+        of embedded or path must be given, and digest must be the FULL 64-character
+        lowercase hex SHA-256 of the target (the 12-character fingerprint is refused).
+        On success the target serves and is pinned. A refusal (for example rollback_target_mismatch)
+        returns 409 with the rejection reason and last-known-good keeps serving. Admin
+        API key only; agent tokens are refused.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.bundleRollbackRequest'
+        description: Rollback target
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Updated bundle status
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: 'Usage error: both or neither of embedded/path, or digest is
+            not 64 lowercase hex'
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BundleRollbackRefusedResponse'
+          description: Rollback refused; the response carries the rejection reason
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Roll the TPA signature bundle back to a named artifact
+      tags:
+      - security
+  /api/v1/security/bundle/unpin:
+    post:
+      description: Clears the rollback pin and re-validates the serving bundle under
+        the normal downgrade watermark, so a rolled-back target below the watermark
+        no longer serves. A quiet no-op when nothing is pinned. Admin API key only.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Updated bundle status
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: The unpin could not be recorded
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Clear the TPA signature bundle rollback pin
+      tags:
+      - security
   /api/v1/servers:
     get:
       description: Get a list of all configured upstream MCP servers with their connection
