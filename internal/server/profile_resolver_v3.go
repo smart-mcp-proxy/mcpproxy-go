@@ -213,9 +213,11 @@ func (p *MCPProxyServer) resolveProfileV3(ctx context.Context, idx *profileIndex
 	}
 
 	// Tier 3: session (set_profile), re-validated against the CURRENT base
-	// on every request; a selection no longer permitted is cleared.
+	// on every request; a selection no longer permitted is cleared. Legacy
+	// sessions only, never for a list-only resolution — see
+	// profileSessionIDFromContext (Spec 058 US3).
 	if p.sessionStore != nil {
-		if sid := sessionIDFromContext(ctx); sid != "" {
+		if sid := profileSessionIDFromContext(ctx); sid != "" {
 			if sel := p.sessionStore.GetActiveProfile(sid); sel != "" {
 				if base == "" || admittedBySwitchableTo(basePolicy, base, sel) {
 					if scope := profileScopeFromIndex(idx, sel); scope != nil {
