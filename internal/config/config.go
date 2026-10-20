@@ -3214,6 +3214,38 @@ type SecurityConfig struct {
 	TPABundlePath string `json:"tpa_bundle_path,omitempty" mapstructure:"tpa-bundle-path"`
 	// (see EnvTPABundlePath for the env override that outranks this field)
 
+	// --- Spec 101 US1: signed TPA bundle trust root ---
+	//
+	// These keys are config-resident ON PURPOSE: the attacker this design
+	// defends against can write the bundle path (and possibly the data
+	// directory) but not mcp_config.json. None of them has an env alias.
+
+	// RequireSignedBundle makes the detached signature sidecar mandatory for
+	// file-dropped bundles (FR-007). Default false (maintainer decision D2):
+	// existing unsigned drops keep working, but an unsigned external bundle
+	// always runs with DEGRADED coverage (scan-mode auto-approval suspended).
+	RequireSignedBundle bool `json:"require_signed_bundle" mapstructure:"require-signed-bundle"`
+	// TPAActiveRoot declares which signing authority's bundles may activate
+	// (FR-004b): "publisher" (default, the keys embedded in this binary) or
+	// "operator" (TPAOperatorSigners). A bundle verified by the other root is
+	// refused as authority_not_active, so whoever can write the bundle path
+	// cannot choose the authority.
+	TPAActiveRoot string `json:"tpa_active_root,omitempty" mapstructure:"tpa-active-root"`
+	// TPAOperatorSigners lists operator Ed25519 public keys, each the standard
+	// base64 encoding of the 32 raw key bytes (FR-004). Their key ids are the
+	// lowercase-hex SHA-256 of those bytes. Malformed or duplicate entries are
+	// rejected on write and dropped (with a log) on load.
+	TPAOperatorSigners []string `json:"tpa_operator_signers,omitempty" mapstructure:"tpa-operator-signers"`
+	// TPAOperatorBaseline is the lowest operator-authority sequence this install
+	// will ever accept (FR-009b). It survives a data-directory wipe because it
+	// lives here. Absent means the operator authority has no anti-downgrade
+	// floor and an active operator bundle runs DEGRADED.
+	TPAOperatorBaseline *uint64 `json:"tpa_operator_baseline,omitempty" mapstructure:"tpa-operator-baseline"`
+	// TPAOperatorEpoch is the operator authority's trust epoch (FR-005a).
+	// Bumping it (after an operator key compromise) re-baselines the operator
+	// watermark and retires prior-epoch pins. Absent means 0.
+	TPAOperatorEpoch *uint64 `json:"tpa_operator_epoch,omitempty" mapstructure:"tpa-operator-epoch"`
+
 	// DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
 	// deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
 	// keys (migrated on load) and gates the heavy Docker-based scanners + source
@@ -3289,6 +3321,54 @@ func (sc *SecurityConfig) EffectiveTPABundlePath() string {
 		return ""
 	}
 	return sc.TPABundlePath
+}
+
+// TPA signing roots accepted by SecurityConfig.TPAActiveRoot (spec 101 FR-004b).
+const (
+	TPARootPublisher = "publisher"
+	TPARootOperator  = "operator"
+)
+
+// IsRequireSignedBundle reports whether file-dropped TPA bundles must carry a
+// signature sidecar. Nil-safe; default false (spec 101 D2).
+func (sc *SecurityConfig) IsRequireSignedBundle() bool {
+	return sc != nil && sc.RequireSignedBundle
+}
+
+// EffectiveTPAActiveRoot returns the declared active signing root, defaulting
+// to "publisher" (spec 101 FR-004b). An unrecognised value is returned verbatim
+// so the loader can refuse every candidate rather than guess.
+func (sc *SecurityConfig) EffectiveTPAActiveRoot() string {
+	if sc == nil || sc.TPAActiveRoot == "" {
+		return TPARootPublisher
+	}
+	return sc.TPAActiveRoot
+}
+
+// EffectiveTPAOperatorSigners returns the configured operator public keys
+// (base64), unvalidated. Nil-safe.
+func (sc *SecurityConfig) EffectiveTPAOperatorSigners() []string {
+	if sc == nil {
+		return nil
+	}
+	return sc.TPAOperatorSigners
+}
+
+// EffectiveTPAOperatorBaseline returns the operator baseline and whether one is
+// declared (spec 101 FR-009b: absent ⇒ operator authority runs degraded).
+func (sc *SecurityConfig) EffectiveTPAOperatorBaseline() (uint64, bool) {
+	if sc == nil || sc.TPAOperatorBaseline == nil {
+		return 0, false
+	}
+	return *sc.TPAOperatorBaseline, true
+}
+
+// EffectiveTPAOperatorEpoch returns the operator trust epoch, 0 when absent.
+func (sc *SecurityConfig) EffectiveTPAOperatorEpoch() uint64 {
+	if sc == nil || sc.TPAOperatorEpoch == nil {
+		return 0
+	}
+	return *sc.TPAOperatorEpoch
 }
 
 // IsAutoBaselineScanEnabled reports whether mcpproxy may run the automatic,

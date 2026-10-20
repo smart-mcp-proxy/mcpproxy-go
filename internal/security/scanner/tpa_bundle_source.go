@@ -58,6 +58,50 @@ type BundleInfo struct {
 	// never leave the scanner with no signatures — but the failure is surfaced
 	// here rather than swallowed.
 	LoadError string `json:"load_error,omitempty"`
+
+	// --- Spec 101 FR-020 (contracts/bundle-status-surface.md) ---
+
+	// FullDigest is the complete lowercase-hex SHA-256 of the bundle bytes —
+	// the ONLY value rollback accepts (FR-010). Fingerprint stays the 12-hex
+	// human label beside it.
+	FullDigest string `json:"full_digest,omitempty"`
+	// Sequence is the manifest sequence as published (decimal string), "" when
+	// the bundle carries none.
+	Sequence string `json:"sequence,omitempty"`
+	// Authority is the signing root serving this bundle: "publisher" (the
+	// embedded default, or verified against a publisher key), "operator", or ""
+	// for an unsigned external bundle.
+	Authority string `json:"authority,omitempty"`
+	// TrustEpoch is the epoch the bundle was published under.
+	TrustEpoch uint64 `json:"trust_epoch"`
+	// SignatureVerified reports whether the active bundle's detached signature
+	// verified. Always false for the embedded default (it is binary-trusted).
+	SignatureVerified bool `json:"signature_verified"`
+	// StalenessDays is the whole days since GeneratedAt (nil when unknown).
+	StalenessDays *int `json:"staleness_days,omitempty"`
+	// CoverageDegraded suspends scan-mode auto-approval; DegradedReason says
+	// why (one of the Degraded* constants).
+	CoverageDegraded bool   `json:"coverage_degraded"`
+	DegradedReason   string `json:"degraded_reason,omitempty"`
+	// Pinned is true while an operator rollback pin governs activation.
+	Pinned bool `json:"pinned,omitempty"`
+	// Rollback is true when the active bundle was activated by an explicit
+	// rollback.
+	Rollback bool `json:"rollback,omitempty"`
+	// LastRejection is the most recent refused candidate. It is retained
+	// across a later successful load so "what did it refuse, and when"
+	// survives.
+	LastRejection *BundleRejection `json:"last_rejection,omitempty"`
+}
+
+// BundleRejection is one refused candidate (FR-020).
+type BundleRejection struct {
+	// Reason is one of the Reject* constants; the only field to branch on.
+	Reason string `json:"reason"`
+	// Detail is a short human string (which ceiling, which key id, which
+	// epoch, the bundlesig contract code). Never parsed.
+	Detail string    `json:"detail,omitempty"`
+	At     time.Time `json:"at"`
 }
 
 // activeBundle is the process-wide corpus in use. It is replaced wholesale by
