@@ -299,6 +299,10 @@ func cmdVerify(args []string, stdout, stderr io.Writer) int {
 	return 0
 }
 
+// beforeOpenHook is a test-only seam called between readBounded's lstat and
+// its open, so a test can swap the path in that window.
+var beforeOpenHook func(path string)
+
 // readBounded reads a regular file of at most limit bytes. The bundle and its
 // sidecar may sit in a directory someone else can write, so a symlink, FIFO or
 // device is refused outright (a FIFO would block the read forever) and the
@@ -312,7 +316,10 @@ func readBounded(path string, limit int64) ([]byte, error) {
 	if !pre.Mode().IsRegular() {
 		return nil, fmt.Errorf("%s is not a regular file", path)
 	}
-	f, err := os.Open(path) //nolint:gosec // operator-supplied path; type-checked above and re-checked on the descriptor below
+	if beforeOpenHook != nil {
+		beforeOpenHook(path)
+	}
+	f, err := openRegular(path)
 	if err != nil {
 		return nil, err
 	}
@@ -346,6 +353,14 @@ func writeReplace(dest string, data []byte, perm os.FileMode) error {
 	}
 	name := tmp.Name()
 	cleanup := func() { _ = os.Remove(name) }
+	// Set the mode on the DESCRIPTOR: a chmod by name would follow whatever
+	// an attacker who can write this directory renamed into the temp name's
+	// place (a symlink to the private key) — Sol 6.1 review, round 2.
+	if err := tmp.Chmod(perm); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return err
+	}
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		cleanup()
@@ -357,10 +372,6 @@ func writeReplace(dest string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	if err := tmp.Close(); err != nil {
-		cleanup()
-		return err
-	}
-	if err := os.Chmod(name, perm); err != nil {
 		cleanup()
 		return err
 	}
