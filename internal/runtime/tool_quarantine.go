@@ -11,6 +11,7 @@ import (
 	"io"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -330,6 +331,94 @@ func (r *Runtime) scanChangeIsClean(serverName string, tool *config.ToolMetadata
 		zap.Bool("coverage_ok", coverageOK),
 		zap.Strings("tpa_signals", signals))
 	return false, &scanHoldEvidence{Reason: reason, Verdict: verdict, Signals: signals}
+}
+
+// baselineScanResult is the per-tool outcome of the first-seen (baseline)
+// toolset scan (R2-1, round-2 red team). It is computed ONCE per baseline pass,
+// before the record loop, from a single engine run over the whole toolset.
+type baselineScanResult struct {
+	// held maps a tool name (config.ToolMetadata.Name, as scanned) to the hold
+	// evidence that keeps it pending. A tool absent from the map is clean.
+	held map[string]*scanHoldEvidence
+	// coverageOK mirrors scanner.ScanToolMetadataVerdict's coverage flag. When
+	// false EVERY tool of the pass is held (fail closed, FR-014), with
+	// ToolHeldReasonScanCoverage for tools that carried no finding of their own.
+	coverageOK bool
+	verdict    string
+}
+
+// holdFor returns the evidence that holds tool (nil when the tool may be
+// auto-baselined). A nil result (no scan ran) holds nothing — callers only
+// consult it on a baseline pass, where scanBaselineToolset always runs.
+func (b *baselineScanResult) holdFor(tool string) *scanHoldEvidence {
+	if b == nil {
+		return nil
+	}
+	if e, ok := b.held[tool]; ok {
+		return e
+	}
+	if !b.coverageOK {
+		return &scanHoldEvidence{Reason: storage.ToolHeldReasonScanCoverage, Verdict: b.verdict}
+	}
+	return nil
+}
+
+// scanBaselineToolset runs the same synchronous, offline TPA scan the
+// trust_mode: scan change gate uses (scanChangeIsClean) over a trusted server's
+// FIRST-SEEN toolset, so the MCP-2931 baseline auto-approval never admits a
+// poisoned contract unscanned (round-2 red team, R2-1: an unquarantined
+// first-seen server auto-baselined an 18-vector poisoned catalog and the
+// poisoned tools were callable; only an operator-triggered scan afterwards
+// said "dangerous").
+//
+// The whole toolset is scanned in ONE engine run, with every OTHER connected
+// server's tools as peers, so the cross-server shadowing/impersonation checks
+// see the same context the async full-server scan gets, and sibling tools of
+// the same server see each other (a clone of a peer's tool is a finding on the
+// clone). The verdict is then read PER TOOL from the findings' locations: a
+// tool with no finding of its own is clean and auto-baselines exactly as
+// before (no new friction for a clean server), a tool with a hard finding
+// ("dangerous") or a soft one ("warnings") lands pending with the findings
+// recorded as hold evidence (FR-018), and a degraded or bundle-less scan holds
+// every tool (fail closed, FR-014) — the same green-only rule as the change
+// gate. Pure in-process string work: no Docker, network or filesystem I/O,
+// so it is safe under the server's approval lock (the caller holds it; see
+// checkToolApprovals).
+func (r *Runtime) scanBaselineToolset(serverName string, tools []*config.ToolMetadata) *baselineScanResult {
+	peers := r.collectPeerToolMetadata(serverName)
+	verdict, findings, coverageOK := scanner.ScanToolMetadataVerdict(serverName, tools, peers)
+	res := &baselineScanResult{held: make(map[string]*scanHoldEvidence), coverageOK: coverageOK, verdict: verdict}
+	prefix := serverName + ":"
+	for _, f := range findings {
+		if f.Tier != scanner.TierHard && f.Tier != scanner.TierSoft {
+			continue // only tiered (baseline) findings gate approval (FR-021)
+		}
+		name := strings.TrimPrefix(f.Location, prefix)
+		e := res.held[name]
+		if e == nil {
+			e = &scanHoldEvidence{Reason: storage.ToolHeldReasonScanFindings, Verdict: "warnings"}
+			res.held[name] = e
+		}
+		if f.Tier == scanner.TierHard {
+			e.Verdict = "dangerous"
+		}
+		e.Signals = append(e.Signals, f.Signals...)
+	}
+	if coverageOK && len(res.held) == 0 {
+		return res
+	}
+	heldNames := make([]string, 0, len(res.held))
+	for name := range res.held {
+		heldNames = append(heldNames, name)
+	}
+	sort.Strings(heldNames)
+	r.logger.Info("baseline scan held first-seen tools for review (non-green verdict)",
+		zap.String("server", serverName),
+		zap.String("verdict", verdict),
+		zap.Bool("coverage_ok", coverageOK),
+		zap.Int("tools", len(tools)),
+		zap.Strings("held_tools", heldNames))
+	return res
 }
 
 // scanHoldEvidence is the compact, serializable explanation of a trust_mode:
@@ -681,6 +770,15 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 	serverHasBaseline := baseline.hasBaseline
 	isBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline
 
+	// R2-1: the baseline is no longer trusted blind. The first-seen toolset is
+	// scanned once (offline, in-process) and only tools with a green verdict
+	// auto-baseline; the rest land pending with the scan evidence. Computed
+	// before the loop so the decision is one snapshot for the whole pass.
+	var baselineScan *baselineScanResult
+	if isBaselinePass {
+		baselineScan = r.scanBaselineToolset(serverName, tools)
+	}
+
 	result := &ToolApprovalResult{
 		BlockedTools: make(map[string]bool),
 	}
@@ -859,7 +957,14 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			case !enforceNewTools:
 				autoApprove, approvedBy = true, "auto"
 			case isBaselinePass:
-				autoApprove, approvedBy = true, "auto-baseline"
+				// Green-only, like the scan-mode change gate below: a first-seen
+				// tool the offline scan flagged (or could not cover) is pending
+				// with its evidence, never baselined (R2-1).
+				if evidence := baselineScan.holdFor(tool.Name); evidence == nil {
+					autoApprove, approvedBy = true, "auto-baseline"
+				} else {
+					holdEvidence = evidence
+				}
 			case autoApproveChanges:
 				autoApprove, approvedBy = true, "auto-approve-changes"
 			case scanMode:
