@@ -2402,7 +2402,8 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// construction lives in buildToolEntry (Spec 085 entry-builder seam) —
 	// full mode is byte-identical to the pre-extraction inline code, guarded
 	// by the T011 golden test (FR-006/SC-003); compact mode renders
-	// {id, score, sig, desc, lossy} from the shared signature cache. The
+	// {id, score, sig, desc, lossy, call_with} from the shared signature cache
+	// (call_with added by #1668 so compact routing never falls back to names). The
 	// ranked order of `results` is already final here — the mode selects
 	// serialization only (FR-007).
 	entryOpts := toolEntryOpts{includeStats: includeStats}

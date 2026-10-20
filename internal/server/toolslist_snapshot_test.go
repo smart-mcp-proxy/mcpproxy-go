@@ -390,6 +390,16 @@ const (
 // assertListRegistriesDelta.
 var spec109CatalogTools = map[string]bool{"search_servers": true, "list_registries": true}
 
+// pre105RetrieveToolsRoutingSentence is the routing sentence the frozen
+// pre-105 retrieve_tools description carried; compactRoutingGuidanceSentence
+// is what #1668 put in its place. Both are test-owned so the exact-delta
+// assertion in TestCodeExecutionDescriptions_EnumerationIsAdminOnly cannot be
+// satisfied by whatever the production literal happens to say.
+const (
+	pre105RetrieveToolsRoutingSentence = "Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. "
+	compactRoutingGuidanceSentence     = "Follow each result's call_with route exactly; upstream annotations determine that route and take precedence over tool names, descriptions, command text, and requested outcome. Compact results preserve the same call_with route as full results, including the existing read fallback when upstream tier annotations are unavailable. Never infer a route from a tool's name or intent. "
+)
+
 // spec105EnumerationPhrases are the pre-105 fragments that advertised
 // discovery-by-failed-call. Neither may survive in the live strings.
 var spec105EnumerationPhrases = []string{
@@ -476,9 +486,21 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 					if surface != "default_server" {
 						postM["description"] = strings.Replace(desc, retrieveToolsReachNote, "", 1)
 					} else {
-						assert.Contains(t, desc, "Follow each result's call_with route exactly")
-						assert.Contains(t, desc, "take precedence over tool names")
-						assert.Contains(t, desc, "existing read fallback")
+						// Exact delta (#1668): the pre-105 routing sentence is
+						// replaced by the compact-routing guidance, and the reach
+						// note sits in front of the diagnostics note the frozen
+						// capture already carried. Nothing else in the
+						// description may move; both sentences are test-owned
+						// so a drift in the production literal fails here.
+						preDesc, _ := preM["description"].(string)
+						require.Contains(t, preDesc, pre105RetrieveToolsRoutingSentence,
+							"surface %s: frozen retrieve_tools description carries the pre-105 routing sentence", surface)
+						require.Contains(t, preDesc, retrieveToolsDiagnosticsNote,
+							"surface %s: frozen retrieve_tools description carries the diagnostics note", surface)
+						expected := strings.Replace(preDesc, pre105RetrieveToolsRoutingSentence, compactRoutingGuidanceSentence, 1)
+						expected = strings.Replace(expected, retrieveToolsDiagnosticsNote, retrieveToolsReachNote+retrieveToolsDiagnosticsNote, 1)
+						assert.Equal(t, expected, desc,
+							"surface %s: retrieve_tools description may differ from pre-105 only by the #1668 routing sentence and the two live notes", surface)
 						postM["description"] = preM["description"]
 					}
 					trimmed, err := json.Marshal(postM)
@@ -496,11 +518,18 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 					require.NoError(t, json.Unmarshal(pre, &preM))
 					require.NoError(t, json.Unmarshal(after[name], &postM))
 					desc, _ := postM["description"].(string)
-					expected := buildCallToolVariantTool(name).Description
-					assert.True(t, strings.HasPrefix(desc, expected),
-						"surface %s: %s begins with the current routing contract", surface, name)
+					preDesc, _ := preM["description"].(string)
+					// Exact delta (#1668): the live description IS the builder
+					// text (which already carries the TOON marker note), and
+					// that note is byte-equal to the frozen capture's tail, so
+					// only the routing contract in front of it moved.
+					tailAt := strings.Index(preDesc, " Result blocks may be prefixed")
+					require.Greater(t, tailAt, 0, "surface %s: %s frozen description carries the result-marker tail", surface, name)
+					assert.Equal(t, buildCallToolVariantTool(name).Description, desc,
+						"surface %s: %s description equals the live routing contract exactly", surface, name)
+					assert.True(t, strings.HasSuffix(desc, preDesc[tailAt:]),
+						"surface %s: %s keeps the frozen result-marker tail byte for byte", surface, name)
 					assert.Contains(t, desc, "call_with="+name)
-					assert.Contains(t, desc, "upstream annotations")
 					assert.Contains(t, desc, "authoritative over a tool's name")
 					postM["description"] = preM["description"]
 					closeOpenObjects(t, postM, "args")
