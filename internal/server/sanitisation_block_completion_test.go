@@ -108,6 +108,15 @@ func TestLegacyCallTool_SanitisationBlockRecordsToolCallCompletion(t *testing.T)
 	assertBlockedCallRecorded(t, f)
 }
 
+func TestDirectMode_SanitisationBlockRecordsToolCallCompletion(t *testing.T) {
+	f := blockedSecretFixture(t)
+	res := f.call(t, fullTierAgentOn("github"), "github", "get_secret")
+	require.True(t, res.IsError)
+	require.Equal(t, int64(1), f.ups["github"].count.Load(), "the upstream ran")
+
+	assertBlockedCallRecorded(t, f)
+}
+
 // The tool-call history entry of a blocked call keeps the attempt but never
 // the response: the block message takes its place. (The direct-routing
 // fixture's incarnation guard drops every history write, so this is checked
