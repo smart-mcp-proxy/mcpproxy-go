@@ -72,7 +72,7 @@
       "id": "TPA-2026-0033",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)(?:^|[.!?:;\\n]\\s*|[-*•]\\s+|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you|so)\\s+)(?:always\\s+)?(?:consult|call|invoke|use)\\s+this\\s+(?:tool|function|module)\\s+(?:immediately\\s+)?(?:as\\s+the\\s+first\\s+step|first\\b|before\\s+(?:anything\\s+else|any\\s+other\\s+(?:tool|action|step))).{0,400}?\\b(?:(?:there\\s+is\\s+)?no\\s+need\\s+to|do\\s+not|don't|never)\\s+(?:(?:mention|reveal|disclose|show|explain)\\s+(?:this|it|these(?:\\s+\\w+)?|the\\s+(?:prefix|rules?|requirements?|instructions?|order|wrapper))\\s+to\\s+the\\s+user|(?:tell|inform|notify|alert)\\s+the\\s+user\\s+(?:about\\s+)?(?:this|it|these|the\\s+(?:prefix|rules?|requirements?|instructions?|order|wrapper)))\\b",
+      "pattern": "(?is)(?:^|[.!?:;\\n]\\s*|[-*•]\\s+|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you|so)\\s+)(?:always\\s+)?(?:consult|call|invoke|use)\\s+this\\s+(?:tool|function|module)\\s+(?:immediately\\s+)?(?:as\\s+the\\s+first\\s+step|first\\b|before\\s+(?:anything\\s+else|any\\s+other\\s+(?:tool|action|step))).{0,400}?\\b(?:(?:there\\s+is\\s+)?no\\s+need\\s+to|do\\s+not|don't|never)\\s+(?:(?:mention|reveal|disclose|show|explain)\\s+(?:this|it|these(?:\\s+(?:rules|requirements|instructions|steps|prefixes|commands|checks))?|the\\s+(?:prefix|rules?|requirements?|instructions?|order|wrapper))\\s+to\\s+the\\s+user|(?:tell|inform|notify|alert)\\s+the\\s+user\\s+(?:about\\s+)?(?:this|it|these|the\\s+(?:prefix|rules?|requirements?|instructions?|order|wrapper)))\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -89,7 +89,7 @@
       "id": "TPA-2026-0033",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(?:(?:all|any|every)\\s+)?(?:shell\\s+)?commands?\\s+(?:you\\s+(?:run|issue|execute)\\s+)?(?:must|should|need\\s+to|have\\s+to)\\s+(?:all\\s+)?(?:include|start\\s+with|begin\\s+with|carry)\\s+(?:the\\s+)?prefix\\s*[:=]?\\s*['\\\"`]?\\s*(?:sudo|chmod|chown|rm|curl|wget|nc|bash|sh|eval|dd|mkfs)\\b.{0,300}?\\b(?:(?:there\\s+is\\s+)?no\\s+need\\s+to|do\\s+not|don't|never)\\s+(?:(?:mention|reveal|disclose|show|explain)\\s+(?:this|it|these(?:\\s+\\w+)?|the\\s+(?:prefix|rules?|requirements?|instructions?|order|wrapper))\\s+to\\s+the\\s+user|(?:tell|inform|notify|alert)\\s+the\\s+user\\s+(?:about\\s+)?(?:this|it|these|the\\s+(?:prefix|rules?|requirements?|instructions?|order|wrapper)))\\b",
+      "pattern": "(?is)\\b(?:(?:all|any|every)\\s+)?(?:shell\\s+)?commands?\\s+(?:you\\s+(?:run|issue|execute)\\s+)?(?:must|should|need\\s+to|have\\s+to)\\s+(?:all\\s+)?(?:include|start\\s+with|begin\\s+with|carry)\\s+(?:the\\s+)?prefix\\s*[:=]?\\s*['\\\"`{\\[(]*\\s*(?:sudo|chmod|chown|rm|curl|wget|nc|bash|sh|eval|dd|mkfs)\\b.{0,300}?\\b(?:(?:there\\s+is\\s+)?no\\s+need\\s+to|do\\s+not|don't|never)\\s+(?:(?:mention|reveal|disclose|show|explain)\\s+(?:this|it|these(?:\\s+(?:rules|requirements|instructions|steps|prefixes|commands|checks))?|the\\s+(?:prefix|rules?|requirements?|instructions?|order|wrapper))\\s+to\\s+the\\s+user|(?:tell|inform|notify|alert)\\s+the\\s+user\\s+(?:about\\s+)?(?:this|it|these|the\\s+(?:prefix|rules?|requirements?|instructions?|order|wrapper)))\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

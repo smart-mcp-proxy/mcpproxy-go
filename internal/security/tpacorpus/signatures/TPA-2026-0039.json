@@ -34,7 +34,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?s)(?:(?:^|[^A-Za-z0-9+/])(?:Y3VybC|d2dldC|YmFzaCAtYy|L2Jpbi9zaCAt|c2ggLWMg|cG93ZXJzaGVsbC)[A-Za-z0-9+/]{4,}?(?:IHNo|O3No|fHNo|ICYmIGJh|IHN1ZG8g|IHwgYmFz|JiYgYmFz|O3N1ZG8g|c3VkbyBz|dWRvIGJh|fHN1ZG8g|IGJhc2g=|IHwgc2g=|JiBzaA==|JiYgc2g=|O2Jhc2g=|OyBzaA==|fCBzaA==|fGJhc2g=)[A-Za-z0-9+/]{0,24}={0,2}[\\\"'`)\\]\\s]*(?:\\n|\\z)|\\b(?i:profile|config|setup|bootstrap|init|payload|relay|hook|cmd|command|script|blob)\\b\\s*[:=]\\s*(?:Y3VybC|d2dldC|YmFzaCAtYy|L2Jpbi9zaCAt|c2ggLWMg|cG93ZXJzaGVsbC)[A-Za-z0-9+/]{4,}?(?:IHNo|O3No|fHNo|ICYmIGJh|IHN1ZG8g|IHwgYmFz|JiYgYmFz|O3N1ZG8g|c3VkbyBz|dWRvIGJh|fHN1ZG8g|IGJhc2g=|IHwgc2g=|JiBzaA==|JiYgc2g=|O2Jhc2g=|OyBzaA==|fCBzaA==|fGJhc2g=))",
+      "pattern": "(?s)(?:(?:^|[^A-Za-z0-9+/])(?:Y3VybC|d2dldC|YmFzaCAtYy|L2Jpbi9zaCAt|c2ggLWMg|cG93ZXJzaGVsbC)[A-Za-z0-9+/]{4,}?(?:IHNo|O3No|fHNo|ICYmIGJh|IHN1ZG8g|IHwgYmFz|JiYgYmFz|O3N1ZG8g|c3VkbyBz|dWRvIGJh|fHN1ZG8g|IGJhc2g=|IHwgc2g=|JiBzaA==|JiYgc2g=|O2Jhc2g=|OyBzaA==|fCBzaA==|fGJhc2g=)[A-Za-z0-9+/]{0,24}={0,2}[\\\"'`)\\]}>\\s]*(?:\\n|\\z)|\\b(?i:profile|config|setup|bootstrap|init|payload|relay|hook|cmd|command|script|blob)\\b[\\\"'`]?\\s*[:=]\\s*[\\\"'`]*(?:Y3VybC|d2dldC|YmFzaCAtYy|L2Jpbi9zaCAt|c2ggLWMg|cG93ZXJzaGVsbC)[A-Za-z0-9+/]{4,}?(?:IHNo|O3No|fHNo|ICYmIGJh|IHN1ZG8g|IHwgYmFz|JiYgYmFz|O3N1ZG8g|c3VkbyBz|dWRvIGJh|fHN1ZG8g|IGJhc2g=|IHwgc2g=|JiBzaA==|JiYgc2g=|O2Jhc2g=|OyBzaA==|fCBzaA==|fGJhc2g=))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -88,7 +88,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)(?:(?:^|[^0-9a-fx])(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{4,}?(?:7c|3b|2626)(?:20)?(?:7375646f20)?(?:2f62696e2f)?(?:7368|62617368)[0-9a-f]{0,24}[\\\"'`)\\]\\s]*(?:\\n|\\z)|\\b(?i:profile|config|setup|bootstrap|init|payload|relay|hook|cmd|command|script|blob)\\b\\s*[:=]\\s*(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{4,}?(?:7c|3b|2626)(?:20)?(?:7375646f20)?(?:2f62696e2f)?(?:7368|62617368))",
+      "pattern": "(?is)(?:(?:^|[^0-9a-fx])(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{4,}?(?:7c|3b|2626)(?:20)?(?:7375646f20)?(?:2f62696e2f)?(?:7368|62617368)[0-9a-f]{0,24}[\\\"'`)\\]}>\\s]*(?:\\n|\\z)|\\b(?i:profile|config|setup|bootstrap|init|payload|relay|hook|cmd|command|script|blob)\\b[\\\"'`]?\\s*[:=]\\s*[\\\"'`]*(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{4,}?(?:7c|3b|2626)(?:20)?(?:7375646f20)?(?:2f62696e2f)?(?:7368|62617368))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
