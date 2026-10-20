@@ -46,14 +46,14 @@ func TestLKGWrite_ExistingFileIsReadThroughTheGuardedReader(t *testing.T) {
 	require.Equal(t, data, got)
 }
 
-// The first activation creates tpa-lkg/; its entry in the data directory must
-// be made durable too, or a power loss after the state commit can leave an
-// Active record whose LKG directory never reached the disk (FR-011a).
+// Every activation fsyncs the data directory: the first one creates tpa-lkg/,
+// and a parent fsync that failed then must be repeated by the retry, which sees
+// the directory already present (FR-011a).
 func TestLKGWrite_FirstWriteSyncsTheParentDirectory(t *testing.T) {
 	dataDir := t.TempDir()
 	var synced []string
 	prev := lkgSyncDirFn
-	lkgSyncDirFn = func(dir string) error { synced = append(synced, dir); return prev(dir) }
+	lkgSyncDirFn = func(dir string, root *os.Root) error { synced = append(synced, dir); return prev(dir, root) }
 	t.Cleanup(func() { lkgSyncDirFn = prev })
 
 	data := []byte(`{"bundle_version":"0.1.0"}`)
@@ -64,5 +64,6 @@ func TestLKGWrite_FirstWriteSyncsTheParentDirectory(t *testing.T) {
 	synced = nil
 	other := []byte(`{"bundle_version":"0.1.1"}`)
 	require.NoError(t, lkgWrite(dataDir, digestHex(other), other, nil, false))
-	require.NotContains(t, synced, dataDir, "an existing tpa-lkg needs no parent fsync")
+	require.Contains(t, synced, dataDir, "every activation fsyncs the parent, not only the one that created tpa-lkg")
+	require.Contains(t, synced, lkgDirPath(dataDir))
 }
