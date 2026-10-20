@@ -3564,6 +3564,16 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// holds an unredacted secret and a blocked response is never cached. A
 	// non-nil result means the call was blocked.
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
+		// The upstream ran, so the started record is closed: history and the
+		// tool_call completion carry the block message, never the response.
+		blockMsg := p.recordOutputBlocked(ctx, toolCallRecord, callInc, blockResult)
+		var intentMap map[string]interface{}
+		if intent != nil {
+			intentMap = intent.ToMap()
+		}
+		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, storage.ActivityStatusError, blockMsg, duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+		internalToolName := "call_tool_" + intent.OperationType
+		p.emitActivityInternalToolCall(ctx, internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, storage.ActivityStatusError, blockMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, nil, intentMap, "")
 		return blockResult, nil
 	}
 	// Spec 112: sanitisation mutates result in place, so the scrubbed record
@@ -4054,6 +4064,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// holds an unredacted secret and a blocked response is never cached. A
 	// non-nil result means the call was blocked.
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
+		// The upstream ran: close the started record (see handleCallToolVariant).
+		blockMsg := p.recordOutputBlocked(ctx, toolCallRecord, callInc, blockResult)
+		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, storage.ActivityStatusError, blockMsg, duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0, "", nil, "")
 		return blockResult, nil
 	}
 	// Spec 112: sanitisation mutates result in place, so the scrubbed record
@@ -4129,6 +4142,24 @@ func (p *MCPProxyServer) toolCallIncarnation(serverName string) int64 {
 
 // recordToolCallAt records a call's history only while its server still has
 // the incarnation the call started on (Spec 116 FR-014c).
+// recordOutputBlocked is the bookkeeping a dispatch owes a call whose result
+// an output policy (Spec 054 block mode) refused to hand over: the upstream
+// ran, so the tool-call history gets the attempt, with the block message in
+// place of the response it must never store. It notes the outcome as a proxy
+// policy refusal (the upstream answered fine) and returns the message for the
+// caller's tool_call completion, which closes the started record. The audit
+// tool_call line is already written by the block's policy_decision.
+func (p *MCPProxyServer) recordOutputBlocked(ctx context.Context, rec *storage.ToolCallRecord, inc int64, blockResult *mcp.CallToolResult) string {
+	msg := firstTextOf(blockResult)
+	rec.Response = nil
+	rec.Error = msg
+	if err := p.recordToolCallAt(rec, inc); err != nil {
+		p.logger.Warn("Failed to record blocked tool call", zap.Error(err))
+	}
+	callerr.NoteOutcome(ctx, callerr.Outcome{Class: callerr.ClassProxyPolicy, Domain: callerr.DomainProxy})
+	return msg
+}
+
 func (p *MCPProxyServer) recordToolCallAt(rec *storage.ToolCallRecord, inc int64) error {
 	written, err := p.storage.RecordToolCallIfIncarnation(rec, inc)
 	if err == nil && !written {
