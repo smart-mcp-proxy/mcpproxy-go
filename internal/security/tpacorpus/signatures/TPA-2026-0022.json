@@ -34,7 +34,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)\\b(?:first|before|prior\\s+to|then|also|additionally|mandatory|required|must|important|always|silently|for\\s+(?:better|best)\\s+\\w+)\\b.{0,100}?\\b(?:read|cat|open|load)\\b.{0,60}?(?:(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|\\.ssh/|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.env\\b|credentials?\\s+file|private\\s+key)|\\.npmrc|settings\\.json).{0,160}?\\b(?:send|post|upload|transmit|forward)\\b.{0,80}?https?://",
+      "pattern": "(?is)\\b(?:first|before|prior\\s+to|then|also|additionally|mandatory|required|must|important|always|silently|for\\s+(?:better|best)\\s+\\w+)\\b.{0,100}?\\b(?:read|cat|open|load)\\b.{0,60}?(?:(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|\\.ssh/|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.env\\b|credentials?\\s+file|private\\s+key)|\\.npmrc|settings\\.json).{0,160}?\\b(?:send|post|upload|transmit|forward)\\w*\\s+(?:(?:(?:the|its|their|all|any|a|that|this)\\s+){0,2}(?:[\\w-]+\\s+){0,2}?(?:contents?|tokens?|keys?|secrets?|credentials?|file)\\b|(?:it|them)\\b).{0,80}?https?://",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

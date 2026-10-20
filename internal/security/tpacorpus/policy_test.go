@@ -116,6 +116,14 @@ func TestValidatePolicy_Rejects(t *testing.T) {
 			want: "hard negative",
 		},
 		{
+			name: "hard negative has a category the gate does not score",
+			dataset: func(e []map[string]any) []map[string]any {
+				e[1]["category"] = "benign"
+				return e
+			},
+			want: "hard negative",
+		},
+		{
 			name: "no canonical entry",
 			dataset: func(e []map[string]any) []map[string]any {
 				delete(e[0], "canonical")

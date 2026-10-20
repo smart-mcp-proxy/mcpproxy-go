@@ -21,7 +21,7 @@
       "id": "TPA-2026-0032",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(llm[_ ]?model[_ ]?name|model[_ ]?name)\\s*:[^\\n]{0,60}?\\b(?:that\\s+(?:calls|invokes|is\\s+calling)\\s+this\\s+tool|of\\s+the\\s+(?:calling|invoking)\\s+(?:agent|model|llm)|calling\\s+(?:llm|agent|model))",
+      "pattern": "(?is)\\b(llm[_ ]?model[_ ]?name|model[_ ]?name)\\s*:[^\\n]{0,60}?\\b(?:that|which)\\s+(?:calls|invokes|is\\s+calling|is\\s+invoking)\\s+this\\s+tool",
       "severity": "medium",
       "target": "tool_description",
       "type": "lexical"

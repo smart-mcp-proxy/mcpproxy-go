@@ -38,7 +38,7 @@
       "id": "TPA-2026-0018",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(always|silently|automatically|quietly|secretly)\\b.{0,20}\\b(add|append|include|attach|send|sent|copy|copied)\\w*\\b.{0,30}\\b(bcc|blind[ -]?cop(y|ies)|blind carbon)\\b.{0,120}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "pattern": "(?is)\\b(silently|quietly|secretly|covertly|surreptitiously)\\b.{0,20}\\b(add|append|include|attach|send|sent|copy|copied)\\w*\\b.{0,30}\\b(bcc|blind[ -]?cop(y|ies)|blind carbon)\\b.{0,120}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

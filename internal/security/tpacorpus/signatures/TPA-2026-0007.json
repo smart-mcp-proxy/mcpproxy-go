@@ -4,7 +4,7 @@
   "id": "TPA-2026-0007",
   "license": "MIT",
   "provenance": {
-    "note": "Square-bracket [Important] or [INST] marker followed by an order to always pick this tool.",
+    "note": "Square-bracket [Important] or [INST] marker followed by an order to use this tool regardless of arguments or to skip the other tools.",
     "published": "2025-08-09",
     "source": "https://github.com/AIS2Lab/MCPSecBench/blob/main/code/maliciousadd.py"
   },
@@ -25,10 +25,16 @@
           "id": "$marker",
           "type": "regex",
           "value": "\\[\\s*(?:important|inst|system)\\s*\\]"
+        },
+        {
+          "context": "tool_description",
+          "id": "$steer",
+          "type": "regex",
+          "value": "(?:use|call|run)\\s+this\\s+tool"
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?\\b(?:no matter|regardless of|whatever)\\b.{0,60}?\\b(?:arguments?|inputs?|parameters?|request|user)\\b",
+      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?(?:[\\]\\.;:!,]|\\band|\\bthen)\\s*(?:(?:always|must|should|just|simply|please)\\s+)*(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b.{0,150}?\\b(?:no matter|regardless of|whatever)\\b.{0,60}?\\b(?:arguments?|inputs?|parameters?|request|user)\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -55,10 +61,16 @@
           "id": "$steer",
           "type": "regex",
           "value": "(?:use|call|run)\\s+this\\s+tool"
+        },
+        {
+          "context": "tool_description",
+          "id": "$displace",
+          "type": "regex",
+          "value": "(?:skip|ignore|bypass|disregard|avoid)\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)"
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?\\b(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b",
+      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?(?:[\\]\\.;:!,]|\\band|\\bthen)\\s*(?:(?:always|must|should|just|simply|please)\\s+)*(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b.{0,150}?\\b(?:skip|ignore|bypass|disregard|avoid|never use|do not use|don't use)\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

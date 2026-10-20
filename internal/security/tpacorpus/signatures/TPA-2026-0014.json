@@ -31,10 +31,16 @@
           "id": "$retired",
           "type": "regex",
           "value": "no longer available|has been replaced"
+        },
+        {
+          "context": "tool_description",
+          "id": "$conceal",
+          "type": "regex",
+          "value": "do not mention|don't tell|never tell|silently|secretly"
         }
       ],
       "level": "high",
-      "pattern": "(?is)<(?:important|system)>.{0,100}?\\b(?:no longer available|has been (?:replaced|removed|deprecated|retired)|is (?:deprecated|obsolete|retired))\\b.{0,200}?\\b(?:route|redirect|send|switch|move|forward|direct)\\b.{0,80}?\\b(?:to|towards)\\b.{0,60}?\\btool\\b",
+      "pattern": "(?is)<(?:important|system)>.{0,100}?\\b(?:no longer available|has been (?:replaced|removed|deprecated|retired)|is (?:deprecated|obsolete|retired))\\b.{0,200}?\\b(?:route|redirect|send|switch|move|forward|direct)\\b.{0,80}?\\b(?:to|towards)\\b.{0,60}?\\btool\\b.{0,200}?(?:\\b(?:do not|don't|never|without)\\s+(?:mention|tell|inform|notify|reveal|disclos|alert|warn)\\w*\\b.{0,40}?\\b(?:user|human|operator|anyone|this)\\b|\\b(?:silently|secretly|covertly|quietly)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

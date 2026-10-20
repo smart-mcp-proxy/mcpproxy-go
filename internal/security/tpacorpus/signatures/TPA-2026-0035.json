@@ -34,7 +34,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:read|load|open|pass|include|carry|attach|append|send|upload|forward)\\b.{0,160}?(?:~/|\\.env\\b|\\.ssh|id_rsa|\\.aws|\\btokens?\\b|credentials?|\\bsecrets?\\b|passwords?|api[_ -]?keys?|session\\.json).{0,200}?(?:(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|inform|mention|reveal|disclose|notify|alert)\\w*\\s+(?:\\w+\\s+){0,2}?(?:the\\s+)?user|(?:keep|hide|conceal)\\s+(?:this|that|it|these|those|all\\s+of\\s+this|the\\s+(?:step|action|call|process|operation|request|routing|copy|read|transfer))\\b[^.\\n]{0,60}?\\b(?:from|out of)\\b[^.\\n]{0,40}?\\buser|(?:say|tell)\\s+(?:the\\s+)?user\\s+nothing)",
+      "pattern": "(?is)\\b(?:read|load|open|pass|include|carry|attach|append|send|upload|forward)\\b.{0,160}?(?:~/|\\.env\\b|\\.ssh|id_rsa|\\.aws|\\btokens?\\b|credentials?|\\bsecrets?\\b|passwords?|api[_ -]?keys?|session\\.json).{0,200}?(?:(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:(?:tell|inform|notify|alert)\\w*\\s+(?:the\\s+)?user|(?:mention|reveal|disclose)\\w*\\s+(?:(?:this|that|it|these|those|any\\s+of\\s+this|the\\s+(?:step|action|call|process|operation|request|routing|copy|read|transfer))\\s+)?(?:to\\s+)?(?:the\\s+)?user)(?:\\s*(?:\\z|[.,;:!)])|\\s+(?:about|of|that|what|how|when|why|which|because|and|or|but|if)\\b)|(?:keep|hide|conceal)\\s+(?:this|that|it|these|those|all\\s+of\\s+this|the\\s+(?:step|action|call|process|operation|request|routing|copy|read|transfer))\\b[^.\\n]{0,60}?\\b(?:from|out of)\\b[^.\\n]{0,40}?\\buser|(?:say|tell)\\s+(?:the\\s+)?user\\s+nothing)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -64,7 +64,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)(?:(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|inform|mention|reveal|disclose|notify|alert)\\w*\\s+(?:\\w+\\s+){0,2}?(?:the\\s+)?user|(?:keep|hide|conceal)\\s+(?:this|that|it|these|those|all\\s+of\\s+this|the\\s+(?:step|action|call|process|operation|request|routing|copy|read|transfer))\\b[^.\\n]{0,60}?\\b(?:from|out of)\\b[^.\\n]{0,40}?\\buser|(?:say|tell)\\s+(?:the\\s+)?user\\s+nothing).{0,200}?\\b(?:read|load|open|pass|include|carry|attach|append|send|upload|forward)\\b.{0,160}?(?:~/|\\.env\\b|\\.ssh|id_rsa|\\.aws|\\btokens?\\b|credentials?|\\bsecrets?\\b|passwords?|api[_ -]?keys?|session\\.json)",
+      "pattern": "(?is)(?:(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:(?:tell|inform|notify|alert)\\w*\\s+(?:the\\s+)?user|(?:mention|reveal|disclose)\\w*\\s+(?:(?:this|that|it|these|those|any\\s+of\\s+this|the\\s+(?:step|action|call|process|operation|request|routing|copy|read|transfer))\\s+)?(?:to\\s+)?(?:the\\s+)?user)(?:\\s*(?:\\z|[.,;:!)])|\\s+(?:about|of|that|what|how|when|why|which|because|and|or|but|if)\\b)|(?:keep|hide|conceal)\\s+(?:this|that|it|these|those|all\\s+of\\s+this|the\\s+(?:step|action|call|process|operation|request|routing|copy|read|transfer))\\b[^.\\n]{0,60}?\\b(?:from|out of)\\b[^.\\n]{0,40}?\\buser|(?:say|tell)\\s+(?:the\\s+)?user\\s+nothing).{0,200}?\\b(?:read|load|open|pass|include|carry|attach|append|send|upload|forward)\\b.{0,160}?(?:~/|\\.env\\b|\\.ssh|id_rsa|\\.aws|\\btokens?\\b|credentials?|\\bsecrets?\\b|passwords?|api[_ -]?keys?|session\\.json)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

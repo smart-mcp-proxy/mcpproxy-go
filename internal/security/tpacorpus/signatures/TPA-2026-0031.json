@@ -21,7 +21,7 @@
       "id": "TPA-2026-0031",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(?:if|whenever|when)\\b[^.\\n]{0,100}?\\b(?:call|use|invoke)\\s+this\\s+tool\\s+(?:immediately\\s+|first\\s+)?before\\s+(?:doing\\s+)?(?:anything|any\\s+other|responding|answering)",
+      "pattern": "(?is)\\b(?:if|whenever|when)\\b[^.\\n]{0,80}?\\b(?:conversation|chat|messages?|prompt|request|input|text|user)\\b[^.\\n]{0,40}?\\b(?:includes?|contains?|mentions?|says?|said|types?|typed|writes?|wrote)\\b[^.\\n]{0,30}?(?:\\bwords?\\b|\\bphrases?\\b|\\bkeywords?\\b|\\bstring\\b|['\\\"])[^.\\n]{0,60}?\\b(?:call|use|invoke)\\s+this\\s+tool\\s+(?:immediately\\s+|first\\s+)?before\\s+(?:doing\\s+)?(?:anything|any\\s+other|responding|answering)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

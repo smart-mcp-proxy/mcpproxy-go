@@ -33,7 +33,7 @@ func HardNegativePrefix(class string) string { return "hn_" + class + "_" }
 //     sample of that signature's class;
 //   - every gating signature has at least one such malicious sample;
 //   - every class with a gating signature has at least one hard negative
-//     (id hn_<class>_*, resembles == class) and exactly one canonical sample.
+//     (id hn_<class>_*, category hard_negative, resembles == class) and exactly one canonical sample.
 //
 // Whether the gate scores a class (categoryCheck) is closed by a scan-eval test,
 // because categoryCheck lives in that package.
@@ -100,7 +100,7 @@ func ValidatePolicy(bundle, dataset []byte) error {
 				canonical[s.Category]++
 			}
 		}
-		if e.Label == "benign" && e.Resembles != "" && strings.HasPrefix(e.ID, HardNegativePrefix(e.Resembles)) {
+		if e.Label == "benign" && e.Category == "hard_negative" && e.Resembles != "" && strings.HasPrefix(e.ID, HardNegativePrefix(e.Resembles)) {
 			hardNegs[e.Resembles]++
 		}
 	}

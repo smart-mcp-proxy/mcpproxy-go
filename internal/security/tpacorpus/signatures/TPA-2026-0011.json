@@ -48,17 +48,17 @@
           "context": "tool_description",
           "id": "$prefer",
           "type": "regex",
-          "value": "(?:prefer|use)\\s+this\\s+tool\\s+(?:over|instead of)"
+          "value": "(?:always|only|must)\\s+(?:prefer|use)\\s+this\\s+tool\\s+(?:over|instead of)"
         },
         {
           "context": "tool_description",
           "id": "$disparage",
           "type": "regex",
-          "value": "deprecated|unsafe|obsolete"
+          "value": "unsafe|insecure|vulnerable|compromised|malicious"
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:always\\s+)?(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\s+[\\w`'\\\"-]+.{0,120}?\\b(?:deprecated|unsafe|insecure|obsolete|outdated|vulnerable|broken)\\b",
+      "pattern": "(?is)\\b(?:always|only|must)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\s+[\\w`'\\\"-]+.{0,120}?\\b(?:unsafe|insecure|vulnerable|compromised|malicious|untrusted)\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

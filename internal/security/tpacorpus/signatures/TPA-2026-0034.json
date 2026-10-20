@@ -21,7 +21,7 @@
       "id": "TPA-2026-0034",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\bthis\\s+is\\s+the\\s+(?:best|greatest|ultimate|only)\\s+(?:\\w+\\s+){0,2}?tool\\s+(?:in\\s+the\\s+world|ever|available|on\\s+the\\s+market)\\b",
+      "pattern": "(?is)\\bthis\\s+is\\s+the\\s+(?:(?:best|greatest|ultimate)\\s+(?:\\w+\\s+){0,2}?tool\\s+(?:in\\s+the\\s+world|ever|available|on\\s+the\\s+market)|only\\s+(?:\\w+\\s+){0,2}?tool\\s+(?:in\\s+the\\s+world|on\\s+the\\s+market))\\b",
       "severity": "medium",
       "target": "tool_description",
       "type": "lexical"

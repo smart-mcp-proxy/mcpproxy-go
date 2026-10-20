@@ -34,7 +34,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b.{0,100}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh).{0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab)",
+      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b.{0,100}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s+[A-Za-z0-9+/]{8,}|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh).{0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -58,7 +58,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b.{0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab).{0,120}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh)",
+      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b.{0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab).{0,120}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s+[A-Za-z0-9+/]{8,}|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
