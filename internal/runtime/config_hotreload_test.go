@@ -147,6 +147,57 @@ func TestDetectConfigChanges_DeepScanSecurity(t *testing.T) {
 	})
 }
 
+// TestDetectConfigChanges_TPATrustRoot (Spec 101): the trust-root keys live in
+// the security block, so an edit to them must be reported (and applied), while a
+// []-vs-nil round trip of tpa_operator_signers (omitempty drops an empty slice,
+// so the on-disk form is nil) must NOT count as a change.
+func TestDetectConfigChanges_TPATrustRoot(t *testing.T) {
+	u := func(v uint64) *uint64 { return &v }
+	mk := func(mut func(*config.SecurityConfig)) *config.Config {
+		sc := &config.SecurityConfig{}
+		if mut != nil {
+			mut(sc)
+		}
+		return &config.Config{Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{}, Security: sc}
+	}
+
+	t.Run("nil vs empty signers is not a change", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(func(sc *config.SecurityConfig) { sc.TPAOperatorSigners = nil }),
+			mk(func(sc *config.SecurityConfig) { sc.TPAOperatorSigners = []string{} }),
+		)
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "security")
+	})
+
+	t.Run("changed signer detected", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(func(sc *config.SecurityConfig) { sc.TPAOperatorSigners = []string{"AAAA"} }),
+			mk(func(sc *config.SecurityConfig) { sc.TPAOperatorSigners = []string{"BBBB"} }),
+		)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "security")
+	})
+
+	t.Run("changed baseline detected", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(func(sc *config.SecurityConfig) { sc.TPAOperatorBaseline = u(3) }),
+			mk(func(sc *config.SecurityConfig) { sc.TPAOperatorBaseline = u(4) }),
+		)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "security")
+	})
+
+	t.Run("absent vs explicit zero baseline detected", func(t *testing.T) {
+		result := DetectConfigChanges(
+			mk(nil),
+			mk(func(sc *config.SecurityConfig) { sc.TPAOperatorBaseline = u(0) }),
+		)
+		require.True(t, result.Success)
+		assert.Contains(t, result.ChangedFields, "security")
+	})
+}
+
 func TestDetectConfigChanges(t *testing.T) {
 	baseConfig := &config.Config{
 		Listen:            "127.0.0.1:8080",
