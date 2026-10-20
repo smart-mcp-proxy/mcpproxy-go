@@ -264,7 +264,7 @@ func TestPayloadV8_TPAScannerIncludedAndAnonymous(t *testing.T) {
 	js := string(data)
 
 	for _, required := range []string{
-		`"schema_version":14`,
+		`"schema_version":15`,
 		`"tpa_scanner":`,
 		`"scans_completed":2`,
 		`"scans_failed":1`,
