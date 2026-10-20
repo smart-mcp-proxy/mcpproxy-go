@@ -9,8 +9,6 @@ import (
 	"strconv"
 	"strings"
 
-	"go.uber.org/zap"
-
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
 
@@ -146,22 +144,6 @@ type bundleMeta struct {
 	SchemaVersion  string
 	SignatureCount int
 	GeneratedAt    string
-}
-
-// bundleMetadata re-reads just the bundle header. It is only called on bytes
-// that loadBundleCheck already parsed successfully, so a decode error here is
-// impossible in practice and yields an empty header rather than a hard failure.
-func bundleMetadata(data []byte) bundleMeta {
-	var b rawBundle
-	if err := json.Unmarshal(data, &b); err != nil {
-		return bundleMeta{}
-	}
-	return bundleMeta{
-		BundleVersion:  b.BundleVersion,
-		SchemaVersion:  b.SchemaVersion,
-		SignatureCount: b.SignatureCount,
-		GeneratedAt:    b.GeneratedAt,
-	}
 }
 
 // rawRule is one rule object. Only the fields the offline tier consumes are
@@ -304,13 +286,7 @@ func loadEmbeddedBundleCheck() (*BundleCheck, bundleLoadStats, error) {
 // Configuration/logging live in tpa_bundle_source.go so this file stays about
 // parsing and matching.
 func defaultBundleCheck() *BundleCheck {
-	if check, info := snapshotBundle(); check != nil || info.LoadError != "" {
-		return check
-	}
-	// Never configured (e.g. a unit test constructing the engine directly):
-	// lazily install the embedded default so behavior is unchanged.
-	ConfigureBundle("", zap.NewNop())
-	check, _ := snapshotBundle()
+	check, _ := activeBundleSnapshot()
 	return check
 }
 

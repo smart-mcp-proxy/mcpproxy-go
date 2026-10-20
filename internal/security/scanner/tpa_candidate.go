@@ -54,6 +54,14 @@ type evalEnv struct {
 	RollbackDigest string
 	// Now stamps rejections; nil means time.Now.
 	Now func() time.Time
+	// Reuse, when non-nil and for the very same bytes (equal FullDigest), lets
+	// the tail of the pipeline reuse the already-compiled check: the compile
+	// stage and the activation self-check are skipped because this exact
+	// bundle already passed both when it activated. The runtime sets it only
+	// when re-validating the serving bundle against a new policy or state;
+	// every policy- and state-dependent stage (signature, authority, epoch,
+	// deny-list, watermark) still runs in full.
+	Reuse *acceptedBundle
 }
 
 // acceptedBundle is a candidate that passed every stage.
@@ -144,6 +152,9 @@ func (ev *evaluation) parseAndCeil() (*rawBundle, *BundleRejection) {
 // compatibility, compile-all-or-reject, runnable-rules > 0, then the
 // activation self-check.
 func (ev *evaluation) compileAndGate(m *rawBundle) (*BundleCheck, bundleLoadStats, *BundleRejection) {
+	if r := ev.env.Reuse; r != nil && r.Check != nil && r.FullDigest == ev.digest {
+		return r.Check, r.Stats, nil
+	}
 	check, stats, err := compileBundle(m)
 	if err != nil {
 		var ce *bundleCeilingError
