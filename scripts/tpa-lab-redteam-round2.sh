@@ -14,22 +14,39 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-TEMPLATE="$PROJECT_DIR/tests/tpa-lab-config-docker.json"
-BINARY="$PROJECT_DIR/mcpproxy"
+TEMPLATE="${TPA_LAB_TEMPLATE:-$PROJECT_DIR/tests/tpa-lab-config-docker.json}"
+BINARY="${TPA_LAB_BINARY:-$PROJECT_DIR/mcpproxy}"
 API_KEY="tpa-lab-key"
-API_URL="http://127.0.0.1:8081/api/v1"
-MCP_URL="http://127.0.0.1:8081/mcp"
+LISTEN="127.0.0.1:8081"
+API_URL="http://$LISTEN/api/v1"
+MCP_URL="http://$LISTEN/mcp"
 IMAGE="${IMAGE:-tpa-attack-lab:lab}"
-RUN_DIR="$PROJECT_DIR/test-data-tpa-lab-docker/round2"
+RUN_ROOT="${TPA_LAB_RUN_ROOT:-$PROJECT_DIR/test-data-tpa-lab-docker}"
 ONLY="${ONLY:-}"
 DAEMON_PID=""
+# shellcheck source=lib/tpa-lab-verdicts.sh
+source "$SCRIPT_DIR/lib/tpa-lab-verdicts.sh"
+# Same guards as the round-1 runner (Sol 6.1 round-2 review, findings 4-7):
+# inherited MCPPROXY_* overrides (MCPPROXY_DATA, MCPPROXY_LISTEN, …) would beat
+# the generated config's data_dir and listen address for the daemon AND the
+# CLI calls — drop them before any malicious fixture runs; start_daemon also
+# pins --data-dir and --listen.
+lab_scrub_mcpproxy_env
 
+# One fresh run dir per invocation: approvals left by an earlier run would
+# otherwise make R2-1 a NON-first-seen pass (pending/approved records already
+# exist and never enter the baseline branch), so a broken gate could still
+# score HOLDS. R2-2's two stages share one data dir INSIDE this invocation.
+mkdir -p "$RUN_ROOT"
+RUN_DIR="${RUN_DIR:-$(mktemp -d "$RUN_ROOT/rXXXX")}"
 mkdir -p "$RUN_DIR"
+ln -sfn "$RUN_DIR" "$RUN_ROOT/round2-latest"
 log() { echo "[r2] $*"; }
 
-if lsof -ti :8081 >/dev/null 2>&1; then
-  pkill -f "mcpproxy serve.*round2" 2>/dev/null && sleep 2
-  lsof -ti :8081 >/dev/null 2>&1 && { echo "ERROR: port 8081 busy"; exit 1; }
+if lab_port_busy 8081; then
+  echo "ERROR: port 8081 is already in use; refusing to run (nothing was stopped)." >&2
+  echo "Inspect the listener with 'lsof -nP -iTCP:8081 -sTCP:LISTEN' and stop it yourself if it is a stale lab daemon." >&2
+  exit 1
 fi
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
@@ -50,6 +67,10 @@ for s in cfg["mcpServers"]:
         s["quarantined"] = (quar == "yes")
 json.dump(cfg, open(out, "w"), indent=2)
 PY
+  [[ $? -eq 0 ]] || { echo "lab config generation failed for $cfg" >&2; return 1; }
+  # Run the image this invocation built (IMAGE override), never the template's
+  # default tag; refuses a config whose upstreams are not Docker-isolated.
+  lab_config_use_image "$cfg" "$IMAGE" >&2 || { echo "refusing lab config $cfg" >&2; return 1; }
   echo "$cfg"
 }
 
@@ -64,8 +85,11 @@ except Exception: print(0)' || echo 0
 
 start_daemon() {
   local cfg="$1" logf="$2"
-  export MCPPROXY_TRAY_ENDPOINT="unix://$(python3 -c "import json;print(json.load(open('$cfg'))['data_dir'])")/mcpproxy.sock"
-  "$BINARY" serve --config "$cfg" --log-level=info >"$logf" 2>&1 &
+  lab_config_require "$cfg" || { echo "refusing to start the daemon without a checked lab config"; return 1; }
+  local ddir
+  ddir="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1]))["data_dir"])' "$cfg")" || return 1
+  export MCPPROXY_TRAY_ENDPOINT="unix://$ddir/mcpproxy.sock"
+  "$BINARY" serve --config "$cfg" --data-dir "$ddir" --listen "$LISTEN" --log-level=info >"$logf" 2>&1 &
   DAEMON_PID=$!
   for i in $(seq 1 60); do
     curl -sf -o /dev/null -H "X-API-Key: $API_KEY" "$API_URL/servers" && break
@@ -124,12 +148,12 @@ mcp_call() {
 }
 
 RESULTS=()
-record() { RESULTS+=("$1"); echo "----------------------------------------"; }
+record() { RESULTS+=("$1"); log "$1"; echo "----------------------------------------"; }
 
 # ================================================================== R2-1
 if [[ -z "$ONLY" || "$ONLY" == "R2-1" ]]; then
   log "R2-1: auto-baseline poisoning — UNQUARANTINED server, full 18-vector catalog, NO scan"
-  CURRENT_CFG="$(make_cfg r2-1 all 1 "$RUN_DIR/r2-1-data" no)"
+  CURRENT_CFG="$(make_cfg r2-1 all 1 "$RUN_DIR/r2-1-data" no)" || { record "R2-1 INCONCLUSIVE: lab config refused"; exit 1; }
   start_daemon "$CURRENT_CFG" "$RUN_DIR/r2-1.log" || { record "R2-1: INCONCLUSIVE (daemon)"; exit 1; }
   sleep 5
   sum_st="$(tool_status summarize_text)"   # poisoned override vector
@@ -177,7 +201,7 @@ fi
 # ================================================================== R2-2
 if [[ -z "$ONLY" || "$ONLY" == "R2-2" ]]; then
   log "R2-2 (control): rug pull while quarantined → immediate call after unquarantine (race window)"
-  CURRENT_CFG="$(make_cfg r2-2 facade 1 "$RUN_DIR/r2-2-data" yes)"
+  CURRENT_CFG="$(make_cfg r2-2 facade 1 "$RUN_DIR/r2-2-data" yes)" || { record "R2-2 INCONCLUSIVE: lab config refused"; exit 1; }
   start_daemon "$CURRENT_CFG" "$RUN_DIR/r2-2.log" || { record "R2-2: INCONCLUSIVE (daemon)"; exit 1; }
   unquarantine
   s="$(wait_status calendar_get_events)"
@@ -186,7 +210,7 @@ if [[ -z "$ONLY" || "$ONLY" == "R2-2" ]]; then
   log "stage-1 facade approved (calendar=$s)"
   stop_daemon
 
-  CURRENT_CFG="$(make_cfg r2-2 facade 2 "$RUN_DIR/r2-2-data" yes)"
+  CURRENT_CFG="$(make_cfg r2-2 facade 2 "$RUN_DIR/r2-2-data" yes)" || { record "R2-2 INCONCLUSIVE: lab config refused"; exit 1; }
   start_daemon "$CURRENT_CFG" "$RUN_DIR/r2-2-2.log" || { record "R2-2: INCONCLUSIVE (restart)"; exit 1; }
   sleep 6
   during="$(tool_status calendar_get_events)"
@@ -218,3 +242,11 @@ fi
 echo
 log "===== round-2 summary ====="
 printf '%s\n' "${RESULTS[@]-}"
+# Fail closed like the round-1 suite: any HOLE, PARTIAL or INCONCLUSIVE line
+# (or no experiment selected) is a non-zero exit.
+if suite_exit_status "${RESULTS[@]-}"; then
+  log "round-2 result: PASS (every finding holds)"
+  exit 0
+fi
+log "round-2 result: FAIL (a hole was confirmed or an experiment was inconclusive)"
+exit 1

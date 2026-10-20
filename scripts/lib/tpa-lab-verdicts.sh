@@ -257,15 +257,18 @@ EXP4_POISON_MARKER="ignore all previous instructions"
 # exp4_poison_recorded <tools-export.json> <summarize_text-diff.json> [<daemon.log>]
 # — how discovery handled the poisoned list-1 contract, from the stored
 # records first and the daemon log second:
-#   "yes"  the stored export's current description carries the marker (still
-#          baselined), or the change diff's PREVIOUS description does
-#          (baselined, then the flap to clean was caught). Since the R2-1
-#          baseline scan gate this means a poisoned first-seen contract was
-#          APPROVED — a regression, scored HOLE by exp4_verdict.
-#   "held" the daemon log shows the baseline scan held BOTH poisoned
-#          first-seen tools (summarize_text and convert_currency) for review
-#          with a dangerous verdict: the list-1 contract reached discovery and
-#          was refused before it was ever approved (R2-1 fix, round 2).
+#   "yes"  the stored export holds an APPROVED summarize_text whose current
+#          description carries the marker (still baselined), or the change
+#          diff's PREVIOUS description does (baselined, then the flap to clean
+#          was caught). Since the R2-1 baseline scan gate this means a poisoned
+#          first-seen contract was APPROVED — a regression, scored HOLE by
+#          exp4_verdict.
+#   "held" the stored export holds a PENDING (or changed) summarize_text whose
+#          current description carries the marker — the R2-1 hold itself — or
+#          the daemon log shows the baseline scan held BOTH poisoned first-seen
+#          tools (summarize_text and convert_currency) for review with a
+#          dangerous verdict: the list-1 contract reached discovery and was
+#          refused before it was ever approved (R2-1 fix, round 2).
 #   "no"   neither: the first tools/list went to a caller that does not ingest
 #          contracts, so discovery only ever saw the clean one (Sol r7 P2).
 exp4_poison_recorded() {
@@ -279,12 +282,23 @@ def load(path):
     except Exception:
         return {}
 export = load(export_path)
+held_record = False
 for tool in export.get("tools") or []:
-    if tool.get("tool_name") == "summarize_text" and marker in (tool.get("description") or "").lower():
+    if tool.get("tool_name") != "summarize_text" or marker not in (tool.get("description") or "").lower():
+        continue
+    # The export lists PENDING records too (their current description is the
+    # contract discovery saw). Only an APPROVED poisoned contract is the
+    # pre-R2-1 shape; a pending one is the R2-1 hold itself (Sol 6.1 review,
+    # finding 3).
+    if tool.get("status") == "approved":
         print("yes"); sys.exit()
+    if tool.get("status") in ("pending", "changed"):
+        held_record = True
 diff = load(diff_path)
 if diff.get("tool_name") == "summarize_text" and marker in (diff.get("previous_description") or "").lower():
     print("yes"); sys.exit()
+if held_record:
+    print("held"); sys.exit()
 if log_path:
     try:
         with open(log_path, errors="replace") as f:

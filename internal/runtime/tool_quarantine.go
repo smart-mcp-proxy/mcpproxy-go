@@ -774,6 +774,12 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 	// scanned once (offline, in-process) and only tools with a green verdict
 	// auto-baseline; the rest land pending with the scan evidence. Computed
 	// before the loop so the decision is one snapshot for the whole pass.
+	//
+	// trust_mode: auto never reaches this scan: auto is a lifted gate
+	// (ServerConfig.IsQuarantineSkipped → !enforceNewTools, so isBaselinePass is
+	// false and new tools are approved "auto"), which is the operator's
+	// explicit opt-out of scanning and holding. Pinned by
+	// TestCheckToolApprovals_AutoTrustMode_IsNotScanGated.
 	var baselineScan *baselineScanResult
 	if isBaselinePass {
 		baselineScan = r.scanBaselineToolset(serverName, tools)
