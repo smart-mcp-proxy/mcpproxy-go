@@ -113,7 +113,7 @@ const REJECTION_LABELS: Record<string, string> = {
   tamper: 'Tamper: signature did not verify',
   downgrade: 'Downgrade refused',
   stale_epoch_replay: 'Stale epoch replay refused',
-  epoch_ahead: 'Bundle newer than this binary trusts (update mcpproxy)',
+  epoch_ahead: 'Bundle epoch is newer than this install trusts (publisher bundle: update mcpproxy; operator bundle: check tpa_operator_epoch)',
   unsigned_refused_by_ratchet: 'Unsigned bundle refused after a signed one was used',
   signature_required: 'Signature required but missing',
   authority_not_active: 'Signed by the non-active authority',

@@ -40,9 +40,23 @@ import ScanHistory from '@/components/ScanHistory.vue'
 import ReviewQueueList from '@/components/ReviewQueueList.vue'
 import SignatureBundleStatus from '@/components/security/SignatureBundleStatus.vue'
 import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
+import { useAuthStore } from '@/stores/auth'
 import { isActiveBlocker, reviewQueueScopeText, sortReviewRows, summarizeReviewQueue, type ReviewSort } from '@/utils/reviewQueue'
 // Shared with Home/Security: one /security/overview fetch; renders nothing when unavailable (scoped session, older daemon).
-const { signatureBundle } = useSecurityScannerStatus()
+const { signatureBundle, refresh: refreshScannerStatus } = useSecurityScannerStatus()
+// The signature bundle status is shared, cached state: re-read it on entry and
+// every 30 s while Review is open, so a bundle that became degraded after the
+// first load (a CLI drop and reload, a refused candidate) is never hidden
+// behind a stale healthy status (Spec 101 FR-020).
+const BUNDLE_REFRESH_MS = 30_000
+let bundleTimer: ReturnType<typeof setInterval> | undefined
+onMounted(() => {
+  // /security/overview is an admin-only door: a tenant session never polls it.
+  if (useAuthStore().principalKind === 'tenant') return
+  void refreshScannerStatus?.()
+  bundleTimer = setInterval(() => { void refreshScannerStatus?.() }, BUNDLE_REFRESH_MS)
+})
+onUnmounted(() => { if (bundleTimer) clearInterval(bundleTimer) })
 const route = useRoute(); const scopeQuery = useScopeQuery('review'); const queue = ref<ReviewQueueResponse | null>(null); const loading = ref(false); const error = ref('')
 const selectedServer = computed(() => typeof route.params.server === 'string' ? route.params.server : '')
 const change = computed(() => scopeQuery.state.change ?? '')

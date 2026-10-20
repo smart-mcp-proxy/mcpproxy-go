@@ -9,6 +9,7 @@ import { createRouter, createMemoryHistory } from 'vue-router'
 
 const FULL = 'c0ffee012345' + 'd'.repeat(52)
 const bundleRef = vi.hoisted(() => ({ current: null as unknown }))
+const refreshSpy = vi.hoisted(() => vi.fn())
 
 vi.mock('@/services/api', () => ({
   default: { getReviewQueue: vi.fn(), listScanHistory: vi.fn() },
@@ -16,7 +17,7 @@ vi.mock('@/services/api', () => ({
 vi.mock('@/composables/useSecurityScannerStatus', async () => {
   const { ref } = await import('vue')
   return {
-    useSecurityScannerStatus: () => ({ signatureBundle: ref(bundleRef.current) }),
+    useSecurityScannerStatus: () => ({ signatureBundle: ref(bundleRef.current), refresh: refreshSpy }),
     refreshSecurityScannerStatus: vi.fn(),
   }
 })
@@ -91,5 +92,34 @@ describe('Review page signature bundle (Spec 101 FR-020)', () => {
     const wrapper = await open()
     expect(wrapper.find('[data-test="signature-bundle-status"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="bundle-degraded-alert"]').exists()).toBe(false)
+  })
+})
+
+// The bundle status is shared, cached state: Review must re-read it on entry
+// and keep it fresh while mounted, or a bundle that became degraded after the
+// first load (CLI drop + reload, a refused candidate) stays hidden behind the
+// cached healthy status (Sol 6.1 review of the Web UI).
+describe('Review page keeps the signature bundle status fresh', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.clearAllMocks()
+    ;(api.getReviewQueue as any).mockResolvedValue({ success: true, data: { count: 0, servers: [] } })
+    ;(api.listScanHistory as any).mockResolvedValue({ success: true, data: { scans: [], total: 0 } })
+    bundleRef.current = healthy
+  })
+
+  it('refreshes on entry and periodically while mounted, and stops after unmount', async () => {
+    vi.useFakeTimers()
+    try {
+      const wrapper = await open()
+      expect(refreshSpy).toHaveBeenCalledTimes(1)
+      await vi.advanceTimersByTimeAsync(30_000)
+      expect(refreshSpy).toHaveBeenCalledTimes(2)
+      wrapper.unmount()
+      await vi.advanceTimersByTimeAsync(60_000)
+      expect(refreshSpy).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
