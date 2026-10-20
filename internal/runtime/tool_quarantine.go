@@ -1246,15 +1246,33 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 
 			// Decide whether this pending record is promoted to approved:
 			//   - baseline migration: trusted server, no prior baseline, hash unchanged (MCP-2931 #4)
+			//     AND the baseline scan is green for this tool (R2-1). A first-seen
+			//     tool the scan held is a pending record on a server that still
+			//     has no baseline (an all-held pass writes no marker, FR-025), so
+			//     without this gate the very next identical list would promote it
+			//     as a "stranded" pending record and clear the scan evidence —
+			//     the EXP-4 TOCTOU lab run found exactly that. The evidence on the
+			//     record is refreshed against the LIVE contract below, so it
+			//     always describes what the operator is looking at.
 			//   - auto_approve_tool_changes: operator opted in (MCP-2931 #3)
+			var baselineHold *scanHoldEvidence
+			if isBaselinePass {
+				baselineHold = baselineScan.holdFor(tool.Name)
+			}
 			promote := false
 			var promoteReason TransitionReason
 			var promoteBy string
 			switch {
-			case isBaselinePass && priorHashMatches:
+			case isBaselinePass && priorHashMatches && baselineHold == nil:
 				promote, promoteReason, promoteBy = true, ReasonBaselineTrust, "auto-baseline"
 			case autoApproveChanges:
 				promote, promoteReason, promoteBy = true, ReasonAutoApproveChanges, "auto-approve-changes"
+			}
+			if isBaselinePass && !promote {
+				// nil clears stale evidence when the live contract scans clean
+				// (it is then promoted by the next unchanged pass); non-nil
+				// records why THIS contract is held.
+				baselineHold.applyTo(existing)
 			}
 
 			if promote {
