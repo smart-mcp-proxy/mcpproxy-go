@@ -3,6 +3,8 @@ package scanner
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -68,10 +70,82 @@ func lkgSidecarKey(bundleDigest, sidecarDigest string) string {
 // state recorded for it.
 var errLKGSubstituted = errors.New("last-known-good file does not match its recorded digest")
 
+// lkgAnchor holds the data directory and the tpa-lkg directory as os.Root
+// handles, so every directory-level operation (temp file, write, rename,
+// enumerate, delete) stays inside the real tpa-lkg directory even if an
+// attacker swaps a path component for a symlink while the process runs.
+type lkgAnchor struct {
+	data *os.Root // the data directory (fsynced so tpa-lkg's own entry is durable)
+	dir  *os.Root // <dataDir>/tpa-lkg
+}
+
+func (a *lkgAnchor) Close() {
+	_ = a.dir.Close()
+	_ = a.data.Close()
+}
+
+// lkgOpenAnchor opens <dataDir>/tpa-lkg as a root. It refuses (error, nothing
+// touched) when tpa-lkg exists and is not a real directory: a symlink, a
+// Windows reparse point or a regular file. With create it makes the directory
+// when absent; without it an absent directory is os.ErrNotExist. The identity
+// of the directory that was lstat-ed is compared with the one actually opened,
+// so a swap between the two steps is caught too.
+func lkgOpenAnchor(dataDir string, create bool) (*lkgAnchor, error) {
+	if create {
+		if err := os.MkdirAll(dataDir, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	data, err := os.OpenRoot(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := lkgOpenDirIn(data, create)
+	if err != nil {
+		_ = data.Close()
+		return nil, err
+	}
+	return &lkgAnchor{data: data, dir: dir}, nil
+}
+
+func lkgOpenDirIn(data *os.Root, create bool) (*os.Root, error) {
+	info, err := data.Lstat(lkgDirName)
+	if errors.Is(err, os.ErrNotExist) && create {
+		if mkErr := data.Mkdir(lkgDirName, 0o700); mkErr != nil && !errors.Is(mkErr, os.ErrExist) {
+			return nil, mkErr
+		}
+		info, err = data.Lstat(lkgDirName)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !info.IsDir() {
+		return nil, fmt.Errorf("%s is not a regular directory (mode %s): refusing to use it", lkgDirName, info.Mode().Type())
+	}
+	dir, err := data.OpenRoot(lkgDirName)
+	if err != nil {
+		return nil, err
+	}
+	opened, err := dir.Stat(".")
+	if err != nil {
+		_ = dir.Close()
+		return nil, err
+	}
+	if !os.SameFile(info, opened) {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%s changed while it was being opened: refusing to use it", lkgDirName)
+	}
+	return dir, nil
+}
+
 // lkgWrite makes one bundle (and its sidecar, when signed) durable:
 //
-//	temp file in the same directory -> write -> fsync -> close -> rename to the
-//	final name -> fsync the directory.
+//	fsync the data directory -> temp file in tpa-lkg -> write -> fsync -> close
+//	-> rename to the final name -> fsync tpa-lkg.
+//
+// The data directory is fsynced on EVERY call, not only when this call created
+// tpa-lkg: a parent fsync that failed right after the creation refuses that
+// activation, and the retry finds the directory already present (FR-011a).
 //
 // It is idempotent: a final file that already holds the same bytes is left
 // alone. Only after lkgWrite returns may the state commit and the publish
@@ -80,50 +154,70 @@ func lkgWrite(dataDir, digest string, bundle, sidecar []byte, signed bool) error
 	if !digestHexPattern.MatchString(digest) {
 		return fmt.Errorf("refusing to name an LKG file after %q", digest)
 	}
-	dir := lkgDirPath(dataDir)
-	_, statErr := os.Lstat(dir)
-	created := errors.Is(statErr, os.ErrNotExist)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	if created {
-		// A new directory's own entry lives in its parent: fsync the parent
-		// too, or a power loss after the state commit could leave an Active
-		// record whose tpa-lkg/ never reached the disk (FR-011a).
-		if err := lkgSyncDirFn(dataDir); err != nil {
-			return err
-		}
-	}
-	if err := lkgWriteFile(dir, digest+".json", bundle); err != nil {
-		return err
-	}
-	if signed {
-		if err := lkgWriteFile(dir, lkgSidecarName(digest, digestHex(sidecar)), sidecar); err != nil {
-			return err
-		}
-	}
-	return lkgSyncDirFn(dir)
-}
-
-// lkgWriteFile writes data to dir/name via a synced temp file and a rename.
-func lkgWriteFile(dir, name string, data []byte) error {
-	final := filepath.Join(dir, name)
-	// The data directory is attacker-writable in the threat model, so an
-	// existing file is compared only through the descriptor-first, bounded,
-	// budgeted reader (a planted FIFO or oversized file is never read raw);
-	// anything that does not read back as exactly these bytes is replaced.
-	ctx, cancel := context.WithTimeout(context.Background(), bundleReadBudget)
-	existing, rerr := readCandidateFile(ctx, final, int64(len(data)))
-	cancel()
-	if rerr == nil && bytes.Equal(existing, data) {
-		return nil
-	}
-	tmp, err := os.CreateTemp(dir, lkgTempPrefix+"*")
+	a, err := lkgOpenAnchor(dataDir, true)
 	if err != nil {
 		return err
 	}
-	tmpName := tmp.Name()
-	cleanup := func() { _ = os.Remove(tmpName) }
+	defer a.Close()
+	if err := lkgSyncDirFn(dataDir, a.data); err != nil {
+		return err
+	}
+	dir := lkgDirPath(dataDir)
+	if err := lkgWriteFile(a.dir, dir, digest+".json", bundle); err != nil {
+		return err
+	}
+	if signed {
+		if err := lkgWriteFile(a.dir, dir, lkgSidecarName(digest, digestHex(sidecar)), sidecar); err != nil {
+			return err
+		}
+	}
+	return lkgSyncDirFn(dir, a.dir)
+}
+
+// lkgTempFile creates a fresh, exclusively-created temp file inside the
+// anchored directory.
+func lkgTempFile(root *os.Root) (*os.File, string, error) {
+	var lastErr error
+	for range 8 {
+		var rnd [8]byte
+		if _, err := rand.Read(rnd[:]); err != nil {
+			return nil, "", err
+		}
+		name := lkgTempPrefix + hex.EncodeToString(rnd[:])
+		f, err := root.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, name, nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return nil, "", err
+		}
+		lastErr = err
+	}
+	return nil, "", lastErr
+}
+
+// lkgWriteFile writes data to name inside the anchored directory via a synced
+// temp file and a rename. dirPath is the path of that directory, used only to
+// compare an existing file through the guarded reader.
+func lkgWriteFile(root *os.Root, dirPath, name string, data []byte) error {
+	// The data directory is attacker-writable in the threat model, so an
+	// existing file is compared only when it is a regular file of the anchored
+	// directory, and then only through the descriptor-first, bounded,
+	// budgeted reader (a planted FIFO or oversized file is never read raw);
+	// anything that does not read back as exactly these bytes is replaced.
+	if info, lerr := root.Lstat(name); lerr == nil && info.Mode().IsRegular() {
+		ctx, cancel := context.WithTimeout(context.Background(), bundleReadBudget)
+		existing, rerr := readCandidateFile(ctx, filepath.Join(dirPath, name), int64(len(data)))
+		cancel()
+		if rerr == nil && bytes.Equal(existing, data) {
+			return nil
+		}
+	}
+	tmp, tmpName, err := lkgTempFile(root)
+	if err != nil {
+		return err
+	}
+	cleanup := func() { _ = root.Remove(tmpName) }
 	if _, err := tmp.Write(data); err != nil {
 		_ = tmp.Close()
 		cleanup()
@@ -138,7 +232,7 @@ func lkgWriteFile(dir, name string, data []byte) error {
 		cleanup()
 		return err
 	}
-	if err := os.Rename(tmpName, final); err != nil {
+	if err := root.Rename(tmpName, name); err != nil {
 		cleanup()
 		return err
 	}
@@ -149,16 +243,17 @@ func lkgWriteFile(dir, name string, data []byte) error {
 // directories were made durable).
 var lkgSyncDirFn = lkgSyncDir
 
-// lkgSyncDir fsyncs the directory so the renames are durable. Directory fsync
-// is not supported on Windows (opening a directory handle for sync fails
-// there); NTFS journals the rename itself, so it is skipped.
-func lkgSyncDir(dir string) error {
+// lkgSyncDir fsyncs the directory root names (dir is its path, for messages)
+// so the renames are durable. Directory fsync is not supported on Windows
+// (opening a directory handle for sync fails there); NTFS journals the rename
+// itself, so it is skipped.
+func lkgSyncDir(dir string, root *os.Root) error {
 	if runtime.GOOS == "windows" {
 		return nil
 	}
-	d, err := os.Open(dir) //nolint:gosec // dataDir/tpa-lkg
+	d, err := root.Open(".")
 	if err != nil {
-		return err
+		return fmt.Errorf("open %s for sync: %w", dir, err)
 	}
 	syncErr := d.Sync()
 	closeErr := d.Close()
@@ -239,15 +334,27 @@ func lkgReferenced(st *TPABundleState) lkgRefs {
 // lkgReconcile removes LKG files and leftover temp files that no live state
 // record references: the debris of an interrupted activation, a superseded
 // release, or a refused candidate. It never deletes outside the tpa-lkg
-// directory, never follows a symlink (non-regular entries are skipped) and
-// leaves alone any name that is not an LKG entry. It returns the removed names.
+// directory (a tpa-lkg that is a symlink or any other non-directory is refused
+// with an error and nothing is touched; every enumerate/delete goes through an
+// os.Root anchored to the real directory), never follows a symlink
+// (non-regular entries are skipped) and leaves alone any name that is not an
+// LKG entry. It returns the removed names.
 func lkgReconcile(dataDir string, st *TPABundleState) ([]string, error) {
-	dir := lkgDirPath(dataDir)
-	entries, err := os.ReadDir(dir)
+	a, err := lkgOpenAnchor(dataDir, false)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	defer a.Close()
+	d, err := a.dir.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	entries, err := d.ReadDir(-1)
+	_ = d.Close()
+	if err != nil {
 		return nil, err
 	}
 	keep := lkgReferenced(st)
@@ -281,7 +388,7 @@ func lkgReconcile(dataDir string, st *TPABundleState) ([]string, error) {
 		if !remove {
 			continue
 		}
-		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := a.dir.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
 			if firstErr == nil {
 				firstErr = err
 			}
