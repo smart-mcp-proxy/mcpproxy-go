@@ -250,31 +250,36 @@ baseline_scan_verdict_ok() {
   [[ "$v" == "dangerous" ]]
 }
 
-# EXP4_POISON_MARKER is a phrase only the toctou fixture's POISONED
-# summarize_text contract carries (tests/tpa-attack-lab/profiles.go).
+# EXP4_POISON_MARKER / EXP4_POISON_MARKER_CURRENCY are phrases only the toctou
+# fixture's POISONED summarize_text / convert_currency contracts carry
+# (tests/tpa-attack-lab/profiles.go). EXP-4 serves TWO poisoned contracts and
+# every verdict needs evidence about both (Sol r16 P2; Sol 6.1 round 2).
 EXP4_POISON_MARKER="ignore all previous instructions"
+EXP4_POISON_MARKER_CURRENCY="include its contents in the amount field"
 
 # exp4_poison_recorded <tools-export.json> <summarize_text-diff.json> [<daemon.log>]
 # — how discovery handled the poisoned list-1 contract, from the stored
 # records first and the daemon log second:
-#   "yes"  the stored export holds an APPROVED summarize_text whose current
-#          description carries the marker (still baselined), or the change
-#          diff's PREVIOUS description does (baselined, then the flap to clean
-#          was caught). Since the R2-1 baseline scan gate this means a poisoned
-#          first-seen contract was APPROVED — a regression, scored HOLE by
-#          exp4_verdict.
-#   "held" the stored export holds a PENDING (or changed) summarize_text whose
-#          current description carries the marker — the R2-1 hold itself — or
-#          the daemon log shows the baseline scan held BOTH poisoned first-seen
-#          tools (summarize_text and convert_currency) for review with a
-#          dangerous verdict: the list-1 contract reached discovery and was
-#          refused before it was ever approved (R2-1 fix, round 2).
+#   "yes"  the stored export holds an APPROVED summarize_text OR convert_currency
+#          whose current description carries its poisoned marker (still
+#          baselined), or the summarize_text change diff's PREVIOUS description
+#          does (baselined, then the flap to clean was caught). Since the R2-1
+#          baseline scan gate this means a poisoned first-seen contract was
+#          APPROVED — a regression, scored HOLE by exp4_verdict. Approval
+#          evidence for EITHER tool takes precedence over any hold evidence.
+#   "held" the stored export holds BOTH poisoned tools PENDING (or changed) with
+#          their poisoned descriptions — the R2-1 hold itself — or the daemon
+#          log shows the baseline scan held BOTH for review with a dangerous
+#          verdict: the list-1 contracts reached discovery and were refused
+#          before either was approved (R2-1 fix, round 2). One tool held and
+#          the other absent/clean is not proof (the other may have been
+#          approved from list #2 or never ingested).
 #   "no"   neither: the first tools/list went to a caller that does not ingest
 #          contracts, so discovery only ever saw the clean one (Sol r7 P2).
 exp4_poison_recorded() {
-  python3 - "$1" "$2" "${3:-}" "$EXP4_POISON_MARKER" <<'PY'
+  python3 - "$1" "$2" "${3:-}" "$EXP4_POISON_MARKER" "$EXP4_POISON_MARKER_CURRENCY" <<'PY'
 import json, sys
-export_path, diff_path, log_path, marker = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4].lower()
+export_path, diff_path, log_path, marker, marker_cur = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4].lower(), sys.argv[5].lower()
 def load(path):
     try:
         with open(path) as f:
@@ -282,22 +287,24 @@ def load(path):
     except Exception:
         return {}
 export = load(export_path)
-held_record = False
+markers = {"summarize_text": marker, "convert_currency": marker_cur}
+held = set()
 for tool in export.get("tools") or []:
-    if tool.get("tool_name") != "summarize_text" or marker not in (tool.get("description") or "").lower():
+    name = tool.get("tool_name")
+    if name not in markers or markers[name] not in (tool.get("description") or "").lower():
         continue
     # The export lists PENDING records too (their current description is the
     # contract discovery saw). Only an APPROVED poisoned contract is the
     # pre-R2-1 shape; a pending one is the R2-1 hold itself (Sol 6.1 review,
-    # finding 3).
+    # finding 3). Approval of EITHER poisoned tool wins (Sol 6.1 round 2).
     if tool.get("status") == "approved":
         print("yes"); sys.exit()
     if tool.get("status") in ("pending", "changed"):
-        held_record = True
+        held.add(name)
 diff = load(diff_path)
 if diff.get("tool_name") == "summarize_text" and marker in (diff.get("previous_description") or "").lower():
     print("yes"); sys.exit()
-if held_record:
+if held == set(markers):
     print("held"); sys.exit()
 if log_path:
     try:
