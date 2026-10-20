@@ -75,17 +75,7 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
 - `signatures[].category` is a snake_case slug with the prefix `tpa_`. Each class gets a **static** entry `categoryCheck["tpa_<class>"] = "tpa.bundle"`.
 - The prefix avoids collisions with the built-in categories `shadowing` and `phrase_injection`.
 - The vocabulary lives once, in `tpacorpus.Classes`. The scan-eval test and the dataset validator both assert against it.
-- Proposed classes (T207 finalises them; there must be at least 8, each with at least one gating signature):
-  - `tpa_hidden_instruction_block`
-  - `tpa_comment_directive`
-  - `tpa_tool_shadowing`
-  - `tpa_cross_server_override`
-  - `tpa_exfil_redirect`
-  - `tpa_sensitive_file_coaxing`
-  - `tpa_rug_pull_phrasing`
-  - `tpa_concealment_directive`
-  - `tpa_agent_config_persistence` (the control)
-  - `tpa_markdown_image_beacon`
+- Final classes (16, from the Phase 1 research; the assignment of TPA ids to verified catalog entries is in `specs/101-tpa-db/corpus-research/assignment.json`): `tpa_hidden_instruction_block`, `tpa_comment_directive`, `tpa_tool_shadowing`, `tpa_cross_server_override`, `tpa_exfil_redirect`, `tpa_sensitive_file_coaxing`, `tpa_credential_harvesting`, `tpa_persistence_implant` (holds the control), `tpa_rug_pull_phrasing`, `tpa_instruction_override`, `tpa_conversation_exfil`, `tpa_preference_manipulation`, `tpa_concealment_directive`, `tpa_invisible_text`, `tpa_payload_execution`, `tpa_schema_injection`. The planned `tpa_markdown_image_beacon` was dropped: no verifiable MCP-specific primary source.
 - `rules[].category` keeps its v0.1 meaning, which is the threat-type mapping. `bundleCategoryToThreatType` gains one case, `"exfiltration"` → `detect.ThreatExfiltration`, so exfil classes do not fall into `uncategorized`.
 - No class name may be a prefix of another class name.
 
@@ -97,12 +87,12 @@ Commits and the PR follow `spec.md` → *Commit Message Conventions* for issue r
 - New hard negatives must stay at **zero** hard findings under the production engine, not merely 5%. `TestCoverage_BenignNotHardBlocked` (`coverage_corpus_test.go:126`) hard-fails on any benign entry the bundle blocks.
 
 **D-US2-7 — The D9 control.**
-- The control signature is the new `tpa_agent_config_persistence` signature. Its sample is an instruction to append to `CLAUDE.md`/`.cursor/rules`.
+- The control signature is the new TPA-2026-0044 in class `tpa_persistence_implant` (agent-config persistence). Its sample is an instruction to append to `CLAUDE.md`/`.cursor/rules`.
   - It contains no override phrase, exfil verb, secret noun, URL, credential file, hidden rune or blob.
   - It matches none of the existing rules.
 - The control corpus is `cmd/scan-eval/testdata/bundle_control_corpus.json`. It contains:
   - 1 malicious entry (`tpa_id` = control, `peers: []`, plain schema, ASCII only);
-  - at least 1 `hn_tpa_agent_config_persistence_*` hard negative;
+  - at least 1 `hn_tpa_persistence_implant_*` hard negative;
   - 1 benign entry.
   - With this corpus, `GatedMalicious == 1`: recall is 1.0 with the control signature and 0.0 without it. The run exits `6`, never `4`.
 - The reduced bundle is built by `tpacorpus.Build(..., Options{Exclude: []string{controlID}})`. That drops the signature and its rules and recomputes `signature_count`, so the reduced bundle still passes the load layer.

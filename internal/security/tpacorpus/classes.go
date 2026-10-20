@@ -11,8 +11,8 @@ package tpacorpus
 // and the suffix of the eval dataset's hard-negative id prefix hn_<class>_.
 // No class may be a prefix of another, or hn_<class>_ prefixes would collide.
 //
-// tpa_agent_config_persistence is the deterministic negative control (spec 101
-// D-US2-7): the gate must breach when its signature is removed.
+// tpa_persistence_implant holds the deterministic negative control (spec 101
+// D-US2-7): the gate must breach when its control signature is removed.
 var Classes = []string{
 	"tpa_hidden_instruction_block",
 	"tpa_comment_directive",
@@ -20,10 +20,16 @@ var Classes = []string{
 	"tpa_cross_server_override",
 	"tpa_exfil_redirect",
 	"tpa_sensitive_file_coaxing",
+	"tpa_credential_harvesting",
+	"tpa_persistence_implant",
 	"tpa_rug_pull_phrasing",
+	"tpa_instruction_override",
+	"tpa_conversation_exfil",
+	"tpa_preference_manipulation",
 	"tpa_concealment_directive",
-	"tpa_agent_config_persistence",
-	"tpa_markdown_image_beacon",
+	"tpa_invisible_text",
+	"tpa_payload_execution",
+	"tpa_schema_injection",
 }
 
 // LicenceAllowlist is the set of SPDX ids a signature may carry (FR-012).
