@@ -33,9 +33,10 @@ func TestManager_LateCallbacks_ReachExistingClients(t *testing.T) {
 	)
 	upstream.AddTool(mcp.NewTool("notify"), func(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		srv := mcpserver.ServerFromContext(ctx)
-		// The first in-request notification on a streamable-HTTP response is
-		// consumed while the response upgrades to SSE and never reaches the
-		// client handler, so lead with a sacrificial one that core ignores.
+		// mcp-go v1.0.0's streamable-HTTP server can drop ONE in-request
+		// notification per call (see the retry loop below), so lead with a
+		// sacrificial one that core ignores; it absorbs the loss most of the
+		// time, and the retry loop covers the rest.
 		if err := srv.SendNotificationToClient(ctx, "notifications/test/warmup", nil); err != nil {
 			return nil, err
 		}
@@ -59,35 +60,70 @@ func TestManager_LateCallbacks_ReachExistingClients(t *testing.T) {
 	}))
 	client, ok := m.GetClient("srv-late")
 	require.True(t, ok)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	require.NoError(t, client.Connect(ctx))
 
 	// 2. Callbacks registered afterwards, as runtime.LoadConfiguredServers does.
-	toolsFired := make(chan string, 4)
-	promptsFired := make(chan string, 4)
+	// The callbacks signal rather than count: a non-blocking send keeps a
+	// repeated notify call from ever blocking core's notification goroutine
+	// (and with it the SSE reader the CallTool response rides on).
+	toolsFired := make(chan string, 1)
+	promptsFired := make(chan string, 1)
 	m.SetToolDiscoveryCallback(func(_ context.Context, serverName string) error {
-		toolsFired <- serverName
+		select {
+		case toolsFired <- serverName:
+		default:
+		}
 		return nil
 	})
 	m.SetPromptsChangedCallback(func(serverName string) {
-		promptsFired <- serverName
+		select {
+		case promptsFired <- serverName:
+		default:
+		}
 	})
 
 	// 3. Upstream sends tools/list_changed + prompts/list_changed.
-	_, err := client.CallTool(ctx, "notify", nil)
-	require.NoError(t, err)
+	//
+	// mcp-go v1.0.0's streamable-HTTP server (server/streamable_http.go,
+	// handlePost) forwards in-request notifications to the SSE response from
+	// a separate goroutine. When the tool handler returns, the request
+	// goroutine takes the stream mutex, drains whatever is still queued,
+	// closes `done`, and the forwarder then discards the notification it had
+	// already dequeued but not yet written (the non-resumable branch). So any
+	// ONE of the notifications a call sends can be lost, and which one is a
+	// matter of scheduling: on a loaded CI runner it is the tools or prompts
+	// notification often enough to fail every run. The subject here is the
+	// manager → client callback plumbing, not transport delivery, so the call
+	// is repeated until both callbacks have fired. Each attempt delivers at
+	// least two of its three notifications, so two attempts nearly always
+	// suffice; the deadline is generous for a loaded runner.
+	deadline := time.Now().Add(10 * time.Second)
+	gotTools, gotPrompts := false, false
+	attempts := 0
+	for !gotTools || !gotPrompts {
+		if time.Now().After(deadline) {
+			t.Fatalf("after %d notify calls the late-registered callbacks had not both fired: tools=%v prompts=%v",
+				attempts, gotTools, gotPrompts)
+		}
+		attempts++
+		_, err := client.CallTool(ctx, "notify", nil)
+		require.NoError(t, err)
 
-	select {
-	case name := <-toolsFired:
-		require.Equal(t, "late-server", name)
-	case <-time.After(5 * time.Second):
-		t.Fatal("tool discovery callback set after client creation was not invoked on tools/list_changed")
-	}
-	select {
-	case name := <-promptsFired:
-		require.Equal(t, "late-server", name)
-	case <-time.After(5 * time.Second):
-		t.Fatal("prompts-changed callback set after client creation was not invoked on prompts/list_changed")
+		settle := time.After(500 * time.Millisecond)
+	collect:
+		for !gotTools || !gotPrompts {
+			select {
+			case name := <-toolsFired:
+				require.Equal(t, "late-server", name)
+				gotTools = true
+			case name := <-promptsFired:
+				require.Equal(t, "late-server", name)
+				gotPrompts = true
+			case <-settle:
+				break collect
+			}
+		}
 	}
 }
