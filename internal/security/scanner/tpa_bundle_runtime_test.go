@@ -532,25 +532,6 @@ func TestRuntime_LKGWriteFailureRefusesActivation(t *testing.T) {
 	assert.Zero(t, f.store.commitCount())
 }
 
-func TestRuntime_StateLoadFailureStillScansAndWritesNothing(t *testing.T) {
-	f := newRTFixture(t, rtOpts{})
-	f.store.failLoad = errors.New("bolt: timeout")
-	f.put(signedCandidate(t, keyPublisher, bundleOpts{Seq: 5}))
-
-	info := f.run()
-
-	assert.Equal(t, BundleSourceFile, info.Source, "the out-of-data-dir anchors still hold, so a verified bundle may serve")
-	assert.Zero(t, f.store.commitCount(), "nothing is recorded against a state that could not be read")
-	assert.NotEmpty(t, f.logMessages(zapcore.ErrorLevel))
-	assert.Empty(t, f.lkgFiles(), "and the LKG store is not reconciled against an unknown state")
-
-	// Once the store recovers the state loads and the activation is recorded.
-	f.store.failLoad = nil
-	info = f.run()
-	assert.Equal(t, "5", info.Sequence)
-	assert.Equal(t, 1, f.store.commitCount())
-}
-
 func TestRuntime_NoStoreNoDataDirStillWorks(t *testing.T) {
 	f := newRTFixture(t, rtOpts{NoStore: true, NoDataDir: true})
 	f.activate(signedCandidate(t, keyPublisher, bundleOpts{Seq: 10}))

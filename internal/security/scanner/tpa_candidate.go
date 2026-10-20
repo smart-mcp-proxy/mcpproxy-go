@@ -195,6 +195,19 @@ func (ev *evaluation) unsigned() (*acceptedBundle, *BundleRejection) {
 	if ev.env.State != nil && ev.env.State.SignatureRatchet {
 		return nil, ev.reject(RejectUnsignedRatchet, "a signature-verified bundle has activated on this install; unsigned candidates are refused")
 	}
+	// An unsigned release has no trustworthy sequence, so it can be neither
+	// deny-listed nor compared to the watermark. A binding rollback pin is the one
+	// thing that can keep an operator's rollback from being undone by the next
+	// refresh (FR-010): while it binds, only the pinned target, or the exact
+	// digest an explicit rollback names, may activate.
+	if ev.env.State != nil {
+		namedByRollback := ev.env.Mode == evalRollback && ev.digest == ev.env.RollbackDigest
+		if a := ev.env.State.Authorities[ev.policy.ActiveRoot]; pinBinds(a) && ev.digest != a.Pin.FullDigest && !namedByRollback {
+			return nil, ev.reject(RejectDowngrade, fmt.Sprintf(
+				"a rollback pin to %s binds; unsigned release %s is refused until the pin is removed or a newer signed release activates",
+				shortDigest(a.Pin.FullDigest), shortDigest(ev.digest)))
+		}
+	}
 	if rej := ev.checkBundleSize(); rej != nil {
 		return nil, rej
 	}
@@ -216,15 +229,8 @@ func (ev *evaluation) signed() (*acceptedBundle, *BundleRejection) {
 
 	sc, err := bundlesig.ParseSidecar(c.Sidecar)
 	if err != nil {
-		code, detail := bundlesig.CodeOf(err), err.Error()
-		var be *bundlesig.Error
-		if errors.As(err, &be) {
-			detail = be.Detail
-		}
-		if code == bundlesig.CodeSidecarTooLarge {
-			return nil, ev.reject(RejectCeilingExceeded, "sidecar: "+detail)
-		}
-		return nil, ev.reject(RejectSidecarInvalid, code)
+		reason, detail := sidecarRejectionFields(err)
+		return nil, ev.reject(reason, detail)
 	}
 
 	if rej := ev.checkBundleSize(); rej != nil {
@@ -295,6 +301,21 @@ func (ev *evaluation) signed() (*acceptedBundle, *BundleRejection) {
 	acc.TrustEpoch = epoch
 	acc.KeyID = key.ID
 	return acc, nil
+}
+
+// sidecarRejectionFields maps a bundlesig.ParseSidecar failure to the recorded
+// rejection reason and detail: an over-long sidecar is a ceiling, everything
+// else is a grammar violation whose bundlesig code is the detail.
+func sidecarRejectionFields(err error) (reason, detail string) {
+	code, detail := bundlesig.CodeOf(err), err.Error()
+	var be *bundlesig.Error
+	if errors.As(err, &be) {
+		detail = be.Detail
+	}
+	if code == bundlesig.CodeSidecarTooLarge {
+		return RejectCeilingExceeded, "sidecar: " + detail
+	}
+	return RejectSidecarInvalid, code
 }
 
 // digestHex is the lowercase-hex SHA-256 of b.

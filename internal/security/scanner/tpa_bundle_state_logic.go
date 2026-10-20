@@ -142,7 +142,11 @@ func downgradeCheck(a *TPAAuthorityState, auth string, policy *bundlePolicy, seq
 	if seq > watermark {
 		return ""
 	}
-	if seq == watermark && setBy != "" && digest == setBy {
+	// While a pin to a DIFFERENT target binds, the release that set the watermark
+	// is not special: a rollback that left it unrecorded (nothing external was
+	// serving) must not be undone by re-dropping it.
+	pinBlocksSetter := pinBinds(a) && digest != a.Pin.FullDigest
+	if seq == watermark && setBy != "" && digest == setBy && !pinBlocksSetter {
 		return ""
 	}
 

@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/bundlesig"
 )
 
 // The serialized bundle runtime (spec 101 FR-008, FR-009, FR-011a; design §2/§6).
@@ -237,6 +238,11 @@ type selection struct {
 	// longer passes validation under the current policy and state.
 	deactivated       *BundleRejection
 	deactivatedDigest string
+	// keepActive is set when the recorded active release could not be restored
+	// for a TRANSIENT reason (an I/O error or timeout reading its last-known-good
+	// files): the embedded default serves for this run, but the committed active
+	// record and its files are kept so the release comes back once reads work.
+	keepActive bool
 }
 
 // runLocked is one pipeline run (design §6). The caller holds rt.mu.
@@ -272,7 +278,7 @@ func (rt *bundleRuntime) runLocked(policy *bundlePolicy, log *zap.Logger, opts r
 		activation = true
 		sel.serving.acc.Meta.GeneratedAt = sel.serving.generatedAt
 		st, row = applyActivation(nst, sel.serving.acc, sel.serving.cand, now)
-	case sel.serving != nil && sel.serving.embedded && nst.Active != nil:
+	case sel.serving != nil && sel.serving.embedded && nst.Active != nil && !sel.keepActive:
 		st = cloneState(nst)
 		st.Active = nil
 		needCommit = true
@@ -291,7 +297,7 @@ func (rt *bundleRuntime) runLocked(policy *bundlePolicy, log *zap.Logger, opts r
 			failed := sel
 			sel = selection{attempt: rej, attemptDigest: failed.serving.digest}
 			rt.fallbackLocked(policy, nst, &sel, log)
-			if sel.serving != nil && sel.serving.embedded && nst.Active != nil {
+			if sel.serving != nil && sel.serving.embedded && nst.Active != nil && !sel.keepActive {
 				st = cloneState(nst)
 				st.Active = nil
 				if perr := rt.persistLocked(st, nil, nil, log); perr != nil {
@@ -467,11 +473,14 @@ func (rt *bundleRuntime) fallbackLocked(policy *bundlePolicy, nst *TPABundleStat
 				zap.String("reason", rej.Reason),
 				zap.String("detail", rej.Detail))
 		case nst.Active != nil && rt.dataDir != "" && !rt.loadFailed:
-			if sv, rej := rt.restoreFromLKGLocked(policy, nst, log); sv != nil {
+			sv, rej, transient := rt.restoreFromLKGLocked(policy, nst, log)
+			if sv != nil {
 				sel.serving = sv
 				return
-			} else if rej != nil {
+			}
+			if rej != nil {
 				sel.deactivated, sel.deactivatedDigest = rej, nst.Active.FullDigest
+				sel.keepActive = transient
 			}
 		}
 	}
@@ -487,36 +496,42 @@ func (rt *bundleRuntime) fallbackLocked(policy *bundlePolicy, nst *TPABundleStat
 
 // restoreFromLKGLocked re-validates the state's Active record from its LKG
 // files. A missing or substituted file, or a record that no longer validates,
-// yields a rejection and no serving bundle.
-func (rt *bundleRuntime) restoreFromLKGLocked(policy *bundlePolicy, nst *TPABundleState, log *zap.Logger) (*servingBundle, *BundleRejection) {
+// yields a rejection and no serving bundle. The third result is true when the
+// failure is transient (an I/O error or timeout, not proof the release is gone):
+// the caller must then keep the active record and its files.
+func (rt *bundleRuntime) restoreFromLKGLocked(policy *bundlePolicy, nst *TPABundleState, log *zap.Logger) (*servingBundle, *BundleRejection, bool) {
 	rec := nst.Active
 	ctx, cancel := context.WithTimeout(context.Background(), bundleReadBudget)
 	defer cancel()
 	cand, err := lkgRead(ctx, rt.dataDir, rec)
 	if err != nil {
 		rej := &BundleRejection{At: time.Now()}
+		transient := false
 		var ce *candidateReadError
 		switch {
 		case errors.Is(err, errLKGSubstituted):
 			rej.Reason, rej.Detail = RejectTamper, "last-known-good file does not match its recorded digest "+shortDigest(rec.FullDigest)
 		case errors.As(err, &ce):
 			rej.Reason, rej.Detail = ce.Reason, "last-known-good: "+ce.Detail
+			transient = !ce.NotExist && (ce.Reason == RejectReadError || ce.Reason == RejectReadTimeout)
 		default:
 			rej.Reason, rej.Detail = RejectReadError, "last-known-good: "+err.Error()
+			transient = true
 		}
 		log.Warn("recorded last-known-good TPA bundle is unavailable; falling back to the embedded default",
-			zap.String("full_digest", rec.FullDigest), zap.String("reason", rej.Reason), zap.String("detail", rej.Detail))
-		return nil, rej
+			zap.String("full_digest", rec.FullDigest), zap.String("reason", rej.Reason), zap.String("detail", rej.Detail),
+			zap.Bool("record_kept", transient))
+		return nil, rej, transient
 	}
 	acc, rej := evaluateCandidate(cand, evalEnv{Policy: policy, State: nst, Mode: evalLKG})
 	if rej != nil {
 		log.Warn("recorded last-known-good TPA bundle no longer passes validation; falling back to the embedded default",
 			zap.String("full_digest", rec.FullDigest), zap.String("reason", rej.Reason), zap.String("detail", rej.Detail))
-		return nil, rej
+		return nil, rej, false
 	}
 	sv := newExternalServing(cand, acc)
 	sv.generatedAt = rec.GeneratedAt
-	return sv, nil
+	return sv, nil, false
 }
 
 // persistLocked makes one transition durable and then publishes nothing: LKG
@@ -524,6 +539,14 @@ func (rt *bundleRuntime) restoreFromLKGLocked(policy *bundlePolicy, nst *TPABund
 // state transaction (state + history row), with the crash seams between. On
 // success it updates the state mirror and reconciles the LKG directory.
 func (rt *bundleRuntime) persistLocked(st *TPABundleState, row *TPABundleActivation, sv *servingBundle, log *zap.Logger) error {
+	if rt.loadFailed && row != nil {
+		// A NEW activation needs a durable watermark and ratchet. With the state
+		// unreadable nothing can be recorded, and activating anyway would let a
+		// later restart (with a readable store holding an older watermark) accept
+		// an older release than the one that had been serving. Refuse, as for a
+		// failed commit.
+		return errors.New("the anti-downgrade state could not be loaded, so the activation cannot be recorded")
+	}
 	if sv != nil && !sv.embedded && rt.dataDir != "" && !rt.loadFailed {
 		if err := lkgWrite(rt.dataDir, sv.digest, sv.cand.Bundle, sv.cand.Sidecar, sv.cand.SidecarPresent); err != nil {
 			rt.reconcileLocked(rt.state, log)
@@ -662,7 +685,10 @@ func (rt *bundleRuntime) buildInfoLocked(policy *bundlePolicy, st *TPABundleStat
 		info.Path = sv.cand.Path
 	}
 
-	embeddedSeq := uint64(0)
+	// The embedded default IS the publisher baseline: when its manifest carries
+	// no sequence the baseline is the declared fallback, and the default must
+	// not read as "below" the very floor it seeds (FR-009b).
+	embeddedSeq := policy.PublisherBaseline
 	if e := rt.embeddedLocked(); e.err == nil && e.hasSeq {
 		embeddedSeq = e.seq
 	}
@@ -786,6 +812,15 @@ func readFileCandidate(path string) (*Candidate, *BundleRejection) {
 	}
 	data, berr := readCandidateFile(ctx, path, MaxBundleBytes)
 	if berr != nil {
+		if present {
+			// FR-008 stage order: the sidecar's grammar outranks the bundle's byte
+			// ceiling, so a malformed sidecar is reported as such even when the
+			// bundle was too large to read.
+			if _, perr := bundlesig.ParseSidecar(sidecar); perr != nil {
+				reason, detail := sidecarRejectionFields(perr)
+				return nil, &BundleRejection{Reason: reason, Detail: detail, At: time.Now()}
+			}
+		}
 		return nil, readRejection(berr, "bundle")
 	}
 	return &Candidate{Bundle: data, Sidecar: sidecar, SidecarPresent: present, Source: BundleSourceFile, Path: path}, nil
