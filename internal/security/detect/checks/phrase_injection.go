@@ -581,7 +581,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				// prohibition, which stays review-only (SEC-01 corpus bn-r10-1).
 				if ti == mixedIndex && negatedBefore(t, start) && conf > deobfuscatedMaxConfidence {
 					conf = deobfuscatedMaxConfidence
-					softReason = "negated directive written with mixed-script look-alike letters"
+					softReason = "negated directive written with " + mixedFoldWording(tool.RawText())
 				}
 				// A credential-file directive governed by a negation in its own
 				// clause is a prohibition on any view (Sol r15 P2). An
@@ -649,7 +649,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		obfuscated = " after de-obfuscation (homoglyphs, leet digits or letter spacing)"
 	}
 	if bestMixed {
-		obfuscated = " once mixed-script look-alike letters (homoglyphs) are folded"
+		obfuscated = " once " + mixedFoldWording(tool.RawText()) + " are folded"
 	}
 
 	// Instruction-position clears the hard floor and auto-quarantine-gates. A
@@ -679,11 +679,25 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	}}
 }
 
+// mixedFoldWording names what the mixed-script view folded in raw, for a
+// finding's detail: look-alike letters when a word really mixes scripts,
+// otherwise the accents that R2-4 strips (the view reports a change for both).
+func mixedFoldWording(raw string) string {
+	if detect.HasMixedScriptWords(raw) {
+		return "mixed-script look-alike letters (homoglyphs)"
+	}
+	return "diacritics on Latin letters"
+}
+
 // breakWord reduces a whitespace-delimited field to the bare word used to
-// compare raw text with the normalized phrase text: normalized, with
-// surrounding punctuation removed.
+// compare raw text with the phrase text: normalized the way the MIXED view is
+// (homoglyphs and Latin diacritics folded, nothing joined), with surrounding
+// punctuation removed. The mixed view is the only view that reaches HARD with
+// such letters, so the raw word stream has to fold them the same way or the
+// line-break cap (#1589) misses every matched word that carries one.
 func breakWord(field string) string {
-	w := strings.TrimFunc(detect.Normalize(field), func(r rune) bool {
+	folded, _ := detect.NormalizeMixedScript(field)
+	w := strings.TrimFunc(folded, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 	return w
@@ -695,7 +709,8 @@ func breakWord(field string) string {
 // that normalizes to nothing contributes no word.
 func breakWords(field string) []string {
 	var out []string
-	for _, w := range strings.Fields(detect.Normalize(field)) {
+	folded, _ := detect.NormalizeMixedScript(field)
+	for _, w := range strings.Fields(folded) {
 		if bw := breakWord(w); bw != "" {
 			out = append(out, bw)
 		}

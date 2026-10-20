@@ -2,6 +2,7 @@ package checks
 
 import (
 	"regexp"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -34,7 +35,11 @@ import (
 // and added both; Turkish is SOV (object first: "önceki talimatları yoksay"),
 // so it has its own family shape below rather than the spaced verb-first one.
 // A Turkish system-prompt DISCLOSURE family ("sistem istemini ifşa et") is
-// also included, the only non-English disclosure family so far.
+// also included, the only non-English disclosure family so far. A review
+// round (2026-10-20) tightened both: Greek is final-sigma-insensitive for
+// all-caps text, Turkish accepts the "edin" imperative of "et" compounds and
+// treats verbal nouns that double as negative imperatives (uyma, izleme,
+// uygulama, takma) as the override only in the polite form or clause-finally.
 //
 // Because the de-obfuscated PhraseText view folds diacritics on Latin letters
 // (R2-4, detect.NormalizeForPhrase) while the plain NormalizedText view keeps
@@ -121,12 +126,24 @@ var i18nOverrides = []i18nOverride{
 		// οδηγίες". Both tonos and tonos-less spellings are listed because the
 		// text may be typed either way (the tonos is a mark on a GREEK letter,
 		// so NormalizeForPhrase leaves it in place).
+		// Every "ς" below is widened to [σς] when the family is built: Go's
+		// ToLower maps a capital Σ to σ even word-finally, so an ALL-CAPS
+		// override normalizes to "ολεσ τισ …" (review round, lens P3).
 		lang:  "el",
 		verb:  `αγνόησε|αγνοησε|αγνοήστε|αγνοηστε|αγνόει|παράβλεψε|παραβλεψε|παραβλέψτε|παραβλεψτε|παράβλεπε|ξέχασε|ξεχασε|ξεχάστε|ξεχαστε|απόρριψε|απορριψε|απορρίψτε|απορριψτε|προσπέρασε|προσπερασε|μην ακολουθήσεις|μην ακολουθησεις|μην ακολουθείτε|μην ακολουθειτε|μη λάβεις υπόψη|μην λάβεις υπόψη|μη λαβεις υποψη|μην λαβεις υποψη|μην υπακούσεις|μην υπακουσεις`,
 		fill:  `όλες|ολες|όλα|ολα|όλους|ολους|τις|τα|τους|την|τη|το|τον|σου|σας|τυχόν|τυχον|οποιεσδήποτε|οποιεσδηποτε|κάθε|καθε|πλέον|πλεον`,
 		prior: `προηγούμεν\p{L}*|προηγουμεν\p{L}*|παραπάνω|παραπανω|ανωτέρω|ανωτερω|αρχικ\p{L}*|πρότερ\p{L}*|προτερ\p{L}*|προγενέστερ\p{L}*|προγενεστερ\p{L}*|του συστήματος|του συστηματος|συστήματος|συστηματος|που δόθηκαν|που δοθηκαν|που έλαβες|που ελαβες`,
 		noun:  `οδηγί\p{L}*|οδηγι\p{L}*|εντολ\p{L}*|κανόν\p{L}*|κανον\p{L}*|υποδείξ\p{L}*|υποδειξ\p{L}*|κατευθυντήρι\p{L}*|κατευθυντηρι\p{L}*|προτροπ\p{L}*|prompt\p{L}*`,
 	},
+}
+
+// greekSigmaInsensitive widens every final sigma in a Greek family's word
+// lists to a [σς] class, so an all-caps text (whose Σ lowercases to σ) matches
+// the same words as the ordinary spelling.
+func greekSigmaInsensitive(o i18nOverride) i18nOverride {
+	w := func(s string) string { return strings.ReplaceAll(s, "ς", "[σς]") }
+	o.verb, o.fill, o.prior, o.noun = w(o.verb), w(o.fill), w(o.prior), w(o.noun)
+	return o
 }
 
 // Turkish (R2-3) is SOV: the directive noun and its qualifier come FIRST and
@@ -141,37 +158,81 @@ var trOverrideFamilies = func() []*regexp.Regexp {
 		// trailing is the consumed trailing word boundary (Go's \b is ASCII-only);
 		// phraseFamily.trailingBoundary trims it back out of the evidence.
 		trailing = `(?:$|[^\p{L}\p{N}])`
-		fill     = `(?:tüm|tum|bütün|butun|verilen|var olan|mevcut|önceden verilen|onceden verilen|sana verilen|size verilen|yukarıdaki|yukaridaki) `
-		prior    = `(?:önceki|onceki|daha önceki|daha onceki|evvelki|önceden|onceden|yukarıdaki|yukaridaki|yukarıda verilen|yukarida verilen|ilk|orijinal|orjinal|asıl|asil|sistem|sistemin|mevcut)`
-		noun     = `(?:talimat|komut|yönerge|yonerge|kural|direktif|yönlendirme|yonlendirme|istem|prompt|emir|buyruk)\p{L}*`
-		// Verbs in the imperative only — 2nd person singular ("yoksay") or
-		// plural/formal ("yoksayın", "yoksayınız", "unutun") — plus the negative
-		// imperatives that ARE the override ("dikkate alma", "uyma"). Turkish
-		// negates with a suffix (-ma/-me, -maz/-mez: "yoksaymaz" = does not
-		// ignore; "yoksayar" = ignores), so the verb is NOT stemmed with \p{L}*
-		// and must end at a word boundary: ordinary descriptive prose ("önceki
-		// talimatları yoksaymaz") stays clean.
-		verb = `(?:(?:yoksay|yok say|görmezden gel|gormezden gel|unut|göz ardı et|goz ardi et|iptal et|geçersiz kıl|gecersiz kil|geçersiz say|gecersiz say|bir kenara bırak|bir kenara birak|boş ver|bos ver|boşver|bosver|atla|hiçe say|hice say|reddet)(?:[ıi]n(?:[ıi]z)?|un(?:uz)?|ün(?:üz)?)?|(?:dikkate alma|uyma|takma|umursama|uygulama|izleme)(?:y[ıi]n(?:[ıi]z)?)?)`
-		gap  = `(?: \p{L}+){0,3} `
+		// clauseEnd is the stricter boundary the ambiguous verbs need (below).
+		clauseEnd = `(?:$|[.!;:?,])`
+		fill      = `(?:tüm|tum|bütün|butun|verilen|var olan|önceden verilen|onceden verilen|sana verilen|size verilen|yukarıdaki|yukaridaki) `
+		// "mevcut" (available/existing) is deliberately absent: "mevcut
+		// komutları …" is how ordinary tool prose says "the available commands".
+		prior = `(?:önceki|onceki|daha önceki|daha onceki|evvelki|önceden|onceden|yukarıdaki|yukaridaki|yukarıda verilen|yukarida verilen|ilk|orijinal|orjinal|asıl|asil|sistem|sistemin)`
+		// "istem" (prompt) is spelled out with its case endings so "istemci"
+		// (client) does not match.
+		noun = `(?:(?:talimat|komut|yönerge|yonerge|kural|direktif|yönlendirme|yonlendirme|prompt|emir|buyruk)\p{L}*|istem(?:i|in|ini|ler|leri|lerin|lerini)?)`
+		// Imperative suffixes: 2nd person plural/formal ("yoksayın",
+		// "yoksayınız", "unutun"). Compound verbs on "et" take "edin"/"ediniz"
+		// (t→d), so "et" is spelled as etForm.
+		sfx    = `(?:[ıi]n(?:[ıi]z)?|un(?:uz)?|ün(?:üz)?)?`
+		etForm = `(?:et|ed[ıi]n(?:[ıi]z)?)`
+		// Unambiguous override verbs: imperative or nothing. Turkish negates
+		// with a suffix (-ma/-me, -maz/-mez: "yoksaymaz" = does not ignore;
+		// "yoksayar" = ignores), so none of these is stemmed with \p{L}* and
+		// each must end at a word boundary: "önceki talimatları yoksaymaz"
+		// stays clean.
+		strong = `(?:(?:yoksay|yok say|görmezden gel|gormezden gel|unut|geçersiz kıl|gecersiz kil|geçersiz say|gecersiz say|bir kenara bırak|bir kenara birak|boş ver|bos ver|boşver|bosver|atla|hiçe say|hice say|reddet)` + sfx + `|(?:göz ardı |goz ardi |iptal |redd)` + etForm + `)`
+		// Ambiguous negative imperatives: "uyma" is also compliance, "izleme"
+		// monitoring, "uygulama" an application, "takma" attaching, "dikkate
+		// alma" taking into account. They count as the override only in the
+		// unambiguous polite form ("uymayın") or when they close the clause
+		// ("… talimatlara uyma."), never mid-sentence ("uyma durumunu
+		// raporlar" = reports compliance status) — review round, lens P3.
+		ambig = `(?:dikkate alma|uyma|takma|umursama|uygulama|izleme)`
+		gap   = `(?: \p{L}+){0,3} `
 	)
+	verbSOV := `(?:` + strong + trailing + `|` + ambig + `y[ıi]n(?:[ıi]z)?` + trailing + `|` + ambig + clauseEnd + `)`
 	return []*regexp.Regexp{
 		// [fill] PRIOR [fill] NOUN … VERB  — "önceki tüm talimatları yoksay",
 		// "tüm önceki kuralları görmezden gel", "sistem talimatlarını unut".
-		regexp.MustCompile(i18nBoundary + `(?:` + fill + `)*` + prior + ` (?:` + fill + `)*` + noun + gap + verb + trailing),
+		regexp.MustCompile(i18nBoundary + `(?:` + fill + `)*` + prior + ` (?:` + fill + `)*` + noun + gap + verbSOV),
 		// VERB-first is unidiomatic but attackers write machine translations:
-		// "yoksay önceki talimatları".
-		regexp.MustCompile(i18nBoundary + verb + ` (?:` + fill + `)*` + prior + ` (?:` + fill + `)*` + noun + trailing),
+		// "yoksay önceki talimatları". Unambiguous verbs only.
+		regexp.MustCompile(i18nBoundary + strong + ` (?:` + fill + `)*` + prior + ` (?:` + fill + `)*` + noun + trailing),
 	}
 }()
 
 // trDisclosureFamily is the Turkish counterpart of the English system-prompt
 // exfiltration family ("reveal your system prompt"): "sistem istemini ifşa
-// et", "sistem komutlarını göster/yazdır/paylaş". Object first, verb last; the
-// verb carries only imperative suffixes and ends at a word boundary, for the
-// same negation reason as trOverrideFamilies.
-var trDisclosureFamily = regexp.MustCompile(i18nBoundary +
-	`(?:sistem|gizli|başlangıç|baslangic|ilk) (?:istem|prompt|komut|talimat|yönerge|yonerge|mesaj|yönlendirme|yonlendirme)\p{L}*(?: \p{L}+){0,3} ` +
-	`(?:ifşa et|ifsa et|göster|goster|yazdır|yazdir|açıkla|acikla|paylaş|paylas|söyle|soyle|ortaya çıkar|ortaya cikar|çıktı olarak ver|cikti olarak ver|aktar|tekrarla|sızdır|sizdir)(?:[ıi]n(?:[ıi]z)?|un(?:uz)?|ün(?:üz)?|y[ıi]n(?:[ıi]z)?)?(?:$|[^\p{L}\p{N}])`)
+// et", "sistem komutlarını sızdır". Object first, verb last; imperative
+// suffixes only and a consumed trailing boundary, for the same negation
+// reason as trOverrideFamilies. Two noun groups: the prompt itself ("sistem
+// istemi", "gizli prompt") takes any disclosure verb, including the plain
+// "göster" (show); the broader nouns ("sistem komutları", "gizli talimatlar",
+// "sistem mesajları") take only exfiltration-shaped verbs, because "Sistem
+// mesajlarını göster" (show system messages) and "İlk mesajı göster" (show the
+// first message) are ordinary UI prose — review round, lens P3. "paylaş" is
+// listed as "payla[sş]?" because Normalize's stem() strips the ASCII "s" of
+// the bare spelling ("paylas" → "payla").
+var trDisclosureFamily = func() *regexp.Regexp {
+	const (
+		trailing   = `(?:$|[^\p{L}\p{N}])`
+		qualifier  = `(?:sistem|gizli|başlangıç|baslangic)`
+		promptNoun = `(?:istem|prompt)\p{L}*`
+		broadNoun  = `(?:talimat|komut|yönerge|yonerge|mesaj|yönlendirme|yonlendirme)\p{L}*`
+		gap        = `(?: \p{L}+){0,3} `
+		sfx        = `(?:[ıi]n(?:[ıi]z)?|un(?:uz)?|ün(?:üz)?|y[ıi]n(?:[ıi]z)?)?`
+		etForm     = `(?:et|ed[ıi]n(?:[ıi]z)?)`
+		// The prompt itself may be "shown", "printed", "explained" or "repeated"
+		// — every disclosure verb. The broader nouns take only verbs that move
+		// the text elsewhere; "göster/yazdır/açıkla/tekrarla" on commands or
+		// messages is UI prose ("Sistem komutlarını göster ve açıkla"), except
+		// after "gizli" (hidden), which no UI label says.
+		promptVerb = `(?:(?:ifşa |ifsa )` + etForm + `|(?:sızdır|sizdir|payla[sş]?|aktar|ortaya çıkar|ortaya cikar|çıktı olarak ver|cikti olarak ver|yazdır|yazdir|söyle|soyle|açıkla|acikla|tekrarla|göster|goster)` + sfx + `)`
+		exfilVerb  = `(?:(?:ifşa |ifsa )` + etForm + `|(?:sızdır|sizdir|payla[sş]?|aktar|ortaya çıkar|ortaya cikar|çıktı olarak ver|cikti olarak ver)` + sfx + `)`
+		showVerb   = `(?:göster|goster|söyle|soyle|yazdır|yazdir)` + sfx
+	)
+	return regexp.MustCompile(i18nBoundary + `(?:` +
+		qualifier + ` ` + promptNoun + gap + promptVerb + `|` +
+		qualifier + ` ` + broadNoun + gap + exfilVerb + `|` +
+		`gizli ` + broadNoun + gap + showVerb + `)` + trailing)
+}()
 
 // i18nSpacedFamily builds both word orders for a space-delimited language:
 // VERB [fill…] PRIOR [word] NOUN  ("ignoriere alle bisherigen Anweisungen") and
@@ -211,6 +272,9 @@ const i18nSoftReason = "non-English matching cannot rule out negation or descrip
 func multilingualOverrideFamilies() []phraseFamily {
 	out := make([]phraseFamily, 0, len(i18nOverrides)+len(cjkOverrideFamilies))
 	for _, o := range i18nOverrides {
+		if o.lang == "el" {
+			o = greekSigmaInsensitive(o)
+		}
 		out = append(out, phraseFamily{
 			re:              i18nSpacedFamily(o),
 			base:            i18nOverrideBase,
