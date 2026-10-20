@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -92,4 +93,39 @@ func ResolveEnvAPIKey() (EnvAPIKeyResult, error) {
 	}
 
 	return EnvAPIKeyResult{Set: envSet, Key: envKey}, nil
+}
+
+// resolveAPIKeyRef replaces an api_key that is a secret reference with the
+// value it points at, as a process-only override: the effective config runs
+// with the secret, while every save writes the reference (never the secret)
+// back, whatever else the save is about (see process_overrides.go).
+//
+// The reference is resolved here, once per load, and a reference that cannot be
+// resolved fails the load. Generating a key instead would start the proxy
+// under a credential the operator did not choose and save it over the
+// reference.
+//
+// A key from the environment (MCPPROXY_API_KEY_FILE or MCPPROXY_API_KEY)
+// overrides the config file's key, so with one present the reference is left
+// as written, unread, for EnsureAPIKey's override to replace.
+func resolveAPIKeyRef(c *Config) error {
+	if !secret.IsSecretRef(c.APIKey) {
+		return nil
+	}
+	envKey, err := ResolveEnvAPIKey()
+	if err != nil {
+		return err
+	}
+	if envKey.Set && envKey.Key != "" {
+		return nil
+	}
+	resolved, err := secret.NewResolver().ExpandSecretRefs(context.Background(), c.APIKey)
+	if err != nil {
+		return fmt.Errorf("api_key: %w", err)
+	}
+	if resolved == "" {
+		return fmt.Errorf("api_key: %s resolved to an empty value", c.APIKey)
+	}
+	OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, resolved)
+	return nil
 }
