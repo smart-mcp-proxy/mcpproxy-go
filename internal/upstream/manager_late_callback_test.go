@@ -94,11 +94,13 @@ func TestManager_LateCallbacks_ReachExistingClients(t *testing.T) {
 	// already dequeued but not yet written (the non-resumable branch). So any
 	// ONE of the notifications a call sends can be lost, and which one is a
 	// matter of scheduling: on a loaded CI runner it is the tools or prompts
-	// notification often enough to fail every run. The subject here is the
-	// manager → client callback plumbing, not transport delivery, so the call
-	// is repeated until both callbacks have fired. Each attempt delivers at
-	// least two of its three notifications, so two attempts nearly always
-	// suffice; the deadline is generous for a loaded runner.
+	// notification often enough to fail every run. (A forwarder from an
+	// earlier request that has not yet observed its own `done` can discard a
+	// later call's notification too, so no fixed per-call minimum holds.) The
+	// subject here is the manager → client callback plumbing, not transport
+	// delivery, so the call is repeated until both callbacks have fired; in
+	// practice one or two attempts suffice, and the deadline is generous for
+	// a loaded runner.
 	deadline := time.Now().Add(10 * time.Second)
 	gotTools, gotPrompts := false, false
 	attempts := 0
