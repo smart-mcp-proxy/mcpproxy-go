@@ -54,7 +54,7 @@ func TestBundleStatus_DefaultsToEmbedded(t *testing.T) {
 
 	info := BundleStatus()
 	assert.Equal(t, BundleSourceEmbedded, info.Source)
-	assert.Equal(t, "0.1.0", info.BundleVersion)
+	assert.Equal(t, "0.1.1", info.BundleVersion)
 	assert.Positive(t, info.RunnableRules, "the embedded bundle must contribute runnable rules")
 	assert.Positive(t, info.SignatureCount, "signature_count must be surfaced")
 	assert.NotEmpty(t, info.Fingerprint, "a corpus fingerprint is the identity signal an operator compares")

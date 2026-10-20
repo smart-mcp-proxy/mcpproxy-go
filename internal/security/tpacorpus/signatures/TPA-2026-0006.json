@@ -1,0 +1,68 @@
+{
+  "category": "tpa_rug_pull_phrasing",
+  "gating": true,
+  "id": "TPA-2026-0006",
+  "license": "MIT",
+  "provenance": {
+    "note": "Silent redirect phrasing typical of a post-approval description change (rug pull).",
+    "published": "2025-04-01",
+    "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+  },
+  "rules": [
+    {
+      "category": "rug-pull",
+      "confidence": 0.9,
+      "detector": "hidden_redirect",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0006",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>|<SYSTEM>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$num",
+          "type": "string",
+          "value": "+13241234123"
+        },
+        {
+          "context": "tool_description",
+          "id": "$sm",
+          "type": "string",
+          "value": "send_message"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)send_message.*?(change the recipient|\\+13241234123)",
+      "severity": "critical",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "rug-pull",
+      "confidence": 0.95,
+      "detector": "manifest_desc_diff",
+      "engine": "structural_diff",
+      "id": "TPA-2026-0006",
+      "indicators": [],
+      "level": "critical",
+      "rule": {
+        "change": "modified",
+        "compare": "manifest_before/after",
+        "field": "description"
+      },
+      "runtime": "stateful",
+      "severity": "critical",
+      "target": "server_manifest",
+      "type": "behavioral"
+    }
+  ],
+  "skipped": []
+}

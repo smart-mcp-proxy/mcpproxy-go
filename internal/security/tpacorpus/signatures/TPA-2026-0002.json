@@ -1,0 +1,44 @@
+{
+  "category": "tpa_comment_directive",
+  "gating": false,
+  "id": "TPA-2026-0002",
+  "license": "MIT",
+  "provenance": {
+    "note": "HTML comment carrying a system/assistant directive inside fetched resource content; not scored offline (resource_content target).",
+    "published": "2025-04-01",
+    "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "hidden_comment_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0002",
+      "indicators": [
+        {
+          "context": "resource_content",
+          "id": "$sys",
+          "type": "regex",
+          "value": "<!--\\s*SYSTEM"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<!--.*?(system|assistant|instruction).*?(private|token|read|publish).*?-->",
+      "severity": "high",
+      "target": "resource_content",
+      "type": "lexical"
+    }
+  ],
+  "skipped": [
+    {
+      "detector": "exfil_intent_judge",
+      "id": "TPA-2026-0002",
+      "reason": "engine llm_judge not offline-capable"
+    }
+  ]
+}

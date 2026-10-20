@@ -1,5 +1,6 @@
 {
-  "bundle_version": "0.1.0",
+  "bundle_version": "0.1.1",
+  "generated_at": "2026-10-20T00:00:00Z",
   "generated_from": "signatures/",
   "rules": [
     {
@@ -275,6 +276,96 @@
   ],
   "schema_version": "0.1.0",
   "signature_count": 6,
+  "signatures": [
+    {
+      "category": "tpa_hidden_instruction_block",
+      "gating": true,
+      "id": "TPA-2026-0001",
+      "license": "MIT",
+      "provenance": {
+        "note": "Hidden <IMPORTANT> block in a tool description that coaxes the agent into reading credentials; the description later changing is the rug-pull variant.",
+        "published": "2025-04-01",
+        "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+      },
+      "rule_ids": [
+        "TPA-2026-0001/hidden_instruction",
+        "TPA-2026-0001/manifest_desc_diff"
+      ]
+    },
+    {
+      "category": "tpa_comment_directive",
+      "gating": false,
+      "id": "TPA-2026-0002",
+      "license": "MIT",
+      "provenance": {
+        "note": "HTML comment carrying a system/assistant directive inside fetched resource content; not scored offline (resource_content target).",
+        "published": "2025-04-01",
+        "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+      },
+      "rule_ids": [
+        "TPA-2026-0002/hidden_comment_directive"
+      ]
+    },
+    {
+      "category": "tpa_sensitive_file_coaxing",
+      "gating": true,
+      "id": "TPA-2026-0003",
+      "license": "MIT",
+      "provenance": {
+        "note": "<IMPORTANT>/<SYSTEM> block instructing the agent to read ~/.ssh/id_rsa or cloud credentials.",
+        "published": "2025-04-01",
+        "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+      },
+      "rule_ids": [
+        "TPA-2026-0003/hidden_tag"
+      ]
+    },
+    {
+      "category": "tpa_tool_shadowing",
+      "gating": true,
+      "id": "TPA-2026-0004",
+      "license": "MIT",
+      "provenance": {
+        "note": "Description that redirects or overrides how another tool is used (shadowing).",
+        "published": "2025-04-01",
+        "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+      },
+      "rule_ids": [
+        "TPA-2026-0004/exfil_redirect",
+        "TPA-2026-0004/shadow_directive"
+      ]
+    },
+    {
+      "category": "tpa_cross_server_override",
+      "gating": true,
+      "id": "TPA-2026-0005",
+      "license": "MIT",
+      "provenance": {
+        "note": "Description that overrides behaviour of tools served by other MCP servers.",
+        "published": "2025-04-01",
+        "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+      },
+      "rule_ids": [
+        "TPA-2026-0005/cross_shadow",
+        "TPA-2026-0005/policy_override"
+      ]
+    },
+    {
+      "category": "tpa_rug_pull_phrasing",
+      "gating": true,
+      "id": "TPA-2026-0006",
+      "license": "MIT",
+      "provenance": {
+        "note": "Silent redirect phrasing typical of a post-approval description change (rug pull).",
+        "published": "2025-04-01",
+        "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+      },
+      "rule_ids": [
+        "TPA-2026-0006/hidden_redirect",
+        "TPA-2026-0006/manifest_desc_diff"
+      ]
+    }
+  ],
   "skipped": [
     {
       "detector": "exfil_intent_judge",
