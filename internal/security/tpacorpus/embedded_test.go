@@ -63,3 +63,14 @@ func TestEmbeddedCorpus_SignaturesMeetBuildPolicy(t *testing.T) {
 		assert.NotEmpty(t, s.Provenance.Source, "%s", s.ID)
 	}
 }
+
+// TestEmbeddedCorpus_PassesPolicyAgainstDetectCorpus is the build-time policy
+// the CI step enforces: the embedded bundle, checked against the committed eval
+// dataset, has a malicious sample for every gating signature, a hard negative
+// and exactly one canonical sample for every gating class, and resolves every
+// tpa_id. It is the in-process twin of `tpa-corpus validate`.
+func TestEmbeddedCorpus_PassesPolicyAgainstDetectCorpus(t *testing.T) {
+	dataset, err := os.ReadFile("../../../specs/065-evaluation-foundation/datasets/detect_corpus_v1.json")
+	require.NoError(t, err)
+	require.NoError(t, ValidatePolicy(scanner.EmbeddedBundle(), dataset))
+}
