@@ -223,7 +223,7 @@ graph LR
 <details>
 <summary>🔵 tpa-db: versioned TPA signature database for the offline scanner — In progress · P1</summary>
 
-> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); 2026-10-20: US1 (tpa-db-format: signed four-key Ed25519 sidecar, verify-before-parse loader, per-authority anti-downgrade state, full-digest rollback, coverage degrade) in review as #1701; US2 corpus in a sibling session; US3 refresh waits on Spec 087.
+> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); 2026-10-20: US1 (tpa-db-format: signed four-key Ed25519 sidecar, verify-before-parse loader, per-authority anti-downgrade state, full-digest rollback, coverage degrade) shipped as #1701; US2 corpus in a sibling session; US3 refresh waits on Spec 087.
 
 Spec: [101-tpa-db](./specs/101-tpa-db/)
 
@@ -236,15 +236,15 @@ graph LR
   tpa_db_format --> tpa_db_corpus
   tpa_db_format --> tpa_db_refresh
 
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class tpa_db_format in_review;
+  class tpa_db_format done;
   class tpa_db_corpus,tpa_db_refresh todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
-| Signature DB format + loader (versioned, signed, bundled default) | 🟡 In review | #1701 |
+| Signature DB format + loader (versioned, signed, bundled default) | 🟢 Done | #1701 |
 | Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
 | Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
 
