@@ -64,7 +64,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)/dev/tcp/|\\bnc\\s+(?:-\\w+\\s+)*-e\\s+\\S+|\\bbash\\s+-i\\s*>&",
+      "pattern": "(?is)/dev/tcp/\\S{1,80}\\s+0>&1|\\b(?:ba|z|da)?sh\\s+<&\\s*\\d+\\s*>&\\s*\\d+|\\bnc\\s+(?:-\\w+\\s+)*-e\\s+\\S+|\\b(?:ba|z|da)?sh\\s+-i\\s*>&",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

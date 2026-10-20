@@ -34,7 +34,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:secretly|covertly|silently|quietly|stealthily)\\b.{0,60}?\\b(?:collects?|gathers?|extracts?|harvests?|copies|copy|sends?|shares?|forwards?|uploads?|transmits?)\\b.{0,80}?\\b(?:api[ _-]?keys?|access tokens?|credentials?|passwords?|secrets?|cookies?|private keys?)\\b",
+      "pattern": "(?is)\\b(?:secretly|covertly|silently|quietly|stealthily)\\b.{0,60}?\\b(?:collects?|gathers?|extracts?|harvests?|copies|copy|sends?|shares?|forwards?|uploads?|transmits?)\\b.{0,80}?\\b(?:(?:api[ _-]?keys?|access tokens?|credentials?|passwords?|secrets?|cookies?|private keys?)\\b.{0,100}?\\b(?:(?:to|with)\\s+(?:an?\\s+|the\\s+|some\\s+|its\\s+|their\\s+)?(?:third[- ]part\\w*|partners?|external\\w*|remote\\w*|outside\\w*|unrelated|another|attacker\\w*|vendor|operator|analytics|https?://|[\\w.+-]+@[\\w.-]+)|(?:and|then)\\s+(?:also\\s+)?(?:sends?|uploads?|forwards?|transmits?|posts?|exfiltrates?)\\b)|(?:(?:to|with)\\s+(?:an?\\s+|the\\s+|some\\s+|its\\s+|their\\s+)?(?:third[- ]part\\w*|partners?|external\\w*|remote\\w*|outside\\w*|unrelated|another|attacker\\w*|vendor|operator|analytics|https?://|[\\w.+-]+@[\\w.-]+)|(?:and|then)\\s+(?:also\\s+)?(?:sends?|uploads?|forwards?|transmits?|posts?|exfiltrates?)\\b).{0,80}?\\b(?:api[ _-]?keys?|access tokens?|credentials?|passwords?|secrets?|cookies?|private keys?)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -64,7 +64,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\bwhile\\s+(?:it\\s+is\\s+)?(?:processing|resizing|converting|running|working)\\b.{0,100}?\\balso\\s+(?:collects?|extracts?|gathers?|harvests?|copies|sends?|uploads?)\\b.{0,80}?\\b(?:api[ _-]?keys?|tokens?|credentials?|passwords?|secrets?)\\b",
+      "pattern": "(?is)(?:\\b(?:secretly|covertly|silently|quietly|stealthily)\\b.{0,40}?\\bwhile\\s+(?:it\\s+is\\s+)?(?:processing|resizing|converting|running|working)\\b.{0,100}?\\balso\\s+(?:collects?|extracts?|gathers?|harvests?|copies|sends?|uploads?)\\b.{0,80}?\\b(?:api[ _-]?keys?|tokens?|credentials?|passwords?|secrets?)\\b|\\bwhile\\s+(?:it\\s+is\\s+)?(?:processing|resizing|converting|running|working)\\b.{0,100}?\\balso\\s+(?:(?:secretly|covertly|silently|quietly|stealthily)\\s+)?(?:collects?|extracts?|gathers?|harvests?|copies|sends?|uploads?)\\b.{0,80}?\\b(?:api[ _-]?keys?|tokens?|credentials?|passwords?|secrets?)\\b.{0,100}?\\b(?:(?:to|with)\\s+(?:an?\\s+|the\\s+|some\\s+|its\\s+|their\\s+)?(?:third[- ]part\\w*|partners?|external\\w*|remote\\w*|outside\\w*|unrelated|another|attacker\\w*|vendor|operator|analytics|https?://|[\\w.+-]+@[\\w.-]+)|(?:and|then)\\s+(?:also\\s+)?(?:sends?|uploads?|forwards?|transmits?|posts?|exfiltrates?)\\b)|\\bwhile\\s+(?:it\\s+is\\s+)?(?:processing|resizing|converting|running|working)\\b.{0,100}?\\balso\\s+(?:secretly|covertly|silently|quietly|stealthily)\\s+(?:collects?|extracts?|gathers?|harvests?|copies|sends?|uploads?)\\b.{0,80}?\\b(?:api[ _-]?keys?|tokens?|credentials?|passwords?|secrets?)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

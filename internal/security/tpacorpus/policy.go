@@ -27,6 +27,8 @@ func HardNegativePrefix(class string) string { return "hn_" + class + "_" }
 // ValidatePolicy checks a built bundle against the eval dataset (spec 101
 // D-US2-3, policy layer). It reports every violation at once:
 //
+//   - the bundle has a non-empty signatures[] section (the runtime loader stays
+//     lenient about legacy bundles without one; the shipped corpus may not);
 //   - the class vocabulary has no prefix collisions, and every signature uses a
 //     known class and an allowlisted licence;
 //   - every dataset tpa_id resolves to a signature and its entry is a malicious
@@ -51,6 +53,10 @@ func ValidatePolicy(bundle, dataset []byte) error {
 
 	var problems []string
 	addf := func(format string, args ...any) { problems = append(problems, fmt.Sprintf(format, args...)) }
+
+	if len(sigs) == 0 {
+		addf("bundle has no signatures[]: the shipped corpus must carry per-signature licence, provenance and eval pairs")
+	}
 
 	for i, a := range Classes {
 		for j, b := range Classes {

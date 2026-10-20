@@ -82,6 +82,12 @@ func parseFlags(fs *flag.FlagSet, args []string) (int, bool) {
 		}
 		return exitUsage, false
 	}
+	if fs.NArg() > 0 {
+		// flag parsing stops at the first positional argument, silently
+		// ignoring every flag after it; refuse rather than act on defaults.
+		fmt.Fprintf(fs.Output(), "tpa-corpus: unexpected argument %q\n", fs.Arg(0))
+		return exitUsage, false
+	}
 	return exitOK, true
 }
 

@@ -207,3 +207,19 @@ func TestValidatePolicy_PrefixClasses(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "prefix")
 }
+
+// A bundle with no signatures[] is a legal legacy bundle for the runtime
+// loader, but the policy layer guards the shipped corpus and must refuse it.
+func TestValidatePolicy_RejectsMissingSignatures(t *testing.T) {
+	for name, bundle := range map[string]string{
+		"absent": `{"rules":[]}`,
+		"null":   `{"signatures":null}`,
+		"empty":  `{"signatures":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := ValidatePolicy([]byte(bundle), policyDataset(t, nil))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "no signatures")
+		})
+	}
+}

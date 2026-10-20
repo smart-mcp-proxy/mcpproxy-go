@@ -72,6 +72,9 @@ func TestRun_UsageErrors(t *testing.T) {
 		{"validate"},
 		{"validate", "--bundle", "x"},
 		{"build", "--no-such-flag"},
+		{"verify", "unexpected", "--out", "/definitely-not-present/scanner-bundle.json"},
+		{"build", "extra"},
+		{"validate", "--bundle", "x", "--dataset", "y", "extra"},
 	} {
 		code, _, stderr := do(args...)
 		assert.Equal(t, exitUsage, code, "args=%v", args)

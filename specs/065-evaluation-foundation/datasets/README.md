@@ -174,7 +174,7 @@ description,input_schema}`, and cross-server `peers` so the `shadowing` check ca
 fire deterministically. Validated by `detect_corpus_test.go` in this directory
 and scored by `cmd/scan-eval --gate`.
 
-**Composition (268 entries):**
+**Composition (292 entries):**
 
 | Label | Category | Count | Mapped check | Gated today? |
 |-------|----------|-------|--------------|--------------|
@@ -184,7 +184,7 @@ and scored by `cmd/scan-eval --gate`.
 | malicious | `phrase_injection` | 13 | `phrase.injection` | yes (Spec 077 US1) |
 | malicious | `capability_mismatch` | 2 | `capability.mismatch` | **no** — US2 check; reported, not enforced |
 | malicious | `tpa_*` (16 signature classes, one gating signature or more each) | 42 | `tpa.bundle` | yes (Spec 101 US2) |
-| benign | `hard_negative` (attack-resembling) | 190 (21 built-in categories, 169 `tpa_*`) | — | — |
+| benign | `hard_negative` (attack-resembling) | 214 (21 built-in categories, 193 `tpa_*`) | — | — |
 | benign | `benign` (clean base rate) | 5 | — | — |
 
 The 42 `tpa_*` malicious entries are one self-authored sample per gating
@@ -194,21 +194,21 @@ vocabulary in `tpacorpus.Classes`:
 
 | Class | Malicious | Hard negatives |
 |-------|-----------|----------------|
-| `tpa_hidden_instruction_block` | 3 | 10 |
+| `tpa_hidden_instruction_block` | 3 | 14 |
 | `tpa_comment_directive` | 1 | 2 |
-| `tpa_tool_shadowing` | 5 | 23 |
+| `tpa_tool_shadowing` | 5 | 26 |
 | `tpa_cross_server_override` | 3 | 11 |
-| `tpa_exfil_redirect` | 4 | 25 |
-| `tpa_sensitive_file_coaxing` | 4 | 26 |
-| `tpa_credential_harvesting` | 1 | 2 |
-| `tpa_persistence_implant` | 2 | 10 |
+| `tpa_exfil_redirect` | 4 | 27 |
+| `tpa_sensitive_file_coaxing` | 4 | 29 |
+| `tpa_credential_harvesting` | 1 | 5 |
+| `tpa_persistence_implant` | 2 | 13 |
 | `tpa_rug_pull_phrasing` | 2 | 4 |
 | `tpa_instruction_override` | 3 | 6 |
 | `tpa_conversation_exfil` | 3 | 12 |
 | `tpa_preference_manipulation` | 2 | 7 |
 | `tpa_concealment_directive` | 1 | 5 |
 | `tpa_invisible_text` | 3 | 9 |
-| `tpa_payload_execution` | 4 | 15 |
+| `tpa_payload_execution` | 4 | 21 |
 | `tpa_schema_injection` | 1 | 2 |
 
 **Spec 101 US2 — in-place extension.** The `tpa_*` entries were appended to this

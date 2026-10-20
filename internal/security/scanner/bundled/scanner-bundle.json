@@ -364,7 +364,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:secretly|covertly|silently|quietly|stealthily)\\b.{0,60}?\\b(?:collects?|gathers?|extracts?|harvests?|copies|copy|sends?|shares?|forwards?|uploads?|transmits?)\\b.{0,80}?\\b(?:api[ _-]?keys?|access tokens?|credentials?|passwords?|secrets?|cookies?|private keys?)\\b",
+      "pattern": "(?is)\\b(?:secretly|covertly|silently|quietly|stealthily)\\b.{0,60}?\\b(?:collects?|gathers?|extracts?|harvests?|copies|copy|sends?|shares?|forwards?|uploads?|transmits?)\\b.{0,80}?\\b(?:(?:api[ _-]?keys?|access tokens?|credentials?|passwords?|secrets?|cookies?|private keys?)\\b.{0,100}?\\b(?:(?:to|with)\\s+(?:an?\\s+|the\\s+|some\\s+|its\\s+|their\\s+)?(?:third[- ]part\\w*|partners?|external\\w*|remote\\w*|outside\\w*|unrelated|another|attacker\\w*|vendor|operator|analytics|https?://|[\\w.+-]+@[\\w.-]+)|(?:and|then)\\s+(?:also\\s+)?(?:sends?|uploads?|forwards?|transmits?|posts?|exfiltrates?)\\b)|(?:(?:to|with)\\s+(?:an?\\s+|the\\s+|some\\s+|its\\s+|their\\s+)?(?:third[- ]part\\w*|partners?|external\\w*|remote\\w*|outside\\w*|unrelated|another|attacker\\w*|vendor|operator|analytics|https?://|[\\w.+-]+@[\\w.-]+)|(?:and|then)\\s+(?:also\\s+)?(?:sends?|uploads?|forwards?|transmits?|posts?|exfiltrates?)\\b).{0,80}?\\b(?:api[ _-]?keys?|access tokens?|credentials?|passwords?|secrets?|cookies?|private keys?)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -394,7 +394,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\bwhile\\s+(?:it\\s+is\\s+)?(?:processing|resizing|converting|running|working)\\b.{0,100}?\\balso\\s+(?:collects?|extracts?|gathers?|harvests?|copies|sends?|uploads?)\\b.{0,80}?\\b(?:api[ _-]?keys?|tokens?|credentials?|passwords?|secrets?)\\b",
+      "pattern": "(?is)(?:\\b(?:secretly|covertly|silently|quietly|stealthily)\\b.{0,40}?\\bwhile\\s+(?:it\\s+is\\s+)?(?:processing|resizing|converting|running|working)\\b.{0,100}?\\balso\\s+(?:collects?|extracts?|gathers?|harvests?|copies|sends?|uploads?)\\b.{0,80}?\\b(?:api[ _-]?keys?|tokens?|credentials?|passwords?|secrets?)\\b|\\bwhile\\s+(?:it\\s+is\\s+)?(?:processing|resizing|converting|running|working)\\b.{0,100}?\\balso\\s+(?:(?:secretly|covertly|silently|quietly|stealthily)\\s+)?(?:collects?|extracts?|gathers?|harvests?|copies|sends?|uploads?)\\b.{0,80}?\\b(?:api[ _-]?keys?|tokens?|credentials?|passwords?|secrets?)\\b.{0,100}?\\b(?:(?:to|with)\\s+(?:an?\\s+|the\\s+|some\\s+|its\\s+|their\\s+)?(?:third[- ]part\\w*|partners?|external\\w*|remote\\w*|outside\\w*|unrelated|another|attacker\\w*|vendor|operator|analytics|https?://|[\\w.+-]+@[\\w.-]+)|(?:and|then)\\s+(?:also\\s+)?(?:sends?|uploads?|forwards?|transmits?|posts?|exfiltrates?)\\b)|\\bwhile\\s+(?:it\\s+is\\s+)?(?:processing|resizing|converting|running|working)\\b.{0,100}?\\balso\\s+(?:secretly|covertly|silently|quietly|stealthily)\\s+(?:collects?|extracts?|gathers?|harvests?|copies|sends?|uploads?)\\b.{0,80}?\\b(?:api[ _-]?keys?|tokens?|credentials?|passwords?|secrets?)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -544,7 +544,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:always|only|must)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\s+[\\w`'\\\"-]+.{0,120}?\\b(?:unsafe|insecure|vulnerable|compromised|malicious|untrusted)\\b",
+      "pattern": "(?is)\\b(?:always|only|must)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\s+(?:(?:the|your|any|built-in|default|original|old|legacy)\\s+){0,2}[\\w`'\\x22-]+(?:\\s+(?:tool|function|command|utility|api|endpoint))?\\s*[,;:(—-]*\\s*(?:(?:which|that|because|since|as|and)\\s+)?(?:(?:it|this|that|they)\\s+)?(?:is|are|was|were|has been|have been|remains?)\\s+(?:\\w+\\s+){0,2}?(?:unsafe|insecure|vulnerable|compromised|malicious|untrusted)\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -892,7 +892,7 @@
       "id": "TPA-2026-0020",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(clipboard|pasteboard|screenshots?|screen)\\b.{0,100}\\b(in the background|continuous\\w*|periodic\\w*|every (few|\\d+) (seconds|minutes)|silently|secretly)\\b.{0,120}\\b(stream|upload|transmit|send|forward|post)\\w*\\b.{0,100}https?://",
+      "pattern": "(?is)(?:\\b(?:clipboard|pasteboard|screenshots?|screen)\\b.{0,100}\\b(?:silently|secretly|covertly|quietly)\\b.{0,120}\\b(?:stream|upload|transmit|send|forward|post)\\w*\\b.{0,100}https?://|\\b(?:clipboard|pasteboard|screenshots?|screen)\\b.{0,100}\\b(?:in the background|continuous\\w*|periodic\\w*|every (?:few|\\d+) (?:seconds|minutes))\\b.{0,120}\\b(?:stream|upload|transmit|send|forward|post)\\w*\\b.{0,100}https?://.{0,200}(?:silently|secretly|covertly|quietly|surreptitious\\w*|(?:never|not) (?:be )?(?:displayed|shown|disclosed|surfaced|mentioned)|(?:do not|don['’]t|never|must not) (?:mention|tell|show|reveal|disclose|inform|notify)|hidden from|invisible to|undisclosed|without (?:the )?(?:user|their|your)\\b[^.]{0,30})|\\b(?:silently|secretly|covertly|quietly|surreptitious\\w*|(?:never|not) (?:be )?(?:displayed|shown|disclosed|surfaced|mentioned)|(?:do not|don['’]t|never|must not) (?:mention|tell|show|reveal|disclose|inform|notify)|hidden from|invisible to|undisclosed|without (?:the )?(?:user|their|your)\\b[^.]{0,30}).{0,100}\\b(?:clipboard|pasteboard|screenshots?|screen)\\b.{0,100}\\b(?:in the background|continuous\\w*|periodic\\w*|every (?:few|\\d+) (?:seconds|minutes))\\b.{0,120}\\b(?:stream|upload|transmit|send|forward|post)\\w*\\b.{0,100}https?://|\\b(?:clipboard|pasteboard|screenshots?|screen)\\b.{0,100}\\b(?:silently|secretly|covertly|quietly|surreptitious\\w*|(?:never|not) (?:be )?(?:displayed|shown|disclosed|surfaced|mentioned)|(?:do not|don['’]t|never|must not) (?:mention|tell|show|reveal|disclose|inform|notify)|hidden from|invisible to|undisclosed|without (?:the )?(?:user|their|your)\\b[^.]{0,30}).{0,100}\\b(?:in the background|continuous\\w*|periodic\\w*|every (?:few|\\d+) (?:seconds|minutes))\\b.{0,120}\\b(?:stream|upload|transmit|send|forward|post)\\w*\\b.{0,100}https?://)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -950,7 +950,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:contents?|text|values?)\\s+of\\b.{0,60}?(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|(?:~|\\$HOME)/\\.env\\b|/etc/passwd|/etc/shadow).{0,100}?\\b(?:in|into|as|via)\\b.{0,30}?(?:^|[\\s'\\\"`])(?:(?:the\\s+)?['\\\"`]?(?:[a-z]{1,12}_)?(?:notes?|context|metadata|meta|comments?|extra|details?|description|text|message|session\\w*|payload|reason|info|log|tags?|labels?|trace\\w*|remarks?|memo|body|input|query|prompt|content|sidenote|annotation)['\\\"`]?\\s+|(?:an?|any|another|one)\\s+(?:other\\s+)?)(?:argument|parameter|field|param)\\b",
+      "pattern": "(?is)(?:\\b(?:silently|quietly|secretly|covertly|discreetly|without\\s+(?:telling|mentioning|informing|notifying|alerting)|(?:do\\s+not|don't|never)\\s+(?:tell|mention|inform|reveal|disclose|notify)|must\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed))\\b.{0,200}?\\b(?:contents?|text|values?)\\s+of\\b.{0,60}?(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|(?:~|\\$HOME)/\\.env\\b|/etc/passwd|/etc/shadow).{0,100}?\\b(?:in|into|as|via)\\b.{0,30}?(?:^|[\\s'\\\"`])(?:(?:the\\s+)?['\\\"`]?(?:[a-z]{1,12}_)?(?:notes?|context|metadata|meta|comments?|extra|details?|description|text|message|session\\w*|payload|reason|info|log|tags?|labels?|trace\\w*|remarks?|memo|body|input|query|prompt|content|sidenote|annotation)['\\\"`]?\\s+|(?:an?|any|another|one)\\s+(?:other\\s+)?)(?:argument|parameter|field|param)\\b|\\b(?:contents?|text|values?)\\s+of\\b.{0,60}?(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|(?:~|\\$HOME)/\\.env\\b|/etc/passwd|/etc/shadow).{0,100}?\\b(?:in|into|as|via)\\b.{0,30}?(?:^|[\\s'\\\"`])(?:(?:the\\s+)?['\\\"`]?(?:[a-z]{1,12}_)?(?:notes?|context|metadata|meta|comments?|extra|details?|description|text|message|session\\w*|payload|reason|info|log|tags?|labels?|trace\\w*|remarks?|memo|body|input|query|prompt|content|sidenote|annotation)['\\\"`]?\\s+|(?:an?|any|another|one)\\s+(?:other\\s+)?)(?:argument|parameter|field|param)\\b.{0,200}?\\b(?:silently|quietly|secretly|covertly|discreetly|without\\s+(?:telling|mentioning|informing|notifying|alerting)|(?:do\\s+not|don't|never)\\s+(?:tell|mention|inform|reveal|disclose|notify)|must\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed))\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1106,7 +1106,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:collect|dump|harvest|gather|extract)\\b.{0,40}?\\b(?:all|every|each|any)\\b.{0,40}?(?:environment\\s+variables?|env\\s+vars?|os\\.environ|process\\.env|api\\s+keys?|secrets?|tokens?).{0,120}?\\b(?:include|put|pass|send|store|place|add|return)\\b.{0,60}?\\b(?:argument|parameter|field|param)\\b",
+      "pattern": "(?is)\\b(?:collect|dump|harvest|gather|extract)\\b.{0,40}?\\b(?:all|every|each|any)\\b.{0,40}?(?:environment\\s+variables?|env\\s+vars?|os\\.environ|process\\.env|api\\s+keys?|secrets?|(?:auth|access|api|bearer|session|oauth|refresh|login|service)\\s+tokens?).{0,120}?\\b(?:include|put|pass|send|store|place|add)\\b.{0,60}?\\b(?:argument|parameter|field|param)\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1160,7 +1160,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b.{0,100}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s+[A-Za-z0-9+/]{8,}|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh).{0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab)",
+      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b(?:[^.\\n]|\\.[^\\s.]){0,100}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s+[A-Za-z0-9+/]{8,}|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh)(?:[^.\\n]|\\.[^\\s.]){0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1184,7 +1184,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b.{0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab).{0,120}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s+[A-Za-z0-9+/]{8,}|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh)",
+      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b(?:[^.\\n]|\\.[^\\s.]){0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab)(?:[^.\\n]|\\.[^\\s.]){0,120}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s+[A-Za-z0-9+/]{8,}|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1867,7 +1867,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:base64[- ]?decode|decode|decrypt|unescape|atob)\\b[^.\\n]{0,80}?\\b(?:and|then|before)\\b[^.\\n]{0,30}?\\b(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|(?:result|output|string|text|contents?|it)(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as)\\b|$))",
+      "pattern": "(?is)\\b(?:base64[- ]?decode|decode|decrypt|unescape|atob)\\b[^.\\n]{0,80}?\\b(?:and|then|before)\\b[^.\\n]{0,30}?\\b(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|script|(?:result|output|string|text|contents?|it))(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as|locally|directly)\\b|$)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1897,7 +1897,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:decode|decrypt)\\b[^\\n]{0,100}?(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?:[^A-Za-z0-9+/]|$).{0,160}?\\b(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|(?:result|output|string|text|contents?|it)(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as)\\b|$))",
+      "pattern": "(?is)\\b(?:decode|decrypt)\\b[^\\n]{0,100}?(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?:[^A-Za-z0-9+/]|$).{0,160}?\\b(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|script|(?:result|output|string|text|contents?|it))(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as|locally|directly)\\b|$)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -2017,7 +2017,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)/dev/tcp/|\\bnc\\s+(?:-\\w+\\s+)*-e\\s+\\S+|\\bbash\\s+-i\\s*>&",
+      "pattern": "(?is)/dev/tcp/\\S{1,80}\\s+0>&1|\\b(?:ba|z|da)?sh\\s+<&\\s*\\d+\\s*>&\\s*\\d+|\\bnc\\s+(?:-\\w+\\s+)*-e\\s+\\S+|\\b(?:ba|z|da)?sh\\s+-i\\s*>&",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

@@ -34,7 +34,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:base64[- ]?decode|decode|decrypt|unescape|atob)\\b[^.\\n]{0,80}?\\b(?:and|then|before)\\b[^.\\n]{0,30}?\\b(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|(?:result|output|string|text|contents?|it)(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as)\\b|$))",
+      "pattern": "(?is)\\b(?:base64[- ]?decode|decode|decrypt|unescape|atob)\\b[^.\\n]{0,80}?\\b(?:and|then|before)\\b[^.\\n]{0,30}?\\b(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|script|(?:result|output|string|text|contents?|it))(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as|locally|directly)\\b|$)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -64,7 +64,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:decode|decrypt)\\b[^\\n]{0,100}?(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?:[^A-Za-z0-9+/]|$).{0,160}?\\b(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|(?:result|output|string|text|contents?|it)(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as)\\b|$))",
+      "pattern": "(?is)\\b(?:decode|decrypt)\\b[^\\n]{0,100}?(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?:[^A-Za-z0-9+/]|$).{0,160}?\\b(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|script|(?:result|output|string|text|contents?|it))(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as|locally|directly)\\b|$)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
