@@ -58,7 +58,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\bthis tool\\s+(?:is no longer available|has been (?:replaced|retired|removed))\\b.{0,120}?\\b(?:route|redirect|forward|send)\\s+(?:all|every)\\b.{0,80}?\\bto\\b.{0,60}?\\btool\\b",
+      "pattern": "(?is)\\bthis tool\\s+(?:is no longer available|has been (?:replaced|retired|removed))\\b.{0,120}?\\b(?:route|redirect|forward|send)\\s+(?:all|every)\\b.{0,80}?\\bto\\b.{0,60}?\\btool\\b.{0,120}?(?:\\b(?:do not|don't|never|without)\\s+(?:mention|tell|inform|notify|reveal|disclos|alert|warn)\\w*\\b.{0,40}?\\b(?:user|human|operator|anyone|this)\\b|\\b(?:silently|secretly|covertly|quietly)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

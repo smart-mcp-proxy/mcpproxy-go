@@ -174,7 +174,7 @@ description,input_schema}`, and cross-server `peers` so the `shadowing` check ca
 fire deterministically. Validated by `detect_corpus_test.go` in this directory
 and scored by `cmd/scan-eval --gate`.
 
-**Composition (182 entries):**
+**Composition (226 entries):**
 
 | Label | Category | Count | Mapped check | Gated today? |
 |-------|----------|-------|--------------|--------------|
@@ -184,7 +184,7 @@ and scored by `cmd/scan-eval --gate`.
 | malicious | `phrase_injection` | 13 | `phrase.injection` | yes (Spec 077 US1) |
 | malicious | `capability_mismatch` | 2 | `capability.mismatch` | **no** — US2 check; reported, not enforced |
 | malicious | `tpa_*` (16 signature classes, one gating signature or more each) | 42 | `tpa.bundle` | yes (Spec 101 US2) |
-| benign | `hard_negative` (attack-resembling) | 104 (21 built-in categories, 83 `tpa_*`) | — | — |
+| benign | `hard_negative` (attack-resembling) | 148 (21 built-in categories, 127 `tpa_*`) | — | — |
 | benign | `benign` (clean base rate) | 5 | — | — |
 
 The 42 `tpa_*` malicious entries are one self-authored sample per gating
@@ -196,10 +196,10 @@ vocabulary in `tpacorpus.Classes`:
 |-------|-----------|----------------|
 | `tpa_hidden_instruction_block` | 3 | 6 |
 | `tpa_comment_directive` | 1 | 2 |
-| `tpa_tool_shadowing` | 5 | 10 |
-| `tpa_cross_server_override` | 3 | 6 |
-| `tpa_exfil_redirect` | 4 | 8 |
-| `tpa_sensitive_file_coaxing` | 4 | 8 |
+| `tpa_tool_shadowing` | 5 | 18 |
+| `tpa_cross_server_override` | 3 | 11 |
+| `tpa_exfil_redirect` | 4 | 18 |
+| `tpa_sensitive_file_coaxing` | 4 | 21 |
 | `tpa_credential_harvesting` | 1 | 2 |
 | `tpa_persistence_implant` | 2 | 4 |
 | `tpa_rug_pull_phrasing` | 2 | 4 |
@@ -208,7 +208,7 @@ vocabulary in `tpacorpus.Classes`:
 | `tpa_preference_manipulation` | 2 | 4 |
 | `tpa_concealment_directive` | 1 | 2 |
 | `tpa_invisible_text` | 3 | 6 |
-| `tpa_payload_execution` | 4 | 7 |
+| `tpa_payload_execution` | 4 | 15 |
 | `tpa_schema_injection` | 1 | 2 |
 
 **Spec 101 US2 — in-place extension.** The `tpa_*` entries were appended to this

@@ -21,7 +21,7 @@
       "id": "TPA-2026-0015",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(change|swap|replace|redirect|override|rewrite)\\w*\\b.{0,40}\\b(recipient|destination|phone number|number)\\b.{0,60}\\+\\d{6,15}",
+      "pattern": "(?is)(?:\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b.{0,100}?\\b(change|swap|replace|redirect|override|rewrite)\\w*\\b.{0,40}\\b(recipient|destination|phone number|number)\\b.{0,60}\\+\\d{6,15}|\\b(change|swap|replace|redirect|override|rewrite)\\w*\\b.{0,40}\\b(recipient|destination|phone number|number)\\b.{0,60}\\+\\d{6,15}.{0,200}?\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

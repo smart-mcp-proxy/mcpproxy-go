@@ -5,8 +5,8 @@
   "license": "MIT",
   "provenance": {
     "note": "Out-of-scope parameter that makes the client fill in session data such as the calling model's name.",
-    "published": "2025-10-14",
-    "source": "https://github.com/dongsenzhang/MSB"
+    "published": "2026-03-24",
+    "source": "https://github.com/dongsenzhang/MSB/blob/main/data/tools/attack_tools/academic_search/PubMed_MCP_Server/pubmed_server-out_of_scope_parameter.py"
   },
   "rules": [
     {

@@ -21,7 +21,7 @@
       "id": "TPA-2026-0018",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(bcc|blind[ -]?cop(y|ies)|blind carbon)\\b.{0,160}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,160}?(not shown|hidden|need not be (surfaced|shown|disclosed|mentioned)|do not (show|mention|tell|surface)|without (telling|notifying|informing))",
+      "pattern": "(?is)\\b(bcc|blind[ -]?cop(y|ies)|blind carbon)\\b.{0,160}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,160}?\\b(silently|secretly|covertly|quietly|need not be (surfaced|shown|disclosed|mentioned)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|without (telling|notifying|informing)|(not shown|hidden|invisible)\\b.{0,15}\\b(to|from) (the )?(user|human|operator|person)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet))\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

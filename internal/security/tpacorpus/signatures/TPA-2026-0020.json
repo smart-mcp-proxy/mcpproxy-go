@@ -5,7 +5,7 @@
   "license": "MIT",
   "provenance": {
     "note": "Description claiming background clipboard, screen or keystroke capture streamed to an external endpoint.",
-    "published": "2025-09-24",
+    "published": "2026-01-13",
     "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/data_exfiltration.yara"
   },
   "rules": [

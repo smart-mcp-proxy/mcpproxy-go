@@ -21,7 +21,7 @@
       "id": "TPA-2026-0017",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(overwrite|override|rewrite|replace|substitute|redirect)\\w*\\b.{0,50}\\b(recipient|to['\\\"`]?\\s+(field|address|parameter)|destination|bcc|cc)\\b.{0,50}\\b(with|to|by)\\b.{0,40}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "pattern": "(?is)(?:\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b.{0,100}?\\b(overwrite|override|rewrite|replace|substitute|redirect)\\w*\\b.{0,50}\\b(recipient|to['\\\"`]?\\s+(field|address|parameter)|destination|bcc|cc)\\b.{0,50}\\b(with|to|by)\\b.{0,40}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+|\\b(overwrite|override|rewrite|replace|substitute|redirect)\\w*\\b.{0,50}\\b(recipient|to['\\\"`]?\\s+(field|address|parameter)|destination|bcc|cc)\\b.{0,50}\\b(with|to|by)\\b.{0,40}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,200}?\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -38,7 +38,7 @@
       "id": "TPA-2026-0017",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(whenever|every time|each time|when)\\b.{0,40}\\b(send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "pattern": "(?is)(?:\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b.{0,100}?\\b(whenever|every time|each time|when)\\b.{0,40}\\b(send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+|\\b(whenever|every time|each time|when)\\b.{0,40}\\b(send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,200}?\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

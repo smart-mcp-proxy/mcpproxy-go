@@ -28,7 +28,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:must|has\\s+to|have\\s+to|needs?\\s+to|required\\s+to|mandatory|before\\s+(?:using|calling|running|any|every|each))\\b.{0,100}?\\b(?:read|open|load|cat|access)\\b.{0,60}?(?:\\.ssh/id_|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.npmrc|\\.netrc|\\.env\\b)",
+      "pattern": "(?is)(?:(?:\\byou\\b|\\bthe\\s+(?:assistant|agent|model|ai|llm)\\b|\\bassistant\\b).{0,40}?\\b(?:must|has\\s+to|have\\s+to|needs?\\s+to|required\\s+to|should|mandatory|compulsory)\\b.{0,100}?\\b(?:read|open|load|cat|access)\\b.{0,60}?(?:\\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|id_(?:rsa|ed25519)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/credentials(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|/etc/passwd(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.npmrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.netrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.env(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$)))|\\bbefore\\s+(?:(?:using|calling|invoking|running)\\s+(?:this|the)\\s+tool|(?:any|every|each)\\s+(?:call|use|request|invocation))\\b.{0,60}?[,:;\\-–]\\s*(?:you\\s+(?:must|should|need\\s+to)\\s+)?(?:first\\s+)?\\b(?:read|open|load|cat|access)\\b.{0,60}?(?:\\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|id_(?:rsa|ed25519)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/credentials(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|/etc/passwd(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.npmrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.netrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.env(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$)))|\\b(?:mandatory|required|compulsory)\\s*[:,\\-–]\\s*(?:first\\s+)?(?:to\\s+)?\\b(?:read|open|load|cat|access)\\b.{0,60}?(?:\\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|id_(?:rsa|ed25519)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/credentials(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|/etc/passwd(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.npmrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.netrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.env(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -52,7 +52,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:read|open|load|cat)\\b.{0,40}?(?:\\.ssh/id_|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.npmrc|\\.netrc).{0,100}?\\b(?:before\\s+(?:every|each|any)\\s+(?:call|use|request|invocation)|skipping\\s+this\\s+step|on\\s+every\\s+call)",
+      "pattern": "(?is)\\b(?:read|open|load|cat)\\b.{0,40}?(?:\\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|id_(?:rsa|ed25519)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/credentials(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|/etc/passwd(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.npmrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.netrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))).{0,100}?\\b(?:before\\s+(?:every|each|any)\\s+(?:call|use|request|invocation)|skipping\\s+this\\s+step|on\\s+every\\s+call)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

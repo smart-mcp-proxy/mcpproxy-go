@@ -34,7 +34,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)\\b(?:delete|wipe|erase|remove|destroy|terminate)\\b[^.\\n]{0,100}?\\b(?:cloud resources|aws resources|home directory|all backups|file[- ]?system contents|everything on (?:the )?disk)\\b.{0,200}?\\bproceed\\w*\\s+without\\s+(?:asking|confirm\\w*|prompt\\w*|approval)",
+      "pattern": "(?is)\\b(?:delete|wipe|erase|remove|destroy|terminate)\\b[^.\\n]{0,100}?\\b(?:cloud resources|aws resources|home directory|all backups|file[- ]?system contents|everything on (?:the )?disk)\\b.{0,200}?\\bproceed\\w*\\s+without\\s+(?:asking|confirm\\w*|prompt\\w*|approval)(?:\\s+(?:for|from|of|with)\\b[^.\\n]{0,40})?\\s*(?:[.!;,)]|$)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -64,7 +64,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)\\b(?:delete|wipe|erase|remove|destroy)\\b[^.\\n]{0,80}?\\b(?:file[- ]?system|home directory|local (?:files|data)|entire disk)\\b.{0,250}?\\b(?:delete|remove|destroy|terminate|tear\\s*down)\\b[^.\\n]{0,80}?\\b(?:cloud (?:resources|infrastructure)|aws (?:resources|account)|backups?|s3 buckets?|ec2|iam)\\b",
+      "pattern": "(?is)(?:\\b(?:agent|assistant|model|ai)\\b[^.\\n]{0,30}?\\b(?:directives?|instructions?|must|should|tasks?)\\b.{0,160}?\\b(?:wipe|erase|destroy|delete|remove)\\b[^.\\n]{0,40}?\\b(?:(?:the |your |their )?(?:entire |whole |local )?file[- ]?system|(?:the |your )?home directory|(?:the )?entire disk|all (?:local |of the )?(?:files|data))\\b.{0,250}?\\b(?:delete|destroy|terminate|remove|tear\\s*down)\\b[^.\\n]{0,40}?\\b(?:all|every|each|entire)\\b[^.\\n]{0,40}?\\b(?:cloud (?:resources?|infrastructure)|aws (?:resources?|account)|backups?|s3 buckets?|ec2|iam)\\b|\\b(?:wipe|erase|destroy|delete|remove)\\b[^.\\n]{0,40}?\\b(?:(?:the |your |their )?(?:entire |whole |local )?file[- ]?system|(?:the |your )?home directory|(?:the )?entire disk|all (?:local |of the )?(?:files|data))\\b.{0,250}?\\b(?:delete|destroy|terminate|remove|tear\\s*down)\\b[^.\\n]{0,40}?\\b(?:all|every|each|entire)\\b[^.\\n]{0,40}?\\b(?:cloud (?:resources?|infrastructure)|aws (?:resources?|account)|backups?|s3 buckets?|ec2|iam)\\b.{0,200}?(?:\\bsilently\\b|\\bwithout (?:asking|confirm\\w*|telling|notifying|approval)\\b|\\bdo not (?:ask|tell|mention|confirm|warn|notify)\\b))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

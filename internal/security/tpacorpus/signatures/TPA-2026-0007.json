@@ -6,7 +6,7 @@
   "provenance": {
     "note": "Square-bracket [Important] or [INST] marker followed by an order to always pick this tool.",
     "published": "2025-08-09",
-    "source": "https://github.com/AIS2Lab/MCPSecBench"
+    "source": "https://github.com/AIS2Lab/MCPSecBench/blob/main/code/maliciousadd.py"
   },
   "rules": [
     {

@@ -21,7 +21,7 @@
       "id": "TPA-2026-0019",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(base32|base64|hex(adecimal)?|encod\\w*)\\b.{0,80}\\b(dns (lookup|quer\\w+|request)|subdomains?|nameserver)\\b.{0,160}?(\\bcredentials?\\b|\\bsecrets?\\b|\\btokens?\\b|\\bapi[ _-]?keys?\\b|\\bprivate keys?\\b|\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bfile contents?\\b)",
+      "pattern": "(?is)\\b(?:base32|base64|hex(?:adecimal)?|encod\\w*)\\b.{0,80}(?:\\bdns (?:lookups?|quer(?:y|ies)|requests?|resolution)\\b|\\bnameservers?\\b).{0,160}?(?:\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bid_rsa\\b|\\bprivate keys?\\b|\\b(?:contents?|values?) of (?:the |your |their |any |all )?(?:user'?s? )?(?:credentials?|secrets?|tokens?|api[ _-]?keys?)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -38,7 +38,7 @@
       "id": "TPA-2026-0019",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(base32|base64|hex(adecimal)?|encod\\w*)\\b.{0,80}(\\bcredentials?\\b|\\bsecrets?\\b|\\btokens?\\b|\\bapi[ _-]?keys?\\b|\\bprivate keys?\\b|\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bfile contents?\\b).{0,160}?\\b(dns (lookup|quer\\w+|request|resolution)|subdomains?|nameserver)\\b",
+      "pattern": "(?is)\\b(?:base32|base64|hex(?:adecimal)?|encod\\w*)\\b.{0,80}(?:\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bid_rsa\\b|\\bprivate keys?\\b|\\b(?:contents?|values?) of (?:the |your |their |any |all )?(?:user'?s? )?(?:credentials?|secrets?|tokens?|api[ _-]?keys?)\\b).{0,160}?(?:\\bdns (?:lookups?|quer(?:y|ies)|requests?|resolution)\\b|\\bnameservers?\\b|\\b(?:as|into|in|under|inside) (?:a |the |each |every )?(?:dns )?subdomains?\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

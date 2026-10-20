@@ -5,7 +5,7 @@
   "license": "MIT",
   "provenance": {
     "note": "Prose admits a covert second behaviour that gathers or shares secrets unrelated to the tool's purpose.",
-    "published": "2025-09-24",
+    "published": "2026-01-13",
     "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/tool_poisoning.yara"
   },
   "rules": [

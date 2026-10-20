@@ -6,7 +6,7 @@
   "provenance": {
     "note": "Post-approval 'upgrade' description that makes the agent read a credentials resource and keep quiet about it.",
     "published": "2025-08-09",
-    "source": "https://github.com/AIS2Lab/MCPSecBench"
+    "source": "https://github.com/AIS2Lab/MCPSecBench/blob/main/code/maliciousadd.py"
   },
   "rules": [
     {

@@ -616,7 +616,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:after|once)\\b.{0,80}?\\b(?:check|verif\\w*|validat\\w*|scan\\w*|audit\\w*)\\s+tool\\b.{0,120}?\\b(?:run|execute|call|invoke)\\s+this\\s+(?:function|tool)\\b.{0,80}?\\b(?:modify|replace|override|correct|change|alter|rewrite|fix)\\w*\\b.{0,60}?\\b(?:result|verdict|output|outcome|finding)s?\\b",
+      "pattern": "(?is)\\b(?:after|once)\\b.{0,80}?\\b(?:check|verif\\w*|validat\\w*|scan\\w*|audit\\w*)\\s+tool\\b.{0,120}?\\b(?:run|execute|call|invoke)\\s+this\\s+(?:function|tool)\\b.{0,80}?\\b(?:modify|replace|override|correct|change|alter|rewrite|fix)\\w*\\b.{0,40}?\\b(?:fail\\w*|wrong|incorrect|negative|bad|error\\w*)\\s+(?:result|verdict|output|outcome|finding)s?\\b(?:.{0,40}?\\bof\\s+(?:the|that)\\s+\\w+\\s+tool\\b|.{0,40}?\\b(?:to|so)\\b.{0,30}?\\b(?:pass\\w*|success\\w*|clean|ok|valid)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -670,7 +670,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\bthis tool\\s+(?:is no longer available|has been (?:replaced|retired|removed))\\b.{0,120}?\\b(?:route|redirect|forward|send)\\s+(?:all|every)\\b.{0,80}?\\bto\\b.{0,60}?\\btool\\b",
+      "pattern": "(?is)\\bthis tool\\s+(?:is no longer available|has been (?:replaced|retired|removed))\\b.{0,120}?\\b(?:route|redirect|forward|send)\\s+(?:all|every)\\b.{0,80}?\\bto\\b.{0,60}?\\btool\\b.{0,120}?(?:\\b(?:do not|don't|never|without)\\s+(?:mention|tell|inform|notify|reveal|disclos|alert|warn)\\w*\\b.{0,40}?\\b(?:user|human|operator|anyone|this)\\b|\\b(?:silently|secretly|covertly|quietly)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -687,7 +687,7 @@
       "id": "TPA-2026-0015",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(change|swap|replace|redirect|override|rewrite)\\w*\\b.{0,40}\\b(recipient|destination|phone number|number)\\b.{0,60}\\+\\d{6,15}",
+      "pattern": "(?is)(?:\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b.{0,100}?\\b(change|swap|replace|redirect|override|rewrite)\\w*\\b.{0,40}\\b(recipient|destination|phone number|number)\\b.{0,60}\\+\\d{6,15}|\\b(change|swap|replace|redirect|override|rewrite)\\w*\\b.{0,40}\\b(recipient|destination|phone number|number)\\b.{0,60}\\+\\d{6,15}.{0,200}?\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -721,7 +721,7 @@
       "id": "TPA-2026-0016",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(transfers?|payments?|transactions?)\\b.{0,60}\\b(must|should|always|required to)\\b.{0,30}\\b(be )?(redirected|rerouted|diverted|forwarded|routed)\\b.{0,100}?(\\bproxy\\b|0x[0-9a-f]{3,})",
+      "pattern": "(?is)\\b(transfers?|payments?|transactions?)\\b.{0,60}\\b(must|should|always|required to)\\b.{0,30}\\b(be )?(redirected|rerouted|diverted|forwarded|routed)\\b.{0,100}?0x[0-9a-f]{20,}",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -738,7 +738,7 @@
       "id": "TPA-2026-0016",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(always|must|mandatory|required)\\b.{0,60}\\b(redirect|reroute|forward|route)\\w*\\b.{0,60}\\b(transfers?|payments?|transactions?|withdrawals?)\\b.{0,160}?(\\bproxy\\b|0x[0-9a-f]{3,})",
+      "pattern": "(?is)\\b(always|must|mandatory|required)\\b.{0,60}\\b(redirect|reroute|forward|route)\\w*\\b.{0,60}\\b(transfers?|payments?|transactions?|withdrawals?)\\b.{0,160}?0x[0-9a-f]{20,}",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -772,7 +772,7 @@
       "id": "TPA-2026-0017",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(overwrite|override|rewrite|replace|substitute|redirect)\\w*\\b.{0,50}\\b(recipient|to['\\\"`]?\\s+(field|address|parameter)|destination|bcc|cc)\\b.{0,50}\\b(with|to|by)\\b.{0,40}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "pattern": "(?is)(?:\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b.{0,100}?\\b(overwrite|override|rewrite|replace|substitute|redirect)\\w*\\b.{0,50}\\b(recipient|to['\\\"`]?\\s+(field|address|parameter)|destination|bcc|cc)\\b.{0,50}\\b(with|to|by)\\b.{0,40}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+|\\b(overwrite|override|rewrite|replace|substitute|redirect)\\w*\\b.{0,50}\\b(recipient|to['\\\"`]?\\s+(field|address|parameter)|destination|bcc|cc)\\b.{0,50}\\b(with|to|by)\\b.{0,40}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,200}?\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -789,7 +789,7 @@
       "id": "TPA-2026-0017",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(whenever|every time|each time|when)\\b.{0,40}\\b(send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "pattern": "(?is)(?:\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b.{0,100}?\\b(whenever|every time|each time|when)\\b.{0,40}\\b(send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+|\\b(whenever|every time|each time|when)\\b.{0,40}\\b(send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,200}?\\b(quietly|silently|secretly|covertly|surreptitiously|without (telling|notifying|informing|mentioning|alerting)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|regardless of (what|whatever|who|which|the user)|no matter (what|which|who)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet)|out of the (visible|user)|(not|never) (be )?visible)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -806,7 +806,7 @@
       "id": "TPA-2026-0018",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(bcc|blind[ -]?cop(y|ies)|blind carbon)\\b.{0,160}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,160}?(not shown|hidden|need not be (surfaced|shown|disclosed|mentioned)|do not (show|mention|tell|surface)|without (telling|notifying|informing))",
+      "pattern": "(?is)\\b(bcc|blind[ -]?cop(y|ies)|blind carbon)\\b.{0,160}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,160}?\\b(silently|secretly|covertly|quietly|need not be (surfaced|shown|disclosed|mentioned)|(do not|don['’]t|never|must not|should not) (be )?(mention|tell|inform|notify|reveal|show|disclose|surface|shown|mentioned|disclosed)|without (telling|notifying|informing)|(not shown|hidden|invisible)\\b.{0,15}\\b(to|from) (the )?(user|human|operator|person)|keep\\b.{0,40}\\b(out of|hidden|secret|quiet))\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -840,7 +840,7 @@
       "id": "TPA-2026-0019",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(base32|base64|hex(adecimal)?|encod\\w*)\\b.{0,80}\\b(dns (lookup|quer\\w+|request)|subdomains?|nameserver)\\b.{0,160}?(\\bcredentials?\\b|\\bsecrets?\\b|\\btokens?\\b|\\bapi[ _-]?keys?\\b|\\bprivate keys?\\b|\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bfile contents?\\b)",
+      "pattern": "(?is)\\b(?:base32|base64|hex(?:adecimal)?|encod\\w*)\\b.{0,80}(?:\\bdns (?:lookups?|quer(?:y|ies)|requests?|resolution)\\b|\\bnameservers?\\b).{0,160}?(?:\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bid_rsa\\b|\\bprivate keys?\\b|\\b(?:contents?|values?) of (?:the |your |their |any |all )?(?:user'?s? )?(?:credentials?|secrets?|tokens?|api[ _-]?keys?)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -857,7 +857,7 @@
       "id": "TPA-2026-0019",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(base32|base64|hex(adecimal)?|encod\\w*)\\b.{0,80}(\\bcredentials?\\b|\\bsecrets?\\b|\\btokens?\\b|\\bapi[ _-]?keys?\\b|\\bprivate keys?\\b|\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bfile contents?\\b).{0,160}?\\b(dns (lookup|quer\\w+|request|resolution)|subdomains?|nameserver)\\b",
+      "pattern": "(?is)\\b(?:base32|base64|hex(?:adecimal)?|encod\\w*)\\b.{0,80}(?:\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bid_rsa\\b|\\bprivate keys?\\b|\\b(?:contents?|values?) of (?:the |your |their |any |all )?(?:user'?s? )?(?:credentials?|secrets?|tokens?|api[ _-]?keys?)\\b).{0,160}?(?:\\bdns (?:lookups?|quer(?:y|ies)|requests?|resolution)\\b|\\bnameservers?\\b|\\b(?:as|into|in|under|inside) (?:a |the |each |every )?(?:dns )?subdomains?\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -932,7 +932,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:contents?|text|values?)\\s+of\\b.{0,60}?(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|\\.ssh/|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.env\\b|credentials?\\s+file|private\\s+key).{0,100}?\\b(?:in|into|as|via)\\b.{0,30}?\\b(?:the\\s+)?'?\\w+'?\\s+(?:argument|parameter|field)\\b",
+      "pattern": "(?is)\\b(?:contents?|text|values?)\\s+of\\b.{0,60}?(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|(?:~|\\$HOME)/\\.env\\b|/etc/passwd|/etc/shadow).{0,100}?\\b(?:in|into|as|via)\\b.{0,30}?\\b(?:the\\s+)?'?\\w+'?\\s+(?:argument|parameter|field)\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1040,7 +1040,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:must|has\\s+to|have\\s+to|needs?\\s+to|required\\s+to|mandatory|before\\s+(?:using|calling|running|any|every|each))\\b.{0,100}?\\b(?:read|open|load|cat|access)\\b.{0,60}?(?:\\.ssh/id_|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.npmrc|\\.netrc|\\.env\\b)",
+      "pattern": "(?is)(?:(?:\\byou\\b|\\bthe\\s+(?:assistant|agent|model|ai|llm)\\b|\\bassistant\\b).{0,40}?\\b(?:must|has\\s+to|have\\s+to|needs?\\s+to|required\\s+to|should|mandatory|compulsory)\\b.{0,100}?\\b(?:read|open|load|cat|access)\\b.{0,60}?(?:\\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|id_(?:rsa|ed25519)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/credentials(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|/etc/passwd(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.npmrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.netrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.env(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$)))|\\bbefore\\s+(?:(?:using|calling|invoking|running)\\s+(?:this|the)\\s+tool|(?:any|every|each)\\s+(?:call|use|request|invocation))\\b.{0,60}?[,:;\\-–]\\s*(?:you\\s+(?:must|should|need\\s+to)\\s+)?(?:first\\s+)?\\b(?:read|open|load|cat|access)\\b.{0,60}?(?:\\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|id_(?:rsa|ed25519)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/credentials(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|/etc/passwd(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.npmrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.netrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.env(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$)))|\\b(?:mandatory|required|compulsory)\\s*[:,\\-–]\\s*(?:first\\s+)?(?:to\\s+)?\\b(?:read|open|load|cat|access)\\b.{0,60}?(?:\\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|id_(?:rsa|ed25519)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/credentials(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|/etc/passwd(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.npmrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.netrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.env(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1064,7 +1064,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:read|open|load|cat)\\b.{0,40}?(?:\\.ssh/id_|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.npmrc|\\.netrc).{0,100}?\\b(?:before\\s+(?:every|each|any)\\s+(?:call|use|request|invocation)|skipping\\s+this\\s+step|on\\s+every\\s+call)",
+      "pattern": "(?is)\\b(?:read|open|load|cat)\\b.{0,40}?(?:\\.ssh/id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|id_(?:rsa|ed25519)(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.aws/credentials(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|/etc/passwd(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.npmrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))|\\.netrc(?:$|[\\s'\"`,;:)]|\\.(?:\\s|$))).{0,100}?\\b(?:before\\s+(?:every|each|any)\\s+(?:call|use|request|invocation)|skipping\\s+this\\s+step|on\\s+every\\s+call)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1849,7 +1849,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:base64[- ]?decode|decode|decrypt|unescape|atob)\\b[^.\\n]{0,80}?\\b(?:and|then|before)\\b[^.\\n]{0,30}?\\b(?:execute|run|eval(?:uate)?)\\b[^.\\n]{0,60}?\\b(?:result|output|it|string|command|payload)\\b",
+      "pattern": "(?is)\\b(?:base64[- ]?decode|decode|decrypt|unescape|atob)\\b[^.\\n]{0,80}?\\b(?:and|then|before)\\b[^.\\n]{0,30}?\\b(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|(?:result|output|string|text|contents?|it)(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as)\\b|$))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1879,7 +1879,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:decode|decrypt)\\b[^\\n]{0,100}?(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{32,}={0,2}(?:[^A-Za-z0-9+/]|$).{0,160}?\\b(?:execute|run|eval(?:uate)?)\\b",
+      "pattern": "(?is)\\b(?:decode|decrypt)\\b[^\\n]{0,100}?(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?:[^A-Za-z0-9+/]|$).{0,160}?\\b(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|(?:result|output|string|text|contents?|it)(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as)\\b|$))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1909,7 +1909,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)\\b(?:delete|wipe|erase|remove|destroy|terminate)\\b[^.\\n]{0,100}?\\b(?:cloud resources|aws resources|home directory|all backups|file[- ]?system contents|everything on (?:the )?disk)\\b.{0,200}?\\bproceed\\w*\\s+without\\s+(?:asking|confirm\\w*|prompt\\w*|approval)",
+      "pattern": "(?is)\\b(?:delete|wipe|erase|remove|destroy|terminate)\\b[^.\\n]{0,100}?\\b(?:cloud resources|aws resources|home directory|all backups|file[- ]?system contents|everything on (?:the )?disk)\\b.{0,200}?\\bproceed\\w*\\s+without\\s+(?:asking|confirm\\w*|prompt\\w*|approval)(?:\\s+(?:for|from|of|with)\\b[^.\\n]{0,40})?\\s*(?:[.!;,)]|$)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -1939,7 +1939,7 @@
         }
       ],
       "level": "critical",
-      "pattern": "(?is)\\b(?:delete|wipe|erase|remove|destroy)\\b[^.\\n]{0,80}?\\b(?:file[- ]?system|home directory|local (?:files|data)|entire disk)\\b.{0,250}?\\b(?:delete|remove|destroy|terminate|tear\\s*down)\\b[^.\\n]{0,80}?\\b(?:cloud (?:resources|infrastructure)|aws (?:resources|account)|backups?|s3 buckets?|ec2|iam)\\b",
+      "pattern": "(?is)(?:\\b(?:agent|assistant|model|ai)\\b[^.\\n]{0,30}?\\b(?:directives?|instructions?|must|should|tasks?)\\b.{0,160}?\\b(?:wipe|erase|destroy|delete|remove)\\b[^.\\n]{0,40}?\\b(?:(?:the |your |their )?(?:entire |whole |local )?file[- ]?system|(?:the |your )?home directory|(?:the )?entire disk|all (?:local |of the )?(?:files|data))\\b.{0,250}?\\b(?:delete|destroy|terminate|remove|tear\\s*down)\\b[^.\\n]{0,40}?\\b(?:all|every|each|entire)\\b[^.\\n]{0,40}?\\b(?:cloud (?:resources?|infrastructure)|aws (?:resources?|account)|backups?|s3 buckets?|ec2|iam)\\b|\\b(?:wipe|erase|destroy|delete|remove)\\b[^.\\n]{0,40}?\\b(?:(?:the |your |their )?(?:entire |whole |local )?file[- ]?system|(?:the |your )?home directory|(?:the )?entire disk|all (?:local |of the )?(?:files|data))\\b.{0,250}?\\b(?:delete|destroy|terminate|remove|tear\\s*down)\\b[^.\\n]{0,40}?\\b(?:all|every|each|entire)\\b[^.\\n]{0,40}?\\b(?:cloud (?:resources?|infrastructure)|aws (?:resources?|account)|backups?|s3 buckets?|ec2|iam)\\b.{0,200}?(?:\\bsilently\\b|\\bwithout (?:asking|confirm\\w*|telling|notifying|approval)\\b|\\bdo not (?:ask|tell|mention|confirm|warn|notify)\\b))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -2188,7 +2188,7 @@
       "provenance": {
         "note": "Square-bracket [Important] or [INST] marker followed by an order to always pick this tool.",
         "published": "2025-08-09",
-        "source": "https://github.com/AIS2Lab/MCPSecBench"
+        "source": "https://github.com/AIS2Lab/MCPSecBench/blob/main/code/maliciousadd.py"
       },
       "rule_ids": [
         "TPA-2026-0007/bracket_marker_regardless",
@@ -2202,7 +2202,7 @@
       "license": "MIT",
       "provenance": {
         "note": "Prose admits a covert second behaviour that gathers or shares secrets unrelated to the tool's purpose.",
-        "published": "2025-09-24",
+        "published": "2026-01-13",
         "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/tool_poisoning.yara"
       },
       "rule_ids": [
@@ -2277,7 +2277,7 @@
       "provenance": {
         "note": "Post-hook description that tells the agent to rewrite the verdict of a check tool after it has run.",
         "published": "2025-08-09",
-        "source": "https://github.com/AIS2Lab/MCPSecBench"
+        "source": "https://github.com/AIS2Lab/MCPSecBench/blob/main/code/maliciousadd.py"
       },
       "rule_ids": [
         "TPA-2026-0013/post_hook_result_tamper"
@@ -2381,7 +2381,7 @@
       "license": "MIT",
       "provenance": {
         "note": "Description claiming background clipboard, screen or keystroke capture streamed to an external endpoint.",
-        "published": "2025-09-24",
+        "published": "2026-01-13",
         "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/data_exfiltration.yara"
       },
       "rule_ids": [
@@ -2473,7 +2473,7 @@
       "provenance": {
         "note": "Post-approval 'upgrade' description that makes the agent read a credentials resource and keep quiet about it.",
         "published": "2025-08-09",
-        "source": "https://github.com/AIS2Lab/MCPSecBench"
+        "source": "https://github.com/AIS2Lab/MCPSecBench/blob/main/code/maliciousadd.py"
       },
       "rule_ids": [
         "TPA-2026-0026/upgrade_claim_read_secret",
@@ -2563,8 +2563,8 @@
       "license": "MIT",
       "provenance": {
         "note": "Out-of-scope parameter that makes the client fill in session data such as the calling model's name.",
-        "published": "2025-10-14",
-        "source": "https://github.com/dongsenzhang/MSB"
+        "published": "2026-03-24",
+        "source": "https://github.com/dongsenzhang/MSB/blob/main/data/tools/attack_tools/academic_search/PubMed_MCP_Server/pubmed_server-out_of_scope_parameter.py"
       },
       "rule_ids": [
         "TPA-2026-0032/caller_model_param",
