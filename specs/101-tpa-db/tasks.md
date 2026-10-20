@@ -96,9 +96,9 @@ plan.md was written 2026-08-26 against Go 1.25.5. Re-validated against `main` @ 
 
 - [x] T080 `./scripts/test-api-e2e.sh`; `go test -race ./internal/security/... ./internal/storage/... ./internal/config/... ./internal/telemetry/...`; the CLAUDE.md skip-regex race run over `internal/server`/`httpapi`; golangci-lint v2 bare and `--build-tags server`.
 - [x] T081 Review workflow (dimensions → 3 refuters per finding → fix confirmed).
-- [ ] T082 Cross-model review (opencode Sol 6.1; ≤10 rounds).
+- [x] T082 Cross-model review (opencode Sol 6.1; ≤10 rounds).
 - [x] T083 Docs: `docs/features/tpa-bundle-signing.md` (operator: verify, drop, reload, roll back, read status, air-gapped walkthrough, Windows/NFS residual), `docs/features/security-quarantine.md` + tool-scanner docs (degraded states), `docs/configuration.md` (new keys), quickstart.md corrections (Δ5, Δ8, Δ13, sequence ≥ baseline), `CLAUDE.md` Recent Changes, `roadmap.yaml` + `scripts/gen-roadmap.py`.
-- [ ] T084 Open the PR; tick this file.
+- [x] T084 Open the PR; tick this file.
 
 ---
 
