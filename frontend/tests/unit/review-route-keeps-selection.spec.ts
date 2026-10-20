@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
+import { createPinia } from 'pinia'
 import Review from '@/views/Review.vue'
 import api from '@/services/api'
 import type { ReviewTool } from '@/types'
@@ -18,7 +19,7 @@ const tool = (name: string, extra: Partial<ReviewTool> = {}): ReviewTool => ({
 async function mountRoute() {
   const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/review', component: Review }, { path: '/review/:server', component: Review }] })
   await router.push('/review/fixture'); await router.isReady()
-  const wrapper = mount(Review, { global: { plugins: [router], stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
+  const wrapper = mount(Review, { global: { plugins: [createPinia(), router], stubs: { RouterLink: { template: '<a><slot /></a>' } } } })
   await flushPromises()
   return wrapper
 }

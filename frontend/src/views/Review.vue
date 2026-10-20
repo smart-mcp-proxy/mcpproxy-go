@@ -24,6 +24,8 @@
       <div v-if="!filteredRows.length" class="alert" data-test="review-no-match"><span>No reviews match this view.</span><button v-if="effectiveView === 'active' || search" type="button" class="btn btn-xs" @click="search = ''; view = 'all'">Show all reviews</button></div>
       <ReviewQueueList :rows="filteredRows" :change="change" />
     </template>
+    <!-- Spec 101 FR-020: signature database state. Quiet (folded) when healthy; the degraded banner is not folded. -->
+    <SignatureBundleStatus v-if="!selectedServer" :bundle="signatureBundle" collapsible data-test="review-signature-bundle" />
     <ScanHistory v-if="!selectedServer" />
   </div>
 </template>
@@ -36,7 +38,11 @@ import type { ReviewQueueResponse } from '@/types'
 import ReviewScreen from '@/components/ReviewScreen.vue'
 import ScanHistory from '@/components/ScanHistory.vue'
 import ReviewQueueList from '@/components/ReviewQueueList.vue'
+import SignatureBundleStatus from '@/components/security/SignatureBundleStatus.vue'
+import { useSecurityScannerStatus } from '@/composables/useSecurityScannerStatus'
 import { isActiveBlocker, reviewQueueScopeText, sortReviewRows, summarizeReviewQueue, type ReviewSort } from '@/utils/reviewQueue'
+// Shared with Home/Security: one /security/overview fetch; renders nothing when unavailable (scoped session, older daemon).
+const { signatureBundle } = useSecurityScannerStatus()
 const route = useRoute(); const scopeQuery = useScopeQuery('review'); const queue = ref<ReviewQueueResponse | null>(null); const loading = ref(false); const error = ref('')
 const selectedServer = computed(() => typeof route.params.server === 'string' ? route.params.server : '')
 const change = computed(() => scopeQuery.state.change ?? '')
