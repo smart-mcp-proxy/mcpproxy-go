@@ -1,0 +1,6 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Heartbeat install_channel field (Spec 121)",
+  "type": "string",
+  "enum": ["brew","dmg","winget","scoop","windows-installer","deb","rpm","docker","registry","curl","tarball","go-install","unknown"]
+}
