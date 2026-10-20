@@ -598,6 +598,21 @@ func SaveConfigToDataDir(cfg *Config) error {
 	return SaveConfig(cfg, configPath)
 }
 
+// Environment variables that name the data directory. EnvDataDir is the
+// documented spelling and, like --data-dir, also decides where `serve` looks
+// for mcp_config.json (see cmd/mcpproxy loadConfig). EnvDataDirLegacy keeps its
+// historical meaning: it relocates the data directory only.
+const (
+	EnvDataDir       = "MCPPROXY_DATA_DIR"
+	EnvDataDirLegacy = "MCPPROXY_DATA"
+)
+
+// DataDirFromEnv returns the directory named by MCPPROXY_DATA_DIR, or "" when
+// it is unset or blank. It does not consult the legacy MCPPROXY_DATA.
+func DataDirFromEnv() string {
+	return strings.TrimSpace(os.Getenv(EnvDataDir))
+}
+
 // GetConfigPath returns the path to the configuration file in the data directory
 func GetConfigPath(dataDir string) string {
 	if dataDir == "" {
@@ -838,8 +853,13 @@ func applyTLSEnvOverrides(cfg *Config) {
 	value = os.Getenv("MCPPROXY_CERTS_DIR")
 	envOverride(b, cfg, FieldTLSCertsDir, value != "", value)
 
-	// Override data directory from environment (for backward compatibility)
-	value = os.Getenv("MCPPROXY_DATA")
+	// Override data directory from environment. MCPPROXY_DATA_DIR is the
+	// documented name; MCPPROXY_DATA is kept for backward compatibility and
+	// loses when both are set.
+	value = os.Getenv(EnvDataDir)
+	if value == "" {
+		value = os.Getenv(EnvDataDirLegacy)
+	}
 	envOverride(b, cfg, FieldDataDir, value != "", value)
 
 	// Spec 112 FR-003: MCPPROXY_FORWARD_CLIENT_HEADERS=false|0|off disables

@@ -788,23 +788,54 @@ func readConfigFile(path string) (*config.Config, error) {
 	return config.DecodeConfigFile(path)
 }
 
+// implicitDataDirConfigPath is the config file `serve` uses when no --config was
+// given but a data directory was: <data-dir>/mcp_config.json when it exists, and
+// on a first run (no config in the data dir or in the legacy discovery
+// locations) the same path so the default config is seeded inside the named
+// directory instead of under $HOME. "" keeps the legacy discovery (cwd, then
+// $HOME/.mcpproxy).
+func implicitDataDirConfigPath() string {
+	if dataDir == "" {
+		return ""
+	}
+	p := config.GetConfigPath(dataDir)
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	if !legacyConfigExists() {
+		return p
+	}
+	return ""
+}
+
 func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 	var cfg *config.Config
 	var err error
 	loadedPath := configFile
 
+	// A --data-dir (or MCPPROXY_DATA_DIR) names where this instance keeps its
+	// state, config included: every management command already reads
+	// <data-dir>/mcp_config.json (GH #854/#897/#908), so `serve` must too or
+	// the two disagree about the listen address and API key. An explicit
+	// --config still wins.
+	configPath := configFile
+	if configPath == "" {
+		configPath = implicitDataDirConfigPath()
+	}
+
 	// Load configuration - use LoadFromFile if config file specified, otherwise use Load
-	if configFile != "" {
+	if configPath != "" {
 		// A named config that has never been written is a FIRST RUN, not an
 		// error: the relocated tray instance of GH #936 spawns its core with
 		// --data-dir <root> --config <root>/mcp_config.json against a root
 		// nothing has used before. The implicit path has always created its
 		// default here; the explicit one used to exit with "no such file or
 		// directory" instead, which made that whole flow unusable.
-		if _, ensureErr := config.EnsureConfigFile(configFile, dataDir); ensureErr != nil {
+		if _, ensureErr := config.EnsureConfigFile(configPath, dataDir); ensureErr != nil {
 			return nil, nil, ensureErr
 		}
-		cfg, err = config.LoadFromFile(configFile)
+		cfg, err = config.LoadFromFile(configPath)
+		loadedPath = configPath
 	} else {
 		cfg, loadedPath, err = config.LoadWithPath()
 	}
