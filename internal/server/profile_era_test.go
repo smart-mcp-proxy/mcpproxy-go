@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // Spec 058 US3 (FR-011): under the 2026-07-28 revision there is no session, so
@@ -80,8 +82,41 @@ func TestProfileEra_SessionTierSkippedOnModernRequests(t *testing.T) {
 	info := proxy.sessionStore.GetSession("stdio")
 	require.NotNil(t, info)
 	assert.Equal(t, "", info.Profile, "a modern request must not write per-connection state")
-	assert.Equal(t, "", proxy.markWorkIfToolCall(urlModern, mcp.MethodToolsCall), "nor mark the connection as worked")
-	assert.Equal(t, "", proxy.markSessionWorked(urlModern, "stdio"), "whichever funnel marks the work")
+}
+
+// The work-session half of the write side (cross-review O2, round 2): over a
+// STORAGE-BACKED session store — a bare one returns "" from EnsurePersisted
+// regardless, which made the earlier assertion vacuous — a legacy tools/call
+// on the stdio session persists it and resolves a work session, while a modern
+// request on the same session id resolves nothing, invokes no resolver and
+// leaves the row unpersisted.
+func TestProfileEra_ModernRequestDoesNotMarkWork(t *testing.T) {
+	newProxy := func(t *testing.T) (*MCPProxyServer, *SessionStore, *atomic.Int32) {
+		p, store := newWorkSessionProxy(t)
+		var calls atomic.Int32
+		p.workSessionResolver = func(id runtime.WorkSessionIdentity) string {
+			calls.Add(1)
+			return "ws-" + id.ClientName
+		}
+		store.SetSession("stdio", "ide", "1.0", false, false, nil)
+		return p, store, &calls
+	}
+
+	t.Run("legacy control persists and resolves", func(t *testing.T) {
+		p, store, calls := newProxy(t)
+		require.Equal(t, "ws-ide", p.markWorkIfToolCall(workSessionCtx("stdio"), mcp.MethodToolsCall))
+		require.EqualValues(t, 1, calls.Load())
+		require.True(t, store.GetSession("stdio").persisted, "the legacy call earns the durable row")
+	})
+
+	t.Run("modern request on the same session id marks nothing", func(t *testing.T) {
+		p, store, calls := newProxy(t)
+		modern := modernRequestCtx(workSessionCtx("stdio"))
+		assert.Equal(t, "", p.markWorkIfToolCall(modern, mcp.MethodToolsCall))
+		assert.Equal(t, "", p.markSessionWorked(modern, "stdio"), "whichever funnel marks the work")
+		assert.Zero(t, calls.Load(), "no work session may be resolved for a modern request")
+		assert.False(t, store.GetSession("stdio").persisted, "no session row may be persisted for a modern request")
+	})
 }
 
 // ─── stdio surface ──────────────────────────────────────────────────────────
