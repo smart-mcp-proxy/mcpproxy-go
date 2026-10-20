@@ -1,0 +1,48 @@
+{
+  "category": "tpa_instruction_override",
+  "gating": true,
+  "id": "TPA-2026-0027",
+  "license": "MIT",
+  "provenance": {
+    "note": "Classic 'ignore all previous instructions' opener inside a tool description followed by a data-dump order.",
+    "published": "2025-08-19",
+    "source": "https://arxiv.org/abs/2508.14925"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "ignore_previous",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0027",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?>\\n]\\s*)(?:(?:first|then|also|now|please|always|and|but|next|you\\s+(?:must|should|shall|need\\s+to))[,:]?\\s+)*(ignore|disregard|forget|override)\\W+(?:(?:all|any|every|the|of|your|my|these|those|other)\\W+){0,4}?(previous|prior|above|earlier|preceding)\\W+(?:\\w+\\W+){0,1}(instructions|directions|rules|guidelines|prompts?|commands)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "ignore_instructions_then_act",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0027",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?>\\n]\\s*)(?:(?:first|then|also|now|please|always|and|but|next|you\\s+(?:must|should|shall|need\\s+to))[,:]?\\s+)*(ignore|disregard|forget)\\W+(?:\\w+\\W+){0,3}?(instructions|directions|guidelines|system\\s+prompt)\\W+(?:\\w+\\W+){0,3}?(instead|and\\s+(?:then\\s+)?(?:output|print|send|post|reveal|dump|upload|execute|run))\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

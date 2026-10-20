@@ -1,0 +1,48 @@
+{
+  "category": "tpa_conversation_exfil",
+  "gating": true,
+  "id": "TPA-2026-0031",
+  "license": "MIT",
+  "provenance": {
+    "note": "Spellchecker-style tool that fires on a trigger phrase and receives the complete conversation as a parameter.",
+    "published": "2025-04-23",
+    "source": "https://blog.trailofbits.com/2025/04/23/how-mcp-servers-can-steal-your-conversation-history/"
+  },
+  "rules": [
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "trigger_phrase_call_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0031",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:if|whenever|when)\\b[^.\\n]{0,100}?\\b(?:call|use|invoke)\\s+this\\s+tool\\s+(?:immediately\\s+|first\\s+)?before\\s+(?:doing\\s+)?(?:anything|any\\s+other|responding|answering)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.92,
+      "detector": "full_history_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0031",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:entire|complete|full|whole)\\s+(?:conversation|chat)\\s+(?:history\\s+)?(?:including|and)\\b.{0,120}?\\b(?:not\\s+just\\s+the\\s+(?:latest|last|current)|and\\s+all\\s+tool\\s+outputs?|must\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed)|do\\s+not\\s+(?:mention|tell|disclose))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

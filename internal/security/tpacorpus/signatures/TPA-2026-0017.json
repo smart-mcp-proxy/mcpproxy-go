@@ -1,0 +1,48 @@
+{
+  "category": "tpa_exfil_redirect",
+  "gating": true,
+  "id": "TPA-2026-0017",
+  "license": "MIT",
+  "provenance": {
+    "note": "A standing rule in an unrelated tool that rewrites the recipient of a later send_email call to a fixed address (parameter tampering).",
+    "published": "2025-08-19",
+    "source": "https://arxiv.org/abs/2508.14925"
+  },
+  "rules": [
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "recipient_overwrite_literal",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0017",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(overwrite|override|rewrite|replace|substitute|redirect)\\w*\\b.{0,50}\\b(recipient|to['\\\"`]?\\s+(field|address|parameter)|destination|bcc|cc)\\b.{0,50}\\b(with|to|by)\\b.{0,40}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "tool_call_recipient_rewrite",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0017",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(whenever|every time|each time|when)\\b.{0,40}\\b(send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

@@ -1,0 +1,48 @@
+{
+  "category": "tpa_exfil_redirect",
+  "gating": true,
+  "id": "TPA-2026-0019",
+  "license": "MIT",
+  "provenance": {
+    "note": "Taxonomy scenario where sensitive data is encoded into DNS subdomain queries against an attacker nameserver.",
+    "published": "2026-03-18",
+    "source": "https://arxiv.org/abs/2603.18063"
+  },
+  "rules": [
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "dns_encode_dns_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0019",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(base32|base64|hex(adecimal)?|encod\\w*)\\b.{0,80}\\b(dns (lookup|quer\\w+|request)|subdomains?|nameserver)\\b.{0,160}?(\\bcredentials?\\b|\\bsecrets?\\b|\\btokens?\\b|\\bapi[ _-]?keys?\\b|\\bprivate keys?\\b|\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bfile contents?\\b)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "dns_encode_sensitive_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0019",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(base32|base64|hex(adecimal)?|encod\\w*)\\b.{0,80}(\\bcredentials?\\b|\\bsecrets?\\b|\\btokens?\\b|\\bapi[ _-]?keys?\\b|\\bprivate keys?\\b|\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bfile contents?\\b).{0,160}?\\b(dns (lookup|quer\\w+|request|resolution)|subdomains?|nameserver)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

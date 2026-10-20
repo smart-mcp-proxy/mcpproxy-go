@@ -1,0 +1,68 @@
+{
+  "category": "tpa_tool_shadowing",
+  "gating": true,
+  "id": "TPA-2026-0012",
+  "license": "MIT",
+  "provenance": {
+    "note": "Description claims to change how all other tools behave whenever this tool is available.",
+    "published": "2025-04-15",
+    "source": "https://github.com/riseandignite/mcp-shield/blob/master/src/analyzers/tool-analyzer.ts"
+  },
+  "rules": [
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.84,
+      "detector": "before_any_other_tool_redirect",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0012",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$before",
+          "type": "regex",
+          "value": "before\\s+(?:using|calling)\\s+any\\s+other\\s+tool"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\bbefore\\s+(?:using|calling|invoking)\\s+(?:any|every|each)\\s+other\\s+tool\\b.{0,120}?\\b(?:address|redirect|route|forward|send|copy|bcc|cc)\\b.{0,100}?\\b(?:to|towards)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.9,
+      "detector": "override_other_tools_when_available",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0012",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cond",
+          "type": "regex",
+          "value": "when\\s+this\\s+tool\\s+is\\s+available"
+        },
+        {
+          "context": "tool_description",
+          "id": "$override",
+          "type": "regex",
+          "value": "override|modify|replace"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:when|if|whenever)\\b.{0,40}?\\bthis tool\\b.{0,20}?\\b(?:is\\s+)?(?:available|present|loaded|enabled)\\b.{0,160}?\\b(?:override|modify|replace|change|alter|redefine)\\w*\\b.{0,50}?\\b(?:behaviou?r|usage|use|function|operation)s?\\b.{0,20}?\\bof\\b.{0,30}?\\b(?:all\\s+)?(?:other|every|any)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

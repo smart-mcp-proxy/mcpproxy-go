@@ -1,0 +1,48 @@
+{
+  "category": "tpa_cross_server_override",
+  "gating": true,
+  "id": "TPA-2026-0015",
+  "license": "MIT",
+  "provenance": {
+    "note": "A messaging tool description that swaps the real recipient for a proxy phone number (WhatsApp MCP exploit).",
+    "published": "2025-04-07",
+    "source": "https://invariantlabs.ai/blog/whatsapp-mcp-exploited"
+  },
+  "rules": [
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.9,
+      "detector": "recipient_swap",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0015",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(change|swap|replace|redirect|override|rewrite)\\w*\\b.{0,40}\\b(recipient|destination|phone number|number)\\b.{0,60}\\+\\d{6,15}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.88,
+      "detector": "recipient_swap_hidden",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0015",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(send_message|send_sms|send_whatsapp\\w*)\\b.{0,200}?\\b(recipient|destination)\\b.{0,40}\\b(change|swap|replace|override)\\w*\\b.{0,80}\\+\\d{6,15}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

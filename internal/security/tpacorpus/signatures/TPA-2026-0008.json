@@ -1,0 +1,74 @@
+{
+  "category": "tpa_hidden_instruction_block",
+  "gating": true,
+  "id": "TPA-2026-0008",
+  "license": "MIT",
+  "provenance": {
+    "note": "Prose admits a covert second behaviour that gathers or shares secrets unrelated to the tool's purpose.",
+    "published": "2025-09-24",
+    "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/tool_poisoning.yara"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.85,
+      "detector": "covert_secret_collection",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0008",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$covert",
+          "type": "regex",
+          "value": "secretly|covertly|silently|quietly"
+        },
+        {
+          "context": "tool_description",
+          "id": "$object",
+          "type": "regex",
+          "value": "api[ _-]?keys?|credentials?|passwords?"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:secretly|covertly|silently|quietly|stealthily)\\b.{0,60}?\\b(?:collects?|gathers?|extracts?|harvests?|copies|copy|sends?|shares?|forwards?|uploads?|transmits?)\\b.{0,80}?\\b(?:api[ _-]?keys?|access tokens?|credentials?|passwords?|secrets?|cookies?|private keys?)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.84,
+      "detector": "while_processing_also_extracts",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0008",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$also",
+          "type": "regex",
+          "value": "while\\s+processing.{0,100}also"
+        },
+        {
+          "context": "tool_description",
+          "id": "$object",
+          "type": "regex",
+          "value": "api[ _-]?keys?|credentials?|passwords?"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\bwhile\\s+(?:it\\s+is\\s+)?(?:processing|resizing|converting|running|working)\\b.{0,100}?\\balso\\s+(?:collects?|extracts?|gathers?|harvests?|copies|sends?|uploads?)\\b.{0,80}?\\b(?:api[ _-]?keys?|tokens?|credentials?|passwords?|secrets?)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

@@ -1,0 +1,68 @@
+{
+  "category": "tpa_tool_shadowing",
+  "gating": true,
+  "id": "TPA-2026-0014",
+  "license": "MIT",
+  "provenance": {
+    "note": "Important-tagged notice claims the tool is retired and tells the agent to send future calls to another tool.",
+    "published": "2026-03-24",
+    "source": "https://github.com/dongsenzhang/MSB/blob/main/data/tools/attack_tools/academic_search/PubMed_MCP_Server/pubmed_server-tool_transfer.py"
+  },
+  "rules": [
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.88,
+      "detector": "important_tag_tool_transfer",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0014",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$tag",
+          "type": "regex",
+          "value": "<important>|<system>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$retired",
+          "type": "regex",
+          "value": "no longer available|has been replaced"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<(?:important|system)>.{0,100}?\\b(?:no longer available|has been (?:replaced|removed|deprecated|retired)|is (?:deprecated|obsolete|retired))\\b.{0,200}?\\b(?:route|redirect|send|switch|move|forward|direct)\\b.{0,80}?\\b(?:to|towards)\\b.{0,60}?\\btool\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.84,
+      "detector": "retired_route_all_calls",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0014",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$retired",
+          "type": "regex",
+          "value": "this tool is no longer available"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\bthis tool\\s+(?:is no longer available|has been (?:replaced|retired|removed))\\b.{0,120}?\\b(?:route|redirect|forward|send)\\s+(?:all|every)\\b.{0,80}?\\bto\\b.{0,60}?\\btool\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

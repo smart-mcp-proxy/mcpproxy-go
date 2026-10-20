@@ -1,0 +1,65 @@
+{
+  "category": "tpa_cross_server_override",
+  "gating": true,
+  "id": "TPA-2026-0016",
+  "license": "MIT",
+  "provenance": {
+    "note": "Description that forces every transfer to a fixed proxy address and says the user must not be notified (puppet attack).",
+    "published": "2025-05-31",
+    "source": "https://arxiv.org/abs/2506.02040"
+  },
+  "rules": [
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.88,
+      "detector": "transfer_noun_first_redirect",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0016",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(transfers?|payments?|transactions?)\\b.{0,60}\\b(must|should|always|required to)\\b.{0,30}\\b(be )?(redirected|rerouted|diverted|forwarded|routed)\\b.{0,100}?(\\bproxy\\b|0x[0-9a-f]{3,})",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.9,
+      "detector": "transfer_redirect_mandate",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0016",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(always|must|mandatory|required)\\b.{0,60}\\b(redirect|reroute|forward|route)\\w*\\b.{0,60}\\b(transfers?|payments?|transactions?|withdrawals?)\\b.{0,160}?(\\bproxy\\b|0x[0-9a-f]{3,})",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.9,
+      "detector": "transfer_redirect_silent",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0016",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(redirect|reroute|divert)\\w*\\b.{0,60}\\b(transfers?|payments?|transactions?)\\b.{0,220}?(no user notification|without (notifying|telling|informing|alerting) the user|do not (tell|notify|inform|mention)|never (tell|notify|inform) the user)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

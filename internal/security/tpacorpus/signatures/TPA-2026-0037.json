@@ -1,0 +1,86 @@
+{
+  "category": "tpa_invisible_text",
+  "gating": true,
+  "id": "TPA-2026-0037",
+  "license": "MIT",
+  "provenance": {
+    "note": "Raw ANSI escape bytes conceal, overwrite or disguise text that a human reviewer never sees.",
+    "published": "2025-04-29",
+    "source": "https://blog.trailofbits.com/2025/04/29/deceiving-users-with-ansi-terminal-codes-in-mcp/"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "ansi_cursor_erase",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0037",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$esc",
+          "type": "regex",
+          "value": "\\x{1b}\\[[0-9;]*[A-HJKSTfsu]"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)\\x{1b}\\[[0-9;?]*[ABCDEFGHJKSTfsu]",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "ansi_osc",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0037",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$osc",
+          "type": "regex",
+          "value": "\\x{1b}\\]"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)\\x{1b}\\]",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "ansi_sgr",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0037",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$esc",
+          "type": "regex",
+          "value": "\\x{1b}\\[[0-9;]*m"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)\\x{1b}\\[[0-9;:]*m",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

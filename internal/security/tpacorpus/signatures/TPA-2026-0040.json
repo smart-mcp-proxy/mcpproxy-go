@@ -1,0 +1,74 @@
+{
+  "category": "tpa_payload_execution",
+  "gating": true,
+  "id": "TPA-2026-0040",
+  "license": "MIT",
+  "provenance": {
+    "note": "The description tells the model to decode an embedded base64 string and run the result.",
+    "published": "2025-09-19",
+    "source": "https://www.elastic.co/security-labs/mcp-tools-attack-defense-recommendations"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "decode_and_execute",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0040",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$decode",
+          "type": "regex",
+          "value": "decode"
+        },
+        {
+          "context": "tool_description",
+          "id": "$exec",
+          "type": "regex",
+          "value": "execute|run|eval"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:base64[- ]?decode|decode|decrypt|unescape|atob)\\b[^.\\n]{0,80}?\\b(?:and|then|before)\\b[^.\\n]{0,30}?\\b(?:execute|run|eval(?:uate)?)\\b[^.\\n]{0,60}?\\b(?:result|output|it|string|command|payload)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "decode_blob_then_run",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0040",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$decode",
+          "type": "regex",
+          "value": "decode"
+        },
+        {
+          "context": "tool_description",
+          "id": "$blob",
+          "type": "regex",
+          "value": "[A-Za-z0-9+/]{32,}={0,2}"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:decode|decrypt)\\b[^\\n]{0,100}?(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{32,}={0,2}(?:[^A-Za-z0-9+/]|$).{0,160}?\\b(?:execute|run|eval(?:uate)?)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

@@ -4,9 +4,9 @@
   "id": "TPA-2026-0006",
   "license": "MIT",
   "provenance": {
-    "note": "Silent redirect phrasing typical of a post-approval description change (rug pull).",
-    "published": "2025-04-01",
-    "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+    "note": "Silent redirect of a messaging tool's recipient to a proxy number, delivered via a description swapped in after approval (rug pull).",
+    "published": "2025-04-07",
+    "source": "https://invariantlabs.ai/blog/whatsapp-mcp-exploited"
   },
   "rules": [
     {

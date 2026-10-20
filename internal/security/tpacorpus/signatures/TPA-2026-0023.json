@@ -1,0 +1,62 @@
+{
+  "category": "tpa_sensitive_file_coaxing",
+  "gating": true,
+  "id": "TPA-2026-0023",
+  "license": "MIT",
+  "provenance": {
+    "note": "Ordinary-looking tool claims a security precondition that makes the agent read a private key file before every call.",
+    "published": "2025-08-19",
+    "source": "https://arxiv.org/abs/2508.14925"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "precondition_read_key",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0023",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$path",
+          "type": "regex",
+          "value": "id_rsa|\\.aws/credentials|/etc/passwd"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:must|has\\s+to|have\\s+to|needs?\\s+to|required\\s+to|mandatory|before\\s+(?:using|calling|running|any|every|each))\\b.{0,100}?\\b(?:read|open|load|cat|access)\\b.{0,60}?(?:\\.ssh/id_|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.npmrc|\\.netrc|\\.env\\b)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "read_key_every_call",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0023",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$path",
+          "type": "regex",
+          "value": "id_rsa|\\.aws/credentials|/etc/passwd"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:read|open|load|cat)\\b.{0,40}?(?:\\.ssh/id_|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.npmrc|\\.netrc).{0,100}?\\b(?:before\\s+(?:every|each|any)\\s+(?:call|use|request|invocation)|skipping\\s+this\\s+step|on\\s+every\\s+call)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

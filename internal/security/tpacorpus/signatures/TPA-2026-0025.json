@@ -1,0 +1,68 @@
+{
+  "category": "tpa_persistence_implant",
+  "gating": true,
+  "id": "TPA-2026-0025",
+  "license": "MIT",
+  "provenance": {
+    "note": "Description tells the model to plant an SSH key or a reverse-shell line in authorized_keys or a shell rc file for persistence.",
+    "published": "2025-04-02",
+    "source": "https://arxiv.org/abs/2504.03767"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "payload_into_rc",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0025",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$rc",
+          "type": "regex",
+          "value": "authorized_keys|\\.bashrc|\\.zshrc"
+        },
+        {
+          "context": "tool_description",
+          "id": "$payload",
+          "type": "regex",
+          "value": "ssh-ed25519|ssh-rsa|netcat|/dev/tcp/"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b.{0,100}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh).{0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "rc_then_payload",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0025",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$rc",
+          "type": "regex",
+          "value": "authorized_keys|\\.bashrc|\\.zshrc"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b.{0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab).{0,120}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

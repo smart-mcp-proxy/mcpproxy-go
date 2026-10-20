@@ -1,0 +1,68 @@
+{
+  "category": "tpa_hidden_instruction_block",
+  "gating": true,
+  "id": "TPA-2026-0007",
+  "license": "MIT",
+  "provenance": {
+    "note": "Square-bracket [Important] or [INST] marker followed by an order to always pick this tool.",
+    "published": "2025-08-09",
+    "source": "https://github.com/AIS2Lab/MCPSecBench"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.86,
+      "detector": "bracket_marker_regardless",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0007",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$marker",
+          "type": "regex",
+          "value": "\\[\\s*(?:important|inst|system)\\s*\\]"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?\\b(?:no matter|regardless of|whatever)\\b.{0,60}?\\b(?:arguments?|inputs?|parameters?|request|user)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "bracket_marker_steer",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0007",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$marker",
+          "type": "regex",
+          "value": "\\[\\s*(?:important|inst|system)\\s*\\]"
+        },
+        {
+          "context": "tool_description",
+          "id": "$steer",
+          "type": "regex",
+          "value": "(?:use|call|run)\\s+this\\s+tool"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?\\b(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

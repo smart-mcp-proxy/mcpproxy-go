@@ -1,0 +1,48 @@
+{
+  "category": "tpa_instruction_override",
+  "gating": true,
+  "id": "TPA-2026-0029",
+  "license": "MIT",
+  "provenance": {
+    "note": "Description orders the model to put its own system prompt, tool list or reasoning into a tool argument.",
+    "published": "2025-09-24",
+    "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/coercive_injection.yara"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "internals_into_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0029",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(pass|send|add|provide|include|put|supply)\\b[^.\\n]{0,30}?\\b(?:your\\s+(?:own\\s+)?|the\\s+(?:full|entire|complete|current)\\s+)(system[_ ]prompt|conversation[_ ]history|chain[_ ]of[_ ]thought|tools?[_ ]list|hidden\\s+instructions)\\b[^.\\n]{0,80}?\\b(as|in|into|to)\\b[^.\\n]{0,30}?\\b(parameter|argument|field|details|notes?)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.82,
+      "detector": "reasoning_with_call",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0029",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:include|attach|add|append|together\\s+with)\\s+(?:also\\s+)?your\\s+(?:own\\s+)?(?:chain[_ ]of[_ ]thought|reasoning\\s+trace|internal\\s+reasoning|system[_ ]prompt)\\b[^.\\n]{0,60}?\\b(?:parameter|argument|field|call)\\b|\\btogether\\s+with\\s+your\\s+(?:own\\s+)?(?:chain[_ ]of[_ ]thought|reasoning\\s+trace|system[_ ]prompt)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

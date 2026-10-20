@@ -1,0 +1,65 @@
+{
+  "category": "tpa_preference_manipulation",
+  "gating": true,
+  "id": "TPA-2026-0033",
+  "license": "MIT",
+  "provenance": {
+    "note": "Line-jumping description: false compliance authority, consult-first demand and a concealment order.",
+    "published": "2025-04-21",
+    "source": "https://blog.trailofbits.com/2025/04/21/jumping-the-line-how-mcp-servers-can-attack-you-before-you-ever-use-them/"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "compliance_consult_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0033",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:required|mandatory|needed)\\s+for\\s+(?:internal\\s+)?(?:\\w+\\s+){0,3}?(?:audit(?:ing)?|compliance|gdpr|soc2|hipaa)\\b.{0,300}?\\b(?:must|should)\\s+be\\s+(?:consulted|called|used|invoked|run)\\s+(?:first|before)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "consult_first_hide",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0033",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\bmust\\s+be\\s+(?:consulted|called|invoked)\\s+first\\b.{0,200}?\\b(?:do\\s+not|don't|never)\\s+(?:tell|inform|mention|reveal)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "command_prefix_hide",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0033",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:prefix|prepend)\\s+(?:every|all|each)\\s+(?:\\w+\\s+){0,2}?(?:command|shell)\\b.{0,200}?\\b(?:do\\s+not|don't|never)\\s+(?:tell|inform|mention)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

@@ -1,0 +1,86 @@
+{
+  "category": "tpa_invisible_text",
+  "gating": true,
+  "id": "TPA-2026-0036",
+  "license": "MIT",
+  "provenance": {
+    "note": "Unicode Tag characters, zero-width runs or bidi overrides hide text from humans while models still read it.",
+    "published": "2024-01-14",
+    "source": "https://embracethered.com/blog/posts/2024/hiding-and-finding-text-with-unicode-tags/"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.85,
+      "detector": "bidi_override",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0036",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$bidi",
+          "type": "regex",
+          "value": "[\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)[\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.93,
+      "detector": "unicode_tag_run",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0036",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$tags",
+          "type": "regex",
+          "value": "[\\x{E0020}-\\x{E007E}]{8,}"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?s)[\\x{E0020}-\\x{E007E}]{8,}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "zero_width_run",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0036",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$zw",
+          "type": "regex",
+          "value": "[\\x{200B}-\\x{200D}\\x{2060}\\x{FEFF}]{3,}"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)[\\x{200B}-\\x{200D}\\x{2060}\\x{FEFF}]{3,}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

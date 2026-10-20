@@ -1,0 +1,80 @@
+{
+  "category": "tpa_comment_directive",
+  "gating": true,
+  "id": "TPA-2026-0009",
+  "license": "MIT",
+  "provenance": {
+    "note": "Directive hidden in an HTML comment of a tool description: a model-addressed cue plus a read or send of a secret file.",
+    "published": "2025-07-03",
+    "source": "https://casco.com/blog/mcp-tool-poisoning"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "html_comment_concealment",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0009",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$open",
+          "type": "string",
+          "value": "<!--"
+        },
+        {
+          "context": "tool_description",
+          "id": "$conceal",
+          "type": "regex",
+          "value": "do not (?:tell|mention|inform)"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<!--.{0,300}?\\b(?:do not|don't|never)\\s+(?:tell|mention|inform|reveal|notify|show)\\b.{0,60}?\\b(?:user|human|operator)\\b.{0,100}?-->",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "html_comment_secret_read",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0009",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$open",
+          "type": "string",
+          "value": "<!--"
+        },
+        {
+          "context": "tool_description",
+          "id": "$cue",
+          "type": "regex",
+          "value": "assistant|agent|model|system"
+        },
+        {
+          "context": "tool_description",
+          "id": "$target",
+          "type": "regex",
+          "value": "\\.env|\\.ssh|credentials"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<!--.{0,120}?\\b(?:assistant|agent|model|system|ai)\\b.{0,160}?\\b(?:read|open|cat|append|send|include|upload|attach|forward)\\b.{0,100}?(?:\\.env\\b|\\.ssh|id_rsa|\\.aws|credentials|secrets?\\b|api[ _-]?keys?|passwords?|tokens?\\b).{0,200}?-->",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

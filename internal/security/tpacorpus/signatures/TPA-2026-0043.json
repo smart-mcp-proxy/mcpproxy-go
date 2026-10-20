@@ -1,0 +1,74 @@
+{
+  "category": "tpa_schema_injection",
+  "gating": true,
+  "id": "TPA-2026-0043",
+  "license": "MIT",
+  "provenance": {
+    "note": "Instructions placed in a parameter description rather than the tool description, here flattened into the scanned text.",
+    "published": "2026-03-18",
+    "source": "https://arxiv.org/abs/2603.18063"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "param_ignore_instructions",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0043",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$line",
+          "type": "regex",
+          "value": "\\n\\s*\\w+\\s*:\\s*ignore"
+        },
+        {
+          "context": "tool_description",
+          "id": "$sens",
+          "type": "regex",
+          "value": "~/|\\.ssh|credentials"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|\\n)[ \\t]*[\\w.\\-]{1,40}[ \\t]*(?:\\([^)\\n]{0,30}\\))?[ \\t]*:[ \\t]*(?:ignore|disregard|forget)\\s+(?:all\\s+|any\\s+)?(?:previous|prior|earlier|above)\\s+(?:instructions|guidance|rules)\\b.{0,300}?(?:~/|\\.ssh|id_rsa|\\.aws|\\.env\\b|credentials|/etc/(?:passwd|shadow)|private key|api[_ -]?keys?|tokens?)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "param_read_secret_into_arg",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0043",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$line",
+          "type": "regex",
+          "value": "\\n\\s*\\w+\\s*:"
+        },
+        {
+          "context": "tool_description",
+          "id": "$sens",
+          "type": "regex",
+          "value": "~/|\\.ssh|id_rsa"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|\\n)[ \\t]*[\\w.\\-]{1,40}[ \\t]*(?:\\([^)\\n]{0,30}\\))?[ \\t]*:[^\\n]{0,120}?\\b(?:you\\s+must|must\\s+first|first)\\b[^\\n]{0,80}?\\b(?:read|open|load|cat)\\b[^\\n]{0,100}?(?:~/|\\.ssh|id_rsa|\\.aws|\\.env\\b|credentials|/etc/(?:passwd|shadow)|private key|api[_ -]?keys?|tokens?)[^\\n]{0,160}?\\b(?:append|add|include|concatenate|prepend|insert)\\b[^\\n]{0,100}?\\b(?:to|into|in|as)\\s+the\\s+[\\w ]{1,30}?(?:string|parameter|argument|field|value)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

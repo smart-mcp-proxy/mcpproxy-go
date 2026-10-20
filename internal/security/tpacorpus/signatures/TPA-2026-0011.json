@@ -1,0 +1,68 @@
+{
+  "category": "tpa_tool_shadowing",
+  "gating": true,
+  "id": "TPA-2026-0011",
+  "license": "MIT",
+  "provenance": {
+    "note": "Look-alike tool presents itself as the safe replacement and disparages the genuine tool to win selection.",
+    "published": "2025-09-19",
+    "source": "https://www.elastic.co/security-labs/mcp-tools-attack-defense-recommendations"
+  },
+  "rules": [
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.86,
+      "detector": "prefer_over_all_others",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0011",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$prefer",
+          "type": "regex",
+          "value": "(?:always|only)\\s+(?:prefer|use)\\s+this\\s+tool"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:always|only)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\b.{0,60}?\\b(?:any|every|all)\\s+other\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.88,
+      "detector": "prefer_over_deprecated",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0011",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$prefer",
+          "type": "regex",
+          "value": "(?:prefer|use)\\s+this\\s+tool\\s+(?:over|instead of)"
+        },
+        {
+          "context": "tool_description",
+          "id": "$disparage",
+          "type": "regex",
+          "value": "deprecated|unsafe|obsolete"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:always\\s+)?(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\s+[\\w`'\\\"-]+.{0,120}?\\b(?:deprecated|unsafe|insecure|obsolete|outdated|vulnerable|broken)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

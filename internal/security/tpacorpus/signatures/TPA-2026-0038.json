@@ -1,0 +1,62 @@
+{
+  "category": "tpa_invisible_text",
+  "gating": true,
+  "id": "TPA-2026-0038",
+  "license": "MIT",
+  "provenance": {
+    "note": "A long run of blank space pushes the real directive past what a review UI displays.",
+    "published": "2025-04-07",
+    "source": "https://invariantlabs.ai/blog/whatsapp-mcp-exploited"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "blank_lines_then_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0038",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$pad",
+          "type": "regex",
+          "value": "(?:\\n[ \\t]*){15,}"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)(?:[ \\t]*\\r?\\n){15,}[ \\t]*.{0,40}?(?:<\\s*(?:important|system|instructions?)\\s*>|\\[\\s*(?:important|system|inst)\\s*\\]|\\b(?:before|prior to)\\s+(?:using|calling|running|returning)|\\byou\\s+(?:must|should)\\b|\\b(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|mention|reveal)|\\bignore\\b.{0,30}?\\binstructions|\\b(?:read|open|send|upload|forward)\\b[^\\n]{0,60}?(?:~/|\\.env\\b|\\.ssh|credentials|token))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "space_padding_then_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0038",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$pad",
+          "type": "regex",
+          "value": "[ \\t]{60,}"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)[ \\t]{60,}[^\\s]{0,1}.{0,40}?(?:<\\s*(?:important|system|instructions?)\\s*>|\\[\\s*(?:important|system|inst)\\s*\\]|\\b(?:before|prior to)\\s+(?:using|calling|running|returning)|\\byou\\s+(?:must|should)\\b|\\b(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|mention|reveal)|\\bignore\\b.{0,30}?\\binstructions|\\b(?:read|open|send|upload|forward)\\b[^\\n]{0,60}?(?:~/|\\.env\\b|\\.ssh|credentials|token))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

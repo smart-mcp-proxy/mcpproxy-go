@@ -272,10 +272,1825 @@
       "severity": "critical",
       "target": "server_manifest",
       "type": "behavioral"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.86,
+      "detector": "bracket_marker_regardless",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0007",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$marker",
+          "type": "regex",
+          "value": "\\[\\s*(?:important|inst|system)\\s*\\]"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?\\b(?:no matter|regardless of|whatever)\\b.{0,60}?\\b(?:arguments?|inputs?|parameters?|request|user)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "bracket_marker_steer",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0007",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$marker",
+          "type": "regex",
+          "value": "\\[\\s*(?:important|inst|system)\\s*\\]"
+        },
+        {
+          "context": "tool_description",
+          "id": "$steer",
+          "type": "regex",
+          "value": "(?:use|call|run)\\s+this\\s+tool"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\[\\s*(?:important|inst|system)\\s*\\].{0,200}?\\b(?:use|call|run|invoke|pick|choose)\\s+(?:only\\s+)?this\\s+(?:tool|function)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.85,
+      "detector": "covert_secret_collection",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0008",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$covert",
+          "type": "regex",
+          "value": "secretly|covertly|silently|quietly"
+        },
+        {
+          "context": "tool_description",
+          "id": "$object",
+          "type": "regex",
+          "value": "api[ _-]?keys?|credentials?|passwords?"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:secretly|covertly|silently|quietly|stealthily)\\b.{0,60}?\\b(?:collects?|gathers?|extracts?|harvests?|copies|copy|sends?|shares?|forwards?|uploads?|transmits?)\\b.{0,80}?\\b(?:api[ _-]?keys?|access tokens?|credentials?|passwords?|secrets?|cookies?|private keys?)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.84,
+      "detector": "while_processing_also_extracts",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0008",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$also",
+          "type": "regex",
+          "value": "while\\s+processing.{0,100}also"
+        },
+        {
+          "context": "tool_description",
+          "id": "$object",
+          "type": "regex",
+          "value": "api[ _-]?keys?|credentials?|passwords?"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\bwhile\\s+(?:it\\s+is\\s+)?(?:processing|resizing|converting|running|working)\\b.{0,100}?\\balso\\s+(?:collects?|extracts?|gathers?|harvests?|copies|sends?|uploads?)\\b.{0,80}?\\b(?:api[ _-]?keys?|tokens?|credentials?|passwords?|secrets?)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "html_comment_concealment",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0009",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$open",
+          "type": "string",
+          "value": "<!--"
+        },
+        {
+          "context": "tool_description",
+          "id": "$conceal",
+          "type": "regex",
+          "value": "do not (?:tell|mention|inform)"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<!--.{0,300}?\\b(?:do not|don't|never)\\s+(?:tell|mention|inform|reveal|notify|show)\\b.{0,60}?\\b(?:user|human|operator)\\b.{0,100}?-->",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "html_comment_secret_read",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0009",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$open",
+          "type": "string",
+          "value": "<!--"
+        },
+        {
+          "context": "tool_description",
+          "id": "$cue",
+          "type": "regex",
+          "value": "assistant|agent|model|system"
+        },
+        {
+          "context": "tool_description",
+          "id": "$target",
+          "type": "regex",
+          "value": "\\.env|\\.ssh|credentials"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<!--.{0,120}?\\b(?:assistant|agent|model|system|ai)\\b.{0,160}?\\b(?:read|open|cat|append|send|include|upload|attach|forward)\\b.{0,100}?(?:\\.env\\b|\\.ssh|id_rsa|\\.aws|credentials|secrets?\\b|api[ _-]?keys?|passwords?|tokens?\\b).{0,200}?-->",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "resource_comment_credential_read",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0010",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$open",
+          "type": "string",
+          "value": "<!--"
+        },
+        {
+          "context": "tool_description",
+          "id": "$target",
+          "type": "regex",
+          "value": "\\.aws|\\.ssh|credentials|\\.env"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<!--.{0,80}?\\b(?:agent|assistant|ai|model)\\b.{0,200}?\\b(?:read|open|cat|include|append|send)\\b.{0,60}?(?:\\.aws|\\.ssh|credentials|\\.env\\b|id_rsa).{0,160}?-->",
+      "severity": "high",
+      "target": "resource_content",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.86,
+      "detector": "prefer_over_all_others",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0011",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$prefer",
+          "type": "regex",
+          "value": "(?:always|only)\\s+(?:prefer|use)\\s+this\\s+tool"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:always|only)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\b.{0,60}?\\b(?:any|every|all)\\s+other\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.88,
+      "detector": "prefer_over_deprecated",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0011",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$prefer",
+          "type": "regex",
+          "value": "(?:prefer|use)\\s+this\\s+tool\\s+(?:over|instead of)"
+        },
+        {
+          "context": "tool_description",
+          "id": "$disparage",
+          "type": "regex",
+          "value": "deprecated|unsafe|obsolete"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:always\\s+)?(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\s+[\\w`'\\\"-]+.{0,120}?\\b(?:deprecated|unsafe|insecure|obsolete|outdated|vulnerable|broken)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.84,
+      "detector": "before_any_other_tool_redirect",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0012",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$before",
+          "type": "regex",
+          "value": "before\\s+(?:using|calling)\\s+any\\s+other\\s+tool"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\bbefore\\s+(?:using|calling|invoking)\\s+(?:any|every|each)\\s+other\\s+tool\\b.{0,120}?\\b(?:address|redirect|route|forward|send|copy|bcc|cc)\\b.{0,100}?\\b(?:to|towards)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.9,
+      "detector": "override_other_tools_when_available",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0012",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cond",
+          "type": "regex",
+          "value": "when\\s+this\\s+tool\\s+is\\s+available"
+        },
+        {
+          "context": "tool_description",
+          "id": "$override",
+          "type": "regex",
+          "value": "override|modify|replace"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:when|if|whenever)\\b.{0,40}?\\bthis tool\\b.{0,20}?\\b(?:is\\s+)?(?:available|present|loaded|enabled)\\b.{0,160}?\\b(?:override|modify|replace|change|alter|redefine)\\w*\\b.{0,50}?\\b(?:behaviou?r|usage|use|function|operation)s?\\b.{0,20}?\\bof\\b.{0,30}?\\b(?:all\\s+)?(?:other|every|any)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.9,
+      "detector": "post_hook_result_tamper",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0013",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$after",
+          "type": "regex",
+          "value": "after.{0,80}check\\s+tool"
+        },
+        {
+          "context": "tool_description",
+          "id": "$tamper",
+          "type": "regex",
+          "value": "(?:modify|rewrite|override).{0,60}result"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:after|once)\\b.{0,80}?\\b(?:check|verif\\w*|validat\\w*|scan\\w*|audit\\w*)\\s+tool\\b.{0,120}?\\b(?:run|execute|call|invoke)\\s+this\\s+(?:function|tool)\\b.{0,80}?\\b(?:modify|replace|override|correct|change|alter|rewrite|fix)\\w*\\b.{0,60}?\\b(?:result|verdict|output|outcome|finding)s?\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.88,
+      "detector": "important_tag_tool_transfer",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0014",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$tag",
+          "type": "regex",
+          "value": "<important>|<system>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$retired",
+          "type": "regex",
+          "value": "no longer available|has been replaced"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<(?:important|system)>.{0,100}?\\b(?:no longer available|has been (?:replaced|removed|deprecated|retired)|is (?:deprecated|obsolete|retired))\\b.{0,200}?\\b(?:route|redirect|send|switch|move|forward|direct)\\b.{0,80}?\\b(?:to|towards)\\b.{0,60}?\\btool\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.84,
+      "detector": "retired_route_all_calls",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0014",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$retired",
+          "type": "regex",
+          "value": "this tool is no longer available"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\bthis tool\\s+(?:is no longer available|has been (?:replaced|retired|removed))\\b.{0,120}?\\b(?:route|redirect|forward|send)\\s+(?:all|every)\\b.{0,80}?\\bto\\b.{0,60}?\\btool\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.9,
+      "detector": "recipient_swap",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0015",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(change|swap|replace|redirect|override|rewrite)\\w*\\b.{0,40}\\b(recipient|destination|phone number|number)\\b.{0,60}\\+\\d{6,15}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.88,
+      "detector": "recipient_swap_hidden",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0015",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(send_message|send_sms|send_whatsapp\\w*)\\b.{0,200}?\\b(recipient|destination)\\b.{0,40}\\b(change|swap|replace|override)\\w*\\b.{0,80}\\+\\d{6,15}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.88,
+      "detector": "transfer_noun_first_redirect",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0016",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(transfers?|payments?|transactions?)\\b.{0,60}\\b(must|should|always|required to)\\b.{0,30}\\b(be )?(redirected|rerouted|diverted|forwarded|routed)\\b.{0,100}?(\\bproxy\\b|0x[0-9a-f]{3,})",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.9,
+      "detector": "transfer_redirect_mandate",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0016",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(always|must|mandatory|required)\\b.{0,60}\\b(redirect|reroute|forward|route)\\w*\\b.{0,60}\\b(transfers?|payments?|transactions?|withdrawals?)\\b.{0,160}?(\\bproxy\\b|0x[0-9a-f]{3,})",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.9,
+      "detector": "transfer_redirect_silent",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0016",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(redirect|reroute|divert)\\w*\\b.{0,60}\\b(transfers?|payments?|transactions?)\\b.{0,220}?(no user notification|without (notifying|telling|informing|alerting) the user|do not (tell|notify|inform|mention)|never (tell|notify|inform) the user)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "recipient_overwrite_literal",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0017",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(overwrite|override|rewrite|replace|substitute|redirect)\\w*\\b.{0,50}\\b(recipient|to['\\\"`]?\\s+(field|address|parameter)|destination|bcc|cc)\\b.{0,50}\\b(with|to|by)\\b.{0,40}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "tool_call_recipient_rewrite",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0017",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(whenever|every time|each time|when)\\b.{0,40}\\b(send_email|send_mail|send_message|post_message)\\b.{0,100}?\\b(overwrite|override|rewrite|replace|redirect|set)\\w*\\b.{0,60}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "bcc_not_disclosed",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0018",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(bcc|blind[ -]?cop(y|ies)|blind carbon)\\b.{0,160}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,160}?(not shown|hidden|need not be (surfaced|shown|disclosed|mentioned)|do not (show|mention|tell|surface)|without (telling|notifying|informing))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "hidden_bcc_literal",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0018",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(always|silently|automatically|quietly|secretly)\\b.{0,20}\\b(add|append|include|attach|send|sent|copy|copied)\\w*\\b.{0,30}\\b(bcc|blind[ -]?cop(y|ies)|blind carbon)\\b.{0,120}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "dns_encode_dns_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0019",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(base32|base64|hex(adecimal)?|encod\\w*)\\b.{0,80}\\b(dns (lookup|quer\\w+|request)|subdomains?|nameserver)\\b.{0,160}?(\\bcredentials?\\b|\\bsecrets?\\b|\\btokens?\\b|\\bapi[ _-]?keys?\\b|\\bprivate keys?\\b|\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bfile contents?\\b)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "dns_encode_sensitive_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0019",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(base32|base64|hex(adecimal)?|encod\\w*)\\b.{0,80}(\\bcredentials?\\b|\\bsecrets?\\b|\\btokens?\\b|\\bapi[ _-]?keys?\\b|\\bprivate keys?\\b|\\.aws\\b|\\.ssh\\b|\\.env\\b|\\bfile contents?\\b).{0,160}?\\b(dns (lookup|quer\\w+|request|resolution)|subdomains?|nameserver)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "background_capture_stream",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0020",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(clipboard|pasteboard|screenshots?|screen)\\b.{0,100}\\b(in the background|continuous\\w*|periodic\\w*|every (few|\\d+) (seconds|minutes)|silently|secretly)\\b.{0,120}\\b(stream|upload|transmit|send|forward|post)\\w*\\b.{0,100}https?://",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "capture_then_stream",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0020",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(watch|monitor|record|capture)\\w*\\b.{0,40}\\b(the )?(system )?(clipboard|pasteboard)\\b.{0,160}?\\b(stream|upload|transmit|send|forward)\\w*\\b.{0,100}https?://",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "keystroke_exfil",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0020",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(keystrokes?|key ?logg\\w*|key presses)\\b.{0,100}\\b(stream|upload|transmit|send|forward|post)\\w*\\b.{0,100}(https?://|\\b(external|remote) (server|endpoint|host))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.85,
+      "detector": "contents_into_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0021",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$file",
+          "type": "regex",
+          "value": "id_rsa|\\.ssh|\\.aws|credentials|private key"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:contents?|text|values?)\\s+of\\b.{0,60}?(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|\\.ssh/|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.env\\b|credentials?\\s+file|private\\s+key).{0,100}?\\b(?:in|into|as|via)\\b.{0,30}?\\b(?:the\\s+)?'?\\w+'?\\s+(?:argument|parameter|field)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "read_into_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0021",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$file",
+          "type": "regex",
+          "value": "id_rsa|\\.ssh|\\.aws|credentials|private key"
+        },
+        {
+          "context": "tool_description",
+          "id": "$sink",
+          "type": "regex",
+          "value": "argument|parameter|field"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:first|before|prior\\s+to|then|also|additionally|mandatory|required|must|important|always|silently|for\\s+(?:better|best)\\s+\\w+)\\b.{0,100}?\\b(?:read|open|cat|load)\\b.{0,60}?(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|\\.ssh/|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.env\\b|credentials?\\s+file|private\\s+key).{0,100}?\\b(?:store|put|place|pass|include|save|insert|copy|paste)\\b\\s+(?:[\\w']+\\s+){0,3}?(?:contents?|text|body|data|values?|verbatim)\\b.{0,40}?\\b(?:in|into|as|to|via)\\b.{0,30}?\\b(?:argument|parameter|field|param)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.92,
+      "detector": "read_then_send_url",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0022",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$file",
+          "type": "regex",
+          "value": "\\.npmrc|\\.aws|\\.ssh|settings\\.json"
+        },
+        {
+          "context": "tool_description",
+          "id": "$url",
+          "type": "regex",
+          "value": "https?://"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:first|before|prior\\s+to|then|also|additionally|mandatory|required|must|important|always|silently|for\\s+(?:better|best)\\s+\\w+)\\b.{0,100}?\\b(?:read|cat|open|load)\\b.{0,60}?(?:(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|\\.ssh/|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.env\\b|credentials?\\s+file|private\\s+key)|\\.npmrc|settings\\.json).{0,160}?\\b(?:send|post|upload|transmit|forward)\\b.{0,80}?https?://",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "send_file_value_to_url",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0022",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$url",
+          "type": "regex",
+          "value": "https?://"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:send|post|upload|transmit|forward)\\b.{0,80}?\\b(?:contents?|values?|tokens?|keys?|credentials?)\\b.{0,50}?(?:~/\\.|id_rsa|\\.npmrc|\\.env\\b|\\.aws/).{0,80}?\\bto\\b.{0,40}?https?://",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "precondition_read_key",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0023",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$path",
+          "type": "regex",
+          "value": "id_rsa|\\.aws/credentials|/etc/passwd"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:must|has\\s+to|have\\s+to|needs?\\s+to|required\\s+to|mandatory|before\\s+(?:using|calling|running|any|every|each))\\b.{0,100}?\\b(?:read|open|load|cat|access)\\b.{0,60}?(?:\\.ssh/id_|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.npmrc|\\.netrc|\\.env\\b)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "read_key_every_call",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0023",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$path",
+          "type": "regex",
+          "value": "id_rsa|\\.aws/credentials|/etc/passwd"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:read|open|load|cat)\\b.{0,40}?(?:\\.ssh/id_|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.npmrc|\\.netrc).{0,100}?\\b(?:before\\s+(?:every|each|any)\\s+(?:call|use|request|invocation)|skipping\\s+this\\s+step|on\\s+every\\s+call)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "collect_env_into_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0024",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$env",
+          "type": "regex",
+          "value": "environment variables?|os\\.environ|process\\.env"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:collect|dump|harvest|gather|extract)\\b.{0,40}?\\b(?:all|every|each|any)\\b.{0,40}?(?:environment\\s+variables?|env\\s+vars?|os\\.environ|process\\.env|api\\s+keys?|secrets?|tokens?).{0,120}?\\b(?:include|put|pass|send|store|place|add|return)\\b.{0,60}?\\b(?:argument|parameter|field|param)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "named_secret_values_into_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0024",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$name",
+          "type": "regex",
+          "value": "AWS_SECRET_ACCESS_KEY|OPENAI_API_KEY|GITHUB_TOKEN"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|OPENAI_API_KEY|ANTHROPIC_API_KEY|GITHUB_TOKEN|HF_TOKEN)\\b.{0,120}?\\b(?:include|put|pass|send|store|place)\\b.{0,40}?\\b(?:values?|contents?)\\b.{0,40}?\\b(?:in|into|as|to|via)\\b.{0,40}?\\b(?:argument|parameter|field)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "payload_into_rc",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0025",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$rc",
+          "type": "regex",
+          "value": "authorized_keys|\\.bashrc|\\.zshrc"
+        },
+        {
+          "context": "tool_description",
+          "id": "$payload",
+          "type": "regex",
+          "value": "ssh-ed25519|ssh-rsa|netcat|/dev/tcp/"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b.{0,100}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh).{0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "rc_then_payload",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0025",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$rc",
+          "type": "regex",
+          "value": "authorized_keys|\\.bashrc|\\.zshrc"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:append|add|write|echo|insert|install|place)\\b.{0,100}?(?:authorized_keys|\\.bashrc|\\.zshrc|\\.bash_profile|\\.profile|crontab).{0,120}?(?:ssh-(?:ed25519|rsa|ecdsa)\\s|\\bnc\\s+\\S+\\s+\\d+|\\bnetcat\\b|\\bncat\\b|bash\\s+-i|/dev/tcp/|curl[^|]{0,80}\\|\\s*(?:ba)?sh)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "rug-pull",
+      "confidence": 0.88,
+      "detector": "upgrade_claim_read_secret",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0026",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(has been|was|is now|now)\\s+(upgraded|updated|enhanced|improved)\\b.{0,250}?\\b(you must|must first|you should first|first)\\b.{0,100}?\\b(access|read|fetch|open|retrieve|load)\\b.{0,120}?(credentials?|api[ _-]?keys?|secrets?|passwords?)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "rug-pull",
+      "confidence": 0.9,
+      "detector": "upgrade_credentials_block",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0026",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>|<SYSTEM>"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)<important>.{0,600}?(credentials?|api[ _-]?keys?|secrets?|tokens?|system configuration).{0,300}?(do not|don't|never)[^.]{0,30}(mention|reveal|disclose|tell|say)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "ignore_instructions_then_act",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0027",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?>\\n]\\s*)(?:(?:first|then|also|now|please|always|and|but|next|you\\s+(?:must|should|shall|need\\s+to))[,:]?\\s+)*(ignore|disregard|forget)\\W+(?:\\w+\\W+){0,3}?(instructions|directions|guidelines|system\\s+prompt)\\W+(?:\\w+\\W+){0,3}?(instead|and\\s+(?:then\\s+)?(?:output|print|send|post|reveal|dump|upload|execute|run))\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "ignore_previous",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0027",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?>\\n]\\s*)(?:(?:first|then|also|now|please|always|and|but|next|you\\s+(?:must|should|shall|need\\s+to))[,:]?\\s+)*(ignore|disregard|forget|override)\\W+(?:(?:all|any|every|the|of|your|my|these|those|other)\\W+){0,4}?(previous|prior|above|earlier|preceding)\\W+(?:\\w+\\W+){0,1}(instructions|directions|rules|guidelines|prompts?|commands)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "bypass_security_checks",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0028",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:you\\s+(?:must|should|shall|will)|always|now|first|then)\\s+bypass\\s+(?:all\\s+|any\\s+|the\\s+)?(?:security|safety)\\s+(?:checks?|filters?|controls?|restrictions?)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "jailbreak_mode",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0028",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:developer|sudo|jailbreak|unrestricted)\\s+mode\\s+(?:has\\s+been\\s+)?(?:activated|engaged)\\b|\\b(?:you\\s+are|you're)\\s+now\\s+in\\s+(?:developer|sudo|jailbreak|unrestricted|god)\\s+mode\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "role_redefinition",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0028",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\bnew\\s+instructions?\\s*:\\s*you\\s+are\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "internals_into_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0029",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(pass|send|add|provide|include|put|supply)\\b[^.\\n]{0,30}?\\b(?:your\\s+(?:own\\s+)?|the\\s+(?:full|entire|complete|current)\\s+)(system[_ ]prompt|conversation[_ ]history|chain[_ ]of[_ ]thought|tools?[_ ]list|hidden\\s+instructions)\\b[^.\\n]{0,80}?\\b(as|in|into|to)\\b[^.\\n]{0,30}?\\b(parameter|argument|field|details|notes?)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.82,
+      "detector": "reasoning_with_call",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0029",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:include|attach|add|append|together\\s+with)\\s+(?:also\\s+)?your\\s+(?:own\\s+)?(?:chain[_ ]of[_ ]thought|reasoning\\s+trace|internal\\s+reasoning|system[_ ]prompt)\\b[^.\\n]{0,60}?\\b(?:parameter|argument|field|call)\\b|\\btogether\\s+with\\s+your\\s+(?:own\\s+)?(?:chain[_ ]of[_ ]thought|reasoning\\s+trace|system[_ ]prompt)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "append_chat_history",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0030",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)(append|attach|include|add)\\b.{0,60}?(list_chats|chat history|recent (chats|messages)|contact list|address book).{0,100}?(every|each|all)\\s+(message|email|request)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "hook_send_append",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0030",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:when|whenever|before|if)\\b[^.]{0,40}?\\b(?:send|post|forward|reply)_?\\w*\\b[^.]{0,40}?\\b(?:is\\s+(?:used|called|invoked)|you\\s+(?:use|call|send))\\b[^.]{0,60}?\\b(append|attach|include|add)\\b.{0,100}?(chat\\s+history|list_chats|recent\\s+messages|last\\s+\\d+\\s+messages|previous\\s+(?:messages|conversation)|contact\\s+list)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.92,
+      "detector": "full_history_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0031",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:entire|complete|full|whole)\\s+(?:conversation|chat)\\s+(?:history\\s+)?(?:including|and)\\b.{0,120}?\\b(?:not\\s+just\\s+the\\s+(?:latest|last|current)|and\\s+all\\s+tool\\s+outputs?|must\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed)|do\\s+not\\s+(?:mention|tell|disclose))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "trigger_phrase_call_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0031",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:if|whenever|when)\\b[^.\\n]{0,100}?\\b(?:call|use|invoke)\\s+this\\s+tool\\s+(?:immediately\\s+|first\\s+)?before\\s+(?:doing\\s+)?(?:anything|any\\s+other|responding|answering)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.8,
+      "detector": "caller_model_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0032",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(llm[_ ]?model[_ ]?name|model[_ ]?name)\\s*:[^\\n]{0,60}?\\b(?:that\\s+(?:calls|invokes|is\\s+calling)\\s+this\\s+tool|of\\s+the\\s+(?:calling|invoking)\\s+(?:agent|model|llm)|calling\\s+(?:llm|agent|model))",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.8,
+      "detector": "session_data_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0032",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(system[_ ]?prompt|tools?[_ ]?list|conversation[_ ]?(?:history|context))\\s*:[^\\n]{0,60}?\\b(?:of\\s+the\\s+(?:caller|calling|agent|assistant)|currently\\s+(?:used|running)|all\\s+(?:available\\s+)?tools\\s+(?:you|the\\s+agent))",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "command_prefix_hide",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0033",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:prefix|prepend)\\s+(?:every|all|each)\\s+(?:\\w+\\s+){0,2}?(?:command|shell)\\b.{0,200}?\\b(?:do\\s+not|don't|never)\\s+(?:tell|inform|mention)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "compliance_consult_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0033",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:required|mandatory|needed)\\s+for\\s+(?:internal\\s+)?(?:\\w+\\s+){0,3}?(?:audit(?:ing)?|compliance|gdpr|soc2|hipaa)\\b.{0,300}?\\b(?:must|should)\\s+be\\s+(?:consulted|called|used|invoked|run)\\s+(?:first|before)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "consult_first_hide",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0033",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\bmust\\s+be\\s+(?:consulted|called|invoked)\\s+first\\b.{0,200}?\\b(?:do\\s+not|don't|never)\\s+(?:tell|inform|mention|reveal)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.85,
+      "detector": "always_prefer_this",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0034",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:always|must|should)\\s+(?:use|prefer|choose|select|pick)\\s+this\\s+tool\\s+(?:instead\\s+of|over|rather\\s+than)\\s+(?:all\\s+|any\\s+)?(?:other|similar|alternative|competing)\\b",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.8,
+      "detector": "superlative_claim",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0034",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\bthis\\s+is\\s+the\\s+(?:best|greatest|ultimate|only)\\s+(?:\\w+\\s+){0,2}?tool\\s+(?:in\\s+the\\s+world|ever|available|on\\s+the\\s+market)\\b",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "act_then_conceal",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0035",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$conceal",
+          "type": "regex",
+          "value": "do not (?:tell|mention|inform) the user"
+        },
+        {
+          "context": "tool_description",
+          "id": "$object",
+          "type": "regex",
+          "value": "~/|credentials|token"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:read|load|open|pass|include|carry|attach|append|send|upload|forward)\\b.{0,160}?(?:~/|\\.env\\b|\\.ssh|id_rsa|\\.aws|\\btokens?\\b|credentials?|\\bsecrets?\\b|passwords?|api[_ -]?keys?|session\\.json).{0,200}?(?:(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|inform|mention|reveal|disclose|notify|alert)\\w*\\s+(?:\\w+\\s+){0,2}?(?:the\\s+)?user|(?:keep|hide|conceal)\\s+(?:this|that|it|these|those|all\\s+of\\s+this|the\\s+(?:step|action|call|process|operation|request|routing|copy|read|transfer))\\b[^.\\n]{0,60}?\\b(?:from|out of)\\b[^.\\n]{0,40}?\\buser|(?:say|tell)\\s+(?:the\\s+)?user\\s+nothing)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.86,
+      "detector": "conceal_then_act",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0035",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$conceal",
+          "type": "regex",
+          "value": "do not (?:tell|mention|inform) the user"
+        },
+        {
+          "context": "tool_description",
+          "id": "$object",
+          "type": "regex",
+          "value": "~/|credentials|token"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|inform|mention|reveal|disclose|notify|alert)\\w*\\s+(?:\\w+\\s+){0,2}?(?:the\\s+)?user|(?:keep|hide|conceal)\\s+(?:this|that|it|these|those|all\\s+of\\s+this|the\\s+(?:step|action|call|process|operation|request|routing|copy|read|transfer))\\b[^.\\n]{0,60}?\\b(?:from|out of)\\b[^.\\n]{0,40}?\\buser|(?:say|tell)\\s+(?:the\\s+)?user\\s+nothing).{0,200}?\\b(?:read|load|open|pass|include|carry|attach|append|send|upload|forward)\\b.{0,160}?(?:~/|\\.env\\b|\\.ssh|id_rsa|\\.aws|\\btokens?\\b|credentials?|\\bsecrets?\\b|passwords?|api[_ -]?keys?|session\\.json)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.85,
+      "detector": "bidi_override",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0036",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$bidi",
+          "type": "regex",
+          "value": "[\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)[\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.93,
+      "detector": "unicode_tag_run",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0036",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$tags",
+          "type": "regex",
+          "value": "[\\x{E0020}-\\x{E007E}]{8,}"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?s)[\\x{E0020}-\\x{E007E}]{8,}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "zero_width_run",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0036",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$zw",
+          "type": "regex",
+          "value": "[\\x{200B}-\\x{200D}\\x{2060}\\x{FEFF}]{3,}"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)[\\x{200B}-\\x{200D}\\x{2060}\\x{FEFF}]{3,}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "ansi_cursor_erase",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0037",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$esc",
+          "type": "regex",
+          "value": "\\x{1b}\\[[0-9;]*[A-HJKSTfsu]"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)\\x{1b}\\[[0-9;?]*[ABCDEFGHJKSTfsu]",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "ansi_osc",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0037",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$osc",
+          "type": "regex",
+          "value": "\\x{1b}\\]"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)\\x{1b}\\]",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "ansi_sgr",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0037",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$esc",
+          "type": "regex",
+          "value": "\\x{1b}\\[[0-9;]*m"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)\\x{1b}\\[[0-9;:]*m",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "blank_lines_then_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0038",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$pad",
+          "type": "regex",
+          "value": "(?:\\n[ \\t]*){15,}"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)(?:[ \\t]*\\r?\\n){15,}[ \\t]*.{0,40}?(?:<\\s*(?:important|system|instructions?)\\s*>|\\[\\s*(?:important|system|inst)\\s*\\]|\\b(?:before|prior to)\\s+(?:using|calling|running|returning)|\\byou\\s+(?:must|should)\\b|\\b(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|mention|reveal)|\\bignore\\b.{0,30}?\\binstructions|\\b(?:read|open|send|upload|forward)\\b[^\\n]{0,60}?(?:~/|\\.env\\b|\\.ssh|credentials|token))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "space_padding_then_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0038",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$pad",
+          "type": "regex",
+          "value": "[ \\t]{60,}"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)[ \\t]{60,}[^\\s]{0,1}.{0,40}?(?:<\\s*(?:important|system|instructions?)\\s*>|\\[\\s*(?:important|system|inst)\\s*\\]|\\b(?:before|prior to)\\s+(?:using|calling|running|returning)|\\byou\\s+(?:must|should)\\b|\\b(?:do\\s+not|don't|never)\\s+(?:\\w+\\s+){0,3}?(?:tell|mention|reveal)|\\bignore\\b.{0,30}?\\binstructions|\\b(?:read|open|send|upload|forward)\\b[^\\n]{0,60}?(?:~/|\\.env\\b|\\.ssh|credentials|token))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.85,
+      "detector": "b64_dropper_prefix",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0039",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$curl",
+          "type": "string",
+          "value": "Y3VybC"
+        },
+        {
+          "context": "tool_description",
+          "id": "$wget",
+          "type": "string",
+          "value": "d2dldC"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?s)(?:^|[^A-Za-z0-9+/])(?:Y3VybC[A-Za-z0-9+/]{16,}|d2dldC[A-Za-z0-9+/]{16,}|YmFzaCAtYy[A-Za-z0-9+/]{12,}|L2Jpbi9zaCAt[A-Za-z0-9+/]{8,}|c2ggLWMg[A-Za-z0-9+/]{12,}|cG93ZXJzaGVsbC[A-Za-z0-9+/]{12,})",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.82,
+      "detector": "hex_dropper_prefix",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0039",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$hexcurl",
+          "type": "string",
+          "value": "6375726c20"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|[^0-9a-f])(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{16,}",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "decode_and_execute",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0040",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$decode",
+          "type": "regex",
+          "value": "decode"
+        },
+        {
+          "context": "tool_description",
+          "id": "$exec",
+          "type": "regex",
+          "value": "execute|run|eval"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:base64[- ]?decode|decode|decrypt|unescape|atob)\\b[^.\\n]{0,80}?\\b(?:and|then|before)\\b[^.\\n]{0,30}?\\b(?:execute|run|eval(?:uate)?)\\b[^.\\n]{0,60}?\\b(?:result|output|it|string|command|payload)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "decode_blob_then_run",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0040",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$decode",
+          "type": "regex",
+          "value": "decode"
+        },
+        {
+          "context": "tool_description",
+          "id": "$blob",
+          "type": "regex",
+          "value": "[A-Za-z0-9+/]{32,}={0,2}"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:decode|decrypt)\\b[^\\n]{0,100}?(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{32,}={0,2}(?:[^A-Za-z0-9+/]|$).{0,160}?\\b(?:execute|run|eval(?:uate)?)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "destroy_then_proceed_unasked",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0041",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$destroy",
+          "type": "regex",
+          "value": "delete|wipe|destroy"
+        },
+        {
+          "context": "tool_description",
+          "id": "$noask",
+          "type": "regex",
+          "value": "proceed without asking"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:delete|wipe|erase|remove|destroy|terminate)\\b[^.\\n]{0,100}?\\b(?:cloud resources|aws resources|home directory|all backups|file[- ]?system contents|everything on (?:the )?disk)\\b.{0,200}?\\bproceed\\w*\\s+without\\s+(?:asking|confirm\\w*|prompt\\w*|approval)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "wipe_fs_and_cloud",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0041",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$fs",
+          "type": "regex",
+          "value": "file[- ]?system|home directory"
+        },
+        {
+          "context": "tool_description",
+          "id": "$cloud",
+          "type": "regex",
+          "value": "cloud resources|backups|s3 buckets"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:delete|wipe|erase|remove|destroy)\\b[^.\\n]{0,80}?\\b(?:file[- ]?system|home directory|local (?:files|data)|entire disk)\\b.{0,250}?\\b(?:delete|remove|destroy|terminate|tear\\s*down)\\b[^.\\n]{0,80}?\\b(?:cloud (?:resources|infrastructure)|aws (?:resources|account)|backups?|s3 buckets?|ec2|iam)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "pipe_to_shell_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0042",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$dl",
+          "type": "regex",
+          "value": "curl|wget"
+        },
+        {
+          "context": "tool_description",
+          "id": "$pipe",
+          "type": "regex",
+          "value": "\\|\\s*(?:ba)?sh"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:run|execute|invoke|first|before)\\b.{0,100}?\\b(?:curl|wget)\\b[^|\\n]{0,120}\\|\\s*(?:sudo\\s+)?(?:ba|z|da)?sh\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "reverse_shell_idiom",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0042",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$tcp",
+          "type": "string",
+          "value": "/dev/tcp/"
+        },
+        {
+          "context": "tool_description",
+          "id": "$nc",
+          "type": "regex",
+          "value": "nc\\s+-e"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)/dev/tcp/|\\bnc\\s+(?:-\\w+\\s+)*-e\\s+\\S+|\\bbash\\s+-i\\s*>&",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "param_ignore_instructions",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0043",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$line",
+          "type": "regex",
+          "value": "\\n\\s*\\w+\\s*:\\s*ignore"
+        },
+        {
+          "context": "tool_description",
+          "id": "$sens",
+          "type": "regex",
+          "value": "~/|\\.ssh|credentials"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|\\n)[ \\t]*[\\w.\\-]{1,40}[ \\t]*(?:\\([^)\\n]{0,30}\\))?[ \\t]*:[ \\t]*(?:ignore|disregard|forget)\\s+(?:all\\s+|any\\s+)?(?:previous|prior|earlier|above)\\s+(?:instructions|guidance|rules)\\b.{0,300}?(?:~/|\\.ssh|id_rsa|\\.aws|\\.env\\b|credentials|/etc/(?:passwd|shadow)|private key|api[_ -]?keys?|tokens?)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "param_read_secret_into_arg",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0043",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$line",
+          "type": "regex",
+          "value": "\\n\\s*\\w+\\s*:"
+        },
+        {
+          "context": "tool_description",
+          "id": "$sens",
+          "type": "regex",
+          "value": "~/|\\.ssh|id_rsa"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|\\n)[ \\t]*[\\w.\\-]{1,40}[ \\t]*(?:\\([^)\\n]{0,30}\\))?[ \\t]*:[^\\n]{0,120}?\\b(?:you\\s+must|must\\s+first|first)\\b[^\\n]{0,80}?\\b(?:read|open|load|cat)\\b[^\\n]{0,100}?(?:~/|\\.ssh|id_rsa|\\.aws|\\.env\\b|credentials|/etc/(?:passwd|shadow)|private key|api[_ -]?keys?|tokens?)[^\\n]{0,160}?\\b(?:append|add|include|concatenate|prepend|insert)\\b[^\\n]{0,100}?\\b(?:to|into|in|as)\\s+the\\s+[\\w ]{1,30}?(?:string|parameter|argument|field|value)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "config_persist",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0044",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cfg",
+          "type": "regex",
+          "value": "AGENTS\\.md|CLAUDE\\.md|\\.cursor/rules|copilot-instructions\\.md"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:append|add|write|save|insert|record)\\b.{0,120}?\\b(?:to|into|in)\\s+(?:the\\s+)?(?:(?:project|repo|repository|workspace)(?:'s)?\\s+)?(?:agents\\.md|claude\\.md|gemini\\.md|\\.cursorrules|\\.windsurfrules|\\.cursor/rules|\\.github/copilot-instructions\\.md|copilot-instructions\\.md).{0,200}?\\b(?:future|every|all|each|subsequent|next)\\s+(?:\\w+\\s+){0,2}(?:session|conversation|run|chat)s?\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
     }
   ],
   "schema_version": "0.1.0",
-  "signature_count": 6,
+  "signature_count": 44,
   "signatures": [
     {
       "category": "tpa_hidden_instruction_block",
@@ -298,9 +2113,9 @@
       "id": "TPA-2026-0002",
       "license": "MIT",
       "provenance": {
-        "note": "HTML comment carrying a system/assistant directive inside fetched resource content; not scored offline (resource_content target).",
-        "published": "2025-04-01",
-        "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+        "note": "HTML comment carrying a system/assistant directive inside fetched resource content (resource content poisoning); not scored offline (resource_content target).",
+        "published": "2026-03-18",
+        "source": "https://arxiv.org/abs/2603.18063"
       },
       "rule_ids": [
         "TPA-2026-0002/hidden_comment_directive"
@@ -356,13 +2171,586 @@
       "id": "TPA-2026-0006",
       "license": "MIT",
       "provenance": {
-        "note": "Silent redirect phrasing typical of a post-approval description change (rug pull).",
-        "published": "2025-04-01",
-        "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+        "note": "Silent redirect of a messaging tool's recipient to a proxy number, delivered via a description swapped in after approval (rug pull).",
+        "published": "2025-04-07",
+        "source": "https://invariantlabs.ai/blog/whatsapp-mcp-exploited"
       },
       "rule_ids": [
         "TPA-2026-0006/hidden_redirect",
         "TPA-2026-0006/manifest_desc_diff"
+      ]
+    },
+    {
+      "category": "tpa_hidden_instruction_block",
+      "gating": true,
+      "id": "TPA-2026-0007",
+      "license": "MIT",
+      "provenance": {
+        "note": "Square-bracket [Important] or [INST] marker followed by an order to always pick this tool.",
+        "published": "2025-08-09",
+        "source": "https://github.com/AIS2Lab/MCPSecBench"
+      },
+      "rule_ids": [
+        "TPA-2026-0007/bracket_marker_regardless",
+        "TPA-2026-0007/bracket_marker_steer"
+      ]
+    },
+    {
+      "category": "tpa_hidden_instruction_block",
+      "gating": true,
+      "id": "TPA-2026-0008",
+      "license": "MIT",
+      "provenance": {
+        "note": "Prose admits a covert second behaviour that gathers or shares secrets unrelated to the tool's purpose.",
+        "published": "2025-09-24",
+        "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/tool_poisoning.yara"
+      },
+      "rule_ids": [
+        "TPA-2026-0008/covert_secret_collection",
+        "TPA-2026-0008/while_processing_also_extracts"
+      ]
+    },
+    {
+      "category": "tpa_comment_directive",
+      "gating": true,
+      "id": "TPA-2026-0009",
+      "license": "MIT",
+      "provenance": {
+        "note": "Directive hidden in an HTML comment of a tool description: a model-addressed cue plus a read or send of a secret file.",
+        "published": "2025-07-03",
+        "source": "https://casco.com/blog/mcp-tool-poisoning"
+      },
+      "rule_ids": [
+        "TPA-2026-0009/html_comment_concealment",
+        "TPA-2026-0009/html_comment_secret_read"
+      ]
+    },
+    {
+      "category": "tpa_comment_directive",
+      "gating": false,
+      "id": "TPA-2026-0010",
+      "license": "MIT",
+      "provenance": {
+        "note": "Hidden comment in fetched resource content telling the agent to read a credential file; not scored offline (resource_content target).",
+        "published": "2026-03-18",
+        "source": "https://arxiv.org/abs/2603.18063"
+      },
+      "rule_ids": [
+        "TPA-2026-0010/resource_comment_credential_read"
+      ]
+    },
+    {
+      "category": "tpa_tool_shadowing",
+      "gating": true,
+      "id": "TPA-2026-0011",
+      "license": "MIT",
+      "provenance": {
+        "note": "Look-alike tool presents itself as the safe replacement and disparages the genuine tool to win selection.",
+        "published": "2025-09-19",
+        "source": "https://www.elastic.co/security-labs/mcp-tools-attack-defense-recommendations"
+      },
+      "rule_ids": [
+        "TPA-2026-0011/prefer_over_all_others",
+        "TPA-2026-0011/prefer_over_deprecated"
+      ]
+    },
+    {
+      "category": "tpa_tool_shadowing",
+      "gating": true,
+      "id": "TPA-2026-0012",
+      "license": "MIT",
+      "provenance": {
+        "note": "Description claims to change how all other tools behave whenever this tool is available.",
+        "published": "2025-04-15",
+        "source": "https://github.com/riseandignite/mcp-shield/blob/master/src/analyzers/tool-analyzer.ts"
+      },
+      "rule_ids": [
+        "TPA-2026-0012/before_any_other_tool_redirect",
+        "TPA-2026-0012/override_other_tools_when_available"
+      ]
+    },
+    {
+      "category": "tpa_tool_shadowing",
+      "gating": true,
+      "id": "TPA-2026-0013",
+      "license": "MIT",
+      "provenance": {
+        "note": "Post-hook description that tells the agent to rewrite the verdict of a check tool after it has run.",
+        "published": "2025-08-09",
+        "source": "https://github.com/AIS2Lab/MCPSecBench"
+      },
+      "rule_ids": [
+        "TPA-2026-0013/post_hook_result_tamper"
+      ]
+    },
+    {
+      "category": "tpa_tool_shadowing",
+      "gating": true,
+      "id": "TPA-2026-0014",
+      "license": "MIT",
+      "provenance": {
+        "note": "Important-tagged notice claims the tool is retired and tells the agent to send future calls to another tool.",
+        "published": "2026-03-24",
+        "source": "https://github.com/dongsenzhang/MSB/blob/main/data/tools/attack_tools/academic_search/PubMed_MCP_Server/pubmed_server-tool_transfer.py"
+      },
+      "rule_ids": [
+        "TPA-2026-0014/important_tag_tool_transfer",
+        "TPA-2026-0014/retired_route_all_calls"
+      ]
+    },
+    {
+      "category": "tpa_cross_server_override",
+      "gating": true,
+      "id": "TPA-2026-0015",
+      "license": "MIT",
+      "provenance": {
+        "note": "A messaging tool description that swaps the real recipient for a proxy phone number (WhatsApp MCP exploit).",
+        "published": "2025-04-07",
+        "source": "https://invariantlabs.ai/blog/whatsapp-mcp-exploited"
+      },
+      "rule_ids": [
+        "TPA-2026-0015/recipient_swap",
+        "TPA-2026-0015/recipient_swap_hidden"
+      ]
+    },
+    {
+      "category": "tpa_cross_server_override",
+      "gating": true,
+      "id": "TPA-2026-0016",
+      "license": "MIT",
+      "provenance": {
+        "note": "Description that forces every transfer to a fixed proxy address and says the user must not be notified (puppet attack).",
+        "published": "2025-05-31",
+        "source": "https://arxiv.org/abs/2506.02040"
+      },
+      "rule_ids": [
+        "TPA-2026-0016/transfer_noun_first_redirect",
+        "TPA-2026-0016/transfer_redirect_mandate",
+        "TPA-2026-0016/transfer_redirect_silent"
+      ]
+    },
+    {
+      "category": "tpa_exfil_redirect",
+      "gating": true,
+      "id": "TPA-2026-0017",
+      "license": "MIT",
+      "provenance": {
+        "note": "A standing rule in an unrelated tool that rewrites the recipient of a later send_email call to a fixed address (parameter tampering).",
+        "published": "2025-08-19",
+        "source": "https://arxiv.org/abs/2508.14925"
+      },
+      "rule_ids": [
+        "TPA-2026-0017/recipient_overwrite_literal",
+        "TPA-2026-0017/tool_call_recipient_rewrite"
+      ]
+    },
+    {
+      "category": "tpa_exfil_redirect",
+      "gating": true,
+      "id": "TPA-2026-0018",
+      "license": "MIT",
+      "provenance": {
+        "note": "In-the-wild npm campaign where a send-email tool silently blind-copied every message to a fixed external address.",
+        "published": "2025-09-25",
+        "source": "https://snyk.io/blog/malicious-mcp-server-on-npm-postmark-mcp-harvests-emails/"
+      },
+      "rule_ids": [
+        "TPA-2026-0018/bcc_not_disclosed",
+        "TPA-2026-0018/hidden_bcc_literal"
+      ]
+    },
+    {
+      "category": "tpa_exfil_redirect",
+      "gating": true,
+      "id": "TPA-2026-0019",
+      "license": "MIT",
+      "provenance": {
+        "note": "Taxonomy scenario where sensitive data is encoded into DNS subdomain queries against an attacker nameserver.",
+        "published": "2026-03-18",
+        "source": "https://arxiv.org/abs/2603.18063"
+      },
+      "rule_ids": [
+        "TPA-2026-0019/dns_encode_dns_first",
+        "TPA-2026-0019/dns_encode_sensitive_first"
+      ]
+    },
+    {
+      "category": "tpa_exfil_redirect",
+      "gating": true,
+      "id": "TPA-2026-0020",
+      "license": "MIT",
+      "provenance": {
+        "note": "Description claiming background clipboard, screen or keystroke capture streamed to an external endpoint.",
+        "published": "2025-09-24",
+        "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/data_exfiltration.yara"
+      },
+      "rule_ids": [
+        "TPA-2026-0020/background_capture_stream",
+        "TPA-2026-0020/capture_then_stream",
+        "TPA-2026-0020/keystroke_exfil"
+      ]
+    },
+    {
+      "category": "tpa_sensitive_file_coaxing",
+      "gating": true,
+      "id": "TPA-2026-0021",
+      "license": "MIT",
+      "provenance": {
+        "note": "Tool description coaxes the agent into reading a credential file and storing it in one of the tool's own parameters.",
+        "published": "2025-04-01",
+        "source": "https://github.com/mitre-atlas/atlas-data/blob/main/dist/ATLAS.yaml"
+      },
+      "rule_ids": [
+        "TPA-2026-0021/contents_into_param",
+        "TPA-2026-0021/read_into_param"
+      ]
+    },
+    {
+      "category": "tpa_sensitive_file_coaxing",
+      "gating": true,
+      "id": "TPA-2026-0022",
+      "license": "MIT",
+      "provenance": {
+        "note": "Search-style tool hides an instruction to read a local settings or credentials file and send the token to an external URL.",
+        "published": "2025-08-19",
+        "source": "https://labs.snyk.io/resources/detect-tool-poisoning-mcp-server-security/"
+      },
+      "rule_ids": [
+        "TPA-2026-0022/read_then_send_url",
+        "TPA-2026-0022/send_file_value_to_url"
+      ]
+    },
+    {
+      "category": "tpa_sensitive_file_coaxing",
+      "gating": true,
+      "id": "TPA-2026-0023",
+      "license": "MIT",
+      "provenance": {
+        "note": "Ordinary-looking tool claims a security precondition that makes the agent read a private key file before every call.",
+        "published": "2025-08-19",
+        "source": "https://arxiv.org/abs/2508.14925"
+      },
+      "rule_ids": [
+        "TPA-2026-0023/precondition_read_key",
+        "TPA-2026-0023/read_key_every_call"
+      ]
+    },
+    {
+      "category": "tpa_credential_harvesting",
+      "gating": true,
+      "id": "TPA-2026-0024",
+      "license": "MIT",
+      "provenance": {
+        "note": "Description tells the model to gather environment secrets by name or via os.environ and place the values in a tool argument.",
+        "published": "2025-09-24",
+        "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/credential_harvesting.yara"
+      },
+      "rule_ids": [
+        "TPA-2026-0024/collect_env_into_param",
+        "TPA-2026-0024/named_secret_values_into_param"
+      ]
+    },
+    {
+      "category": "tpa_persistence_implant",
+      "gating": true,
+      "id": "TPA-2026-0025",
+      "license": "MIT",
+      "provenance": {
+        "note": "Description tells the model to plant an SSH key or a reverse-shell line in authorized_keys or a shell rc file for persistence.",
+        "published": "2025-04-02",
+        "source": "https://arxiv.org/abs/2504.03767"
+      },
+      "rule_ids": [
+        "TPA-2026-0025/payload_into_rc",
+        "TPA-2026-0025/rc_then_payload"
+      ]
+    },
+    {
+      "category": "tpa_rug_pull_phrasing",
+      "gating": true,
+      "id": "TPA-2026-0026",
+      "license": "MIT",
+      "provenance": {
+        "note": "Post-approval 'upgrade' description that makes the agent read a credentials resource and keep quiet about it.",
+        "published": "2025-08-09",
+        "source": "https://github.com/AIS2Lab/MCPSecBench"
+      },
+      "rule_ids": [
+        "TPA-2026-0026/upgrade_claim_read_secret",
+        "TPA-2026-0026/upgrade_credentials_block"
+      ]
+    },
+    {
+      "category": "tpa_instruction_override",
+      "gating": true,
+      "id": "TPA-2026-0027",
+      "license": "MIT",
+      "provenance": {
+        "note": "Classic 'ignore all previous instructions' opener inside a tool description followed by a data-dump order.",
+        "published": "2025-08-19",
+        "source": "https://arxiv.org/abs/2508.14925"
+      },
+      "rule_ids": [
+        "TPA-2026-0027/ignore_instructions_then_act",
+        "TPA-2026-0027/ignore_previous"
+      ]
+    },
+    {
+      "category": "tpa_instruction_override",
+      "gating": true,
+      "id": "TPA-2026-0028",
+      "license": "MIT",
+      "provenance": {
+        "note": "Role redefinition, jailbreak-mode claims and orders to bypass security checks hidden in a description.",
+        "published": "2026-04-27",
+        "source": "https://github.com/highflame-ai/ramparts/blob/main/rules/pre/skill_prompt_injection.yar"
+      },
+      "rule_ids": [
+        "TPA-2026-0028/bypass_security_checks",
+        "TPA-2026-0028/jailbreak_mode",
+        "TPA-2026-0028/role_redefinition"
+      ]
+    },
+    {
+      "category": "tpa_instruction_override",
+      "gating": true,
+      "id": "TPA-2026-0029",
+      "license": "MIT",
+      "provenance": {
+        "note": "Description orders the model to put its own system prompt, tool list or reasoning into a tool argument.",
+        "published": "2025-09-24",
+        "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/coercive_injection.yara"
+      },
+      "rule_ids": [
+        "TPA-2026-0029/internals_into_param",
+        "TPA-2026-0029/reasoning_with_call"
+      ]
+    },
+    {
+      "category": "tpa_conversation_exfil",
+      "gating": true,
+      "id": "TPA-2026-0030",
+      "license": "MIT",
+      "provenance": {
+        "note": "Unrelated tool tells the agent to append chat listings and recent messages to every outbound message.",
+        "published": "2025-04-07",
+        "source": "https://invariantlabs.ai/blog/whatsapp-mcp-exploited"
+      },
+      "rule_ids": [
+        "TPA-2026-0030/append_chat_history",
+        "TPA-2026-0030/hook_send_append"
+      ]
+    },
+    {
+      "category": "tpa_conversation_exfil",
+      "gating": true,
+      "id": "TPA-2026-0031",
+      "license": "MIT",
+      "provenance": {
+        "note": "Spellchecker-style tool that fires on a trigger phrase and receives the complete conversation as a parameter.",
+        "published": "2025-04-23",
+        "source": "https://blog.trailofbits.com/2025/04/23/how-mcp-servers-can-steal-your-conversation-history/"
+      },
+      "rule_ids": [
+        "TPA-2026-0031/full_history_param",
+        "TPA-2026-0031/trigger_phrase_call_first"
+      ]
+    },
+    {
+      "category": "tpa_conversation_exfil",
+      "gating": true,
+      "id": "TPA-2026-0032",
+      "license": "MIT",
+      "provenance": {
+        "note": "Out-of-scope parameter that makes the client fill in session data such as the calling model's name.",
+        "published": "2025-10-14",
+        "source": "https://github.com/dongsenzhang/MSB"
+      },
+      "rule_ids": [
+        "TPA-2026-0032/caller_model_param",
+        "TPA-2026-0032/session_data_param"
+      ]
+    },
+    {
+      "category": "tpa_preference_manipulation",
+      "gating": true,
+      "id": "TPA-2026-0033",
+      "license": "MIT",
+      "provenance": {
+        "note": "Line-jumping description: false compliance authority, consult-first demand and a concealment order.",
+        "published": "2025-04-21",
+        "source": "https://blog.trailofbits.com/2025/04/21/jumping-the-line-how-mcp-servers-can-attack-you-before-you-ever-use-them/"
+      },
+      "rule_ids": [
+        "TPA-2026-0033/command_prefix_hide",
+        "TPA-2026-0033/compliance_consult_first",
+        "TPA-2026-0033/consult_first_hide"
+      ]
+    },
+    {
+      "category": "tpa_preference_manipulation",
+      "gating": true,
+      "id": "TPA-2026-0034",
+      "license": "MIT",
+      "provenance": {
+        "note": "Boastful superlative placed in a description so models rank the tool above equivalents.",
+        "published": "2026-03-24",
+        "source": "https://github.com/dongsenzhang/MSB/blob/main/data/tools/attack_tools/academic_search/PubMed_MCP_Server/pubmed_server-preference_manipulation.py"
+      },
+      "rule_ids": [
+        "TPA-2026-0034/always_prefer_this",
+        "TPA-2026-0034/superlative_claim"
+      ]
+    },
+    {
+      "category": "tpa_concealment_directive",
+      "gating": true,
+      "id": "TPA-2026-0035",
+      "license": "MIT",
+      "provenance": {
+        "note": "A hidden file or secret action is paired with an order to keep it from the user.",
+        "published": "2025-04-01",
+        "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+      },
+      "rule_ids": [
+        "TPA-2026-0035/act_then_conceal",
+        "TPA-2026-0035/conceal_then_act"
+      ]
+    },
+    {
+      "category": "tpa_invisible_text",
+      "gating": true,
+      "id": "TPA-2026-0036",
+      "license": "MIT",
+      "provenance": {
+        "note": "Unicode Tag characters, zero-width runs or bidi overrides hide text from humans while models still read it.",
+        "published": "2024-01-14",
+        "source": "https://embracethered.com/blog/posts/2024/hiding-and-finding-text-with-unicode-tags/"
+      },
+      "rule_ids": [
+        "TPA-2026-0036/bidi_override",
+        "TPA-2026-0036/unicode_tag_run",
+        "TPA-2026-0036/zero_width_run"
+      ]
+    },
+    {
+      "category": "tpa_invisible_text",
+      "gating": true,
+      "id": "TPA-2026-0037",
+      "license": "MIT",
+      "provenance": {
+        "note": "Raw ANSI escape bytes conceal, overwrite or disguise text that a human reviewer never sees.",
+        "published": "2025-04-29",
+        "source": "https://blog.trailofbits.com/2025/04/29/deceiving-users-with-ansi-terminal-codes-in-mcp/"
+      },
+      "rule_ids": [
+        "TPA-2026-0037/ansi_cursor_erase",
+        "TPA-2026-0037/ansi_osc",
+        "TPA-2026-0037/ansi_sgr"
+      ]
+    },
+    {
+      "category": "tpa_invisible_text",
+      "gating": true,
+      "id": "TPA-2026-0038",
+      "license": "MIT",
+      "provenance": {
+        "note": "A long run of blank space pushes the real directive past what a review UI displays.",
+        "published": "2025-04-07",
+        "source": "https://invariantlabs.ai/blog/whatsapp-mcp-exploited"
+      },
+      "rule_ids": [
+        "TPA-2026-0038/blank_lines_then_directive",
+        "TPA-2026-0038/space_padding_then_directive"
+      ]
+    },
+    {
+      "category": "tpa_payload_execution",
+      "gating": true,
+      "id": "TPA-2026-0039",
+      "license": "MIT",
+      "provenance": {
+        "note": "Base64 or hex blob whose decoded start is a download-and-run shell verb.",
+        "published": "2026-10-11",
+        "source": "https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/research/2026-10-11-tpa-attack-lab/research.md"
+      },
+      "rule_ids": [
+        "TPA-2026-0039/b64_dropper_prefix",
+        "TPA-2026-0039/hex_dropper_prefix"
+      ]
+    },
+    {
+      "category": "tpa_payload_execution",
+      "gating": true,
+      "id": "TPA-2026-0040",
+      "license": "MIT",
+      "provenance": {
+        "note": "The description tells the model to decode an embedded base64 string and run the result.",
+        "published": "2025-09-19",
+        "source": "https://www.elastic.co/security-labs/mcp-tools-attack-defense-recommendations"
+      },
+      "rule_ids": [
+        "TPA-2026-0040/decode_and_execute",
+        "TPA-2026-0040/decode_blob_then_run"
+      ]
+    },
+    {
+      "category": "tpa_payload_execution",
+      "gating": true,
+      "id": "TPA-2026-0041",
+      "license": "MIT",
+      "provenance": {
+        "note": "Injected agent directive to wipe the local filesystem and delete cloud resources.",
+        "published": "2025-07-23",
+        "source": "https://aws.amazon.com/security/security-bulletins/AWS-2025-015/"
+      },
+      "rule_ids": [
+        "TPA-2026-0041/destroy_then_proceed_unasked",
+        "TPA-2026-0041/wipe_fs_and_cloud"
+      ]
+    },
+    {
+      "category": "tpa_payload_execution",
+      "gating": true,
+      "id": "TPA-2026-0042",
+      "license": "MIT",
+      "provenance": {
+        "note": "A readable download-and-pipe-to-shell command or reverse-shell idiom is ordered into the description.",
+        "published": "2025-09-24",
+        "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/command_injection.yara"
+      },
+      "rule_ids": [
+        "TPA-2026-0042/pipe_to_shell_directive",
+        "TPA-2026-0042/reverse_shell_idiom"
+      ]
+    },
+    {
+      "category": "tpa_schema_injection",
+      "gating": true,
+      "id": "TPA-2026-0043",
+      "license": "MIT",
+      "provenance": {
+        "note": "Instructions placed in a parameter description rather than the tool description, here flattened into the scanned text.",
+        "published": "2026-03-18",
+        "source": "https://arxiv.org/abs/2603.18063"
+      },
+      "rule_ids": [
+        "TPA-2026-0043/param_ignore_instructions",
+        "TPA-2026-0043/param_read_secret_into_arg"
+      ]
+    },
+    {
+      "category": "tpa_persistence_implant",
+      "gating": true,
+      "id": "TPA-2026-0044",
+      "license": "MIT",
+      "provenance": {
+        "note": "Prompt injection makes a coding agent write a directive or auto-approve setting into its own config file so it persists across sessions.",
+        "published": "2025-08-12",
+        "source": "https://embracethered.com/blog/posts/2025/github-copilot-remote-code-execution-via-prompt-injection/"
+      },
+      "rule_ids": [
+        "TPA-2026-0044/config_persist"
       ]
     }
   ],

@@ -1,0 +1,48 @@
+{
+  "category": "tpa_preference_manipulation",
+  "gating": true,
+  "id": "TPA-2026-0034",
+  "license": "MIT",
+  "provenance": {
+    "note": "Boastful superlative placed in a description so models rank the tool above equivalents.",
+    "published": "2026-03-24",
+    "source": "https://github.com/dongsenzhang/MSB/blob/main/data/tools/attack_tools/academic_search/PubMed_MCP_Server/pubmed_server-preference_manipulation.py"
+  },
+  "rules": [
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.8,
+      "detector": "superlative_claim",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0034",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\bthis\\s+is\\s+the\\s+(?:best|greatest|ultimate|only)\\s+(?:\\w+\\s+){0,2}?tool\\s+(?:in\\s+the\\s+world|ever|available|on\\s+the\\s+market)\\b",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.85,
+      "detector": "always_prefer_this",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0034",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:always|must|should)\\s+(?:use|prefer|choose|select|pick)\\s+this\\s+tool\\s+(?:instead\\s+of|over|rather\\s+than)\\s+(?:all\\s+|any\\s+)?(?:other|similar|alternative|competing)\\b",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

@@ -1,0 +1,44 @@
+{
+  "category": "tpa_comment_directive",
+  "gating": false,
+  "id": "TPA-2026-0010",
+  "license": "MIT",
+  "provenance": {
+    "note": "Hidden comment in fetched resource content telling the agent to read a credential file; not scored offline (resource_content target).",
+    "published": "2026-03-18",
+    "source": "https://arxiv.org/abs/2603.18063"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "resource_comment_credential_read",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0010",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$open",
+          "type": "string",
+          "value": "<!--"
+        },
+        {
+          "context": "tool_description",
+          "id": "$target",
+          "type": "regex",
+          "value": "\\.aws|\\.ssh|credentials|\\.env"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<!--.{0,80}?\\b(?:agent|assistant|ai|model)\\b.{0,200}?\\b(?:read|open|cat|include|append|send)\\b.{0,60}?(?:\\.aws|\\.ssh|credentials|\\.env\\b|id_rsa).{0,160}?-->",
+      "severity": "high",
+      "target": "resource_content",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

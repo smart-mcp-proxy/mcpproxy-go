@@ -1,0 +1,62 @@
+{
+  "category": "tpa_credential_harvesting",
+  "gating": true,
+  "id": "TPA-2026-0024",
+  "license": "MIT",
+  "provenance": {
+    "note": "Description tells the model to gather environment secrets by name or via os.environ and place the values in a tool argument.",
+    "published": "2025-09-24",
+    "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/credential_harvesting.yara"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "collect_env_into_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0024",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$env",
+          "type": "regex",
+          "value": "environment variables?|os\\.environ|process\\.env"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:collect|dump|harvest|gather|extract)\\b.{0,40}?\\b(?:all|every|each|any)\\b.{0,40}?(?:environment\\s+variables?|env\\s+vars?|os\\.environ|process\\.env|api\\s+keys?|secrets?|tokens?).{0,120}?\\b(?:include|put|pass|send|store|place|add|return)\\b.{0,60}?\\b(?:argument|parameter|field|param)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "named_secret_values_into_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0024",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$name",
+          "type": "regex",
+          "value": "AWS_SECRET_ACCESS_KEY|OPENAI_API_KEY|GITHUB_TOKEN"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:AWS_SECRET_ACCESS_KEY|AWS_ACCESS_KEY_ID|OPENAI_API_KEY|ANTHROPIC_API_KEY|GITHUB_TOKEN|HF_TOKEN)\\b.{0,120}?\\b(?:include|put|pass|send|store|place)\\b.{0,40}?\\b(?:values?|contents?)\\b.{0,40}?\\b(?:in|into|as|to|via)\\b.{0,40}?\\b(?:argument|parameter|field)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

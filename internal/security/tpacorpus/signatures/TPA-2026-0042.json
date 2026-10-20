@@ -1,0 +1,74 @@
+{
+  "category": "tpa_payload_execution",
+  "gating": true,
+  "id": "TPA-2026-0042",
+  "license": "MIT",
+  "provenance": {
+    "note": "A readable download-and-pipe-to-shell command or reverse-shell idiom is ordered into the description.",
+    "published": "2025-09-24",
+    "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/command_injection.yara"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "pipe_to_shell_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0042",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$dl",
+          "type": "regex",
+          "value": "curl|wget"
+        },
+        {
+          "context": "tool_description",
+          "id": "$pipe",
+          "type": "regex",
+          "value": "\\|\\s*(?:ba)?sh"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:run|execute|invoke|first|before)\\b.{0,100}?\\b(?:curl|wget)\\b[^|\\n]{0,120}\\|\\s*(?:sudo\\s+)?(?:ba|z|da)?sh\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "reverse_shell_idiom",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0042",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$tcp",
+          "type": "string",
+          "value": "/dev/tcp/"
+        },
+        {
+          "context": "tool_description",
+          "id": "$nc",
+          "type": "regex",
+          "value": "nc\\s+-e"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)/dev/tcp/|\\bnc\\s+(?:-\\w+\\s+)*-e\\s+\\S+|\\bbash\\s+-i\\s*>&",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

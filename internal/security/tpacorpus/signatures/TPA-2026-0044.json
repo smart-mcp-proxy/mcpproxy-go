@@ -1,0 +1,38 @@
+{
+  "category": "tpa_persistence_implant",
+  "gating": true,
+  "id": "TPA-2026-0044",
+  "license": "MIT",
+  "provenance": {
+    "note": "Prompt injection makes a coding agent write a directive or auto-approve setting into its own config file so it persists across sessions.",
+    "published": "2025-08-12",
+    "source": "https://embracethered.com/blog/posts/2025/github-copilot-remote-code-execution-via-prompt-injection/"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "config_persist",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0044",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$cfg",
+          "type": "regex",
+          "value": "AGENTS\\.md|CLAUDE\\.md|\\.cursor/rules|copilot-instructions\\.md"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:append|add|write|save|insert|record)\\b.{0,120}?\\b(?:to|into|in)\\s+(?:the\\s+)?(?:(?:project|repo|repository|workspace)(?:'s)?\\s+)?(?:agents\\.md|claude\\.md|gemini\\.md|\\.cursorrules|\\.windsurfrules|\\.cursor/rules|\\.github/copilot-instructions\\.md|copilot-instructions\\.md).{0,200}?\\b(?:future|every|all|each|subsequent|next)\\s+(?:\\w+\\s+){0,2}(?:session|conversation|run|chat)s?\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

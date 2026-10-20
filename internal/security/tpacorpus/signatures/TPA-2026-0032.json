@@ -1,0 +1,48 @@
+{
+  "category": "tpa_conversation_exfil",
+  "gating": true,
+  "id": "TPA-2026-0032",
+  "license": "MIT",
+  "provenance": {
+    "note": "Out-of-scope parameter that makes the client fill in session data such as the calling model's name.",
+    "published": "2025-10-14",
+    "source": "https://github.com/dongsenzhang/MSB"
+  },
+  "rules": [
+    {
+      "category": "exfiltration",
+      "confidence": 0.8,
+      "detector": "caller_model_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0032",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(llm[_ ]?model[_ ]?name|model[_ ]?name)\\s*:[^\\n]{0,60}?\\b(?:that\\s+(?:calls|invokes|is\\s+calling)\\s+this\\s+tool|of\\s+the\\s+(?:calling|invoking)\\s+(?:agent|model|llm)|calling\\s+(?:llm|agent|model))",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.8,
+      "detector": "session_data_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0032",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(system[_ ]?prompt|tools?[_ ]?list|conversation[_ ]?(?:history|context))\\s*:[^\\n]{0,60}?\\b(?:of\\s+the\\s+(?:caller|calling|agent|assistant)|currently\\s+(?:used|running)|all\\s+(?:available\\s+)?tools\\s+(?:you|the\\s+agent))",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

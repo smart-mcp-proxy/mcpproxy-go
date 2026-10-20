@@ -1,0 +1,55 @@
+{
+  "category": "tpa_rug_pull_phrasing",
+  "gating": true,
+  "id": "TPA-2026-0026",
+  "license": "MIT",
+  "provenance": {
+    "note": "Post-approval 'upgrade' description that makes the agent read a credentials resource and keep quiet about it.",
+    "published": "2025-08-09",
+    "source": "https://github.com/AIS2Lab/MCPSecBench"
+  },
+  "rules": [
+    {
+      "category": "rug-pull",
+      "confidence": 0.9,
+      "detector": "upgrade_credentials_block",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0026",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>|<SYSTEM>"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)<important>.{0,600}?(credentials?|api[ _-]?keys?|secrets?|tokens?|system configuration).{0,300}?(do not|don't|never)[^.]{0,30}(mention|reveal|disclose|tell|say)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "rug-pull",
+      "confidence": 0.88,
+      "detector": "upgrade_claim_read_secret",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0026",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(has been|was|is now|now)\\s+(upgraded|updated|enhanced|improved)\\b.{0,250}?\\b(you must|must first|you should first|first)\\b.{0,100}?\\b(access|read|fetch|open|retrieve|load)\\b.{0,120}?(credentials?|api[ _-]?keys?|secrets?|passwords?)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

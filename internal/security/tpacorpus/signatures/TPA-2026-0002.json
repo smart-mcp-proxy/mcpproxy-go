@@ -4,9 +4,9 @@
   "id": "TPA-2026-0002",
   "license": "MIT",
   "provenance": {
-    "note": "HTML comment carrying a system/assistant directive inside fetched resource content; not scored offline (resource_content target).",
-    "published": "2025-04-01",
-    "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+    "note": "HTML comment carrying a system/assistant directive inside fetched resource content (resource content poisoning); not scored offline (resource_content target).",
+    "published": "2026-03-18",
+    "source": "https://arxiv.org/abs/2603.18063"
   },
   "rules": [
     {

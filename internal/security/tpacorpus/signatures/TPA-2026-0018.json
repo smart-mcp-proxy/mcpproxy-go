@@ -1,0 +1,48 @@
+{
+  "category": "tpa_exfil_redirect",
+  "gating": true,
+  "id": "TPA-2026-0018",
+  "license": "MIT",
+  "provenance": {
+    "note": "In-the-wild npm campaign where a send-email tool silently blind-copied every message to a fixed external address.",
+    "published": "2025-09-25",
+    "source": "https://snyk.io/blog/malicious-mcp-server-on-npm-postmark-mcp-harvests-emails/"
+  },
+  "rules": [
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "bcc_not_disclosed",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0018",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(bcc|blind[ -]?cop(y|ies)|blind carbon)\\b.{0,160}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+.{0,160}?(not shown|hidden|need not be (surfaced|shown|disclosed|mentioned)|do not (show|mention|tell|surface)|without (telling|notifying|informing))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "hidden_bcc_literal",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0018",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(always|silently|automatically|quietly|secretly)\\b.{0,20}\\b(add|append|include|attach|send|sent|copy|copied)\\w*\\b.{0,30}\\b(bcc|blind[ -]?cop(y|ies)|blind carbon)\\b.{0,120}[a-z0-9._+-]+@[a-z0-9-]+\\.[a-z.]+",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

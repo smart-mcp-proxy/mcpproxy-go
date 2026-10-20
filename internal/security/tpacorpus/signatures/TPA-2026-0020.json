@@ -1,0 +1,65 @@
+{
+  "category": "tpa_exfil_redirect",
+  "gating": true,
+  "id": "TPA-2026-0020",
+  "license": "MIT",
+  "provenance": {
+    "note": "Description claiming background clipboard, screen or keystroke capture streamed to an external endpoint.",
+    "published": "2025-09-24",
+    "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/data_exfiltration.yara"
+  },
+  "rules": [
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "background_capture_stream",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0020",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(clipboard|pasteboard|screenshots?|screen)\\b.{0,100}\\b(in the background|continuous\\w*|periodic\\w*|every (few|\\d+) (seconds|minutes)|silently|secretly)\\b.{0,120}\\b(stream|upload|transmit|send|forward|post)\\w*\\b.{0,100}https?://",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "capture_then_stream",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0020",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(watch|monitor|record|capture)\\w*\\b.{0,40}\\b(the )?(system )?(clipboard|pasteboard)\\b.{0,160}?\\b(stream|upload|transmit|send|forward)\\w*\\b.{0,100}https?://",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "keystroke_exfil",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0020",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)\\b(keystrokes?|key ?logg\\w*|key presses)\\b.{0,100}\\b(stream|upload|transmit|send|forward|post)\\w*\\b.{0,100}(https?://|\\b(external|remote) (server|endpoint|host))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

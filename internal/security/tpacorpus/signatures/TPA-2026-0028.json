@@ -1,0 +1,65 @@
+{
+  "category": "tpa_instruction_override",
+  "gating": true,
+  "id": "TPA-2026-0028",
+  "license": "MIT",
+  "provenance": {
+    "note": "Role redefinition, jailbreak-mode claims and orders to bypass security checks hidden in a description.",
+    "published": "2026-04-27",
+    "source": "https://github.com/highflame-ai/ramparts/blob/main/rules/pre/skill_prompt_injection.yar"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "role_redefinition",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0028",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\bnew\\s+instructions?\\s*:\\s*you\\s+are\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.88,
+      "detector": "jailbreak_mode",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0028",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:developer|sudo|jailbreak|unrestricted)\\s+mode\\s+(?:has\\s+been\\s+)?(?:activated|engaged)\\b|\\b(?:you\\s+are|you're)\\s+now\\s+in\\s+(?:developer|sudo|jailbreak|unrestricted|god)\\s+mode\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "bypass_security_checks",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0028",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:you\\s+(?:must|should|shall|will)|always|now|first|then)\\s+bypass\\s+(?:all\\s+|any\\s+|the\\s+)?(?:security|safety)\\s+(?:checks?|filters?|controls?|restrictions?)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

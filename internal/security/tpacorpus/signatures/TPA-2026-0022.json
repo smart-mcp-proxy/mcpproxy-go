@@ -1,0 +1,68 @@
+{
+  "category": "tpa_sensitive_file_coaxing",
+  "gating": true,
+  "id": "TPA-2026-0022",
+  "license": "MIT",
+  "provenance": {
+    "note": "Search-style tool hides an instruction to read a local settings or credentials file and send the token to an external URL.",
+    "published": "2025-08-19",
+    "source": "https://labs.snyk.io/resources/detect-tool-poisoning-mcp-server-security/"
+  },
+  "rules": [
+    {
+      "category": "exfiltration",
+      "confidence": 0.92,
+      "detector": "read_then_send_url",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0022",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$file",
+          "type": "regex",
+          "value": "\\.npmrc|\\.aws|\\.ssh|settings\\.json"
+        },
+        {
+          "context": "tool_description",
+          "id": "$url",
+          "type": "regex",
+          "value": "https?://"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:first|before|prior\\s+to|then|also|additionally|mandatory|required|must|important|always|silently|for\\s+(?:better|best)\\s+\\w+)\\b.{0,100}?\\b(?:read|cat|open|load)\\b.{0,60}?(?:(?:~/\\.(?:ssh|aws|npmrc|netrc|gnupg)|\\.ssh/|id_rsa|id_ed25519|\\.aws/credentials|/etc/passwd|\\.env\\b|credentials?\\s+file|private\\s+key)|\\.npmrc|settings\\.json).{0,160}?\\b(?:send|post|upload|transmit|forward)\\b.{0,80}?https?://",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "send_file_value_to_url",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0022",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$url",
+          "type": "regex",
+          "value": "https?://"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)\\b(?:send|post|upload|transmit|forward)\\b.{0,80}?\\b(?:contents?|values?|tokens?|keys?|credentials?)\\b.{0,50}?(?:~/\\.|id_rsa|\\.npmrc|\\.env\\b|\\.aws/).{0,80}?\\bto\\b.{0,40}?https?://",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}
