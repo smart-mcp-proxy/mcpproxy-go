@@ -305,7 +305,8 @@
   - a refusal pair (`tool_call` with `dispatched=false` plus a pre-dispatch blocked decision), counted once in blocked;
   - an unpaired `dispatched=false` limiter shed → `blocked.other`;
   - an unpaired sandbox profile refusal (`profile_tier`) → `blocked.profile`;
-  - output-sanitisation and strict-schema blocks → brokered + `responses_blocked`;
+  - output-sanitisation and strict-schema blocks → brokered + `responses_blocked` (paired by `request_id` with a dispatched `tool_call`);
+  - a blocked `prompts/get` output-sanitisation decision → zero contribution to every digest figure;
   - limiter `rejected` → `other`;
   - quarantine and profile blocks;
   - holds: enter, approve, re-enter (counted once); an already-held change (not counted); a quarantine-off change (not counted);
@@ -317,7 +318,7 @@
 - [ ] T053 [US4] impl: `internal/storage/activity_digest.go` with `DigestAccumulator`, `BlockClass` and an exported `SensitiveDataDetected` (it wraps `extractSensitiveDataInfo`, `activity_models.go:726`).
 - [ ] T054 [P] [US4] test: `internal/httpapi/activity_digest_test.go`.
   - `GET /activity/summary?period=7d` includes `data.digest`, and the existing fields are unchanged (the existing summary tests stay green).
-  - **Scope**: a scoped token on servers {a, b} gets an identical response with and without holds on c, for both `held_for_review` and `currently_awaiting`.
+  - **Scope**: a scoped token on servers {a, b} gets a **byte-identical digest** with and without c's history. That covers holds on c (`held_for_review`, `currently_awaiting`), a prune of c's records and a watermark initialised from a c record. Scoped callers get `coverage.state = unavailable`.
   - The `profile`, `client` and `token` filters give `held_for_review` null with `reason: not_attributable`.
   - `view=web` counts once per hour, `view=bogus` is ignored without an error, and no `view` counts nothing.
   - **Window**: install 3 days old → `window.label = since_install`, `days = 3`, `effective_start` = anchor; install 30 days old → `period`; anchorless upgrade → `period`. `start_time` is unchanged in all three.

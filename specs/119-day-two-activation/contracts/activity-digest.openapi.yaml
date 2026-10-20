@@ -60,8 +60,8 @@ components:
         coverage:
           type: object
           properties:
-            state: { type: string, enum: [complete, partial] }
-            complete_since: { type: string, format: date-time }
+            state: { type: string, enum: [complete, partial, unavailable], description: "unavailable for scoped callers (watermark is installation-wide)" }
+            complete_since: { type: string, format: date-time, nullable: true }
         window:
           type: object
           description: "Shared source for the 'this week' vs 'since <date> (N days)' label. effective_start = max(start, install anchor); anchorless installs always label=period."

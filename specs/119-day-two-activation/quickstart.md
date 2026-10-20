@@ -31,6 +31,7 @@ sleep 20; R=$(curl -s -H "$K" $B/servers/time/review)
 echo "$R" | jq -e '(.data.tools | length) > 0 and all(.data.tools[]; (.current_hash // "") != "") and (.data.server.incarnation != null)'
 echo "$R" | jq '[.data.tools[].name]'   # ["convert_time","get_current_time"]
 # SC-005: a call before approval is refused and never reaches the upstream
+N0=$(curl -s -H "$K" "$B/activity?type=policy_decision&server=time&tool=get_current_time&status=blocked&limit=1000" | jq '.data.activities | length')
 # If the core is on mcp-go >= v1.0, also send `Mcp-Method: <method>` on each POST.
 # Use the daemon's MCP endpoint, NOT `mcpproxy call` (it falls back to a standalone mode that bypasses the daemon).
 M=http://127.0.0.1:18919/mcp; HJ='Content-Type: application/json'; HA='Accept: application/json, text/event-stream'
@@ -40,8 +41,8 @@ curl -s -H "$HJ" -H "$HA" -H "Mcp-Session-Id: $SID" $M -d '{"jsonrpc":"2.0","id"
   | tee /tmp/s119/refused.txt | grep -q '"isError":true'      # must be refused
 grep -qi 'quarantin' /tmp/s119/refused.txt                      # names quarantine
 # The quarantine gate writes a policy_decision (no tool_call completion). Zero upstream dispatch is proven by the SC-005 safety test's upstream spy, not here.
-curl -s -H "$K" "$B/activity?type=policy_decision&server=time&limit=5" \
-  | jq -e '[.data.activities[] | select(.tool_name=="get_current_time" and .status=="blocked")] | length >= 1'
+N1=$(curl -s -H "$K" "$B/activity?type=policy_decision&server=time&tool=get_current_time&status=blocked&limit=1000" | jq '.data.activities | length')
+[ "$N1" -eq $((N0 + 1)) ]   # exactly one NEW blocked decision, for this attempt
 
 # Bound approval (Spec 117), as the wizard sends it.
 H=$(echo "$R" | jq -ec '[.data.tools[] | {(.name): .current_hash}] | add')   # hashes and incarnation were asserted non-empty above

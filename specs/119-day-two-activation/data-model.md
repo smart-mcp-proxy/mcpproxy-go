@@ -120,7 +120,8 @@ All REST bodies use the standard `{"success": true, "data": …}` envelope (`int
 ```
 
 - `window` is the single shared source for the US4 scenario 6 label (plan review r3 #16). `start` is the nominal period start, the same value as the existing `start_time`. `effective_start = max(start, install anchor)`. `label` is `since_install` when `effective_start > start`, otherwise `period`. `days` is the whole number of days from `effective_start` to the end, rounded up. An anchorless (upgraded) install always gets `label = period`. Coverage is independent: a `period` window can still be `partial`.
-- `blocked.responses_blocked` counts post-dispatch output blocks. They are not in `blocked.total`, because those calls were brokered.
+- `blocked.responses_blocked` counts post-dispatch output blocks paired by `request_id` with a dispatched `tool_call`. Blocked prompt results never count. They are not in `blocked.total`, because those calls were brokered.
+- `coverage` comes from the installation-wide watermark for admin callers only. Scoped callers get `{state: "unavailable", complete_since: null}`, so out-of-scope pruning cannot leak through it.
 - `held_for_review` takes the form `{entered: null, ..., reason: "not_attributable"}` when an attribution filter is set (spec FR-023).
 - `held_for_review.coverage` is `partial` while legacy records without `entered_hold` exist in the window.
 - `new + changed` may exceed `entered`: a tool counts once in `entered` but may appear under both kinds if it entered twice with different kinds.

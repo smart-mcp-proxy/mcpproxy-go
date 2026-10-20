@@ -137,7 +137,7 @@ A runtime background goroutine, `onboardingFactsLoop`, runs at startup (after `E
 
 **Post-dispatch blocks** (r1 #9). `emitActivityPolicyDecisionWithBlockReason` already distinguishes them (`isPostDispatchBlockKey(reasonKey)`, `internal/server/mcp.go:991-998`: `output_sanitisation`, `output_schema`). R7 persists `reasonKey` as the typed `BlockReason`, so the phase is derivable:
 - a **pre-dispatch** blocked `policy_decision` counts in `blocked.total` and its class;
-- a **post-dispatch** block counts in a new `blocked.responses_blocked` and **not** in `blocked.total`. The call itself stays brokered (`dispatched=true`).
+- a **post-dispatch** block counts in a new `blocked.responses_blocked` and **not** in `blocked.total`, but **only** when its `request_id` pairs with a `tool_call` that has `dispatched=true`. The call itself stays brokered. `prompts/get` emits the same `output_sanitisation` reason after an upstream prompt fetch (`internal/server/output_sanitisation.go:286-289`, `mcp.go:1124-1132`) with no `tool_call`, so it never pairs and never counts (plan review r4 #9). A blocked-prompt fixture asserts zero contribution to every digest figure.
 
 The strict output-schema exit (`mcp.go:3610-3612,3653`) must also emit the canonical `tool_call` completion with `dispatched=true`; a test covers both output-block paths.
 
@@ -188,6 +188,8 @@ Mapping table (`internal/storage/activity_digest.go`, `BlockClass(rec)`):
 **Alternatives rejected**: deriving from `ToolApprovalRecord.PendingSince` / `DefinitionChangedAt`. These are current-state fields (`internal/storage/bbolt.go:479-501`).
 
 ## R9. Coverage watermark
+
+**Scope** (plan review r4 #8): the watermark is installation-wide, so pruning of a disallowed server's history would leak through it. Only **admin** callers get `coverage.state` and `complete_since` from it. A scoped caller (`AllowedServers` set) gets `coverage: {state: "unavailable", complete_since: null}`, which never depends on records outside its scope. Test: identical A/B activity with different C history (including a prune of C and watermark initialisation from a C record) gives byte-identical digests for an A/B-scoped token.
 
 **Decision**: a new key `activity_complete_since` in the existing activity meta area (`internal/storage/activity.go`). `PruneOldActivities` (`:342`), `PruneExcessActivities` (`:393`) and `PruneActivitiesToSize` (`:451`) each set it to the timestamp of the newest deleted record + 1 ns, inside their own delete transaction, and only ever move it forward. On first open by this build, if the key is absent, it is initialised to the oldest surviving record's timestamp, or to "now" for an empty log.
 
