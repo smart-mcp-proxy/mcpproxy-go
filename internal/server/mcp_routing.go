@@ -745,6 +745,11 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// applied to /mcp/all. Applied to the RAW result before the activity
 		// classification and truncation below; a non-nil result means blocked.
 		if blockResult := p.applyOutputSanitisation(ctx, serverName, toolName, requestID, directContentTrust, result); blockResult != nil {
+			// The upstream ran, so the started record is closed with the block
+			// message, never the response (direct mode keeps no history).
+			blockMsg := firstTextOf(blockResult)
+			callerr.NoteOutcome(ctx, callerr.Outcome{Class: callerr.ClassProxyPolicy, Domain: callerr.DomainProxy})
+			p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", blockMsg, durationMs, enrichedArgs, "", false, contracts.DeriveCallWith(annotations), nil, directContentTrust, "", 0, 0, "", nil, "")
 			return blockResult, nil
 		}
 
