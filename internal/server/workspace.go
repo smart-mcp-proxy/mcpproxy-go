@@ -242,6 +242,13 @@ func (p *MCPProxyServer) markWorkIfToolCall(ctx context.Context, method mcp.MCPM
 	if method != mcp.MethodToolsCall {
 		return ""
 	}
+	// Spec 058 US3: a 2026-07-28 request belongs to no connection, so there
+	// is no session to mark as worked or persist (session records are a
+	// legacy-era feature — research D11), even on stdio, whose transport id
+	// is the constant "stdio" in both eras.
+	if mcpserver.IsModernRequest(ctx) {
+		return ""
+	}
 	session := mcpserver.ClientSessionFromContext(ctx)
 	if session == nil {
 		return ""

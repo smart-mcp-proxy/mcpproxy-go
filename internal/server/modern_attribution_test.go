@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -119,4 +120,28 @@ func TestModernAttribution_ReachesActivityRecord(t *testing.T) {
 	require.NotNil(t, after)
 	assert.Greater(t, len(after.ClientLastSeen), seenBefore,
 		"the client-seen funnel must observe a modern client although initialize never ran")
+}
+
+// The recorder debounces per identity and is bounded against invented names
+// (cross-review O1): past the cap, fresh identities are neither tracked nor
+// reported, and stale ones are swept once the window has passed.
+func TestModernAttribution_RecorderIsBounded(t *testing.T) {
+	now := time.Unix(1_700_000_000, 0)
+	r := newModernClientRecorder()
+	r.now = func() time.Time { return now }
+
+	assert.True(t, r.firstSightingWithin("ide", "1.0", time.Minute))
+	assert.False(t, r.firstSightingWithin("ide", "1.0", time.Minute), "a repeat within the window is debounced")
+
+	for i := 1; i < modernClientRecorderCap; i++ {
+		require.True(t, r.firstSightingWithin("flood", fmt.Sprint(i), time.Minute))
+	}
+	assert.Len(t, r.seen, modernClientRecorderCap)
+	assert.False(t, r.firstSightingWithin("one-too-many", "1", time.Minute), "a full map with nothing stale records nothing")
+	assert.Len(t, r.seen, modernClientRecorderCap)
+
+	now = now.Add(2 * time.Minute)
+	assert.True(t, r.firstSightingWithin("after-sweep", "1", time.Minute), "stale entries are swept to make room")
+	assert.LessOrEqual(t, len(r.seen), modernClientRecorderCap)
+	assert.True(t, r.firstSightingWithin("ide", "1.0", time.Minute), "a known identity is re-reported once its window passed")
 }

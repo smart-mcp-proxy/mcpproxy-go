@@ -449,27 +449,52 @@ func rejectUnservedProtocolOnStdio(ctx context.Context, message any) error {
 // modernClientRecorder debounces the per-request client identity of modern
 // (2026-07-28) requests, so the activation funnel and the client-seen presence
 // are fed once per distinct client per window rather than once per request.
-// Bounded: an entry per distinct (name, version) ever seen by this process,
-// which is the same cardinality the session store's client names have.
+//
+// The identity is client-supplied, so the map is bounded explicitly rather
+// than by trust: at modernClientRecorderCap entries, sightings older than the
+// window are swept, and if the map is still full the new identity is NOT
+// recorded (and not fed to the funnels). A client inventing a fresh name per
+// request therefore costs one map entry per name up to the cap and nothing
+// after, instead of unbounded memory plus a BBolt write per request.
 type modernClientRecorder struct {
 	mu   sync.Mutex
 	seen map[string]time.Time
 	now  func() time.Time
 }
 
+// modernClientRecorderCap bounds distinct (name, version) pairs tracked at
+// once. Real deployments see a handful of client identities; the cap only
+// matters under a flood of invented names.
+const modernClientRecorderCap = 1024
+
 func newModernClientRecorder() *modernClientRecorder {
 	return &modernClientRecorder{seen: map[string]time.Time{}, now: time.Now}
 }
 
 // firstSightingWithin reports whether (name, version) has not been recorded in
-// the last window, recording it when so.
+// the last window, recording it when so. It returns false, recording nothing,
+// when the map is at capacity with no stale entry to evict.
 func (r *modernClientRecorder) firstSightingWithin(name, version string, window time.Duration) bool {
 	key := name + "\x00" + version
 	now := r.now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if last, ok := r.seen[key]; ok && now.Sub(last) < window {
-		return false
+	if last, ok := r.seen[key]; ok {
+		if now.Sub(last) < window {
+			return false
+		}
+		r.seen[key] = now
+		return true
+	}
+	if len(r.seen) >= modernClientRecorderCap {
+		for k, last := range r.seen {
+			if now.Sub(last) >= window {
+				delete(r.seen, k)
+			}
+		}
+		if len(r.seen) >= modernClientRecorderCap {
+			return false
+		}
 	}
 	r.seen[key] = now
 	return true

@@ -123,7 +123,9 @@ func (p *MCPProxyServer) recordSessionResolution(ctx context.Context, res Profil
 	if p.sessionStore == nil || ctx.Value(noResolutionRecordKey{}) != nil {
 		return
 	}
-	if sid := sessionIDFromContext(ctx); sid != "" {
+	// Era-gated (Spec 058 US3): a 2026-07-28 request has no session to record
+	// a resolution on, whatever id the transport reports (stdio: "stdio").
+	if sid := profileSessionIDFromContext(ctx); sid != "" {
 		p.sessionStore.UpdateSessionProfile(sid, res.Name, res.Source)
 	}
 }

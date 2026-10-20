@@ -69,6 +69,18 @@ func TestProfileEra_SessionTierSkippedOnModernRequests(t *testing.T) {
 
 	assert.Equal(t, "research", proxy.sessionStore.GetActiveProfile("stdio"),
 		"skipping the tier is a read-side gate; a modern request neither applies nor clears a legacy selection")
+
+	// Write side: a modern request records no resolution on the session row
+	// either (cross-review O2), even when it resolves a request-carried
+	// profile the legacy path would have recorded as the session's latest.
+	proxy.sessionStore.SetSession("stdio", "ide", "1.0", false, false, nil)
+	urlModern := profile.WithProfileScope(modern, profileScopeForSlugIn(proxy.currentConfig(), "research"))
+	res = proxy.ResolveProfileV3(urlModern, idx)
+	require.Equal(t, "research", res.Name, "the URL tier is request-carried and still applies")
+	info := proxy.sessionStore.GetSession("stdio")
+	require.NotNil(t, info)
+	assert.Equal(t, "", info.Profile, "a modern request must not write per-connection state")
+	assert.Equal(t, "", proxy.markWorkIfToolCall(urlModern, mcp.MethodToolsCall), "nor mark the connection as worked")
 }
 
 // ─── stdio surface ──────────────────────────────────────────────────────────
