@@ -95,7 +95,7 @@ func TestRegistryPublishersShareStampAndPreflight(t *testing.T) {
 			if stamp < 0 || pre < 0 || pub < 0 {
 				t.Fatalf("%s mcp-registry must stamp (%d), preflight (%d) and publish (%d)", name, stamp, pre, pub)
 			}
-			if !(stamp < pre && pre < pub) {
+			if stamp >= pre || pre >= pub {
 				t.Errorf("%s: order must be stamp < preflight < publish (got %d, %d, %d)", name, stamp, pre, pub)
 			}
 			if strings.Contains(run, `'.version = $v'`) {

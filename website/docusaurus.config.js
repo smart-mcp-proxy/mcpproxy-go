@@ -6,36 +6,38 @@ const path = require('path');
 const {themes: prismThemes} = require('prism-react-renderer');
 
 // Published documentation: the Docusaurus docs plugin serves ONLY these paths.
-// Hoisted into constants so the llms.txt generator below can be restricted to
+// Hoisted into one constant so the llms.txt generator below can be restricted to
 // exactly the same set (Spec 121): the llms plugin walks the whole docs
 // directory, so without this it advertised ~70 internal plans/audits/research
 // pages whose URLs 404 on the live site.
-const docsInclude = [
-  'intro.md',
-  'getting-started/**/*.{md,mdx}',
-  'configuration/**/*.{md,mdx}',
-  'cli/**/*.{md,mdx}',
-  'api/**/*.{md,mdx}',
-  'web-ui/**/*.{md,mdx}',
-  'features/**/*.{md,mdx}',
-  'code_execution/**/*.{md,mdx}',
-  'operations/**/*.{md,mdx}',
-  'errors/**/*.{md,mdx}',
-  'development/**/*.{md,mdx}',
-  'contributing.md',
-  // Standalone references with no structured counterpart
-  'cli-client-mode.md',
-  'cli-output-formatting.md',
-  'logging.md',
-  'prerelease-builds.md',
-  'registries.md',
-  'socket-communication.md',
-];
-// Internal working documents that live in the repo but are not published.
-const docsExclude = [
-  'development/sandbox-snap-docker-harness.md',
-  'development/sandbox-spike-mcp-34.md',
-];
+const docsPublished = {
+  include: [
+    'intro.md',
+    'getting-started/**/*.{md,mdx}',
+    'configuration/**/*.{md,mdx}',
+    'cli/**/*.{md,mdx}',
+    'api/**/*.{md,mdx}',
+    'web-ui/**/*.{md,mdx}',
+    'features/**/*.{md,mdx}',
+    'code_execution/**/*.{md,mdx}',
+    'operations/**/*.{md,mdx}',
+    'errors/**/*.{md,mdx}',
+    'development/**/*.{md,mdx}',
+    'contributing.md',
+    // Standalone references with no structured counterpart
+    'cli-client-mode.md',
+    'cli-output-formatting.md',
+    'logging.md',
+    'prerelease-builds.md',
+    'registries.md',
+    'socket-communication.md',
+  ],
+    // Internal working documents that live in the repo but are not published.
+  exclude: [
+    'development/sandbox-snap-docker-harness.md',
+    'development/sandbox-spike-mcp-34.md',
+  ],
+};
 
 const llmsRootContent = [
   'MCPProxy is a local-first smart proxy for the Model Context Protocol: it indexes every upstream MCP server\'s tools for BM25 discovery, quarantines unreviewed servers and tool changes, and cuts tool-schema token cost.',
@@ -46,14 +48,14 @@ const llmsRootContent = [
 /**
  * ignoreFiles patterns for docusaurus-plugin-llms: every markdown file/dir in
  * the docs tree that the docs plugin does NOT publish. Derived from
- * docsInclude by top-level name, so adding a page to the allowlist also adds
+ * docsPublished.include by top-level name, so adding a page to the allowlist also adds
  * it to the llms bundles with no second list to maintain.
  */
 function unpublishedDocsPatterns() {
   const docsDir = path.join(__dirname, 'docs');
   if (!fs.existsSync(docsDir)) return [];
-  const allowedFiles = new Set(docsInclude.filter((g) => !g.includes('/')));
-  const allowedDirs = new Set(docsInclude.filter((g) => g.includes('/')).map((g) => g.split('/')[0]));
+  const allowedFiles = new Set(docsPublished.include.filter((g) => !g.includes('/')));
+  const allowedDirs = new Set(docsPublished.include.filter((g) => g.includes('/')).map((g) => g.split('/')[0]));
   const out = [];
   for (const entry of fs.readdirSync(docsDir, {withFileTypes: true})) {
     if (entry.isDirectory()) {
@@ -63,7 +65,7 @@ function unpublishedDocsPatterns() {
     }
   }
   // Explicitly excluded pages inside a published directory.
-  return out.concat(docsExclude);
+  return out.concat(docsPublished.exclude);
 }
 
 /** @type {import('@docusaurus/types').Config} */
@@ -117,9 +119,9 @@ const config = {
           sidebarPath: './sidebars.js',
           editUrl: 'https://github.com/smart-mcp-proxy/mcpproxy-go/edit/main/',
           // Only include structured documentation pages
-          include: docsInclude,
+          include: docsPublished.include,
           // Internal working documents that live in the repo but are not published
-          exclude: docsExclude,
+          exclude: docsPublished.exclude,
         },
         blog: false,
         theme: {

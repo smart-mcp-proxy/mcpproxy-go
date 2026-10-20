@@ -48,7 +48,7 @@ No violations.
 ### B. Windows
 - New reusable workflow `.github/workflows/publish-windows-packages.yml` (`workflow_call` + `workflow_dispatch` with `tag`): jobs `scoop` and `winget`, both `if: !contains(tag,'-')`, each first checking its secret/repo is configured (else `::notice::` and exit 0).
 - `scripts/gen-scoop-manifest.sh <tag> <checksums.txt>` → `mcpproxy.json` (version, per-arch `architecture.{64bit,arm64}.{url,hash}` from `mcpproxy-<ver>-windows-<arch>.zip`, `bin: [mcpproxy.exe]`, `shortcuts` for the tray, `checkver: github`, `autoupdate` with `$version` templates and a `hash` url to `checksums.txt`). Job commits it to `smart-mcp-proxy/scoop-bucket/bucket/mcpproxy.json` using `SCOOP_BUCKET_TOKEN`; idempotent (no diff → no commit).
-- winget: SHA-pinned `vedantmgoyal9/winget-releaser` (wingetcreate wrapper), `identifier: smart-mcp-proxy.mcpproxy`, `installers-regex: 'mcpproxy-setup-v.*-(amd64|arm64)\.exe$'`, token `WINGET_TOKEN`; a checked-in template `packaging/windows/winget/` (YAML 3-file skeleton incl. `InstallerType: inno`, `Scope: machine`, `InstallerSwitches.Custom: /CHANNEL=winget`, `Silent: /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`) is what the human uses for the one-time first submission (`wingetcreate new` flags in docs). Job only runs if the package exists in winget-pkgs (checked via the GitHub API), else notice.
+- winget: `scripts/gen-winget-manifest.sh <tag> <checksums.txt> <outdir>` renders the 3-file manifest (`InstallerType: inno`, `Scope: machine`, `InstallerSwitches.Custom: /CHANNEL=winget`, silent switches, `ProductCode` from the Inno AppId, x64/arm64 paired with the right exe); fixture-tested and schema-validated against Microsoft's published schemas. The `winget` job opens the PR to `microsoft/winget-pkgs` from the maintainer's fork with `gh` (no third-party action: `winget-releaser` pulls `cargo-binstall@main` unpinned), only if the package already exists upstream and the version is neither merged nor has an open PR. The first submission is manual (runbook).
 - `release.yml` calls the reusable workflow after `release`; `retry-sign-release.yml` calls it too (post-release-only path).
 - Inno (`scripts/installer.iss`): `{param:CHANNEL|}`-style handling in `[Code]`: write `{app}\install-channel` (value validated to `winget`) in `CurStepChanged(ssPostInstall)` if the param is present, else delete a stale one; `[UninstallDelete]` removes it; `NeedsAddPath`'s `MsgBox` guarded by `not WizardSilent`.
 - Detector: `ChannelScoop="scoop"` in `knownChannels`; path heuristic (`\scoop\apps\mcpproxy\` or `\scoop\persist\`, case-insensitive, slash-normalized) before the tarball fallback; `UpdateCommand` → `scoop update mcpproxy`; `decideAction` → command; `UpdateBanner.vue` + generated types doc strings updated.
@@ -60,7 +60,7 @@ No violations.
 - Prompt content: detect OS; check `command -v mcpproxy` / existing instance first and stop to ask if present; macOS/Linux → `brew install smart-mcp-proxy/mcpproxy/mcpproxy` (cask on macOS desktop), Windows → `winget install smart-mcp-proxy.mcpproxy` else `scoop`, else release archive with `checksums.txt` verification and a data-dir marker `curl`; `mcpproxy serve` (background); verify with `mcpproxy doctor` / `mcpproxy upstream list`; `mcpproxy connect <client>`; tell user to reload the client; never read/print config or keys.
 
 ### D. Telemetry
-- `internal/telemetry/install_channel.go`: `type InstallChannel string` + `AllInstallChannels()`; `ResolveInstallChannel(deps)` where deps injects env getter, exe path, file reader, data dir, detector func — pure and table-testable. `MapDetectorChannel(string) InstallChannel` is total (homebrew→brew, dmg, deb, rpm, docker, go-install, windows-installer, tarball, scoop, unknown→unknown, anything else→unknown).
+- `internal/telemetry/install_channel.go`: `type InstallChannel string` + `AllInstallChannels()`; `resolveInstallChannel(deps)` where deps injects env getter, exe path, file reader, data dir, detector func — pure and table-testable. `MapDetectorChannel(string) InstallChannel` is total (homebrew→brew, dmg, deb, rpm, docker, go-install, windows-installer, tarball, scoop, unknown→unknown, anything else→unknown).
 - `HeartbeatPayload.InstallChannel string json:"install_channel,omitempty"`; filled in `BuildPayload` only on the enabled path; resolved once per process (cached via `sync.Once`, since channel cannot change while running) — preview path uses the same cached resolver but only when telemetry is enabled. No `SchemaVersion` bump (FR-030).
 - Anonymity scanner (`anonymity.go`) allow-lists the field's closed values; `payload_privacy_test.go` gains a canary (marker content `C:\Users\secret` and an out-of-set token must not appear).
 - `MCPPROXY_INSTALL_CHANNEL` documented in `docs/features/telemetry.md` and `docs/configuration.md` env table (env var only; no config field → config checklist N/A).
@@ -74,21 +74,32 @@ No violations.
 specs/121-install-surfaces/{spec,plan,research,data-model,quickstart,tasks,review-log,followup-mcpb}.md, contracts/, checklists/
 server.json                         # + packages
 Dockerfile                          # + LABEL
-scripts/{stamp-server-json,registry-preflight,gen-scoop-manifest,sync-agent-prompt}.sh (+ tests)
+scripts/{stamp-server-json,registry-preflight,gen-scoop-manifest,gen-winget-manifest,sync-agent-prompt}.sh (+ tests, testdata/)
 scripts/installer.iss               # channel switch, silent-safe
-packaging/windows/winget/           # one-time bootstrap templates
-.github/workflows/{release,retry-sign-release,publish-windows-packages,docs}.yml
+.github/workflows/{release,retry-sign-release,publish-windows-packages,installer-channel-test,distribution-checks,docs}.yml
 internal/updatecheck/{channel,guidance}.go (+tests)
 internal/telemetry/{install_channel,telemetry,anonymity}.go (+tests)
 cmd/mcpproxy/update_cmd.go (+test)   # scoop action
 frontend/src/components/UpdateBanner.vue, frontend/src/types/contracts.ts, cmd/generate-types
 website/{docusaurus.config.js,sidebars.js,scripts/check-llms.mjs,package.json}
-docs/getting-started/{installation,agent-install}.md, docs/features/telemetry.md, docs/mcp-registry-publishing.md, docs/release-runbook.md, docs/operations/windows-package-managers.md, README.md
+docs/getting-started/{installation,agent-install}.md, docs/features/telemetry.md, docs/configuration.md, docs/mcp-registry-publishing.md, docs/release-runbook.md (maintainer steps), README.md
 ```
 
 ## Risks
 
-- Winget-releaser/first-submission delays are human/Microsoft-bound → job skips cleanly; docs checklist.
-- Inno changes cannot be executed on macOS CI; verified by installer.iss review + a Windows runner dry compile is out of reach locally → noted in PR as "needs first-release verification"; the `[Code]` change is minimal.
+- First-submission delays are human/Microsoft-bound → winget job skips cleanly until the package exists; checklist in `docs/release-runbook.md`.
+- Inno changes cannot be run locally (macOS): `.github/workflows/installer-channel-test.yml` builds a throwaway installer on a Windows runner and exercises silent install / reinstall / uninstall / long-PATH, triggered by changes to `installer.iss`.
 - Registry immutability: preflight is the only guard; smoke test uses the exact declared args.
 - Merge collision with concurrent specs on `telemetry.go`/`release.yml`: kept additive and localized.
+
+## Changes after the Sol plan review (round 1, see review-log.md)
+
+- Scoop detection also accepts custom `$SCOOP`/`$SCOOP_GLOBAL` roots via scoop's own `install.json` beside the executable.
+- Telemetry eligibility is read live under the service mutex (`telemetryEnabledLive`); marker reads accept only regular files, reject oversized files rather than truncating, and never block on a FIFO.
+- The reusable Windows workflow is classified as a publisher by the QA-gate audit and has its own invariant tests.
+- winget uses our generator, not a third-party action; local generation + schema validation are tested.
+- Installer lifecycle is tested on a Windows runner (new workflow), not only reviewed.
+- Server.json schema validation runs in PR CI (`distribution-checks.yml`) using the same stamped file the release publishes.
+- The llms plugin walked the whole docs tree: the live `llms.txt` advertised ~70 unpublished pages (404). Ignore patterns are now derived from the docs `include` allowlist, `intro.md` (linked as `/docs`, a 404) is replaced by `rootContent`, and `check-llms.mjs` fails the build on any non-resolving link.
+- Isolated agent-prompt end-to-end run is scheduled (T045) with redacted evidence in the PR.
+- Known, not fixed here: the ARM64 Inno installer declares `ArchitecturesAllowed=x64compatible arm64` (pre-existing); winget selects by manifest architecture so installs are unaffected.

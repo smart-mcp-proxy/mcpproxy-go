@@ -46,6 +46,7 @@ RULES
 3. START IT
    mcpproxy serve --listen 127.0.0.1:8080 > ~/.mcpproxy/serve.log 2>&1 &     # Windows: Start-Process mcpproxy -ArgumentList serve -WindowStyle Hidden
    If port 8080 is taken, use another, e.g. --listen 127.0.0.1:18080.
+   It must keep running after your command returns: start it with your tool's background/long-running mode rather than relying on a trailing `&`, which some agent shells kill when the call ends.
    Wait until `mcpproxy status` reports it is running (retry for up to 30 seconds).
 
 4. VERIFY (these commands print masked output)

@@ -15,3 +15,21 @@
 | 9 | P2 | Inno `MsgBox` blocks silent winget install | Fixed: silent-safe (FR-014, US2.8) |
 | 10 | P2 | Registry acceptance didn't run the package | Fixed: smoke test with declared env/port (FR-005, US1.7); container smoke-tested manually |
 | 11 | P3 | "Nothing is sent" vs opt-out beacon; preview path | Fixed: wording + preview gating (US4.6) |
+
+## Round 1 — plan.md — verdict: CHANGES REQUIRED → 12 of 13 applied, 1 deferred
+
+| # | Sev | Finding | Disposition |
+|---|-----|---------|-------------|
+| 1 | P1 | Scoop custom roots fall through to `tarball` → self-update | Fixed: `install.json` evidence beside the exe; tests |
+| 2 | P2 | Telemetry eligibility read from a config snapshot, not live | Fixed: `telemetryEnabledLive()` |
+| 3 | P2 | Marker reader: FIFO blocking, truncated-prefix acceptance | Fixed: regular-file only, overflow rejects; FIFO/symlink/oversize tests |
+| 4 | P2 | New publisher escapes the QA-gate audit | Fixed: signature added + invariant tests |
+| 5 | P2 | No local winget generator/validator | Fixed: `gen-winget-manifest.sh` + tests, schema-validated |
+| 6 | P2 | winget tag dispatch/idempotence underspecified | Fixed: explicit tag, existing-version/open-PR checks |
+| 7 | P2 | ARM64 installer advertises x64 | Deferred (pre-existing; winget unaffected; noted in PR) |
+| 8 | P2 | Installer lifecycle untested | Fixed: Windows runner workflow |
+| 9 | P2 | No PR-CI schema validation of server.json | Fixed: `distribution-checks.yml` |
+| 10 | P2 | Isolated agent-prompt run unscheduled | Done: see PR body for the run |
+| 11 | P2 | OpenAPI regeneration missing | Fixed: `make swagger` |
+| 12 | P3 | Declaration acceptance rules inconsistent | Fixed: data-model/tests/docs now source-specific |
+| 13 | P3 | Receiver compat unverified | Verified by reading `mcpproxy-telemetry/src/validation.ts` (known fields only, unknown top-level fields not rejected); listed as follow-up |
