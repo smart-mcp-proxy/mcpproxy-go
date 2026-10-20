@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +15,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 )
 
 // SecretResolverFunc resolves a secret reference like ${keyring:name} to its value
