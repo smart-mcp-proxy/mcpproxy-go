@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -161,6 +162,12 @@ func TestReadCandidateFile_DirectoryRefused(t *testing.T) {
 func TestReadCandidateFile_NotExistOnlyForENOENT(t *testing.T) {
 	// A path whose parent is a regular file fails with ENOTDIR, which is a
 	// read failure, not "absent": the loader must not treat it as unsigned.
+	// Windows reports that path as ERROR_PATH_NOT_FOUND (genuinely absent), so
+	// the distinction is a POSIX one. It cannot matter there either: a sidecar
+	// lives in its bundle's directory, so that bundle read would fail too.
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX ENOTDIR semantics")
+	}
 	f := writeCandidate(t, "file", []byte("x"))
 	_, err := readCandidateFile(context.Background(), filepath.Join(f, "child"), 16)
 	ce := requireCandidateErr(t, err, RejectReadError)
