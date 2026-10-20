@@ -1314,6 +1314,15 @@ func (s *Server) setupRoutes() {
 			r.Get("/scanners/{id}/status", s.handleGetScannerStatus)
 			r.Get("/overview", s.handleSecurityOverview)
 
+			// Spec 101 TPA signature bundle. Status and history are admin-read;
+			// the mutations (a rollback overrides the downgrade watermark) are
+			// refused to agent tokens.
+			r.Get("/bundle", s.handleGetSecurityBundle)
+			r.Get("/bundle/history", s.handleGetSecurityBundleHistory)
+			r.Post("/bundle/rollback", s.requireServerOp(auth.ServerOpBundleManage, s.handleRollbackSecurityBundle))
+			r.Post("/bundle/unpin", s.requireServerOp(auth.ServerOpBundleManage, s.handleUnpinSecurityBundle))
+			r.Post("/bundle/reload", s.requireServerOp(auth.ServerOpBundleManage, s.handleReloadSecurityBundle))
+
 			// Legacy routes (backwards compatibility)
 			r.Post("/scanners/install", s.requireServerOp(auth.ServerOpScan, s.handleInstallScanner))
 			r.Delete("/scanners/{id}", s.requireServerOp(auth.ServerOpScan, s.handleRemoveScanner))
