@@ -134,9 +134,12 @@ func TestCheckToolApprovals_TrustedServer_AllHeldBaselineIsNotPromotedOnRepeat(t
 
 	// TOCTOU flip (EXP-4): the server now serves a CLEAN contract under the
 	// same name. The poisoned contract is never approved; the clean one is
-	// baselined only once it has been seen unchanged across passes. The hold
-	// evidence of the flagged first contract stays on the pending record until
-	// promotion clears it, so the review screen still shows what was refused.
+	// baselined only once it has been seen unchanged across passes. The
+	// baseline gate itself never erases evidence (a clean verdict applies
+	// nothing); on a moved pending definition the Spec 118 evidence scan
+	// (#1689) then re-describes the record for its CURRENT definition, so a
+	// clean swap reads "awaiting_review" rather than the refused contract's
+	// "scan_findings" — the review screen describes what it shows.
 	clean := []*config.ToolMetadata{
 		{ServerName: "tpa-lab-attacker", Name: "summarize_text", Description: "Summarize the given text.", ParamsJSON: `{"type":"object"}`},
 	}
@@ -146,7 +149,7 @@ func TestCheckToolApprovals_TrustedServer_AllHeldBaselineIsNotPromotedOnRepeat(t
 	rec, err := rt.storageManager.GetToolApproval("tpa-lab-attacker", "summarize_text")
 	require.NoError(t, err)
 	assert.Equal(t, storage.ToolApprovalStatusPending, rec.Status)
-	assert.Equal(t, storage.ToolHeldReasonScanFindings, rec.HeldReason, "the refused first contract's evidence travels with the pending record")
+	assert.Equal(t, storage.ToolHeldReasonAwaitingReview, rec.HeldReason, "evidence describes the CURRENT (clean, moved) definition — Spec 118 evidence scan")
 	assert.Equal(t, "Summarize the given text.", rec.CurrentDescription)
 
 	result, err = rt.checkToolApprovals("tpa-lab-attacker", clean)
