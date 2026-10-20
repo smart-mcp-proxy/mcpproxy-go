@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"sync"
 )
 
@@ -246,6 +248,99 @@ var tpaScannerScalarKeys = []string{
 	"tool_change_gate_scans", "prompt_scans",
 }
 
+// tpaBundleKeys is the schema-v15 (Spec 101 FR-021) active-bundle group inside
+// tpa_scanner. It is deliberately NOT part of tpaScannerScalarKeys, which stays
+// integer-only: these four keys have four different types and are validated as
+// one tuple by scanTPABundle.
+var tpaBundleKeys = []string{
+	"bundle_source", "bundle_signature_verified", "bundle_version", "bundle_sequence",
+}
+
+// tpaBundleSources is the closed bundle_source enum.
+var tpaBundleSources = []string{"embedded", "file", "fetch"}
+
+// tpaBundleSchemaLine is the only non-"other" bundle_version shape: a corpus
+// schema line such as "0.1". It is a normalization that does not depend on any
+// individual release, so a binary can report a corpus line published after it
+// shipped, while the near-unique release string never leaves the install
+// (research D7).
+var tpaBundleSchemaLine = regexp.MustCompile(`^[0-9]{1,3}\.[0-9]{1,3}$`)
+
+// tpaBundleMaxSequence is 2^53-1, the largest integer every JSON consumer
+// represents exactly.
+const tpaBundleMaxSequence = 1<<53 - 1
+
+// scanTPABundle enforces the typed shape of each bundle key and the WHOLE-TUPLE
+// rule: if any bundle_* key is present, bundle_source, bundle_signature_verified
+// and bundle_version must all be present; a schema-line bundle_version requires
+// bundle_sequence AND (source "embedded", or source file/fetch with
+// signature_verified true); bundle_version "other" forbids bundle_sequence.
+//
+// This is a backstop, so it does not trust the producer's provenance gate:
+// every other combination is refused. Violation messages are constants and
+// never echo the offending key or value.
+func scanTPABundle(obj map[string]json.RawMessage) *AnonymityViolation {
+	rawSource, hasSource := obj["bundle_source"]
+	rawVerified, hasVerified := obj["bundle_signature_verified"]
+	rawVersion, hasVersion := obj["bundle_version"]
+	rawSeq, hasSeq := obj["bundle_sequence"]
+	if !hasSource && !hasVerified && !hasVersion && !hasSeq {
+		return nil
+	}
+	if !hasSource || !hasVerified || !hasVersion {
+		return v8FieldViolation("tpa_scanner", "carries an incomplete bundle tuple")
+	}
+
+	var source string
+	if err := json.Unmarshal(rawSource, &source); err != nil || !slices.Contains(tpaBundleSources, source) {
+		return v8FieldViolation("tpa_scanner.bundle_source", "must be a value of its fixed enum")
+	}
+
+	// json.Unmarshal into a bool accepts neither strings nor numbers, but does
+	// accept null (leaving false); require a bare true/false token.
+	var verified bool
+	switch string(bytes.TrimSpace(rawVerified)) {
+	case "true":
+		verified = true
+	case "false":
+	default:
+		return v8FieldViolation("tpa_scanner.bundle_signature_verified", "must be a boolean")
+	}
+
+	var version string
+	if err := json.Unmarshal(rawVersion, &version); err != nil {
+		return v8FieldViolation("tpa_scanner.bundle_version", "must be a schema line or other")
+	}
+	schemaLine := tpaBundleSchemaLine.MatchString(version)
+	if !schemaLine && version != "other" {
+		return v8FieldViolation("tpa_scanner.bundle_version", "must be a schema line or other")
+	}
+
+	if !hasSeq {
+		if schemaLine {
+			return v8FieldViolation("tpa_scanner.bundle_sequence", "is required with a schema-line bundle_version")
+		}
+		return nil
+	}
+	if !schemaLine {
+		return v8FieldViolation("tpa_scanner.bundle_sequence", "must be absent when bundle_version is other")
+	}
+	if source != "embedded" && !verified {
+		return v8FieldViolation("tpa_scanner.bundle_version", "reports a schema line for an unverified external bundle")
+	}
+	msg := json.RawMessage(rawSeq)
+	if viol := scanNonNegativeInt(&msg, "tpa_scanner.bundle_sequence", v8FieldViolation); viol != nil {
+		return viol
+	}
+	// scanNonNegativeInt already proved a bare, whole, non-negative int64.
+	var n json.Number
+	_ = json.Unmarshal(bytes.TrimSpace(rawSeq), &n)
+	if i, err := n.Int64(); err != nil || i > tpaBundleMaxSequence {
+		return v8FieldViolation("tpa_scanner.bundle_sequence", "exceeds the exactly-representable integer range")
+	}
+	return nil
+}
+
 // scanV8TPAScanner asserts the schema-v8 tpa_scanner sub-object (if present)
 // carries counts and fixed enum keys ONLY: an object whose keys are
 // whitelisted, whose scalars are non-negative integers, and whose findings map
@@ -270,6 +365,9 @@ func scanV8TPAScanner(raw json.RawMessage) *AnonymityViolation {
 		allowed[k] = struct{}{}
 	}
 	allowed["findings"] = struct{}{}
+	for _, k := range tpaBundleKeys {
+		allowed[k] = struct{}{}
+	}
 	for k := range obj {
 		if _, ok := allowed[k]; !ok {
 			// The violation is logged on send failure — echoing the
@@ -288,6 +386,10 @@ func scanV8TPAScanner(raw json.RawMessage) *AnonymityViolation {
 		if viol := scanNonNegativeInt(&msg, "tpa_scanner."+k, v8FieldViolation); viol != nil {
 			return viol
 		}
+	}
+
+	if viol := scanTPABundle(obj); viol != nil {
+		return viol
 	}
 
 	rawFindings, ok := obj["findings"]
