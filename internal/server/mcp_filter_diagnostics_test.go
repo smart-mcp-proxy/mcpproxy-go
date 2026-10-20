@@ -126,11 +126,13 @@ func addAnnotatedTool(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runtime, 
 	})
 }
 
-// --- T003: frozen pre-feature response goldens (SC-002) ---
+// --- T003: frozen response goldens (SC-002) ---
 //
-// Captured while the branch still had pre-feature behavior, these six files
-// pin the EXACT bytes of the three response conditions in both serialization
-// modes. Post-feature:
+// These six files pin the exact bytes for the three response conditions in
+// both serialization modes. They originate from the pre-filter-diagnostics
+// capture and were updated only for the deliberate compact routing changes:
+// the `call_with` field and authoritative routing guidance. The diagnostics
+// feature is checked separately below. The current feature:
 //
 //	(a) no filters            -> byte-identical to the golden
 //	(b) filters, no omissions -> byte-identical to the golden
@@ -208,7 +210,7 @@ func compareSpec094Golden(t *testing.T, goldenPath, got string) {
 	assert.Equal(t,
 		strings.TrimRight(string(want), "\n"),
 		strings.TrimRight(got, "\n"),
-		"response must be byte-identical to the frozen pre-feature capture (SC-002)")
+		"response must be byte-identical to the committed routing-contract golden (SC-002)")
 }
 
 // stripTopLevelJSONKey removes one top-level `"key": <value>` member from a
