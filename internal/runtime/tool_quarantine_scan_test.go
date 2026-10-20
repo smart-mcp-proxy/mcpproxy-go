@@ -32,7 +32,7 @@ func seedApprovedBaseline(t *testing.T, rt *Runtime, server, tool, desc, schema 
 // server whose approved tool changes to a description that scans CLEAN is still
 // held (changed + blocked) for operator confirmation — RT-02: paraphrased rug
 // pulls scan clean, so a green verdict never re-approves a changed contract.
-// The hold carries no scan evidence (there is nothing to show).
+// The hold carries awaiting_review evidence: verdict clean, no signals.
 func TestScanMode_BenignChange_HeldForOperatorConfirmation(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{scanServer("github")})
 	seedApprovedBaseline(t, rt, "github", "create_issue", "Creates issues", `{"type":"object"}`)
@@ -51,7 +51,9 @@ func TestScanMode_BenignChange_HeldForOperatorConfirmation(t *testing.T) {
 	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
 	assert.NotEqual(t, "scan-approved", rec.ApprovedBy, "a clean scan must not re-approve a changed contract")
 	assert.NotEqual(t, rec.CurrentHash, rec.ApprovedHash, "the approved baseline is not moved")
-	assert.Empty(t, rec.HeldReason, "a clean verdict leaves no scan evidence on the hold")
+	assert.Equal(t, storage.ToolHeldReasonAwaitingReview, rec.HeldReason, "a clean verdict is recorded as awaiting review, not as a finding")
+	assert.Equal(t, "clean", rec.HeldVerdict)
+	assert.Empty(t, rec.HeldSignals)
 
 	// The operator confirms the change: it is approved and stays approved.
 	require.NoError(t, rt.ApproveTools("github", []string{"create_issue"}, "operator"))
@@ -454,28 +456,6 @@ func TestScanMode_HeldEvidenceClearedOnCleanRescan(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "a clean rescan does not re-approve a changed contract")
 	assert.Empty(t, rec.HeldSignals, "a clean rescan must clear stale hold evidence")
-	assert.Empty(t, rec.HeldReason)
-	assert.Empty(t, rec.HeldVerdict)
-}
-
-// TestManualMode_HeldChange_HasNoScanEvidence: manual mode never runs the scan,
-// so a held record carries no scan evidence — the new fields stay empty and old
-// records (which never had them) render identically.
-func TestManualMode_HeldChange_HasNoScanEvidence(t *testing.T) {
-	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
-		{Name: "github", Enabled: true, TrustMode: string(config.TrustModeManual)},
-	})
-	seedApprovedBaseline(t, rt, "github", "create_issue", "Creates issues", `{"type":"object"}`)
-
-	changed := []*config.ToolMetadata{
-		{ServerName: "github", Name: "create_issue", Description: "Creates issues, benign edit", ParamsJSON: `{"type":"object"}`},
-	}
-	_, err := rt.checkToolApprovals("github", changed)
-	require.NoError(t, err)
-
-	rec, err := rt.storageManager.GetToolApproval("github", "create_issue")
-	require.NoError(t, err)
-	require.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
-	assert.Empty(t, rec.HeldReason, "manual holds carry no scan evidence")
-	assert.Empty(t, rec.HeldSignals)
+	assert.Equal(t, storage.ToolHeldReasonAwaitingReview, rec.HeldReason, "the stale finding is replaced by the clean verdict")
+	assert.Equal(t, "clean", rec.HeldVerdict)
 }

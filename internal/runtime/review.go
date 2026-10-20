@@ -323,7 +323,7 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 // pending or changed tool starts allowed only when it is read-only, the scan
 // verified its current definition as clean and nothing holds it. Everything
 // else (write, destructive, unannotated, unknown, not scanned, warnings,
-// dangerous, held) starts unchecked.
+// dangerous, held by a scan finding or coverage failure) starts unchecked.
 func reviewDefaultAllowed(tool ReviewTool) bool {
 	if tool.Disabled {
 		return false
@@ -331,6 +331,11 @@ func reviewDefaultAllowed(tool ReviewTool) bool {
 	if tool.ApprovalStatus == storage.ToolApprovalStatusApproved {
 		return true
 	}
+	// Spec 118: a held_reason of awaiting_review (the in-process scan came back
+	// clean) is deliberately NOT cleared here. That scan is evidence only and
+	// defeatable by paraphrase (RT-02), so it must not widen what the screens
+	// pre-check: before it was recorded such a tool read "not_scanned" and
+	// started unchecked, and it still does.
 	return tool.Tier == contracts.TierRead && tool.ScanVerdict == "clean" && tool.HeldReason == ""
 }
 

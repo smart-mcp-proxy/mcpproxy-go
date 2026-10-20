@@ -125,6 +125,9 @@ type Runtime struct {
 	commitState
 	// purgeObserverState: Spec 116 PR2 purge observers (commit_purge.go).
 	purgeObserverState
+	// toolDefinitionsObserverState: Spec 118 observers of a post-baseline
+	// tool-inventory change (tool_definitions_observer.go).
+	toolDefinitionsObserverState
 
 	// Config-watcher self-write suppression (config_watcher.go): marshaled
 	// bytes of the configs mcpproxy itself recently saved to disk. Needed on
