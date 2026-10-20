@@ -1,14 +1,12 @@
 package scanner
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
-	"fmt"
-	"os"
 	"sync"
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // Bundle source labels reported by BundleInfo.Source.
@@ -58,11 +56,56 @@ type BundleInfo struct {
 	// never leave the scanner with no signatures — but the failure is surfaced
 	// here rather than swallowed.
 	LoadError string `json:"load_error,omitempty"`
+
+	// --- Spec 101 FR-020 (contracts/bundle-status-surface.md) ---
+
+	// FullDigest is the complete lowercase-hex SHA-256 of the bundle bytes —
+	// the ONLY value rollback accepts (FR-010). Fingerprint stays the 12-hex
+	// human label beside it.
+	FullDigest string `json:"full_digest,omitempty"`
+	// Sequence is the manifest sequence as published (decimal string), "" when
+	// the bundle carries none.
+	Sequence string `json:"sequence,omitempty"`
+	// Authority is the signing root serving this bundle: "publisher" (the
+	// embedded default, or verified against a publisher key), "operator", or ""
+	// for an unsigned external bundle.
+	Authority string `json:"authority,omitempty"`
+	// TrustEpoch is the epoch the bundle was published under.
+	TrustEpoch uint64 `json:"trust_epoch"`
+	// SignatureVerified reports whether the active bundle's detached signature
+	// verified. Always false for the embedded default (it is binary-trusted).
+	SignatureVerified bool `json:"signature_verified"`
+	// StalenessDays is the whole days since GeneratedAt (nil when unknown).
+	StalenessDays *int `json:"staleness_days,omitempty"`
+	// CoverageDegraded suspends scan-mode auto-approval; DegradedReason says
+	// why (one of the Degraded* constants).
+	CoverageDegraded bool   `json:"coverage_degraded"`
+	DegradedReason   string `json:"degraded_reason,omitempty"`
+	// Pinned is true while an operator rollback pin governs activation.
+	Pinned bool `json:"pinned,omitempty"`
+	// Rollback is true when the active bundle was activated by an explicit
+	// rollback.
+	Rollback bool `json:"rollback,omitempty"`
+	// LastRejection is the most recent refused candidate. It is retained
+	// across a later successful load so "what did it refuse, and when"
+	// survives.
+	LastRejection *BundleRejection `json:"last_rejection,omitempty"`
 }
 
-// activeBundle is the process-wide corpus in use. It is replaced wholesale by
-// ConfigureBundle; readers take a snapshot under RLock so a hot-reload can never
-// hand a scan a half-swapped corpus.
+// BundleRejection is one refused candidate (FR-020).
+type BundleRejection struct {
+	// Reason is one of the Reject* constants; the only field to branch on.
+	Reason string `json:"reason"`
+	// Detail is a short human string (which ceiling, which key id, which
+	// epoch, the bundlesig contract code). Never parsed.
+	Detail string    `json:"detail,omitempty"`
+	At     time.Time `json:"at"`
+}
+
+// activeBundle is the process-wide corpus in use. The serialized runtime
+// (tpa_bundle_runtime.go) replaces it wholesale at the end of each run; readers
+// take a snapshot under RLock so a hot-reload can never hand a scan a
+// half-swapped corpus, and (check, info) are always published together.
 var (
 	activeBundleMu    sync.RWMutex
 	activeBundleCheck *BundleCheck
@@ -71,56 +114,18 @@ var (
 
 // ConfigureBundle installs the TPA signature corpus the scanner will run,
 // reading it from path when non-empty and falling back to the embedded default
-// otherwise (spec 086 FR-019: the path MUST NOT be hardcoded). It is safe to
-// call repeatedly — the wiring layer calls it at startup and again on every
-// config hot-reload, which is what makes the path re-readable at runtime.
+// otherwise (spec 086 FR-019: the path MUST NOT be hardcoded). It is a thin
+// wrapper over the serialized runtime with an otherwise default policy and NO
+// environment override: the path is explicit. Production code configures the
+// full trust policy through ConfigureBundleFromConfig.
 //
 // Failure policy (fail-closed, never fail-empty): if the configured file cannot
-// be read, parsed, version-checked, or compiled, the currently active corpus
-// (or the embedded default on first call) stays live and the reason is recorded
-// in BundleInfo.LoadError AND logged through the INJECTED logger. The previous
-// implementation logged through the unconfigured global zap.L(), so its one
-// status report reached no console and no log file (GH #938 finding 2).
+// be read, verified, parsed, version-checked, or compiled, the currently active
+// corpus (or the embedded default on first call) stays live and the reason is
+// recorded in BundleInfo.LoadError and BundleInfo.LastRejection AND logged
+// through the INJECTED logger.
 func ConfigureBundle(path string, logger *zap.Logger) {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-	log := logger.Named("security.scanner")
-
-	if path == "" {
-		check, info, err := loadEmbeddedBundle()
-		if err != nil {
-			log.Warn("embedded TPA scanner bundle failed to load; continuing without bundle-backed checks",
-				zap.Error(err))
-			storeBundle(nil, BundleInfo{Source: BundleSourceEmbedded, LoadedAt: time.Now(), LoadError: err.Error()})
-			return
-		}
-		storeBundle(check, info)
-		logBundle(log, info)
-		return
-	}
-
-	check, info, err := loadBundleFromFile(path)
-	if err != nil {
-		// Keep the last-known-good corpus (or install the embedded default if
-		// this is the first configuration) and make the failure visible.
-		prevCheck, prevInfo := snapshotBundle()
-		if prevCheck == nil {
-			if embeddedCheck, embeddedInfo, embErr := loadEmbeddedBundle(); embErr == nil {
-				prevCheck, prevInfo = embeddedCheck, embeddedInfo
-			}
-		}
-		prevInfo.LoadError = err.Error()
-		storeBundle(prevCheck, prevInfo)
-		log.Error("configured TPA scanner bundle failed to load; keeping the previously active corpus",
-			zap.String("path", path),
-			zap.String("active_source", prevInfo.Source),
-			zap.Int("runnable_rules", prevInfo.RunnableRules),
-			zap.Error(err))
-		return
-	}
-	storeBundle(check, info)
-	logBundle(log, info)
+	configureWithPolicy(policyFor(&config.SecurityConfig{TPABundlePath: path}, path), logger)
 }
 
 // BundleStatus returns a snapshot of the active corpus for the operator-facing
@@ -128,12 +133,40 @@ func ConfigureBundle(path string, logger *zap.Logger) {
 // It lazily installs the embedded default so a caller that never configured a
 // bundle still gets a truthful answer instead of a zero value.
 func BundleStatus() BundleInfo {
-	if check, info := snapshotBundle(); check != nil || info.LoadError != "" {
-		return info
-	}
-	ConfigureBundle("", zap.NewNop())
-	_, info := snapshotBundle()
+	_, info := activeBundleSnapshot()
+	info.StalenessDays = stalenessDays(info.GeneratedAt, time.Now())
 	return info
+}
+
+// statusFromSnapshot is BundleStatus without the lazy install, for callers that
+// already hold bundleRT.mu (the lazy install would deadlock on it).
+func statusFromSnapshot() BundleInfo {
+	_, info := snapshotBundle()
+	info.StalenessDays = stalenessDays(info.GeneratedAt, time.Now())
+	return info
+}
+
+// stalenessDays is the whole days between generatedAt and now, nil when the
+// stamp is absent or unparseable. A stamp in the future reads as 0.
+func stalenessDays(generatedAt string, now time.Time) *int {
+	if generatedAt == "" {
+		return nil
+	}
+	var t time.Time
+	var err error
+	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+		if t, err = time.Parse(layout, generatedAt); err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return nil
+	}
+	days := int(now.Sub(t).Hours() / 24)
+	if days < 0 {
+		days = 0
+	}
+	return &days
 }
 
 // logBundle emits the one status report an operator can grep for.
@@ -144,6 +177,15 @@ func logBundle(log *zap.Logger, info BundleInfo) {
 		zap.String("bundle_version", info.BundleVersion),
 		zap.String("generated_at", info.GeneratedAt),
 		zap.String("fingerprint", info.Fingerprint),
+		zap.String("full_digest", info.FullDigest),
+		zap.String("sequence", info.Sequence),
+		zap.String("authority", info.Authority),
+		zap.Uint64("trust_epoch", info.TrustEpoch),
+		zap.Bool("signature_verified", info.SignatureVerified),
+		zap.Bool("coverage_degraded", info.CoverageDegraded),
+		zap.String("degraded_reason", info.DegradedReason),
+		zap.Bool("pinned", info.Pinned),
+		zap.Bool("rollback", info.Rollback),
 		zap.Int("signature_count", info.SignatureCount),
 		zap.Int("runnable_rules", info.RunnableRules),
 		zap.Int("skipped_rules", info.SkippedRules),
@@ -163,58 +205,28 @@ func snapshotBundle() (*BundleCheck, BundleInfo) {
 	return activeBundleCheck, activeBundleInfo
 }
 
-// loadEmbeddedBundle compiles the corpus shipped with this build.
-func loadEmbeddedBundle() (*BundleCheck, BundleInfo, error) {
-	check, info, err := loadBundleWithInfo(bundledScannerBundle)
-	if err != nil {
-		return nil, BundleInfo{}, err
+// activeBundleSnapshot returns ONE consistent (check, info) pair, lazily
+// installing the embedded default when nothing has been published yet. Callers
+// that need both the check and its coverage (the scan gate) must take them from
+// this single snapshot, never from two lock acquisitions.
+func activeBundleSnapshot() (*BundleCheck, BundleInfo) {
+	check, info := snapshotBundle()
+	if check != nil || info.LoadError != "" {
+		return check, info
 	}
-	info.Source = BundleSourceEmbedded
-	return check, info, nil
+	installDefaultBundleIfUnpublished()
+	return snapshotBundle()
 }
 
-// loadBundleFromFile reads and compiles a corpus from the configured path. A
-// missing file is an error (not a silent fallback) so a mistyped path is
-// reported rather than looking like a working configuration.
-func loadBundleFromFile(path string) (*BundleCheck, BundleInfo, error) {
-	data, err := os.ReadFile(path) //nolint:gosec // operator-configured path, same trust level as mcp_config.json
-	if err != nil {
-		return nil, BundleInfo{}, fmt.Errorf("read scanner bundle %s: %w", path, err)
+// installDefaultBundleIfUnpublished installs the embedded default, but only if
+// nothing has been published by the time the activation mutex is held: a real
+// configuration that raced this lazy install must never be clobbered by the
+// default policy.
+func installDefaultBundleIfUnpublished() {
+	bundleRT.mu.Lock()
+	defer bundleRT.mu.Unlock()
+	if check, info := snapshotBundle(); check != nil || info.LoadError != "" {
+		return
 	}
-	check, info, err := loadBundleWithInfo(data)
-	if err != nil {
-		return nil, BundleInfo{}, fmt.Errorf("scanner bundle %s: %w", path, err)
-	}
-	info.Source = BundleSourceFile
-	info.Path = path
-	if info.GeneratedAt == "" {
-		// The v0.1.0 bundle format carries no generated_at; the file's mtime is
-		// the next-best freshness signal and is strictly better than nothing.
-		if st, statErr := os.Stat(path); statErr == nil {
-			info.GeneratedAt = st.ModTime().UTC().Format(time.RFC3339)
-		}
-	}
-	return check, info, nil
-}
-
-// loadBundleWithInfo compiles raw bundle bytes and derives the operator-facing
-// metadata alongside the check.
-func loadBundleWithInfo(data []byte) (*BundleCheck, BundleInfo, error) {
-	check, stats, err := loadBundleCheck(data)
-	if err != nil {
-		return nil, BundleInfo{}, err
-	}
-	meta := bundleMetadata(data)
-	sum := sha256.Sum256(data)
-	return check, BundleInfo{
-		BundleVersion:   meta.BundleVersion,
-		SchemaVersion:   meta.SchemaVersion,
-		SignatureCount:  meta.SignatureCount,
-		GeneratedAt:     meta.GeneratedAt,
-		RunnableRules:   stats.Runnable,
-		SkippedRules:    stats.Skipped,
-		DeclaredSkipped: stats.Declared,
-		Fingerprint:     hex.EncodeToString(sum[:])[:12],
-		LoadedAt:        time.Now(),
-	}, nil
+	bundleRT.runLocked(bundleRT.policyOrDefaultLocked(), bundleLogger(nil), runOptions{force: true})
 }

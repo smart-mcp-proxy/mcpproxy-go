@@ -333,11 +333,32 @@ entire in-process detection behavior, with `phrase.injection` (hard) carrying th
 approval-blocking posture the removed rules used to provide and `tpa.bundle`
 adding the known-attack signatures.
 
+## Signature corpus and coverage
+
+Alongside the seven checks, the `scan` trust mode matches tool text against an
+offline corpus of known-attack signatures (the tpa-db `scanner-bundle.json`).
+The build embeds one; `security.tpa_bundle_path` points the scanner at another
+from disk. A corpus can be signed with an operator Ed25519 key, and a signed
+corpus is protected against downgrade by a sequence watermark.
+
+If a candidate corpus is refused, the previous one keeps serving; the scanner is
+never left with an empty or partial rule set. The state of the corpus is
+reported by `mcpproxy security bundle`, including **degraded coverage**:
+an unsigned external corpus, an operator corpus with no baseline, a lost operator
+corpus, or an embedded corpus older than one seen before. **While coverage is
+degraded, `scan`-mode auto-approval is suspended** and changes are held for
+human review (held reason `scan_coverage`). The detect engine itself is
+unaffected and keeps scanning.
+
+See [Signed TPA Bundles](/features/tpa-bundle-signing) for signing, rollback and
+the full list of reasons.
+
 ## Related reading
 
 - [Security Scanner Plugins](/features/security-scanner-plugins) — the plugin framework hosting the `tpa-descriptions` scanner
 - [TPA Signature Database](/features/tpa-signatures) — how the `tpa.bundle` corpus is authored, built and gated
 - [Security Quarantine](/features/security-quarantine) — the quarantine mechanism hard-tier findings drive
 - [Tool Quarantine (Spec 032)](/features/tool-quarantine) — per-tool hash-based approval
+- [Signed TPA Bundles](/features/tpa-bundle-signing) — signing, dropping, rolling back and monitoring the signature corpus
 - [Sensitive-Data Detection](/features/sensitive-data-detection) — the shared secret matchers the embedded-secret check reuses
 - Spec: `specs/076-deterministic-tool-scanner/spec.md` · engine contract: `internal/security/detect/doc.go`

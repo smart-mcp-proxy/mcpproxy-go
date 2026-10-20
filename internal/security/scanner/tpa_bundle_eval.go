@@ -1,8 +1,11 @@
 package scanner
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // Signature is the exported view of one bundle signatures[] entry, for the
@@ -29,7 +32,28 @@ type SignatureProvenance struct {
 // the process-wide active bundle, so tools can score a candidate corpus without
 // installing it. Source and Path are left empty for the caller to set.
 func LoadBundleCheck(data []byte) (*BundleCheck, BundleInfo, error) {
-	return loadBundleWithInfo(data)
+	b, err := parseBundleManifest(data)
+	if err != nil {
+		return nil, BundleInfo{}, err
+	}
+	check, stats, err := compileBundle(b)
+	if err != nil {
+		return nil, BundleInfo{}, err
+	}
+	sum := sha256.Sum256(data)
+	digest := hex.EncodeToString(sum[:])
+	return check, BundleInfo{
+		BundleVersion:   b.BundleVersion,
+		SchemaVersion:   b.SchemaVersion,
+		SignatureCount:  b.SignatureCount,
+		GeneratedAt:     b.GeneratedAt,
+		RunnableRules:   stats.Runnable,
+		SkippedRules:    stats.Skipped,
+		DeclaredSkipped: stats.Declared,
+		FullDigest:      digest,
+		Fingerprint:     shortDigest(digest),
+		LoadedAt:        time.Now(),
+	}, nil
 }
 
 // EmbeddedBundle returns a copy of the corpus compiled into this build.

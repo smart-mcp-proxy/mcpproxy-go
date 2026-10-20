@@ -756,18 +756,14 @@ func TestRetrieveToolsInstructions_CodeExecutionMode(t *testing.T) {
 	assert.Contains(t, instructions, "call_tool(",
 		"code_execution mode should mention call_tool() JavaScript function")
 
-	// Code execution mode: should NOT recommend call_tool_read/write/destructive as tools to use.
-	// Note: the instructions may mention them in a "Do NOT use" warning, which is acceptable.
-	// What they must NOT contain is the retrieve_tools-mode decision rules that tell the LLM
-	// to use these as tool variants.
-	assert.NotContains(t, instructions, "DECISION RULES BY TOOL NAME",
-		"code_execution mode should NOT contain call_tool variant decision rules")
-	assert.NotContains(t, instructions, "(1) READ (call_tool_read)",
-		"code_execution mode should NOT recommend call_tool_read as a variant")
-	assert.NotContains(t, instructions, "(2) WRITE (call_tool_write)",
-		"code_execution mode should NOT recommend call_tool_write as a variant")
-	assert.NotContains(t, instructions, "(3) DESTRUCTIVE (call_tool_destructive)",
-		"code_execution mode should NOT recommend call_tool_destructive as a variant")
+	// Code execution mode: should NOT carry the retrieve_tools-mode selection
+	// guide that tells the LLM to pick a call_tool_* variant. The guide's
+	// heading is asserted present in retrieve_tools mode below, so this check
+	// cannot pass vacuously if the wording moves again.
+	assert.NotContains(t, instructions, "TOOL SELECTION GUIDE",
+		"code_execution mode should NOT contain the call_tool variant selection guide")
+	assert.NotContains(t, instructions, "'call_with' value as the exact variant to call",
+		"code_execution mode should NOT tell the LLM to call a call_tool_* variant")
 }
 
 // TestRetrieveToolsInstructions_RetrieveToolsMode verifies that handleRetrieveToolsWithMode
@@ -795,6 +791,11 @@ func TestRetrieveToolsInstructions_RetrieveToolsMode(t *testing.T) {
 	instructions, ok := response["usage_instructions"].(string)
 	require.True(t, ok, "usage_instructions should be a string")
 
+	// Retrieve tools mode: carries the variant selection guide (the same
+	// heading TestRetrieveToolsInstructions_CodeExecutionMode asserts absent,
+	// so neither check can pass vacuously if the wording moves).
+	assert.Contains(t, instructions, "TOOL SELECTION GUIDE",
+		"retrieve_tools mode should carry the call_tool variant selection guide")
 	// Retrieve tools mode: should mention call_tool_read/write/destructive
 	assert.Contains(t, instructions, "call_tool_read",
 		"retrieve_tools mode should mention call_tool_read")
@@ -804,6 +805,9 @@ func TestRetrieveToolsInstructions_RetrieveToolsMode(t *testing.T) {
 		"retrieve_tools mode should mention call_tool_destructive")
 	assert.Contains(t, instructions, "INTENT TRACKING",
 		"retrieve_tools mode should mention intent tracking")
+	assert.Contains(t, instructions, "upstream annotations")
+	assert.Contains(t, instructions, "existing read fallback")
+	assert.NotContains(t, instructions, "DECISION RULES BY TOOL NAME")
 }
 
 // TestRetrieveToolsInstructions_DefaultMode verifies that handleRetrieveToolsWithMode

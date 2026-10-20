@@ -71,6 +71,13 @@ const (
 	// records.
 	ToolBaselineDecisionsBucket = "tool_baseline_decisions"
 
+	// TPABundleStateBucket holds the installation-wide Spec 101 anti-downgrade
+	// state of the signed TPA bundle: key "state" (scanner.TPABundleState) and a
+	// nested "history" bucket of activation rows. It is keyed by signing
+	// authority, not by server, so server removal never purges it. Created
+	// lazily on the first write, never by a read.
+	TPABundleStateBucket = "tpa_bundle_state"
+
 	// Onboarding wizard bucket (Spec 046)
 	OnboardingBucket = "onboarding"
 )
