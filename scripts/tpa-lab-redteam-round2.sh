@@ -159,12 +159,17 @@ if [[ -z "$ONLY" || "$ONLY" == "R2-1" ]]; then
   verdict="$(grep -oiE 'dangerous|warnings|clean' "$RUN_DIR/r2-1-scan.txt" | head -1)"
   log "post-hoc operator scan verdict: ${verdict:-unknown}"
 
+  held_re='^(pending|changed|blocked)'
   if [[ "$sum_st" == "approved" && "$call_result" == CALLED* ]]; then
     record "R2-1 HOLE: unquarantined first-seen server auto-baselined the POISONED catalog (summarize_text=$sum_st, ${approved_count} approved rows) and the poisoned tool is callable; the operator-triggered scan says '$verdict' only AFTER the tools are live"
-  elif [[ "$sum_st" == "approved" ]]; then
-    record "R2-1 PARTIAL: poisoned tools auto-baselined (approved) but call answered: $call_result; scan='$verdict'"
+  elif [[ "$sum_st" == "approved" || "$fin_st" == "approved" ]]; then
+    record "R2-1 HOLE: a poisoned first-seen tool was auto-baselined (summarize_text=$sum_st finance_convert_currency=$fin_st); call: $call_result; scan='$verdict'"
+  elif [[ "$sum_st" =~ $held_re && "$fin_st" =~ $held_re && "$call_result" == "BLOCKED" ]]; then
+    # Acceptance (round-2 report): BOTH poisoned vectors pending or worse AND the
+    # call blocked. An empty/unparsed status or an unclear call never scores HOLDS.
+    record "R2-1 HOLDS: poisoned tools not auto-approved (summarize_text=$sum_st finance_convert_currency=$fin_st, ${approved_count} approved rows for the benign controls) and the call is blocked"
   else
-    record "R2-1 HOLDS: poisoned tools not auto-approved (summarize_text=$sum_st)"
+    record "R2-1 INCONCLUSIVE: summarize_text='$sum_st' finance_convert_currency='$fin_st' call='$call_result' scan='$verdict'"
   fi
   stop_daemon
 fi

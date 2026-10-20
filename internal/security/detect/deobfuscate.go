@@ -31,7 +31,9 @@ import (
 //   - diacritics on Latin letters ("ígnore áll prévious ínstructions", written
 //     either as precomposed letters or as base letter + combining mark): the
 //     marks are dropped so the word folds to its plain spelling (R2-4, round-2
-//     red team). Only marks that sit on a LATIN base letter are stripped; the
+//     red team), including a mark on a look-alike base that the homoglyph
+//     step folds to Latin ("а́ll", "ignόre"). Only marks that end up on a
+//     LATIN base letter are stripped; the
 //     breve of Cyrillic й, the diaeresis of ё/ї, Greek tonos and the kana
 //     dakuten are left alone, so the non-English families keep matching their
 //     own spellings.
@@ -67,8 +69,13 @@ func NormalizeForPhraseIn(s string, latinMajority bool) string {
 	}
 	s = norm.NFKC.String(s)
 	s = stripFormatRunes(s)
-	s = stripLatinMarks(s)
+	// Decompose BEFORE folding so a mark on a look-alike base ("а́" = Cyrillic
+	// а + U+0301, "ό" = Greek ο + tonos) rides along as a bare mark while the
+	// base folds to Latin, and is then dropped with every other Latin-base
+	// mark; stripLatinMarks recomposes (NFC) what it keeps.
+	s = norm.NFD.String(s)
 	s = foldConfusables(s, latinMajority, false)
+	s = stripLatinMarks(s)
 	s = foldLeetTokens(s)
 	s = joinSeparatedLetters(s)
 	s = joinSpacedLetters(s)
@@ -86,7 +93,7 @@ func FoldHomoglyphsIn(s string, latinMajority bool) string {
 	if s == "" {
 		return ""
 	}
-	return foldConfusables(stripLatinMarks(stripFormatRunes(norm.NFKC.String(s))), latinMajority, false)
+	return stripLatinMarks(foldConfusables(norm.NFD.String(stripFormatRunes(norm.NFKC.String(s))), latinMajority, false))
 }
 
 // NormalizeMixedScript is Normalize preceded by homoglyph folding of MIXED-script
@@ -108,7 +115,7 @@ func NormalizeMixedScript(s string) (normalized string, changed bool) {
 		return "", false
 	}
 	pre := stripFormatRunes(norm.NFKC.String(s))
-	folded := foldConfusables(stripLatinMarks(pre), LatinMajority(s), true)
+	folded := stripLatinMarks(foldConfusables(norm.NFD.String(pre), LatinMajority(s), true))
 	if folded == pre {
 		return Normalize(s), false
 	}
@@ -129,16 +136,37 @@ func Squash(s string) string {
 	return b.String()
 }
 
+// HasMixedScriptWords reports whether s contains a word that mixes Latin
+// letters with Cyrillic, Greek or Armenian look-alikes — the homoglyph trick
+// itself, as opposed to accents on Latin letters, which NormalizeMixedScript
+// also folds. Callers use it to word a finding truthfully.
+func HasMixedScriptWords(s string) bool {
+	if s == "" {
+		return false
+	}
+	pre := stripFormatRunes(norm.NFKC.String(s))
+	return foldConfusables(pre, LatinMajority(s), true) != pre
+}
+
 // stripLatinMarks removes nonspacing marks (Unicode category Mn) that sit on a
 // Latin base letter, whether the input spelled them as combining characters
 // ("i" + U+0301) or as precomposed letters ("í", which NFKC keeps composed).
 // The text is decomposed (NFD), the marks that follow a Latin letter are
 // dropped, and the rest is recomposed (NFC), so marks on every other script
-// — Cyrillic й/ё/ї, Greek tonos, kana dakuten, Devanagari vowel signs — come
-// back exactly as they went in. Letters that are not decomposable (ł, ø, đ)
-// are untouched. Pure and deterministic.
+// — Cyrillic й/ё/ï, Greek tonos, kana dakuten, Devanagari vowel signs — come
+// back exactly as they went in, and a caller that hands in already-decomposed
+// text (NormalizeForPhraseIn, after folding) gets composed text back. Letters
+// that are not decomposable (ł, ø, đ) are untouched. Pure ASCII is returned
+// as is. Pure and deterministic.
 func stripLatinMarks(s string) string {
-	if !hasLatinMark(s) {
+	ascii := true
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
 		return s
 	}
 	decomposed := norm.NFD.String(s)
@@ -157,31 +185,6 @@ func stripLatinMarks(s string) string {
 		b.WriteRune(r)
 	}
 	return norm.NFC.String(b.String())
-}
-
-// hasLatinMark reports whether s contains a Latin letter that carries a mark —
-// a precomposed letter whose NFD form has a mark, or a combining mark after a
-// Latin letter — so the common all-ASCII case pays no normalization cost.
-func hasLatinMark(s string) bool {
-	latinBase := false
-	for _, r := range s {
-		switch {
-		case r < 0x80:
-			latinBase = unicode.IsLetter(r)
-		case unicode.Is(unicode.Mn, r):
-			if latinBase {
-				return true
-			}
-		case unicode.Is(unicode.Latin, r):
-			latinBase = true
-			if norm.NFD.String(string(r)) != string(r) {
-				return true
-			}
-		default:
-			latinBase = false
-		}
-	}
-	return false
 }
 
 // toLatin maps Cyrillic, Greek and Armenian letters that render like a Latin
