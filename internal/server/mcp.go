@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -408,6 +409,43 @@ func (p *MCPProxyServer) currentTruncator() *truncate.Truncator {
 	return p.truncatorFn()
 }
 
+// rejectUnservedProtocolOnStdio is the stdio half of the FR-028 era pin (Spec
+// 058 T036a). The Streamable HTTP transport refuses a request whose declared
+// protocol version it has not been configured to serve, but mcp-go has no such
+// option for stdio, and the shared handler chooses the era per request from
+// params._meta — so without this a stdio client could opt into 2026-07-28 while
+// every HTTP door refused it. Registered as an OnRequestInitialization hook, it
+// runs before the era is read and before any dispatch; returning an error makes
+// mcp-go answer INVALID_REQUEST without touching a handler.
+//
+// Scoped to the stdio transport (the context tag stdioAuthContext installs) and
+// to requests that DECLARE a version in _meta: a legacy request carries none
+// and passes. The served set is clientFacingProtocolVersions, the same constant
+// the HTTP pin reads, so lifting one lifts the other.
+func rejectUnservedProtocolOnStdio(ctx context.Context, message any) error {
+	if transport.GetConnectionSource(ctx) != transport.ConnectionSourceStdio {
+		return nil
+	}
+	raw, ok := message.(json.RawMessage)
+	if !ok {
+		return nil
+	}
+	var wrapper struct {
+		Params struct {
+			Meta *mcp.Meta `json:"_meta"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(raw, &wrapper) != nil {
+		return nil // a malformed body is reported by the per-method unmarshal
+	}
+	version := wrapper.Params.Meta.ProtocolVersion()
+	if version == "" || slices.Contains(clientFacingProtocolVersions(), version) {
+		return nil
+	}
+	return fmt.Errorf("protocol version %s is not served on the stdio surface: the client-facing era is pinned to %s (Spec 058 FR-028); send a legacy initialize instead",
+		version, strings.Join(clientFacingProtocolVersions(), ", "))
+}
+
 // modernClientRecorder debounces the per-request client identity of modern
 // (2026-07-28) requests, so the activation funnel and the client-seen presence
 // are fed once per distinct client per window rather than once per request.
@@ -556,6 +594,12 @@ func NewMCPProxyServer(
 
 	// Create hooks to capture session information
 	hooks := &mcpserver.Hooks{}
+	// Spec 058 T036a: pin the stdio surface to the same protocol eras as the
+	// Streamable HTTP transports. This hook runs before mcp-go reads the era,
+	// which is why it parses _meta itself.
+	hooks.AddOnRequestInitialization(func(ctx context.Context, _ any, message any) error {
+		return rejectUnservedProtocolOnStdio(ctx, message)
+	})
 	// Update session activity on every MCP message to prevent premature cleanup.
 	// Without this, sessions that only do retrieve_tools (not tool calls) would
 	// appear inactive and get closed by the background cleanup.

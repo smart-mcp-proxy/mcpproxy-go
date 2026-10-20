@@ -2989,15 +2989,15 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 // /mcp/call and /mcp/p/<slug>) — a pin applied to four of five would leave one
 // door open on a different protocol era.
 //
-// SCOPE, precisely: this covers the Streamable HTTP surfaces and nothing else.
-// mcp-go offers no equivalent option for stdio (server/stdio.go exposes only
-// error-logger, context-func and worker-pool options), and the protocol era is
-// decided per request from params._meta by the shared handler, with the version
-// gate living inside the Streamable HTTP transport. So a client speaking stdio
-// to `mcpproxy serve` in stdio mode can still opt into 2026-07-28 and be served
-// it. That gap is tracked with the rest of the stateless work (spec 058 US3);
-// it is not reachable by default, since an empty listen address is rewritten to
-// the HTTP default during config validation.
+// SCOPE, precisely: this covers the Streamable HTTP surfaces. mcp-go offers no
+// equivalent option for stdio (server/stdio.go exposes only error-logger,
+// context-func and worker-pool options), and the protocol era is decided per
+// request from params._meta by the shared handler, with the version gate living
+// inside the Streamable HTTP transport. The stdio surface is therefore pinned
+// separately, by rejectUnservedProtocolOnStdio (mcp.go), which reads the SAME
+// set — clientFacingProtocolVersions — so lifting the pin lifts both at once
+// (spec 058 T036a). Stdio is not reachable by default anyway, since an empty
+// listen address is rewritten to the HTTP default during config validation.
 //
 // The options are deliberately not configurable:
 //
@@ -3022,9 +3022,20 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 func clientFacingStreamableOptions(cfgProvider func() *config.Config) []server.StreamableHTTPOption {
 	return []server.StreamableHTTPOption{
 		server.WithDisableLocalhostProtection(true),
-		server.WithStreamableHTTPProtocolVersions(mcp.LegacyProtocolVersions()...),
+		server.WithStreamableHTTPProtocolVersions(clientFacingProtocolVersions()...),
 		server.WithHTTPContextFunc(captureClientHeaders(cfgProvider)),
 	}
+}
+
+// clientFacingProtocolVersions is the ONE definition of the protocol eras the
+// client-facing surfaces serve (Spec 058 FR-028): the legacy set, until the
+// stateless work has landed and T041 lifts the pin. Both the Streamable HTTP
+// transport option above and the stdio guard (rejectUnservedProtocolOnStdio)
+// read it, so the two surfaces cannot disagree about what is served. A
+// function, not a variable, for the same reason as its caller: it must not be
+// flippable at runtime or from a test.
+func clientFacingProtocolVersions() []string {
+	return mcp.LegacyProtocolVersions()
 }
 
 // liveConfig returns the runtime's current config, tolerating a nil runtime.
