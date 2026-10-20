@@ -31,11 +31,17 @@ import (
 // two OAuth users with differing entitlements over modern requests, where no
 // session exists to carry identity between calls.
 //
-// The identity path under test is the one setup.go wires for the MCP surface
-// (buildSessionPrincipalResolver): a bearer JWT on each request → the user
-// record → UserHandlers.ResolveAgentTokenOwner, THE entitlement predicate →
-// an AuthContext whose AllowedServers is the tenant's entitlement. Every
-// input is request-carried; the test proves the resulting tool view is too.
+// What this test exercises, precisely: the production entitlement predicate
+// (UserHandlers.ResolveAgentTokenOwner, the same call setup.go's
+// buildSessionPrincipalResolver makes) derived per request from a bearer JWT,
+// and the stateless era of the mcp-go transport. The JWT → AuthContext step
+// and the tool filter are test-local stand-ins, because this package cannot
+// import internal/server (import cycle through serveredition_wire.go), so the
+// production MCP auth middleware and direct-surface filters are NOT on this
+// path. Their modern-era behaviour is pinned in internal/server:
+// TestStatelessList_AgentTokensScopedPerRequest drives two agent tokens with
+// differing allowed_servers — the credential a server-edition user actually
+// reaches /mcp with — through mcpAuthMiddleware over the era harness.
 //
 // Test names avoid the substring "MCP" (release-qa-gate.yml skips on it).
 

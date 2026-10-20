@@ -81,6 +81,7 @@ func TestProfileEra_SessionTierSkippedOnModernRequests(t *testing.T) {
 	require.NotNil(t, info)
 	assert.Equal(t, "", info.Profile, "a modern request must not write per-connection state")
 	assert.Equal(t, "", proxy.markWorkIfToolCall(urlModern, mcp.MethodToolsCall), "nor mark the connection as worked")
+	assert.Equal(t, "", proxy.markSessionWorked(urlModern, "stdio"), "whichever funnel marks the work")
 }
 
 // ─── stdio surface ──────────────────────────────────────────────────────────
@@ -215,11 +216,15 @@ func TestProfileEra_ModernStdioRequestCannotPersistSelection(t *testing.T) {
 		resp := probe.request(string(mcp.MethodToolsCall), map[string]any{
 			"name": "set_profile", "arguments": map[string]any{"profile": "research"}, "_meta": modernMeta(),
 		})
-		if resp["error"] == nil {
-			result, ok := resp["result"].(map[string]any)
-			require.True(t, ok, "response must carry a result or an error: %v", resp)
-			assert.Equal(t, true, result["isError"], "a modern request must not be able to select a session profile: %v", result)
-		}
+		// Under the FR-028 pin the stdio era guard (T036a) refuses the request
+		// before dispatch, so the observable is that exact refusal — not "any
+		// error", which a hidden tool or a transport failure would also
+		// produce. The handler-level refusal for a modern request that IS
+		// dispatched is pinned by TestProfileEra_SetProfileModernRequestGuidance.
+		errObj, ok := resp["error"].(map[string]any)
+		require.True(t, ok, "the stdio era guard must refuse the request as a JSON-RPC error: %v", resp)
+		assert.EqualValues(t, mcp.INVALID_REQUEST, errObj["code"])
+		assert.Contains(t, errObj["message"], mcp.LATEST_PROTOCOL_VERSION)
 		assert.Equal(t, "", proxy.sessionStore.GetActiveProfile("stdio"),
 			"FR-011: a modern request must not persist per-connection state, despite stdio's non-empty session id")
 	})

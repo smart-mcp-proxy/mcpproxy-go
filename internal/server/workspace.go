@@ -188,6 +188,15 @@ func (p *MCPProxyServer) markSessionWorked(ctx context.Context, sessionID string
 	if sessionID == "" || p.sessionStore == nil {
 		return ""
 	}
+	// Spec 058 US3: a 2026-07-28 request belongs to no connection, so there
+	// is no session to mark as worked or persist (session records are a
+	// legacy-era feature, research D11) — even on stdio, whose transport id
+	// is the constant "stdio" in both eras. Gated here, not at the call
+	// sites, so every funnel that marks work (retrieve_tools, call_tool_*,
+	// code_execution, direct dispatch, the BeforeAny hook) agrees.
+	if mcpserver.IsModernRequest(ctx) {
+		return ""
+	}
 
 	// Wait (briefly, once) for the project, so this connection's first record is
 	// not filed under a different work session than its second.
@@ -240,13 +249,6 @@ func (p *MCPProxyServer) resolveWorkSession() func(runtime.WorkSessionIdentity) 
 // do nothing, and leave.
 func (p *MCPProxyServer) markWorkIfToolCall(ctx context.Context, method mcp.MCPMethod) string {
 	if method != mcp.MethodToolsCall {
-		return ""
-	}
-	// Spec 058 US3: a 2026-07-28 request belongs to no connection, so there
-	// is no session to mark as worked or persist (session records are a
-	// legacy-era feature — research D11), even on stdio, whose transport id
-	// is the constant "stdio" in both eras.
-	if mcpserver.IsModernRequest(ctx) {
 		return ""
 	}
 	session := mcpserver.ClientSessionFromContext(ctx)

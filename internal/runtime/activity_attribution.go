@@ -99,14 +99,24 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 			rec.ClientName = name
 		}
 	}
-	if a.ClientVersion != "" {
-		if _, ok := rec.Metadata["client_version"]; !ok {
-			if rec.Metadata == nil {
-				rec.Metadata = make(map[string]interface{})
-			}
-			rec.Metadata["client_version"] = a.ClientVersion
+	// A request-carried identity (Spec 058 US3) also lands under the metadata
+	// keys withClientInfo writes for a session-resolved one, because readers
+	// such as UsageAggregate.applyClientCalls key per-client usage on
+	// metadata.client_name, not on the first-class field.
+	setMetadataIfAbsent := func(key, value string) {
+		if value == "" {
+			return
 		}
+		if _, ok := rec.Metadata[key]; ok {
+			return
+		}
+		if rec.Metadata == nil {
+			rec.Metadata = make(map[string]interface{})
+		}
+		rec.Metadata[key] = value
 	}
+	setMetadataIfAbsent("client_name", a.ClientName)
+	setMetadataIfAbsent("client_version", a.ClientVersion)
 }
 
 // NewUsageAggregate returns an empty aggregate at the current admission

@@ -143,7 +143,7 @@ func callSucceeded(body []byte) bool {
 }
 
 // Documents the library defect the guard exists for, so the guard can be
-// retired the day this test FAILS: against an unguarded mcp-go v1.0.0
+// retired the day this test SKIPS: against an unguarded mcp-go v1.0.0
 // transport, client B's notifications/cancelled for id 1 cancels client A's
 // in-flight call with id 1. Both are modern, so both run under session id "".
 func TestCancelIsolation_LibraryCollisionStillPresent(t *testing.T) {
@@ -160,13 +160,24 @@ func TestCancelIsolation_LibraryCollisionStillPresent(t *testing.T) {
 	resp, _ := b.send(string(mcp.MethodNotificationCancelled), cancelledNotificationParams(1), false)
 	require.Equal(t, http.StatusAccepted, resp.StatusCode)
 
-	outcome := awaitOutcome(t, inflight)
-	if callSucceeded(outcome.body) {
-		t.Skip("mcp-go no longer lets one modern client cancel another's request: " +
-			"the upstream fix has landed — retire modernCancellationGuard and this test together")
+	// A bounded window for a cross-client cancellation to land. If A is still
+	// running afterwards, the library no longer collides: release A, require
+	// the released result, and skip — the signal to retire the guard.
+	select {
+	case r := <-inflight:
+		require.NoError(t, r.err)
+		assert.False(t, callSucceeded(r.body), "A ended before release, so it must not carry the released result: %s", r.body)
+		assert.Contains(t, string(r.body), "context canceled",
+			"A must have ended by cancellation, not by some other failure: %s", r.body)
+		close(probe.release)
+		return
+	case <-time.After(500 * time.Millisecond):
 	}
-	// Reaching here is the defect: A's call ended without ever being released.
 	close(probe.release)
+	outcome := awaitOutcome(t, inflight)
+	require.True(t, callSucceeded(outcome.body), "A was not cancelled yet did not complete when released: %s", outcome.body)
+	t.Skip("mcp-go no longer lets one modern client cancel another's request: " +
+		"the upstream fix has landed — retire modernCancellationGuard and this test together")
 }
 
 // The guard: with mcpproxy's middleware in the chain, B's cancellation is

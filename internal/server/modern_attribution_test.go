@@ -113,6 +113,8 @@ func TestModernAttribution_ReachesActivityRecord(t *testing.T) {
 	record := awaitToolCallActivity(t, rt, "attrib-srv", "echo")
 	assert.Equal(t, "era-probe", record.ClientName, "the modern client's self-reported name must reach the record")
 	assert.Equal(t, "1.0.0", record.Metadata["client_version"], "and so must its version")
+	assert.Equal(t, "era-probe", record.Metadata["client_name"],
+		"per-client usage accounting (UsageAggregate.applyClientCalls) reads metadata.client_name, so a modern record needs the legacy shape")
 	assert.Empty(t, record.SessionID, "no session was involved")
 
 	after, err := rt.StorageManager().GetOnboardingState()

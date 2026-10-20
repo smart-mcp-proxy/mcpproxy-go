@@ -3,6 +3,7 @@ package server
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -11,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mark3labs/mcp-go/client"
+	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 	mcpserver "github.com/mark3labs/mcp-go/server"
 	"github.com/stretchr/testify/assert"
@@ -264,6 +267,52 @@ func TestStatelessList_ToolsListIdenticalAcrossConnections(t *testing.T) {
 		assert.Equal(t, string(listB), string(b.result(string(mcp.MethodToolsList), nil)),
 			"a refused set_profile on one connection must not reach another")
 	})
+}
+
+// US3 acceptance scenario 2 / SC-004, through the production chain: two agent
+// tokens with different server scopes, each pinned to the modern era over the
+// era harness (mcpAuthMiddleware included), see only their permitted tools on
+// identity-scoped discovery, interleaved, with no session involved. Identity
+// is re-derived from the Authorization header on every request.
+func TestStatelessList_AgentTokensScopedPerRequest(t *testing.T) {
+	env := newProfileTestEnv(t)
+	ctx := context.Background()
+	url := env.eraEndpoint()
+	tokenA := mintProfileAgentToken(t, env, "scope-a", []string{"research-srv"}, []string{auth.PermRead}, "")
+	tokenB := mintProfileAgentToken(t, env, "scope-b", []string{"deploy-srv"}, []string{auth.PermRead}, "")
+
+	connect := func(token string) *client.Client {
+		tr, err := transport.NewStreamableHTTP(url, transport.WithHTTPHeaders(map[string]string{"Authorization": "Bearer " + token}))
+		require.NoError(t, err)
+		c := client.NewClient(tr, modernEra().options...)
+		env.initClient(c)
+		requireEra(t, c, modernEra())
+		require.Empty(t, tr.GetSessionId(), "the modern era binds no session; scoping must come from the request")
+		return c
+	}
+	hasAny := func(names []string, needles ...string) bool {
+		for _, n := range names {
+			for _, needle := range needles {
+				if strings.Contains(n, needle) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	a := connect(tokenA)
+	b := connect(tokenB)
+
+	query := "search deploy papers rollback app"
+	first := env.retrieveTools(ctx, a, query)
+	require.True(t, hasAny(first, "search_papers", "fetch_article"), "A must see its research tools: %v", first)
+	require.False(t, hasAny(first, "deploy_app", "rollback"), "A must not see deploy tools: %v", first)
+
+	viewB := env.retrieveTools(ctx, b, query)
+	require.True(t, hasAny(viewB, "deploy_app", "rollback"), "B must see its deploy tools: %v", viewB)
+	require.False(t, hasAny(viewB, "search_papers", "fetch_article"), "B must not see research tools: %v", viewB)
+
+	assert.Equal(t, first, env.retrieveTools(ctx, a, query), "A's view must not drift after B's requests")
 }
 
 // ─── the two list filters skip the session tier (T020 unit / T021) ──────────
