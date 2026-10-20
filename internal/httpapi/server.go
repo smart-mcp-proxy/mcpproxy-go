@@ -1076,6 +1076,7 @@ func (s *Server) setupRoutes() {
 		r.Post("/profiles/{name}/rename", s.requireServerOp(auth.ServerOpConfigWrite, s.handleRenameProfile)) // guarded: MutateConfig
 		r.Get("/profiles/{name}/effective-tools", s.handleProfileEffectiveTools)
 		r.Get("/access/explain", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAccessExplain))
+		r.Get("/access/suggest", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAccessSuggest)) // read-only: applies nothing
 		// #1166 round 11: the ONLY mutating route in this group, and it was
 		// ungated. The active profile is server-level shared state — it decides
 		// which servers the Web UI and the tray render — so a READ-scoped agent

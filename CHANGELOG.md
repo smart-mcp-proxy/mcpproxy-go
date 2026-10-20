@@ -79,6 +79,15 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Features
 
+- **profiles:** `mcpproxy access suggest` turns the calls your profiles blocked into reviewed profile
+  changes (#1700). It reads the profile refusals in the audit log (`--since`, default 24h), groups them
+  by profile, tool and block reason, re-checks each group with the access explainer so tools that are
+  reachable now drop out, and prints the command that would fix each one. A deny rule is reported and
+  never offered for widening, an unannotated tool is never given a tier, and `code_execution` and
+  management refusals carry a warning. Nothing is applied. `--patch` adds the proposed profile
+  document per profile, in mcpproxy's own profile format. Also `GET /api/v1/access/suggest` and the
+  `suggest` operation of the `profiles` MCP tool (administrators only).
+
 - **catalog:** a catalog source whose live search times out or fails is now answered from the listing
   the daemon last saw from it (at most 24 hours old, kept in memory). Those results are marked
   `from_cache` ("From cached list" in the Web UI and macOS, `(cached)` in the CLI) and the source

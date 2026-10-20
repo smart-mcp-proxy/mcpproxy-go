@@ -3716,6 +3716,44 @@ components:
         verdict:
           $ref: '#/components/schemas/profile.ExplainVerdict'
       type: object
+    httpapi.AccessSuggestionsData:
+      properties:
+        already_fixed:
+          description: AlreadyFixed counts groups the explainer now allows (they drop
+            out).
+          type: integer
+        blocked_calls:
+          description: BlockedCalls counts every profile-refused call in the window.
+          type: integer
+        non_profile_blocked:
+          description: NonProfileBlocked counts blocked calls with a cause outside
+            profiles.
+          type: integer
+        patches:
+          items:
+            $ref: '#/components/schemas/runtime.ProfilePatch'
+          type: array
+          uniqueItems: false
+        profile_removed:
+          description: ProfileRemoved counts groups whose profile no longer exists
+            (they drop out).
+          type: integer
+        since:
+          type: string
+        suggestions:
+          items:
+            $ref: '#/components/schemas/runtime.AccessSuggestion'
+          type: array
+          uniqueItems: false
+        unattributed:
+          description: Unattributed counts profile refusals whose record names no
+            profile.
+          type: integer
+        until:
+          type: string
+        window:
+          type: string
+      type: object
     httpapi.AddServerRequest:
       properties:
         args:
@@ -4980,6 +5018,15 @@ components:
       - AccessSubjectProfile
       - AccessSubjectToken
       - AccessSubjectAnonymous
+    profile.BlockReason:
+      type: string
+      x-enum-varnames:
+      - BlockReasonTier
+      - BlockReasonRule
+      - BlockReasonUnannotated
+      - BlockReasonCodeExecution
+      - BlockReasonManagement
+      - BlockReasonServerScope
     profile.CredentialState:
       description: |-
         Spec 108-f ClientView additions (data-model §7). The Spec 109 fields above
@@ -5041,6 +5088,59 @@ components:
       x-enum-varnames:
       - WarningSeverityWarn
       - WarningSeverityInfo
+    runtime.AccessSuggestion:
+      properties:
+        block_reason:
+          $ref: '#/components/schemas/profile.BlockReason'
+        clients:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        count:
+          type: integer
+        first_seen:
+          type: string
+        fixes:
+          description: |-
+            Fixes are the access explainer's remediations of the first failing step,
+            in preference order. Empty for a deny rule and for the built-in tools.
+          items:
+            $ref: '#/components/schemas/runtime.Fix'
+          type: array
+          uniqueItems: false
+        last_seen:
+          type: string
+        needs_input:
+          description: |-
+            NeedsInput names what a person must supply before a change is
+            apply-ready (classify: "tier").
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        note:
+          type: string
+        profile:
+          type: string
+        server:
+          type: string
+        suggestion:
+          $ref: '#/components/schemas/runtime.SuggestionKind'
+        tokens:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        tool:
+          description: '"server:tool", or the built-in name'
+          type: string
+        warning:
+          description: |-
+            Warning is set for profile_code_execution and profile_management: both
+            change what a profile can do beyond tool access.
+          type: string
+      type: object
     runtime.BindingRef:
       properties:
         client_id:
@@ -5150,6 +5250,18 @@ components:
           type: array
           uniqueItems: false
       type: object
+    runtime.ProfilePatch:
+      properties:
+        changes:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        profile:
+          type: string
+        proposed:
+          $ref: '#/components/schemas/config.ProfileConfig'
+      type: object
     runtime.ProfileView:
       properties:
         blocked_24h:
@@ -5203,6 +5315,13 @@ components:
         used_by:
           $ref: '#/components/schemas/runtime.UsedBy'
       type: object
+    runtime.SuggestionKind:
+      type: string
+      x-enum-varnames:
+      - SuggestAllow
+      - SuggestAddServer
+      - SuggestClassify
+      - SuggestNone
     runtime.ToolAccessView:
       properties:
         callable:
@@ -5523,6 +5642,79 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Explain why a tool is or is not reachable
+      tags:
+      - access
+  /api/v1/access/suggest:
+    get:
+      description: Reads the profile refusals in the activity log over a look-back
+        window and groups them by profile, tool and block reason. Each group is re-checked
+        with the access explainer, so tools that are already reachable drop out, and
+        carries the explainer's fixes. A deny-rule block is reported and never offered
+        for widening; an unannotated tool is never given a tier. Nothing is applied.
+        patch=true also returns the proposed profile document per profile (the body
+        PUT /api/v1/profiles/{name} takes).
+      parameters:
+      - description: 'Look-back window: a duration such as 90m, 24h or 7d (default
+          24h; the audit-log retention is the only limit)'
+        in: query
+        name: since
+        schema:
+          type: string
+      - description: Only refusals under this profile
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Only refusals of this token
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Also return the proposed profile document per profile
+        in: query
+        name: patch
+        schema:
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The suggestions
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid since
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Suggest profile changes from blocked calls
       tags:
       - access
   /api/v1/activity:

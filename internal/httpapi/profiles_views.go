@@ -29,6 +29,7 @@ type ProfilesAPI interface {
 	Try(ctx context.Context, draft config.ProfileConfig, query string, limit int) (*internalRuntime.TryResult, error)
 	EffectiveTools(ctx context.Context, name string, opt internalRuntime.EffectiveToolsOptions) (*internalRuntime.EffectiveToolsResult, error)
 	Explain(ctx context.Context, subject profile.AccessSubject, tool string) (*internalRuntime.AccessExplanation, error)
+	Suggest(ctx context.Context, req internalRuntime.SuggestRequest) (*internalRuntime.AccessSuggestions, error)
 }
 
 var _ ProfilesAPI = (*internalRuntime.ProfilesService)(nil)
@@ -109,6 +110,9 @@ func (configOnlyProfiles) EffectiveTools(context.Context, string, internalRuntim
 	return nil, internalRuntime.ErrEvaluatorUnavailable
 }
 func (configOnlyProfiles) Explain(context.Context, profile.AccessSubject, string) (*internalRuntime.AccessExplanation, error) {
+	return nil, internalRuntime.ErrEvaluatorUnavailable
+}
+func (configOnlyProfiles) Suggest(context.Context, internalRuntime.SuggestRequest) (*internalRuntime.AccessSuggestions, error) {
 	return nil, internalRuntime.ErrEvaluatorUnavailable
 }
 
