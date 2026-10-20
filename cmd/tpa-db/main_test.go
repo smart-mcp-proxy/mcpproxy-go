@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -59,7 +60,9 @@ func TestKeygenFilesAndRefusesOverwrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Mode().Perm() != 0o600 {
+	// Windows has no POSIX permission bits (os reports 0666 for any writable
+	// file); the 0600 guarantee is a POSIX one.
+	if runtime.GOOS != "windows" && st.Mode().Perm() != 0o600 {
 		t.Fatalf("operator.key mode = %v, want 0600", st.Mode().Perm())
 	}
 	pubFile, err := os.ReadFile(filepath.Join(dir, "operator.pub"))
