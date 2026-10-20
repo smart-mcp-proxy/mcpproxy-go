@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -2341,8 +2342,70 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	errors := append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
 	errors = append(errors, c.forwardHeadersErrors()...)
 	errors = append(errors, c.oauthEndpointOverrideErrors()...)
+	errors = append(errors, c.tpaTrustRootErrors()...)
 	if _, err := ValidateProfiles(c); err != nil {
 		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
+	}
+	return errors
+}
+
+// tpaOperatorSignerKeyLen is the raw length of an Ed25519 public key. The config
+// package checks only the shape of tpa_operator_signers; key-id derivation and
+// signature verification live in internal/security/bundlesig, which config must
+// not import.
+const tpaOperatorSignerKeyLen = 32
+
+// tpaTrustRootErrors validates the Spec 101 trust-root keys under `security`:
+// tpa_active_root must be "", "publisher" or "operator"; every
+// tpa_operator_signers entry must be the canonical standard base64 of exactly
+// 32 bytes and unique; an "operator" root needs at least one signer.
+//
+// Write-time only, like oauthRedirectURIErrors: a hand-edited bad value must
+// not brick boot. Load drops unusable signers (with a log) and the scanner
+// treats an unusable operator root as having no operator authority, so a bad
+// key can never widen what is trusted. Messages never echo the offending value.
+func (c *Config) tpaTrustRootErrors() []ValidationError {
+	sc := c.Security
+	if sc == nil {
+		return nil
+	}
+	var errors []ValidationError
+	switch sc.TPAActiveRoot {
+	case "", TPARootPublisher, TPARootOperator:
+	default:
+		errors = append(errors, ValidationError{
+			Field:   "security.tpa_active_root",
+			Message: fmt.Sprintf("must be %q or %q", TPARootPublisher, TPARootOperator),
+		})
+	}
+
+	seen := make(map[string]struct{}, len(sc.TPAOperatorSigners))
+	for i, signer := range sc.TPAOperatorSigners {
+		field := fmt.Sprintf("security.tpa_operator_signers[%d]", i)
+		raw, err := base64.StdEncoding.Strict().DecodeString(signer)
+		if err != nil || base64.StdEncoding.EncodeToString(raw) != signer {
+			errors = append(errors, ValidationError{Field: field, Message: "must be canonical standard base64 (with padding)"})
+			continue
+		}
+		if len(raw) != tpaOperatorSignerKeyLen {
+			errors = append(errors, ValidationError{
+				Field:   field,
+				Message: fmt.Sprintf("must decode to exactly %d bytes (an Ed25519 public key)", tpaOperatorSignerKeyLen),
+			})
+			continue
+		}
+		if _, dup := seen[string(raw)]; dup {
+			errors = append(errors, ValidationError{Field: field, Message: "duplicate signer"})
+			continue
+		}
+		seen[string(raw)] = struct{}{}
+	}
+
+	if sc.TPAActiveRoot == TPARootOperator && len(sc.TPAOperatorSigners) == 0 {
+		errors = append(errors, ValidationError{
+			Field:   "security.tpa_active_root",
+			Message: "operator root declared but no tpa_operator_signers",
+		})
 	}
 	return errors
 }

@@ -931,6 +931,11 @@ block** — off by default, best-effort, and unable to change the baseline verdi
     "integrity_check_on_restart": false,
     "scanner_registry_url": "",
     "tpa_bundle_path": "",
+    "require_signed_bundle": false,
+    "tpa_active_root": "publisher",
+    "tpa_operator_signers": [],
+    "tpa_operator_baseline": 0,
+    "tpa_operator_epoch": 0,
     "auto_baseline_scan": true,
     "deep_scan": {
       "enabled": false,
@@ -945,11 +950,18 @@ block** — off by default, best-effort, and unable to change the baseline verdi
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `tpa_bundle_path` | string | `""` (embedded) | Filesystem path to the tpa-db `scanner-bundle.json` the offline TPA scanner runs. Empty uses the corpus embedded in the build. Env override: `MCPPROXY_TPA_BUNDLE_PATH`, which wins over this field on every path (loader, hot-reload, `/api/v1/config/apply`). Re-read on config hot-reload and honoured in every transport, stdio included. A bundle that fails to read/parse/version-check/compile — or that contributes zero runnable rules — is refused and the previously active corpus stays live; the reason is surfaced as `signature_bundle.load_error` in `GET /api/v1/security/overview` and in `mcpproxy security overview`. |
+| `require_signed_bundle` | boolean | `false` | When `true`, a file-dropped TPA bundle must carry a valid detached signature; an unsigned or badly signed one is refused and the previous corpus stays live. When `false`, unsigned drops keep working but always run with degraded coverage. |
+| `tpa_active_root` | string | `"publisher"` | Which signing authority may activate a bundle: `"publisher"` (the keys embedded in this binary) or `"operator"` (the keys in `tpa_operator_signers`). A bundle signed by the other authority is refused. Rejected on write for any other value, and `"operator"` needs at least one signer. |
+| `tpa_operator_signers` | string[] | `[]` | Operator Ed25519 public keys, each the standard base64 of the 32 raw key bytes. Rejected on write if an entry is malformed, not canonically encoded, or a duplicate. |
+| `tpa_operator_baseline` | integer | absent | The lowest operator bundle sequence this install will accept, as an anti-downgrade floor. Absent means no floor. An explicit `0` is kept and is different from absent. |
+| `tpa_operator_epoch` | integer | absent (`0`) | The operator trust epoch. Raise it after an operator key compromise to retire pins from earlier epochs. |
 | `auto_baseline_scan` | boolean | `true` | Kill switch for the **automatic informational baseline scan**. When on (the default), every newly added server gets one free in-process Pass-1 TPA scan, and once per installation a background sweep scans pre-existing enabled servers that have never been scanned (marker persisted in BBolt, so it runs exactly once and never delays startup). The result only populates the security badge / scan summary: it **never** quarantines, approves, or otherwise gates a server. Disabled servers are skipped, and so are `trust_mode: "scan"` servers — that mode's own admission gate scans them and auto-approves on a clean verdict, so the informational path stays out of it entirely rather than risk feeding that gate; this flag does not affect that separate path. Set to `false` to suppress all automatic scans; manual scans keep working. Hot-reloadable — the flag is read live at each decision point. Env override: `MCPPROXY_AUTO_BASELINE_SCAN` (`true`/`1`/`false`/`0`), which wins over this field on every path. |
 | `deep_scan.enabled` | boolean | `false` | Master opt-in for the heavy layer. When `false`, no Docker scanner runs and no source extraction is attempted — only the in-process baseline scanner executes. |
 | `deep_scan.fetch_package_source` | boolean | `true` (when deep scan is on) | Whether the scanner fetches (never executes) the published source of `npx`/`uvx` package-runner servers when no local source is available. Set `false` for air-gapped deployments. |
 | `deep_scan.disable_no_new_privileges` | boolean | `false` | Omits `--security-opt no-new-privileges` from scanner container runs (snap-docker/AppArmor escape hatch). |
 | `deep_scan.scanners` | string[] | `[]` | Optional allow-list of deep scanner ids. Empty ⇒ all enabled deep scanners are eligible. |
+
+These five keys have no environment-variable aliases on purpose: the trust root lives only in `mcp_config.json`, so someone who can change the bundle path or the environment cannot also choose who is trusted. `GET /api/v1/config` shows them unmasked, since they hold public keys and counters, not secrets.
 
 **Deprecated-key migration.** The old top-level `security.scanner_fetch_package_source`
 and `security.scanner_disable_no_new_privileges` keys still parse and are migrated
