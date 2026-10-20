@@ -4140,8 +4140,6 @@ func (p *MCPProxyServer) toolCallIncarnation(serverName string) int64 {
 	return 0
 }
 
-// recordToolCallAt records a call's history only while its server still has
-// the incarnation the call started on (Spec 116 FR-014c).
 // recordOutputBlocked is the bookkeeping a dispatch owes a call whose result
 // an output policy (Spec 054 block mode) refused to hand over: the upstream
 // ran, so the tool-call history gets the attempt, with the block message in
@@ -4160,6 +4158,8 @@ func (p *MCPProxyServer) recordOutputBlocked(ctx context.Context, rec *storage.T
 	return msg
 }
 
+// recordToolCallAt records a call's history only while its server still has
+// the incarnation the call started on (Spec 116 FR-014c).
 func (p *MCPProxyServer) recordToolCallAt(rec *storage.ToolCallRecord, inc int64) error {
 	written, err := p.storage.RecordToolCallIfIncarnation(rec, inc)
 	if err == nil && !written {
