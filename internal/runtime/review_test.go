@@ -151,7 +151,12 @@ func TestReviewPayload_ClassifiesCapturedAndLegacyAnnotations(t *testing.T) {
 	require.Equal(t, contracts.TierRead, byName["safe"].Tier)
 	require.Equal(t, contracts.TierUnannotated, byName["plain"].Tier)
 	require.Equal(t, contracts.TierUnknown, byName["legacy"].Tier)
-	require.Equal(t, "not_scanned", byName["safe"].ScanVerdict)
+	// Spec 118: the pending tool carries the in-process scan verdict of its
+	// definition (it used to read "not_scanned" until a full scan ran). The
+	// verdict is evidence only: the tool stays pending.
+	require.Equal(t, "clean", byName["safe"].ScanVerdict)
+	require.Equal(t, storage.ToolApprovalStatusPending, byName["safe"].ApprovalStatus)
+	require.False(t, byName["safe"].DefaultAllowed)
 
 	approved, err := rt.storageManager.GetToolApproval("github", "safe")
 	require.NoError(t, err)

@@ -175,6 +175,11 @@ type Server struct {
 	infoScanRunMu         sync.Mutex
 	infoScanSettleTimeout time.Duration
 	infoScanSweepDelay    time.Duration
+	// Spec 118: pending debounce timers of the post-change rescan, guarded by
+	// infoScanMu. infoRescanDebounce overrides the default window in tests.
+	infoRescanTimers   map[string]*infoRescanTimer
+	infoRescanSeq      uint64
+	infoRescanDebounce time.Duration
 
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
@@ -359,6 +364,7 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// Registered here, before the config watcher and background initialization
 	// start below, so no removal can commit without forgetting its scan state.
 	server.forgetInformationalScansOnPurge()
+	server.registerToolChangeRescan()
 
 	// Replace the diagnostics package's placeholder fixers with the real,
 	// runtime-backed ones (see diagnostics_fixers.go). builtin_fixers.go has
