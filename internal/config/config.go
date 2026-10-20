@@ -3236,10 +3236,11 @@ type SecurityConfig struct {
 	// lowercase-hex SHA-256 of those bytes. Malformed or duplicate entries are
 	// rejected on write and dropped (with a log) on load.
 	TPAOperatorSigners []string `json:"tpa_operator_signers,omitempty" mapstructure:"tpa-operator-signers"`
-	// TPAOperatorBaseline is the lowest operator-authority sequence this install
-	// will ever accept (FR-009b). It survives a data-directory wipe because it
-	// lives here. Absent means the operator authority has no anti-downgrade
-	// floor and an active operator bundle runs DEGRADED.
+	// TPAOperatorBaseline seeds the operator authority's anti-downgrade
+	// watermark (FR-009b): an operator-signed bundle must carry a sequence
+	// ABOVE it (a rollback target may sit at it). It survives a data-directory
+	// wipe because it lives here. Absent means the operator authority has no
+	// anti-downgrade floor and an active operator bundle runs DEGRADED.
 	TPAOperatorBaseline *uint64 `json:"tpa_operator_baseline,omitempty" mapstructure:"tpa-operator-baseline"`
 	// TPAOperatorEpoch is the operator authority's trust epoch (FR-005a).
 	// Bumping it (after an operator key compromise) re-baselines the operator
