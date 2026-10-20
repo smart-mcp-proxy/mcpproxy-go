@@ -110,7 +110,7 @@ export function describeDegradedReason(reason: string | undefined): string {
 }
 
 const REJECTION_LABELS: Record<string, string> = {
-  tamper: 'Tamper: signature did not verify',
+  tamper: 'Tamper: the signature or the signing-key identity check failed',
   downgrade: 'Downgrade refused',
   stale_epoch_replay: 'Stale epoch replay refused',
   epoch_ahead: 'Bundle epoch is newer than this install trusts (publisher bundle: update mcpproxy; operator bundle: check tpa_operator_epoch)',
