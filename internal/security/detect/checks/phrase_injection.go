@@ -72,6 +72,12 @@ type phraseFamily struct {
 	// leadingBoundary marks a pattern whose match begins with a consumed
 	// non-letter boundary character (the non-English families, SEC-01).
 	leadingBoundary bool
+	// trailingBoundary marks a pattern whose match ENDS with a consumed
+	// non-letter boundary character (or the end of text). The Turkish families
+	// (R2-3) need one because Turkish negates with a suffix ("yoksaymaz"), so
+	// the verb must be matched whole; the consumed character is trimmed back
+	// out of the evidence like the leading one.
+	trailingBoundary bool
 	// softReason, when set, explains why this family is review-only by design
 	// (its base sits below the hard floor); it replaces the generic
 	// "quoted/described position" wording in the finding detail.
@@ -544,9 +550,12 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				// match and the position window at the first letter so a quote
 				// right before the phrase still counts as quoting it. Other
 				// families keep their match start exactly as before.
-				start := loc[0]
+				start, end := loc[0], loc[1]
 				if fam.leadingBoundary {
 					start += len(t[loc[0]:loc[1]]) - len(strings.TrimLeftFunc(t[loc[0]:loc[1]], isNotWordRune))
+				}
+				if fam.trailingBoundary {
+					end -= len(t[start:loc[1]]) - len(strings.TrimRightFunc(t[start:loc[1]], isNotWordRune))
 				}
 				conf := fam.base * detect.ClassifyPositionForRecall(t, start).Discount()
 				softReason := fam.softReason
@@ -605,7 +614,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 					if wordStarts == nil || startsText != t {
 						startsText, wordStarts = t, bareWordStarts(t)
 					}
-					if matchJoinsBreak(t, start, loc[1], breakSet, breakWords, wordStarts) {
+					if matchJoinsBreak(t, start, end, breakSet, breakWords, wordStarts) {
 						conf = deobfuscatedMaxConfidence
 						softReason = "the match joins a line that ends with the start of a new sentence on the next line"
 					}
@@ -617,7 +626,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				if !matched || conf > bestConf {
 					matched = true
 					bestConf = conf
-					bestMatch = t[start:loc[1]]
+					bestMatch = t[start:end]
 					bestWhat = fam.what
 					bestThreat = fam.threat
 					bestSoftReason = softReason
