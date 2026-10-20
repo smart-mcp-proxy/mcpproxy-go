@@ -53,7 +53,7 @@ render_comment() {
 }
 
 cmd_thanks() {
-  local pr="$1" dry="${DRY_RUN:-true}" info login utype assoc title url merged total first body
+  local pr="$1" dry="${DRY_RUN:-true}" info login utype assoc title url merged others first body existing
   info="$(gh api "repos/$REPO/pulls/$pr")"
   merged="$(jq -r '.merged' <<<"$info")"
   login="$(jq -r '.user.login' <<<"$info")"
@@ -65,15 +65,22 @@ cmd_thanks() {
   [[ "$merged" == "true" ]] || { echo "skip: PR #$pr is not merged"; return 0; }
   is_external "$login" "$utype" "$assoc" || { echo "skip: $login ($utype, $assoc) is not an external contributor"; return 0; }
 
-  if gh api --paginate "repos/$REPO/issues/$pr/comments" --jq '.[].body' | grep -qF "$MARKER"; then
+  # Read all comments first: piping into `grep -q` can SIGPIPE gh and, under
+  # pipefail, look like "marker not found" (a duplicate comment).
+  existing="$(gh api --paginate "repos/$REPO/issues/$pr/comments" --jq '.[].body')"
+  if grep -qF "$MARKER" <<<"$existing"; then
     echo "skip: PR #$pr already has a thank-you comment"; return 0
   fi
 
-  total="$(gh api -X GET search/issues -f q="repo:$REPO is:pr is:merged author:$login" --jq '.total_count')"
-  first=false; [[ "$total" == "1" ]] && first=true
+  # First contribution = no OTHER merged PR by this author. Counting "others"
+  # (instead of total == 1) keeps this right while the search index lags behind
+  # the merge we are reacting to. A failed search degrades to "not first".
+  others="$(gh api -X GET search/issues -f q="repo:$REPO is:pr is:merged author:$login" -f per_page=5 \
+    --jq "[.items[].number | select(. != $pr)] | length" 2>/dev/null)" || others=-1
+  first=false; [[ "$others" == "0" ]] && first=true
 
   body="$(render_comment "$login" "$title" "$url" "$first")"
-  echo "--- comment for PR #$pr (author=$login assoc=$assoc merged_prs=$total first=$first, ${#body} chars) ---"
+  echo "--- comment for PR #$pr (author=$login assoc=$assoc other_merged_prs=$others first=$first, ${#body} chars) ---"
   printf '%s\n' "$body"
   if [[ "$dry" == "true" ]]; then
     echo "--- DRY_RUN=true: nothing posted ---"
