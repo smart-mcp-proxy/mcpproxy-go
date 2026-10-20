@@ -170,6 +170,9 @@
       </div>
     </div>
 
+    <!-- Spec 101 FR-020: degraded-coverage alert + bundle identity panel. -->
+    <SignatureBundleStatus :bundle="overview?.signature_bundle" />
+
     <!-- Docker unavailable warning (only after overview has loaded). Scanning
          still works: only the optional deep scanners need Docker. -->
     <div v-if="overviewLoaded && overview.docker_available === false" class="alert alert-warning" data-test="docker-unavailable-alert">
@@ -533,6 +536,7 @@ import { refreshSecurityScannerStatus } from '@/composables/useSecurityScannerSt
 import { useSystemStore } from '@/stores/system'
 import { scanReportPath } from '@/utils/serverRoute'
 import { formatSignatureBundle } from '@/utils/signatureBundle'
+import SignatureBundleStatus from '@/components/security/SignatureBundleStatus.vue'
 import { deepScanSummary, enabledDockerScanners, scanAllTooltip, scannerWontRun } from './security/deepScanState'
 
 const systemStore = useSystemStore()

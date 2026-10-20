@@ -6,6 +6,22 @@
     <!-- Upgrade nudge (Spec 079): dismissible per-version update banner -->
     <UpdateBanner />
 
+    <!-- Spec 101 FR-020: a suspended scan-mode auto-approval is otherwise
+         indistinguishable from a quiet install, so degraded signature coverage
+         gets an alert with its reason. Nothing is shown when coverage is fine. -->
+    <div
+      v-if="bundleDegraded"
+      class="alert alert-warning"
+      role="alert"
+      data-test="home-signature-degraded"
+    >
+      <div class="flex-1">
+        <div class="font-semibold">Scan-mode auto-approval is suspended<span v-if="bundleDegraded.reason" class="font-mono text-xs font-normal"> ({{ bundleDegraded.reason }})</span></div>
+        <div class="text-sm">{{ bundleDegraded.explanation }}</div>
+      </div>
+      <router-link to="/review" class="btn btn-sm" data-test="home-signature-degraded-link">Open Review</router-link>
+    </div>
+
     <!-- Spec 109 FR-051/FR-001/FR-003: the ONE needs-attention list, replacing
          the two bespoke Dashboard.vue banners (servers needing attention,
          tools pending approval) that duplicated FR-001's logic locally. -->
@@ -427,6 +443,7 @@ import type { Hint } from '@/components/CollapsibleHintsPanel.vue'
 import type { ClientStatus } from '@/types'
 import { liveClientsFromSessions } from '@/utils/sessionLabel'
 import { formatRelativeTime } from '@/utils/activity'
+import { formatSignatureBundle } from '@/utils/signatureBundle'
 
 const serversStore = useServersStore()
 const systemStore = useSystemStore()
@@ -486,7 +503,15 @@ const {
   totalFindings: securityTotalFindings,
   totalScans: securityTotalScans,
   loaded: securityScannerLoaded,
+  signatureBundle: securitySignatureBundle,
 } = useSecurityScannerStatus()
+
+// Spec 101 FR-020: non-null only while signature coverage is degraded.
+const bundleDegraded = computed(() =>
+  authStore.principalKind === 'tenant'
+    ? null
+    : formatSignatureBundle(securitySignatureBundle?.value)?.degraded ?? null
+)
 
 const loadSecurityStatus = async () => {
   // Spec 107 FR-041 / T088: /docker/status and /config are admin-only core

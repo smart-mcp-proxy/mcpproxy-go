@@ -8,7 +8,7 @@ import (
 )
 
 // TestSchemaVersionIsAtLeastV7 pins FR-014: the Spec 080 payload contract
-// shipped at v7 and may only move forward. The current version is 14 (v8's
+// shipped at v7 and may only move forward. The current version is 15 (v8's
 // additive tpa_scanner / deep_scan_enabled bump, v9's TPA funnel counters +
 // trust_mode_distribution, v10's tool_response_mode /
 // direct_tool_response_mode, then v11's edge-triggered error_code_counts_24h +
@@ -17,8 +17,8 @@ func TestSchemaVersionIsAtLeastV7(t *testing.T) {
 	if SchemaVersion < 7 {
 		t.Fatalf("SchemaVersion = %d, want >= 7 (Spec 080 FR-014)", SchemaVersion)
 	}
-	if SchemaVersion != 14 {
-		t.Fatalf("SchemaVersion = %d, want 14 (v14 activation/attempt semantics)", SchemaVersion)
+	if SchemaVersion != 15 {
+		t.Fatalf("SchemaVersion = %d, want 15 (v15 TPA bundle provenance)", SchemaVersion)
 	}
 }
 
@@ -78,7 +78,7 @@ func TestPayloadV7_FullyPopulatedPassesScanner(t *testing.T) {
 	}
 
 	for _, required := range []string{
-		`"schema_version":14`,
+		`"schema_version":15`,
 		`"wizard_shown":true`,
 		`"wizard_connect_step":"completed_external"`,
 		`"web_ui_opened":3`,
@@ -109,8 +109,8 @@ func TestPayloadV7_ZeroNewFieldsShapeCompatibleWithV6(t *testing.T) {
 	}
 	js := string(data)
 
-	if !strings.Contains(js, `"schema_version":14`) {
-		t.Errorf("expected schema_version:14 even on a zero-valued payload, got:\n%s", js)
+	if !strings.Contains(js, `"schema_version":15`) {
+		t.Errorf("expected schema_version:15 even on a zero-valued payload, got:\n%s", js)
 	}
 	for _, forbidden := range []string{
 		`"wizard_shown"`,

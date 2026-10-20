@@ -71,6 +71,13 @@ const (
 	// records.
 	ToolBaselineDecisionsBucket = "tool_baseline_decisions"
 
+	// TPABundleStateBucket holds the installation-wide Spec 101 anti-downgrade
+	// state of the signed TPA bundle: key "state" (scanner.TPABundleState) and a
+	// nested "history" bucket of activation rows. It is keyed by signing
+	// authority, not by server, so server removal never purges it. Created
+	// lazily on the first write, never by a read.
+	TPABundleStateBucket = "tpa_bundle_state"
+
 	// Onboarding wizard bucket (Spec 046)
 	OnboardingBucket = "onboarding"
 )
@@ -327,6 +334,12 @@ const (
 	// failed, or the signature bundle was unavailable), so the gate failed closed
 	// with no findings to show.
 	ToolHeldReasonScanCoverage = "scan_coverage"
+	// ToolHeldReasonAwaitingReview: the in-process scan of the tool's current
+	// definition came back clean (HeldVerdict "clean", no signals), yet the tool
+	// stays held — a changed or newly pending contract is always reviewed by an
+	// operator in manual and scan trust modes (RT-02), and a clean verdict never
+	// approves it. Evidence only: it is neither a threat nor a precaution.
+	ToolHeldReasonAwaitingReview = "awaiting_review"
 )
 
 // MaxToolHeldSignals caps how many matched check ids are persisted on an

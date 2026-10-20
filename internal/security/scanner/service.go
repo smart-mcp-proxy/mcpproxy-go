@@ -426,7 +426,9 @@ func (s *Service) ApplySecurityConfig(sec *config.SecurityConfig) {
 	// and re-read here, which is what makes it hot-reloadable. An empty path
 	// means the corpus embedded in this build; a broken configured bundle keeps
 	// the previously active corpus and surfaces the reason via BundleStatus().
-	ConfigureBundle(sec.EffectiveTPABundlePath(), s.logger)
+	// Spec 101: the same call carries the trust policy -- require_signed_bundle,
+	// the active signing root, the operator signers/baseline/epoch.
+	ConfigureBundleFromConfig(sec, s.logger)
 
 	enabled := sec.IsDeepScanEnabled()
 	s.SetDeepScan(enabled, sec.DeepScanScanners())
@@ -444,6 +446,28 @@ func (s *Service) ApplySecurityConfig(sec *config.SecurityConfig) {
 // without importing the loader internals (GH #938 finding 2).
 func (s *Service) BundleStatus() BundleInfo {
 	return BundleStatus()
+}
+
+// BundleHistory returns the append-only TPA bundle activation history, oldest
+// first (spec 101 FR-010/FR-020).
+func (s *Service) BundleHistory() ([]TPABundleActivation, error) {
+	return BundleHistory()
+}
+
+// RollbackBundle runs the explicit FR-010 rollback; see RollbackBundle.
+func (s *Service) RollbackBundle(req BundleRollbackRequest) (BundleInfo, error) {
+	return RollbackBundle(req, s.logger)
+}
+
+// UnpinBundle clears the active root's rollback pin; see UnpinBundle.
+func (s *Service) UnpinBundle() (BundleInfo, error) {
+	return UnpinBundle(s.logger)
+}
+
+// ReloadBundle re-runs the bundle pipeline with the current policy, so a
+// file drop is picked up without waiting for a config change (spec 101 Δ5).
+func (s *Service) ReloadBundle() BundleInfo {
+	return ReloadBundle(s.logger)
 }
 
 // isBaselineScanner reports whether a scanner id belongs to the deterministic

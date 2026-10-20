@@ -7,7 +7,7 @@
       "idempotentHint": false,
       "openWorldHint": true
     },
-    "description": "Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations. Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
+    "description": "Execute a DESTRUCTIVE tool. Use this variant only when retrieve_tools returns call_with=call_tool_destructive. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. This variant does not bypass authorization, quarantine, approval, or other dispatch gates. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
     "inputSchema": {
       "properties": {
         "args": {
@@ -47,7 +47,7 @@
       "idempotentHint": false,
       "openWorldHint": true
     },
-    "description": "Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only. Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
+    "description": "Execute a READ-ONLY tool. Use this variant only when retrieve_tools returns call_with=call_tool_read. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
     "inputSchema": {
       "properties": {
         "args": {
@@ -87,7 +87,7 @@
       "idempotentHint": false,
       "openWorldHint": true
     },
-    "description": "Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state. Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
+    "description": "Execute a STATE-MODIFYING tool. Use this variant only when retrieve_tools returns call_with=call_tool_write. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
     "inputSchema": {
       "properties": {
         "args": {

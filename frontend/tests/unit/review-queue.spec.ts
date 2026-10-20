@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount } from '@vue/test-utils'
 import { createRouter, createMemoryHistory } from 'vue-router'
+import { createPinia } from 'pinia'
 import Review from '@/views/Review.vue'
 import api from '@/services/api'
 
@@ -14,7 +15,7 @@ describe('Review queue (T088)', () => {
   it('lists servers and refreshes after review.changed', async () => {
     const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/review', component: Review }, { path: '/review/:server', component: Review }] })
     await router.push('/review'); await router.isReady()
-    const wrapper = mount(Review, { global: { plugins: [router] } }); await flushPromises()
+    const wrapper = mount(Review, { global: { plugins: [createPinia(), router] } }); await flushPromises()
     expect(wrapper.get('[data-test="servers-review-row-alpha"]').text()).toContain('1 new')
     expect(wrapper.get('[data-test="servers-review-link-alpha"]').attributes('href')).toContain('/review/alpha')
     window.dispatchEvent(new Event('mcpproxy:review-changed')); await flushPromises()
@@ -28,7 +29,7 @@ describe('Review queue (T088)', () => {
     ] } })
     const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/review', component: Review }, { path: '/review/:server', component: Review }] })
     await router.push('/review?server=alpha'); await router.isReady()
-    const wrapper = mount(Review, { global: { plugins: [router] } }); await flushPromises()
+    const wrapper = mount(Review, { global: { plugins: [createPinia(), router] } }); await flushPromises()
     expect(wrapper.find('[data-test="servers-review-row-alpha"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="servers-review-row-bravo"]').exists()).toBe(false)
     expect(wrapper.find('[data-test="review-screen"]').exists()).toBe(false)
@@ -46,7 +47,7 @@ describe('Review queue (T088)', () => {
       ;(api.getReviewQueue as any).mockResolvedValue({ success: true, data })
       const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/review', component: Review }, { path: '/review/:server', component: Review }] })
       await router.push(path); await router.isReady()
-      const wrapper = mount(Review, { global: { plugins: [router] } }); await flushPromises()
+      const wrapper = mount(Review, { global: { plugins: [createPinia(), router] } }); await flushPromises()
       return { wrapper, router }
     }
     const names = (w: any) => w.findAll('[data-test^="servers-review-row-"]').map((r: any) => r.attributes('data-test').replace('servers-review-row-', ''))
