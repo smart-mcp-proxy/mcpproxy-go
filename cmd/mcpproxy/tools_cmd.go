@@ -601,6 +601,10 @@ func formatToolHold(t map[string]interface{}) string {
 		// A hold with no signals means the scan itself could not be trusted
 		// (degraded coverage / missing bundle) — still worth naming.
 		if reason := getStringField(t, "held_reason"); reason != "" {
+			// A clean verdict held only for review (Spec 118) is not a scan hold.
+			if reason == "awaiting_review" {
+				return "clean"
+			}
 			return reason
 		}
 		return "-"

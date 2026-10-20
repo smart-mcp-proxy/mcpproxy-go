@@ -56,6 +56,15 @@ func TestReviewDefaultAllowed(t *testing.T) {
 	require.True(t, reviewDefaultAllowed(ReviewTool{
 		Tier: contracts.TierRead, ApprovalStatus: storage.ToolApprovalStatusPending, ScanVerdict: "clean",
 	}))
+	// Spec 118: the in-process verdict recorded as awaiting_review is evidence,
+	// not a licence to pre-check: every hold reason starts unchecked.
+	for _, reason := range []string{
+		storage.ToolHeldReasonAwaitingReview, storage.ToolHeldReasonScanFindings, storage.ToolHeldReasonScanCoverage,
+	} {
+		require.False(t, reviewDefaultAllowed(ReviewTool{
+			Tier: contracts.TierRead, ApprovalStatus: storage.ToolApprovalStatusChanged, ScanVerdict: "clean", HeldReason: reason,
+		}), reason)
+	}
 }
 
 func TestReviewTool_DefaultAllowedSerialisedWhenFalse(t *testing.T) {
