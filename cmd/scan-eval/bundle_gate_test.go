@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -99,8 +100,10 @@ func TestBundleGate_InvalidBundleNeverFallsBack(t *testing.T) {
 			if m != nil {
 				t.Errorf("an invalid bundle must not fall back to the embedded default and score: %v", m)
 			}
-			if !strings.Contains(stderr, p) {
-				t.Errorf("stderr should name the bundle path: %q", stderr)
+			// The path is rendered with %q, which escapes Windows backslashes,
+			// so compare against the quoted form rather than the raw path.
+			if !strings.Contains(stderr, strconv.Quote(p)) {
+				t.Errorf("stderr should name the bundle path %s: %q", strconv.Quote(p), stderr)
 			}
 		})
 	}
