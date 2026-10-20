@@ -38,7 +38,7 @@
       "id": "TPA-2026-0034",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(?:always|must|should)\\s+(?:use|prefer|choose|select|pick)\\s+this\\s+tool\\s+(?:instead\\s+of|over|rather\\s+than)\\s+(?:all\\s+|any\\s+)?(?:other|similar|alternative|competing)\\s+(?:(?:other|similar|alternative|competing|search|web|file|code|data|document)\\s+)*(?:tools?|servers?|options?|alternatives?|products?|implementations?)\\s*(?:[.!;,:]|$)",
+      "pattern": "(?is)(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you|to)\\s+)(?:always|must|should)\\s+(?:use|prefer|choose|select|pick)\\s+this\\s+tool\\s+(?:instead\\s+of|over|rather\\s+than)\\s+(?:all\\s+|any\\s+)?(?:other|similar|alternative|competing)\\s+(?:(?:other|similar|alternative|competing|search|web|file|code|data|document)\\s+)*(?:tools?|servers?|options?|alternatives?|products?|implementations?)\\s*(?:[.!;,:]|$)",
       "severity": "medium",
       "target": "tool_description",
       "type": "lexical"
