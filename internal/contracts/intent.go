@@ -197,8 +197,11 @@ func (i *IntentDeclaration) ValidateAgainstServerAnnotations(toolVariant, server
 }
 
 // DeriveCallWith derives the recommended tool variant from server annotations.
-// Defaults to call_tool_read as the safest option when intent is unclear.
-// LLMs should analyze the tool description to override this default when appropriate.
+// Defaults to call_tool_read when no tier annotation is present. Agents are told
+// that call_with is authoritative over a tool's name, description or the requested
+// outcome (PR #1668), so this default is what an unannotated tool is routed through;
+// the server-side tier gate and the profile `unannotated` policy, not the agent's
+// guess, decide whether that call is admitted.
 //
 // Priority:
 //  1. destructiveHint=true → call_tool_destructive

@@ -1396,7 +1396,7 @@ Controls only the *serialization* of `retrieve_tools` responses (Spec 085) — n
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `tool_response_mode` | string | `"full"` | `full` returns complete `inputSchema` entries (pre-Spec-085 behavior, byte-identical). `compact` returns one-line signatures instead: per entry `id`, `score`, `sig`, first-sentence `desc`, and a `lossy` flag, plus one top-level `hint` line. |
+| `tool_response_mode` | string | `"full"` | `full` returns complete `inputSchema` entries (pre-Spec-085 behavior). `compact` returns one-line signatures instead: per entry `id`, `score`, `sig`, first-sentence `desc`, a `lossy` flag and the same `call_with` route as full mode, plus one top-level `hint` line. |
 
 - **Compact signatures**: `*` marks a required parameter (never elided), `~` marks a lossy collapse (nested objects, long enums — call `describe_tool` for the full schema), short enums/defaults are inlined (e.g. `(origin*:str, ttl:int=3600)`).
 - **Per-call override**: the `detail` parameter on `retrieve_tools` (`compact` | `full`) overrides the configured mode for that call only.
