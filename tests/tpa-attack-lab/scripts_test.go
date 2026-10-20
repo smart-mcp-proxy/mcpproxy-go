@@ -1506,6 +1506,13 @@ func TestScanGateLoggedRequiresScanModeMessages(t *testing.T) {
 	if got, _ := runLib(t, lib, `scan_gate_logged "$1" calendar_get_events notes_export`, scan); got != "no(notes_export)" {
 		t.Errorf("a tool without a scan-mode message = %q, want no(notes_export)", got)
 	}
+	// Spec 118 (#1689) wording: the synchronous definition scan logs one line
+	// for the scan-mode gate and the manual-mode evidence scan alike.
+	spec118 := writeTemp(t, "spec118.log",
+		`INFO	tool definition scan returned a non-green verdict; tool held for review	{"server": "tpa-lab-attacker", "tool": "calendar_get_events", "verdict": "dangerous", "coverage_ok": true}`+"\n")
+	if got, _ := runLib(t, lib, `scan_gate_logged "$1" calendar_get_events`, spec118); got != "yes" {
+		t.Errorf("the Spec 118 non-green line = %q, want yes", got)
+	}
 }
 
 // TestScanHoldEvidenceOK (Sol r12 P2): a hostile scan-mode change must

@@ -150,17 +150,20 @@ PY
 }
 
 # scan_gate_logged <log> <tool>... — "yes" when the daemon log shows the
-# trust_mode: scan change gate itself scanning every named tool (Sol r12
-# P2): either its non-green hold ("trust_mode scan held tool change for
-# review") or its clean-verdict hold ("clean verdict does not auto-approve a
-# changed contract"). Manual mode emits neither, so the generic "changed
-# since approval" line cannot stand in for the scan-mode gate.
+# daemon's own synchronous definition scan holding every named tool (Sol r12
+# P2): the non-green hold — "trust_mode scan held tool change for review"
+# before Spec 118, "tool definition scan returned a non-green verdict; tool
+# held for review" since #1689, when the manual-mode evidence scan started
+# emitting the same line as the scan-mode gate — or the scan-mode gate's
+# clean-verdict hold ("clean verdict does not auto-approve a changed
+# contract"). The generic "changed since approval" line is not a scan and
+# cannot stand in for one.
 scan_gate_logged() {
   local logf="$1" t
   shift
   [[ $# -gt 0 ]] || { echo "no(no-tools)"; return; }
   for t in "$@"; do
-    grep -E 'trust_mode scan held tool change for review|clean verdict does not auto-approve a changed contract' "$logf" 2>/dev/null \
+    grep -E 'trust_mode scan held tool change for review|tool definition scan returned a non-green verdict; tool held for review|clean verdict does not auto-approve a changed contract' "$logf" 2>/dev/null \
       | grep -q "\"tool\": \"$t\"" || { echo "no($t)"; return; }
   done
   echo yes
