@@ -67,6 +67,19 @@ describe('parseHoldEvidence (spec 088 FR-008/FR-012)', () => {
     expect(evidence!.signals).toEqual([])
   })
 
+  it('marks an awaiting_review + clean hold as neither a threat nor a precaution (Spec 118)', () => {
+    const evidence = parseHoldEvidence({ held_reason: 'awaiting_review', held_verdict: 'clean' })
+    expect(evidence).not.toBeNull()
+    expect(evidence!.isThreat).toBe(false)
+    expect(evidence!.isPrecaution).toBe(false)
+    expect(evidence!.isAwaitingReview).toBe(true)
+    expect(evidence!.signals).toEqual([])
+    const reason = reasonPresentation(evidence)
+    expect(reason?.tone).toBe('neutral')
+    expect(reason?.label).toBe('Scan clean, awaiting your review')
+    expect(reason?.description).toMatch(/never approves/)
+  })
+
   it('does not fabricate a threat claim for an unrecognized reason', () => {
     const evidence = parseHoldEvidence({ held_reason: 'future_reason' })
     expect(evidence).not.toBeNull()

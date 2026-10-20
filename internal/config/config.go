@@ -2119,6 +2119,14 @@ const EnvTPABundlePath = "MCPPROXY_TPA_BUNDLE_PATH"
 // setting. Accepts "true"/"1" and "false"/"0"; any other value is ignored.
 const EnvAutoBaselineScan = "MCPPROXY_AUTO_BASELINE_SCAN"
 
+// EnvAutoRescanOnChange is the environment switch for the automatic,
+// informational rescan that follows a tool-definition hash change
+// (`security.auto_rescan_on_change`). Same precedence and vocabulary as
+// EnvAutoBaselineScan: resolved in SecurityConfig.IsAutoRescanOnChangeEnabled so
+// /api/v1/config/apply cannot defeat it; "true"/"1"/"false"/"0", anything else
+// is ignored.
+const EnvAutoRescanOnChange = "MCPPROXY_AUTO_RESCAN_ON_CHANGE"
+
 // TrustModeNormalization records one per-server trust_mode value that the load
 // path rewrote because it was not in the accepted vocabulary.
 type TrustModeNormalization struct {
@@ -3236,6 +3244,22 @@ type SecurityConfig struct {
 	// (manual scans keep working). Env override: MCPPROXY_AUTO_BASELINE_SCAN,
 	// which wins over this field on every path.
 	AutoBaselineScan *bool `json:"auto_baseline_scan,omitempty" mapstructure:"auto-baseline-scan" swaggertype:"boolean"`
+
+	// AutoRescanOnChange is the finer switch for the automatic, informational
+	// rescan that follows a tool-definition hash change: the in-process TPA scan
+	// of the changed (or newly pending) tool, recorded as hold evidence, and a
+	// debounced informational server rescan that brings the review screen's scan
+	// coverage back to "current".
+	//
+	// Evidence and freshness ONLY: a clean verdict never approves a changed
+	// contract (RT-02); every change is still held for review in scan and manual
+	// trust modes. Runs in every trust mode except "auto".
+	//
+	// Default (nil) is ENABLED. It only takes effect while auto_baseline_scan is
+	// also enabled, so a user can keep the admission scan and turn off per-change
+	// rescans with this key alone. Env override: MCPPROXY_AUTO_RESCAN_ON_CHANGE,
+	// which wins over this field on every path.
+	AutoRescanOnChange *bool `json:"auto_rescan_on_change,omitempty" mapstructure:"auto-rescan-on-change" swaggertype:"boolean"`
 }
 
 // DeepScanConfig configures the opt-in "deep scan" layer (Spec 077 US3):
@@ -3312,6 +3336,31 @@ func (sc *SecurityConfig) IsAutoBaselineScanEnabled() bool {
 		return true
 	}
 	return *sc.AutoBaselineScan
+}
+
+// IsAutoRescanOnChangeEnabled reports whether the per-change automatic rescan
+// (hold evidence + debounced informational server rescan) is switched on by
+// auto_rescan_on_change alone. Default ENABLED; MCPPROXY_AUTO_RESCAN_ON_CHANGE
+// outranks the file value on every path. Callers that decide whether to run the
+// rescan use IsAutoChangeScanEnabled, which also honours auto_baseline_scan.
+func (sc *SecurityConfig) IsAutoRescanOnChangeEnabled() bool {
+	switch os.Getenv(EnvAutoRescanOnChange) {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	}
+	if sc == nil || sc.AutoRescanOnChange == nil {
+		return true
+	}
+	return *sc.AutoRescanOnChange
+}
+
+// IsAutoChangeScanEnabled is the gate for the automatic scan that follows a
+// tool-definition hash change: the coarse auto_baseline_scan kill switch AND
+// the finer auto_rescan_on_change switch must both be on.
+func (sc *SecurityConfig) IsAutoChangeScanEnabled() bool {
+	return sc.IsAutoBaselineScanEnabled() && sc.IsAutoRescanOnChangeEnabled()
 }
 
 // DeepScanScanners returns the optional per-scanner allow-list for the deep-scan

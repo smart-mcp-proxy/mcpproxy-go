@@ -941,6 +941,19 @@ func applyTLSEnvOverrides(cfg *Config) {
 	}
 	envOverride(b, cfg, FieldAutoBaselineScan, autoScan != nil, autoScan)
 
+	// Same shape for the finer per-change rescan switch; the vocabulary matches
+	// IsAutoRescanOnChangeEnabled so a typo never materializes a value.
+	var autoRescan *bool
+	switch os.Getenv(EnvAutoRescanOnChange) {
+	case trueValue, "1":
+		enabled := true
+		autoRescan = &enabled
+	case falseValue, "0":
+		enabled := false
+		autoRescan = &enabled
+	}
+	envOverride(b, cfg, FieldAutoRescanOnChange, autoRescan != nil, autoRescan)
+
 	// Override retrieve_tools serialization mode from environment (Spec 085).
 	// Explicit MCPPROXY_* alias per the established loader convention; the
 	// value is validated by cfg.Validate() right after these overrides apply.
