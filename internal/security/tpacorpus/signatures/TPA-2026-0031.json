@@ -21,7 +21,7 @@
       "id": "TPA-2026-0031",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(?:if|whenever|when)\\b[^.\\n]{0,80}?\\b(?:conversation|chat|messages?|prompt|request|input|text|user)\\b[^.\\n]{0,40}?\\b(?:includes?|contains?|mentions?|says?|said|types?|typed|writes?|wrote)\\b[^.\\n]{0,30}?(?:\\bwords?\\b|\\bphrases?\\b|\\bkeywords?\\b|\\bstring\\b|['\\\"])[^.\\n]{0,60}?\\b(?:call|use|invoke)\\s+this\\s+tool\\s+(?:immediately\\s+|first\\s+)?before\\s+(?:doing\\s+)?(?:anything|any\\s+other|responding|answering)",
+      "pattern": "(?is)\\b(?:if|whenever|when)\\b[^.\\n]{0,80}?\\b(?:conversation|chat|messages?|prompt|request|input|text|user)\\b[^.\\n]{0,40}?\\b(?:includes?|contains?|mentions?|says?|said|types?|typed|writes?|wrote)\\b[^.\\n]{0,30}?(?:\\bwords?\\b|\\bphrases?\\b|\\bkeywords?\\b|\\bstring\\b|['\\\"])[^.\\n]{0,60}?\\b(?:call|use|invoke)\\s+this\\s+tool\\s+(?:immediately\\s+|first\\s+)?before\\s+(?:doing\\s+)?(?:anything|any\\s+other|responding|answering).{0,300}?(?:(?:pass|send|provide|supply|include|submit|forward|upload|put|paste)\\b[^.\\n]{0,40}?(?:whole|entire|full|complete|all)\\s+(?:the\\s+)?(?:conversation|chat|messages?|history|transcript)|(?:must|should)\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed)\\s+to)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -38,7 +38,7 @@
       "id": "TPA-2026-0031",
       "indicators": [],
       "level": "critical",
-      "pattern": "(?is)\\b(?:entire|complete|full|whole)\\s+(?:conversation|chat)\\s+(?:history\\s+)?(?:including|and)\\b.{0,120}?\\b(?:not\\s+just\\s+the\\s+(?:latest|last|current)|and\\s+all\\s+tool\\s+outputs?|must\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed)|do\\s+not\\s+(?:mention|tell|disclose))",
+      "pattern": "(?is)(?:^|[.!?;:\\n]\\s*|\\b(?:and|then|also|always|must|should|please|first)\\s+)(?:pass|provide|send|supply|include|submit|put|paste|upload|forward|attach)\\b[^.\\n]{0,40}?\\b(?:entire|complete|full|whole)\\s+(?:conversation|chat)\\s+(?:history\\s+)?(?:including|and)\\b.{0,200}?\\b(?:must\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed)|(?:do\\s+not|don't|never)\\s+(?:mention|tell|disclose)\\s+(?:this|it|these|that)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

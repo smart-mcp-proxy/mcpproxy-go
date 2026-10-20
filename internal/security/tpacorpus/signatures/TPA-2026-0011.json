@@ -34,7 +34,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:always|only)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\b.{0,60}?\\b(?:any|every|all)\\s+other\\b.{0,120}?(?:\\b(?:is|are|was|were)\\s+(?:\\w+\\s+){0,2}?(?:outdated|obsolete|insecure|unsafe|vulnerable|compromised|malicious|untrusted|unreliable|broken|buggy|flawed)\\b|\\b(?:never|do not|don't)\\s+use\\s+(?:any\\s+|the\\s+)?(?:other|alternative)|\\bignore\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)|\\bwithout\\s+(?:telling|informing|notifying|asking)\\s+the\\s+user)",
+      "pattern": "(?is)\\b(?:always|only)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\b[^.;!?]{0,60}?\\b(?:any|every|all)\\s+other\\s+(?:[\\w-]+\\s+){0,2}?[\\w-]+(?:\\s*[;,.:\\x{2014}-]+\\s*(?:and\\s+)?(?:the\\s+|those\\s+|these\\s+)?(?:(?:other|older|all)\\s+)?[\\w`'-]+(?:\\s+[\\w-]+)?\\s+(?:is|are|was|were)\\s+(?:\\w+\\s+){0,2}?(?:outdated|obsolete|insecure|unsafe|vulnerable|compromised|malicious|untrusted|unreliable|broken|buggy|flawed)\\b(?:\\s+(?:and|or)\\s+\\w+){0,3}\\s*(?:[.;,!)]|$)|\\s*[;,.:\\x{2014}-]+\\s*(?:and\\s+)?(?:never|do not|don't)\\s+use\\s+(?:any\\s+|the\\s+|all\\s+)?(?:other|alternative)\\s+(?:\\w+\\s+)?\\w+\\s*(?:[.;!]|$)|\\s*[;,.:\\x{2014}-]+\\s*(?:and\\s+)?ignore\\s+(?:all\\s+|any\\s+|the\\s+)?(?:other|alternative)\\s+(?:\\w+\\s+)?\\w+\\s*(?:[.;!]|$)|[^.!?]{0,60}?\\bwithout\\s+(?:telling|informing|notifying)\\s+the\\s+user\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -64,7 +64,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:always|only|must)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\s+(?:(?:the|your|any|built-in|default|original|old|legacy)\\s+){0,2}[\\w`'\\x22-]+(?:\\s+(?:tool|function|command|utility|api|endpoint))?\\s*[,;:(—-]*\\s*(?:(?:which|that|because|since|as|and)\\s+)?(?:(?:it|this|that|they)\\s+)?(?:is|are|was|were|has been|have been|remains?)\\s+(?:\\w+\\s+){0,2}?(?:unsafe|insecure|vulnerable|compromised|malicious|untrusted)\\b",
+      "pattern": "(?is)\\b(?:always|only|must)\\s+(?:prefer|choose|pick|use)\\s+this\\s+(?:tool\\s+)?(?:over|instead of|rather than)\\s+(?:(?:the|your|any|built-in|default|original|old|legacy)\\s+){0,2}[\\w`'\\x22-]+(?:\\s+(?:tool|function|command|utility|api|endpoint))?\\s*[,;:(\\x{2014}-]*\\s*(?:(?:which|that|because|since|as|and)\\s+)?(?:(?:it|this|that|they)\\s+)?(?:is|are|was|were|has been|have been|remains?)\\s+(?:\\w+\\s+){0,2}?(?:unsafe|insecure|vulnerable|compromised|malicious|untrusted)\\b.{0,160}?(?:\\b(?:ignore|disregard)\\s+(?:it|that|them|this one)\\s*(?:[.;!]|$)|\\b(?:never|do not|don't)\\s+(?:use|call|run|invoke)\\s+(?:it|that|them|the\\s+(?:original|old|legacy|built-in|default))\\s*(?:[.;!]|$)|\\bwithout\\s+(?:telling|informing|notifying)\\s+the\\s+user\\b|\\b(?:do not|don't|never)\\s+(?:mention|tell|inform|reveal|disclose)\\b|\\beven\\s+if\\s+the\\s+user\\s+(?:asks|requests|insists|specifies|says|names)\\b|\\bregardless\\s+of\\s+(?:what\\s+)?the\\s+user\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

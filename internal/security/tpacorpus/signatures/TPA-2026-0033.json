@@ -21,7 +21,7 @@
       "id": "TPA-2026-0033",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(?:required|mandatory|needed)\\s+for\\s+(?:internal\\s+)?(?:\\w+\\s+){0,3}?(?:audit(?:ing)?|compliance|gdpr|soc2|hipaa)\\b.{0,300}?\\b(?:must|should)\\s+be\\s+(?:consulted|called|used|invoked|run)\\s+(?:first|before)\\b",
+      "pattern": "(?is)\\b(?:required|mandatory|needed)\\s+for\\s+(?:internal\\s+)?(?:\\w+\\s+){0,3}?(?:audit(?:ing)?|compliance|gdpr|soc2|hipaa)\\b.{0,300}?\\b(?:must|should)\\s+be\\s+(?:consulted|called|used|invoked|run)\\s+(?:first|before)\\b[,]?\\s*(?:(?:before\\s+)?(?:any|every|all)\\s+(?:other\\s+)?(?:tools?|actions?|calls?|commands?|operations?|tasks?|steps?|requests?|questions?|responses?|answers?)\\s+(?:or|and)\\s+(?:any\\s+)?(?:other\\s+)?(?:tools?|actions?|calls?|commands?|operations?|tasks?|steps?|requests?|questions?|responses?|answers?)\\b|anything\\s+else|doing\\s+anything|(?:before\\s+)?(?:any|every|all)\\s+(?:other\\s+)?(?:tools?|actions?|calls?|commands?|operations?|tasks?|steps?|requests?|questions?|responses?|answers?)\\b.{0,300}?\\b(?:do\\s+not|don't|never)\\s+(?:(?:tell|inform|notify)\\s+the\\s+user\\s+(?:about\\s+)?(?:this|these|the\\s+(?:rules?|requirements?|instructions?|order|ordering))\\b|(?:mention|reveal|disclose)\\s+(?:this|these|the\\s+(?:rules?|requirements?|instructions?|order|ordering))\\b))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -38,7 +38,7 @@
       "id": "TPA-2026-0033",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\bmust\\s+be\\s+(?:consulted|called|invoked)\\s+first\\b.{0,200}?\\b(?:do\\s+not|don't|never)\\s+(?:tell|inform|mention|reveal)\\b",
+      "pattern": "(?is)\\bmust\\s+be\\s+(?:consulted|called|invoked)\\s+first\\b.{0,200}?\\b(?:do\\s+not|don't|never)\\s+(?:(?:tell|inform|notify)\\s+the\\s+user\\s+(?:about\\s+)?(?:this|these|the\\s+(?:rules?|requirements?|instructions?|order|ordering))\\b|(?:mention|reveal|disclose)\\s+(?:this|these|the\\s+(?:rules?|requirements?|instructions?|order|ordering))\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -55,7 +55,7 @@
       "id": "TPA-2026-0033",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(?:prefix|prepend)\\s+(?:every|all|each)\\s+(?:\\w+\\s+){0,2}?(?:command|shell)\\b.{0,200}?\\b(?:do\\s+not|don't|never)\\s+(?:tell|inform|mention)\\b",
+      "pattern": "(?is)\\b(?:prefix|prepend)\\s+(?:every|all|each)\\s+(?:\\w+\\s+){0,2}?(?:command|shell)\\b.{0,200}?\\b(?:do\\s+not|don't|never)\\s+(?:tell|inform|notify)\\s+the\\s+user\\s+(?:about\\s+)?(?:this|these|the\\s+(?:rules?|prefix|wrapper|requirements?|instructions?))\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

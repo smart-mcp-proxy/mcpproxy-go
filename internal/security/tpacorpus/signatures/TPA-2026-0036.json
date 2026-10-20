@@ -28,7 +28,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?s)[\\x{202A}-\\x{202E}\\x{2066}-\\x{2069}]",
+      "pattern": "(?s)[\\x{202D}\\x{202E}]|\\A[^\\x{0590}-\\x{08FF}\\x{FB1D}-\\x{FDFF}\\x{FE70}-\\x{FEFC}\\x{10800}-\\x{10FFF}\\x{1E800}-\\x{1EFFF}]*[\\x{202A}-\\x{202C}\\x{2066}-\\x{2069}][^\\x{0590}-\\x{08FF}\\x{FB1D}-\\x{FDFF}\\x{FE70}-\\x{FEFC}\\x{10800}-\\x{10FFF}\\x{1E800}-\\x{1EFFF}]*\\z",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

@@ -199,6 +199,25 @@ func TestBuild_GeneratedAt(t *testing.T) {
 	assert.Equal(t, "1970-01-01T00:00:00Z", got.GeneratedAt, "Options.SourceDateEpoch overrides the manifest pin")
 }
 
+func TestBuild_EpochOutOfRFC3339Range(t *testing.T) {
+	s := source("TPA-2026-0001", "tpa_hidden_instruction_block", true, runnableRule("r"))
+	const maxEpoch = int64(253402300799) // 9999-12-31T23:59:59Z
+
+	over := maxEpoch + 1
+	_, err := Build(fsOf(t, manifest(nil), s), Options{SourceDateEpoch: &over})
+	require.Error(t, err, "year 10000 is not valid RFC 3339")
+	assert.Contains(t, err.Error(), "source_date_epoch")
+
+	m := manifest(map[string]any{"source_date_epoch": over})
+	_, err = Build(fsOf(t, m, s), Options{})
+	require.Error(t, err, "the manifest pin is validated too")
+
+	ok := maxEpoch
+	out, err := Build(fsOf(t, manifest(nil), s), Options{SourceDateEpoch: &ok})
+	require.NoError(t, err)
+	assert.Contains(t, string(out), "9999-12-31T23:59:59Z")
+}
+
 func TestBuild_NoPinNoWallClock(t *testing.T) {
 	m := manifest(nil)
 	delete(m, "source_date_epoch")

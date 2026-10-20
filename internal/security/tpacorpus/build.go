@@ -31,6 +31,10 @@ var (
 	}
 )
 
+// maxSourceDateEpoch is 9999-12-31T23:59:59Z; a later instant formats with a
+// five-digit year, which is not valid RFC 3339.
+const maxSourceDateEpoch int64 = 253402300799
+
 // Options tune a build.
 type Options struct {
 	// Exclude drops the named signatures (and their rules and skipped entries)
@@ -98,6 +102,9 @@ func Build(fsys fs.FS, opts Options) ([]byte, error) {
 	}
 	if *epoch < 0 {
 		return nil, fmt.Errorf("source_date_epoch %d is negative", *epoch)
+	}
+	if *epoch > maxSourceDateEpoch {
+		return nil, fmt.Errorf("source_date_epoch %d is past 9999-12-31T23:59:59Z (generated_at must be valid RFC 3339)", *epoch)
 	}
 
 	docs, err := loadSources(fsys)

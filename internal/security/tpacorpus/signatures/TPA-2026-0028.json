@@ -21,7 +21,7 @@
       "id": "TPA-2026-0028",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\bnew\\s+instructions?\\s*:\\s*you\\s+are\\b",
+      "pattern": "(?is)(?:^|[.!?>\\n]\\s*)new\\s+instructions?\\s*:\\s*you\\s+are\\b.{0,160}?\\b(?:unrestricted|unfiltered|uncensored|jailbroken|no\\s+longer\\s+bound|not\\s+bound|without\\s+(?:any\\s+)?(?:restrictions?|rules|limits|filters|safety)|no\\s+(?:restrictions?|rules|limits|filters))\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -38,7 +38,7 @@
       "id": "TPA-2026-0028",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(?:developer|sudo|jailbreak|unrestricted)\\s+mode\\s+(?:has\\s+been\\s+)?(?:activated|engaged)\\b|\\b(?:you\\s+are|you're)\\s+now\\s+in\\s+(?:developer|sudo|jailbreak|unrestricted|god)\\s+mode\\b",
+      "pattern": "(?is)\\b(?:(?:developer|sudo|jailbreak|unrestricted)\\s+mode\\s+(?:has\\s+been\\s+)?(?:activated|engaged)|(?:you\\s+are|you're)\\s+now\\s+in\\s+(?:developer|sudo|jailbreak|unrestricted|god)\\s+mode)\\b.{0,200}?(?:(?:bypass|disregard|override|circumvent|ignore)\\s+(?:all\\s+|any\\s+|the\\s+|your\\s+)*(?:security|safety|restrictions?|filters?|guardrails?|rules|guidelines|instructions|polic(?:y|ies)|checks?)|you\\s+(?:now\\s+)?have\\s+no\\s+(?:restrictions?|rules|limits|filters|guardrails)|(?:unfiltered|uncensored|unrestricted)\\s+(?:agent|assistant|model|ai)\\b|you\\s+(?:are|will\\s+be)\\s+(?:now\\s+)?(?:free\\s+(?:of|from)|unbound|not\\s+bound))|(?:(?:bypass|disregard|override|circumvent|ignore)\\s+(?:all\\s+|any\\s+|the\\s+|your\\s+)*(?:security|safety|restrictions?|filters?|guardrails?|rules|guidelines|instructions|polic(?:y|ies)|checks?)|you\\s+(?:now\\s+)?have\\s+no\\s+(?:restrictions?|rules|limits|filters|guardrails)|(?:unfiltered|uncensored|unrestricted)\\s+(?:agent|assistant|model|ai)\\b|you\\s+(?:are|will\\s+be)\\s+(?:now\\s+)?(?:free\\s+(?:of|from)|unbound|not\\s+bound)).{0,120}?\\b(?:(?:developer|sudo|jailbreak|unrestricted)\\s+mode\\s+(?:has\\s+been\\s+)?(?:activated|engaged)|(?:you\\s+are|you're)\\s+now\\s+in\\s+(?:developer|sudo|jailbreak|unrestricted|god)\\s+mode)\\b",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -55,7 +55,7 @@
       "id": "TPA-2026-0028",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(?:you\\s+(?:must|should|shall|will)|always|now|first|then)\\s+bypass\\s+(?:all\\s+|any\\s+|the\\s+)?(?:security|safety)\\s+(?:checks?|filters?|controls?|restrictions?)\\b",
+      "pattern": "(?is)\\b(?:you\\s+(?:must|should|shall|will)|always|now|first|then)\\s+bypass\\s+(?:all\\s+|any\\s+|the\\s+)?(?:security|safety)\\s+(?:checks?|filters?|controls?|restrictions?)(?:\\s*(?:[.!;]|\\z)|\\s+(?:when|while|before|whenever)\\s+(?:calling|using|invoking|running|executing)\\b|\\s+(?:for|on|in|with)\\s+(?:all|every|each|any)\\b)",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

@@ -21,7 +21,7 @@
       "id": "TPA-2026-0032",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(llm[_ ]?model[_ ]?name|model[_ ]?name)\\s*:[^\\n]{0,60}?\\b(?:that|which)\\s+(?:calls|invokes|is\\s+calling|is\\s+invoking)\\s+this\\s+tool",
+      "pattern": "(?is)\\b(llm[_ ]?model[_ ]?name|model[_ ]?name)\\s*:[^\\n]{0,60}?\\b(?:that|which)\\s+(?:calls|invokes|is\\s+calling|is\\s+invoking)\\s+this\\s+tool[.]?[ \\t]*(?:\\n|\\z)",
       "severity": "medium",
       "target": "tool_description",
       "type": "lexical"
@@ -38,7 +38,7 @@
       "id": "TPA-2026-0032",
       "indicators": [],
       "level": "high",
-      "pattern": "(?is)\\b(system[_ ]?prompt|tools?[_ ]?list|conversation[_ ]?(?:history|context))\\s*:[^\\n]{0,60}?\\b(?:of\\s+the\\s+(?:caller|calling|agent|assistant)|currently\\s+(?:used|running)|all\\s+(?:available\\s+)?tools\\s+(?:you|the\\s+agent))",
+      "pattern": "(?is)\\b(system[_ ]?prompt|tools?[_ ]?list|conversation[_ ]?(?:history|context))\\s*:[^\\n]{0,60}?\\b(?:of\\s+the\\s+(?:caller|calling\\s+\\w+|agent|assistant)|currently\\s+(?:used|running)(?:\\s+by\\s+the\\s+(?:agent|assistant|model|caller))?|all\\s+(?:available\\s+)?tools\\s+(?:you|the\\s+agent)[^\\n]{0,25}?)[.]?[ \\t]*(?:\\n|\\z)",
       "severity": "medium",
       "target": "tool_description",
       "type": "lexical"

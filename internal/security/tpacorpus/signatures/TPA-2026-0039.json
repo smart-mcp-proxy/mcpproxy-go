@@ -34,7 +34,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?s)(?:^|[^A-Za-z0-9+/])(?:Y3VybC[A-Za-z0-9+/]{16,}|d2dldC[A-Za-z0-9+/]{16,}|YmFzaCAtYy[A-Za-z0-9+/]{12,}|L2Jpbi9zaCAt[A-Za-z0-9+/]{8,}|c2ggLWMg[A-Za-z0-9+/]{12,}|cG93ZXJzaGVsbC[A-Za-z0-9+/]{12,})",
+      "pattern": "(?s)(?:(?:^|[^A-Za-z0-9+/])(?:Y3VybC[A-Za-z0-9+/]{16,}|d2dldC[A-Za-z0-9+/]{16,}|YmFzaCAtYy[A-Za-z0-9+/]{12,}|L2Jpbi9zaCAt[A-Za-z0-9+/]{8,}|c2ggLWMg[A-Za-z0-9+/]{12,}|cG93ZXJzaGVsbC[A-Za-z0-9+/]{12,})={0,2}[\\\"'`)\\]\\s]*(?:\\n|\\z)|\\b(?i:profile|config|setup|bootstrap|init|payload|relay|hook|cmd|command|script|blob)\\b\\s*[:=]\\s*(?:Y3VybC[A-Za-z0-9+/]{16,}|d2dldC[A-Za-z0-9+/]{16,}|YmFzaCAtYy[A-Za-z0-9+/]{12,}|L2Jpbi9zaCAt[A-Za-z0-9+/]{8,}|c2ggLWMg[A-Za-z0-9+/]{12,}|cG93ZXJzaGVsbC[A-Za-z0-9+/]{12,}))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
@@ -58,7 +58,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)(?:^|[^0-9a-f])(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{16,}",
+      "pattern": "(?is)(?:(?:^|[^0-9a-fx])(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{16,}[\\\"'`)\\]\\s]*(?:\\n|\\z)|\\b(?i:profile|config|setup|bootstrap|init|payload|relay|hook|cmd|command|script|blob)\\b\\s*[:=]\\s*(?:6375726c20|7767657420|2f62696e2f7368202d)[0-9a-f]{16,})",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"

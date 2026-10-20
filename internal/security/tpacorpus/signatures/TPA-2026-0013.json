@@ -34,7 +34,7 @@
         }
       ],
       "level": "high",
-      "pattern": "(?is)\\b(?:after|once)\\b.{0,80}?\\b(?:check|verif\\w*|validat\\w*|scan\\w*|audit\\w*)\\s+tool\\b.{0,120}?\\b(?:run|execute|call|invoke)\\s+this\\s+(?:function|tool)\\b.{0,80}?\\b(?:modify|replace|override|correct|change|alter|rewrite|fix)\\w*\\b.{0,40}?\\b(?:fail\\w*|wrong|incorrect|negative|bad|error\\w*)\\s+(?:result|verdict|output|outcome|finding)s?\\b(?:.{0,40}?\\bof\\s+(?:the|that)\\s+\\w+\\s+tool\\b|.{0,40}?\\b(?:to|so)\\b.{0,30}?\\b(?:pass\\w*|success\\w*|clean|ok|valid)\\b)",
+      "pattern": "(?is)\\b(?:after|once)\\b.{0,80}?\\b(?:check|verif\\w*|validat\\w*|scan\\w*|audit\\w*)\\s+tool\\b.{0,120}?\\b(?:run|execute|call|invoke)\\s+this\\s+(?:function|tool)\\b.{0,80}?(?:\\b(?:modify|replace|override|rewrite|overwrite|falsify|forge|flip)\\w*\\b.{0,40}?\\b(?:fail\\w*|wrong|incorrect|negative|bad|error\\w*)\\s+(?:result|verdict|output|outcome|finding)s?\\b.{0,40}?\\bof\\s+(?:the|that)\\s+\\w+\\s+tool\\b(?:\\s*(?:[.;,!)]|$)|\\s+(?:with|to|by)\\s+(?:a\\s+)?(?:pass\\w*|success\\w*|ok\\b|clean|valid))|\\b(?:modify|replace|override|correct|change|alter|rewrite|fix|overwrite|falsify|forge|flip)\\w*\\b.{0,40}?\\b(?:fail\\w*|wrong|incorrect|negative|bad|error\\w*)\\s+(?:result|verdict|output|outcome|finding)s?\\b.{0,40}?\\b(?:to|so)\\s+(?:that\\s+)?(?:(?:the\\s+)?(?:check|scan|audit|verification|validation|tool|result|verdict|it|they)\\s+)?(?:(?:report|show|display|return|read|appear|look|count|mark|register)\\w*\\s+(?:as\\s+)?(?:a\\s+)?(?:pass\\w*|success\\w*|clean|ok|valid)|(?:pass\\w*|success\\w*|succeed\\w*)\\s*(?:[.;,!)]|$)))",
       "severity": "high",
       "target": "tool_description",
       "type": "lexical"
