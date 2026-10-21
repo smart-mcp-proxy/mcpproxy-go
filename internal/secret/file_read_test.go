@@ -3,6 +3,7 @@ package secret
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -85,6 +86,9 @@ func TestReadFile_Refusals(t *testing.T) {
 		assert.Contains(t, err.Error(), "NUL")
 	})
 	t.Run("unreadable file", func(t *testing.T) {
+		if runtime.GOOS == "windows" {
+			t.Skip("file permission bits are not enforced on Windows")
+		}
 		if os.Geteuid() == 0 {
 			t.Skip("root can read any file")
 		}
