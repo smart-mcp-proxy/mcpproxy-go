@@ -26,6 +26,12 @@ type BundleActivation struct {
 	PreviousDigest string
 	// ActivatedAt is the history row's timestamp.
 	ActivatedAt time.Time
+	// Seq orders activations of this process: assigned (1, 2, ...) in commit
+	// order as the event is dispatched. Observers run on separate goroutines,
+	// so arrival order is not commit order; an observer that must not act on a
+	// stale event compares Seq. Zero means "not a dispatched event" (a
+	// synthetic catch-up activation).
+	Seq uint64
 }
 
 // observers is the process-wide observer registry. Dispatch counts in-flight
@@ -34,6 +40,7 @@ var observers struct {
 	mu       sync.Mutex
 	cond     *sync.Cond
 	next     uint64
+	seq      uint64
 	inflight int
 	activate map[uint64]func(BundleActivation)
 	refresh  func(RefreshOutcomeClass)
@@ -71,6 +78,8 @@ func AddBundleActivationObserver(fn func(BundleActivation)) (unsubscribe func())
 // themselves never run under it.
 func fireBundleActivation(a BundleActivation) {
 	observers.mu.Lock()
+	observers.seq++
+	a.Seq = observers.seq
 	fns := make([]func(BundleActivation), 0, len(observers.activate))
 	for _, fn := range observers.activate {
 		fns = append(fns, fn)

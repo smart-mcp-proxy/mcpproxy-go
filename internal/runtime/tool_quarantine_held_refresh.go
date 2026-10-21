@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"errors"
 	"fmt"
 
 	"go.uber.org/zap"
@@ -35,6 +36,7 @@ func (r *Runtime) RefreshHeldScanEvidence(server string) error {
 	if err != nil {
 		return fmt.Errorf("list tool approvals for %s: %w", server, err)
 	}
+	var writeErrs []error
 	for _, rec := range records {
 		if rec == nil || rec.ToolName == "" {
 			continue
@@ -60,9 +62,14 @@ func (r *Runtime) RefreshHeldScanEvidence(server string) error {
 		// scanToolEvidence, not scanChangeIsClean: this is a re-evaluation of
 		// evidence, not a gate invocation, so it must not move the gate counter.
 		_, evidence := r.scanToolEvidence(server, tool)
-		r.recordScanHold(server, rec.ToolName, rec, wasUnstamped, evidence)
+		// A write that did not land is a failure of the refresh: the sweep
+		// would otherwise write its completion marker and the catch-up would
+		// never retry a held tool still carrying the previous corpus's verdict.
+		if err := r.persistScanHold(rec, wasUnstamped, evidence); err != nil {
+			writeErrs = append(writeErrs, fmt.Errorf("persist held scan evidence for %s/%s: %w", server, rec.ToolName, err))
+		}
 	}
 	r.logger.Debug("Refreshed held scan evidence after a TPA bundle activation",
-		zap.String("server", server), zap.Int("records", len(records)))
-	return nil
+		zap.String("server", server), zap.Int("records", len(records)), zap.Int("write_failures", len(writeErrs)))
+	return errors.Join(writeErrs...)
 }

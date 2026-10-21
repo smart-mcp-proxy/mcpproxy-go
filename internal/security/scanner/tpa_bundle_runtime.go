@@ -251,6 +251,10 @@ type offerResult struct {
 	Outcome string
 	// Rejection is the refusal when Outcome is RefreshOutcomeRejected.
 	Rejection *BundleRejection
+	// Refused is true when Outcome is RefreshOutcomeUnchanged only because the
+	// pair equals one the pipeline refused earlier under this policy (the
+	// negative cache), not because it equals what serves.
+	Refused bool
 }
 
 // offerCandidate is runOffered plus the decision, for the refresher.
@@ -271,6 +275,12 @@ type runOutcome struct {
 	// Rejection is the refusal of the leg's candidate (the configured file, or
 	// the offered pair); nil when it was accepted or there was none.
 	Rejection *BundleRejection
+	// RejectionNew is true when Rejection is a refusal this run recorded for
+	// the first time (not the same refusal repeated).
+	RejectionNew bool
+	// RepeatRefusal is true when an offered run did nothing because the pair
+	// equals one refused earlier under this policy.
+	RepeatRefusal bool
 }
 
 func (o runOutcome) offerResult() offerResult {
@@ -280,7 +290,7 @@ func (o runOutcome) offerResult() offerResult {
 	case o.Rejection != nil:
 		return offerResult{Outcome: RefreshOutcomeRejected, Rejection: o.Rejection}
 	}
-	return offerResult{Outcome: RefreshOutcomeUnchanged}
+	return offerResult{Outcome: RefreshOutcomeUnchanged, Refused: o.RepeatRefusal}
 }
 
 // BundleCoverageDegraded reports whether the active bundle demotes the install to
@@ -371,6 +381,9 @@ func (rt *bundleRuntime) runLocked(policy *bundlePolicy, log *zap.Logger, opts r
 		// refused" comparisons happen here, under the lock and before any
 		// compile or self-check, so an unchanged channel costs nothing.
 		if rt.offerUnchangedLocked(policy, opts.offered) {
+			if opts.out != nil {
+				opts.out.RepeatRefusal = rt.refusedOffer != "" && rt.refusedOffer == offerKey(policy, opts.offered)
+			}
 			return
 		}
 	} else {
@@ -498,13 +511,18 @@ func previousDigest(rec *TPABundleActiveRecord) string {
 // finishLocked records rejections, then builds and publishes the status.
 func (rt *bundleRuntime) finishLocked(policy *bundlePolicy, st *TPABundleState, sel selection, clean bool, opts runOptions, log *zap.Logger, now time.Time) {
 	loadErr := ""
+	var fileRejNew bool
 	switch {
 	case opts.offered != nil:
 		// An offered run neither reads nor clears the file leg's load_error.
 		loadErr = rt.loadErr
 	case policy.Path != "" && sel.attempt != nil:
 		loadErr = sel.attempt.Reason + ": " + sel.attempt.Detail
-		if rt.recordRejectionLocked(sel.attempt, sel.attemptDigest, false) {
+		fileRejNew = rt.recordRejectionLocked(sel.attempt, sel.attemptDigest, false)
+		if opts.out != nil {
+			opts.out.RejectionNew = fileRejNew
+		}
+		if fileRejNew {
 			log.Error("configured TPA scanner bundle refused; keeping the last-known-good corpus",
 				zap.String("path", policy.Path),
 				zap.String("reason", sel.attempt.Reason),
@@ -752,6 +770,12 @@ func (rt *bundleRuntime) restorePinLocked(policy *bundlePolicy, nst *TPABundleSt
 	source := pin.Source
 	if source == "" {
 		source = BundleSourceFile
+	}
+	// A pinned FILE bundle belongs to the configured path: with the path
+	// removed the operator removed the bundle, and an enabled fetch does not
+	// make the pin a reason to bring it back (see externalConfigured).
+	if source == BundleSourceFile && policy.Path == "" {
+		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), bundleReadBudget)
 	defer cancel()

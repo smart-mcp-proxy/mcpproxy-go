@@ -416,3 +416,22 @@ func TestRefreshRuntime_FileDropUnaffectedByExternalConfigured(t *testing.T) {
 	assert.Equal(t, BundleSourceEmbedded, info.Source, "removing the path drops a FILE bundle (only fetched bundles outlive the path)")
 	assert.Nil(t, f.store.persisted(t).Active)
 }
+
+// US3 judge finding 10 (B9): the grace that keeps a bundle alive when its
+// source setting disappears belongs to FETCHED bundles. A FILE bundle whose
+// tpa_bundle_path was removed is gone with the path, whether or not fetch is
+// switched on, on this run and on every restart.
+func TestRefreshRuntime_RemovingTheFilePathDropsAFileBundleEvenWithFetchOn(t *testing.T) {
+	f := newFileAndFetchFixture(t, nil, true)
+	c := signedCandidate(t, keyOperator, bundleOpts{Seq: 5, Tag: "file"})
+	info := f.activate(c)
+	require.Equal(t, BundleSourceFile, info.Source)
+
+	f.sec.TPABundlePath = ""
+	info = f.run()
+	assert.Equal(t, BundleSourceEmbedded, info.Source, "the operator removed the file bundle: the embedded corpus serves")
+
+	f.restart()
+	info = f.run()
+	assert.Equal(t, BundleSourceEmbedded, info.Source, "and a restart does not restore it from the last-known-good files")
+}

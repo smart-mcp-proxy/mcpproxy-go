@@ -148,20 +148,28 @@ func (p *bundlePolicy) fingerprint(keys []bundlesig.Key) string {
 }
 
 // externalConfigured reports whether an external (non-embedded) bundle source
-// is configured or already serving: the configured path, an enabled fetch, or a
-// recorded fetched Active bundle (tasks B9, Hazard A). It is a function rather
-// than a policy method because bundlePolicy holds configuration only; the
-// recorded Active record lives in the committed state st (nil-safe).
+// is configured or already serving: the configured path, a recorded fetched
+// Active bundle, or an enabled fetch with nothing external serving yet (tasks
+// B9, Hazard A). It is a function rather than a policy method because
+// bundlePolicy holds configuration only; the recorded Active record lives in
+// the committed state st (nil-safe).
 //
-// The last clause keeps a fetched bundle alive when the fetch is switched off:
-// dropping silently to the weaker embedded corpus would be an unrequested
-// degrade (security bundle rollback --embedded is the explicit way back). A FILE
-// bundle gets no such grace: with its path removed the operator removed it.
+// The fetched-Active clause keeps a fetched bundle alive when the fetch is
+// switched off: dropping silently to the weaker embedded corpus would be an
+// unrequested degrade (security bundle rollback --embedded is the explicit way
+// back). A FILE bundle gets no such grace, with fetch on or off: with its path
+// removed the operator removed it, so an enabled fetch does not keep a recorded
+// file Active alive (nor restore it from its last-known-good files). An enabled
+// fetch with no external bundle recorded still counts as configured, so a
+// fetched or pinned bundle can come back.
 func externalConfigured(policy *bundlePolicy, st *TPABundleState) bool {
-	if policy.Path != "" || policy.FetchEnabled {
+	if policy.Path != "" {
 		return true
 	}
-	return st != nil && st.Active != nil && st.Active.Source == BundleSourceFetch
+	if st != nil && st.Active != nil {
+		return st.Active.Source == BundleSourceFetch
+	}
+	return policy.FetchEnabled
 }
 
 // currentEpoch returns the trusted epoch of auth (FR-005a). An unknown

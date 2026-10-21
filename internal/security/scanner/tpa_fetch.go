@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -62,6 +63,10 @@ type fetchSettings struct {
 	Client   *http.Client
 	Resolver FetchResolver
 	Now      func() time.Time
+	// Proxy selects the proxy for a request of the production transport; nil
+	// selects http.ProxyFromEnvironment. A test seam: the standard function
+	// reads the environment once per process.
+	Proxy func(*http.Request) (*url.URL, error)
 	// Log, when set, receives host-only diagnostics (redirect hops by host).
 	Log *zap.Logger
 }
@@ -435,17 +440,47 @@ func (a *fetchAttempt) buildClient() *http.Client {
 
 // buildTransport builds the production transport: TLS 1.2+, bounded handshake
 // and header waits, no connection reuse between daily cycles, and the dial-time
-// egress control. With a proxy in use for the configured URL the dial control
-// would only ever see the proxy, so the application-layer check carries the
-// load there.
+// egress control.
+//
+// The control is always on. The one exemption is the operator's own proxy: a
+// dial whose address is the proxy the Proxy function just selected for some
+// request of this attempt is not an egress to the target, so it is not judged
+// by the target's rules (the proxy is often a private address). Every other
+// dial, including a redirect hop or an asset host that NO_PROXY exempts and
+// that therefore goes direct, is checked against the configured host's class
+// after name resolution, so DNS rebinding cannot slip an inward address past
+// the application-layer check. The decision follows each request's actual next
+// hop, not the configured URL alone.
 func (a *fetchAttempt) buildTransport() *http.Transport {
-	dialer := &net.Dialer{Timeout: fetchHeaderTimeout, KeepAlive: -1}
-	if !a.proxyInUse() {
-		dialer.Control = egressDialControl(a.class)
+	selectProxy := a.s.Proxy
+	if selectProxy == nil {
+		selectProxy = http.ProxyFromEnvironment
 	}
+	var (
+		mu      sync.Mutex
+		proxies = map[string]bool{}
+	)
+	plain := &net.Dialer{Timeout: fetchHeaderTimeout, KeepAlive: -1}
+	guarded := &net.Dialer{Timeout: fetchHeaderTimeout, KeepAlive: -1, Control: egressDialControl(a.class)}
 	return &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           dialer.DialContext,
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			pu, err := selectProxy(req)
+			if err == nil && pu != nil {
+				mu.Lock()
+				proxies[proxyDialAddr(pu)] = true
+				mu.Unlock()
+			}
+			return pu, err
+		},
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			mu.Lock()
+			isProxy := proxies[strings.ToLower(addr)]
+			mu.Unlock()
+			if isProxy {
+				return plain.DialContext(ctx, network, addr)
+			}
+			return guarded.DialContext(ctx, network, addr)
+		},
 		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
 		TLSHandshakeTimeout:   fetchHeaderTimeout,
 		ResponseHeaderTimeout: fetchHeaderTimeout,
@@ -454,13 +489,21 @@ func (a *fetchAttempt) buildTransport() *http.Transport {
 	}
 }
 
-func (a *fetchAttempt) proxyInUse() bool {
-	req, err := http.NewRequest(http.MethodGet, a.u.String(), nil)
-	if err != nil {
-		return false
+// proxyDialAddr is the host:port the transport dials for proxy pu: the proxy's
+// own port, or the scheme default, lower-cased like the transport's key.
+func proxyDialAddr(pu *url.URL) string {
+	port := pu.Port()
+	if port == "" {
+		switch pu.Scheme {
+		case "https":
+			port = "443"
+		case "socks5", "socks5h":
+			port = "1080"
+		default:
+			port = "80"
+		}
 	}
-	pu, err := http.ProxyFromEnvironment(req)
-	return err == nil && pu != nil
+	return strings.ToLower(net.JoinHostPort(pu.Hostname(), port))
 }
 
 // --- requests -----------------------------------------------------------------

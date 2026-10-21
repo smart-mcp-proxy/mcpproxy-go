@@ -207,3 +207,28 @@ func TestRefreshHeldScanEvidence_UnknownServerAndIdempotentRerun(t *testing.T) {
 	require.NoError(t, f.rt.RefreshHeldScanEvidence("github"))
 	assert.Equal(t, first, *mustRecord(t, f.rt, "create_issue"), "a second refresh with the same corpus writes nothing new")
 }
+
+// US3 judge finding 9: a held record whose evidence could not be written is a
+// failure of the refresh, not a success. The sweep counts it and leaves its
+// completion marker unwritten so the startup catch-up retries.
+func TestRefreshHeldScanEvidence_AFailedEvidenceWriteIsReported(t *testing.T) {
+	f := newHeldRefreshFixture(t)
+	activateBundleForTest(t, canaryBundle)
+	f.rt.testHooks.toolApprovalWriteFault = func(_, tool, _ string) error {
+		if tool == "create_issue" {
+			return assert.AnError
+		}
+		return nil
+	}
+
+	err := f.rt.RefreshHeldScanEvidence("github")
+	require.Error(t, err, "an evidence write that did not land must fail the refresh")
+	assert.ErrorIs(t, err, assert.AnError)
+
+	// The other held record is still refreshed: one failure does not stop the leg.
+	assert.True(t, hasSignalPrefix(mustRecord(t, f.rt, "file_ticket").HeldSignals, "tpa.TPA-2099-0042"))
+	assert.Equal(t, "clean", mustRecord(t, f.rt, "create_issue").HeldVerdict, "the failed write left the old evidence")
+
+	f.rt.testHooks.toolApprovalWriteFault = nil
+	require.NoError(t, f.rt.RefreshHeldScanEvidence("github"), "control: a retry once the store works succeeds")
+}

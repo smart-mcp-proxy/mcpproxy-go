@@ -478,39 +478,58 @@ func (s *Service) RefreshBundle(ctx context.Context) BundleInfo {
 }
 
 // ErrNoCachedContracts is returned by StartScanFromCachedContracts when the
-// server has no approved tool contract to scan (or the provider cannot list
+// server has no recorded tool contract to scan (or the provider cannot list
 // them). No job is recorded, so the server reads as unscanned, never clean.
-var ErrNoCachedContracts = errors.New("no cached approved tool contracts to scan")
+var ErrNoCachedContracts = errors.New("no cached tool contracts to scan")
 
-// approvedToolContractsProvider is an OPTIONAL capability a ServerInfoProvider
+// ErrServerQuarantined is returned by StartScanFromCachedContracts for a
+// quarantined server: its stored contracts are not what a scan-mode admission
+// verdict is about, so a quarantined server never gets a cached scan job
+// (Spec 101 tasks B17).
+var ErrServerQuarantined = errors.New("server is quarantined: no cached scan")
+
+// serverQuarantineProvider is an OPTIONAL capability a ServerInfoProvider may
+// implement: whether the server is quarantined right now, read from the live
+// configuration. StartScanFromCachedContracts uses it as a last-moment guard.
+type serverQuarantineProvider interface {
+	IsServerQuarantined(serverName string) bool
+}
+
+// currentToolContractsProvider is an OPTIONAL capability a ServerInfoProvider
 // may implement for the post-activation re-protection scan (Spec 101 FR-019):
-// the tool contracts discovery recorded on a server's APPROVED tool records,
-// in the same tools/list shape as GetServerTools, read from storage with no
-// upstream connection.
-type approvedToolContractsProvider interface {
-	GetApprovedToolContracts(serverName string) ([]map[string]interface{}, error)
+// the CURRENT tool contract discovery recorded on every one of a server's tool
+// records (approved, pending and changed), in the same tools/list shape as
+// GetServerTools, read from storage with no upstream connection. The job built
+// from it is the server's newest Pass-1 job, so it must cover the same tool set
+// a live scan does or it would displace a verdict that rests on a held tool.
+type currentToolContractsProvider interface {
+	GetCurrentToolContracts(serverName string) ([]map[string]interface{}, error)
 }
 
 // StartScanFromCachedContracts starts the post-activation re-protection scan of
 // one server (Spec 101 FR-019, tasks B17): an informational job over the
-// tool contracts discovery already ingested for its approved tools, labelled
+// tool contracts discovery already ingested for its tools, labelled
 // with the activated bundle's digest. It never connects to the upstream
 // (no IsConnected, EnsureConnected or live tools export), never schedules
 // Pass 2 and is excluded from the scan telemetry counters.
 //
 // The job runs the in-process tpa-descriptions baseline only, over the
 // immutable snapshot built here (ScanRequest.ToolDefinitions), with no source
-// directory. A server with no approved contracts gets no job at all
+// directory. A server with no recorded contracts gets no job at all
 // (ErrNoCachedContracts): it stays unscanned, never clean. A busy server
-// returns ErrScanInProgress so the caller can re-arm.
+// returns ErrScanInProgress so the caller can re-arm. A quarantined server is
+// refused (ErrServerQuarantined) when the provider can say so.
 func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, bundleDigest string) (*ScanJob, error) {
-	provider, ok := s.serverInfo.(approvedToolContractsProvider)
+	if q, ok := s.serverInfo.(serverQuarantineProvider); ok && q.IsServerQuarantined(serverName) {
+		return nil, ErrServerQuarantined
+	}
+	provider, ok := s.serverInfo.(currentToolContractsProvider)
 	if !ok {
 		return nil, fmt.Errorf("%w: the server info provider cannot list cached contracts", ErrNoCachedContracts)
 	}
-	contracts, err := provider.GetApprovedToolContracts(serverName)
+	contracts, err := provider.GetCurrentToolContracts(serverName)
 	if err != nil {
-		return nil, fmt.Errorf("read approved tool contracts for %s: %w", serverName, err)
+		return nil, fmt.Errorf("read tool contracts for %s: %w", serverName, err)
 	}
 	if len(contracts) == 0 {
 		return nil, ErrNoCachedContracts

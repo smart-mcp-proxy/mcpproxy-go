@@ -185,3 +185,28 @@ func TestBundleObserver_RefreshObserverIsReplaceable(t *testing.T) {
 	defer mu.Unlock()
 	assert.Equal(t, []RefreshOutcomeClass{RefreshClassActivated}, got)
 }
+
+// US3 judge finding 7: dispatch stamps a strictly increasing Seq in commit
+// order, so an observer can drop an event that arrives after a newer one.
+func TestBundleObserver_SequenceFollowsCommitOrder(t *testing.T) {
+	f := operatorFixture(t)
+	var mu sync.Mutex
+	var seqs []uint64
+	unsub := AddBundleActivationObserver(func(a BundleActivation) {
+		mu.Lock()
+		seqs = append(seqs, a.Seq)
+		mu.Unlock()
+	})
+	defer unsub()
+
+	f.activate(signedCandidate(t, keyOperator, bundleOpts{Seq: 5, Tag: "A"}))
+	drainBundleObserversForTest() // arrival order == commit order for this assertion
+	f.activate(signedCandidate(t, keyOperator, bundleOpts{Seq: 6, Tag: "B"}))
+	drainBundleObserversForTest()
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Len(t, seqs, 2)
+	assert.NotZero(t, seqs[0])
+	assert.Less(t, seqs[0], seqs[1], "a later commit gets a higher sequence number")
+}

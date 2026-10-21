@@ -980,6 +980,12 @@ func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName str
 	if mode != config.TrustModeScan || !sc.Quarantined {
 		return
 	}
+	// Spec 101 US3: a post-activation re-protection job analyses the stored
+	// approved/held contracts, not the live tool list an admission verdict is
+	// about. Its settle must never drive this gate.
+	if latestScanIsReprotect(ctx, scanSvc, serverName) {
+		return
+	}
 	// Spec 101 FR-007: a degraded signature bundle (unsigned external drop, an
 	// embedded corpus below the watermark, an operator authority with no bundle
 	// or baseline) means the offline tier's coverage is not the coverage a
@@ -1018,6 +1024,15 @@ func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName str
 	}
 	s.logger.Info("auto-approved scan-mode server after green baseline scan (spec 086 FR-011)",
 		zap.String("server", serverName))
+}
+
+// latestScanIsReprotect reports whether the server's newest Pass-1 job is a
+// post-activation re-protection job (it carries the activated bundle's
+// digest). A read failure reads as "no": the admission gate has its own
+// fail-closed checks.
+func latestScanIsReprotect(ctx context.Context, scanSvc securityScannerService, serverName string) bool {
+	job, err := scanSvc.GetScanStatusByPass(ctx, serverName, scanner.ScanPassSecurityScan)
+	return err == nil && job != nil && job.ScanContext != nil && job.ScanContext.BundleDigest != ""
 }
 
 // bundleAdmissionSuspended reports whether scan-mode auto-approval is suspended
@@ -1233,6 +1248,9 @@ func (s *Server) reapplyScannerSecurityConfig() {
 		return
 	}
 	scanSvc.ApplySecurityConfig(cfg.Security)
+	// A re-protection sweep suspended by auto_baseline_scan=false resumes when
+	// the switch is back on (Spec 101 FR-019). Off the event loop: it scans.
+	go s.resumeSuspendedReprotect()
 	if cfg.DockerIsolation != nil {
 		scanSvc.SetIsolationMode(string(cfg.DockerIsolation.ResolvedMode()))
 	}
@@ -5178,13 +5196,16 @@ func (p *configServerInfoProvider) GetIngestedToolContracts(serverName string) (
 	return contracts, nil
 }
 
-// GetApprovedToolContracts implements scanner's optional
-// approvedToolContractsProvider (Spec 101 FR-019): the contracts recorded on
-// serverName's APPROVED tool-approval records, read from storage with no
-// upstream connection and no StateView read. The post-activation
-// re-protection scan analyses exactly these, so its verdict describes what the
-// operator approved. Pending and changed records are leg (i)'s business.
-func (p *configServerInfoProvider) GetApprovedToolContracts(serverName string) ([]map[string]interface{}, error) {
+// GetCurrentToolContracts implements scanner's optional
+// currentToolContractsProvider (Spec 101 FR-019): the CURRENT definition
+// recorded on every one of serverName's tool-approval records (approved,
+// pending and changed alike), read from storage with no upstream connection
+// and no StateView read. The post-activation re-protection scan is stored as
+// the server's newest Pass-1 job, so it must describe the same tool set a live
+// scan does: a job that left out a held tool would replace a verdict resting on
+// that tool with a clean one. For a changed record the current definition is
+// the new one, never the approved one it replaced.
+func (p *configServerInfoProvider) GetCurrentToolContracts(serverName string) ([]map[string]interface{}, error) {
 	if p.server == nil || p.server.runtime == nil {
 		return nil, nil
 	}
@@ -5198,7 +5219,7 @@ func (p *configServerInfoProvider) GetApprovedToolContracts(serverName string) (
 	}
 	contracts := make([]map[string]interface{}, 0, len(records))
 	for _, rec := range records {
-		if rec == nil || rec.ToolName == "" || rec.Status != storage.ToolApprovalStatusApproved {
+		if rec == nil || rec.ToolName == "" {
 			continue
 		}
 		if rec.CurrentDescription == "" && rec.CurrentSchema == "" && rec.CurrentOutputSchema == "" {
@@ -5210,6 +5231,17 @@ func (p *configServerInfoProvider) GetApprovedToolContracts(serverName string) (
 		}))
 	}
 	return contracts, nil
+}
+
+// IsServerQuarantined implements scanner's optional serverQuarantineProvider:
+// the live quarantine flag of serverName, read from storage so a flip made
+// seconds ago is seen. An unknown server reads as quarantined (fail closed).
+func (p *configServerInfoProvider) IsServerQuarantined(serverName string) bool {
+	if p.server == nil || p.server.runtime == nil {
+		return false
+	}
+	sc := p.server.findServerConfig(serverName)
+	return sc == nil || sc.Quarantined
 }
 
 // GetAllServerTools implements scanner's optional allServerToolsProvider: it

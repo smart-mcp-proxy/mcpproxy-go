@@ -728,9 +728,11 @@ changed the embedded corpus), a startup catch-up runs it once. It has two legs:
   (see [Hold evidence in the Web UI](#hold-evidence-in-the-web-ui-spec-088)). A
   signature that the newer corpus no longer has leaves the tool held, with a clean
   verdict that still waits for your review.
-- **Cached scan of approved tools.** For every non-quarantined server with at
+- **Cached scan of the stored tools.** For every non-quarantined server with at
   least one approved tool, in any trust mode, an informational scan runs over the
-  stored contracts of the approved tools. The report, scan summary, server-list
+  stored current definition of every tool record, approved and held alike, so the
+  result describes the same tools a live scan does and never replaces a verdict
+  that rests on a held tool with a clean one. The report, scan summary, server-list
   badge, Security overview and activity log show the result, and the tool's scan
   verdict on the server's review view (`GET /api/v1/servers/{name}/review`)
   reflects a finding, naming the matching signature as `tpa.<id>.<detector>`.
@@ -738,8 +740,9 @@ changed the embedded corpus), a startup catch-up runs it once. It has two legs:
 **What it never does (RT-02).** It never approves, blocks, revokes, disables or
 unquarantines anything, and a clean verdict approves nothing. An approved tool
 stays approved with the same approved hash, a held tool stays held, a quarantined
-server stays quarantined. The cached scan skips quarantined servers on purpose, so the settle event of a re-protection job
-cannot trigger the scan-mode auto-approval or the review capture (both belong to
+server stays quarantined. The cached scan skips quarantined servers on purpose (checked again at the moment
+each server's scan starts), and the settle event of a re-protection job is
+ignored by the scan-mode auto-approval and the review capture (both belong to
 quarantined servers).
 
 **Cached only.** The sweep reads what MCPProxy already stored. It does not
@@ -758,7 +761,8 @@ does not get an alert storm.
 informational scan, so it follows the same switch (env
 `MCPPROXY_AUTO_BASELINE_SCAN`). With it off, the held-tool evidence still
 refreshes, the cached scan does not run, and the status says so
-(`reprotect.state: suspended`, `reason: auto_baseline_scan_off`).
+(`reprotect.state: suspended`, `reason: auto_baseline_scan_off`). Turning the
+switch back on resumes the suspended sweep without a restart.
 
 **Where to see it.** `mcpproxy security bundle` prints a `Re-protection:` line
 (state, how many scanned servers matched the active corpus, when it last

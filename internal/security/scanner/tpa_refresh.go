@@ -527,11 +527,16 @@ func (r *BundleRefresher) doCycle(ctx context.Context, trigger string) {
 
 // mergeLegs picks the one outcome a cycle reports: an activation beats a
 // refusal, which beats whatever the fetch leg said, which beats "disabled".
+//
+// A file-leg refusal that merely persists (the same stale or unreadable file,
+// refused again every cycle) does not mask the fetch leg: it reports on its own
+// cycle only while it is new or while the fetch leg has nothing to say (B7).
 func mergeLegs(file runOutcome, fetch legResult) (outcome, reason string) {
+	fetchSilent := fetch.Outcome == "" || (fetch.Outcome == RefreshOutcomeDisabled && fetch.Reason == RefreshReasonFetchOff)
 	switch {
 	case file.Activated || fetch.Outcome == RefreshOutcomeActivated:
 		return RefreshOutcomeActivated, ""
-	case file.Rejection != nil || fetch.Outcome == RefreshOutcomeRejected:
+	case fetch.Outcome == RefreshOutcomeRejected || (file.Rejection != nil && (file.RejectionNew || fetchSilent)):
 		return RefreshOutcomeRejected, ""
 	case fetch.Outcome == "":
 		return RefreshOutcomeUnchanged, ""
@@ -573,13 +578,20 @@ func (r *BundleRefresher) etagFor(url string) string {
 	return r.etags[url]
 }
 
-func (r *BundleRefresher) rememberETag(url, etag string) {
+// rememberETag caches etag for url, but only while the generation the response
+// was fetched under is still the live one: a Nudge that cleared the cache
+// (trust or fetch settings changed) must not have a cycle already in flight
+// write its stale validator back.
+func (r *BundleRefresher) rememberETag(url, etag string, gen uint64) {
 	if etag == "" {
 		return
 	}
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.gen != gen {
+		return
+	}
 	r.etags[url] = etag
-	r.mu.Unlock()
 }
 
 func (r *BundleRefresher) setRetryAt(t time.Time) {
@@ -621,7 +633,7 @@ func (r *BundleRefresher) fetchLeg(ctx context.Context, sec *config.SecurityConf
 	leg := legResult{Outcome: res.Outcome, Reason: res.Reason, Detail: res.Detail}
 	if res.Outcome != fetchOutcomeCandidate {
 		if res.Outcome == RefreshOutcomeUnchanged || res.Outcome == RefreshOutcomeNotModified {
-			r.rememberETag(policy.FetchURL, res.ETag)
+			r.rememberETag(policy.FetchURL, res.ETag, startGen)
 		}
 		return leg
 	}
@@ -635,9 +647,14 @@ func (r *BundleRefresher) fetchLeg(ctx context.Context, sec *config.SecurityConf
 		return legResult{Outcome: RefreshOutcomeSuperseded}
 	}
 	_, off := offerCandidate(*res.Candidate, r.logger(zap.NewNop()))
-	if off.Outcome != RefreshOutcomeRejected || off.Rejection.Reason != RejectStateCommitFailed {
-		// A transient commit failure must not freeze the channel behind a 304.
-		r.rememberETag(policy.FetchURL, res.ETag)
+	// The validator is remembered only once the pair is settled for good: it
+	// activated, or it is byte-identical to what serves. A refused pair (and a
+	// repeat of one the negative cache already holds) must be downloaded and
+	// offered again next cycle: in direct mode the ETag covers the bundle only,
+	// so a 304 would hide a sidecar that appears or changes later, and a trust
+	// change is not the only thing that can turn a refusal into an acceptance.
+	if off.Outcome == RefreshOutcomeActivated || (off.Outcome == RefreshOutcomeUnchanged && !off.Refused) {
+		r.rememberETag(policy.FetchURL, res.ETag, startGen)
 	}
 	return legResult{Outcome: off.Outcome}
 }

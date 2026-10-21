@@ -50,6 +50,13 @@ type bundleReprotectState struct {
 	// nothing, and a sweep whose digest is no longer the latest is abandoned.
 	last   string
 	latest string
+	// latestSeq is the highest dispatch sequence (BundleActivation.Seq) seen.
+	// Observers run on separate goroutines, so a stale event can arrive after
+	// a newer one; it is dropped.
+	latestSeq uint64
+	// suspended is true while the last sweep ended suspended by the
+	// auto_baseline_scan kill switch; resumeSuspendedReprotect clears it.
+	suspended bool
 	// runMu serializes sweeps.
 	runMu sync.Mutex
 
@@ -187,6 +194,13 @@ func (s *Server) runBundleReprotect(ctx context.Context, act scanner.BundleActiv
 	}
 	st := &s.bundleReprotect
 	st.mu.Lock()
+	if act.Seq != 0 {
+		if act.Seq < st.latestSeq {
+			st.mu.Unlock()
+			return
+		}
+		st.latestSeq = act.Seq
+	}
 	st.latest = act.Digest
 	if st.last == act.Digest {
 		st.mu.Unlock()
@@ -205,22 +219,58 @@ func (s *Server) runBundleReprotect(ctx context.Context, act scanner.BundleActiv
 	if ctx.Err() != nil || superseded() {
 		return
 	}
-	s.reprotectSweep(ctx, act, superseded)
+	result := s.reprotectSweep(ctx, act, superseded)
+
+	// "last" means "swept to completion": a sweep that failed, was suspended or
+	// was abandoned must not leave its digest latched, or the same digest could
+	// never be retried in-process.
+	st.mu.Lock()
+	if result != reprotectSweepCompleted && st.last == act.Digest {
+		st.last = ""
+	}
+	if st.latest == act.Digest {
+		st.suspended = result == reprotectSweepSuspended
+	}
+	st.mu.Unlock()
+}
+
+// resumeSuspendedReprotect re-runs a sweep that ended suspended by the
+// auto_baseline_scan kill switch, once the switch is back on. It sweeps the
+// bundle that serves now. Called (off the event loop) from the config reload
+// path; a no-op unless the last sweep was suspended and scans are enabled.
+func (s *Server) resumeSuspendedReprotect() {
+	st := &s.bundleReprotect
+	st.mu.Lock()
+	suspended := st.suspended
+	st.mu.Unlock()
+	if !suspended || !s.informationalScansEnabled() {
+		return
+	}
+	digest := s.activeBundleDigest()
+	if digest == "" {
+		return
+	}
+	ctx, end, ok := s.beginReprotect(s.informationalScanContext())
+	if !ok {
+		return
+	}
+	defer end()
+	s.runBundleReprotect(ctx, scanner.BundleActivation{Digest: digest, ActivatedAt: time.Now()})
 }
 
 // reprotectSweep walks every configured server once: leg (i) for servers with
 // held records, then leg (ii) for non-quarantined servers with approved ones.
-func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivation, superseded func() bool) {
+func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivation, superseded func() bool) reprotectSweepResult {
 	sm := s.runtime.StorageManager()
 	if sm == nil {
-		return
+		return reprotectSweepIncomplete
 	}
 	s.publishReprotectStatus(scanner.BundleReprotectStatus{State: scanner.ReprotectStateRunning})
 	servers, err := sm.ListUpstreamServers()
 	if err != nil {
 		s.logger.Warn("bundle re-protection: could not list servers", zap.Error(err))
 		s.publishReprotectStatus(scanner.BundleReprotectStatus{State: scanner.ReprotectStateFailed, Reason: reprotectReasonStorageUnavailable})
-		return
+		return reprotectSweepIncomplete
 	}
 	sort.Slice(servers, func(i, j int) bool { return servers[i].Name < servers[j].Name })
 
@@ -235,7 +285,7 @@ func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivatio
 	for _, sc := range servers {
 		if ctx.Err() != nil || superseded() {
 			s.logger.Debug("bundle re-protection sweep abandoned", zap.String("digest", shortDigest(act.Digest)))
-			return
+			return reprotectSweepIncomplete
 		}
 		if sc == nil || sc.Name == "" {
 			continue
@@ -276,15 +326,15 @@ func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivatio
 			continue
 		}
 		if scannedAny && !sleepContext(ctx, s.bundleReprotect.pause()) {
-			return
+			return reprotectSweepIncomplete
 		}
 		if superseded() {
-			return
+			return reprotectSweepIncomplete
 		}
 		outcome := s.reprotectScanServer(ctx, scanSvc, sc.Name, act.Digest)
 		switch outcome.kind {
 		case reprotectAborted:
-			return
+			return reprotectSweepIncomplete
 		case reprotectSuspended:
 			suspended = true
 		case reprotectFailed:
@@ -300,7 +350,7 @@ func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivatio
 	}
 
 	if ctx.Err() != nil || superseded() {
-		return
+		return reprotectSweepIncomplete
 	}
 	status := scanner.BundleReprotectStatus{State: scanner.ReprotectStateIdle, ServersScanned: scanned, ServersWithHits: hits}
 	switch {
@@ -328,7 +378,28 @@ func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivatio
 		zap.Int("servers_with_hits", hits),
 		zap.Int("failed", failed),
 		zap.Bool("suspended", suspended))
+	switch {
+	case failed > 0:
+		return reprotectSweepIncomplete
+	case suspended:
+		return reprotectSweepSuspended
+	case scanSvc == nil:
+		return reprotectSweepIncomplete
+	}
+	return reprotectSweepCompleted
 }
+
+// reprotectSweepResult is how one sweep ended.
+type reprotectSweepResult int
+
+const (
+	// reprotectSweepIncomplete: failed, abandoned, aborted or no scanner.
+	reprotectSweepIncomplete reprotectSweepResult = iota
+	// reprotectSweepSuspended: ended because auto_baseline_scan is off.
+	reprotectSweepSuspended
+	// reprotectSweepCompleted: every leg ran and nothing failed.
+	reprotectSweepCompleted
+)
 
 type reprotectOutcomeKind int
 
@@ -366,7 +437,7 @@ func (s *Server) reprotectScanServer(ctx context.Context, scanSvc securityScanne
 				return reprotectOutcome{kind: reprotectFailed}
 			}
 			return reprotectOutcome{kind: reprotectScanned, hit: summary != nil && summary.Status == "dangerous"}
-		case errors.Is(err, scanner.ErrNoCachedContracts):
+		case errors.Is(err, scanner.ErrNoCachedContracts), errors.Is(err, scanner.ErrServerQuarantined):
 			return reprotectOutcome{kind: reprotectSkipped}
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded), ctx.Err() != nil:
 			return reprotectOutcome{kind: reprotectAborted}
@@ -396,6 +467,12 @@ func (s *Server) startReprotectScan(ctx context.Context, scanSvc securityScanner
 	defer s.infoScanRunMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	// The sweep listed its servers up front and may have waited minutes for
+	// this lock, so quarantine is judged here, at the moment the scan starts:
+	// a server quarantined meanwhile never gets a cached scan job (B17).
+	if sc := s.findServerConfig(name); sc == nil || sc.Quarantined {
+		return nil, scanner.ErrServerQuarantined
 	}
 	if _, err := scanSvc.StartScanFromCachedContracts(ctx, name, digest); err != nil {
 		return nil, err

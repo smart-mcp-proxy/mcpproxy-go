@@ -449,3 +449,217 @@ func TestReprotect_StopDuringARunningSweepExitsAndWritesNothing(t *testing.T) {
 	s.handleBundleActivation(activation(reprotectDigestB))
 	assert.Len(t, fake.cachedScans(), 1)
 }
+
+// US3 judge finding 5: the quarantine decision for leg (ii) is taken when the
+// server's scan starts, not when the sweep listed the servers - a sweep pauses
+// between servers and waits on the informational queue, so the listing can be
+// minutes old. A server quarantined meanwhile never gets a cached scan job.
+func TestReprotect_QuarantineIsRecheckedWhenTheServersScanStarts(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s, _ := newReprotectServer(t, fake, nil,
+		enabledServer("alpha", config.TrustModeManual),
+		enabledServer("bravo", config.TrustModeScan),
+	)
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+	seedToolRecords(t, s, "bravo", approvedOnly("b1"))
+	fake.onCachedScan = func(server string) {
+		if server != "alpha" {
+			return
+		}
+		sm := s.runtime.StorageManager()
+		sc, err := sm.GetUpstreamServer("bravo")
+		require.NoError(t, err)
+		sc.Quarantined = true // the operator switched bravo to scan mode and it got quarantined
+		require.NoError(t, sm.SaveUpstreamServer(sc))
+	}
+
+	s.handleBundleActivation(activation(reprotectDigestA))
+
+	assert.Equal(t, []string{"alpha@" + reprotectDigestA}, fake.cachedScans())
+	assert.Equal(t, []string{"alpha"}, fake.cachedScanAttempts(), "a server quarantined after the listing must not even be attempted")
+}
+
+// US3 judge finding 5: the settle of a re-protection job must never drive the
+// scan-mode admission gate - its contracts are the stored ones, not the live
+// tool list the admission verdict is about.
+func TestReprotect_SettleOfACachedJobNeverAutoApprovesAServer(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s, _ := newReprotectServer(t, fake, nil,
+		&config.ServerConfig{Name: "gate", TrustMode: string(config.TrustModeScan), Enabled: true, Quarantined: true},
+	)
+	fake.setScanResult("gate",
+		&scanner.ScanJob{ServerName: "gate", ScanPass: scanner.ScanPassSecurityScan, Status: scanner.ScanJobStatusCompleted,
+			ScanContext: &scanner.ScanContext{BundleDigest: reprotectDigestA}},
+		&scanner.ScanSummary{Status: "clean"})
+
+	s.maybeAutoApproveScanSettled(context.Background(), "gate")
+
+	assert.Empty(t, fake.approvedServers(), "a clean re-protection job over stored contracts must not unquarantine a server")
+
+	// Control: the same clean verdict from a live scan (no bundle digest) does
+	// approve, so the assertion above is about the cached job, not the fixture.
+	fake.setScanResult("gate",
+		&scanner.ScanJob{ServerName: "gate", ScanPass: scanner.ScanPassSecurityScan, Status: scanner.ScanJobStatusCompleted},
+		&scanner.ScanSummary{Status: "clean"})
+	s.maybeAutoApproveScanSettled(context.Background(), "gate")
+	assert.Equal(t, []string{"gate"}, fake.approvedServers())
+}
+
+// US3 judge finding 7: observers run on separate goroutines, so two activations
+// committed milliseconds apart can reach the sweep in reverse order. The older
+// one (lower Seq) must be dropped instead of becoming "latest" while the newer
+// bundle serves.
+func TestReprotect_AnActivationArrivingAfterANewerOneIsDropped(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s, _ := newReprotectServer(t, fake, nil, enabledServer("alpha", config.TrustModeManual))
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+
+	newer := activation(reprotectDigestB)
+	newer.Seq = 2
+	older := activation(reprotectDigestA)
+	older.Seq = 1
+	s.handleBundleActivation(newer) // the goroutine of the NEWER commit ran first
+	s.handleBundleActivation(older)
+
+	assert.Equal(t, []string{"alpha@" + reprotectDigestB}, fake.cachedScans(), "the stale activation must not start a sweep over the newer bundle's corpus")
+	assert.Equal(t, reprotectDigestB, reprotectMarker(t, s).FullDigest, "the marker records the bundle that is serving")
+}
+
+// US3 judge finding 8: a sweep suspended by auto_baseline_scan=false is
+// resumed when the switch comes back on, without waiting for a restart.
+func TestReprotect_SuspendedSweepResumesWhenAutoBaselineScanTurnsOn(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	off := false
+	s, probe := newReprotectServer(t, fake, &config.SecurityConfig{AutoBaselineScan: &off},
+		enabledServer("alpha", config.TrustModeManual))
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+	s.bundleReprotect.activeDigest = func() string { return reprotectDigestA }
+
+	s.handleBundleActivation(activation(reprotectDigestA))
+	require.Equal(t, scanner.ReprotectStateSuspended, probe.lastStatus(t).State)
+	require.Empty(t, fake.cachedScans())
+
+	s.resumeSuspendedReprotect() // switch still off: nothing to resume
+	require.Empty(t, fake.cachedScans(), "control: resuming while the switch is off does nothing")
+
+	off = true // the operator turned auto_baseline_scan back on
+	s.resumeSuspendedReprotect()
+
+	assert.Equal(t, []string{"alpha@" + reprotectDigestA}, fake.cachedScans(), "the suspended sweep runs once the switch is on")
+	assert.Equal(t, scanner.ReprotectStateIdle, probe.lastStatus(t).State)
+	assert.Equal(t, reprotectDigestA, reprotectMarker(t, s).FullDigest)
+
+	s.resumeSuspendedReprotect()
+	assert.Len(t, fake.cachedScans(), 1, "a completed sweep is not resumed again")
+}
+
+// US3 judge finding 8: a sweep that did not complete (failed scan) must not
+// leave its digest latched as "already swept", or the same activation (a
+// rollback re-fire) could never retry it in-process.
+func TestReprotect_AFailedSweepCanBeRetriedForTheSameDigest(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	boom := errors.New("scanner unavailable")
+	fake.cachedScanErrs["alpha"] = []error{boom, boom, boom}
+	s, _ := newReprotectServer(t, fake, nil, enabledServer("alpha", config.TrustModeManual))
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+
+	s.handleBundleActivation(activation(reprotectDigestA))
+	require.Empty(t, fake.cachedScans())
+	require.Empty(t, reprotectMarker(t, s).FullDigest)
+
+	s.handleBundleActivation(activation(reprotectDigestA)) // errors queue is drained: succeeds now
+
+	assert.Equal(t, []string{"alpha@" + reprotectDigestA}, fake.cachedScans())
+	assert.Equal(t, reprotectDigestA, reprotectMarker(t, s).FullDigest)
+}
+
+// T362 shutdown, end to end (US3 judge gap): Server.Shutdown must join a
+// running sweep BEFORE runtime.Close begins, so the sweep never writes to a
+// closing store. While the sweep is held inside its first scan, Shutdown cannot
+// have reached runtime.Close; once the sweep ends, Shutdown completes and no
+// further scan or marker write happened.
+func TestReprotect_ServerShutdownJoinsARunningSweepBeforeTheRuntimeCloses(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s, _ := newReprotectServer(t, fake, nil,
+		enabledServer("alpha", config.TrustModeManual),
+		enabledServer("bravo", config.TrustModeManual))
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+	seedToolRecords(t, s, "bravo", approvedOnly("b1"))
+
+	inFirst := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	fake.onCachedScan = func(string) {
+		once.Do(func() {
+			close(inFirst)
+			<-release
+		})
+	}
+
+	swept := make(chan struct{})
+	go func() { defer close(swept); s.handleBundleActivation(activation(reprotectDigestA)) }()
+	awaitClosed(t, inFirst)
+
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- s.Shutdown() }()
+
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("Shutdown returned (err=%v) while a sweep was still running: runtime.Close ran before the sweep was joined", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	close(release)
+	awaitClosed(t, swept)
+	select {
+	case err := <-shutdownDone:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("Shutdown did not complete once the sweep ended")
+	}
+
+	assert.Equal(t, []string{"alpha@" + reprotectDigestA}, fake.cachedScans(), "no scan starts after Shutdown began")
+	s.handleBundleActivation(activation(reprotectDigestB))
+	assert.Len(t, fake.cachedScans(), 1, "an activation after Shutdown is ignored")
+}
+
+// US3 judge finding 5 / T366: the settle of a re-protection job must not start
+// a review-definition capture either; it scanned stored contracts, and the
+// capture follows up on a LIVE admission scan. The control proves the same
+// server and job shape DO capture when the job is an ordinary scan.
+func TestReprotect_SettleOfACachedJobNeverStartsAReviewCapture(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s, _ := newReprotectServer(t, fake, nil,
+		&config.ServerConfig{Name: "gate", TrustMode: string(config.TrustModeScan), Enabled: true, Quarantined: true})
+	captured := make(chan string, 4)
+	s.reviewCaptureFn = func(_ context.Context, name string) error { captured <- name; return nil }
+
+	started := time.Now().Add(-time.Hour)
+	seed := func(id string, digest string) {
+		job := &scanner.ScanJob{
+			ID: id, ServerName: "gate", Status: scanner.ScanJobStatusCompleted, ScanPass: scanner.ScanPassSecurityScan,
+			StartedAt: started, CompletedAt: started.Add(time.Second),
+			ScannerStatuses: []scanner.ScannerJobStatus{{ScannerID: "tpa", Status: scanner.ScanJobStatusCompleted}},
+			ScanContext:     &scanner.ScanContext{SourceMethod: "tool_definitions_only", ToolsExported: 3, BundleDigest: digest},
+		}
+		require.NoError(t, s.runtime.StorageManager().SaveScanJob(job))
+		fake.setScanResult("gate", job, &scanner.ScanSummary{Status: "clean"})
+	}
+
+	seed("cached", reprotectDigestA)
+	s.maybeCaptureReviewDefinitions("gate", "completed")
+	select {
+	case name := <-captured:
+		t.Fatalf("a re-protection job's settle started a capture for %s", name)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	seed("live", "")
+	s.maybeCaptureReviewDefinitions("gate", "completed")
+	select {
+	case name := <-captured:
+		assert.Equal(t, "gate", name)
+	case <-time.After(5 * time.Second):
+		t.Fatal("control: an ordinary completed scan of a quarantined server must capture")
+	}
+}

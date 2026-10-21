@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func (p *cachedScanProvider) IsConnected(string) bool {
 	p.isConnectedCalls.Add(1)
 	return false
 }
-func (p *cachedScanProvider) GetApprovedToolContracts(string) ([]map[string]interface{}, error) {
+func (p *cachedScanProvider) GetCurrentToolContracts(string) ([]map[string]interface{}, error) {
 	return p.approved, nil
 }
 func (p *cachedScanProvider) GetAllServerTools() (map[string][]map[string]interface{}, error) {
@@ -236,4 +237,63 @@ func TestStartScanFromCachedContracts_BusyServerReportsScanInProgress(t *testing
 
 	close(store.release)
 	waitCachedScan(t, store.mockStorage, first.ID)
+}
+
+// quarantinedCachedScanProvider adds the optional quarantine capability.
+type quarantinedCachedScanProvider struct {
+	*cachedScanProvider
+	quarantined bool
+}
+
+func (p *quarantinedCachedScanProvider) IsServerQuarantined(string) bool { return p.quarantined }
+
+func TestStartScanFromCachedContracts_QuarantinedServerGetsNoJob(t *testing.T) {
+	base := &cachedScanProvider{info: &ServerInfo{Name: "srv", Protocol: "stdio"}, approved: approvedPair()}
+	provider := &quarantinedCachedScanProvider{cachedScanProvider: base, quarantined: true}
+	svc, store, _ := newCachedScanService(t, provider)
+
+	job, err := svc.StartScanFromCachedContracts(context.Background(), "srv", cachedDigest)
+	require.ErrorIs(t, err, ErrServerQuarantined)
+	assert.Nil(t, job)
+	jobs, _ := store.ListScanJobs("srv")
+	assert.Empty(t, jobs, "no job is recorded for a quarantined server")
+
+	provider.quarantined = false
+	job, err = svc.StartScanFromCachedContracts(context.Background(), "srv", cachedDigest)
+	require.NoError(t, err, "control: the same server scans once it is no longer quarantined")
+	waitCachedScan(t, store, job.ID)
+}
+
+// T362 storm bound (US3 judge gap): a cached scan over many tools is ONE job
+// with ONE started and ONE terminal event - what feeds the single activity
+// record and the bounded SSE traffic - never one per tool.
+func TestStartScanFromCachedContracts_ManyToolsIsOneJobAndOneTerminalEvent(t *testing.T) {
+	var tools []map[string]interface{}
+	for i := 0; i < 40; i++ {
+		tools = append(tools, map[string]interface{}{
+			"name":        fmt.Sprintf("tool_%02d", i),
+			"description": fmt.Sprintf("Does thing number %d.", i),
+			"inputSchema": map[string]interface{}{"type": "object"},
+		})
+	}
+	provider := &cachedScanProvider{info: &ServerInfo{Name: "srv", Protocol: "stdio"}, approved: tools}
+	svc, store, emitter := newCachedScanService(t, provider)
+
+	job, err := svc.StartScanFromCachedContracts(context.Background(), "srv", cachedDigest)
+	require.NoError(t, err)
+	waitCachedScan(t, store, job.ID)
+	time.Sleep(100 * time.Millisecond) // let any straggling event land
+
+	jobs, _ := store.ListScanJobs("srv")
+	assert.Len(t, jobs, 1, "one job for 40 tools")
+	counts := map[string]int{}
+	emitter.mu.Lock()
+	for _, ev := range emitter.events {
+		counts[ev.eventType]++
+	}
+	emitter.mu.Unlock()
+	assert.Equal(t, 1, counts["scan_started"])
+	assert.Equal(t, 1, counts["scan_completed"])
+	assert.Zero(t, counts["scan_failed"])
+	assert.LessOrEqual(t, counts["scan_progress"], 3, "progress events are per scanner, not per tool")
 }

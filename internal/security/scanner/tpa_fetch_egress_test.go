@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -486,4 +487,99 @@ func TestEgress_URLPathNeverReachesLogsOrStatus(t *testing.T) {
 	assert.Equal(t, "http://127.0.0.1", info.Path, "the status carries scheme and host only")
 	require.NotNil(t, info.Refresh)
 	assert.Equal(t, "127.0.0.1", info.Refresh.FetchHost)
+}
+
+// --- the production transport's dial control (US3 judge finding 6) ------------
+
+// listenerAddr starts a TCP listener that accepts and closes connections, and
+// returns its host:port.
+func listenerAddr(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			_ = c.Close()
+		}
+	}()
+	return ln.Addr().String()
+}
+
+// productionTransport builds the real transport of a fetch attempt whose
+// configured host is public, with proxy as the proxy selector.
+func productionTransport(t *testing.T, proxy func(*http.Request) (*url.URL, error)) *http.Transport {
+	t.Helper()
+	u, err := parseFetchURL("https://mirror.example/bundles/scanner-bundle.json")
+	require.NoError(t, err)
+	a := &fetchAttempt{s: fetchSettings{Proxy: proxy}, u: u, host: u.Hostname(), class: egressPublic}
+	return a.buildTransport()
+}
+
+func dialOK(t *testing.T, tr *http.Transport, addr string) bool {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := tr.DialContext(ctx, "tcp", addr)
+	if err != nil {
+		var ee *egressError
+		assert.ErrorAs(t, err, &ee, "a refusal is an egress error, not a network failure")
+		return false
+	}
+	_ = c.Close()
+	return true
+}
+
+// The dial control stays on even when a proxy is configured for the fetch URL:
+// a redirect hop or asset host that NO_PROXY exempts is dialed directly, and a
+// rebinding answer that points it inward must still be refused at connect time.
+func TestProductionTransport_DialControlSurvivesAProxyForTheConfiguredURL(t *testing.T) {
+	proxyAddr, directInward := listenerAddr(t), listenerAddr(t)
+	proxyURL, err := url.Parse("http://" + proxyAddr)
+	require.NoError(t, err)
+	tr := productionTransport(t, func(req *http.Request) (*url.URL, error) {
+		if req.URL.Hostname() == "mirror.example" {
+			return proxyURL, nil // proxied
+		}
+		return nil, nil // NO_PROXY: dialed directly
+	})
+
+	req, _ := http.NewRequest(http.MethodGet, "https://mirror.example/x", nil)
+	pu, err := tr.Proxy(req)
+	require.NoError(t, err)
+	require.NotNil(t, pu)
+
+	assert.True(t, dialOK(t, tr, proxyAddr), "the operator's proxy is dialed even though it is a private/loopback address")
+	assert.False(t, dialOK(t, tr, directInward), "a direct dial to an inward address is refused although the configured URL is proxied")
+
+	// DNS rebinding: a NAME the application-layer check may have seen as public
+	// resolves inward at dial time. The control sees the address actually dialed.
+	_, port, err := net.SplitHostPort(directInward)
+	require.NoError(t, err)
+	assert.False(t, dialOK(t, tr, net.JoinHostPort("localhost", port)), "a name that resolves to loopback is refused at connect time")
+}
+
+// The reverse: an unproxied configured host with a proxied asset host must not
+// refuse the (private) proxy of the asset request.
+func TestProductionTransport_ProxiedAssetHostMayUseAPrivateProxy(t *testing.T) {
+	proxyAddr := listenerAddr(t)
+	proxyURL, err := url.Parse("http://" + proxyAddr)
+	require.NoError(t, err)
+	tr := productionTransport(t, func(req *http.Request) (*url.URL, error) {
+		if req.URL.Hostname() == "assets.example" {
+			return proxyURL, nil
+		}
+		return nil, nil // the configured host is NO_PROXY
+	})
+
+	assetReq, _ := http.NewRequest(http.MethodGet, "https://assets.example/y", nil)
+	pu, err := tr.Proxy(assetReq)
+	require.NoError(t, err)
+	require.NotNil(t, pu)
+
+	assert.True(t, dialOK(t, tr, proxyAddr), "the proxy selected for the asset request is exempt from the egress control")
 }
