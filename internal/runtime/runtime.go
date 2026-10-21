@@ -2773,7 +2773,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					zap.Bool("token_nil", token == nil),
 					zap.Error(err))
 
-				if err == nil && token != nil {
+				// DCR persists client credentials before the code exchange. Like
+				// PersistentTokenStore.GetToken, require an actual access token.
+				if err == nil && token != nil && token.AccessToken != "" {
 					authenticated = true
 					tokenExpiresAt = token.ExpiresAt
 					hasRefreshToken = token.RefreshToken != ""
@@ -2807,7 +2809,12 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 						oauthStatus = string(oauth.OAuthStatusAuthenticated)
 					}
 				} else {
-					// No token found - check if OAuth config exists to determine status
+					// A DCR-only record still identifies an autodiscovered OAuth
+					// server, but is not evidence of a completed login.
+					if err == nil && token != nil && oauthConfig == nil {
+						oauthConfig = map[string]interface{}{"autodiscovery": true}
+					}
+					// No access token - check if OAuth config exists to determine status
 					if oauthConfig != nil {
 						oauthStatus = string(oauth.OAuthStatusNone)
 					}
