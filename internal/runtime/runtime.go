@@ -1160,6 +1160,16 @@ func (r *Runtime) Close() error {
 		r.telemetryService.Stop()
 	}
 
+	// Spec 087 / Spec 101 US3 (B19): the TPA bundle refresher writes BBolt
+	// state (the activation transaction) and LKG files from its own goroutine,
+	// so it is stopped AND joined here, before the storage manager starts to
+	// stop. appCancel above already ended its context; Stop cancels an
+	// in-flight HTTP fetch and returns once the loop goroutine exited. The
+	// scanner slot is cleared only while it still points at this runtime's
+	// instance, so RefreshBundle falls back to ReloadBundle afterwards without
+	// evicting a replacement installed by someone else.
+	r.stopBundleRefresher()
+
 	// The index closes AFTER the telemetry flush above, not before it. That
 	// flush builds one last heartbeat, and tool_count is read from this index
 	// (GetToolCount). Closing first made GetDocumentCount fail, which sent the
@@ -1190,6 +1200,7 @@ func (r *Runtime) Close() error {
 	if r.storageManager != nil {
 		// (1) Stop + drain queued async DB operations — the last DB writes
 		// other than the marker resolve itself.
+		r.notifyCloseStep("storage_stop_async")
 		r.storageManager.StopAsync()
 
 		// (2) Resolve the marker to clean, now that no other DB work remains.
@@ -3589,13 +3600,34 @@ type bundleRefresherLifecycle interface {
 	Stop()
 }
 
+// stopBundleRefresher stops and joins the registered TPA bundle refresher and
+// detaches it from the scanner's package-level slot. Safe to call twice and with
+// no refresher registered.
+func (r *Runtime) stopBundleRefresher() {
+	r.mu.RLock()
+	refresher := r.bundleRefresher
+	r.mu.RUnlock()
+	if refresher == nil {
+		return
+	}
+	refresher.Stop()
+	if own, ok := refresher.(*scanner.BundleRefresher); ok && scanner.CurrentBundleRefresher() == own {
+		scanner.SetBundleRefresher(nil)
+	}
+	r.notifyCloseStep("bundle_refresher_stopped")
+}
+
+// notifyCloseStep reports an ordered point of Close to the test seam.
+func (r *Runtime) notifyCloseStep(step string) {
+	if r.closeOrderHook != nil {
+		r.closeOrderHook(step)
+	}
+}
+
 // SetBundleRefresher registers the TPA bundle refresher so the runtime owns its
 // lifecycle: StartBackgroundInitialization starts it with the app context and
 // Close stops and joins it (Spec 087 / Spec 101 US3 B19). Call it once during
 // server construction, before StartBackgroundInitialization; nil clears it.
-//
-// STUB (Spec 101 US3 wave 0): only records the refresher; the start and the
-// Close join land with T367.
 func (r *Runtime) SetBundleRefresher(refresher *scanner.BundleRefresher) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
