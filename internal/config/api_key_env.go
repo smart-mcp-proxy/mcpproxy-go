@@ -124,7 +124,7 @@ func resolveAPIKeyRef(c *Config) error {
 		return fmt.Errorf("api_key: %w", err)
 	}
 	if resolved == "" {
-		return fmt.Errorf("api_key: %s resolved to an empty value", c.APIKey)
+		return fmt.Errorf("api_key: the reference resolved to an empty value")
 	}
 	OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, resolved)
 	return nil
