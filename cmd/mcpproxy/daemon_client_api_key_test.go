@@ -27,13 +27,18 @@ func TestResolveAPIKey_Precedence(t *testing.T) {
 		t.Setenv(config.EnvAPIKeyFile, "")
 		assert.Equal(t, "env-key", resolveAPIKey(cfg))
 	})
-	t.Run("file beats env and config, as the daemon resolves it", func(t *testing.T) {
-		t.Setenv(config.EnvAPIKey, "env-key")
+	t.Run("file beats config, as the daemon resolves it", func(t *testing.T) {
+		t.Setenv(config.EnvAPIKey, "")
 		t.Setenv(config.EnvAPIKeyFile, keyFile)
 		assert.Equal(t, "file-key", resolveAPIKey(cfg))
 	})
-	t.Run("an unusable file gives no key rather than a wrong one", func(t *testing.T) {
+	t.Run("both variables set gives no key, as the daemon refuses to start", func(t *testing.T) {
 		t.Setenv(config.EnvAPIKey, "env-key")
+		t.Setenv(config.EnvAPIKeyFile, keyFile)
+		assert.Empty(t, resolveAPIKey(cfg))
+	})
+	t.Run("an unusable file gives no key rather than a wrong one", func(t *testing.T) {
+		t.Setenv(config.EnvAPIKey, "")
 		t.Setenv(config.EnvAPIKeyFile, filepath.Join(t.TempDir(), "missing"))
 		assert.Empty(t, resolveAPIKey(cfg))
 	})

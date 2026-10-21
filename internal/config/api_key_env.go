@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -33,8 +34,20 @@ type EnvAPIKeyResult struct {
 	FromFile bool
 	// Path is the file Key was read from, when FromFile.
 	Path string
-	// Shadowed is true when both variables carry a key and the file won.
-	Shadowed bool
+}
+
+// ErrAPIKeyBothSet is returned when MCPPROXY_API_KEY and MCPPROXY_API_KEY_FILE
+// are both set to a non-empty value. The text is fixed: it names the two
+// variables and nothing else, so it can never carry a key or file contents.
+var ErrAPIKeyBothSet = errors.New(EnvAPIKey + " and " + EnvAPIKeyFile + " are both set; set only one of them")
+
+// checkEnvAPIKeyConflict returns ErrAPIKeyBothSet when both variables are
+// non-empty. It reads no file.
+func checkEnvAPIKeyConflict() error {
+	if os.Getenv(EnvAPIKey) != "" && os.Getenv(EnvAPIKeyFile) != "" {
+		return ErrAPIKeyBothSet
+	}
+	return nil
 }
 
 // ResolveEnvAPIKey is the one place the environment's API key is read. Every
@@ -42,11 +55,13 @@ type EnvAPIKeyResult struct {
 // core it launches) goes through it so the two variables mean the same thing
 // everywhere.
 //
-// MCPPROXY_API_KEY_FILE wins over MCPPROXY_API_KEY when both are set (an
-// explicit file is the more deliberate choice and the one that keeps the key
-// out of the environment); the result reports Shadowed so a caller can warn.
-// An empty MCPPROXY_API_KEY_FILE is treated as unset, as Compose files that
-// interpolate an optional variable produce one.
+// Setting both MCPPROXY_API_KEY and MCPPROXY_API_KEY_FILE to a non-empty value
+// is an error (ErrAPIKeyBothSet), whatever the file holds and whether or not it
+// exists: there is one rule, and no variable silently shadows the other. The
+// check looks at the variables only and does not open the file. An empty
+// variable counts as unset, as Compose files that interpolate an optional
+// variable produce one. (An empty MCPPROXY_API_KEY alone still disables
+// authentication, as before.)
 //
 // A file that is named but cannot be used (missing, unreadable, not absolute,
 // too large, empty after removing its trailing newline) is an error. The caller
@@ -54,8 +69,13 @@ type EnvAPIKeyResult struct {
 // would start the proxy under a credential the operator did not choose.
 func ResolveEnvAPIKey() (EnvAPIKeyResult, error) {
 	envKey, envSet := os.LookupEnv(EnvAPIKey)
+	path := os.Getenv(EnvAPIKeyFile)
 
-	if path := os.Getenv(EnvAPIKeyFile); path != "" {
+	if err := checkEnvAPIKeyConflict(); err != nil {
+		return EnvAPIKeyResult{}, err
+	}
+
+	if path != "" {
 		key, err := secret.ReadFile(path)
 		if err != nil {
 			return EnvAPIKeyResult{}, fmt.Errorf("%s: %w", EnvAPIKeyFile, err)
@@ -68,7 +88,6 @@ func ResolveEnvAPIKey() (EnvAPIKeyResult, error) {
 			Key:      key,
 			FromFile: true,
 			Path:     path,
-			Shadowed: envSet && envKey != "",
 		}, nil
 	}
 

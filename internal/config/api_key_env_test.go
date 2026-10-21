@@ -42,7 +42,6 @@ func TestResolveEnvAPIKey(t *testing.T) {
 		assert.True(t, res.Set)
 		assert.Equal(t, "env-key", res.Key)
 		assert.False(t, res.FromFile)
-		assert.False(t, res.Shadowed)
 	})
 
 	t.Run("an empty key variable is still set (it disables authentication)", func(t *testing.T) {
@@ -64,7 +63,6 @@ func TestResolveEnvAPIKey(t *testing.T) {
 		assert.Equal(t, "file-key", res.Key, "one trailing newline is removed")
 		assert.True(t, res.FromFile)
 		assert.Equal(t, path, res.Path)
-		assert.False(t, res.Shadowed)
 	})
 
 	t.Run("CRLF file", func(t *testing.T) {
@@ -75,14 +73,13 @@ func TestResolveEnvAPIKey(t *testing.T) {
 		assert.Equal(t, "file-key", res.Key)
 	})
 
-	t.Run("both set: the file wins and the result says so", func(t *testing.T) {
-		t.Setenv(EnvAPIKey, "env-key")
+	t.Run("an empty key variable and a file is not a conflict", func(t *testing.T) {
+		t.Setenv(EnvAPIKey, "")
 		t.Setenv(EnvAPIKeyFile, writeKeyFile(t, "file-key"))
 		res, err := ResolveEnvAPIKey()
 		require.NoError(t, err)
 		assert.Equal(t, "file-key", res.Key)
 		assert.True(t, res.FromFile)
-		assert.True(t, res.Shadowed)
 	})
 
 	t.Run("an empty file variable is unset", func(t *testing.T) {
@@ -95,10 +92,9 @@ func TestResolveEnvAPIKey(t *testing.T) {
 	})
 }
 
-// A named file that cannot be used is an error and never falls back to the
-// other variable, nor to a generated key.
+// A named file that cannot be used is an error and never falls back to a
+// generated key.
 func TestResolveEnvAPIKey_UnusableFileIsAnError(t *testing.T) {
-	const fallback = "must-not-be-used"
 	cases := map[string]string{
 		"missing":         filepath.Join(t.TempDir(), "nope"),
 		"relative":        "run/secrets/key",
@@ -109,22 +105,100 @@ func TestResolveEnvAPIKey_UnusableFileIsAnError(t *testing.T) {
 	}
 	for name, path := range cases {
 		t.Run(name, func(t *testing.T) {
-			t.Setenv(EnvAPIKey, fallback)
+			unsetEnv(t, EnvAPIKey)
 			t.Setenv(EnvAPIKeyFile, path)
 			res, err := ResolveEnvAPIKey()
 			require.Error(t, err)
+			assert.NotErrorIs(t, err, ErrAPIKeyBothSet)
 			assert.Contains(t, err.Error(), EnvAPIKeyFile)
 			assert.False(t, res.Set)
-			assert.NotContains(t, err.Error(), fallback)
 		})
 	}
 }
 
-func TestEnsureAPIKey_FileOverridesConfigAndEnv(t *testing.T) {
+// Setting both variables is one error, whatever the file holds or whether it
+// exists. The text names both variables and never a key or file contents.
+func TestResolveEnvAPIKey_BothSetIsAnError(t *testing.T) {
+	const envSecret = "env-secret-value-1234"
+	const fileSecret = "file-secret-value-5678"
+	cases := map[string]string{
+		"readable file":    writeKeyFile(t, fileSecret+"\n"),
+		"missing file":     filepath.Join(t.TempDir(), "missing"),
+		"relative path":    "run/secrets/key",
+		"empty file":       writeKeyFile(t, ""),
+		"directory":        t.TempDir(),
+		"unrelated string": "not-a-path",
+	}
+	for name, path := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Setenv(EnvAPIKey, envSecret)
+			t.Setenv(EnvAPIKeyFile, path)
+			res, err := ResolveEnvAPIKey()
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrAPIKeyBothSet)
+			assert.Contains(t, err.Error(), EnvAPIKey+" ")
+			assert.Contains(t, err.Error(), EnvAPIKeyFile)
+			assert.NotContains(t, err.Error(), envSecret)
+			assert.NotContains(t, err.Error(), fileSecret)
+			assert.NotContains(t, err.Error(), path, "the conflict is reported without opening or naming the file")
+			assert.Equal(t, EnvAPIKeyResult{}, res, "no key is returned from either variable")
+		})
+	}
+}
+
+func TestEnsureAPIKey_BothSetIsAnErrorAndNeverGeneratesAKey(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	t.Setenv(EnvAPIKey, "env-secret-value-1234")
+	t.Setenv(EnvAPIKeyFile, writeKeyFile(t, "file-secret-value-5678\n"))
+
+	for name, cfg := range map[string]*Config{
+		"no key configured": {},
+		"key configured":    {APIKey: "config-key", apiKeyExplicitlySet: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := cfg.APIKey
+			key, generated, _, err := cfg.EnsureAPIKey()
+			require.ErrorIs(t, err, ErrAPIKeyBothSet)
+			assert.Contains(t, err.Error(), EnvAPIKey)
+			assert.Contains(t, err.Error(), EnvAPIKeyFile)
+			assert.Empty(t, key)
+			assert.False(t, generated)
+			assert.Equal(t, before, cfg.APIKey, "no key was generated or replaced")
+		})
+	}
+}
+
+// The load refuses both-set even when the config file carries its own api_key,
+// so no entry point that loads the config can start under an ambiguous setting.
+func TestLoad_BothSetFailsTheLoad(t *testing.T) {
+	for name, body := range map[string]string{
+		"no api_key in the config": `{"listen": "127.0.0.1:8080", "mcpServers": []}`,
+		"api_key in the config":    `{"listen": "127.0.0.1:8080", "api_key": "config-key", "mcpServers": []}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(ResetProcessOverrides)
+			ResetProcessOverrides()
+			path := writeOverrideTestFile(t, body)
+			t.Setenv(EnvAPIKey, "env-secret-value-1234")
+			t.Setenv(EnvAPIKeyFile, writeKeyFile(t, "file-secret-value-5678\n"))
+
+			_, err := LoadFromFile(path)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrAPIKeyBothSet)
+			assert.Contains(t, err.Error(), EnvAPIKey)
+			assert.Contains(t, err.Error(), EnvAPIKeyFile)
+			assert.NotContains(t, err.Error(), "env-secret-value")
+			assert.NotContains(t, err.Error(), "file-secret-value")
+		})
+	}
+}
+
+func TestEnsureAPIKey_FileOverridesConfig(t *testing.T) {
 	t.Cleanup(ResetProcessOverrides)
 	ResetProcessOverrides()
 	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "api_key": "config-key", "mcpServers": []}`)
-	t.Setenv(EnvAPIKey, "env-key")
+	unsetEnv(t, EnvAPIKey)
 	t.Setenv(EnvAPIKeyFile, writeKeyFile(t, "file-key\n"))
 
 	cfg, err := LoadFromFile(path)

@@ -455,7 +455,7 @@ func TestBuildCoreEnvironmentAPIKey(t *testing.T) {
 
 	t.Run("key left in the file when one is named", func(t *testing.T) {
 		t.Setenv("MCPPROXY_API_KEY_FILE", "/run/secrets/mcpproxy_key")
-		t.Setenv("MCPPROXY_API_KEY", "stale")
+		t.Setenv("MCPPROXY_API_KEY", "")
 		env := launcher.buildCoreEnvironment()
 		if n, _ := count(env, "MCPPROXY_API_KEY="); n != 0 {
 			t.Fatalf("the key must not be copied into the core's environment, found %d entries", n)

@@ -1836,7 +1836,7 @@ Many configuration options can be overridden via environment variables:
 |----------------------|--------------|-------------|
 | `MCPPROXY_LISTEN` / `MCPP_LISTEN` | `listen` | Network binding address |
 | `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty values trigger auto-generation; auth remains enabled) |
-| `MCPPROXY_API_KEY_FILE` | `api_key` | Absolute path of a file that holds the API key; wins over `MCPPROXY_API_KEY`; an unusable file stops startup (no fallback, nothing generated) |
+| `MCPPROXY_API_KEY_FILE` | `api_key` | Absolute path of a file that holds the API key; set it or `MCPPROXY_API_KEY`, not both (both set stops startup with an error naming both); an unusable file stops startup (no fallback, nothing generated) |
 | `MCPPROXY_TRUSTED_HOSTS` | `trusted_hosts` | Comma-separated `Host` allowlist for loopback listeners behind a reverse proxy |
 | `MCPPROXY_TRUSTED_PROXIES` | `trusted_proxies` | Comma-separated CIDRs/IPs whose `X-Forwarded-*` headers are honoured |
 | `MCPPROXY_AUDIT_LOG_ENABLED` | `audit_log.enabled` | Turn audit logging on/off |

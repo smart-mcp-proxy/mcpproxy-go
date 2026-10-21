@@ -156,19 +156,22 @@ func main() {
 	// Determine if we're using socket/pipe communication (which doesn't need API key)
 	usingSocketCommunication := isSocketEndpoint(coreURL)
 
+	// Read the API key the environment names (MCPPROXY_API_KEY_FILE or
+	// MCPPROXY_API_KEY), for consistency with the core. Resolve it even when the
+	// tray talks over a socket: the core it launches inherits the same
+	// environment and refuses to start when both variables are set or the file
+	// cannot be used, so the tray stops here with the reason instead of
+	// generating a key that would hide it. The error never contains a key.
+	envKey, envErr := config.ResolveEnvAPIKey()
+	if envErr != nil {
+		logger.Error("Cannot read the API key named by the environment", zap.Error(envErr))
+		_ = logger.Sync()
+		os.Exit(1)
+	}
+
 	// Setup API key for secure communication between tray and core
 	// Skip API key generation for socket/pipe connections as they're trusted by default
 	if trayAPIKey == "" && !usingSocketCommunication {
-		// Check the environment first (for consistency with core behavior):
-		// MCPPROXY_API_KEY_FILE, else MCPPROXY_API_KEY. A named file that cannot
-		// be used stops the tray: the core would refuse to start with it, and a
-		// generated key would hide that.
-		envKey, envErr := config.ResolveEnvAPIKey()
-		if envErr != nil {
-			logger.Error("Cannot read the API key named by the environment", zap.Error(envErr))
-			_ = logger.Sync()
-			os.Exit(1)
-		}
 		if envKey.Set && envKey.Key != "" {
 			trayAPIKey = envKey.Key
 			source := "MCPPROXY_API_KEY environment variable"

@@ -2289,14 +2289,15 @@ func (sc *ServerConfig) IsToolAllowedByConfig(toolName string) bool {
 // Returns the API key, whether it was auto-generated, and the source
 // SECURITY: Empty API keys are never allowed - always auto-generates if empty or missing
 //
-// The error is non-nil only when MCPPROXY_API_KEY_FILE names a file that cannot
+// The error is non-nil only when MCPPROXY_API_KEY and MCPPROXY_API_KEY_FILE are
+// both set (ErrAPIKeyBothSet), or MCPPROXY_API_KEY_FILE names a file that cannot
 // be used. The caller must stop in that case: no key is generated and nothing
 // is saved, so a typo in a secret path can never replace the key the operator
 // meant to run with.
 func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKeySource, err error) {
-	// The environment (MCPPROXY_API_KEY_FILE, else MCPPROXY_API_KEY) overrides
-	// the config file. Use the result's Set/Key to distinguish "not set" from
-	// "set to empty string".
+	// The environment (MCPPROXY_API_KEY_FILE or MCPPROXY_API_KEY, never both)
+	// overrides the config file. Use the result's Set/Key to distinguish
+	// "not set" from "set to empty string".
 	envKey, err := ResolveEnvAPIKey()
 	if err != nil {
 		return "", false, APIKeySourceEnvironment, err
@@ -2965,11 +2966,18 @@ func (c *Config) Validate() error {
 	}
 	c.profileWarnings = profileWarnings
 
+	// Both key variables set is an error whether or not the config file
+	// carries an api_key: one rule, checked on every load.
+	if err := checkEnvAPIKeyConflict(); err != nil {
+		return err
+	}
+
 	// Handle API key generation if not configured
 	// Empty string means authentication disabled, nil means auto-generate
 	if c.APIKey == "" {
-		// Check the environment for an API key (MCPPROXY_API_KEY_FILE, else
-		// MCPPROXY_API_KEY). A file that is named but unusable fails the load:
+		// Check the environment for an API key (MCPPROXY_API_KEY_FILE or
+		// MCPPROXY_API_KEY; both set is an error). A file that is named but
+		// unusable fails the load:
 		// continuing would auto-generate a key and save it.
 		envKey, err := ResolveEnvAPIKey()
 		if err != nil {
