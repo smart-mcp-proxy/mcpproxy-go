@@ -2,6 +2,7 @@ package server
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
@@ -24,6 +25,7 @@ type bundleWiring struct {
 	mu          sync.Mutex
 	nudger      bundleNudger
 	unsubscribe func()
+	observerSeq uint64
 }
 
 // Test seams over the scanner package-level hooks. Production never replaces
@@ -64,4 +66,53 @@ func (s *Server) bundleNudgerOrNil() bundleNudger {
 	s.bundleWiring.mu.Lock()
 	defer s.bundleWiring.mu.Unlock()
 	return s.bundleWiring.nudger
+}
+
+// refreshObserverOwner identifies the Server whose refresh observer is
+// installed, so a Server that shuts down clears the process-wide observer only
+// while it is still the owner (tests build several Servers in one process).
+var (
+	refreshObserverOwner atomic.Uint64
+	refreshObserverSeq   atomic.Uint64
+)
+
+// wireTPABundleLifecycle registers the server-side hooks of the refresh
+// lifecycle: the refresher the config.reloaded listener nudges, the
+// refresh-cycle observer that feeds the schema-v16 telemetry counters, and the
+// activation observer that drives the re-protection sweep.
+func (s *Server) wireTPABundleLifecycle(refresher bundleNudger) {
+	s.setBundleNudger(refresher)
+
+	seq := refreshObserverSeq.Add(1)
+	refreshObserverOwner.Store(seq)
+	rt := s.runtime
+	setBundleRefreshObserver(func(class scanner.RefreshOutcomeClass) {
+		recordBundleRefresh(rt.TelemetryRegistry(), mapRefreshClass(class))
+	})
+
+	unsubscribe := addBundleActivationObserver(s.handleBundleActivation)
+	s.bundleWiring.mu.Lock()
+	s.bundleWiring.unsubscribe = unsubscribe
+	s.bundleWiring.observerSeq = seq
+	s.bundleWiring.mu.Unlock()
+}
+
+// unwireTPABundleLifecycle undoes wireTPABundleLifecycle at Shutdown: it stops
+// activation delivery, clears the refresh observer if this Server still owns
+// it, and cancels and joins every re-protection sweep. Idempotent.
+func (s *Server) unwireTPABundleLifecycle() {
+	s.bundleWiring.mu.Lock()
+	unsubscribe := s.bundleWiring.unsubscribe
+	s.bundleWiring.unsubscribe = nil
+	seq := s.bundleWiring.observerSeq
+	s.bundleWiring.observerSeq = 0
+	s.bundleWiring.mu.Unlock()
+
+	if unsubscribe != nil {
+		unsubscribe()
+	}
+	if seq != 0 && refreshObserverOwner.CompareAndSwap(seq, 0) {
+		setBundleRefreshObserver(nil)
+	}
+	s.stopBundleReprotect()
 }
