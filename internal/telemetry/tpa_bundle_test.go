@@ -17,7 +17,7 @@ import (
 
 // bundleObj wraps the given tpa_scanner members into a minimal payload.
 func bundleObj(members string) []byte {
-	return []byte(`{"anonymous_id":"abc","schema_version":15,"tpa_scanner":{` + members + `}}`)
+	return []byte(`{"anonymous_id":"abc","schema_version":16,"tpa_scanner":{` + members + `}}`)
 }
 
 func u64(v uint64) *uint64 { return &v }
@@ -154,7 +154,7 @@ func TestTPABundleProvider_ZeroCountersStillCarriesObject(t *testing.T) {
 	}
 	js := string(data)
 	for _, want := range []string{
-		`"schema_version":15`,
+		`"schema_version":16`,
 		`"tpa_scanner":{`,
 		`"scans_completed":0`,
 		`"bundle_source":"embedded"`,
