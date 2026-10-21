@@ -5,6 +5,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 )
 
 // Production wiring of the TPA bundle refresh lifecycle (Spec 087 / Spec 101
@@ -30,4 +31,37 @@ type bundleWiring struct {
 var (
 	enableActivationSelfCheck   = scanner.EnableActivationSelfCheck
 	addBundleActivationObserver = scanner.AddBundleActivationObserver
+	setBundleRefreshObserver    = scanner.SetBundleRefreshObserver
+	bundleDoctorWarnings        = scanner.BundleDoctorWarnings
+	recordBundleRefresh         = telemetry.RecordTPABundleRefreshOn
 )
+
+// mapRefreshClass maps the scanner's refresh-cycle class to the telemetry enum
+// (internal/telemetry must not import scanner, so the mapping lives here). An
+// unknown class counts as unchanged rather than inventing a bucket.
+func mapRefreshClass(class scanner.RefreshOutcomeClass) telemetry.TPABundleRefreshClass {
+	switch class {
+	case scanner.RefreshClassActivated:
+		return telemetry.TPABundleRefreshActivated
+	case scanner.RefreshClassRejected:
+		return telemetry.TPABundleRefreshRejected
+	case scanner.RefreshClassUnavailable:
+		return telemetry.TPABundleRefreshUnavailable
+	default:
+		return telemetry.TPABundleRefreshUnchanged
+	}
+}
+
+// setBundleNudger replaces the refresher the config.reloaded listener nudges.
+func (s *Server) setBundleNudger(n bundleNudger) {
+	s.bundleWiring.mu.Lock()
+	defer s.bundleWiring.mu.Unlock()
+	s.bundleWiring.nudger = n
+}
+
+// bundleNudgerOrNil returns the registered nudger, if any.
+func (s *Server) bundleNudgerOrNil() bundleNudger {
+	s.bundleWiring.mu.Lock()
+	defer s.bundleWiring.mu.Unlock()
+	return s.bundleWiring.nudger
+}
