@@ -193,8 +193,12 @@ type Server struct {
 	// bundleReprotectWG tracks the post-activation re-protection sweep
 	// goroutines (see scan_bundle_reprotect.go). Shutdown waits for it before
 	// runtime.Close.
-	//nolint:unused // used once the re-protection sweep lands (T369)
 	bundleReprotectWG sync.WaitGroup
+	// bundleReprotect is the sweep's bookkeeping and test seams; bundleWiring
+	// holds the refresher nudger and the activation-observer unsubscribe (see
+	// tpa_bundle_wiring.go). Both are usable at their zero value.
+	bundleReprotect bundleReprotectState
+	bundleWiring    bundleWiring
 
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
