@@ -3,12 +3,15 @@ package server
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
@@ -662,4 +665,243 @@ func TestReprotect_SettleOfACachedJobNeverStartsAReviewCapture(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("control: an ordinary completed scan of a quarantined server must capture")
 	}
+}
+
+// Sol round 1, finding 2: Shutdown joins the sweep, so the sweep must join the
+// scan worker it started. A worker still running when runtime.Close begins
+// would write jobs and reports into a closing store.
+func TestReprotect_StopJoinsTheScanWorkerTheSweepStarted(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s, _ := newReprotectServer(t, fake, nil, enabledServer("alpha", config.TrustModeManual))
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+	s.infoScanSettleTimeout = time.Minute // the stop, not the settle timeout, ends the wait
+
+	finishCh := make(chan func(), 1)
+	fake.onCachedJob = func(_ string, finish func()) { finishCh <- finish }
+
+	swept := make(chan struct{})
+	go func() { defer close(swept); s.handleBundleActivation(activation(reprotectDigestA)) }()
+	var finish func()
+	select {
+	case finish = <-finishCh:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the cached scan never started")
+	}
+
+	stopped := make(chan struct{})
+	go func() { defer close(stopped); s.stopBundleReprotect() }()
+	select {
+	case <-stopped:
+		t.Fatal("stopBundleReprotect returned while the scan worker was still running")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	finish() // the worker's callbacks return
+	awaitClosed(t, stopped)
+	awaitClosed(t, swept)
+	assert.Empty(t, reprotectMarker(t, s).FullDigest, "an interrupted sweep writes no completion marker")
+}
+
+// Sol round 1, finding 3: a job that is still running when the settle timeout
+// fires has not produced a verdict. It must not count as scanned, must not
+// feed the hit count and must not let the sweep write its completion marker -
+// a process exit before the job finished would otherwise skip the re-protection
+// at the next start.
+func TestReprotect_SettleTimeoutIsAFailureAndWritesNoMarker(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	// The summary is still the in-flight one when the timeout (30ms) fires.
+	fake.cachedScanResult["alpha"] = &scanner.ScanSummary{Status: "scanning"}
+	fake.onCachedJob = func(_ string, finish func()) { time.AfterFunc(150*time.Millisecond, finish) }
+	s, probe := newReprotectServer(t, fake, nil, enabledServer("alpha", config.TrustModeManual))
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+
+	start := time.Now()
+	s.handleBundleActivation(activation(reprotectDigestA))
+
+	assert.GreaterOrEqual(t, time.Since(start), 100*time.Millisecond, "the sweep joins the job it started before it ends")
+	last := probe.lastStatus(t)
+	assert.Equal(t, scanner.ReprotectStateFailed, last.State)
+	assert.Zero(t, last.ServersScanned, "a job that did not settle is not a scanned server")
+	assert.Empty(t, reprotectMarker(t, s).FullDigest, "no completion marker for a sweep with an unsettled job")
+	assert.Len(t, fake.cachedScanAttempts(), 1, "a timeout is not retried into a duplicate job")
+}
+
+// Sol round 1, finding 4: a retry of a partly completed sweep (here: suspended
+// by the kill switch after the first server) resumes the unfinished servers;
+// it does not create a second job and a second activity/hit contribution for a
+// server that already settled under the same digest.
+func TestReprotect_ResumedSweepDoesNotRescanServersThatAlreadySettled(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	on := true
+	s, _ := newReprotectServer(t, fake, &config.SecurityConfig{AutoBaselineScan: &on},
+		enabledServer("alpha", config.TrustModeManual),
+		enabledServer("bravo", config.TrustModeManual))
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+	seedToolRecords(t, s, "bravo", approvedOnly("b1"))
+	s.bundleReprotect.activeDigest = func() string { return reprotectDigestA }
+	fake.onCachedScan = func(server string) {
+		if server == "alpha" {
+			on = false // automatic scanning is switched off before bravo
+		}
+	}
+
+	s.handleBundleActivation(activation(reprotectDigestA))
+	require.Equal(t, []string{"alpha@" + reprotectDigestA}, fake.cachedScans(), "precondition: only alpha ran before the switch went off")
+
+	on = true
+	s.resumeSuspendedReprotect()
+
+	assert.Equal(t, []string{"alpha@" + reprotectDigestA, "bravo@" + reprotectDigestA}, fake.cachedScans(),
+		"the resumed sweep scans bravo only; alpha already has its job for this digest")
+	assert.Equal(t, reprotectDigestA, reprotectMarker(t, s).FullDigest)
+}
+
+func TestReprotect_RetryAfterAFailureDoesNotRescanTheServersThatSucceeded(t *testing.T) {
+	boom := errors.New("scanner unavailable")
+	fake := newFakeSecurityScanner()
+	fake.cachedScanErrs["bravo"] = []error{boom, boom, boom}
+	fake.cachedScanResult["alpha"] = &scanner.ScanSummary{Status: "dangerous"}
+	s, probe := newReprotectServer(t, fake, nil,
+		enabledServer("alpha", config.TrustModeManual),
+		enabledServer("bravo", config.TrustModeManual))
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+	seedToolRecords(t, s, "bravo", approvedOnly("b1"))
+
+	s.handleBundleActivation(activation(reprotectDigestA))
+	require.Equal(t, []string{"alpha@" + reprotectDigestA}, fake.cachedScans())
+	require.Equal(t, 1, probe.hitCount())
+
+	s.handleBundleActivation(activation(reprotectDigestA)) // bravo's error queue is drained
+
+	assert.Equal(t, []string{"alpha@" + reprotectDigestA, "bravo@" + reprotectDigestA}, fake.cachedScans(), "alpha is not scanned a second time")
+	assert.Equal(t, 1, probe.hitCount(), "alpha's hit is counted once, not once per attempt")
+	last := probe.lastStatus(t)
+	assert.Equal(t, 2, last.ServersScanned, "the completed sweep still reports every server it covered")
+	assert.Equal(t, 1, last.ServersWithHits)
+	assert.Equal(t, reprotectDigestA, reprotectMarker(t, s).FullDigest)
+
+	// A later activation of the same digest after another bundle is a new
+	// activation (a rollback), so the remembered scans must not leak into it.
+	s.handleBundleActivation(activation(reprotectDigestB))
+	s.handleBundleActivation(activation(reprotectDigestA))
+	assert.Equal(t, []string{
+		"alpha@" + reprotectDigestA, "bravo@" + reprotectDigestA,
+		"alpha@" + reprotectDigestB, "bravo@" + reprotectDigestB,
+		"alpha@" + reprotectDigestA, "bravo@" + reprotectDigestA,
+	}, fake.cachedScans())
+}
+
+// Sol round 1, finding 5: the sweep read auto_baseline_scan, then queued behind
+// another informational scan on infoScanRunMu. The switch is read live at every
+// decision point and the last one is when the lock is acquired.
+func TestReprotect_KillSwitchIsRecheckedAfterWaitingForTheScanQueue(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s, probe := newReprotectServer(t, fake, nil, enabledServer("alpha", config.TrustModeManual))
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+
+	s.infoScanRunMu.Lock() // another informational scan holds the queue
+	swept := make(chan struct{})
+	go func() { defer close(swept); s.handleBundleActivation(activation(reprotectDigestA)) }()
+	require.Eventually(t, func() bool {
+		probe.mu.Lock()
+		defer probe.mu.Unlock()
+		return len(probe.statuses) > 0
+	}, 5*time.Second, time.Millisecond, "the sweep must be under way")
+	time.Sleep(150 * time.Millisecond) // past its own checks, blocked on the queue
+
+	t.Setenv(config.EnvAutoBaselineScan, "false") // the operator switches automatic scanning off
+	s.infoScanRunMu.Unlock()
+	awaitClosed(t, swept)
+
+	assert.Empty(t, fake.cachedScanAttempts(), "a scan switched off while queued must not start")
+	assert.Equal(t, scanner.ReprotectStateSuspended, probe.lastStatus(t).State)
+	assert.Empty(t, reprotectMarker(t, s).FullDigest)
+}
+
+// Sol round 1, finding 6: the startup catch-up reads the digest, then pauses.
+// A real activation (sequenced) of another bundle lands meanwhile. The catch-up
+// carries no sequence, so it used to slip past the staleness check, become the
+// "latest" activation and abandon the newer bundle's sweep.
+func TestReprotect_StaleCatchUpDoesNotSupersedeANewerActivation(t *testing.T) {
+	fake := newFakeSecurityScanner()
+	s, _ := newReprotectServer(t, fake, nil, enabledServer("alpha", config.TrustModeManual))
+	seedToolRecords(t, s, "alpha", approvedOnly("a1"))
+	s.infoScanSweepDelay = 0
+
+	var once sync.Once
+	s.bundleReprotect.activeDigest = func() string {
+		once.Do(func() {
+			newer := activation(reprotectDigestB)
+			newer.Seq = 5
+			s.handleBundleActivation(newer) // bundle B activates while the catch-up is paused
+		})
+		return reprotectDigestA // what the catch-up read before B activated
+	}
+
+	s.runBundleReprotectCatchUp(context.Background())
+
+	assert.Equal(t, []string{"alpha@" + reprotectDigestB}, fake.cachedScans(),
+		"the stale catch-up must not start a sweep labelled with the superseded digest")
+	assert.Equal(t, reprotectDigestB, reprotectMarker(t, s).FullDigest, "the marker records the bundle that serves")
+	s.bundleReprotect.mu.Lock()
+	defer s.bundleReprotect.mu.Unlock()
+	assert.Equal(t, reprotectDigestB, s.bundleReprotect.latest)
+}
+
+// Sol round 1, wiring finding: the startup catch-up must run wherever a Runtime
+// exists, stdio included. There is no scanner Service on stdio, so only leg (i)
+// (the held-evidence refresh) runs and leg (ii) stays inert.
+func TestReprotect_StartupCatchUpRunsOnTheStdioTransport(t *testing.T) {
+	// No listen address: stdio. The held server is part of the configuration so
+	// startup reconciliation keeps it (a quarantined, disabled one: leg (i)
+	// covers every configured server with held records).
+	t.Setenv("MCPPROXY_DISABLE_OAUTH", "true")
+	dataDir := filepath.Join(t.TempDir(), "data")
+	require.NoError(t, os.MkdirAll(dataDir, 0700))
+	quarantineOn := true
+	srv, err := NewServer(&config.Config{
+		DataDir:           dataDir,
+		APIKey:            "test-api-key-stdio-catchup",
+		ToolResponseLimit: 10000,
+		QuarantineEnabled: &quarantineOn,
+		Servers:           []*config.ServerConfig{{Name: "held", Quarantined: true, Protocol: "stdio", Command: "true"}},
+	}, zap.NewNop())
+	require.NoError(t, err)
+	defer func() { _ = srv.Shutdown() }()
+	require.Nil(t, srv.securityScannerSvc(), "precondition: stdio has no scanner service")
+	srv.infoScanSweepDelay = 0
+	srv.bundleReprotect.activeDigest = func() string { return reprotectDigestA }
+	refreshed := make(chan string, 4)
+	srv.bundleReprotect.refreshHeld = func(server string) error {
+		refreshed <- server
+		return nil
+	}
+	sm := srv.runtime.StorageManager()
+	require.NoError(t, sm.SaveToolApproval(&storage.ToolApprovalRecord{
+		ServerName: "held", ToolName: "h1", Status: storage.ToolApprovalStatusPending,
+		CurrentHash: "h", CurrentDescription: "Does h1.", CurrentSchema: `{"type":"object"}`,
+	}))
+
+	// An EOF on stdin ends the stdio transport right after its startup.
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	require.NoError(t, w.Close())
+	oldStdin := os.Stdin
+	os.Stdin = r
+	defer func() { os.Stdin = oldStdin; _ = r.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	go func() { defer close(started); _ = srv.Start(ctx) }()
+
+	select {
+	case name := <-refreshed:
+		assert.Equal(t, "held", name, "leg (i) refreshes the held evidence at startup on stdio")
+	case <-time.After(15 * time.Second):
+		t.Fatal("the startup catch-up never ran on the stdio transport")
+	}
+	cancel()
+	awaitClosed(t, started)
+	assert.Empty(t, reprotectMarker(t, srv).FullDigest, "leg (ii) is inert without a scanner: no completion marker")
 }

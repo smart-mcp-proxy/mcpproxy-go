@@ -57,6 +57,13 @@ type bundleReprotectState struct {
 	// suspended is true while the last sweep ended suspended by the
 	// auto_baseline_scan kill switch; resumeSuspendedReprotect clears it.
 	suspended bool
+	// done remembers, for the digest in doneDigest, which servers already have
+	// a settled cached scan (and whether it was a hit), so a retry of a partly
+	// failed or suspended sweep resumes the unfinished servers instead of
+	// creating a second job for every server that already succeeded. It is
+	// reset whenever a sweep starts for a different digest.
+	doneDigest string
+	done       map[string]reprotectOutcome
 	// runMu serializes sweeps.
 	runMu sync.Mutex
 
@@ -175,7 +182,17 @@ func (s *Server) runBundleReprotectCatchUp(ctx context.Context) {
 	if state.FullDigest == digest {
 		return
 	}
-	s.runBundleReprotect(sweepCtx, scanner.BundleActivation{Digest: digest, ActivatedAt: time.Now()})
+	s.runBundleReprotectFrom(sweepCtx, scanner.BundleActivation{Digest: digest, ActivatedAt: time.Now()}, true)
+}
+
+// startStartupReprotect launches the tracked startup catch-up. Both transports
+// call it: the construction-time activation predates the activation observer,
+// so without it a restart that serves a different bundle than the previous run
+// would leave held tools carrying the old bundle's verdict. On stdio there is
+// no scanner Service, so only leg (i), the held-evidence refresh, runs there
+// and leg (ii) stays inert.
+func (s *Server) startStartupReprotect(ctx context.Context) {
+	go s.runBundleReprotectCatchUp(ctx)
 }
 
 func (s *Server) activeBundleDigest() string {
@@ -189,11 +206,30 @@ func (s *Server) activeBundleDigest() string {
 // sweep's starts nothing; sweeps are serialized, and one whose digest was
 // superseded by a newer activation stops between servers.
 func (s *Server) runBundleReprotect(ctx context.Context, act scanner.BundleActivation) {
+	s.runBundleReprotectFrom(ctx, act, false)
+}
+
+// runBundleReprotectFrom is runBundleReprotect with the origin of the event.
+// A synthetic event (the startup catch-up and the kill-switch resume) carries
+// no dispatch sequence and read its digest some time before it gets here, so
+// it must never supersede a real activation: it is dropped unless its digest
+// is still the one serving and no newer sequenced activation names another.
+func (s *Server) runBundleReprotectFrom(ctx context.Context, act scanner.BundleActivation, synthetic bool) {
 	if act.Digest == "" {
 		return
 	}
+	serving := ""
+	if synthetic {
+		serving = s.activeBundleDigest()
+	}
 	st := &s.bundleReprotect
 	st.mu.Lock()
+	if synthetic {
+		if serving != act.Digest || (st.latestSeq != 0 && st.latest != act.Digest) {
+			st.mu.Unlock()
+			return
+		}
+	}
 	if act.Seq != 0 {
 		if act.Seq < st.latestSeq {
 			st.mu.Unlock()
@@ -207,6 +243,9 @@ func (s *Server) runBundleReprotect(ctx context.Context, act scanner.BundleActiv
 		return
 	}
 	st.last = act.Digest
+	if st.doneDigest != act.Digest {
+		st.doneDigest, st.done = act.Digest, nil
+	}
 	st.mu.Unlock()
 
 	st.runMu.Lock()
@@ -255,7 +294,7 @@ func (s *Server) resumeSuspendedReprotect() {
 		return
 	}
 	defer end()
-	s.runBundleReprotect(ctx, scanner.BundleActivation{Digest: digest, ActivatedAt: time.Now()})
+	s.runBundleReprotectFrom(ctx, scanner.BundleActivation{Digest: digest, ActivatedAt: time.Now()}, true)
 }
 
 // reprotectSweep walks every configured server once: leg (i) for servers with
@@ -321,6 +360,17 @@ func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivatio
 		if !hasApproved || sc.Quarantined || scanSvc == nil {
 			continue
 		}
+		// A retry of a partly failed or suspended sweep resumes the servers
+		// that have no settled scan for this digest yet; it does not scan the
+		// ones that already succeeded a second time (one job and one hit
+		// contribution per server and digest).
+		if prior, ok := s.reprotectSettledScan(act.Digest, sc.Name); ok {
+			scanned++
+			if prior.hit {
+				hits++
+			}
+			continue
+		}
 		if !s.informationalScansEnabled() {
 			suspended = true
 			continue
@@ -342,6 +392,7 @@ func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivatio
 		case reprotectScanned:
 			scanned++
 			scannedAny = true
+			s.reprotectRememberScan(act.Digest, sc.Name, outcome)
 			if outcome.hit {
 				hits++
 				s.reprotectRecordHit()
@@ -416,6 +467,19 @@ type reprotectOutcome struct {
 	hit  bool
 }
 
+// Why a cached scan ended without a usable verdict (reprotectScanServer maps
+// each to an outcome).
+var (
+	// errReprotectSuspended: the auto_baseline_scan kill switch was found off
+	// at the last decision point before the job would have started.
+	errReprotectSuspended = errors.New("automatic scans were switched off before the cached scan started")
+	// errReprotectSettleTimeout: the job did not finish within the settle
+	// timeout. It was cancelled and joined; it is a failure, never a success.
+	errReprotectSettleTimeout = errors.New("the cached scan did not finish in time")
+	// errReprotectNoVerdict: the job finished but left no terminal summary.
+	errReprotectNoVerdict = errors.New("the cached scan finished without a terminal verdict")
+)
+
 // reprotectScanServer runs one server's cached scan with its retry rules: a
 // busy answer (ErrScanInProgress) re-arms without spending a failure, a server
 // with nothing to scan is skipped, any other error spends one of the
@@ -433,10 +497,17 @@ func (s *Server) reprotectScanServer(ctx context.Context, scanSvc securityScanne
 		summary, err := s.startReprotectScan(ctx, scanSvc, name, digest)
 		switch {
 		case err == nil:
-			if summary != nil && summary.Status == "failed" {
+			if summary.Status == "failed" {
 				return reprotectOutcome{kind: reprotectFailed}
 			}
-			return reprotectOutcome{kind: reprotectScanned, hit: summary != nil && summary.Status == "dangerous"}
+			return reprotectOutcome{kind: reprotectScanned, hit: summary.Status == "dangerous"}
+		case errors.Is(err, errReprotectSuspended):
+			return reprotectOutcome{kind: reprotectSuspended}
+		case errors.Is(err, errReprotectSettleTimeout), errors.Is(err, errReprotectNoVerdict):
+			// Not retried: the job did run (or ran too long), so a second one
+			// would only duplicate it. The sweep stays incomplete.
+			s.logger.Debug("bundle re-protection scan did not settle", zap.String("server", name), zap.Error(err))
+			return reprotectOutcome{kind: reprotectFailed}
 		case errors.Is(err, scanner.ErrNoCachedContracts), errors.Is(err, scanner.ErrServerQuarantined):
 			return reprotectOutcome{kind: reprotectSkipped}
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded), ctx.Err() != nil:
@@ -460,13 +531,22 @@ func (s *Server) reprotectScanServer(ctx context.Context, scanSvc securityScanne
 }
 
 // startReprotectScan starts one cached scan under infoScanRunMu and waits for
-// its settle, returning the settled summary (nil when none was published in
-// time). The wait only serializes the queue; a timeout is not an error.
+// THAT job to settle, returning its terminal summary. The job runs under a
+// context derived from the sweep's, so a stopping sweep ends it, and it is
+// always joined before this returns: no scan worker outlives the sweep that
+// started it (Shutdown joins the sweep, hence the worker, before the store
+// closes). A job that does not settle in time, or settles without a terminal
+// verdict, is an error - never a success.
 func (s *Server) startReprotectScan(ctx context.Context, scanSvc securityScannerService, name, digest string) (*scanner.ScanSummary, error) {
 	s.infoScanRunMu.Lock()
 	defer s.infoScanRunMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	// The kill switch is read live at every decision point, and this is the
+	// last one: the sweep may have queued behind another scan for minutes.
+	if !s.informationalScansEnabled() {
+		return nil, errReprotectSuspended
 	}
 	// The sweep listed its servers up front and may have waited minutes for
 	// this lock, so quarantine is judged here, at the moment the scan starts:
@@ -474,29 +554,89 @@ func (s *Server) startReprotectScan(ctx context.Context, scanSvc securityScanner
 	if sc := s.findServerConfig(name); sc == nil || sc.Quarantined {
 		return nil, scanner.ErrServerQuarantined
 	}
-	if _, err := scanSvc.StartScanFromCachedContracts(ctx, name, digest); err != nil {
+	scanCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	job, err := scanSvc.StartScanFromCachedContracts(scanCtx, name, digest)
+	if err != nil {
 		return nil, err
 	}
-	timeout := s.infoScanSettleTimeout
-	summary := scanSvc.GetScanSummary(ctx, name)
-	if timeout <= 0 {
-		return summary, nil
+
+	var timeoutC <-chan time.Time
+	if timeout := s.infoScanSettleTimeout; timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		timeoutC = timer.C
 	}
-	deadline := time.NewTimer(timeout)
-	defer deadline.Stop()
-	ticker := time.NewTicker(informationalScanPollInterval)
-	defer ticker.Stop()
-	for summary == nil || !isTerminalScanStatus(summary.Status) {
+	if done := job.Done(); done != nil {
 		select {
+		case <-done:
 		case <-ctx.Done():
-			return summary, nil
-		case <-deadline.C:
-			return summary, nil
-		case <-ticker.C:
-			summary = scanSvc.GetScanSummary(ctx, name)
+			cancel()
+			<-done
+			return nil, ctx.Err()
+		case <-timeoutC:
+			cancel()
+			<-done
+			return nil, errReprotectSettleTimeout
 		}
+	} else if err := s.pollReprotectSettle(ctx, scanSvc, name, timeoutC); err != nil {
+		// A scan service that hands back no completion handle can only be
+		// polled; it is not joinable, which the real service always is.
+		return nil, err
+	}
+	summary := scanSvc.GetScanSummary(ctx, name)
+	if summary == nil || !isTerminalScanStatus(summary.Status) {
+		return nil, errReprotectNoVerdict
 	}
 	return summary, nil
+}
+
+// pollReprotectSettle waits until the server's scan summary is terminal, the
+// context ends or the timeout fires.
+func (s *Server) pollReprotectSettle(ctx context.Context, scanSvc securityScannerService, name string, timeoutC <-chan time.Time) error {
+	ticker := time.NewTicker(informationalScanPollInterval)
+	defer ticker.Stop()
+	for {
+		if summary := scanSvc.GetScanSummary(ctx, name); summary != nil && isTerminalScanStatus(summary.Status) {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-timeoutC:
+			return errReprotectSettleTimeout
+		case <-ticker.C:
+		}
+	}
+}
+
+// reprotectSettledScan reports the settled cached-scan outcome already recorded
+// for server under digest, if any.
+func (s *Server) reprotectSettledScan(digest, server string) (reprotectOutcome, bool) {
+	st := &s.bundleReprotect
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.doneDigest != digest {
+		return reprotectOutcome{}, false
+	}
+	out, ok := st.done[server]
+	return out, ok
+}
+
+// reprotectRememberScan records server's settled cached scan under digest. A
+// sweep whose digest is no longer the one being tracked (a newer activation
+// reset it) records nothing.
+func (s *Server) reprotectRememberScan(digest, server string, out reprotectOutcome) {
+	st := &s.bundleReprotect
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.doneDigest != digest {
+		return
+	}
+	if st.done == nil {
+		st.done = make(map[string]reprotectOutcome)
+	}
+	st.done[server] = out
 }
 
 func (s *Server) reprotectRefreshHeld(server string) error {

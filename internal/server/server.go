@@ -1357,6 +1357,15 @@ func (s *Server) Start(ctx context.Context) error {
 			configPath,
 		)
 
+		// Spec 101 FR-019 (B17): the startup catch-up runs on stdio too. The
+		// construction-time bundle activation predates the activation observer
+		// and a stdio process has no HTTP startup path, so without this a
+		// restart that serves a different bundle than the last run would leave
+		// pending/changed tools carrying the old bundle's verdict. There is no
+		// scanner Service here: leg (i), the held-evidence refresh, runs and
+		// leg (ii), the cached informational scan, stays inert.
+		s.startStartupReprotect(ctx)
+
 		// Serve using stdio (standard MCP transport).
 		//
 		// Issue #1148: stdio has no HTTP middleware, so it used to run with NO
@@ -3487,7 +3496,7 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		// not the one the last completed sweep covered (construction-time
 		// activation, a crash mid-sweep, a binary upgrade). After the scanner
 		// is published, because leg (ii) needs it.
-		go s.runBundleReprotectCatchUp(ctx)
+		s.startStartupReprotect(ctx)
 	}
 	// Wire server edition multi-user OAuth (no-op in personal edition)
 	wireServerEditionOAuth(s, httpAPIServer)
