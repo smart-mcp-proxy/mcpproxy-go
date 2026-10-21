@@ -2,9 +2,14 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
+	"net/url"
+	"syscall"
 	"time"
+
+	"go.uber.org/zap"
 )
 
 // The fetch adapter (Spec 087 FR-003/FR-009 to FR-015, Spec 101 US3 tasks
@@ -48,7 +53,14 @@ type fetchSettings struct {
 	Client   *http.Client
 	Resolver FetchResolver
 	Now      func() time.Time
+	// Log, when set, receives host-only diagnostics (redirect hops by host).
+	Log *zap.Logger
 }
+
+// fetchOutcomeCandidate is the internal outcome of an attempt that downloaded a
+// pair to offer to the pipeline. It is not part of the closed status
+// vocabulary: the refresher turns it into activated, unchanged or rejected.
+const fetchOutcomeCandidate = "candidate"
 
 // fetchResult is the outcome of one fetch attempt. Outcome and Reason use the
 // RefreshOutcome* and RefreshReason* vocabularies; Candidate is set only when
@@ -66,6 +78,9 @@ type fetchResult struct {
 	// RetryAt, when non-zero, is the earliest time the next attempt may run
 	// (rate limiting); the refresher caps it at 24h.
 	RetryAt time.Time
+	// Detail is a short host-only note for logs; it never carries a URL, a
+	// path or a query (B12).
+	Detail string
 }
 
 // fetchCandidate performs one fetch attempt against the configured channel and
@@ -78,6 +93,30 @@ type fetchResult struct {
 func fetchCandidate(ctx context.Context, settings fetchSettings) fetchResult {
 	_, _ = ctx, settings
 	return fetchResult{Outcome: RefreshOutcomeDisabled, Reason: RefreshReasonFetchOff}
+}
+
+// parseFetchURL validates the configured channel URL (B1, B11): https, or http
+// only for a loopback literal or localhost; a host; no userinfo, query or
+// fragment. The error never echoes the URL.
+//
+// STUB (Spec 101 US3 wave 1): always an error until T331.
+//
+//nolint:unused // called by fetchCandidate once T331 lands
+func parseFetchURL(raw string) (*url.URL, error) {
+	_ = raw
+	return nil, errors.New("not implemented")
+}
+
+// isReleasesPath reports whether path selects the GitHub Releases channel
+// shape (/repos/<owner>/<repo>/releases/latest); any other path is a direct
+// URL (B4). Detection looks at the path only, so httptest can exercise both.
+//
+// STUB (Spec 101 US3 wave 1): always false until T331.
+//
+//nolint:unused // called by fetchCandidate once T331 lands
+func isReleasesPath(path string) bool {
+	_ = path
+	return false
 }
 
 // egressClass classifies the address the configured host resolved to, for the
@@ -109,4 +148,16 @@ const (
 func egressAllowed(ip net.IP, configuredClass egressClass) bool {
 	_, _ = ip, configuredClass
 	return true
+}
+
+// egressDialControl returns the net.Dialer.Control function enforcing the
+// egress predicate at connect time, after name resolution, so DNS rebinding
+// cannot slip an inward address past the application-layer check (B11).
+//
+// STUB (Spec 101 US3 wave 1): permits everything until T331.
+//
+//nolint:unused // installed on the built transport once T331 lands
+func egressDialControl(class egressClass) func(network, address string, c syscall.RawConn) error {
+	_ = class
+	return nil
 }

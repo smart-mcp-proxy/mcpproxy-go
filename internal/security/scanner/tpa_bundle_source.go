@@ -154,6 +154,11 @@ func ConfigureBundle(path string, logger *zap.Logger) {
 	configureWithPolicy(policyFor(&config.SecurityConfig{TPABundlePath: path}, path), logger)
 }
 
+// bundleClock is the clock of the bundle runtime and of the read-time status
+// fields (staleness, last_checked_at). It is a variable only so tests can
+// inject a fixed time.
+var bundleClock = time.Now
+
 // BundleStatus returns a snapshot of the active corpus for the operator-facing
 // surfaces (REST /api/v1/security/overview, `mcpproxy security overview`).
 // It lazily installs the embedded default so a caller that never configured a

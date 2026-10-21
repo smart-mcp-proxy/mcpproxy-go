@@ -209,6 +209,25 @@ func runOffered(c Candidate, logger *zap.Logger) BundleInfo {
 	return statusFromSnapshot()
 }
 
+// offerResult is what an offered (fetch) run decided about its candidate.
+type offerResult struct {
+	// Outcome is RefreshOutcomeActivated, RefreshOutcomeUnchanged or
+	// RefreshOutcomeRejected.
+	Outcome string
+	// Rejection is the refusal when Outcome is RefreshOutcomeRejected.
+	Rejection *BundleRejection
+}
+
+// offerCandidate is runOffered plus the decision, for the refresher.
+//
+// STUB (Spec 101 US3 wave 1): delegates to the runOffered stub, so the decision
+// is never reported, until T330.
+//
+//nolint:unused // called by the refresher's fetch leg once T331 lands
+func offerCandidate(c Candidate, logger *zap.Logger) (BundleInfo, offerResult) {
+	return runOffered(c, logger), offerResult{}
+}
+
 // BundleCoverageDegraded reports whether the active bundle demotes the install to
 // degraded coverage, and why. The scan-mode admission gates consult it: while it
 // is true auto-approval is suspended and changes route to human review.

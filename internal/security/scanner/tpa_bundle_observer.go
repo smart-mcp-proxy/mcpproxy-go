@@ -46,6 +46,14 @@ func SetBundleRefreshObserver(fn func(RefreshOutcomeClass)) {
 	_ = fn
 }
 
+// notifyRefreshObserver hands one cycle's class to the registered refresh
+// observer, if any.
+//
+// STUB (Spec 101 US3 wave 1): never delivers until T331.
+//
+//nolint:unused // called by the refresher once T331 lands
+func notifyRefreshObserver(class RefreshOutcomeClass) { _ = class }
+
 // drainBundleObserversForTest blocks until every in-flight activation-observer
 // dispatch has returned, so a test can assert on its effects.
 //
