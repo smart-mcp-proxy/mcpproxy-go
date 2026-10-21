@@ -2474,9 +2474,22 @@ func bundleReprotectText(bundle map[string]interface{}) string {
 		text += fmt.Sprintf(", %d of %d servers matched the active corpus", int(hits), int(scanned))
 	}
 	if done, _ := rp["last_completed_at"].(string); done != "" {
-		text += ", last completed " + formatTimestamp(done)
+		text += ", last completed " + formatLocalTimestamp(done)
 	}
 	return text
+}
+
+// formatLocalTimestamp is formatTimestamp rendered in the host's local zone.
+// The daemon stamps the re-protection completion in UTC while the cycle
+// timestamps carry the host's local offset, so the human line converts it to
+// keep every time in the block on the same clock.
+func formatLocalTimestamp(ts string) string {
+	for _, layout := range []string{time.RFC3339, time.RFC3339Nano} {
+		if t, err := time.Parse(layout, ts); err == nil {
+			return t.Local().Format("2006-01-02 15:04:05")
+		}
+	}
+	return ts
 }
 
 func secFormatInt(m map[string]interface{}, key string) string {

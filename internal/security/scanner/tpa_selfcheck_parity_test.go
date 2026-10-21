@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -277,7 +278,14 @@ func TestSelfCheckCorpusProvenance(t *testing.T) {
 
 // TestSelfCheckGateCLIDifferential is the optional guard (d): the real CI gate
 // binary and the in-process self-check agree on the embedded default bundle
-// over the embedded corpus. Skipped when the go tool is not on PATH.
+// over the embedded corpus. Skipped only with -short or when the go tool is not
+// on PATH.
+//
+// The gate is BUILT into a temp dir and executed directly: `go run` collapses
+// the program's exit code to 1, which would make a legitimate gate refusal
+// (exitGateBreach, 6) indistinguishable from a build or runtime failure. Only
+// exit 0 (gate passed) and 6 (gate refused) are decisions; a build error, a
+// timeout or any other exit fails the test rather than skipping it.
 func TestSelfCheckGateCLIDifferential(t *testing.T) {
 	if testing.Short() {
 		t.Skip("differential guard compiles cmd/scan-eval; skipped with -short")
@@ -288,20 +296,82 @@ func TestSelfCheckGateCLIDifferential(t *testing.T) {
 	}
 	corpusPath, err := filepath.Abs(selfCheckCorpusRel)
 	require.NoError(t, err)
+	repoRoot := filepath.Join("..", "..", "..")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, goBin, "run", "./cmd/scan-eval", "--gate", "--corpus", corpusPath)
-	cmd.Dir = filepath.Join("..", "..", "..")
-	out, runErr := cmd.CombinedOutput()
-	gatePassed := runErr == nil
-	var exitErr *exec.ExitError
-	if runErr != nil && (!errors.As(runErr, &exitErr) || exitErr.ExitCode() != gateBreachExitCode) {
-		t.Skipf("could not run the gate (%v): %s", runErr, out)
+
+	binName := "scan-eval"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
 	}
+	binPath := filepath.Join(t.TempDir(), binName)
+	build := exec.CommandContext(ctx, goBin, "build", "-o", binPath, "./cmd/scan-eval")
+	build.Dir = repoRoot
+	buildOut, buildErr := build.CombinedOutput()
+	require.NoError(t, buildErr, "building cmd/scan-eval failed:\n%s", buildOut)
+
+	gate := exec.CommandContext(ctx, binPath, gateArgs(corpusPath)...)
+	gate.Dir = repoRoot
+	out, runErr := gate.CombinedOutput()
+	gatePassed, decided := gateDecision(runErr)
+	require.True(t, decided, "scan-eval --gate did not reach a decision (want exit 0 or %d): %v\n%s", gateBreachExitCode, runErr, out)
 
 	check, _, err := loadEmbeddedBundleCheck()
 	require.NoError(t, err)
 	selfErr := activationSelfCheck(check)
 	assert.Equal(t, gatePassed, selfErr == nil, "gate passed=%v but self-check err=%v\ngate output:\n%s", gatePassed, selfErr, out)
+}
+
+// gateArgs is the scan-eval invocation the differential runs.
+func gateArgs(corpusPath string) []string {
+	return []string{"--gate", "--corpus", corpusPath}
+}
+
+// gateDecision classifies the result of running the gate binary: passed is true
+// for exit 0; decided is true only for exit 0 (pass) or gateBreachExitCode
+// (refusal). Anything else (start failure, timeout kill, another exit code) is
+// not a decision.
+func gateDecision(runErr error) (passed, decided bool) {
+	if runErr == nil {
+		return true, true
+	}
+	var exitErr *exec.ExitError
+	if errors.As(runErr, &exitErr) && exitErr.ExitCode() == gateBreachExitCode {
+		return false, true
+	}
+	return false, false
+}
+
+// TestSelfCheckGateDecisionClassification pins gateDecision: a refusal (6) is a
+// decision, any other non-zero exit is not.
+func TestSelfCheckGateDecisionClassification(t *testing.T) {
+	run := func(code int) error {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestSelfCheckGateExitHelper$")
+		cmd.Env = append(os.Environ(), "SELFCHECK_GATE_EXIT_HELPER="+strconv.Itoa(code))
+		return cmd.Run()
+	}
+	passed, decided := gateDecision(run(0))
+	assert.True(t, passed)
+	assert.True(t, decided)
+	passed, decided = gateDecision(run(gateBreachExitCode))
+	assert.False(t, passed)
+	assert.True(t, decided, "exit 6 is a legitimate gate refusal")
+	for _, code := range []int{1, 2, 3} {
+		passed, decided = gateDecision(run(code))
+		assert.False(t, passed)
+		assert.False(t, decided, "exit %d is not a gate decision", code)
+	}
+	_, decided = gateDecision(errors.New("start failure"))
+	assert.False(t, decided)
+}
+
+// TestSelfCheckGateExitHelper is the child process of the classification test.
+func TestSelfCheckGateExitHelper(t *testing.T) {
+	v := os.Getenv("SELFCHECK_GATE_EXIT_HELPER")
+	if v == "" {
+		t.Skip("helper process only")
+	}
+	code, _ := strconv.Atoi(v)
+	os.Exit(code)
 }
