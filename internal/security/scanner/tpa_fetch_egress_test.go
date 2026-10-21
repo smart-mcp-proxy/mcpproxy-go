@@ -520,9 +520,9 @@ func productionTransport(t *testing.T, proxy func(*http.Request) (*url.URL, erro
 	return a.buildTransport()
 }
 
-func dialOK(t *testing.T, tr *http.Transport, addr string) bool {
+func dialOKCtx(t *testing.T, parent context.Context, tr *http.Transport, addr string) bool {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	c, err := tr.DialContext(ctx, "tcp", addr)
 	if err != nil {
@@ -548,19 +548,20 @@ func TestProductionTransport_DialControlSurvivesAProxyForTheConfiguredURL(t *tes
 		return nil, nil // NO_PROXY: dialed directly
 	})
 
-	req, _ := http.NewRequest(http.MethodGet, "https://mirror.example/x", nil)
+	ctx := fetchHopContext(context.Background())
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://mirror.example/x", nil)
 	pu, err := tr.Proxy(req)
 	require.NoError(t, err)
 	require.NotNil(t, pu)
 
-	assert.True(t, dialOK(t, tr, proxyAddr), "the operator's proxy is dialed even though it is a private/loopback address")
-	assert.False(t, dialOK(t, tr, directInward), "a direct dial to an inward address is refused although the configured URL is proxied")
+	assert.True(t, dialOKCtx(t, ctx, tr, proxyAddr), "the operator's proxy is dialed even though it is a private/loopback address")
+	assert.False(t, dialOKCtx(t, ctx, tr, directInward), "a direct dial to an inward address is refused although the configured URL is proxied")
 
 	// DNS rebinding: a NAME the application-layer check may have seen as public
 	// resolves inward at dial time. The control sees the address actually dialed.
 	_, port, err := net.SplitHostPort(directInward)
 	require.NoError(t, err)
-	assert.False(t, dialOK(t, tr, net.JoinHostPort("localhost", port)), "a name that resolves to loopback is refused at connect time")
+	assert.False(t, dialOKCtx(t, ctx, tr, net.JoinHostPort("localhost", port)), "a name that resolves to loopback is refused at connect time")
 }
 
 // The reverse: an unproxied configured host with a proxied asset host must not
@@ -576,10 +577,11 @@ func TestProductionTransport_ProxiedAssetHostMayUseAPrivateProxy(t *testing.T) {
 		return nil, nil // the configured host is NO_PROXY
 	})
 
-	assetReq, _ := http.NewRequest(http.MethodGet, "https://assets.example/y", nil)
+	ctx := fetchHopContext(context.Background())
+	assetReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, "https://assets.example/y", nil)
 	pu, err := tr.Proxy(assetReq)
 	require.NoError(t, err)
 	require.NotNil(t, pu)
 
-	assert.True(t, dialOK(t, tr, proxyAddr), "the proxy selected for the asset request is exempt from the egress control")
+	assert.True(t, dialOKCtx(t, ctx, tr, proxyAddr), "the proxy selected for the asset request is exempt from the egress control")
 }

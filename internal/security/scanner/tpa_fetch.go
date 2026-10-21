@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -438,45 +439,76 @@ func (a *fetchAttempt) buildClient() *http.Client {
 	return &c
 }
 
+// fetchHop records where the transport's most recent proxy decision sent the
+// connection of one request chain. It rides the request context, so the dial
+// that serves a hop can tell whether its address is that hop's proxy.
+type fetchHop struct {
+	mu        sync.Mutex
+	proxyAddr string // host:port the current hop dials as its proxy; "" for a direct hop
+}
+
+func (h *fetchHop) set(addr string) {
+	h.mu.Lock()
+	h.proxyAddr = addr
+	h.mu.Unlock()
+}
+
+func (h *fetchHop) isProxy(addr string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.proxyAddr != "" && h.proxyAddr == strings.ToLower(addr)
+}
+
+type fetchHopKey struct{}
+
+// fetchHopContext returns ctx carrying a fresh hop record. Every request of the
+// production transport is issued on such a context; a dial without one is a
+// direct dial and is always guarded.
+func fetchHopContext(ctx context.Context) context.Context {
+	return context.WithValue(ctx, fetchHopKey{}, &fetchHop{})
+}
+
+func fetchHopFrom(ctx context.Context) *fetchHop {
+	h, _ := ctx.Value(fetchHopKey{}).(*fetchHop)
+	return h
+}
+
 // buildTransport builds the production transport: TLS 1.2+, bounded handshake
 // and header waits, no connection reuse between daily cycles, and the dial-time
 // egress control.
 //
 // The control is always on. The one exemption is the operator's own proxy: a
-// dial whose address is the proxy the Proxy function just selected for some
-// request of this attempt is not an egress to the target, so it is not judged
-// by the target's rules (the proxy is often a private address). Every other
-// dial, including a redirect hop or an asset host that NO_PROXY exempts and
-// that therefore goes direct, is checked against the configured host's class
-// after name resolution, so DNS rebinding cannot slip an inward address past
-// the application-layer check. The decision follows each request's actual next
-// hop, not the configured URL alone.
+// dial whose address is the proxy the Proxy function selected for the hop being
+// dialed is not an egress to the target, so it is not judged by the target's
+// rules (the proxy is often a private address). Every other dial, including a
+// redirect hop or an asset host that NO_PROXY exempts and that therefore goes
+// direct, is checked against the configured host's class after name
+// resolution, so DNS rebinding cannot slip an inward address past the
+// application-layer check. The decision follows each hop's actual next hop and
+// is overwritten by the next hop's own decision (it lives on the request
+// context, see fetchHop): a proxy chosen earlier never exempts a later direct
+// dial to the same host:port, and a dial with no hop on its context is guarded.
 func (a *fetchAttempt) buildTransport() *http.Transport {
 	selectProxy := a.s.Proxy
 	if selectProxy == nil {
 		selectProxy = http.ProxyFromEnvironment
 	}
-	var (
-		mu      sync.Mutex
-		proxies = map[string]bool{}
-	)
 	plain := &net.Dialer{Timeout: fetchHeaderTimeout, KeepAlive: -1}
 	guarded := &net.Dialer{Timeout: fetchHeaderTimeout, KeepAlive: -1, Control: egressDialControl(a.class)}
 	return &http.Transport{
 		Proxy: func(req *http.Request) (*url.URL, error) {
 			pu, err := selectProxy(req)
-			if err == nil && pu != nil {
-				mu.Lock()
-				proxies[proxyDialAddr(pu)] = true
-				mu.Unlock()
+			if hop := fetchHopFrom(req.Context()); hop != nil {
+				if err == nil && pu != nil {
+					hop.set(proxyDialAddr(pu))
+				} else {
+					hop.set("")
+				}
 			}
 			return pu, err
 		},
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			mu.Lock()
-			isProxy := proxies[strings.ToLower(addr)]
-			mu.Unlock()
-			if isProxy {
+			if hop := fetchHopFrom(ctx); hop != nil && hop.isProxy(addr) {
 				return plain.DialContext(ctx, network, addr)
 			}
 			return guarded.DialContext(ctx, network, addr)
@@ -512,7 +544,7 @@ func (a *fetchAttempt) get(ctx context.Context, target *url.URL, accept, etag st
 	if err := a.checkTarget(ctx, target); err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
+	req, err := http.NewRequestWithContext(fetchHopContext(ctx), http.MethodGet, target.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -540,23 +572,55 @@ func (a *fetchAttempt) failure(ctx context.Context, err error) fetchResult {
 	case errors.Is(context.Cause(ctx), errCycleDeadline), errors.Is(err, context.DeadlineExceeded), errors.As(err, &ne) && ne.Timeout():
 		reason = RefreshReasonTimeout
 	}
-	inner := err
-	var ue *url.Error
-	if errors.As(err, &ue) {
-		inner = ue.Err
-	}
-	return fetchResult{Outcome: RefreshOutcomeFetchUnavailable, Reason: reason, Detail: a.host + ": " + a.scrub(inner.Error())}
+	return fetchResult{Outcome: RefreshOutcomeFetchUnavailable, Reason: reason, Detail: a.host + ": " + classifyFetchError(err)}
 }
 
-// scrub removes the configured URL and its path from s. The standard library's
-// errors carry the host and the failing operation, not the path, so this is a
-// belt-and-braces guard for B12.
-func (a *fetchAttempt) scrub(s string) string {
-	s = strings.ReplaceAll(s, a.s.URL, "<url>")
-	if p := a.u.Path; len(p) > 1 {
-		s = strings.ReplaceAll(s, p, "<path>")
+// classifyFetchError names a transport failure from a closed vocabulary. The
+// error's own text is never copied: net/http and the URL parser embed the
+// failing request or redirect URL (path, query, a malformed Location) in it
+// (B12). The one exception is an egressError, whose text the egress check built
+// from a host it had just judged and a fixed reason.
+func classifyFetchError(err error) string {
+	var (
+		ee  *egressError
+		dns *net.DNSError
+		ua  x509.UnknownAuthorityError
+		hn  x509.HostnameError
+		ci  x509.CertificateInvalidError
+		ne  net.Error
+		ue  *url.Error
+	)
+	switch {
+	case errors.As(err, &ee):
+		return ee.Error()
+	case errors.Is(err, errTooManyRedirects):
+		return errTooManyRedirects.Error()
+	case errors.Is(err, errRedirectDowngrade):
+		return errRedirectDowngrade.Error()
+	case errors.Is(err, errCycleDeadline), errors.Is(err, context.DeadlineExceeded):
+		return "timed out"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.As(err, &dns):
+		return "name resolution failed"
+	case errors.As(err, &ua), errors.As(err, &hn), errors.As(err, &ci):
+		return "TLS certificate not accepted"
+	case errors.Is(err, syscall.ECONNREFUSED):
+		return "connection refused"
+	case errors.As(err, &ne) && ne.Timeout():
+		return "timed out"
+	case errors.As(err, &ue) && isMalformedRedirect(ue.Err):
+		return "malformed redirect"
 	}
-	return s
+	return "request failed"
+}
+
+// isMalformedRedirect recognises net/http's two refusals of an unusable
+// redirect response by their fixed prefixes. Only the classification leaves
+// this function; the text, which embeds the Location, does not.
+func isMalformedRedirect(err error) bool {
+	m := err.Error()
+	return strings.HasPrefix(m, "failed to parse Location header") || strings.HasPrefix(m, "missing Location header")
 }
 
 // statusFailure maps a non-2xx response to fetch_unavailable. 403, 429, a
@@ -582,21 +646,31 @@ func (a *fetchAttempt) statusFailure(resp *http.Response) fetchResult {
 // when neither is present or both already passed.
 func (a *fetchAttempt) retryAt(resp *http.Response) time.Time {
 	now := a.now()
+	limit := now.Add(refreshRetryCap)
+	maxSecs := int64(refreshRetryCap / time.Second)
 	var at time.Time
+	// consider keeps the latest future instant, never past the refresher's cap.
+	// Server-supplied numbers are clamped before any arithmetic so that a huge
+	// value cannot wrap time.Duration or time.Unix negative and be discarded as
+	// already passed.
 	consider := func(t time.Time) {
+		if t.After(limit) {
+			t = limit
+		}
 		if t.After(now) && t.After(at) {
 			at = t
 		}
 	}
 	if v := resp.Header.Get("Retry-After"); v != "" {
 		if secs, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && secs > 0 {
-			consider(now.Add(time.Duration(secs) * time.Second))
+			consider(now.Add(time.Duration(min(secs, maxSecs)) * time.Second))
 		} else if t, err := http.ParseTime(v); err == nil {
 			consider(t)
 		}
 	}
 	if v := resp.Header.Get("X-RateLimit-Reset"); v != "" && resp.Header.Get("X-RateLimit-Remaining") == "0" {
 		if epoch, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil && epoch > 0 {
+			epoch = min(epoch, now.Unix()+maxSecs)
 			consider(time.Unix(epoch, 0).UTC())
 		}
 	}
