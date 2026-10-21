@@ -1069,6 +1069,17 @@ components:
             fail-empty); the reason is logged and surfaced in the security overview's
             signature_bundle.load_error.
           type: string
+        tpa_fetch_enabled:
+          description: |-
+            TPAFetchEnabled opts in to the network fetch leg. Default false; the
+            environment override is MCPPROXY_TPA_FETCH_ENABLED (EnvTPAFetchEnabled).
+          type: boolean
+        tpa_fetch_url:
+          description: |-
+            TPAFetchURL is the channel URL: a GitHub Releases "latest" API URL or a
+            direct bundle URL. Empty (the default) means the fetch leg is off; no URL
+            is compiled into the binary.
+          type: string
         tpa_operator_baseline:
           description: |-
             TPAOperatorBaseline seeds the operator authority's anti-downgrade
@@ -1093,6 +1104,19 @@ components:
             type: string
           type: array
           uniqueItems: false
+        tpa_refresh_interval:
+          description: |-
+            TPARefreshInterval is the cadence of the refresh cycle (the network-free
+            file leg, then the optional fetch leg). Absent or 0 means 24h; the runtime
+            clamps to at least 1h. There is no refresh-enable key: the file leg is
+            idempotent and always on.
+          type: string
+        tpa_stale_after_days:
+          description: |-
+            TPAStaleAfterDays is the age in days after which the active bundle reads
+            as stale. Absent means 30; an explicit 0 disables the stale flag and the
+            doctor stale warning.
+          type: integer
       type: object
     config.SensitiveDataDetectionConfig:
       description: Sensitive data detection settings (Spec 026)
@@ -3204,6 +3228,8 @@ components:
           type: integer
       type: object
     contracts.SuccessResponse:
+      allOf:
+      - $ref: '#/components/schemas/data'
       properties:
         data:
           type: object
@@ -5261,7 +5287,159 @@ components:
         target:
           type: string
       type: object
+    scanner.BundleInfo:
+      properties:
+        authority:
+          description: |-
+            Authority is the signing root serving this bundle: "publisher" (the
+            embedded default, or verified against a publisher key), "operator", or ""
+            for an unsigned external bundle.
+          type: string
+        bundle_version:
+          description: BundleVersion / SchemaVersion are the corpus's own declared
+            versions.
+          type: string
+        coverage_degraded:
+          description: |-
+            CoverageDegraded suspends scan-mode auto-approval; DegradedReason says
+            why (one of the Degraded* constants).
+          type: boolean
+        declared_skipped:
+          type: integer
+        degraded_reason:
+          type: string
+        fingerprint:
+          description: |-
+            Fingerprint is the first 12 hex chars of the SHA-256 of the corpus bytes:
+            a stable identity an operator (or automation) can compare across hosts
+            without shipping the whole file around.
+          type: string
+        full_digest:
+          description: |-
+            FullDigest is the complete lowercase-hex SHA-256 of the bundle bytes —
+            the ONLY value rollback accepts (FR-010). Fingerprint stays the 12-hex
+            human label beside it.
+          type: string
+        generated_at:
+          description: |-
+            GeneratedAt is the corpus freshness stamp. It is the bundle's own
+            `generated_at` key when present; for a file-sourced bundle without one it
+            falls back to the file's modification time, so a years-stale corpus is
+            distinguishable from a fresh export.
+          type: string
+        last_activated_at:
+          description: |-
+            LastActivatedAt is when the serving external bundle was activated; nil
+            for the embedded default.
+          type: string
+        last_checked_at:
+          description: |-
+            LastCheckedAt is the end of the most recent pipeline run, including
+            no-op runs the idempotence short-circuit skipped.
+          type: string
+        last_rejection:
+          $ref: '#/components/schemas/scanner.BundleRejection'
+        load_error:
+          description: |-
+            LoadError is the reason the LAST configured-path load failed, if any. The
+            previously active (or embedded) corpus stays live — a bundle problem must
+            never leave the scanner with no signatures — but the failure is surfaced
+            here rather than swallowed.
+          type: string
+        loaded_at:
+          description: LoadedAt is when this corpus became active in this process.
+          type: string
+        path:
+          description: Path is the configured filesystem path, when Source is "file".
+          type: string
+        pinned:
+          description: Pinned is true while an operator rollback pin governs activation.
+          type: boolean
+        refresh:
+          $ref: '#/components/schemas/scanner.BundleRefreshStatus'
+        reprotect:
+          $ref: '#/components/schemas/scanner.BundleReprotectStatus'
+        rollback:
+          description: |-
+            Rollback is true when the active bundle was activated by an explicit
+            rollback.
+          type: boolean
+        runnable_rules:
+          description: |-
+            RunnableRules is how many rules are LIVE in the offline tier; SkippedRules
+            and DeclaredSkipped are the not-runnable / bundle-declared-skipped
+            remainder (FR-006/FR-007) — un-evaluated coverage, never clean coverage.
+          type: integer
+        schema_version:
+          type: string
+        sequence:
+          description: |-
+            Sequence is the manifest sequence as published (decimal string), "" when
+            the bundle carries none.
+          type: string
+        signature_count:
+          description: SignatureCount is the bundle's self-declared signature count.
+          type: integer
+        signature_verified:
+          description: |-
+            SignatureVerified reports whether the active bundle's detached signature
+            verified. Always false for the embedded default (it is binary-trusted).
+          type: boolean
+        skipped_rules:
+          type: integer
+        source:
+          description: Source is BundleSourceEmbedded, BundleSourceFile or BundleSourceFetch.
+          type: string
+        stale:
+          description: |-
+            Stale and StaleAfterDays are computed at read time next to
+            StalenessDays; a future generated_at is never stale. StaleAfterDays nil
+            means the flag is not evaluated.
+          type: boolean
+        stale_after_days:
+          type: integer
+        staleness_days:
+          description: StalenessDays is the whole days since GeneratedAt (nil when
+            unknown).
+          type: integer
+        trust_epoch:
+          description: TrustEpoch is the epoch the bundle was published under.
+          type: integer
+      type: object
+    scanner.BundleRefreshStatus:
+      description: |-
+        Refresh is the refresh-cycle status (nil before any cycle or setting is
+        known). Reprotect is the post-activation re-protection sweep status,
+        set from the server through SetReprotectStatus.
+      properties:
+        consecutive_failures:
+          type: integer
+        fetch_enabled:
+          type: boolean
+        fetch_host:
+          description: FetchHost is the host of the configured fetch URL ("" when
+            none).
+          type: string
+        interval_seconds:
+          type: integer
+        last_attempt_at:
+          type: string
+        last_outcome:
+          type: string
+        last_reason:
+          type: string
+        last_trigger:
+          description: LastTrigger, LastOutcome and LastReason use the closed vocabularies
+            above.
+          type: string
+        next_check_at:
+          type: string
+      type: object
     scanner.BundleRejection:
+      description: |-
+        LastRejection is the most recent refused candidate. It is retained
+        across a later successful load so "what did it refuse, and when"
+        survives.
       properties:
         at:
           type: string
@@ -5273,6 +5451,23 @@ components:
         reason:
           description: Reason is one of the Reject* constants; the only field to branch
             on.
+          type: string
+      type: object
+    scanner.BundleReprotectStatus:
+      properties:
+        last_completed_at:
+          type: string
+        reason:
+          description: |-
+            Reason qualifies suspended and failed (for example
+            ReprotectReasonAutoBaselineScanOff).
+          type: string
+        servers_scanned:
+          type: integer
+        servers_with_hits:
+          type: integer
+        state:
+          description: State is one of the ReprotectState* constants.
           type: string
       type: object
     secureenv.EnvConfig:
@@ -8898,15 +9093,25 @@ paths:
     get:
       description: 'Reports the offline TPA signature corpus this install is serving:
         full SHA-256 digest, sequence, authority, trust epoch, signature verification,
-        staleness, degraded coverage with its reason, rollback pin, and the last refused
-        candidate. Admin only.'
+        staleness (with the stale flag and its threshold), degraded coverage with
+        its reason, rollback pin, and the last refused candidate. Also carries the
+        refresh status (last checked and activated times, last cycle outcome, next
+        check, consecutive failures; the fetch host only, never the URL) and the post-activation
+        re-protection sweep status. Admin only.'
       responses:
         "200":
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/contracts.SuccessResponse'
-          description: Bundle status (data is the BundleInfo object)
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  success:
+                    type: boolean
+                type: object
+          description: Bundle status
         "403":
           content:
             application/json:
@@ -8959,6 +9164,49 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Get the TPA signature bundle activation history
+      tags:
+      - security
+  /api/v1/security/bundle/refresh:
+    post:
+      description: 'Runs one refresh cycle immediately: the local file leg (always
+        network-free) followed by the optional fetch leg when security.tpa_fetch_enabled
+        is on and a trusted signer and URL are configured. A cycle already in flight
+        is joined, so one download and at most one activation happen per distinct
+        candidate. The response is the resulting bundle status; the cycle outcome
+        is in its refresh block (activated, unchanged, not_modified, rejected, fetch_unavailable,
+        channel_invalid, superseded, disabled). Network failures are reported as fetch_unavailable
+        and never as a rejection; last-known-good keeps serving. Unlike reload, refresh
+        may make an outbound request. Admin API key only.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  success:
+                    type: boolean
+                type: object
+          description: Updated bundle status; the refresh block holds the cycle outcome
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Refresh the TPA signature bundle now
       tags:
       - security
   /api/v1/security/bundle/reload:
