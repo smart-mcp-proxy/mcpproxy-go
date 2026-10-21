@@ -477,21 +477,107 @@ func (s *Service) RefreshBundle(ctx context.Context) BundleInfo {
 	return RefreshBundle(ctx, s.logger)
 }
 
-// StartScanFromCachedContracts starts the post-activation re-protection scan of
-// one server (Spec 101 FR-019, tasks B17): an informational job over the
-// tool contracts discovery already ingested for its approved tools, labelled
-// with the activated bundle's digest. It never connects to the upstream, never
-// schedules Pass 2 and is excluded from the scan counters.
-//
-// STUB (Spec 101 US3 wave 0): returns an error until T368.
 // ErrNoCachedContracts is returned by StartScanFromCachedContracts when the
 // server has no approved tool contract to scan (or the provider cannot list
 // them). No job is recorded, so the server reads as unscanned, never clean.
 var ErrNoCachedContracts = errors.New("no cached approved tool contracts to scan")
 
+// approvedToolContractsProvider is an OPTIONAL capability a ServerInfoProvider
+// may implement for the post-activation re-protection scan (Spec 101 FR-019):
+// the tool contracts discovery recorded on a server's APPROVED tool records,
+// in the same tools/list shape as GetServerTools, read from storage with no
+// upstream connection.
+type approvedToolContractsProvider interface {
+	GetApprovedToolContracts(serverName string) ([]map[string]interface{}, error)
+}
+
+// StartScanFromCachedContracts starts the post-activation re-protection scan of
+// one server (Spec 101 FR-019, tasks B17): an informational job over the
+// tool contracts discovery already ingested for its approved tools, labelled
+// with the activated bundle's digest. It never connects to the upstream
+// (no IsConnected, EnsureConnected or live tools export), never schedules
+// Pass 2 and is excluded from the scan telemetry counters.
+//
+// The job runs the in-process tpa-descriptions baseline only, over the
+// immutable snapshot built here (ScanRequest.ToolDefinitions), with no source
+// directory. A server with no approved contracts gets no job at all
+// (ErrNoCachedContracts): it stays unscanned, never clean. A busy server
+// returns ErrScanInProgress so the caller can re-arm.
 func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, bundleDigest string) (*ScanJob, error) {
-	_, _, _ = ctx, serverName, bundleDigest
-	return nil, errors.New("not implemented")
+	provider, ok := s.serverInfo.(approvedToolContractsProvider)
+	if !ok {
+		return nil, fmt.Errorf("%w: the server info provider cannot list cached contracts", ErrNoCachedContracts)
+	}
+	contracts, err := provider.GetApprovedToolContracts(serverName)
+	if err != nil {
+		return nil, fmt.Errorf("read approved tool contracts for %s: %w", serverName, err)
+	}
+	if len(contracts) == 0 {
+		return nil, ErrNoCachedContracts
+	}
+	inc, err := s.scanIncarnation(serverName)
+	if err != nil {
+		return nil, err
+	}
+
+	// The stamp is taken before the contracts are digested, so a definition
+	// changing underneath is judged not covered rather than covered.
+	at := time.Now().UTC()
+	data, err := json.MarshalIndent(map[string]interface{}{"tools": contracts}, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("serialize cached tool contracts for %s: %w", serverName, err)
+	}
+
+	scanCtx := &ScanContext{
+		SourceMethod:        "tool_definitions_only",
+		ToolsExported:       len(contracts),
+		ToolNames:           toolDefinitionNames(contracts),
+		ToolHashes:          toolDefinitionHashes(contracts),
+		ToolContractDigests: ToolContractDigests(contracts),
+		ToolsExportedAt:     at,
+		BundleDigest:        bundleDigest,
+	}
+	if info, err := s.serverInfo.GetServerInfo(serverName); err == nil && info != nil {
+		scanCtx.ServerProtocol = info.Protocol
+		scanCtx.ServerCommand = info.Command
+	}
+
+	req := ScanRequest{
+		ServerName:      serverName,
+		Incarnation:     inc,
+		ScannerIDs:      []string{inProcessTPAScannerID},
+		ScanPass:        ScanPassSecurityScan,
+		IsolationMode:   s.resolveIsolationMode(serverName),
+		ToolDefinitions: data,
+		ScanContext:     scanCtx,
+	}
+	// Cross-server snapshot for the shadowing check, from the cached
+	// StateView, exactly as StartScan builds it. Best-effort.
+	if prov, ok := s.serverInfo.(allServerToolsProvider); ok {
+		if all, err := prov.GetAllServerTools(); err == nil && len(all) > 0 {
+			peers := make(map[string][]map[string]interface{}, len(all))
+			for name, tools := range all {
+				if name != serverName && len(tools) > 0 {
+					peers[name] = tools
+				}
+			}
+			if len(peers) > 0 {
+				req.PeerTools = peers
+			}
+		}
+	}
+
+	callback := &scanCallbackAdapter{
+		service:       s,
+		scanPass:      ScanPassSecurityScan,
+		informational: true,
+	}
+	job, err := s.engine.StartScan(ctx, req, callback)
+	if err != nil {
+		return job, err
+	}
+	go s.pruneOldScans(serverName)
+	return job, nil
 }
 
 // isBaselineScanner reports whether a scanner id belongs to the deterministic
@@ -1050,7 +1136,7 @@ type scanCallbackAdapter struct {
 // the deep-scan cohort the counters exist to compare. Dry-run jobs are excluded
 // because they do not affect quarantine state and are not real scans.
 func (a *scanCallbackAdapter) countsForTelemetry(job *ScanJob) bool {
-	return job != nil && a.scanPass == ScanPassSecurityScan && !job.DryRun
+	return job != nil && a.scanPass == ScanPassSecurityScan && !job.DryRun && !a.informational
 }
 
 // saveJob persists job, conditionally on its incarnation when both the job
@@ -1200,7 +1286,7 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 	// deep-scan layer, so with deep scan OFF (the default) it must NOT be
 	// scheduled at all; the scan is the Pass-1 in-process baseline only.
 	// Skip for HTTP/URL servers — they have no filesystem to do supply chain analysis on.
-	if a.scanPass == ScanPassSecurityScan && !job.DryRun && a.service.deepScanEnabled() {
+	if a.scanPass == ScanPassSecurityScan && !job.DryRun && !a.informational && a.service.deepScanEnabled() {
 		isURLServer := a.serverInfo != nil && (a.serverInfo.Protocol == "http" || a.serverInfo.Protocol == "sse" || a.serverInfo.Protocol == "streamable-http")
 		if !isURLServer {
 			// The ORIGINATING job's incarnation (review round 1): a late
