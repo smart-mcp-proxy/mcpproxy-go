@@ -29,6 +29,9 @@ type refresherHarness struct {
 }
 
 func cloneSecurity(sec *config.SecurityConfig) *config.SecurityConfig {
+	if sec == nil {
+		return nil
+	}
 	c := *sec
 	return &c
 }

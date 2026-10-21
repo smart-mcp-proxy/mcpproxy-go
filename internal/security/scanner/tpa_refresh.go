@@ -138,8 +138,13 @@ type BundleRefresher struct {
 	gen uint64
 	fp  string
 	// nudged is the config the last Nudge delivered, the fallback when there is
-	// no ConfigProvider.
-	nudged   *config.SecurityConfig
+	// no ConfigProvider. nudgedSet tells a delivered nil (the security block
+	// was removed: the default policy) from "nothing delivered yet".
+	nudged    *config.SecurityConfig
+	nudgedSet bool
+	// soonSeq counts the wakeSoon signals Nudge sent; a manual Refresh that
+	// finds it moved must not push the timer out over that early re-arm.
+	soonSeq  uint64
 	interval time.Duration
 	pending  wakeReason
 	wake     chan struct{}
@@ -168,17 +173,30 @@ func NewBundleRefresher(opts BundleRefresherOptions) *BundleRefresher {
 	return r
 }
 
-// config returns the live security config: the provider's, else the last
-// nudged one, else nil. It never holds r.mu across the provider call.
+// config returns the live security config: the provider's when one is
+// installed (authoritative, even when it answers nil because the security block
+// was removed), else the last nudged one, else nil. It never holds r.mu across
+// the provider call.
 func (r *BundleRefresher) config() *config.SecurityConfig {
 	if r.opts.ConfigProvider != nil {
-		if sec := r.opts.ConfigProvider(); sec != nil {
-			return sec
-		}
+		return r.opts.ConfigProvider()
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.nudged
+}
+
+// hasConfigSource reports whether config() speaks for the operator: a provider
+// is installed or a Nudge delivered something (possibly nil, the default
+// policy). Without either, a nil config means "nothing configured through us"
+// and the cycle re-reads whatever policy the runtime already holds.
+func (r *BundleRefresher) hasConfigSource() bool {
+	if r.opts.ConfigProvider != nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nudgedSet
 }
 
 func (r *BundleRefresher) random() float64 {
@@ -203,11 +221,8 @@ func (r *BundleRefresher) intervalFor(sec *config.SecurityConfig) time.Duration 
 	return clampRefreshInterval(sec.EffectiveTPARefreshInterval())
 }
 
-// fingerprintOf is the policy fingerprint of sec ("" for nil).
+// fingerprintOf is the policy fingerprint of sec; nil is the default policy.
 func fingerprintOf(sec *config.SecurityConfig) string {
-	if sec == nil {
-		return ""
-	}
 	return policyFromConfig(sec).Fingerprint
 }
 
@@ -299,10 +314,10 @@ func (r *BundleRefresher) Running() bool {
 // fetch and trust settings, bumps the generation (superseding an in-flight
 // download whose inputs changed) and re-arms the timer. Non-blocking; a Nudge
 // after Stop began is a no-op.
+//
+// A nil sec means the security block was removed: the default policy applies,
+// exactly as configureTPABundle(nil) applied it to the runtime.
 func (r *BundleRefresher) Nudge(sec *config.SecurityConfig) {
-	if sec == nil {
-		return
-	}
 	policy := policyFromConfig(sec)
 	bundleRT.disp.applySettings(policy)
 
@@ -311,7 +326,7 @@ func (r *BundleRefresher) Nudge(sec *config.SecurityConfig) {
 		r.mu.Unlock()
 		return
 	}
-	r.nudged = sec
+	r.nudged, r.nudgedSet = sec, true
 	reason := wakeNone
 	if policy.Fingerprint != r.fp {
 		r.fp = policy.Fingerprint
@@ -320,6 +335,7 @@ func (r *BundleRefresher) Nudge(sec *config.SecurityConfig) {
 		r.retryAt = time.Time{}
 		if policy.FetchEnabled {
 			reason = wakeSoon
+			r.soonSeq++
 		}
 	}
 	if iv := r.intervalFor(sec); iv != r.interval {
@@ -443,6 +459,9 @@ func (r *BundleRefresher) executeCycle(ctx context.Context, c *cycleCall, trigge
 // there is one, and returns the resulting status. Without a running loop it is
 // ReloadBundle.
 func (r *BundleRefresher) Refresh(ctx context.Context, logger *zap.Logger) BundleInfo {
+	r.mu.Lock()
+	soonBefore := r.soonSeq
+	r.mu.Unlock()
 	c := r.joinOrStart(RefreshTriggerManual)
 	if c == nil {
 		return ReloadBundle(r.logger(logger))
@@ -452,11 +471,20 @@ func (r *BundleRefresher) Refresh(ctx context.Context, logger *zap.Logger) Bundl
 	case <-ctx.Done():
 		return BundleStatus()
 	}
-	if c.started {
-		// A manual cycle satisfies the daily check: push the timer out.
+	if c.started && !r.soonMovedSince(soonBefore) {
+		// A manual cycle satisfies the daily check: push the timer out. Not when
+		// a settings change asked for an early look while it ran: that re-arm
+		// stands, or the new settings would wait out a full interval.
 		r.signal(wakeManual)
 	}
 	return BundleStatus()
+}
+
+// soonMovedSince reports whether Nudge asked for an early look after seq.
+func (r *BundleRefresher) soonMovedSince(seq uint64) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.soonSeq != seq
 }
 
 // --- one cycle ----------------------------------------------------------------
@@ -497,7 +525,9 @@ func (r *BundleRefresher) doCycle(ctx context.Context, trigger string) {
 		policy *bundlePolicy
 		file   runOutcome
 	)
-	if sec != nil {
+	if sec != nil || r.hasConfigSource() {
+		// A nil config from a live source is the default policy (the security
+		// block was removed), not "keep whatever the runtime holds".
 		policy = policyFromConfig(sec)
 		file = applyPolicy(policy, raw, trigger)
 	} else {
