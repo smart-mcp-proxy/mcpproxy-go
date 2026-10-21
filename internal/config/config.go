@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -2431,11 +2433,96 @@ func (c *Config) tpaTrustRootErrors() []ValidationError {
 // `security` (tpa_refresh_interval, tpa_fetch_enabled, tpa_fetch_url,
 // tpa_stale_after_days). Write-time only, like tpaTrustRootErrors: it is
 // appended to ValidateDetailed and never reached from the boot-fatal
-// validateDetailedCore. Messages never echo the URL.
+// validateDetailedCore, so a hand-edited bad value on disk cannot brick a load;
+// the runtime treats it as "fetch off". Messages never echo the URL.
 //
-// STUB (Spec 101 US3 wave 0): the real shape checks land with T312.
+// The publisher-root-with-empty-built-in-set case cannot be seen here
+// (internal/config must not import the scanner); the runtime reports it as
+// no_trusted_signer and doctor surfaces it.
 func (c *Config) tpaRefreshErrors() []ValidationError {
-	return nil
+	sc := c.Security
+	if sc == nil {
+		return nil
+	}
+	var errors []ValidationError
+
+	if sc.TPARefreshInterval != 0 && sc.TPARefreshInterval.Duration() < MinTPARefreshInterval {
+		errors = append(errors, ValidationError{
+			Field:   "security.tpa_refresh_interval",
+			Message: fmt.Sprintf("must be at least %s (leave unset for the %s default)", MinTPARefreshInterval, DefaultTPARefreshInterval),
+		})
+	}
+
+	if msg := tpaFetchURLProblem(sc.TPAFetchURL); msg != "" {
+		errors = append(errors, ValidationError{Field: "security.tpa_fetch_url", Message: msg})
+	}
+
+	if sc.TPAFetchEnabled {
+		if sc.TPAFetchURL == "" {
+			errors = append(errors, ValidationError{
+				Field:   "security.tpa_fetch_url",
+				Message: "tpa_fetch_enabled requires a tpa_fetch_url (there is no built-in default URL)",
+			})
+		}
+		if sc.TPAActiveRoot == TPARootOperator && len(sc.TPAOperatorSigners) == 0 {
+			errors = append(errors, ValidationError{
+				Field:   "security.tpa_fetch_enabled",
+				Message: "tpa_fetch_enabled with the operator root requires tpa_operator_signers",
+			})
+		}
+	}
+
+	if sc.TPAStaleAfterDays != nil && *sc.TPAStaleAfterDays < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "security.tpa_stale_after_days",
+			Message: "must not be negative (0 disables the stale flag)",
+		})
+	}
+	return errors
+}
+
+// tpaFetchURLProblem returns a fixed, value-free description of what is wrong
+// with a configured fetch URL, or "" when it is acceptable (including empty,
+// which means "no URL"). https is required; http is allowed only for a
+// loopback literal or "localhost" (test rigs and LAN-local mirrors behind a
+// loopback forwarder). Userinfo, query and fragment are refused: the URL is
+// logged by host only and a credential in it would be one typo from a leak.
+func tpaFetchURLProblem(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Hostname() == "" {
+		return "must be an absolute https URL"
+	}
+	host := u.Hostname()
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+	case "http":
+		if !tpaLoopbackHost(host) {
+			return "must use https (http is allowed only for localhost or a loopback address)"
+		}
+	default:
+		return "must use https (http is allowed only for localhost or a loopback address)"
+	}
+	switch {
+	case u.User != nil:
+		return "must not contain credentials"
+	case u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "?"):
+		return "must not contain a query string"
+	case u.Fragment != "" || strings.Contains(raw, "#"):
+		return "must not contain a fragment"
+	}
+	return ""
+}
+
+// tpaLoopbackHost reports whether host is "localhost" or a loopback IP literal.
+func tpaLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ValidateServerForLoad runs the per-server checks config.Load applies at boot
@@ -3507,28 +3594,42 @@ func (sc *SecurityConfig) EffectiveTPAOperatorEpoch() uint64 {
 const (
 	// DefaultTPARefreshInterval is the refresh cadence when none is configured.
 	DefaultTPARefreshInterval = 24 * time.Hour
+	// MinTPARefreshInterval is the floor for the refresh cadence (B1). A
+	// configured value below it is refused at write time and clamped at read
+	// time.
+	MinTPARefreshInterval = time.Hour
 	// DefaultTPAStaleAfterDays is the stale threshold when none is configured.
 	DefaultTPAStaleAfterDays = 30
 )
 
-// EffectiveTPARefreshInterval returns the configured refresh cadence, 24h when
-// absent or non-positive. Nil-safe. The runtime applies its own 1h floor.
-//
-// STUB (wave 0): the clamp lands with T312.
+// EffectiveTPARefreshInterval returns the configured refresh cadence: 24h when
+// absent or non-positive, and never below MinTPARefreshInterval (a hand-edited
+// sub-hour value is clamped, not honoured). Nil-safe. A runtime test seam may
+// go lower; this accessor does not.
 func (sc *SecurityConfig) EffectiveTPARefreshInterval() time.Duration {
 	if sc == nil || sc.TPARefreshInterval <= 0 {
 		return DefaultTPARefreshInterval
 	}
-	return sc.TPARefreshInterval.Duration()
+	if d := sc.TPARefreshInterval.Duration(); d >= MinTPARefreshInterval {
+		return d
+	}
+	return MinTPARefreshInterval
 }
 
 // IsTPAFetchEnabled reports whether the optional TPA bundle network fetch is
-// on. Default false; nil-safe. The environment override
-// (EnvTPAFetchEnabled) is read here, like EffectiveTPABundlePath, once T312
-// lands.
-//
-// STUB (wave 0): no env override yet.
+// on. Default false; nil-safe. MCPPROXY_TPA_FETCH_ENABLED outranks the file
+// value on every path (bidirectional: "true"/"1" force on, "false"/"0" force
+// off), like EffectiveTPABundlePath. The env is read here and never mirrored
+// into the struct or process_overrides.go, so no save path can persist it, and
+// it enables only the config-resident URL (the environment cannot redirect the
+// fetch).
 func (sc *SecurityConfig) IsTPAFetchEnabled() bool {
+	switch os.Getenv(EnvTPAFetchEnabled) {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	}
 	return sc != nil && sc.TPAFetchEnabled
 }
 
