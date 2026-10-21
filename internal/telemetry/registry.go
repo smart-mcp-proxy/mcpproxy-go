@@ -416,6 +416,14 @@ type RegistrySnapshot struct {
 	// Schema v9: TPA funnel counters for the two synchronous detection paths.
 	TPAToolChangeGateScans int64 `json:"tpa_tool_change_gate_scans"`
 	TPAPromptScans         int64 `json:"tpa_prompt_scans"`
+
+	// Schema v16 (Spec 087 / Spec 101 US3): TPA bundle refresh counters. Integer
+	// counts only; see RecordTPABundleRefreshOn.
+	TPABundleRefreshCycles      int64 `json:"tpa_bundle_refresh_cycles"`
+	TPABundleRefreshActivations int64 `json:"tpa_bundle_refresh_activations"`
+	TPABundleRefreshRejections  int64 `json:"tpa_bundle_refresh_rejections"`
+	TPABundleRefreshUnavailable int64 `json:"tpa_bundle_refresh_unavailable"`
+	TPABundleReprotectHits      int64 `json:"tpa_bundle_reprotect_hits"`
 }
 
 // TPAScannerStats projects the schema-v8 scanner counters out of the snapshot,

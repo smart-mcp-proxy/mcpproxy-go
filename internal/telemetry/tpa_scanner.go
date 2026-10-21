@@ -75,6 +75,17 @@ type TPAScannerStats struct {
 	// the prompt name, the server, or the verdict.
 	PromptScans int64 `json:"prompt_scans"`
 
+	// Schema v16 (Spec 087 / Spec 101 US3): TPA bundle refresh counters. Each is
+	// a non-negative integer in the reporting window; omitted when zero so an
+	// install that never refreshes keeps its v15 tpa_scanner shape. They carry
+	// no age, URL, host, reason or digest (FR-021, SC-006); see
+	// RecordTPABundleRefreshOn for the unit of each.
+	BundleRefreshCycles      int64 `json:"bundle_refresh_cycles,omitempty"`
+	BundleRefreshActivations int64 `json:"bundle_refresh_activations,omitempty"`
+	BundleRefreshRejections  int64 `json:"bundle_refresh_rejections,omitempty"`
+	BundleRefreshUnavailable int64 `json:"bundle_refresh_unavailable,omitempty"`
+	BundleReprotectHits      int64 `json:"bundle_reprotect_hits,omitempty"`
+
 	// Schema v15 (Spec 101 FR-021): the ACTIVE bundle's provenance tuple. This
 	// is per-heartbeat STATE merged from the TPABundleSnapshot provider after
 	// the counters are applied; it is not a reset-on-accept counter. Typed and
