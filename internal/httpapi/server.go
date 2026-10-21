@@ -1322,6 +1322,7 @@ func (s *Server) setupRoutes() {
 			r.Post("/bundle/rollback", s.requireServerOp(auth.ServerOpBundleManage, s.handleRollbackSecurityBundle))
 			r.Post("/bundle/unpin", s.requireServerOp(auth.ServerOpBundleManage, s.handleUnpinSecurityBundle))
 			r.Post("/bundle/reload", s.requireServerOp(auth.ServerOpBundleManage, s.handleReloadSecurityBundle))
+			r.Post("/bundle/refresh", s.requireServerOp(auth.ServerOpBundleManage, s.handleRefreshSecurityBundle))
 
 			// Legacy routes (backwards compatibility)
 			r.Post("/scanners/install", s.requireServerOp(auth.ServerOpScan, s.handleInstallScanner))
