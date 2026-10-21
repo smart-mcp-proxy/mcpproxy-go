@@ -147,6 +147,15 @@ type CounterRegistry struct {
 	// reason as the v8 scalars — one consistent sample per Snapshot.
 	tpaToolChangeGateScans int64
 	tpaPromptScans         int64
+
+	// Schema v16: TPA bundle refresh counters (Spec 087 / Spec 101 US3). Plain
+	// integers under mu, like the v8/v9 groups; they are bumped from the
+	// refresher goroutine and the bundle activation observer.
+	tpaBundleRefreshCycles      int64
+	tpaBundleRefreshActivations int64
+	tpaBundleRefreshRejections  int64
+	tpaBundleRefreshUnavailable int64
+	tpaBundleReprotectHits      int64
 }
 
 // NewCounterRegistry creates an empty registry. All counters start at zero.
@@ -359,6 +368,33 @@ func (r *CounterRegistry) RecordTPAToolChangeGateScan() {
 	r.mu.Unlock()
 }
 
+// recordTPABundleRefresh counts one refresh cycle of the given class (schema
+// v16). bundle_refresh_cycles always moves; exactly one class counter moves with
+// it for activated, rejected and unavailable. Unchanged cycles and any class this
+// build does not know count as a cycle alone, so the class string can never
+// become a key or a value on the wire.
+func (r *CounterRegistry) recordTPABundleRefresh(class TPABundleRefreshClass) {
+	r.mu.Lock()
+	r.tpaBundleRefreshCycles++
+	switch class {
+	case TPABundleRefreshActivated:
+		r.tpaBundleRefreshActivations++
+	case TPABundleRefreshRejected:
+		r.tpaBundleRefreshRejections++
+	case TPABundleRefreshUnavailable:
+		r.tpaBundleRefreshUnavailable++
+	}
+	r.mu.Unlock()
+}
+
+// recordTPABundleReprotectHit counts one server whose re-protection scan had at
+// least one hard finding (schema v16).
+func (r *CounterRegistry) recordTPABundleReprotectHit() {
+	r.mu.Lock()
+	r.tpaBundleReprotectHits++
+	r.mu.Unlock()
+}
+
 // RecordTPAPromptScan records ONE aggregated-upstream-prompt poisoning scan
 // (schema v9), counted per prompt scanned. Invocation count only — never the
 // prompt name, the server name, or whether the prompt was dropped.
@@ -436,6 +472,12 @@ func (s RegistrySnapshot) TPAScannerStats() *TPAScannerStats {
 		ScansWithFindings:   s.TPAScansWithFindings,
 		ToolChangeGateScans: s.TPAToolChangeGateScans,
 		PromptScans:         s.TPAPromptScans,
+
+		BundleRefreshCycles:      s.TPABundleRefreshCycles,
+		BundleRefreshActivations: s.TPABundleRefreshActivations,
+		BundleRefreshRejections:  s.TPABundleRefreshRejections,
+		BundleRefreshUnavailable: s.TPABundleRefreshUnavailable,
+		BundleReprotectHits:      s.TPABundleReprotectHits,
 	}
 	for sev, n := range s.TPAFindings {
 		if n == 0 {
@@ -501,6 +543,11 @@ func (r *CounterRegistry) Snapshot() RegistrySnapshot {
 	snap.TPAScansWithFindings = r.tpaScansWithFindings
 	snap.TPAToolChangeGateScans = r.tpaToolChangeGateScans
 	snap.TPAPromptScans = r.tpaPromptScans
+	snap.TPABundleRefreshCycles = r.tpaBundleRefreshCycles
+	snap.TPABundleRefreshActivations = r.tpaBundleRefreshActivations
+	snap.TPABundleRefreshRejections = r.tpaBundleRefreshRejections
+	snap.TPABundleRefreshUnavailable = r.tpaBundleRefreshUnavailable
+	snap.TPABundleReprotectHits = r.tpaBundleReprotectHits
 	for k, v := range r.tpaFindings {
 		snap.TPAFindings[k] = v
 	}
@@ -554,6 +601,11 @@ func (r *CounterRegistry) Drain() RegistrySnapshot {
 	snap.TPAScansWithFindings = r.tpaScansWithFindings
 	snap.TPAToolChangeGateScans = r.tpaToolChangeGateScans
 	snap.TPAPromptScans = r.tpaPromptScans
+	snap.TPABundleRefreshCycles = r.tpaBundleRefreshCycles
+	snap.TPABundleRefreshActivations = r.tpaBundleRefreshActivations
+	snap.TPABundleRefreshRejections = r.tpaBundleRefreshRejections
+	snap.TPABundleRefreshUnavailable = r.tpaBundleRefreshUnavailable
+	snap.TPABundleReprotectHits = r.tpaBundleReprotectHits
 	for _, sev := range tpaSeverityKeys {
 		snap.TPAFindings[sev] = r.tpaFindings[sev]
 	}
@@ -568,6 +620,11 @@ func (r *CounterRegistry) Drain() RegistrySnapshot {
 	r.tpaFindings = make(map[string]int64)
 	r.tpaToolChangeGateScans = 0
 	r.tpaPromptScans = 0
+	r.tpaBundleRefreshCycles = 0
+	r.tpaBundleRefreshActivations = 0
+	r.tpaBundleRefreshRejections = 0
+	r.tpaBundleRefreshUnavailable = 0
+	r.tpaBundleReprotectHits = 0
 
 	return snap
 }
@@ -608,6 +665,10 @@ func (r *CounterRegistry) HasPendingCounters() bool {
 		r.tpaToolChangeGateScans > 0 || r.tpaPromptScans > 0 {
 		return true
 	}
+	if r.tpaBundleRefreshCycles > 0 || r.tpaBundleRefreshActivations > 0 || r.tpaBundleRefreshRejections > 0 ||
+		r.tpaBundleRefreshUnavailable > 0 || r.tpaBundleReprotectHits > 0 {
+		return true
+	}
 	for _, v := range r.tpaFindings {
 		if v > 0 {
 			return true
@@ -644,6 +705,11 @@ func (r *CounterRegistry) Reset() {
 	r.tpaFindings = make(map[string]int64)
 	r.tpaToolChangeGateScans = 0
 	r.tpaPromptScans = 0
+	r.tpaBundleRefreshCycles = 0
+	r.tpaBundleRefreshActivations = 0
+	r.tpaBundleRefreshRejections = 0
+	r.tpaBundleRefreshUnavailable = 0
+	r.tpaBundleReprotectHits = 0
 }
 
 // bucketUpstream maps an upstream tool call count to its log bucket label.

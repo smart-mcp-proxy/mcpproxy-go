@@ -241,11 +241,15 @@ func v8FieldViolation(field, reason string) *AnonymityViolation {
 }
 
 // tpaScannerScalarKeys is the fixed set of non-negative-integer keys allowed
-// in the tpa_scanner sub-object. The last two are the schema-v9 funnel
-// counters; adding a key here is the deliberate act that widens the whitelist.
+// in the tpa_scanner sub-object. tool_change_gate_scans and prompt_scans are the
+// schema-v9 funnel counters; the five bundle_refresh_* / bundle_reprotect_hits
+// keys are the schema-v16 (Spec 087 / Spec 101 US3) refresh counters. Adding a
+// key here is the deliberate act that widens the whitelist.
 var tpaScannerScalarKeys = []string{
 	"scans_completed", "scans_failed", "scans_with_findings",
 	"tool_change_gate_scans", "prompt_scans",
+	"bundle_refresh_cycles", "bundle_refresh_activations", "bundle_refresh_rejections",
+	"bundle_refresh_unavailable", "bundle_reprotect_hits",
 }
 
 // tpaBundleKeys is the schema-v15 (Spec 101 FR-021) active-bundle group inside

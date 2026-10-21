@@ -22,17 +22,21 @@ const (
 // RecordTPABundleRefreshOn counts one refresh cycle of the given class on reg if
 // reg is non-nil (schema v16): bundle_refresh_cycles always, plus the
 // activations, rejections or unavailable counter for the matching class.
-//
-// STUB (Spec 101 US3 wave 0): no-op until T351.
+// A cycle of class unchanged, or of a class this build does not know, counts as
+// a cycle alone: the class string is never transmitted.
 func RecordTPABundleRefreshOn(reg *CounterRegistry, class TPABundleRefreshClass) {
-	_, _ = reg, class
+	if reg == nil {
+		return
+	}
+	reg.recordTPABundleRefresh(class)
 }
 
 // RecordTPABundleReprotectHitOn counts one server whose re-protection scan had
 // at least one hard finding (bundle_reprotect_hits) on reg if reg is non-nil
 // (schema v16).
-//
-// STUB (Spec 101 US3 wave 0): no-op until T351.
 func RecordTPABundleReprotectHitOn(reg *CounterRegistry) {
-	_ = reg
+	if reg == nil {
+		return
+	}
+	reg.recordTPABundleReprotectHit()
 }

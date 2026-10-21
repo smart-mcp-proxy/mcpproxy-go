@@ -113,6 +113,10 @@ func (t *TPAScannerStats) isZero() bool {
 	if t.ToolChangeGateScans != 0 || t.PromptScans != 0 {
 		return false
 	}
+	if t.BundleRefreshCycles != 0 || t.BundleRefreshActivations != 0 || t.BundleRefreshRejections != 0 ||
+		t.BundleRefreshUnavailable != 0 || t.BundleReprotectHits != 0 {
+		return false
+	}
 	if t.BundleSource != "" || t.BundleSignatureVerified != nil || t.BundleVersion != "" || t.BundleSequence != nil {
 		return false
 	}
