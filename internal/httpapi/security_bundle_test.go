@@ -261,6 +261,103 @@ func TestSecurityBundle_UnpinAndReload(t *testing.T) {
 	assert.Equal(t, "42", got.Sequence)
 }
 
+// sampleRefreshedBundleInfo is sampleBundleInfo plus the Spec 087 / Spec 101 US3
+// freshness fields (tasks B15) so a surface test can prove they pass through.
+func sampleRefreshedBundleInfo() scanner.BundleInfo {
+	info := sampleBundleInfo()
+	checked := time.Date(2026, 10, 21, 6, 0, 0, 0, time.UTC)
+	activated := time.Date(2026, 10, 20, 6, 0, 0, 0, time.UTC)
+	attempt := time.Date(2026, 10, 21, 6, 0, 5, 0, time.UTC)
+	next := time.Date(2026, 10, 22, 6, 0, 0, 0, time.UTC)
+	reprotected := time.Date(2026, 10, 20, 6, 5, 0, 0, time.UTC)
+	staleAfter := 30
+	info.Source = scanner.BundleSourceFetch
+	info.LastCheckedAt = &checked
+	info.LastActivatedAt = &activated
+	info.Stale = true
+	info.StaleAfterDays = &staleAfter
+	info.Refresh = &scanner.BundleRefreshStatus{
+		FetchEnabled:        true,
+		FetchHost:           "mirror.example.test",
+		IntervalSeconds:     86400,
+		LastTrigger:         scanner.RefreshTriggerManual,
+		LastOutcome:         scanner.RefreshOutcomeFetchUnavailable,
+		LastReason:          scanner.RefreshReasonRateLimited,
+		LastAttemptAt:       &attempt,
+		ConsecutiveFailures: 2,
+		NextCheckAt:         &next,
+	}
+	info.Reprotect = &scanner.BundleReprotectStatus{
+		State:           scanner.ReprotectStateIdle,
+		LastCompletedAt: &reprotected,
+		ServersScanned:  4,
+		ServersWithHits: 1,
+	}
+	return info
+}
+
+// assertRefreshedBundleFields checks the US3 fields survived the REST round trip.
+func assertRefreshedBundleFields(t *testing.T, got scanner.BundleInfo) {
+	t.Helper()
+	require.NotNil(t, got.LastCheckedAt, "last_checked_at")
+	assert.Equal(t, time.Date(2026, 10, 21, 6, 0, 0, 0, time.UTC), got.LastCheckedAt.UTC())
+	require.NotNil(t, got.LastActivatedAt, "last_activated_at")
+	assert.True(t, got.Stale, "stale")
+	require.NotNil(t, got.StaleAfterDays, "stale_after_days")
+	assert.Equal(t, 30, *got.StaleAfterDays)
+	require.NotNil(t, got.Refresh, "refresh")
+	assert.Equal(t, "mirror.example.test", got.Refresh.FetchHost)
+	assert.Equal(t, scanner.RefreshOutcomeFetchUnavailable, got.Refresh.LastOutcome)
+	assert.Equal(t, scanner.RefreshReasonRateLimited, got.Refresh.LastReason)
+	assert.Equal(t, 2, got.Refresh.ConsecutiveFailures)
+	require.NotNil(t, got.Refresh.NextCheckAt, "refresh.next_check_at")
+	require.NotNil(t, got.Reprotect, "reprotect")
+	assert.Equal(t, scanner.ReprotectStateIdle, got.Reprotect.State)
+	assert.Equal(t, 1, got.Reprotect.ServersWithHits)
+}
+
+// Spec 087 FR-004 / tasks B20: POST /security/bundle/refresh runs one joined
+// refresh cycle and answers with the resulting BundleInfo, outcome included.
+func TestSecurityBundle_RefreshReturnsStatusWithRefreshBlock(t *testing.T) {
+	sec := &mockSecurityController{bundle: bundleMock{info: sampleRefreshedBundleInfo()}}
+	srv := newTestServerWithSecurity(t, sec)
+
+	rec := bundleReq(t, srv, http.MethodPost, "/api/v1/security/bundle/refresh", "", mockControllerAPIKey)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, 1, sec.bundle.refreshCalls, "the refresh must reach the controller exactly once")
+	assert.Zero(t, sec.bundle.reloadCalls, "refresh is not reload")
+
+	var got scanner.BundleInfo
+	decodeBundleData(t, rec, &got)
+	assertRefreshedBundleFields(t, got)
+}
+
+// The status read carries the freshness block (tasks B15).
+func TestSecurityBundle_StatusCarriesFreshnessFields(t *testing.T) {
+	sec := &mockSecurityController{bundle: bundleMock{info: sampleRefreshedBundleInfo()}}
+	srv := newTestServerWithSecurity(t, sec)
+
+	rec := bundleReq(t, srv, http.MethodGet, "/api/v1/security/bundle", "", mockControllerAPIKey)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got scanner.BundleInfo
+	decodeBundleData(t, rec, &got)
+	assertRefreshedBundleFields(t, got)
+}
+
+// ... and so does the overview's embedded signature_bundle descriptor.
+func TestSecurityOverview_SignatureBundleCarriesFreshnessFields(t *testing.T) {
+	info := sampleRefreshedBundleInfo()
+	sec := &mockSecurityController{overview: &scanner.SecurityOverview{SignatureBundle: &info}}
+	srv := newTestServerWithSecurity(t, sec)
+
+	rec := bundleReq(t, srv, http.MethodGet, "/api/v1/security/overview", "", mockControllerAPIKey)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var got scanner.SecurityOverview
+	decodeBundleData(t, rec, &got)
+	require.NotNil(t, got.SignatureBundle)
+	assertRefreshedBundleFields(t, *got.SignatureBundle)
+}
+
 func TestSecurityBundle_UnpinErrorIs500(t *testing.T) {
 	sec := &mockSecurityController{bundle: bundleMock{info: sampleBundleInfo(), unpinErr: errors.New("unpin not recorded")}}
 	srv := newTestServerWithSecurity(t, sec)
@@ -290,6 +387,7 @@ var bundleRoutes = []struct {
 	{"rollback", http.MethodPost, "/api/v1/security/bundle/rollback", true},
 	{"unpin", http.MethodPost, "/api/v1/security/bundle/unpin", true},
 	{"reload", http.MethodPost, "/api/v1/security/bundle/reload", true},
+	{"refresh", http.MethodPost, "/api/v1/security/bundle/refresh", true},
 }
 
 func TestSecurityBundle_AgentTokenRefusedOnEveryRoute(t *testing.T) {
@@ -305,7 +403,7 @@ func TestSecurityBundle_AgentTokenRefusedOnEveryRoute(t *testing.T) {
 			rec := bundleReq(t, srv, rt.method, rt.path, body, token)
 			assert.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
 			assert.NotContains(t, rec.Body.String(), bundleFullDigest, "a refused caller must learn nothing")
-			assert.Zero(t, sec.bundle.rollbackCalls+sec.bundle.unpinCalls+sec.bundle.reloadCalls,
+			assert.Zero(t, sec.bundle.rollbackCalls+sec.bundle.unpinCalls+sec.bundle.reloadCalls+sec.bundle.refreshCalls,
 				"a refused caller must not reach the mutation")
 
 			// Positive control: the same route and fixture serve an admin.
