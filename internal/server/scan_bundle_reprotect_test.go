@@ -60,6 +60,7 @@ func newReprotectServer(t *testing.T, fake securityScannerService, sec *config.S
 	t.Helper()
 	s := newInformationalTestServer(t, fake, sec, servers...)
 	probe := &reprotectProbe{}
+	s.infoScanSettleTimeout = 30 * time.Millisecond // fakes settle instantly or never
 	s.bundleReprotect.serverPause = time.Nanosecond
 	s.bundleReprotect.busyRetryDelay = time.Millisecond
 	s.bundleReprotect.statusSink = func(st scanner.BundleReprotectStatus) {
