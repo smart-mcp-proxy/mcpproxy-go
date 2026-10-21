@@ -197,11 +197,10 @@ type Runtime struct {
 	// US3 B19), registered by the server and started in
 	// StartBackgroundInitialization. Close stops and joins it before
 	// storageManager.StopAsync. Guarded by r.mu.
-	bundleRefresher *scanner.BundleRefresher
+	bundleRefresher bundleRefresherLifecycle
 	// closeOrderHook, when non-nil, is called with a step name at the ordered
 	// points of Close ("bundle_refresher_stopped", "storage_stop_async") so a
 	// test can assert the shutdown order. Test seam only.
-	//nolint:unused // used by the T360 shutdown-order test
 	closeOrderHook func(step string)
 
 	// Spec 080 (US3): pre-churn snapshot. prechurnStore owns the BBolt
@@ -3581,6 +3580,15 @@ func (r *Runtime) RefreshOAuthToken(serverName string) error {
 	return nil
 }
 
+// bundleRefresherLifecycle is the part of *scanner.BundleRefresher the runtime
+// drives: Start runs the cycle loop under ctx, Stop cancels it and returns only
+// after the loop exited, and a Start after Stop is a no-op. An interface so the
+// lifecycle is testable without a network scheduler.
+type bundleRefresherLifecycle interface {
+	Start(ctx context.Context)
+	Stop()
+}
+
 // SetBundleRefresher registers the TPA bundle refresher so the runtime owns its
 // lifecycle: StartBackgroundInitialization starts it with the app context and
 // Close stops and joins it (Spec 087 / Spec 101 US3 B19). Call it once during
@@ -3591,6 +3599,11 @@ func (r *Runtime) RefreshOAuthToken(serverName string) error {
 func (r *Runtime) SetBundleRefresher(refresher *scanner.BundleRefresher) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if refresher == nil {
+		// A typed nil pointer must not become a non-nil interface.
+		r.bundleRefresher = nil
+		return
+	}
 	r.bundleRefresher = refresher
 }
 
