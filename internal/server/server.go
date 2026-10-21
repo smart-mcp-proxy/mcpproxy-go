@@ -5178,6 +5178,40 @@ func (p *configServerInfoProvider) GetIngestedToolContracts(serverName string) (
 	return contracts, nil
 }
 
+// GetApprovedToolContracts implements scanner's optional
+// approvedToolContractsProvider (Spec 101 FR-019): the contracts recorded on
+// serverName's APPROVED tool-approval records, read from storage with no
+// upstream connection and no StateView read. The post-activation
+// re-protection scan analyses exactly these, so its verdict describes what the
+// operator approved. Pending and changed records are leg (i)'s business.
+func (p *configServerInfoProvider) GetApprovedToolContracts(serverName string) ([]map[string]interface{}, error) {
+	if p.server == nil || p.server.runtime == nil {
+		return nil, nil
+	}
+	sm := p.server.runtime.StorageManager()
+	if sm == nil {
+		return nil, nil
+	}
+	records, err := sm.ListToolApprovals(serverName)
+	if err != nil {
+		return nil, err
+	}
+	contracts := make([]map[string]interface{}, 0, len(records))
+	for _, rec := range records {
+		if rec == nil || rec.ToolName == "" || rec.Status != storage.ToolApprovalStatusApproved {
+			continue
+		}
+		if rec.CurrentDescription == "" && rec.CurrentSchema == "" && rec.CurrentOutputSchema == "" {
+			continue
+		}
+		contracts = append(contracts, toolMetadataToScanMap(serverName, &config.ToolMetadata{
+			Name: rec.ToolName, Description: rec.CurrentDescription, ParamsJSON: rec.CurrentSchema,
+			OutputSchemaJSON: rec.CurrentOutputSchema, Annotations: rec.CurrentAnnotations,
+		}))
+	}
+	return contracts, nil
+}
+
 // GetAllServerTools implements scanner's optional allServerToolsProvider: it
 // returns every configured server's current tool definitions, keyed by server
 // name, so a scan can build a cross-server snapshot for the shadowing check.
