@@ -484,6 +484,11 @@ func (s *Service) RefreshBundle(ctx context.Context) BundleInfo {
 // schedules Pass 2 and is excluded from the scan counters.
 //
 // STUB (Spec 101 US3 wave 0): returns an error until T368.
+// ErrNoCachedContracts is returned by StartScanFromCachedContracts when the
+// server has no approved tool contract to scan (or the provider cannot list
+// them). No job is recorded, so the server reads as unscanned, never clean.
+var ErrNoCachedContracts = errors.New("no cached approved tool contracts to scan")
+
 func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, bundleDigest string) (*ScanJob, error) {
 	_, _, _ = ctx, serverName, bundleDigest
 	return nil, errors.New("not implemented")
@@ -1031,6 +1036,10 @@ type scanCallbackAdapter struct {
 	cleanup    func()      // Optional cleanup function (e.g., remove temp source dir)
 	scanPass   int         // Which pass this callback is for (1 or 2)
 	serverInfo *ServerInfo // Cached server info for pass 2 auto-start
+	// informational marks a post-activation re-protection job (Spec 101
+	// FR-019): it schedules no Pass 2 and is not counted in the anonymous
+	// scan telemetry, so the sweep cannot inflate scans_completed.
+	informational bool
 }
 
 // countsForTelemetry reports whether this job is the unit the anonymous
