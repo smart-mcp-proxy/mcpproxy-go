@@ -286,9 +286,14 @@ type ScanContext struct {
 	// output schemas were exported; review then treats ToolHashes as
 	// output-unaware.
 	ToolContractDigests map[string][]string `json:"tool_contract_digests,omitempty"`
-	ScannedFiles        []string            `json:"scanned_files,omitempty"` // List of files that were scanned (capped at MaxScannedFiles)
-	TotalFiles          int                 `json:"total_files"`             // Total file count (may be > len(ScannedFiles) if capped)
-	TotalSizeBytes      int64               `json:"total_size_bytes"`        // Total size of scanned source
+	// BundleDigest is the full SHA-256 of the TPA signature bundle whose
+	// activation triggered this scan. Set only on a post-activation
+	// re-protection scan (Spec 101 FR-019), which analyses cached contracts
+	// rather than a fresh export.
+	BundleDigest   string   `json:"bundle_digest,omitempty"`
+	ScannedFiles   []string `json:"scanned_files,omitempty"` // List of files that were scanned (capped at MaxScannedFiles)
+	TotalFiles     int      `json:"total_files"`             // Total file count (may be > len(ScannedFiles) if capped)
+	TotalSizeBytes int64    `json:"total_size_bytes"`        // Total size of scanned source
 }
 
 // ScannerJobStatus tracks a single scanner's execution within a scan job

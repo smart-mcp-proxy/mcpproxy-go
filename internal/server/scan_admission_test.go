@@ -55,9 +55,18 @@ type fakeSecurityScanner struct {
 	// startScanTries records EVERY StartScan entry, including the ones that
 	// return startScanErr, so retry-capping can be asserted.
 	startScanTries []string
-	// cachedScanCalls records every StartScanFromCachedContracts call
-	// (re-protection sweep, Spec 101 FR-019) as "server@digest".
+	// cachedScanCalls records every SUCCESSFUL StartScanFromCachedContracts call
+	// (re-protection sweep, Spec 101 FR-019) as "server@digest"; cachedScanTries
+	// records every entry, failures included.
 	cachedScanCalls []string
+	cachedScanTries []string
+	// cachedScanErrs queues errors per server, consumed one per call; an empty
+	// queue means success. cachedScanResult publishes the settled summary a
+	// successful call leaves behind (as the real service does).
+	cachedScanErrs   map[string][]error
+	cachedScanResult map[string]*scanner.ScanSummary
+	// onCachedScan runs inside every call, before the outcome is decided.
+	onCachedScan func(serverName string)
 }
 
 func newFakeSecurityScanner() *fakeSecurityScanner {
@@ -68,6 +77,9 @@ func newFakeSecurityScanner() *fakeSecurityScanner {
 		jobs:        map[string]*scanner.ScanJob{},
 		passJobs:    map[passKey]*scanner.ScanJob{},
 		reports:     map[string]*scanner.AggregatedReport{},
+
+		cachedScanErrs:   map[string][]error{},
+		cachedScanResult: map[string]*scanner.ScanSummary{},
 	}
 }
 
@@ -194,9 +206,40 @@ func (f *fakeSecurityScanner) HasApprovalBaseline(serverName string) bool {
 
 func (f *fakeSecurityScanner) StartScanFromCachedContracts(_ context.Context, serverName, bundleDigest string) (*scanner.ScanJob, error) {
 	f.mu.Lock()
+	f.cachedScanTries = append(f.cachedScanTries, serverName)
+	hook := f.onCachedScan
+	f.mu.Unlock()
+	if hook != nil {
+		hook(serverName)
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
+	if queue := f.cachedScanErrs[serverName]; len(queue) > 0 {
+		err := queue[0]
+		f.cachedScanErrs[serverName] = queue[1:]
+		if err != nil {
+			return nil, err
+		}
+	}
 	f.cachedScanCalls = append(f.cachedScanCalls, serverName+"@"+bundleDigest)
+	if result, ok := f.cachedScanResult[serverName]; ok {
+		f.summaries[serverName] = result
+	}
 	return &scanner.ScanJob{ServerName: serverName}, nil
+}
+
+// cachedScans returns the successful cached-contract scan calls so far.
+func (f *fakeSecurityScanner) cachedScans() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cachedScanCalls...)
+}
+
+// cachedScanAttempts returns every cached-contract scan entry, failures included.
+func (f *fakeSecurityScanner) cachedScanAttempts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.cachedScanTries...)
 }
 
 func (f *fakeSecurityScanner) ApplySecurityConfig(*config.SecurityConfig) {}

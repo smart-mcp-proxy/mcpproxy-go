@@ -193,8 +193,12 @@ type Server struct {
 	// bundleReprotectWG tracks the post-activation re-protection sweep
 	// goroutines (see scan_bundle_reprotect.go). Shutdown waits for it before
 	// runtime.Close.
-	//nolint:unused // used once the re-protection sweep lands (T369)
 	bundleReprotectWG sync.WaitGroup
+	// bundleReprotect is the sweep's bookkeeping and test seams; bundleWiring
+	// holds the refresher nudger and the activation-observer unsubscribe (see
+	// tpa_bundle_wiring.go). Both are usable at their zero value.
+	bundleReprotect bundleReprotectState
+	bundleWiring    bundleWiring
 
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string
@@ -282,11 +286,34 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// the first configure. A nil storage manager (storage failed to open)
 	// keeps the state in memory only.
 	configureTPABundleRuntime(rt, cfg)
+	// Spec 087 FR-008 / Spec 101 FR-016a(c): install the activation self-check
+	// BEFORE the first configure, so the construction-time activation of a
+	// configured bundle file is checked too. Production wiring only: US1
+	// fixtures and the scan-eval tool keep the nil default.
+	enableActivationSelfCheck()
 	configureTPABundle(cfg, logger)
 
 	// Initialize update checker with build version
 	// This must happen before StartBackgroundInitialization is called
 	rt.SetVersion(httpapi.GetBuildVersion())
+
+	// Spec 087 / Spec 101 US3 (B19): the daily TPA bundle refresher. The
+	// runtime starts it in StartBackgroundInitialization (every transport, dev
+	// builds included) and joins it in Close; the scanner slot lets
+	// `security bundle refresh` join its in-flight cycle. The cycle reads the
+	// LIVE security config through the lock-free runtime snapshot.
+	bundleRefresher := scanner.NewBundleRefresher(scanner.BundleRefresherOptions{
+		ConfigProvider: func() *config.SecurityConfig {
+			if live := rt.Config(); live != nil {
+				return live.Security
+			}
+			return nil
+		},
+		Logger:  logger,
+		Version: httpapi.GetBuildVersion(),
+	})
+	scanner.SetBundleRefresher(bundleRefresher)
+	rt.SetBundleRefresher(bundleRefresher)
 
 	// Initialize telemetry service with build version and edition (Spec 036)
 	rt.SetTelemetry(httpapi.GetBuildVersion(), httpapi.GetEdition())
@@ -327,6 +354,13 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// the LIVE config on every Doctor call (never the boot pointer).
 	mgmtService.AddRuntimeWarningSource(func() []string {
 		return config.DoctorFindings(rt.Config())
+	})
+	// Spec 101 US3 (B16): stale, stuck-on-last-known-good and
+	// fetch-configured-but-inactive bundle states. Calling BundleStatus on a
+	// runtime nothing was published to installs the embedded default without
+	// holding the activation mutex first.
+	mgmtService.AddRuntimeWarningSource(func() []string {
+		return bundleDoctorWarnings(scanner.BundleStatus(), time.Now())
 	})
 	// Spec 107 FR-029: an explicit require_mcp_auth: false under an enabled
 	// server-edition block is overridden, never refused — one boot notice.
@@ -392,6 +426,12 @@ func NewServerWithConfigPath(cfg *config.Config, configPath string, logger *zap.
 	// start below, so no removal can commit without forgetting its scan state.
 	server.forgetInformationalScansOnPurge()
 	server.registerToolChangeRescan()
+	// Spec 101 US3 (B17, B19, B21): the refresher nudge, the refresh-cycle
+	// telemetry and the post-activation re-protection sweep. Registered here,
+	// at construction, so no activation can slip in before the observer; the
+	// construction-time activation above predates it and is covered by the
+	// startup catch-up (runBundleReprotectCatchUp).
+	server.wireTPABundleLifecycle(bundleRefresher)
 
 	// Replace the diagnostics package's placeholder fixers with the real,
 	// runtime-backed ones (see diagnostics_fixers.go). builtin_fixers.go has
@@ -1176,6 +1216,15 @@ func (s *Server) reapplyScannerSecurityConfig() {
 	// there is no scanner Service at all — the scan gate still runs (spec 086
 	// FR-019 hot-reload).
 	configureTPABundle(cfg, s.logger)
+	// Spec 087 FR-016 / Spec 101 US3 (B8): tell the refresher the security
+	// config changed. Non-blocking; on every transport, like the corpus above.
+	if nudger := s.bundleNudgerOrNil(); nudger != nil {
+		var sec *config.SecurityConfig
+		if cfg != nil {
+			sec = cfg.Security
+		}
+		nudger.Nudge(sec)
+	}
 	scanSvc := s.securityScannerSvc()
 	if scanSvc == nil {
 		return
@@ -1414,6 +1463,11 @@ func (s *Server) Shutdown() error {
 			s.logger.Info("HTTP server shutdown completed gracefully")
 		}
 	}
+
+	// Spec 101 US3 (B17): unsubscribe the activation observer and join any
+	// running re-protection sweep BEFORE the runtime closes, so no sweep
+	// writes to the store once Close begins.
+	s.unwireTPABundleLifecycle()
 
 	if err := s.runtime.Close(); err != nil {
 		s.logger.Error("Failed to close runtime", zap.Error(err))
@@ -3411,6 +3465,11 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		// with the server context, and gated by a persisted marker so it runs
 		// exactly once.
 		go s.runBaselineSweep(ctx)
+		// Spec 101 FR-019: re-protect approved tools when the active bundle is
+		// not the one the last completed sweep covered (construction-time
+		// activation, a crash mid-sweep, a binary upgrade). After the scanner
+		// is published, because leg (ii) needs it.
+		go s.runBundleReprotectCatchUp(ctx)
 	}
 	// Wire server edition multi-user OAuth (no-op in personal edition)
 	wireServerEditionOAuth(s, httpAPIServer)
@@ -5115,6 +5174,40 @@ func (p *configServerInfoProvider) GetIngestedToolContracts(serverName string) (
 				OutputSchemaJSON: rec.PreviousOutputSchema, Annotations: rec.PreviousAnnotations,
 			}))
 		}
+	}
+	return contracts, nil
+}
+
+// GetApprovedToolContracts implements scanner's optional
+// approvedToolContractsProvider (Spec 101 FR-019): the contracts recorded on
+// serverName's APPROVED tool-approval records, read from storage with no
+// upstream connection and no StateView read. The post-activation
+// re-protection scan analyses exactly these, so its verdict describes what the
+// operator approved. Pending and changed records are leg (i)'s business.
+func (p *configServerInfoProvider) GetApprovedToolContracts(serverName string) ([]map[string]interface{}, error) {
+	if p.server == nil || p.server.runtime == nil {
+		return nil, nil
+	}
+	sm := p.server.runtime.StorageManager()
+	if sm == nil {
+		return nil, nil
+	}
+	records, err := sm.ListToolApprovals(serverName)
+	if err != nil {
+		return nil, err
+	}
+	contracts := make([]map[string]interface{}, 0, len(records))
+	for _, rec := range records {
+		if rec == nil || rec.ToolName == "" || rec.Status != storage.ToolApprovalStatusApproved {
+			continue
+		}
+		if rec.CurrentDescription == "" && rec.CurrentSchema == "" && rec.CurrentOutputSchema == "" {
+			continue
+		}
+		contracts = append(contracts, toolMetadataToScanMap(serverName, &config.ToolMetadata{
+			Name: rec.ToolName, Description: rec.CurrentDescription, ParamsJSON: rec.CurrentSchema,
+			OutputSchemaJSON: rec.CurrentOutputSchema, Annotations: rec.CurrentAnnotations,
+		}))
 	}
 	return contracts, nil
 }
