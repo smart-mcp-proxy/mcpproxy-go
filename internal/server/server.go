@@ -78,6 +78,10 @@ type securityScannerService interface {
 	GetScanStatusByPass(ctx context.Context, serverName string, pass int) (*scanner.ScanJob, error)
 	GetScanReport(ctx context.Context, serverName string) (*scanner.AggregatedReport, error)
 	HasApprovalBaseline(serverName string) bool
+	// StartScanFromCachedContracts starts the post-activation re-protection scan
+	// of one server over its already-ingested approved contracts, with no
+	// upstream connection (Spec 101 FR-019, B17).
+	StartScanFromCachedContracts(ctx context.Context, serverName, bundleDigest string) (*scanner.ScanJob, error)
 	ApplySecurityConfig(sec *config.SecurityConfig)
 	SetIsolationMode(mode string)
 	DeepScanEnabled() bool
@@ -185,6 +189,12 @@ type Server struct {
 	infoRescanTimers   map[string]*infoRescanTimer
 	infoRescanSeq      uint64
 	infoRescanDebounce time.Duration
+
+	// bundleReprotectWG tracks the post-activation re-protection sweep
+	// goroutines (see scan_bundle_reprotect.go). Shutdown waits for it before
+	// runtime.Close.
+	//nolint:unused // used once the re-protection sweep lands (T369)
+	bundleReprotectWG sync.WaitGroup
 
 	// Spec 024: Shutdown info for lifecycle events
 	shutdownReason string

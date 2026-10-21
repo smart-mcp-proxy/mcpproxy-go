@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -28,6 +29,7 @@ type bundleMock struct {
 	unpinErr      error
 	unpinCalls    int
 	reloadCalls   int
+	refreshCalls  int
 }
 
 func (m *mockSecurityController) BundleStatus() scanner.BundleInfo { return m.bundle.info }
@@ -49,6 +51,11 @@ func (m *mockSecurityController) UnpinBundle() (scanner.BundleInfo, error) {
 
 func (m *mockSecurityController) ReloadBundle() scanner.BundleInfo {
 	m.bundle.reloadCalls++
+	return m.bundle.info
+}
+
+func (m *mockSecurityController) RefreshBundle(context.Context) scanner.BundleInfo {
+	m.bundle.refreshCalls++
 	return m.bundle.info
 }
 

@@ -55,6 +55,9 @@ type fakeSecurityScanner struct {
 	// startScanTries records EVERY StartScan entry, including the ones that
 	// return startScanErr, so retry-capping can be asserted.
 	startScanTries []string
+	// cachedScanCalls records every StartScanFromCachedContracts call
+	// (re-protection sweep, Spec 101 FR-019) as "server@digest".
+	cachedScanCalls []string
 }
 
 func newFakeSecurityScanner() *fakeSecurityScanner {
@@ -187,6 +190,13 @@ func (f *fakeSecurityScanner) HasApprovalBaseline(serverName string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.hasBaseline[serverName]
+}
+
+func (f *fakeSecurityScanner) StartScanFromCachedContracts(_ context.Context, serverName, bundleDigest string) (*scanner.ScanJob, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cachedScanCalls = append(f.cachedScanCalls, serverName+"@"+bundleDigest)
+	return &scanner.ScanJob{ServerName: serverName}, nil
 }
 
 func (f *fakeSecurityScanner) ApplySecurityConfig(*config.SecurityConfig) {}

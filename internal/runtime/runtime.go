@@ -41,6 +41,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -191,6 +192,17 @@ type Runtime struct {
 	refreshManager   *oauth.RefreshManager // Proactive OAuth token refresh
 	updateChecker    *updatecheck.Checker  // Background version checking
 	telemetryService *telemetry.Service    // Anonymous usage telemetry (Spec 036)
+
+	// bundleRefresher is the TPA bundle refresh scheduler (Spec 087 / Spec 101
+	// US3 B19), registered by the server and started in
+	// StartBackgroundInitialization. Close stops and joins it before
+	// storageManager.StopAsync. Guarded by r.mu.
+	bundleRefresher *scanner.BundleRefresher
+	// closeOrderHook, when non-nil, is called with a step name at the ordered
+	// points of Close ("bundle_refresher_stopped", "storage_stop_async") so a
+	// test can assert the shutdown order. Test seam only.
+	//nolint:unused // used by the T360 shutdown-order test
+	closeOrderHook func(step string)
 
 	// Spec 080 (US3): pre-churn snapshot. prechurnStore owns the BBolt
 	// shutdown marker + last_error_code record; previousShutdown is the
@@ -3567,6 +3579,19 @@ func (r *Runtime) RefreshOAuthToken(serverName string) error {
 	}
 
 	return nil
+}
+
+// SetBundleRefresher registers the TPA bundle refresher so the runtime owns its
+// lifecycle: StartBackgroundInitialization starts it with the app context and
+// Close stops and joins it (Spec 087 / Spec 101 US3 B19). Call it once during
+// server construction, before StartBackgroundInitialization; nil clears it.
+//
+// STUB (Spec 101 US3 wave 0): only records the refresher; the start and the
+// Close join land with T367.
+func (r *Runtime) SetBundleRefresher(refresher *scanner.BundleRefresher) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.bundleRefresher = refresher
 }
 
 // SetVersion initializes the update checker with the given version.

@@ -17,6 +17,10 @@ const (
 	// BundleSourceFile is a corpus read from the configured filesystem path
 	// (security.tpa_bundle_path / MCPPROXY_TPA_BUNDLE_PATH).
 	BundleSourceFile = "file"
+	// BundleSourceFetch is a corpus fetched from the configured channel
+	// (security.tpa_fetch_url, Spec 087 / Spec 101 US3). It reaches the same
+	// verifier as a file drop; only the Candidate's origin differs.
+	BundleSourceFetch = "fetch"
 )
 
 // BundleInfo is the operator-facing status of the TPA signature corpus the
@@ -25,7 +29,7 @@ const (
 // running, and how old are they?" — the bundle was embed-only and its single
 // load report went to an unconfigured global logger.
 type BundleInfo struct {
-	// Source is BundleSourceEmbedded or BundleSourceFile.
+	// Source is BundleSourceEmbedded, BundleSourceFile or BundleSourceFetch.
 	Source string `json:"source"`
 	// Path is the configured filesystem path, when Source is "file".
 	Path string `json:"path,omitempty"`
@@ -90,6 +94,28 @@ type BundleInfo struct {
 	// across a later successful load so "what did it refuse, and when"
 	// survives.
 	LastRejection *BundleRejection `json:"last_rejection,omitempty"`
+
+	// --- Spec 087 / Spec 101 US3 freshness fields (tasks B15) ---
+	//
+	// All pointer or omitempty so a status that never refreshed reads exactly
+	// as before.
+
+	// LastCheckedAt is the end of the most recent pipeline run, including
+	// no-op runs the idempotence short-circuit skipped.
+	LastCheckedAt *time.Time `json:"last_checked_at,omitempty"`
+	// LastActivatedAt is when the serving external bundle was activated; nil
+	// for the embedded default.
+	LastActivatedAt *time.Time `json:"last_activated_at,omitempty"`
+	// Stale and StaleAfterDays are computed at read time next to
+	// StalenessDays; a future generated_at is never stale. StaleAfterDays nil
+	// means the flag is not evaluated.
+	Stale          bool `json:"stale,omitempty"`
+	StaleAfterDays *int `json:"stale_after_days,omitempty"`
+	// Refresh is the refresh-cycle status (nil before any cycle or setting is
+	// known). Reprotect is the post-activation re-protection sweep status,
+	// set from the server through SetReprotectStatus.
+	Refresh   *BundleRefreshStatus   `json:"refresh,omitempty"`
+	Reprotect *BundleReprotectStatus `json:"reprotect,omitempty"`
 }
 
 // BundleRejection is one refused candidate (FR-020).

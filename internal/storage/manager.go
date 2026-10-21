@@ -942,6 +942,25 @@ func (m *Manager) LoadBaselineSweepState() (*BaselineSweepState, error) {
 	return state, nil
 }
 
+// TPA bundle re-protection sweep marker
+
+// SaveBundleReprotectState persists the marker written when a re-protection
+// sweep completes with zero failures (Spec 101 FR-019, B17).
+//
+// STUB (Spec 101 US3 wave 0): writes nothing until T369.
+func (m *Manager) SaveBundleReprotectState(state BundleReprotectState) error {
+	_ = state
+	return nil
+}
+
+// LoadBundleReprotectState returns the re-protection marker, or the zero value
+// when no sweep has ever completed. A read never creates the bucket.
+//
+// STUB (Spec 101 US3 wave 0): always the zero value until T369.
+func (m *Manager) LoadBundleReprotectState() (BundleReprotectState, error) {
+	return BundleReprotectState{}, nil
+}
+
 // Maintenance operations
 
 // Backup creates a backup of the database

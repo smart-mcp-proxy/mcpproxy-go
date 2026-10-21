@@ -192,6 +192,23 @@ func ReloadBundle(logger *zap.Logger) BundleInfo {
 	return statusFromSnapshot()
 }
 
+// runOffered runs the pipeline with c as the freshly offered candidate (the
+// fetch adapter's entry point, tasks B7): it evaluates ONLY c, never re-reads
+// the configured file, and on refusal leaves the serving bundle in place. It
+// returns the resulting status.
+//
+// STUB (Spec 101 US3 wave 0): delegates to a normal run and ignores c; T330
+// adds the offered-only branch.
+//
+//nolint:unused // called by the refresher's fetch leg once T331 lands
+func runOffered(c Candidate, logger *zap.Logger) BundleInfo {
+	log := bundleLogger(logger)
+	bundleRT.mu.Lock()
+	defer bundleRT.mu.Unlock()
+	bundleRT.runLocked(bundleRT.policyOrDefaultLocked(), log, runOptions{offered: &c})
+	return statusFromSnapshot()
+}
+
 // BundleCoverageDegraded reports whether the active bundle demotes the install to
 // degraded coverage, and why. The scan-mode admission gates consult it: while it
 // is true auto-approval is suspended and changes route to human review.
@@ -221,6 +238,12 @@ type runOptions struct {
 	// force skips the idempotence short-circuit (unpin re-validates the serving
 	// bundle even though no input file changed).
 	force bool
+	// offered, when non-nil, is the single freshly offered candidate (fetch
+	// leg). The run evaluates only it as the fresh one (tasks B7).
+	//
+	// STUB (Spec 101 US3 wave 0): ignored until T330.
+	//nolint:unused // read by the offered-only branch once T330 lands
+	offered *Candidate
 }
 
 // selection is what a run chose to serve and why.
@@ -245,6 +268,13 @@ type selection struct {
 	// restored is the Active record put back from the active root's rollback
 	// pin (restorePinLocked); serving is then that pin's bundle.
 	restored *TPABundleActiveRecord
+	// offeredRej is the refusal of the offered (fetch) candidate and
+	// offeredDigest the candidate's digest; they are kept apart from attempt
+	// so a fetch refusal never sets the file leg's load_error (tasks B7).
+	//nolint:unused // written by the offered-only branch once T330 lands
+	offeredRej *BundleRejection
+	//nolint:unused // written by the offered-only branch once T330 lands
+	offeredDigest string
 }
 
 // runLocked is one pipeline run (design §6). The caller holds rt.mu.
@@ -422,7 +452,7 @@ func (rt *bundleRuntime) canSkipLocked(policy *bundlePolicy, cand *Candidate) bo
 	if !rt.clean || rt.policy == nil || rt.policy.Fingerprint != policy.Fingerprint || rt.loadErr != "" {
 		return false
 	}
-	if policy.Path == "" {
+	if !externalConfigured(policy, rt.state) {
 		return rt.active == nil
 	}
 	if cand == nil || rt.active == nil {
@@ -466,7 +496,7 @@ func (rt *bundleRuntime) chooseLocked(policy *bundlePolicy, nst *TPABundleState,
 // fallbackLocked fills sel.serving from steps b, c and d.
 func (rt *bundleRuntime) fallbackLocked(policy *bundlePolicy, nst *TPABundleState, sel *selection, log *zap.Logger) {
 	sel.serving, sel.fromPath = nil, false
-	if policy.Path != "" {
+	if externalConfigured(policy, nst) {
 		switch {
 		case rt.active != nil:
 			acc, rej := evaluateCandidate(rt.active.cand, evalEnv{Policy: policy, State: nst, Mode: evalLKG, Reuse: rt.active.acc})
@@ -515,7 +545,7 @@ func (rt *bundleRuntime) fallbackLocked(policy *bundlePolicy, nst *TPABundleStat
 // switching back must restore the pinned bundle unchanged rather than leave the
 // install on the embedded default while the pin still binds.
 func (rt *bundleRuntime) restorePinLocked(policy *bundlePolicy, nst *TPABundleState, sel *selection, log *zap.Logger, now time.Time) {
-	if policy.Path == "" || rt.dataDir == "" || rt.loadFailed || sel.keepActive || sel.serving == nil || !sel.serving.embedded {
+	if !externalConfigured(policy, nst) || rt.dataDir == "" || rt.loadFailed || sel.keepActive || sel.serving == nil || !sel.serving.embedded {
 		return
 	}
 	a := nst.Authorities[policy.ActiveRoot]

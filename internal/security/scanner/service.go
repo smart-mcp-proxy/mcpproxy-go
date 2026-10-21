@@ -470,6 +470,25 @@ func (s *Service) ReloadBundle() BundleInfo {
 	return ReloadBundle(s.logger)
 }
 
+// RefreshBundle runs one joined refresh cycle (the network-free file leg, then
+// the optional fetch leg) and returns the resulting status; without a running
+// refresher it behaves as ReloadBundle (Spec 087 FR-004, Spec 101 US3 B20).
+func (s *Service) RefreshBundle(ctx context.Context) BundleInfo {
+	return RefreshBundle(ctx, s.logger)
+}
+
+// StartScanFromCachedContracts starts the post-activation re-protection scan of
+// one server (Spec 101 FR-019, tasks B17): an informational job over the
+// tool contracts discovery already ingested for its approved tools, labelled
+// with the activated bundle's digest. It never connects to the upstream, never
+// schedules Pass 2 and is excluded from the scan counters.
+//
+// STUB (Spec 101 US3 wave 0): returns an error until T368.
+func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, bundleDigest string) (*ScanJob, error) {
+	_, _, _ = ctx, serverName, bundleDigest
+	return nil, errors.New("not implemented")
+}
+
 // isBaselineScanner reports whether a scanner id belongs to the deterministic
 // in-process baseline (Spec 077). An unknown id is treated as a deep scanner so
 // its failure is attributed to the deep-scan layer, never the baseline.

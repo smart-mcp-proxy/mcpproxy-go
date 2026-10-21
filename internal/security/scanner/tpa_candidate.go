@@ -66,6 +66,14 @@ type evalEnv struct {
 	// every policy- and state-dependent stage (signature, authority, epoch,
 	// deny-list, watermark) still runs in full.
 	Reuse *acceptedBundle
+	// MustSign makes THIS evaluation refuse an unsigned candidate as
+	// signature_required without touching the policy (tasks B5): the offered
+	// fetch run sets it, so a policy copy with RequireSigned=true never reaches
+	// fallback step b and a serving unsigned file-drop bundle is not
+	// deactivated.
+	//
+	// STUB (Spec 101 US3 wave 0): ignored until T330.
+	MustSign bool
 }
 
 // acceptedBundle is a candidate that passed every stage.

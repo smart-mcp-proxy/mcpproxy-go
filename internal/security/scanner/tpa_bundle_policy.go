@@ -31,6 +31,13 @@ type bundlePolicy struct {
 	OperatorBaselineSet bool
 	OperatorEpoch       uint64
 
+	// FetchEnabled and FetchURL mirror security.tpa_fetch_enabled (with its
+	// environment override) and security.tpa_fetch_url. They are part of the
+	// policy fingerprint once T330 lands: a change to either supersedes an
+	// in-flight download (tasks B8, B9).
+	FetchEnabled bool
+	FetchURL     string
+
 	// PublisherEpoch and PublisherBaseline are the binary's anchors, captured
 	// when the policy is built so that one run sees one consistent view.
 	PublisherEpoch    uint64
@@ -68,6 +75,8 @@ func policyFor(sec *config.SecurityConfig, path string) *bundlePolicy {
 		OperatorBaseline:    opBase,
 		OperatorBaselineSet: opBaseSet,
 		OperatorEpoch:       sec.EffectiveTPAOperatorEpoch(),
+		FetchEnabled:        sec.IsTPAFetchEnabled(),
+		FetchURL:            sec.EffectiveTPAFetchURL(),
 		PublisherEpoch:      publisherTrustEpoch,
 		PublisherBaseline:   pubBase,
 		Warnings:            warnings,
@@ -101,6 +110,18 @@ func (p *bundlePolicy) fingerprint(keys []bundlesig.Key) string {
 		field("key", id)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// externalConfigured reports whether an external (non-embedded) bundle source
+// is configured or already serving: the configured path, an enabled fetch, or a
+// recorded fetched Active bundle (tasks B9, Hazard A). It is a function rather
+// than a policy method because bundlePolicy holds configuration only; the
+// recorded Active record lives in the committed state st (nil-safe).
+//
+// STUB (Spec 101 US3 wave 0): behaves as the path-only guard it replaces
+// (policy.Path != ""). T330 widens it for fetched bundles.
+func externalConfigured(policy *bundlePolicy, _ *TPABundleState) bool {
+	return policy.Path != ""
 }
 
 // currentEpoch returns the trusted epoch of auth (FR-005a). An unknown

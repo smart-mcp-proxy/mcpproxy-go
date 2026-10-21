@@ -2112,6 +2112,14 @@ func IsValidTrustMode(s string) bool {
 // loader's env pass.
 const EnvTPABundlePath = "MCPPROXY_TPA_BUNDLE_PATH"
 
+// EnvTPAFetchEnabled is the environment override for the optional TPA bundle
+// network fetch (`security.tpa_fetch_enabled`, Spec 087 FR-016 / Spec 101 US3
+// B2). It is read inside SecurityConfig.IsTPAFetchEnabled, bidirectional
+// ("true"/"1" force on, "false"/"0" force off), and is never persisted. It
+// enables only the config-resident URL, verified against config-resident keys,
+// so the environment cannot redirect the fetch.
+const EnvTPAFetchEnabled = "MCPPROXY_TPA_FETCH_ENABLED"
+
 // EnvAutoBaselineScan is the environment kill-switch for the automatic,
 // informational Pass-1 baseline scan (`security.auto_baseline_scan`). Like the
 // bundle path, precedence is enforced in the accessor
@@ -2351,6 +2359,7 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	errors = append(errors, c.forwardHeadersErrors()...)
 	errors = append(errors, c.oauthEndpointOverrideErrors()...)
 	errors = append(errors, c.tpaTrustRootErrors()...)
+	errors = append(errors, c.tpaRefreshErrors()...)
 	if _, err := ValidateProfiles(c); err != nil {
 		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
 	}
@@ -2416,6 +2425,17 @@ func (c *Config) tpaTrustRootErrors() []ValidationError {
 		})
 	}
 	return errors
+}
+
+// tpaRefreshErrors validates the Spec 087 / Spec 101 US3 refresh keys under
+// `security` (tpa_refresh_interval, tpa_fetch_enabled, tpa_fetch_url,
+// tpa_stale_after_days). Write-time only, like tpaTrustRootErrors: it is
+// appended to ValidateDetailed and never reached from the boot-fatal
+// validateDetailedCore. Messages never echo the URL.
+//
+// STUB (Spec 101 US3 wave 0): the real shape checks land with T312.
+func (c *Config) tpaRefreshErrors() []ValidationError {
+	return nil
 }
 
 // ValidateServerForLoad runs the per-server checks config.Load applies at boot
@@ -3318,6 +3338,30 @@ type SecurityConfig struct {
 	// watermark and retires prior-epoch pins. Absent means 0.
 	TPAOperatorEpoch *uint64 `json:"tpa_operator_epoch,omitempty" mapstructure:"tpa-operator-epoch"`
 
+	// --- Spec 087 / Spec 101 US3: daily refresh and optional fetch ---
+	//
+	// Flat keys, none containing a masked substring (KEY, AUTH, TOKEN, PASS,
+	// CERT, SECRET), so GET /api/v1/config returns them verbatim. The trust set
+	// a fetched pair is verified against is the Spec 101 one above; there is no
+	// per-fetch key.
+
+	// TPARefreshInterval is the cadence of the refresh cycle (the network-free
+	// file leg, then the optional fetch leg). Absent or 0 means 24h; the runtime
+	// clamps to at least 1h. There is no refresh-enable key: the file leg is
+	// idempotent and always on.
+	TPARefreshInterval Duration `json:"tpa_refresh_interval,omitempty" mapstructure:"tpa-refresh-interval" swaggertype:"string"`
+	// TPAFetchEnabled opts in to the network fetch leg. Default false; the
+	// environment override is MCPPROXY_TPA_FETCH_ENABLED (EnvTPAFetchEnabled).
+	TPAFetchEnabled bool `json:"tpa_fetch_enabled" mapstructure:"tpa-fetch-enabled"`
+	// TPAFetchURL is the channel URL: a GitHub Releases "latest" API URL or a
+	// direct bundle URL. Empty (the default) means the fetch leg is off; no URL
+	// is compiled into the binary.
+	TPAFetchURL string `json:"tpa_fetch_url,omitempty" mapstructure:"tpa-fetch-url"`
+	// TPAStaleAfterDays is the age in days after which the active bundle reads
+	// as stale. Absent means 30; an explicit 0 disables the stale flag and the
+	// doctor stale warning.
+	TPAStaleAfterDays *int `json:"tpa_stale_after_days,omitempty" mapstructure:"tpa-stale-after-days"`
+
 	// DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
 	// deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
 	// keys (migrated on load) and gates the heavy Docker-based scanners + source
@@ -3457,6 +3501,53 @@ func (sc *SecurityConfig) EffectiveTPAOperatorEpoch() uint64 {
 		return 0
 	}
 	return *sc.TPAOperatorEpoch
+}
+
+// Defaults for the Spec 087 / Spec 101 US3 refresh keys.
+const (
+	// DefaultTPARefreshInterval is the refresh cadence when none is configured.
+	DefaultTPARefreshInterval = 24 * time.Hour
+	// DefaultTPAStaleAfterDays is the stale threshold when none is configured.
+	DefaultTPAStaleAfterDays = 30
+)
+
+// EffectiveTPARefreshInterval returns the configured refresh cadence, 24h when
+// absent or non-positive. Nil-safe. The runtime applies its own 1h floor.
+//
+// STUB (wave 0): the clamp lands with T312.
+func (sc *SecurityConfig) EffectiveTPARefreshInterval() time.Duration {
+	if sc == nil || sc.TPARefreshInterval <= 0 {
+		return DefaultTPARefreshInterval
+	}
+	return sc.TPARefreshInterval.Duration()
+}
+
+// IsTPAFetchEnabled reports whether the optional TPA bundle network fetch is
+// on. Default false; nil-safe. The environment override
+// (EnvTPAFetchEnabled) is read here, like EffectiveTPABundlePath, once T312
+// lands.
+//
+// STUB (wave 0): no env override yet.
+func (sc *SecurityConfig) IsTPAFetchEnabled() bool {
+	return sc != nil && sc.TPAFetchEnabled
+}
+
+// EffectiveTPAFetchURL returns the configured fetch URL, "" when none.
+// Nil-safe.
+func (sc *SecurityConfig) EffectiveTPAFetchURL() string {
+	if sc == nil {
+		return ""
+	}
+	return sc.TPAFetchURL
+}
+
+// EffectiveTPAStaleAfterDays returns the stale threshold in days: 30 when
+// absent, 0 (never stale) when explicitly zero. Nil-safe.
+func (sc *SecurityConfig) EffectiveTPAStaleAfterDays() int {
+	if sc == nil || sc.TPAStaleAfterDays == nil {
+		return DefaultTPAStaleAfterDays
+	}
+	return *sc.TPAStaleAfterDays
 }
 
 // IsAutoBaselineScanEnabled reports whether mcpproxy may run the automatic,
