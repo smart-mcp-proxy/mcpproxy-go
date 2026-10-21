@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -57,7 +59,8 @@ Examples:
   mcpproxy security disable mcp-scan
   mcpproxy security scan github-server
   mcpproxy security report github-server
-  mcpproxy security overview`,
+  mcpproxy security overview
+  mcpproxy security bundle`,
 	}
 
 	securityCmd.AddCommand(newSecurityScannersCmd())
@@ -76,6 +79,7 @@ Examples:
 	securityCmd.AddCommand(newSecurityOverviewCmd())
 	securityCmd.AddCommand(newSecurityIntegrityCmd())
 	securityCmd.AddCommand(newSecurityCancelAllCmd())
+	securityCmd.AddCommand(newSecurityBundleCmd())
 
 	return securityCmd
 }
@@ -2284,38 +2288,99 @@ func signatureBundleLines(overview map[string]interface{}) []string {
 		return nil
 	}
 
-	source, _ := bundle["source"].(string)
+	field := func(label, value string) string {
+		return fmt.Sprintf("    %-16s %s", label+":", value)
+	}
+
+	rawSource, _ := bundle["source"].(string)
+	source := rawSource
 	if path, _ := bundle["path"].(string); path != "" {
 		source = fmt.Sprintf("%s (%s)", source, path)
 	}
 
 	lines := []string{
 		"  Signature bundle:",
-		fmt.Sprintf("    Source:      %s", source),
+		field("Source", source),
 	}
 	if version, _ := bundle["bundle_version"].(string); version != "" {
-		lines = append(lines, fmt.Sprintf("    Version:     %s", version))
+		lines = append(lines, field("Version", version))
 	}
 	if generated, _ := bundle["generated_at"].(string); generated != "" {
-		lines = append(lines, fmt.Sprintf("    Generated:   %s", generated))
+		if days, ok := bundle["staleness_days"].(float64); ok {
+			generated = fmt.Sprintf("%s (%d days old)", generated, int(days))
+		}
+		lines = append(lines, field("Generated", generated))
 	}
 	if fingerprint, _ := bundle["fingerprint"].(string); fingerprint != "" {
-		lines = append(lines, fmt.Sprintf("    Fingerprint: %s", fingerprint))
+		lines = append(lines, field("Fingerprint", fingerprint))
 	}
-	lines = append(lines, fmt.Sprintf("    Rules:       %s runnable, %s skipped, %s declared-skipped",
+	if digest, _ := bundle["full_digest"].(string); digest != "" {
+		// Shown in FULL: it is the only value `security bundle rollback` accepts.
+		lines = append(lines, field("Full digest", digest))
+	}
+	if seq, _ := bundle["sequence"].(string); seq != "" {
+		lines = append(lines, field("Sequence", seq))
+	}
+	authority, _ := bundle["authority"].(string)
+	verified, _ := bundle["signature_verified"].(bool)
+	switch {
+	case authority != "":
+		auth := authority
+		if epoch, ok := bundle["trust_epoch"].(float64); ok {
+			auth = fmt.Sprintf("%s (epoch %d)", authority, int(epoch))
+		}
+		lines = append(lines, field("Authority", auth))
+	case rawSource != "" && rawSource != "embedded":
+		lines = append(lines, field("Authority", "none (unsigned external bundle)"))
+	}
+	switch {
+	case verified:
+		lines = append(lines, field("Signature", "verified"))
+	case rawSource == "embedded":
+		lines = append(lines, field("Signature", "binary-trusted (embedded default)"))
+	case rawSource != "":
+		lines = append(lines, field("Signature", "unsigned - not verified"))
+	}
+	lines = append(lines, field("Rules", fmt.Sprintf("%s runnable, %s skipped, %s declared-skipped",
 		secFormatInt(bundle, "runnable_rules"),
 		secFormatInt(bundle, "skipped_rules"),
-		secFormatInt(bundle, "declared_skipped")))
+		secFormatInt(bundle, "declared_skipped"))))
+	if degraded, _ := bundle["coverage_degraded"].(bool); degraded {
+		// scan-mode auto-approval is suspended while coverage is degraded; a
+		// silent flag is indistinguishable from a quiet install.
+		reason, _ := bundle["degraded_reason"].(string)
+		if reason == "" {
+			reason = "unspecified"
+		}
+		lines = append(lines, field("Coverage", "DEGRADED: "+reason+" (scan-mode auto-approval is suspended)"))
+	}
+	if pinned, _ := bundle["pinned"].(bool); pinned {
+		lines = append(lines, field("Pinned", "yes - pinned by an operator rollback (`security bundle unpin` clears it)"))
+	}
+	if rollback, _ := bundle["rollback"].(bool); rollback {
+		lines = append(lines, field("Rollback", "the serving bundle was activated by an explicit rollback"))
+	}
 	if loadErr, _ := bundle["load_error"].(string); loadErr != "" {
 		// A configured bundle that failed to load keeps the previous corpus
 		// live; say so loudly rather than letting the counts imply all is well.
-		lines = append(lines, fmt.Sprintf("    load error:  %s", loadErr))
+		lines = append(lines, field("load error", loadErr))
+	}
+	if rej, ok := bundle["last_rejection"].(map[string]interface{}); ok && len(rej) > 0 {
+		reason, _ := rej["reason"].(string)
+		text := reason
+		if detail, _ := rej["detail"].(string); detail != "" {
+			text += ": " + detail
+		}
+		if at, _ := rej["at"].(string); at != "" {
+			text += " (" + formatTimestamp(at) + ")"
+		}
+		lines = append(lines, field("Last rejection", text))
 	}
 	if runnable, _ := bundle["runnable_rules"].(float64); runnable == 0 {
 		// Zero runnable rules means offline TPA coverage is OFF. Printed in the
 		// same tone as a healthy count, it read as "fine" — the exact class of
 		// "the runtime is right but the operator is misled" bug #938 is about.
-		lines = append(lines, "    WARNING:     no TPA signatures are running — offline scan coverage is OFF")
+		lines = append(lines, field("WARNING", "no TPA signatures are running — offline scan coverage is OFF"))
 	}
 	return append(lines, "")
 }
@@ -2325,6 +2390,334 @@ func secFormatInt(m map[string]interface{}, key string) string {
 		return fmt.Sprintf("%d", int(v))
 	}
 	return "0"
+}
+
+// --- security bundle (Spec 101 US1: status, history, rollback, unpin, reload) ---
+
+// bundleFullDigestPattern is the only digest grammar rollback accepts: the
+// complete SHA-256 as 64 lowercase hex characters. The daemon enforces the same
+// rule; checking here refuses a typo before any request is made.
+var bundleFullDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func newSecurityBundleCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "bundle",
+		Short: "Show and manage the offline TPA signature bundle",
+		Long: `Show which TPA signature corpus this proxy is running and whether it is current
+and verified, or stuck on last-known-good and why.
+
+The status shows the full SHA-256 digest (the value "rollback" requires), the
+sequence, the signing authority and trust epoch, whether the signature
+verified, staleness, a DEGRADED coverage line with its reason when scan-mode
+auto-approval is suspended, the rollback pin, and the last refused candidate.
+
+Examples:
+  mcpproxy security bundle
+  mcpproxy security bundle -o json
+  mcpproxy security bundle history
+  mcpproxy security bundle rollback --embedded --digest <64-hex>
+  mcpproxy security bundle rollback --path /var/lib/tpa/known-good.json --digest <64-hex>
+  mcpproxy security bundle unpin
+  mcpproxy security bundle reload`,
+		Args: cobra.NoArgs,
+		RunE: runSecurityBundleStatus,
+	}
+	cmd.AddCommand(newSecurityBundleHistoryCmd())
+	cmd.AddCommand(newSecurityBundleRollbackCmd())
+	cmd.AddCommand(newSecurityBundleUnpinCmd())
+	cmd.AddCommand(newSecurityBundleReloadCmd())
+	return cmd
+}
+
+func newSecurityBundleHistoryCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "history",
+		Short: "List the bundle activation history (oldest first)",
+		Long: `List every bundle activation on this install, oldest first, with its full
+SHA-256 digest. This is the trustworthy place to learn the digest of a
+known-good artifact to name in "bundle rollback".
+
+Examples:
+  mcpproxy security bundle history
+  mcpproxy security bundle history -o json`,
+		Args: cobra.NoArgs,
+		RunE: runSecurityBundleHistory,
+	}
+}
+
+func newSecurityBundleRollbackCmd() *cobra.Command {
+	var (
+		embedded bool
+		path     string
+		digest   string
+	)
+	cmd := &cobra.Command{
+		Use:   "rollback (--embedded | --path PATH) --digest <64-hex>",
+		Short: "Roll the bundle back to a named artifact (overrides the downgrade watermark)",
+		Long: `Roll the signature bundle back to an older artifact. This is the one operator
+override of the anti-downgrade watermark, so it is authorized by the COMPLETE
+SHA-256 digest of the target bytes (64 lowercase hex characters), never by a
+path or the 12-character fingerprint. The path only says where to find the
+bytes. Find full digests with "mcpproxy security bundle history".
+
+Give exactly one of --embedded (the corpus compiled into this binary) or
+--path. A refused rollback (for example rollback_target_mismatch) leaves the
+last-known-good bundle serving and prints the reason.
+
+Examples:
+  mcpproxy security bundle rollback --embedded --digest <64-hex>
+  mcpproxy security bundle rollback --path /var/lib/tpa/known-good.json --digest <64-hex>`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateBundleRollbackFlags(embedded, path, cmd.Flags().Changed("path"), digest); err != nil {
+				return err
+			}
+			return runSecurityBundleRollback(embedded, path, digest)
+		},
+	}
+	cmd.Flags().BoolVar(&embedded, "embedded", false, "Roll back to the bundle compiled into this binary")
+	cmd.Flags().StringVar(&path, "path", "", "Path to the target bundle file (a hint for where to find the bytes; a relative path is resolved against the current directory; it must sit directly in the directory of security.tpa_bundle_path)")
+	cmd.Flags().StringVar(&digest, "digest", "", "Full SHA-256 of the target as 64 lowercase hex characters (required)")
+	return cmd
+}
+
+func newSecurityBundleUnpinCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unpin",
+		Short: "Clear the rollback pin and return to normal downgrade protection",
+		Long: `Clear the rollback pin and re-validate the serving bundle under the normal
+watermark. A rolled-back target below the watermark no longer serves; the
+install falls back as a restart would. A quiet no-op when nothing is pinned.
+
+Examples:
+  mcpproxy security bundle unpin`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runSecurityBundleMutation("/api/v1/security/bundle/unpin", "unpin bundle", "Rollback pin cleared. Now serving:")
+		},
+	}
+}
+
+func newSecurityBundleReloadCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reload",
+		Short: "Re-run the bundle pipeline against the configured source",
+		Long: `Re-read the configured bundle source and run it through the same
+verification pipeline as startup. A refused candidate leaves last-known-good
+serving and is reported as the last rejection.
+
+Examples:
+  mcpproxy security bundle reload`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runSecurityBundleMutation("/api/v1/security/bundle/reload", "reload bundle", "Bundle reloaded. Now serving:")
+		},
+	}
+}
+
+// validateBundleRollbackFlags enforces the rollback grammar locally, so a
+// malformed request is refused before any request is made.
+func validateBundleRollbackFlags(embedded bool, path string, pathChanged bool, digest string) error {
+	hasPath := pathChanged || path != ""
+	if embedded == hasPath {
+		return newFlagValidationError("give exactly one of --embedded or --path PATH")
+	}
+	if hasPath && path == "" {
+		return newFlagValidationError("--path must not be empty")
+	}
+	if !bundleFullDigestPattern.MatchString(digest) {
+		return newFlagValidationError("--digest must be the full SHA-256 of the target: 64 lowercase hex characters (got %d characters); the 12-character fingerprint is a label, not an authorization - the full digest is required, see `mcpproxy security bundle history`", len(digest))
+	}
+	return nil
+}
+
+// bundleDaemonRequest sends one bundle request and returns the status and body.
+func bundleDaemonRequest(method, path string, body []byte, operation string) (int, []byte, error) {
+	client, _, err := newSecurityCLIClient()
+	if err != nil {
+		return 0, nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := client.DoRaw(ctx, method, path, body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to %s: %w", operation, err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	return resp.StatusCode, respBody, nil
+}
+
+// bundleData runs a bundle request that must answer 200 and returns the
+// envelope's data payload.
+func bundleData(method, path string, body []byte, operation string) ([]byte, error) {
+	status, respBody, err := bundleDaemonRequest(method, path, body, operation)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, parseAPIError(respBody, status, operation)
+	}
+	data, err := unwrapAPIResponse(respBody)
+	if err != nil {
+		return nil, fmt.Errorf("API error: %w", err)
+	}
+	return data, nil
+}
+
+func printBundleStatus(bundle map[string]interface{}) {
+	for _, line := range signatureBundleLines(map[string]interface{}{"signature_bundle": bundle}) {
+		fmt.Println(line)
+	}
+}
+
+func runSecurityBundleStatus(_ *cobra.Command, _ []string) error {
+	data, err := bundleData(http.MethodGet, "/api/v1/security/bundle", nil, "get bundle status")
+	if err != nil {
+		return err
+	}
+	var bundle map[string]interface{}
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+	if format := ResolveOutputFormat(); format == "json" || format == "yaml" {
+		return formatAndPrint(format, bundle)
+	}
+	printBundleStatus(bundle)
+	return nil
+}
+
+func runSecurityBundleHistory(_ *cobra.Command, _ []string) error {
+	data, err := bundleData(http.MethodGet, "/api/v1/security/bundle/history", nil, "get bundle history")
+	if err != nil {
+		return err
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+	if rows == nil {
+		rows = []map[string]interface{}{}
+	}
+	if format := ResolveOutputFormat(); format == "json" || format == "yaml" {
+		return formatAndPrint(format, rows)
+	}
+	if len(rows) == 0 {
+		fmt.Println("No bundle activations recorded.")
+		return nil
+	}
+	// The digest column is last and unpadded: it is the rollback input and must
+	// never be truncated or wrapped by a column width.
+	fmt.Printf("%-9s %-10s %-6s %-19s %-9s %-17s %s\n", "SEQUENCE", "AUTHORITY", "EPOCH", "ACTIVATED", "SOURCE", "FLAGS", "FULL DIGEST")
+	for _, row := range rows {
+		seq := getMapString(row, "sequence")
+		if seq == "" {
+			seq = "-"
+		}
+		authority := getMapString(row, "authority")
+		if authority == "" {
+			authority = "-"
+		}
+		var flags []string
+		if v, _ := row["signature_verified"].(bool); v {
+			flags = append(flags, "verified")
+		}
+		if v, _ := row["rollback"].(bool); v {
+			flags = append(flags, "rollback")
+		}
+		flagText := strings.Join(flags, ",")
+		if flagText == "" {
+			flagText = "-"
+		}
+		fmt.Printf("%-9s %-10s %-6s %-19s %-9s %-17s %s\n",
+			seq, authority, secFormatInt(row, "trust_epoch"),
+			formatTimestamp(getMapString(row, "activated_at")),
+			getMapString(row, "source"), flagText, getMapString(row, "full_digest"))
+	}
+	return nil
+}
+
+func runSecurityBundleRollback(embedded bool, path, digest string) error {
+	// The daemon is another process with its own working directory, so a
+	// relative path is resolved here, against the shell the operator typed it in.
+	if path != "" {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("resolve --path %q: %w", path, err)
+		}
+		path = abs
+	}
+	reqBody, err := json.Marshal(map[string]interface{}{"embedded": embedded, "path": path, "digest": digest})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	status, respBody, err := bundleDaemonRequest(http.MethodPost, "/api/v1/security/bundle/rollback", reqBody, "roll back bundle")
+	if err != nil {
+		return err
+	}
+	if status == http.StatusConflict {
+		return bundleRollbackRefusal(respBody)
+	}
+	if status != http.StatusOK {
+		return parseAPIError(respBody, status, "roll back bundle")
+	}
+	data, err := unwrapAPIResponse(respBody)
+	if err != nil {
+		return fmt.Errorf("API error: %w", err)
+	}
+	return printBundleMutationResult(data, "Rolled back and pinned. Now serving:")
+}
+
+// bundleRollbackRefusal turns the daemon's 409 into an error that names the
+// rejection reason, so an operator can tell a wrong digest from a tamper
+// attempt from a stale epoch.
+func bundleRollbackRefusal(respBody []byte) error {
+	var resp struct {
+		Error     string `json:"error"`
+		ErrorCode string `json:"error_code"`
+		Rejection struct {
+			Reason string `json:"reason"`
+			Detail string `json:"detail"`
+		} `json:"rejection"`
+	}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return cliRefusalError{fmt.Errorf("bundle rollback refused: HTTP 409: %s", string(respBody))}
+	}
+	reason := resp.Rejection.Reason
+	if reason == "" {
+		reason = resp.ErrorCode
+	}
+	msg := "bundle rollback refused (" + reason + ")"
+	if resp.Rejection.Detail != "" {
+		msg += ": " + resp.Rejection.Detail
+	} else if resp.Error != "" {
+		msg += ": " + resp.Error
+	}
+	return cliRefusalError{fmt.Errorf("%s; the last-known-good bundle keeps serving", msg)}
+}
+
+func runSecurityBundleMutation(path, operation, successLine string) error {
+	data, err := bundleData(http.MethodPost, path, nil, operation)
+	if err != nil {
+		return err
+	}
+	return printBundleMutationResult(data, successLine)
+}
+
+func printBundleMutationResult(data []byte, successLine string) error {
+	var bundle map[string]interface{}
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+	if format := ResolveOutputFormat(); format == "json" || format == "yaml" {
+		return formatAndPrint(format, bundle)
+	}
+	fmt.Println(successLine)
+	printBundleStatus(bundle)
+	return nil
 }
 
 // scannerDisplayStatus normalizes the scanner status to a single vocabulary

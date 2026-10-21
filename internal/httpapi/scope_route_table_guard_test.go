@@ -63,6 +63,8 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/secrets/config":           {scopeRefused, "credential inventory; TestSecretsInventory_DeniedToScopedCaller"},
 	"/api/v1/security/overview":        {scopeRefused, "fleet scan/finding counts; TestSecurityFleetDoors_DeniedToScopedCaller"},
 	"/api/v1/security/queue":           {scopeRefused, "names every queued server; TestSecurityFleetDoors_DeniedToScopedCaller"},
+	"/api/v1/security/bundle":          {scopeRefused, "TPA bundle digests + last rejection; TestSecurityBundle_AgentTokenRefusedOnEveryRoute"},
+	"/api/v1/security/bundle/history":  {scopeRefused, "TPA bundle activation history (rollback digests); TestSecurityBundle_AgentTokenRefusedOnEveryRoute"},
 	"/api/v1/sessions":                 {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
 	"/api/v1/sessions/{id}":            {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
 	"/api/v1/stats/tokens":             {scopeRefused, "deployment-wide token stats; TestTokenStats_DeniedToAgentTokens"},

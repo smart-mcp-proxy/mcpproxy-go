@@ -56,6 +56,14 @@ type SecurityController interface {
 	// Scan history
 	ListScanHistory(ctx context.Context) ([]scanner.ScanJobSummary, error)
 	GetScanReportByJobID(ctx context.Context, jobID string) (*scanner.AggregatedReport, error)
+
+	// TPA signature bundle (Spec 101): status, activation history and the
+	// operator mutations (explicit rollback, unpin, reload).
+	BundleStatus() scanner.BundleInfo
+	BundleHistory() ([]scanner.TPABundleActivation, error)
+	RollbackBundle(req scanner.BundleRollbackRequest) (scanner.BundleInfo, error)
+	UnpinBundle() (scanner.BundleInfo, error)
+	ReloadBundle() scanner.BundleInfo
 }
 
 // SetSecurityController configures the security scanner controller on the server.

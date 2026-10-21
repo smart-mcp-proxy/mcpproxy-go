@@ -74,6 +74,20 @@ type TPAScannerStats struct {
 	// refresh). Same posture as ToolChangeGateScans: invocations only, never
 	// the prompt name, the server, or the verdict.
 	PromptScans int64 `json:"prompt_scans"`
+
+	// Schema v15 (Spec 101 FR-021): the ACTIVE bundle's provenance tuple. This
+	// is per-heartbeat STATE merged from the TPABundleSnapshot provider after
+	// the counters are applied; it is not a reset-on-accept counter. Typed and
+	// kept in its own group so tpaScannerScalarKeys stays integer-only. The
+	// backstop (scanTPABundle) enforces the whole tuple.
+	BundleSource string `json:"bundle_source,omitempty"`
+	// BundleSignatureVerified is a pointer so an explicit false is transmitted
+	// while a heartbeat without a bundle snapshot omits the key.
+	BundleSignatureVerified *bool `json:"bundle_signature_verified,omitempty"`
+	// BundleVersion is "other" or a "<major>.<minor>" schema line.
+	BundleVersion string `json:"bundle_version,omitempty"`
+	// BundleSequence is present only together with a schema-line BundleVersion.
+	BundleSequence *uint64 `json:"bundle_sequence,omitempty"`
 }
 
 // isZero reports whether nothing at all was recorded, in which case the
@@ -86,6 +100,9 @@ func (t *TPAScannerStats) isZero() bool {
 		return false
 	}
 	if t.ToolChangeGateScans != 0 || t.PromptScans != 0 {
+		return false
+	}
+	if t.BundleSource != "" || t.BundleSignatureVerified != nil || t.BundleVersion != "" || t.BundleSequence != nil {
 		return false
 	}
 	for _, n := range t.Findings {

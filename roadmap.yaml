@@ -341,15 +341,16 @@ epics:
 
   - id: tpa-db
     title: "tpa-db: versioned TPA signature database for the offline scanner"
-    status: todo
+    status: in_progress
     priority: P1
     spec: specs/101-tpa-db
     depends_on: [scanner-simplification]
-    note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); no implementation has started, so the epic and every child task stay todo (the pr: link is the spec, not the build)."
+    note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); 2026-10-20: US1 (tpa-db-format: signed four-key Ed25519 sidecar, verify-before-parse loader, per-authority anti-downgrade state, full-digest rollback, coverage degrade) shipped as #1701; US2 corpus in a sibling session; US3 refresh waits on Spec 087."
     tasks:
       - id: tpa-db-format
         title: "Signature DB format + loader (versioned, signed, bundled default)"
-        status: todo
+        status: done
+        pr: "#1701"
         depends_on: []
       - id: tpa-db-corpus
         title: "Seed corpus: catalog known public TPA campaigns/patterns into the DB"

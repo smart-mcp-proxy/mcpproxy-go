@@ -1165,7 +1165,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 
 	switch variant {
 	case contracts.ToolVariantRead:
-		description = "Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only."
+		description = "Execute a READ-ONLY tool. Use this variant only when retrieve_tools returns call_with=call_tool_read. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first)."
 		title = "Call Tool (Read)"
 		nameExample = "github:get_user"
 		sensitivityDesc = "Classify data being accessed: public, internal, private, or unknown. Helps track sensitive data access patterns."
@@ -1176,7 +1176,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 			mcp.WithOpenWorldHintAnnotation(true),
 		}
 	case contracts.ToolVariantWrite:
-		description = "Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state."
+		description = "Execute a STATE-MODIFYING tool. Use this variant only when retrieve_tools returns call_with=call_tool_write. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first)."
 		title = "Call Tool (Write)"
 		nameExample = "github:create_issue"
 		sensitivityDesc = "Classify data being modified: public, internal, private, or unknown. Helps track sensitive data changes."
@@ -1187,7 +1187,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 			mcp.WithOpenWorldHintAnnotation(true),
 		}
 	case contracts.ToolVariantDestructive:
-		description = "Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations."
+		description = "Execute a DESTRUCTIVE tool. Use this variant only when retrieve_tools returns call_with=call_tool_destructive. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. This variant does not bypass authorization, quarantine, approval, or other dispatch gates. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first)."
 		title = "Call Tool (Destructive)"
 		nameExample = "github:delete_repo"
 		sensitivityDesc = "Classify data being deleted: public, internal, private, or unknown. Important for tracking destructive operations on sensitive data."
@@ -1343,7 +1343,7 @@ const retrieveToolsDiagnosticsNote = " ANNOTATION FILTERS: read_only_only, exclu
 func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
 	retrieveToolsOpts := []mcp.ToolOption{
-		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers." + retrieveToolsReachNote + retrieveToolsDiagnosticsNote),
+		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Follow each result's call_with route exactly; upstream annotations determine that route and take precedence over tool names, descriptions, command text, and requested outcome. Compact results preserve the same call_with route as full results, including the existing read fallback when upstream tier annotations are unavailable. Never infer a route from a tool's name or intent. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers." + retrieveToolsReachNote + retrieveToolsDiagnosticsNote),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -2402,7 +2402,8 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// construction lives in buildToolEntry (Spec 085 entry-builder seam) —
 	// full mode is byte-identical to the pre-extraction inline code, guarded
 	// by the T011 golden test (FR-006/SC-003); compact mode renders
-	// {id, score, sig, desc, lossy} from the shared signature cache. The
+	// {id, score, sig, desc, lossy, call_with} from the shared signature cache
+	// (call_with added by #1668 so compact routing never falls back to names). The
 	// ranked order of `results` is already final here — the mode selects
 	// serialization only (FR-007).
 	entryOpts := toolEntryOpts{includeStats: includeStats}
@@ -2439,11 +2440,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			"Do NOT use call_tool_read, call_tool_write, or call_tool_destructive — they are not available in code execution mode."
 	default:
 		// Default instructions for retrieve_tools mode and backward-compatible callers
-		usageInstructions = "TOOL SELECTION GUIDE: Check the 'call_with' field for each tool, then use the matching tool variant. " +
-			"DECISION RULES BY TOOL NAME: " +
-			"(1) READ (call_tool_read): search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. DEFAULT choice when unsure. " +
-			"(2) WRITE (call_tool_write): create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. " +
-			"(3) DESTRUCTIVE (call_tool_destructive): delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. " +
+		usageInstructions = "TOOL SELECTION GUIDE: Use each result's 'call_with' value as the exact variant to call (call_tool_read, call_tool_write, or call_tool_destructive). The route comes from upstream annotations and overrides tool names, descriptions, command wording, and apparent user intent. When no upstream tier annotations exist, call_with preserves the existing read fallback; do not infer a different route from tool names or intent. " +
 			"INTENT TRACKING: Always provide intent_reason (why you're calling this tool) and intent_data_sensitivity (public/internal/private/unknown) to enable activity auditing."
 	}
 

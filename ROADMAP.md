@@ -83,9 +83,9 @@ graph LR
   classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
   class sandbox_isolation,scanner_v2,analytics_dashboard,scanner_simplification,schema_deferred,agent_scope_hardening,upstream_resilience,mcp_credential_lifecycle,config_commit_consistency,review_bound_approvals,quarantine_approval_pilot done;
-  class ux_audit,action_log_transparency,token_bench,telemetry_identity,telemetry_v7_churn,profiles_v3 in_progress;
+  class ux_audit,action_log_transparency,tpa_db,token_bench,telemetry_identity,telemetry_v7_churn,profiles_v3 in_progress;
   class pending_call_outcome in_review;
-  class tpa_db,remote_access_tunnel,auto_routing_mode,tool_graph todo;
+  class remote_access_tunnel,auto_routing_mode,tool_graph todo;
 ```
 
 **Independent epics** (16) — no cross-epic prerequisites; each stands alone:
@@ -217,6 +217,36 @@ graph LR
 | tray_menu_opened counter: Swift menuWillOpen (MCPProxyApp.swift:192) -> lightweight POST /api/v1/telemetry/tray-menu-opened -> registry counter -> heartbeat tray_menu_opened_24h | ⚪ Todo | — |
 | Tie activity retention/size into the glance view | ⚪ Todo | — |
 | Bound every activity-adjacent store: response truncation on the write path (#1173/#1174), per-server tool_calls buckets (#1176), omitempty zero-erasure (#1175) | 🟢 Done | #1174 #1214 |
+
+</details>
+
+<details>
+<summary>🔵 tpa-db: versioned TPA signature database for the offline scanner — In progress · P1</summary>
+
+> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); 2026-10-20: US1 (tpa-db-format: signed four-key Ed25519 sidecar, verify-before-parse loader, per-authority anti-downgrade state, full-digest rollback, coverage degrade) shipped as #1701; US2 corpus in a sibling session; US3 refresh waits on Spec 087.
+
+Spec: [101-tpa-db](./specs/101-tpa-db/)
+
+```mermaid
+graph LR
+  tpa_db_format["Signature DB format + loader (versioned, sign…"]
+  tpa_db_corpus["Seed corpus: catalog known public TPA campaig…"]
+  tpa_db_refresh["Out-of-band refresh (offline-friendly: manual…"]
+
+  tpa_db_format --> tpa_db_corpus
+  tpa_db_format --> tpa_db_refresh
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class tpa_db_format done;
+  class tpa_db_corpus,tpa_db_refresh todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Signature DB format + loader (versioned, signed, bundled default) | 🟢 Done | #1701 |
+| Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
+| Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
 
 </details>
 
@@ -442,34 +472,6 @@ graph LR
 > Spec-only PR #1536 open; implementation follows the spec review. Tracks issue #1321 (follow-up to #1317).
 
 PR: #1536
-
-</details>
-
-<details>
-<summary>⚪ tpa-db: versioned TPA signature database for the offline scanner — Todo · P1</summary>
-
-> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); no implementation has started, so the epic and every child task stay todo (the pr: link is the spec, not the build).
-
-Spec: [101-tpa-db](./specs/101-tpa-db/)
-
-```mermaid
-graph LR
-  tpa_db_format["Signature DB format + loader (versioned, sign…"]
-  tpa_db_corpus["Seed corpus: catalog known public TPA campaig…"]
-  tpa_db_refresh["Out-of-band refresh (offline-friendly: manual…"]
-
-  tpa_db_format --> tpa_db_corpus
-  tpa_db_format --> tpa_db_refresh
-
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class tpa_db_format,tpa_db_corpus,tpa_db_refresh todo;
-```
-
-| Task | Status | Refs |
-| --- | --- | --- |
-| Signature DB format + loader (versioned, signed, bundled default) | ⚪ Todo | — |
-| Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
-| Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
 
 </details>
 
@@ -1006,6 +1008,7 @@ graph LR
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | 4/4 (100%) | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
+| tpa-db: versioned TPA signature database for the offline scanner | In progress | P1 | 30/30 (100%) | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
@@ -1015,7 +1018,6 @@ graph LR
 | Planning/docs truth automation | In progress | P2 | — |  |  |
 | Discovery-quality eval harness (Spec 065 second half) | In progress | P3 | — | [065-evaluation-foundation](./specs/065-evaluation-foundation/) |  |
 | Spec 114 typed pending-call outcome + call correlation for long-running stdio tool calls | In review | P2 | — |  | #1536 |
-| tpa-db: versioned TPA signature database for the offline scanner | Todo | P1 | — | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Auto routing mode: budget-fitted tool surface per session (spec 104) | Todo | P1 | — | [104-auto-routing-mode](./specs/104-auto-routing-mode/) |  |
 | Windows native tray app `MCP-43` | Todo | P2 | — |  |  |
 | Remote access tunnel (feature-flagged MVP, spec 089) | Todo | P2 | — | [089-remote-access-tunnel](./specs/089-remote-access-tunnel/) |  |
@@ -1156,7 +1158,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 28/33 (85%) |
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
-| [101-tpa-db](./specs/101-tpa-db/) | — | — |
+| [101-tpa-db](./specs/101-tpa-db/) | `shipped` | 30/30 (100%) |
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
@@ -1172,3 +1174,5 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [115-mcp-credential-lifecycle](./specs/115-mcp-credential-lifecycle/) | `shipped` | 86/87 (99%) |
 | [116-config-commit-consistency](./specs/116-config-commit-consistency/) | `in-flight` | 81/124 (65%) |
 | [117-review-bound-approvals](./specs/117-review-bound-approvals/) | `in-flight` | 46/50 (92%) |
+| [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) | — | — |
+| [118-pin-visibility-boundary](./specs/118-pin-visibility-boundary/) | — | — |
