@@ -121,12 +121,10 @@ func resolveAPIKeyRef(c *Config) error {
 	}
 	resolved, err := secret.NewResolver().ExpandSecretRefs(context.Background(), c.APIKey)
 	if err != nil {
-		// ExpandSecretRefs prefixes its error with the reference text; the
-		// operator already knows which field this is, so report the cause only.
-		if cause := errors.Unwrap(err); cause != nil {
-			err = cause
-		}
-		return fmt.Errorf("api_key: could not resolve the reference: %w", err)
+		// The error is deliberately a fixed sentence: ExpandSecretRefs' own
+		// text quotes the reference, and the api_key field is the one value
+		// no error or log line may carry. The operator knows which field it is.
+		return errors.New("api_key: could not resolve the secret reference; check that the referenced file, environment variable or keyring entry exists and is readable")
 	}
 	if resolved == "" {
 		return fmt.Errorf("api_key: the reference resolved to an empty value")
