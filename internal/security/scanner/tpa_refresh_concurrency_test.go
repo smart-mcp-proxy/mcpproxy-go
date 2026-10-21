@@ -172,7 +172,13 @@ func TestRefreshConcurrency_ScansDuringASlowSelfCheckSeeOldOrNew(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the activation never completed")
 	}
-	time.Sleep(50 * time.Millisecond)
+	// Wait for a scanner to observe the swap rather than for a fixed time: under
+	// -race on a loaded CI runner one scan can take longer than any short sleep.
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return seen["new"] > 0
+	}, 10*time.Second, 5*time.Millisecond, "scans after the swap see the new bundle")
 	close(stop)
 	wg.Wait()
 
