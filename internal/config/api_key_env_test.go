@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,21 @@ func writeKeyFile(t *testing.T, content string) string {
 	path := filepath.Join(t.TempDir(), "api_key")
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 	return path
+}
+
+// writeAPIKeyConfig writes a minimal mcp_config.json whose api_key is apiKey.
+// The JSON is built with encoding/json, never by formatting apiKey into a
+// string: a reference such as ${file:C:\Users\x\key} carries backslashes that
+// a Windows path puts into the document and that must be escaped.
+func writeAPIKeyConfig(t *testing.T, apiKey string) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"listen":     "127.0.0.1:8080",
+		"api_key":    apiKey,
+		"mcpServers": []any{},
+	})
+	require.NoError(t, err)
+	return writeOverrideTestFile(t, string(raw))
 }
 
 // unsetEnv removes name for the test and restores it afterwards (t.Setenv
@@ -275,7 +291,7 @@ func TestLoad_APIKeyReferenceResolvesAsProcessOverride(t *testing.T) {
 	ResetProcessOverrides()
 	keyFile := writeKeyFile(t, "ref-secret-key\r\n")
 	ref := "${file:" + keyFile + "}"
-	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "api_key": "`+ref+`", "mcpServers": []}`)
+	path := writeAPIKeyConfig(t, ref)
 	unsetEnv(t, EnvAPIKey)
 	t.Setenv(EnvAPIKeyFile, "")
 
@@ -307,7 +323,7 @@ func TestPersistableConfig_APIKeyReferenceSurvivesAnUnrelatedEdit(t *testing.T) 
 	ResetProcessOverrides()
 	keyFile := writeKeyFile(t, "ref-secret-key\n")
 	ref := "${file:" + keyFile + "}"
-	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "api_key": "`+ref+`", "mcpServers": []}`)
+	path := writeAPIKeyConfig(t, ref)
 	unsetEnv(t, EnvAPIKey)
 	t.Setenv(EnvAPIKeyFile, "")
 
@@ -325,7 +341,7 @@ func TestPersistableConfig_EditingAPIKeyUnderAReferenceIsPersisted(t *testing.T)
 	t.Cleanup(ResetProcessOverrides)
 	ResetProcessOverrides()
 	keyFile := writeKeyFile(t, "ref-secret-key\n")
-	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "api_key": "${file:`+keyFile+`}", "mcpServers": []}`)
+	path := writeAPIKeyConfig(t, "${file:"+keyFile+"}")
 	unsetEnv(t, EnvAPIKey)
 	t.Setenv(EnvAPIKeyFile, "")
 
@@ -348,16 +364,15 @@ func TestLoad_APIKeyReferenceThatCannotBeResolvedFailsTheLoad(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Cleanup(ResetProcessOverrides)
 			ResetProcessOverrides()
-			path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "api_key": "`+ref+`", "mcpServers": []}`)
+			path := writeAPIKeyConfig(t, ref)
 			unsetEnv(t, EnvAPIKey)
 			t.Setenv(EnvAPIKeyFile, "")
 
 			_, err := LoadFromFile(path)
 			require.Error(t, err, "no key may be generated over a reference that does not resolve")
 			assert.Contains(t, err.Error(), "api_key")
-			raw, readErr := os.ReadFile(path)
-			require.NoError(t, readErr)
-			assert.Contains(t, string(raw), ref, "the file is untouched")
+			assert.NotContains(t, err.Error(), ref, "the error never quotes the reference")
+			assert.Equal(t, ref, readJSON(t, path)["api_key"], "the file is untouched")
 		})
 	}
 }
@@ -368,7 +383,7 @@ func TestLoad_EnvironmentKeyWinsOverAnAPIKeyReferenceWithoutReadingIt(t *testing
 	// The referenced file does not exist: with an env key the reference is not
 	// resolved at all, so that is not an error.
 	ref := "${file:" + filepath.Join(t.TempDir(), "missing") + "}"
-	path := writeOverrideTestFile(t, `{"listen": "127.0.0.1:8080", "api_key": "`+ref+`", "mcpServers": []}`)
+	path := writeAPIKeyConfig(t, ref)
 	t.Setenv(EnvAPIKey, "env-key")
 	t.Setenv(EnvAPIKeyFile, "")
 
@@ -404,4 +419,28 @@ func TestServerConfig_FileReferencesExpandOnACopy(t *testing.T) {
 	assert.Equal(t, []string{"--token", "upstream-token"}, resolved.Args)
 	assert.Contains(t, orig.Env["GH_TOKEN"], "${file:", "the stored config keeps the reference")
 	assert.Contains(t, orig.Headers["Authorization"], "${file:")
+}
+
+// Both variables set stays an error when api_key is a reference: the reference
+// is not read, and the error is the same fixed text.
+func TestLoad_BothSetFailsTheLoadEvenWithAnAPIKeyReference(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	ref := "${file:" + writeKeyFile(t, "ref-secret-key\n") + "}"
+	path := writeAPIKeyConfig(t, ref)
+	t.Setenv(EnvAPIKey, "env-secret-value-1234")
+	t.Setenv(EnvAPIKeyFile, writeKeyFile(t, "file-secret-value-5678\n"))
+
+	_, err := LoadFromFile(path)
+	require.ErrorIs(t, err, ErrAPIKeyBothSet)
+	assert.NotContains(t, err.Error(), ref)
+	assert.NotContains(t, err.Error(), "ref-secret-key")
+}
+
+// The helper must produce valid JSON for a Windows-style path, which is what
+// the tests above feed it when they run on Windows.
+func TestWriteAPIKeyConfig_EscapesBackslashes(t *testing.T) {
+	ref := `${file:C:\Users\ci\AppData\Local\Temp\key}`
+	path := writeAPIKeyConfig(t, ref)
+	assert.Equal(t, ref, readJSON(t, path)["api_key"])
 }

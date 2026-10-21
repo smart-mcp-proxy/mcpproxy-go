@@ -54,7 +54,10 @@ MCPProxy supports three types of secret references that can be used anywhere in 
 (`docker inspect`, `/proc/<pid>/environ`). The same rules apply wherever it is used:
 
 - The path must be absolute. A symlink is followed (Kubernetes secret volumes are symlinks) but must
-  point at a regular file.
+  point at a regular file. On Windows an absolute path has a drive letter (`C:\ProgramData\mcpproxy\key`
+  or `C:/ProgramData/mcpproxy/key`); a path that starts with `/` and has no drive is not absolute. In
+  `mcp_config.json` a backslash must be escaped (`"${file:C:\\ProgramData\\mcpproxy\\key}"`), so forward
+  slashes are easier.
 - At most 64 KiB is read. A larger file is an error, never a truncated secret.
 - One trailing newline is removed, LF or CRLF, so a file written on Windows resolves to the same value
   as one written on Linux. Leading and inner whitespace are kept.
