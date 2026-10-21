@@ -2,7 +2,8 @@
 
 **Feature Branch**: `087-tpa-daily-refresh`
 **Created**: 2026-07-16
-**Status**: Draft
+**Status**: Implemented by Spec 101 US3 (specs/101-tpa-db/tasks.md T300+)
+**Implementation note (2026-10-21)**: `plan.md` names a package `internal/security/bundle` (and a nested `security.bundle` config block). Neither exists and neither will be built. Spec 101 US1 shipped the bundle pipeline as `internal/security/scanner/tpa_*.go` plus `internal/security/bundlesig`, with flat `security.tpa_*` config keys. Under Spec 101 D11 this feature is a thin adapter on that pipeline: the daily scheduler and the optional fetch build a source-neutral `Candidate` (`internal/security/scanner/tpa_candidate.go`) and hand it to the same `evaluateCandidate` verifier, which is never forked. The FR-to-task mapping and the amendments to this spec are listed in Spec 101 tasks.md, US3 section. Release awareness (User Story 3, FR-018, FR-019, SC-007) is already covered by Spec 079.
 **Input**: A once-per-day, non-blocking, offline-FIRST refresh that (a) updates the tpa-db signature bundle — bundled-with-binary default, manual file-drop override, and an OPTIONAL verified/signed network fetch, versioned against the tpa-db `SCHEMA_VERSION`, failing safe to last-known-good; and (b) checks for a new mcpproxy release and surfaces it, respecting the existing update-check/distribution mechanism (no auto-installer).
 
 ## User Scenarios & Testing *(mandatory)*

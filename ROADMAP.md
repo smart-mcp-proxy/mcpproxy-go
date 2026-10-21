@@ -1008,7 +1008,7 @@ graph LR
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | 4/4 (100%) | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
-| tpa-db: versioned TPA signature database for the offline scanner | In progress | P1 | 30/30 (100%) | [101-tpa-db](./specs/101-tpa-db/) |  |
+| tpa-db: versioned TPA signature database for the offline scanner | In progress | P1 | 30/81 (37%) | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
@@ -1158,7 +1158,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 28/33 (85%) |
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
-| [101-tpa-db](./specs/101-tpa-db/) | `shipped` | 30/30 (100%) |
+| [101-tpa-db](./specs/101-tpa-db/) | `in-flight` | 30/81 (37%) |
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
