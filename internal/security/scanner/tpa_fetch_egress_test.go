@@ -153,6 +153,15 @@ func TestEgress_RedirectPolicy(t *testing.T) {
 		assert.Equal(t, 1, rig.count(), "the downgraded hop was never sent")
 	})
 
+	t.Run("https to http is refused even between loopback hosts", func(t *testing.T) {
+		// The scheme rule alone would allow http to localhost; the downgrade rule
+		// is what stops it.
+		rig := &redirectRig{}
+		res := fetchCandidate(fetchCtx(t), redirectSettings(t, "https://localhost:8443/bundles/scanner-bundle.json", redirectingTo(rig, func(int) string { return "http://localhost:8080/x" })))
+		refused(t, res)
+		assert.Equal(t, 1, rig.count())
+	})
+
 	t.Run("more than 5 hops is refused", func(t *testing.T) {
 		rig := &redirectRig{}
 		res := fetchCandidate(fetchCtx(t), redirectSettings(t, url, redirectingTo(rig, func(n int) string { return fmt.Sprintf("https://pub.test/hop%d", n) })))

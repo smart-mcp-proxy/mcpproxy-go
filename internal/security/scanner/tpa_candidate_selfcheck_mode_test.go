@@ -19,7 +19,8 @@ func TestSelfCheckMode_RunsForNormalAndRollbackOnly(t *testing.T) {
 		s.TPAOperatorBaseline = u64p(1)
 	}})
 	var calls atomic.Int32
-	withSelfCheck(t, func(*BundleCheck) error { calls.Add(1); return nil })
+	install := func() { withSelfCheck(t, func(*BundleCheck) error { calls.Add(1); return nil }) }
+	install()
 
 	a := signedCandidate(t, keyOperator, bundleOpts{Seq: 5, Tag: "A"})
 	b := signedCandidate(t, keyOperator, bundleOpts{Seq: 6, Tag: "B"})
@@ -39,6 +40,7 @@ func TestSelfCheckMode_RunsForNormalAndRollbackOnly(t *testing.T) {
 
 	calls.Store(0)
 	f.restart()
+	install() // a restart clears the hook, like a fresh process
 	info = f.run()
 	require.Equal(t, digestOf(a.Bundle), info.FullDigest, "the rolled-back bundle is restored at startup")
 	assert.Zero(t, calls.Load(), "a startup LKG restore does not run the self-check")
