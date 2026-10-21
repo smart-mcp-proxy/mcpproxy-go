@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"go.uber.org/zap"
 )
@@ -102,7 +101,7 @@ func RollbackBundle(req BundleRollbackRequest, logger *zap.Logger) (BundleInfo, 
 }
 
 func (rt *bundleRuntime) rollbackLocked(req BundleRollbackRequest, log *zap.Logger) error {
-	now := time.Now()
+	now := bundleClock()
 	if rt.policy == nil || !rt.loaded {
 		// Nothing has run yet: establish the baseline serving state first so
 		// there is something to roll away from.
@@ -195,6 +194,18 @@ func (rt *bundleRuntime) rollbackLocked(req BundleRollbackRequest, log *zap.Logg
 	rt.active = external
 	rt.clean = false
 	rt.publishLocked(policy, st, sv, log, now)
+
+	// A rollback writes a history row, so it is an activation event too (one
+	// more re-protection sweep, tasks B17). Dispatched off the lock.
+	fireBundleActivation(BundleActivation{
+		Digest:         row.FullDigest,
+		Sequence:       row.Sequence,
+		Authority:      row.Authority,
+		Source:         row.Source,
+		Rollback:       true,
+		PreviousDigest: previousDigest(nst.Active),
+		ActivatedAt:    row.ActivatedAt,
+	})
 
 	fields := []zap.Field{
 		zap.String("target_full_digest", target.FullDigest),

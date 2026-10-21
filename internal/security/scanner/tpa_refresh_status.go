@@ -1,6 +1,10 @@
 package scanner
 
-import "time"
+import (
+	"net/url"
+	"sync"
+	"time"
+)
 
 // Refresh and re-protection status (Spec 087 FR-017, Spec 101 US3 tasks B15,
 // B17). The vocabularies below are CLOSED: a surface may branch on them.
@@ -117,9 +121,203 @@ const (
 )
 
 // SetReprotectStatus publishes the re-protection sweep status that BundleStatus
-// merges into BundleInfo.Reprotect (tasks B15, B17).
-//
-// STUB (Spec 101 US3 wave 0): no-op until T330.
+// merges into BundleInfo.Reprotect (tasks B15, B17). A zero status (empty
+// State) clears it.
 func SetReprotectStatus(status BundleReprotectStatus) {
-	_ = status
+	bundleRT.disp.setReprotect(status)
+}
+
+// bundleDisplay is the read-time half of BundleInfo (tasks B15): the refresh
+// settings and status, last_checked_at, the stale threshold and the
+// re-protection status. It lives beside histMu under its own mutex, never
+// under bundleRT.mu, and is merged into the COPIES BundleStatus and
+// statusFromSnapshot return, so a refresh cycle or a threshold edit never
+// republishes the (check, info) pair a scan reads.
+type bundleDisplay struct {
+	mu sync.Mutex
+	displayData
+}
+
+// displayData is the guarded state of bundleDisplay, a separate type so reset
+// can zero it without touching the mutex.
+type displayData struct {
+	// known is true once a policy has been applied; the refresh block is
+	// reported from then on.
+	known bool
+	// configured is true after the first configure of this process: the first
+	// apply is trigger "startup", every later one "config".
+	configured bool
+
+	staleAfterDays  int
+	fetchEnabled    bool
+	fetchHost       string
+	intervalSeconds int
+	// intervalOverride, when positive, is what intervalSeconds reports.
+	intervalOverride int
+
+	lastTrigger         string
+	lastOutcome         string
+	lastReason          string
+	lastAttemptAt       time.Time
+	consecutiveFailures int
+	nextCheckAt         time.Time
+
+	lastCheckedAt time.Time
+	reprotect     *BundleReprotectStatus
+}
+
+// reset returns the display to its zero state (a fresh process).
+func (d *bundleDisplay) reset() {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.displayData = displayData{}
+}
+
+// applySettings records the display settings of policy. It runs on every apply,
+// before the idempotence short-circuit, so a threshold edit is visible even
+// when the pipeline itself has nothing to redo.
+func (d *bundleDisplay) applySettings(p *bundlePolicy) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.known = true
+	d.staleAfterDays = p.StaleAfterDays
+	d.fetchEnabled = p.FetchEnabled
+	d.fetchHost = fetchHostOf(p.FetchURL)
+	d.intervalSeconds = int(p.RefreshInterval / time.Second)
+	if d.intervalOverride > 0 {
+		d.intervalSeconds = d.intervalOverride
+	}
+}
+
+// setIntervalOverride makes the reported interval v seconds regardless of the
+// configuration (the refresher's IntervalOverride test seam); 0 removes it.
+func (d *bundleDisplay) setIntervalOverride(v int) {
+	d.mu.Lock()
+	d.intervalOverride = v
+	if v > 0 {
+		d.intervalSeconds = v
+	}
+	d.mu.Unlock()
+}
+
+// noteTrigger records what started the current apply. An empty trigger means a
+// configure: "startup" the first time in this process, "config" afterwards.
+func (d *bundleDisplay) noteTrigger(trigger string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if trigger == "" {
+		trigger = RefreshTriggerConfig
+		if !d.configured {
+			trigger = RefreshTriggerStartup
+		}
+		d.configured = true
+	}
+	d.lastTrigger = trigger
+}
+
+func (d *bundleDisplay) markChecked(t time.Time) {
+	d.mu.Lock()
+	d.lastCheckedAt = t
+	d.mu.Unlock()
+}
+
+func (d *bundleDisplay) setReprotect(s BundleReprotectStatus) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if s.State == "" {
+		d.reprotect = nil
+		return
+	}
+	cp := s
+	d.reprotect = &cp
+}
+
+// cycleRecord is one finished refresh cycle.
+type cycleRecord struct {
+	Trigger, Outcome, Reason string
+	At                       time.Time
+	// Failures is how the consecutive-failure counter moves.
+	Failures failureMove
+}
+
+type failureMove int
+
+const (
+	failuresKeep failureMove = iota
+	failuresIncrement
+	failuresReset
+)
+
+func (d *bundleDisplay) recordCycle(r cycleRecord) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.lastTrigger, d.lastOutcome, d.lastReason, d.lastAttemptAt = r.Trigger, r.Outcome, r.Reason, r.At
+	switch r.Failures {
+	case failuresIncrement:
+		d.consecutiveFailures++
+	case failuresReset:
+		d.consecutiveFailures = 0
+	}
+}
+
+func (d *bundleDisplay) setNextCheck(t time.Time) {
+	d.mu.Lock()
+	d.nextCheckAt = t
+	d.mu.Unlock()
+}
+
+// merge adds the read-time fields to info, a copy the caller owns.
+func (d *bundleDisplay) merge(info *BundleInfo) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if !d.lastCheckedAt.IsZero() {
+		t := d.lastCheckedAt
+		info.LastCheckedAt = &t
+	}
+	if d.known {
+		info.Stale, info.StaleAfterDays = false, nil
+		if d.staleAfterDays > 0 {
+			v := d.staleAfterDays
+			info.StaleAfterDays = &v
+			// A future generated_at reads as age 0 (stalenessDays) and so is
+			// never stale.
+			info.Stale = info.StalenessDays != nil && *info.StalenessDays >= d.staleAfterDays
+		}
+		r := &BundleRefreshStatus{
+			FetchEnabled:        d.fetchEnabled,
+			FetchHost:           d.fetchHost,
+			IntervalSeconds:     d.intervalSeconds,
+			LastTrigger:         d.lastTrigger,
+			LastOutcome:         d.lastOutcome,
+			LastReason:          d.lastReason,
+			ConsecutiveFailures: d.consecutiveFailures,
+		}
+		if !d.lastAttemptAt.IsZero() {
+			t := d.lastAttemptAt
+			r.LastAttemptAt = &t
+		}
+		if !d.nextCheckAt.IsZero() {
+			t := d.nextCheckAt
+			r.NextCheckAt = &t
+		}
+		info.Refresh = r
+	}
+	if d.reprotect != nil {
+		cp := *d.reprotect
+		info.Reprotect = &cp
+	}
+}
+
+// fetchHostOf is the host of a configured fetch URL, "" when it is empty or
+// unparsable. It is the only part of the URL any status, log or metric carries
+// (B12).
+func fetchHostOf(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Hostname()
 }

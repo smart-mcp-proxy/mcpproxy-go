@@ -26,7 +26,7 @@ const fetchChannelURL = "https://mirror.test/repos/acme/tpa-db/releases/latest"
 // bundle path, the operator root with a baseline of 1, fetch enabled.
 func newFetchFixture(t *testing.T, mutate func(*config.SecurityConfig)) *rtFixture {
 	t.Helper()
-	return newRTFixture(t, rtOpts{Sec: func(s *config.SecurityConfig) {
+	f := newRTFixture(t, rtOpts{Sec: func(s *config.SecurityConfig) {
 		s.TPABundlePath = ""
 		s.TPAActiveRoot = config.TPARootOperator
 		s.TPAOperatorBaseline = u64p(1)
@@ -36,6 +36,9 @@ func newFetchFixture(t *testing.T, mutate func(*config.SecurityConfig)) *rtFixtu
 			mutate(s)
 		}
 	}})
+	// Production applies the config before the first fetch is ever offered.
+	f.run()
+	return f
 }
 
 // fetchedCandidate is a signed candidate in the shape the fetch adapter hands
@@ -219,10 +222,4 @@ func (t *fakeTimer) arms() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return len(t.durations)
-}
-
-func (t *fakeTimer) isActive() bool {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	return t.active
 }

@@ -245,20 +245,20 @@ func TestEgress_RedirectPolicy(t *testing.T) {
 		assert.Equal(t, fetchOutcomeCandidate, res.Outcome, "reason=%s detail=%s", res.Reason, res.Detail)
 	})
 
-	t.Run("a mixed public and private answer is treated as public", func(t *testing.T) {
+	t.Run("a hop whose name also resolves inward is refused", func(t *testing.T) {
 		rig := &redirectRig{}
-		rt := rtFunc(func(r *http.Request) (*http.Response, error) {
-			rig.record(r.URL.String())
-			if r.URL.Host == "pub.test" {
-				return respond(r, 302, nil, map[string]string{"Location": "https://mixed.test/x"}), nil
-			}
-			return respond(r, 200, nil, nil), nil
-		})
-		// mixed.test has a public address, so the app layer lets the hop through
-		// (class public); the dial-time control refuses the inward address when
-		// the connection is actually made.
-		fetchCandidate(fetchCtx(t), redirectSettings(t, url, rt))
-		assert.Equal(t, 2, rig.count())
+		// mixed.test answers with a public AND a private address. Every address
+		// must be permitted, so the hop is refused before it is sent.
+		res := fetchCandidate(fetchCtx(t), redirectSettings(t, url, redirectingTo(rig, func(int) string { return "https://mixed.test/x" })))
+		refused(t, res)
+		assert.Equal(t, 1, rig.count())
+	})
+
+	t.Run("a configured host whose answer mixes public and private space is refused", func(t *testing.T) {
+		rig := &redirectRig{}
+		res := fetchCandidate(fetchCtx(t), redirectSettings(t, "https://mixed.test/repos/a/b/releases/latest", redirectingTo(rig, func(int) string { return "" })))
+		refused(t, res)
+		assert.Zero(t, rig.count())
 	})
 
 	t.Run("a loopback mirror may redirect to another loopback port but not to the LAN", func(t *testing.T) {
@@ -357,7 +357,7 @@ func TestEgress_StatusMapping(t *testing.T) {
 
 func TestEgress_RateLimitMovesNextCheckAndNothingIsRecorded(t *testing.T) {
 	ch := newTestChannel(t)
-	f := newFileAndFetchFixture(t, ch, true)
+	f := newChannelFixture(t, ch)
 	h := newRefresherHarness(t, f, func(o *BundleRefresherOptions) { o.IntervalOverride = 10 * time.Minute })
 	h.start()
 	commits := f.store.commitCount()
@@ -404,7 +404,7 @@ func TestEgress_CycleDeadlineCutsATrickledBody(t *testing.T) {
 		once.Do(func() { close(reached) })
 		<-r.Context().Done() // a body that never completes
 	})
-	f := newFileAndFetchFixture(t, ch, true)
+	f := newChannelFixture(t, ch)
 	h := newRefresherHarness(t, f, nil)
 	h.start()
 

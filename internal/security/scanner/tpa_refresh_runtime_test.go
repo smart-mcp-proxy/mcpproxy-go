@@ -264,7 +264,13 @@ func TestRefreshRuntime_OfferedRunSemantics(t *testing.T) {
 		require.NotNil(t, info.LastRejection)
 		assert.Equal(t, RejectDowngrade, info.LastRejection.Reason)
 		assert.Contains(t, info.LoadError, RejectDowngrade, "the stale file is reported as the file leg's load_error")
-		assert.Equal(t, 1, f.countLogs(zapcore.ErrorLevel, "configured TPA scanner bundle refused"), "refused once, deduplicated")
+		downgrades := 0
+		for _, e := range f.logs.All() {
+			if e.Level == zapcore.ErrorLevel && e.ContextMap()["reason"] == RejectDowngrade {
+				downgrades++
+			}
+		}
+		assert.Equal(t, 1, downgrades, "the stale file is refused once, deduplicated")
 	})
 
 	t.Run("equal sequence with a different digest is a downgrade on the fetch leg", func(t *testing.T) {

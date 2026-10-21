@@ -148,7 +148,12 @@ func TestBundleObserver_DrainWaitsForInFlightDispatches(t *testing.T) {
 	t.Cleanup(unsub)
 
 	f.activate(signedCandidate(t, keyOperator, bundleOpts{Seq: 5, Tag: "A"}))
-	<-started
+	select {
+	case <-started:
+	case <-time.After(10 * time.Second):
+		close(release)
+		t.Fatal("the observer was never called")
+	}
 
 	drained := make(chan struct{})
 	go func() { drainBundleObserversForTest(); close(drained) }()

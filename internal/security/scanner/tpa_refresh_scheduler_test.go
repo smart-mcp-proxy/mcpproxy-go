@@ -99,8 +99,13 @@ func (h *refresherHarness) waitClass() RefreshOutcomeClass {
 // tick fires the scheduler's timer and waits for the cycle it starts.
 func (h *refresherHarness) tick() RefreshOutcomeClass {
 	h.t.Helper()
-	h.clock.loop(h.t).Fire()
-	return h.waitClass()
+	timer := h.clock.loop(h.t)
+	arms := timer.arms()
+	timer.Fire()
+	class := h.waitClass()
+	// The observer fires inside the cycle; the loop re-arms right after it.
+	require.Eventually(h.t, func() bool { return timer.arms() > arms }, 10*time.Second, time.Millisecond, "the timer was never re-armed")
+	return class
 }
 
 func (h *refresherHarness) requireNoMoreCycles() {
@@ -116,7 +121,7 @@ func (h *refresherHarness) requireNoMoreCycles() {
 // fetch URL (fetch off unless the test turns it on).
 func newFileAndFetchFixture(t *testing.T, ch *testChannel, fetch bool) *rtFixture {
 	t.Helper()
-	return newRTFixture(t, rtOpts{Sec: func(s *config.SecurityConfig) {
+	f := newRTFixture(t, rtOpts{Sec: func(s *config.SecurityConfig) {
 		s.TPAActiveRoot = config.TPARootOperator
 		s.TPAOperatorBaseline = u64p(1)
 		s.TPAFetchEnabled = fetch
@@ -124,6 +129,15 @@ func newFileAndFetchFixture(t *testing.T, ch *testChannel, fetch bool) *rtFixtur
 			s.TPAFetchURL = ch.srv.URL + releasesPath
 		}
 	}})
+	// Production applies the config before the refresher ever runs.
+	f.run()
+	return f
+}
+
+// newChannelFixture is a fetch-only install (no bundle path) pointed at ch.
+func newChannelFixture(t *testing.T, ch *testChannel) *rtFixture {
+	t.Helper()
+	return newFetchFixture(t, func(s *config.SecurityConfig) { s.TPAFetchURL = ch.srv.URL + releasesPath })
 }
 
 // T327: cadence.
@@ -407,7 +421,7 @@ func TestRefreshScheduler_MidFlightNudgeSupersedes(t *testing.T) {
 		"require_signed_bundle flips":   func(s *config.SecurityConfig) { s.RequireSignedBundle = true },
 		"the bundle path flips":         func(s *config.SecurityConfig) { s.TPABundlePath = "" },
 		"the operator epoch changes":    func(s *config.SecurityConfig) { s.TPAOperatorEpoch = u64p(3) },
-		"the operator baseline changes": func(s *config.SecurityConfig) { s.TPAOperatorBaseline = u64p(7) },
+		"the operator baseline changes": func(s *config.SecurityConfig) { s.TPAOperatorBaseline = u64p(0) },
 	}
 	for name, change := range changes {
 		t.Run(name, func(t *testing.T) {
@@ -574,7 +588,7 @@ func TestRefreshScheduler_Lifecycle(t *testing.T) {
 // T327: failure accounting and log dedup.
 func TestRefreshScheduler_FailureAccounting(t *testing.T) {
 	ch := newTestChannel(t)
-	f := newFileAndFetchFixture(t, ch, true)
+	f := newChannelFixture(t, ch)
 	h := newRefresherHarness(t, f, nil)
 	h.start()
 	failing := func() { ch.serve(releasesPath, 500, []byte("boom"), nil) }

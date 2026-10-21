@@ -117,8 +117,14 @@ func TestFetchGate_RefresherIssuesNoRequestWhileDisabled(t *testing.T) {
 	})
 
 	t.Run("an unreadable state store", func(t *testing.T) {
-		f := newFetchFixture(t, func(s *config.SecurityConfig) { s.TPAFetchURL = ch.srv.URL + releasesPath })
-		f.store.failLoad = assert.AnError
+		f := newRTFixture(t, rtOpts{Sec: func(s *config.SecurityConfig) {
+			s.TPABundlePath = ""
+			s.TPAActiveRoot = config.TPARootOperator
+			s.TPAOperatorBaseline = u64p(1)
+			s.TPAFetchEnabled = true
+			s.TPAFetchURL = ch.srv.URL + releasesPath
+		}})
+		f.store.failLoad = assert.AnError // before the first run reads the state
 		h := newRefresherHarness(t, f, nil)
 		h.start()
 		h.tick()
@@ -134,6 +140,9 @@ func TestFetchGate_RefresherIssuesNoRequestWhileDisabled(t *testing.T) {
 			s.TPAActiveRoot = config.TPARootPublisher
 			s.TPAFetchURL = ch.srv.URL + releasesPath
 		})
+		// The shipped binary's publisher signer set is empty.
+		withTrustAnchors(t, nil, 0, nil)
+		f.run()
 		h := newRefresherHarness(t, f, nil)
 		h.start()
 		h.tick()

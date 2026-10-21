@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/bundlesig"
@@ -33,10 +34,23 @@ type bundlePolicy struct {
 
 	// FetchEnabled and FetchURL mirror security.tpa_fetch_enabled (with its
 	// environment override) and security.tpa_fetch_url. They are part of the
-	// policy fingerprint once T330 lands: a change to either supersedes an
-	// in-flight download (tasks B8, B9).
+	// policy fingerprint: a change to either supersedes an in-flight download
+	// (tasks B8, B9).
 	FetchEnabled bool
 	FetchURL     string
+
+	// ActiveRootKeys is how many trusted keys belong to ActiveRoot. Zero means
+	// no fetched pair could ever verify, so the fetch leg issues no request
+	// (B10 no_trusted_signer). Derived from the key set, so it adds nothing to
+	// the fingerprint.
+	ActiveRootKeys int
+
+	// RefreshInterval and StaleAfterDays are display and scheduling settings,
+	// not policy: they are deliberately NOT part of Fingerprint (B15), so a
+	// threshold edit takes effect on the next status read without rerunning
+	// the pipeline.
+	RefreshInterval time.Duration
+	StaleAfterDays  int
 
 	// PublisherEpoch and PublisherBaseline are the binary's anchors, captured
 	// when the policy is built so that one run sees one consistent view.
@@ -77,12 +91,31 @@ func policyFor(sec *config.SecurityConfig, path string) *bundlePolicy {
 		OperatorEpoch:       sec.EffectiveTPAOperatorEpoch(),
 		FetchEnabled:        sec.IsTPAFetchEnabled(),
 		FetchURL:            sec.EffectiveTPAFetchURL(),
+		RefreshInterval:     clampRefreshInterval(sec.EffectiveTPARefreshInterval()),
+		StaleAfterDays:      sec.EffectiveTPAStaleAfterDays(),
 		PublisherEpoch:      publisherTrustEpoch,
 		PublisherBaseline:   pubBase,
 		Warnings:            warnings,
 	}
+	for _, k := range keys {
+		if k.Authority == p.ActiveRoot {
+			p.ActiveRootKeys++
+		}
+	}
 	p.Fingerprint = p.fingerprint(keys)
 	return p
+}
+
+// minRefreshInterval is the floor of the refresh cadence (B1). A test seam on
+// the refresher goes lower.
+const minRefreshInterval = time.Hour
+
+// clampRefreshInterval applies the runtime's 1h floor to the configured cadence.
+func clampRefreshInterval(d time.Duration) time.Duration {
+	if d < minRefreshInterval {
+		return minRefreshInterval
+	}
+	return d
 }
 
 // fingerprint hashes a canonical, length-prefixed encoding of every policy
@@ -105,6 +138,8 @@ func (p *bundlePolicy) fingerprint(keys []bundlesig.Key) string {
 	field("operator_epoch", strconv.FormatUint(p.OperatorEpoch, 10))
 	field("publisher_epoch", strconv.FormatUint(p.PublisherEpoch, 10))
 	field("publisher_baseline", strconv.FormatUint(p.PublisherBaseline, 10))
+	field("fetch_enabled", strconv.FormatBool(p.FetchEnabled))
+	field("fetch_url", p.FetchURL)
 	field("keys", strconv.Itoa(len(ids)))
 	for _, id := range ids {
 		field("key", id)
@@ -118,10 +153,15 @@ func (p *bundlePolicy) fingerprint(keys []bundlesig.Key) string {
 // than a policy method because bundlePolicy holds configuration only; the
 // recorded Active record lives in the committed state st (nil-safe).
 //
-// STUB (Spec 101 US3 wave 0): behaves as the path-only guard it replaces
-// (policy.Path != ""). T330 widens it for fetched bundles.
-func externalConfigured(policy *bundlePolicy, _ *TPABundleState) bool {
-	return policy.Path != ""
+// The last clause keeps a fetched bundle alive when the fetch is switched off:
+// dropping silently to the weaker embedded corpus would be an unrequested
+// degrade (security bundle rollback --embedded is the explicit way back). A FILE
+// bundle gets no such grace: with its path removed the operator removed it.
+func externalConfigured(policy *bundlePolicy, st *TPABundleState) bool {
+	if policy.Path != "" || policy.FetchEnabled {
+		return true
+	}
+	return st != nil && st.Active != nil && st.Active.Source == BundleSourceFetch
 }
 
 // currentEpoch returns the trusted epoch of auth (FR-005a). An unknown

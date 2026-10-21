@@ -81,7 +81,7 @@ func scanLoop(n int) (gens map[string]int, worst time.Duration, durations []time
 
 func TestRefreshConcurrency_ScansIgnoreABlackholedFetchLeg(t *testing.T) {
 	ch := newTestChannel(t)
-	f := newFileAndFetchFixture(t, ch, true)
+	f := newChannelFixture(t, ch)
 	old := fetchedCandidate(t, keyOperator, bundleOpts{Seq: 2, Tag: "old"})
 	old = rebundleMarker(t, old, "bundle-marker-2-old")
 	require.Equal(t, digestOf(old.Bundle), runOffered(old, f.log).FullDigest)
