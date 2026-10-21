@@ -182,7 +182,8 @@ func refresherGoroutines() int {
 	return n
 }
 
-// A Close racing a late Start leaves no refresher goroutine behind: the real
+// A Close straight after StartBackgroundInitialization races the launched
+// goroutine's Start; it leaves no refresher goroutine behind: the real
 // refresher treats a Start after Stop as a no-op, and Close joins a running one.
 func TestBundleRefresher_CloseRacingALateStartLeavesNoGoroutine(t *testing.T) {
 	t.Cleanup(func() { scanner.SetBundleRefresher(nil) })
@@ -194,11 +195,9 @@ func TestBundleRefresher_CloseRacingALateStartLeavesNoGoroutine(t *testing.T) {
 		})
 		rt.SetBundleRefresher(refresher)
 
-		var wg sync.WaitGroup
-		wg.Add(2)
-		go func() { defer wg.Done(); rt.StartBackgroundInitialization() }()
-		go func() { defer wg.Done(); _ = closeRT() }()
-		wg.Wait()
+		// StartBackgroundInitialization launches the refresher on a goroutine;
+		// closing straight away lets that goroutine run after Stop did.
+		rt.StartBackgroundInitialization()
 		_ = closeRT()
 
 		require.Eventually(t, func() bool { return !refresher.Running() && refresherGoroutines() == 0 },
