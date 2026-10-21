@@ -154,21 +154,35 @@ func ConfigureBundle(path string, logger *zap.Logger) {
 	configureWithPolicy(policyFor(&config.SecurityConfig{TPABundlePath: path}, path), logger)
 }
 
+// bundleClock is the clock of the bundle runtime and of the read-time status
+// fields (staleness, last_checked_at). It is a variable only so tests can
+// inject a fixed time.
+var bundleClock = time.Now
+
 // BundleStatus returns a snapshot of the active corpus for the operator-facing
 // surfaces (REST /api/v1/security/overview, `mcpproxy security overview`).
 // It lazily installs the embedded default so a caller that never configured a
 // bundle still gets a truthful answer instead of a zero value.
 func BundleStatus() BundleInfo {
 	_, info := activeBundleSnapshot()
-	info.StalenessDays = stalenessDays(info.GeneratedAt, time.Now())
-	return info
+	return readTimeStatus(info)
 }
 
 // statusFromSnapshot is BundleStatus without the lazy install, for callers that
 // already hold bundleRT.mu (the lazy install would deadlock on it).
 func statusFromSnapshot() BundleInfo {
 	_, info := snapshotBundle()
-	info.StalenessDays = stalenessDays(info.GeneratedAt, time.Now())
+	return readTimeStatus(info)
+}
+
+// readTimeStatus adds the fields computed at read time to a copy of the
+// published info: the staleness age, the stale flag against the CURRENT
+// threshold, last_checked_at, the refresh status and the re-protection status
+// (tasks B15). None of them is part of the published pair, so a refresh cycle
+// or a threshold edit never republishes what scans read.
+func readTimeStatus(info BundleInfo) BundleInfo {
+	info.StalenessDays = stalenessDays(info.GeneratedAt, bundleClock())
+	bundleRT.disp.merge(&info)
 	return info
 }
 
@@ -254,5 +268,7 @@ func installDefaultBundleIfUnpublished() {
 	if check, info := snapshotBundle(); check != nil || info.LoadError != "" {
 		return
 	}
-	bundleRT.runLocked(bundleRT.policyOrDefaultLocked(), bundleLogger(nil), runOptions{force: true})
+	policy := bundleRT.policyOrDefaultLocked()
+	bundleRT.disp.applySettings(policy)
+	bundleRT.runLocked(policy, bundleLogger(nil), runOptions{force: true})
 }

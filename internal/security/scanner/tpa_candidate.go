@@ -71,8 +71,6 @@ type evalEnv struct {
 	// fetch run sets it, so a policy copy with RequireSigned=true never reaches
 	// fallback step b and a serving unsigned file-drop bundle is not
 	// deactivated.
-	//
-	// STUB (Spec 101 US3 wave 0): ignored until T330.
 	MustSign bool
 }
 
@@ -101,7 +99,9 @@ type acceptedBundle struct {
 
 // bundleSelfCheck is the activation self-check stage hook (FR-008; tasks.md
 // Δ14). The default (nil) is a no-op; a non-nil error refuses the candidate as
-// gate_failure. The real self-check is Spec 087 / US2 D8.
+// gate_failure. It runs for evalNormal and evalRollback only, never for evalLKG
+// (tasks B13, Δ27). Production wiring installs the real self-check through
+// EnableActivationSelfCheck.
 var bundleSelfCheck func(check *BundleCheck) error
 
 // evaluateCandidate runs the FR-008 validate-before-activate stages in order;
@@ -162,7 +162,7 @@ func (ev *evaluation) parseAndCeil() (*rawBundle, *BundleRejection) {
 
 // compileAndGate runs the tail every accepted candidate shares: version
 // compatibility, compile-all-or-reject, runnable-rules > 0, then the
-// activation self-check.
+// activation self-check (not for evalLKG).
 func (ev *evaluation) compileAndGate(m *rawBundle) (*BundleCheck, bundleLoadStats, *BundleRejection) {
 	if r := ev.env.Reuse; r != nil && r.Check != nil && r.FullDigest == ev.digest {
 		return r.Check, r.Stats, nil
@@ -175,7 +175,11 @@ func (ev *evaluation) compileAndGate(m *rawBundle) (*BundleCheck, bundleLoadStat
 		}
 		return nil, bundleLoadStats{}, ev.reject(RejectInvalidBundle, err.Error())
 	}
-	if bundleSelfCheck != nil {
+	// The self-check scores a bundle that is ABOUT to be activated. A bundle
+	// that already passed it when it activated (an LKG restore at startup, a
+	// rollback-pin restore) is not scored again: that would deactivate it at
+	// upgrade time and pay the corpus cost on every start (tasks B13).
+	if bundleSelfCheck != nil && ev.env.Mode != evalLKG {
 		if err := bundleSelfCheck(check); err != nil {
 			return nil, bundleLoadStats{}, ev.reject(RejectGateFailure, err.Error())
 		}
@@ -203,6 +207,9 @@ func (ev *evaluation) accepted(m *rawBundle, check *BundleCheck, stats bundleLoa
 func (ev *evaluation) unsigned() (*acceptedBundle, *BundleRejection) {
 	if ev.policy.RequireSigned {
 		return nil, ev.reject(RejectSignatureRequired, "require_signed_bundle is on and the candidate has no signature sidecar")
+	}
+	if ev.env.MustSign {
+		return nil, ev.reject(RejectSignatureRequired, "the candidate has no signature sidecar and this source only offers signed bundles")
 	}
 	if ev.env.State != nil && ev.env.State.SignatureRatchet {
 		return nil, ev.reject(RejectUnsignedRatchet, "a signature-verified bundle has activated on this install; unsigned candidates are refused")
