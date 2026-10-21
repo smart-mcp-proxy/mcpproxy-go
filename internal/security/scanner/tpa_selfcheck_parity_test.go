@@ -138,6 +138,33 @@ func selfCheckBuiltinNames() []string {
 	return names
 }
 
+// TestSelfCheckGateParserToleratesBothGateShapes keeps guard (b) honest across
+// the US2 rewrite of gate.go: HEAD's gateChecks() and the bundle-aware
+// gateChecks(bundle) / builtinGateChecks() split must read the same.
+func TestSelfCheckGateParserToleratesBothGateShapes(t *testing.T) {
+	const head = `package main
+func gateChecks() []detect.Check {
+	return []detect.Check{&checks.UnicodeHidden{}, &checks.Shadowing{}}
+}
+var categoryCheck = map[string]string{"shadowing": "shadowing.cross_server", "tpa_x": "tpa.bundle"}
+`
+	const us2 = `package main
+func builtinGateChecks() []detect.Check {
+	return []detect.Check{&checks.UnicodeHidden{}, &checks.Shadowing{}}
+}
+func gateChecks(bundle detect.Check) []detect.Check {
+	return append(builtinGateChecks(), bundle)
+}
+var categoryCheck = map[string]string{"shadowing": "shadowing.cross_server", "tpa_x": "tpa.bundle"}
+`
+	for name, src := range map[string]string{"head": head, "us2": us2} {
+		f, err := parser.ParseFile(token.NewFileSet(), name+".go", src, 0)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"Shadowing", "UnicodeHidden"}, gateBuiltinCheckNames(t, f), name)
+		assert.Equal(t, map[string]string{"shadowing": "shadowing.cross_server", "tpa_x": "tpa.bundle"}, gateCategoryPairs(t, f), name)
+	}
+}
+
 // TestSelfCheckGateASTParity is guard (b): the built-in check list, the
 // category map, the HARD-tier flag rule and the thresholds are the gate's.
 func TestSelfCheckGateASTParity(t *testing.T) {

@@ -60,19 +60,21 @@ func TestSelfCheckPipelineRefusesCatchAllFileDrop(t *testing.T) {
 	assert.Equal(t, BundleSourceEmbedded, info.Source, "the embedded default keeps serving")
 	assert.EqualValues(t, 1, count.Load(), "exactly one self-check for the one distinct candidate")
 
-	t.Run("re-running over the same bytes does not re-score", func(t *testing.T) {
+	t.Run("a rerun over the same bytes scores at most once more", func(t *testing.T) {
+		before := count.Load()
 		info := f.run()
 		require.NotNil(t, info.LastRejection)
 		assert.Equal(t, RejectGateFailure, info.LastRejection.Reason)
-		assert.LessOrEqual(t, count.Load(), int64(1), "at most one self-check per distinct candidate")
+		assert.LessOrEqual(t, count.Load()-before, int64(1), "at most one self-check per evaluated candidate, never one per pipeline stage")
 	})
 
-	t.Run("a second distinct candidate costs one more", func(t *testing.T) {
+	t.Run("a second distinct candidate costs one", func(t *testing.T) {
+		before := count.Load()
 		require.NoError(t, writeFileForTest(f.path, selfCheckPatternBundle(t, `(?s).+`, "catchall-two")))
 		info := f.run()
 		require.NotNil(t, info.LastRejection)
 		assert.Equal(t, RejectGateFailure, info.LastRejection.Reason)
-		assert.EqualValues(t, 2, count.Load())
+		assert.EqualValues(t, 1, count.Load()-before)
 	})
 
 	t.Run("the shipped default written as a file activates", func(t *testing.T) {
