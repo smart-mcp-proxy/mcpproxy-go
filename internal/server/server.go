@@ -574,6 +574,15 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 	// consumers.
 	next = directRequestKindMiddleware(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// mcp_reject_query_apikey: refuse a URL-borne credential outright. It
+		// must be a 401 and not "no token": with require_mcp_auth off a request
+		// without a recognised credential is served as the anonymous
+		// administrator, so silently ignoring the parameter would downgrade a
+		// caller that thinks it is authenticated.
+		if cfg := s.runtime.Config(); cfg != nil && cfg.MCPRejectQueryAPIKey && r.URL.Query().Has("apikey") {
+			http.Error(w, `{"error":"A credential in the ?apikey= query parameter is not accepted on MCP endpoints. Send it as Authorization: Bearer <token> or X-API-Key."}`, http.StatusUnauthorized)
+			return
+		}
 		token := httpapi.ExtractToken(r)
 		if token == "" {
 			// Check if MCP auth is required

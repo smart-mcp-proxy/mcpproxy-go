@@ -745,6 +745,7 @@ curl -X POST http://localhost:8080/api/v1/tokens \
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `require_mcp_auth` | bool | `false` | Require authentication on `/mcp` endpoint |
+| `mcp_reject_query_apikey` | bool | `false` | Refuse a `?apikey=` query parameter on every MCP endpoint (`/mcp*` and the legacy `/v1/tool_code` aliases) with a 401, forcing clients onto `Authorization: Bearer <token>` or `X-API-Key`. It does not stop a URL already sent from being logged in transit; it makes a query-form client fail until it is migrated, so tokens stop appearing in access logs, proxy logs and browser history. Applies to MCP endpoints only; the REST API, the Web UI and its `/events` stream keep accepting the query form. Clients the Connect wizard configured with `?apikey=` in the URL (Codex, the generic fallback) need a header carrier first (see [Connect clients](./connect-clients.md)). Takes effect without a restart |
 | `api_key` | string | auto-generated | Admin API key for full access |
 
 ### CLI Flags
