@@ -32,3 +32,7 @@ go test -race ./internal/... -v    # With the race detector
 
 See [CLAUDE.md](CLAUDE.md) and the [docs](https://docs.mcpproxy.app) for the
 full development and testing reference.
+
+## Recognition
+
+When your pull request is merged, a bot comments with a thank-you and a short snippet you can copy if you would like to mention it. Sharing is entirely optional; it does help a small open-source project get found. Contributors from outside the maintainer team are also credited in a "Contributors" section of the release notes. The logic lives in `scripts/contributors.sh` (tests: `scripts/test-contributors.sh`) and `.github/workflows/contributor-thanks.yml`.

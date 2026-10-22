@@ -200,7 +200,8 @@ func TestServeSaverDoesNotPersistEnvAPIKey(t *testing.T) {
 
 	cfg, saver, err := loadConfig(newServeFlagTestCmd())
 	require.NoError(t, err)
-	apiKey, wasGenerated, _ := cfg.EnsureAPIKey()
+	apiKey, wasGenerated, _, keyErr := cfg.EnsureAPIKey()
+	require.NoError(t, keyErr)
 	require.Equal(t, "mcp_env_secret", apiKey)
 	require.False(t, wasGenerated)
 

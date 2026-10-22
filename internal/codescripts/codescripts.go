@@ -27,6 +27,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 )
 
 const (
@@ -330,7 +333,7 @@ func ValidateName(name string) error {
 		switch {
 		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9', c == '-', c == '_':
 		default:
-			return &InvalidNameError{Name: name, Reason: fmt.Sprintf("character %q is not allowed", string(name[i]))}
+			return &InvalidNameError{Name: name, Reason: disallowedCharReason(name[i:])}
 		}
 	}
 	return nil
@@ -768,11 +771,32 @@ func describeEntry(scriptsDir, name, ext string, d fs.DirEntry) Entry {
 	return entry
 }
 
+// disallowedCharReason names the offending character in a name refusal.
+//
+// The loop above walks bytes — that is the confinement boundary and stays as
+// it is; only the wording changes. It used to report `string(name[i])`, and
+// converting a byte to a string yields the code point of the same value, so
+// the first byte of "語" (0xE8) was rendered as "è": the caller was told to
+// remove a character that is not in the name it sent. A byte that begins no
+// valid rune is not a character at all and is reported as a byte.
+func disallowedCharReason(rest string) string {
+	r, size := utf8.DecodeRuneInString(rest)
+	if r == utf8.RuneError && size <= 1 {
+		return fmt.Sprintf("byte %#02x is not allowed", rest[0])
+	}
+	return fmt.Sprintf("character %q is not allowed", string(r))
+}
+
 // truncateForMessage bounds caller-supplied text echoed back in an error.
+//
+// The cut goes through stringutil.UTF8Prefix (#1647, #1664, #1665): a script
+// name is caller-supplied and need not be ASCII, and a raw byte cut leaves a
+// partial rune that %q then renders as \xNN escapes, so the refusal ends in
+// hex noise instead of the name it is quoting.
 func truncateForMessage(s string) string {
 	const limit = MaxNameLen + 16
 	if len(s) <= limit {
 		return s
 	}
-	return s[:limit] + "…"
+	return stringutil.UTF8Prefix(s, limit) + "…"
 }

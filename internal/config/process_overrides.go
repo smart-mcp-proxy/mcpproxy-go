@@ -133,6 +133,17 @@ var (
 			s.AutoBaselineScan = v
 		},
 	}
+	FieldAutoRescanOnChange = Field[*bool]{
+		Name: "security.auto_rescan_on_change",
+		Get:  func(c *Config) *bool { return securityOf(c).AutoRescanOnChange },
+		Set: func(c *Config, v *bool) {
+			if c.Security == nil && v == nil {
+				return // nothing to unset; do not materialize an empty block
+			}
+			s := cowSecurity(c)
+			s.AutoRescanOnChange = v
+		},
+	}
 )
 
 // scalar builds a Field for a top-level value addressed by pointer.

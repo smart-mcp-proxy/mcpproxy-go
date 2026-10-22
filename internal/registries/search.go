@@ -9,7 +9,12 @@ import (
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/experiments"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 )
+
+// pulseDescriptionMaxBytes caps the description carried on a Pulse registry
+// search result.
+const pulseDescriptionMaxBytes = 300
 
 // Sentinel errors for single-server lookup. Surfaces map these to stable error
 // codes (registry_not_found / server_not_found) for cross-surface consistency
@@ -702,19 +707,15 @@ func parsePulseWithoutGuesser(rawData interface{}) []ServerEntry {
 			Name: name,
 		}
 
-		// Try to get description from multiple fields
+		// Try to get description from multiple fields. The display cap goes
+		// through stringutil.UTF8Prefix: a registry description is
+		// upstream-authored free text, and a raw byte cut at 300 can land
+		// inside a multi-byte rune, leaving the entry invalid UTF-8 (U+FFFD
+		// once the REST/Web UI encoder sees it).
 		if shortDesc, ok := itemMap["short_description"].(string); ok && shortDesc != "" {
-			if len(shortDesc) > 300 {
-				server.Description = shortDesc[:300]
-			} else {
-				server.Description = shortDesc
-			}
+			server.Description = stringutil.UTF8Prefix(shortDesc, pulseDescriptionMaxBytes)
 		} else if aiDesc, ok := itemMap["EXPERIMENTAL_ai_generated_description"].(string); ok && aiDesc != "" {
-			if len(aiDesc) > 300 {
-				server.Description = aiDesc[:300]
-			} else {
-				server.Description = aiDesc
-			}
+			server.Description = stringutil.UTF8Prefix(aiDesc, pulseDescriptionMaxBytes)
 		} else {
 			server.Description = noDescAvailable
 		}

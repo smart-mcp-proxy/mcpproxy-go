@@ -1076,6 +1076,7 @@ func (s *Server) setupRoutes() {
 		r.Post("/profiles/{name}/rename", s.requireServerOp(auth.ServerOpConfigWrite, s.handleRenameProfile)) // guarded: MutateConfig
 		r.Get("/profiles/{name}/effective-tools", s.handleProfileEffectiveTools)
 		r.Get("/access/explain", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAccessExplain))
+		r.Get("/access/suggest", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAccessSuggest)) // read-only: applies nothing
 		// #1166 round 11: the ONLY mutating route in this group, and it was
 		// ungated. The active profile is server-level shared state — it decides
 		// which servers the Web UI and the tray render — so a READ-scoped agent
@@ -1313,6 +1314,16 @@ func (s *Server) setupRoutes() {
 			r.Put("/scanners/{id}/config", s.requireServerOp(auth.ServerOpScan, s.handleConfigureScanner))
 			r.Get("/scanners/{id}/status", s.handleGetScannerStatus)
 			r.Get("/overview", s.handleSecurityOverview)
+
+			// Spec 101 TPA signature bundle. Status and history are admin-read;
+			// the mutations (a rollback overrides the downgrade watermark) are
+			// refused to agent tokens.
+			r.Get("/bundle", s.handleGetSecurityBundle)
+			r.Get("/bundle/history", s.handleGetSecurityBundleHistory)
+			r.Post("/bundle/rollback", s.requireServerOp(auth.ServerOpBundleManage, s.handleRollbackSecurityBundle))
+			r.Post("/bundle/unpin", s.requireServerOp(auth.ServerOpBundleManage, s.handleUnpinSecurityBundle))
+			r.Post("/bundle/reload", s.requireServerOp(auth.ServerOpBundleManage, s.handleReloadSecurityBundle))
+			r.Post("/bundle/refresh", s.requireServerOp(auth.ServerOpBundleManage, s.handleRefreshSecurityBundle))
 
 			// Legacy routes (backwards compatibility)
 			r.Post("/scanners/install", s.requireServerOp(auth.ServerOpScan, s.handleInstallScanner))
@@ -6284,6 +6295,9 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	// logged every Web-UI tool call — and every shed of one — as if it came from
 	// the CLI. The surface header the clients already send is the discriminator.
 	ctx := reqcontext.WithRequestSource(r.Context(), toolCallRequestSource(r))
+	if r.Header.Get("X-MCPProxy-Result-Envelope") == "1" {
+		ctx = reqcontext.WithToolResultEnvelope(ctx)
+	}
 
 	// Call tool via controller
 	result, err := s.controller.CallTool(ctx, request.ToolName, request.Arguments)

@@ -24,6 +24,7 @@ func GetAccessCommand() *cobra.Command {
 		Short: "Explain what a client, token or profile can reach",
 	}
 	cmd.AddCommand(newAccessExplainCmd())
+	cmd.AddCommand(newAccessSuggestCmd())
 	silenceUsageOnRun(cmd)
 	return cmd
 }
@@ -87,6 +88,139 @@ Examples:
 	cmd.Flags().StringVar(&prof, "profile", "", "Explain a profile")
 	cmd.Flags().BoolVar(&anonymous, "anonymous", false, "Explain a caller that sends no credential")
 	return cmd
+}
+
+func newAccessSuggestCmd() *cobra.Command {
+	var since, token, prof string
+	var patch bool
+	cmd := &cobra.Command{
+		Use:   "suggest",
+		Short: "Suggest profile changes from calls the profiles blocked",
+		Long: `Read the profile refusals in the audit log, group them by profile, tool and
+block reason, and print one reviewed suggestion per group with the command that
+would apply it. Each group is re-checked with the access explainer, so a tool
+that is reachable now no longer appears.
+
+Nothing is applied. A deny rule is reported and never offered for widening, and
+an unannotated tool is never given a tier: you choose it. Blocks that no profile
+change fixes (quarantine, token permissions) are counted; use "access explain".
+Administrators only.
+
+--since is a duration (90m, 24h, 7d); the default is 24h and the audit-log
+retention is the only limit. --patch also prints, per profile, the proposed
+profile document. That is mcpproxy's own profile format (what PUT
+/api/v1/profiles/{name} takes, and a profiles[] entry in the config file), not a
+client permission file.
+
+Examples:
+  mcpproxy access suggest
+  mcpproxy access suggest --since 7d --profile work-readonly
+  mcpproxy access suggest --token ci-bot --patch
+  mcpproxy access suggest -o json`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			q := url.Values{}
+			q.Set("since", since)
+			if token != "" {
+				q.Set("token", token)
+			}
+			if prof != "" {
+				q.Set("profile", prof)
+			}
+			if patch {
+				q.Set("patch", "true")
+			}
+			data, err := restDo("access", http.MethodGet, "/api/v1/access/suggest?"+q.Encode(), nil)
+			if err != nil {
+				return err
+			}
+			if structuredOutput() {
+				return printData(data)
+			}
+			var res runtime.AccessSuggestions
+			if err := json.Unmarshal(data, &res); err != nil {
+				return err
+			}
+			return printSuggestions(res, patch)
+		},
+	}
+	cmd.Flags().StringVar(&since, "since", "24h", "Look-back window: a duration such as 90m, 24h or 7d")
+	cmd.Flags().StringVar(&token, "token", "", "Only blocks of this token")
+	cmd.Flags().StringVar(&prof, "profile", "", "Only blocks under this profile")
+	cmd.Flags().BoolVar(&patch, "patch", false, "Also print the proposed profile document per profile")
+	return cmd
+}
+
+func printSuggestions(res runtime.AccessSuggestions, patch bool) error {
+	fmt.Printf("Profile refusals in the last %s: %d\n", res.Window, res.BlockedCalls)
+	if len(res.Suggestions) == 0 {
+		fmt.Println("Nothing to suggest.")
+	} else {
+		rows := make([][]string, 0, len(res.Suggestions))
+		for _, s := range res.Suggestions {
+			rows = append(rows, []string{
+				s.Profile, s.Tool, string(s.BlockReason), fmt.Sprint(s.Count),
+				dash(strings.Join(s.Tokens, ",")), s.LastSeen.Local().Format("2006-01-02 15:04"), string(s.Suggestion),
+			})
+		}
+		if err := printTable([]string{"PROFILE", "TOOL", "REASON", "BLOCKED", "TOKENS", "LAST SEEN", "SUGGESTION"}, rows); err != nil {
+			return err
+		}
+		for _, s := range res.Suggestions {
+			printSuggestionDetail(s)
+		}
+	}
+	var skipped []string
+	add := func(n int, what string) {
+		if n > 0 {
+			skipped = append(skipped, fmt.Sprintf("%d %s", n, what))
+		}
+	}
+	add(res.AlreadyFixed, "group(s) already reachable")
+	add(res.ProfileRemoved, "group(s) of a removed profile")
+	add(res.NonProfileBlocked, "blocked call(s) not caused by a profile (see 'mcpproxy access explain')")
+	add(res.Unattributed, "refusal(s) naming no profile")
+	if len(skipped) > 0 {
+		fmt.Println("Not listed: " + strings.Join(skipped, "; ") + ".")
+	}
+	if patch {
+		if len(res.Patches) == 0 {
+			fmt.Println("No apply-ready profile change (classify needs a tier from you).")
+		}
+		for _, p := range res.Patches {
+			doc, err := json.MarshalIndent(p.Proposed, "", "  ")
+			if err != nil {
+				return err
+			}
+			fmt.Printf("\nProposed profile %s (%s):\n%s\n", p.Profile, strings.Join(p.Changes, "; "), doc)
+		}
+	}
+	return nil
+}
+
+// printSuggestionDetail prints the command, note and warning of one row.
+func printSuggestionDetail(s runtime.AccessSuggestion) {
+	var want profile.FixAction
+	switch s.Suggestion {
+	case runtime.SuggestAllow:
+		want = profile.FixAllowInProfile
+	case runtime.SuggestAddServer:
+		want = profile.FixAddServerToProfile
+	case runtime.SuggestClassify:
+		want = profile.FixClassifyInProfile
+	}
+	fmt.Printf("\n%s  %s  (%s, %d blocked)\n", s.Profile, s.Tool, s.BlockReason, s.Count)
+	for _, f := range s.Fixes {
+		if f.Action == want {
+			fmt.Printf("  %s\n", fixCommand(f, s.Tool))
+		}
+	}
+	if s.Note != "" {
+		fmt.Printf("  %s\n", s.Note)
+	}
+	if s.Warning != "" {
+		fmt.Printf("  WARNING: %s\n", s.Warning)
+	}
 }
 
 func printExplanation(ex runtime.AccessExplanation) {

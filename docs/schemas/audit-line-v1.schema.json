@@ -102,7 +102,7 @@
         "required": ["request_id", "surface", "server", "tool", "operation", "decision", "reason", "args_sha256", "args_bytes"],
         "properties": {
           "surface": { "enum": ["call_tool_read", "call_tool_write", "call_tool_destructive", "direct", "code_execution", "rest"] },
-          "reason": { "enum": ["none", "intent_invalid", "intent_rejected", "profile_scope", "token_scope", "token_permission", "server_quarantined", "tool_pending_approval", "tool_changed_approval", "tool_not_callable", "other"] },
+          "reason": { "enum": ["none", "intent_invalid", "intent_rejected", "profile_scope", "profile_tier", "profile_rule", "profile_unannotated", "token_scope", "token_permission", "server_quarantined", "tool_pending_approval", "tool_changed_approval", "tool_not_callable", "other"] },
           "caller": { "properties": { "kind": { "enum": ["api_key", "socket", "stdio", "anonymous", "agent_token", "session_admin", "internal"] } }, "not": { "required": ["email_hash"] } }
         },
         "not": { "anyOf": [

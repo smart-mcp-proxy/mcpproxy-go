@@ -12,7 +12,7 @@ keywords: [mcp, proxy, ai agents, tool discovery, security, docker]
 
 **A smart proxy for AI agents using the Model Context Protocol (MCP)**
 
-![MCPProxy Architecture](/img/mcpproxy-architecture.jpeg)
+![AI clients connect to MCPProxy, which discovers tools across upstream MCP servers. Review and isolation controls reduce risk but do not guarantee safety.](/img/mcpproxy-architecture.svg)
 
 ## What is MCPProxy?
 

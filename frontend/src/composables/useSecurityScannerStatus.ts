@@ -10,12 +10,17 @@
 import { ref } from 'vue'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
+import type { SignatureBundle } from '@/utils/signatureBundle'
 
 const enabledCount = ref<number | null>(null)
 const dockerAvailable = ref<boolean>(true)
 const loaded = ref(false)
 const totalFindings = ref<number>(0)
 const totalScans = ref<number>(0)
+// Spec 101 FR-020: the signature_bundle descriptor from the same overview
+// response, shared so Review and Home show the bundle state without a second
+// fetch. Null until loaded, on an older daemon, or for a scoped session.
+const signatureBundle = ref<SignatureBundle | null>(null)
 let inflight: Promise<void> | null = null
 
 // Spec 077 US4 (MCP-2207): the backend now collapses the per-scanner
@@ -49,6 +54,8 @@ export async function refreshSecurityScannerStatus(): Promise<void> {
       const fbs = data.findings_by_severity ?? {}
       totalFindings.value = typeof fbs.total === 'number' ? fbs.total : 0
       totalScans.value = typeof data.total_scans === 'number' ? data.total_scans : 0
+      const bundle = data.signature_bundle
+      signatureBundle.value = bundle && typeof bundle === 'object' ? bundle : null
       loaded.value = true
     } catch {
       // On error, keep current values; the UI will fall back to dockerAvailable
@@ -79,6 +86,7 @@ export function useSecurityScannerStatus() {
     loaded,
     totalFindings,
     totalScans,
+    signatureBundle,
     /** True when at least one scanner is enabled and docker is available. */
     hasEnabledScanners: () => (enabledCount.value ?? 0) > 0,
     /** True when at least one scan has completed (ever). */

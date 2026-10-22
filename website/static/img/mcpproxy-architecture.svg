@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 270" role="img" aria-labelledby="title desc">
+<title id="title">MCPProxy architecture</title>
+<desc id="desc">AI clients connect to MCPProxy, which discovers tools across upstream MCP servers. Review and isolation controls reduce risk but do not guarantee safety.</desc>
+<defs><marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0 0L8 4L0 8" fill="#317768"/></marker></defs>
+<rect width="960" height="270" rx="16" fill="#f1f7f4"/>
+<g fill="#fff" stroke="#317768" stroke-width="2"><rect x="24" y="48" width="224" height="132" rx="12"/><rect x="332" y="24" width="296" height="180" rx="12"/><rect x="712" y="48" width="224" height="132" rx="12"/></g>
+<g stroke="#317768" stroke-width="3" marker-end="url(#arrow)"><path d="M258 114H320"/><path d="M638 114H700"/></g>
+<g font-family="system-ui, sans-serif" text-anchor="middle" fill="#173c34"><g font-size="25" font-weight="700"><text x="136" y="96">AI clients</text><text x="480" y="65">MCPProxy</text><text x="824" y="96">MCP servers</text></g><g font-size="18"><text x="136" y="130">One proxy connection</text><text x="480" y="101">Discover and call tools</text><text x="480" y="133">Review new servers</text><text x="480" y="165">Inspect activity records</text><text x="824" y="130">Local or remote tools</text></g><text x="480" y="245" font-size="18">Review and isolation reduce risk; they do not guarantee safety.</text></g>
+</svg>
