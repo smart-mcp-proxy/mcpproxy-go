@@ -67,6 +67,9 @@ type fakeSecurityScanner struct {
 	cachedScanResult map[string]*scanner.ScanSummary
 	// onCachedScan runs inside every call, before the outcome is decided.
 	onCachedScan func(serverName string)
+	// onCachedJob, when set, takes over the completion handle of every started
+	// cached job: the job reads as running until the test calls finish.
+	onCachedJob func(serverName string, finish func())
 }
 
 func newFakeSecurityScanner() *fakeSecurityScanner {
@@ -213,19 +216,35 @@ func (f *fakeSecurityScanner) StartScanFromCachedContracts(_ context.Context, se
 		hook(serverName)
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if queue := f.cachedScanErrs[serverName]; len(queue) > 0 {
 		err := queue[0]
 		f.cachedScanErrs[serverName] = queue[1:]
 		if err != nil {
+			f.mu.Unlock()
 			return nil, err
 		}
 	}
 	f.cachedScanCalls = append(f.cachedScanCalls, serverName+"@"+bundleDigest)
+	// The real service leaves a settled summary behind; a job that settles
+	// without a configured result reads as clean.
 	if result, ok := f.cachedScanResult[serverName]; ok {
 		f.summaries[serverName] = result
+	} else {
+		f.summaries[serverName] = &scanner.ScanSummary{Status: "clean"}
 	}
-	return &scanner.ScanJob{ServerName: serverName}, nil
+	jobHook := f.onCachedJob
+	f.mu.Unlock()
+
+	// Like the engine's job, the fake's carries a completion handle. It is
+	// finished at once unless a test takes the job over via onCachedJob.
+	job := &scanner.ScanJob{ServerName: serverName}
+	finish := job.TrackCompletion()
+	if jobHook != nil {
+		jobHook(serverName, finish)
+	} else {
+		finish()
+	}
+	return job, nil
 }
 
 // cachedScans returns the successful cached-contract scan calls so far.

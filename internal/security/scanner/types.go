@@ -3,6 +3,7 @@ package scanner
 import (
 	"encoding/json"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
@@ -216,6 +217,32 @@ type ScanJob struct {
 	// a scan that outlives a remove and re-add leaves nothing for the
 	// replacement. 0 for a job started without a committed view.
 	Incarnation int64 `json:"incarnation,omitempty"`
+
+	// done is closed by the engine once the scan goroutine has returned (after
+	// the terminal callback). Snapshots share the channel. Nil for a job that
+	// did not come from Engine.startScan.
+	done chan struct{}
+}
+
+// Done returns a channel that is closed when the engine's scan goroutine for
+// this job has returned, completion callback included. It is nil for a job
+// that carries no completion handle (a nil channel blocks forever in a select).
+func (j *ScanJob) Done() <-chan struct{} {
+	if j == nil {
+		return nil
+	}
+	return j.done
+}
+
+// TrackCompletion attaches a completion handle to a job that is not yet shared
+// and returns the idempotent function that closes it. The engine calls it for
+// every job it starts; test doubles of the scan service use it to hand a
+// caller a handle they control.
+func (j *ScanJob) TrackCompletion() (finish func()) {
+	ch := make(chan struct{})
+	j.done = ch
+	var once sync.Once
+	return func() { once.Do(func() { close(ch) }) }
 }
 
 // clone returns a snapshot copy of the job.

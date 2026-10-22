@@ -297,3 +297,91 @@ func TestStartScanFromCachedContracts_ManyToolsIsOneJobAndOneTerminalEvent(t *te
 	assert.Zero(t, counts["scan_failed"])
 	assert.LessOrEqual(t, counts["scan_progress"], 3, "progress events are per scanner, not per tool")
 }
+
+// replacingCachedScanProvider runs onRead inside every contract read, which is
+// where a remove + re-add of the server can land between the read and the
+// moment the scan binds to the server.
+type replacingCachedScanProvider struct {
+	*cachedScanProvider
+	onRead func()
+}
+
+func (p *replacingCachedScanProvider) GetCurrentToolContracts(name string) ([]map[string]interface{}, error) {
+	contracts, err := p.cachedScanProvider.GetCurrentToolContracts(name)
+	if p.onRead != nil {
+		p.onRead()
+	}
+	return contracts, err
+}
+
+// Sol round 1, finding 1: the scan must bind to the incarnation the contracts
+// were read for. The old order read the contracts and THEN captured the
+// incarnation, so a remove + re-add between the two scanned server A's stored
+// contracts under replacement B's incarnation, and B's storage accepted A's
+// verdict as its own.
+func TestStartScanFromCachedContracts_BindsToTheIncarnationTheContractsWereReadFor(t *testing.T) {
+	base := &cachedScanProvider{info: &ServerInfo{Name: "srv", Protocol: "stdio"}, approved: approvedPair()}
+	svc, mock, _ := newCachedScanService(t, base)
+	store := &rowStorage{mockStorage: mock, rows: map[string]int64{"srv": 1}}
+	svc.storage = store
+	svc.SetServerUnquarantiner(&rowUnquarantiner{store: store})
+	svc.SetServerInfoProvider(&replacingCachedScanProvider{
+		cachedScanProvider: base,
+		// The server is removed and re-added (incarnation 3) while its stored
+		// contracts are being read.
+		onRead: func() { store.setRow("srv", 3) },
+	})
+
+	job, err := svc.StartScanFromCachedContracts(context.Background(), "srv", cachedDigest)
+
+	require.Error(t, err, "contracts read for incarnation 1 must not be scanned as the replacement's (incarnation 3)")
+	assert.Nil(t, job)
+	jobs, _ := mock.ListScanJobs("srv")
+	assert.Empty(t, jobs, "no job under the replacement")
+}
+
+// Sol round 1, finding 2: the cached scan runs under the caller's lifecycle
+// context and hands back a completion handle, so a stopping server can end it
+// and join it before the stores close.
+func TestStartScanFromCachedContracts_StoppedLifecycleStartsNothing(t *testing.T) {
+	base := &cachedScanProvider{info: &ServerInfo{Name: "srv", Protocol: "stdio"}, approved: approvedPair()}
+	svc, store, _ := newCachedScanService(t, base)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	job, err := svc.StartScanFromCachedContracts(ctx, "srv", cachedDigest)
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Nil(t, job)
+	jobs, _ := store.ListScanJobs("srv")
+	assert.Empty(t, jobs, "a stopped lifecycle leaves no job record")
+}
+
+func TestStartScanFromCachedContracts_DoneClosesOnlyAfterTheCompletionCallbackReturned(t *testing.T) {
+	provider := &cachedScanProvider{info: &ServerInfo{Name: "srv", Protocol: "stdio"}, approved: approvedPair()}
+	dir := t.TempDir()
+	logger := zap.NewNop()
+	store := &gateReportStorage{mockStorage: newMockStorage(), release: make(chan struct{})}
+	svc := NewService(store, NewRegistry(dir, logger), NewDockerRunner(logger), dir, logger)
+	svc.SetServerInfoProvider(provider)
+
+	job, err := svc.StartScanFromCachedContracts(context.Background(), "srv", cachedDigest)
+	require.NoError(t, err)
+	require.NotNil(t, job.Done(), "a cached scan job exposes its completion handle")
+
+	select {
+	case <-job.Done():
+		t.Fatal("Done closed while the report save (a callback write) was still in flight")
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(store.release)
+	select {
+	case <-job.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Done never closed after the callbacks returned")
+	}
+	stored, err := store.GetScanJob(job.ID)
+	require.NoError(t, err)
+	assert.Equal(t, ScanJobStatusCompleted, stored.Status, "when Done closes the terminal job is already persisted")
+}

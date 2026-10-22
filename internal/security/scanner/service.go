@@ -519,7 +519,22 @@ type currentToolContractsProvider interface {
 // (ErrNoCachedContracts): it stays unscanned, never clean. A busy server
 // returns ErrScanInProgress so the caller can re-arm. A quarantined server is
 // refused (ErrServerQuarantined) when the provider can say so.
+//
+// ctx is the scan's EXECUTION context, not just the call's: the job runs under
+// it (unlike the live StartScan, which detaches), so a stopping caller ends it,
+// and a context that is already done starts nothing. The returned job's Done
+// channel closes after the completion callback returned, so the caller can
+// join the worker before the stores it writes to close.
 func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, bundleDigest string) (*ScanJob, error) {
+	// The scan binds to the incarnation current BEFORE the contracts are read,
+	// and the engine refuses to register a job whose incarnation is no longer
+	// current. Reading the incarnation after the contracts would let a remove
+	// and re-add in between attribute the old server's contracts to the
+	// replacement.
+	inc, err := s.scanIncarnation(serverName)
+	if err != nil {
+		return nil, err
+	}
 	if q, ok := s.serverInfo.(serverQuarantineProvider); ok && q.IsServerQuarantined(serverName) {
 		return nil, ErrServerQuarantined
 	}
@@ -534,9 +549,8 @@ func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, 
 	if len(contracts) == 0 {
 		return nil, ErrNoCachedContracts
 	}
-	inc, err := s.scanIncarnation(serverName)
-	if err != nil {
-		return nil, err
+	if !s.incarnationIsCurrent(serverName, inc) {
+		return nil, fmt.Errorf("cannot scan server %s: the server was removed or replaced while its contracts were read", serverName)
 	}
 
 	// The stamp is taken before the contracts are digested, so a definition
@@ -591,11 +605,13 @@ func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, 
 		scanPass:      ScanPassSecurityScan,
 		informational: true,
 	}
-	job, err := s.engine.StartScan(ctx, req, callback)
+	job, err := s.engine.StartScanBound(ctx, req, callback)
 	if err != nil {
 		return job, err
 	}
-	go s.pruneOldScans(serverName)
+	// Synchronous, not a detached goroutine: nothing this call starts may
+	// outlive the caller's lifecycle except the job, which Done joins.
+	s.pruneOldScans(serverName)
 	return job, nil
 }
 
