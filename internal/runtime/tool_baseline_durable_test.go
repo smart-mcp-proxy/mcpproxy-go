@@ -49,7 +49,8 @@ func newBaselineRuntime(t *testing.T, dataDir string, quarantined bool) *Runtime
 	cfg := &config.Config{
 		DataDir: dataDir,
 		Listen:  "127.0.0.1:0",
-		Servers: []*config.ServerConfig{{Name: baselineServer, Enabled: true, Quarantined: quarantined}},
+		// manual: these fixtures encode manual-mode holds (see setupQuarantineRuntime).
+		Servers: []*config.ServerConfig{{Name: baselineServer, Enabled: true, Quarantined: quarantined, TrustMode: string(config.TrustModeManual)}},
 	}
 	rt, err := New(cfg, "", zap.NewNop())
 	require.NoError(t, err)

@@ -163,7 +163,7 @@ var Scenarios = []Scenario{
 	{ID: "S12", Title: "scan, baselined: a new tool that scans dangerous is held pending",
 		Requirements: []string{"QP-09"}, Setup: scanTrusted,
 		Steps: []Action{discover("t1", Benign), discover("t1", Benign, "t2", Malicious), discover("t1", Benign, "t2", Malicious)}},
-	{ID: "S13", Title: "scan: a benign change to an approved tool is held (clean verdict never re-approves a changed contract)",
+	{ID: "S13", Title: "scan: a benign change to an approved tool is scan-approved on its new definition (spec 119)",
 		Requirements: []string{"QP-10"}, Setup: scanTrusted,
 		Steps: []Action{discover("t1", Benign), discover("t1", BenignV2), discover("t1", BenignV2)}},
 	{ID: "S14", Title: "scan: a dangerous change to an approved tool is held",

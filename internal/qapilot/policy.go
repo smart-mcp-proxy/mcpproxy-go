@@ -67,13 +67,15 @@ func Authorize(caller Caller, op string) bool {
 // (MCP-2931/2930) and scan_approved (spec 086 stage 2)).
 var (
 	// ChangedToApprovedReasons may clear a changed (rug-pull) record: the
-	// operator, proof the content did not actually change, or the operator's
-	// standing opt-in to auto-approve changes. scan_approved is deliberately
-	// absent: a clean verdict never re-approves a changed contract (RT-02).
+	// operator, proof the content did not actually change, the operator's
+	// standing opt-in to auto-approve changes, or — since spec 119 — a clean
+	// offline scan under trust_mode scan. Under manual a clean verdict never
+	// re-approves a changed contract (RT-02); that is a trust-mode rule the
+	// gate applies, not a reason the table refuses.
 	ChangedToApprovedReasons = []string{
 		"hash_match", "description_revert", "formula_migration",
 		"content_match", "description_match", "user_approve",
-		"auto_approve_changes",
+		"auto_approve_changes", "scan_approved",
 	}
 	// PendingToApprovedReasons may promote a never-reviewed record.
 	PendingToApprovedReasons = []string{

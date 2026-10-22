@@ -23,7 +23,7 @@
         <span class="flex-1 min-w-0">
           <span class="flex flex-wrap items-center gap-2">
             <span class="font-semibold">{{ m.label }}</span>
-            <!-- FR-001: no value configured — manual is presented as the default. -->
+            <!-- FR-001: no value configured — the default tier (scan, spec 119) is presented as the selection. -->
             <span
               v-if="state.isDefault && state.effective === m.mode"
               data-test="trust-mode-default-note"

@@ -225,11 +225,12 @@ const (
 	// besides explicit user action, that may clear a changed (rug-pull) record —
 	// because the operator opted into auto-approving changes for that server.
 	ReasonAutoApproveChanges TransitionReason = "auto_approve_changes"
-	// ReasonScanApproved marks a NEW tool auto-approved because the server runs
-	// in trust_mode: scan AND a synchronous, offline TPA scan of the tool
-	// returned a green (clean) verdict (spec 086 stage 2). It never clears a
-	// changed (rug-pull) record (RT-02): a clean verdict is not proof a changed
-	// contract is safe, so changed→approved needs an operator.
+	// ReasonScanApproved marks a tool auto-approved because the server runs in
+	// trust_mode: scan AND a synchronous, offline TPA scan of its current
+	// definition returned a green (clean) verdict: a NEW tool (spec 086 stage
+	// 2) and, since spec 119, a CHANGED contract too. Under manual the 2026-10-11
+	// RT-02 rule still applies (a changed contract is held whatever the
+	// verdict); the gate uses this reason only under scan.
 	ReasonScanApproved TransitionReason = "scan_approved"
 )
 
@@ -237,9 +238,10 @@ const (
 // to quarantine safety rules. Returns nil for valid transitions.
 //
 // Invariants:
-//   - changed→approved: requires user action, description revert, or proof that
+//   - changed→approved: requires user action, description revert, proof that
 //     the tool content hasn't actually changed (hash match, formula migration,
-//     content match).
+//     content match), the operator's standing auto_approve_tool_changes opt-in,
+//     or a clean scan under trust_mode scan (spec 119).
 //   - pending→approved: requires explicit user action or auto-approve (when
 //     quarantine is disabled for the server).
 func assertToolApprovalInvariant(oldStatus, newStatus string, reason TransitionReason) error {
@@ -252,7 +254,7 @@ func assertToolApprovalInvariant(oldStatus, newStatus string, reason TransitionR
 		switch reason {
 		case ReasonHashMatch, ReasonDescriptionRevert, ReasonFormulaMigration,
 			ReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,
-			ReasonAutoApproveChanges:
+			ReasonAutoApproveChanges, ReasonScanApproved:
 			return nil
 		default:
 			return fmt.Errorf("invariant violation: changed→approved with reason %q "+
@@ -574,10 +576,9 @@ type toolQuarantineGate struct {
 	// autoApproveChanges: trust_mode auto (today's behavior — every change
 	// and addition auto-approves).
 	autoApproveChanges bool
-	// scanMode: trust_mode scan — a NEW tool auto-approves ONLY on a green
-	// in-process TPA verdict, else it is held (fail closed). A CHANGED
-	// contract is always held for operator confirmation, whatever the
-	// verdict (RT-02); the scan only contributes hold evidence.
+	// scanMode: trust_mode scan — a NEW tool, and since spec 119 a CHANGED
+	// contract, auto-approve ONLY on a green in-process TPA verdict; anything
+	// else is held (fail closed) with the scan's evidence attached.
 	scanMode bool
 	// enforceNewTools: block NEW tools for review (unless quarantine is
 	// disabled globally or the server is skipped). Even trusted
@@ -695,6 +696,12 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 	// scans switched on — hold evidence is recorded for changed and pending tools.
 	// Evidence only; no approval decision reads it.
 	evidenceScan := !scanMode && !autoApproveChanges && r.autoChangeScanEnabled()
+	// scanApprovesChanges: the spec 119 approval of a clean-scanned CHANGED
+	// contract. Only while quarantine is enforced: with quarantine off globally
+	// nothing is blocked anyway, and the record keeps its provenance (changed,
+	// unblocked) exactly as under manual, instead of being re-stamped by a scan
+	// that gates nothing.
+	scanApprovesChanges := scanMode && globalEnabled
 	// definitionsChanged: this pass saw the tool inventory move after the
 	// baseline (a tool changed or was added). Reported to the
 	// tool-definitions-changed observers once the pass has finished.
@@ -1313,19 +1320,31 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			if r.refreshHeldContractSnapshot(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
 				definitionsChanged = true
 			}
-			// trust_mode: scan (spec 086 stage 2, tightened by RT-02): a
-			// still-changed record is never re-baselined by the scan. The scan
-			// re-runs only to keep the hold evidence current (FR-018): matched
-			// TPA/check ids on a non-green verdict, cleared on a green one.
+			// trust_mode: scan (spec 119 FR-006): a still-changed record is
+			// re-evaluated on every pass against its CURRENT definition. A clean,
+			// full-coverage verdict approves it (a hold written before this
+			// release, or on a finding the definition has since moved past,
+			// clears without a click); a safer-direction hint flip (FR-007) or
+			// a non-green verdict keeps it held with the evidence refreshed.
 			//
-			// Manual mode runs the same scan (evidenceScan): the held change
-			// carries a verdict for the definition it holds, refreshed on every
-			// further change.
-			if scanMode || evidenceScan {
-				// RT-02: a clean verdict never re-approves a changed contract;
-				// it only refreshes the hold evidence (awaiting_review when
-				// clean). The record stays changed until an operator confirms it.
-				r.recordScanHold(serverName, toolName, existing, wasUnstamped, r.scanHeldToolEvidence(serverName, tool, scanMode))
+			// Manual mode runs the evidence scan only (evidenceScan): the held
+			// change carries a verdict for the definition it holds, refreshed on
+			// every further change, and stays held until an operator confirms it
+			// (RT-02 applies to manual).
+			if scanMode {
+				clean, evidence := r.scanChangeIsClean(serverName, tool)
+				if clean && scanApprovesChanges {
+					// PreviousAnnotations is the approved contract's snapshot
+					// (refreshHeldContractSnapshot leaves it untouched).
+					if saferHintFlip(existing.PreviousAnnotations, tool.Annotations) {
+						evidence = hintFlipHoldEvidence()
+					} else if r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
+						continue
+					}
+				}
+				r.recordScanHold(serverName, toolName, existing, wasUnstamped, evidence)
+			} else if evidenceScan {
+				r.recordScanHold(serverName, toolName, existing, wasUnstamped, r.scanHeldToolEvidence(serverName, tool, false))
 			}
 			// Tool still has the changed description — keep it blocked. A
 			// pre-105 record that stays changed still RESTRICTS, so there is
@@ -1576,35 +1595,35 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 				continue
 			}
 
-			// trust_mode: scan (spec 086 stage 2, tightened by RT-02) — a genuine
-			// tool change (rug pull) is ALWAYS held for human review, exactly as in
-			// manual mode. A synchronous, offline TPA scan of the new definition
-			// still runs so a non-green ("warnings"/"dangerous"), degraded or
-			// absent verdict is recorded as hold evidence; a green verdict no
-			// longer auto-approves, because paraphrased pulls scan clean.
-			// The hold evidence (verdict + matched TPA/check ids) rides along onto
-			// the changed record so the tool-approval surfaces can explain the hold
-			// (FR-018).
+			// A genuine tool change (the rug-pull guard). A synchronous, offline
+			// TPA scan of the new definition runs in scan and manual mode.
+			//
+			// trust_mode: scan (spec 119 FR-004): a clean, full-coverage verdict
+			// approves the new contract in this pass, unless it re-labels the
+			// tool as safer (FR-007, held with GATE-HINT-SAFER-FLIP). A non-green
+			// ("warnings"/"dangerous"), degraded or absent verdict holds the
+			// change with the evidence (verdict + matched TPA/check ids) on the
+			// record so the tool-approval surfaces can explain the hold (FR-018).
+			//
+			// trust_mode: manual (RT-02, red-team 2026-10-11): the detector is
+			// defeatable by paraphrase, so the change is ALWAYS held; the scan
+			// only records the verdict of the new definition (awaiting_review
+			// when clean).
 			definitionsChanged = true
 			var holdEvidence *scanHoldEvidence
 			if evidenceScan {
-				// trust_mode manual: hold as always; the scan only records the
-				// verdict of the new definition (awaiting_review when clean).
 				_, holdEvidence = r.scanToolEvidence(serverName, tool)
 			}
 			if scanMode {
 				clean, evidence := r.scanChangeIsClean(serverName, tool)
-				if clean {
-					// RT-02 (red-team 2026-10-11): the detector is defeatable by
-					// paraphrase, so a clean verdict is not proof that a changed
-					// contract is safe. Hold it for operator confirmation exactly
-					// like manual mode, and say so loudly: the mark-changed path
-					// below also emits the tool_description_changed activity event.
-					r.logger.Warn("Tool change held for operator confirmation (trust_mode: scan, clean verdict does not auto-approve a changed contract)",
-						zap.String("server", serverName),
-						zap.String("tool", toolName),
-						zap.String("approved_hash", existing.ApprovedHash),
-						zap.String("current_hash", currentHash))
+				if clean && scanApprovesChanges {
+					// CurrentAnnotations is still the approved contract's snapshot
+					// here: the record is approved and Current* = Approved*.
+					if saferHintFlip(existing.CurrentAnnotations, tool.Annotations) {
+						evidence = hintFlipHoldEvidence()
+					} else if r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
+						continue
+					}
 				}
 				holdEvidence = evidence
 			}
