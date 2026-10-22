@@ -23,6 +23,11 @@ func serveDataDirEnv(t *testing.T) (home string) {
 	t.Setenv(config.EnvDataDir, "")
 	t.Setenv(config.EnvDataDirLegacy, "")
 	t.Setenv("MCPPROXY_API_KEY", "")
+	// Seeding a first-run config probes Docker with a `docker info` subprocess
+	// (2 s timeout). On Windows a probe killed at the deadline can still hold
+	// the test's working directory for a moment and make t.TempDir cleanup
+	// fail; with no docker on PATH the probe returns without spawning anything.
+	t.Setenv("PATH", t.TempDir())
 	t.Chdir(t.TempDir())
 	configFile, dataDir = "", ""
 	return home
