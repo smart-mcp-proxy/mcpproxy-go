@@ -528,7 +528,7 @@ func (s *Server) reprotectScanServer(ctx context.Context, scanSvc securityScanne
 			return reprotectOutcome{kind: reprotectScanned, hit: summary.Status == "dangerous"}
 		case errors.Is(err, errReprotectSuspended):
 			return reprotectOutcome{kind: reprotectSuspended}
-		case errors.Is(err, errReprotectSuperseded):
+		case errors.Is(err, errReprotectSuperseded), errors.Is(err, scanner.ErrBundleSuperseded):
 			return reprotectOutcome{kind: reprotectAborted}
 		case errors.Is(err, errReprotectSettleTimeout), errors.Is(err, errReprotectNoVerdict):
 			// Not retried: the job did run (or ran too long), so a second one
@@ -617,11 +617,29 @@ func (s *Server) startReprotectScan(ctx context.Context, scanSvc securityScanner
 		// polled; it is not joinable, which the real service always is.
 		return nil, err
 	}
-	summary := scanSvc.GetScanSummary(ctx, name)
+	summary := s.reprotectJobSummary(ctx, scanSvc, name, job.ID)
 	if summary == nil || !isTerminalScanStatus(summary.Status) {
 		return nil, errReprotectNoVerdict
 	}
 	return summary, nil
+}
+
+// scanJobSummarizer is the scan service's by-job verdict read. The real service
+// implements it; a stand-in that does not falls back to the server's latest
+// summary.
+type scanJobSummarizer interface {
+	GetScanJobSummary(ctx context.Context, serverName, jobID string) *scanner.ScanSummary
+}
+
+// reprotectJobSummary is the settled verdict of the cached scan job the sweep
+// started, read by that job's ID. The server-wide latest summary is not the
+// job's: a manual scan does not take infoScanRunMu, so by now it may read
+// "scanning", or carry the verdict of a newer scan of the same server.
+func (s *Server) reprotectJobSummary(ctx context.Context, scanSvc securityScannerService, name, jobID string) *scanner.ScanSummary {
+	if js, ok := scanSvc.(scanJobSummarizer); ok {
+		return js.GetScanJobSummary(ctx, name, jobID)
+	}
+	return scanSvc.GetScanSummary(ctx, name)
 }
 
 // pollReprotectSettle waits until the server's scan summary is terminal, the

@@ -58,6 +58,16 @@ func (p *cachedScanProvider) upstreamTouches() int32 {
 	return p.isConnectedCalls.Load() + p.ensureConnectedCalls.Load() + p.getServerToolsCalls.Load()
 }
 
+// activeBundleReadsAsCachedDigest makes svc see the active bundle under
+// cachedDigest, the label these tests give their jobs.
+func activeBundleReadsAsCachedDigest(svc *Service) {
+	svc.bundleSnapshotFn = func() (*BundleCheck, BundleInfo) {
+		check, info := activeBundleSnapshot()
+		info.FullDigest = cachedDigest
+		return check, info
+	}
+}
+
 func newCachedScanService(t *testing.T, provider ServerInfoProvider) (*Service, *mockStorage, *mockEmitter) {
 	t.Helper()
 	dir := t.TempDir()
@@ -67,6 +77,10 @@ func newCachedScanService(t *testing.T, provider ServerInfoProvider) (*Service, 
 	emitter := newMockEmitter()
 	svc.SetEmitter(emitter)
 	svc.SetServerInfoProvider(provider)
+	// The cached scan refuses a digest other than the active bundle's; these
+	// tests label their jobs with a fixed digest, so the active bundle reads
+	// as that digest.
+	activeBundleReadsAsCachedDigest(svc)
 	return svc, store, emitter
 }
 
@@ -227,6 +241,7 @@ func TestStartScanFromCachedContracts_BusyServerReportsScanInProgress(t *testing
 	store := &gateReportStorage{mockStorage: newMockStorage(), release: make(chan struct{})}
 	svc := NewService(store, NewRegistry(dir, logger), NewDockerRunner(logger), dir, logger)
 	svc.SetServerInfoProvider(provider)
+	activeBundleReadsAsCachedDigest(svc)
 
 	first, err := svc.StartScanFromCachedContracts(context.Background(), "srv", cachedDigest)
 	require.NoError(t, err)
@@ -364,6 +379,7 @@ func TestStartScanFromCachedContracts_DoneClosesOnlyAfterTheCompletionCallbackRe
 	store := &gateReportStorage{mockStorage: newMockStorage(), release: make(chan struct{})}
 	svc := NewService(store, NewRegistry(dir, logger), NewDockerRunner(logger), dir, logger)
 	svc.SetServerInfoProvider(provider)
+	activeBundleReadsAsCachedDigest(svc)
 
 	job, err := svc.StartScanFromCachedContracts(context.Background(), "srv", cachedDigest)
 	require.NoError(t, err)

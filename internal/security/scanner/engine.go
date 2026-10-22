@@ -171,6 +171,19 @@ type ScanRequest struct {
 	// it is failed, while scanners independent of tool metadata (supply-chain
 	// / CVE analysis) still run.
 	ToolDefinitionsUnavailable bool
+	// pinnedBundle, when set, is the TPA signature bundle the in-process
+	// scanner must use instead of resolving the active one when it finally
+	// runs. A cached re-protection scan (Spec 101 B17) is labelled with the
+	// digest of the bundle it covers; pinning the (check, info) pair it was
+	// admitted against keeps that label true even if a newer bundle activates
+	// between registration and the asynchronous detector read.
+	pinnedBundle *pinnedBundle
+}
+
+// pinnedBundle is one consistent (check, info) snapshot of the active bundle.
+type pinnedBundle struct {
+	check *BundleCheck
+	info  BundleInfo
 }
 
 // toolMetadataIndependentScanners are the scanners whose analysis never uses
