@@ -31,8 +31,18 @@ const configPkg = "github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 // LogConfig is a plain struct type describing the tray's OWN logger, built in
 // memory from logs.DefaultLogConfig() — see cmd/mcpproxy-tray/main.go. It reads
 // nothing from disk, so it is allowed.
+//
+// ResolveEnvAPIKey and EnvAPIKeyFile are the one helper that turns
+// MCPPROXY_API_KEY / MCPPROXY_API_KEY_FILE into the proxy's key. The tray must
+// resolve the key exactly as the core does (and refuse to start on an unusable
+// key file instead of generating a key), so it calls the helper rather than
+// copying its rules. The helper reads the process environment and, when
+// MCPPROXY_API_KEY_FILE is set, that one file the operator named. It never
+// opens mcp_config.json and writes nothing.
 var allowedConfigSymbols = map[string]bool{
-	"LogConfig": true,
+	"LogConfig":        true,
+	"ResolveEnvAPIKey": true,
+	"EnvAPIKeyFile":    true,
 }
 
 // trayRoots are the tray-side trees the rule applies to. Both are walked

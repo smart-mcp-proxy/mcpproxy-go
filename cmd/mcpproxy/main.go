@@ -549,8 +549,13 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.Bool("enable_prompts", cfg.EnablePrompts))
 
 	// Ensure API key is configured
-	apiKey, wasGenerated, source := cfg.EnsureAPIKey()
-
+	apiKey, wasGenerated, source, keyErr := cfg.EnsureAPIKey()
+	if keyErr != nil {
+		// Both MCPPROXY_API_KEY and MCPPROXY_API_KEY_FILE are set, or the file
+		// cannot be used. Stop here: generating and saving a key instead would
+		// replace the credential the operator meant to run with.
+		return keyErr
+	}
 	// SECURITY: API key is always required - empty keys are never allowed
 	if apiKey == "" {
 		return fmt.Errorf("API key is required but could not be generated")
