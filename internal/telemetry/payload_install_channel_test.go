@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -78,8 +79,8 @@ func TestResolveInstallChannel_HostileValuesNeverEscape(t *testing.T) {
 		dataDir:  "/data",
 		detected: "../../etc/passwd",
 		files: map[string]string{
-			"/opt/app/install-channel": `C:\Users\secret`,
-			"/data/install-channel":    strings.Repeat("A", 4096),
+			filepath.Join("/opt/app", "install-channel"): `C:\Users\secret`,
+			filepath.Join("/data", "install-channel"):    strings.Repeat("A", 4096),
 		},
 	}
 	got := resolveInstallChannel(f.deps())

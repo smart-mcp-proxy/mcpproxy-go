@@ -181,7 +181,8 @@ func TestWindowsPackagesWorkflowInvariants(t *testing.T) {
 
 // The Inno script must stay silent-safe and own its channel marker (FR-014).
 func TestInstallerChannelMarkerContract(t *testing.T) {
-	iss := repoFile(t, "scripts", "installer.iss")
+	// Windows checkouts may convert line endings (.gitattributes); compare LF-normalised.
+	iss := strings.ReplaceAll(repoFile(t, "scripts", "installer.iss"), "\r\n", "\n")
 	for _, want := range []string{
 		"{param:CHANNEL|}",              // winget switch
 		"'winget'",                      // only this token is ever written

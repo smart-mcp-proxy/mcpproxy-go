@@ -2,6 +2,7 @@ package telemetry
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -84,8 +85,10 @@ func TestInstallChannelEnum_IsClosedAndComplete(t *testing.T) {
 }
 
 func TestResolveInstallChannel_Precedence(t *testing.T) {
-	const exeMarker = "/opt/app/install-channel"
-	const dataMarker = "/data/install-channel"
+	// Built with filepath.Join: the resolver joins with the OS separator, so
+	// literal "/" keys would never match on Windows.
+	exeMarker := filepath.Join("/opt/app", "install-channel")
+	dataMarker := filepath.Join("/data", "install-channel")
 	tests := []struct {
 		name string
 		f    fakeChannelDeps
