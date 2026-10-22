@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -238,6 +239,9 @@ func TestUpstreamImportDryRunInvalidSourceReportsValidationOnly(t *testing.T) {
 }
 
 func TestUpstreamImportConfigSaveFailureRendersZeroApplied(t *testing.T) {
+	if runtime.GOOS == "windows" || os.Geteuid() == 0 {
+		t.Skip("directory permission bits are not enforced here")
+	}
 	setOutputGlobals(t, "json", false)
 	configPath, sourcePath := importScratch(t, `{"mcpServers":{"first":{"command":"echo"},"second":{"command":"echo"}}}`)
 	blockedDir := filepath.Join(filepath.Dir(configPath), "blocked")
