@@ -85,3 +85,8 @@ MCPProxy works with any MCP-compatible client and connects to 100+ MCP servers p
 - [GitHub Repository](https://github.com/smart-mcp-proxy/mcpproxy-go)
 - [Main Website](https://mcpproxy.app)
 - [Release Notes](https://github.com/smart-mcp-proxy/mcpproxy-go/releases)
+
+## Complete a task
+
+- [Reuse one MCP setup in two AI clients](/guides/two-clients-one-setup)
+- [Find out why an agent cannot use a tool](/guides/diagnose-unavailable-tool)
