@@ -287,7 +287,9 @@ func (s *Server) runBundleReprotectOnce(ctx context.Context, act scanner.BundleA
 	}
 	published := false
 	if st.latest == act.Digest {
-		st.suspended = result == reprotectSweepSuspended
+		// A failure elsewhere does not clear the deferral: the switch-off skipped
+		// cached scans that only a resume can run.
+		st.suspended = result == reprotectSweepSuspended || result == reprotectSweepFailedSuspended
 		published = st.suspended
 	}
 	st.mu.Unlock()
@@ -452,6 +454,8 @@ func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivatio
 		zap.Int("failed", failed),
 		zap.Bool("suspended", suspended))
 	switch {
+	case failed > 0 && suspended:
+		return reprotectSweepFailedSuspended
 	case failed > 0:
 		return reprotectSweepIncomplete
 	case suspended:
@@ -470,6 +474,10 @@ const (
 	reprotectSweepIncomplete reprotectSweepResult = iota
 	// reprotectSweepSuspended: ended because auto_baseline_scan is off.
 	reprotectSweepSuspended
+	// reprotectSweepFailedSuspended: a leg failed AND the kill switch skipped
+	// cached scans. Reported as failed, retried like any failure, but the
+	// deferral is tracked on its own so the resume still fires.
+	reprotectSweepFailedSuspended
 	// reprotectSweepCompleted: every leg ran and nothing failed.
 	reprotectSweepCompleted
 )
