@@ -349,3 +349,30 @@ func TestSuggest_CancelledContextReturnsWithRecordsLeft(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, r.find(res, "github:create_issue", profile.BlockReasonTier))
 }
+
+func TestDrainActivities_LetsTheProducerFinish(t *testing.T) {
+	ch := make(chan *storage.ActivityRecord, 100)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		defer close(ch)
+		for i := 0; i < 250; i++ { // more than the buffer: the producer blocks without a reader
+			ch <- &storage.ActivityRecord{RequestID: fmt.Sprintf("r%d", i)}
+		}
+	}()
+	// The consumer takes a few records and walks away, as Suggest does on cancel.
+	<-ch
+	<-ch
+	select {
+	case <-finished:
+		t.Fatal("the producer cannot have finished with no reader")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	drainActivities(ch)
+	select {
+	case <-finished:
+	case <-time.After(5 * time.Second):
+		t.Fatal("drainActivities did not let the producer finish")
+	}
+}
