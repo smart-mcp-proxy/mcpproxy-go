@@ -147,7 +147,10 @@ type BundleRefresher struct {
 	nudgedSet bool
 	// soonSeq counts the wakeSoon signals Nudge sent; a manual Refresh that
 	// finds it moved must not push the timer out over that early re-arm.
-	soonSeq  uint64
+	soonSeq uint64
+	// nudgeSeq counts every Nudge; Start compares it with its value at config
+	// capture so it never overwrites settings a concurrent Nudge delivered.
+	nudgeSeq uint64
 	interval time.Duration
 	pending  wakeReason
 	wake     chan struct{}
@@ -163,6 +166,8 @@ type BundleRefresher struct {
 	// when a downloaded candidate is about to be offered to the pipeline.
 	afterCapture func()
 	beforeOffer  func()
+	// startCaptured runs in Start between the config capture and the lock.
+	startCaptured func()
 }
 
 // NewBundleRefresher builds a refresher; it does nothing until Start.
@@ -275,7 +280,13 @@ func (r *BundleRefresher) nextDelay() time.Duration {
 // Start begins the cycle loop, bound to ctx. A second Start, or a Start after
 // Stop, is a no-op. The loop timer is created before Start returns.
 func (r *BundleRefresher) Start(ctx context.Context) {
+	r.mu.Lock()
+	nudgesBefore := r.nudgeSeq
+	r.mu.Unlock()
 	sec := r.config()
+	if r.startCaptured != nil {
+		r.startCaptured()
+	}
 
 	r.mu.Lock()
 	if r.started || r.stopped {
@@ -284,8 +295,13 @@ func (r *BundleRefresher) Start(ctx context.Context) {
 	}
 	r.started, r.running = true, true
 	r.base, r.cancel = context.WithCancel(ctx)
-	r.interval = r.intervalFor(sec)
-	r.fp = fingerprintOf(sec)
+	// A Nudge since the capture delivered newer settings (and set interval and
+	// fp itself, both being zero before Start); the older capture must not
+	// overwrite them.
+	if r.nudgeSeq == nudgesBefore {
+		r.interval = r.intervalFor(sec)
+		r.fp = fingerprintOf(sec)
+	}
 	base := r.base
 	r.wg.Add(1)
 	r.mu.Unlock()
@@ -338,6 +354,7 @@ func (r *BundleRefresher) Nudge(sec *config.SecurityConfig) {
 	// Stop publishes nothing, and one racing Stop is ordered by the lock.
 	bundleRT.disp.applySettings(policy)
 	r.nudged, r.nudgedSet = sec, true
+	r.nudgeSeq++
 	reason := wakeNone
 	if policy.Fingerprint != r.fp {
 		r.fp = policy.Fingerprint
@@ -432,10 +449,7 @@ func (r *BundleRefresher) loop(ctx context.Context, timer RefreshTimer) {
 }
 
 // startedCycle is a joined or newly started cycle.
-type startedCycle struct {
-	cycle   *cycleCall
-	started bool
-}
+type startedCycle struct{ cycle *cycleCall }
 
 // joinOrStart joins the in-flight cycle or starts one with the given trigger.
 // It returns nil when the refresher is not running.
@@ -451,11 +465,11 @@ func (r *BundleRefresher) joinOrStart(trigger string) *startedCycle {
 	c := &cycleCall{done: make(chan struct{})}
 	r.cycle = c
 	r.wg.Add(1)
-	go r.executeCycle(r.base, c, trigger)
-	return &startedCycle{cycle: c, started: true}
+	go r.executeCycle(r.base, c, trigger, r.soonSeq)
+	return &startedCycle{cycle: c}
 }
 
-func (r *BundleRefresher) executeCycle(ctx context.Context, c *cycleCall, trigger string) {
+func (r *BundleRefresher) executeCycle(ctx context.Context, c *cycleCall, trigger string, soonAtStart uint64) {
 	defer r.wg.Done()
 	defer func() {
 		r.mu.Lock()
@@ -464,15 +478,21 @@ func (r *BundleRefresher) executeCycle(ctx context.Context, c *cycleCall, trigge
 		close(c.done)
 	}()
 	r.doCycle(ctx, trigger)
+	if trigger == RefreshTriggerManual {
+		// A manual cycle satisfies the daily check: push the timer out. Done
+		// here, not by a waiting caller, so a caller that gave up (cancelled
+		// context) cannot leave the original deadline to fire and ignore a
+		// rate limit the cycle just recorded. Not when a settings change asked
+		// for an early look while it ran: that re-arm stands, or the new
+		// settings would wait out a full interval.
+		r.signalManualUnlessSoon(soonAtStart)
+	}
 }
 
 // Refresh runs one cycle now (trigger "manual"), joining an in-flight cycle if
 // there is one, and returns the resulting status. Without a running loop it is
 // ReloadBundle.
 func (r *BundleRefresher) Refresh(ctx context.Context, logger *zap.Logger) BundleInfo {
-	r.mu.Lock()
-	soonBefore := r.soonSeq
-	r.mu.Unlock()
 	c := r.joinOrStart(RefreshTriggerManual)
 	if c == nil {
 		return ReloadBundle(r.logger(logger))
@@ -481,12 +501,6 @@ func (r *BundleRefresher) Refresh(ctx context.Context, logger *zap.Logger) Bundl
 	case <-c.cycle.done:
 	case <-ctx.Done():
 		return BundleStatus()
-	}
-	if c.started {
-		// A manual cycle satisfies the daily check: push the timer out. Not when
-		// a settings change asked for an early look while it ran: that re-arm
-		// stands, or the new settings would wait out a full interval.
-		r.signalManualUnlessSoon(soonBefore)
 	}
 	return BundleStatus()
 }
