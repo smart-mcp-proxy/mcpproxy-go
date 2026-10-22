@@ -2311,6 +2311,7 @@ func signatureBundleLines(overview map[string]interface{}) []string {
 		}
 		lines = append(lines, field("Generated", generated))
 	}
+	lines = append(lines, bundleFreshnessLines(bundle, field)...)
 	if fingerprint, _ := bundle["fingerprint"].(string); fingerprint != "" {
 		lines = append(lines, field("Fingerprint", fingerprint))
 	}
@@ -2354,6 +2355,14 @@ func signatureBundleLines(overview map[string]interface{}) []string {
 		}
 		lines = append(lines, field("Coverage", "DEGRADED: "+reason+" (scan-mode auto-approval is suspended)"))
 	}
+	if stale, _ := bundle["stale"].(bool); stale {
+		// An age number alone reads as trivia; a stale corpus is a missing-
+		// signature risk, so it gets its own loud line (Spec 087 FR-017).
+		lines = append(lines, field("STALE", bundleStaleText(bundle)))
+	}
+	if reprotect := bundleReprotectText(bundle); reprotect != "" {
+		lines = append(lines, field("Re-protection", reprotect))
+	}
 	if pinned, _ := bundle["pinned"].(bool); pinned {
 		lines = append(lines, field("Pinned", "yes - pinned by an operator rollback (`security bundle unpin` clears it)"))
 	}
@@ -2385,6 +2394,104 @@ func signatureBundleLines(overview map[string]interface{}) []string {
 	return append(lines, "")
 }
 
+// bundleFreshnessLines renders when the corpus was last checked and activated
+// and how the last refresh cycle went (Spec 087 FR-017, tasks B15). Everything
+// is optional: an older daemon, or an embedded default that never refreshed,
+// yields no lines at all.
+func bundleFreshnessLines(bundle map[string]interface{}, field func(label, value string) string) []string {
+	var lines []string
+	if checked, _ := bundle["last_checked_at"].(string); checked != "" {
+		lines = append(lines, field("Last checked", formatTimestamp(checked)))
+	}
+	if activated, _ := bundle["last_activated_at"].(string); activated != "" {
+		lines = append(lines, field("Last activated", formatTimestamp(activated)))
+	}
+	refresh, ok := bundle["refresh"].(map[string]interface{})
+	if !ok || len(refresh) == 0 {
+		return lines
+	}
+	outcome, _ := refresh["last_outcome"].(string)
+	text := "no cycle has run yet"
+	if outcome != "" {
+		text = outcome
+		if reason, _ := refresh["last_reason"].(string); reason != "" {
+			text += " (" + reason + ")"
+		}
+	}
+	if failures, _ := refresh["consecutive_failures"].(float64); failures > 0 {
+		noun := "failures"
+		if int(failures) == 1 {
+			noun = "failure"
+		}
+		text += fmt.Sprintf(", %d consecutive %s", int(failures), noun)
+	}
+	if next, _ := refresh["next_check_at"].(string); next != "" {
+		text += ", next check " + formatTimestamp(next)
+	}
+	lines = append(lines, field("Refresh", text))
+	// The host is shown only while fetch is on and a host is known. The URL is
+	// never reported by the daemon (host-only logging, tasks B12).
+	if enabled, _ := refresh["fetch_enabled"].(bool); enabled {
+		if host, _ := refresh["fetch_host"].(string); host != "" {
+			lines = append(lines, field("Fetch host", host))
+		}
+	}
+	return lines
+}
+
+// bundleStaleText is the STALE line: age, threshold and the way out.
+func bundleStaleText(bundle map[string]interface{}) string {
+	age := "older than the threshold"
+	if days, ok := bundle["staleness_days"].(float64); ok {
+		age = fmt.Sprintf("%d days old", int(days))
+	}
+	threshold := ""
+	if after, ok := bundle["stale_after_days"].(float64); ok {
+		threshold = fmt.Sprintf(" (threshold %d days)", int(after))
+	}
+	return age + threshold + " - run `mcpproxy security bundle refresh`, or check that the refresh source is reachable"
+}
+
+// bundleReprotectText describes the post-activation re-protection sweep (Spec 101
+// FR-019): its state, why it is suspended, and how many scanned servers matched
+// the newly active corpus. Empty when the daemon reports no sweep status.
+func bundleReprotectText(bundle map[string]interface{}) string {
+	rp, ok := bundle["reprotect"].(map[string]interface{})
+	if !ok || len(rp) == 0 {
+		return ""
+	}
+	state, _ := rp["state"].(string)
+	if state == "" {
+		return ""
+	}
+	text := state
+	if reason, _ := rp["reason"].(string); reason != "" {
+		text += " (" + reason + ")"
+	}
+	scanned, _ := rp["servers_scanned"].(float64)
+	hits, _ := rp["servers_with_hits"].(float64)
+	if scanned > 0 {
+		text += fmt.Sprintf(", %d of %d servers matched the active corpus", int(hits), int(scanned))
+	}
+	if done, _ := rp["last_completed_at"].(string); done != "" {
+		text += ", last completed " + formatLocalTimestamp(done)
+	}
+	return text
+}
+
+// formatLocalTimestamp is formatTimestamp rendered in the host's local zone.
+// The daemon stamps the re-protection completion in UTC while the cycle
+// timestamps carry the host's local offset, so the human line converts it to
+// keep every time in the block on the same clock.
+func formatLocalTimestamp(ts string) string {
+	for _, layout := range []string{time.RFC3339, time.RFC3339Nano} {
+		if t, err := time.Parse(layout, ts); err == nil {
+			return t.Local().Format("2006-01-02 15:04:05")
+		}
+	}
+	return ts
+}
+
 func secFormatInt(m map[string]interface{}, key string) string {
 	if v, ok := m[key].(float64); ok {
 		return fmt.Sprintf("%d", int(v))
@@ -2392,7 +2499,7 @@ func secFormatInt(m map[string]interface{}, key string) string {
 	return "0"
 }
 
-// --- security bundle (Spec 101 US1: status, history, rollback, unpin, reload) ---
+// --- security bundle (Spec 101 US1: status, history, rollback, unpin, reload; US3: refresh) ---
 
 // bundleFullDigestPattern is the only digest grammar rollback accepts: the
 // complete SHA-256 as 64 lowercase hex characters. The daemon enforces the same
@@ -2408,8 +2515,11 @@ and verified, or stuck on last-known-good and why.
 
 The status shows the full SHA-256 digest (the value "rollback" requires), the
 sequence, the signing authority and trust epoch, whether the signature
-verified, staleness, a DEGRADED coverage line with its reason when scan-mode
-auto-approval is suspended, the rollback pin, and the last refused candidate.
+verified, staleness (with a STALE line past the configured threshold), when the
+bundle was last checked and activated, how the last refresh cycle went, the
+post-activation re-protection sweep, a DEGRADED coverage line with its reason
+when scan-mode auto-approval is suspended, the rollback pin, and the last
+refused candidate.
 
 Examples:
   mcpproxy security bundle
@@ -2418,7 +2528,8 @@ Examples:
   mcpproxy security bundle rollback --embedded --digest <64-hex>
   mcpproxy security bundle rollback --path /var/lib/tpa/known-good.json --digest <64-hex>
   mcpproxy security bundle unpin
-  mcpproxy security bundle reload`,
+  mcpproxy security bundle reload
+  mcpproxy security bundle refresh`,
 		Args: cobra.NoArgs,
 		RunE: runSecurityBundleStatus,
 	}
@@ -2426,6 +2537,7 @@ Examples:
 	cmd.AddCommand(newSecurityBundleRollbackCmd())
 	cmd.AddCommand(newSecurityBundleUnpinCmd())
 	cmd.AddCommand(newSecurityBundleReloadCmd())
+	cmd.AddCommand(newSecurityBundleRefreshCmd())
 	return cmd
 }
 
@@ -2504,13 +2616,41 @@ func newSecurityBundleReloadCmd() *cobra.Command {
 		Short: "Re-run the bundle pipeline against the configured source",
 		Long: `Re-read the configured bundle source and run it through the same
 verification pipeline as startup. A refused candidate leaves last-known-good
-serving and is reported as the last rejection.
+serving and is reported as the last rejection. Reload never makes a network
+request; use "refresh" to also check the fetch channel.
 
 Examples:
   mcpproxy security bundle reload`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			return runSecurityBundleMutation("/api/v1/security/bundle/reload", "reload bundle", "Bundle reloaded. Now serving:")
+		},
+	}
+}
+
+func newSecurityBundleRefreshCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "refresh",
+		Short: "Check for a newer bundle now (local file, then the optional fetch)",
+		Long: `Run one refresh cycle immediately: re-read the configured bundle file, then,
+when security.tpa_fetch_enabled is on and a trusted signer and security.tpa_fetch_url
+are configured, check the fetch channel for a newer signed bundle. Everything
+goes through the same verification pipeline as startup; a refused candidate
+leaves last-known-good serving and is reported as the last rejection.
+
+The status shows what the cycle did on the "Refresh" line: activated, unchanged,
+not_modified, rejected, fetch_unavailable (a network or rate-limit problem, never
+a rejection), channel_invalid, superseded or disabled (with the reason).
+
+"refresh" may make one outbound request when fetch is enabled; "reload" never
+does - it only re-reads the local file.
+
+Examples:
+  mcpproxy security bundle refresh
+  mcpproxy security bundle refresh -o json`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runSecurityBundleMutation("/api/v1/security/bundle/refresh", "refresh bundle", "Bundle refresh finished. Now serving:")
 		},
 	}
 }

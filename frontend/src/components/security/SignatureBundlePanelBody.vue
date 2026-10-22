@@ -26,6 +26,14 @@
         {{ digestCopied ? 'Copied' : 'Copy' }}
       </button>
     </div>
+    <div
+      v-for="problem in summary.refreshProblems"
+      :key="problem.kind"
+      class="text-warning"
+      role="status"
+      data-test="bundle-refresh-problem"
+      :data-kind="problem.kind"
+    >{{ problem.explanation }}</div>
     <div v-if="summary.lastRejection" class="text-base-content/70" data-test="bundle-last-rejection">
       Last refused candidate: <span class="text-base-content">{{ summary.lastRejection.label }}</span>
       <span v-if="summary.lastRejection.detail"> &mdash; {{ summary.lastRejection.detail }}</span>

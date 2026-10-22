@@ -396,21 +396,28 @@ func (e *scanHoldEvidence) applyTo(record *storage.ToolApprovalRecord) {
 // caller's pass and still restricts (it is held), so the write goes through
 // saveReadToolApproval with the caller's wasUnstamped (Spec 105 FR-009).
 func (r *Runtime) recordScanHold(serverName, toolName string, existing *storage.ToolApprovalRecord, wasUnstamped bool, evidence *scanHoldEvidence) {
-	if existing == nil || r.storageManager == nil {
-		return
-	}
-	prevReason, prevVerdict, prevSignals := existing.HeldReason, existing.HeldVerdict, existing.HeldSignals
-	evidence.applyTo(existing)
-	if existing.HeldReason == prevReason && existing.HeldVerdict == prevVerdict &&
-		slices.Equal(existing.HeldSignals, prevSignals) {
-		return
-	}
-	if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
+	if saveErr := r.persistScanHold(existing, wasUnstamped, evidence); saveErr != nil {
 		r.logger.Debug("Failed to persist scan-hold evidence on tool approval",
 			zap.String("server", serverName),
 			zap.String("tool", toolName),
 			zap.Error(saveErr))
 	}
+}
+
+// persistScanHold is recordScanHold with the write error returned, for the
+// callers (the post-activation held-evidence refresh) that must not count a
+// write that did not land as done.
+func (r *Runtime) persistScanHold(existing *storage.ToolApprovalRecord, wasUnstamped bool, evidence *scanHoldEvidence) error {
+	if existing == nil || r.storageManager == nil {
+		return nil
+	}
+	prevReason, prevVerdict, prevSignals := existing.HeldReason, existing.HeldVerdict, existing.HeldSignals
+	evidence.applyTo(existing)
+	if existing.HeldReason == prevReason && existing.HeldVerdict == prevVerdict &&
+		slices.Equal(existing.HeldSignals, prevSignals) {
+		return nil
+	}
+	return r.saveReadToolApproval(existing, wasUnstamped)
 }
 
 // refreshHeldContractSnapshot records a further change to an already-held
