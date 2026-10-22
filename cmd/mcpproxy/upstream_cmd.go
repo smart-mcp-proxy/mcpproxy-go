@@ -2113,14 +2113,45 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 		return outputError(output.NewStructuredError(output.ErrCodeOperationFailed, err.Error()), output.ErrCodeOperationFailed)
 	}
 
-	// Output results based on format
-	outputFormat := ResolveOutputFormat()
-
-	if outputFormat == "json" || outputFormat == "yaml" {
-		return outputImportResultStructured(result, outputFormat)
+	// Apply once, before choosing a renderer. The parser's Imported slice is a
+	// plan; only successful writes may be reported as imported after execution.
+	planned := len(result.Imported)
+	applied := 0
+	var applyErr error
+	if !upstreamImportDryRun && planned > 0 {
+		var successful []*configimport.ImportedServer
+		var failed []configimport.FailedServer
+		successful, failed, applyErr = applyImportedServers(result.Imported, globalConfig)
+		result.Imported = successful
+		result.Failed = append(result.Failed, failed...)
+		result.Summary.Imported = len(successful)
+		result.Summary.Failed = len(result.Failed)
+		applied = len(successful)
 	}
+	outcome := importOutcome{planned: planned, applied: applied, dryRun: upstreamImportDryRun}
 
-	return outputImportResultTable(result, upstreamImportDryRun, upstreamImportNoQuarantine, globalConfig)
+	// Render the completed outcome even when some writes failed. Automation gets
+	// the per-server failures on stdout and a nonzero exit status.
+	outputFormat := ResolveOutputFormat()
+	var outputErr error
+	if outputFormat == "json" || outputFormat == "yaml" {
+		outputErr = outputImportResultStructured(result, outcome)
+	} else {
+		outputErr = outputImportResultTable(result, outcome, upstreamImportNoQuarantine)
+	}
+	if outputErr != nil {
+		return outputErr
+	}
+	if applyErr != nil {
+		return applyErr
+	}
+	if result.Summary.Failed > 0 {
+		if outcome.dryRun {
+			return fmt.Errorf("validation failed for %d of %d source servers; no changes made", result.Summary.Failed, result.Summary.Total)
+		}
+		return fmt.Errorf("failed to import %d of %d servers", result.Summary.Failed, result.Summary.Total)
+	}
+	return nil
 }
 
 // importSelfListenAddrs returns the addresses the local mcpproxy answers on,
@@ -2164,13 +2195,28 @@ func parseImportFormat(format string) configimport.ConfigFormat {
 	}
 }
 
-// outputImportResultStructured outputs the import result in JSON/YAML format
-func outputImportResultStructured(result *configimport.ImportResult, format string) error {
+type importOutcome struct {
+	planned int
+	applied int
+	dryRun  bool
+}
+
+func importOutputSummary(result *configimport.ImportResult, outcome importOutcome) map[string]int {
+	return map[string]int{
+		"total": result.Summary.Total, "imported": result.Summary.Imported,
+		"planned": outcome.planned, "applied": outcome.applied,
+		"skipped": result.Summary.Skipped, "failed": result.Summary.Failed,
+	}
+}
+
+// outputImportResultStructured outputs the import result in JSON/YAML format.
+func outputImportResultStructured(result *configimport.ImportResult, outcome importOutcome) error {
 	// Build output structure
 	output := map[string]interface{}{
 		"format":      result.Format,
 		"format_name": result.FormatDisplayName,
-		"summary":     result.Summary,
+		"summary":     importOutputSummary(result, outcome),
+		"dry_run":     outcome.dryRun,
 		"imported":    buildImportedServersOutput(result.Imported),
 		"skipped":     result.Skipped,
 		"failed":      result.Failed,
@@ -2241,9 +2287,9 @@ func buildImportedServersOutput(imported []*configimport.ImportedServer) []map[s
 }
 
 // outputImportResultTable outputs the import result in table format
-func outputImportResultTable(result *configimport.ImportResult, dryRun bool, noQuarantine bool, globalConfig *config.Config) error {
+func outputImportResultTable(result *configimport.ImportResult, outcome importOutcome, noQuarantine bool) error {
 	// Header
-	if dryRun {
+	if outcome.dryRun {
 		fmt.Println("🔍 DRY RUN - No changes will be made")
 		fmt.Println()
 	}
@@ -2254,14 +2300,15 @@ func outputImportResultTable(result *configimport.ImportResult, dryRun bool, noQ
 	// Summary
 	fmt.Printf("Summary:\n")
 	fmt.Printf("  Total servers found: %d\n", result.Summary.Total)
-	fmt.Printf("  To import:          %d\n", result.Summary.Imported)
+	fmt.Printf("  Planned:            %d\n", outcome.planned)
+	fmt.Printf("  Applied:            %d\n", outcome.applied)
 	fmt.Printf("  Skipped:            %d\n", result.Summary.Skipped)
 	fmt.Printf("  Failed:             %d\n", result.Summary.Failed)
 	fmt.Println()
 
 	// Show imported servers
 	if len(result.Imported) > 0 {
-		if dryRun {
+		if outcome.dryRun {
 			fmt.Println("Servers to import:")
 		} else {
 			fmt.Println("Imported servers:")
@@ -2269,7 +2316,7 @@ func outputImportResultTable(result *configimport.ImportResult, dryRun bool, noQ
 
 		for _, s := range result.Imported {
 			statusIcon := "✅"
-			if dryRun {
+			if outcome.dryRun {
 				statusIcon = "📋"
 			}
 			fmt.Printf("  %s %s (%s)\n", statusIcon, s.Server.Name, s.Server.Protocol)
@@ -2325,12 +2372,7 @@ func outputImportResultTable(result *configimport.ImportResult, dryRun bool, noQ
 		fmt.Println()
 	}
 
-	// If not dry run and we have servers to import, actually add them
-	if !dryRun && len(result.Imported) > 0 {
-		err := applyImportedServers(result.Imported, globalConfig)
-		if err != nil {
-			return err
-		}
+	if outcome.applied > 0 {
 		if noQuarantine {
 			fmt.Println("✅ Servers imported without quarantine. They are ready to use.")
 		} else {
@@ -2342,7 +2384,7 @@ func outputImportResultTable(result *configimport.ImportResult, dryRun bool, noQ
 }
 
 // applyImportedServers adds the imported servers to the configuration
-func applyImportedServers(imported []*configimport.ImportedServer, globalConfig *config.Config) error {
+func applyImportedServers(imported []*configimport.ImportedServer, globalConfig *config.Config) ([]*configimport.ImportedServer, []configimport.FailedServer, error) {
 	// Create context
 	ctx := reqcontext.WithMetadata(context.Background(), reqcontext.SourceCLI)
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -2354,11 +2396,20 @@ func applyImportedServers(imported []*configimport.ImportedServer, globalConfig 
 	}
 
 	// Direct config file mode
-	return applyImportedServersConfigMode(imported, globalConfig)
+	if err := applyImportedServersConfigMode(imported, globalConfig); err != nil {
+		failed := make([]configimport.FailedServer, 0, len(imported))
+		for _, s := range imported {
+			failed = append(failed, configimport.FailedServer{Name: s.Server.Name, Error: "apply_failed", Details: err.Error()})
+		}
+		return nil, failed, err
+	}
+	return imported, nil, nil
 }
 
 // applyImportedServersDaemonMode adds servers via the daemon
-func applyImportedServersDaemonMode(ctx context.Context, client *cliclient.Client, imported []*configimport.ImportedServer) error {
+func applyImportedServersDaemonMode(ctx context.Context, client *cliclient.Client, imported []*configimport.ImportedServer) ([]*configimport.ImportedServer, []configimport.FailedServer, error) {
+	var applied []*configimport.ImportedServer
+	var failed []configimport.FailedServer
 	for _, s := range imported {
 		req := &cliclient.AddServerRequest{
 			Name:       s.Server.Name,
@@ -2377,12 +2428,15 @@ func applyImportedServersDaemonMode(ctx context.Context, client *cliclient.Clien
 
 		_, err := client.AddServer(ctx, req)
 		if err != nil {
-			// Log error but continue with other servers
-			fmt.Fprintf(os.Stderr, "  ❌ Failed to add '%s': %v\n", s.Server.Name, err)
+			failed = append(failed, configimport.FailedServer{Name: s.Server.Name, Error: "apply_failed", Details: err.Error()})
+			continue
 		}
+		applied = append(applied, s)
 	}
-
-	return nil
+	if len(failed) > 0 {
+		return applied, failed, fmt.Errorf("failed to import %d of %d servers", len(failed), len(imported))
+	}
+	return applied, nil, nil
 }
 
 // runUpstreamInspect handles the 'upstream inspect' command (Spec 032)
