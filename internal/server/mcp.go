@@ -995,7 +995,7 @@ func (p *MCPProxyServer) emitActivityPolicyDecisionWithBlockReason(ctx context.C
 		if isPostDispatchBlockKey(reasonKey) {
 			p.auditToolCall(ctx, "blocked", reasonKey, "", auditDurationMs(ctx), nil, nil)
 		} else {
-			p.auditAuthz(ctx, "deny", reasonKey)
+			p.auditAuthzWithProfileReason(ctx, "deny", reasonKey, blockReason)
 		}
 	}
 	if p.mainServer != nil && p.mainServer.runtime != nil {
