@@ -19,7 +19,7 @@ These flags are available for all commands:
 |------|-------------|
 | `--config` | Path to configuration file |
 | `--log-level` | Log level (debug, info, warn, error) |
-| `--data-dir, -d` | Data directory path (default: ~/.mcpproxy) |
+| `--data-dir, -d` | Data directory path (default: ~/.mcpproxy). Also the place `serve` reads `mcp_config.json` from when `--config` is not given. Env: `MCPPROXY_DATA_DIR` |
 | `--log-to-file` | Enable logging to file in standard OS location |
 | `--log-dir` | Custom log directory path (overrides standard OS location) |
 | `--help` | Show help for command |

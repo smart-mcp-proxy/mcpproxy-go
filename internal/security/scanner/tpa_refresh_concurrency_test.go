@@ -60,9 +60,29 @@ func boolStr(b bool) string {
 }
 
 func median(ds []time.Duration) time.Duration {
+	return percentile(ds, 0.5)
+}
+
+// percentile returns the q-quantile (0 < q <= 1) of ds. The latency guards
+// below bound p90 relative to the baseline rather than the single worst scan:
+// one GC pause or a descheduled goroutine on a loaded CI runner makes one
+// scan take 100 ms without saying anything about the lock the guard is
+// about. The single worst scan keeps an absolute ceiling (scanWorstCeiling)
+// instead: a scan that really waited on the refresh waits for the gate or a
+// multi-second fetch deadline, which no scheduler hiccup reaches.
+// scanWorstCeiling is the absolute bound on any single scan while a refresh
+// is blocked: well above a scheduler stall, well below the shortest wait a
+// scan could spend behind the refresh (the test gate, or a fetch deadline).
+const scanWorstCeiling = 2 * time.Second
+
+func percentile(ds []time.Duration, q float64) time.Duration {
 	s := append([]time.Duration(nil), ds...)
 	sort.Slice(s, func(i, j int) bool { return s[i] < s[j] })
-	return s[len(s)/2]
+	i := int(float64(len(s)) * q)
+	if i >= len(s) {
+		i = len(s) - 1
+	}
+	return s[i]
 }
 
 // scanLoop runs n scans, returning the generations seen and the slowest scan.
@@ -104,11 +124,12 @@ func TestRefreshConcurrency_ScansIgnoreABlackholedFetchLeg(t *testing.T) {
 		t.Fatal("the fetch leg never reached the channel")
 	}
 
-	gens, worst, _ := scanLoop(300)
+	gens, worst, during := scanLoop(300)
 
 	assert.Equal(t, map[string]int{"old": 300}, gens, "every scan runs against the serving (old) bundle")
 	if !raceDetectorEnabled {
-		assert.Less(t, worst, 50*base+50*time.Millisecond, "a hung fetch must not slow scans (baseline median %s)", base)
+		assert.Less(t, percentile(during, 0.9), 50*base+50*time.Millisecond, "a hung fetch must not slow scans (baseline median %s)", base)
+		assert.Less(t, worst, scanWorstCeiling, "no scan waited behind the hung fetch")
 	}
 }
 
@@ -137,10 +158,11 @@ func TestRefreshConcurrency_ScansDuringASlowSelfCheckSeeOldOrNew(t *testing.T) {
 	}
 
 	// While the activation is mid-flight every scan still sees the old bundle.
-	during, worst, _ := scanLoop(300)
+	during, worst, took := scanLoop(300)
 	assert.Equal(t, map[string]int{"old": 300}, during)
 	if !raceDetectorEnabled {
-		assert.Less(t, worst, 50*base+50*time.Millisecond, "a slow self-check must not slow scans (baseline median %s)", base)
+		assert.Less(t, percentile(took, 0.9), 50*base+50*time.Millisecond, "a slow self-check must not slow scans (baseline median %s)", base)
+		assert.Less(t, worst, scanWorstCeiling, "no scan waited behind the self-check")
 	}
 
 	// Scans racing the swap itself see exactly the old or the new bundle.

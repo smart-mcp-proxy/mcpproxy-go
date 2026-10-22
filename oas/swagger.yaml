@@ -266,6 +266,16 @@ components:
             inline-response ceiling from 50k to up to 500k chars. Omit the key for
             the 500000 default; set it to 0 to disable the annotation.
           type: integer
+        mcp_reject_query_apikey:
+          description: |-
+            MCPRejectQueryAPIKey makes every MCP endpoint (/mcp*) refuse a request that
+            carries a ?apikey= query parameter, with a 401, instead of honouring it. A credential in a URL ends up in access logs,
+            proxy logs and browser history; MCP clients can send Authorization:
+            Bearer or X-API-Key instead. Default false (the query form keeps
+            working, for clients that can only configure a URL). It covers only the
+            MCP endpoints: the Web UI and its SSE stream (/events) still use the
+            query form. Live, no restart needed.
+          type: boolean
         mcpServers:
           items:
             $ref: '#/components/schemas/config.ServerConfig'

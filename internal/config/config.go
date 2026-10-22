@@ -378,6 +378,14 @@ type Config struct {
 	// Security settings
 	APIKey         string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
 	RequireMCPAuth bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"` // Require authentication on /mcp endpoint (default: false)
+	// MCPRejectQueryAPIKey makes every MCP endpoint (/mcp*) refuse a request that
+	// carries a ?apikey= query parameter, with a 401, instead of honouring it. A credential in a URL ends up in access logs,
+	// proxy logs and browser history; MCP clients can send Authorization:
+	// Bearer or X-API-Key instead. Default false (the query form keeps
+	// working, for clients that can only configure a URL). It covers only the
+	// MCP endpoints: the Web UI and its SSE stream (/events) still use the
+	// query form. Live, no restart needed.
+	MCPRejectQueryAPIKey bool `json:"mcp_reject_query_apikey,omitempty" mapstructure:"mcp-reject-query-apikey"`
 	// TrustedHosts lists non-loopback Host header values accepted on loopback
 	// listeners (GH #898). DNS-rebinding protection rejects requests whose Host
 	// header is not a loopback address when mcpproxy listens on loopback; a
