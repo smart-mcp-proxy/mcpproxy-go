@@ -223,7 +223,7 @@ graph LR
 <details>
 <summary>🔵 tpa-db: versioned TPA signature database for the offline scanner — In progress · P1</summary>
 
-> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); 2026-10-20: US1 (tpa-db-format: signed four-key Ed25519 sidecar, verify-before-parse loader, per-authority anti-downgrade state, full-digest rollback, coverage degrade) shipped as #1701; US2 corpus in a sibling session; US3 refresh waits on Spec 087.
+> Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); 2026-10-20: US1 (tpa-db-format: signed four-key Ed25519 sidecar, verify-before-parse loader, per-authority anti-downgrade state, full-digest rollback, coverage degrade) shipped as #1701; US2 corpus in a sibling session (#1702, open); 2026-10-22: US3 (tpa-db-refresh, implements Spec 087 US1+US2: daily file+optional signed fetch refresh, activation self-check, freshness surfaces, cached re-protection sweep) shipped as #1720. Epic stays in_progress until the corpus (US2) lands.
 
 Spec: [101-tpa-db](./specs/101-tpa-db/)
 
@@ -238,15 +238,15 @@ graph LR
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
   classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class tpa_db_format done;
-  class tpa_db_corpus,tpa_db_refresh todo;
+  class tpa_db_format,tpa_db_refresh done;
+  class tpa_db_corpus todo;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | Signature DB format + loader (versioned, signed, bundled default) | 🟢 Done | #1701 |
 | Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
-| Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | ⚪ Todo | — |
+| Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | 🟢 Done | #1720 |
 
 </details>
 
@@ -1008,7 +1008,7 @@ graph LR
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | 4/4 (100%) | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
-| tpa-db: versioned TPA signature database for the offline scanner | In progress | P1 | 30/81 (37%) | [101-tpa-db](./specs/101-tpa-db/) |  |
+| tpa-db: versioned TPA signature database for the offline scanner | In progress | P1 | 81/81 (100%) | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
@@ -1158,7 +1158,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 28/33 (85%) |
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
-| [101-tpa-db](./specs/101-tpa-db/) | `in-flight` | 30/81 (37%) |
+| [101-tpa-db](./specs/101-tpa-db/) | `shipped` | 81/81 (100%) |
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |
