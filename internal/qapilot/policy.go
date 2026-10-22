@@ -5,8 +5,8 @@ package qapilot
 
 // AdmissionQuarantined is the add-time quarantine default (spec 086 FR-011,
 // spec 088 FR-006): a new server is quarantined unless global quarantine is
-// off or its trust mode is auto. An unknown trust mode is manual (spec 088
-// FR-002: empty or unrecognised resolves to manual).
+// off or its trust mode is auto. An empty trust mode is the default tier,
+// scan (spec 119); an unrecognised one is manual (spec 088 FR-002).
 func AdmissionQuarantined(globalQuarantine bool, trust TrustMode) bool {
 	if !globalQuarantine {
 		return false
@@ -14,12 +14,15 @@ func AdmissionQuarantined(globalQuarantine bool, trust TrustMode) bool {
 	return EffectiveTrust(trust) != TrustAuto
 }
 
-// EffectiveTrust resolves a raw trust_mode value: auto and scan are
-// themselves, everything else (including empty and garbage) is manual.
+// EffectiveTrust resolves a raw trust_mode value the way
+// config.ServerConfig.EffectiveTrustMode does: auto, scan and manual are
+// themselves, empty is the default tier (scan, spec 119), garbage is manual.
 func EffectiveTrust(raw TrustMode) TrustMode {
 	switch raw {
-	case TrustAuto, TrustScan:
+	case TrustAuto, TrustScan, TrustManual:
 		return raw
+	case "":
+		return TrustScan
 	default:
 		return TrustManual
 	}

@@ -49,10 +49,14 @@ that scans clean (red-team EXP-6); operators who do not accept it keep `trust_mo
   clean-scanned holds after upgrading.
 - **FR-007** Safety-hint flips toward a SAFER tier are never auto-approved, whatever the verdict:
   `readOnlyHint` false→true or `destructiveHint` true→false on a changed contract is held with
-  `held_reason: scan_findings` and the deterministic signal `GATE-HINT-SAFER-FLIP`. A tool that re-labels
+  `held_reason: scan_findings` and the deterministic signal `GATE-HINT-SAFER-FLIP`, appended to the scan's own
+  signals when the verdict is not clean (the signal is recorded on every pass the flip stands). A tool that re-labels
   itself read-only is exactly the change a profile `max_tier` cap and the `call_tool_read` dispatch trust;
   the scanner's `capability_mismatch` check does not cover a flip without a description change. (Builder's
   call, kept small; the review diff already renders hint flips.)
+- **FR-007a** A failed approval write (FR-004/FR-006) leaves the record exactly as it was before the
+  attempt: the hold written afterwards must not carry the new approved hash or cleared `Previous*` evidence,
+  or the next pass's hash-match shortcut would approve the contract with no scan and no operator.
 - **FR-008** The approval invariant table (`assertToolApprovalInvariant`, qapilot `ChangedToApprovedReasons`)
   admits `scan_approved` for changed→approved. The gate is the only writer of that reason and uses it only
   under `scan`.

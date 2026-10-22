@@ -1333,14 +1333,15 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			// (RT-02 applies to manual).
 			if scanMode {
 				clean, evidence := r.scanChangeIsClean(serverName, tool)
-				if clean && scanApprovesChanges {
-					// PreviousAnnotations is the approved contract's snapshot
-					// (refreshHeldContractSnapshot leaves it untouched).
-					if saferHintFlip(existing.PreviousAnnotations, tool.Annotations) {
-						evidence = hintFlipHoldEvidence()
-					} else if r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
-						continue
-					}
+				// PreviousAnnotations is the approved contract's snapshot
+				// (refreshHeldContractSnapshot leaves it untouched).
+				flip := saferHintFlip(existing.PreviousAnnotations, tool.Annotations)
+				if clean && !flip && scanApprovesChanges &&
+					r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
+					continue
+				}
+				if flip {
+					evidence = withHintFlip(evidence)
 				}
 				r.recordScanHold(serverName, toolName, existing, wasUnstamped, evidence)
 			} else if evidenceScan {
@@ -1616,14 +1617,15 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			}
 			if scanMode {
 				clean, evidence := r.scanChangeIsClean(serverName, tool)
-				if clean && scanApprovesChanges {
-					// CurrentAnnotations is still the approved contract's snapshot
-					// here: the record is approved and Current* = Approved*.
-					if saferHintFlip(existing.CurrentAnnotations, tool.Annotations) {
-						evidence = hintFlipHoldEvidence()
-					} else if r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
-						continue
-					}
+				// CurrentAnnotations is still the approved contract's snapshot
+				// here: the record is approved and Current* = Approved*.
+				flip := saferHintFlip(existing.CurrentAnnotations, tool.Annotations)
+				if clean && !flip && scanApprovesChanges &&
+					r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
+					continue
+				}
+				if flip {
+					evidence = withHintFlip(evidence)
 				}
 				holdEvidence = evidence
 			}

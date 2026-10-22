@@ -48,12 +48,18 @@ func saferHintFlip(approved, live *config.ToolAnnotations) bool {
 	return false
 }
 
-// hintFlipHoldEvidence is the hold evidence for a clean-scanned change refused
-// by saferHintFlip: a finding (not a coverage problem) with the gate's own
-// signal, so the review surfaces explain the hold and the record is never
-// auto-approved while the flip stands.
-func hintFlipHoldEvidence() *scanHoldEvidence {
-	return &scanHoldEvidence{Reason: storage.ToolHeldReasonScanFindings, Verdict: "clean", Signals: []string{SignalHintSaferFlip}}
+// withHintFlip adds the gate's safer-flip signal to the scan's evidence (FR-007:
+// the signal is recorded whatever the verdict). A clean verdict becomes a
+// finding with that one signal; a non-clean one keeps its verdict and
+// signals, the flip listed after them. The result is never nil.
+func withHintFlip(evidence *scanHoldEvidence) *scanHoldEvidence {
+	if evidence == nil {
+		return &scanHoldEvidence{Reason: storage.ToolHeldReasonScanFindings, Verdict: "clean", Signals: []string{SignalHintSaferFlip}}
+	}
+	out := *evidence
+	out.Reason = storage.ToolHeldReasonScanFindings
+	out.Signals = append(append([]string(nil), evidence.Signals...), SignalHintSaferFlip)
+	return &out
 }
 
 // scanApproveChangedContract approves a changed contract that scanned clean
@@ -62,13 +68,16 @@ func hintFlipHoldEvidence() *scanHoldEvidence {
 // cleared and a tool_auto_approved activity event is emitted, exactly as
 // auto_approve_tool_changes does. It returns true when the record was written
 // (the caller moves on to the next tool). On an invariant refusal or a failed
-// write it returns false and the caller holds the change as before, so a
-// storage error never widens trust.
+// write it returns false with the record restored field for field to what it
+// was, and the caller holds the change as before: the hold write that follows
+// must not carry the approved hash or the cleared Previous* evidence of an
+// approval that never landed, or the next pass's hash-match shortcut would
+// approve the contract with no scan and no operator (review round 1, P2).
 func (r *Runtime) scanApproveChangedContract(serverName, toolName string, existing *storage.ToolApprovalRecord, wasUnstamped bool, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON, currentHash string) bool {
 	if invErr := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonScanApproved); invErr != nil {
 		return false
 	}
-	previousStatus := existing.Status
+	before := *existing
 	existing.Status = storage.ToolApprovalStatusApproved
 	existing.ApprovedHash = currentHash
 	existing.CurrentHash = currentHash
@@ -86,7 +95,7 @@ func (r *Runtime) scanApproveChangedContract(serverName, toolName string, existi
 	existing.PreviousOutputSchema = ""
 	existing.ClearScanHold()
 	if saveErr := r.saveReadToolApproval(existing, wasUnstamped); saveErr != nil {
-		existing.Status = previousStatus
+		*existing = before
 		r.logger.Error("Failed to scan-approve changed tool; holding it for review instead",
 			zap.String("server", serverName),
 			zap.String("tool", toolName),
