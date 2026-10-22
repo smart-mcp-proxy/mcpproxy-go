@@ -40,6 +40,21 @@ func TestTPABundleSnapshotFromInfo(t *testing.T) {
 			want: telemetry.TPABundleSnapshot{Source: "file", SignatureVerified: true, BundleVersion: "0.2", Sequence: seqPtr(9)},
 		},
 		{
+			name: "publisher-verified fetched bundle reports fetch with its sequence",
+			info: scanner.BundleInfo{Source: scanner.BundleSourceFetch, Authority: scanner.AuthorityPublisher, SignatureVerified: true, BundleVersion: "0.3.1", Sequence: "12"},
+			want: telemetry.TPABundleSnapshot{Source: "fetch", SignatureVerified: true, BundleVersion: "0.3", Sequence: seqPtr(12)},
+		},
+		{
+			name: "operator-signed fetched bundle reports fetch/other with no sequence",
+			info: scanner.BundleInfo{Source: scanner.BundleSourceFetch, Authority: scanner.AuthorityOperator, SignatureVerified: true, BundleVersion: "0.1.0", Sequence: "42"},
+			want: telemetry.TPABundleSnapshot{Source: "fetch", SignatureVerified: true, BundleVersion: "other"},
+		},
+		{
+			name: "unsigned fetched bundle copying a publisher version string reports fetch/other",
+			info: scanner.BundleInfo{Source: scanner.BundleSourceFetch, BundleVersion: "0.1.0", Sequence: "42"},
+			want: telemetry.TPABundleSnapshot{Source: "fetch", BundleVersion: "other"},
+		},
+		{
 			name: "operator-signed bundle copying a publisher version string reports other",
 			info: scanner.BundleInfo{Source: scanner.BundleSourceFile, Authority: scanner.AuthorityOperator, SignatureVerified: true, BundleVersion: "0.1.0", Sequence: "42"},
 			want: telemetry.TPABundleSnapshot{Source: "file", SignatureVerified: true, BundleVersion: "other"},
@@ -87,6 +102,9 @@ func TestTPABundleSnapshotPassesAnonymityBackstop(t *testing.T) {
 		{Source: scanner.BundleSourceFile, Authority: scanner.AuthorityPublisher, SignatureVerified: true, BundleVersion: "0.1.0", Sequence: "7"},
 		{Source: scanner.BundleSourceFile, Authority: scanner.AuthorityOperator, SignatureVerified: true, BundleVersion: "0.1.0", Sequence: "7"},
 		{Source: scanner.BundleSourceFile, BundleVersion: "0.1.0", Sequence: "7"},
+		{Source: scanner.BundleSourceFetch, Authority: scanner.AuthorityPublisher, SignatureVerified: true, BundleVersion: "0.1.0", Sequence: "7"},
+		{Source: scanner.BundleSourceFetch, Authority: scanner.AuthorityOperator, SignatureVerified: true, BundleVersion: "0.1.0", Sequence: "7"},
+		{Source: scanner.BundleSourceFetch, BundleVersion: "0.1.0", Sequence: "7"},
 		{Source: scanner.BundleSourceFile, BundleVersion: "weird /home/user/x"},
 	}
 	for _, info := range infos {

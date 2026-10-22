@@ -827,7 +827,7 @@ With `require_mcp_auth` off, a change that would let a client bound to a profile
 | `allow_server_remove` | boolean | `true` | Allow removing servers via API/tools |
 
 **Security Notes:**
-- **API Key**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, or config file
+- **API Key**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, `MCPPROXY_API_KEY_FILE` (a file holding the key, for Docker/Kubernetes secrets and systemd credentials; see [Environment variables](/configuration/environment-variables#api-key-from-a-file)), or config file
 - **Empty API Key**: Empty values are replaced with an auto-generated key; authentication is always enforced
 - **Auto-Generation**: If no API key is provided, one is generated, persisted to the config file, and printed once to the terminal (stderr). It is deliberately **not** written to the log files - to recover it later, read `api_key` from `~/.mcpproxy/mcp_config.json`
 - **Tray Integration**: Tray app automatically manages API keys for core communication
@@ -936,6 +936,10 @@ block** — off by default, best-effort, and unable to change the baseline verdi
     "tpa_operator_signers": [],
     "tpa_operator_baseline": 0,
     "tpa_operator_epoch": 0,
+    "tpa_refresh_interval": "24h",
+    "tpa_fetch_enabled": false,
+    "tpa_fetch_url": "",
+    "tpa_stale_after_days": 30,
     "auto_baseline_scan": true,
     "auto_rescan_on_change": true,
     "deep_scan": {
@@ -956,6 +960,10 @@ block** — off by default, best-effort, and unable to change the baseline verdi
 | `tpa_operator_signers` | string[] | `[]` | Operator Ed25519 public keys, each the standard base64 of the 32 raw key bytes. Rejected on write if an entry is malformed, not canonically encoded, or a duplicate. |
 | `tpa_operator_baseline` | integer | absent | The anti-downgrade floor for operator bundles: a bundle must carry a sequence strictly above it. Raise it when you retire older releases for good. Absent means no floor. An explicit `0` is kept and is different from absent. |
 | `tpa_operator_epoch` | integer | absent (`0`) | The operator trust epoch. Raise it after an operator key compromise to retire pins from earlier epochs. |
+| `tpa_refresh_interval` | duration | absent (`24h`) | How often the refresh cycle runs. Each cycle first re-reads `tpa_bundle_path` (network-free, always on, idempotent) and then, when `tpa_fetch_enabled` is on, runs the fetch step. There is no key that turns the cycle itself off. Absent or `0` means `24h`; anything under `1h` is rejected on write and clamped to `1h` if it is already on disk. Each run is jittered by about 10%, and a suspended laptop produces one cycle on wake, not a burst. Hot-reloadable. |
+| `tpa_fetch_enabled` | boolean | `false` | Opt in to downloading a signed bundle and its `.sig` from `tpa_fetch_url`. Off by default, and a fetched bundle is held to the same verification as a file drop (signature, sequence watermark, deny-list, activation self-check). Env override: `MCPPROXY_TPA_FETCH_ENABLED` (`true`/`1`/`false`/`0`), which wins over this field on every path but is never written back to the config file. The environment can switch the fetch on or off, but it cannot choose the URL or the trusted keys. Setting `MCPPROXY_DISABLE_AUTO_UPDATE` does **not** switch this fetch off; they are separate. |
+| `tpa_fetch_url` | string | `""` | Where the fetch step looks. **There is no working default URL**: empty means the fetch makes no request (`disabled`, reason `no_url`), and no URL is compiled into the binary until a release ships the first publisher key. Two shapes are recognised from the URL path: a GitHub Releases `…/repos/<owner>/<repo>/releases/latest` API URL (the release must carry one `scanner-bundle-<sequence>.json` asset with a sibling `.sig`), or any other path, fetched as the bundle with `<url>.sig` as its signature. Must be `https` (plain `http` only for `localhost` or a loopback address) and must not contain credentials, a query string or a fragment; the URL is never logged beyond its host. Rejected on write when `tpa_fetch_enabled` is on and the URL is empty. |
+| `tpa_stale_after_days` | integer | absent (`30`) | Age in days of the active bundle (from its signed `generated_at`) after which it is flagged stale in `GET /api/v1/security/bundle`, `mcpproxy security bundle status` and `mcpproxy doctor`. An explicit `0` disables the stale flag and the doctor warning, and is different from absent. Negative values are rejected on write. |
 | `auto_baseline_scan` | boolean | `true` | Kill switch for the **automatic informational baseline scan**. When on (the default), every newly added server gets one free in-process Pass-1 TPA scan, and once per installation a background sweep scans pre-existing enabled servers that have never been scanned (marker persisted in BBolt, so it runs exactly once and never delays startup). The result only populates the security badge / scan summary: it **never** quarantines, approves, or otherwise gates a server. Disabled servers are skipped, and so are `trust_mode: "scan"` servers — that mode's own admission gate scans them and auto-approves on a clean verdict, so the informational path stays out of it entirely rather than risk feeding that gate; this flag does not affect that separate path. Set to `false` to suppress all automatic scans; manual scans keep working. Hot-reloadable — the flag is read live at each decision point. Env override: `MCPPROXY_AUTO_BASELINE_SCAN` (`true`/`1`/`false`/`0`), which wins over this field on every path. |
 | `auto_rescan_on_change` | boolean | `true` | Finer switch for the **automatic rescan after a tool definition changes** (Spec 118), in every trust mode except `auto`. When on, a changed tool, a tool added after the baseline, or a changed definition that moves again gets the in-process TPA scan of its current definition recorded as hold evidence (`held_reason`/`held_verdict`/`held_signals`, so the review screen shows a per-tool verdict without a click), and a debounced (about 5 s, coalesced per server) informational rescan of the server brings the review screen's scan line back to "current". Evidence and freshness only: a clean verdict **never** approves a changed or new tool, and no approval rule changes. It only takes effect while `auto_baseline_scan` is also on, so set this to `false` to keep the admission scan and turn off per-change rescans. The `trust_mode: "scan"` gate's own admission-time scan of new tools is not affected. Hot-reloadable. Env override: `MCPPROXY_AUTO_RESCAN_ON_CHANGE` (`true`/`1`/`false`/`0`), which wins over this field on every path. |
 | `deep_scan.enabled` | boolean | `false` | Master opt-in for the heavy layer. When `false`, no Docker scanner runs and no source extraction is attempted — only the in-process baseline scanner executes. |
@@ -963,7 +971,9 @@ block** — off by default, best-effort, and unable to change the baseline verdi
 | `deep_scan.disable_no_new_privileges` | boolean | `false` | Omits `--security-opt no-new-privileges` from scanner container runs (snap-docker/AppArmor escape hatch). |
 | `deep_scan.scanners` | string[] | `[]` | Optional allow-list of deep scanner ids. Empty ⇒ all enabled deep scanners are eligible. |
 
-For the operator workflow around these keys (signing, dropping, rolling back, key compromise) see [Signed TPA Bundles](/features/tpa-bundle-signing). These five keys have no environment-variable aliases on purpose: the trust root lives only in `mcp_config.json`, so someone who can change the bundle path or the environment cannot also choose who is trusted. `GET /api/v1/config` shows them unmasked, since they hold public keys and counters, not secrets.
+For the operator workflow around these keys (signing, dropping, rolling back, key compromise) see [Signed TPA Bundles](/features/tpa-bundle-signing). The trust keys (`require_signed_bundle`, `tpa_active_root`, `tpa_operator_signers`, `tpa_operator_baseline`, `tpa_operator_epoch`) have no environment-variable aliases on purpose: the trust root lives only in `mcp_config.json`, so someone who can change the bundle path or the environment cannot also choose who is trusted. The same holds for the fetch URL, interval and stale threshold; only `tpa_fetch_enabled` has an env switch. `GET /api/v1/config` shows all of these keys unmasked, since they hold public keys, counters, durations and a plain URL, not secrets.
+
+**Fetching needs an operator root today.** A fetched bundle is verified against the active root's trust set, and the built-in publisher key set ships empty. With the default `tpa_active_root: "publisher"`, turning the fetch on therefore makes no request and reports `disabled` with reason `no_trusted_signer`. To use the fetch before a publisher key is released, set `tpa_active_root` to `"operator"` and list your signing keys in `tpa_operator_signers` (add `tpa_operator_baseline` for non-degraded coverage). Turning the fetch off later keeps the last verified fetched bundle serving; `mcpproxy security bundle rollback --embedded` is the explicit way back to the embedded corpus, and a rollback to an earlier fetched release needs that file in the `tpa_bundle_path` directory. The shape checks above run only when a config is written (REST, CLI, Web UI); a bad value already on disk never stops the daemon from starting and is treated as "fetch off".
 
 **Deprecated-key migration.** The old top-level `security.scanner_fetch_package_source`
 and `security.scanner_disable_no_new_privileges` keys still parse and are migrated
@@ -1848,6 +1858,7 @@ Many configuration options can be overridden via environment variables:
 |----------------------|--------------|-------------|
 | `MCPPROXY_LISTEN` / `MCPP_LISTEN` | `listen` | Network binding address |
 | `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty values trigger auto-generation; auth remains enabled) |
+| `MCPPROXY_API_KEY_FILE` | `api_key` | Absolute path of a file that holds the API key; set it or `MCPPROXY_API_KEY`, not both (both set stops startup with an error naming both); an unusable file stops startup (no fallback, nothing generated) |
 | `MCPPROXY_TRUSTED_HOSTS` | `trusted_hosts` | Comma-separated `Host` allowlist for loopback listeners behind a reverse proxy |
 | `MCPPROXY_TRUSTED_PROXIES` | `trusted_proxies` | Comma-separated CIDRs/IPs whose `X-Forwarded-*` headers are honoured |
 | `MCPPROXY_AUDIT_LOG_ENABLED` | `audit_log.enabled` | Turn audit logging on/off |
@@ -1856,7 +1867,8 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_TLS_ENABLED` | `tls.enabled` | Enable HTTPS/TLS |
 | `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | `tls.require_client_cert` | Enable mTLS |
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |
-| `MCPPROXY_DATA` | `data_dir` | Override data directory |
+| `MCPPROXY_DATA_DIR` | `data_dir` | Override data directory; also where `serve` looks for `mcp_config.json` (same as `--data-dir`) |
+| `MCPPROXY_DATA` | `data_dir` | Override data directory only (legacy name; `MCPPROXY_DATA_DIR` wins) |
 | `MCPPROXY_TOOL_RESPONSE_MODE` | `tool_response_mode` | `retrieve_tools` serialization: `full` (default) or `compact` |
 | `MCPPROXY_DIRECT_TOOL_RESPONSE_MODE` | `direct_tool_response_mode` | Direct enumeration surface serialization: `full` (default) or `deferred` |
 | `MCPPROXY_MAX_CONCURRENT_REQUESTS` | `max_concurrent_requests` | Global aggregate cap on concurrent upstream tool calls (`0` disables it). See [Concurrency Limits](#concurrency-limits--request-queueing) |

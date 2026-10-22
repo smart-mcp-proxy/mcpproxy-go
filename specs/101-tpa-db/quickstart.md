@@ -2,7 +2,7 @@
 
 **Feature**: `101-tpa-db` · Sign a corpus, drop it, verify it activated, roll it back, read the status.
 
-Everything here works with **no network** — that is SC-003, not a footnote. The fetch path is Spec 087's (plan D11).
+Steps 1 to 7 work with **no network** — that is SC-003, not a footnote. The optional fetch (Spec 087, off by default, no default URL) is step 8, against a mirror on your own machine.
 
 ## 0. Build
 
@@ -166,7 +166,68 @@ With the pin gone, the sequence-1 bundle no longer passes the watermark, so the 
 
 Steps 1–6 with the network unavailable behave identically. That is the criterion — the file-drop path is not a degraded mode, it is the primary one, and the fetch path adds convenience rather than capability. The operator-facing version of this walkthrough is `docs/features/tpa-bundle-signing.md`.
 
-## 8. Contributor loop (User Story 2, not in the first PR)
+The file leg of the daily refresh (`tpa_refresh_interval`, default 24h) re-reads `tpa_bundle_path` too, so a later drop activates within a cycle with no `reload` and no restart. `mcpproxy security bundle refresh` runs that cycle on demand.
+
+## 8. Optional fetch against a local mirror (Spec 087)
+
+The fetch is **off by default and has no default URL**; nothing in steps 1–7 touched the network. It also works today only with operator-signed bundles, because the publisher key set embedded in the binary is empty. This step exercises it against a mirror on loopback, where plain `http` is allowed. Run it after step 4 (any state whose watermark is below 3), keeping the same `SCRATCH`, `KEY_ID`, `PUBKEY` and operator key.
+
+Publish a newer signed pair to a directory and serve it. A path that is not `/repos/<owner>/<repo>/releases/latest` is the *direct* shape: the bundle is the URL and `<url>.sig` is its sidecar (the Releases API shape is the same with a JSON listing in front, see the operator guide):
+
+```bash
+mkdir "$SCRATCH/mirror"
+jq --arg id "$KEY_ID" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+   '. + {sequence: "3", trust_epoch: 0, key_id: $id, generated_at: $now}' \
+   internal/security/scanner/bundled/scanner-bundle.json > "$SCRATCH/mirror/scanner-bundle.json"
+go run ./cmd/tpa-db sign --bundle "$SCRATCH/mirror/scanner-bundle.json" --key "$SCRATCH/keys/operator.key"
+
+uv run python -m http.server 18702 --bind 127.0.0.1 --directory "$SCRATCH/mirror" &
+```
+
+Turn the fetch on in `$SCRATCH/config.json` (the config file is hot-reloaded), keeping the operator root and signers from step 3. `tpa_fetch_enabled` could also be switched with `MCPPROXY_TPA_FETCH_ENABLED=true`, but only the config chooses the URL and the keys:
+
+```json
+{
+  "security": {
+    "tpa_active_root": "operator",
+    "tpa_operator_signers": ["<PUBKEY from step 1>"],
+    "tpa_operator_baseline": 1,
+    "tpa_fetch_enabled": true,
+    "tpa_fetch_url": "http://127.0.0.1:18702/scanner-bundle.json"
+  }
+}
+```
+
+Run one cycle and read the result:
+
+```bash
+./mcpproxy security bundle refresh --config "$SCRATCH/config.json" --data-dir "$SCRATCH/data"
+# Source: fetch (http://127.0.0.1)   Sequence: 3   Signature: verified
+# Refresh: activated, next check …   Fetch host: 127.0.0.1
+```
+
+The status shows the host only, never the URL path. Then check the failure modes, each of which leaves the serving bundle untouched:
+
+```bash
+# unsigned: publish a sequence-4 bundle with no sidecar (the .sig 404s). A fetch is
+# signed-only even with require_signed_bundle off.
+jq --arg id "$KEY_ID" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+   '. + {sequence: "4", trust_epoch: 0, key_id: $id, generated_at: $now}' \
+   internal/security/scanner/bundled/scanner-bundle.json > "$SCRATCH/mirror/scanner-bundle.json"
+rm "$SCRATCH/mirror/scanner-bundle.json.sig"
+./mcpproxy security bundle refresh …      # Last rejection: signature_required; sequence 3 keeps serving
+
+# outage: stop the mirror
+kill %1
+./mcpproxy security bundle refresh …      # Refresh: fetch_unavailable (network_error); NOT a rejection
+
+# no URL: fetch enabled with tpa_fetch_url "" makes zero requests
+#   Refresh: disabled (no_url)   (and mcpproxy doctor says the fetch is enabled but inactive)
+```
+
+`mcpproxy security bundle reload` never makes a request, even with the fetch on: watch the mirror log while you run it. After a successful fetch, the new bundle's last-known-good copy survives a restart, and turning `tpa_fetch_enabled` off keeps it serving; `rollback --embedded --digest <embedded digest>` is the deliberate way back. An approved tool that matches a signature added by the fetched bundle is re-checked from its cached contract and shows a `dangerous` scan verdict on the server's review view, without being approved, revoked or quarantined (see `docs/features/security-quarantine.md`, "Re-protection after a bundle activates").
+
+## 9. Contributor loop (User Story 2, not in the first PR)
 
 ```bash
 go run ./cmd/tpa-db validate --bundle <path>   # schema + signatures[] integrity + licences

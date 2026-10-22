@@ -11,8 +11,9 @@ import (
 )
 
 // Spec 101 TPA signature bundle surface (contracts/bundle-status-surface.md).
-// Status and history are admin-read; the three mutations are additionally
-// gated by auth.ServerOpBundleManage at the route.
+// Status and history are admin-read; the four mutations (rollback, unpin,
+// reload, refresh) are additionally gated by auth.ServerOpBundleManage at the
+// route.
 
 // bundleAdminDenialMessage is the fixed refusal a scoped caller gets on the
 // bundle reads. The bundle status names the artifact digests an operator rolls
@@ -56,12 +57,12 @@ func isFullBundleDigest(d string) bool {
 
 // handleGetSecurityBundle godoc
 // @Summary Get the TPA signature bundle status
-// @Description Reports the offline TPA signature corpus this install is serving: full SHA-256 digest, sequence, authority, trust epoch, signature verification, staleness, degraded coverage with its reason, rollback pin, and the last refused candidate. Admin only.
+// @Description Reports the offline TPA signature corpus this install is serving: full SHA-256 digest, sequence, authority, trust epoch, signature verification, staleness (with the stale flag and its threshold), degraded coverage with its reason, rollback pin, and the last refused candidate. Also carries the refresh status (last checked and activated times, last cycle outcome, next check, consecutive failures; the fetch host only, never the URL) and the post-activation re-protection sweep status. Admin only.
 // @Tags security
 // @Produce json
 // @Security ApiKeyAuth
 // @Security ApiKeyQuery
-// @Success 200 {object} contracts.SuccessResponse "Bundle status (data is the BundleInfo object)"
+// @Success 200 {object} contracts.SuccessResponse{data=scanner.BundleInfo} "Bundle status"
 // @Failure 403 {object} contracts.ErrorResponse "Admin credentials required"
 // @Failure 501 {object} contracts.ErrorResponse "Security scanner not configured"
 // @Router /api/v1/security/bundle [get]
@@ -204,4 +205,22 @@ func (s *Server) handleReloadSecurityBundle(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.writeSuccess(w, s.securityController.ReloadBundle())
+}
+
+// handleRefreshSecurityBundle godoc
+// @Summary Refresh the TPA signature bundle now
+// @Description Runs one refresh cycle immediately: the local file leg (always network-free) followed by the optional fetch leg when security.tpa_fetch_enabled is on and a trusted signer and URL are configured. A cycle already in flight is joined, so one download and at most one activation happen per distinct candidate. The response is the resulting bundle status; the cycle outcome is in its refresh block (activated, unchanged, not_modified, rejected, fetch_unavailable, channel_invalid, superseded, disabled). Network failures are reported as fetch_unavailable and never as a rejection; last-known-good keeps serving. Unlike reload, refresh may make an outbound request. Admin API key only.
+// @Tags security
+// @Produce json
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.SuccessResponse{data=scanner.BundleInfo} "Updated bundle status; the refresh block holds the cycle outcome"
+// @Failure 403 {object} contracts.ErrorResponse "Admin credentials required"
+// @Failure 501 {object} contracts.ErrorResponse "Security scanner not configured"
+// @Router /api/v1/security/bundle/refresh [post]
+func (s *Server) handleRefreshSecurityBundle(w http.ResponseWriter, r *http.Request) {
+	if !s.requireSecurity(w, r) {
+		return
+	}
+	s.writeSuccess(w, s.securityController.RefreshBundle(r.Context()))
 }

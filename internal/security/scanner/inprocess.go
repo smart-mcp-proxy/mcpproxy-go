@@ -178,6 +178,12 @@ type toolDef struct {
 // the cross-server shadowing check a real multi-server RegistryView; nil/empty
 // means only the scanned server's tools are in view (no cross-server detection).
 func inProcessToolScan(toolsJSON []byte, serverName string, peerTools map[string][]toolDef, scannerID string) []ScanFinding {
+	return inProcessToolScanPinned(toolsJSON, serverName, peerTools, scannerID, nil)
+}
+
+// inProcessToolScanPinned is inProcessToolScan over a pinned bundle snapshot
+// (nil = resolve the active bundle now).
+func inProcessToolScanPinned(toolsJSON []byte, serverName string, peerTools map[string][]toolDef, scannerID string, pin *pinnedBundle) []ScanFinding {
 	var doc struct {
 		Tools []toolDef `json:"tools"`
 	}
@@ -185,7 +191,7 @@ func inProcessToolScan(toolsJSON []byte, serverName string, peerTools map[string
 		return nil
 	}
 
-	return detectEngineFindings(doc.Tools, serverName, peerTools, scannerID)
+	return detectEngineFindings(doc.Tools, serverName, peerTools, scannerID, pin)
 }
 
 // detectEngineFindings runs the Spec-076 offline detect.Engine over the scanned
@@ -195,7 +201,7 @@ func inProcessToolScan(toolsJSON []byte, serverName string, peerTools map[string
 // what lets shadowing.cross_server fire end-to-end (it only emits when a
 // collision/reference points at a *different* server). Findings are filtered to
 // the scanned server so a peer's own issues aren't reported under this scan.
-func detectEngineFindings(tools []toolDef, serverName string, peerTools map[string][]toolDef, scannerID string) []ScanFinding {
+func detectEngineFindings(tools []toolDef, serverName string, peerTools map[string][]toolDef, scannerID string, pin *pinnedBundle) []ScanFinding {
 	views := make([]detect.ToolView, 0, len(tools))
 	for _, t := range tools {
 		views = append(views, toolView(serverName, t))
@@ -219,7 +225,8 @@ func detectEngineFindings(tools []toolDef, serverName string, peerTools map[stri
 	// loaded once (embedded default) at package init; if the bundle failed to
 	// load we log and continue WITHOUT it — a bundle problem must never break
 	// scanning. A live bundle is the expected path.
-	if bundleCheck := defaultBundleCheck(); bundleCheck != nil {
+	bundleCheck := defaultBundleCheckOr(pin)
+	if bundleCheck != nil {
 		engineChecks = append(engineChecks, bundleCheck)
 	}
 
@@ -354,7 +361,7 @@ func (e *Engine) runInProcessScanner(s *ScannerPlugin, req ScanRequest) (*ScanRe
 		data = fileData
 	}
 
-	findings := inProcessToolScan(data, req.ServerName, peerToolDefs(req.PeerTools), s.ID)
+	findings := inProcessToolScanPinned(data, req.ServerName, peerToolDefs(req.PeerTools), s.ID, req.pinnedBundle)
 	// Findings already carry threat_type/threat_level; this is a no-op safety
 	// net consistent with how Docker scanner output is normalized.
 	ClassifyAllFindings(findings)

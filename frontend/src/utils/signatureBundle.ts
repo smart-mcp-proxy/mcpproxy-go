@@ -34,6 +34,38 @@ export interface SignatureBundle {
   pinned?: boolean
   rollback?: boolean
   last_rejection?: BundleRejection | null
+  // --- Spec 087 / Spec 101 US3 freshness fields (tasks B15) ---
+  last_checked_at?: string
+  last_activated_at?: string
+  stale?: boolean
+  stale_after_days?: number
+  refresh?: BundleRefresh | null
+  reprotect?: BundleReprotect | null
+}
+
+/** Refresh-cycle status. Carries the fetch HOST only, never the URL. */
+export interface BundleRefresh {
+  fetch_enabled?: boolean
+  fetch_host?: string
+  interval_seconds?: number
+  last_trigger?: string
+  last_outcome?: string
+  last_reason?: string
+  /** The fetch leg's own last answer, apart from the merged cycle outcome. */
+  fetch_state?: string
+  fetch_reason?: string
+  last_attempt_at?: string
+  consecutive_failures?: number
+  next_check_at?: string
+}
+
+/** Post-activation re-protection sweep status (Spec 101 FR-019). */
+export interface BundleReprotect {
+  state?: string
+  reason?: string
+  last_completed_at?: string
+  servers_scanned?: number
+  servers_with_hits?: number
 }
 
 export interface BundleRejection {
@@ -60,6 +92,15 @@ export interface LastRejectionSummary {
   at: string
 }
 
+/** B16-style conditions: states of the refresh itself that need attention. */
+export type RefreshProblemKind = 'stale' | 'stuck' | 'fetch_inactive'
+
+export interface RefreshProblem {
+  kind: RefreshProblemKind
+  /** Plain-language why, carrying no digest, path, URL or host. */
+  explanation: string
+}
+
 export interface SignatureBundleSummary {
   /** Stat title. */
   title: string
@@ -81,6 +122,14 @@ export interface SignatureBundleSummary {
   degraded: DegradedCoverage | null
   /** Most recent refused candidate; last-known-good is still serving. */
   lastRejection: LastRejectionSummary | null
+  /**
+   * The first B16-style refresh condition (stale corpus, stuck on
+   * last-known-good, fetch configured but inactive), or null. Separate from
+   * `degraded`, which stays coverage-only.
+   */
+  refreshProblem: RefreshProblem | null
+  /** Every refresh condition that holds, in priority order. */
+  refreshProblems: RefreshProblem[]
   pinned: boolean
   rollback: boolean
 }
@@ -136,6 +185,119 @@ function rejectionLabel(reason: string): string {
 
 function plural(n: number, unit: string): string {
   return `${n} ${unit}${n === 1 ? '' : 's'}`
+}
+
+const OUTCOME_LABELS: Record<string, string> = {
+  activated: 'Activated a new bundle',
+  // Neutral on purpose: `unchanged` also covers a candidate the pipeline already
+  // refused, and `not_modified` only says the remote resource did not change.
+  // Neither establishes that the serving corpus is current.
+  unchanged: 'No change',
+  not_modified: 'Remote not modified',
+  rejected: 'Candidate refused',
+  fetch_unavailable: 'Fetch unavailable',
+  channel_invalid: 'Channel invalid',
+  superseded: 'Superseded by a settings change',
+  disabled: 'Fetch disabled',
+}
+
+const REASON_LABELS: Record<string, string> = {
+  network_error: 'network error',
+  timeout: 'timed out',
+  http_status: 'unexpected HTTP status',
+  rate_limited: 'rate limited',
+  fetch_off: 'fetch is off',
+  no_url: 'no URL configured',
+  invalid_url: 'URL is invalid',
+  no_trusted_signer: 'no trusted signer configured',
+  state_unavailable: 'anti-downgrade state unavailable',
+}
+
+const REPROTECT_REASON_LABELS: Record<string, string> = {
+  auto_baseline_scan_off: 'the automatic baseline scan is off',
+}
+
+function words(code: string): string {
+  return code.replace(/_/g, ' ')
+}
+
+/** `2026-10-21T06:00:00Z` -> `2026-10-21 06:00 UTC`; anything unparsable stays as sent. */
+function formatWhen(iso: string): string {
+  const t = Date.parse(iso)
+  if (Number.isNaN(t)) return iso
+  return `${new Date(t).toISOString().slice(0, 16).replace('T', ' ')} UTC`
+}
+
+function refreshRowValue(r: BundleRefresh): string {
+  const outcome = r.last_outcome
+  let text = outcome ? (OUTCOME_LABELS[outcome] ?? words(outcome)) : 'No cycle has run yet'
+  if (outcome && r.last_reason) {
+    text += ` (${REASON_LABELS[r.last_reason] ?? words(r.last_reason)})`
+  }
+  if (r.next_check_at) text += `, next check ${formatWhen(r.next_check_at)}`
+  return text
+}
+
+function reprotectRowValue(r: BundleReprotect): string {
+  let text = r.state ?? ''
+  if (r.reason) text += ` (${REPROTECT_REASON_LABELS[r.reason] ?? words(r.reason)})`
+  if (typeof r.servers_scanned === 'number' && r.servers_scanned > 0) {
+    text += `, ${r.servers_with_hits ?? 0} of ${r.servers_scanned} ${r.servers_scanned === 1 ? 'server' : 'servers'} matched`
+  }
+  if (r.last_completed_at) text += `, last completed ${formatWhen(r.last_completed_at)}`
+  return text
+}
+
+/** Reasons that mean "the pipeline correctly refused a replay"; never a problem. */
+const QUIET_REJECTIONS = new Set(['downgrade', 'deny_listed'])
+const FETCH_CONFIG_REASONS = new Set(['no_url', 'invalid_url', 'no_trusted_signer'])
+const FAILURE_WARN_AT = 3
+
+/**
+ * The three B16 conditions, mirroring scanner.BundleDoctorWarnings so the Web UI
+ * and `mcpproxy doctor` never disagree: a stale corpus on an install that can
+ * refresh, a refresh stuck on last-known-good, and fetch configured but inactive.
+ */
+function refreshProblemsOf(b: SignatureBundle): RefreshProblem[] {
+  const out: RefreshProblem[] = []
+  const refresh = b.refresh ?? null
+  const fetchOn = refresh?.fetch_enabled === true
+
+  if (b.stale === true && (b.source === 'file' || b.source === 'fetch' || fetchOn)) {
+    const age = typeof b.staleness_days === 'number' ? plural(b.staleness_days, 'day') + ' old' : 'past its freshness threshold'
+    const threshold = typeof b.stale_after_days === 'number' ? ` (the threshold is ${plural(b.stale_after_days, 'day')})` : ''
+    out.push({
+      kind: 'stale',
+      explanation: `The signature corpus is ${age}${threshold}, so newer signatures may be missing. Run "mcpproxy security bundle refresh" or check the refresh source.`,
+    })
+  }
+
+  const rej = b.last_rejection
+  let stuck = ''
+  if (rej && rej.reason && !QUIET_REJECTIONS.has(rej.reason)) {
+    const since = Date.parse(b.last_activated_at ?? b.loaded_at ?? '')
+    const at = Date.parse(rej.at ?? '')
+    if (!Number.isNaN(at) && (Number.isNaN(since) || at > since)) {
+      stuck = `A newer candidate was refused (${rejectionLabel(rej.reason)}); the previous bundle is still serving as last-known-good.`
+    }
+  }
+  if (!stuck && (refresh?.consecutive_failures ?? 0) >= FAILURE_WARN_AT) {
+    stuck = `The last ${refresh!.consecutive_failures} refresh attempts failed; the previous bundle is still serving as last-known-good.`
+  }
+  if (stuck) out.push({ kind: 'stuck', explanation: stuck })
+
+  if (
+    fetchOn &&
+    refresh?.fetch_state === 'disabled' &&
+    refresh.fetch_reason &&
+    FETCH_CONFIG_REASONS.has(refresh.fetch_reason)
+  ) {
+    out.push({
+      kind: 'fetch_inactive',
+      explanation: `Fetching is enabled but not running: ${REASON_LABELS[refresh.fetch_reason]}. Check the tpa_fetch_url, tpa_active_root and tpa_operator_signers settings.`,
+    })
+  }
+  return out
 }
 
 /**
@@ -201,11 +363,32 @@ export function formatSignatureBundle(
   if (typeof bundle.staleness_days === 'number') {
     identity.push({ label: 'Age', value: plural(bundle.staleness_days, 'day') })
   }
+  // Spec 087 FR-017: when the corpus was last checked and activated, how the
+  // last refresh cycle went, and the re-protection sweep. Each row appears only
+  // when the daemon reports it, so an older backend renders exactly as before.
+  if (bundle.last_checked_at) {
+    identity.push({ label: 'Last checked', value: formatWhen(bundle.last_checked_at) })
+  }
+  if (bundle.last_activated_at) {
+    identity.push({ label: 'Last activated', value: formatWhen(bundle.last_activated_at) })
+  }
+  const refresh = bundle.refresh ?? null
+  if (refresh && (refresh.last_outcome || refresh.next_check_at)) {
+    identity.push({ label: 'Refresh', value: refreshRowValue(refresh) })
+  }
+  if (refresh?.fetch_enabled && refresh.fetch_host) {
+    identity.push({ label: 'Fetch host', value: refresh.fetch_host })
+  }
+  if (bundle.reprotect?.state) {
+    identity.push({ label: 'Re-protection', value: reprotectRowValue(bundle.reprotect) })
+  }
 
   const rej = bundle.last_rejection
   const lastRejection: LastRejectionSummary | null = rej && rej.reason
     ? { reason: rej.reason, label: rejectionLabel(rej.reason), detail: rej.detail ?? '', at: rej.at ?? '' }
     : null
+
+  const refreshProblems = refreshProblemsOf(bundle)
 
   return {
     title: 'Signatures (runnable)',
@@ -220,6 +403,8 @@ export function formatSignatureBundle(
       ? { reason: bundle.degraded_reason ?? '', explanation: describeDegradedReason(bundle.degraded_reason) }
       : null,
     lastRejection,
+    refreshProblem: refreshProblems[0] ?? null,
+    refreshProblems,
     pinned: bundle.pinned === true,
     rollback: bundle.rollback === true,
   }

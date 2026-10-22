@@ -295,6 +295,15 @@ func defaultBundleCheck() *BundleCheck {
 	return check
 }
 
+// defaultBundleCheckOr is the pinned snapshot's check when one is supplied,
+// else the active bundle check.
+func defaultBundleCheckOr(pin *pinnedBundle) *BundleCheck {
+	if pin != nil {
+		return pin.check
+	}
+	return defaultBundleCheck()
+}
+
 // loadBundleCheck parses, version-checks, and compiles a scanner bundle into a
 // BundleCheck. It:
 //   - refuses an unsupported bundle_version major/minor (do not run stale rules),

@@ -549,8 +549,13 @@ func runServer(cmd *cobra.Command, _ []string) error {
 		zap.Bool("enable_prompts", cfg.EnablePrompts))
 
 	// Ensure API key is configured
-	apiKey, wasGenerated, source := cfg.EnsureAPIKey()
-
+	apiKey, wasGenerated, source, keyErr := cfg.EnsureAPIKey()
+	if keyErr != nil {
+		// Both MCPPROXY_API_KEY and MCPPROXY_API_KEY_FILE are set, or the file
+		// cannot be used. Stop here: generating and saving a key instead would
+		// replace the credential the operator meant to run with.
+		return keyErr
+	}
 	// SECURITY: API key is always required - empty keys are never allowed
 	if apiKey == "" {
 		return fmt.Errorf("API key is required but could not be generated")
@@ -788,23 +793,53 @@ func readConfigFile(path string) (*config.Config, error) {
 	return config.DecodeConfigFile(path)
 }
 
+// implicitDataDirConfigPath is the config file `serve` uses when no --config was
+// given but a data directory was: <data-dir>/mcp_config.json when it exists, and
+// on a first run (no config in the data dir or in the legacy discovery
+// locations) the same path so the default config is seeded inside the named
+// directory instead of under $HOME. "" keeps the legacy discovery (cwd, then
+// $HOME/.mcpproxy).
+func implicitDataDirConfigPath() string {
+	if dataDir == "" {
+		return ""
+	}
+	p := config.GetConfigPath(dataDir)
+	if _, err := os.Stat(p); err == nil {
+		return p
+	}
+	if !legacyConfigExists() {
+		return p
+	}
+	return ""
+}
+
 func loadConfig(cmd *cobra.Command) (*config.Config, *serveConfigSaver, error) {
 	var cfg *config.Config
 	var err error
-	loadedPath := configFile
+
+	// A --data-dir (or MCPPROXY_DATA_DIR) names where this instance keeps its
+	// state, config included: every management command already reads
+	// <data-dir>/mcp_config.json (GH #854/#897/#908), so `serve` must too or
+	// the two disagree about the listen address and API key. An explicit
+	// --config still wins.
+	configPath := configFile
+	if configPath == "" {
+		configPath = implicitDataDirConfigPath()
+	}
+	loadedPath := configPath
 
 	// Load configuration - use LoadFromFile if config file specified, otherwise use Load
-	if configFile != "" {
+	if configPath != "" {
 		// A named config that has never been written is a FIRST RUN, not an
 		// error: the relocated tray instance of GH #936 spawns its core with
 		// --data-dir <root> --config <root>/mcp_config.json against a root
 		// nothing has used before. The implicit path has always created its
 		// default here; the explicit one used to exit with "no such file or
 		// directory" instead, which made that whole flow unusable.
-		if _, ensureErr := config.EnsureConfigFile(configFile, dataDir); ensureErr != nil {
+		if _, ensureErr := config.EnsureConfigFile(configPath, dataDir); ensureErr != nil {
 			return nil, nil, ensureErr
 		}
-		cfg, err = config.LoadFromFile(configFile)
+		cfg, err = config.LoadFromFile(configPath)
 	} else {
 		cfg, loadedPath, err = config.LoadWithPath()
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/bundlesig"
@@ -30,6 +31,26 @@ type bundlePolicy struct {
 	OperatorBaseline    uint64
 	OperatorBaselineSet bool
 	OperatorEpoch       uint64
+
+	// FetchEnabled and FetchURL mirror security.tpa_fetch_enabled (with its
+	// environment override) and security.tpa_fetch_url. They are part of the
+	// policy fingerprint: a change to either supersedes an in-flight download
+	// (tasks B8, B9).
+	FetchEnabled bool
+	FetchURL     string
+
+	// ActiveRootKeys is how many trusted keys belong to ActiveRoot. Zero means
+	// no fetched pair could ever verify, so the fetch leg issues no request
+	// (B10 no_trusted_signer). Derived from the key set, so it adds nothing to
+	// the fingerprint.
+	ActiveRootKeys int
+
+	// RefreshInterval and StaleAfterDays are display and scheduling settings,
+	// not policy: they are deliberately NOT part of Fingerprint (B15), so a
+	// threshold edit takes effect on the next status read without rerunning
+	// the pipeline.
+	RefreshInterval time.Duration
+	StaleAfterDays  int
 
 	// PublisherEpoch and PublisherBaseline are the binary's anchors, captured
 	// when the policy is built so that one run sees one consistent view.
@@ -68,12 +89,42 @@ func policyFor(sec *config.SecurityConfig, path string) *bundlePolicy {
 		OperatorBaseline:    opBase,
 		OperatorBaselineSet: opBaseSet,
 		OperatorEpoch:       sec.EffectiveTPAOperatorEpoch(),
+		FetchEnabled:        sec.IsTPAFetchEnabled(),
+		FetchURL:            sec.EffectiveTPAFetchURL(),
+		RefreshInterval:     clampRefreshInterval(sec.EffectiveTPARefreshInterval()),
+		StaleAfterDays:      sec.EffectiveTPAStaleAfterDays(),
 		PublisherEpoch:      publisherTrustEpoch,
 		PublisherBaseline:   pubBase,
 		Warnings:            warnings,
 	}
+	for _, k := range keys {
+		if k.Authority == p.ActiveRoot {
+			p.ActiveRootKeys++
+		}
+	}
 	p.Fingerprint = p.fingerprint(keys)
 	return p
+}
+
+// sameSettings reports whether o would apply exactly what p applies: the same
+// policy fingerprint and the same display settings. The refresher compares a
+// policy it captured at the start of a cycle with the live one.
+func (p *bundlePolicy) sameSettings(o *bundlePolicy) bool {
+	return p.Fingerprint == o.Fingerprint &&
+		p.RefreshInterval == o.RefreshInterval &&
+		p.StaleAfterDays == o.StaleAfterDays
+}
+
+// minRefreshInterval is the floor of the refresh cadence (B1). A test seam on
+// the refresher goes lower.
+const minRefreshInterval = time.Hour
+
+// clampRefreshInterval applies the runtime's 1h floor to the configured cadence.
+func clampRefreshInterval(d time.Duration) time.Duration {
+	if d < minRefreshInterval {
+		return minRefreshInterval
+	}
+	return d
 }
 
 // fingerprint hashes a canonical, length-prefixed encoding of every policy
@@ -96,11 +147,38 @@ func (p *bundlePolicy) fingerprint(keys []bundlesig.Key) string {
 	field("operator_epoch", strconv.FormatUint(p.OperatorEpoch, 10))
 	field("publisher_epoch", strconv.FormatUint(p.PublisherEpoch, 10))
 	field("publisher_baseline", strconv.FormatUint(p.PublisherBaseline, 10))
+	field("fetch_enabled", strconv.FormatBool(p.FetchEnabled))
+	field("fetch_url", p.FetchURL)
 	field("keys", strconv.Itoa(len(ids)))
 	for _, id := range ids {
 		field("key", id)
 	}
 	return hex.EncodeToString(h.Sum(nil))
+}
+
+// externalConfigured reports whether an external (non-embedded) bundle source
+// is configured or already serving: the configured path, a recorded fetched
+// Active bundle, or an enabled fetch with nothing external serving yet (tasks
+// B9, Hazard A). It is a function rather than a policy method because
+// bundlePolicy holds configuration only; the recorded Active record lives in
+// the committed state st (nil-safe).
+//
+// The fetched-Active clause keeps a fetched bundle alive when the fetch is
+// switched off: dropping silently to the weaker embedded corpus would be an
+// unrequested degrade (security bundle rollback --embedded is the explicit way
+// back). A FILE bundle gets no such grace, with fetch on or off: with its path
+// removed the operator removed it, so an enabled fetch does not keep a recorded
+// file Active alive (nor restore it from its last-known-good files). An enabled
+// fetch with no external bundle recorded still counts as configured, so a
+// fetched or pinned bundle can come back.
+func externalConfigured(policy *bundlePolicy, st *TPABundleState) bool {
+	if policy.Path != "" {
+		return true
+	}
+	if st != nil && st.Active != nil {
+		return st.Active.Source == BundleSourceFetch
+	}
+	return policy.FetchEnabled
 }
 
 // currentEpoch returns the trusted epoch of auth (FR-005a). An unknown

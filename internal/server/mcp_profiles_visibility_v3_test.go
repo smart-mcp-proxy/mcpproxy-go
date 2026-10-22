@@ -201,6 +201,7 @@ var profilesReadArgs = []map[string]any{
 	{"operation": "list_clients"},
 	{"operation": "effective_tools", "name": "work-full"},
 	{"operation": "explain", "profile": "work-full", "tool": "github:list_issues"},
+	{"operation": "suggest"},
 }
 
 var profilesMutatingArgs = []map[string]any{

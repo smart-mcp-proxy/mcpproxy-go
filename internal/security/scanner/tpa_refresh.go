@@ -1,0 +1,940 @@
+package scanner
+
+import (
+	"context"
+	"math/rand/v2"
+	"net/http"
+	"sync"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+)
+
+// The refresh scheduler (Spec 087 FR-003, FR-004, FR-009 to FR-015; Spec 101
+// US3 tasks B6 to B8, B19, B20). One BundleRefresher per process runs a cycle
+// per interval: the network-free file leg, then the optional fetch leg. Every
+// trigger (timer tick, manual refresh, config nudge) that arrives during a
+// cycle joins it, so there is one download and one activation per distinct
+// candidate.
+//
+// Locking rules this file keeps:
+//   - network I/O never happens under bundleRT.mu (the fetch adapter takes no
+//     lock; the pipeline is entered only through applyPolicy/offerCandidate);
+//   - the refresher never reads rt.state or rt.active: it reads the snapshot
+//     publishLocked leaves in bundleFacts;
+//   - the refresher never takes Runtime.mu: live configuration arrives through
+//     ConfigProvider and Nudge.
+
+const (
+	// refreshCycleDeadline is the total time budget of one cycle; the CLI's hard
+	// limit is 30s (B8).
+	refreshCycleDeadline = 20 * time.Second
+	// refreshFirstMin and refreshFirstMax bound the first cycle after Start.
+	refreshFirstMin = 30 * time.Second
+	refreshFirstMax = 5 * time.Minute
+	// refreshJitter is the +/- fraction applied to the interval.
+	refreshJitter = 0.10
+	// refreshRetryCap caps how far a rate limit may push the next attempt.
+	refreshRetryCap = 24 * time.Hour
+	// refreshLogEvery is how often a persisting failure is logged again.
+	refreshLogEvery = 24 * time.Hour
+)
+
+// RefreshClock is the time seam of the scheduler. Tests inject a fake whose
+// timers fire on demand; production uses the real clock (nil Clock).
+type RefreshClock interface {
+	Now() time.Time
+	// NewTimer returns a timer that fires once after d.
+	NewTimer(d time.Duration) RefreshTimer
+}
+
+// RefreshTimer is the timer half of RefreshClock, shaped like *time.Timer.
+type RefreshTimer interface {
+	// C delivers the fire time.
+	C() <-chan time.Time
+	Stop() bool
+	Reset(d time.Duration) bool
+}
+
+type realClock struct{}
+
+func (realClock) Now() time.Time { return time.Now() }
+
+func (realClock) NewTimer(d time.Duration) RefreshTimer { return realTimer{time.NewTimer(d)} }
+
+type realTimer struct{ t *time.Timer }
+
+func (r realTimer) C() <-chan time.Time        { return r.t.C }
+func (r realTimer) Stop() bool                 { return r.t.Stop() }
+func (r realTimer) Reset(d time.Duration) bool { return r.t.Reset(d) }
+
+// BundleRefresherOptions are the construction-time seams of a BundleRefresher.
+// Every field is optional; the zero value selects the production defaults.
+type BundleRefresherOptions struct {
+	// Clock replaces the real clock and timers.
+	Clock RefreshClock
+	// Rand returns a uniform value in [0,1) for jitter.
+	Rand func() float64
+	// HTTPClient, when set, is used as is; otherwise one is built from
+	// Transport and the egress rules.
+	HTTPClient *http.Client
+	// Transport replaces the base transport of the built client.
+	Transport http.RoundTripper
+	// Resolver replaces DNS for the egress checks.
+	Resolver FetchResolver
+	// ConfigProvider returns the live security config each cycle. The
+	// refresher never takes Runtime.mu to read it. The refresher also calls it
+	// inside the bundle runtime's critical section (the freshness checks of the
+	// file leg and of the offer), so it must be quick and must not call back into
+	// the bundle runtime.
+	ConfigProvider func() *config.SecurityConfig
+	// Logger is the injected logger (nil => no-op).
+	Logger *zap.Logger
+	// Version is the mcpproxy version for the User-Agent header.
+	Version string
+	// IntervalOverride is a test seam that replaces the configured interval
+	// and bypasses the 1h floor; zero means "use the config".
+	IntervalOverride time.Duration
+}
+
+// cycleCall is one in-flight cycle that triggers join.
+type cycleCall struct{ done chan struct{} }
+
+// BundleRefresher owns the refresh lifecycle. Start/Stop follow the
+// telemetry.Service pattern: Stop cancels and joins, a Start after Stop is a
+// no-op.
+type BundleRefresher struct {
+	opts  BundleRefresherOptions
+	clock RefreshClock
+
+	mu      sync.Mutex
+	started bool
+	stopped bool
+	running bool
+	base    context.Context
+	cancel  context.CancelFunc
+	wg      sync.WaitGroup
+
+	// cycle is the in-flight cycle, nil between cycles.
+	cycle *cycleCall
+
+	// gen is bumped on any change to the fetch settings or to an input of the
+	// policy fingerprint; fp is the fingerprint last seen. A download finished
+	// under an older generation is discarded as superseded (B8).
+	gen uint64
+	fp  string
+	// nudged is the config the last Nudge delivered, the fallback when there is
+	// no ConfigProvider. nudgedSet tells a delivered nil (the security block
+	// was removed: the default policy) from "nothing delivered yet".
+	nudged    *config.SecurityConfig
+	nudgedSet bool
+	// nudgeSeq counts every Nudge; Start compares it with its value at config
+	// capture so it never overwrites settings a concurrent Nudge delivered.
+	nudgeSeq uint64
+	interval time.Duration
+
+	// due is the one authoritative time the next timer cycle is due. Every
+	// scheduling decision sets it under r.mu, in the same critical section as
+	// the state change that causes it: Start, the completion of a cycle of any
+	// trigger, a Nudge. Starting a cycle clears it; a cycle's completion sets
+	// it to the next interval (or the recorded rate-limit reset when later),
+	// unless a Nudge asked for an early look after the cycle began, which then
+	// stands. The loop only arms its timer to due, and a tick that fires before
+	// due is stale (a cycle completed since the arm and satisfied the check, or
+	// recorded a rate limit): it re-arms and starts nothing (B6).
+	due time.Time
+	// dueEarly says due is an early look a settings change asked for; an
+	// interval change does not push it out.
+	dueEarly bool
+	// wake tells the loop to re-read due; it carries no decision of its own.
+	wake    chan struct{}
+	etags   map[string]string
+	retryAt time.Time
+
+	// lastLogKey and lastLogAt deduplicate failure logs per (outcome, reason).
+	lastLogKey string
+	lastLogAt  time.Time
+
+	// Test seams, set before Start and never in production. afterCapture runs
+	// once the cycle captured the live config and generation; beforeOffer runs
+	// when a downloaded candidate is about to be offered to the pipeline.
+	afterCapture func()
+	beforeOffer  func()
+	// beforeTimerCycle runs in the loop after it took a timer tick and before
+	// it starts that tick's cycle: the window in which a manual cycle can
+	// complete while the old tick is already in hand.
+	beforeTimerCycle func()
+	// startCaptured runs in Start between the config capture and the lock.
+	startCaptured func()
+	// afterCompletionWake runs in the cycle goroutine once the cycle's
+	// completion woke the loop and before the goroutine finishes: the window in
+	// which the loop can consume that wake ahead of the goroutine's exit.
+	afterCompletionWake func(trigger string)
+}
+
+// NewBundleRefresher builds a refresher; it does nothing until Start.
+func NewBundleRefresher(opts BundleRefresherOptions) *BundleRefresher {
+	r := &BundleRefresher{
+		opts:  opts,
+		clock: opts.Clock,
+		wake:  make(chan struct{}, 1),
+		etags: map[string]string{},
+	}
+	if r.clock == nil {
+		r.clock = realClock{}
+	}
+	if r.opts.Version == "" {
+		r.opts.Version = "dev"
+	}
+	return r
+}
+
+// config returns the live security config: the provider's when one is
+// installed (authoritative, even when it answers nil because the security block
+// was removed), else the last nudged one, else nil. It never holds r.mu across
+// the provider call.
+func (r *BundleRefresher) config() *config.SecurityConfig {
+	if r.opts.ConfigProvider != nil {
+		return r.opts.ConfigProvider()
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nudged
+}
+
+// hasConfigSource reports whether config() speaks for the operator: a provider
+// is installed or a Nudge delivered something (possibly nil, the default
+// policy). Without either, a nil config means "nothing configured through us"
+// and the cycle re-reads whatever policy the runtime already holds.
+func (r *BundleRefresher) hasConfigSource() bool {
+	if r.opts.ConfigProvider != nil {
+		return true
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.nudgedSet
+}
+
+func (r *BundleRefresher) random() float64 {
+	if r.opts.Rand != nil {
+		return r.opts.Rand()
+	}
+	return rand.Float64()
+}
+
+func (r *BundleRefresher) logger(fallback *zap.Logger) *zap.Logger {
+	if r.opts.Logger != nil {
+		return r.opts.Logger
+	}
+	return fallback
+}
+
+// intervalFor is the effective cadence for sec.
+func (r *BundleRefresher) intervalFor(sec *config.SecurityConfig) time.Duration {
+	if r.opts.IntervalOverride > 0 {
+		return r.opts.IntervalOverride
+	}
+	return clampRefreshInterval(sec.EffectiveTPARefreshInterval())
+}
+
+// fingerprintOf is the policy fingerprint of sec; nil is the default policy.
+func fingerprintOf(sec *config.SecurityConfig) string {
+	return policyFromConfig(sec).Fingerprint
+}
+
+// jitter returns d spread uniformly over +/- refreshJitter.
+func (r *BundleRefresher) jitter(d time.Duration) time.Duration {
+	f := 1 - refreshJitter + 2*refreshJitter*r.random()
+	return time.Duration(float64(d) * f)
+}
+
+// firstDelay is the delay before the first cycle after Start (a uniform point
+// in [30s, 5m], so a fleet restarted together does not stampede the channel),
+// and after a settings change that needs an early look. With an interval
+// override (tests) the first cycle follows the override instead.
+func (r *BundleRefresher) firstDelay() time.Duration {
+	if r.opts.IntervalOverride > 0 {
+		return r.jitter(r.opts.IntervalOverride)
+	}
+	return refreshFirstMin + time.Duration(r.random()*float64(refreshFirstMax-refreshFirstMin))
+}
+
+// nextDelayLocked is the delay from now until the next cycle: the interval
+// +/- 10%, pushed out to a pending rate-limit reset (capped at 24h) when that
+// is later. The caller holds r.mu.
+func (r *BundleRefresher) nextDelayLocked(now time.Time) time.Duration {
+	d := r.jitter(r.interval)
+	if !r.retryAt.IsZero() {
+		if until := r.retryAt.Sub(now); until > 0 {
+			if until > refreshRetryCap {
+				until = refreshRetryCap
+			}
+			if until > d {
+				d = until
+			}
+		}
+	}
+	return d
+}
+
+// Start begins the cycle loop, bound to ctx. A second Start, or a Start after
+// Stop, is a no-op. The loop timer is created before Start returns.
+func (r *BundleRefresher) Start(ctx context.Context) {
+	r.mu.Lock()
+	nudgesBefore := r.nudgeSeq
+	r.mu.Unlock()
+	sec := r.config()
+	if r.startCaptured != nil {
+		r.startCaptured()
+	}
+
+	r.mu.Lock()
+	if r.started || r.stopped {
+		r.mu.Unlock()
+		return
+	}
+	r.started, r.running = true, true
+	r.base, r.cancel = context.WithCancel(ctx)
+	// A Nudge since the capture delivered newer settings (and set interval and
+	// fp itself, both being zero before Start); the older capture must not
+	// overwrite them.
+	if r.nudgeSeq == nudgesBefore {
+		r.interval = r.intervalFor(sec)
+		r.fp = fingerprintOf(sec)
+	}
+	now := r.clock.Now()
+	delay := r.firstDelay()
+	r.due, r.dueEarly = now.Add(delay), false
+	due := r.due
+	base := r.base
+	r.wg.Add(1)
+	r.mu.Unlock()
+
+	if r.opts.IntervalOverride > 0 {
+		bundleRT.disp.setIntervalOverride(int(r.opts.IntervalOverride / time.Second))
+	}
+	timer := r.clock.NewTimer(delay)
+	bundleRT.disp.setNextCheck(due)
+	go r.loop(base, timer, due)
+}
+
+// Stop cancels any in-flight cycle and returns only after the loop goroutine
+// and every cycle goroutine exited. Idempotent.
+func (r *BundleRefresher) Stop() {
+	r.mu.Lock()
+	r.stopped = true
+	cancel := r.cancel
+	r.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	r.wg.Wait()
+}
+
+// Running reports whether the loop goroutine is alive.
+func (r *BundleRefresher) Running() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.running && !r.stopped
+}
+
+// Nudge tells the refresher the security config changed: it re-reads the
+// fetch and trust settings, bumps the generation (superseding an in-flight
+// download whose inputs changed) and moves the due time. Non-blocking; a Nudge
+// after Stop began is a no-op.
+//
+// A nil sec means the security block was removed: the default policy applies,
+// exactly as configureTPABundle(nil) applied it to the runtime.
+func (r *BundleRefresher) Nudge(sec *config.SecurityConfig) {
+	policy := policyFromConfig(sec)
+
+	r.mu.Lock()
+	if r.stopped {
+		r.mu.Unlock()
+		return
+	}
+	// Published under r.mu, after the stopped check: a Nudge that begins after
+	// Stop publishes nothing, and one racing Stop is ordered by the lock.
+	bundleRT.disp.applySettings(policy)
+	r.nudged, r.nudgedSet = sec, true
+	r.nudgeSeq++
+	early := false
+	if policy.Fingerprint != r.fp {
+		r.fp = policy.Fingerprint
+		r.gen++
+		r.etags = map[string]string{}
+		r.retryAt = time.Time{}
+		// Fetch or trust settings changed with the fetch on: look again within
+		// the first-cycle window instead of waiting out the interval.
+		early = policy.FetchEnabled
+	}
+	intervalChanged := false
+	if iv := r.intervalFor(sec); iv != r.interval {
+		r.interval = iv
+		intervalChanged = true
+	}
+	moved := false
+	if r.started { // before Start, Start sets the first due time
+		now := r.clock.Now()
+		switch {
+		case early:
+			moved = r.scheduleEarlyLocked(now)
+		case intervalChanged && r.cycle == nil:
+			// With a cycle in flight its completion schedules at the new cadence.
+			moved = r.rescheduleLocked(now)
+		}
+	}
+	r.mu.Unlock()
+	if moved {
+		r.wakeLoop()
+	}
+}
+
+// scheduleEarlyLocked moves due to an early look (a point in the first-cycle
+// window from now), unless something is already due sooner. During a cycle
+// due is clear, so the look is scheduled and that cycle's completion keeps it:
+// the cycle began under the older settings. It reports whether due moved.
+func (r *BundleRefresher) scheduleEarlyLocked(now time.Time) bool {
+	at := now.Add(r.firstDelay())
+	r.dueEarly = true
+	if !r.due.IsZero() && !at.Before(r.due) {
+		return false
+	}
+	r.due = at
+	return true
+}
+
+// rescheduleLocked recomputes due at the (new) cadence from now, keeping an
+// early look that is sooner. It reports whether due moved.
+func (r *BundleRefresher) rescheduleLocked(now time.Time) bool {
+	next := now.Add(r.nextDelayLocked(now))
+	if r.dueEarly && !r.due.IsZero() && r.due.Before(next) {
+		return false
+	}
+	if next.Equal(r.due) {
+		return false
+	}
+	r.due, r.dueEarly = next, false
+	return true
+}
+
+// finishCycleLocked ends the in-flight cycle: it clears r.cycle and schedules
+// the next timer cycle at the interval, or at the recorded rate-limit reset
+// when later. A cycle of any trigger satisfies the check, so a manual one pushes
+// the timer out too. An early look a Nudge asked for after the cycle began (due
+// is set again) stands, or the new settings would wait out a full interval. It
+// reports whether due moved.
+func (r *BundleRefresher) finishCycleLocked(now time.Time) bool {
+	r.cycle = nil
+	if !r.due.IsZero() {
+		return false
+	}
+	r.due, r.dueEarly = now.Add(r.nextDelayLocked(now)), false
+	return true
+}
+
+// wakeLoop tells the loop to re-read due, without blocking.
+func (r *BundleRefresher) wakeLoop() {
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
+}
+
+// armToDue arms the loop timer to the current due time and publishes it as the
+// next check. Nothing to do while no time is due (a cycle is in flight; its
+// completion sets one and wakes the loop) or while the timer is still armed
+// for exactly that time. It returns what the timer is now armed for.
+func (r *BundleRefresher) armToDue(t RefreshTimer, armedFor time.Time, armed bool) (time.Time, bool) {
+	r.mu.Lock()
+	due := r.due
+	r.mu.Unlock()
+	if due.IsZero() || (armed && due.Equal(armedFor)) {
+		return armedFor, armed
+	}
+	now := r.clock.Now()
+	d := max(due.Sub(now), 0)
+	t.Stop()
+	t.Reset(d)
+	bundleRT.disp.setNextCheck(now.Add(d))
+	return due, true
+}
+
+// loop is the scheduler goroutine: one timer, armed to the due time. A
+// suspended machine or a forward clock jump therefore yields ONE cycle on
+// wake, never a catch-up burst. The due time is compared on the monotonic
+// clock, and a fired timer counts as no earlier than the time it was armed
+// for, so a backward wall-clock jump cannot wedge it.
+func (r *BundleRefresher) loop(ctx context.Context, timer RefreshTimer, armedFor time.Time) {
+	defer r.wg.Done()
+	defer func() {
+		timer.Stop()
+		r.mu.Lock()
+		r.running = false
+		r.mu.Unlock()
+	}()
+	armed := true
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C():
+			armed = false
+			if r.beforeTimerCycle != nil {
+				r.beforeTimerCycle()
+			}
+			c, stale := r.startTimerCycle(armedFor)
+			if !stale {
+				if c == nil {
+					return
+				}
+				select {
+				case <-c.cycle.done:
+				case <-ctx.Done():
+					return
+				}
+			}
+			armedFor, armed = r.armToDue(timer, armedFor, armed)
+		case <-r.wake:
+			armedFor, armed = r.armToDue(timer, armedFor, armed)
+		}
+	}
+}
+
+// startedCycle is a joined or newly started cycle.
+type startedCycle struct{ cycle *cycleCall }
+
+// joinOrStart joins the in-flight cycle or starts one with the given trigger.
+// It returns nil when the refresher is not running.
+func (r *BundleRefresher) joinOrStart(trigger string) *startedCycle {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.joinOrStartLocked(trigger)
+}
+
+// startTimerCycle is joinOrStart for a tick of a timer armed for armedFor. The
+// due check and admission are one critical section with a cycle's completion:
+// a cycle still in flight is joined (the loop re-arms from its completion); with
+// none in flight, a tick that fires before due is stale (a completion moved due
+// out since the arm) and starts nothing.
+func (r *BundleRefresher) startTimerCycle(armedFor time.Time) (c *startedCycle, stale bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.started && !r.stopped && r.cycle == nil {
+		fired := r.clock.Now()
+		if armedFor.After(fired) {
+			fired = armedFor // a timer fires no earlier than the time it was armed for
+		}
+		if r.due.After(fired) {
+			return nil, true
+		}
+	}
+	return r.joinOrStartLocked(RefreshTriggerTimer), false
+}
+
+func (r *BundleRefresher) joinOrStartLocked(trigger string) *startedCycle {
+	if !r.started || r.stopped {
+		return nil
+	}
+	if r.cycle != nil {
+		return &startedCycle{cycle: r.cycle}
+	}
+	c := &cycleCall{done: make(chan struct{})}
+	r.cycle = c
+	// The cycle being started is the look whatever was due asked for; its
+	// completion schedules the next one.
+	r.due, r.dueEarly = time.Time{}, false
+	r.wg.Add(1)
+	go r.executeCycle(r.base, c, trigger)
+	return &startedCycle{cycle: c}
+}
+
+func (r *BundleRefresher) executeCycle(ctx context.Context, c *cycleCall, trigger string) {
+	defer r.wg.Done()
+	defer func() {
+		// Done here, not by a waiting caller, so a manual caller that gave up
+		// (cancelled context) cannot leave the original deadline to fire and
+		// ignore a rate limit the cycle just recorded. Clearing r.cycle and
+		// setting due are one critical section, and the loop is woken only
+		// after both.
+		r.mu.Lock()
+		moved := r.finishCycleLocked(r.clock.Now())
+		r.mu.Unlock()
+		if moved {
+			r.wakeLoop()
+		}
+		if r.afterCompletionWake != nil {
+			r.afterCompletionWake(trigger)
+		}
+		close(c.done)
+	}()
+	r.doCycle(ctx, trigger)
+}
+
+// Refresh runs one cycle now (trigger "manual"), joining an in-flight cycle if
+// there is one, and returns the resulting status. Without a running loop it is
+// ReloadBundle.
+func (r *BundleRefresher) Refresh(ctx context.Context, logger *zap.Logger) BundleInfo {
+	c := r.joinOrStart(RefreshTriggerManual)
+	if c == nil {
+		return ReloadBundle(r.logger(logger))
+	}
+	select {
+	case <-c.cycle.done:
+	case <-ctx.Done():
+		return BundleStatus()
+	}
+	return BundleStatus()
+}
+
+// --- one cycle ----------------------------------------------------------------
+
+// legResult is what one leg of a cycle reports.
+type legResult struct {
+	Outcome string
+	Reason  string
+	Detail  string
+}
+
+// doCycle runs the file leg, then the fetch leg, and records the result. A
+// cycle cancelled by Stop reports nothing.
+func (r *BundleRefresher) doCycle(ctx context.Context, trigger string) {
+	raw := r.logger(zap.NewNop())
+	log := raw.Named(scannerLogName)
+	sec := r.config()
+	startGen := r.currentGeneration()
+	if r.afterCapture != nil {
+		r.afterCapture()
+	}
+
+	// The 20s total budget runs on the injected clock, so a trickled body is
+	// cut deterministically in tests. Its cancellation cause is how
+	// fetchCandidate tells a timeout from a Stop.
+	cctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	deadline := r.clock.NewTimer(refreshCycleDeadline)
+	defer deadline.Stop()
+	go func() {
+		select {
+		case <-deadline.C():
+			cancel(errCycleDeadline)
+		case <-cctx.Done():
+		}
+	}()
+
+	// File leg: re-apply the live policy (idempotent) and re-read the
+	// configured file. Network-free and always on.
+	var (
+		policy  *bundlePolicy
+		file    runOutcome
+		applied = true
+	)
+	if sec != nil || r.hasConfigSource() {
+		// A nil config from a live source is the default policy (the security
+		// block was removed), not "keep whatever the runtime holds". The policy
+		// was captured above; a reload that replaced it since must not be undone,
+		// so freshness is checked inside the activation critical section.
+		policy = policyFromConfig(sec)
+		file, applied = applyPolicyIf(policy, raw, trigger, func() bool { return r.policyIsLive(policy) })
+	} else {
+		_, file = reloadLastPolicy(raw, trigger)
+	}
+
+	// Fetch leg: only when B10 allows it; fetchCandidate decides. A superseded
+	// file leg ends the cycle (the reload that replaced its policy already ran the
+	// pipeline), and a file activation owns the cycle: the fetch wins at the next
+	// one (B7).
+	var fetch legResult
+	switch {
+	case !applied:
+		fetch = legResult{Outcome: RefreshOutcomeSuperseded}
+	case file.Activated:
+		fetch = r.skippedFetchLeg(policy)
+	default:
+		fetch = r.fetchLeg(cctx, sec, policy, startGen, log)
+	}
+	if ctx.Err() != nil {
+		return // Stop: nothing is recorded
+	}
+
+	outcome, reason := mergeLegs(file, fetch)
+	rec := cycleRecord{Trigger: trigger, Outcome: outcome, Reason: reason, At: r.clock.Now()}
+	// The failure counter follows the outcome the cycle reports (B6).
+	switch outcome {
+	case RefreshOutcomeFetchUnavailable, RefreshOutcomeChannelInvalid:
+		rec.Failures = failuresIncrement
+	case RefreshOutcomeSuperseded:
+		rec.Failures = failuresKeep
+	default:
+		rec.Failures = failuresReset
+	}
+	// The fetch leg's own answer is kept apart from the merged outcome so the
+	// doctor still sees a leg that cannot run behind a file activation.
+	if fetch.Outcome != "" && fetch.Outcome != RefreshOutcomeSuperseded {
+		rec.FetchSet, rec.FetchState, rec.FetchReason = true, fetch.Outcome, fetch.Reason
+	} else if applied && file.Activated && fetch.Outcome == "" {
+		// The fetch leg was skipped behind a file activation and the (possibly
+		// repaired) configuration lets it run: whatever it last said under an
+		// older configuration (a no_trusted_signer disabled state) no longer
+		// describes it, so clear it rather than let the doctor keep warning.
+		rec.FetchSet, rec.FetchState, rec.FetchReason = true, "", ""
+	}
+	bundleRT.disp.recordCycle(rec)
+	r.logOutcome(log, outcome, reason, fetch, policy)
+	notifyRefreshObserver(classOfOutcome(outcome))
+}
+
+// mergeLegs picks the one outcome a cycle reports: an activation beats a
+// refusal, which beats whatever the fetch leg said, which beats "disabled".
+//
+// A file-leg refusal that merely persists (the same stale or unreadable file,
+// refused again every cycle) does not mask the fetch leg: it reports on its own
+// cycle only while it is new or while the fetch leg has nothing to say (B7).
+func mergeLegs(file runOutcome, fetch legResult) (outcome, reason string) {
+	fetchSilent := fetch.Outcome == "" || (fetch.Outcome == RefreshOutcomeDisabled && fetch.Reason == RefreshReasonFetchOff)
+	switch {
+	case file.Activated || fetch.Outcome == RefreshOutcomeActivated:
+		return RefreshOutcomeActivated, ""
+	case fetch.Outcome == RefreshOutcomeRejected || (file.Rejection != nil && (file.RejectionNew || fetchSilent)):
+		return RefreshOutcomeRejected, ""
+	case fetch.Outcome == "":
+		return RefreshOutcomeUnchanged, ""
+	}
+	return fetch.Outcome, fetch.Reason
+}
+
+// classOfOutcome maps a cycle outcome to the observer's coarse class.
+func classOfOutcome(outcome string) RefreshOutcomeClass {
+	switch outcome {
+	case RefreshOutcomeActivated:
+		return RefreshClassActivated
+	case RefreshOutcomeRejected:
+		return RefreshClassRejected
+	case RefreshOutcomeFetchUnavailable, RefreshOutcomeChannelInvalid:
+		return RefreshClassUnavailable
+	}
+	return RefreshClassUnchanged
+}
+
+func (r *BundleRefresher) currentGeneration() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.gen
+}
+
+// policyIsLive reports whether p, a policy captured earlier in the cycle, still
+// matches the live configuration. It runs inside the bundle runtime's critical
+// section (applyPolicyIf), so a reload that applied a newer policy first is
+// always seen: the live config is replaced before the reload applies it.
+func (r *BundleRefresher) policyIsLive(p *bundlePolicy) bool {
+	return p.sameSettings(policyFromConfig(r.config()))
+}
+
+// skippedFetchLeg is the fetch leg's answer for a cycle whose file leg
+// activated, so the leg does not run (B7). Nothing to report unless the
+// configuration keeps the leg from ever running: that is still surfaced.
+func (r *BundleRefresher) skippedFetchLeg(policy *bundlePolicy) legResult {
+	if policy == nil {
+		return legResult{}
+	}
+	_, reason := fetchGate(fetchSettings{
+		Enabled:          policy.FetchEnabled,
+		URL:              policy.FetchURL,
+		Policy:           policy,
+		StateUnavailable: publishedStateUnavailable(),
+	})
+	if reason == "" {
+		return legResult{}
+	}
+	return legResult{Outcome: RefreshOutcomeDisabled, Reason: reason}
+}
+
+// stillCurrent reports whether the settings a download started under are still
+// the live ones: same generation and the same policy fingerprint (which covers
+// the fetch settings, the active root, the operator signers, baseline and
+// epoch, require_signed_bundle and the bundle path). Otherwise the candidate
+// is discarded as superseded (B8).
+func (r *BundleRefresher) stillCurrent(startGen uint64, policy *bundlePolicy) bool {
+	return r.currentGeneration() == startGen && fingerprintOf(r.config()) == policy.Fingerprint
+}
+
+func (r *BundleRefresher) etagFor(url string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.etags[url]
+}
+
+// rememberETag caches etag for url, but only while the generation the response
+// was fetched under is still the live one: a Nudge that cleared the cache
+// (trust or fetch settings changed) must not have a cycle already in flight
+// write its stale validator back.
+func (r *BundleRefresher) rememberETag(url, etag string, gen uint64) {
+	if etag == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.gen != gen {
+		return
+	}
+	r.etags[url] = etag
+}
+
+// setRetryAt records (or clears) the rate-limit delay, but only while the
+// generation the response was fetched under is still the live one: a Nudge
+// that cleared the delay with the settings must not have a superseded response
+// restore it (the same guard as rememberETag).
+func (r *BundleRefresher) setRetryAt(t time.Time, gen uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.gen != gen {
+		return
+	}
+	r.retryAt = t
+}
+
+// fetchLeg runs the optional network leg. The HTTP exchange happens with no
+// lock held; the candidate reaches the pipeline only through offerCandidate.
+func (r *BundleRefresher) fetchLeg(ctx context.Context, sec *config.SecurityConfig, policy *bundlePolicy, startGen uint64, log *zap.Logger) legResult {
+	if sec == nil || policy == nil {
+		return legResult{Outcome: RefreshOutcomeDisabled, Reason: RefreshReasonFetchOff}
+	}
+	client := r.opts.HTTPClient
+	if client == nil && r.opts.Transport != nil {
+		client = &http.Client{Transport: r.opts.Transport}
+	}
+	settings := fetchSettings{
+		Enabled:          policy.FetchEnabled,
+		URL:              policy.FetchURL,
+		Version:          r.opts.Version,
+		Policy:           policy,
+		StateUnavailable: publishedStateUnavailable(),
+		Watermark:        publishedWatermark,
+		ETag:             r.etagFor(policy.FetchURL),
+		Client:           client,
+		Resolver:         r.opts.Resolver,
+		Now:              r.clock.Now,
+		Log:              log,
+	}
+	res := fetchCandidate(ctx, settings)
+	if !res.RetryAt.IsZero() {
+		r.setRetryAt(res.RetryAt, startGen)
+	} else if res.Outcome != RefreshOutcomeDisabled {
+		r.setRetryAt(time.Time{}, startGen)
+	}
+
+	leg := legResult{Outcome: res.Outcome, Reason: res.Reason, Detail: res.Detail}
+	if res.Outcome != fetchOutcomeCandidate {
+		if res.Outcome == RefreshOutcomeUnchanged || res.Outcome == RefreshOutcomeNotModified {
+			r.rememberETag(policy.FetchURL, res.ETag, startGen)
+		}
+		return leg
+	}
+
+	if ctx.Err() != nil && context.Cause(ctx) != errCycleDeadline {
+		return legResult{} // Stop: discarded without a trace
+	}
+	if r.beforeOffer != nil {
+		r.beforeOffer()
+	}
+	// The supersession check runs inside the serialized offer, under the bundle
+	// runtime's lock, so a settings change cannot land between the check and the
+	// activation (B8).
+	_, off, offered := offerCandidateIf(*res.Candidate, r.logger(zap.NewNop()), func() bool { return r.stillCurrent(startGen, policy) })
+	if !offered {
+		log.Info("a fetched TPA bundle was discarded: the fetch or trust settings changed while it downloaded",
+			zap.String("host", fetchHostOf(policy.FetchURL)))
+		return legResult{Outcome: RefreshOutcomeSuperseded}
+	}
+	// The validator is remembered only once the pair is settled for good: it
+	// activated, or it is byte-identical to what serves. A refused pair (and a
+	// repeat of one the negative cache already holds) must be downloaded and
+	// offered again next cycle: in direct mode the ETag covers the bundle only,
+	// so a 304 would hide a sidecar that appears or changes later, and a trust
+	// change is not the only thing that can turn a refusal into an acceptance.
+	if off.Outcome == RefreshOutcomeActivated || (off.Outcome == RefreshOutcomeUnchanged && !off.Refused) {
+		r.rememberETag(policy.FetchURL, res.ETag, startGen)
+	}
+	return legResult{Outcome: off.Outcome}
+}
+
+// logOutcome logs a failing or misconfigured fetch leg, deduplicated on
+// (outcome, reason): when it changes, or once per 24h while it persists. The
+// line carries the host only (B12).
+func (r *BundleRefresher) logOutcome(log *zap.Logger, outcome, reason string, fetch legResult, policy *bundlePolicy) {
+	key := ""
+	switch outcome {
+	case RefreshOutcomeFetchUnavailable, RefreshOutcomeChannelInvalid:
+		key = outcome + "|" + reason
+	case RefreshOutcomeDisabled:
+		switch reason {
+		case RefreshReasonNoURL, RefreshReasonInvalidURL, RefreshReasonNoTrustedSigner, RefreshReasonStateUnavailable:
+			if policy != nil && policy.FetchEnabled {
+				key = outcome + "|" + reason
+			}
+		}
+	}
+
+	now := r.clock.Now()
+	r.mu.Lock()
+	repeat := key != "" && key == r.lastLogKey && now.Sub(r.lastLogAt) < refreshLogEvery
+	if !repeat {
+		r.lastLogKey = key
+		if key != "" {
+			r.lastLogAt = now
+		}
+	}
+	r.mu.Unlock()
+	if key == "" || repeat {
+		return
+	}
+
+	host := ""
+	if policy != nil {
+		host = fetchHostOf(policy.FetchURL)
+	}
+	fields := []zap.Field{zap.String("outcome", outcome), zap.String("reason", reason), zap.String("host", host)}
+	if fetch.Detail != "" {
+		fields = append(fields, zap.String("detail", fetch.Detail))
+	}
+	if outcome == RefreshOutcomeDisabled {
+		log.Warn("TPA bundle fetch is enabled but cannot run", fields...)
+		return
+	}
+	log.Warn("TPA bundle fetch failed; keeping the last-known-good corpus", fields...)
+}
+
+var (
+	refresherSlotMu sync.RWMutex
+	refresherSlot   *BundleRefresher
+)
+
+// SetBundleRefresher installs r as the process's refresher, the one
+// RefreshBundle consults. nil clears the slot.
+func SetBundleRefresher(r *BundleRefresher) {
+	refresherSlotMu.Lock()
+	defer refresherSlotMu.Unlock()
+	refresherSlot = r
+}
+
+// CurrentBundleRefresher returns the installed refresher, or nil. The runtime
+// uses it on Close to clear the slot only if it still points at its own
+// instance.
+func CurrentBundleRefresher() *BundleRefresher {
+	refresherSlotMu.RLock()
+	defer refresherSlotMu.RUnlock()
+	return refresherSlot
+}
+
+// RefreshBundle is the manual refresh (`security bundle refresh`, B20): one
+// joined cycle (file leg plus fetch leg), trigger "manual". When no running
+// refresher is installed it falls back to ReloadBundle, so a manual refresh
+// still picks up a dropped file.
+func RefreshBundle(ctx context.Context, logger *zap.Logger) BundleInfo {
+	if r := CurrentBundleRefresher(); r != nil && r.Running() {
+		return r.Refresh(ctx, logger)
+	}
+	return ReloadBundle(logger)
+}

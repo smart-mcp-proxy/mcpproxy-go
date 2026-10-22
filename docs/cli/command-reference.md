@@ -19,7 +19,7 @@ These flags are available for all commands:
 |------|-------------|
 | `--config` | Path to configuration file |
 | `--log-level` | Log level (debug, info, warn, error) |
-| `--data-dir, -d` | Data directory path (default: ~/.mcpproxy) |
+| `--data-dir, -d` | Data directory path (default: ~/.mcpproxy). Also the place `serve` reads `mcp_config.json` from when `--config` is not given. Env: `MCPPROXY_DATA_DIR` |
 | `--log-to-file` | Enable logging to file in standard OS location |
 | `--log-dir` | Custom log directory path (overrides standard OS location) |
 | `--help` | Show help for command |
@@ -310,6 +310,15 @@ mcpproxy upstream import <path> [flags]
 | `--format` | Force format (claude-desktop, claude-code, cursor, codex, gemini) | auto-detect |
 | `--dry-run` | Preview import without making changes | `false` |
 | `--no-quarantine` | Don't quarantine imported servers (use with caution) | `false` |
+
+Table, JSON, and YAML output apply the same import. Structured output includes
+`dry_run` and `summary.planned`, `summary.applied`, `summary.skipped`, and
+`summary.failed`. The existing `summary.imported` field remains available:
+it counts applied servers during an import and preview candidates with
+`--dry-run`. A partial failure is rendered with per-server details and returns
+a nonzero exit status; successfully applied servers remain imported. An invalid
+preview also returns nonzero and reports a validation failure without making
+changes.
 
 **Supported Formats:**
 

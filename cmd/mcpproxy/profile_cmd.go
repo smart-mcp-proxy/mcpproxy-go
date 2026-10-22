@@ -90,7 +90,7 @@ func runProfileList(_ *cobra.Command, _ []string) error {
 	rows := make([][]string, 0, len(list.Profiles))
 	for _, p := range list.Profiles {
 		rows = append(rows, []string{
-			p.Name, dash(p.Title), shorten(dash(strings.Join(p.EffectiveServers, ",")), 30), dash(p.MaxTier),
+			p.Name, dash(p.Title), truncateCell(dash(strings.Join(p.EffectiveServers, ",")), 30), dash(p.MaxTier),
 			strconv.Itoa(p.ToolCounts.Read), strconv.Itoa(p.ToolCounts.Write), strconv.Itoa(p.ToolCounts.Destructive),
 			strconv.Itoa(p.ToolCounts.UnannotatedHidden), usedBySummary(p.UsedBy),
 			strconv.Itoa(p.Calls24h), strconv.Itoa(p.Blocked24h),
@@ -123,13 +123,6 @@ func plural(n int) string {
 		return ""
 	}
 	return "s"
-}
-
-func shorten(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max-3] + "..."
 }
 
 type profileShowOpts struct {

@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	upstreamtypes "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 func TestReviewFixtureContract(t *testing.T) {
@@ -89,6 +90,7 @@ func TestReviewFixtureContract(t *testing.T) {
 	review, err := rt.GetServerReview(context.Background(), "filesystem")
 	require.NoError(t, err)
 	require.True(t, review.Server.DefinitionsCaptured)
+	require.Equal(t, "quarantined", review.Server.Readiness)
 	require.Len(t, review.Tools, fixture.Expected.ToolCount)
 	gotByName := make(map[string]ReviewTool, len(review.Tools))
 	for _, got := range review.Tools {
@@ -173,6 +175,35 @@ func TestReviewPayload_ClassifiesCapturedAndLegacyAnnotations(t *testing.T) {
 	require.NotNil(t, byName["safe"].Previous)
 	require.Contains(t, byName["safe"].Diff.Description, "Old description")
 	require.Contains(t, byName["safe"].Diff.Annotations, "Old title")
+}
+
+func TestReviewReadiness_DoesNotTreatApprovalAsConnection(t *testing.T) {
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{
+		{Name: "approved", Enabled: true},
+		{Name: "parked", Enabled: false},
+	})
+	for _, tc := range []struct{ name, want string }{{"approved", "disconnected"}, {"parked", "disabled"}} {
+		review, err := rt.GetServerReview(context.Background(), tc.name)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, review.Server.Readiness)
+		require.False(t, review.Server.Connected)
+	}
+}
+
+func TestReviewConnectionReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		state upstreamtypes.ConnectionState
+		want  string
+	}{
+		{upstreamtypes.StateDisconnected, "disconnected"},
+		{upstreamtypes.StateConnecting, "connecting"},
+		{upstreamtypes.StateAuthenticating, "connecting"},
+		{upstreamtypes.StateDiscovering, "connecting"},
+		{upstreamtypes.StatePendingAuth, "auth_required"},
+		{upstreamtypes.StateError, "error"},
+	} {
+		require.Equal(t, tc.want, reviewConnectionReadiness(tc.state))
+	}
 }
 
 func TestReviewPayload_QueueAndUncapturedDefinitions(t *testing.T) {

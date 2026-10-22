@@ -21,7 +21,7 @@ func tpaBundleTelemetrySnapshot() *telemetry.TPABundleSnapshot {
 // tpaBundleSnapshotFromInfo applies the PROVENANCE gate. The schema line and the
 // sequence are reported only when the active bundle's authority is "publisher"
 // (the embedded default, or signature-verified against a publisher key).
-// Everything else - an unsigned file, or a bundle verified by an operator key -
+// Everything else - an unsigned file or fetch, or a bundle verified by an operator key -
 // reports "other" with no sequence, REGARDLESS of the version string it carries:
 // an operator corpus that copies a publisher version string must not be able to
 // masquerade as that publisher release in the fleet statistics.
@@ -31,8 +31,13 @@ func tpaBundleSnapshotFromInfo(info scanner.BundleInfo) *telemetry.TPABundleSnap
 		SignatureVerified: info.SignatureVerified,
 		BundleVersion:     "other",
 	}
-	if info.Source == scanner.BundleSourceEmbedded {
+	// Any other source (including an unknown one) stays "file"; the closed
+	// enum the backstop enforces is embedded|file|fetch.
+	switch info.Source {
+	case scanner.BundleSourceEmbedded:
 		snap.Source = scanner.BundleSourceEmbedded
+	case scanner.BundleSourceFetch:
+		snap.Source = scanner.BundleSourceFetch
 	}
 	if info.Authority != scanner.AuthorityPublisher {
 		return snap

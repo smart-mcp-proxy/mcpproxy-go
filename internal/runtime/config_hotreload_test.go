@@ -198,6 +198,78 @@ func TestDetectConfigChanges_TPATrustRoot(t *testing.T) {
 	})
 }
 
+// TestDetectConfigChanges_TPARefresh (Spec 087 FR-016 / Spec 101 US3 B1): the
+// refresh keys sit inside SecurityConfig, which is compared whole, so an edit
+// to any of them must report `security` changed (the runtime then nudges the
+// refresher, B8). Absent versus explicit values are distinct: an absent stale
+// threshold means 30, an explicit 0 means never stale.
+func TestDetectConfigChanges_TPARefresh(t *testing.T) {
+	i := func(v int) *int { return &v }
+	mk := func(mut func(*config.SecurityConfig)) *config.Config {
+		sc := &config.SecurityConfig{}
+		if mut != nil {
+			mut(sc)
+		}
+		return &config.Config{Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{}, Security: sc}
+	}
+
+	tests := []struct {
+		name string
+		old  func(*config.SecurityConfig)
+		next func(*config.SecurityConfig)
+	}{
+		{
+			name: "interval",
+			old:  func(sc *config.SecurityConfig) { sc.TPARefreshInterval = config.Duration(24 * time.Hour) },
+			next: func(sc *config.SecurityConfig) { sc.TPARefreshInterval = config.Duration(6 * time.Hour) },
+		},
+		{
+			name: "interval absent vs set",
+			old:  nil,
+			next: func(sc *config.SecurityConfig) { sc.TPARefreshInterval = config.Duration(6 * time.Hour) },
+		},
+		{
+			name: "fetch enabled",
+			old:  nil,
+			next: func(sc *config.SecurityConfig) { sc.TPAFetchEnabled = true },
+		},
+		{
+			name: "fetch url",
+			old:  func(sc *config.SecurityConfig) { sc.TPAFetchURL = "https://a.example.com/b.json" },
+			next: func(sc *config.SecurityConfig) { sc.TPAFetchURL = "https://b.example.com/b.json" },
+		},
+		{
+			name: "stale days",
+			old:  func(sc *config.SecurityConfig) { sc.TPAStaleAfterDays = i(30) },
+			next: func(sc *config.SecurityConfig) { sc.TPAStaleAfterDays = i(60) },
+		},
+		{
+			name: "stale days absent vs explicit zero",
+			old:  nil,
+			next: func(sc *config.SecurityConfig) { sc.TPAStaleAfterDays = i(0) },
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name+" change detected", func(t *testing.T) {
+			result := DetectConfigChanges(mk(tc.old), mk(tc.next))
+			require.True(t, result.Success)
+			assert.Contains(t, result.ChangedFields, "security")
+		})
+	}
+
+	t.Run("identical refresh keys are not a change", func(t *testing.T) {
+		set := func(sc *config.SecurityConfig) {
+			sc.TPARefreshInterval = config.Duration(6 * time.Hour)
+			sc.TPAFetchEnabled = true
+			sc.TPAFetchURL = "https://a.example.com/b.json"
+			sc.TPAStaleAfterDays = i(0)
+		}
+		result := DetectConfigChanges(mk(set), mk(set))
+		require.True(t, result.Success)
+		assert.NotContains(t, result.ChangedFields, "security")
+	})
+}
+
 func TestDetectConfigChanges(t *testing.T) {
 	baseConfig := &config.Config{
 		Listen:            "127.0.0.1:8080",

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -279,4 +280,193 @@ func TestSignatureBundleLines_UnsignedExternalShowsNoAuthorityNoise(t *testing.T
 	joined := strings.Join(lines, "\n")
 	assert.Contains(t, joined, "DEGRADED: unsigned_external_active")
 	assert.Contains(t, joined, "unsigned", "an unsigned external bundle says so")
+}
+
+// --- Spec 087 / Spec 101 US3: `security bundle refresh` and the freshness lines ---
+
+// bundleCLIRefreshedBody is a fetch-sourced bundle that is stale and whose last
+// refresh cycle was rate limited, with a re-protection sweep that found a hit.
+func bundleCLIRefreshedBody() string {
+	return `{
+  "source": "fetch",
+  "runnable_rules": 10,
+  "skipped_rules": 0,
+  "declared_skipped": 0,
+  "generated_at": "2026-08-01T00:00:00Z",
+  "fingerprint": "0123456789ab",
+  "full_digest": "` + bundleCLIDigest + `",
+  "sequence": "42",
+  "authority": "operator",
+  "trust_epoch": 1,
+  "signature_verified": true,
+  "staleness_days": 81,
+  "stale": true,
+  "stale_after_days": 30,
+  "coverage_degraded": false,
+  "loaded_at": "2026-10-20T00:00:00Z",
+  "last_checked_at": "2026-10-21T06:00:00Z",
+  "last_activated_at": "2026-10-20T06:00:00Z",
+  "refresh": {
+    "fetch_enabled": true,
+    "fetch_host": "mirror.example.test",
+    "interval_seconds": 86400,
+    "last_trigger": "manual",
+    "last_outcome": "fetch_unavailable",
+    "last_reason": "rate_limited",
+    "last_attempt_at": "2026-10-21T06:00:05Z",
+    "consecutive_failures": 2,
+    "next_check_at": "2026-10-22T06:00:00Z"
+  },
+  "reprotect": {
+    "state": "idle",
+    "last_completed_at": "2026-10-20T06:05:00Z",
+    "servers_scanned": 4,
+    "servers_with_hits": 1
+  }
+}`
+}
+
+func TestSecurityBundleRefresh_PostsAndPrintsFreshnessLines(t *testing.T) {
+	rec := newRESTRecorder(t, map[string]cannedResponse{"POST /api/v1/security/bundle/refresh": okResp(bundleCLIRefreshedBody())})
+
+	out, _, err := runCLI(t, GetSecurityCommand, "table", "bundle", "refresh")
+	require.NoError(t, err)
+
+	req := rec.only(t)
+	assert.Equal(t, http.MethodPost, req.Method)
+	assert.Equal(t, "/api/v1/security/bundle/refresh", req.Path)
+
+	assert.Contains(t, out, "Last checked:")
+	assert.Contains(t, out, "2026-10-21 06:00:00")
+	assert.Contains(t, out, "Last activated:")
+	assert.Contains(t, out, "2026-10-20 06:00:00")
+	assert.Contains(t, out, "Refresh:")
+	assert.Contains(t, out, "fetch_unavailable (rate_limited)")
+	assert.Contains(t, out, "next check 2026-10-22 06:00:00")
+	assert.Contains(t, out, "Fetch host:")
+	assert.Contains(t, out, "mirror.example.test")
+	assert.Contains(t, out, "Re-protection:")
+	assert.Contains(t, out, "idle")
+	assert.Contains(t, out, "STALE", "a stale bundle gets a loud line, not just an age number")
+	assert.Contains(t, out, "30 days", "the stale line names the threshold")
+}
+
+func TestSecurityBundleRefresh_JSONAndYAMLPassTheFieldsThrough(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{"POST /api/v1/security/bundle/refresh": okResp(bundleCLIRefreshedBody())})
+
+	out, _, err := runCLI(t, GetSecurityCommand, "json", "bundle", "refresh")
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal([]byte(out), &got), out)
+	assert.Equal(t, true, got["stale"])
+	assert.Equal(t, "2026-10-21T06:00:00Z", got["last_checked_at"])
+	refresh, _ := got["refresh"].(map[string]any)
+	require.NotNil(t, refresh)
+	assert.Equal(t, "fetch_unavailable", refresh["last_outcome"])
+	reprotect, _ := got["reprotect"].(map[string]any)
+	require.NotNil(t, reprotect)
+	assert.Equal(t, "idle", reprotect["state"])
+
+	out, _, err = runCLI(t, GetSecurityCommand, "yaml", "bundle", "refresh")
+	require.NoError(t, err)
+	assert.Contains(t, out, "last_outcome: fetch_unavailable")
+}
+
+func TestSecurityBundleRefresh_AgentTokenRefusalIsSurfaced(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{"POST /api/v1/security/bundle/refresh": refuse(http.StatusForbidden, `{"success":false,"error":"operation requires admin access"}`)})
+	_, _, err := runCLI(t, GetSecurityCommand, "table", "bundle", "refresh")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires admin access")
+}
+
+// The freshness lines also appear on the plain status read (one edit in
+// signatureBundleLines covers status, overview and every mutation).
+func TestSecurityBundleStatus_ShowsFreshnessLines(t *testing.T) {
+	newRESTRecorder(t, map[string]cannedResponse{"GET /api/v1/security/bundle": okResp(bundleCLIRefreshedBody())})
+	out, _, err := runCLI(t, GetSecurityCommand, "table", "bundle")
+	require.NoError(t, err)
+	for _, want := range []string{"Last checked:", "Last activated:", "Refresh:", "Fetch host:", "Re-protection:", "STALE"} {
+		assert.Contains(t, out, want)
+	}
+}
+
+func TestSignatureBundleLines_RefreshAndReprotectDetails(t *testing.T) {
+	var bundle map[string]any
+	require.NoError(t, json.Unmarshal([]byte(bundleCLIRefreshedBody()), &bundle))
+	joined := strings.Join(signatureBundleLines(map[string]any{"signature_bundle": bundle}), "\n")
+
+	assert.Contains(t, joined, "1 of 4 servers", "the sweep line says how many scanned servers matched the new corpus")
+	assert.Contains(t, joined, "2 consecutive failures", "repeated failures are called out")
+}
+
+func TestSignatureBundleLines_ReprotectSuspendedShowsReason(t *testing.T) {
+	joined := strings.Join(signatureBundleLines(map[string]any{"signature_bundle": map[string]any{
+		"source": "file", "path": "/p", "runnable_rules": float64(6),
+		"reprotect": map[string]any{
+			"state": "suspended", "reason": "auto_baseline_scan_off",
+			"servers_scanned": float64(0), "servers_with_hits": float64(0),
+		},
+	}}), "\n")
+	assert.Contains(t, joined, "Re-protection:")
+	assert.Contains(t, joined, "suspended")
+	assert.Contains(t, joined, "auto_baseline_scan_off")
+}
+
+func TestSignatureBundleLines_RefreshDisabledShowsReasonNotHost(t *testing.T) {
+	joined := strings.Join(signatureBundleLines(map[string]any{"signature_bundle": map[string]any{
+		"source": "file", "path": "/p", "runnable_rules": float64(6),
+		"refresh": map[string]any{
+			"fetch_enabled": true, "interval_seconds": float64(86400),
+			"last_outcome": "disabled", "last_reason": "no_trusted_signer",
+		},
+	}}), "\n")
+	assert.Contains(t, joined, "Refresh:")
+	assert.Contains(t, joined, "disabled (no_trusted_signer)")
+	assert.NotContains(t, joined, "Fetch host:", "no host is known, so no host line")
+	assert.NotContains(t, joined, "next check", "no next_check_at, so no next-check clause")
+}
+
+func TestSignatureBundleLines_EmbeddedWithoutRefreshHasNoFreshnessNoise(t *testing.T) {
+	joined := strings.Join(signatureBundleLines(map[string]any{"signature_bundle": map[string]any{
+		"source": "embedded", "runnable_rules": float64(6), "coverage_degraded": false,
+		"sequence": "5", "authority": "publisher", "staleness_days": float64(12),
+	}}), "\n")
+	assert.NotContains(t, joined, "STALE")
+	assert.NotContains(t, joined, "Fetch host")
+	assert.NotContains(t, joined, "Last checked")
+	assert.NotContains(t, joined, "Last activated")
+	assert.NotContains(t, joined, "Refresh:")
+	assert.NotContains(t, joined, "Re-protection")
+}
+
+func TestSignatureBundleLines_FetchOffRefreshBlockHasNoHostLine(t *testing.T) {
+	joined := strings.Join(signatureBundleLines(map[string]any{"signature_bundle": map[string]any{
+		"source": "file", "path": "/p", "runnable_rules": float64(6),
+		"last_checked_at": "2026-10-21T06:00:00Z",
+		"refresh": map[string]any{
+			"fetch_enabled": false, "interval_seconds": float64(86400),
+			"last_trigger": "timer", "last_outcome": "unchanged",
+			"next_check_at": "2026-10-22T06:00:00Z",
+		},
+	}}), "\n")
+	assert.Contains(t, joined, "Last checked:")
+	assert.Contains(t, joined, "unchanged")
+	assert.NotContains(t, joined, "Fetch host")
+	assert.NotContains(t, joined, "STALE")
+}
+
+// The daemon stamps the re-protection completion in UTC while the cycle
+// timestamps carry the host's local offset, so the human line must convert it
+// to local time like the rest of the block.
+func TestBundleReprotectText_LastCompletedShownInLocalTime(t *testing.T) {
+	orig := time.Local
+	time.Local = time.FixedZone("TEST", 5*3600+30*60)
+	t.Cleanup(func() { time.Local = orig })
+
+	text := bundleReprotectText(map[string]any{"reprotect": map[string]any{
+		"state":             "idle",
+		"last_completed_at": "2026-10-20T06:05:00Z",
+	}})
+	assert.Contains(t, text, "last completed 2026-10-20 11:35:00")
+	assert.NotContains(t, text, "06:05:00", "the UTC clock must not leak into the human output")
 }

@@ -942,6 +942,54 @@ func (m *Manager) LoadBaselineSweepState() (*BaselineSweepState, error) {
 	return state, nil
 }
 
+// TPA bundle re-protection sweep marker
+
+// SaveBundleReprotectState persists the marker written when a re-protection
+// sweep completes with zero failures (Spec 101 FR-019, B17). The record is
+// installation-wide, so no server purge touches it.
+func (m *Manager) SaveBundleReprotectState(state BundleReprotectState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
+		if err != nil {
+			return fmt.Errorf("failed to create meta bucket: %w", err)
+		}
+		data, err := json.Marshal(state)
+		if err != nil {
+			return fmt.Errorf("failed to marshal bundle reprotect state: %w", err)
+		}
+		return bucket.Put([]byte(BundleReprotectDoneKey), data)
+	})
+}
+
+// LoadBundleReprotectState returns the re-protection marker, or the zero value
+// when no sweep has ever completed. A read never creates the bucket. A value
+// that cannot be decoded is an error, never a silent zero: the caller decides
+// whether to re-run the sweep.
+func (m *Manager) LoadBundleReprotectState() (BundleReprotectState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var state BundleReprotectState
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(MetaBucket))
+		if bucket == nil {
+			return nil
+		}
+		data := bucket.Get([]byte(BundleReprotectDoneKey))
+		if data == nil {
+			return nil
+		}
+		return json.Unmarshal(data, &state)
+	})
+	if err != nil {
+		return BundleReprotectState{}, fmt.Errorf("failed to load bundle reprotect state: %w", err)
+	}
+	return state, nil
+}
+
 // Maintenance operations
 
 // Backup creates a backup of the database
