@@ -1106,7 +1106,10 @@ The tokenizer automatically maps model names to encodings:
     "enabled": false,
     "require_client_cert": false,
     "certs_dir": "",
-    "hsts": true
+    "hsts": true,
+    "extra_sans": [],
+    "cert_file": "",
+    "key_file": ""
   }
 }
 ```
@@ -1114,9 +1117,12 @@ The tokenizer automatically maps model names to encodings:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable HTTPS/TLS |
-| `require_client_cert` | boolean | `false` | Enable mutual TLS (mTLS) for client authentication |
+| `require_client_cert` | boolean | `false` | Enable mutual TLS (mTLS) for client authentication. Client certificates are verified against the local CA (`ca.pem` in `certs_dir`), also when `cert_file` is set |
 | `certs_dir` | string | `""` | Custom certificate directory (defaults to `${data_dir}/certs`) |
 | `hsts` | boolean | `true` | Enable HTTP Strict Transport Security headers |
+| `extra_sans` | string array | `[]` | DNS names and IP addresses added to the generated server certificate, next to `localhost`, `127.0.0.1` and `::1`. See [Other host names](#other-host-names-extra_sans-cert_file-key_file) |
+| `cert_file` | string | `""` | Absolute path of a server certificate (PEM) to serve instead of the generated one. Needs `key_file` |
+| `key_file` | string | `""` | Absolute path of the private key (PEM) for `cert_file`. Needs `cert_file` |
 
 **Quick Setup:**
 1. Trust certificate: `mcpproxy trust-cert`
@@ -1124,6 +1130,36 @@ The tokenizer automatically maps model names to encodings:
 3. Update client URLs to use `https://`
 
 See [Setup Guide - HTTPS](setup.md#optional-https-setup) for complete details.
+
+### Other host names (`extra_sans`, `cert_file`, `key_file`)
+
+The generated server certificate is valid for `localhost`, `127.0.0.1` and `::1` only. A client that reaches mcpproxy by another name (a Docker or Kubernetes service name, a VM host name, a tailnet name) cannot verify it. Either of these fixes that; without either, startup is unchanged.
+
+**`extra_sans`**: names for the generated certificate.
+
+```json
+{ "tls": { "enabled": true, "extra_sans": ["mcp.internal", "mcpproxy.tail1234.ts.net", "10.0.0.5"] } }
+```
+
+- Each entry is a host name or an IP address. Wildcards (`*.example.com`), URLs, ports and empty entries are refused at startup with an error that names the entry. Host names are lower-cased; non-ASCII names must be given in punycode.
+- When `localhost.pem` does not carry exactly `localhost`, `127.0.0.1`, `::1` and the listed names, it is replaced with a new certificate and key signed by the **same** CA. `ca.pem` and `ca.key` are never regenerated, so clients that trust `ca.pem` (`mcpproxy trust-cert`, `NODE_EXTRA_CA_CERTS`) keep working with no new step. A restart with an unchanged list rewrites nothing.
+- With an empty list an existing `localhost.pem` is used as it is. If `localhost.pem` was not issued by the local CA and does not carry the listed names (for example one you placed there by hand), startup stops instead of overwriting it; use `cert_file` and `key_file` for such a certificate.
+- The new certificate is valid for one year from the day it is written. There is no automatic renewal.
+- Environment variable: `MCPPROXY_TLS_EXTRA_SANS` (comma-separated).
+
+**`cert_file` and `key_file`**: serve a certificate you provide (a public or internal CA, `certbot`, a Docker or Kubernetes secret mount).
+
+```json
+{ "tls": { "enabled": true, "cert_file": "/run/secrets/mcpproxy.crt", "key_file": "/run/secrets/mcpproxy.key" } }
+```
+
+- Set both or neither, as absolute paths to PEM files. A certificate chain goes in `cert_file`, leaf first. The files are read with the same rules as `MCPPROXY_API_KEY_FILE`: a symlink is followed (Kubernetes secret volumes), the target must be a regular file of at most 64 KiB.
+- If only one is set, a file cannot be read, or the key does not belong to the certificate, startup stops with an error that names the setting and never shows file content.
+- Nothing is generated and `extra_sans` is refused alongside it, since the certificate you provide decides the names. The local CA is created only when `require_client_cert` is on, because client certificates are verified against it.
+- The files are read once at startup. After the certificate is renewed, restart mcpproxy.
+- Environment variables: `MCPPROXY_TLS_CERT_FILE` and `MCPPROXY_TLS_KEY_FILE`.
+
+Changing any of the three settings needs a restart.
 
 ---
 
@@ -1867,6 +1903,9 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_TLS_ENABLED` | `tls.enabled` | Enable HTTPS/TLS |
 | `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | `tls.require_client_cert` | Enable mTLS |
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |
+| `MCPPROXY_TLS_EXTRA_SANS` | `tls.extra_sans` | Comma-separated host names and IP addresses added to the generated certificate |
+| `MCPPROXY_TLS_CERT_FILE` | `tls.cert_file` | Absolute path of a server certificate to serve instead of the generated one |
+| `MCPPROXY_TLS_KEY_FILE` | `tls.key_file` | Absolute path of the private key for `MCPPROXY_TLS_CERT_FILE` |
 | `MCPPROXY_DATA_DIR` | `data_dir` | Override data directory; also where `serve` looks for `mcp_config.json` (same as `--data-dir`) |
 | `MCPPROXY_DATA` | `data_dir` | Override data directory only (legacy name; `MCPPROXY_DATA_DIR` wins) |
 | `MCPPROXY_TOOL_RESPONSE_MODE` | `tool_response_mode` | `retrieve_tools` serialization: `full` (default) or `compact` |
