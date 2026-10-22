@@ -7264,6 +7264,16 @@ func (p *MCPProxyServer) monitorConnectionStatusAt(ctx context.Context, serverNa
 // CallToolDirect calls a tool directly without going through the MCP server's request handling
 // This is used for REST API calls that bypass the MCP protocol layer
 func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToolRequest) (interface{}, error) {
+	return p.callToolDirect(ctx, request, false)
+}
+
+// CallToolDirectResult keeps the MCP result envelope for the REST tool-call
+// endpoint. Other direct callers retain the historical content-only return.
+func (p *MCPProxyServer) CallToolDirectResult(ctx context.Context, request mcp.CallToolRequest) (interface{}, error) {
+	return p.callToolDirect(ctx, request, true)
+}
+
+func (p *MCPProxyServer) callToolDirect(ctx context.Context, request mcp.CallToolRequest, preserveResult bool) (interface{}, error) {
 	toolName := request.Params.Name
 
 	// Spec 093 FR-011: the REST surface must answer a concurrency-limiter shed
@@ -7349,13 +7359,19 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 				if refusal := codeExecRefusal.take(); refusal != nil {
 					return nil, &codeExecDispatchError{err: refusal, message: textContent.Text}
 				}
+				if preserveResult {
+					return result, nil
+				}
 				return nil, fmt.Errorf("%s", textContent.Text)
 			}
 		}
 		return nil, fmt.Errorf("tool call failed")
 	}
 
-	// Return the content as the result
+	if preserveResult {
+		return result, nil
+	}
+	// Return the content as the result for existing direct callers.
 	return result.Content, nil
 }
 

@@ -4424,7 +4424,13 @@ func (s *Server) CallTool(ctx context.Context, toolName string, arguments map[st
 	}
 
 	// Call the tool via MCP proxy
-	result, err := s.mcpProxy.CallToolDirect(ctx, request)
+	var result interface{}
+	var err error
+	if reqcontext.ToolResultEnvelope(ctx) {
+		result, err = s.mcpProxy.CallToolDirectResult(ctx, request)
+	} else {
+		result, err = s.mcpProxy.CallToolDirect(ctx, request)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("tool call failed: %w", err)
 	}
