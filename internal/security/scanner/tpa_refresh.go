@@ -148,6 +148,12 @@ type BundleRefresher struct {
 	// soonSeq counts the wakeSoon signals Nudge sent; a manual Refresh that
 	// finds it moved must not push the timer out over that early re-arm.
 	soonSeq uint64
+	// manualDone counts completed manual cycles (bumped in the same critical
+	// section that clears r.cycle); armedManual is its value when the loop
+	// timer was last armed. A timer tick whose arm predates a completed manual
+	// cycle is stale: that cycle satisfied the check and may have recorded a
+	// rate limit, so the tick must not start another attempt (B6).
+	manualDone, armedManual uint64
 	// nudgeSeq counts every Nudge; Start compares it with its value at config
 	// capture so it never overwrites settings a concurrent Nudge delivered.
 	nudgeSeq uint64
@@ -166,6 +172,10 @@ type BundleRefresher struct {
 	// when a downloaded candidate is about to be offered to the pipeline.
 	afterCapture func()
 	beforeOffer  func()
+	// beforeTimerCycle runs in the loop after it took a timer tick and before
+	// it starts that tick's cycle: the window in which a manual cycle can
+	// complete while the old tick is already in hand.
+	beforeTimerCycle func()
 	// startCaptured runs in Start between the config capture and the lock.
 	startCaptured func()
 }
@@ -401,6 +411,9 @@ func (r *BundleRefresher) takePending() wakeReason {
 
 // arm re-arms the loop timer and publishes the next check time.
 func (r *BundleRefresher) arm(t RefreshTimer, d time.Duration) {
+	r.mu.Lock()
+	r.armedManual = r.manualDone
+	r.mu.Unlock()
 	t.Stop()
 	t.Reset(d)
 	bundleRT.disp.setNextCheck(r.clock.Now().Add(d))
@@ -423,7 +436,20 @@ func (r *BundleRefresher) loop(ctx context.Context, timer RefreshTimer) {
 		case <-ctx.Done():
 			return
 		case <-timer.C():
-			c := r.joinOrStart(RefreshTriggerTimer)
+			if r.beforeTimerCycle != nil {
+				r.beforeTimerCycle()
+			}
+			c, stale := r.startTimerCycle()
+			if stale {
+				// Consume the stale tick and re-arm the way a completed
+				// manual cycle (or a settings change) asks.
+				if r.takePending() == wakeSoon {
+					r.arm(timer, r.firstDelay())
+				} else {
+					r.arm(timer, r.nextDelay())
+				}
+				continue
+			}
 			if c == nil {
 				return
 			}
@@ -456,6 +482,23 @@ type startedCycle struct{ cycle *cycleCall }
 func (r *BundleRefresher) joinOrStart(trigger string) *startedCycle {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.joinOrStartLocked(trigger)
+}
+
+// startTimerCycle is joinOrStart for a timer tick. Admission and the staleness
+// check are one critical section with executeCycle's cleanup, so a manual cycle
+// either is still in flight (the tick joins it and the loop re-arms from its
+// completion) or has already bumped manualDone (the tick is stale).
+func (r *BundleRefresher) startTimerCycle() (c *startedCycle, stale bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.started && !r.stopped && r.cycle == nil && r.manualDone != r.armedManual {
+		return nil, true
+	}
+	return r.joinOrStartLocked(RefreshTriggerTimer), false
+}
+
+func (r *BundleRefresher) joinOrStartLocked(trigger string) *startedCycle {
 	if !r.started || r.stopped {
 		return nil
 	}
@@ -474,6 +517,9 @@ func (r *BundleRefresher) executeCycle(ctx context.Context, c *cycleCall, trigge
 	defer func() {
 		r.mu.Lock()
 		r.cycle = nil
+		if trigger == RefreshTriggerManual {
+			r.manualDone++
+		}
 		r.mu.Unlock()
 		close(c.done)
 	}()
