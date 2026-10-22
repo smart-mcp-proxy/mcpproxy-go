@@ -64,8 +64,11 @@ describe('formatSignatureBundle — refresh and freshness rows', () => {
     const outcome = (o: string, reason?: string) =>
       rows({ ...base, refresh: { fetch_enabled: false, interval_seconds: 86400, last_outcome: o, last_reason: reason } })['Refresh']
     expect(outcome('activated')).toMatch(/activated/i)
-    expect(outcome('unchanged')).toMatch(/up to date/i)
-    expect(outcome('not_modified')).toMatch(/up to date/i)
+    // Neutral wording: neither outcome proves the serving corpus is current.
+    expect(outcome('unchanged')).toBe('No change')
+    expect(outcome('not_modified')).toBe('Remote not modified')
+    expect(outcome('unchanged')).not.toMatch(/up to date/i)
+    expect(outcome('not_modified')).not.toMatch(/up to date/i)
     expect(outcome('rejected')).toMatch(/refused/i)
     expect(outcome('channel_invalid')).toMatch(/channel/i)
     expect(outcome('superseded')).toMatch(/superseded/i)
@@ -154,7 +157,7 @@ describe('formatSignatureBundle — refreshProblem', () => {
   it('flags fetch enabled but inactive for the three configuration reasons only', () => {
     const mk = (reason: string) => formatSignatureBundle({
       source: 'embedded', runnable_rules: 6,
-      refresh: { fetch_enabled: true, interval_seconds: 86400, last_outcome: 'disabled', last_reason: reason },
+      refresh: { fetch_enabled: true, interval_seconds: 86400, last_outcome: 'disabled', last_reason: reason, fetch_state: 'disabled', fetch_reason: reason },
     })!.refreshProblem
     for (const reason of ['no_url', 'invalid_url', 'no_trusted_signer']) {
       expect(mk(reason)?.kind).toBe('fetch_inactive')
@@ -163,11 +166,29 @@ describe('formatSignatureBundle — refreshProblem', () => {
     expect(mk('state_unavailable')).toBeNull()
   })
 
+  it('still flags an inactive fetch leg behind a file activation that owns the cycle outcome', () => {
+    const out = formatSignatureBundle({
+      source: 'file', runnable_rules: 6,
+      refresh: {
+        fetch_enabled: true, interval_seconds: 86400, last_outcome: 'activated',
+        fetch_state: 'disabled', fetch_reason: 'no_trusted_signer',
+      },
+    })!
+    expect(out.refreshProblem?.kind).toBe('fetch_inactive')
+    // The merged outcome alone is not enough: a disabled cycle outcome without
+    // the fetch leg's own state is not reported.
+    const merged = formatSignatureBundle({
+      source: 'embedded', runnable_rules: 6,
+      refresh: { fetch_enabled: true, interval_seconds: 86400, last_outcome: 'disabled', last_reason: 'no_trusted_signer' },
+    })!
+    expect(merged.refreshProblem).toBeNull()
+  })
+
   it('lists every condition in refreshProblems, the first one in refreshProblem', () => {
     const out = formatSignatureBundle({
       ...base, source: 'fetch', staleness_days: 81, stale: true, stale_after_days: 30,
       last_activated_at: activated, last_rejection: { reason: 'key_not_trusted', at: newer },
-      refresh: { fetch_enabled: true, interval_seconds: 86400, last_outcome: 'disabled', last_reason: 'no_trusted_signer', consecutive_failures: 4 },
+      refresh: { fetch_enabled: true, interval_seconds: 86400, last_outcome: 'disabled', last_reason: 'no_trusted_signer', fetch_state: 'disabled', fetch_reason: 'no_trusted_signer', consecutive_failures: 4 },
     })!
     expect(out.refreshProblems.map((p) => p.kind)).toEqual(['stale', 'stuck', 'fetch_inactive'])
     expect(out.refreshProblem).toEqual(out.refreshProblems[0])

@@ -85,7 +85,10 @@ type BundleRefresherOptions struct {
 	// Resolver replaces DNS for the egress checks.
 	Resolver FetchResolver
 	// ConfigProvider returns the live security config each cycle. The
-	// refresher never takes Runtime.mu to read it.
+	// refresher never takes Runtime.mu to read it. The refresher also calls it
+	// inside the bundle runtime's critical section (the freshness checks of the
+	// file leg and of the offer), so it must be quick and must not call back into
+	// the bundle runtime.
 	ConfigProvider func() *config.SecurityConfig
 	// Logger is the injected logger (nil => no-op).
 	Logger *zap.Logger
@@ -154,6 +157,12 @@ type BundleRefresher struct {
 	// lastLogKey and lastLogAt deduplicate failure logs per (outcome, reason).
 	lastLogKey string
 	lastLogAt  time.Time
+
+	// Test seams, set before Start and never in production. afterCapture runs
+	// once the cycle captured the live config and generation; beforeOffer runs
+	// when a downloaded candidate is about to be offered to the pipeline.
+	afterCapture func()
+	beforeOffer  func()
 }
 
 // NewBundleRefresher builds a refresher; it does nothing until Start.
@@ -503,6 +512,9 @@ func (r *BundleRefresher) doCycle(ctx context.Context, trigger string) {
 	log := raw.Named(scannerLogName)
 	sec := r.config()
 	startGen := r.currentGeneration()
+	if r.afterCapture != nil {
+		r.afterCapture()
+	}
 
 	// The 20s total budget runs on the injected clock, so a trickled body is
 	// cut deterministically in tests. Its cancellation cause is how
@@ -522,33 +534,53 @@ func (r *BundleRefresher) doCycle(ctx context.Context, trigger string) {
 	// File leg: re-apply the live policy (idempotent) and re-read the
 	// configured file. Network-free and always on.
 	var (
-		policy *bundlePolicy
-		file   runOutcome
+		policy  *bundlePolicy
+		file    runOutcome
+		applied = true
 	)
 	if sec != nil || r.hasConfigSource() {
 		// A nil config from a live source is the default policy (the security
-		// block was removed), not "keep whatever the runtime holds".
+		// block was removed), not "keep whatever the runtime holds". The policy
+		// was captured above; a reload that replaced it since must not be undone,
+		// so freshness is checked inside the activation critical section.
 		policy = policyFromConfig(sec)
-		file = applyPolicy(policy, raw, trigger)
+		file, applied = applyPolicyIf(policy, raw, trigger, func() bool { return r.policyIsLive(policy) })
 	} else {
 		_, file = reloadLastPolicy(raw, trigger)
 	}
 
-	// Fetch leg: only when B10 allows it; fetchCandidate decides.
-	fetch := r.fetchLeg(cctx, sec, policy, startGen, log)
+	// Fetch leg: only when B10 allows it; fetchCandidate decides. A superseded
+	// file leg ends the cycle (the reload that replaced its policy already ran the
+	// pipeline), and a file activation owns the cycle: the fetch wins at the next
+	// one (B7).
+	var fetch legResult
+	switch {
+	case !applied:
+		fetch = legResult{Outcome: RefreshOutcomeSuperseded}
+	case file.Activated:
+		fetch = r.skippedFetchLeg(policy)
+	default:
+		fetch = r.fetchLeg(cctx, sec, policy, startGen, log)
+	}
 	if ctx.Err() != nil {
 		return // Stop: nothing is recorded
 	}
 
 	outcome, reason := mergeLegs(file, fetch)
 	rec := cycleRecord{Trigger: trigger, Outcome: outcome, Reason: reason, At: r.clock.Now()}
-	switch fetch.Outcome {
+	// The failure counter follows the outcome the cycle reports (B6).
+	switch outcome {
 	case RefreshOutcomeFetchUnavailable, RefreshOutcomeChannelInvalid:
 		rec.Failures = failuresIncrement
 	case RefreshOutcomeSuperseded:
 		rec.Failures = failuresKeep
 	default:
 		rec.Failures = failuresReset
+	}
+	// The fetch leg's own answer is kept apart from the merged outcome so the
+	// doctor still sees a leg that cannot run behind a file activation.
+	if fetch.Outcome != "" && fetch.Outcome != RefreshOutcomeSuperseded {
+		rec.FetchSet, rec.FetchState, rec.FetchReason = true, fetch.Outcome, fetch.Reason
 	}
 	bundleRT.disp.recordCycle(rec)
 	r.logOutcome(log, outcome, reason, fetch, policy)
@@ -591,6 +623,33 @@ func (r *BundleRefresher) currentGeneration() uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.gen
+}
+
+// policyIsLive reports whether p, a policy captured earlier in the cycle, still
+// matches the live configuration. It runs inside the bundle runtime's critical
+// section (applyPolicyIf), so a reload that applied a newer policy first is
+// always seen: the live config is replaced before the reload applies it.
+func (r *BundleRefresher) policyIsLive(p *bundlePolicy) bool {
+	return p.sameSettings(policyFromConfig(r.config()))
+}
+
+// skippedFetchLeg is the fetch leg's answer for a cycle whose file leg
+// activated, so the leg does not run (B7). Nothing to report unless the
+// configuration keeps the leg from ever running: that is still surfaced.
+func (r *BundleRefresher) skippedFetchLeg(policy *bundlePolicy) legResult {
+	if policy == nil {
+		return legResult{}
+	}
+	_, reason := fetchGate(fetchSettings{
+		Enabled:          policy.FetchEnabled,
+		URL:              policy.FetchURL,
+		Policy:           policy,
+		StateUnavailable: publishedStateUnavailable(),
+	})
+	if reason == "" {
+		return legResult{}
+	}
+	return legResult{Outcome: RefreshOutcomeDisabled, Reason: reason}
 }
 
 // stillCurrent reports whether the settings a download started under are still
@@ -671,12 +730,18 @@ func (r *BundleRefresher) fetchLeg(ctx context.Context, sec *config.SecurityConf
 	if ctx.Err() != nil && context.Cause(ctx) != errCycleDeadline {
 		return legResult{} // Stop: discarded without a trace
 	}
-	if !r.stillCurrent(startGen, policy) {
+	if r.beforeOffer != nil {
+		r.beforeOffer()
+	}
+	// The supersession check runs inside the serialized offer, under the bundle
+	// runtime's lock, so a settings change cannot land between the check and the
+	// activation (B8).
+	_, off, offered := offerCandidateIf(*res.Candidate, r.logger(zap.NewNop()), func() bool { return r.stillCurrent(startGen, policy) })
+	if !offered {
 		log.Info("a fetched TPA bundle was discarded: the fetch or trust settings changed while it downloaded",
 			zap.String("host", fetchHostOf(policy.FetchURL)))
 		return legResult{Outcome: RefreshOutcomeSuperseded}
 	}
-	_, off := offerCandidate(*res.Candidate, r.logger(zap.NewNop()))
 	// The validator is remembered only once the pair is settled for good: it
 	// activated, or it is byte-identical to what serves. A refused pair (and a
 	// repeat of one the negative cache already holds) must be downloaded and

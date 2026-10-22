@@ -175,25 +175,37 @@ func disabledResult(reason string) fetchResult {
 	return fetchResult{Outcome: RefreshOutcomeDisabled, Reason: reason}
 }
 
+// fetchGate applies the B10 preconditions: the parsed channel URL when the leg
+// may issue requests, otherwise the RefreshReason* that says why not. The
+// refresher also asks it for a cycle that skips the leg, so the reason stays
+// visible.
+func fetchGate(settings fetchSettings) (*url.URL, string) {
+	if !settings.Enabled {
+		return nil, RefreshReasonFetchOff
+	}
+	if settings.URL == "" {
+		return nil, RefreshReasonNoURL
+	}
+	u, err := parseFetchURL(settings.URL)
+	if err != nil {
+		return nil, RefreshReasonInvalidURL
+	}
+	if settings.Policy == nil || settings.Policy.ActiveRootKeys == 0 {
+		return nil, RefreshReasonNoTrustedSigner
+	}
+	if settings.StateUnavailable {
+		return nil, RefreshReasonStateUnavailable
+	}
+	return u, ""
+}
+
 // fetchCandidate performs one fetch attempt against the configured channel and
 // returns what to do with it. It issues zero requests unless every B10
 // precondition holds.
 func fetchCandidate(ctx context.Context, settings fetchSettings) fetchResult {
-	if !settings.Enabled {
-		return disabledResult(RefreshReasonFetchOff)
-	}
-	if settings.URL == "" {
-		return disabledResult(RefreshReasonNoURL)
-	}
-	u, err := parseFetchURL(settings.URL)
-	if err != nil {
-		return disabledResult(RefreshReasonInvalidURL)
-	}
-	if settings.Policy == nil || settings.Policy.ActiveRootKeys == 0 {
-		return disabledResult(RefreshReasonNoTrustedSigner)
-	}
-	if settings.StateUnavailable {
-		return disabledResult(RefreshReasonStateUnavailable)
+	u, reason := fetchGate(settings)
+	if reason != "" {
+		return disabledResult(reason)
 	}
 	a := &fetchAttempt{s: settings, u: u, host: u.Hostname(), now: settings.Now, resolver: settings.Resolver, log: settings.Log}
 	if a.now == nil {

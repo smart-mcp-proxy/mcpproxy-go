@@ -132,6 +132,13 @@ func TestRefreshStatus_LastTriggerStartupThenConfig(t *testing.T) {
 	require.NotNil(t, first.Refresh)
 	assert.Equal(t, RefreshTriggerStartup, first.Refresh.LastTrigger)
 
+	// The scanner service re-applies the identical config after the
+	// construction-time configure: still the startup, not a reload.
+	same := f.run()
+	require.NotNil(t, same.Refresh)
+	assert.Equal(t, RefreshTriggerStartup, same.Refresh.LastTrigger)
+
+	f.sec.TPAStaleAfterDays = intp(45)
 	second := f.run()
 	require.NotNil(t, second.Refresh)
 	assert.Equal(t, RefreshTriggerConfig, second.Refresh.LastTrigger)

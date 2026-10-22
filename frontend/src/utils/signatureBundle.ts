@@ -51,6 +51,9 @@ export interface BundleRefresh {
   last_trigger?: string
   last_outcome?: string
   last_reason?: string
+  /** The fetch leg's own last answer, apart from the merged cycle outcome. */
+  fetch_state?: string
+  fetch_reason?: string
   last_attempt_at?: string
   consecutive_failures?: number
   next_check_at?: string
@@ -186,8 +189,11 @@ function plural(n: number, unit: string): string {
 
 const OUTCOME_LABELS: Record<string, string> = {
   activated: 'Activated a new bundle',
-  unchanged: 'Up to date',
-  not_modified: 'Up to date (not modified)',
+  // Neutral on purpose: `unchanged` also covers a candidate the pipeline already
+  // refused, and `not_modified` only says the remote resource did not change.
+  // Neither establishes that the serving corpus is current.
+  unchanged: 'No change',
+  not_modified: 'Remote not modified',
   rejected: 'Candidate refused',
   fetch_unavailable: 'Fetch unavailable',
   channel_invalid: 'Channel invalid',
@@ -282,13 +288,13 @@ function refreshProblemsOf(b: SignatureBundle): RefreshProblem[] {
 
   if (
     fetchOn &&
-    refresh?.last_outcome === 'disabled' &&
-    refresh.last_reason &&
-    FETCH_CONFIG_REASONS.has(refresh.last_reason)
+    refresh?.fetch_state === 'disabled' &&
+    refresh.fetch_reason &&
+    FETCH_CONFIG_REASONS.has(refresh.fetch_reason)
   ) {
     out.push({
       kind: 'fetch_inactive',
-      explanation: `Fetching is enabled but not running: ${REASON_LABELS[refresh.last_reason]}. Check the tpa_fetch_url, tpa_active_root and tpa_operator_signers settings.`,
+      explanation: `Fetching is enabled but not running: ${REASON_LABELS[refresh.fetch_reason]}. Check the tpa_fetch_url, tpa_active_root and tpa_operator_signers settings.`,
     })
   }
   return out
