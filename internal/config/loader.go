@@ -335,6 +335,12 @@ func loadConfigFile(path string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	// Spec 101 US3 B1: a malformed security.tpa_refresh_interval must not
+	// fail the boot; drop it, turn the fetch leg off, record a value-free
+	// diagnostic. Only this key is touched.
+	var refreshDiags []LoadDiagnostic
+	data, refreshDiags = normalizeTPARefreshInterval(data)
+	diagnostics = append(diagnostics, refreshDiags...)
 	cfg.loadDiagnostics = diagnostics
 
 	// First check if api_key is present in the JSON to distinguish between
@@ -598,6 +604,21 @@ func SaveConfigToDataDir(cfg *Config) error {
 	return SaveConfig(cfg, configPath)
 }
 
+// Environment variables that name the data directory. EnvDataDir is the
+// documented spelling and, like --data-dir, also decides where `serve` looks
+// for mcp_config.json (see cmd/mcpproxy loadConfig). EnvDataDirLegacy keeps its
+// historical meaning: it relocates the data directory only.
+const (
+	EnvDataDir       = "MCPPROXY_DATA_DIR"
+	EnvDataDirLegacy = "MCPPROXY_DATA"
+)
+
+// DataDirFromEnv returns the directory named by MCPPROXY_DATA_DIR, or "" when
+// it is unset or blank. It does not consult the legacy MCPPROXY_DATA.
+func DataDirFromEnv() string {
+	return strings.TrimSpace(os.Getenv(EnvDataDir))
+}
+
 // GetConfigPath returns the path to the configuration file in the data directory
 func GetConfigPath(dataDir string) string {
 	if dataDir == "" {
@@ -838,8 +859,15 @@ func applyTLSEnvOverrides(cfg *Config) {
 	value = os.Getenv("MCPPROXY_CERTS_DIR")
 	envOverride(b, cfg, FieldTLSCertsDir, value != "", value)
 
-	// Override data directory from environment (for backward compatibility)
-	value = os.Getenv("MCPPROXY_DATA")
+	// Override data directory from environment. MCPPROXY_DATA_DIR is the
+	// documented name; MCPPROXY_DATA is kept for backward compatibility and
+	// loses when both are set.
+	// DataDirFromEnv trims the value, so a whitespace-only MCPPROXY_DATA_DIR
+	// neither relocates the data dir to "   " nor shadows the legacy variable.
+	value = DataDirFromEnv()
+	if value == "" {
+		value = strings.TrimSpace(os.Getenv(EnvDataDirLegacy))
+	}
 	envOverride(b, cfg, FieldDataDir, value != "", value)
 
 	// Spec 112 FR-003: MCPPROXY_FORWARD_CLIENT_HEADERS=false|0|off disables
@@ -940,6 +968,19 @@ func applyTLSEnvOverrides(cfg *Config) {
 		autoScan = &enabled
 	}
 	envOverride(b, cfg, FieldAutoBaselineScan, autoScan != nil, autoScan)
+
+	// Same shape for the finer per-change rescan switch; the vocabulary matches
+	// IsAutoRescanOnChangeEnabled so a typo never materializes a value.
+	var autoRescan *bool
+	switch os.Getenv(EnvAutoRescanOnChange) {
+	case trueValue, "1":
+		enabled := true
+		autoRescan = &enabled
+	case falseValue, "0":
+		enabled := false
+		autoRescan = &enabled
+	}
+	envOverride(b, cfg, FieldAutoRescanOnChange, autoRescan != nil, autoRescan)
 
 	// Override retrieve_tools serialization mode from environment (Spec 085).
 	// Explicit MCPPROXY_* alias per the established loader convention; the

@@ -11,6 +11,7 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cache"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 )
 
 // Every truncation banner mcpproxy emits points the caller at read_cache. That
@@ -68,6 +69,67 @@ func TestCallToolDirect_ReadCachePagesStoredRecords(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(text.Text), &page))
 	require.Len(t, page.Records, 2)
 	assert.Equal(t, "github:get_repo", page.Records[0]["name"])
+}
+
+func TestCallToolDirectResultPreservesEnvelopeForREST(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	const key = "cache-key-result-envelope"
+	require.NoError(t, proxy.cacheManager.StoreAs(key, "retrieve_tools", map[string]interface{}{"query": "manage"}, `{"tools":[{"name":"echo"}]}`, "tools", 1,
+		cache.Authorization{CallerKind: cache.CallerKindAnonymous}))
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "read_cache"
+	request.Params.Arguments = map[string]interface{}{"key": key, "offset": float64(0), "limit": float64(50)}
+
+	got, err := proxy.CallToolDirectResult(context.Background(), request)
+	require.NoError(t, err)
+	result, ok := got.(*mcp.CallToolResult)
+	require.True(t, ok, "REST path must retain the MCP result envelope")
+	require.NotEmpty(t, result.Content)
+	_, ok = result.Content[0].(mcp.TextContent)
+	require.True(t, ok)
+	controller := &Server{mcpProxy: proxy}
+	legacy, err := controller.CallTool(context.Background(), "read_cache", request.Params.Arguments.(map[string]interface{}))
+	require.NoError(t, err)
+	_, ok = legacy.([]mcp.Content)
+	require.True(t, ok, "ordinary REST callers keep the content-array response")
+	envelope, err := controller.CallTool(reqcontext.WithToolResultEnvelope(context.Background()), "read_cache", request.Params.Arguments.(map[string]interface{}))
+	require.NoError(t, err)
+	_, ok = envelope.(*mcp.CallToolResult)
+	require.True(t, ok, "opted-in callers receive the full result")
+}
+
+func TestCallToolDirectResultPreservesToolError(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	request := mcp.CallToolRequest{}
+	request.Params.Name = "read_cache"
+	request.Params.Arguments = map[string]interface{}{"key": "no-such-key", "offset": float64(0), "limit": float64(50)}
+	got, err := proxy.CallToolDirectResult(context.Background(), request)
+	require.NoError(t, err)
+	result, ok := got.(*mcp.CallToolResult)
+	require.True(t, ok)
+	require.True(t, result.IsError)
+	require.NotEmpty(t, result.Content)
+	_, legacyErr := proxy.CallToolDirect(context.Background(), request)
+	require.Error(t, legacyErr)
+}
+
+func TestDirectToolErrorPayloadPreservesArbitraryContent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content []mcp.Content
+	}{
+		{"empty", []mcp.Content{}},
+		{"image first", []mcp.Content{mcp.NewImageContent("YWJj", "image/png")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := &mcp.CallToolResult{Content: tc.content, IsError: true, StructuredContent: map[string]any{"reason": tc.name}}
+			got, err := directToolErrorPayload(want, true, "tool call failed")
+			require.NoError(t, err)
+			require.Same(t, want, got)
+			_, err = directToolErrorPayload(want, false, "tool call failed")
+			require.EqualError(t, err, "tool call failed")
+		})
+	}
 }
 
 // Spec 105 FR-001/FR-010 (gap FR001-G5, task T025): the REST direct call path

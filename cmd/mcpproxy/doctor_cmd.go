@@ -591,6 +591,16 @@ func outputDiagnosticsWithProfileChecks(diag map[string]interface{}, info map[st
 			fmt.Println("⚠️  Runtime Warnings")
 			fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
 			for _, warningItem := range runtimeWarnings {
+				// The daemon's management Doctor emits free-text warnings as
+				// plain strings (config findings, audit counters, the
+				// signature-bundle freshness warnings); the legacy path emits
+				// structured objects. Both render here.
+				if warningText, ok := warningItem.(string); ok {
+					if warningText != "" {
+						fmt.Printf("  • %s\n", warningText)
+					}
+					continue
+				}
 				if warningMap, ok := warningItem.(map[string]interface{}); ok {
 					message := getStringField(warningMap, "message")
 					severity := getStringField(warningMap, "severity")

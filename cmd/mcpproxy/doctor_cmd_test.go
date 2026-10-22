@@ -628,6 +628,46 @@ func TestOutputDiagnostics_WarningWithoutTitle(t *testing.T) {
 	}
 }
 
+// The daemon's management Doctor emits runtime_warnings as plain strings
+// (appData denial, config findings, audit counters and, from Spec 101 US3, the
+// signature-bundle freshness warnings registered via AddRuntimeWarningSource).
+// A string warning must render under "Runtime Warnings" and must suppress the
+// all-clear verdict; before this it was counted in total_issues but printed
+// nowhere.
+func TestOutputDiagnostics_StringRuntimeWarningRendersAndSuppressesAllClear(t *testing.T) {
+	const warning = "TPA signature bundle is 81 days old (stale after 30): run `mcpproxy security bundle refresh`"
+	diag := map[string]interface{}{
+		"total_issues":     1,
+		"runtime_warnings": []interface{}{warning},
+	}
+
+	oldStdout := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+	defer func() { os.Stdout = oldStdout }()
+
+	doctorOutput = "pretty"
+	err := outputDiagnostics(diag, nil, nil, "", nil)
+
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if err != nil {
+		t.Errorf("outputDiagnostics() returned error: %v", err)
+	}
+	if !strings.Contains(output, "Runtime Warnings") {
+		t.Error("Missing runtime warnings section header for a string warning")
+	}
+	if !strings.Contains(output, warning) {
+		t.Errorf("A plain-string runtime warning must be printed, got:\n%s", output)
+	}
+	if strings.Contains(output, "All systems operational") {
+		t.Error("A runtime warning must suppress the all-clear verdict")
+	}
+}
+
 func TestOutputDiagnostics_HighSeverityWarning(t *testing.T) {
 	diag := map[string]interface{}{
 		"total_issues": 1,

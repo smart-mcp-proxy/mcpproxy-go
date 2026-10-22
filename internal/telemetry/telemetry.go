@@ -160,7 +160,38 @@ import (
 // before dispatch, and nothing for direct routing or JS sub-calls). v13-and-
 // earlier values are not comparable with v14 ones; do not graph them as one
 // series, and do not reinterpret historical flags.
-const SchemaVersion = 14
+//
+// v15 (Spec 101 FR-021) adds the ACTIVE TPA signature bundle's provenance as
+// four typed keys inside the existing tpa_scanner sub-object: bundle_source
+// (closed enum embedded|file|fetch), bundle_signature_verified (boolean),
+// bundle_version (the literal "other" or a corpus schema line matching
+// ^[0-9]{1,3}\.[0-9]{1,3}$, e.g. "0.1" — never the bundle's free-form release
+// string) and bundle_sequence (integer <= 2^53-1, present only together with a
+// schema-line bundle_version). Unlike the counters beside them these are STATE
+// read fresh at every heartbeat build and never cleared by the reset-on-accept
+// window, so tpa_scanner is now also emitted when every scan counter is zero
+// whenever a bundle provider (SetTPABundleProvider) returns a snapshot. The
+// provider applies the provenance gate (schema line + sequence only for the
+// embedded default or a publisher-verified bundle, else "other"); the
+// anonymity backstop independently enforces the whole tuple. Installs with no
+// provider, or whose provider returns nil, send the v14 shape plus the new
+// schema_version only.
+//
+// v16 (Spec 087 / Spec 101 US3) adds five reset-on-accept integer counters to the
+// tpa_scanner sub-object, each omitted while zero: bundle_refresh_cycles (one per
+// refresh cycle, whatever its outcome), bundle_refresh_activations,
+// bundle_refresh_rejections and bundle_refresh_unavailable (the cycles that
+// activated a bundle, had a candidate refused, or could not reach or parse the
+// channel; an unchanged cycle counts only in bundle_refresh_cycles, so the three
+// are not a partition of it) and bundle_reprotect_hits (servers whose
+// post-activation re-protection scan had at least one hard finding). They are
+// integers only: no age, generated_at, last-checked time, URL, host, reason
+// string or digest is ever transmitted, and bundle_source may now also be
+// "fetch" with the same provenance gate (an operator-signed fetch reports
+// bundle_version "other" and no sequence). Like every counter they ride the
+// telemetry opt-out. tpa_scanner is emitted when only these counters are
+// non-zero. The age-of-bundle join of SC-006 is a receiver-side computation.
+const SchemaVersion = 16
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.
@@ -385,6 +416,13 @@ type HeartbeatPayload struct {
 	// scanned server name, scanner id, rule id, or finding title.
 	TPAScanner *TPAScannerStats `json:"tpa_scanner,omitempty"`
 
+	// tpaBundle is the Spec 101 FR-021 active-bundle snapshot captured when the
+	// payload was built. It is NOT serialized itself: applyTPABundle merges it
+	// into TPAScanner, and it is kept on the payload because
+	// applyRegistrySnapshot REPLACES TPAScanner with the counter view, so the
+	// merge has to be re-applied after every counter application.
+	tpaBundle *TPABundleSnapshot
+
 	// Schema v9: count of configured servers per effective trust tier, keyed
 	// exclusively by the fixed auto|scan|manual enum (all three keys always
 	// present, even at zero — the protocol-counts convention). A STATE field,
@@ -523,6 +561,11 @@ type Service struct {
 	// and the BBolt-backed OnboardingState. nil-safe: when unset the
 	// onboarding fields are simply omitted from the heartbeat.
 	onboardingProvider func() *OnboardingSnapshot
+
+	// Spec 101 FR-021: optional provider for the active TPA bundle's
+	// provenance tuple (source, signature_verified, schema line, sequence).
+	// nil-safe: when unset, or when it returns nil, no bundle keys are sent.
+	tpaBundleProvider func() *TPABundleSnapshot
 
 	// MCP-2967: optional provider for the STANDING diagnostic state —
 	// classified MCPX_* code -> number of configured servers currently in
@@ -1611,6 +1654,18 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 		applyRegistrySnapshot(&payload, snap)
 	}
 
+	// Spec 101 FR-021: active TPA bundle provenance tuple. Captured on the
+	// payload and merged into tpa_scanner (also re-merged by
+	// applyRegistrySnapshot, which replaces that object). The provider owns
+	// the provenance gate; scanTPABundle re-enforces the tuple on the wire.
+	if s.tpaBundleProvider != nil {
+		if snap := s.tpaBundleProvider(); snap != nil {
+			cp := *snap
+			payload.tpaBundle = &cp
+			applyTPABundle(&payload)
+		}
+	}
+
 	// Spec 046: onboarding funnel snapshot. Provider closes over connect.Service
 	// (for the connected-client count + IDs) and the BBolt-backed onboarding
 	// state (for wizard engagement + per-step status). nil-safe.
@@ -1715,6 +1770,32 @@ func applyRegistrySnapshot(payload *HeartbeatPayload, snap RegistrySnapshot) {
 	// Schema v8: security-scanner counters. nil (and therefore omitted) when
 	// the install never completed or failed a scan in the window.
 	payload.TPAScanner = snap.TPAScannerStats()
+	// Bundle state is per-heartbeat state, not a reset-on-accept counter: the
+	// counter view above just replaced TPAScanner, so merge it back in.
+	applyTPABundle(payload)
+}
+
+// applyTPABundle merges the captured active-bundle snapshot into the
+// tpa_scanner sub-object, creating the object when every scan counter is zero
+// (an install that never scanned still has an active bundle). A payload
+// without a snapshot is left untouched. It is idempotent.
+func applyTPABundle(payload *HeartbeatPayload) {
+	b := payload.tpaBundle
+	if b == nil {
+		return
+	}
+	if payload.TPAScanner == nil {
+		payload.TPAScanner = &TPAScannerStats{}
+	}
+	verified := b.SignatureVerified
+	payload.TPAScanner.BundleSource = b.Source
+	payload.TPAScanner.BundleSignatureVerified = &verified
+	payload.TPAScanner.BundleVersion = b.BundleVersion
+	payload.TPAScanner.BundleSequence = nil
+	if b.Sequence != nil {
+		seq := *b.Sequence
+		payload.TPAScanner.BundleSequence = &seq
+	}
 }
 
 // ensureAnonymousID gives the install an anonymous id, generating and

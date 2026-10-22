@@ -63,6 +63,8 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/secrets/config":           {scopeRefused, "credential inventory; TestSecretsInventory_DeniedToScopedCaller"},
 	"/api/v1/security/overview":        {scopeRefused, "fleet scan/finding counts; TestSecurityFleetDoors_DeniedToScopedCaller"},
 	"/api/v1/security/queue":           {scopeRefused, "names every queued server; TestSecurityFleetDoors_DeniedToScopedCaller"},
+	"/api/v1/security/bundle":          {scopeRefused, "TPA bundle digests + last rejection; TestSecurityBundle_AgentTokenRefusedOnEveryRoute"},
+	"/api/v1/security/bundle/history":  {scopeRefused, "TPA bundle activation history (rollback digests); TestSecurityBundle_AgentTokenRefusedOnEveryRoute"},
 	"/api/v1/sessions":                 {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
 	"/api/v1/sessions/{id}":            {scopeRefused, "MCP client/session history; TestSessions_DeniedToAgentTokens"},
 	"/api/v1/stats/tokens":             {scopeRefused, "deployment-wide token stats; TestTokenStats_DeniedToAgentTokens"},
@@ -73,6 +75,7 @@ var getRouteScopes = map[string]routeScope{
 	"/api/v1/connect/{client}":         {scopeRefused, "MCP client connection status is admin-only"},
 	"/api/v1/connect/{client}/preview": {scopeRefused, "MCP client configuration preview is admin-only"},
 	"/api/v1/access/explain":           {scopeRefused, "access explainer names other credentials' bindings and every gate; requireServerOp(ConfigWrite); TestAccessExplainRoute_ScopedCallerIs403"},
+	"/api/v1/access/suggest":           {scopeRefused, "access suggest names other credentials' tokens, profiles and servers out of scope; requireServerOp(ConfigWrite); TestAccessSuggestRoute_ScopedCallerIs403"},
 
 	// --- Filtered: reachable, per-server content narrowed to the grant ---
 	"/api/v1/servers":                       {scopeFiltered, "visibleServers; TestGetServers_AgentTokenSeesOnlyAllowedSubset_ManagementPath"},
@@ -204,6 +207,7 @@ var routeDenialMarkers = map[string]string{
 	"/api/v1/connect/{client}":         "Admin credentials required to read client connection status",
 	"/api/v1/connect/{client}/preview": "Admin credentials required to read client connection status",
 	"/api/v1/access/explain":           "operation requires admin access",
+	"/api/v1/access/suggest":           "operation requires admin access",
 }
 
 func init() {

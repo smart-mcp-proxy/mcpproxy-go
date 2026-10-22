@@ -248,6 +248,10 @@ type Service struct {
 	// resolver. Nil ⇒ fall back to the engine-wide default.
 	isolationModeResolver func(serverName string) string
 
+	// bundleSnapshotFn reads the active TPA bundle as one (check, info) pair.
+	// Nil means activeBundleSnapshot; tests substitute it.
+	bundleSnapshotFn func() (*BundleCheck, BundleInfo)
+
 	// In-memory scan summary cache — avoids expensive BBolt reads per server.
 	//
 	// summaryCacheGen is a per-server invalidation counter. GetScanSummary
@@ -426,7 +430,9 @@ func (s *Service) ApplySecurityConfig(sec *config.SecurityConfig) {
 	// and re-read here, which is what makes it hot-reloadable. An empty path
 	// means the corpus embedded in this build; a broken configured bundle keeps
 	// the previously active corpus and surfaces the reason via BundleStatus().
-	ConfigureBundle(sec.EffectiveTPABundlePath(), s.logger)
+	// Spec 101: the same call carries the trust policy -- require_signed_bundle,
+	// the active signing root, the operator signers/baseline/epoch.
+	ConfigureBundleFromConfig(sec, s.logger)
 
 	enabled := sec.IsDeepScanEnabled()
 	s.SetDeepScan(enabled, sec.DeepScanScanners())
@@ -444,6 +450,222 @@ func (s *Service) ApplySecurityConfig(sec *config.SecurityConfig) {
 // without importing the loader internals (GH #938 finding 2).
 func (s *Service) BundleStatus() BundleInfo {
 	return BundleStatus()
+}
+
+// BundleHistory returns the append-only TPA bundle activation history, oldest
+// first (spec 101 FR-010/FR-020).
+func (s *Service) BundleHistory() ([]TPABundleActivation, error) {
+	return BundleHistory()
+}
+
+// RollbackBundle runs the explicit FR-010 rollback; see RollbackBundle.
+func (s *Service) RollbackBundle(req BundleRollbackRequest) (BundleInfo, error) {
+	return RollbackBundle(req, s.logger)
+}
+
+// UnpinBundle clears the active root's rollback pin; see UnpinBundle.
+func (s *Service) UnpinBundle() (BundleInfo, error) {
+	return UnpinBundle(s.logger)
+}
+
+// ReloadBundle re-runs the bundle pipeline with the current policy, so a
+// file drop is picked up without waiting for a config change (spec 101 Δ5).
+func (s *Service) ReloadBundle() BundleInfo {
+	return ReloadBundle(s.logger)
+}
+
+// RefreshBundle runs one joined refresh cycle (the network-free file leg, then
+// the optional fetch leg) and returns the resulting status; without a running
+// refresher it behaves as ReloadBundle (Spec 087 FR-004, Spec 101 US3 B20).
+func (s *Service) RefreshBundle(ctx context.Context) BundleInfo {
+	return RefreshBundle(ctx, s.logger)
+}
+
+// ErrNoCachedContracts is returned by StartScanFromCachedContracts when the
+// server has no recorded tool contract to scan (or the provider cannot list
+// them). No job is recorded, so the server reads as unscanned, never clean.
+var ErrNoCachedContracts = errors.New("no cached tool contracts to scan")
+
+// ErrServerQuarantined is returned by StartScanFromCachedContracts for a
+// quarantined server: its stored contracts are not what a scan-mode admission
+// verdict is about, so a quarantined server never gets a cached scan job
+// (Spec 101 tasks B17).
+var ErrServerQuarantined = errors.New("server is quarantined: no cached scan")
+
+// ErrBundleSuperseded is returned by StartScanFromCachedContracts when the
+// bundle the caller asked to cover is no longer the active one at the moment the
+// job would be registered: a job labelled with the requested digest would not
+// describe the bundle that serves.
+var ErrBundleSuperseded = errors.New("the requested bundle is no longer the active bundle: no cached scan")
+
+// serverQuarantineProvider is an OPTIONAL capability a ServerInfoProvider may
+// implement: whether the server is quarantined right now, read from the live
+// configuration. StartScanFromCachedContracts uses it as a last-moment guard.
+type serverQuarantineProvider interface {
+	IsServerQuarantined(serverName string) bool
+}
+
+// currentToolContractsProvider is an OPTIONAL capability a ServerInfoProvider
+// may implement for the post-activation re-protection scan (Spec 101 FR-019):
+// the CURRENT tool contract discovery recorded on every one of a server's tool
+// records (approved, pending and changed), in the same tools/list shape as
+// GetServerTools, read from storage with no upstream connection. The job built
+// from it is the server's newest Pass-1 job, so it must cover the same tool set
+// a live scan does or it would displace a verdict that rests on a held tool.
+type currentToolContractsProvider interface {
+	GetCurrentToolContracts(serverName string) ([]map[string]interface{}, error)
+}
+
+// StartScanFromCachedContracts starts the post-activation re-protection scan of
+// one server (Spec 101 FR-019, tasks B17): an informational job over the
+// tool contracts discovery already ingested for its tools, labelled
+// with the activated bundle's digest. It never connects to the upstream
+// (no IsConnected, EnsureConnected or live tools export), never schedules
+// Pass 2 and is excluded from the scan telemetry counters.
+//
+// The job runs the in-process tpa-descriptions baseline only, over the
+// immutable snapshot built here (ScanRequest.ToolDefinitions), with no source
+// directory. A server with no recorded contracts gets no job at all
+// (ErrNoCachedContracts): it stays unscanned, never clean. A busy server
+// returns ErrScanInProgress so the caller can re-arm. A quarantined server is
+// refused (ErrServerQuarantined) when the provider can say so.
+//
+// ctx is the scan's EXECUTION context, not just the call's: the job runs under
+// it (unlike the live StartScan, which detaches), so a stopping caller ends it,
+// and a context that is already done starts nothing. The returned job's Done
+// channel closes after the completion callback returned, so the caller can
+// join the worker before the stores it writes to close.
+func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, bundleDigest string) (*ScanJob, error) {
+	// The scan binds to the incarnation current BEFORE the contracts are read,
+	// and the engine refuses to register a job whose incarnation is no longer
+	// current. Reading the incarnation after the contracts would let a remove
+	// and re-add in between attribute the old server's contracts to the
+	// replacement.
+	inc, err := s.scanIncarnation(serverName)
+	if err != nil {
+		return nil, err
+	}
+	if q, ok := s.serverInfo.(serverQuarantineProvider); ok && q.IsServerQuarantined(serverName) {
+		return nil, ErrServerQuarantined
+	}
+	provider, ok := s.serverInfo.(currentToolContractsProvider)
+	if !ok {
+		return nil, fmt.Errorf("%w: the server info provider cannot list cached contracts", ErrNoCachedContracts)
+	}
+	contracts, err := provider.GetCurrentToolContracts(serverName)
+	if err != nil {
+		return nil, fmt.Errorf("read tool contracts for %s: %w", serverName, err)
+	}
+	if len(contracts) == 0 {
+		return nil, ErrNoCachedContracts
+	}
+	if !s.incarnationIsCurrent(serverName, inc) {
+		return nil, fmt.Errorf("cannot scan server %s: the server was removed or replaced while its contracts were read", serverName)
+	}
+
+	// The stamp is taken before the contracts are digested, so a definition
+	// changing underneath is judged not covered rather than covered.
+	at := time.Now().UTC()
+	data, err := json.MarshalIndent(map[string]interface{}{"tools": contracts}, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("serialize cached tool contracts for %s: %w", serverName, err)
+	}
+
+	scanCtx := &ScanContext{
+		SourceMethod:        "tool_definitions_only",
+		ToolsExported:       len(contracts),
+		ToolNames:           toolDefinitionNames(contracts),
+		ToolHashes:          toolDefinitionHashes(contracts),
+		ToolContractDigests: ToolContractDigests(contracts),
+		ToolsExportedAt:     at,
+		BundleDigest:        bundleDigest,
+	}
+	if info, err := s.serverInfo.GetServerInfo(serverName); err == nil && info != nil {
+		scanCtx.ServerProtocol = info.Protocol
+		scanCtx.ServerCommand = info.Command
+	}
+
+	req := ScanRequest{
+		ServerName:      serverName,
+		Incarnation:     inc,
+		ScannerIDs:      []string{inProcessTPAScannerID},
+		ScanPass:        ScanPassSecurityScan,
+		IsolationMode:   s.resolveIsolationMode(serverName),
+		ToolDefinitions: data,
+		ScanContext:     scanCtx,
+	}
+	// Cross-server snapshot for the shadowing check, from the cached
+	// StateView, exactly as StartScan builds it. Best-effort.
+	if prov, ok := s.serverInfo.(allServerToolsProvider); ok {
+		if all, err := prov.GetAllServerTools(); err == nil && len(all) > 0 {
+			peers := make(map[string][]map[string]interface{}, len(all))
+			for name, tools := range all {
+				if name != serverName && len(tools) > 0 {
+					peers[name] = tools
+				}
+			}
+			if len(peers) > 0 {
+				req.PeerTools = peers
+			}
+		}
+	}
+
+	callback := &scanCallbackAdapter{
+		service:       s,
+		scanPass:      ScanPassSecurityScan,
+		informational: true,
+	}
+	// The authoritative quarantine decision and the job registration are ONE
+	// step under the server's approval lock, the lock a quarantine mutation
+	// holds while it flips the stored flag (Sol round 2): the checks above
+	// precede the contract and peer collection, so a quarantine landing in
+	// that window would otherwise still get a job. The engine re-checks the
+	// incarnation at registration, and the lock holder does too before fn, so
+	// a remove or replace is caught here as well. Nothing in fn takes the
+	// approval lock: registration saves the job record and emits a no-op
+	// event.
+	var job *ScanJob
+	register := func() error {
+		if q, ok := s.serverInfo.(serverQuarantineProvider); ok && q.IsServerQuarantined(serverName) {
+			return ErrServerQuarantined
+		}
+		// The bundle is judged and pinned here, in the same step as the
+		// registration (Sol round 3): the caller's own supersession check
+		// precedes the contract and peer collection and the approval-lock
+		// wait, so a bundle activating in that window would otherwise get a
+		// job labelled with the old digest that the asynchronous detector
+		// scans with the new bundle. The job is bound to this snapshot and
+		// carries its digest.
+		check, info := s.activeBundle()
+		if bundleDigest != "" && info.FullDigest != bundleDigest {
+			return ErrBundleSuperseded
+		}
+		req.pinnedBundle = &pinnedBundle{check: check, info: info}
+		scanCtx.BundleDigest = info.FullDigest
+		var startErr error
+		job, startErr = s.engine.StartScanBound(ctx, req, callback)
+		return startErr
+	}
+	if binder, ok := s.unquarantiner.(ApprovalIncarnationBinder); ok {
+		err = binder.WithServerApprovalLockAt(serverName, inc, register)
+	} else {
+		err = register()
+	}
+	if err != nil {
+		return job, err
+	}
+	// Synchronous, not a detached goroutine: nothing this call starts may
+	// outlive the caller's lifecycle except the job, which Done joins.
+	s.pruneOldScans(serverName)
+	return job, nil
+}
+
+// activeBundle is the active TPA bundle as one consistent (check, info) pair.
+func (s *Service) activeBundle() (*BundleCheck, BundleInfo) {
+	if s.bundleSnapshotFn != nil {
+		return s.bundleSnapshotFn()
+	}
+	return activeBundleSnapshot()
 }
 
 // isBaselineScanner reports whether a scanner id belongs to the deterministic
@@ -988,6 +1210,10 @@ type scanCallbackAdapter struct {
 	cleanup    func()      // Optional cleanup function (e.g., remove temp source dir)
 	scanPass   int         // Which pass this callback is for (1 or 2)
 	serverInfo *ServerInfo // Cached server info for pass 2 auto-start
+	// informational marks a post-activation re-protection job (Spec 101
+	// FR-019): it schedules no Pass 2 and is not counted in the anonymous
+	// scan telemetry, so the sweep cannot inflate scans_completed.
+	informational bool
 }
 
 // countsForTelemetry reports whether this job is the unit the anonymous
@@ -998,7 +1224,7 @@ type scanCallbackAdapter struct {
 // the deep-scan cohort the counters exist to compare. Dry-run jobs are excluded
 // because they do not affect quarantine state and are not real scans.
 func (a *scanCallbackAdapter) countsForTelemetry(job *ScanJob) bool {
-	return job != nil && a.scanPass == ScanPassSecurityScan && !job.DryRun
+	return job != nil && a.scanPass == ScanPassSecurityScan && !job.DryRun && !a.informational
 }
 
 // saveJob persists job, conditionally on its incarnation when both the job
@@ -1148,7 +1374,7 @@ func (a *scanCallbackAdapter) OnScanCompleted(job *ScanJob, reports []*ScanRepor
 	// deep-scan layer, so with deep scan OFF (the default) it must NOT be
 	// scheduled at all; the scan is the Pass-1 in-process baseline only.
 	// Skip for HTTP/URL servers — they have no filesystem to do supply chain analysis on.
-	if a.scanPass == ScanPassSecurityScan && !job.DryRun && a.service.deepScanEnabled() {
+	if a.scanPass == ScanPassSecurityScan && !job.DryRun && !a.informational && a.service.deepScanEnabled() {
 		isURLServer := a.serverInfo != nil && (a.serverInfo.Protocol == "http" || a.serverInfo.Protocol == "sse" || a.serverInfo.Protocol == "streamable-http")
 		if !isURLServer {
 			// The ORIGINATING job's incarnation (review round 1): a late
@@ -3238,4 +3464,65 @@ func (s *Service) CancelAllScans() error {
 // IsQueueRunning returns true if a batch scan is in progress
 func (s *Service) IsQueueRunning() bool {
 	return s.queue.IsRunning()
+}
+
+// GetScanJobSummary is the terminal ScanSummary of ONE specific job, read by
+// its ID: the status and findings of that job alone, never the server-wide
+// latest summary, which another scan of the same server (a manual scan, an
+// admission scan) may have displaced or still be running. Nil when the job does
+// not exist, belongs to another server or to an incarnation other than the
+// server's current one, or has not reached a terminal state. A failed or
+// cancelled job, or one without any usable scanner report, reports "failed".
+func (s *Service) GetScanJobSummary(_ context.Context, serverName, jobID string) *ScanSummary {
+	if jobID == "" {
+		return nil
+	}
+	job, err := s.storage.GetScanJob(jobID)
+	if err != nil || job == nil || job.ServerName != serverName {
+		return nil
+	}
+	if !s.incarnationIsCurrent(serverName, job.Incarnation) {
+		return nil
+	}
+	started := job.StartedAt
+	summary := &ScanSummary{LastScanAt: &started, Status: "clean"}
+	switch job.Status {
+	case ScanJobStatusCompleted:
+	case ScanJobStatusFailed, ScanJobStatusCancelled:
+		summary.Status = "failed"
+		return summary
+	default:
+		return nil
+	}
+	for _, ss := range job.ScannerStatuses {
+		summary.ScannersTotal++
+		switch ss.Status {
+		case ScanJobStatusCompleted:
+			summary.ScannersRun++
+		case ScanJobStatusFailed:
+			summary.ScannersFailed++
+		}
+	}
+	if summary.ScannersTotal > 0 && summary.ScannersRun == 0 {
+		summary.Status = "failed"
+		return summary
+	}
+	reports, err := s.storage.ListScanReportsByJob(job.ID)
+	if err != nil || len(reports) == 0 {
+		summary.Status = "failed"
+		return summary
+	}
+	var findings []ScanFinding
+	for _, r := range reports {
+		findings = append(findings, r.Findings...)
+	}
+	if len(findings) == 0 {
+		return summary
+	}
+	ClassifyAllFindings(findings)
+	summary.RiskScore = CalculateRiskScore(findings)
+	verdict, counts := deriveBaselineVerdict(findings)
+	summary.FindingCounts = &counts
+	summary.Status = verdict
+	return summary
 }

@@ -10,7 +10,7 @@ MCPProxy collects anonymous usage statistics to help improve the product. This p
 
 ## What is collected
 
-MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 14** (`schema_version: 14` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
+MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying information. The current schema is **version 16** (`schema_version: 16` in the JSON payload); the schema is forward-compatible so older consumers simply ignore fields they don't recognize.
 
 | Field | Example | Purpose |
 |-------|---------|---------|
@@ -40,7 +40,7 @@ MCPProxy sends a **daily heartbeat** containing only aggregate, non-identifying 
 | `previous_shutdown` | `clean` | How the previous process instance ended — fixed enum `clean` / `crash`, absent on first run (schema v7) |
 | `last_error_code` | `MCPX_DOCKER_CLI_NOT_FOUND` | Most recent stable `MCPX_*` diagnostic code (schema v7). Enum code only, never error text |
 | `diagnostics.current_error_codes` | `{"MCPX_OAUTH_LOGIN_REQUIRED":2}` | How many configured servers are in each failure state **right now** (schema v11) — fixed `MCPX_*` enum keys, counts only. Never server names. Omitted when nothing is failing. See below |
-| `tpa_scanner` | `{"scans_completed":4,"scans_failed":0,"scans_with_findings":1,"findings":{"high":2},"tool_change_gate_scans":6,"prompt_scans":11}` | Security/TPA scanner activity (schema v8, extended in v9) — counts only, keyed by the fixed severity enum. Omitted entirely when no scan of any kind ran |
+| `tpa_scanner` | `{"scans_completed":4,"scans_failed":0,"scans_with_findings":1,"findings":{"high":2},"tool_change_gate_scans":6,"prompt_scans":11}` | Security/TPA scanner activity (schema v8, extended in v9; v15 adds the active signature bundle's provenance, v16 the refresh counters) — counts and closed enums only, keyed by the fixed severity enum. Omitted entirely when no scan ran, no refresh cycle ran and no bundle provider is wired |
 | `trust_mode_distribution` | `{"auto":1,"scan":3,"manual":8}` | Configured servers per effective trust tier (schema v9) — fixed enum keys `auto`/`scan`/`manual`, counts only. Never server names |
 | `feature_flags.deep_scan_enabled` | `false` | Whether the opt-in deep-scan layer is turned on (schema v8) |
 | `feature_flags.server_edition_enabled` | `false` | Whether the `server_edition` block is present and enabled (schema v13, Spec 107). Always `false` on the personal edition, where the block is never interpreted |
@@ -231,6 +231,39 @@ The v8 counters above only see **scan jobs**, which most installs never start. T
 The two new counters share the window and reset semantics of every other registry counter — zeroed only after an accepted (2xx) heartbeat. **Do not sum them with the v8 job counters**: the units differ (one changed tool / one prompt vs. one scan job).
 
 The anonymity scanner enforces both shapes on the wire form: the v9 counters widen the `tpa_scanner` key whitelist (rule `v8_field_invalid`), and `trust_mode_distribution` gets its own rule `trust_mode_field_invalid` — fixed trust-tier keys with non-negative integer counts, or the heartbeat is blocked.
+
+## Schema v15 and v16 — the TPA signature bundle (Specs 087 and 101)
+
+The scanner's detection rules ship as a signed **bundle**. Schema v15 reports which bundle is active; schema v16 counts how often it was refreshed. Both live in the `tpa_scanner` object and keep the closed-contract posture: booleans, non-negative integers and fixed enums only. No age, timestamp, URL, host, reason string or digest is ever sent.
+
+### v15 — the active bundle (state, not a counter)
+
+These four keys describe the bundle in force **at the moment the heartbeat is built**. They are recomputed on every heartbeat and are never cleared by the reset-on-accept window. They are validated as one tuple by the anonymity scanner: if any `bundle_*` key is present, `bundle_source`, `bundle_signature_verified` and `bundle_version` must all be present.
+
+| Field | Type | When it is set | Privacy rationale |
+|-------|------|----------------|-------------------|
+| `tpa_scanner.bundle_source` | enum `embedded` / `file` / `fetch` | Where the active bundle came from: the copy built into the binary, a file at `security.tpa_bundle_path`, or a bundle fetched from the refresh channel (`fetch` is reported from v16 on) | Three-value enum. The path and the URL are never sent |
+| `tpa_scanner.bundle_signature_verified` | boolean | `true` when the bundle's signature verified against a trusted key; an explicit `false` is transmitted | A boolean about our own state |
+| `tpa_scanner.bundle_version` | the literal `other`, or a corpus schema line such as `0.1` | A schema line only for the embedded default or a bundle verified against a **publisher** key; anything else (an unsigned file or fetch, or a bundle verified by an operator key) reports `other` | The schema line (`^[0-9]{1,3}\.[0-9]{1,3}$`) is a normalisation. The near-unique release string never leaves the install, and an operator corpus that copies a publisher version string cannot masquerade as that release |
+| `tpa_scanner.bundle_sequence` | non-negative integer, at most 2^53-1 | Present only together with a schema-line `bundle_version` | The publisher's monotonic release counter; absent for `other` |
+
+Because the bundle keys are state, `tpa_scanner` is also emitted when every scan counter is zero, whenever the bundle provider returns a snapshot.
+
+### v16 — refresh counters
+
+Five reset-on-accept counters count the refresh lifecycle (the daily check of the bundle file and the optional fetch). Each is a non-negative integer, **omitted while zero**, and zeroed only after an accepted (2xx) heartbeat like every other registry counter.
+
+| Field | Type | When it is set | Privacy rationale |
+|-------|------|----------------|-------------------|
+| `tpa_scanner.bundle_refresh_cycles` | non-negative integer | One per refresh cycle, whatever its outcome | An invocation count of our own scheduler |
+| `tpa_scanner.bundle_refresh_activations` | non-negative integer | Cycles that activated a bundle | Never which bundle, from where or at which sequence |
+| `tpa_scanner.bundle_refresh_rejections` | non-negative integer | Cycles in which the pipeline refused a candidate (bad signature, downgrade, failed self-check and the like) | Never the reason; the refusal reason stays in the local status |
+| `tpa_scanner.bundle_refresh_unavailable` | non-negative integer | Cycles in which the fetch could not reach the channel, was rate limited, or got a malformed channel answer | Never the URL, the host or the HTTP status |
+| `tpa_scanner.bundle_reprotect_hits` | non-negative integer | Servers whose post-activation re-protection scan of already-approved tools had at least one hard finding | A count of servers only; no server name, tool name or rule id |
+
+**Not a partition.** A cycle that found nothing new (unchanged, not modified, superseded, or fetch disabled) counts only in `bundle_refresh_cycles`, so the three class counters do not sum to it. Do not add them to the v8 `scans_*` counters either: the unit is a refresh cycle (or a server), not a scan job.
+
+**What is deliberately absent.** The bundle's age, `generated_at`, the last-checked and last-activated times, the next-check time, the fetch URL and host, refusal reasons and digests are never transmitted. The freshness view ("how old is the bundle in the fleet") is computed on the receiver by joining `bundle_sequence` against the release timeline, not reported by the client. The anonymity scanner rejects any `tpa_scanner` key outside the whitelist, and the five counters above must be non-negative integers (strings, negatives and floats block the heartbeat). With telemetry disabled (`MCPPROXY_TELEMETRY=false`, `DO_NOT_TRACK`, the CLI or config opt-out) none of these keys, and no `tpa_scanner` object, is sent.
 
 ## Preflight baseline counters (issue #969)
 

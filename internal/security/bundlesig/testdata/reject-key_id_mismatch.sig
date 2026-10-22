@@ -1,0 +1,1 @@
+{"sidecar_version":"1","algorithm":"ed25519","key_id":"34750f98bd59fcfc946da45aaabe933be154a4b5094e1c4abf42866505f3c97e","signature":"7pCjJ2ofdiFYAu+G5cS0KmjZT3mEzOFXJfVyGsicZ1f/KFuDne75I4clWnLXl9UPV9hAJQKREuaH1g1qenG9DA=="}

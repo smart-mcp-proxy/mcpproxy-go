@@ -412,11 +412,15 @@ docker run -d --name mcpproxy \
 - **State survives restarts, not replacement**: `docker restart` keeps everything. Removing and
   re-running the container, upgrading the tag, or rescheduling the pod destroys whatever is not
   on the volume — so mount one before you configure anything.
-- **Don't use `MCPPROXY_DATA` or a bare `--data-dir` to relocate state.** The data-dir override is
-  applied after the config file is resolved, so the config in that directory is never read and is
-  overwritten with a fresh default (rotating the API key) on every boot. Mount the volume at the
-  default `/root/.mcpproxy` path instead. (`MCPPROXY_DATA_DIR`, referenced elsewhere in the docs,
-  is not implemented at all.)
+- **Relocating state**: `--data-dir` and `MCPPROXY_DATA_DIR` move the data directory and also
+  decide where `serve` looks for `mcp_config.json` — `<data-dir>/mcp_config.json` is read when it
+  exists, and seeded there on a first run with no config anywhere — so the config and its API key
+  live on the same volume as the database. If the data dir has no config but a legacy one exists in
+  the working directory or `$HOME/.mcpproxy`, `serve` keeps using that legacy file and moves only the
+  data. An explicit `--config` still wins. The legacy `MCPPROXY_DATA` only relocates the data
+  directory: with it the config is still looked up in the working directory and `$HOME/.mcpproxy`
+  (`/root/.mcpproxy` in this image). Releases before this change ignored `<data-dir>/mcp_config.json`
+  under `serve`, so on those, mount the volume at the default `/root/.mcpproxy` path instead.
 - **Port**: the entrypoint is `mcpproxy serve --listen 0.0.0.0:8080`, so the container listens on
   `8080` inside the network namespace. The `-p 127.0.0.1:8080:8080` above keeps it reachable only
   from the host; drop the `127.0.0.1:` prefix only if you deliberately want it on the network, and
@@ -426,6 +430,9 @@ docker run -d --name mcpproxy \
 - **API key**: the REST API and Web UI require one. Set `MCPPROXY_API_KEY` explicitly and keep a
   copy — the image is distroless (no shell), so reading an auto-generated key back out of the
   container is awkward.
+  To keep the key out of `docker inspect` and the process environment, mount it as a secret and set
+  `MCPPROXY_API_KEY_FILE=/run/secrets/<name>` instead of `MCPPROXY_API_KEY` (setting both is an error; see
+  [API key from a file](/configuration/environment-variables#api-key-from-a-file)).
 - **Web UI**: `http://localhost:8080/ui/`.
 
 ### Behind an ingress with SSO

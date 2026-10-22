@@ -21,6 +21,7 @@ jobs:
     outputs:
       notes: ${{ steps.generate.outputs.notes }}
       notes_file: ${{ steps.generate.outputs.notes_file }}
+      contributors: ${{ steps.contributors.outputs.section }}
 
     steps:
       - name: Checkout
@@ -78,6 +79,23 @@ jobs:
           echo "EOF" >> $GITHUB_OUTPUT
 
           echo "Collected $(echo "$COMMITS" | wc -l) commits"
+
+      # Deterministic credit for outside contributors. Kept out of the LLM
+      # summary above so a name can never be dropped or invented. Lists the
+      # authors of PRs merged since the previous stable tag, excluding
+      # maintainers, bots and org members (scripts/contributors.sh).
+      - name: Collect contributors
+        id: contributors
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREV_TAG: ${{ steps.prev_tag.outputs.tag }}
+        run: |
+          SECTION=$(bash scripts/contributors.sh release "$PREV_TAG" HEAD || true)
+          {
+            echo "section<<CONTRIBUTORS_EOF"
+            echo "$SECTION"
+            echo "CONTRIBUTORS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Generate release notes with Claude
         id: generate
@@ -1531,6 +1549,8 @@ jobs:
             ${{ steps.notice.outputs.notice }}
 
             ${{ needs.generate-notes.outputs.notes }}
+
+            ${{ needs.generate-notes.outputs.contributors }}
 
             ---
 

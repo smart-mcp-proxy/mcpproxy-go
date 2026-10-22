@@ -108,7 +108,7 @@ the query, the ranking, or which tools are found.
 
 | Option | Type | Default | Values | Description |
 |--------|------|---------|--------|-------------|
-| `tool_response_mode` | string | `"full"` | `full`, `compact` | `full` returns each result with its complete `inputSchema` (pre-Spec-085 behaviour, byte-identical). `compact` returns a one-line signature instead: per entry `id`, `score`, `sig`, a first-sentence `desc` and a `lossy` flag, plus one top-level `hint`. An empty value means `full`. |
+| `tool_response_mode` | string | `"full"` | `full`, `compact` | `full` returns each result with its complete `inputSchema` (pre-Spec-085 behaviour). `compact` returns a one-line signature instead: per entry `id`, `score`, `sig`, a first-sentence `desc`, a `lossy` flag and the same `call_with` route as full mode, plus one top-level `hint`. An empty value means `full`. |
 
 - **Compact signatures**: `*` marks a required parameter (never elided), `~`
   marks a lossy collapse (nested objects, long enums), and short enums/defaults

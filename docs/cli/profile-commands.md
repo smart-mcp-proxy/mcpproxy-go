@@ -88,6 +88,30 @@ mcpproxy access explain --tool github:create_issue (--client cursor | --token ci
 
 Walks the gates a call meets (credential, profile, server in scope, tool rule, tier cap, token permission, global gate, server state, tool approval), prints the verdict (`allowed`, `blocked`, `hidden`) and the fixes in preference order, each with the command that performs it. The verdict is computed by the same predicate that enforces the call, so it never disagrees with what actually happens. The move-client fix prints `mcpproxy client set-profile <client> <destination-profile>` with the profile it names. Exit code 0 whenever an explanation is produced: the verdict is data.
 
+## `mcpproxy access suggest`
+
+```bash
+mcpproxy access suggest [--since 24h] [--profile <p>] [--token <name>] [--patch] [-o json]
+```
+
+Turns the calls your profiles blocked into reviewed profile changes. It reads the profile refusals in the audit log over `--since` (a duration such as `90m`, `24h` or `7d`; default `24h`, and the audit-log retention is the only limit), groups them by profile, tool and block reason, and prints one row per group: how many calls, which tokens, when last, and the command that would fix it. Each group is checked again with the access explainer first, so a tool that is reachable now no longer appears.
+
+What it will and will not suggest:
+
+| Block reason | Suggestion |
+|--------------|------------|
+| `profile_tier` | `profile update <p> --add-allow <server:tool>` |
+| `profile_unannotated` | `profile classify <p> <server:tool> <read\|write\|destructive>`. The tier is yours to choose; none is assumed. |
+| `profile_server_scope` | `profile update <p> --add-server <server>` (a `code_execution` script called a server outside the profile) |
+| `profile_rule` | Reported, never offered for widening. A deny rule is a decision someone wrote. |
+| `profile_code_execution`, `profile_management` | Reported with a warning naming the profile field (`code_execution`, `management_tools`); no command. |
+
+Only profile changes are suggested. Calls blocked for another reason (quarantine, token permissions, a global gate) are counted under "Not listed"; use `access explain` for those. Nothing is applied: you run the commands yourself. Administrators only.
+
+`--patch` also prints, per profile, the stored profile with every apply-ready suggestion merged in. That document is mcpproxy's own profile format: the body `PUT /api/v1/profiles/<name>` takes and the shape of a `profiles[]` entry in the config file. It is not a permission file for Claude, Codex or any other client; those clients do not decide what a profile allows. A classify suggestion is left out of the document, because it needs a tier from you. With `-o json` the same data (and `patches` when `--patch` is set) is returned as JSON.
+
+The same data is available as `GET /api/v1/access/suggest` (`since`, `profile`, `token`, `patch`) and as the `suggest` operation of the `profiles` MCP tool.
+
 ## `mcpproxy token`
 
 - `token create --profile <p>` pins the token to a profile; its scope comes from the profile. `--servers`/`--permissions` are optional with `--profile`; without it at least one is required (a legacy scope, which prints a hint to prefer a profile). `--profile-pin` still works as a hidden alias and prints a deprecation notice. Names starting with `client-` are reserved for client credentials.

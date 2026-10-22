@@ -48,6 +48,7 @@ type profilesAdminViews interface {
 	ProfileViewData(ctx context.Context, name string) (*runtime.ProfileView, error)
 	EffectiveToolsData(ctx context.Context, name, client, server, reason string) (*runtime.EffectiveToolsResult, error)
 	ExplainAccess(ctx context.Context, q httpapi.ExplainRequest) (*runtime.AccessExplanation, error)
+	SuggestAccess(ctx context.Context, q httpapi.SuggestRequest) (*runtime.AccessSuggestions, error)
 	ClientsListData(ctx context.Context, profileFilter, clientFilter string) (map[string]any, error)
 	ClientBindingData(ctx context.Context, clientID string) (map[string]any, error)
 }
@@ -71,8 +72,8 @@ func (p *MCPProxyServer) adminViews() profilesAdminViews {
 // buildProfilesTool is the tool definition. Description: three sentences.
 func buildProfilesTool() mcp.Tool {
 	opts := []mcp.ToolOption{
-		mcp.WithDescription("Administrator tool to manage profiles and client bindings; every operation takes the REST argument names and returns the REST data (/api/v1/profiles, /clients, /access/explain). " +
-			"Operations: list, get, create, update (full replace), delete, rename, classify, assign (one client to a profile, or bulk from_profile to to_profile), list_clients, effective_tools, explain. " +
+		mcp.WithDescription("Administrator tool to manage profiles and client bindings; every operation takes the REST argument names and returns the REST data (/api/v1/profiles, /clients, /access/explain, /access/suggest). " +
+			"Operations: list, get, create, update (full replace), delete, rename, classify, assign (one client to a profile, or bulk from_profile to to_profile), list_clients, effective_tools, explain, suggest (read-only: profile changes proposed from blocked calls). " +
 			"Writes are refused under read_only_mode or disable_management and by the binding guard (binding_bypassable_without_auth); errors carry the REST error body."),
 		mcp.WithTitleAnnotation("Manage profiles and client bindings"),
 		mcp.WithReadOnlyHintAnnotation(false),
@@ -360,6 +361,24 @@ func (p *MCPProxyServer) runProfilesOperation(ctx context.Context, args map[stri
 			return nil, err
 		}
 		return views.EffectiveToolsData(ctx, name, client, server, reason)
+	case "suggest":
+		var q httpapi.SuggestRequest
+		for _, f := range []struct {
+			key string
+			dst *string
+		}{{"since", &q.Since}, {"profile", &q.Profile}, {"token", &q.Token}} {
+			v, _, err := argString(args, f.key)
+			if err != nil {
+				return nil, err
+			}
+			*f.dst = v
+		}
+		patch, _, err := argBool(args, "patch")
+		if err != nil {
+			return nil, err
+		}
+		q.Patch = patch
+		return views.SuggestAccess(ctx, q)
 	default: // explain
 		var q httpapi.ExplainRequest
 		for _, f := range []struct {

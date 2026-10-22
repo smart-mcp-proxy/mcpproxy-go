@@ -163,9 +163,18 @@ entry for this page — see `verification.md`.)
 
 #### `authz` reason vocabulary
 
-`intent_invalid` · `intent_rejected` · `profile_scope` · `token_scope` ·
-`token_permission` · `server_quarantined` · `tool_pending_approval` ·
+`intent_invalid` · `intent_rejected` · `profile_scope` · `profile_tier` ·
+`profile_rule` · `profile_unannotated` · `token_scope` · `token_permission` · `server_quarantined` · `tool_pending_approval` ·
 `tool_changed_approval` · `tool_not_callable` · `other`
+
+`profile_scope` is a profile refusing a server outside its scope (non-disclosing,
+`disclosed: false`). `profile_tier`, `profile_rule` and `profile_unannotated` are
+a profile's tool policy refusing a tool inside its scope: the tier cap, a deny
+rule, or an unannotated tool under a fail-closed policy. They are disclosed
+refusals (`disclosed: true`) and match the `block_reason` of the same call in the
+activity log. The same reasons are written for a refusal inside a
+`code_execution` script. `profile_code_execution` and `profile_management` are
+not audit reasons: those built-in tools are not audited per call.
 
 ### `tool_call` — one per `authz allow`, at completion
 

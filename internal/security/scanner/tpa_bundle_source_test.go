@@ -42,7 +42,9 @@ func writeBundle(t *testing.T, content string) string {
 // file-sourced corpus never leaks into the rest of the package.
 func restoreEmbeddedBundle(t *testing.T) {
 	t.Helper()
-	t.Cleanup(func() { ConfigureBundle("", zap.NewNop()) })
+	// The loader is stateful (idempotence, anti-downgrade state), so each test
+	// starts from a fresh runtime and restores the embedded default on cleanup.
+	resetBundleRuntimeForTest(t)
 }
 
 // TestBundleStatus_DefaultsToEmbedded is the visibility half of GH #938 finding
