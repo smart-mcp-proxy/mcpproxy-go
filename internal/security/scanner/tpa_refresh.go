@@ -328,13 +328,15 @@ func (r *BundleRefresher) Running() bool {
 // exactly as configureTPABundle(nil) applied it to the runtime.
 func (r *BundleRefresher) Nudge(sec *config.SecurityConfig) {
 	policy := policyFromConfig(sec)
-	bundleRT.disp.applySettings(policy)
 
 	r.mu.Lock()
 	if r.stopped {
 		r.mu.Unlock()
 		return
 	}
+	// Published under r.mu, after the stopped check: a Nudge that begins after
+	// Stop publishes nothing, and one racing Stop is ordered by the lock.
+	bundleRT.disp.applySettings(policy)
 	r.nudged, r.nudgedSet = sec, true
 	reason := wakeNone
 	if policy.Fingerprint != r.fp {
@@ -480,20 +482,33 @@ func (r *BundleRefresher) Refresh(ctx context.Context, logger *zap.Logger) Bundl
 	case <-ctx.Done():
 		return BundleStatus()
 	}
-	if c.started && !r.soonMovedSince(soonBefore) {
+	if c.started {
 		// A manual cycle satisfies the daily check: push the timer out. Not when
 		// a settings change asked for an early look while it ran: that re-arm
 		// stands, or the new settings would wait out a full interval.
-		r.signal(wakeManual)
+		r.signalManualUnlessSoon(soonBefore)
 	}
 	return BundleStatus()
 }
 
-// soonMovedSince reports whether Nudge asked for an early look after seq.
-func (r *BundleRefresher) soonMovedSince(seq uint64) bool {
+// signalManualUnlessSoon records the wakeManual re-arm and wakes the loop, but
+// only while no Nudge asked for an early look after seq. The check and the
+// pending-wake update are one critical section, so a Nudge cannot slip its
+// early re-arm between them and have it replaced by the full interval.
+func (r *BundleRefresher) signalManualUnlessSoon(seq uint64) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.soonSeq != seq
+	if r.soonSeq != seq {
+		r.mu.Unlock()
+		return
+	}
+	if wakeManual > r.pending {
+		r.pending = wakeManual
+	}
+	r.mu.Unlock()
+	select {
+	case r.wake <- struct{}{}:
+	default:
+	}
 }
 
 // --- one cycle ----------------------------------------------------------------
@@ -581,6 +596,12 @@ func (r *BundleRefresher) doCycle(ctx context.Context, trigger string) {
 	// doctor still sees a leg that cannot run behind a file activation.
 	if fetch.Outcome != "" && fetch.Outcome != RefreshOutcomeSuperseded {
 		rec.FetchSet, rec.FetchState, rec.FetchReason = true, fetch.Outcome, fetch.Reason
+	} else if applied && file.Activated && fetch.Outcome == "" {
+		// The fetch leg was skipped behind a file activation and the (possibly
+		// repaired) configuration lets it run: whatever it last said under an
+		// older configuration (a no_trusted_signer disabled state) no longer
+		// describes it, so clear it rather than let the doctor keep warning.
+		rec.FetchSet, rec.FetchState, rec.FetchReason = true, "", ""
 	}
 	bundleRT.disp.recordCycle(rec)
 	r.logOutcome(log, outcome, reason, fetch, policy)
@@ -683,10 +704,17 @@ func (r *BundleRefresher) rememberETag(url, etag string, gen uint64) {
 	r.etags[url] = etag
 }
 
-func (r *BundleRefresher) setRetryAt(t time.Time) {
+// setRetryAt records (or clears) the rate-limit delay, but only while the
+// generation the response was fetched under is still the live one: a Nudge
+// that cleared the delay with the settings must not have a superseded response
+// restore it (the same guard as rememberETag).
+func (r *BundleRefresher) setRetryAt(t time.Time, gen uint64) {
 	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.gen != gen {
+		return
+	}
 	r.retryAt = t
-	r.mu.Unlock()
 }
 
 // fetchLeg runs the optional network leg. The HTTP exchange happens with no
@@ -714,9 +742,9 @@ func (r *BundleRefresher) fetchLeg(ctx context.Context, sec *config.SecurityConf
 	}
 	res := fetchCandidate(ctx, settings)
 	if !res.RetryAt.IsZero() {
-		r.setRetryAt(res.RetryAt)
+		r.setRetryAt(res.RetryAt, startGen)
 	} else if res.Outcome != RefreshOutcomeDisabled {
-		r.setRetryAt(time.Time{})
+		r.setRetryAt(time.Time{}, startGen)
 	}
 
 	leg := legResult{Outcome: res.Outcome, Reason: res.Reason, Detail: res.Detail}
