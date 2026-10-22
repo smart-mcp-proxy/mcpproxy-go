@@ -79,6 +79,8 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Features
 
+- **config: `MCPPROXY_API_KEY_FILE` reads the API key from a file (#1706).** The `*_FILE` form of Docker Compose/Swarm secrets, Kubernetes secret volumes and systemd `LoadCredential=`: the key is not in the process environment (`docker inspect`, `/proc/<pid>/environ`) and is never written to `mcp_config.json`. The path must be absolute; one trailing LF or CRLF is removed; at most 64 KiB is read. Setting both `MCPPROXY_API_KEY` and `MCPPROXY_API_KEY_FILE` (both non-empty) is an error: mcpproxy refuses to start with a message naming both variables (never a key or file contents), and the CLI commands and the tray stop the same way. An empty value is treated as unset. A file that is named but cannot be used stops startup with an error naming the variable and path: mcpproxy does not fall back to the config file or a generated key. `mcpproxy status`, the other CLI commands and the tray read it too, and a tray-launched core reads the file itself instead of receiving the key in its environment. `Config.EnsureAPIKey` now also returns an error. (refs #1706, spec 111 FR-014/FR-030/US7)
+
 - **catalog:** a catalog source whose live search times out or fails is now answered from the listing
   the daemon last saw from it (at most 24 hours old, kept in memory). Those results are marked
   `from_cache` ("From cached list" in the Web UI and macOS, `(cached)` in the CLI) and the source

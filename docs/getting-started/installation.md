@@ -401,6 +401,9 @@ docker run -d --name mcpproxy \
 - **API key**: the REST API and Web UI require one. Set `MCPPROXY_API_KEY` explicitly and keep a
   copy — the image is distroless (no shell), so reading an auto-generated key back out of the
   container is awkward.
+  To keep the key out of `docker inspect` and the process environment, mount it as a secret and set
+  `MCPPROXY_API_KEY_FILE=/run/secrets/<name>` instead of `MCPPROXY_API_KEY` (setting both is an error; see
+  [API key from a file](/configuration/environment-variables#api-key-from-a-file)).
 - **Web UI**: `http://localhost:8080/ui/`.
 
 ### Behind an ingress with SSO

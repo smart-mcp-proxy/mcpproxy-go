@@ -30,8 +30,45 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 |----------|-------------|---------|
 | `MCPPROXY_LISTEN` | Override listen address | `127.0.0.1:8080` or `:8080` |
 | `MCPPROXY_API_KEY` | Set API key for authentication | `my-secret-key` |
+| `MCPPROXY_API_KEY_FILE` | Read the API key from a file (absolute path). Set it or `MCPPROXY_API_KEY`, not both; see [API key from a file](#api-key-from-a-file) | `/run/secrets/mcpproxy_api_key` |
 | `MCPPROXY_DATA_DIR` | Override data directory. Like `--data-dir` (which wins when both are set), it also makes `serve` read `<data-dir>/mcp_config.json` | `/var/lib/mcpproxy` |
 | `MCPPROXY_DATA` | Override data directory only (backward compatibility; `MCPPROXY_DATA_DIR` wins when both are set, and the config file is still looked up in the working directory and `~/.mcpproxy`) | `/var/lib/mcpproxy` |
+
+### API key from a file
+
+`MCPPROXY_API_KEY_FILE` is the `*_FILE` form used by Docker Compose and Swarm secrets
+(`/run/secrets/<name>`), Kubernetes secret volumes and systemd `LoadCredential=`. The key is read
+from the file at start, so it is not in the process environment (`docker inspect`,
+`/proc/<pid>/environ`, crash dumps) and is never written to `mcp_config.json`.
+
+- The path must be absolute. A symlink is followed (Kubernetes secret volumes are symlinks) but must
+  point at a regular file. At most 64 KiB is read.
+- One trailing newline (LF or CRLF) is removed. Everything else, including inner whitespace, is kept.
+- An empty `MCPPROXY_API_KEY_FILE` is treated as unset.
+- Set `MCPPROXY_API_KEY` or `MCPPROXY_API_KEY_FILE`, never both. If both are non-empty, mcpproxy
+  refuses to start (and the CLI commands and the tray stop) with an error that names both
+  variables: `MCPPROXY_API_KEY and MCPPROXY_API_KEY_FILE are both set; set only one of them`. The
+  check does not open the file, and the error never contains a key or file contents. An empty
+  variable counts as unset.
+- A file that is named but cannot be used (missing, unreadable, not absolute, too large, empty) stops
+  startup with an error that names the variable and path. mcpproxy does **not** fall back to
+  the config file or a generated key, so a typo in a secret path cannot start the
+  proxy under a different credential.
+- `mcpproxy status`, the other CLI commands and the tray read the same variable, so they find the key
+  the daemon uses. A tray-launched core reads the file itself rather than receiving the key in its
+  environment.
+
+```yaml
+# docker-compose.yml
+services:
+  mcpproxy:
+    environment:
+      MCPPROXY_API_KEY_FILE: /run/secrets/mcpproxy_api_key
+    secrets: [mcpproxy_api_key]
+secrets:
+  mcpproxy_api_key:
+    file: ./mcpproxy_api_key.txt
+```
 
 ### Security Settings
 
