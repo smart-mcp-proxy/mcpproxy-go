@@ -1,7 +1,7 @@
 ---
 title: Guides
 slug: /guides
-description: Complete a task with MCPProxy, from sharing one MCP setup across AI clients to diagnosing an unavailable tool.
+description: "Complete MCPProxy tasks: share one setup across clients, diagnose unavailable tools, discover tools on demand, and review tool definitions before use."
 ---
 
 # What do you want to do?
@@ -13,6 +13,8 @@ New to MCPProxy? [Install it first](/getting-started/installation), then follow 
 | --- | --- |
 | [Reuse one MCP setup in two AI clients](/guides/two-clients-one-setup) | Claude Code and Codex using the same upstream, with a successful call from each recorded in Activity. |
 | [Find out why an agent cannot use a tool](/guides/diagnose-unavailable-tool) | A diagnosed connection, approval, access or call failure, followed by a verified retry. |
+| [Discover tools on demand](/guides/discover-tools-on-demand) | A measured comparison of initial tool definitions and a successful call through discovery. |
+| [Review a tool before use](/guides/review-tool-before-use) | A deliberate approval decision for a new server and a changed tool definition. |
 
 ## Choose the right reference
 

@@ -34,7 +34,12 @@ const sidebars = {
       type: 'category',
       label: 'Guides',
       link: { type: 'doc', id: 'guides/index' },
-      items: ['guides/two-clients-one-setup', 'guides/diagnose-unavailable-tool'],
+      items: [
+        'guides/two-clients-one-setup',
+        'guides/diagnose-unavailable-tool',
+        'guides/discover-tools-on-demand',
+        'guides/review-tool-before-use',
+      ],
     },
     {
       type: 'category',
