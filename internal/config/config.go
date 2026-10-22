@@ -3643,9 +3643,10 @@ func (sc *SecurityConfig) EffectiveTPAFetchURL() string {
 }
 
 // EffectiveTPAStaleAfterDays returns the stale threshold in days: 30 when
-// absent, 0 (never stale) when explicitly zero. Nil-safe.
+// absent or negative (malformed), 0 (never stale) when explicitly zero.
+// Nil-safe.
 func (sc *SecurityConfig) EffectiveTPAStaleAfterDays() int {
-	if sc == nil || sc.TPAStaleAfterDays == nil {
+	if sc == nil || sc.TPAStaleAfterDays == nil || *sc.TPAStaleAfterDays < 0 {
 		return DefaultTPAStaleAfterDays
 	}
 	return *sc.TPAStaleAfterDays

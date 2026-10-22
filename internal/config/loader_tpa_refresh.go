@@ -75,10 +75,10 @@ var tpaRefreshKeyCheckers = []tpaRefreshKeyCheck{
 			if !ok {
 				return false
 			}
-			_, err := strconv.ParseInt(n.String(), 10, 64)
-			return err == nil
+			d, err := strconv.ParseInt(n.String(), 10, 64)
+			return err == nil && d >= 0
 		},
-		message: "security.tpa_stale_after_days is not a whole number of days; ignoring it, using the 30-day default, and treating the TPA bundle network fetch as off",
+		message: "security.tpa_stale_after_days is not a non-negative whole number of days; ignoring it, using the 30-day default, and treating the TPA bundle network fetch as off",
 	},
 }
 
