@@ -1,7 +1,7 @@
 package scanner
 
 import (
-	"strings"
+	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -12,15 +12,13 @@ import (
 // Activation self-check through the real pipeline (tasks T342, B13). The
 // fetch-sourced catch-all case is in T391 (it needs the fetch adapter).
 
-// selfCheckPatternBundle renders a one-rule bundle with an arbitrary regex, so a
-// fixture can model a release whose rule is too broad.
+// selfCheckPatternBundle renders the EMBEDDED default bundle plus one extra
+// rule with an arbitrary regex, so a fixture can model a release whose added
+// rule is too broad (or harmlessly narrow) while recall stays carried by the
+// shipped signatures on any corpus size.
 func selfCheckPatternBundle(t *testing.T, pattern, tag string) []byte {
 	t.Helper()
-	// buildBundle gives the right envelope; swap its marker rule for ours.
-	base := string(buildBundle(t, bundleOpts{Tag: tag}))
-	marker := "bundle-marker-0-" + tag
-	require.Contains(t, base, marker)
-	return []byte(strings.Replace(base, marker, pattern, 1))
+	return selfCheckEmbeddedPlusRule(t, pattern, tag)
 }
 
 // enableSelfCheckForTest installs the real hook, counts invocations, and
@@ -41,7 +39,7 @@ func enableSelfCheckForTest(t *testing.T) *atomic.Int64 {
 }
 
 func TestSelfCheckPipelineRefusesCatchAllFileDrop(t *testing.T) {
-	realEmbedded := append([]byte(nil), bundledScannerBundle...)
+	realEmbedded := append([]byte(nil), shippedBundleForTest...)
 	f := newRTFixture(t, rtOpts{})
 	count := enableSelfCheckForTest(t)
 
@@ -56,7 +54,11 @@ func TestSelfCheckPipelineRefusesCatchAllFileDrop(t *testing.T) {
 	info := f.run()
 
 	f.requireRejected(info, RejectGateFailure, base.FullDigest, prevCheck)
-	assert.Contains(t, info.LastRejection.Detail, "21/21")
+	hn, err := selfCheckEvaluate(selfCheckCorpusBytes(), selfCheckBuiltins())
+	require.NoError(t, err)
+	require.NotZero(t, hn.HardNegatives)
+	assert.Contains(t, info.LastRejection.Detail, fmt.Sprintf("%d/%d hard negatives", hn.HardNegatives, hn.HardNegatives),
+		"a catch-all flags every hard negative of the embedded corpus")
 	assert.Equal(t, BundleSourceEmbedded, info.Source, "the embedded default keeps serving")
 	assert.EqualValues(t, 1, count.Load(), "exactly one self-check for the one distinct candidate")
 
