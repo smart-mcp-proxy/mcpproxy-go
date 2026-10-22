@@ -4349,14 +4349,16 @@ func (r *Runtime) UsageSnapshot() *UsageAggregate {
 	return r.activityService.UsageSnapshot()
 }
 
-// StreamActivities returns a channel that yields activity records matching the filter.
-func (r *Runtime) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+// StreamActivities returns a channel that yields activity records matching the
+// filter. A consumer that stops reading early must cancel ctx so the producer
+// releases its read transaction (see storage.Manager.StreamActivities).
+func (r *Runtime) StreamActivities(ctx context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	if r.storageManager == nil {
 		ch := make(chan *storage.ActivityRecord)
 		close(ch)
 		return ch
 	}
-	return r.storageManager.StreamActivities(filter)
+	return r.storageManager.StreamActivities(ctx, filter)
 }
 
 // ListToolApprovals returns all tool approval records for a server (Spec 032).

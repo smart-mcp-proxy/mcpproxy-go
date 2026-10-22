@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -288,10 +290,17 @@ func (m *Manager) AggregateToolUsage(since time.Time) (map[string]ToolUsageStat,
 }
 
 // StreamActivities returns a channel that yields activity records matching the filter.
-// The channel is closed when all matching records have been sent.
-// This is useful for streaming large exports without loading all records into memory.
-// Respects filter.Limit and filter.Offset for bounded streaming.
-func (m *Manager) StreamActivities(filter ActivityFilter) <-chan *ActivityRecord {
+// The channel is closed when all matching records have been sent, or as soon as
+// ctx is done. This is useful for streaming large exports without loading all
+// records into memory. Respects filter.Limit and filter.Offset for bounded streaming.
+//
+// The producer walks the activity bucket inside a BBolt read transaction and
+// sends into a bounded channel. A consumer that stops reading early MUST cancel
+// ctx: that is what lets the producer give up its pending send, return from
+// db.View and release the read transaction (an open read transaction pins the
+// mmap and blocks db.Close and remaps on later writes). Without cancellation an
+// abandoned stream holds that transaction for the life of the process.
+func (m *Manager) StreamActivities(ctx context.Context, filter ActivityFilter) <-chan *ActivityRecord {
 	ch := make(chan *ActivityRecord, 100)
 
 	go func() {
@@ -328,14 +337,23 @@ func (m *Manager) StreamActivities(filter ActivityFilter) <-chan *ActivityRecord
 					return nil
 				}
 
-				ch <- &record
-				sent++
+				// A done context wins even when the buffer has room: select
+				// picks a ready case at random, so check first.
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				select {
+				case ch <- &record:
+					sent++
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 
 			return nil
 		})
 
-		if err != nil {
+		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			m.logger.Errorw("Error streaming activities", "error", err)
 		}
 	}()

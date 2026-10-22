@@ -264,7 +264,7 @@ type ServerController interface {
 	// Activity logging (RFC-003)
 	ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error)
 	GetActivity(id string) (*storage.ActivityRecord, error)
-	StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord
+	StreamActivities(ctx context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord
 	// AggregateToolUsage rolls up tool_call activity per (server,tool) since the
 	// given time. Backs the global tools page usage columns (spec 050).
 	AggregateToolUsage(since time.Time) (map[string]storage.ToolUsageStat, error)
