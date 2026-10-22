@@ -215,8 +215,26 @@ func (s *Server) runBundleReprotect(ctx context.Context, act scanner.BundleActiv
 // it must never supersede a real activation: it is dropped unless its digest
 // is still the one serving and no newer sequenced activation names another.
 func (s *Server) runBundleReprotectFrom(ctx context.Context, act scanner.BundleActivation, synthetic bool) {
-	if act.Digest == "" {
+	if !s.runBundleReprotectOnce(ctx, act, synthetic) || ctx.Err() != nil {
 		return
+	}
+	// The sweep ended suspended, yet automatic scans are on again: the
+	// operator re-enabled them while the sweep was still running, so the
+	// config-reload resume saw the suspended flag unset (it is published only
+	// when a sweep returns) and returned. Resume here, after the sweep's
+	// serialization is released and on this tracked goroutine; the digest
+	// bookkeeping deduplicates it against a concurrent reload-driven resume.
+	s.resumeSuspendedReprotect()
+}
+
+// runBundleReprotectOnce is one sweep attempt. It reports whether the sweep
+// ended suspended while the auto_baseline_scan switch is already back on - a
+// resume that nothing else would schedule. The switch is read AFTER the
+// suspended flag is published, so either a reload's resume sees the flag or
+// this recheck sees the switch.
+func (s *Server) runBundleReprotectOnce(ctx context.Context, act scanner.BundleActivation, synthetic bool) (resume bool) {
+	if act.Digest == "" {
+		return false
 	}
 	serving := ""
 	if synthetic {
@@ -267,10 +285,14 @@ func (s *Server) runBundleReprotectFrom(ctx context.Context, act scanner.BundleA
 	if result != reprotectSweepCompleted && st.last == act.Digest {
 		st.last = ""
 	}
+	published := false
 	if st.latest == act.Digest {
 		st.suspended = result == reprotectSweepSuspended
+		published = st.suspended
 	}
 	st.mu.Unlock()
+	// Read the live switch only after the flag is visible (see the doc).
+	return published && s.informationalScansEnabled()
 }
 
 // resumeSuspendedReprotect re-runs a sweep that ended suspended by the
@@ -381,7 +403,7 @@ func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivatio
 		if superseded() {
 			return reprotectSweepIncomplete
 		}
-		outcome := s.reprotectScanServer(ctx, scanSvc, sc.Name, act.Digest)
+		outcome := s.reprotectScanServer(ctx, scanSvc, sc.Name, act.Digest, superseded)
 		switch outcome.kind {
 		case reprotectAborted:
 			return reprotectSweepIncomplete
@@ -473,6 +495,9 @@ var (
 	// errReprotectSuspended: the auto_baseline_scan kill switch was found off
 	// at the last decision point before the job would have started.
 	errReprotectSuspended = errors.New("automatic scans were switched off before the cached scan started")
+	// errReprotectSuperseded: a newer bundle activated while the sweep waited
+	// for the scan queue; its job would be labelled with a stale digest.
+	errReprotectSuperseded = errors.New("the sweep was superseded by a newer bundle activation before the cached scan started")
 	// errReprotectSettleTimeout: the job did not finish within the settle
 	// timeout. It was cancelled and joined; it is a failure, never a success.
 	errReprotectSettleTimeout = errors.New("the cached scan did not finish in time")
@@ -485,16 +510,16 @@ var (
 // with nothing to scan is skipped, any other error spends one of the
 // reprotectMaxAttempts. Each attempt holds infoScanRunMu, so the sweep never
 // runs concurrently with an admission or per-change informational scan.
-func (s *Server) reprotectScanServer(ctx context.Context, scanSvc securityScannerService, name, digest string) reprotectOutcome {
+func (s *Server) reprotectScanServer(ctx context.Context, scanSvc securityScannerService, name, digest string, superseded func() bool) reprotectOutcome {
 	attempts, busy := 0, 0
 	for {
-		if ctx.Err() != nil {
+		if ctx.Err() != nil || superseded() {
 			return reprotectOutcome{kind: reprotectAborted}
 		}
 		if !s.informationalScansEnabled() {
 			return reprotectOutcome{kind: reprotectSuspended}
 		}
-		summary, err := s.startReprotectScan(ctx, scanSvc, name, digest)
+		summary, err := s.startReprotectScan(ctx, scanSvc, name, digest, superseded)
 		switch {
 		case err == nil:
 			if summary.Status == "failed" {
@@ -503,6 +528,8 @@ func (s *Server) reprotectScanServer(ctx context.Context, scanSvc securityScanne
 			return reprotectOutcome{kind: reprotectScanned, hit: summary.Status == "dangerous"}
 		case errors.Is(err, errReprotectSuspended):
 			return reprotectOutcome{kind: reprotectSuspended}
+		case errors.Is(err, errReprotectSuperseded):
+			return reprotectOutcome{kind: reprotectAborted}
 		case errors.Is(err, errReprotectSettleTimeout), errors.Is(err, errReprotectNoVerdict):
 			// Not retried: the job did run (or ran too long), so a second one
 			// would only duplicate it. The sweep stays incomplete.
@@ -537,11 +564,17 @@ func (s *Server) reprotectScanServer(ctx context.Context, scanSvc securityScanne
 // started it (Shutdown joins the sweep, hence the worker, before the store
 // closes). A job that does not settle in time, or settles without a terminal
 // verdict, is an error - never a success.
-func (s *Server) startReprotectScan(ctx context.Context, scanSvc securityScannerService, name, digest string) (*scanner.ScanSummary, error) {
+func (s *Server) startReprotectScan(ctx context.Context, scanSvc securityScannerService, name, digest string, superseded func() bool) (*scanner.ScanSummary, error) {
 	s.infoScanRunMu.Lock()
 	defer s.infoScanRunMu.Unlock()
 	if err := ctx.Err(); err != nil {
 		return nil, err
+	}
+	// The sweep may have queued behind another scan while a newer bundle
+	// activated: the cached contracts are scanned against the bundle serving
+	// NOW, so a job labelled with this sweep's digest would be mislabelled.
+	if superseded() {
+		return nil, errReprotectSuperseded
 	}
 	// The kill switch is read live at every decision point, and this is the
 	// last one: the sweep may have queued behind another scan for minutes.

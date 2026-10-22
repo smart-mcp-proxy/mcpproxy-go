@@ -605,7 +605,29 @@ func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, 
 		scanPass:      ScanPassSecurityScan,
 		informational: true,
 	}
-	job, err := s.engine.StartScanBound(ctx, req, callback)
+	// The authoritative quarantine decision and the job registration are ONE
+	// step under the server's approval lock, the lock a quarantine mutation
+	// holds while it flips the stored flag (Sol round 2): the checks above
+	// precede the contract and peer collection, so a quarantine landing in
+	// that window would otherwise still get a job. The engine re-checks the
+	// incarnation at registration, and the lock holder does too before fn, so
+	// a remove or replace is caught here as well. Nothing in fn takes the
+	// approval lock: registration saves the job record and emits a no-op
+	// event.
+	var job *ScanJob
+	register := func() error {
+		if q, ok := s.serverInfo.(serverQuarantineProvider); ok && q.IsServerQuarantined(serverName) {
+			return ErrServerQuarantined
+		}
+		var startErr error
+		job, startErr = s.engine.StartScanBound(ctx, req, callback)
+		return startErr
+	}
+	if binder, ok := s.unquarantiner.(ApprovalIncarnationBinder); ok {
+		err = binder.WithServerApprovalLockAt(serverName, inc, register)
+	} else {
+		err = register()
+	}
 	if err != nil {
 		return job, err
 	}
