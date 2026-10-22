@@ -699,7 +699,7 @@ func (a *fetchAttempt) releases(ctx context.Context) fetchResult {
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusNotModified:
-		return fetchResult{Outcome: RefreshOutcomeNotModified, ETag: a.s.ETag}
+		return fetchResult{Outcome: RefreshOutcomeNotModified, ETag: a.s.ETag, RetryAt: a.retryAt(resp)}
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
 		return a.statusFailure(resp)
 	}
@@ -801,7 +801,7 @@ func (a *fetchAttempt) direct(ctx context.Context) fetchResult {
 	defer resp.Body.Close()
 	switch {
 	case resp.StatusCode == http.StatusNotModified:
-		return fetchResult{Outcome: RefreshOutcomeNotModified, ETag: a.s.ETag}
+		return fetchResult{Outcome: RefreshOutcomeNotModified, ETag: a.s.ETag, RetryAt: a.retryAt(resp)}
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
 		return a.statusFailure(resp)
 	}

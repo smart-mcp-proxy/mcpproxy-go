@@ -216,19 +216,16 @@ func applyPolicy(policy *bundlePolicy, logger *zap.Logger, trigger string) runOu
 func applyPolicyIf(policy *bundlePolicy, logger *zap.Logger, trigger string, still func() bool) (runOutcome, bool) {
 	log := bundleLogger(logger)
 	var out runOutcome
-	if still == nil {
-		bundleRT.disp.applySettings(policy)
-		bundleRT.disp.noteTrigger(trigger, policy)
-	}
 	bundleRT.mu.Lock()
 	defer bundleRT.mu.Unlock()
-	if still != nil {
-		if !still() {
-			return out, false
-		}
-		bundleRT.disp.applySettings(policy)
-		bundleRT.disp.noteTrigger(trigger, policy)
+	if still != nil && !still() {
+		return out, false
 	}
+	// The display settings are published under the same lock as the policy
+	// transition they describe, so a reload that captured the previous policy
+	// cannot overwrite the settings of a configure that is waiting behind it.
+	bundleRT.disp.applySettings(policy)
+	bundleRT.disp.noteTrigger(trigger, policy)
 	bundleRT.runLocked(policy, log, runOptions{out: &out})
 	return out, true
 }
