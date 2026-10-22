@@ -113,6 +113,25 @@ func TestCallToolDirectResultPreservesToolError(t *testing.T) {
 	require.Error(t, legacyErr)
 }
 
+func TestDirectToolErrorPayloadPreservesArbitraryContent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		content []mcp.Content
+	}{
+		{"empty", []mcp.Content{}},
+		{"image first", []mcp.Content{mcp.NewImageContent("YWJj", "image/png")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := &mcp.CallToolResult{Content: tc.content, IsError: true, StructuredContent: map[string]any{"reason": tc.name}}
+			got, err := directToolErrorPayload(want, true, "tool call failed")
+			require.NoError(t, err)
+			require.Same(t, want, got)
+			_, err = directToolErrorPayload(want, false, "tool call failed")
+			require.EqualError(t, err, "tool call failed")
+		})
+	}
+}
+
 // Spec 105 FR-001/FR-010 (gap FR001-G5, task T025): the REST direct call path
 // (`POST /api/v1/tools/call` → CallToolDirect) is a read_cache redemption
 // door too, and an agent token's refusal there must be as non-disclosing as

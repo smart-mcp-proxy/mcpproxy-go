@@ -7343,29 +7343,26 @@ func (p *MCPProxyServer) callToolDirect(ctx context.Context, request mcp.CallToo
 		if limitErr := shed.take(); limitErr != nil {
 			return nil, &shedDispatchError{limitErr: limitErr, message: shedMessage(limitErr)}
 		}
+		message := "tool call failed"
 		if len(result.Content) > 0 {
 			if textContent, ok := result.Content[0].(mcp.TextContent); ok {
-				if refusal := profileToolRefusal.take(); refusal != nil {
-					return nil, refusal
-				}
-				// Quarantine / pending-approval / changed-tool blocks keep their
-				// typed identity so REST answers 403 with the payload, not a 500.
-				if refusal := quarantineRefusal.take(); refusal != nil {
-					return nil, refusal
-				}
-				// A code_execution refusal keeps its typed identity so the HTTP
-				// layer can answer 403/404/400 (Spec 097). The message stays the
-				// agent-readable one either way.
-				if refusal := codeExecRefusal.take(); refusal != nil {
-					return nil, &codeExecDispatchError{err: refusal, message: textContent.Text}
-				}
-				if preserveResult {
-					return result, nil
-				}
-				return nil, fmt.Errorf("%s", textContent.Text)
+				message = textContent.Text
 			}
 		}
-		return nil, fmt.Errorf("tool call failed")
+		if refusal := profileToolRefusal.take(); refusal != nil {
+			return nil, refusal
+		}
+		// Quarantine / pending-approval / changed-tool blocks keep their
+		// typed identity so REST answers 403 with the payload, not a 500.
+		if refusal := quarantineRefusal.take(); refusal != nil {
+			return nil, refusal
+		}
+		// A code_execution refusal keeps its typed identity so the HTTP
+		// layer can answer 403/404/400 (Spec 097).
+		if refusal := codeExecRefusal.take(); refusal != nil {
+			return nil, &codeExecDispatchError{err: refusal, message: message}
+		}
+		return directToolErrorPayload(result, preserveResult, message)
 	}
 
 	if preserveResult {
@@ -7373,6 +7370,13 @@ func (p *MCPProxyServer) callToolDirect(ctx context.Context, request mcp.CallToo
 	}
 	// Return the content as the result for existing direct callers.
 	return result.Content, nil
+}
+
+func directToolErrorPayload(result *mcp.CallToolResult, preserveResult bool, message string) (interface{}, error) {
+	if preserveResult {
+		return result, nil
+	}
+	return nil, fmt.Errorf("%s", message)
 }
 
 // ============================================================================
