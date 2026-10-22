@@ -224,6 +224,15 @@ func TestReviewApproveReportsAppliedCountsAndWarnsOnHolds(t *testing.T) {
 	require.Contains(t, unknown.String(), "could not be read back")
 }
 
+func TestReviewShowTable_SeparatesReadinessFromApproval(t *testing.T) {
+	for _, tc := range []struct{ readiness string }{{"connecting"}, {"connected"}, {"disabled"}} {
+		output := captureReviewOutput(t, func() error {
+			return formatReviewResponse("table", []byte(`{"data":{"server":{"name":"fixture","readiness":"`+tc.readiness+`"},"tools":[]}}`), false)
+		})
+		require.Contains(t, output, "Readiness: "+tc.readiness+" (approval is separate from connection and discovery)")
+	}
+}
+
 func TestFormatReviewResponseTableQueueColumns(t *testing.T) {
 	raw := []byte(`{"data":{"servers":[{"server":"github","kind":"server_review","quarantined":true,"pending":2,"changed":1,"tier_counts":{"write":2},"scan":{"verdict":"warnings"}}]}}`)
 

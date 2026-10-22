@@ -88,20 +88,26 @@ type ServerReview struct {
 }
 
 type ReviewServer struct {
-	Name                     string            `json:"name"`
-	Transport                string            `json:"transport"`
-	Command                  string            `json:"command,omitempty"`
-	Args                     []string          `json:"args,omitempty"`
-	WorkingDir               string            `json:"working_dir,omitempty"`
-	URL                      string            `json:"url,omitempty"`
-	Env                      map[string]string `json:"env,omitempty"`
-	Headers                  map[string]string `json:"headers,omitempty"`
-	Quarantined              bool              `json:"quarantined"`
-	TrustMode                string            `json:"trust_mode"`
-	SourceRegistryID         string            `json:"source_registry_id,omitempty"`
-	SourceRegistryProvenance string            `json:"source_registry_provenance,omitempty"`
-	Scan                     *ReviewScan       `json:"scan,omitempty"`
-	DefinitionsCaptured      bool              `json:"definitions_captured"`
+	Name        string            `json:"name"`
+	Transport   string            `json:"transport"`
+	Command     string            `json:"command,omitempty"`
+	Args        []string          `json:"args,omitempty"`
+	WorkingDir  string            `json:"working_dir,omitempty"`
+	URL         string            `json:"url,omitempty"`
+	Env         map[string]string `json:"env,omitempty"`
+	Headers     map[string]string `json:"headers,omitempty"`
+	Quarantined bool              `json:"quarantined"`
+	Enabled     bool              `json:"enabled"`
+	Connected   bool              `json:"connected"`
+	// Readiness is a conservative connection hint, not a callable verdict.
+	// "connected" may still precede tool discovery; effective-tools supplies
+	// the canonical per-tool callable projection.
+	Readiness                string      `json:"readiness"`
+	TrustMode                string      `json:"trust_mode"`
+	SourceRegistryID         string      `json:"source_registry_id,omitempty"`
+	SourceRegistryProvenance string      `json:"source_registry_provenance,omitempty"`
+	Scan                     *ReviewScan `json:"scan,omitempty"`
+	DefinitionsCaptured      bool        `json:"definitions_captured"`
 	// LiveToolCount and LastCaptureAt are the fresh-capture proof: how many of
 	// the stored records the upstream listed in its most recent capture, and
 	// when that capture ran. They are separate from the stored-record
@@ -252,11 +258,27 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 		Name: contractServer.Name, Transport: reviewTransport(server.Protocol),
 		Command: contractServer.Command, Args: contractServer.Args, WorkingDir: contractServer.WorkingDir,
 		URL: contractServer.URL, Env: contractServer.Env, Headers: contractServer.Headers,
-		Quarantined: server.Quarantined, TrustMode: string(server.EffectiveTrustMode()),
+		Quarantined: server.Quarantined, Enabled: server.Enabled, TrustMode: string(server.EffectiveTrustMode()),
 		SourceRegistryID: server.SourceRegistryID, SourceRegistryProvenance: server.SourceRegistryProvenance,
 	}
 	if hasGen {
 		reviewServer.Generation, reviewServer.Incarnation = gen.Gen, gen.Incarnation
+	}
+	// Approval commits policy; it does not wait for an upstream connection or
+	// discovery. Keep readiness separate so an approved review never promises an
+	// immediately successful call.
+	switch {
+	case !server.Enabled:
+		reviewServer.Readiness = "disabled"
+	case server.Quarantined:
+		reviewServer.Readiness = "quarantined"
+	default:
+		if client, ok := r.upstreamManager.GetClient(serverName); ok && client != nil && client.IsConnected() {
+			reviewServer.Connected = true
+			reviewServer.Readiness = "connected"
+		} else {
+			reviewServer.Readiness = "connecting"
+		}
 	}
 	// Stored records and the live capture state are published by different
 	// writers. A capture holds captureSnapMu for persist + prune + stamp, so

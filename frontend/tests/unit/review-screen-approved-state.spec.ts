@@ -11,11 +11,11 @@ vi.mock('@/services/api', () => ({ default: {
 
 type Tool = { name: string; approval_status: string; disabled?: boolean }
 
-function payload(quarantined: boolean, tools: Tool[]) {
+function payload(quarantined: boolean, tools: Tool[], readiness: 'connecting' | 'connected' = 'connected') {
   return {
     success: true,
     data: {
-      server: { name: 'fixture', transport: 'stdio', quarantined, definitions_captured: true, scan: { verdict: 'clean', risk_score: 0, coverage: 'current', tools_scanned: tools.length } },
+      server: { name: 'fixture', transport: 'stdio', quarantined, readiness, definitions_captured: true, scan: { verdict: 'clean', risk_score: 0, coverage: 'current', tools_scanned: tools.length } },
       tools: tools.map(t => ({ description: t.name, tier: 'read', disabled: false, scan_verdict: 'clean', ...t })),
     },
   }
@@ -53,14 +53,25 @@ describe('ReviewScreen approved state', () => {
     expect(wrapper.get('[data-test="review-tool-state-a"]').text()).toBe('Approved')
     expect(wrapper.get('[data-test="review-tool-state-c"]').text()).toBe('Blocked')
     expect(wrapper.get('[data-test="review-heading"]').text()).toBe('fixture is approved')
-    expect(wrapper.get('[data-test="review-subtitle"]').text()).toContain('All 3 tools approved (1 blocked)')
+    expect(wrapper.get('[data-test="review-subtitle"]').text()).toContain('2 approved and unblocked · 1 blocked of 3')
     expect(wrapper.text()).not.toContain('Review tool definitions before changing what agents can call')
     expect(wrapper.get('[data-test="review-manage-tools"]').attributes('data-to')).toBe('/servers/fixture?tab=tools')
   })
 
   it('omits the blocked count when nothing is blocked', async () => {
     const wrapper = await mountScreen(false, approvedTools.slice(0, 2))
-    expect(wrapper.get('[data-test="review-subtitle"]').text()).toContain('All 2 tools approved.')
+    expect(wrapper.get('[data-test="review-subtitle"]').text()).toContain('2 approved and unblocked · 0 blocked of 2')
+  })
+
+  it('explains selective approval and connecting without promising a callable tool', async () => {
+    const tools = Array.from({ length: 25 }, (_, i) => ({ name: `tool_${i}`, approval_status: 'approved', disabled: i > 0 }))
+    ;(api.getServerReview as any).mockResolvedValue(payload(false, tools, 'connecting'))
+    const wrapper = mount(ReviewScreen, {
+      props: { serverName: 'fixture' },
+      global: { stubs: { RouterLink: { props: ['to'], template: '<a><slot /></a>' } } },
+    })
+    await flushPromises()
+    expect(wrapper.get('[data-test="review-subtitle"]').text()).toContain('1 approved and unblocked · 24 blocked of 25. Upstream connecting')
   })
 
   it('confirms before quarantining to review again, then reloads', async () => {
@@ -99,6 +110,7 @@ describe('ReviewScreen approved state', () => {
     ])
     expect(wrapper.get('[data-test="review-heading"]').text()).toBe('Review fixture')
     expect(wrapper.get('[data-test="review-subtitle"]').text()).toContain('1 tool needs review')
+    expect(wrapper.get('[data-test="review-subtitle"]').text()).toContain('1 approved and unblocked')
     expect(wrapper.get('[data-test="review-tool-a"]').findAll('button').map(b => b.text())).toEqual([])
     expect(wrapper.get('[data-test="review-tool-a"]').get('[data-test="review-tool-state-a"]').text()).toBe('Approved')
     expect(wrapper.get('[data-test="review-tool-b"]').findAll('button').map(b => b.text())).toEqual(['Approve', 'Reject'])

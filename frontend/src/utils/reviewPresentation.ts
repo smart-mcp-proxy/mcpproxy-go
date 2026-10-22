@@ -70,20 +70,24 @@ export function reviewHeadline(review: ServerReviewResponse): ReviewHeadline {
   }
   const tools = review.tools
   const pending = tools.filter(needsReview).length
+  const approvedUnblocked = tools.filter(t => t.approval_status === 'approved' && !t.disabled).length
+  const blocked = tools.filter(t => t.disabled).length
+  const readiness = review.server.readiness === 'disabled' ? 'Server disabled.'
+    : review.server.readiness === 'connecting' ? 'Upstream connecting; retry after discovery.'
+      : review.server.readiness === 'connected' ? 'Upstream connected; tool discovery may still be in progress.'
+        : 'Approval does not confirm upstream readiness.'
   if (pending > 0) {
     return {
       state: 'review',
       title: `Review ${name}`,
-      subtitle: `${pending} ${plural(pending, 'tool needs', 'tools need')} review. Agents cannot call ${plural(pending, 'it', 'them')} until approved.`,
+      subtitle: `${pending} ${plural(pending, 'tool needs', 'tools need')} review · ${approvedUnblocked} approved and unblocked · ${blocked} blocked. ${readiness}`,
     }
   }
   if (tools.length === 0) {
     // Approved without seeing tools: still an approved server, just with nothing captured yet.
-    return { state: 'approved', title: `${name} is approved`, subtitle: 'No tool definitions have been captured yet. New or changed tools come back here for review.' }
+    return { state: 'approved', title: `${name} is approved`, subtitle: `No tool definitions have been captured yet. ${readiness}` }
   }
-  const blocked = tools.filter(t => t.disabled).length
-  const summary = `All ${tools.length} ${plural(tools.length, 'tool', 'tools')} approved${blocked > 0 ? ` (${blocked} blocked)` : ''}.`
-  return { state: 'approved', title: `${name} is approved`, subtitle: `${summary} New or changed tools come back here for review.` }
+  return { state: 'approved', title: `${name} is approved`, subtitle: `${approvedUnblocked} approved and unblocked · ${blocked} blocked of ${tools.length}. ${readiness}` }
 }
 
 export type ToolControl = 'allow-toggle' | 'approve-reject' | 'approved' | 'blocked'

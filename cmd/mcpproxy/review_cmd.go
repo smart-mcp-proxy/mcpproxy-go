@@ -211,6 +211,9 @@ func runReviewWrite(server, operation string, value interface{}) error {
 		return err
 	}
 	warnApprovalHolds(os.Stderr, server, response)
+	if operation == "security/approve" || operation == "tools/approve" {
+		fmt.Fprintf(os.Stderr, "Approval updates policy; upstream connection and discovery may still be in progress. Check connection state with: mcpproxy review show %s -o json (server.readiness). Retry the call after discovery completes.\n", server)
+	}
 	return nil
 }
 
@@ -634,6 +637,9 @@ func formatReviewResponse(format string, raw []byte, full bool) error {
 	}
 	server, _ := value["server"].(map[string]interface{})
 	fmt.Printf("Server: %v\n", server["name"])
+	if readiness, ok := server["readiness"].(string); ok {
+		fmt.Printf("Readiness: %s (approval is separate from connection and discovery)\n", readiness)
+	}
 	if line := reviewScanLine(server); line != "" {
 		fmt.Println(line)
 	}

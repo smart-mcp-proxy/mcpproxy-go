@@ -1509,7 +1509,7 @@ export interface ServerReviewResponse {
     name: string; transport: string; command?: string; url?: string
     /** Launch identity, already redacted by the core (UX-10); never read from the raw server config. */
     args?: string[]; working_dir?: string
-    quarantined: boolean; trust_mode?: string; source_registry_id?: string; source_registry_provenance?: string; scan?: ReviewScan
+    quarantined: boolean; enabled?: boolean; connected?: boolean; readiness?: 'disabled' | 'quarantined' | 'connecting' | 'connected'; trust_mode?: string; source_registry_id?: string; source_registry_provenance?: string; scan?: ReviewScan
     definitions_captured: boolean
     /** Spec 116 FR-017: the reviewed server's identity; sent back as expected_incarnation. */
     generation?: number; incarnation?: number

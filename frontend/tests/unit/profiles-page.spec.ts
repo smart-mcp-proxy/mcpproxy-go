@@ -12,6 +12,7 @@ vi.mock('@/services/api', () => ({
   default: {
     hasAPIKey: vi.fn(() => true),
     getProfiles: vi.fn(),
+    getProfileEffectiveTools: vi.fn(),
     createProfile: vi.fn(),
     getServers: vi.fn(),
     getClients: vi.fn(),
@@ -62,6 +63,7 @@ describe('Profiles page (Spec 108-i T090, FR-040)', () => {
     ;(api.hasAPIKey as any).mockReturnValue(true)
     setAvailableFeatures(['scope_filters'])
     ;(api.getProfiles as any).mockResolvedValue({ profiles: [work, legacy], anonymous_profile: 'work-ro' })
+    ;(api.getProfileEffectiveTools as any).mockResolvedValue({ counts: { visible: 25, callable: 1, hidden: 225 } })
     ;(api.getServers as any).mockResolvedValue({ success: true, data: { servers: [{ name: 'github' }, { name: 'notion' }] } })
     ;(api.getClients as any).mockResolvedValue({ success: true, data: { clients: [makeClient('cursor'), makeClient('claude-code', { display_name: 'Claude Code' })], warnings: [] } })
   })
@@ -80,7 +82,8 @@ describe('Profiles page (Spec 108-i T090, FR-040)', () => {
     const card = wrapper.get('[data-test="profile-card-work-ro"]')
     expect(card.text()).toContain('Work')
     expect(card.text()).toContain('work-ro')
-    expect(card.get('[data-test="profile-counts"]').text()).toMatch(/Read\s*4.*Write\s*2.*Destructive\s*1/)
+    expect(card.get('[data-test="profile-counts"]').text()).toMatch(/Read visible\s*4.*Write visible\s*2.*Destructive visible\s*1/)
+    expect(card.get('[data-test="profile-access-counts"]').text()).toContain('1 callable now · 24 held · 225 hidden')
     expect(card.get('[data-test="profile-unannotated"]').text()).toBe('3 unannotated hidden')
     expect(card.get('[data-test="profile-used-by"]').text()).toContain('Cursor')
     expect(card.get('[data-test="profile-used-by"]').text()).toContain('\u{1F512}')

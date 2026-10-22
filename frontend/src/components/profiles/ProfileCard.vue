@@ -14,10 +14,11 @@
         {{ tierPhrase(profile.max_tier, profile.tool_counts) || 'No cap' }}
       </p>
       <dl class="flex flex-wrap gap-x-4 gap-y-1 text-sm" data-test="profile-counts">
-        <div class="flex gap-1"><dt class="opacity-70">Read</dt><dd>{{ profile.tool_counts.read }}</dd></div>
-        <div class="flex gap-1"><dt class="opacity-70">Write</dt><dd>{{ profile.tool_counts.write }}</dd></div>
-        <div class="flex gap-1"><dt class="opacity-70">Destructive</dt><dd>{{ profile.tool_counts.destructive }}</dd></div>
+        <div class="flex gap-1"><dt class="opacity-70">Read visible</dt><dd>{{ profile.tool_counts.read }}</dd></div>
+        <div class="flex gap-1"><dt class="opacity-70">Write visible</dt><dd>{{ profile.tool_counts.write }}</dd></div>
+        <div class="flex gap-1"><dt class="opacity-70">Destructive visible</dt><dd>{{ profile.tool_counts.destructive }}</dd></div>
       </dl>
+      <p v-if="accessCounts?.callable !== undefined" class="text-sm font-medium" data-test="profile-access-counts">{{ accessCounts.callable }} callable now · {{ Math.max(0, accessCounts.visible - accessCounts.callable) }} held · {{ accessCounts.hidden }} hidden</p>
       <p v-if="profile.tool_counts.unannotated_hidden > 0" class="text-xs opacity-70" data-test="profile-unannotated">{{ profile.tool_counts.unannotated_hidden }} unannotated hidden</p>
 
       <!-- used_by is administrator-only: absent, never empty, for anyone else. -->
@@ -65,12 +66,12 @@ import { computed, ref } from 'vue'
 import { useClientsStore } from '@/stores/clients'
 import { isScopeParamAvailable, useScopeQuery } from '@/composables/useScopeQuery'
 import { tierPhrase } from '@/utils/profiles'
-import type { ProfileView } from '@/types/api'
+import type { EffectiveToolsResult, ProfileView } from '@/types/api'
 
 // Spec 108-i I17 / FR-040: one profile on the Profiles page. The four links go
 // through Spec 109's link map (`linkTo`), so the profile travels as the
 // `profile` URL filter and the target pages read it the same way everywhere.
-const props = defineProps<{ profile: ProfileView; tenant?: boolean }>()
+const props = defineProps<{ profile: ProfileView; tenant?: boolean; accessCounts?: EffectiveToolsResult['counts'] }>()
 const emit = defineEmits<{ (e: 'assign'): void; (e: 'delete'): void }>()
 const scope = useScopeQuery('profiles')
 const menuOpen = ref(false)
