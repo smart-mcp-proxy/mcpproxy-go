@@ -185,7 +185,7 @@ func TestBundleDoctorWarnings_TruthTable(t *testing.T) {
 			name: "fetch enabled but no URL",
 			info: func() BundleInfo {
 				return BundleInfo{Source: BundleSourceEmbedded, LoadedAt: doctorNow, Refresh: &BundleRefreshStatus{
-					FetchEnabled: true, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonNoURL,
+					FetchEnabled: true, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonNoURL, FetchState: RefreshOutcomeDisabled, FetchReason: RefreshReasonNoURL,
 				}}
 			},
 			want: []string{"tpa_fetch_url"},
@@ -194,7 +194,7 @@ func TestBundleDoctorWarnings_TruthTable(t *testing.T) {
 			name: "fetch enabled with an invalid URL",
 			info: func() BundleInfo {
 				return BundleInfo{Source: BundleSourceEmbedded, LoadedAt: doctorNow, Refresh: &BundleRefreshStatus{
-					FetchEnabled: true, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonInvalidURL,
+					FetchEnabled: true, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonInvalidURL, FetchState: RefreshOutcomeDisabled, FetchReason: RefreshReasonInvalidURL,
 				}}
 			},
 			want: []string{"tpa_fetch_url"},
@@ -203,7 +203,17 @@ func TestBundleDoctorWarnings_TruthTable(t *testing.T) {
 			name: "fetch enabled with no trusted signer",
 			info: func() BundleInfo {
 				return BundleInfo{Source: BundleSourceEmbedded, LoadedAt: doctorNow, Refresh: &BundleRefreshStatus{
-					FetchEnabled: true, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonNoTrustedSigner,
+					FetchEnabled: true, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonNoTrustedSigner, FetchState: RefreshOutcomeDisabled, FetchReason: RefreshReasonNoTrustedSigner,
+				}}
+			},
+			want: []string{"signer"},
+		},
+		{
+			name: "a file activation owns the cycle outcome but the inactive fetch leg is still reported",
+			info: func() BundleInfo {
+				return BundleInfo{Source: BundleSourceFile, LoadedAt: doctorNow, Refresh: &BundleRefreshStatus{
+					FetchEnabled: true, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeActivated,
+					FetchState: RefreshOutcomeDisabled, FetchReason: RefreshReasonNoTrustedSigner,
 				}}
 			},
 			want: []string{"signer"},
@@ -212,7 +222,7 @@ func TestBundleDoctorWarnings_TruthTable(t *testing.T) {
 			name: "fetch disabled by configuration is not a problem",
 			info: func() BundleInfo {
 				return BundleInfo{Source: BundleSourceEmbedded, LoadedAt: doctorNow, Refresh: &BundleRefreshStatus{
-					FetchEnabled: false, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonFetchOff,
+					FetchEnabled: false, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonFetchOff, FetchState: RefreshOutcomeDisabled, FetchReason: RefreshReasonFetchOff,
 				}}
 			},
 		},
@@ -220,7 +230,7 @@ func TestBundleDoctorWarnings_TruthTable(t *testing.T) {
 			name: "state_unavailable is not a configuration error and is not reported by this source",
 			info: func() BundleInfo {
 				return BundleInfo{Source: BundleSourceEmbedded, LoadedAt: doctorNow, Refresh: &BundleRefreshStatus{
-					FetchEnabled: true, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonStateUnavailable,
+					FetchEnabled: true, IntervalSeconds: 86400, LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonStateUnavailable, FetchState: RefreshOutcomeDisabled, FetchReason: RefreshReasonStateUnavailable,
 				}}
 			},
 		},
@@ -232,7 +242,7 @@ func TestBundleDoctorWarnings_TruthTable(t *testing.T) {
 				i.LastRejection = doctorRejection(RejectKeyNotTrusted, newer)
 				i.Refresh = &BundleRefreshStatus{
 					FetchEnabled: true, FetchHost: "mirror.example.test", IntervalSeconds: 86400,
-					LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonNoTrustedSigner,
+					LastOutcome: RefreshOutcomeDisabled, LastReason: RefreshReasonNoTrustedSigner, FetchState: RefreshOutcomeDisabled, FetchReason: RefreshReasonNoTrustedSigner,
 					ConsecutiveFailures: 5,
 				}
 				return i

@@ -88,6 +88,12 @@ type BundleRefreshStatus struct {
 	LastAttemptAt       *time.Time `json:"last_attempt_at,omitempty"`
 	ConsecutiveFailures int        `json:"consecutive_failures"`
 	NextCheckAt         *time.Time `json:"next_check_at,omitempty"`
+	// FetchState and FetchReason are the fetch leg's own last answer (one of the
+	// RefreshOutcome* values and its reason), kept apart from LastOutcome: a file
+	// activation owns the merged cycle outcome but must not hide a fetch leg that
+	// cannot run (B16 warning 3).
+	FetchState  string `json:"fetch_state,omitempty"`
+	FetchReason string `json:"fetch_reason,omitempty"`
 }
 
 // BundleReprotectStatus is the post-activation re-protection sweep status
@@ -145,8 +151,11 @@ type displayData struct {
 	// reported from then on.
 	known bool
 	// configured is true after the first configure of this process: the first
-	// apply is trigger "startup", every later one "config".
+	// apply is trigger "startup", every later one "config" unless it is an
+	// identical re-apply of the startup settings (see noteTrigger).
 	configured bool
+	// startupSig is the settings signature of that first apply.
+	startupSig settingsSig
 
 	staleAfterDays  int
 	fetchEnabled    bool
@@ -158,6 +167,8 @@ type displayData struct {
 	lastTrigger         string
 	lastOutcome         string
 	lastReason          string
+	fetchState          string
+	fetchReason         string
 	lastAttemptAt       time.Time
 	consecutiveFailures int
 	nextCheckAt         time.Time
@@ -200,17 +211,37 @@ func (d *bundleDisplay) setIntervalOverride(v int) {
 	d.mu.Unlock()
 }
 
+// settingsSig is what a configure applied, as far as the trigger label cares.
+type settingsSig struct {
+	fingerprint string
+	staleDays   int
+	interval    time.Duration
+}
+
+func sigOf(p *bundlePolicy) settingsSig {
+	return settingsSig{fingerprint: p.Fingerprint, staleDays: p.StaleAfterDays, interval: p.RefreshInterval}
+}
+
 // noteTrigger records what started the current apply. An empty trigger means a
-// configure: "startup" the first time in this process, "config" afterwards.
-func (d *bundleDisplay) noteTrigger(trigger string) {
+// configure: "startup" the first time in this process, "config" afterwards. The
+// scanner service re-applies the identical config right after the
+// construction-time configure; that is still the startup, not a reload, so an
+// identical re-apply keeps "startup" until a cycle or a real change replaces it.
+func (d *bundleDisplay) noteTrigger(trigger string, p *bundlePolicy) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if trigger == "" {
-		trigger = RefreshTriggerConfig
-		if !d.configured {
+		sig := sigOf(p)
+		switch {
+		case !d.configured:
 			trigger = RefreshTriggerStartup
+			d.configured = true
+			d.startupSig = sig
+		case d.lastTrigger == RefreshTriggerStartup && sig == d.startupSig:
+			trigger = RefreshTriggerStartup
+		default:
+			trigger = RefreshTriggerConfig
 		}
-		d.configured = true
 	}
 	d.lastTrigger = trigger
 }
@@ -236,6 +267,10 @@ func (d *bundleDisplay) setReprotect(s BundleReprotectStatus) {
 type cycleRecord struct {
 	Trigger, Outcome, Reason string
 	At                       time.Time
+	// FetchSet is true when the fetch leg ran (or was known unable to run) this
+	// cycle; FetchState and FetchReason are then its own answer.
+	FetchSet                bool
+	FetchState, FetchReason string
 	// Failures is how the consecutive-failure counter moves.
 	Failures failureMove
 }
@@ -252,6 +287,9 @@ func (d *bundleDisplay) recordCycle(r cycleRecord) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.lastTrigger, d.lastOutcome, d.lastReason, d.lastAttemptAt = r.Trigger, r.Outcome, r.Reason, r.At
+	if r.FetchSet {
+		d.fetchState, d.fetchReason = r.FetchState, r.FetchReason
+	}
 	switch r.Failures {
 	case failuresIncrement:
 		d.consecutiveFailures++
@@ -290,6 +328,8 @@ func (d *bundleDisplay) merge(info *BundleInfo) {
 			LastTrigger:         d.lastTrigger,
 			LastOutcome:         d.lastOutcome,
 			LastReason:          d.lastReason,
+			FetchState:          d.fetchState,
+			FetchReason:         d.fetchReason,
 			ConsecutiveFailures: d.consecutiveFailures,
 		}
 		if !d.lastAttemptAt.IsZero() {

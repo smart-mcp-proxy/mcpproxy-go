@@ -106,6 +106,15 @@ func policyFor(sec *config.SecurityConfig, path string) *bundlePolicy {
 	return p
 }
 
+// sameSettings reports whether o would apply exactly what p applies: the same
+// policy fingerprint and the same display settings. The refresher compares a
+// policy it captured at the start of a cycle with the live one.
+func (p *bundlePolicy) sameSettings(o *bundlePolicy) bool {
+	return p.Fingerprint == o.Fingerprint &&
+		p.RefreshInterval == o.RefreshInterval &&
+		p.StaleAfterDays == o.StaleAfterDays
+}
+
 // minRefreshInterval is the floor of the refresh cadence (B1). A test seam on
 // the refresher goes lower.
 const minRefreshInterval = time.Hour

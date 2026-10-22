@@ -5420,6 +5420,15 @@ components:
           description: FetchHost is the host of the configured fetch URL ("" when
             none).
           type: string
+        fetch_reason:
+          type: string
+        fetch_state:
+          description: |-
+            FetchState and FetchReason are the fetch leg's own last answer (one of the
+            RefreshOutcome* values and its reason), kept apart from LastOutcome: a file
+            activation owns the merged cycle outcome but must not hide a fetch leg that
+            cannot run (B16 warning 3).
+          type: string
         interval_seconds:
           type: integer
         last_attempt_at:

@@ -203,14 +203,34 @@ func configureWithPolicy(policy *bundlePolicy, logger *zap.Logger) {
 // configure: startup the first time in this process, config afterwards) and
 // the leg's outcome.
 func applyPolicy(policy *bundlePolicy, logger *zap.Logger, trigger string) runOutcome {
+	out, _ := applyPolicyIf(policy, logger, trigger, nil)
+	return out
+}
+
+// applyPolicyIf is applyPolicy for a policy captured earlier (the refresher's
+// file leg). When still is non-nil it is evaluated under bundleRT.mu, before
+// anything is applied: a policy a newer reload already replaced must not be
+// re-applied (it could activate what the live policy forbids and would leave
+// the stale policy serving). It reports whether the policy was applied. still
+// must not call back into the bundle runtime.
+func applyPolicyIf(policy *bundlePolicy, logger *zap.Logger, trigger string, still func() bool) (runOutcome, bool) {
 	log := bundleLogger(logger)
-	bundleRT.disp.applySettings(policy)
-	bundleRT.disp.noteTrigger(trigger)
 	var out runOutcome
+	if still == nil {
+		bundleRT.disp.applySettings(policy)
+		bundleRT.disp.noteTrigger(trigger, policy)
+	}
 	bundleRT.mu.Lock()
 	defer bundleRT.mu.Unlock()
+	if still != nil {
+		if !still() {
+			return out, false
+		}
+		bundleRT.disp.applySettings(policy)
+		bundleRT.disp.noteTrigger(trigger, policy)
+	}
 	bundleRT.runLocked(policy, log, runOptions{out: &out})
-	return out
+	return out, true
 }
 
 // ReloadBundle re-runs the pipeline with the last applied policy and returns the
@@ -229,7 +249,7 @@ func reloadLastPolicy(logger *zap.Logger, trigger string) (BundleInfo, runOutcom
 	defer bundleRT.mu.Unlock()
 	policy := bundleRT.policyOrDefaultLocked()
 	bundleRT.disp.applySettings(policy)
-	bundleRT.disp.noteTrigger(trigger)
+	bundleRT.disp.noteTrigger(trigger, policy)
 	var out runOutcome
 	bundleRT.runLocked(policy, log, runOptions{out: &out})
 	return statusFromSnapshot(), out
@@ -259,12 +279,26 @@ type offerResult struct {
 
 // offerCandidate is runOffered plus the decision, for the refresher.
 func offerCandidate(c Candidate, logger *zap.Logger) (BundleInfo, offerResult) {
+	info, res, _ := offerCandidateIf(c, logger, nil)
+	return info, res
+}
+
+// offerCandidateIf is offerCandidate with the supersession check made inside
+// the serialized offer: when still is non-nil it is evaluated under bundleRT.mu
+// immediately before the run, so no configuration transition can slip between
+// the check and the activation. It reports whether the candidate was offered;
+// when it was not, nothing ran. still must not call back into the bundle
+// runtime.
+func offerCandidateIf(c Candidate, logger *zap.Logger, still func() bool) (BundleInfo, offerResult, bool) {
 	log := bundleLogger(logger)
 	var out runOutcome
 	bundleRT.mu.Lock()
 	defer bundleRT.mu.Unlock()
+	if still != nil && !still() {
+		return statusFromSnapshot(), offerResult{}, false
+	}
 	bundleRT.runLocked(bundleRT.policyOrDefaultLocked(), log, runOptions{offered: &c, out: &out})
-	return statusFromSnapshot(), out.offerResult()
+	return statusFromSnapshot(), out.offerResult(), true
 }
 
 // runOutcome is what one run decided, for the refresher's status: the file leg
@@ -392,6 +426,10 @@ func (rt *bundleRuntime) runLocked(policy *bundlePolicy, log *zap.Logger, opts r
 			fileAbsent = readRej != nil && pathMissing(policy.Path)
 		}
 		if !opts.force && rt.canSkipLocked(policy, cand) {
+			// Nothing to decide, but the policy object carries the display
+			// settings (stale threshold, interval): keep the newer one, or the
+			// next ReloadBundle re-applies the old values.
+			rt.policy = policy
 			return
 		}
 	}
@@ -653,8 +691,13 @@ func offerKey(policy *bundlePolicy, c *Candidate) string {
 // byte-identical to the serving external bundle, or to the pair the pipeline
 // refused last time under this very policy (tasks B7). Either way there is
 // nothing to decide.
+//
+// The serving-pair shortcut holds only for a signature-verified serving bundle:
+// an offered pair is always evaluated signed-only (MustSign), so an unsigned
+// serving file bundle with identical bytes must reach that gate and be refused,
+// not be reported as unchanged (which would also cache its validator).
 func (rt *bundleRuntime) offerUnchangedLocked(policy *bundlePolicy, c *Candidate) bool {
-	if a := rt.active; a != nil &&
+	if a := rt.active; a != nil && a.verified &&
 		a.cand.SidecarPresent == c.SidecarPresent &&
 		bytes.Equal(a.cand.Bundle, c.Bundle) &&
 		bytes.Equal(a.cand.Sidecar, c.Sidecar) {

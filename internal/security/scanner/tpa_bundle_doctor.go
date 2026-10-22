@@ -90,13 +90,15 @@ func doctorStuckWarning(info BundleInfo) string {
 
 // doctorFetchInactiveWarning is warning (3): fetch is enabled but the leg may
 // not issue requests because of a configuration problem (Spec 087 edge case: no
-// key configured is a clear configuration error, not silence).
+// key configured is a clear configuration error, not silence). It reads the
+// fetch leg's own state, not the merged cycle outcome: a successful file leg
+// owns the cycle outcome and must not hide a fetch leg that cannot run.
 func doctorFetchInactiveWarning(info BundleInfo) string {
 	r := info.Refresh
-	if r == nil || !r.FetchEnabled || r.LastOutcome != RefreshOutcomeDisabled {
+	if r == nil || !r.FetchEnabled || r.FetchState != RefreshOutcomeDisabled {
 		return ""
 	}
-	switch r.LastReason {
+	switch r.FetchReason {
 	case RefreshReasonNoURL, RefreshReasonInvalidURL:
 		return "TPA bundle fetch is enabled but inactive: security.tpa_fetch_url is empty or invalid"
 	case RefreshReasonNoTrustedSigner:
