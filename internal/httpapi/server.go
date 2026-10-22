@@ -6294,6 +6294,9 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	// logged every Web-UI tool call — and every shed of one — as if it came from
 	// the CLI. The surface header the clients already send is the discriminator.
 	ctx := reqcontext.WithRequestSource(r.Context(), toolCallRequestSource(r))
+	if r.Header.Get("X-MCPProxy-Result-Envelope") == "1" {
+		ctx = reqcontext.WithToolResultEnvelope(ctx)
+	}
 
 	// Call tool via controller
 	result, err := s.controller.CallTool(ctx, request.ToolName, request.Arguments)
