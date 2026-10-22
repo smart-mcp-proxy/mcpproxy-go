@@ -316,7 +316,9 @@ Table, JSON, and YAML output apply the same import. Structured output includes
 `summary.failed`. The existing `summary.imported` field remains available:
 it counts applied servers during an import and preview candidates with
 `--dry-run`. A partial failure is rendered with per-server details and returns
-a nonzero exit status; successfully applied servers remain imported.
+a nonzero exit status; successfully applied servers remain imported. An invalid
+preview also returns nonzero and reports a validation failure without making
+changes.
 
 **Supported Formats:**
 

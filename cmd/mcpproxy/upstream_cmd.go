@@ -2146,6 +2146,9 @@ func runUpstreamImport(_ *cobra.Command, args []string) error {
 		return applyErr
 	}
 	if result.Summary.Failed > 0 {
+		if outcome.dryRun {
+			return fmt.Errorf("validation failed for %d of %d source servers; no changes made", result.Summary.Failed, result.Summary.Total)
+		}
 		return fmt.Errorf("failed to import %d of %d servers", result.Summary.Failed, result.Summary.Total)
 	}
 	return nil

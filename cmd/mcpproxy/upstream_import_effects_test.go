@@ -183,6 +183,15 @@ func TestUpstreamImportDaemonPartialFailureReportsAppliedAndFailed(t *testing.T)
 	require.Equal(t, "good", payload.Imported[0].Name)
 	require.Equal(t, "bad", payload.Failed[0].Name)
 	require.ElementsMatch(t, []string{"good", "bad"}, added)
+
+	setOutputGlobals(t, "table", false)
+	table, tableErr := captureImport(t, sourcePath)
+	require.Error(t, tableErr)
+	require.Contains(t, string(table), "Applied:            1")
+	require.Contains(t, string(table), "Failed:             1")
+	require.Contains(t, string(table), "Failed servers:")
+	require.Contains(t, string(table), "bad:")
+	require.Contains(t, string(table), "New servers are quarantined by default")
 }
 
 func TestUpstreamImportParseFailureRetainsSuccessfulWrites(t *testing.T) {
@@ -204,6 +213,60 @@ func TestUpstreamImportParseFailureRetainsSuccessfulWrites(t *testing.T) {
 	require.NoError(t, loadErr)
 	require.Len(t, cfg.Servers, 1)
 	require.Equal(t, "good", cfg.Servers[0].Name)
+}
+
+func TestUpstreamImportDryRunInvalidSourceReportsValidationOnly(t *testing.T) {
+	setOutputGlobals(t, "json", false)
+	configPath, sourcePath := importScratch(t, `{"mcpServers":{"broken":{"url":"https://example.invalid/mcp"},"good":{"command":"echo"}}}`)
+	upstreamImportFormat = "claude-desktop"
+	upstreamImportDryRun = true
+	out, err := captureImport(t, sourcePath)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "validation failed for 1 of 2 source servers; no changes made")
+	var payload struct {
+		DryRun  bool                                   `json:"dry_run"`
+		Summary struct{ Planned, Applied, Failed int } `json:"summary"`
+	}
+	require.NoError(t, json.Unmarshal(out, &payload))
+	require.True(t, payload.DryRun)
+	require.Equal(t, 1, payload.Summary.Planned)
+	require.Zero(t, payload.Summary.Applied)
+	require.Equal(t, 1, payload.Summary.Failed)
+	cfg, loadErr := config.LoadFromFile(configPath)
+	require.NoError(t, loadErr)
+	require.Empty(t, cfg.Servers)
+}
+
+func TestUpstreamImportConfigSaveFailureRendersZeroApplied(t *testing.T) {
+	setOutputGlobals(t, "json", false)
+	configPath, sourcePath := importScratch(t, `{"mcpServers":{"first":{"command":"echo"},"second":{"command":"echo"}}}`)
+	blockedDir := filepath.Join(filepath.Dir(configPath), "blocked")
+	require.NoError(t, os.Mkdir(blockedDir, 0700))
+	blockedPath := filepath.Join(blockedDir, "config.json")
+	contents, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(blockedPath, contents, 0600))
+	configFile = blockedPath
+	require.NoError(t, os.Chmod(blockedDir, 0500))
+	t.Cleanup(func() { _ = os.Chmod(blockedDir, 0700) })
+	out, runErr := captureImport(t, sourcePath)
+	require.Error(t, runErr)
+	require.Contains(t, runErr.Error(), "failed to save config")
+	var payload struct {
+		Summary struct{ Planned, Applied, Failed int } `json:"summary"`
+		Failed  []struct{ Name, Error string }         `json:"failed"`
+	}
+	require.NoError(t, json.Unmarshal(out, &payload))
+	require.Equal(t, 2, payload.Summary.Planned)
+	require.Zero(t, payload.Summary.Applied)
+	require.Equal(t, 2, payload.Summary.Failed)
+	require.ElementsMatch(t, []string{"first", "second"}, []string{payload.Failed[0].Name, payload.Failed[1].Name})
+	for _, item := range payload.Failed {
+		require.Equal(t, "apply_failed", item.Error)
+	}
+	stored, readErr := os.ReadFile(blockedPath)
+	require.NoError(t, readErr)
+	require.Equal(t, contents, stored)
 }
 
 func TestApplyImportedServersConfigModeFailureReportsNoWrites(t *testing.T) {
