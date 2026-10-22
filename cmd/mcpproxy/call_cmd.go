@@ -462,7 +462,7 @@ func runCallToolVariantClientMode(client *cliclient.Client, toolVariant string, 
 	// For tool variants, we call the variant tool directly
 	result, err := client.CallTool(callCtx, toolVariant, args)
 	if err != nil {
-		// T028: Use cliError to include request_id in error output
+		// Keep the API error wrapped so JSON output can retain request_id.
 		return callDaemonError{cause: err}
 	}
 
@@ -481,8 +481,6 @@ func runCallToolVariantClientMode(client *cliclient.Client, toolVariant string, 
 	default:
 		return outputPrettyCallResult(result, result.IsError)
 	}
-
-	return nil
 }
 
 // runCallToolVariantStandalone calls tool variant directly without daemon
@@ -562,6 +560,4 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 	default:
 		return outputPrettyCallResult(result, result.IsError)
 	}
-
-	return nil
 }
