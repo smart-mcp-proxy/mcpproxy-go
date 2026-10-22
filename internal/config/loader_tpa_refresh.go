@@ -106,8 +106,20 @@ func normalizeTPARefreshInterval(data []byte) ([]byte, []LoadDiagnostic) {
 		return data, nil
 	}
 
+	// Map decoding keeps only the last occurrence of a duplicated key, while
+	// the typed decode rejects an earlier malformed one. Inspect every
+	// occurrence token by token; a duplicated or malformed key is dropped.
+	badCanon := scanTPARefreshOccurrences(data)
+
 	var diags []LoadDiagnostic
-	seen := map[string]bool{}
+	for _, c := range tpaRefreshKeyCheckers {
+		if badCanon[c.key] {
+			diags = append(diags, LoadDiagnostic{Key: "security." + c.key, Message: c.message})
+		}
+	}
+	if len(diags) == 0 {
+		return data, nil
+	}
 	for rootKey, rootVal := range root {
 		if !strings.EqualFold(rootKey, "security") {
 			continue
@@ -116,23 +128,12 @@ func normalizeTPARefreshInterval(data []byte) ([]byte, []LoadDiagnostic) {
 		if !ok {
 			continue
 		}
-		var badKeys []string
-		for k, v := range sec {
+		for k := range sec {
 			for _, c := range tpaRefreshKeyCheckers {
-				if strings.EqualFold(k, c.key) && !c.valid(v) {
-					badKeys = append(badKeys, k)
-					if !seen[c.key] {
-						seen[c.key] = true
-						diags = append(diags, LoadDiagnostic{Key: "security." + c.key, Message: c.message})
-					}
+				if badCanon[c.key] && strings.EqualFold(k, c.key) {
+					delete(sec, k)
 				}
 			}
-		}
-		if len(badKeys) == 0 {
-			continue
-		}
-		for _, k := range badKeys {
-			delete(sec, k)
 		}
 		for k := range sec {
 			if strings.EqualFold(k, tpaFetchEnabledKey) {
@@ -141,23 +142,65 @@ func normalizeTPARefreshInterval(data []byte) ([]byte, []LoadDiagnostic) {
 		}
 		sec[tpaFetchEnabledKey] = false
 	}
-	if len(diags) == 0 {
-		return data, nil
-	}
 
 	out, err := json.Marshal(root)
 	if err != nil {
 		return data, nil
 	}
-	// Deterministic order for the diagnostics (map iteration above).
-	order := map[string]int{}
-	for i, c := range tpaRefreshKeyCheckers {
-		order["security."+c.key] = i
+	return out, diags
+}
+
+// scanTPARefreshOccurrences walks every `security` object of the document
+// token by token and returns the canonical refresh keys that are duplicated
+// (case-insensitively) or have at least one malformed occurrence. It never
+// retains or reports values. A scan failure yields the partial result: the
+// caller already decoded the document, so this only happens on exotic input.
+func scanTPARefreshOccurrences(data []byte) map[string]bool {
+	bad := map[string]bool{}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return bad
 	}
-	for i := 1; i < len(diags); i++ {
-		for j := i; j > 0 && order[diags[j].Key] < order[diags[j-1].Key]; j-- {
-			diags[j], diags[j-1] = diags[j-1], diags[j]
+	count := map[string]int{}
+	for dec.More() {
+		kt, err := dec.Token()
+		if err != nil {
+			return bad
+		}
+		key, _ := kt.(string)
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return bad
+		}
+		if !strings.EqualFold(key, "security") || !bytes.HasPrefix(bytes.TrimSpace(raw), []byte("{")) {
+			continue
+		}
+		sd := json.NewDecoder(bytes.NewReader(raw))
+		sd.UseNumber()
+		if _, err := sd.Token(); err != nil {
+			return bad
+		}
+		for sd.More() {
+			ft, err := sd.Token()
+			if err != nil {
+				return bad
+			}
+			field, _ := ft.(string)
+			var v any
+			if err := sd.Decode(&v); err != nil {
+				return bad
+			}
+			for _, c := range tpaRefreshKeyCheckers {
+				if !strings.EqualFold(field, c.key) {
+					continue
+				}
+				count[c.key]++
+				if count[c.key] > 1 || !c.valid(v) {
+					bad[c.key] = true
+				}
+			}
 		}
 	}
-	return out, diags
+	return bad
 }
