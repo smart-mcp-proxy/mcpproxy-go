@@ -191,8 +191,10 @@ func (s *ProfilesService) Suggest(ctx context.Context, req SuggestRequest) (*Acc
 		Profile:   req.Profile,
 		TokenName: req.Token,
 	}
-	for rec := range s.rt.StreamActivities(filter) {
+	stream := s.rt.StreamActivities(filter)
+	for rec := range stream {
 		if ctx.Err() != nil {
+			drainActivities(stream)
 			return nil, ctx.Err()
 		}
 		reason := profile.BlockReason(rec.EffectiveBlockReason())
@@ -280,14 +282,24 @@ func (s *ProfilesService) finishSuggestion(ctx context.Context, ev ProfileEvalua
 	switch g.BlockReason {
 	case profile.BlockReasonCodeExecution, profile.BlockReasonManagement:
 		// Built-in tools do not walk the upstream chain, so the explainer does
-		// not cover them. The profile field that governs them is named, never set.
-		if indexOfProfile(cfg, g.Profile) < 0 {
+		// not cover them. The profile field that governs them is named, never
+		// set; once it is set the group has been fixed and drops out like any
+		// other.
+		idx := indexOfProfile(cfg, g.Profile)
+		if idx < 0 {
 			out.ProfileRemoved++
 			return false, nil
 		}
+		prof := cfg.Profiles[idx]
 		field, effect := "code_execution", "lets scripts call every upstream tool the profile can reach"
+		enabled := prof.EffectiveCodeExecution()
 		if g.BlockReason == profile.BlockReasonManagement {
 			field, effect = "management_tools", "lets this caller add, remove and quarantine upstream servers"
+			enabled = prof.ManagementTools != nil && *prof.ManagementTools
+		}
+		if enabled {
+			out.AlreadyFixed++
+			return false, nil
 		}
 		g.Warning = fmt.Sprintf("Setting %s on profile %s %s.", field, g.Profile, effect)
 		g.Note = fmt.Sprintf("Built-in tool refused by the %s setting; change it only if that access is intended.", field)
@@ -308,8 +320,10 @@ func (s *ProfilesService) finishSuggestion(ctx context.Context, ev ProfileEvalua
 	}
 
 	// A deny rule is a decision somebody wrote. It is reported and never
-	// offered for widening.
-	if g.BlockReason == profile.BlockReasonRule {
+	// offered for widening, whether the recorded refusal was the rule or an
+	// older tier-cap refusal of a tool a rule has denied since: the explainer
+	// offers its allow fix for both, and against a rule it would not help.
+	if g.BlockReason == profile.BlockReasonRule || deniedByRuleNow(exp) {
 		g.Note = "Denied by an explicit rule in the profile. Edit tools.deny if this access is intended."
 		return true, nil
 	}
@@ -339,6 +353,34 @@ func (s *ProfilesService) finishSuggestion(ctx context.Context, ev ProfileEvalua
 		g.Note = "A code_execution script called a server outside the profile. Adding it widens the profile's reach."
 	}
 	return true, nil
+}
+
+// deniedByRuleNow reports whether the fresh explanation stops at the tool-rule
+// step for a deny rule. The same step also reports an unannotated tool the
+// profile hides, which the explainer marks with a classify fix; that one is
+// a tier question, not a rule.
+func deniedByRuleNow(exp *AccessExplanation) bool {
+	if exp.FirstFailure != profile.StepToolRule {
+		return false
+	}
+	for _, f := range exp.Fixes {
+		if f.Action == profile.FixClassifyInProfile {
+			return false
+		}
+	}
+	return true
+}
+
+// drainActivities lets a StreamActivities producer run to its end after the
+// consumer stops early. The producer sends into a bounded channel from inside
+// a BBolt read transaction, so a consumer that walks away with records left
+// would leave that transaction open for the life of the process, and an open
+// read transaction keeps the database from remapping on a later write.
+func drainActivities(ch <-chan *storage.ActivityRecord) {
+	go func() {
+		for range ch { //nolint:revive // discard the remainder
+		}
+	}()
 }
 
 // buildPatches applies every apply-ready suggestion (allow, add_server) to a

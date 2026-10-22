@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -56,6 +57,9 @@ func newSuggestRig(t *testing.T) *suggestRig {
 		"slack:post": blockedExplanation(profile.StepServerInScope,
 			Fix{Step: profile.StepServerInScope, Action: profile.FixAddServerToProfile, Target: "research", Label: "Add slack to research"}),
 		"github:already_ok": {Verdict: profile.ExplainVerdictAllowed},
+		// Refused by the tier cap when recorded; a deny rule has been added since.
+		"github:now_denied": blockedExplanation(profile.StepToolRule,
+			Fix{Step: profile.StepToolRule, Action: profile.FixAllowInProfile, Target: "research", Label: "Allow github:now_denied in research"}),
 	}}
 	h.rt.SetProfileEvaluator(ev)
 	_, err := h.svc.Create(context.Background(), h.actor(), config.ProfileConfig{Name: "research", Servers: []string{"github"}, MaxTier: "read"})
@@ -294,4 +298,54 @@ func TestParseSuggestWindow(t *testing.T) {
 		_, err := ParseSuggestWindow(bad)
 		assert.Error(t, err, bad)
 	}
+}
+
+func TestSuggest_CurrentDenyRuleIsNeverWidened(t *testing.T) {
+	r := newSuggestRig(t)
+	r.block("research", "github", "now_denied", profile.BlockReasonTier, "ci-bot", time.Hour, "r1")
+	res, err := r.svc.Suggest(context.Background(), SuggestRequest{IncludePatch: true})
+	require.NoError(t, err)
+	s := r.find(res, "github:now_denied", profile.BlockReasonTier)
+	require.NotNil(t, s)
+	assert.Equal(t, SuggestNone, s.Suggestion, "the fresh explanation stops at a deny rule; the recorded tier refusal is history")
+	assert.Empty(t, s.Fixes)
+	assert.Contains(t, s.Note, "explicit rule")
+	assert.Empty(t, res.Patches)
+}
+
+func TestSuggest_BuiltinRefusalDropsOutOnceTheSettingIsOn(t *testing.T) {
+	r := newSuggestRig(t)
+	on := true
+	_, err := r.svc.Create(context.Background(), r.actor(), config.ProfileConfig{Name: "scripts", Servers: []string{"github"}, MaxTier: "read", CodeExecution: &on, ManagementTools: &on})
+	require.NoError(t, err)
+	r.block("scripts", "", "code_execution", profile.BlockReasonCodeExecution, "ci-bot", time.Hour, "r1")
+	r.block("scripts", "", "upstream_servers", profile.BlockReasonManagement, "ci-bot", time.Hour, "r2")
+	r.block("research", "", "code_execution", profile.BlockReasonCodeExecution, "ci-bot", time.Hour, "r3")
+	res, err := r.svc.Suggest(context.Background(), SuggestRequest{})
+	require.NoError(t, err)
+	for _, sg := range res.Suggestions {
+		assert.NotEqual(t, "scripts", sg.Profile, "a built-in refusal of a profile that now allows it has dropped out: %+v", sg)
+	}
+	require.NotNil(t, r.find(res, "code_execution", profile.BlockReasonCodeExecution), "the profile that still refuses keeps its warning")
+	assert.Equal(t, 2, res.AlreadyFixed)
+}
+
+func TestSuggest_CancelledContextReturnsWithRecordsLeft(t *testing.T) {
+	r := newSuggestRig(t)
+	for i := 0; i < 250; i++ { // more than the stream's channel buffer
+		r.block("research", "github", "create_issue", profile.BlockReasonTier, "ci-bot", time.Minute, fmt.Sprintf("r%d", i))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := r.svc.Suggest(ctx, SuggestRequest{})
+	require.ErrorIs(t, err, context.Canceled)
+
+	// The producer was left behind with records to send; it must be drained so
+	// its read transaction ends and the store keeps accepting writes.
+	for i := 0; i < 50; i++ {
+		r.block("research", "github", "create_issue", profile.BlockReasonTier, "ci-bot", time.Minute, fmt.Sprintf("w%d", i))
+	}
+	res, err := r.svc.Suggest(context.Background(), SuggestRequest{})
+	require.NoError(t, err)
+	require.NotNil(t, r.find(res, "github:create_issue", profile.BlockReasonTier))
 }
