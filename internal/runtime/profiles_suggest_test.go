@@ -343,39 +343,12 @@ func TestSuggest_CancelledContextReturnsWithRecordsLeft(t *testing.T) {
 	_, err := r.svc.Suggest(ctx, SuggestRequest{})
 	require.ErrorIs(t, err, context.Canceled)
 
-	// The producer was left behind with records to send; it must be drained so
-	// its read transaction ends and the store keeps accepting writes.
+	// The producer was left behind with records to send; cancellation must have
+	// released its read transaction so the store keeps accepting writes.
 	for i := 0; i < 50; i++ {
 		r.block("research", "github", "create_issue", profile.BlockReasonTier, "ci-bot", time.Minute, fmt.Sprintf("w%d", i))
 	}
 	res, err := r.svc.Suggest(context.Background(), SuggestRequest{})
 	require.NoError(t, err)
 	require.NotNil(t, r.find(res, "github:create_issue", profile.BlockReasonTier))
-}
-
-func TestDrainActivities_LetsTheProducerFinish(t *testing.T) {
-	ch := make(chan *storage.ActivityRecord, 100)
-	finished := make(chan struct{})
-	go func() {
-		defer close(finished)
-		defer close(ch)
-		for i := 0; i < 250; i++ { // more than the buffer: the producer blocks without a reader
-			ch <- &storage.ActivityRecord{RequestID: fmt.Sprintf("r%d", i)}
-		}
-	}()
-	// The consumer takes a few records and walks away, as Suggest does on cancel.
-	<-ch
-	<-ch
-	select {
-	case <-finished:
-		t.Fatal("the producer cannot have finished with no reader")
-	case <-time.After(50 * time.Millisecond):
-	}
-
-	drainActivities(ch)
-	select {
-	case <-finished:
-	case <-time.After(5 * time.Second):
-		t.Fatal("drainActivities did not let the producer finish")
-	}
 }

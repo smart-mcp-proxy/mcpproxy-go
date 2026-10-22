@@ -4586,8 +4586,8 @@ func (s *Server) GetActivity(id string) (*storage.ActivityRecord, error) {
 }
 
 // StreamActivities returns a channel that yields activity records matching the filter.
-func (s *Server) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
-	return s.runtime.StreamActivities(filter)
+func (s *Server) StreamActivities(ctx context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+	return s.runtime.StreamActivities(ctx, filter)
 }
 
 // AggregateToolUsage rolls up tool_call activity per (server,tool) since the
