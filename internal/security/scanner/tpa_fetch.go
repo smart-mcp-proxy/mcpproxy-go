@@ -461,7 +461,38 @@ func (a *fetchAttempt) buildClient() *http.Client {
 		c.Transport = a.buildTransport()
 	}
 	c.CheckRedirect = a.checkRedirect
+	// Every response of the chain passes through the observer, redirects
+	// included: http.Client.Do hands back only the last one, so a backoff a
+	// 3xx announced would otherwise be lost, and one on a redirect the client
+	// then refused to follow even more so (B6).
+	base := c.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	c.Transport = backoffObserver{base: base, a: a}
 	return &c
+}
+
+// backoffObserver is the RoundTripper that records the rate-limit headers of
+// every response, intermediate redirects included, into the attempt.
+type backoffObserver struct {
+	base http.RoundTripper
+	a    *fetchAttempt
+}
+
+func (o backoffObserver) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := o.base.RoundTrip(req)
+	if err == nil && resp != nil {
+		o.a.noteBackoff(resp)
+	}
+	return resp, err
+}
+
+// noteBackoff keeps the latest backoff any response of this attempt announced.
+func (a *fetchAttempt) noteBackoff(resp *http.Response) {
+	if at := a.retryAt(resp); at.After(a.retry) {
+		a.retry = at
+	}
 }
 
 // fetchHop records where the transport's most recent proxy decision sent the
@@ -580,9 +611,7 @@ func (a *fetchAttempt) get(ctx context.Context, target *url.URL, accept, etag st
 	}
 	resp, err := a.client.Do(req)
 	if err == nil {
-		if at := a.retryAt(resp); at.After(a.retry) {
-			a.retry = at
-		}
+		a.noteBackoff(resp)
 	}
 	return resp, err
 }
