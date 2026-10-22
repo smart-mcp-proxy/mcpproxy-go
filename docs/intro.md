@@ -32,7 +32,7 @@ Instead of loading all tools from all servers into your AI client's context, MCP
 
 ### Security Quarantine
 
-Under the default `manual` trust mode, new MCP servers are quarantined until approval, and their tools are withheld from agents in the meantime. This reduces exposure to Tool Poisoning Attacks, where a malicious server tries to manipulate AI behavior through crafted tool descriptions. A clean scan is not proof of safety, and trust modes other than `manual` admit servers or changes without a human review.
+New MCP servers are quarantined on add and their tools are withheld from agents in the meantime. Under the default `scan` trust mode a server is released automatically when its offline scan is clean; under `manual` it waits for your approval. This reduces exposure to Tool Poisoning Attacks, where a malicious server tries to manipulate AI behavior through crafted tool descriptions. A clean scan is not proof of safety: `scan` and `auto` admit servers or changes without a human review, so use `manual` on servers where that is not acceptable.
 
 ### Docker Isolation
 
