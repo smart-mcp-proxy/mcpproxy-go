@@ -48,6 +48,7 @@ Preflight reads local proxy state; it does **not** contact the upstream or guara
 | `server_initializing` or another retryable reason (exit `10`) | Read the action/detail; allow a short retry with `--wait 10s`. If it persists, inspect the server's connection error and logs. |
 | `server_quarantined`, `tool_pending_approval`, `tool_changed` (usually exit `11`) | Inspect the held definitions in step 3. |
 | Disabled server or tool; configuration policy denial | Confirm whether the restriction is intentional. Use the server/Tools view to identify it before enabling anything. |
+| `tool_blocked_by_user` (exit `11`) | The tool was disabled explicitly. Inspect the Tools view and enable it only if that decision should be reversed. |
 | `oauth_required` or an upstream authentication problem | Authenticate the upstream through its server page. See [OAuth authentication](/features/oauth-authentication). |
 | `not_found` (exit `12`) | Verify the exact name and server entry. An agent-visible `not_found` can also mean its access scope hides the tool. |
 
@@ -98,6 +99,8 @@ For `retrieve_tools` mode, ask the agent:
 
 If retrieval returns no match despite client access being allowed, try a short query describing the tool's operation. Check that discovery has completed and the server's Tools view lists the expected tool. If the agent does not attempt MCPProxy at all, use [Agent instructions](/features/agent-instructions). In other routing modes, use their [documented call surface](/features/routing-modes).
 
+When a tool is disabled, ordinary retrieval can return a different match instead. A direct attempt may return `TOOL_BLOCKED` with a hint to retrieve with `include_disabled:true`. If the client exposes that retrieval option, use it; otherwise use preflight and the Tools view to identify the hold before changing its state.
+
 If a call was attempted, inspect Activity:
 
 ```bash
@@ -126,4 +129,4 @@ Repeat the **same original request in the same client**, with the intended profi
 
 If it still fails, save the sanitized error, MCPProxy version, timestamp/request ID, routing mode and preflight reason when [reporting an issue](https://github.com/smart-mcp-proxy/mcpproxy-go/issues). A ready preflight alone is not proof of a successful recovery.
 
-*Validation: 22 October 2026, MCPProxy v0.71.1 on macOS. Quarantine, approval, transient initialization, tool disable/re-enable, unknown ID, invalid arguments and successful retry were checked in an isolated instance. Maintained by the MCPProxy maintainers.*
+*Validation: 22 October 2026, MCPProxy v0.71.1, Claude Code 2.1.307 and Codex CLI 0.159.2 on macOS. With the Context7 resolver disabled in an isolated proxy, real sessions in both clients received `TOOL_BLOCKED` and preflight reported `tool_blocked_by_user` (exit `11`). After it was re-enabled, both clients retried successfully and Activity recorded the upstream calls. Other diagnostic paths were checked with isolated proxy and protocol tests, not a real client session for each path. Maintained by the MCPProxy maintainers.*

@@ -91,6 +91,8 @@ Approve the client's tool-use prompt if it asks. Repeat the same request in Code
 2. The agent uses the returned `call_with` tool (normally `call_tool_read`) to invoke that exact name with `libraryName` and `query`.
 3. Context7 returns actual library matches. Their IDs and contents can change; do not compare against a hard-coded ID.
 
+If a client cannot start an authenticated AI session, complete its sign-in first and repeat this step. A successful MCP connection or a direct protocol test cannot stand in for a call made by that client.
+
 In discovery mode, seeing only MCPProxy's small set of routing tools in `/mcp` is normal. The upstream tools appear through retrieval. If the agent chooses another route, use the [agent-instructions snippet](/features/agent-instructions) and repeat the explicit request.
 
 ## 5. Verify both calls in Activity
@@ -119,4 +121,4 @@ Follow [Find out why an agent cannot use a tool](/guides/diagnose-unavailable-to
 - Disconnect only the client entry you no longer want with `mcpproxy disconnect claude-code` or `mcpproxy disconnect codex`. See [client credential lifecycle](/features/connect-clients#using-client-credentials) for revocation; removing a config entry and revoking its credential are distinct actions.
 - To stop using the example upstream while keeping its configuration, run `mcpproxy upstream disable context7`.
 
-*Validation: 22 October 2026, MCPProxy v0.71.1 on macOS. Upstream review, discovery, calls from two independent MCP sessions and Activity were checked against the released daemon. Client connection instructions were checked against Connect's configuration tests and the linked client references; this is not a claim of an end-to-end UI test of every client release. Maintained by the MCPProxy maintainers.*
+*Validation: 22 October 2026, MCPProxy v0.71.1, Claude Code 2.1.307 and Codex CLI 0.159.2 on macOS. Both real CLIs used separate scratch client credentials to call the same reviewed Context7 resolver through one isolated proxy; Activity recorded a successful upstream call under each client identity. The Connect configuration flows were checked separately; the live CLI runs used temporary client overrides and did not modify the clients' saved configuration. Maintained by the MCPProxy maintainers.*
