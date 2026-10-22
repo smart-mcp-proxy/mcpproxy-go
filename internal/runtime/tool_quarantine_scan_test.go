@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -188,6 +189,30 @@ func TestScanMode_SaferHintFlipWithFindings_SignalRecorded(t *testing.T) {
 		assert.Contains(t, rec.HeldSignals, SignalHintSaferFlip, "pass %d", pass)
 		assert.True(t, hasSignalPrefix(rec.HeldSignals, "tpa.TPA-2026-0001"), "pass %d: the TPA finding is kept, got %v", pass, rec.HeldSignals)
 	}
+}
+
+// TestWithHintFlip_SurvivesSignalCap (review round 2, P2): the flip signal is
+// placed first so SetScanHold's MaxToolHeldSignals cap never drops it, and the
+// input evidence is not mutated.
+func TestWithHintFlip_SurvivesSignalCap(t *testing.T) {
+	many := make([]string, 0, storage.MaxToolHeldSignals+4)
+	for i := 0; i < storage.MaxToolHeldSignals+4; i++ {
+		many = append(many, fmt.Sprintf("tpa.TPA-2026-%04d.detector", i))
+	}
+	in := &scanHoldEvidence{Reason: storage.ToolHeldReasonScanFindings, Verdict: "dangerous", Signals: many}
+	out := withHintFlip(in)
+	assert.Equal(t, SignalHintSaferFlip, out.Signals[0])
+	assert.Len(t, in.Signals, storage.MaxToolHeldSignals+4, "input evidence is not mutated")
+	assert.Equal(t, many[0], in.Signals[0])
+
+	rec := &storage.ToolApprovalRecord{}
+	rec.SetScanHold(out.Reason, out.Verdict, out.Signals)
+	assert.Len(t, rec.HeldSignals, storage.MaxToolHeldSignals)
+	assert.Contains(t, rec.HeldSignals, SignalHintSaferFlip, "the flip survives the cap")
+
+	clean := withHintFlip(&scanHoldEvidence{Reason: storage.ToolHeldReasonAwaitingReview, Verdict: "clean"})
+	assert.Equal(t, storage.ToolHeldReasonScanFindings, clean.Reason)
+	assert.Equal(t, []string{SignalHintSaferFlip}, clean.Signals)
 }
 
 // TestSaferHintFlip pins the rule's table, MCP defaults included.

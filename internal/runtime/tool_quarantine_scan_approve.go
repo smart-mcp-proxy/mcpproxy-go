@@ -51,14 +51,18 @@ func saferHintFlip(approved, live *config.ToolAnnotations) bool {
 // withHintFlip adds the gate's safer-flip signal to the scan's evidence (FR-007:
 // the signal is recorded whatever the verdict). A clean verdict becomes a
 // finding with that one signal; a non-clean one keeps its verdict and
-// signals, the flip listed after them. The result is never nil.
+// signals. The flip goes FIRST: SetScanHold keeps at most
+// storage.MaxToolHeldSignals signals, and a bundle matching that many would
+// otherwise drop the flip (review round 2, P2). Display ordering (TPA ids
+// first) is the surfaces' job. The result is never nil and shares no slice
+// with the input.
 func withHintFlip(evidence *scanHoldEvidence) *scanHoldEvidence {
 	if evidence == nil {
 		return &scanHoldEvidence{Reason: storage.ToolHeldReasonScanFindings, Verdict: "clean", Signals: []string{SignalHintSaferFlip}}
 	}
 	out := *evidence
 	out.Reason = storage.ToolHeldReasonScanFindings
-	out.Signals = append(append([]string(nil), evidence.Signals...), SignalHintSaferFlip)
+	out.Signals = append([]string{SignalHintSaferFlip}, evidence.Signals...)
 	return &out
 }
 
