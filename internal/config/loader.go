@@ -335,6 +335,12 @@ func loadConfigFile(path string, cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	// Spec 101 US3 B1: a malformed security.tpa_refresh_interval must not
+	// fail the boot; drop it, turn the fetch leg off, record a value-free
+	// diagnostic. Only this key is touched.
+	var refreshDiags []LoadDiagnostic
+	data, refreshDiags = normalizeTPARefreshInterval(data)
+	diagnostics = append(diagnostics, refreshDiags...)
 	cfg.loadDiagnostics = diagnostics
 
 	// First check if api_key is present in the JSON to distinguish between

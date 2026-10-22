@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -452,4 +453,20 @@ func TestSignatureBundleLines_FetchOffRefreshBlockHasNoHostLine(t *testing.T) {
 	assert.Contains(t, joined, "unchanged")
 	assert.NotContains(t, joined, "Fetch host")
 	assert.NotContains(t, joined, "STALE")
+}
+
+// The daemon stamps the re-protection completion in UTC while the cycle
+// timestamps carry the host's local offset, so the human line must convert it
+// to local time like the rest of the block.
+func TestBundleReprotectText_LastCompletedShownInLocalTime(t *testing.T) {
+	orig := time.Local
+	time.Local = time.FixedZone("TEST", 5*3600+30*60)
+	t.Cleanup(func() { time.Local = orig })
+
+	text := bundleReprotectText(map[string]any{"reprotect": map[string]any{
+		"state":             "idle",
+		"last_completed_at": "2026-10-20T06:05:00Z",
+	}})
+	assert.Contains(t, text, "last completed 2026-10-20 11:35:00")
+	assert.NotContains(t, text, "06:05:00", "the UTC clock must not leak into the human output")
 }
