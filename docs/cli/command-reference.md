@@ -311,6 +311,13 @@ mcpproxy upstream import <path> [flags]
 | `--dry-run` | Preview import without making changes | `false` |
 | `--no-quarantine` | Don't quarantine imported servers (use with caution) | `false` |
 
+Table, JSON, and YAML output apply the same import. Structured output includes
+`dry_run` and `summary.planned`, `summary.applied`, `summary.skipped`, and
+`summary.failed`. The existing `summary.imported` field remains available:
+it counts applied servers during an import and preview candidates with
+`--dry-run`. A partial failure is rendered with per-server details and returns
+a nonzero exit status; successfully applied servers remain imported.
+
 **Supported Formats:**
 
 | Source | Format Flag | Auto-detected |
