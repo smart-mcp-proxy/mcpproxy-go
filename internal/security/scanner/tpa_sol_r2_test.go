@@ -51,32 +51,29 @@ func TestSolR2_NotModifiedKeepsTheRateLimitBackoff(t *testing.T) {
 }
 
 // A manual completion must not replace an early re-arm a Nudge asked for after
-// the manual call began: the check and the pending-wake update are one step.
+// the manual call began: the completion and the due update are one step.
 func TestSolR2_ManualCompletionDoesNotOverwriteAnEarlyRearm(t *testing.T) {
-	r := NewBundleRefresher(BundleRefresherOptions{Clock: newFakeClock()})
-	seq := r.soonSeq
-
-	// The early re-arm: Nudge bumped soonSeq and queued wakeSoon.
+	r := NewBundleRefresher(BundleRefresherOptions{Clock: newFakeClock(), Rand: func() float64 { return 0.5 }})
+	now := r.clock.Now()
 	r.mu.Lock()
-	r.soonSeq++
-	r.mu.Unlock()
-	r.signal(wakeSoon)
-	// The loop consumed the early re-arm and armed its timer.
-	<-r.wake
-	require.Equal(t, wakeSoon, r.takePending())
+	defer r.mu.Unlock()
+	r.started, r.interval = true, 24*time.Hour
 
-	r.signalManualUnlessSoon(seq)
+	// A manual cycle is in flight (starting it cleared due); a Nudge asks for
+	// an early look while it runs.
+	r.cycle = &cycleCall{done: make(chan struct{})}
+	require.True(t, r.scheduleEarlyLocked(now))
+	early := r.due
+	require.Less(t, early.Sub(now), 6*time.Minute)
 
-	assert.Equal(t, wakeNone, r.takePending(), "the manual completion must not queue a full-interval re-arm over the early one")
-	select {
-	case <-r.wake:
-		t.Fatal("a suppressed manual completion must not wake the loop")
-	default:
-	}
+	assert.False(t, r.finishCycleLocked(now), "a kept early look does not wake the loop")
+	assert.Nil(t, r.cycle)
+	assert.Equal(t, early, r.due, "the manual completion must not replace the early look with a full interval")
 
-	r.signalManualUnlessSoon(r.soonSeq)
-	assert.Equal(t, wakeManual, r.takePending(), "with no early look pending the manual completion re-arms")
-	<-r.wake
+	// With no early look asked for, the completion schedules the full interval.
+	r.cycle, r.due, r.dueEarly = &cycleCall{done: make(chan struct{})}, time.Time{}, false
+	assert.True(t, r.finishCycleLocked(now))
+	assert.Equal(t, now.Add(24*time.Hour), r.due)
 }
 
 // A response fetched under a superseded generation must not restore a
