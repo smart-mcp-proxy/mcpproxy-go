@@ -57,11 +57,13 @@ type bundleReprotectState struct {
 	// suspended is true while the last sweep ended suspended by the
 	// auto_baseline_scan kill switch; resumeSuspendedReprotect clears it.
 	suspended bool
-	// done remembers, for the digest in doneDigest, which servers already have
-	// a settled cached scan (and whether it was a hit), so a retry of a partly
-	// failed or suspended sweep resumes the unfinished servers instead of
-	// creating a second job for every server that already succeeded. It is
-	// reset whenever a sweep starts for a different digest.
+	// done remembers, for the digest in doneDigest, every cached scan job the
+	// scanner ACCEPTED (registered) for a server - settled or not, with its
+	// job ID and last known outcome - so a retry of a partly failed or
+	// suspended sweep never registers a second job for a (server, digest) pair
+	// (B17): a settled one is skipped, an unsettled or failed one is
+	// re-inspected by job ID. It is reset whenever a sweep starts for a
+	// different digest.
 	doneDigest string
 	done       map[string]reprotectOutcome
 	// runMu serializes sweeps.
@@ -385,13 +387,26 @@ func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivatio
 			continue
 		}
 		// A retry of a partly failed or suspended sweep resumes the servers
-		// that have no settled scan for this digest yet; it does not scan the
-		// ones that already succeeded a second time (one job and one hit
-		// contribution per server and digest).
-		if prior, ok := s.reprotectSettledScan(act.Digest, sc.Name); ok {
-			scanned++
-			if prior.hit {
-				hits++
+		// that have no accepted job for this digest yet. A server whose job
+		// was already accepted gets no second one (one job and one hit
+		// contribution per server and digest): a settled verdict is reused, a
+		// failed or unsettled job is re-inspected by its job ID and, while it
+		// still has no verdict, keeps the sweep incomplete (the next startup
+		// catch-up is the retry path).
+		if prior, ok := s.reprotectAcceptedScan(act.Digest, sc.Name); ok {
+			if prior.kind != reprotectScanned {
+				prior = s.reprotectRecheckAccepted(ctx, scanSvc, act.Digest, sc.Name, prior)
+				if prior.kind == reprotectScanned && prior.hit {
+					s.reprotectRecordHit()
+				}
+			}
+			if prior.kind == reprotectScanned {
+				scanned++
+				if prior.hit {
+					hits++
+				}
+			} else {
+				failed++
 			}
 			continue
 		}
@@ -416,6 +431,7 @@ func (s *Server) reprotectSweep(ctx context.Context, act scanner.BundleActivatio
 		case reprotectScanned:
 			scanned++
 			scannedAny = true
+			outcome.accepted = true
 			s.reprotectRememberScan(act.Digest, sc.Name, outcome)
 			if outcome.hit {
 				hits++
@@ -495,6 +511,11 @@ const (
 type reprotectOutcome struct {
 	kind reprotectOutcomeKind
 	hit  bool
+	// accepted and jobID identify the cached scan job the scanner registered
+	// for the server, when one was; they survive in the sweep's bookkeeping so
+	// a resume re-inspects that job instead of registering another.
+	accepted bool
+	jobID    string
 }
 
 // Why a cached scan ended without a usable verdict (reprotectScanServer maps
@@ -601,6 +622,10 @@ func (s *Server) startReprotectScan(ctx context.Context, scanSvc securityScanner
 	if err != nil {
 		return nil, err
 	}
+	// Remember the job the moment it is registered, whatever happens to it
+	// next: a failed, timed-out or verdict-less job must not be repeated by a
+	// resume of the same digest.
+	s.reprotectRememberScan(digest, name, reprotectOutcome{kind: reprotectFailed, accepted: true, jobID: job.ID})
 
 	var timeoutC <-chan time.Time
 	if timeout := s.infoScanSettleTimeout; timeout > 0 {
@@ -669,9 +694,9 @@ func (s *Server) pollReprotectSettle(ctx context.Context, scanSvc securityScanne
 	}
 }
 
-// reprotectSettledScan reports the settled cached-scan outcome already recorded
-// for server under digest, if any.
-func (s *Server) reprotectSettledScan(digest, server string) (reprotectOutcome, bool) {
+// reprotectAcceptedScan reports the outcome recorded for the cached scan job
+// the scanner accepted for server under digest, if any.
+func (s *Server) reprotectAcceptedScan(digest, server string) (reprotectOutcome, bool) {
 	st := &s.bundleReprotect
 	st.mu.Lock()
 	defer st.mu.Unlock()
@@ -682,7 +707,21 @@ func (s *Server) reprotectSettledScan(digest, server string) (reprotectOutcome, 
 	return out, ok
 }
 
-// reprotectRememberScan records server's settled cached scan under digest. A
+// reprotectRecheckAccepted re-inspects, by its job ID, a job accepted earlier
+// whose outcome was not a verdict. It registers nothing. A job that has since
+// settled with a usable verdict is remembered as scanned; otherwise the
+// failure stands.
+func (s *Server) reprotectRecheckAccepted(ctx context.Context, scanSvc securityScannerService, digest, name string, prior reprotectOutcome) reprotectOutcome {
+	summary := s.reprotectJobSummary(ctx, scanSvc, name, prior.jobID)
+	if summary == nil || !isTerminalScanStatus(summary.Status) || summary.Status == "failed" {
+		return prior
+	}
+	out := reprotectOutcome{kind: reprotectScanned, hit: summary.Status == "dangerous", accepted: true, jobID: prior.jobID}
+	s.reprotectRememberScan(digest, name, out)
+	return out
+}
+
+// reprotectRememberScan records server's accepted cached scan under digest. A
 // sweep whose digest is no longer the one being tracked (a newer activation
 // reset it) records nothing.
 func (s *Server) reprotectRememberScan(digest, server string, out reprotectOutcome) {
