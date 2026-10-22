@@ -2,7 +2,38 @@
 // Note: type annotations allow type checking and IDEs autocompletion
 
 const {themes: prismThemes} = require('prism-react-renderer');
-const publishedDocs = require('./published-docs');
+
+// Shared publication boundary for HTML pages and both LLM exports.
+// Keep internal research, plans and QA notes outside these patterns.
+// Keep these literal lists here: cmd/release-gate also reads them to guard
+// claims and links across every published page.
+const publishedDocs = {
+  include: [
+    'intro.md',
+    'getting-started/**/*.{md,mdx}',
+    'configuration/**/*.{md,mdx}',
+    'cli/**/*.{md,mdx}',
+    'api/**/*.{md,mdx}',
+    'web-ui/**/*.{md,mdx}',
+    'features/**/*.{md,mdx}',
+    'code_execution/**/*.{md,mdx}',
+    'operations/**/*.{md,mdx}',
+    'errors/**/*.{md,mdx}',
+    'development/**/*.{md,mdx}',
+    'contributing.md',
+    // Standalone references with no structured counterpart
+    'cli-client-mode.md',
+    'cli-output-formatting.md',
+    'logging.md',
+    'prerelease-builds.md',
+    'registries.md',
+    'socket-communication.md',
+  ],
+  exclude: [
+    'development/sandbox-snap-docker-harness.md',
+    'development/sandbox-spike-mcp-34.md',
+  ],
+};
 
 /** @type {import('@docusaurus/types').Config} */
 // Version shown in the navbar badge. Supplied by CI: docs.yml derives it from
