@@ -2536,10 +2536,7 @@ func runUpstreamInspect(_ *cobra.Command, args []string) error {
 			approvedCount++
 		}
 
-		desc := r.Description
-		if len(desc) > 60 {
-			desc = desc[:57] + "..."
-		}
+		desc := truncateCell(r.Description, 60)
 
 		hash := r.Hash
 		if len(hash) > 12 {

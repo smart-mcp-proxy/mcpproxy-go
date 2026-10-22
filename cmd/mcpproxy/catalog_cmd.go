@@ -429,7 +429,7 @@ func printCatalogTable(formatter clioutput.OutputFormatter, results []registries
 		if r.FromCache {
 			source += " (cached)"
 		}
-		rows = append(rows, []string{source, r.ID, truncateStr(r.Title, 40), r.Transport, added})
+		rows = append(rows, []string{source, r.ID, truncateCell(r.Title, 40), r.Transport, added})
 	}
 	out, err := formatter.FormatTable(headers, rows)
 	if err == nil {

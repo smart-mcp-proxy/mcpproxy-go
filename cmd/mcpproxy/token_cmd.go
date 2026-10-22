@@ -668,8 +668,8 @@ func joinInterfaceSlice(m map[string]interface{}, key string, maxLen int) string
 		strs[i] = fmt.Sprintf("%v", s)
 	}
 	result := strings.Join(strs, ",")
-	if maxLen > 0 && len(result) > maxLen {
-		result = result[:maxLen-3] + "..."
+	if maxLen > 0 {
+		result = truncateCell(result, maxLen)
 	}
 	return result
 }
