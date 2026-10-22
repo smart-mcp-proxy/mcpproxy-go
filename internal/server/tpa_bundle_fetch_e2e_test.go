@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,7 +43,7 @@ const (
 	e2eDirectPath   = "/direct/scanner-bundle.json"
 	// e2eMarker is what the one added signature matches: narrow and
 	// fixture-specific, so the real self-check sees 0 false positives over the
-	// 21 hard negatives (B13).
+	// corpus's hard negatives (B13), whatever its size.
 	e2eMarker  = "zz-fetch-e2e-marker"
 	e2eRuleID  = "TPA-2099-0091"
 	e2eSignal  = "tpa." + e2eRuleID + "."
@@ -141,11 +142,63 @@ func (c *e2eChannel) countPrefix(prefix string) int {
 	return n
 }
 
-// e2eBundle renders a one-rule operator-signed-shaped manifest for keyID.
-func e2eBundle(keyID string, seq uint64, generatedAt, pattern string) []byte {
-	pat, _ := json.Marshal(pattern)
-	return []byte(fmt.Sprintf(`{"bundle_version":"0.1.0","generated_at":%q,"key_id":%q,"rules":[{"category":"prompt-injection","confidence":0.95,"detector":"fetch_e2e","engine":"regex","id":%q,"level":"high","pattern":%s,"target":"tool_description"}],"schema_version":"0.1.0","sequence":"%d","signature_count":1,"trust_epoch":0}`,
-		generatedAt, keyID, e2eRuleID, pat, seq))
+// e2eEmbeddedBundlePath is the shipped default signature database, read from
+// the source tree (the scanner package keeps its embed unexported).
+const e2eEmbeddedBundlePath = "../security/scanner/bundled/scanner-bundle.json"
+
+// e2eBundle renders an operator-signed-shaped manifest for keyID: the EMBEDDED
+// default bundle plus one added narrow rule. Carrying the shipped signatures
+// keeps recall of the real activation self-check satisfied on any corpus size,
+// so only the added rule decides the false-positive leg (a one-rule bundle
+// would depend on the corpus having no tpa_* samples).
+func e2eBundle(t *testing.T, keyID string, seq uint64, generatedAt, pattern string) []byte {
+	t.Helper()
+	embedded, err := os.ReadFile(e2eEmbeddedBundlePath)
+	require.NoError(t, err)
+	var doc map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(embedded, &doc))
+	set := func(k string, v any) {
+		raw, mErr := json.Marshal(v)
+		require.NoError(t, mErr)
+		doc[k] = raw
+	}
+	var rules []json.RawMessage
+	require.NoError(t, json.Unmarshal(doc["rules"], &rules))
+	extra, err := json.Marshal(map[string]any{
+		"category": "prompt-injection", "confidence": 0.95, "detector": "fetch_e2e",
+		"engine": "regex", "id": e2eRuleID, "level": "high",
+		"pattern": pattern, "target": "tool_description",
+	})
+	require.NoError(t, err)
+	set("rules", append(rules, extra))
+
+	// A bundle with signatures[] (Spec 101 US2) needs the added rule owned by a
+	// signature and signature_count == len(signatures); a v0.1 bundle only
+	// declares a count.
+	if raw, ok := doc["signatures"]; ok {
+		var sigs []json.RawMessage
+		require.NoError(t, json.Unmarshal(raw, &sigs))
+		sig, mErr := json.Marshal(map[string]any{
+			"id": e2eRuleID, "category": "tpa_fetch_e2e_fixture", "gating": true,
+			"license": "self-authored", "rule_ids": []string{e2eRuleID + "/fetch_e2e"},
+			"provenance": map[string]string{"source": "fetch e2e fixture", "published": "2026-10-22", "note": "test-only"},
+		})
+		require.NoError(t, mErr)
+		sigs = append(sigs, sig)
+		set("signatures", sigs)
+		set("signature_count", len(sigs))
+	} else {
+		var count int
+		require.NoError(t, json.Unmarshal(doc["signature_count"], &count))
+		set("signature_count", count+1)
+	}
+	set("generated_at", generatedAt)
+	set("key_id", keyID)
+	set("sequence", fmt.Sprintf("%d", seq))
+	set("trust_epoch", 0)
+	out, err := json.Marshal(doc)
+	require.NoError(t, err)
+	return out
 }
 
 type e2eFixture struct {
@@ -279,14 +332,21 @@ func newE2EFixture(t *testing.T, fetchPath string, withApprovedTool bool) *e2eFi
 }
 
 // signedPair signs bundle with the operator key.
-func (f *e2eFixture) signedPair(seq uint64, pattern string) (bundle, sig []byte) {
-	bundle = e2eBundle(f.keyID, seq, f.genAt, pattern)
+func (f *e2eFixture) signedPair(t *testing.T, seq uint64, pattern string) (bundle, sig []byte) {
+	t.Helper()
+	bundle = e2eBundle(t, f.keyID, seq, f.genAt, pattern)
 	return bundle, bundlesig.SignSidecar(f.priv, bundle)
 }
 
+// e2eEventuallyTimeout bounds every poll. The real activation self-check scores
+// a candidate over the whole embedded corpus (over a thousand tools once the
+// TPA corpus is merged), which takes tens of seconds under -race on a loaded
+// runner; the bound only matters when something is actually stuck.
+const e2eEventuallyTimeout = 4 * time.Minute
+
 func e2eEventually(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	require.Eventually(t, cond, 30*time.Second, 20*time.Millisecond, what)
+	require.Eventually(t, cond, e2eEventuallyTimeout, 20*time.Millisecond, what)
 }
 
 func (f *e2eFixture) record(t *testing.T) storage.ToolApprovalRecord {
@@ -323,7 +383,7 @@ func TestTPAFetchLifecycle_ActivatesReprotectsAndRefusesBadReleases(t *testing.T
 	before := f.record(t)
 
 	// --- A signed seq baseline+1 release appears on the channel. ---
-	good, goodSig := f.signedPair(e2eBaseSeq+1, e2eMarker)
+	good, goodSig := f.signedPair(t, e2eBaseSeq+1, e2eMarker)
 	f.channel.publish(e2eBaseSeq+1, good, goodSig)
 
 	// Activates within a cycle or two: source=fetch, signature verified.
@@ -393,7 +453,7 @@ func TestTPAFetchLifecycle_ActivatesReprotectsAndRefusesBadReleases(t *testing.T
 	assert.EqualValues(t, 1, f.acts.count(), "one activation, one history row")
 
 	// --- A signed catch-all release: refused by the self-check (087 SC-004 at activation). ---
-	catchAll, catchAllSig := f.signedPair(e2eBaseSeq+2, "(?s).+")
+	catchAll, catchAllSig := f.signedPair(t, e2eBaseSeq+2, "(?s).+")
 	f.channel.publish(e2eBaseSeq+2, catchAll, catchAllSig)
 	e2eEventually(t, "the catch-all release is refused", func() bool {
 		rej := scanner.BundleStatus().LastRejection
@@ -405,7 +465,7 @@ func TestTPAFetchLifecycle_ActivatesReprotectsAndRefusesBadReleases(t *testing.T
 	assert.NotContains(t, info.LastRejection.Detail, "(?s)", "the rejection detail never carries candidate pattern text")
 
 	// --- A tampered pair: signed bytes altered in transit. ---
-	tamperedBundle, tamperedSig := f.signedPair(e2eBaseSeq+3, e2eMarker)
+	tamperedBundle, tamperedSig := f.signedPair(t, e2eBaseSeq+3, e2eMarker)
 	tamperedBundle = bytes.Replace(tamperedBundle, []byte(e2eMarker), []byte(e2eMarker+"X"), 1)
 	f.channel.publish(e2eBaseSeq+3, tamperedBundle, tamperedSig)
 	e2eEventually(t, "the tampered release is refused", func() bool {
@@ -433,7 +493,7 @@ func TestTPAFetchLifecycle_ActivatesReprotectsAndRefusesBadReleases(t *testing.T
 
 func TestTPAFetchLifecycle_UnsignedDirectBodyIsRefusedAsSignatureRequired(t *testing.T) {
 	f := newE2EFixture(t, e2eDirectPath, false)
-	unsigned := e2eBundle(f.keyID, e2eBaseSeq+1, f.genAt, e2eMarker)
+	unsigned := e2eBundle(t, f.keyID, e2eBaseSeq+1, f.genAt, e2eMarker)
 	f.channel.publish(e2eBaseSeq+1, unsigned, nil)
 	f.channel.mu.Lock()
 	f.channel.noSig = true
