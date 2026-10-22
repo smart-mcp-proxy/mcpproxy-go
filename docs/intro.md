@@ -16,10 +16,10 @@ keywords: [mcp, proxy, ai agents, tool discovery, security, docker]
 
 ## What is MCPProxy?
 
-MCPProxy is a Go-based application that acts as an intelligent proxy between AI clients (like Cursor, Claude Desktop, VS Code Copilot) and MCP servers. It runs locally on your machine or LAN and provides:
+MCPProxy is a Go-based application that acts as an intelligent proxy between AI clients (such as Claude Code, Codex CLI and Cursor) and MCP servers. It runs locally on your machine or LAN and provides:
 
 - **Intelligent Tool Discovery** - BM25 search indexes tools across all connected servers, so that, in the default `retrieve_tools` and `code_execution` routing modes, agents load a small set of MCPProxy discovery and execution tools and fetch tool schemas on demand instead of the full upstream catalog (`direct` routing lists upstream tools individually and does not reduce initial context; savings depend on tool count, routing mode and task)
-- **Security Quarantine** - Withholds new servers and tools from agents until you review and approve them, and, under the default `scan` trust mode, scans every later change to an approved tool's definition offline and holds the ones it flags, cannot cover, or that re-label the tool as safer (the `manual` mode holds every change for a person; `auto` admits everything). This reduces exposure to Tool Poisoning Attacks (TPA); it is not a guarantee of safety (see [limits](/features/security-quarantine#what-quarantine-does-and-does-not-cover))
+- **Security Quarantine** - Withholds new servers and tools from agents until approval. Under the default `scan` trust mode, clean new servers and tools are admitted automatically, and every later change to an approved tool's definition is scanned offline: changes the scan flags, cannot cover, or that re-label the tool as safer are held, the rest are approved. `manual` holds every new server, tool and change for a person; `auto` skips these holds. This reduces exposure to Tool Poisoning Attacks (TPA), with [normalization, upgrade exceptions and other limits](/features/security-quarantine#what-quarantine-does-and-does-not-cover); it is not a guarantee of safety.
 - **Containerized MCP Servers** - Run upstream servers in Docker isolation for enhanced security
 - **Audit & Transparency** - Local activity records of tool calls for inspection and debugging, with configurable retention and a response size cap per record (not a compliance certification)
 - **Sensitive Data Detection** - Flags potential API keys, credentials and other sensitive data in tool arguments and responses in the activity log. Optional [output sanitisation](/features/output-sanitisation) can redact detected secrets or block critical detections in supported text responses (not in direct routing mode or upstream error results)
@@ -32,7 +32,7 @@ Instead of loading all tools from all servers into your AI client's context, MCP
 
 ### Security Quarantine
 
-New MCP servers are automatically quarantined until you review and approve them, and their tools are withheld from agents in the meantime. This reduces exposure to Tool Poisoning Attacks, where a malicious server tries to manipulate AI behavior through crafted tool descriptions. A clean scan is not proof of safety, and trust modes other than `manual` admit servers or changes without a human review.
+Under the default `manual` trust mode, new MCP servers are quarantined until approval, and their tools are withheld from agents in the meantime. This reduces exposure to Tool Poisoning Attacks, where a malicious server tries to manipulate AI behavior through crafted tool descriptions. A clean scan is not proof of safety, and trust modes other than `manual` admit servers or changes without a human review.
 
 ### Docker Isolation
 
@@ -60,17 +60,25 @@ Ready to get started? Follow the [Installation Guide](/getting-started/installat
 
 ## Ecosystem
 
-MCPProxy works with any MCP-compatible client and connects to 100+ MCP servers providing 1000+ tools. Popular integrations include:
+MCPProxy works with any MCP-compatible client and connects to 100+ MCP servers providing 1000+ tools. Examples of integrations include:
 
-**AI Clients:**
-- Cursor
+**AI clients in telemetry reports (September 22–October 22, 2026):**
+
+- Claude Code
+- Codex CLI
+- OpenCode
 - Claude Desktop
-- VS Code Copilot
-- ChatGPT/Codex
-- Goose
+- Cursor
+- VS Code
+- Gemini CLI
 - Windsurf
+- Goose
+- ZCode
+
+This anonymous, incomplete snapshot combines configured integrations with self-reported MCP client names, including names seen before the reporting window.
 
 **MCP Servers:**
+
 - GitHub
 - Playwright
 - Context7
@@ -85,3 +93,10 @@ MCPProxy works with any MCP-compatible client and connects to 100+ MCP servers p
 - [GitHub Repository](https://github.com/smart-mcp-proxy/mcpproxy-go)
 - [Main Website](https://mcpproxy.app)
 - [Release Notes](https://github.com/smart-mcp-proxy/mcpproxy-go/releases)
+
+## Complete a task
+
+- [Reuse one MCP setup in two AI clients](/guides/two-clients-one-setup)
+- [Find out why an agent cannot use a tool](/guides/diagnose-unavailable-tool)
+- [Discover tools on demand](/guides/discover-tools-on-demand)
+- [Review a tool before use](/guides/review-tool-before-use)

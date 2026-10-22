@@ -551,6 +551,26 @@ func TestProfilesService_Stats24hCountsByProfileAndClient(t *testing.T) {
 	assert.Equal(t, Counter{Calls: 2, Blocked: 2}, stats.ByClient["cursor"])
 }
 
+// A cancelled caller gets whatever was counted so far, but that truncated
+// rollup must not be cached for the next 30 s of callers (the stream closes
+// early on cancellation, so the loop ends as if it had seen everything).
+func TestProfilesService_Stats24hDoesNotCacheTruncatedRollup(t *testing.T) {
+	h := newProfilesHarness(t)
+	sm := h.rt.StorageManager()
+	now := time.Now()
+	for i := 0; i < 250; i++ { // more than the stream's channel buffer
+		require.NoError(t, sm.SaveActivity(&storage.ActivityRecord{Type: storage.ActivityTypeToolCall, Status: "success", Profile: "ro", ClientID: "cursor", Timestamp: now}))
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	truncated := h.svc.Stats24h(ctx, ViewerScope{})
+	assert.Less(t, truncated.ByProfile["ro"].Calls, 250, "a cancelled context ends the stream early")
+
+	stats := h.svc.Stats24h(context.Background(), ViewerScope{})
+	assert.Equal(t, 250, stats.ByProfile["ro"].Calls, "the truncated rollup must not have been cached")
+}
+
 // A save surfaces one warning per stale tools.classify entry, with its reason
 // (#1446): the editors previously only learned of staleness from a later
 // effective-tools read.

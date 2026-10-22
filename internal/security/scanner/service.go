@@ -107,6 +107,25 @@ type ServerInfoProvider interface {
 	IsConnected(serverName string) bool
 }
 
+// oauthLoginAwareProvider is an OPTIONAL capability a ServerInfoProvider may
+// implement (GH #1722): report that a server cannot connect until a person
+// completes its OAuth login — a manual login flow is in flight for it, or it
+// is parked in Pending Auth. A scan never reconnects such a server:
+// EnsureConnected RESTARTS it, which retires the instance that owns the
+// pending flow (PKCE verifier, callback waiter), so the code the browser
+// delivers afterwards cannot be exchanged. The scan proceeds with whatever it
+// can export without a restart (the ingested contracts) or fails closed.
+type oauthLoginAwareProvider interface {
+	AwaitingOAuthLogin(serverName string) bool
+}
+
+// awaitingOAuthLogin reports the optional capability, false when the provider
+// does not implement it.
+func (s *Service) awaitingOAuthLogin(serverName string) bool {
+	provider, ok := s.serverInfo.(oauthLoginAwareProvider)
+	return ok && provider.AwaitingOAuthLogin(serverName)
+}
+
 // ingestedToolContractsProvider is an OPTIONAL capability a ServerInfoProvider
 // may also implement (RT-06, red-team 2026-10-11): return the tool contracts
 // discovery actually ingested for a server — the definitions recorded on its
@@ -1568,7 +1587,12 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 				req.ToolDefinitions = e.Data
 				return nil
 			}
-			if !s.serverInfo.IsConnected(serverName) {
+			if !s.serverInfo.IsConnected(serverName) && s.awaitingOAuthLogin(serverName) {
+				// GH #1722: a restart would retire the pending login flow, and a
+				// server waiting on a person can never connect for the scan.
+				s.logger.Info("Server is waiting on an OAuth login; scanning without reconnecting it (a restart would invalidate the login)",
+					zap.String("server", serverName))
+			} else if !s.serverInfo.IsConnected(serverName) {
 				s.logger.Info("Server is disconnected, attempting to connect for scan",
 					zap.String("server", serverName))
 				if err := s.serverInfo.EnsureConnected(ctx, serverName); err != nil {
@@ -1593,6 +1617,9 @@ func (s *Service) StartScan(ctx context.Context, serverName string, dryRun bool,
 					s.logger.Info("Tool export returned 0 for a connected server, retrying export without restarting it",
 						zap.String("server", serverName))
 					exportErr = exportInto(scanCtx)
+				} else if s.awaitingOAuthLogin(serverName) {
+					s.logger.Info("Tool export returned 0 for a server waiting on an OAuth login; not restarting it (a restart would invalidate the login)",
+						zap.String("server", serverName))
 				} else {
 					s.logger.Info("Tool export returned 0, retrying after EnsureConnected",
 						zap.String("server", serverName))

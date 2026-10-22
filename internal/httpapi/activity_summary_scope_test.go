@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -49,7 +50,7 @@ func (m *summaryScopeController) ListActivities(filter storage.ActivityFilter) (
 	return matched, total, nil
 }
 
-func (m *summaryScopeController) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+func (m *summaryScopeController) StreamActivities(_ context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	ch := make(chan *storage.ActivityRecord)
 	go func() {
 		defer close(ch)
