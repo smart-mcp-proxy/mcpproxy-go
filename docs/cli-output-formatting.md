@@ -144,6 +144,20 @@ This enables AI agents to discover available commands and their options programm
 
 ## Structured Error Output
 
+For `mcpproxy call tool-read`, `tool-write`, and `tool-destructive -o json`,
+stdout contains the MCP result envelope. The CLI sends
+`X-MCPProxy-Result-Envelope: 1` to opt into this REST response shape; calls
+without that header retain their content-array response. `content` retains its ordered text,
+image, audio, or resource blocks; `structuredContent` and `_meta` are included
+when supplied by the daemon. Older daemons that return a content array are
+normalized to `{ "content": [...], "isError": false }`. An `isError` result
+keeps that envelope on stdout and exits nonzero.
+
+Runtime tool-call failures emit one structured error object on stdout with
+`code: "OPERATION_FAILED"`, a `message`, and `request_id` when available, and
+exit nonzero. Diagnostics may also appear on stderr. Required-flag validation
+still follows Cobra's usual usage output.
+
 When using JSON output format, errors include structured information:
 
 ```json

@@ -3,9 +3,12 @@ package config
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -2111,6 +2114,14 @@ func IsValidTrustMode(s string) bool {
 // loader's env pass.
 const EnvTPABundlePath = "MCPPROXY_TPA_BUNDLE_PATH"
 
+// EnvTPAFetchEnabled is the environment override for the optional TPA bundle
+// network fetch (`security.tpa_fetch_enabled`, Spec 087 FR-016 / Spec 101 US3
+// B2). It is read inside SecurityConfig.IsTPAFetchEnabled, bidirectional
+// ("true"/"1" force on, "false"/"0" force off), and is never persisted. It
+// enables only the config-resident URL, verified against config-resident keys,
+// so the environment cannot redirect the fetch.
+const EnvTPAFetchEnabled = "MCPPROXY_TPA_FETCH_ENABLED"
+
 // EnvAutoBaselineScan is the environment kill-switch for the automatic,
 // informational Pass-1 baseline scan (`security.auto_baseline_scan`). Like the
 // bundle path, precedence is enforced in the accessor
@@ -2118,6 +2129,14 @@ const EnvTPABundlePath = "MCPPROXY_TPA_BUNDLE_PATH"
 // a config posted to /api/v1/config/apply cannot defeat the operator's env
 // setting. Accepts "true"/"1" and "false"/"0"; any other value is ignored.
 const EnvAutoBaselineScan = "MCPPROXY_AUTO_BASELINE_SCAN"
+
+// EnvAutoRescanOnChange is the environment switch for the automatic,
+// informational rescan that follows a tool-definition hash change
+// (`security.auto_rescan_on_change`). Same precedence and vocabulary as
+// EnvAutoBaselineScan: resolved in SecurityConfig.IsAutoRescanOnChangeEnabled so
+// /api/v1/config/apply cannot defeat it; "true"/"1"/"false"/"0", anything else
+// is ignored.
+const EnvAutoRescanOnChange = "MCPPROXY_AUTO_RESCAN_ON_CHANGE"
 
 // TrustModeNormalization records one per-server trust_mode value that the load
 // path rewrote because it was not in the accepted vocabulary.
@@ -2341,10 +2360,169 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	errors := append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
 	errors = append(errors, c.forwardHeadersErrors()...)
 	errors = append(errors, c.oauthEndpointOverrideErrors()...)
+	errors = append(errors, c.tpaTrustRootErrors()...)
+	errors = append(errors, c.tpaRefreshErrors()...)
 	if _, err := ValidateProfiles(c); err != nil {
 		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
 	}
 	return errors
+}
+
+// tpaOperatorSignerKeyLen is the raw length of an Ed25519 public key. The config
+// package checks only the shape of tpa_operator_signers; key-id derivation and
+// signature verification live in internal/security/bundlesig, which config must
+// not import.
+const tpaOperatorSignerKeyLen = 32
+
+// tpaTrustRootErrors validates the Spec 101 trust-root keys under `security`:
+// tpa_active_root must be "", "publisher" or "operator"; every
+// tpa_operator_signers entry must be the canonical standard base64 of exactly
+// 32 bytes and unique; an "operator" root needs at least one signer.
+//
+// Write-time only, like oauthRedirectURIErrors: a hand-edited bad value must
+// not brick boot. Load drops unusable signers (with a log) and the scanner
+// treats an unusable operator root as having no operator authority, so a bad
+// key can never widen what is trusted. Messages never echo the offending value.
+func (c *Config) tpaTrustRootErrors() []ValidationError {
+	sc := c.Security
+	if sc == nil {
+		return nil
+	}
+	var errors []ValidationError
+	switch sc.TPAActiveRoot {
+	case "", TPARootPublisher, TPARootOperator:
+	default:
+		errors = append(errors, ValidationError{
+			Field:   "security.tpa_active_root",
+			Message: fmt.Sprintf("must be %q or %q", TPARootPublisher, TPARootOperator),
+		})
+	}
+
+	seen := make(map[string]struct{}, len(sc.TPAOperatorSigners))
+	for i, signer := range sc.TPAOperatorSigners {
+		field := fmt.Sprintf("security.tpa_operator_signers[%d]", i)
+		raw, err := base64.StdEncoding.Strict().DecodeString(signer)
+		if err != nil || base64.StdEncoding.EncodeToString(raw) != signer {
+			errors = append(errors, ValidationError{Field: field, Message: "must be canonical standard base64 (with padding)"})
+			continue
+		}
+		if len(raw) != tpaOperatorSignerKeyLen {
+			errors = append(errors, ValidationError{
+				Field:   field,
+				Message: fmt.Sprintf("must decode to exactly %d bytes (an Ed25519 public key)", tpaOperatorSignerKeyLen),
+			})
+			continue
+		}
+		if _, dup := seen[string(raw)]; dup {
+			errors = append(errors, ValidationError{Field: field, Message: "duplicate signer"})
+			continue
+		}
+		seen[string(raw)] = struct{}{}
+	}
+
+	if sc.TPAActiveRoot == TPARootOperator && len(sc.TPAOperatorSigners) == 0 {
+		errors = append(errors, ValidationError{
+			Field:   "security.tpa_active_root",
+			Message: "operator root declared but no tpa_operator_signers",
+		})
+	}
+	return errors
+}
+
+// tpaRefreshErrors validates the Spec 087 / Spec 101 US3 refresh keys under
+// `security` (tpa_refresh_interval, tpa_fetch_enabled, tpa_fetch_url,
+// tpa_stale_after_days). Write-time only, like tpaTrustRootErrors: it is
+// appended to ValidateDetailed and never reached from the boot-fatal
+// validateDetailedCore, so a hand-edited bad value on disk cannot brick a load;
+// the runtime treats it as "fetch off". Messages never echo the URL.
+//
+// The publisher-root-with-empty-built-in-set case cannot be seen here
+// (internal/config must not import the scanner); the runtime reports it as
+// no_trusted_signer and doctor surfaces it.
+func (c *Config) tpaRefreshErrors() []ValidationError {
+	sc := c.Security
+	if sc == nil {
+		return nil
+	}
+	var errors []ValidationError
+
+	if sc.TPARefreshInterval != 0 && sc.TPARefreshInterval.Duration() < MinTPARefreshInterval {
+		errors = append(errors, ValidationError{
+			Field:   "security.tpa_refresh_interval",
+			Message: fmt.Sprintf("must be at least %s (leave unset for the %s default)", MinTPARefreshInterval, DefaultTPARefreshInterval),
+		})
+	}
+
+	if msg := tpaFetchURLProblem(sc.TPAFetchURL); msg != "" {
+		errors = append(errors, ValidationError{Field: "security.tpa_fetch_url", Message: msg})
+	}
+
+	if sc.TPAFetchEnabled {
+		if sc.TPAFetchURL == "" {
+			errors = append(errors, ValidationError{
+				Field:   "security.tpa_fetch_url",
+				Message: "tpa_fetch_enabled requires a tpa_fetch_url (there is no built-in default URL)",
+			})
+		}
+		if sc.TPAActiveRoot == TPARootOperator && len(sc.TPAOperatorSigners) == 0 {
+			errors = append(errors, ValidationError{
+				Field:   "security.tpa_fetch_enabled",
+				Message: "tpa_fetch_enabled with the operator root requires tpa_operator_signers",
+			})
+		}
+	}
+
+	if sc.TPAStaleAfterDays != nil && *sc.TPAStaleAfterDays < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "security.tpa_stale_after_days",
+			Message: "must not be negative (0 disables the stale flag)",
+		})
+	}
+	return errors
+}
+
+// tpaFetchURLProblem returns a fixed, value-free description of what is wrong
+// with a configured fetch URL, or "" when it is acceptable (including empty,
+// which means "no URL"). https is required; http is allowed only for a
+// loopback literal or "localhost" (test rigs and LAN-local mirrors behind a
+// loopback forwarder). Userinfo, query and fragment are refused: the URL is
+// logged by host only and a credential in it would be one typo from a leak.
+func tpaFetchURLProblem(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Hostname() == "" {
+		return "must be an absolute https URL"
+	}
+	host := u.Hostname()
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+	case "http":
+		if !tpaLoopbackHost(host) {
+			return "must use https (http is allowed only for localhost or a loopback address)"
+		}
+	default:
+		return "must use https (http is allowed only for localhost or a loopback address)"
+	}
+	switch {
+	case u.User != nil:
+		return "must not contain credentials"
+	case u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "?"):
+		return "must not contain a query string"
+	case u.Fragment != "" || strings.Contains(raw, "#"):
+		return "must not contain a fragment"
+	}
+	return ""
+}
+
+// tpaLoopbackHost reports whether host is "localhost" or a loopback IP literal.
+func tpaLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ValidateServerForLoad runs the per-server checks config.Load applies at boot
@@ -3214,6 +3392,63 @@ type SecurityConfig struct {
 	TPABundlePath string `json:"tpa_bundle_path,omitempty" mapstructure:"tpa-bundle-path"`
 	// (see EnvTPABundlePath for the env override that outranks this field)
 
+	// --- Spec 101 US1: signed TPA bundle trust root ---
+	//
+	// These keys are config-resident ON PURPOSE: the attacker this design
+	// defends against can write the bundle path (and possibly the data
+	// directory) but not mcp_config.json. None of them has an env alias.
+
+	// RequireSignedBundle makes the detached signature sidecar mandatory for
+	// file-dropped bundles (FR-007). Default false (maintainer decision D2):
+	// existing unsigned drops keep working, but an unsigned external bundle
+	// always runs with DEGRADED coverage (scan-mode auto-approval suspended).
+	RequireSignedBundle bool `json:"require_signed_bundle" mapstructure:"require-signed-bundle"`
+	// TPAActiveRoot declares which signing authority's bundles may activate
+	// (FR-004b): "publisher" (default, the keys embedded in this binary) or
+	// "operator" (TPAOperatorSigners). A bundle verified by the other root is
+	// refused as authority_not_active, so whoever can write the bundle path
+	// cannot choose the authority.
+	TPAActiveRoot string `json:"tpa_active_root,omitempty" mapstructure:"tpa-active-root"`
+	// TPAOperatorSigners lists operator Ed25519 public keys, each the standard
+	// base64 encoding of the 32 raw key bytes (FR-004). Their key ids are the
+	// lowercase-hex SHA-256 of those bytes. Malformed or duplicate entries are
+	// rejected on write and dropped (with a log) on load.
+	TPAOperatorSigners []string `json:"tpa_operator_signers,omitempty" mapstructure:"tpa-operator-signers"`
+	// TPAOperatorBaseline seeds the operator authority's anti-downgrade
+	// watermark (FR-009b): an operator-signed bundle must carry a sequence
+	// ABOVE it (a rollback target may sit at it). It survives a data-directory
+	// wipe because it lives here. Absent means the operator authority has no
+	// anti-downgrade floor and an active operator bundle runs DEGRADED.
+	TPAOperatorBaseline *uint64 `json:"tpa_operator_baseline,omitempty" mapstructure:"tpa-operator-baseline"`
+	// TPAOperatorEpoch is the operator authority's trust epoch (FR-005a).
+	// Bumping it (after an operator key compromise) re-baselines the operator
+	// watermark and retires prior-epoch pins. Absent means 0.
+	TPAOperatorEpoch *uint64 `json:"tpa_operator_epoch,omitempty" mapstructure:"tpa-operator-epoch"`
+
+	// --- Spec 087 / Spec 101 US3: daily refresh and optional fetch ---
+	//
+	// Flat keys, none containing a masked substring (KEY, AUTH, TOKEN, PASS,
+	// CERT, SECRET), so GET /api/v1/config returns them verbatim. The trust set
+	// a fetched pair is verified against is the Spec 101 one above; there is no
+	// per-fetch key.
+
+	// TPARefreshInterval is the cadence of the refresh cycle (the network-free
+	// file leg, then the optional fetch leg). Absent or 0 means 24h; the runtime
+	// clamps to at least 1h. There is no refresh-enable key: the file leg is
+	// idempotent and always on.
+	TPARefreshInterval Duration `json:"tpa_refresh_interval,omitempty" mapstructure:"tpa-refresh-interval" swaggertype:"string"`
+	// TPAFetchEnabled opts in to the network fetch leg. Default false; the
+	// environment override is MCPPROXY_TPA_FETCH_ENABLED (EnvTPAFetchEnabled).
+	TPAFetchEnabled bool `json:"tpa_fetch_enabled" mapstructure:"tpa-fetch-enabled"`
+	// TPAFetchURL is the channel URL: a GitHub Releases "latest" API URL or a
+	// direct bundle URL. Empty (the default) means the fetch leg is off; no URL
+	// is compiled into the binary.
+	TPAFetchURL string `json:"tpa_fetch_url,omitempty" mapstructure:"tpa-fetch-url"`
+	// TPAStaleAfterDays is the age in days after which the active bundle reads
+	// as stale. Absent means 30; an explicit 0 disables the stale flag and the
+	// doctor stale warning.
+	TPAStaleAfterDays *int `json:"tpa_stale_after_days,omitempty" mapstructure:"tpa-stale-after-days"`
+
 	// DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
 	// deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
 	// keys (migrated on load) and gates the heavy Docker-based scanners + source
@@ -3236,6 +3471,22 @@ type SecurityConfig struct {
 	// (manual scans keep working). Env override: MCPPROXY_AUTO_BASELINE_SCAN,
 	// which wins over this field on every path.
 	AutoBaselineScan *bool `json:"auto_baseline_scan,omitempty" mapstructure:"auto-baseline-scan" swaggertype:"boolean"`
+
+	// AutoRescanOnChange is the finer switch for the automatic, informational
+	// rescan that follows a tool-definition hash change: the in-process TPA scan
+	// of the changed (or newly pending) tool, recorded as hold evidence, and a
+	// debounced informational server rescan that brings the review screen's scan
+	// coverage back to "current".
+	//
+	// Evidence and freshness ONLY: a clean verdict never approves a changed
+	// contract (RT-02); every change is still held for review in scan and manual
+	// trust modes. Runs in every trust mode except "auto".
+	//
+	// Default (nil) is ENABLED. It only takes effect while auto_baseline_scan is
+	// also enabled, so a user can keep the admission scan and turn off per-change
+	// rescans with this key alone. Env override: MCPPROXY_AUTO_RESCAN_ON_CHANGE,
+	// which wins over this field on every path.
+	AutoRescanOnChange *bool `json:"auto_rescan_on_change,omitempty" mapstructure:"auto-rescan-on-change" swaggertype:"boolean"`
 }
 
 // DeepScanConfig configures the opt-in "deep scan" layer (Spec 077 US3):
@@ -3291,6 +3542,116 @@ func (sc *SecurityConfig) EffectiveTPABundlePath() string {
 	return sc.TPABundlePath
 }
 
+// TPA signing roots accepted by SecurityConfig.TPAActiveRoot (spec 101 FR-004b).
+const (
+	TPARootPublisher = "publisher"
+	TPARootOperator  = "operator"
+)
+
+// IsRequireSignedBundle reports whether file-dropped TPA bundles must carry a
+// signature sidecar. Nil-safe; default false (spec 101 D2).
+func (sc *SecurityConfig) IsRequireSignedBundle() bool {
+	return sc != nil && sc.RequireSignedBundle
+}
+
+// EffectiveTPAActiveRoot returns the declared active signing root, defaulting
+// to "publisher" (spec 101 FR-004b). An unrecognised value is returned verbatim
+// so the loader can refuse every candidate rather than guess.
+func (sc *SecurityConfig) EffectiveTPAActiveRoot() string {
+	if sc == nil || sc.TPAActiveRoot == "" {
+		return TPARootPublisher
+	}
+	return sc.TPAActiveRoot
+}
+
+// EffectiveTPAOperatorSigners returns the configured operator public keys
+// (base64), unvalidated. Nil-safe.
+func (sc *SecurityConfig) EffectiveTPAOperatorSigners() []string {
+	if sc == nil {
+		return nil
+	}
+	return sc.TPAOperatorSigners
+}
+
+// EffectiveTPAOperatorBaseline returns the operator baseline and whether one is
+// declared (spec 101 FR-009b: absent ⇒ operator authority runs degraded).
+func (sc *SecurityConfig) EffectiveTPAOperatorBaseline() (uint64, bool) {
+	if sc == nil || sc.TPAOperatorBaseline == nil {
+		return 0, false
+	}
+	return *sc.TPAOperatorBaseline, true
+}
+
+// EffectiveTPAOperatorEpoch returns the operator trust epoch, 0 when absent.
+func (sc *SecurityConfig) EffectiveTPAOperatorEpoch() uint64 {
+	if sc == nil || sc.TPAOperatorEpoch == nil {
+		return 0
+	}
+	return *sc.TPAOperatorEpoch
+}
+
+// Defaults for the Spec 087 / Spec 101 US3 refresh keys.
+const (
+	// DefaultTPARefreshInterval is the refresh cadence when none is configured.
+	DefaultTPARefreshInterval = 24 * time.Hour
+	// MinTPARefreshInterval is the floor for the refresh cadence (B1). A
+	// configured value below it is refused at write time and clamped at read
+	// time.
+	MinTPARefreshInterval = time.Hour
+	// DefaultTPAStaleAfterDays is the stale threshold when none is configured.
+	DefaultTPAStaleAfterDays = 30
+)
+
+// EffectiveTPARefreshInterval returns the configured refresh cadence: 24h when
+// absent or non-positive, and never below MinTPARefreshInterval (a hand-edited
+// sub-hour value is clamped, not honoured). Nil-safe. A runtime test seam may
+// go lower; this accessor does not.
+func (sc *SecurityConfig) EffectiveTPARefreshInterval() time.Duration {
+	if sc == nil || sc.TPARefreshInterval <= 0 {
+		return DefaultTPARefreshInterval
+	}
+	if d := sc.TPARefreshInterval.Duration(); d >= MinTPARefreshInterval {
+		return d
+	}
+	return MinTPARefreshInterval
+}
+
+// IsTPAFetchEnabled reports whether the optional TPA bundle network fetch is
+// on. Default false; nil-safe. MCPPROXY_TPA_FETCH_ENABLED outranks the file
+// value on every path (bidirectional: "true"/"1" force on, "false"/"0" force
+// off), like EffectiveTPABundlePath. The env is read here and never mirrored
+// into the struct or process_overrides.go, so no save path can persist it, and
+// it enables only the config-resident URL (the environment cannot redirect the
+// fetch).
+func (sc *SecurityConfig) IsTPAFetchEnabled() bool {
+	switch os.Getenv(EnvTPAFetchEnabled) {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	}
+	return sc != nil && sc.TPAFetchEnabled
+}
+
+// EffectiveTPAFetchURL returns the configured fetch URL, "" when none.
+// Nil-safe.
+func (sc *SecurityConfig) EffectiveTPAFetchURL() string {
+	if sc == nil {
+		return ""
+	}
+	return sc.TPAFetchURL
+}
+
+// EffectiveTPAStaleAfterDays returns the stale threshold in days: 30 when
+// absent or negative (malformed), 0 (never stale) when explicitly zero.
+// Nil-safe.
+func (sc *SecurityConfig) EffectiveTPAStaleAfterDays() int {
+	if sc == nil || sc.TPAStaleAfterDays == nil || *sc.TPAStaleAfterDays < 0 {
+		return DefaultTPAStaleAfterDays
+	}
+	return *sc.TPAStaleAfterDays
+}
+
 // IsAutoBaselineScanEnabled reports whether mcpproxy may run the automatic,
 // informational Pass-1 baseline scan (new-server admission scan + the one-shot
 // baseline sweep). Default is ENABLED: a nil SecurityConfig, or an unset
@@ -3312,6 +3673,31 @@ func (sc *SecurityConfig) IsAutoBaselineScanEnabled() bool {
 		return true
 	}
 	return *sc.AutoBaselineScan
+}
+
+// IsAutoRescanOnChangeEnabled reports whether the per-change automatic rescan
+// (hold evidence + debounced informational server rescan) is switched on by
+// auto_rescan_on_change alone. Default ENABLED; MCPPROXY_AUTO_RESCAN_ON_CHANGE
+// outranks the file value on every path. Callers that decide whether to run the
+// rescan use IsAutoChangeScanEnabled, which also honours auto_baseline_scan.
+func (sc *SecurityConfig) IsAutoRescanOnChangeEnabled() bool {
+	switch os.Getenv(EnvAutoRescanOnChange) {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	}
+	if sc == nil || sc.AutoRescanOnChange == nil {
+		return true
+	}
+	return *sc.AutoRescanOnChange
+}
+
+// IsAutoChangeScanEnabled is the gate for the automatic scan that follows a
+// tool-definition hash change: the coarse auto_baseline_scan kill switch AND
+// the finer auto_rescan_on_change switch must both be on.
+func (sc *SecurityConfig) IsAutoChangeScanEnabled() bool {
+	return sc.IsAutoBaselineScanEnabled() && sc.IsAutoRescanOnChangeEnabled()
 }
 
 // DeepScanScanners returns the optional per-scanner allow-list for the deep-scan

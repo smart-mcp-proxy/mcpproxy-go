@@ -370,7 +370,7 @@ export interface GlobalTool {
   // on tools the trust gate refused to auto-approve. GET /api/v1/tools emits
   // these alongside the approval status (internal/httpapi/server.go); records
   // predating Spec 086 omit them entirely, which must render unchanged.
-  held_reason?: string     // "scan_findings" (threat) | "scan_coverage" (precaution)
+  held_reason?: string     // "scan_findings" (threat) | "scan_coverage" (precaution) | "awaiting_review" (clean, held for review)
   held_verdict?: string    // "dangerous" | "warnings" | "clean"
   held_signals?: string[]  // matched deterministic check ids, producer order, ≤16
   // Spec 116 FR-017: the incarnation of the server this row was read for; a
@@ -497,7 +497,7 @@ export interface ToolApproval {
   // them on from GET /api/v1/servers/{id}/tools; the diff endpoint returns them
   // directly. Absent on records that are not currently held by the scan gate
   // and on every record written before spec 086, which must render unchanged.
-  //   held_reason:  'scan_findings' | 'scan_coverage'
+  //   held_reason:  'scan_findings' | 'scan_coverage' | 'awaiting_review'
   //   held_verdict: 'dangerous' | 'warnings' | 'clean'
   //   held_signals: matched check ids, e.g. 'tpa.TPA-2026-0001.hidden_instruction'
   held_reason?: string
@@ -1509,7 +1509,7 @@ export interface ServerReviewResponse {
     name: string; transport: string; command?: string; url?: string
     /** Launch identity, already redacted by the core (UX-10); never read from the raw server config. */
     args?: string[]; working_dir?: string
-    quarantined: boolean; trust_mode?: string; source_registry_id?: string; source_registry_provenance?: string; scan?: ReviewScan
+    quarantined: boolean; enabled?: boolean; connected?: boolean; readiness?: 'disabled' | 'quarantined' | 'connecting' | 'connected' | 'disconnected' | 'auth_required' | 'error'; trust_mode?: string; source_registry_id?: string; source_registry_provenance?: string; scan?: ReviewScan
     definitions_captured: boolean
     /** Spec 116 FR-017: the reviewed server's identity; sent back as expected_incarnation. */
     generation?: number; incarnation?: number

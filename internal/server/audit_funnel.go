@@ -33,6 +33,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/callerr"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/jsruntime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -292,6 +293,22 @@ func auditCallerFromContext(ctx context.Context) audit.Caller {
 // the refusal was non-disclosing to the caller (Spec 105 FR-010 shapes:
 // scope refusals reveal nothing about whether the server exists).
 func auditReasonFromBlockKey(reasonKey string) (reason string, disclosed bool) {
+	return auditReasonFromBlockKeyAndProfileReason(reasonKey, "")
+}
+
+// auditReasonFromBlockKeyAndProfileReason is auditReasonFromBlockKey for a
+// refusal that may also carry the typed cause of a profile tool-policy
+// refusal (profile.BlockReason). The three tool-policy causes are their own
+// authz reasons so the audit stream says which rule refused the call without
+// a join against the activity log. They are disclosed refusals: the caller's
+// own error text already names the cause. profile_scope is unchanged, and
+// profile_code_execution / profile_management are deliberately not members:
+// those built-in invocations never reach the audit stream.
+func auditReasonFromBlockKeyAndProfileReason(reasonKey, profileReason string) (reason string, disclosed bool) {
+	switch profile.BlockReason(profileReason) {
+	case profile.BlockReasonTier, profile.BlockReasonRule, profile.BlockReasonUnannotated:
+		return profileReason, true
+	}
 	switch reasonKey {
 	case telemetry.BlockReasonTokenScope, telemetry.BlockReasonProfileScope:
 		return reasonKey, false
@@ -331,6 +348,13 @@ func (p *MCPProxyServer) auditWrite(line audit.Line, err error) {
 // reasonKey is the gate's telemetry.BlockReason* (ignored for allow). A
 // second call for the same attempt is a no-op.
 func (p *MCPProxyServer) auditAuthz(ctx context.Context, decision, reasonKey string) {
+	p.auditAuthzWithProfileReason(ctx, decision, reasonKey, "")
+}
+
+// auditAuthzWithProfileReason is auditAuthz for a gate that also knows the
+// typed cause of a profile tool-policy refusal (profile.BlockReason, "" for
+// every other refusal).
+func (p *MCPProxyServer) auditAuthzWithProfileReason(ctx context.Context, decision, reasonKey, profileReason string) {
 	d := auditDispatchFromContext(ctx)
 	if d == nil || p.auditSink == nil {
 		return
@@ -351,7 +375,7 @@ func (p *MCPProxyServer) auditAuthz(ctx context.Context, decision, reasonKey str
 		Reason:   "none",
 	}
 	if decision == "deny" {
-		reason, disclosed := auditReasonFromBlockKey(reasonKey)
+		reason, disclosed := auditReasonFromBlockKeyAndProfileReason(reasonKey, profileReason)
 		in.Reason = reason
 		in.Disclosed = &disclosed
 	}
@@ -528,9 +552,10 @@ func (o *nestedAuthzObserver) ObserveAuthzGate(report jsruntime.AuthzGateReport)
 	if o.proxy == nil || o.proxy.auditSink == nil {
 		return
 	}
-	// Note: the audit reason below stays the Spec 107 vocabulary even for a
-	// profile refusal (report.BlockReason is not mapped here); aligning it
-	// with the top-level gate's `other` is a Spec 107/108 follow-up.
+	// A profile tool-policy refusal (tier cap, deny rule, unannotated tool)
+	// carries its typed cause in report.BlockReason and is audited under that
+	// reason, as at the top-level gates. Every other refusal keeps the Spec 107
+	// nested vocabulary below.
 	reasonKey := telemetry.BlockReasonTokenScope
 	switch report.Code {
 	case jsruntime.ErrorCodeServerNotAllowed:
@@ -581,5 +606,5 @@ func (o *nestedAuthzObserver) ObserveAuthzGate(report jsruntime.AuthzGateReport)
 		Args:          report.Arguments,
 		Caller:        &caller,
 	})
-	o.proxy.auditAuthz(ctx, "deny", reasonKey)
+	o.proxy.auditAuthzWithProfileReason(ctx, "deny", reasonKey, report.BlockReason)
 }

@@ -609,10 +609,32 @@ so every server ends up with a security verdict instead of an empty badge:
   serialized, never delays startup, is cancelled on shutdown, and a persisted
   marker keeps it one-shot.
 
+- **After a tool definition changes** — when a tool's definition changes, or a
+  tool is added to a server that already has an approved baseline, in every trust
+  mode except `auto`, two things run without a click:
+  - the in-process scan of that tool's *current* definition, recorded on the tool
+    (see [Hold evidence in the Web UI](#hold-evidence-in-the-web-ui-spec-088)).
+    In `scan` mode this scan is the gate's own; in `manual` mode it is run for
+    evidence only. It re-runs each time the held definition changes again.
+  - a debounced (about 5 seconds, coalesced per server) informational rescan of
+    the server, so the review screen's scan line returns to **current** instead
+    of **stale** ("Scan out of date: N tool definitions changed after the last
+    scan"). A change that lands while a scan of that server is queued or running
+    is retried, not dropped. Disabled servers, `trust_mode: "auto"` servers and
+    quarantined `trust_mode: "scan"` servers (the admission gate owns those) are
+    skipped. Failed starts share the per-server retry cap of the admission scan.
+
 These scans are **informational**: the verdict fills in the scan summary and the
-UI badge and never quarantines, approves, or blocks anything. Disable with
-`security.auto_baseline_scan: false` (env: `MCPPROXY_AUTO_BASELINE_SCAN`).
-The `trust_mode: "scan"` gate above is a separate path and is unaffected.
+UI badge and never quarantines, approves, or blocks anything. **A clean verdict
+never approves a changed or new tool**: a changed contract is held for review in
+`scan` and `manual` modes whatever the scan says (RT-02); the scan only adds
+evidence and freshness. Disable everything above with
+`security.auto_baseline_scan: false` (env: `MCPPROXY_AUTO_BASELINE_SCAN`), or
+keep the admission scan and turn off only the per-change rescans with
+`security.auto_rescan_on_change: false` (env: `MCPPROXY_AUTO_RESCAN_ON_CHANGE`).
+Manual scans keep working either way. The `trust_mode: "scan"` gate above is a
+separate path: its admission-time scan of new tools is not switched off by either
+setting.
 
 ### Signature bundle (offline TPA corpus)
 
@@ -636,8 +658,43 @@ Which corpus is live is visible in:
 
 - `mcpproxy security overview` — source, version, freshness stamp, fingerprint,
   and the runnable / skipped / declared-skipped rule split;
+- `mcpproxy security bundle` / `GET /api/v1/security/bundle` — the full status:
+  full digest, sequence, signing authority, trust epoch, whether the signature
+  verified, staleness, degraded coverage, and the last refused candidate;
 - `GET /api/v1/security/overview` → `signature_bundle`;
 - the Web UI **Security** tab ("Signatures (runnable)" stat).
+
+**Signed bundles (Spec 101).** A bundle can carry a detached Ed25519 signature
+(`<bundle>.sig`). A signed bundle is checked against the keys you trust
+(`tpa_operator_signers`) and against a per-install anti-downgrade watermark, so
+an older genuinely signed corpus cannot be put back. Rejections keep the
+previous corpus serving and are reported as `last_rejection`. Unsigned bundles
+still load unless `require_signed_bundle` is on, but they always run with
+degraded coverage. The bundle is **not** watched: it activates on config
+reload, restart, or `mcpproxy security bundle reload`.
+
+**Degraded coverage suspends `scan`-mode auto-approval.** When MCPProxy cannot
+vouch for the corpus that is scanning (an unsigned external bundle, an operator
+bundle with no baseline, a lost operator bundle, or an embedded corpus older
+than a bundle seen before), new and changed tools are held for human review
+with held reason `scan_coverage` instead of being approved on a clean verdict.
+The reason is always shown in the status. An ordinary fresh install on the
+embedded corpus is not degraded.
+
+Rollback is by the full SHA-256 digest, not a path or the 12-character
+fingerprint (`mcpproxy security bundle rollback`). The operator lifecycle,
+every rejection and degraded reason, key compromise and the threat-model
+boundary are in [Signed TPA Bundles](/features/tpa-bundle-signing).
+
+**Daily refresh and optional fetch (Spec 087).** The configured bundle file is
+re-read about every 24 hours (`security.tpa_refresh_interval`), so a dropped file
+activates without a restart. A fetch of a signed bundle from a URL you choose
+(`tpa_fetch_enabled`, `tpa_fetch_url`) is available but **off by default, with no
+default URL**, and today works only with operator-signed bundles because the
+publisher key set is still empty. A fetched bundle passes the same checks as a
+file. `mcpproxy security bundle refresh` runs one cycle now; `reload` never
+touches the network. After a new bundle activates, approved tools are re-checked
+against it: see [Re-protection after a bundle activates](#re-protection-after-a-bundle-activates).
 
 The "Add time" column applies to every admission path — the `upstream_servers`
 tool, the REST API, a registry add, and (since issue #937) a first-seen server
@@ -649,6 +706,76 @@ selector (choosing `auto` asks for confirmation and explains the risk); the
 add-server form chooses the mode instead of a raw quarantine checkbox
 (initial quarantine is derived from the mode); server tiles show a
 trust-mode badge.
+
+### Re-protection after a bundle activates {#re-protection-after-a-bundle-activates}
+
+A tool you approved last month was checked against the corpus that existed then.
+When a newer signature bundle activates (a refresh, a fetch, a dropped file or a
+rollback), that tool may now match a signature that did not exist when you
+approved it. MCPProxy re-checks your approved tools against the new corpus
+without waiting for them to change, and **only ever adds evidence for a human**.
+
+The sweep runs once per activation (a given bundle digest is swept once; a
+rollback is a new activation and one more sweep). It does not run for a
+last-known-good restore at startup or for a refused candidate. If the last
+completed sweep covered a different bundle than the one now active (an
+activation before the app was fully up, a crash mid-sweep, an upgrade that
+changed the embedded corpus), a startup catch-up runs it once. It has two legs:
+
+- **Held-tool evidence.** For every server with `pending` or `changed` tools,
+  quarantined servers included, the scan of the stored current definition is
+  repeated under the new corpus and the evidence shown on the tool is updated
+  (see [Hold evidence in the Web UI](#hold-evidence-in-the-web-ui-spec-088)). A
+  signature that the newer corpus no longer has leaves the tool held, with a clean
+  verdict that still waits for your review.
+- **Cached scan of the stored tools.** For every non-quarantined server with at
+  least one approved tool, in any trust mode, an informational scan runs over the
+  stored current definition of every tool record, approved and held alike, so the
+  result describes the same tools a live scan does and never replaces a verdict
+  that rests on a held tool with a clean one. The report, scan summary, server-list
+  badge, Security overview and activity log show the result, and the tool's scan
+  verdict on the server's review view (`GET /api/v1/servers/{name}/review`)
+  reflects a finding, naming the matching signature as `tpa.<id>.<detector>`.
+
+**What it never does (RT-02).** It never approves, blocks, revokes, disables or
+unquarantines anything, and a clean verdict approves nothing. An approved tool
+stays approved with the same approved hash, a held tool stays held, a quarantined
+server stays quarantined. The cached scan skips quarantined servers on purpose (checked again at the moment
+each server's scan starts), and the settle event of a re-protection job is
+ignored by the scan-mode auto-approval and the review capture (both belong to
+quarantined servers).
+
+**Cached only.** The sweep reads what MCPProxy already stored. It does not
+connect to the upstream server, does not call `tools/list`, starts no Docker deep
+scan, is not counted in the scan telemetry, and cannot be influenced by a slow or
+hostile server. A server with no stored approved contracts is reported as
+unscanned, never as clean.
+
+**Pacing.** Servers are swept one at a time, with a short pause between them. A
+server that is busy with another scan is retried without counting as a failure; a
+server whose scan cannot start is tried at most three times. One sweep produces at
+most one finding per tool and one activity record per server, so a large install
+does not get an alert storm.
+
+**It depends on `security.auto_baseline_scan`.** The cached scan is an
+informational scan, so it follows the same switch (env
+`MCPPROXY_AUTO_BASELINE_SCAN`). With it off, the held-tool evidence still
+refreshes, the cached scan does not run, and the status says so
+(`reprotect.state: suspended`, `reason: auto_baseline_scan_off`). Turning the
+switch back on resumes the suspended sweep without a restart.
+
+**Where to see it.** `mcpproxy security bundle` prints a `Re-protection:` line
+(state, how many scanned servers matched the active corpus, when it last
+completed), and `GET /api/v1/security/bundle` and `/api/v1/security/overview`
+carry the same `reprotect` object (`idle`, `running`, `suspended` or `failed`).
+There is no new attention or review-queue item for "an approved tool now matches a
+signature": a server with only approved tools does not enter `/review` or the Home
+attention list. The finding is visible on the surfaces above. Whether to add an
+attention kind for it is an open decision, since it touches every surface of the
+Web UI and the macOS app.
+
+**Limitation.** In stdio mode there is no scanner service, so the cached scan of
+approved tools does not run; the held-tool evidence refresh still does.
 
 ### Hold evidence in the Web UI (spec 088)
 
@@ -662,6 +789,17 @@ link into the server's latest scan report highlighting matching findings.
 The quarantine banner distinguishes four states: scan running, scan verdict
 blocked automatic approval, scan could not complete (retry offered), and
 awaiting manual review.
+
+`held_reason` has a third value, `awaiting_review`, recorded in `manual` and
+`scan` modes when the automatic scan of a changed or newly pending tool's current
+definition came back **clean** (`held_verdict: "clean"`, no signals). It is
+evidence, not a finding and not a precaution: the tool is still `changed` or
+`pending` and stays blocked until you approve it, because a clean verdict never
+approves a changed contract. The Web UI shows it as "Scan clean, awaiting your
+review", the review screen shows the tool's scan verdict as `clean` (the tool still starts
+unchecked there: the in-process verdict never widens what is pre-selected), and `mcpproxy tools list` shows
+`clean` in the HELD column. The server banner is derived from the server scan,
+not from this field, and is unchanged.
 
 ### Reviewing a held change {#reviewing-a-held-change}
 

@@ -3,11 +3,11 @@ package scanner
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
+	"strconv"
 	"strings"
-
-	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 )
@@ -50,6 +50,91 @@ type rawBundle struct {
 	GeneratedAt string    `json:"generated_at"`
 	Rules       []rawRule `json:"rules"`
 	Skipped     []rawSkip `json:"skipped"`
+
+	// --- Spec 101 manifest fields. They are authenticated only when the
+	// bundle's detached signature verified; an unsigned candidate's values are
+	// never trusted for any decision (FR-008, FR-009). ---
+
+	// Sequence is kept raw so a bare JSON number is detectable and refused:
+	// the published grammar is a decimal STRING (parseSequence).
+	Sequence json.RawMessage `json:"sequence"`
+	// KeyID is the manifest's claim about its signing key; it must equal the
+	// sidecar key id and the id of the key that verified (bundlesig row 13).
+	KeyID string `json:"key_id"`
+	// TrustEpoch is kept raw for the same reason as Sequence (parseTrustEpoch).
+	TrustEpoch json.RawMessage `json:"trust_epoch"`
+}
+
+// bundleCompileHook, when non-nil, is called once per regexp.Compile the
+// loader performs. It is a test seam: a compile counter of zero proves that a
+// tampered candidate was refused before any pattern was compiled (FR-006).
+var bundleCompileHook func()
+
+// bundleCeilingError reports that a bundle exceeds MaxBundleRules. It is
+// raised before anything is compiled and mapped to RejectCeilingExceeded.
+type bundleCeilingError struct{ Rules int }
+
+func (e *bundleCeilingError) Error() string {
+	return fmt.Sprintf("rules: %d > %d", e.Rules, MaxBundleRules)
+}
+
+// checkRuleCeiling enforces FR-011's rules[] ceiling over ALL entries,
+// runnable or not. Exactly MaxBundleRules loads; one more is refused whole.
+func checkRuleCeiling(b *rawBundle) error {
+	if len(b.Rules) > MaxBundleRules {
+		return &bundleCeilingError{Rules: len(b.Rules)}
+	}
+	return nil
+}
+
+// sequenceGrammar is the manifest `sequence` grammar: a decimal string without
+// sign, leading zero, exponent or whitespace, at most 20 digits.
+var sequenceGrammar = regexp.MustCompile(`^[1-9][0-9]{0,19}$`)
+
+// parseSequence decodes the manifest `sequence`. It must be a JSON STRING
+// matching ^[1-9][0-9]{0,19}$ whose value fits in a uint64. A bare number is
+// refused on purpose: a JSON number is a float64 to most parsers and loses
+// precision above 2^53, so two implementations could disagree about a
+// watermark. It returns the value and its canonical decimal string.
+func parseSequence(raw json.RawMessage) (uint64, string, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, "", errors.New("sequence is missing")
+	}
+	if raw[0] != '"' {
+		return 0, "", errors.New(`sequence must be a JSON string (a decimal like "5"), not a bare number`)
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return 0, "", fmt.Errorf("sequence is not a JSON string: %w", err)
+	}
+	if !sequenceGrammar.MatchString(s) {
+		return 0, "", errors.New("sequence must match ^[1-9][0-9]{0,19}$")
+	}
+	v, err := strconv.ParseUint(s, 10, 64)
+	if err != nil {
+		return 0, "", errors.New("sequence exceeds 18446744073709551615")
+	}
+	return v, s, nil
+}
+
+// parseTrustEpoch decodes the manifest `trust_epoch`: a JSON integer >= 0 with
+// no sign, fraction or exponent.
+func parseTrustEpoch(raw json.RawMessage) (uint64, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return 0, errors.New("trust_epoch is missing")
+	}
+	// A JSON integer without sign, fraction or exponent is exactly a run of
+	// ASCII digits (JSON forbids leading zeros except "0" itself).
+	for _, c := range raw {
+		if c < '0' || c > '9' {
+			return 0, errors.New("trust_epoch must be a non-negative JSON integer")
+		}
+	}
+	v, err := strconv.ParseUint(string(raw), 10, 64)
+	if err != nil {
+		return 0, errors.New("trust_epoch exceeds 18446744073709551615")
+	}
+	return v, nil
 }
 
 // bundleMeta is the operator-facing header of a bundle, extracted without
@@ -59,22 +144,6 @@ type bundleMeta struct {
 	SchemaVersion  string
 	SignatureCount int
 	GeneratedAt    string
-}
-
-// bundleMetadata re-reads just the bundle header. It is only called on bytes
-// that loadBundleCheck already parsed successfully, so a decode error here is
-// impossible in practice and yields an empty header rather than a hard failure.
-func bundleMetadata(data []byte) bundleMeta {
-	var b rawBundle
-	if err := json.Unmarshal(data, &b); err != nil {
-		return bundleMeta{}
-	}
-	return bundleMeta{
-		BundleVersion:  b.BundleVersion,
-		SchemaVersion:  b.SchemaVersion,
-		SignatureCount: b.SignatureCount,
-		GeneratedAt:    b.GeneratedAt,
-	}
 }
 
 // rawRule is one rule object. Only the fields the offline tier consumes are
@@ -217,14 +286,17 @@ func loadEmbeddedBundleCheck() (*BundleCheck, bundleLoadStats, error) {
 // Configuration/logging live in tpa_bundle_source.go so this file stays about
 // parsing and matching.
 func defaultBundleCheck() *BundleCheck {
-	if check, info := snapshotBundle(); check != nil || info.LoadError != "" {
-		return check
-	}
-	// Never configured (e.g. a unit test constructing the engine directly):
-	// lazily install the embedded default so behavior is unchanged.
-	ConfigureBundle("", zap.NewNop())
-	check, _ := snapshotBundle()
+	check, _ := activeBundleSnapshot()
 	return check
+}
+
+// defaultBundleCheckOr is the pinned snapshot's check when one is supplied,
+// else the active bundle check.
+func defaultBundleCheckOr(pin *pinnedBundle) *BundleCheck {
+	if pin != nil {
+		return pin.check
+	}
+	return defaultBundleCheck()
 }
 
 // loadBundleCheck parses, version-checks, and compiles a scanner bundle into a
@@ -236,9 +308,30 @@ func defaultBundleCheck() *BundleCheck {
 //     (never failing the load), and
 //   - ignores unknown additive keys (forward-compat).
 func loadBundleCheck(data []byte) (*BundleCheck, bundleLoadStats, error) {
+	b, err := parseBundleManifest(data)
+	if err != nil {
+		return nil, bundleLoadStats{}, err
+	}
+	return compileBundle(b)
+}
+
+// parseBundleManifest is the ONE JSON parse of a candidate's bytes. The
+// pipeline calls it on the buffer that was verified, so the bytes parsed are
+// the bytes authenticated (FR-006).
+func parseBundleManifest(data []byte) (*rawBundle, error) {
 	var b rawBundle
 	if err := json.Unmarshal(data, &b); err != nil {
-		return nil, bundleLoadStats{}, fmt.Errorf("parse scanner bundle: %w", err)
+		return nil, fmt.Errorf("parse scanner bundle: %w", err)
+	}
+	return &b, nil
+}
+
+// compileBundle version-checks and compiles a parsed manifest, all or nothing.
+// The rule-count ceiling is enforced first so an oversized rule list never
+// reaches regexp.Compile.
+func compileBundle(b *rawBundle) (*BundleCheck, bundleLoadStats, error) {
+	if err := checkRuleCeiling(b); err != nil {
+		return nil, bundleLoadStats{}, err
 	}
 
 	if err := checkBundleVersion(b.BundleVersion); err != nil {
@@ -261,6 +354,9 @@ func loadBundleCheck(data []byte) (*BundleCheck, bundleLoadStats, error) {
 		if r.Engine != bundleEngineRegex || r.Target != bundleTargetToolDescription {
 			stats.Skipped++
 			continue
+		}
+		if bundleCompileHook != nil {
+			bundleCompileHook()
 		}
 		re, err := regexp.Compile(r.Pattern)
 		if err != nil {

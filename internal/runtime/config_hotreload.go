@@ -447,8 +447,11 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 	// that re-apply — otherwise toggling deep scan via config edit / API apply
 	// only takes effect on restart. Deep compare covers deep_scan.{enabled,
 	// fetch_package_source,disable_no_new_privileges,scanners} plus the deprecated
-	// top-level scanner_* keys.
-	if !reflect.DeepEqual(oldCfg.Security, newCfg.Security) {
+	// top-level scanner_* keys. Compared via jsonEqual (the on-disk form), not
+	// reflect.DeepEqual: Spec 101's tpa_operator_signers is omitempty, so a
+	// nil-vs-empty slice round trip is the same config and must not read as a
+	// spurious "security" change.
+	if !jsonEqual(oldCfg.Security, newCfg.Security) {
 		result.ChangedFields = append(result.ChangedFields, "security")
 	}
 

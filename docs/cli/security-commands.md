@@ -686,6 +686,60 @@ mcpproxy security overview -o json \
 
 ---
 
+## security bundle
+
+Show and manage the offline TPA signature corpus (Spec 101, Spec 087): which bundle is live, whether its signature verified, whether coverage is degraded, how fresh it is, what the last refresh did, and the last candidate that was refused. Full operator guide: [Signed TPA Bundles](/features/tpa-bundle-signing).
+
+### Usage
+
+```bash
+mcpproxy security bundle [-o json|yaml]                    # status
+mcpproxy security bundle history                           # every activation, oldest first
+mcpproxy security bundle rollback (--embedded | --path P) --digest <64-hex>
+mcpproxy security bundle unpin                             # clear the rollback pin
+mcpproxy security bundle reload                            # re-read the local file now (never the network)
+mcpproxy security bundle refresh [-o json|yaml]            # run one refresh cycle now (file, then the optional fetch)
+```
+
+The status prints the full digest in full, because `rollback` accepts only the complete 64-character SHA-256 (the 12-character fingerprint is refused). When coverage is degraded it prints `DEGRADED: <reason>`, and while it is degraded `scan`-mode auto-approval is suspended. `rollback`, `unpin`, `reload` and `refresh` need the admin API key and are refused for agent tokens.
+
+### Freshness lines in the status
+
+| Line | Meaning |
+|---|---|
+| `Last checked` | The end of the most recent refresh or reload run, including runs that found nothing new. |
+| `Last activated` | When the serving external bundle was activated (absent for the embedded corpus). |
+| `Refresh` | What the last cycle did, for example `unchanged, next check 2026-10-22 08:14` or `fetch_unavailable (network_error), 3 consecutive failures`. See the outcome list in [Signed TPA Bundles](/features/tpa-bundle-signing#outcomes-versus-rejections). |
+| `Fetch host` | Shown only while the fetch is enabled: the host of `security.tpa_fetch_url`. The URL itself is never printed. |
+| `STALE` | The bundle is older than `security.tpa_stale_after_days` (default 30), with the way out. Absent when the threshold is `0` or the bundle is fresh. |
+| `Re-protection` | State of the sweep that re-checks approved tools after a bundle activates, for example `idle, 1 of 3 servers matched the active corpus`. See [Re-protection after a bundle activates](/features/security-quarantine#re-protection-after-a-bundle-activates). |
+
+`-o json` and `-o yaml` pass the same fields through (`last_checked_at`, `last_activated_at`, `stale`, `stale_after_days`, `refresh`, `reprotect`).
+
+### `refresh` versus `reload`
+
+`refresh` runs one cycle immediately: it re-reads `security.tpa_bundle_path` and, only when `security.tpa_fetch_enabled` is on and the fetch is allowed to run (a URL, a trusted signer for the active root), checks the channel for a newer signed bundle. It joins a cycle that is already running instead of starting a second one, and it returns when the cycle is done (the CLI waits up to 30 seconds). With the fetch off, which is the default, it makes no network request and behaves like `reload` plus the status of the cycle.
+
+`reload` only re-reads the local file. It never makes a network request, even when the fetch is on.
+
+```bash
+$ mcpproxy security bundle refresh
+Bundle refresh finished. Now serving:
+  Signature bundle:
+    Source:          fetch (https://mirror.example.com)
+    Generated:       2026-10-20T09:00:00Z (1 days old)
+    Last checked:    2026-10-21 08:14:02
+    Last activated:  2026-10-21 08:14:02
+    Refresh:         activated, next check 2026-10-22 08:09
+    Fetch host:      mirror.example.com
+    ...
+    Re-protection:   running
+```
+
+A refused candidate leaves the previous bundle serving and appears as `Last rejection`. A network problem appears on the `Refresh` line as `fetch_unavailable` and is not a rejection. The REST endpoint is `POST /api/v1/security/bundle/refresh`.
+
+---
+
 ## security cancel-all
 
 Cancel an in-progress batch scan (started with `security scan --all`). Individual per-scanner containers may still complete, but pending servers are skipped and the batch transitions to `cancelled`.
@@ -779,5 +833,6 @@ mcpproxy security report my-server -o sarif > my-server.sarif
 - [Security Scanner Plugin System](/features/security-scanner-plugins) — architecture and feature overview
 - [Scanner Images](/features/scanner-images) — which image each scanner uses and why
 - [Security Quarantine](/features/security-quarantine) — the underlying quarantine mechanism
+- [Signed TPA Bundles](/features/tpa-bundle-signing) — signing, rollback and status of the signature corpus
 - [Activity Commands](/cli/activity-commands) — correlate scans with the activity log
 - [Command Reference](/cli/command-reference) — top-level CLI index

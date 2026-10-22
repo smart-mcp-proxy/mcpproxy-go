@@ -46,6 +46,10 @@ const (
 	ServerOpSecurityReject  = "security_reject"
 	ServerOpSecretWrite     = "secret_write"
 	ServerOpDiagnosticsFix  = "diagnostics_fix"
+	// ServerOpBundleManage covers the Spec 101 TPA bundle mutations (roll back,
+	// unpin, reload). A rollback is the one operator override of the downgrade
+	// watermark, so it is an admin-only decision.
+	ServerOpBundleManage = "bundle_manage"
 )
 
 // agentDeniedServerOps is the canonical set of server/tool-mutating operations
@@ -80,6 +84,7 @@ var agentDeniedServerOps = map[string]struct{}{
 	ServerOpSecurityReject:  {},
 	ServerOpSecretWrite:     {},
 	ServerOpDiagnosticsFix:  {},
+	ServerOpBundleManage:    {},
 }
 
 // AgentDeniedServerOp reports whether the named operation is forbidden to agent

@@ -157,6 +157,7 @@ var numericOmitemptyAllowlist = map[string]string{
 	"Config.Observability.UsagePersistInterval": "doc comment: 'Default 30s' — 0 and absent both resolve to it",
 	"Config.Security.ScanTimeoutDefault":        "0 and absent both take the built-in scan timeout",
 	"Config.Security.IntegrityCheckInterval":    "0 and absent both take the built-in check interval",
+	"Config.Security.TPARefreshInterval":        "EffectiveTPARefreshInterval resolves <= 0 to the same 24h an absent key gets; there is deliberately no off switch (the file leg is always on)",
 
 	// Code execution: every one of these is validated as "0 means use default"
 	// (Validate: 'must be between 1 and 600000 milliseconds (or 0 for default)').
