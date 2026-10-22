@@ -54,6 +54,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
+	upstreamtypes "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // Status captures high-level state for API consumers.
@@ -504,6 +505,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// Phase 7.3: Initialize Supervisor with ActorPoolSimple (delegates to UpstreamManager)
 	actorPool := supervisor.NewActorPoolSimple(upstreamManager, logger)
 	supervisorInstance := supervisor.New(configSvc, actorPool, logger)
+	// GH #1722: a quarantined server's inspection exemption must not expire
+	// underneath an OAuth login the operator is completing for it.
+	supervisorInstance.SetInspectionExemptionHold(oauth.IsManualFlowActive)
 
 	// Initialize OAuth refresh manager for proactive token refresh
 	// Uses storageManager as the token store and global coordinator for flow coordination
@@ -3420,6 +3424,25 @@ func (r *Runtime) TriggerOAuthLogin(serverName string) error {
 	}
 
 	return nil
+}
+
+// ServerAwaitsOAuthLogin reports whether the named server cannot connect until
+// a person completes its OAuth login: a manual login flow is in flight for it,
+// or its live instance is parked in Pending Auth (GH #1722). Background
+// restarts (the security scan's reconnect) stand down for such a server,
+// because replacing its instance retires the pending flow.
+func (r *Runtime) ServerAwaitsOAuthLogin(serverName string) bool {
+	if serverName == "" {
+		return false
+	}
+	if oauth.IsManualFlowActive(serverName) {
+		return true
+	}
+	if r.upstreamManager == nil {
+		return false
+	}
+	client, exists := r.upstreamManager.GetClient(serverName)
+	return exists && client != nil && !client.Retired() && client.GetState() == upstreamtypes.StatePendingAuth
 }
 
 // TriggerOAuthLoginQuick implements RuntimeOperations interface for management service.

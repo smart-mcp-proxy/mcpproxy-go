@@ -5312,6 +5312,16 @@ func (p *configServerInfoProvider) EnsureConnected(ctx context.Context, serverNa
 	return p.server.runtime.RestartServer(serverName)
 }
 
+// AwaitingOAuthLogin implements the scanner's optional oauthLoginAwareProvider
+// capability (GH #1722): the scan must not restart a server that is waiting on
+// a person's OAuth login, because the restart retires the pending flow.
+func (p *configServerInfoProvider) AwaitingOAuthLogin(serverName string) bool {
+	if p.server == nil || p.server.runtime == nil {
+		return false
+	}
+	return p.server.runtime.ServerAwaitsOAuthLogin(serverName)
+}
+
 // IsConnected checks if the server has an active MCP connection via the stateview.
 func (p *configServerInfoProvider) IsConnected(serverName string) bool {
 	if p.server == nil {
