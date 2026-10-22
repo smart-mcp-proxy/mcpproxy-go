@@ -289,6 +289,17 @@ func outputCallResultPretty(result interface{}) {
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 }
 
+func outputPrettyCallResult(result interface{}, isError bool) error {
+	if isError {
+		fmt.Fprintln(os.Stderr, "⚠️  Tool call returned an error.")
+		outputCallResultPretty(result)
+		return callResultError{}
+	}
+	fmt.Fprintf(os.Stderr, "✅ Tool call completed successfully!\n\n")
+	outputCallResultPretty(result)
+	return nil
+}
+
 // createLogger creates a zap logger with the specified level
 func createLogger(level string) (*zap.Logger, error) {
 	var zapLevel zap.AtomicLevel
@@ -468,8 +479,7 @@ func runCallToolVariantClientMode(client *cliclient.Client, toolVariant string, 
 	case outputFormatPretty, "":
 		fallthrough
 	default:
-		fmt.Fprintf(os.Stderr, "✅ Tool call completed successfully!\n\n")
-		outputCallResultPretty(result)
+		return outputPrettyCallResult(result, result.IsError)
 	}
 
 	return nil
@@ -550,8 +560,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 	case outputFormatPretty, "":
 		fallthrough
 	default:
-		fmt.Fprintf(os.Stderr, "✅ Tool call completed successfully!\n\n")
-		outputCallResultPretty(result)
+		return outputPrettyCallResult(result, result.IsError)
 	}
 
 	return nil

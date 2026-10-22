@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cli/output"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/spf13/cobra"
@@ -99,4 +101,43 @@ func TestCallToolJSONErrorRetainsRequestID(t *testing.T) {
 	require.NoError(t, json.Unmarshal(bytes, &got))
 	require.Equal(t, "req-123", got.RequestID)
 	require.Equal(t, output.ErrCodeOperationFailed, got.Code)
+}
+
+func TestCallToolDaemonPrettyErrorIsNonzeroWithoutSuccessMessage(t *testing.T) {
+	oldFormat := callOutputFormat
+	callOutputFormat = "pretty"
+	defer func() { callOutputFormat = oldFormat }()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/status" {
+			_, _ = w.Write([]byte(`{"status":"ok"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"success":true,"data":{"content":[{"type":"text","text":"fixture denied"}],"isError":true}}`))
+	}))
+	defer srv.Close()
+	stdoutReader, stdoutWriter, err := os.Pipe()
+	require.NoError(t, err)
+	stderrReader, stderrWriter, err := os.Pipe()
+	require.NoError(t, err)
+	oldStdout, oldStderr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = stdoutWriter, stderrWriter
+	defer func() { os.Stdout, os.Stderr = oldStdout, oldStderr }()
+
+	err = runCallToolVariantClientMode(cliclient.NewClient(srv.URL, nil), "call_tool_read", map[string]interface{}{"name": "fixture:fail"}, zap.NewNop())
+	require.ErrorAs(t, err, new(callResultError))
+	require.NoError(t, stdoutWriter.Close())
+	require.NoError(t, stderrWriter.Close())
+	stdout, err := io.ReadAll(stdoutReader)
+	require.NoError(t, err)
+	stderr, err := io.ReadAll(stderrReader)
+	require.NoError(t, err)
+	require.True(t, strings.Contains(string(stdout), "fixture denied"))
+	require.NotContains(t, string(stderr), "completed successfully")
+	require.Contains(t, string(stderr), "returned an error")
+}
+
+func TestStandalonePrettyResultErrorIsNonzero(t *testing.T) {
+	result := &mcp.CallToolResult{Content: []mcp.Content{mcp.NewTextContent("standalone denied")}, IsError: true}
+	err := outputPrettyCallResult(result, result.IsError)
+	require.ErrorAs(t, err, new(callResultError))
 }
