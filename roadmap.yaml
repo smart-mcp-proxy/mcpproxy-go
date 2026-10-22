@@ -354,7 +354,7 @@ epics:
         depends_on: []
       - id: tpa-db-corpus
         title: "Seed corpus: catalog known public TPA campaigns/patterns into the DB"
-        status: in_review
+        status: done
         pr: "#1702"
         depends_on: [tpa-db-format]
       - id: tpa-db-refresh
