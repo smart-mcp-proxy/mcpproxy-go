@@ -148,7 +148,7 @@ func toolPropertyNames(t *testing.T, tool mcp.Tool) []string {
 // arguments, so a new ProfileConfig field reaches MCP and a stray one fails.
 func TestProfilesTool_SchemaPropertiesEqualProfileConfigPlusOpArgs(t *testing.T) {
 	want := []string{"operation", "new_name", "reassign_to", "force", "tool", "tier", "client", "profile", "mode",
-		"from_profile", "to_profile", "token", "anonymous", "server", "reason"}
+		"from_profile", "to_profile", "token", "since", "patch", "anonymous", "server", "reason"}
 	pc := reflect.TypeOf(config.ProfileConfig{})
 	for i := 0; i < pc.NumField(); i++ {
 		name, _, _ := strings.Cut(pc.Field(i).Tag.Get("json"), ",")
@@ -163,7 +163,7 @@ func TestProfilesTool_SchemaPropertiesEqualProfileConfigPlusOpArgs(t *testing.T)
 		assert.Contains(t, tool.InputSchema.Properties, name, "REST field %s is an argument", name)
 	}
 	op := tool.InputSchema.Properties["operation"].(map[string]any)
-	assert.Equal(t, []string{"list", "get", "create", "update", "delete", "rename", "classify", "assign", "list_clients", "effective_tools", "explain"}, op["enum"])
+	assert.Equal(t, []string{"list", "get", "create", "update", "delete", "rename", "classify", "assign", "list_clients", "effective_tools", "explain", "suggest"}, op["enum"])
 	assert.Equal(t, []string{"read", "write", "destructive"}, tool.InputSchema.Properties["max_tier"].(map[string]any)["enum"])
 	assert.Equal(t, []string{"deny", "as_write", "as_read"}, tool.InputSchema.Properties["unannotated"].(map[string]any)["enum"])
 	assert.Equal(t, []string{"locked", "switchable"}, tool.InputSchema.Properties["mode"].(map[string]any)["enum"])
@@ -293,7 +293,7 @@ func TestProfilesTool_OperationAndArgumentErrors(t *testing.T) {
 		want string
 	}{
 		{"no operation", map[string]any{}, `missing required argument "operation"`},
-		{"unknown operation", map[string]any{"operation": "explode"}, `unknown operation "explode"; valid: list, get, create, update, delete, rename, classify, assign, list_clients, effective_tools, explain`},
+		{"unknown operation", map[string]any{"operation": "explode"}, `unknown operation "explode"; valid: list, get, create, update, delete, rename, classify, assign, list_clients, effective_tools, explain, suggest`},
 		{"get without name", map[string]any{"operation": "get"}, `get: missing required argument "name"`},
 		{"rename without new_name", map[string]any{"operation": "rename", "name": "legacy"}, `rename: missing required argument "new_name"`},
 		{"classify without tool", map[string]any{"operation": "classify", "name": "legacy", "tier": "read"}, `classify: missing required argument "tool"`},
@@ -407,6 +407,28 @@ func TestProfilesTool_ExplainBuiltinTool400Text(t *testing.T) {
 	assert.Equal(t, profile.ErrExplainBuiltinTool.Error(), body["error"])
 	f.assertErrorEqualsREST(apiKeyCtx(), map[string]any{"operation": "explain", "profile": "ghost", "tool": "github:list_issues"},
 		http.MethodGet, "/api/v1/access/explain?profile=ghost&tool="+url.QueryEscape("github:list_issues"), nil)
+}
+
+func TestProfilesTool_SuggestEqualsRESTAndRejectsABadWindow(t *testing.T) {
+	f := newProfilesToolFixture(t, nil)
+	status, want, _ := f.rest(http.MethodGet, "/api/v1/access/suggest?since=7d", nil)
+	require.Equal(t, http.StatusOK, status)
+	got := f.ok(map[string]any{"operation": "suggest", "since": "7d"})
+	// since/until are the clock at each call.
+	for _, m := range []map[string]any{want, got} {
+		delete(m, "since")
+		delete(m, "until")
+	}
+	wantRaw, err := json.Marshal(want)
+	require.NoError(t, err)
+	gotRaw, err := json.Marshal(got)
+	require.NoError(t, err)
+	assert.JSONEq(t, string(wantRaw), string(gotRaw))
+	assert.Equal(t, "168h0m0s", got["window"])
+
+	body := f.assertErrorEqualsREST(apiKeyCtx(), map[string]any{"operation": "suggest", "since": "soon"},
+		http.MethodGet, "/api/v1/access/suggest?since=soon", nil)
+	assert.Contains(t, body["error"], "invalid since")
 }
 
 // --- reads (H3, H4) -------------------------------------------------------------

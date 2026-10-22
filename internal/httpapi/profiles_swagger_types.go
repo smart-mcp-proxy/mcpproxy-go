@@ -30,6 +30,9 @@ type EffectiveToolsData = runtime.EffectiveToolsResult
 // AccessExplanationData is the data of GET /api/v1/access/explain.
 type AccessExplanationData = runtime.AccessExplanation
 
+// AccessSuggestionsData is the data of GET /api/v1/access/suggest.
+type AccessSuggestionsData = runtime.AccessSuggestions
+
 // ClientWarning is one Clients-surface warning (code, severity, action).
 type ClientWarning = runtime.Warning
 

@@ -124,7 +124,7 @@ var guardedOps = map[string][]guardedOpCase{
 
 // readOps never write and never consult the guard.
 var readOps = map[string]bool{
-	"list": true, "get": true, "list_clients": true, "effective_tools": true, "explain": true,
+	"list": true, "get": true, "list_clients": true, "effective_tools": true, "explain": true, "suggest": true,
 }
 
 // tokenSnapshot is the token store as (name, pin, mode) lines, for a
