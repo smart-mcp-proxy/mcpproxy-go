@@ -1,5 +1,7 @@
 # Implementation Plan: Daily Offline-First Refresh of the TPA Signature Bundle + mcpproxy Self-Update Awareness
 
+> **Superseded by specs/101-tpa-db/tasks.md US3 (Δ15–Δ31).** The package, config block and file layout below were never built.
+
 **Branch**: `087-tpa-daily-refresh` | **Date**: 2026-07-16 | **Spec**: [spec.md](./spec.md)
 **Input**: Feature specification from `/specs/087-tpa-daily-refresh/spec.md`
 

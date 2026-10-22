@@ -345,7 +345,7 @@ epics:
     priority: P1
     spec: specs/101-tpa-db
     depends_on: [scanner-simplification]
-    note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); 2026-10-20: US1 (tpa-db-format: signed four-key Ed25519 sidecar, verify-before-parse loader, per-authority anti-downgrade state, full-digest rollback, coverage degrade) shipped as #1701; US2 corpus in a sibling session; US3 refresh waits on Spec 087."
+    note: "Vision pillar 'feel protected': the deterministic detect engine (Spec 076/077) ships with built-in checks but no updatable knowledge of in-the-wild Tool Poisoning Attacks. Build a versioned, offline-first signature/pattern database (known TPA campaigns, malicious phrase corpora, IoC hashes) that the engine consumes — bundled with the binary, refreshable out-of-band, community-contributable, and guarded by the existing scan-eval recall/FP CI gate. SPEC STAGE: specs/101-tpa-db MERGED as PR #1028 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that); 2026-10-20: US1 (tpa-db-format: signed four-key Ed25519 sidecar, verify-before-parse loader, per-authority anti-downgrade state, full-digest rollback, coverage degrade) shipped as #1701; US2 corpus in a sibling session (#1702, open); 2026-10-22: US3 (tpa-db-refresh, implements Spec 087 US1+US2: daily file+optional signed fetch refresh, activation self-check, freshness surfaces, cached re-protection sweep) shipped as #1720. Epic stays in_progress until the corpus (US2) lands."
     tasks:
       - id: tpa-db-format
         title: "Signature DB format + loader (versioned, signed, bundled default)"
@@ -358,7 +358,8 @@ epics:
         depends_on: [tpa-db-format]
       - id: tpa-db-refresh
         title: "Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated"
-        status: todo
+        status: done
+        pr: "#1720"
         depends_on: [tpa-db-format]
 
   - id: remote-access-tunnel

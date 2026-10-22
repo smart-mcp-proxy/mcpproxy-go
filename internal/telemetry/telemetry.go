@@ -176,7 +176,22 @@ import (
 // anonymity backstop independently enforces the whole tuple. Installs with no
 // provider, or whose provider returns nil, send the v14 shape plus the new
 // schema_version only.
-const SchemaVersion = 15
+//
+// v16 (Spec 087 / Spec 101 US3) adds five reset-on-accept integer counters to the
+// tpa_scanner sub-object, each omitted while zero: bundle_refresh_cycles (one per
+// refresh cycle, whatever its outcome), bundle_refresh_activations,
+// bundle_refresh_rejections and bundle_refresh_unavailable (the cycles that
+// activated a bundle, had a candidate refused, or could not reach or parse the
+// channel; an unchanged cycle counts only in bundle_refresh_cycles, so the three
+// are not a partition of it) and bundle_reprotect_hits (servers whose
+// post-activation re-protection scan had at least one hard finding). They are
+// integers only: no age, generated_at, last-checked time, URL, host, reason
+// string or digest is ever transmitted, and bundle_source may now also be
+// "fetch" with the same provenance gate (an operator-signed fetch reports
+// bundle_version "other" and no sequence). Like every counter they ride the
+// telemetry opt-out. tpa_scanner is emitted when only these counters are
+// non-zero. The age-of-bundle join of SC-006 is a receiver-side computation.
+const SchemaVersion = 16
 
 // HeartbeatPayload is the anonymous telemetry payload sent periodically.
 // Spec 042 expanded the payload with Tier 2 fields; v1 fields are preserved.

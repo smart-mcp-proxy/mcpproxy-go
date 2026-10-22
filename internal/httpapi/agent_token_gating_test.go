@@ -86,6 +86,7 @@ var mutatingServerRoutes = []struct {
 	{"bundle-rollback", http.MethodPost, "/api/v1/security/bundle/rollback"},
 	{"bundle-unpin", http.MethodPost, "/api/v1/security/bundle/unpin"},
 	{"bundle-reload", http.MethodPost, "/api/v1/security/bundle/reload"},
+	{"bundle-refresh", http.MethodPost, "/api/v1/security/bundle/refresh"},
 	{"connect-client", http.MethodPost, "/api/v1/connect/claude"},
 	{"connect-undo", http.MethodPost, "/api/v1/connect/claude/undo"},
 	{"connect-disconnect", http.MethodDelete, "/api/v1/connect/claude"},

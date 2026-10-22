@@ -389,9 +389,12 @@ func TestRuntime_IdenticalRunsAreIdempotent(t *testing.T) {
 	f := newRTFixture(t, rtOpts{})
 	f.put(signedCandidate(t, keyPublisher, bundleOpts{Seq: 5}))
 
-	first := f.run()
-	second := f.run()
-	third := f.run()
+	// The PUBLISHED pair must not churn. (BundleStatus also carries read-time
+	// fields such as last_checked_at, which advance on every run by design.)
+	published := func() BundleInfo { f.run(); _, info := snapshotBundle(); return info }
+	first := published()
+	second := published()
+	third := published()
 
 	assert.Equal(t, first, second)
 	assert.Equal(t, first, third)

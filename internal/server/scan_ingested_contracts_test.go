@@ -63,3 +63,41 @@ func TestRT06_LiveScanExport_CarriesOutputSchema(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "object", out["type"])
 }
+
+// TestReprotectContracts_DescribeEveryCurrentDefinition (US3 judge finding 1):
+// the post-activation cached scan is stored as the server's newest Pass-1 job,
+// so it must describe the same tool set as a live scan - approved AND held
+// (pending / changed) tools at their current definition - or it would replace
+// a "dangerous" live verdict that rests on a held tool with a clean one.
+func TestReprotectContracts_DescribeEveryCurrentDefinition(t *testing.T) {
+	s := newAdmissionTestServer(t, newFakeSecurityScanner(), scanModeServer("srv", false))
+	sm := s.runtime.StorageManager()
+	require.NotNil(t, sm)
+	for tool, status := range map[string]string{
+		"approved_tool": storage.ToolApprovalStatusApproved,
+		"changed_tool":  storage.ToolApprovalStatusChanged,
+		"pending_tool":  storage.ToolApprovalStatusPending,
+	} {
+		require.NoError(t, sm.SaveToolApproval(&storage.ToolApprovalRecord{
+			ServerName: "srv", ToolName: tool, Status: status,
+			ApprovedHash: "a", CurrentHash: "b",
+			CurrentDescription: "Current " + tool + ".", CurrentSchema: `{"type":"object"}`,
+			PreviousDescription: "Previous " + tool + ".",
+		}))
+	}
+
+	p := &configServerInfoProvider{cfg: s.runtime.Config(), liveConfig: s.runtime.Config, server: s}
+	contracts, err := p.GetCurrentToolContracts("srv")
+	require.NoError(t, err)
+	got := map[string]string{}
+	for _, c := range contracts {
+		name, _ := c["name"].(string)
+		desc, _ := c["description"].(string)
+		got[name] = desc
+	}
+	assert.Equal(t, map[string]string{
+		"approved_tool": "Current approved_tool.",
+		"changed_tool":  "Current changed_tool.",
+		"pending_tool":  "Current pending_tool.",
+	}, got, "the cached scan must cover held tools at their CURRENT definition, never the previous one")
+}

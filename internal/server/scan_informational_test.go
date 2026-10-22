@@ -28,7 +28,12 @@ func newInformationalTestServer(t *testing.T, fake securityScannerService, sec *
 	cfg.Security = sec
 	rt, err := runtime.New(cfg, "", zap.NewNop())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = rt.Close() })
+	t.Cleanup(func() {
+		// A test that drives Server.Shutdown has already closed the runtime,
+		// and a second Close is not idempotent (cache manager): tolerate it.
+		defer func() { _ = recover() }()
+		_ = rt.Close()
+	})
 	for _, sc := range servers {
 		if sc != nil {
 			require.NoError(t, rt.StorageManager().SaveUpstreamServer(sc))
