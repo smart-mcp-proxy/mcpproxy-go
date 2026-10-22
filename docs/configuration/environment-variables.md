@@ -31,8 +31,8 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 | `MCPPROXY_LISTEN` | Override listen address | `127.0.0.1:8080` or `:8080` |
 | `MCPPROXY_API_KEY` | Set API key for authentication | `my-secret-key` |
 | `MCPPROXY_API_KEY_FILE` | Read the API key from a file (absolute path). Set it or `MCPPROXY_API_KEY`, not both; see [API key from a file](#api-key-from-a-file) | `/run/secrets/mcpproxy_api_key` |
-| `MCPPROXY_DATA_DIR` | Override data directory | `/var/lib/mcpproxy` |
-| `MCPPROXY_DATA` | Override data directory (backward compatibility, prefer `MCPPROXY_DATA_DIR`) | `/var/lib/mcpproxy` |
+| `MCPPROXY_DATA_DIR` | Override data directory. Like `--data-dir` (which wins when both are set), it also makes `serve` read `<data-dir>/mcp_config.json` | `/var/lib/mcpproxy` |
+| `MCPPROXY_DATA` | Override data directory only (backward compatibility; `MCPPROXY_DATA_DIR` wins when both are set, and the config file is still looked up in the working directory and `~/.mcpproxy`) | `/var/lib/mcpproxy` |
 
 ### API key from a file
 

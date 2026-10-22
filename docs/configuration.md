@@ -1867,7 +1867,8 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_TLS_ENABLED` | `tls.enabled` | Enable HTTPS/TLS |
 | `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | `tls.require_client_cert` | Enable mTLS |
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |
-| `MCPPROXY_DATA` | `data_dir` | Override data directory |
+| `MCPPROXY_DATA_DIR` | `data_dir` | Override data directory; also where `serve` looks for `mcp_config.json` (same as `--data-dir`) |
+| `MCPPROXY_DATA` | `data_dir` | Override data directory only (legacy name; `MCPPROXY_DATA_DIR` wins) |
 | `MCPPROXY_TOOL_RESPONSE_MODE` | `tool_response_mode` | `retrieve_tools` serialization: `full` (default) or `compact` |
 | `MCPPROXY_DIRECT_TOOL_RESPONSE_MODE` | `direct_tool_response_mode` | Direct enumeration surface serialization: `full` (default) or `deferred` |
 | `MCPPROXY_MAX_CONCURRENT_REQUESTS` | `max_concurrent_requests` | Global aggregate cap on concurrent upstream tool calls (`0` disables it). See [Concurrency Limits](#concurrency-limits--request-queueing) |
