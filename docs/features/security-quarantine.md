@@ -624,6 +624,17 @@ so every server ends up with a security verdict instead of an empty badge:
     quarantined `trust_mode: "scan"` servers (the admission gate owns those) are
     skipped. Failed starts share the per-server retry cap of the admission scan.
 
+A scan never reconnects a server that is waiting on a person's OAuth login (a
+login flow in flight, or a server parked in **Pending Auth**): reconnecting
+replaces the server's instance, which retires the pending flow and turns the
+browser approval into a failed code exchange (GH #1722). Such a server is
+scanned with what can be exported without a restart (the tool contracts
+discovery already recorded, if any) and the reason is logged. The temporary
+review connection a newly quarantined server gets is likewise held open while
+a login for it is in flight, so its expiry cannot disconnect the server
+underneath the sign-in. Neither rule approves, unquarantines or blocks
+anything.
+
 These scans are **informational**: the verdict fills in the scan summary and the
 UI badge and never quarantines, approves, or blocks anything. **A clean verdict
 never approves a changed or new tool**: a changed contract is held for review in

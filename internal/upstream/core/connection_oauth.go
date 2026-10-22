@@ -2363,6 +2363,18 @@ func (c *Client) waitForOAuthCallbackAsync(ctx context.Context, oauthHandler *up
 		tokenManager := oauth.GetTokenStoreManager()
 		tokenManager.MarkOAuthCompletedBound(c.config.Name, c.CredentialBinding())
 
+	case <-c.Gate().Context().Done():
+		// GH #1722: the instance this login runs behind was retired (the
+		// server was restarted, replaced, removed or quarantined) while the
+		// person was still signing in. The code the browser delivers later
+		// could not be exchanged through the retired gate, so stop waiting
+		// and tell the callback page why.
+		const reason = "the server's connection was retired (restarted, replaced, removed or quarantined) while the sign-in was in progress"
+		c.logger.Warn("⚠️ OAuth login invalidated: upstream instance retired while waiting for the callback",
+			zap.String("server", c.config.Name),
+			zap.String("correlation_id", correlationID))
+		callbackServer.InvalidateState(state, reason)
+
 	case <-ctx.Done():
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			c.logger.Warn("⏱️ OAuth authorization timeout",
