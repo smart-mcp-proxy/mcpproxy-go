@@ -1936,6 +1936,7 @@ const (
 	APIKeySourceEnvironment APIKeySource = iota
 	APIKeySourceConfig
 	APIKeySourceGenerated
+	APIKeySourceEnvironmentFile
 )
 
 // String returns a human-readable representation of the API key source
@@ -1947,6 +1948,8 @@ func (s APIKeySource) String() string {
 		return "configuration file"
 	case APIKeySourceGenerated:
 		return "auto-generated"
+	case APIKeySourceEnvironmentFile:
+		return "file named by " + EnvAPIKeyFile
 	default:
 		return "unknown"
 	}
@@ -2304,29 +2307,43 @@ func (sc *ServerConfig) IsToolAllowedByConfig(toolName string) bool {
 // EnsureAPIKey ensures the API key is set, generating one if needed
 // Returns the API key, whether it was auto-generated, and the source
 // SECURITY: Empty API keys are never allowed - always auto-generates if empty or missing
-func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKeySource) {
-	// Check environment variable for API key first - this overrides config file
-	// Use LookupEnv to distinguish between "not set" and "set to empty string"
-	if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists && envAPIKey != "" {
+//
+// The error is non-nil only when MCPPROXY_API_KEY and MCPPROXY_API_KEY_FILE are
+// both set (ErrAPIKeyBothSet), or MCPPROXY_API_KEY_FILE names a file that cannot
+// be used. The caller must stop in that case: no key is generated and nothing
+// is saved, so a typo in a secret path can never replace the key the operator
+// meant to run with.
+func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKeySource, err error) {
+	// The environment (MCPPROXY_API_KEY_FILE or MCPPROXY_API_KEY, never both)
+	// overrides the config file. Use the result's Set/Key to distinguish
+	// "not set" from "set to empty string".
+	envKey, err := ResolveEnvAPIKey()
+	if err != nil {
+		return "", false, APIKeySourceEnvironment, err
+	}
+	if envKey.Set && envKey.Key != "" {
 		// A process-only override of whatever the file holds: no save path
 		// may replace the file's key with it (see process_overrides.go).
 		// Already equal means Validate recorded it (or the file literally
 		// holds the env key); re-recording would lose the file value.
-		if c.APIKey != envAPIKey {
-			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envAPIKey)
+		if c.APIKey != envKey.Key {
+			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envKey.Key)
 		}
-		return c.APIKey, false, APIKeySourceEnvironment
+		if envKey.FromFile {
+			return c.APIKey, false, APIKeySourceEnvironmentFile, nil
+		}
+		return c.APIKey, false, APIKeySourceEnvironment, nil
 	}
 
 	// If API key was explicitly set in config and is non-empty, use it
 	if c.apiKeyExplicitlySet && c.APIKey != "" {
-		return c.APIKey, false, APIKeySourceConfig
+		return c.APIKey, false, APIKeySourceConfig, nil
 	}
 
 	// Generate a new API key if missing or empty (never allow empty for security)
 	c.APIKey = generateAPIKey()
 	c.apiKeyExplicitlySet = true
-	return c.APIKey, true, APIKeySourceGenerated
+	return c.APIKey, true, APIKeySourceGenerated, nil
 }
 
 // ValidationError represents a configuration validation error
@@ -3127,16 +3144,28 @@ func (c *Config) Validate() error {
 	}
 	c.profileWarnings = profileWarnings
 
+	// Both key variables set is an error whether or not the config file
+	// carries an api_key: one rule, checked on every load.
+	if err := checkEnvAPIKeyConflict(); err != nil {
+		return err
+	}
+
 	// Handle API key generation if not configured
 	// Empty string means authentication disabled, nil means auto-generate
 	if c.APIKey == "" {
-		// Check environment variable for API key
-		// Use LookupEnv to distinguish between "not set" and "set to empty string"
-		if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists {
+		// Check the environment for an API key (MCPPROXY_API_KEY_FILE or
+		// MCPPROXY_API_KEY; both set is an error). A file that is named but
+		// unusable fails the load:
+		// continuing would auto-generate a key and save it.
+		envKey, err := ResolveEnvAPIKey()
+		if err != nil {
+			return err
+		}
+		if envKey.Set {
 			// Allow empty string to explicitly disable authentication. A
 			// process-only override: no save path may write it into api_key
 			// (see process_overrides.go).
-			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envAPIKey)
+			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envKey.Key)
 		}
 	}
 
