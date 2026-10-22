@@ -32,6 +32,12 @@ func parseActivityKey(key []byte) string {
 
 // truncateResponse truncates a response string if it exceeds maxSize.
 // Returns the (potentially truncated) string and whether truncation occurred.
+//
+// The cut goes through truncateRuneSafe, the same in-package helper the
+// per-server tool-call records use: an upstream response is arbitrary UTF-8,
+// and a raw byte cut at maxSize can land inside a multi-byte rune. The record
+// is then persisted and served over /api/v1/activities with invalid UTF-8,
+// which JSON encoding rewrites to U+FFFD.
 func truncateResponse(response string, maxSize int) (string, bool) {
 	if maxSize <= 0 {
 		maxSize = DefaultMaxResponseSize
@@ -39,7 +45,7 @@ func truncateResponse(response string, maxSize int) (string, bool) {
 	if len(response) <= maxSize {
 		return response, false
 	}
-	return response[:maxSize] + "...[truncated]", true
+	return truncateRuneSafe(response, maxSize) + truncationMarker, true
 }
 
 // SaveActivity stores an activity record in BBolt.

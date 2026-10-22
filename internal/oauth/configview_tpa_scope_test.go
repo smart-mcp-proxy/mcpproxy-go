@@ -80,3 +80,28 @@ func TestRedactedConfig_OnlyPublicKeyShapedSignersAreReadable(t *testing.T) {
 	assert.NotEqual(t, tpaScopeSecret, masked.Security.TPAOperatorSigners[1])
 	assert.Equal(t, []string{signer, tpaScopeSecret}, cfg.Security.TPAOperatorSigners, "the source config is untouched")
 }
+
+// The refresh keys need no read-door exemption (their names carry none of the
+// masked substrings), so the generic walkers - which also redact audit payloads
+// and request bodies - treat a field of that name exactly like any other: a
+// credential-shaped value under it is masked, never waved through by name.
+func TestRedactionValue_TPARefreshKeyNamesAreNotExemptInGenericPayloads(t *testing.T) {
+	const credential = "mcp_agt_1234567890abcdef1234567890abcdef"
+	payload := func() map[string]interface{} {
+		return map[string]interface{}{
+			"security": map[string]interface{}{"tpa_fetch_url": credential},
+			"request": map[string]interface{}{
+				"security": map[string]interface{}{"tpa_fetch_url": credential},
+			},
+		}
+	}
+	for name, r := range map[string]Redaction{"live": LiveRedaction, "audit": AuditRedaction} {
+		t.Run(name, func(t *testing.T) {
+			got := r.Value("", payload()).(map[string]interface{})
+			top := got["security"].(map[string]interface{})["tpa_fetch_url"]
+			nested := got["request"].(map[string]interface{})["security"].(map[string]interface{})["tpa_fetch_url"]
+			assert.NotEqual(t, credential, top, "a credential under that name is masked at the top level")
+			assert.NotEqual(t, credential, nested, "and when nested")
+		})
+	}
+}

@@ -2,15 +2,15 @@
 id: tpa-bundle-signing
 title: Signed TPA Bundles (Spec 101)
 sidebar_label: Signed TPA Bundles
-description: Sign, drop, verify, roll back and monitor an offline TPA signature corpus, with downgrade protection that works without a network.
-keywords: [security, tpa, signature bundle, ed25519, anti-downgrade, rollback, air-gapped, tpa-db, scanner]
+description: Sign, drop, verify, roll back and monitor an offline TPA signature corpus, with downgrade protection that works without a network, a daily refresh, and an opt-in signed fetch.
+keywords: [security, tpa, signature bundle, ed25519, anti-downgrade, rollback, air-gapped, tpa-db, scanner, refresh, fetch, re-protection]
 ---
 
 # Signed TPA Bundles (Spec 101)
 
 The `scan` trust mode matches tool descriptions against an offline corpus of Tool Poisoning Attack (TPA) signatures, the tpa-db `scanner-bundle.json`. MCPProxy ships one inside the binary. This page is for operators who want to run a different corpus from disk and want the proxy to prove that the corpus is the one they signed, and that nobody has swapped in an older one.
 
-Everything on this page works with no network. Dropping a file is the primary path, not a fallback. Fetching bundles over the network is a later feature (see [What is not in this release](#what-is-not-in-this-release)).
+Everything on this page works with no network. Dropping a file is the primary path, not a fallback. A daily refresh re-reads that file for you, and an **opt-in, default-off** fetch can also download a signed bundle from a channel you name (see [Daily refresh and optional fetch](#daily-refresh-and-optional-fetch)). Nothing is fetched unless you turn it on and give it a URL, and there is no default URL.
 
 For the short version of how the corpus fits into quarantine, see [Signature bundle (offline TPA corpus)](/features/security-quarantine#signature-bundle-offline-tpa-corpus). For the detection engine the corpus feeds, see [Tool Scanner](/features/tool-scanner#signature-corpus-and-coverage).
 
@@ -20,8 +20,9 @@ For the short version of how the corpus fits into quarantine, see [Signature bun
 2. Put the public key in `security.tpa_operator_signers`, declare `tpa_active_root: "operator"`, and set a baseline and an epoch.
 3. Author a bundle whose manifest carries `sequence`, `trust_epoch`, `key_id` and `generated_at`, then sign it with `tpa-db sign`.
 4. Drop `scanner-bundle.json` and `scanner-bundle.json.sig` side by side at `tpa_bundle_path`.
-5. Activate it (config reload, restart, or `mcpproxy security bundle reload`) and read the status.
-6. If a release turns out to be bad, roll back by full digest. If a key leaks, bump `tpa_operator_epoch`.
+5. Activate it (config reload, restart, `mcpproxy security bundle reload`, or just wait for the next daily refresh cycle) and read the status.
+6. Optionally let MCPProxy fetch later releases itself (`tpa_fetch_enabled`, `tpa_fetch_url`).
+7. If a release turns out to be bad, roll back by full digest. If a key leaks, bump `tpa_operator_epoch`.
 
 ## What is signed, and why
 
@@ -41,7 +42,7 @@ You never write it by hand; `tpa-db sign` produces it. The full grammar is in `s
 
 ## Configuration keys
 
-These live under `security` in `mcp_config.json`. They have no environment-variable aliases on purpose: the trust root is config-resident, so someone who can change the environment or the bundle file cannot also choose who is trusted. `GET /api/v1/config` shows them unmasked because they hold public keys and counters, not secrets.
+These live under `security` in `mcp_config.json`. The trust keys have no environment-variable aliases on purpose: the trust root is config-resident, so someone who can change the environment or the bundle file cannot also choose who is trusted. The only environment switch among the keys is `MCPPROXY_TPA_FETCH_ENABLED` (plus the existing `MCPPROXY_TPA_BUNDLE_PATH`); it can turn the fetch on or off, but it cannot choose the URL or the keys, and it is never written back to the config file. `GET /api/v1/config` shows them unmasked because they hold public keys and counters, not secrets.
 
 | Key | Default | Meaning |
 |---|---|---|
@@ -51,6 +52,10 @@ These live under `security` in `mcp_config.json`. They have no environment-varia
 | `tpa_operator_signers` | `[]` | Operator public keys, each the standard base64 of the 32 raw key bytes. |
 | `tpa_operator_baseline` | absent | The anti-downgrade floor for operator bundles. A bundle must have a sequence strictly above it. Absent means no floor and degraded coverage. An explicit `0` is different from absent. |
 | `tpa_operator_epoch` | absent (`0`) | The operator trust epoch. Bundles must carry exactly this `trust_epoch`. |
+| `tpa_refresh_interval` | absent (`24h`) | How often the refresh cycle runs. At least `1h`. See [Daily refresh and optional fetch](#daily-refresh-and-optional-fetch). |
+| `tpa_fetch_enabled` | `false` | Opt in to downloading a signed bundle from `tpa_fetch_url`. Env override `MCPPROXY_TPA_FETCH_ENABLED`. |
+| `tpa_fetch_url` | `""` | The channel to fetch from. Empty means no request is ever made. There is no compiled-in default. |
+| `tpa_stale_after_days` | absent (`30`) | Age in days after which the active bundle is flagged stale. `0` disables the flag. |
 
 The field-by-field reference is in the Security section of `docs/configuration.md` in the repository. Invalid values are rejected when you write the config (`PATCH /api/v1/config`, `POST /api/v1/config/apply`). A malformed or duplicate signer found in a file that was edited by hand is dropped with a log line instead of stopping the daemon, so a bad key can never brick startup and never widens what is trusted.
 
@@ -115,11 +120,132 @@ Put `scanner-bundle.json` and `scanner-bundle.json.sig` at `tpa_bundle_path`. Wr
 
 - the configuration is reloaded (any hot-reload of `mcp_config.json`),
 - the daemon restarts,
-- you run `mcpproxy security bundle reload`, or call `POST /api/v1/security/bundle/reload`.
+- the next [refresh cycle](#daily-refresh-and-optional-fetch) runs (within `tpa_refresh_interval`, 24 hours by default), with no restart,
+- you run `mcpproxy security bundle reload`, or call `POST /api/v1/security/bundle/reload`,
+- you run `mcpproxy security bundle refresh` (the same file re-read, plus the fetch when it is on).
 
-The reload command runs the same single-flight pipeline the other two use, and returns the updated status. Reloading a file that is already active is a no-op: no log line, no history row.
+All of them run the same single-flight pipeline and return the updated status. Reloading a file that is already active is a no-op: no log line, no history row.
 
 Every candidate goes through the same checks in the same order, and the first failure wins. Whatever fails, the previously active corpus keeps serving. A rejection never leaves the scanner with an empty or partial rule set.
+
+## Daily refresh and optional fetch
+
+Spec 087 adds a refresh cycle on top of the file drop. It has two legs, run in this order every cycle:
+
+1. **File leg.** Re-reads `tpa_bundle_path` and runs it through the pipeline. Network-free, always on, idempotent: an unchanged file costs nothing and writes no history. There is no key that turns the cycle off. This is what makes an air-gapped drop activate by itself within a day.
+2. **Fetch leg.** Only when [all of its prerequisites hold](#when-the-fetch-may-make-a-request), downloads a signed pair from the channel and offers it to the same pipeline.
+
+The first cycle runs 30 seconds to 5 minutes after startup. Later cycles run every `tpa_refresh_interval` (default `24h`, minimum `1h`) with about 10% jitter, so a fleet restarted together does not hit the channel in lockstep. The timer is re-armed after each cycle, so a suspended laptop produces one cycle when it wakes, not a burst. A manual `refresh` and a timer tick that arrive together join the cycle already running, so there is one download. A `reload` or a config reload runs through the same serialized pipeline and is idempotent, so a given bundle is activated once however many triggers see it.
+
+### The fetch is opt-in, has no default URL, and needs an operator root today
+
+- **Default off.** `tpa_fetch_enabled` is `false`. Until you set it (or `MCPPROXY_TPA_FETCH_ENABLED=true`), the fetch leg makes zero requests.
+- **No default URL.** `tpa_fetch_url` is empty and no URL is compiled into the binary. An empty URL means no request, reported as `disabled` with reason `no_url`. The URL shapes below are examples of what you would configure, not something MCPProxy contacts on its own.
+- **Works today only with operator-signed bundles.** The publisher key set embedded in the binary is still empty, so a publisher-signed bundle is refused as `key_not_trusted`. A fetched bundle is verified against the same trust set as a dropped one, so the fetch is only useful with `tpa_active_root: "operator"` and your own key in `tpa_operator_signers`. With the publisher root and the empty publisher set, the fetch leg stays silent (reason `no_trusted_signer`) and `mcpproxy doctor` says so.
+- **`MCPPROXY_DISABLE_AUTO_UPDATE` does not apply.** It governs the MCPProxy release check. The bundle fetch has its own switch.
+
+```json
+{
+  "security": {
+    "tpa_active_root": "operator",
+    "tpa_operator_signers": ["<public_key>"],
+    "tpa_operator_baseline": 1,
+    "tpa_fetch_enabled": true,
+    "tpa_fetch_url": "https://api.github.com/repos/<owner>/<repo>/releases/latest",
+    "tpa_refresh_interval": "24h"
+  }
+}
+```
+
+Writing the config (`PATCH /api/v1/config`, `POST /api/v1/config/apply`) validates the shape: the URL must be `https` (plain `http` only for `localhost` or a loopback address), must have no credentials, query string or fragment, and must not be empty while the fetch is on; fetch with `tpa_active_root: "operator"` and no signers is refused; the interval must be at least `1h`. The error messages never repeat the URL. A malformed value already on disk is logged and treated as "fetch off" instead of stopping the daemon.
+
+### When the fetch may make a request
+
+The fetch leg sends a request only when all of these hold. Otherwise it reports `disabled` and a reason, and nothing leaves the machine:
+
+| Reason | Meaning |
+|---|---|
+| `fetch_off` | `tpa_fetch_enabled` is false. |
+| `no_url` | `tpa_fetch_url` is empty. |
+| `invalid_url` | The URL does not pass the shape rules above. |
+| `no_trusted_signer` | The active root has no keys to verify against (the publisher set is empty, or the operator root has no `tpa_operator_signers`). |
+| `state_unavailable` | The anti-downgrade state store could not be loaded, so nothing could be activated safely. |
+
+### Channel shapes
+
+The shape is chosen from the **path** of `tpa_fetch_url` alone.
+
+- **Releases API, "latest".** A path of the form `/repos/<owner>/<repo>/releases/latest` (for example the GitHub API URL above). MCPProxy reads the release JSON (capped at 1 MiB) and needs exactly one asset named `scanner-bundle-<sequence>.json` with a sibling `scanner-bundle-<sequence>.json.sig`. Zero or several such assets, or a missing `.sig`, is `channel_invalid`. Both assets are downloaded through their `browser_download_url`. The sequence in the file name is an unsigned hint, used only to skip a download whose sequence is already at or below the watermark; it is never trusted for activation.
+- **Direct.** Any other path. The URL is the bundle and `<url>.sig` is its sidecar. A `404` on the sidecar is treated as "unsigned", which a fetch always refuses as `signature_required`, even when `require_signed_bundle` is off. Any other sidecar failure is `fetch_unavailable` with reason `http_status`.
+
+Both shapes send `If-None-Match` with the `ETag` of the previous answer (kept in memory, so it resets at restart), so an unchanged channel answers `304` (`not_modified`) with no download. The bundle and sidecar are held to the same size ceilings as a dropped pair (8 MiB, 4096 bytes). The file names match the file-drop convention (`<name>` plus `<name>.sig`), so a pair downloaded by hand from the same channel can be dropped at `tpa_bundle_path` as it is.
+
+### Transport rules
+
+- https is required, except for `localhost` and loopback literals (a local mirror or a test).
+- A request has a 20 second total budget and a 10 second response-header timeout.
+- Redirects: at most 5 hops, never from https to http. A redirect may cross hosts, because GitHub release assets are served from another host and integrity comes from the signature, not from the host.
+- At connect time, link-local, cloud-metadata (169.254.0.0/16 and fe80::/10), unspecified and multicast addresses are always refused. Loopback and private ranges are refused unless the host you configured is itself in that range (a mirror on your LAN), so a public URL cannot redirect the fetch inward. With `HTTP_PROXY` or `HTTPS_PROXY` set, the same check is applied to the target host before the request.
+- **Logs and status carry the host only.** The URL, its path and any redirect targets never appear in logs, in `GET /api/v1/security/bundle`, in `last_rejection` or in error text. `refresh.fetch_host` is the only place a name shows up.
+
+### What a fetched bundle has to pass
+
+Exactly what a dropped bundle passes, in the same order: Ed25519 signature over the raw bytes, key id, epoch and sequence agreement, the per-authority watermark and the equal-sequence-different-digest check, the deny-list, then the [activation self-check](/features/tool-scanner#activation-self-check). A substituted or replayed asset therefore fails as `tamper` or `downgrade`. A withheld asset (an attacker who just blocks new releases) cannot be detected from a single response, so it surfaces as staleness: see the `stale` field and the doctor warning below.
+
+A fetched bundle is stored like any activated external bundle: its last-known-good copy is kept in the data directory and restored at the next start, and `source` reads `fetch`. It keeps serving across config reloads and restarts. **Turning the fetch off does not drop it.** Falling back silently to the embedded corpus would be a downgrade you did not ask for; use `mcpproxy security bundle rollback --embedded --digest <embedded digest>` to go back deliberately.
+
+### Outcomes versus rejections
+
+Two different things can go wrong, and the status keeps them apart.
+
+- A **rejection** means a candidate was refused by the pipeline (`tamper`, `downgrade`, `gate_failure`, `signature_required`, and the other reasons in the [table above](#rejection-reasons)). It is recorded in `last_rejection`, and the previous bundle keeps serving.
+- A **non-verification outcome** means nothing was verified at all: the network failed, the server rate-limited you, or the listing was malformed. It is reported in `refresh`, never in `last_rejection`, and it never touches the watermark.
+
+`refresh.last_outcome` uses a closed vocabulary:
+
+| `last_outcome` | Meaning |
+|---|---|
+| `activated` | A new bundle became active this cycle. |
+| `unchanged` | Nothing newer than what is serving (or a refused pair that was already refused once). |
+| `not_modified` | The channel answered `304`. |
+| `rejected` | A candidate was refused; see `last_rejection`. |
+| `fetch_unavailable` | Network error, timeout, a non-2xx status or a rate limit. `last_reason` is `network_error`, `timeout`, `http_status` or `rate_limited`. A rate limit pushes the next attempt to the reset time (at most 24 hours). |
+| `channel_invalid` | The Releases listing did not have exactly one usable asset pair. |
+| `superseded` | The fetch settings changed while a download was in flight, so the result was discarded. |
+| `disabled` | The fetch leg did not run; `last_reason` is one of the table above. |
+
+`refresh.last_trigger` is `startup`, `config` (a config reload), `timer` or `manual`. `consecutive_failures` counts `fetch_unavailable` and `channel_invalid` cycles in a row and resets on any other outcome. Persisting failures are logged once per change and then at most once a day.
+
+### `refresh` versus `reload`
+
+| Command | Reads the local file | Makes a network request |
+|---|---|---|
+| `mcpproxy security bundle reload` | yes | **never** |
+| `mcpproxy security bundle refresh` | yes | at most one cycle, only if the fetch is on and allowed |
+
+`reload` is the offline tool and stays offline even when the fetch is on. `refresh` runs one cycle now, joins a cycle already in flight, and returns the status with the outcome in `refresh`.
+
+### Freshness, stale flag and doctor
+
+The status adds these fields (all omitted when unknown):
+
+| Field | Meaning |
+|---|---|
+| `last_checked_at` | The end of the most recent pipeline run, including runs that found nothing to do. |
+| `last_activated_at` | When the serving external bundle was activated. Absent for the embedded corpus. |
+| `stale`, `stale_after_days` | `true` when the bundle's `generated_at` is older than `tpa_stale_after_days` (default 30). Computed when you read the status, so editing the threshold takes effect immediately. A `generated_at` in the future is never stale. |
+| `refresh` | `fetch_enabled`, `fetch_host`, `interval_seconds`, `last_trigger`, `last_outcome`, `last_reason`, `fetch_state`, `fetch_reason`, `last_attempt_at`, `consecutive_failures`, `next_check_at`. `fetch_state` and `fetch_reason` are the fetch leg's own last answer, kept apart from `last_outcome`: a dropped file that activates owns the cycle outcome, but a fetch that cannot run (for example `no_trusted_signer`) stays visible. When the file activates, the fetch leg waits for the next cycle. |
+| `reprotect` | The state of the [re-protection sweep](/features/security-quarantine#re-protection-after-a-bundle-activates). |
+
+`mcpproxy doctor` adds at most three short warnings, none of which contains a digest, path, URL or host: the bundle is stale (only when you configured a way to refresh it), a newer candidate was refused or the refresh has failed three or more times in a row (so you are stuck on last-known-good), and the fetch is enabled but cannot run (`no_url`, `invalid_url` or `no_trusted_signer`). A stale embedded corpus on an install that never configured a refresh shows in the status only; updating MCPProxy is what refreshes it.
+
+### Rolling back when you only fetch
+
+A rollback by path needs the target file in the directory of `tpa_bundle_path`. On an install that fetches and has no `tpa_bundle_path`, only `rollback --embedded` is available. To keep the option of returning to an earlier fetched release, set `tpa_bundle_path` to a directory you control and keep the downloaded pairs of the releases you may want next to it. Rolling back deny-lists the release you rolled away from, so the channel offering it again is refused quietly (`deny_listed`) and does not reactivate it; a strictly newer signed release activates normally and clears the pin.
+
+### Air-gapped use of a downloaded pair
+
+You do not need the fetch to use the channel. Download `scanner-bundle-<n>.json` and `scanner-bundle-<n>.json.sig` on a connected machine, carry them across, and drop them as `tpa_bundle_path` and `<tpa_bundle_path>.sig` (any one name pair works, since the names are yours to choose). The file leg picks them up on the next cycle or on `reload`, and they go through the same verification.
 
 ## Reading the status
 
@@ -132,8 +258,8 @@ The same object is returned by `GET /api/v1/security/bundle`.
 
 | Field | Meaning |
 |---|---|
-| `source` | `embedded` or `file`. |
-| `path` | The configured path, when `source` is `file`. |
+| `source` | `embedded`, `file` or `fetch`. |
+| `path` | The configured path, when `source` is `file`. For `fetch` it is the origin (`https://host`) only, never the full URL. |
 | `bundle_version`, `schema_version` | The corpus's own declared versions. |
 | `runnable_rules`, `skipped_rules`, `declared_skipped` | How many rules are live, and how many are not. Skipped rules are un-evaluated coverage, never clean coverage. |
 | `generated_at`, `staleness_days` | The corpus freshness stamp and its age in whole days. |
@@ -163,7 +289,7 @@ The human table always prints the full digest in full, because you will paste it
 | `sidecar_invalid` | The sidecar breaks its grammar. `detail` carries the exact code (`sidecar_malformed`, `sidecar_missing_field`, `sidecar_unknown_field`, `sidecar_duplicate_field`, `sidecar_type`, `sidecar_version_unsupported`, `sidecar_algorithm_unsupported`, `sidecar_key_id_malformed`, `sidecar_signature_malformed`). A present but invalid sidecar is never treated as "no sidecar". |
 | `invalid_bundle` | The bundle did not parse, has a bad `sequence` or `trust_epoch`, an unsupported version, a pattern that does not compile, or no runnable rule. |
 | `deny_listed` | You rolled away from this exact release. It stays refused until you remove or replace the file. |
-| `gate_failure` | The activation self-check refused the candidate. The self-check hook is a no-op in this release. |
+| `gate_failure` | The [activation self-check](/features/tool-scanner#activation-self-check) refused the candidate: it would have missed too many known attacks or flagged too many benign tools. `detail` carries counts and corpus ids, never the candidate's patterns. |
 | `ceiling_exceeded` | Over a limit: bundle larger than 8 MiB, more than 2000 entries in `rules`, or sidecar larger than 4096 bytes. `detail` gives the limit and the observed value. A file exactly at a limit loads. |
 | `not_regular_file` | The path (or its sidecar) is a FIFO, device, socket, directory or a symlink. Point `tpa_bundle_path` at the real file. |
 | `read_timeout` | The read did not finish in 5 seconds. See [Platform notes](#platform-notes). |
@@ -327,18 +453,21 @@ The bundle and sidecar are opened without following symlinks, and the checks are
 | `mcpproxy security bundle rollback (--embedded \| --path P) --digest D` | `POST /api/v1/security/bundle/rollback` | admin API key |
 | `mcpproxy security bundle unpin` | `POST /api/v1/security/bundle/unpin` | admin API key |
 | `mcpproxy security bundle reload` | `POST /api/v1/security/bundle/reload` | admin API key |
+| `mcpproxy security bundle refresh` | `POST /api/v1/security/bundle/refresh` | admin API key |
 
 All commands accept `-o json` and `-o yaml`. The mutating endpoints refuse agent tokens. Scoped tokens cannot read the status either.
 
 ## What is not in this release
 
-- **No publisher key has been issued.** The publisher signer set embedded in the binary is empty, so a bundle signed by the publisher is refused as `key_not_trusted`. The operator authority is the only signed path today. A later release will add the key, and with it the publisher baseline.
-- **No network fetch.** Bundles are dropped by hand. Fetching, the daily refresh and a re-scan after activation belong to Spec 087.
-- **No seed corpus yet.** The corpus that ships in the binary does not carry `sequence`, `trust_epoch` or `key_id`, which is why the walkthrough stamps them with `jq`. The structured `signatures[]` section, the contributor workflow and the detection-quality gate before signing are part of the next story of this spec.
-- **The activation self-check is a stub.** The hook exists and maps a failure to `gate_failure`, but nothing refuses a candidate through it yet.
+- **No publisher key has been issued.** The publisher signer set embedded in the binary is empty, so a bundle signed by the publisher is refused as `key_not_trusted`. The operator authority is the only signed path today, which is also why the fetch works only with operator-signed bundles. A later release will add the key, and with it the publisher baseline.
+- **No default fetch URL.** The first official channel is not published yet, so nothing is compiled in. You choose where to fetch from.
+- **No signed release index.** The fetch trusts only what the signature, watermark and deny-list establish. A channel that just withholds new releases is visible as staleness, not as an error.
+- **No seed corpus yet.** The corpus that ships in the binary does not carry `sequence`, `trust_epoch` or `key_id`, which is why the walkthrough stamps them with `jq`. The structured `signatures[]` section and the contributor workflow are part of Spec 101 US2.
+- **No "check now" button in the Web UI.** The Security tab shows the refresh rows; `mcpproxy security bundle refresh` and the REST endpoint run a cycle.
 
 ## See also
 
 - [Security Quarantine: Signature bundle](/features/security-quarantine#signature-bundle-offline-tpa-corpus)
+- [Security Quarantine: Re-protection after a bundle activates](/features/security-quarantine#re-protection-after-a-bundle-activates)
 - [Tool Scanner: Signature corpus and coverage](/features/tool-scanner#signature-corpus-and-coverage)
 - Spec: `specs/101-tpa-db/spec.md`, walkthrough: `specs/101-tpa-db/quickstart.md`

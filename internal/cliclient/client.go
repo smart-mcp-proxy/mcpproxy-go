@@ -359,9 +359,10 @@ func (c *Client) GetCodeScripts(ctx context.Context) (dir string, entries []code
 
 // CallToolResult represents tool call result.
 type CallToolResult struct {
-	Content  []interface{}          `json:"content"`
-	IsError  bool                   `json:"isError"`
-	Metadata map[string]interface{} `json:"_meta,omitempty"`
+	Content           []interface{}          `json:"content"`
+	IsError           bool                   `json:"isError"`
+	StructuredContent interface{}            `json:"structuredContent,omitempty"`
+	Metadata          map[string]interface{} `json:"_meta,omitempty"`
 }
 
 // CallTool calls a tool on an upstream server via daemon API.
@@ -388,6 +389,7 @@ func (c *Client) CallTool(
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-MCPProxy-Result-Envelope", "1")
 
 	// Send request
 	resp, err := c.httpClient.Do(req)
@@ -429,16 +431,25 @@ func (c *Client) CallTool(
 	// Convert data to CallToolResult format
 	result := &CallToolResult{}
 
-	// Try to extract as map with content field
-	if dataMap, ok := apiResp.Data.(map[string]interface{}); ok {
+	// Older daemons return the MCP content array directly.
+	if content, ok := apiResp.Data.([]interface{}); ok {
+		result.Content = content
+	} else if dataMap, ok := apiResp.Data.(map[string]interface{}); ok {
 		if content, hasContent := dataMap["content"].([]interface{}); hasContent {
 			result.Content = content
+		} else if _, hasStructured := dataMap["structuredContent"]; hasStructured {
+			// Structured-only MCP results can omit content.
+			result.Content = []interface{}{}
 		} else {
-			// Wrap data in content array if not already in that format
+			// Legacy non-MCP object payloads remain available as JSON text.
+			dataJSON, err := json.Marshal(apiResp.Data)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal tool result: %w", err)
+			}
 			result.Content = []interface{}{
 				map[string]interface{}{
 					"type": "text",
-					"text": fmt.Sprintf("%v", apiResp.Data),
+					"text": string(dataJSON),
 				},
 			}
 		}
@@ -446,16 +457,27 @@ func (c *Client) CallTool(
 		if isError, ok := dataMap["isError"].(bool); ok {
 			result.IsError = isError
 		}
+		if structured, ok := dataMap["structuredContent"]; ok {
+			result.StructuredContent = structured
+		}
 
 		if meta, ok := dataMap["_meta"].(map[string]interface{}); ok {
 			result.Metadata = meta
 		}
 	} else {
-		// Fallback: wrap data in content array
+		// Fallback for legacy scalar payloads.
+		dataJSON, err := json.Marshal(apiResp.Data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal tool result: %w", err)
+		}
+		text := string(dataJSON)
+		if raw, ok := apiResp.Data.(string); ok {
+			text = raw
+		}
 		result.Content = []interface{}{
 			map[string]interface{}{
 				"type": "text",
-				"text": fmt.Sprintf("%v", apiResp.Data),
+				"text": text,
 			},
 		}
 	}

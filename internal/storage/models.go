@@ -189,6 +189,21 @@ type BaselineSweepState struct {
 	Findings int `json:"findings"`
 }
 
+// BundleReprotectDoneKey holds the BundleReprotectState marker in MetaBucket.
+const BundleReprotectDoneKey = "tpa_bundle_reprotect_done"
+
+// BundleReprotectState records the last TPA bundle for which the post-activation
+// re-protection sweep (Spec 101 FR-019, tasks B17) completed with zero failures.
+// Stored in MetaBucket under BundleReprotectDoneKey. Absence (the zero value)
+// means "no sweep has completed here". It is installation-wide state and is not
+// touched by server purge.
+type BundleReprotectState struct {
+	// FullDigest is the full SHA-256 of the bundle the sweep covered.
+	FullDigest string `json:"full_digest"`
+	// CompletedAt is when the sweep finished.
+	CompletedAt time.Time `json:"completed_at"`
+}
+
 // Current schema version
 const CurrentSchemaVersion = 3
 
