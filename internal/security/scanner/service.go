@@ -248,6 +248,10 @@ type Service struct {
 	// resolver. Nil ⇒ fall back to the engine-wide default.
 	isolationModeResolver func(serverName string) string
 
+	// bundleSnapshotFn reads the active TPA bundle as one (check, info) pair.
+	// Nil means activeBundleSnapshot; tests substitute it.
+	bundleSnapshotFn func() (*BundleCheck, BundleInfo)
+
 	// In-memory scan summary cache — avoids expensive BBolt reads per server.
 	//
 	// summaryCacheGen is a per-server invalidation counter. GetScanSummary
@@ -488,6 +492,12 @@ var ErrNoCachedContracts = errors.New("no cached tool contracts to scan")
 // (Spec 101 tasks B17).
 var ErrServerQuarantined = errors.New("server is quarantined: no cached scan")
 
+// ErrBundleSuperseded is returned by StartScanFromCachedContracts when the
+// bundle the caller asked to cover is no longer the active one at the moment the
+// job would be registered: a job labelled with the requested digest would not
+// describe the bundle that serves.
+var ErrBundleSuperseded = errors.New("the requested bundle is no longer the active bundle: no cached scan")
+
 // serverQuarantineProvider is an OPTIONAL capability a ServerInfoProvider may
 // implement: whether the server is quarantined right now, read from the live
 // configuration. StartScanFromCachedContracts uses it as a last-moment guard.
@@ -619,6 +629,19 @@ func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, 
 		if q, ok := s.serverInfo.(serverQuarantineProvider); ok && q.IsServerQuarantined(serverName) {
 			return ErrServerQuarantined
 		}
+		// The bundle is judged and pinned here, in the same step as the
+		// registration (Sol round 3): the caller's own supersession check
+		// precedes the contract and peer collection and the approval-lock
+		// wait, so a bundle activating in that window would otherwise get a
+		// job labelled with the old digest that the asynchronous detector
+		// scans with the new bundle. The job is bound to this snapshot and
+		// carries its digest.
+		check, info := s.activeBundle()
+		if bundleDigest != "" && info.FullDigest != bundleDigest {
+			return ErrBundleSuperseded
+		}
+		req.pinnedBundle = &pinnedBundle{check: check, info: info}
+		scanCtx.BundleDigest = info.FullDigest
 		var startErr error
 		job, startErr = s.engine.StartScanBound(ctx, req, callback)
 		return startErr
@@ -635,6 +658,14 @@ func (s *Service) StartScanFromCachedContracts(ctx context.Context, serverName, 
 	// outlive the caller's lifecycle except the job, which Done joins.
 	s.pruneOldScans(serverName)
 	return job, nil
+}
+
+// activeBundle is the active TPA bundle as one consistent (check, info) pair.
+func (s *Service) activeBundle() (*BundleCheck, BundleInfo) {
+	if s.bundleSnapshotFn != nil {
+		return s.bundleSnapshotFn()
+	}
+	return activeBundleSnapshot()
 }
 
 // isBaselineScanner reports whether a scanner id belongs to the deterministic
@@ -3433,4 +3464,65 @@ func (s *Service) CancelAllScans() error {
 // IsQueueRunning returns true if a batch scan is in progress
 func (s *Service) IsQueueRunning() bool {
 	return s.queue.IsRunning()
+}
+
+// GetScanJobSummary is the terminal ScanSummary of ONE specific job, read by
+// its ID: the status and findings of that job alone, never the server-wide
+// latest summary, which another scan of the same server (a manual scan, an
+// admission scan) may have displaced or still be running. Nil when the job does
+// not exist, belongs to another server or to an incarnation other than the
+// server's current one, or has not reached a terminal state. A failed or
+// cancelled job, or one without any usable scanner report, reports "failed".
+func (s *Service) GetScanJobSummary(_ context.Context, serverName, jobID string) *ScanSummary {
+	if jobID == "" {
+		return nil
+	}
+	job, err := s.storage.GetScanJob(jobID)
+	if err != nil || job == nil || job.ServerName != serverName {
+		return nil
+	}
+	if !s.incarnationIsCurrent(serverName, job.Incarnation) {
+		return nil
+	}
+	started := job.StartedAt
+	summary := &ScanSummary{LastScanAt: &started, Status: "clean"}
+	switch job.Status {
+	case ScanJobStatusCompleted:
+	case ScanJobStatusFailed, ScanJobStatusCancelled:
+		summary.Status = "failed"
+		return summary
+	default:
+		return nil
+	}
+	for _, ss := range job.ScannerStatuses {
+		summary.ScannersTotal++
+		switch ss.Status {
+		case ScanJobStatusCompleted:
+			summary.ScannersRun++
+		case ScanJobStatusFailed:
+			summary.ScannersFailed++
+		}
+	}
+	if summary.ScannersTotal > 0 && summary.ScannersRun == 0 {
+		summary.Status = "failed"
+		return summary
+	}
+	reports, err := s.storage.ListScanReportsByJob(job.ID)
+	if err != nil || len(reports) == 0 {
+		summary.Status = "failed"
+		return summary
+	}
+	var findings []ScanFinding
+	for _, r := range reports {
+		findings = append(findings, r.Findings...)
+	}
+	if len(findings) == 0 {
+		return summary
+	}
+	ClassifyAllFindings(findings)
+	summary.RiskScore = CalculateRiskScore(findings)
+	verdict, counts := deriveBaselineVerdict(findings)
+	summary.FindingCounts = &counts
+	summary.Status = verdict
+	return summary
 }
