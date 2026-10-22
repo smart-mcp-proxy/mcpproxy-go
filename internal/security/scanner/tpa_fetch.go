@@ -231,9 +231,22 @@ type fetchAttempt struct {
 	log      *zap.Logger
 	class    egressClass
 	client   *http.Client
+	// retry is the latest backoff any response of this attempt announced. One
+	// attempt can make several requests (listing, bundle, sidecar); a later
+	// failure or a success must not discard what an earlier response asked for
+	// (B6), so every return path folds it into the result.
+	retry time.Time
 }
 
 func (a *fetchAttempt) run(ctx context.Context) fetchResult {
+	res := a.runOnce(ctx)
+	if a.retry.After(res.RetryAt) {
+		res.RetryAt = a.retry
+	}
+	return res
+}
+
+func (a *fetchAttempt) runOnce(ctx context.Context) fetchResult {
 	class, err := a.configuredClass(ctx)
 	if err != nil {
 		return a.failure(ctx, err)
@@ -565,7 +578,13 @@ func (a *fetchAttempt) get(ctx context.Context, target *url.URL, accept, etag st
 	if etag != "" {
 		req.Header.Set("If-None-Match", etag)
 	}
-	return a.client.Do(req)
+	resp, err := a.client.Do(req)
+	if err == nil {
+		if at := a.retryAt(resp); at.After(a.retry) {
+			a.retry = at
+		}
+	}
+	return resp, err
 }
 
 // readLimited reads at most limit bytes of the body.
