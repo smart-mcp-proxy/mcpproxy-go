@@ -39,8 +39,12 @@ func TestRefreshScheduler_RemovingTheSecurityBlockRevertsToTheDefaultPolicy(t *t
 	h := newRefresherHarness(t, f, nil)
 	h.start()
 
-	// A nudge while the block exists stores the fetch-enabled config.
+	// A nudge while the block exists stores the fetch-enabled config. Wait for
+	// its asynchronous re-arm before ticking so the tick fires the live timer.
+	firstTimer := h.clock.loop(t)
+	firstArms := firstTimer.arms()
 	h.reload(func(s *config.SecurityConfig) { s.TPAOperatorBaseline = u64p(1) })
+	require.Eventually(t, func() bool { return firstTimer.arms() > firstArms }, 10*time.Second, time.Millisecond, "the nudge re-arms the timer")
 	require.Equal(t, RefreshClassActivated, h.tick(), "the fetch leg activates the operator-signed release")
 	require.Equal(t, digestOf(pair.Bundle), BundleStatus().FullDigest)
 	requestsBefore := ch.count()

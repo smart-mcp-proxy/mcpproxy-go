@@ -190,10 +190,15 @@ func TestSolR2_RepairedFetchConfigClearsTheLegSpecificWarning(t *testing.T) {
 	require.Len(t, BundleDoctorWarnings(BundleStatus(), time.Now()), 1)
 
 	// The operator repairs the configuration; a new local bundle activates.
+	// The nudge re-arms the timer asynchronously: wait for that re-arm before
+	// ticking, or the tick can fire a timer the loop replaces right after.
+	timer := h.clock.loop(t)
+	armsBefore := timer.arms()
 	h.reload(func(s *config.SecurityConfig) {
 		s.TPAOperatorSigners = []string{keyOperator.b64}
 		s.TPAOperatorBaseline = u64p(1)
 	})
+	require.Eventually(t, func() bool { return timer.arms() > armsBefore }, 10*time.Second, time.Millisecond, "the nudge re-arms the timer")
 	f.put(unsignedCandidate(t, bundleOpts{Seq: 6, Tag: "day-2"}))
 	require.Equal(t, RefreshClassActivated, h.tick())
 
