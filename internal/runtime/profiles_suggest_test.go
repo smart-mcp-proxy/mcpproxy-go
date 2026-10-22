@@ -283,18 +283,21 @@ func TestSuggest_RefusesWithoutEvaluator(t *testing.T) {
 
 func TestParseSuggestWindow(t *testing.T) {
 	ok := map[string]time.Duration{
-		"":    DefaultSuggestWindow,
-		"24h": 24 * time.Hour,
-		"90m": 90 * time.Minute,
-		"7d":  7 * 24 * time.Hour,
-		" 1d": 24 * time.Hour,
+		"":      DefaultSuggestWindow,
+		"24h":   24 * time.Hour,
+		"90m":   90 * time.Minute,
+		"7d":    7 * 24 * time.Hour,
+		" 1d":   24 * time.Hour,
+		"3650d": 3650 * 24 * time.Hour,
 	}
 	for in, want := range ok {
 		got, err := ParseSuggestWindow(in)
 		require.NoError(t, err, in)
 		assert.Equal(t, want, got, in)
 	}
-	for _, bad := range []string{"0", "0h", "-1h", "-2d", "abc", "1.5d", "d", "7w"} {
+	// 300000d would wrap time.Duration to about 86 days and 200000d to a
+	// negative value; the day form is bounded instead of overflowing.
+	for _, bad := range []string{"0", "0h", "-1h", "-2d", "abc", "1.5d", "d", "7w", "3651d", "200000d", "300000d"} {
 		_, err := ParseSuggestWindow(bad)
 		assert.Error(t, err, bad)
 	}

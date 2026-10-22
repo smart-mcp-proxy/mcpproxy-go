@@ -33,6 +33,10 @@ const DefaultSuggestWindow = 24 * time.Hour
 // ParseSuggestWindow parses the --since / since= value: a Go duration (90m,
 // 24h) or whole days (7d). "" is DefaultSuggestWindow. Zero and negative
 // windows are refused.
+// maxSuggestWindowDays bounds the "<n>d" form: retention is the real limit,
+// and a day count past this would overflow time.Duration and wrap.
+const maxSuggestWindowDays = 3650
+
 func ParseSuggestWindow(v string) (time.Duration, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
@@ -43,6 +47,9 @@ func ParseSuggestWindow(v string) (time.Duration, error) {
 		n, err := strconv.Atoi(days)
 		if err != nil {
 			return 0, fmt.Errorf("invalid since %q: use a duration such as 90m, 24h or 7d", v)
+		}
+		if n > maxSuggestWindowDays {
+			return 0, fmt.Errorf("invalid since %q: at most %dd", v, maxSuggestWindowDays)
 		}
 		d = time.Duration(n) * 24 * time.Hour
 	} else {
