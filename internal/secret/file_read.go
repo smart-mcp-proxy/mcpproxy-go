@@ -43,6 +43,16 @@ func ReadFile(path string) (string, error) {
 		return "", fmt.Errorf("secret file path %q must be absolute", path)
 	}
 
+	// Check the type before opening: open(2) on a FIFO blocks until a writer
+	// appears, and on some devices it has side effects, so a mis-pointed path
+	// must be refused without ever reaching open. The check is repeated on the
+	// open descriptor so a path swapped in between is still refused.
+	if info, err := os.Stat(path); err != nil {
+		return "", fmt.Errorf("cannot read secret file %q: %w", path, unwrapPathError(err))
+	} else if !info.Mode().IsRegular() {
+		return "", fmt.Errorf("secret file %q is not a regular file", path)
+	}
+
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("cannot read secret file %q: %w", path, unwrapPathError(err))
