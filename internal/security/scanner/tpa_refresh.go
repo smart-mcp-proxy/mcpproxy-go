@@ -99,21 +99,6 @@ type BundleRefresherOptions struct {
 	IntervalOverride time.Duration
 }
 
-// wakeReason says why the loop was woken outside its timer.
-type wakeReason int
-
-const (
-	wakeNone wakeReason = iota
-	// wakeManual: a manual cycle finished; the daily check is satisfied, so the
-	// timer is re-armed.
-	wakeManual
-	// wakeInterval: the interval changed; re-arm at the new cadence.
-	wakeInterval
-	// wakeSoon: fetch or trust settings changed with the fetch on; look again
-	// within the first-cycle window instead of waiting out the interval.
-	wakeSoon
-)
-
 // cycleCall is one in-flight cycle that triggers join.
 type cycleCall struct{ done chan struct{} }
 
@@ -145,23 +130,28 @@ type BundleRefresher struct {
 	// was removed: the default policy) from "nothing delivered yet".
 	nudged    *config.SecurityConfig
 	nudgedSet bool
-	// soonSeq counts the wakeSoon signals Nudge sent; a manual Refresh that
-	// finds it moved must not push the timer out over that early re-arm.
-	soonSeq uint64
-	// manualDone counts completed manual cycles (bumped in the same critical
-	// section that clears r.cycle); armedManual is its value when the loop
-	// timer was last armed. A timer tick whose arm predates a completed manual
-	// cycle is stale: that cycle satisfied the check and may have recorded a
-	// rate limit, so the tick must not start another attempt (B6).
-	manualDone, armedManual uint64
 	// nudgeSeq counts every Nudge; Start compares it with its value at config
 	// capture so it never overwrites settings a concurrent Nudge delivered.
 	nudgeSeq uint64
 	interval time.Duration
-	pending  wakeReason
-	wake     chan struct{}
-	etags    map[string]string
-	retryAt  time.Time
+
+	// due is the one authoritative time the next timer cycle is due. Every
+	// scheduling decision sets it under r.mu, in the same critical section as
+	// the state change that causes it: Start, the completion of a cycle of any
+	// trigger, a Nudge. Starting a cycle clears it; a cycle's completion sets
+	// it to the next interval (or the recorded rate-limit reset when later),
+	// unless a Nudge asked for an early look after the cycle began, which then
+	// stands. The loop only arms its timer to due, and a tick that fires before
+	// due is stale (a cycle completed since the arm and satisfied the check, or
+	// recorded a rate limit): it re-arms and starts nothing (B6).
+	due time.Time
+	// dueEarly says due is an early look a settings change asked for; an
+	// interval change does not push it out.
+	dueEarly bool
+	// wake tells the loop to re-read due; it carries no decision of its own.
+	wake    chan struct{}
+	etags   map[string]string
+	retryAt time.Time
 
 	// lastLogKey and lastLogAt deduplicate failure logs per (outcome, reason).
 	lastLogKey string
@@ -178,6 +168,10 @@ type BundleRefresher struct {
 	beforeTimerCycle func()
 	// startCaptured runs in Start between the config capture and the lock.
 	startCaptured func()
+	// afterCompletionWake runs in the cycle goroutine once the cycle's
+	// completion woke the loop and before the goroutine finishes: the window in
+	// which the loop can consume that wake ahead of the goroutine's exit.
+	afterCompletionWake func(trigger string)
 }
 
 // NewBundleRefresher builds a refresher; it does nothing until Start.
@@ -267,15 +261,13 @@ func (r *BundleRefresher) firstDelay() time.Duration {
 	return refreshFirstMin + time.Duration(r.random()*float64(refreshFirstMax-refreshFirstMin))
 }
 
-// nextDelay is the delay until the next cycle: the interval +/- 10%, pushed out
-// to a pending rate-limit reset (capped at 24h) when that is later.
-func (r *BundleRefresher) nextDelay() time.Duration {
-	r.mu.Lock()
-	interval, retryAt := r.interval, r.retryAt
-	r.mu.Unlock()
-	d := r.jitter(interval)
-	if !retryAt.IsZero() {
-		if until := retryAt.Sub(r.clock.Now()); until > 0 {
+// nextDelayLocked is the delay from now until the next cycle: the interval
+// +/- 10%, pushed out to a pending rate-limit reset (capped at 24h) when that
+// is later. The caller holds r.mu.
+func (r *BundleRefresher) nextDelayLocked(now time.Time) time.Duration {
+	d := r.jitter(r.interval)
+	if !r.retryAt.IsZero() {
+		if until := r.retryAt.Sub(now); until > 0 {
 			if until > refreshRetryCap {
 				until = refreshRetryCap
 			}
@@ -312,6 +304,10 @@ func (r *BundleRefresher) Start(ctx context.Context) {
 		r.interval = r.intervalFor(sec)
 		r.fp = fingerprintOf(sec)
 	}
+	now := r.clock.Now()
+	delay := r.firstDelay()
+	r.due, r.dueEarly = now.Add(delay), false
+	due := r.due
 	base := r.base
 	r.wg.Add(1)
 	r.mu.Unlock()
@@ -319,10 +315,9 @@ func (r *BundleRefresher) Start(ctx context.Context) {
 	if r.opts.IntervalOverride > 0 {
 		bundleRT.disp.setIntervalOverride(int(r.opts.IntervalOverride / time.Second))
 	}
-	delay := r.firstDelay()
 	timer := r.clock.NewTimer(delay)
-	bundleRT.disp.setNextCheck(r.clock.Now().Add(delay))
-	go r.loop(base, timer)
+	bundleRT.disp.setNextCheck(due)
+	go r.loop(base, timer, due)
 }
 
 // Stop cancels any in-flight cycle and returns only after the loop goroutine
@@ -347,7 +342,7 @@ func (r *BundleRefresher) Running() bool {
 
 // Nudge tells the refresher the security config changed: it re-reads the
 // fetch and trust settings, bumps the generation (superseding an in-flight
-// download whose inputs changed) and re-arms the timer. Non-blocking; a Nudge
+// download whose inputs changed) and moves the due time. Non-blocking; a Nudge
 // after Stop began is a no-op.
 //
 // A nil sec means the security block was removed: the default policy applies,
@@ -365,65 +360,114 @@ func (r *BundleRefresher) Nudge(sec *config.SecurityConfig) {
 	bundleRT.disp.applySettings(policy)
 	r.nudged, r.nudgedSet = sec, true
 	r.nudgeSeq++
-	reason := wakeNone
+	early := false
 	if policy.Fingerprint != r.fp {
 		r.fp = policy.Fingerprint
 		r.gen++
 		r.etags = map[string]string{}
 		r.retryAt = time.Time{}
-		if policy.FetchEnabled {
-			reason = wakeSoon
-			r.soonSeq++
-		}
+		// Fetch or trust settings changed with the fetch on: look again within
+		// the first-cycle window instead of waiting out the interval.
+		early = policy.FetchEnabled
 	}
+	intervalChanged := false
 	if iv := r.intervalFor(sec); iv != r.interval {
 		r.interval = iv
-		if reason < wakeInterval {
-			reason = wakeInterval
+		intervalChanged = true
+	}
+	moved := false
+	if r.started { // before Start, Start sets the first due time
+		now := r.clock.Now()
+		switch {
+		case early:
+			moved = r.scheduleEarlyLocked(now)
+		case intervalChanged && r.cycle == nil:
+			// With a cycle in flight its completion schedules at the new cadence.
+			moved = r.rescheduleLocked(now)
 		}
 	}
 	r.mu.Unlock()
-	if reason != wakeNone {
-		r.signal(reason)
+	if moved {
+		r.wakeLoop()
 	}
 }
 
-// signal records why the loop should re-arm and wakes it, without blocking.
-func (r *BundleRefresher) signal(reason wakeReason) {
-	r.mu.Lock()
-	if reason > r.pending {
-		r.pending = reason
+// scheduleEarlyLocked moves due to an early look (a point in the first-cycle
+// window from now), unless something is already due sooner. During a cycle
+// due is clear, so the look is scheduled and that cycle's completion keeps it:
+// the cycle began under the older settings. It reports whether due moved.
+func (r *BundleRefresher) scheduleEarlyLocked(now time.Time) bool {
+	at := now.Add(r.firstDelay())
+	r.dueEarly = true
+	if !r.due.IsZero() && !at.Before(r.due) {
+		return false
 	}
-	r.mu.Unlock()
+	r.due = at
+	return true
+}
+
+// rescheduleLocked recomputes due at the (new) cadence from now, keeping an
+// early look that is sooner. It reports whether due moved.
+func (r *BundleRefresher) rescheduleLocked(now time.Time) bool {
+	next := now.Add(r.nextDelayLocked(now))
+	if r.dueEarly && !r.due.IsZero() && r.due.Before(next) {
+		return false
+	}
+	if next.Equal(r.due) {
+		return false
+	}
+	r.due, r.dueEarly = next, false
+	return true
+}
+
+// finishCycleLocked ends the in-flight cycle: it clears r.cycle and schedules
+// the next timer cycle at the interval, or at the recorded rate-limit reset
+// when later. A cycle of any trigger satisfies the check, so a manual one pushes
+// the timer out too. An early look a Nudge asked for after the cycle began (due
+// is set again) stands, or the new settings would wait out a full interval. It
+// reports whether due moved.
+func (r *BundleRefresher) finishCycleLocked(now time.Time) bool {
+	r.cycle = nil
+	if !r.due.IsZero() {
+		return false
+	}
+	r.due, r.dueEarly = now.Add(r.nextDelayLocked(now)), false
+	return true
+}
+
+// wakeLoop tells the loop to re-read due, without blocking.
+func (r *BundleRefresher) wakeLoop() {
 	select {
 	case r.wake <- struct{}{}:
 	default:
 	}
 }
 
-func (r *BundleRefresher) takePending() wakeReason {
+// armToDue arms the loop timer to the current due time and publishes it as the
+// next check. Nothing to do while no time is due (a cycle is in flight; its
+// completion sets one and wakes the loop) or while the timer is still armed
+// for exactly that time. It returns what the timer is now armed for.
+func (r *BundleRefresher) armToDue(t RefreshTimer, armedFor time.Time, armed bool) (time.Time, bool) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	p := r.pending
-	r.pending = wakeNone
-	return p
-}
-
-// arm re-arms the loop timer and publishes the next check time.
-func (r *BundleRefresher) arm(t RefreshTimer, d time.Duration) {
-	r.mu.Lock()
-	r.armedManual = r.manualDone
+	due := r.due
 	r.mu.Unlock()
+	if due.IsZero() || (armed && due.Equal(armedFor)) {
+		return armedFor, armed
+	}
+	now := r.clock.Now()
+	d := max(due.Sub(now), 0)
 	t.Stop()
 	t.Reset(d)
-	bundleRT.disp.setNextCheck(r.clock.Now().Add(d))
+	bundleRT.disp.setNextCheck(now.Add(d))
+	return due, true
 }
 
-// loop is the scheduler goroutine: one timer, re-armed after each cycle
-// completes. A suspended machine or a forward clock jump therefore yields ONE
-// cycle on wake, never a catch-up burst, and the timer counts durations, not
-// wall-clock instants, so a backward jump cannot wedge it.
-func (r *BundleRefresher) loop(ctx context.Context, timer RefreshTimer) {
+// loop is the scheduler goroutine: one timer, armed to the due time. A
+// suspended machine or a forward clock jump therefore yields ONE cycle on
+// wake, never a catch-up burst. The due time is compared on the monotonic
+// clock, and a fired timer counts as no earlier than the time it was armed
+// for, so a backward wall-clock jump cannot wedge it.
+func (r *BundleRefresher) loop(ctx context.Context, timer RefreshTimer, armedFor time.Time) {
 	defer r.wg.Done()
 	defer func() {
 		timer.Stop()
@@ -431,45 +475,30 @@ func (r *BundleRefresher) loop(ctx context.Context, timer RefreshTimer) {
 		r.running = false
 		r.mu.Unlock()
 	}()
+	armed := true
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-timer.C():
+			armed = false
 			if r.beforeTimerCycle != nil {
 				r.beforeTimerCycle()
 			}
-			c, stale := r.startTimerCycle()
-			if stale {
-				// Consume the stale tick and re-arm the way a completed
-				// manual cycle (or a settings change) asks.
-				if r.takePending() == wakeSoon {
-					r.arm(timer, r.firstDelay())
-				} else {
-					r.arm(timer, r.nextDelay())
+			c, stale := r.startTimerCycle(armedFor)
+			if !stale {
+				if c == nil {
+					return
 				}
-				continue
+				select {
+				case <-c.cycle.done:
+				case <-ctx.Done():
+					return
+				}
 			}
-			if c == nil {
-				return
-			}
-			select {
-			case <-c.cycle.done:
-			case <-ctx.Done():
-				return
-			}
-			if r.takePending() == wakeSoon {
-				r.arm(timer, r.firstDelay())
-			} else {
-				r.arm(timer, r.nextDelay())
-			}
+			armedFor, armed = r.armToDue(timer, armedFor, armed)
 		case <-r.wake:
-			switch r.takePending() {
-			case wakeSoon:
-				r.arm(timer, r.firstDelay())
-			case wakeInterval, wakeManual:
-				r.arm(timer, r.nextDelay())
-			}
+			armedFor, armed = r.armToDue(timer, armedFor, armed)
 		}
 	}
 }
@@ -485,15 +514,22 @@ func (r *BundleRefresher) joinOrStart(trigger string) *startedCycle {
 	return r.joinOrStartLocked(trigger)
 }
 
-// startTimerCycle is joinOrStart for a timer tick. Admission and the staleness
-// check are one critical section with executeCycle's cleanup, so a manual cycle
-// either is still in flight (the tick joins it and the loop re-arms from its
-// completion) or has already bumped manualDone (the tick is stale).
-func (r *BundleRefresher) startTimerCycle() (c *startedCycle, stale bool) {
+// startTimerCycle is joinOrStart for a tick of a timer armed for armedFor. The
+// due check and admission are one critical section with a cycle's completion:
+// a cycle still in flight is joined (the loop re-arms from its completion); with
+// none in flight, a tick that fires before due is stale (a completion moved due
+// out since the arm) and starts nothing.
+func (r *BundleRefresher) startTimerCycle(armedFor time.Time) (c *startedCycle, stale bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.started && !r.stopped && r.cycle == nil && r.manualDone != r.armedManual {
-		return nil, true
+	if r.started && !r.stopped && r.cycle == nil {
+		fired := r.clock.Now()
+		if armedFor.After(fired) {
+			fired = armedFor // a timer fires no earlier than the time it was armed for
+		}
+		if r.due.After(fired) {
+			return nil, true
+		}
 	}
 	return r.joinOrStartLocked(RefreshTriggerTimer), false
 }
@@ -507,32 +543,34 @@ func (r *BundleRefresher) joinOrStartLocked(trigger string) *startedCycle {
 	}
 	c := &cycleCall{done: make(chan struct{})}
 	r.cycle = c
+	// The cycle being started is the look whatever was due asked for; its
+	// completion schedules the next one.
+	r.due, r.dueEarly = time.Time{}, false
 	r.wg.Add(1)
-	go r.executeCycle(r.base, c, trigger, r.soonSeq)
+	go r.executeCycle(r.base, c, trigger)
 	return &startedCycle{cycle: c}
 }
 
-func (r *BundleRefresher) executeCycle(ctx context.Context, c *cycleCall, trigger string, soonAtStart uint64) {
+func (r *BundleRefresher) executeCycle(ctx context.Context, c *cycleCall, trigger string) {
 	defer r.wg.Done()
 	defer func() {
+		// Done here, not by a waiting caller, so a manual caller that gave up
+		// (cancelled context) cannot leave the original deadline to fire and
+		// ignore a rate limit the cycle just recorded. Clearing r.cycle and
+		// setting due are one critical section, and the loop is woken only
+		// after both.
 		r.mu.Lock()
-		r.cycle = nil
-		if trigger == RefreshTriggerManual {
-			r.manualDone++
-		}
+		moved := r.finishCycleLocked(r.clock.Now())
 		r.mu.Unlock()
+		if moved {
+			r.wakeLoop()
+		}
+		if r.afterCompletionWake != nil {
+			r.afterCompletionWake(trigger)
+		}
 		close(c.done)
 	}()
 	r.doCycle(ctx, trigger)
-	if trigger == RefreshTriggerManual {
-		// A manual cycle satisfies the daily check: push the timer out. Done
-		// here, not by a waiting caller, so a caller that gave up (cancelled
-		// context) cannot leave the original deadline to fire and ignore a
-		// rate limit the cycle just recorded. Not when a settings change asked
-		// for an early look while it ran: that re-arm stands, or the new
-		// settings would wait out a full interval.
-		r.signalManualUnlessSoon(soonAtStart)
-	}
 }
 
 // Refresh runs one cycle now (trigger "manual"), joining an in-flight cycle if
@@ -549,26 +587,6 @@ func (r *BundleRefresher) Refresh(ctx context.Context, logger *zap.Logger) Bundl
 		return BundleStatus()
 	}
 	return BundleStatus()
-}
-
-// signalManualUnlessSoon records the wakeManual re-arm and wakes the loop, but
-// only while no Nudge asked for an early look after seq. The check and the
-// pending-wake update are one critical section, so a Nudge cannot slip its
-// early re-arm between them and have it replaced by the full interval.
-func (r *BundleRefresher) signalManualUnlessSoon(seq uint64) {
-	r.mu.Lock()
-	if r.soonSeq != seq {
-		r.mu.Unlock()
-		return
-	}
-	if wakeManual > r.pending {
-		r.pending = wakeManual
-	}
-	r.mu.Unlock()
-	select {
-	case r.wake <- struct{}{}:
-	default:
-	}
 }
 
 // --- one cycle ----------------------------------------------------------------

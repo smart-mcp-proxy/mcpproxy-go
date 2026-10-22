@@ -95,7 +95,11 @@ func TestRefreshScheduler_ManualCycleKeepsAnEarlyRearm(t *testing.T) {
 	}()
 	g.waitReached(t)
 
-	// The fetch settings change while the manual cycle is in flight.
+	// The fetch settings change while the manual cycle is in flight. The fake
+	// clock does not move: a different rand keeps the early look off the
+	// instant the first-cycle timer is already armed for (an identical instant
+	// needs no re-arm).
+	h.setRand(0.2)
 	h.reload(func(s *config.SecurityConfig) { s.TPAOperatorBaseline = u64p(2) })
 	require.Eventually(t, func() bool { return timer.arms() > armsBefore }, 5*time.Second, time.Millisecond)
 	early := timer.last()
