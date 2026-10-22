@@ -244,10 +244,13 @@ function invalidateForceRetry() { if (lastBlock.value === null) return; lastBloc
 // Each load takes a generation; only the newest response may replace the review, so an older refresh that resolves late cannot resurrect an allow the newer definitions invalidated.
 let loadGeneration = 0
 let readinessTimer: ReturnType<typeof setTimeout> | null = null
+let readinessEventTimer: ReturnType<typeof setTimeout> | null = null
 let readinessChecks = 0
+let readinessRequestGeneration = 0
+let active = true
 function scheduleReadinessRefresh() {
   if (readinessTimer) { clearTimeout(readinessTimer); readinessTimer = null }
-  if (review.value?.server.readiness !== 'connecting' || readinessChecks >= 15) return
+  if (!active || review.value?.server.readiness !== 'connecting' || readinessChecks >= 15) return
   readinessTimer = setTimeout(() => {
     readinessTimer = null
     readinessChecks++
@@ -258,9 +261,13 @@ async function refreshReadiness() {
   if (!review.value || refreshing.value || approving.value) { scheduleReadinessRefresh(); return }
   const server = props.serverName
   const visit = visitGeneration
+  const request = ++readinessRequestGeneration
   const incarnation = review.value.server.incarnation
-  const res = await api.getServerReview(server)
-  if (!isCurrent(server, visit) || !review.value || !res.success || !res.data) return
+  let res
+  try { res = await api.getServerReview(server) }
+  catch { if (isCurrent(server, visit) && request === readinessRequestGeneration) scheduleReadinessRefresh(); return }
+  if (!isCurrent(server, visit) || request !== readinessRequestGeneration || !review.value) return
+  if (!res.success || !res.data) { scheduleReadinessRefresh(); return }
   // Poll only the connection hint. Never replace the reviewed tool definitions
   // or an operator's pending selection with a background response.
   if (res.data.server.incarnation !== incarnation) return
@@ -269,7 +276,7 @@ async function refreshReadiness() {
 }
 // Each visit (a serverName change) takes a generation too: a response that started in an earlier visit is dropped even when the screen is back on the same server name (A -> B -> A).
 let visitGeneration = 0
-async function load() { if (typeof api.getServerReview !== 'function') return; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); if (confirmOpen.value) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; if (review.value && review.value.server.incarnation !== res.data.server.incarnation) choices.clear(); review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); if (confirmOpen.value && blindReview !== res.data) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; scheduleReadinessRefresh(); emit('refreshed') }
+async function load() { if (typeof api.getServerReview !== 'function') return; readinessChecks = 0; readinessRequestGeneration++; const server = props.serverName; const generation = ++loadGeneration; if (!review.value) loading.value = true; refreshing.value = true; invalidateForceRetry(); if (confirmOpen.value) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; error.value = ''; const res = await api.getServerReview(server); if (server !== props.serverName || generation !== loadGeneration) return; loading.value = false; refreshing.value = false; if (!res.success || !res.data) { error.value = res.error || 'Failed to load review'; return }; if (review.value && review.value.server.incarnation !== res.data.server.incarnation) choices.clear(); review.value = res.data; allowedTools.value = mergeSelection(res.data.tools, choices); invalidateForceRetry(); if (confirmOpen.value && blindReview !== res.data) { closeConfirm(); notice.value = STALE_FORCE_NOTICE }; scheduleReadinessRefresh(); emit('refreshed') }
 async function rescan() {
   const server = props.serverName
   const visit = visitGeneration
@@ -393,6 +400,14 @@ async function reloadAfterStaleReview(server: string, visit: number, message: st
 }
 async function blockTool(name: string) { const server = props.serverName; const visit = visitGeneration; toolNotice.value = ''; const res = await api.blockTools(server, [name], ...incarnationArgs(review.value?.server.incarnation)); if (!isCurrent(server, visit)) return; await load(); if (!res.success && isCurrent(server, visit)) toolNotice.value = res.error || 'Block failed' }
 function refreshAfterReviewChange() { scanning.value = false; rescanning.value = false; void load() }
+function refreshAfterServersChange() {
+  if (readinessEventTimer) clearTimeout(readinessEventTimer)
+  readinessEventTimer = setTimeout(() => {
+    readinessEventTimer = null
+    readinessChecks = 0
+    void refreshReadiness()
+  }, 150)
+}
 async function refreshAfterScanSettled(event: Event) {
   const serverName = (event as CustomEvent<{ server_name?: string }>).detail?.server_name
   if (serverName && serverName !== props.serverName) return
@@ -406,10 +421,16 @@ onMounted(() => {
   void load()
   window.addEventListener('mcpproxy:review-changed', refreshAfterReviewChange)
   window.addEventListener('mcpproxy:scan-settled', refreshAfterScanSettled)
+  window.addEventListener('mcpproxy:servers-changed', refreshAfterServersChange)
 })
 onUnmounted(() => {
+  active = false
+  visitGeneration++ // invalidate a readiness request already in flight
+  readinessRequestGeneration++
   if (readinessTimer) clearTimeout(readinessTimer)
+  if (readinessEventTimer) clearTimeout(readinessEventTimer)
   window.removeEventListener('mcpproxy:review-changed', refreshAfterReviewChange)
   window.removeEventListener('mcpproxy:scan-settled', refreshAfterScanSettled)
+  window.removeEventListener('mcpproxy:servers-changed', refreshAfterServersChange)
 })
 </script>

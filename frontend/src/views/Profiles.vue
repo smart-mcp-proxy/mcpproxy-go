@@ -81,12 +81,12 @@ const assignTo = ref('')
 const deleting = ref<ProfileView | null>(null)
 const accessCounts = ref<Record<string, EffectiveToolsResult['counts']>>({})
 let countsGeneration = 0
+let countsRefreshTimer: ReturnType<typeof setTimeout> | null = null
 // Use the same live access projection as the profile preview. A profile's tier
-// counts describe visibility, and cannot tell whether its tools are callable.
+// counts describe policy permission, and cannot tell whether its tools are callable.
 async function refreshAccessCounts() {
   const generation = ++countsGeneration
-  accessCounts.value = {}
-  if (tenant.value) return // callable/by_reason are administrator-only
+  if (tenant.value) { accessCounts.value = {}; return } // callable/by_reason are administrator-only
   const names = store.profiles.map(p => p.name)
   const results = await Promise.allSettled(names.map(name => api.getProfileEffectiveTools(name)))
   if (generation !== countsGeneration) return
@@ -97,6 +97,10 @@ async function refreshAccessCounts() {
   accessCounts.value = next
 }
 watch([() => store.profiles, tenant], () => { void refreshAccessCounts() })
+function scheduleAccessCountsRefresh() {
+  if (countsRefreshTimer) clearTimeout(countsRefreshTimer)
+  countsRefreshTimer = setTimeout(() => { countsRefreshTimer = null; void refreshAccessCounts() }, 150)
+}
 
 const errorText = computed(() => {
   if (store.errorStatus === 503) return 'Profile evaluation is unavailable; retry in a moment'
@@ -133,7 +137,11 @@ onMounted(() => {
   void store.fetchProfiles()
   // Who uses a profile (client names) comes from the clients store.
   if (!tenant.value && (!clients.allClients.length || clients.stale)) void clients.refreshPresence()
-  window.addEventListener('mcpproxy:servers-changed', refreshAccessCounts)
+  window.addEventListener('mcpproxy:servers-changed', scheduleAccessCountsRefresh)
 })
-onUnmounted(() => window.removeEventListener('mcpproxy:servers-changed', refreshAccessCounts))
+onUnmounted(() => {
+  countsGeneration++
+  if (countsRefreshTimer) clearTimeout(countsRefreshTimer)
+  window.removeEventListener('mcpproxy:servers-changed', scheduleAccessCountsRefresh)
+})
 </script>

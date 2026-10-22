@@ -16,9 +16,23 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	upstreamtypes "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 var ErrReviewServerNotFound = errors.New("review server not found")
+
+func reviewConnectionReadiness(state upstreamtypes.ConnectionState) string {
+	switch state {
+	case upstreamtypes.StateConnecting, upstreamtypes.StateAuthenticating, upstreamtypes.StateDiscovering:
+		return "connecting"
+	case upstreamtypes.StatePendingAuth:
+		return "auth_required"
+	case upstreamtypes.StateError:
+		return "error"
+	default:
+		return "disconnected"
+	}
+}
 
 // ReviewQueue is the composed, server-level review list shared by REST, CLI,
 // MCP and native clients.
@@ -273,11 +287,16 @@ func (r *Runtime) GetServerReview(ctx context.Context, serverName string) (*Serv
 	case server.Quarantined:
 		reviewServer.Readiness = "quarantined"
 	default:
-		if client, ok := r.upstreamManager.GetClient(serverName); ok && client != nil && client.IsConnected() {
-			reviewServer.Connected = true
-			reviewServer.Readiness = "connected"
-		} else {
-			reviewServer.Readiness = "connecting"
+		reviewServer.Readiness = "disconnected"
+		if r.upstreamManager != nil {
+			if client, ok := r.upstreamManager.GetClient(serverName); ok && client != nil {
+				if client.IsConnected() {
+					reviewServer.Connected = true
+					reviewServer.Readiness = "connected"
+				} else {
+					reviewServer.Readiness = reviewConnectionReadiness(client.GetConnectionInfo().State)
+				}
+			}
 		}
 	}
 	// Stored records and the live capture state are published by different

@@ -14,9 +14,9 @@
         {{ tierPhrase(profile.max_tier, profile.tool_counts) || 'No cap' }}
       </p>
       <dl class="flex flex-wrap gap-x-4 gap-y-1 text-sm" data-test="profile-counts">
-        <div class="flex gap-1"><dt class="opacity-70">Read visible</dt><dd>{{ profile.tool_counts.read }}</dd></div>
-        <div class="flex gap-1"><dt class="opacity-70">Write visible</dt><dd>{{ profile.tool_counts.write }}</dd></div>
-        <div class="flex gap-1"><dt class="opacity-70">Destructive visible</dt><dd>{{ profile.tool_counts.destructive }}</dd></div>
+        <div class="flex gap-1"><dt class="opacity-70">Read allowed by profile</dt><dd>{{ profile.tool_counts.read }}</dd></div>
+        <div class="flex gap-1"><dt class="opacity-70">Write allowed by profile</dt><dd>{{ profile.tool_counts.write }}</dd></div>
+        <div class="flex gap-1"><dt class="opacity-70">Destructive allowed by profile</dt><dd>{{ profile.tool_counts.destructive }}</dd></div>
       </dl>
       <p v-if="accessCounts?.callable !== undefined" class="text-sm font-medium" data-test="profile-access-counts">{{ accessCounts.callable }} callable now · {{ Math.max(0, accessCounts.visible - accessCounts.callable) }} held · {{ accessCounts.hidden }} hidden</p>
       <p v-if="profile.tool_counts.unannotated_hidden > 0" class="text-xs opacity-70" data-test="profile-unannotated">{{ profile.tool_counts.unannotated_hidden }} unannotated hidden</p>

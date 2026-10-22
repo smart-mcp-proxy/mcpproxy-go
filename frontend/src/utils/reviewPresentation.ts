@@ -1,8 +1,7 @@
 import type { ReviewScan, ReviewTool, ServerReviewResponse } from '@/types'
 
-// Pure presentation rules for the review screen. The strings are the shared
-// vocabulary of Spec 109 (fix-review-screen): the macOS app (ReviewPresentation
-// in ReviewQueueView.swift) and `mcpproxy review show` use the same sentences.
+// Pure presentation rules for the web review screen. The native app maintains
+// its own presentation and should be updated separately for wording parity.
 
 export type ScanBannerSeverity = 'error' | 'warning' | 'success' | 'info'
 export type ScanBannerAction = 'rescan' | 'scan-now' | 'none'
@@ -75,7 +74,10 @@ export function reviewHeadline(review: ServerReviewResponse): ReviewHeadline {
   const readiness = review.server.readiness === 'disabled' ? 'Server disabled.'
     : review.server.readiness === 'connecting' ? 'Upstream connecting; retry after discovery.'
       : review.server.readiness === 'connected' ? 'Upstream connected; tool discovery may still be in progress.'
-        : 'Approval does not confirm upstream readiness.'
+        : review.server.readiness === 'auth_required' ? 'Upstream authentication required.'
+          : review.server.readiness === 'error' ? 'Upstream connection error; check the server status.'
+            : review.server.readiness === 'disconnected' ? 'Upstream disconnected; check the server status.'
+              : 'Approval does not confirm upstream readiness.'
   if (pending > 0) {
     return {
       state: 'review',

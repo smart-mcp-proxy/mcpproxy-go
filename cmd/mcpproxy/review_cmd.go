@@ -212,7 +212,7 @@ func runReviewWrite(server, operation string, value interface{}) error {
 	}
 	warnApprovalHolds(os.Stderr, server, response)
 	if operation == "security/approve" || operation == "tools/approve" {
-		fmt.Fprintf(os.Stderr, "Approval updates policy; upstream connection and discovery may still be in progress. Check connection state with: mcpproxy review show %s -o json (server.readiness). Retry the call after discovery completes.\n", server)
+		fmt.Fprintf(os.Stderr, "Approval updates policy; it does not confirm upstream connection or tool discovery. Check server.readiness with: mcpproxy review show %s -o json. Retry only after the upstream is connected and tools have been discovered.\n", server)
 	}
 	return nil
 }

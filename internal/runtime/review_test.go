@@ -14,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
+	upstreamtypes "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 func TestReviewFixtureContract(t *testing.T) {
@@ -181,11 +182,27 @@ func TestReviewReadiness_DoesNotTreatApprovalAsConnection(t *testing.T) {
 		{Name: "approved", Enabled: true},
 		{Name: "parked", Enabled: false},
 	})
-	for _, tc := range []struct{ name, want string }{{"approved", "connecting"}, {"parked", "disabled"}} {
+	for _, tc := range []struct{ name, want string }{{"approved", "disconnected"}, {"parked", "disabled"}} {
 		review, err := rt.GetServerReview(context.Background(), tc.name)
 		require.NoError(t, err)
 		require.Equal(t, tc.want, review.Server.Readiness)
 		require.False(t, review.Server.Connected)
+	}
+}
+
+func TestReviewConnectionReadiness(t *testing.T) {
+	for _, tc := range []struct {
+		state upstreamtypes.ConnectionState
+		want  string
+	}{
+		{upstreamtypes.StateDisconnected, "disconnected"},
+		{upstreamtypes.StateConnecting, "connecting"},
+		{upstreamtypes.StateAuthenticating, "connecting"},
+		{upstreamtypes.StateDiscovering, "connecting"},
+		{upstreamtypes.StatePendingAuth, "auth_required"},
+		{upstreamtypes.StateError, "error"},
+	} {
+		require.Equal(t, tc.want, reviewConnectionReadiness(tc.state))
 	}
 }
 

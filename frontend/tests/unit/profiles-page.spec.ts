@@ -82,7 +82,7 @@ describe('Profiles page (Spec 108-i T090, FR-040)', () => {
     const card = wrapper.get('[data-test="profile-card-work-ro"]')
     expect(card.text()).toContain('Work')
     expect(card.text()).toContain('work-ro')
-    expect(card.get('[data-test="profile-counts"]').text()).toMatch(/Read visible\s*4.*Write visible\s*2.*Destructive visible\s*1/)
+    expect(card.get('[data-test="profile-counts"]').text()).toMatch(/Read allowed by profile\s*4.*Write allowed by profile\s*2.*Destructive allowed by profile\s*1/)
     expect(card.get('[data-test="profile-access-counts"]').text()).toContain('1 callable now · 24 held · 225 hidden')
     expect(card.get('[data-test="profile-unannotated"]').text()).toBe('3 unannotated hidden')
     expect(card.get('[data-test="profile-used-by"]').text()).toContain('Cursor')
@@ -92,6 +92,31 @@ describe('Profiles page (Spec 108-i T090, FR-040)', () => {
     expect(card.get('[data-test="profile-stats"]').text()).toContain('12 calls')
     expect(card.get('[data-test="profile-stats"]').text()).toContain('2 blocked')
     expect(wrapper.get('[data-test="profile-legacy-legacy"]').text()).toBe('Servers only')
+  })
+
+  it('keeps the last callable count visible while debouncing server change refreshes', async () => {
+    const { wrapper } = await mountAt()
+    const count = () => wrapper.get('[data-test="profile-card-work-ro"]').get('[data-test="profile-access-counts"]').text()
+    expect(count()).toContain('1 callable now')
+    let finish!: (value: unknown) => void
+    const delayed = new Promise(resolve => { finish = resolve })
+    ;(api.getProfileEffectiveTools as any).mockReturnValueOnce(delayed)
+    vi.useFakeTimers()
+    try {
+      const initialCalls = (api.getProfileEffectiveTools as any).mock.calls.length
+      window.dispatchEvent(new Event('mcpproxy:servers-changed'))
+      window.dispatchEvent(new Event('mcpproxy:servers-changed'))
+      expect(count()).toContain('1 callable now')
+      await vi.advanceTimersByTimeAsync(150)
+      expect((api.getProfileEffectiveTools as any).mock.calls.length).toBe(initialCalls + 2)
+      expect(count()).toContain('1 callable now')
+      finish({ counts: { visible: 0, callable: 0, hidden: 0 } })
+      await flushPromises()
+      expect(count()).toContain('0 callable now')
+      wrapper.unmount()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('omits the Used by line when used_by is absent (non-administrator)', async () => {
