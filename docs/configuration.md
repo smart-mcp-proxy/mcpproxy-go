@@ -827,7 +827,7 @@ With `require_mcp_auth` off, a change that would let a client bound to a profile
 | `allow_server_remove` | boolean | `true` | Allow removing servers via API/tools |
 
 **Security Notes:**
-- **API Key**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, or config file
+- **API Key**: Set via `--api-key` flag, `MCPPROXY_API_KEY` environment variable, `MCPPROXY_API_KEY_FILE` (a file holding the key, for Docker/Kubernetes secrets and systemd credentials; see [Environment variables](/configuration/environment-variables#api-key-from-a-file)), or config file
 - **Empty API Key**: Empty values are replaced with an auto-generated key; authentication is always enforced
 - **Auto-Generation**: If no API key is provided, one is generated, persisted to the config file, and printed once to the terminal (stderr). It is deliberately **not** written to the log files - to recover it later, read `api_key` from `~/.mcpproxy/mcp_config.json`
 - **Tray Integration**: Tray app automatically manages API keys for core communication
@@ -1858,6 +1858,7 @@ Many configuration options can be overridden via environment variables:
 |----------------------|--------------|-------------|
 | `MCPPROXY_LISTEN` / `MCPP_LISTEN` | `listen` | Network binding address |
 | `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty values trigger auto-generation; auth remains enabled) |
+| `MCPPROXY_API_KEY_FILE` | `api_key` | Absolute path of a file that holds the API key; set it or `MCPPROXY_API_KEY`, not both (both set stops startup with an error naming both); an unusable file stops startup (no fallback, nothing generated) |
 | `MCPPROXY_TRUSTED_HOSTS` | `trusted_hosts` | Comma-separated `Host` allowlist for loopback listeners behind a reverse proxy |
 | `MCPPROXY_TRUSTED_PROXIES` | `trusted_proxies` | Comma-separated CIDRs/IPs whose `X-Forwarded-*` headers are honoured |
 | `MCPPROXY_AUDIT_LOG_ENABLED` | `audit_log.enabled` | Turn audit logging on/off |
