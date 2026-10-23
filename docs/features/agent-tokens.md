@@ -579,6 +579,57 @@ A token created before profiles existed carries its own `allowed_servers` and `p
 
 To see which tokens use a profile, filter: `mcpproxy token list --profile work-readonly` (`--profile -` selects tokens with none), `--token <name>`, or open the Clients page, Tokens tab, filtered by `profile` or `token` in the URL. A profile's card links to its tokens. Token activity is filterable the same way: `mcpproxy activity list --token ci-bot`.
 
+## Call Rate Limit
+
+A runaway agent loop can burn through an upstream's quota or bill in minutes. A
+call rate limit caps how many upstream tool calls one agent token may make in a
+minute. It is **off by default**.
+
+The budget is a token bucket: the token may spend up to `burst` calls at once
+after a quiet spell, and earns `per_minute` calls back per minute. `burst`
+defaults to `per_minute`.
+
+Set a default for every agent token in the config file (applied on a config
+reload, no restart needed):
+
+```json
+{
+  "agent_token_rate_limit": { "per_minute": 60, "burst": 10 }
+}
+```
+
+Or give one token its own budget when you create it. A token's own budget
+replaces the config default, and `--rate-limit 0` exempts that token:
+
+```bash
+mcpproxy token create --name ci-bot --profile work-ro --rate-limit 120 --rate-burst 20
+mcpproxy token create --name batch --profile work-ro --rate-limit 0
+```
+
+What it covers:
+
+- Every upstream tool call a token makes: `call_tool_read`, `call_tool_write`,
+  `call_tool_destructive`, direct routing mode, `code_execution` (each call the
+  script makes counts) and `POST /api/v1/tools/call`. Listing and searching tools
+  are not counted.
+- Agent tokens only. The admin API key, the Unix socket and unauthenticated local
+  callers are never limited.
+- Each token has its own bucket, so one busy token does not slow another.
+- A call that is refused never reaches the upstream and does not take a
+  concurrency slot (see `max_concurrent_requests` in the
+  [configuration reference](../configuration/config-file.md)).
+
+A refused call is answered with a rate-limit message that says when to retry. Over
+REST it is `429 Too Many Requests` with a `Retry-After` header (seconds). Over MCP
+it is a tool result with `isError: true` and the same text. The call is recorded
+in the [activity log](./activity-log.md) as a `tool_call` with status `rejected`,
+the reason `rate_limited` and the token's name, and is counted in
+`mcpproxy_tool_calls_rejected_total{reason="rate_limited",scope="token"}`.
+
+The limit is per process and is not persisted: a restart gives every token a full
+bucket. Changing a budget keeps the calls a token has already spent; it does not
+refund them.
+
 ## Managing Tokens
 
 ### Token Limit
@@ -722,6 +773,11 @@ curl -X POST http://localhost:8080/api/v1/tokens \
   }'
 ```
 
+Add `"rate_limit": {"per_minute": 120, "burst": 20}` to give the token its own
+[call budget](#call-rate-limit); `"rate_limit": {"per_minute": 0}` exempts it from
+the config default. `GET /api/v1/tokens` and `GET /api/v1/tokens/{name}` return it
+as `rate_limit` when the token has one.
+
 ## Security Model
 
 - **HMAC-SHA256 hashing** — raw tokens are never stored; only HMAC hashes are persisted
@@ -747,6 +803,7 @@ curl -X POST http://localhost:8080/api/v1/tokens \
 | `require_mcp_auth` | bool | `false` | Require authentication on `/mcp` endpoint |
 | `mcp_reject_query_apikey` | bool | `false` | Refuse a `?apikey=` query parameter on every MCP endpoint (`/mcp*` and the legacy `/v1/tool_code` aliases) with a 401, forcing clients onto `Authorization: Bearer <token>` or `X-API-Key`. It does not stop a URL already sent from being logged in transit; it makes a query-form client fail until it is migrated, so tokens stop appearing in access logs, proxy logs and browser history. Applies to MCP endpoints only; the REST API, the Web UI and its `/events` stream keep accepting the query form. Clients the Connect wizard configured with `?apikey=` in the URL (Codex, the generic fallback) need a header carrier first (see [Connect clients](./connect-clients.md)). Takes effect without a restart |
 | `api_key` | string | auto-generated | Admin API key for full access |
+| `agent_token_rate_limit` | object | off | Default call budget for every agent token: `per_minute` (calls a minute, `0` = off, max 100000) and `burst` (optional, defaults to `per_minute`). A token created with `--rate-limit` uses its own budget instead. See [Call Rate Limit](#call-rate-limit). Takes effect without a restart |
 
 ### CLI Flags
 
@@ -764,6 +821,8 @@ mcpproxy serve --require-mcp-auth    # Enforce /mcp authentication
 | `--permissions` | Legacy scope | — | Comma-separated: `read`, `write`, `destructive` (prefer `--profile`) |
 | `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`) |
 | `--profile-pin` | No | — | Deprecated alias of `--profile` |
+| `--rate-limit` | No | config default | Calls per minute this token may make; `0` exempts it from `agent_token_rate_limit` (see [Call Rate Limit](#call-rate-limit)) |
+| `--rate-burst` | No | `--rate-limit` | Calls the token may make at once after a quiet spell; needs `--rate-limit` above 0 |
 
 ### Documented invariant (Spec 107 FR-046)
 

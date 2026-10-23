@@ -290,6 +290,16 @@ type Config struct {
 	QueueSize             *int      `json:"queue_size,omitempty" mapstructure:"queue-size"`
 	QueueTimeout          *Duration `json:"queue_timeout,omitempty" mapstructure:"queue-timeout" swaggertype:"string"`
 
+	// AgentTokenRateLimit caps how many upstream tool calls ONE agent token may
+	// make: PerMinute on average, Burst at once (issue #1699). Every token is
+	// counted separately, and a token's own rate_limit (set when it is created)
+	// replaces this default for that token. Only agent-token callers are
+	// limited; the admin API key, the unix socket and an unauthenticated /mcp
+	// caller are not. Absent or per_minute 0 = no limit (default, zero behavior
+	// change). The counters are in memory: a restart gives every token a full
+	// allowance again. Hot-reloadable. File/API-configured only, no env scheme.
+	AgentTokenRateLimit *AgentTokenRateLimit `json:"agent_token_rate_limit,omitempty" mapstructure:"agent-token-rate-limit"`
+
 	// ServerConcurrencyDefaults is scope (b) of FR-020: the blanket per-server
 	// default set inherited by every server that does not override a setting.
 	// Absent (the default) = no per-server limiting unless a server configures
@@ -2762,6 +2772,9 @@ func (c *Config) validateDetailedCore() []ValidationError {
 
 	// Concurrency limits, all three scopes after resolution (spec 093, FR-023).
 	errors = append(errors, c.validateConcurrency()...)
+
+	// Per-agent-token call budget (issue #1699).
+	errors = append(errors, c.AgentTokenRateLimit.validate("agent_token_rate_limit")...)
 
 	// Validate code execution configuration (0 means use default)
 	if c.CodeExecutionTimeoutMs != 0 && (c.CodeExecutionTimeoutMs < 1 || c.CodeExecutionTimeoutMs > 600000) {

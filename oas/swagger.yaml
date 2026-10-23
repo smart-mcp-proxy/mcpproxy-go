@@ -9,6 +9,26 @@ components:
         surface:
           type: string
       type: object
+    config.AgentTokenRateLimit:
+      description: |-
+        AgentTokenRateLimit caps how many upstream tool calls ONE agent token may
+        make: PerMinute on average, Burst at once (issue #1699). Every token is
+        counted separately, and a token's own rate_limit (set when it is created)
+        replaces this default for that token. Only agent-token callers are
+        limited; the admin API key, the unix socket and an unauthenticated /mcp
+        caller are not. Absent or per_minute 0 = no limit (default, zero behavior
+        change). The counters are in memory: a restart gives every token a full
+        allowance again. Hot-reloadable. File/API-configured only, no env scheme.
+      properties:
+        burst:
+          description: |-
+            Burst is how many calls a token may make at once after a quiet spell.
+            0 = the PerMinute value.
+          type: integer
+        per_minute:
+          description: PerMinute is the sustained rate. 0 = no limit.
+          type: integer
+      type: object
     config.AuditLogConfig:
       description: |-
         AuditLog configures the Spec 107 edition-neutral audit sink
@@ -74,6 +94,8 @@ components:
             filtered to the caller's profile and agent-token scope. Default true;
             set false to keep server names out of client context. Read live.
           type: boolean
+        agent_token_rate_limit:
+          $ref: '#/components/schemas/config.AgentTokenRateLimit'
         aggregate_upstream_prompts:
           description: |-
             AggregateUpstreamPrompts, when true, aggregates every connected upstream
@@ -1781,10 +1803,12 @@ components:
           type: string
         rejected_count:
           description: |-
-            RejectedCount is the number of calls shed by a concurrency limiter before
-            they reached an upstream (spec 093). Counted separately from errors: it is
-            proxy backpressure, not an upstream fault, and it is the signal an
-            operator right-sizes max_concurrent_requests against.
+            RejectedCount is the number of calls shed by a concurrency limiter, or
+            refused because an agent token was over its call budget, before they
+            reached an upstream (spec 093, issue #1699). Counted separately from
+            errors: it is proxy backpressure, not an upstream fault, and it is the
+            signal an operator right-sizes max_concurrent_requests and the rate
+            limits against.
           type: integer
         start_time:
           description: Start of the period (RFC3339)
@@ -11405,8 +11429,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Shed by a concurrency limit (Retry-After header carries the
-            wait hint)
+          description: Shed by a concurrency limit or an agent token call rate limit
+            (Retry-After header carries the wait hint)
         "500":
           content:
             application/json:
@@ -11512,8 +11536,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Shed by a concurrency limit (Retry-After header carries the
-            wait hint)
+          description: Shed by a concurrency limit or an agent token call rate limit
+            (Retry-After header carries the wait hint)
         "500":
           content:
             application/json:
