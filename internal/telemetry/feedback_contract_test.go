@@ -7,11 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
@@ -95,11 +98,12 @@ func TestFeedbackContract_FixtureRoundTrips(t *testing.T) {
 	}
 }
 
-// TestFeedbackContract_SubmitSendsOnlyContractFields sends a fully populated
-// feedback through SubmitFeedback and asserts the wire body uses only key
-// paths the fixture declares — a new field must be added to the fixture (and
-// so to the worker) before it ships.
-func TestFeedbackContract_SubmitSendsOnlyContractFields(t *testing.T) {
+// TestFeedbackContract_SubmitSendsExactlyContractFields sends a fully
+// populated feedback through SubmitFeedback (every store wired, every optional
+// field non-empty) and asserts the wire body has exactly the fixture's key
+// paths: a new field must be added to the fixture (and so to the worker) before
+// it ships, and dropping a populated field fails too.
+func TestFeedbackContract_SubmitSendsExactlyContractFields(t *testing.T) {
 	clearTelemetryEnv(t)
 	withFixedMachineID(t, strings.Repeat("b", 64))
 
@@ -112,6 +116,7 @@ func TestFeedbackContract_SubmitSendsOnlyContractFields(t *testing.T) {
 	defer server.Close()
 
 	svc := newFeedbackTestService(t, server.URL, true)
+	wireAllFeedbackStores(t, svc)
 	if _, err := svc.SubmitFeedback(context.Background(), &FeedbackRequest{
 		Category: "bug",
 		Message:  "Something is broken and I want to report it",
@@ -136,6 +141,97 @@ func TestFeedbackContract_SubmitSendsOnlyContractFields(t *testing.T) {
 			t.Errorf("SubmitFeedback sent %q, which the contract fixture does not declare", k)
 		}
 	}
+	for _, k := range sortedKeys(allowed) {
+		if !sentKeys[k] {
+			t.Errorf("contract fixture declares %q, but a fully populated SubmitFeedback did not send it", k)
+		}
+	}
+}
+
+// wireAllFeedbackStores gives svc every source an optional feedback field
+// reads, each non-empty, so the contract test sees the complete wire shape.
+func wireAllFeedbackStores(t *testing.T, svc *Service) {
+	t.Helper()
+	db, err := bbolt.Open(filepath.Join(t.TempDir(), "feedback.db"), 0o600, &bbolt.Options{Timeout: 2 * time.Second})
+	if err != nil {
+		t.Fatalf("open bbolt: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := EnsureDiagnosticsCountersBucket(db); err != nil {
+		t.Fatalf("ensure diagnostics bucket: %v", err)
+	}
+	diag := NewDiagnosticsCounterStore()
+	if err := diag.RecordErrorCode(db, "MCPX_STDIO_SPAWN_ENOENT"); err != nil {
+		t.Fatalf("record error code: %v", err)
+	}
+	if err := diag.RecordFixAttempt(db, "success"); err != nil {
+		t.Fatalf("record fix attempt: %v", err)
+	}
+	svc.SetDiagnosticsCounterStore(diag, db)
+	svc.SetCurrentErrorCodesProvider(func() map[string]int {
+		return map[string]int{"MCPX_OAUTH_REFRESH_EXPIRED": 1}
+	})
+	prechurn := NewPreChurnStore()
+	if err := prechurn.RecordLastErrorCode(db, "MCPX_STDIO_SPAWN_ENOENT"); err != nil {
+		t.Fatalf("record last error code: %v", err)
+	}
+	svc.SetPreChurn(PreviousShutdownCrash, prechurn, db)
+	svc.startTime = time.Now().Add(-95 * time.Minute)
+}
+
+// TestSubmitFeedback_NoTelemetryRefAfterOptOutLatch: once the opt-out has
+// latched, feedback carries no ids even if the config still reads enabled.
+func TestSubmitFeedback_NoTelemetryRefAfterOptOutLatch(t *testing.T) {
+	clearTelemetryEnv(t)
+	withFixedMachineID(t, strings.Repeat("e", 64))
+
+	var got FeedbackRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(FeedbackResponse{Success: true})
+	}))
+	defer server.Close()
+
+	svc := newFeedbackTestService(t, server.URL, true)
+	svc.optedOut.Store(true)
+	if _, err := svc.SubmitFeedback(context.Background(), &FeedbackRequest{
+		Category: "bug",
+		Message:  "High CPU usage while idle, please help",
+	}); err != nil {
+		t.Fatalf("SubmitFeedback: %v", err)
+	}
+	if got.Context.AnonymousID != "" || got.Context.MachineID != "" || got.Context.PreviousShutdown != "" {
+		t.Errorf("opt-out latched but telemetry fields sent: %+v", got.Context)
+	}
+}
+
+// TestFeedbackContext_WithoutTelemetryClearsEveryConsentField guards the
+// last-moment recheck: every field documented as consent-only is cleared.
+func TestFeedbackContext_WithoutTelemetryClearsEveryConsentField(t *testing.T) {
+	var fc FeedbackContext
+	if err := json.Unmarshal(mustContractContext(t), &fc); err != nil {
+		t.Fatal(err)
+	}
+	fc.withoutTelemetry()
+	if fc.AnonymousID != "" || fc.MachineID != "" || fc.LastStartupOutcome != "" ||
+		fc.PreviousShutdown != "" || fc.LastErrorCode != "" || fc.Diagnostics != nil {
+		t.Errorf("withoutTelemetry left consent-only fields: %+v", fc)
+	}
+	if fc.Version == "" || fc.ServerCount == 0 {
+		t.Errorf("withoutTelemetry cleared basic context: %+v", fc)
+	}
+}
+
+func mustContractContext(t *testing.T) []byte {
+	t.Helper()
+	var doc struct {
+		Context json.RawMessage `json:"context"`
+	}
+	if err := json.Unmarshal(loadFeedbackContract(t), &doc); err != nil {
+		t.Fatal(err)
+	}
+	return doc.Context
 }
 
 // TestSubmitFeedback_IncludesTelemetryRefWhenEnabled: with telemetry on, the

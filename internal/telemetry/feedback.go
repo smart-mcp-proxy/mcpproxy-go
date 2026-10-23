@@ -138,6 +138,12 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *FeedbackRequest) (*Fe
 	}
 
 	req.Context = s.feedbackContext()
+	// Building the context reads BBolt; an opt-out can land meanwhile. Recheck
+	// consent at the last moment so a report sent after opting out never
+	// carries the install's ids or diagnostics.
+	if !s.feedbackTelemetryConsent() {
+		req.Context.withoutTelemetry()
+	}
 
 	// Marshal and send
 	data, err := json.Marshal(req)
@@ -197,7 +203,7 @@ func (s *Service) feedbackContext() FeedbackContext {
 		fc.UptimeMinutes = int(time.Since(s.startTime).Minutes())
 	}
 
-	if !s.telemetryEnabledLive() {
+	if !s.feedbackTelemetryConsent() {
 		return fc
 	}
 	anonID, _, _, lastStartupOutcome := s.telemetryCursor(s.liveConfig())
@@ -211,4 +217,21 @@ func (s *Service) feedbackContext() FeedbackContext {
 	fc.LastErrorCode = s.lastErrorCode()
 	fc.Diagnostics = s.diagnosticsSnapshot()
 	return fc
+}
+
+// feedbackTelemetryConsent reports whether a feedback submission may carry the
+// install's telemetry ids and diagnostics: telemetry resolves as enabled (config
+// and env) and no opt-out has latched — the same gates the heartbeat honours.
+func (s *Service) feedbackTelemetryConsent() bool {
+	return !s.optedOut.Load() && s.telemetryEnabledLive()
+}
+
+// withoutTelemetry clears every field that is sent only with telemetry consent.
+func (fc *FeedbackContext) withoutTelemetry() {
+	fc.AnonymousID = ""
+	fc.MachineID = ""
+	fc.LastStartupOutcome = ""
+	fc.PreviousShutdown = ""
+	fc.LastErrorCode = ""
+	fc.Diagnostics = nil
 }
