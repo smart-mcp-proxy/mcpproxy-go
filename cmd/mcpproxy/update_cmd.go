@@ -137,7 +137,7 @@ func GetUpdateCommand() *cobra.Command {
 		Long: `Check for a newer MCPProxy release and update it the way your install expects.
 
 MCPProxy detects how it was installed and acts accordingly:
-  homebrew / deb / rpm / go-install   prints the exact upgrade command
+  homebrew / deb / rpm / go-install / scoop   prints the exact upgrade command
   docker / windows-installer          prints channel-appropriate guidance
   dmg (macOS app bundle)              points at the tray updater; never touches the bundle
   tarball (official release archive)  downloads, verifies and swaps the binary in place
@@ -264,7 +264,7 @@ func (r *updateRunner) effectiveChannel() string {
 // decideAction maps a channel to what the command will do (FR-020).
 func decideAction(channel string, self bool) string {
 	switch channel {
-	case updatecheck.ChannelHomebrew, updatecheck.ChannelDeb, updatecheck.ChannelRPM, updatecheck.ChannelGoInstall:
+	case updatecheck.ChannelHomebrew, updatecheck.ChannelDeb, updatecheck.ChannelRPM, updatecheck.ChannelGoInstall, updatecheck.ChannelScoop:
 		return actionCommand
 	case updatecheck.ChannelDocker, updatecheck.ChannelWindowsInstaller:
 		return actionGuidance

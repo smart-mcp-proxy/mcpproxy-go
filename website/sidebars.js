@@ -26,6 +26,7 @@ const sidebars = {
       // "Getting Started" card used to land.
       link: { type: 'generated-index', slug: '/getting-started', description: 'Install MCPProxy and make your first successful MCP tool call.' },
       items: [
+        'getting-started/agent-install',
         'getting-started/installation',
         'getting-started/quick-start',
       ],

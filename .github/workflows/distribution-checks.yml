@@ -1,0 +1,60 @@
+name: Distribution checks
+
+# Spec 121: fast PR guards for the install surfaces (registry entry, scoop and
+# winget manifest generators, the agent install prompt). No secrets, no release.
+on:
+  pull_request:
+    paths:
+      - 'server.json'
+      - 'Dockerfile'
+      - 'README.md'
+      - 'docs/getting-started/**'
+      - 'scripts/stamp-server-json*'
+      - 'scripts/registry-preflight.sh'
+      - 'scripts/gen-scoop-manifest*'
+      - 'scripts/gen-winget-manifest*'
+      - 'scripts/sync-agent-prompt*'
+      - 'scripts/testdata/**'
+      - '.github/workflows/distribution-checks.yml'
+      - '.github/workflows/release.yml'
+      - '.github/workflows/retry-sign-release.yml'
+      - '.github/workflows/publish-windows-packages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Generator and stamping tests
+        run: |
+          scripts/stamp-server-json.test.sh
+          scripts/gen-scoop-manifest.test.sh
+          scripts/gen-winget-manifest.test.sh
+          scripts/sync-agent-prompt.test.sh
+
+      - name: Agent install prompt is in sync (README <-> docs)
+        run: scripts/sync-agent-prompt.sh --check
+
+      - name: Install mcp-publisher
+        run: |
+          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
+
+      # Schema + semantic validation of the stamped entry, so an invalid
+      # `packages` block fails the PR instead of silently skipping a release's
+      # registry publish (that job is continue-on-error by design).
+      - name: Validate stamped server.json
+        run: |
+          scripts/stamp-server-json.sh v0.0.1 server.json > "${RUNNER_TEMP}/server.json"
+          ./mcp-publisher validate "${RUNNER_TEMP}/server.json"
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Workflow and installer invariants
+        run: go test ./cmd/release-gate/ -run 'Registry|Windows|Installer|PublishJobsGated' -count=1

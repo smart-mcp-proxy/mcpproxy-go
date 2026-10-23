@@ -1,0 +1,94 @@
+name: Windows installer channel marker
+
+# Spec 121 FR-014: the Inno installer must (a) write the winget channel marker
+# only for /CHANNEL=winget, (b) remove a stale marker on any other run and on
+# uninstall, and (c) never block on a dialog in silent mode (winget runs it
+# silently). Builds a throwaway installer around dummy binaries and exercises
+# the real silent install / reinstall / uninstall lifecycle on a disposable
+# runner (it modifies the machine PATH registry value, which is why this must
+# never be pointed at a developer machine).
+on:
+  pull_request:
+    paths:
+      - 'scripts/installer.iss'
+      - '.github/workflows/installer-channel-test.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lifecycle:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Ensure Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Build a throwaway installer
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist\windows-amd64 | Out-Null
+          Copy-Item "$env:WINDIR\System32\whoami.exe" dist\windows-amd64\mcpproxy.exe
+          Copy-Item "$env:WINDIR\System32\whoami.exe" dist\windows-amd64\mcpproxy-tray.exe
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DVersion=0.0.1 /DArch=amd64 "/DBinPath=..\dist\windows-amd64" scripts\installer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          if (-not (Test-Path dist\mcpproxy-setup-0.0.1-amd64.exe)) { throw "installer not produced" }
+
+      - name: Exercise channel marker lifecycle
+        shell: pwsh
+        run: |
+          $setup  = (Resolve-Path dist\mcpproxy-setup-0.0.1-amd64.exe).Path
+          $dir    = "C:\mcpproxy-e7-test"
+          $marker = Join-Path $dir "install-channel"
+
+          function Run-Silent([string]$exe, [string[]]$extra) {
+            $a = @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") + $extra
+            $p = Start-Process -FilePath $exe -ArgumentList $a -PassThru
+            if (-not $p.WaitForExit(180000)) { $p.Kill(); throw "$exe blocked (>180s): a dialog or prompt is waiting in silent mode" }
+            if ($p.ExitCode -ne 0) { throw "$exe exited $($p.ExitCode)" }
+          }
+
+          # 1. winget install writes exactly the token
+          Run-Silent $setup @("/DIR=$dir", "/CHANNEL=winget")
+          if (-not (Test-Path $marker)) { throw "marker missing after /CHANNEL=winget" }
+          if ((Get-Content $marker -Raw).Trim() -ne "winget") { throw "marker content wrong: $(Get-Content $marker -Raw)" }
+
+          # 2. direct reinstall (no switch) removes the stale marker
+          Run-Silent $setup @("/DIR=$dir")
+          if (Test-Path $marker) { throw "stale marker survived a direct reinstall" }
+
+          # 3. an unknown channel value is never written
+          Run-Silent $setup @("/DIR=$dir", "/CHANNEL=C:\Users\secret")
+          if (Test-Path $marker) { throw "an arbitrary /CHANNEL value was written" }
+
+          # 4. uninstall removes the marker with the app
+          Run-Silent $setup @("/DIR=$dir", "/CHANNEL=winget")
+          if (-not (Test-Path $marker)) { throw "marker missing before uninstall" }
+          Run-Silent (Join-Path $dir "unins000.exe") @()
+          if (Test-Path $marker) { throw "marker survived uninstall" }
+
+      - name: Silent install must not block on an over-long PATH
+        shell: pwsh
+        run: |
+          # Disposable runner only: push the machine PATH past the 2047-char limit.
+          $orig = [Environment]::GetEnvironmentVariable("Path", "Machine")
+          $pad  = ";C:\e7-pad\" + ("x" * 200)
+          $long = $orig
+          while ($long.Length -lt 2200) { $long += $pad }
+          [Environment]::SetEnvironmentVariable("Path", $long, "Machine")
+          try {
+            $setup = (Resolve-Path dist\mcpproxy-setup-0.0.1-amd64.exe).Path
+            $p = Start-Process -FilePath $setup -ArgumentList @("/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART","/DIR=C:\mcpproxy-e7-path") -PassThru
+            if (-not $p.WaitForExit(180000)) { $p.Kill(); throw "installer blocked on the PATH-length dialog in silent mode" }
+            if ($p.ExitCode -ne 0) { throw "installer exited $($p.ExitCode)" }
+            if (Test-Path C:\mcpproxy-e7-path\unins000.exe) { Start-Process C:\mcpproxy-e7-path\unins000.exe -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait }
+          } finally {
+            [Environment]::SetEnvironmentVariable("Path", $orig, "Machine")
+          }

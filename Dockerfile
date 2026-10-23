@@ -29,6 +29,10 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build \
 # Runtime stage
 FROM gcr.io/distroless/static-debian12
 
+# Official MCP registry ownership proof (Spec 121 FR-003): the registry rejects
+# a package whose image does not carry this label equal to server.json "name".
+LABEL io.modelcontextprotocol.server.name="io.github.smart-mcp-proxy/mcpproxy-go"
+
 COPY --from=builder /mcpproxy /usr/local/bin/mcpproxy
 
 EXPOSE 8080

@@ -1340,6 +1340,7 @@ jobs:
             org.opencontainers.image.licenses=MIT
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.version=${{ github.ref_name }}
+            io.modelcontextprotocol.server.name=io.github.smart-mcp-proxy/mcpproxy-go
 
   # Spec 081: release qualification gate. Runs the server-type matrix +
   # invariants + assembled suites and produces one pass/fail verdict. The
@@ -2231,6 +2232,20 @@ jobs:
           event-type: update-version
           client-payload: '{"version": "${{ github.ref_name }}"}'
 
+  # Spec 121: scoop bucket + winget community repository. Reusable workflow so a
+  # recovered release can republish by manual dispatch with a tag. Stable only;
+  # each inner job skips (notice) when its credentials are not configured.
+  publish-windows-packages:
+    name: Publish Windows packages
+    needs: release
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish-windows-packages.yml
+    with:
+      tag: ${{ github.ref_name }}
+    secrets: inherit
+
   mcp-registry:
     name: Publish to MCP Registry
     needs: release
@@ -2241,10 +2256,6 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
 
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
@@ -2252,9 +2263,20 @@ jobs:
       - name: Authenticate to MCP Registry
         run: ./mcp-publisher login github-oidc
 
-      - name: Update version in server.json
+      # Spec 121: stamp version AND the OCI package identifier from the tag
+      # (shared with retry-sign-release.yml), then prove the image the entry
+      # points at exists, is anonymously pullable, carries the registry
+      # ownership label and answers an MCP initialize. The registry is
+      # immutable per version, so a bad publish cannot be corrected later.
+      - name: Stamp server.json for the tag
         run: |
-          jq --arg v "${{ steps.version.outputs.VERSION }}" '.version = $v' server.json > server.tmp && mv server.tmp server.json
+          scripts/stamp-server-json.sh "${GITHUB_REF_NAME}" server.json > server.tmp && mv server.tmp server.json
+
+      - name: Pre-publish checks (image, label, MCP smoke test)
+        run: scripts/registry-preflight.sh "${GITHUB_REF_NAME}"
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate server.json
 
       - name: Publish to MCP Registry
         run: ./mcp-publisher publish

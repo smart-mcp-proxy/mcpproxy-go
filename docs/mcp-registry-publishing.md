@@ -90,6 +90,44 @@ mcp-publisher status --status deleted \
   io.github.smart-mcp-proxy/mcpproxy-go 0.33.1
 ```
 
+## Packages (what registry-fed catalogs show)
+
+`server.json` carries one `oci` package: the Server-edition image
+`ghcr.io/smart-mcp-proxy/mcpproxy-server`, streamable-HTTP at
+`http://localhost:8080/mcp`. The registry has **no raw-binary package type**
+(`npm`, `pypi`, `nuget`, `cargo`, `oci`, `mcpb` only), so release archives are not
+listed; a Claude Desktop `.mcpb` bundle is a separate follow-up
+(`specs/121-install-surfaces/followup-mcpb.md`).
+
+How it stays correct on every release (Spec 121):
+
+1. `Dockerfile` and the `build-docker` job label the image
+   `io.modelcontextprotocol.server.name=io.github.smart-mcp-proxy/mcpproxy-go`.
+   The registry rejects a package whose image lacks this label, and a version
+   is immutable once published. A Go test (`cmd/release-gate`) keeps
+   `server.json` `name`, the Dockerfile label and the workflow label equal.
+2. `scripts/stamp-server-json.sh vX.Y.Z` sets `.version` (no `v`) and the image
+   tag in the package identifier (with `v`, as the image is tagged).
+   **Both** publishers use it: `release.yml` and `retry-sign-release.yml`.
+3. `scripts/registry-preflight.sh vX.Y.Z` runs before `mcp-publisher publish`:
+   the tag exists and is anonymously pullable, carries the label, and the
+   container started with the exact environment/port `server.json` declares
+   answers an MCP `initialize`. A failure skips the publish (the job is
+   non-blocking) with the cause in the log.
+4. `MCPPROXY_INSTALL_CHANNEL=registry` is declared in the package's
+   `environmentVariables`, so installs started from the registry entry report the
+   `registry` channel in telemetry.
+
+Versions published before the label existed (≤ 0.71.x) stay package-less; the
+first stable release after Spec 121 is the first with a package.
+The image is the Server edition (distroless: no shell, Node or uv), so it cannot
+launch stdio upstreams; the Personal-edition image of Spec 111 will replace it
+in the entry once published.
+
+Local checks: `scripts/stamp-server-json.test.sh`,
+`mcp-publisher validate` on the stamped file, and (needs Docker and a published
+labelled image) `scripts/registry-preflight.sh vX.Y.Z`.
+
 ## What Requires the User
 
 - **Nothing, for the normal release path.** The `mcp-registry` job in [`.github/workflows/release.yml`](../.github/workflows/release.yml) already runs `mcp-publisher login github-oidc` + `mcp-publisher publish` on every tag (`id-token: write`, `continue-on-error: true`). The workflow's repo OIDC identity proves `smart-mcp-proxy` org membership, which owns the `io.github.smart-mcp-proxy` namespace — no secret or interactive login is involved.

@@ -1,0 +1,12 @@
+{
+  "registryType": "oci",
+  "identifier": "ghcr.io/smart-mcp-proxy/mcpproxy-server:v0.0.0",
+  "runtimeHint": "docker",
+  "runtimeArguments": [
+    {"type": "named", "name": "-p", "value": "127.0.0.1:8080:8080"}
+  ],
+  "transport": {"type": "streamable-http", "url": "http://localhost:8080/mcp"},
+  "environmentVariables": [
+    {"name": "MCPPROXY_INSTALL_CHANNEL", "value": "registry"}
+  ]
+}
