@@ -21,14 +21,35 @@ type FeedbackRequest struct {
 }
 
 // FeedbackContext provides automatic system context alongside feedback.
+//
+// The wire shape is a contract with the telemetry worker's /v1/feedback
+// handler, pinned by testdata/feedback_contract.json (see
+// feedback_contract_test.go). Add a field there before adding it here.
 type FeedbackContext struct {
 	Version              string `json:"version"`
 	Edition              string `json:"edition"`
 	OS                   string `json:"os"`
 	Arch                 string `json:"arch"`
+	GoVersion            string `json:"go_version,omitempty"`
 	ServerCount          int    `json:"server_count"`
 	ConnectedServerCount int    `json:"connected_server_count"`
+	ToolCount            int    `json:"tool_count"`
 	RoutingMode          string `json:"routing_mode"`
+	// UptimeMinutes is the daemon's uptime. Omitted from short-lived CLI
+	// submissions, where the process uptime says nothing about the daemon.
+	UptimeMinutes int `json:"uptime_minutes,omitempty"`
+
+	// Everything below is sent only while telemetry is enabled. AnonymousID and
+	// MachineID are the same values the heartbeat reports, so a maintainer can
+	// join a report to its install's telemetry; the worker stores them
+	// privately and never prints them in the public issue. The diagnostics are
+	// the heartbeat's enum-only fields (MCPX_* codes, fixed outcome words).
+	AnonymousID        string               `json:"anonymous_id,omitempty"`
+	MachineID          string               `json:"machine_id,omitempty"`
+	LastStartupOutcome string               `json:"last_startup_outcome,omitempty"`
+	PreviousShutdown   string               `json:"previous_shutdown,omitempty"`
+	LastErrorCode      string               `json:"last_error_code,omitempty"`
+	Diagnostics        *DiagnosticsCounters `json:"diagnostics,omitempty"`
 }
 
 // FeedbackResponse is the response from the telemetry backend.
@@ -116,16 +137,7 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *FeedbackRequest) (*Fe
 		return nil, fmt.Errorf("invalid message: %w", err)
 	}
 
-	// Auto-populate context
-	req.Context.Version = s.version
-	req.Context.Edition = s.edition
-	req.Context.OS = runtime.GOOS
-	req.Context.Arch = runtime.GOARCH
-	if s.stats != nil {
-		req.Context.ServerCount = s.stats.GetServerCount()
-		req.Context.ConnectedServerCount = s.stats.GetConnectedServerCount()
-		req.Context.RoutingMode = s.stats.GetRoutingMode()
-	}
+	req.Context = s.feedbackContext()
 
 	// Marshal and send
 	data, err := json.Marshal(req)
@@ -162,4 +174,41 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *FeedbackRequest) (*Fe
 	}
 
 	return &result, nil
+}
+
+// feedbackContext builds the automatic context for a feedback submission. The
+// telemetry correlation ids and diagnostics are attached only while telemetry
+// is enabled: a user who opted out has not agreed to have a report linked to
+// their install.
+func (s *Service) feedbackContext() FeedbackContext {
+	fc := FeedbackContext{
+		Version:   s.version,
+		Edition:   s.edition,
+		OS:        runtime.GOOS,
+		Arch:      runtime.GOARCH,
+		GoVersion: runtime.Version(),
+	}
+	if s.stats != nil {
+		fc.ServerCount = s.stats.GetServerCount()
+		fc.ConnectedServerCount = s.stats.GetConnectedServerCount()
+		fc.ToolCount = s.stats.GetToolCount()
+		fc.RoutingMode = s.stats.GetRoutingMode()
+		// Runtime stats are wired only inside the daemon, so this is its uptime.
+		fc.UptimeMinutes = int(time.Since(s.startTime).Minutes())
+	}
+
+	if !s.telemetryEnabledLive() {
+		return fc
+	}
+	anonID, _, _, lastStartupOutcome := s.telemetryCursor(s.liveConfig())
+	if anonID == "" {
+		anonID, _ = s.fallbackIdentity()
+	}
+	fc.AnonymousID = anonID
+	fc.MachineID = resolveMachineID()
+	fc.LastStartupOutcome = lastStartupOutcome
+	fc.PreviousShutdown = s.previousShutdown
+	fc.LastErrorCode = s.lastErrorCode()
+	fc.Diagnostics = s.diagnosticsSnapshot()
+	return fc
 }
