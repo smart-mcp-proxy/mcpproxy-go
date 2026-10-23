@@ -72,6 +72,12 @@ type phraseFamily struct {
 	// leadingBoundary marks a pattern whose match begins with a consumed
 	// non-letter boundary character (the non-English families, SEC-01).
 	leadingBoundary bool
+	// trailingBoundary marks a pattern whose match ENDS with a consumed
+	// non-letter boundary character (or the end of text). The Turkish families
+	// (R2-3) need one because Turkish negates with a suffix ("yoksaymaz"), so
+	// the verb must be matched whole; the consumed character is trimmed back
+	// out of the evidence like the leading one.
+	trailingBoundary bool
 	// softReason, when set, explains why this family is review-only by design
 	// (its base sits below the hard floor); it replaces the generic
 	// "quoted/described position" wording in the finding detail.
@@ -544,9 +550,12 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				// match and the position window at the first letter so a quote
 				// right before the phrase still counts as quoting it. Other
 				// families keep their match start exactly as before.
-				start := loc[0]
+				start, end := loc[0], loc[1]
 				if fam.leadingBoundary {
 					start += len(t[loc[0]:loc[1]]) - len(strings.TrimLeftFunc(t[loc[0]:loc[1]], isNotWordRune))
+				}
+				if fam.trailingBoundary {
+					end -= len(t[start:loc[1]]) - len(strings.TrimRightFunc(t[start:loc[1]], isNotWordRune))
 				}
 				conf := fam.base * detect.ClassifyPositionForRecall(t, start).Discount()
 				softReason := fam.softReason
@@ -572,7 +581,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				// prohibition, which stays review-only (SEC-01 corpus bn-r10-1).
 				if ti == mixedIndex && negatedBefore(t, start) && conf > deobfuscatedMaxConfidence {
 					conf = deobfuscatedMaxConfidence
-					softReason = "negated directive written with mixed-script look-alike letters"
+					softReason = "negated directive written with " + mixedFoldWording(tool.RawText())
 				}
 				// A credential-file directive governed by a negation in its own
 				// clause is a prohibition on any view (Sol r15 P2). An
@@ -605,7 +614,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 					if wordStarts == nil || startsText != t {
 						startsText, wordStarts = t, bareWordStarts(t)
 					}
-					if matchJoinsBreak(t, start, loc[1], breakSet, breakWords, wordStarts) {
+					if matchJoinsBreak(t, start, end, breakSet, breakWords, wordStarts) {
 						conf = deobfuscatedMaxConfidence
 						softReason = "the match joins a line that ends with the start of a new sentence on the next line"
 					}
@@ -617,7 +626,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				if !matched || conf > bestConf {
 					matched = true
 					bestConf = conf
-					bestMatch = t[start:loc[1]]
+					bestMatch = t[start:end]
 					bestWhat = fam.what
 					bestThreat = fam.threat
 					bestSoftReason = softReason
@@ -640,7 +649,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		obfuscated = " after de-obfuscation (homoglyphs, leet digits or letter spacing)"
 	}
 	if bestMixed {
-		obfuscated = " once mixed-script look-alike letters (homoglyphs) are folded"
+		obfuscated = " once " + mixedFoldWording(tool.RawText()) + " are folded"
 	}
 
 	// Instruction-position clears the hard floor and auto-quarantine-gates. A
@@ -670,11 +679,25 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	}}
 }
 
+// mixedFoldWording names what the mixed-script view folded in raw, for a
+// finding's detail: look-alike letters when a word really mixes scripts,
+// otherwise the accents that R2-4 strips (the view reports a change for both).
+func mixedFoldWording(raw string) string {
+	if detect.HasMixedScriptWords(raw) {
+		return "mixed-script look-alike letters (homoglyphs)"
+	}
+	return "diacritics on Latin letters"
+}
+
 // breakWord reduces a whitespace-delimited field to the bare word used to
-// compare raw text with the normalized phrase text: normalized, with
-// surrounding punctuation removed.
+// compare raw text with the phrase text: normalized the way the MIXED view is
+// (homoglyphs and Latin diacritics folded, nothing joined), with surrounding
+// punctuation removed. The mixed view is the only view that reaches HARD with
+// such letters, so the raw word stream has to fold them the same way or the
+// line-break cap (#1589) misses every matched word that carries one.
 func breakWord(field string) string {
-	w := strings.TrimFunc(detect.Normalize(field), func(r rune) bool {
+	folded, _ := detect.NormalizeMixedScript(field)
+	w := strings.TrimFunc(folded, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 	return w
@@ -686,7 +709,8 @@ func breakWord(field string) string {
 // that normalizes to nothing contributes no word.
 func breakWords(field string) []string {
 	var out []string
-	for _, w := range strings.Fields(detect.Normalize(field)) {
+	folded, _ := detect.NormalizeMixedScript(field)
+	for _, w := range strings.Fields(folded) {
 		if bw := breakWord(w); bw != "" {
 			out = append(out, bw)
 		}
