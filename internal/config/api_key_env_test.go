@@ -1,12 +1,16 @@
 package config
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
 
 func writeKeyFile(t *testing.T, content string) string {
@@ -14,6 +18,21 @@ func writeKeyFile(t *testing.T, content string) string {
 	path := filepath.Join(t.TempDir(), "api_key")
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 	return path
+}
+
+// writeAPIKeyConfig writes a minimal mcp_config.json whose api_key is apiKey.
+// The JSON is built with encoding/json, never by formatting apiKey into a
+// string: a reference such as ${file:C:\Users\x\key} carries backslashes that
+// a Windows path puts into the document and that must be escaped.
+func writeAPIKeyConfig(t *testing.T, apiKey string) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"listen":     "127.0.0.1:8080",
+		"api_key":    apiKey,
+		"mcpServers": []any{},
+	})
+	require.NoError(t, err)
+	return writeOverrideTestFile(t, string(raw))
 }
 
 // unsetEnv removes name for the test and restores it afterwards (t.Setenv
@@ -265,4 +284,163 @@ func TestLoad_UnusableKeyFileFailsTheLoad(t *testing.T) {
 	_, err := LoadFromFile(path)
 	require.Error(t, err, "a missing key file must stop the load, not fall through to a generated key")
 	assert.Contains(t, err.Error(), EnvAPIKeyFile)
+}
+
+func TestLoad_APIKeyReferenceResolvesAsProcessOverride(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	keyFile := writeKeyFile(t, "ref-secret-key\r\n")
+	ref := "${file:" + keyFile + "}"
+	path := writeAPIKeyConfig(t, ref)
+	unsetEnv(t, EnvAPIKey)
+	t.Setenv(EnvAPIKeyFile, "")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "ref-secret-key", cfg.APIKey, "the process runs with the resolved secret")
+	assert.Contains(t, ProcessOverrideFields(), "api_key")
+
+	key, generated, source, keyErr := cfg.EnsureAPIKey()
+	require.NoError(t, keyErr)
+	assert.Equal(t, "ref-secret-key", key)
+	assert.False(t, generated)
+	assert.Equal(t, APIKeySourceConfig, source)
+
+	// Any save, here one that is about something else, writes the reference
+	// and never the secret.
+	cfg.EnableSocket = !cfg.EnableSocket
+	require.NoError(t, SaveConfig(cfg, path))
+	assert.Equal(t, ref, readJSON(t, path)["api_key"])
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "ref-secret-key")
+}
+
+// PersistableConfig is what a PATCH/PUT of /api/v1/config saves through: the
+// merged config carries the resolved secret, the file must keep the reference.
+func TestPersistableConfig_APIKeyReferenceSurvivesAnUnrelatedEdit(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	keyFile := writeKeyFile(t, "ref-secret-key\n")
+	ref := "${file:" + keyFile + "}"
+	path := writeAPIKeyConfig(t, ref)
+	unsetEnv(t, EnvAPIKey)
+	t.Setenv(EnvAPIKeyFile, "")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+
+	edited := *cfg
+	edited.ToolsLimit = 7
+	persisted := PersistableConfig(&edited, path)
+	assert.Equal(t, ref, persisted.APIKey)
+	assert.Equal(t, 7, persisted.ToolsLimit, "the edit itself is kept")
+}
+
+func TestPersistableConfig_EditingAPIKeyUnderAReferenceIsPersisted(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	keyFile := writeKeyFile(t, "ref-secret-key\n")
+	path := writeAPIKeyConfig(t, "${file:"+keyFile+"}")
+	unsetEnv(t, EnvAPIKey)
+	t.Setenv(EnvAPIKeyFile, "")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+
+	cfg.APIKey = "operator-chose-this"
+	require.NoError(t, SaveConfig(cfg, path))
+	assert.Equal(t, "operator-chose-this", readJSON(t, path)["api_key"], "an edit of the field is the operator's change")
+}
+
+func TestLoad_APIKeyReferenceThatCannotBeResolvedFailsTheLoad(t *testing.T) {
+	cases := map[string]string{
+		"missing file": "${file:" + filepath.Join(t.TempDir(), "missing") + "}",
+		"relative":     "${file:run/secrets/key}",
+		"empty file":   "${file:" + writeKeyFile(t, "\n") + "}",
+		"unknown type": "${nope:thing}",
+	}
+	for name, ref := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Cleanup(ResetProcessOverrides)
+			ResetProcessOverrides()
+			path := writeAPIKeyConfig(t, ref)
+			unsetEnv(t, EnvAPIKey)
+			t.Setenv(EnvAPIKeyFile, "")
+
+			_, err := LoadFromFile(path)
+			require.Error(t, err, "no key may be generated over a reference that does not resolve")
+			assert.Contains(t, err.Error(), "api_key")
+			assert.NotContains(t, err.Error(), ref, "the error never quotes the reference")
+			assert.Equal(t, ref, readJSON(t, path)["api_key"], "the file is untouched")
+		})
+	}
+}
+
+func TestLoad_EnvironmentKeyWinsOverAnAPIKeyReferenceWithoutReadingIt(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	// The referenced file does not exist: with an env key the reference is not
+	// resolved at all, so that is not an error.
+	ref := "${file:" + filepath.Join(t.TempDir(), "missing") + "}"
+	path := writeAPIKeyConfig(t, ref)
+	t.Setenv(EnvAPIKey, "env-key")
+	t.Setenv(EnvAPIKeyFile, "")
+
+	cfg, err := LoadFromFile(path)
+	require.NoError(t, err)
+	key, _, source, keyErr := cfg.EnsureAPIKey()
+	require.NoError(t, keyErr)
+	assert.Equal(t, "env-key", key)
+	assert.Equal(t, APIKeySourceEnvironment, source)
+
+	require.NoError(t, SaveConfig(cfg, path))
+	assert.Equal(t, ref, readJSON(t, path)["api_key"], "the reference is still what is on disk")
+}
+
+// ${file:} works wherever ${env:} does: an upstream server's env, headers, url
+// and args, resolved on a copy so the stored config keeps the reference.
+func TestServerConfig_FileReferencesExpandOnACopy(t *testing.T) {
+	tokenFile := writeKeyFile(t, "upstream-token\n")
+	orig := &ServerConfig{
+		Name:    "gh",
+		URL:     "https://example.test/mcp",
+		Headers: map[string]string{"Authorization": "Bearer ${file:" + tokenFile + "}"},
+		Env:     map[string]string{"GH_TOKEN": "${file:" + tokenFile + "}"},
+		Args:    []string{"--token", "${file:" + tokenFile + "}"},
+	}
+
+	resolved := CopyServerConfig(orig)
+	errs := secret.NewResolver().ExpandStructSecretsCollectErrors(context.Background(), resolved)
+	require.Empty(t, errs)
+
+	assert.Equal(t, "Bearer upstream-token", resolved.Headers["Authorization"])
+	assert.Equal(t, "upstream-token", resolved.Env["GH_TOKEN"])
+	assert.Equal(t, []string{"--token", "upstream-token"}, resolved.Args)
+	assert.Contains(t, orig.Env["GH_TOKEN"], "${file:", "the stored config keeps the reference")
+	assert.Contains(t, orig.Headers["Authorization"], "${file:")
+}
+
+// Both variables set stays an error when api_key is a reference: the reference
+// is not read, and the error is the same fixed text.
+func TestLoad_BothSetFailsTheLoadEvenWithAnAPIKeyReference(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	ref := "${file:" + writeKeyFile(t, "ref-secret-key\n") + "}"
+	path := writeAPIKeyConfig(t, ref)
+	t.Setenv(EnvAPIKey, "env-secret-value-1234")
+	t.Setenv(EnvAPIKeyFile, writeKeyFile(t, "file-secret-value-5678\n"))
+
+	_, err := LoadFromFile(path)
+	require.ErrorIs(t, err, ErrAPIKeyBothSet)
+	assert.NotContains(t, err.Error(), ref)
+	assert.NotContains(t, err.Error(), "ref-secret-key")
+}
+
+// The helper must produce valid JSON for a Windows-style path, which is what
+// the tests above feed it when they run on Windows.
+func TestWriteAPIKeyConfig_EscapesBackslashes(t *testing.T) {
+	ref := `${file:C:\Users\ci\AppData\Local\Temp\key}`
+	path := writeAPIKeyConfig(t, ref)
+	assert.Equal(t, ref, readJSON(t, path)["api_key"])
 }
