@@ -80,8 +80,10 @@ func storedServer(t *testing.T, rt *Runtime, name string) *config.ServerConfig {
 }
 
 // The headline case from the issue: a hand-written entry with NO `quarantined`
-// key and NO `trust_mode`. EffectiveTrustMode() resolves to manual, which the
-// docs publish as "Quarantined for human review".
+// key and NO `trust_mode`. EffectiveTrustMode() resolves to scan (the default,
+// spec 119), which the docs publish as "Quarantined, then a fail-closed
+// automatic TPA scan admits it on a clean verdict" — quarantined on first load
+// either way.
 func TestConfigLoadAdmissionGate_QuarantinesFirstSeenServer(t *testing.T) {
 	rt, cfg := gateEnv(t, []map[string]any{
 		{"name": "handwritten", "command": "./poison", "protocol": "stdio", "enabled": true},
@@ -90,7 +92,7 @@ func TestConfigLoadAdmissionGate_QuarantinesFirstSeenServer(t *testing.T) {
 	require.NoError(t, rt.LoadConfiguredServers(cfg))
 
 	assert.True(t, storedServer(t, rt, "handwritten").Quarantined,
-		"a first-seen config-file server under the default manual trust mode must be quarantined (issue #937)")
+		"a first-seen config-file server under the default (scan) trust mode must be quarantined (issue #937)")
 	assert.True(t, rt.Config().Servers[0].Quarantined,
 		"the PUBLISHED snapshot must agree, or the supervisor will still connect it unquarantined")
 }
