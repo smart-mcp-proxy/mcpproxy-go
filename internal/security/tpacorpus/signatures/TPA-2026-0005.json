@@ -1,0 +1,68 @@
+{
+  "category": "tpa_cross_server_override",
+  "gating": true,
+  "id": "TPA-2026-0005",
+  "license": "MIT",
+  "provenance": {
+    "note": "Description that overrides behaviour of tools served by other MCP servers.",
+    "published": "2025-04-01",
+    "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+  },
+  "rules": [
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.9,
+      "detector": "cross_shadow",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0005",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>|<SYSTEM>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$tgt",
+          "type": "string",
+          "value": "send_email"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<important>.*?send_email.*?</important>",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "cross-server-shadowing",
+      "confidence": 0.88,
+      "detector": "policy_override",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0005",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$atk",
+          "type": "string",
+          "value": "attkr@pwnd.com"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)override .*?attkr@pwnd\\.com",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

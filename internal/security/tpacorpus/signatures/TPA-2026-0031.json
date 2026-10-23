@@ -1,0 +1,65 @@
+{
+  "category": "tpa_conversation_exfil",
+  "gating": true,
+  "id": "TPA-2026-0031",
+  "license": "MIT",
+  "provenance": {
+    "note": "Spellchecker-style tool that fires on a trigger phrase and receives the complete conversation as a parameter.",
+    "published": "2025-04-23",
+    "source": "https://blog.trailofbits.com/2025/04/23/how-mcp-servers-can-steal-your-conversation-history/"
+  },
+  "rules": [
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "trigger_phrase_call_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0031",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:if|whenever|when)\\b[^.\\n]{0,80}?\\b(?:conversation|chat|messages?|prompt|request|input|text|user)\\b[^.\\n]{0,40}?\\b(?:includes?|contains?|mentions?|says?|said|types?|typed|writes?|wrote)\\b[^.\\n]{0,30}?(?:\\bwords?\\b|\\bphrases?\\b|\\bkeywords?\\b|\\bstring\\b|['\\\"`\\x{201C}\\x{2018}])[^.\\n]{0,60}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:call|use|invoke)\\s+this\\s+tool\\s+(?:immediately\\s+|first\\s+)?before\\s+(?:doing\\s+)?(?:anything|any\\s+other|responding|answering).{0,300}?(?:(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:pass|send|provide|supply|include|submit|forward|upload|put|paste)\\b(?:[^\\w.\\n]+(?:a(?:v(?:o(?:i(?:d(?:\\w+)|[^\\Wd]\\w*|)|[^\\Wi]\\w*|)|[^\\Wo]\\w*|)|[^\\Wv]\\w*|)|b(?:e(?:s(?:i(?:d(?:e(?:s(?:\\w+)|[^\\Ws]\\w*|)|[^\\We]\\w*|)|[^\\Wd]\\w*|)|[^\\Wi]\\w*|)|[^\\Ws]\\w*|)|u(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Weu]\\w*|)|e(?:x(?:c(?:e(?:p(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Wp]\\w*|)|l(?:u(?:d(?:e(?:\\w+)|i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wei]\\w*|)|[^\\Wd]\\w*|)|[^\\Wu]\\w*|)|[^\\Wel]\\w*|)|[^\\Wc]\\w*|)|[^\\Wx]\\w*|)|i(?:n(?:s(?:t(?:e(?:a(?:d(?:\\w+)|[^\\Wd]\\w*|)|[^\\Wa]\\w*|)|[^\\We]\\w*|)|[^\\Wt]\\w*|)|[^\\Ws]\\w*|)|[^\\Wn]\\w*|)|m(?:i(?:n(?:u(?:s(?:\\w+)|[^\\Ws]\\w*|)|[^\\Wu]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|n(?:e(?:i(?:t(?:h(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|v(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wiv]\\w*|)|o(?:n(?:e(?:\\w+)|[^\\We]\\w*|)|r(?:\\w+)|t(?:h(?:i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|[^\\Wh]\\w*)|[^\\Wnrt]\\w*)|[^\\Weo]\\w*|)|o(?:m(?:i(?:t(?:t(?:i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|[^\\Wt]\\w*)|[^\\Wt]\\w*|)|[^\\Wi]\\w*|)|[^\\Wm]\\w*|)|r(?:a(?:t(?:h(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|[^\\Wa]\\w*|)|s(?:k(?:i(?:p(?:\\w+)|[^\\Wp]\\w*|)|[^\\Wi]\\w*|)|[^\\Wk]\\w*|)|t(?:h(?:a(?:n(?:\\w+)|[^\\Wn]\\w*|)|[^\\Wa]\\w*|)|[^\\Wh]\\w*)|w(?:i(?:t(?:h(?:o(?:u(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Wu]\\w*|)|[^\\Wo]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|[^\\Wi]\\w*|)|[^\\Wabeimnorstw]\\w*)){0,6}?[^\\w.\\n]+(?:whole|entire|full|complete|all)\\s+(?:the\\s+)?(?:conversation|chat|messages?|history|transcript)|(?:must|should)\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed)\\s+to)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.92,
+      "detector": "full_history_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0031",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)(?:^|[.!?;:\\n]\\s*|\\b(?:and|then|also|always|must|should|please|first)\\s+)(?:pass|provide|send|supply|include|submit|put|paste|upload|forward|attach)\\b(?:[^\\w.\\n]+(?:a(?:v(?:o(?:i(?:d(?:\\w+)|[^\\Wd]\\w*|)|[^\\Wi]\\w*|)|[^\\Wo]\\w*|)|[^\\Wv]\\w*|)|b(?:e(?:s(?:i(?:d(?:e(?:s(?:\\w+)|[^\\Ws]\\w*|)|[^\\We]\\w*|)|[^\\Wd]\\w*|)|[^\\Wi]\\w*|)|[^\\Ws]\\w*|)|u(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Weu]\\w*|)|e(?:x(?:c(?:e(?:p(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Wp]\\w*|)|l(?:u(?:d(?:e(?:\\w+)|i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wei]\\w*|)|[^\\Wd]\\w*|)|[^\\Wu]\\w*|)|[^\\Wel]\\w*|)|[^\\Wc]\\w*|)|[^\\Wx]\\w*|)|i(?:n(?:s(?:t(?:e(?:a(?:d(?:\\w+)|[^\\Wd]\\w*|)|[^\\Wa]\\w*|)|[^\\We]\\w*|)|[^\\Wt]\\w*|)|[^\\Ws]\\w*|)|[^\\Wn]\\w*|)|m(?:i(?:n(?:u(?:s(?:\\w+)|[^\\Ws]\\w*|)|[^\\Wu]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|n(?:e(?:i(?:t(?:h(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|v(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wiv]\\w*|)|o(?:n(?:e(?:\\w+)|[^\\We]\\w*|)|r(?:\\w+)|t(?:h(?:i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|[^\\Wh]\\w*)|[^\\Wnrt]\\w*)|[^\\Weo]\\w*|)|o(?:m(?:i(?:t(?:t(?:i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|[^\\Wt]\\w*)|[^\\Wt]\\w*|)|[^\\Wi]\\w*|)|[^\\Wm]\\w*|)|r(?:a(?:t(?:h(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|[^\\Wa]\\w*|)|s(?:k(?:i(?:p(?:\\w+)|[^\\Wp]\\w*|)|[^\\Wi]\\w*|)|[^\\Wk]\\w*|)|t(?:h(?:a(?:n(?:\\w+)|[^\\Wn]\\w*|)|[^\\Wa]\\w*|)|[^\\Wh]\\w*)|w(?:i(?:t(?:h(?:o(?:u(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Wu]\\w*|)|[^\\Wo]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|[^\\Wi]\\w*|)|[^\\Wabeimnorstw]\\w*)){0,6}?[^\\w.\\n]+(?:entire|complete|full|whole)\\s+(?:conversation|chat)\\s+(?:history\\s+)?(?:including|and)\\b.{0,200}?\\b(?:must\\s+not\\s+be\\s+(?:mentioned|disclosed|revealed)|(?:do\\s+not|don't|never)\\s+(?:mention|tell|disclose|reveal|inform)\\w*\\s+(?:(?:this|it|these|that)\\b|(?:the\\s+)?(?:user|human)\\b))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.86,
+      "detector": "trigger_phrase_consult_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0031",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(?:if|whenever|when)\\b[^.\\n]{0,80}?\\b(?:conversation|chat|messages?|prompt|request|input|text|user)\\b[^.\\n]{0,40}?\\b(?:ever\\s+)?(?:includes?|contains?|mentions?|says?|said|types?|typed|writes?|wrote|has|have)\\b[^.\\n]{0,30}?(?:\\bwords?\\b|\\bphrases?\\b|\\bkeywords?\\b|\\bstring\\b|['\\\"`\\x{201C}\\x{2018}])[^.\\n]{0,100}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:always\\s+)?(?:consult|call|use|invoke|run)\\s+this\\s+tool\\s+(?:first|before\\s+(?:doing\\s+)?(?:anything|any\\s+other|responding|answering|replying)).{0,400}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:pass|send|provide|supply|include|submit|forward|upload|put|paste|hand|give|share)\\b(?:[^\\w.\\n]+(?:a(?:v(?:o(?:i(?:d(?:\\w+)|[^\\Wd]\\w*|)|[^\\Wi]\\w*|)|[^\\Wo]\\w*|)|[^\\Wv]\\w*|)|b(?:e(?:s(?:i(?:d(?:e(?:s(?:\\w+)|[^\\Ws]\\w*|)|[^\\We]\\w*|)|[^\\Wd]\\w*|)|[^\\Wi]\\w*|)|[^\\Ws]\\w*|)|u(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Weu]\\w*|)|e(?:x(?:c(?:e(?:p(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Wp]\\w*|)|l(?:u(?:d(?:e(?:\\w+)|i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wei]\\w*|)|[^\\Wd]\\w*|)|[^\\Wu]\\w*|)|[^\\Wel]\\w*|)|[^\\Wc]\\w*|)|[^\\Wx]\\w*|)|i(?:n(?:s(?:t(?:e(?:a(?:d(?:\\w+)|[^\\Wd]\\w*|)|[^\\Wa]\\w*|)|[^\\We]\\w*|)|[^\\Wt]\\w*|)|[^\\Ws]\\w*|)|[^\\Wn]\\w*|)|m(?:i(?:n(?:u(?:s(?:\\w+)|[^\\Ws]\\w*|)|[^\\Wu]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|n(?:e(?:i(?:t(?:h(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|v(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wiv]\\w*|)|o(?:n(?:e(?:\\w+)|[^\\We]\\w*|)|r(?:\\w+)|t(?:h(?:i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|[^\\Wh]\\w*)|[^\\Wnrt]\\w*)|[^\\Weo]\\w*|)|o(?:m(?:i(?:t(?:t(?:i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|[^\\Wt]\\w*)|[^\\Wt]\\w*|)|[^\\Wi]\\w*|)|[^\\Wm]\\w*|)|r(?:a(?:t(?:h(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|[^\\Wa]\\w*|)|s(?:k(?:i(?:p(?:\\w+)|[^\\Wp]\\w*|)|[^\\Wi]\\w*|)|[^\\Wk]\\w*|)|t(?:h(?:a(?:n(?:\\w+)|[^\\Wn]\\w*|)|[^\\Wa]\\w*|)|[^\\Wh]\\w*)|w(?:i(?:t(?:h(?:o(?:u(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Wu]\\w*|)|[^\\Wo]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|[^\\Wi]\\w*|)|[^\\Wabeimnorstw]\\w*)){0,6}?[^\\w.\\n]+(?:whole|entire|full|complete|all)\\s+(?:the\\s+)?(?:conversation|chat|messages?|history|transcript)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

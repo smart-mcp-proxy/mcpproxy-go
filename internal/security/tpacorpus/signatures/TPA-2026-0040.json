@@ -1,0 +1,74 @@
+{
+  "category": "tpa_payload_execution",
+  "gating": true,
+  "id": "TPA-2026-0040",
+  "license": "MIT",
+  "provenance": {
+    "note": "The description tells the model to decode an embedded base64 string and run the result.",
+    "published": "2025-09-19",
+    "source": "https://www.elastic.co/security-labs/mcp-tools-attack-defense-recommendations"
+  },
+  "rules": [
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.9,
+      "detector": "decode_and_execute",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0040",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$decode",
+          "type": "regex",
+          "value": "decode"
+        },
+        {
+          "context": "tool_description",
+          "id": "$exec",
+          "type": "regex",
+          "value": "execute|run|eval"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?:;\\n]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:base64[- ]?decode|decode|decrypt|unescape|atob)\\b[^.\\n]{0,80}?\\b(?:and|then|before)\\s+(?:(?:immediately|directly|silently|then|also|just|simply|first|automatically|locally|must|should|will)\\s+)*(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|script|(?:result|output|string|text|contents?|it))(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as|locally|directly)\\b|$)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "hidden-instructions",
+      "confidence": 0.88,
+      "detector": "decode_blob_then_run",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0040",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$decode",
+          "type": "regex",
+          "value": "decode"
+        },
+        {
+          "context": "tool_description",
+          "id": "$blob",
+          "type": "regex",
+          "value": "[A-Za-z0-9+/]{32,}={0,2}"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?:;\\n]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:decode|decrypt)\\b[^\\n]{0,100}?(?:^|[^A-Za-z0-9+/])[A-Za-z0-9+/]{40,}={0,2}(?:[^A-Za-z0-9+/]|$).{0,160}?(?:^|[.!?:;\\n]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:(?:you|assistant|agent|model|ai|must|will|shall)\\s+(?:need|needs|have|has)\\s+to|in\\s+order\\s+to|so\\s+as\\s+to)\\s+)(?:(?:immediately|directly|silently|then|also|just|simply|first|automatically|locally|must|should|will)\\s+)*(?:execute|run|eval(?:uate)?)\\s+(?:(?:the|that|this|its|resulting)\\s+){0,2}(?:(?:decoded|resulting)\\s+\\w+|payload|commands?|shellcode|script|(?:result|output|string|text|contents?|it))(?:[.,;:]|\\s+(?:before|immediately|first|silently|without|and|now|then|as|locally|directly)\\b|$)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

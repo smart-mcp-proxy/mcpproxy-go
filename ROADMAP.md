@@ -237,15 +237,13 @@ graph LR
   tpa_db_format --> tpa_db_refresh
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
-  class tpa_db_format,tpa_db_refresh done;
-  class tpa_db_corpus todo;
+  class tpa_db_format,tpa_db_corpus,tpa_db_refresh done;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | Signature DB format + loader (versioned, signed, bundled default) | 🟢 Done | #1701 |
-| Seed corpus: catalog known public TPA campaigns/patterns into the DB | ⚪ Todo | — |
+| Seed corpus: catalog known public TPA campaigns/patterns into the DB | 🟢 Done | #1702 |
 | Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated | 🟢 Done | #1720 |
 
 </details>
@@ -1008,7 +1006,7 @@ graph LR
 | Web UI + macOS app UX audit | In progress | P0 | — |  |  |
 | Release qualification gate (auto-QA matrix blocks the tag) | In progress | P0 | 4/4 (100%) | [081-release-qa-gate](./specs/081-release-qa-gate/) |  |
 | Action log / transparency — info at a glance | In progress | P1 | — |  |  |
-| tpa-db: versioned TPA signature database for the offline scanner | In progress | P1 | 81/81 (100%) | [101-tpa-db](./specs/101-tpa-db/) |  |
+| tpa-db: versioned TPA signature database for the offline scanner | In progress | P1 | 117/117 (100%) | [101-tpa-db](./specs/101-tpa-db/) |  |
 | Token-efficiency benchmark: measured savings, published results | In progress | P1 | 62/64 (97%) | [103-token-bench](./specs/103-token-bench/) |  |
 | Telemetry identity & data quality (machine_id + CI-filter hardening) | In progress | P1 | — |  |  |
 | Telemetry v7: honest funnel + churn instrumentation | In progress | P1 | — | [080-telemetry-v7-churn](./specs/080-telemetry-v7-churn/) |  |
@@ -1158,7 +1156,7 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [098-tools-preflight](./specs/098-tools-preflight/) | `in-flight` | 28/33 (85%) |
 | [099-describe-check-mode](./specs/099-describe-check-mode/) | `in-flight` | 9/10 (90%) |
 | [100-prompt-rugpull-baseline](./specs/100-prompt-rugpull-baseline/) | — | — |
-| [101-tpa-db](./specs/101-tpa-db/) | `shipped` | 81/81 (100%) |
+| [101-tpa-db](./specs/101-tpa-db/) | `shipped` | 117/117 (100%) |
 | [102-schema-deferred](./specs/102-schema-deferred/) | `shipped` | 89/89 (100%) |
 | [103-token-bench](./specs/103-token-bench/) | `shipped` | 62/64 (97%) |
 | [104-auto-routing-mode](./specs/104-auto-routing-mode/) | — | — |

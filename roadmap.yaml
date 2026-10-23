@@ -354,7 +354,8 @@ epics:
         depends_on: []
       - id: tpa-db-corpus
         title: "Seed corpus: catalog known public TPA campaigns/patterns into the DB"
-        status: todo
+        status: done
+        pr: "#1702"
         depends_on: [tpa-db-format]
       - id: tpa-db-refresh
         title: "Out-of-band refresh (offline-friendly: manual file drop + optional fetch), eval-gated"
