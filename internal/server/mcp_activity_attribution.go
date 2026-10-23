@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 
+	mcpserver "github.com/mark3labs/mcp-go/server"
+
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
@@ -94,5 +96,28 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 			}
 		}
 	}
+
+	// Spec 058 US3 (T033): a 2026-07-28 request never ran initialize, so no
+	// session knows its client — its session id is "" over Streamable HTTP,
+	// or a transport constant the handshake never named. The identity travels
+	// on the request itself (research D5), stamped by mcp-go before any hook
+	// or handler runs. Still advisory, exactly like the initialize-time name.
+	if attr.ClientName == "" {
+		if name, version := requestClientInfo(ctx); name != "" {
+			attr.ClientName = name
+			attr.ClientVersion = version
+		}
+	}
 	return attr
+}
+
+// requestClientInfo returns the client name and version a modern (2026-07-28)
+// request declared in its _meta, or empty strings for a legacy request or a
+// modern one that declared none.
+func requestClientInfo(ctx context.Context) (name, version string) {
+	info := mcpserver.RequestProtocolInfoFromContext(ctx)
+	if info == nil || !info.Modern || info.ClientInfo == nil {
+		return "", ""
+	}
+	return info.ClientInfo.Name, info.ClientInfo.Version
 }

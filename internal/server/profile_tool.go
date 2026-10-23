@@ -89,10 +89,10 @@ func setProfileRefusal(ctx context.Context, slug string) *mcp.CallToolResult {
 func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	slug := strings.TrimSpace(request.GetString("profile", ""))
 
-	sessionID := sessionIDFromContext(ctx)
-	if sessionID == "" {
-		return mcp.NewToolResultError("set_profile requires an active MCP session; no session id is bound to this request"), nil
-	}
+	// The session guard runs AFTER slug validation below (Spec 058 US3, T026):
+	// an unknown slug is refused as unknown in both eras, so a modern client
+	// is not handed a /mcp/p/<slug> URL for a profile that does not exist, and
+	// the refusal wording never reveals which guard fired first.
 
 	// One (index, snapshot) pair for the whole call: admission, the stored
 	// selection's server list and the effective scope all read cfg, the
@@ -154,6 +154,19 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		}
 	}
 
+	// Spec 058 US3 (FR-011): a 2026-07-28 request has no session to bind a
+	// selection to. The transport's session id is no guide — it is "" over
+	// Streamable HTTP but the constant "stdio" on stdio — so the gate is the
+	// era itself, and the answer names the per-request form the caller can
+	// use instead. Nothing is stored.
+	if mcpserver.IsModernRequest(ctx) {
+		return mcp.NewToolResultError(setProfileModernGuidance(slug)), nil
+	}
+	sessionID := sessionIDFromContext(ctx)
+	if sessionID == "" {
+		return mcp.NewToolResultError("set_profile requires an active MCP session; no session id is bound to this request"), nil
+	}
+
 	p.sessionStore.SetActiveProfile(sessionID, slug)
 	if slug == "" && anonymousBindingGuard {
 		// Clearing is always admitted (FR-018), but the guarded anonymous
@@ -206,6 +219,21 @@ func (p *MCPProxyServer) handleSetProfile(ctx context.Context, request mcp.CallT
 		allowed = ac.AllowedServers
 	}
 	return setProfileResult(slug, profiles.EffectiveServersFor(effectiveProfileName, allowed))
+}
+
+// setProfileModernGuidance is the set_profile refusal for a request in the
+// 2026-07-28 era (Spec 058 US3). It is deliberately machine-actionable: it
+// names the exact per-request endpoint for the validated slug, so an agent
+// can act on it without a human translating "no session" into a URL. slug is
+// already validated (or empty for a clear) when this is rendered.
+func setProfileModernGuidance(slug string) string {
+	target := "/mcp/p/<slug>"
+	if slug != "" {
+		target = "/mcp/p/" + slug
+	}
+	return fmt.Sprintf("set_profile cannot persist a selection on a %s request: that protocol revision has no session to bind it to. "+
+		"Select the profile per request instead by connecting to %s (the URL form applies to every request on that endpoint).",
+		mcp.LATEST_PROTOCOL_VERSION, target)
 }
 
 // profileServersIn renders the pre-105 set_profile server list for a stored
