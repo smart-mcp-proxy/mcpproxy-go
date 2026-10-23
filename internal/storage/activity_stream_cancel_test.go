@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 	"go.uber.org/zap"
 )
 
@@ -95,23 +96,68 @@ func TestStreamActivities_CancelReleasesReadTransaction(t *testing.T) {
 	}
 }
 
-// A consumer that walks away WITHOUT cancelling still leaks the transaction
-// (that is the contract: the context is the release). This guards the test
-// above against passing vacuously if the buffer ever grows past the seed.
-func TestStreamActivities_AbandonedWithoutCancelHoldsTransaction(t *testing.T) {
+// A consumer that stops reading WITHOUT cancelling (an export to an HTTP
+// client that keeps the connection open but no longer reads) must not pin a
+// read transaction either: the producer parks on the channel send outside
+// db.View (#1742).
+func TestStreamActivities_StalledConsumerHoldsNoTransaction(t *testing.T) {
 	manager := newStreamTestManager(t)
 	seedStreamRecords(t, manager, 300)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	ch := manager.StreamActivities(ctx, ActivityFilter{Types: []string{string(ActivityTypeToolCall)}})
 	_, ok := <-ch
 	require.True(t, ok)
 
 	time.Sleep(200 * time.Millisecond)
-	require.Equal(t, 1, manager.GetDB().Stats().OpenTxN, "producer should be parked on a full channel inside db.View")
+	require.Equal(t, 0, manager.GetDB().Stats().OpenTxN, "producer must not hold a read transaction while blocked on a send")
 
 	cancel()
-	waitForOpenTx(t, manager, 0)
+	closeWithin(t, manager, 5*time.Second)
+}
+
+// The #1742 hang: a stalled stream plus a write that must grow (remap) the
+// file. With the read transaction held across the send, the writer waits for
+// the mmap lock for ever and every later reader queues behind it.
+func TestStreamActivities_StalledConsumerDoesNotBlockRemap(t *testing.T) {
+	manager := newStreamTestManager(t)
+	seedStreamRecords(t, manager, 300)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := manager.StreamActivities(ctx, ActivityFilter{Types: []string{string(ActivityTypeToolCall)}})
+	_, ok := <-ch
+	require.True(t, ok)
+	time.Sleep(100 * time.Millisecond) // let the producer fill the buffer and park
+
+	db := manager.GetDB()
+	grow := make([]byte, 16<<20) // larger than the current mmap: forces a remap
+	done := make(chan error, 1)
+	go func() {
+		done <- db.Update(func(tx *bbolt.Tx) error {
+			b, err := tx.CreateBucketIfNotExists([]byte("remap-probe"))
+			if err != nil {
+				return err
+			}
+			return b.Put([]byte("k"), grow)
+		})
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		cancel() // unwedge the writer so the package run can finish
+		<-done
+		t.Fatal("a write needing a remap blocked behind a stalled activity stream")
+	}
+
+	// The stream resumes where it stopped and loses nothing across batches.
+	n := 1
+	for range ch {
+		n++
+	}
+	require.Equal(t, 300, n, "stream must deliver every record across batches")
 	closeWithin(t, manager, 5*time.Second)
 }
 
@@ -142,6 +188,48 @@ func TestStreamActivities_LiveContextStreamsAll(t *testing.T) {
 		n++
 	}
 	require.Equal(t, 250, n)
+	waitForOpenTx(t, manager, 0)
+	closeWithin(t, manager, 5*time.Second)
+}
+
+// Offset, limit and order hold across batch boundaries, and a filter that
+// matches rarely still finds every match past the per-transaction scan cap.
+func TestStreamActivities_BatchBoundaries(t *testing.T) {
+	manager := newStreamTestManager(t)
+	const total = 2500 // > streamScanPerTx, > several streamBatchSize
+	seedStreamRecords(t, manager, total)
+
+	collect := func(f ActivityFilter) []string {
+		var ids []string
+		for rec := range manager.StreamActivities(context.Background(), f) {
+			ids = append(ids, rec.ID)
+		}
+		return ids
+	}
+	id := func(i int) string { return fmt.Sprintf("stream-cancel-%04d", i) }
+
+	all := collect(ActivityFilter{})
+	require.Len(t, all, total)
+	for i, got := range all {
+		require.Equal(t, id(total-1-i), got, "newest first, no gaps or repeats")
+	}
+
+	page := collect(ActivityFilter{Offset: 150, Limit: 230})
+	require.Len(t, page, 230)
+	require.Equal(t, id(total-1-150), page[0])
+	require.Equal(t, id(total-1-150-229), page[229])
+
+	// One match near each end of a 2500-key walk: the scan cap must not end
+	// the stream early.
+	sparse := collect(ActivityFilter{Types: []string{string(ActivityTypeToolCall)}, RequestID: "none"})
+	require.Empty(t, sparse)
+	require.NoError(t, manager.SaveActivity(&ActivityRecord{
+		ID: "oldest-match", Type: ActivityTypeToolCall, ServerName: "rare", ToolName: "t",
+		Status: ActivityStatusSuccess, Timestamp: time.Now().UTC().Add(-2 * time.Hour),
+	}))
+	rare := collect(ActivityFilter{Server: "rare"})
+	require.Equal(t, []string{"oldest-match"}, rare)
+
 	waitForOpenTx(t, manager, 0)
 	closeWithin(t, manager, 5*time.Second)
 }
