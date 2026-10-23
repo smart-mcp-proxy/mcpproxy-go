@@ -512,7 +512,7 @@ func (mm *MetricsManager) RecordQuarantineEvent(scope, action string) {
 }
 
 // RecordToolCallRejected counts one call shed by a concurrency limiter (spec
-// 093 FR-013). reason is queue_full | queue_timeout; scope is server | global.
+// 093 FR-013). reason is queue_full | queue_timeout | rate_limited; scope is server | global | token.
 // server is the call's TARGET even for a global shed — a rejection an operator
 // cannot attribute to a workload is not actionable.
 func (mm *MetricsManager) RecordToolCallRejected(server, reason, scope string) {

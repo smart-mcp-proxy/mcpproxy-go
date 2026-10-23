@@ -3,6 +3,7 @@ package limiter
 import (
 	"errors"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -14,6 +15,8 @@ const (
 	ScopeServer Scope = "server"
 	// ScopeGlobal is the proxy-wide aggregate limiter.
 	ScopeGlobal Scope = "global"
+	// ScopeToken is a per-agent-token call budget (issue #1699).
+	ScopeToken Scope = "token"
 )
 
 // Reason is the stable machine-readable cause of a rejection (FR-012).
@@ -28,6 +31,10 @@ const (
 	// ReasonServerUnavailable means the target server was disabled, quarantined
 	// or removed while the call was queued (or just before it enqueued).
 	ReasonServerUnavailable Reason = "server_unavailable"
+	// ReasonRateLimited means the calling agent token used up its call budget
+	// (rate_limit / agent_token_rate_limit). The call was refused before it
+	// queued for a concurrency slot and never reached the upstream.
+	ReasonRateLimited Reason = "rate_limited"
 )
 
 // Sentinel errors for errors.Is matching at the shed-semantics seams (MCP
@@ -42,6 +49,9 @@ var (
 	// ErrServerUnavailable matches a rejection caused by the target server being
 	// disabled/quarantined/removed (FR-009).
 	ErrServerUnavailable = errors.New("concurrency limit: server unavailable")
+	// ErrRateLimited matches a call refused because its agent token is over its
+	// call budget.
+	ErrRateLimited = errors.New("rate limit: token over its call budget")
 )
 
 // LimitError is the typed rejection identity that must survive end-to-end
@@ -56,10 +66,34 @@ type LimitError struct {
 	Server     string
 	Limit      int
 	RetryAfter time.Duration
+	// Burst is the bucket size of a ScopeToken rejection (0 for the other
+	// scopes, and for a token whose burst equals its per-minute rate).
+	Burst int
+}
+
+// Shed reports whether the call was refused by a limit (queue full, queue
+// timeout or the token's call budget) rather than because the server went
+// away. Every dispatch path answers a shed the same way — a retry-friendly
+// error result, or 429 with Retry-After — and the admission observer has
+// already written the call's "rejected" record.
+func (e *LimitError) Shed() bool {
+	if e == nil {
+		return false
+	}
+	switch e.Reason {
+	case ReasonQueueFull, ReasonQueueTimeout, ReasonRateLimited:
+		return true
+	default:
+		return false
+	}
 }
 
 func (e *LimitError) Error() string {
 	switch {
+	case e.Reason == ReasonRateLimited:
+		// One wording everywhere (MCP result, REST body, activity record, the
+		// text a sandboxed script sees): it already carries the retry hint.
+		return e.UserMessage()
 	case e.Reason == ReasonServerUnavailable:
 		if e.Server != "" {
 			return fmt.Sprintf("upstream %q is not available (disabled, quarantined or removed)", e.Server)
@@ -91,6 +125,19 @@ func (e *LimitError) UserMessage() string {
 	if e.Reason == ReasonServerUnavailable {
 		return e.Error()
 	}
+	if e.Reason == ReasonRateLimited {
+		secs := int(math.Ceil(e.RetryAfter.Seconds()))
+		if secs < 1 {
+			secs = 1
+		}
+		unit := "seconds"
+		if secs == 1 {
+			unit = "second"
+		}
+		return fmt.Sprintf(
+			"Rate limit reached: this agent token may make %d tool calls per minute%s and has used its allowance. Retry in %d %s.",
+			e.Limit, e.burstClause(), secs, unit)
+	}
 
 	cause := "its wait queue is full"
 	if e.Reason == ReasonQueueTimeout {
@@ -107,7 +154,16 @@ func (e *LimitError) UserMessage() string {
 		e.Server, e.Limit, cause, RetryAdvice)
 }
 
-// Is makes errors.Is(err, ErrQueueFull|ErrQueueTimeout|ErrServerUnavailable)
+// burstClause renders the bucket size when it differs from the per-minute
+// rate, e.g. " (bursts of up to 5)".
+func (e *LimitError) burstClause() string {
+	if e.Burst > 0 && e.Burst != e.Limit {
+		return fmt.Sprintf(" (bursts of up to %d)", e.Burst)
+	}
+	return ""
+}
+
+// Is makes errors.Is(err, ErrQueueFull|ErrQueueTimeout|ErrServerUnavailable|ErrRateLimited)
 // work against the typed error.
 func (e *LimitError) Is(target error) bool {
 	switch target {
@@ -117,6 +173,8 @@ func (e *LimitError) Is(target error) bool {
 		return e.Reason == ReasonQueueTimeout
 	case ErrServerUnavailable:
 		return e.Reason == ReasonServerUnavailable
+	case ErrRateLimited:
+		return e.Reason == ReasonRateLimited
 	default:
 		return false
 	}

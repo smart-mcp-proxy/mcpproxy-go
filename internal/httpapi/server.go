@@ -5619,7 +5619,7 @@ func (s *Server) maskToolCallRecord(record *contracts.ToolCallRecord) {
 // @Failure      400      {object}  contracts.ErrorResponse             "Tool call ID required or invalid JSON payload"
 // @Failure      401      {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
 // @Failure      405      {object}  contracts.ErrorResponse             "Method not allowed"
-// @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit (Retry-After header carries the wait hint)"
+// @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure      500      {object}  contracts.ErrorResponse             "Failed to replay tool call"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
@@ -5675,8 +5675,7 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 		// and certainly not the 200 success:true it used to produce when the
 		// rejection was flattened into the record's error field.
 		var limitErr *limiter.LimitError
-		if errors.As(err, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(err, &limitErr) && limitErr.Shed() {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
 			s.logger.Warnw("Tool call replay shed by concurrency limiter",
 				"id", id,
@@ -6265,7 +6264,7 @@ func deepMergeJSON(base, patch map[string]interface{}) {
 // @Param request body object{tool_name=string,arguments=object} true "Tool call request with tool name and arguments"
 // @Success 200 {object} contracts.SuccessResponse "Tool call result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (invalid payload or missing tool name)"
-// @Failure 429 {object} contracts.ErrorResponse "Shed by a concurrency limit (Retry-After header carries the wait hint)"
+// @Failure 429 {object} contracts.ErrorResponse "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error or tool execution failure"
 // @Router /api/v1/tools/call [post]
 func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
@@ -6318,8 +6317,7 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 		// server fault — answer 429 with a Retry-After derived from the shedding
 		// scope's effective queue_timeout so a client can back off correctly.
 		var limitErr *limiter.LimitError
-		if errors.As(err, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(err, &limitErr) && limitErr.Shed() {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
 			s.logger.Warnw("Tool call shed by concurrency limiter",
 				"tool", request.ToolName,

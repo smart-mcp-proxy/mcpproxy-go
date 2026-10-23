@@ -79,6 +79,7 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Features
 
+- **agent tokens: per-token call rate limit (#1699).** Cap how many upstream tool calls one agent token may make per minute, so a runaway agent loop cannot burn through an upstream's quota. Off by default. `agent_token_rate_limit` (`per_minute`, optional `burst`) sets a default for every agent token and is live-reloadable; `mcpproxy token create --rate-limit N [--rate-burst M]` (or `rate_limit` on `POST /api/v1/tokens`) gives one token its own budget, and `--rate-limit 0` exempts it. It is enforced where the concurrency limits are, so it covers `call_tool_*`, direct routing mode, `code_execution` and the REST tool-call endpoint, and never applies to the admin API key or unauthenticated local callers. A refused call never reaches the upstream: MCP callers get an error result, REST callers get `429` with `Retry-After`, the activity log records a `tool_call` with status `rejected`, reason `rate_limited` and the token's name, and `mcpproxy_tool_calls_rejected_total` counts it with `reason="rate_limited"`, `scope="token"`. The audit-line `reason` vocabulary gains `rate_limited`. Buckets are in memory, so a restart refills them.
 - **profiles:** `mcpproxy access suggest` turns the calls your profiles blocked into reviewed profile
   changes (#1700). It reads the profile refusals in the audit log (`--since`, default 24h), groups them
   by profile, tool and block reason, re-checks each group with the access explainer so tools that are

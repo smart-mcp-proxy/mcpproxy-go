@@ -1301,12 +1301,11 @@ func (u *upstreamToolCaller) emitSubCallRefused(ctx context.Context, serverName,
 
 // shedHasCanonicalRecord reports whether callErr is a limiter shed the
 // admission observer already recorded (managed.reportRejection forwards only
-// queue_full/queue_timeout; server_unavailable travels the ordinary error path
-// and has no canonical record).
+// queue_full/queue_timeout/rate_limited; server_unavailable travels the
+// ordinary error path and has no canonical record).
 func shedHasCanonicalRecord(callErr error) bool {
 	var limitErr *limiter.LimitError
-	return errors.As(callErr, &limitErr) &&
-		(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout)
+	return errors.As(callErr, &limitErr) && limitErr.Shed()
 }
 
 // subCallActivityOutcome classifies one sandboxed sub-call for the activity log
