@@ -317,6 +317,26 @@ transmissible if telemetry is re-enabled later.
 session id, the number of tools in the response, or any part of the suggestion
 string the agent saw.
 
+## Feedback submissions
+
+`mcpproxy feedback` and the Web UI feedback page send feedback through the same
+path. Each submission files a public GitHub issue on
+`smart-mcp-proxy/mcpproxy-go` containing your message and this context:
+version, edition, OS/arch, Go version, server and tool counts, routing mode and
+(from the running daemon) uptime.
+
+While telemetry is enabled, the submission also carries the same
+`anonymous_id` and `machine_id` the heartbeat reports, plus the heartbeat's
+enum-only diagnostics (`last_startup_outcome`, `previous_shutdown`,
+`last_error_code`, and the `MCPX_*` error-code counts). That lets a maintainer
+match a report to your install's telemetry. The ids and your optional email are
+stored privately by the telemetry service (pruned after 180 days) and never
+appear in the public issue; the issue shows only a reference such as
+`fb-123`. With telemetry disabled, the ids and diagnostics are not sent.
+
+The wire format is pinned by `internal/telemetry/testdata/feedback_contract.json`,
+which the telemetry worker keeps a copy of.
+
 ## One-time opt-out signal
 
 When telemetry transitions from **enabled to disabled** (via the CLI, the config
