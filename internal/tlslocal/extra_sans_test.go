@@ -166,13 +166,21 @@ func TestExtraSANsRegenerateLeafFromSameCA(t *testing.T) {
 		}
 	})
 
-	t.Run("no extra SANs leaves the leaf alone", func(t *testing.T) {
+	t.Run("emptying the list drops the extra names", func(t *testing.T) {
+		cfg, err := EnsureServerTLSConfig(Options{Dir: dir})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := "dns:localhost,ip:127.0.0.1,ip:::1"
+		if got := strings.Join(sansOf(leafOf(t, cfg)), ","); got != want {
+			t.Errorf("SANs after emptying extra_sans = %s, want %s", got, want)
+		}
 		before := readFile(t, filepath.Join(dir, "localhost.pem"))
 		if _, err := EnsureServerTLSConfig(Options{Dir: dir}); err != nil {
 			t.Fatal(err)
 		}
 		if !bytes.Equal(before, readFile(t, filepath.Join(dir, "localhost.pem"))) {
-			t.Error("default behaviour rewrote an existing leaf")
+			t.Error("a plain localhost leaf was rewritten on a restart without extra_sans")
 		}
 	})
 

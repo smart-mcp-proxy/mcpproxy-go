@@ -1142,7 +1142,7 @@ The generated server certificate is valid for `localhost`, `127.0.0.1` and `::1`
 ```
 
 - Each entry is a host name or an IP address. Wildcards (`*.example.com`), URLs, ports and empty entries are refused at startup with an error that names the entry. Host names are lower-cased; non-ASCII names must be given in punycode.
-- When `localhost.pem` does not carry exactly `localhost`, `127.0.0.1`, `::1` and the listed names, it is replaced with a new certificate and key signed by the **same** CA. `ca.pem` and `ca.key` are never regenerated, so clients that trust `ca.pem` (`mcpproxy trust-cert`, `NODE_EXTRA_CA_CERTS`) keep working with no new step. A restart with an unchanged list rewrites nothing.
+- When `localhost.pem` does not carry exactly `localhost`, `127.0.0.1`, `::1` and the listed names, it is replaced with a new certificate and key signed by the **same** CA. `ca.pem` and `ca.key` are never regenerated, so clients that trust `ca.pem` (`mcpproxy trust-cert`, `NODE_EXTRA_CA_CERTS`) keep working with no new step. A restart with an unchanged list rewrites nothing, and emptying the list replaces it with a plain `localhost` certificate (one the local CA did not sign is left as it is).
 - With an empty list an existing `localhost.pem` is used as it is. If `localhost.pem` was not issued by the local CA and does not carry the listed names (for example one you placed there by hand), startup stops instead of overwriting it; use `cert_file` and `key_file` for such a certificate.
 - The new certificate is valid for one year from the day it is written. There is no automatic renewal.
 - Environment variable: `MCPPROXY_TLS_EXTRA_SANS` (comma-separated).

@@ -80,7 +80,7 @@ func EnsureServerTLSConfig(opts Options) (*tls.Config, error) {
 		}
 	} else {
 		regen := !exists(srvCrt) || !exists(srvKey)
-		if !regen && len(extraDNS)+len(extraIPs) > 0 {
+		if !regen {
 			regen, err = serverCertNeedsRegen(srvCrt, caCrt, extraDNS, extraIPs)
 			if err != nil {
 				return nil, err
@@ -140,10 +140,17 @@ func loadProvidedKeyPair(certFile, keyFile string) (tls.Certificate, error) {
 // the extra names. A certificate that already does is left alone, so a restart
 // with an unchanged list rewrites nothing. A certificate with other names that
 // the local CA did not sign is not overwritten: it is most likely one the
-// operator put there, so the error points at tls.cert_file instead.
+// operator put there, so the error points at tls.cert_file instead. With no
+// extra names such a certificate is served as it is, as before extra_sans
+// existed; a local-CA leaf that still carries names removed from the list is
+// replaced by a plain localhost one.
 func serverCertNeedsRegen(srvCrt, caCrt string, extraDNS []string, extraIPs []net.IP) (bool, error) {
+	noExtras := len(extraDNS)+len(extraIPs) == 0
 	leaf, err := readCert(srvCrt)
 	if err != nil {
+		if noExtras {
+			return false, nil
+		}
 		return false, err
 	}
 	want := sanSet(append(append([]string{}, defaultDNSNames...), extraDNS...), append(append([]net.IP{}, defaultIPs...), extraIPs...))
@@ -152,9 +159,15 @@ func serverCertNeedsRegen(srvCrt, caCrt string, extraDNS []string, extraIPs []ne
 	}
 	ca, err := readCert(caCrt)
 	if err != nil {
+		if noExtras {
+			return false, nil
+		}
 		return false, err
 	}
 	if err := leaf.CheckSignatureFrom(ca); err != nil {
+		if noExtras {
+			return false, nil
+		}
 		return false, fmt.Errorf("%s was not issued by the local CA and does not carry tls.extra_sans; "+
 			"set tls.cert_file and tls.key_file to serve it, or remove %s and its key to have a new one generated", srvCrt, srvCrt)
 	}
