@@ -429,7 +429,7 @@ func printCatalogTable(formatter clioutput.OutputFormatter, results []registries
 		if r.FromCache {
 			source += " (cached)"
 		}
-		rows = append(rows, []string{source, r.ID, truncateCell(r.Title, 40), r.Transport, added})
+		rows = append(rows, []string{source, sanitizeCell(r.ID, 0), sanitizeDescriptionCell(r.Title, 40), sanitizeCell(r.Transport, 0), added})
 	}
 	out, err := formatter.FormatTable(headers, rows)
 	if err == nil {
@@ -440,28 +440,30 @@ func printCatalogTable(formatter clioutput.OutputFormatter, results []registries
 
 func renderCatalogShow(formatter clioutput.OutputFormatter, result registries.CatalogResult) error {
 	if _, isTable := formatter.(*clioutput.TableFormatter); isTable {
-		fmt.Printf("%s\n", result.Title)
-		fmt.Printf("  ref:         %s/%s\n", result.Source, result.ID)
+		// Every string below comes from a remote registry; escape it like
+		// upstream tool text so it cannot drive the terminal (GH #938).
+		fmt.Printf("%s\n", sanitizeDescriptionCell(result.Title, 0))
+		fmt.Printf("  ref:         %s/%s\n", result.Source, sanitizeCell(result.ID, 0))
 		if result.Publisher != "" {
-			fmt.Printf("  publisher:   %s\n", result.Publisher)
+			fmt.Printf("  publisher:   %s\n", sanitizeCell(result.Publisher, 0))
 		}
 		fmt.Printf("  official:    %v\n", result.Official)
 		fmt.Printf("  verified:    %v\n", result.Verified)
-		fmt.Printf("  transport:   %s\n", result.Transport)
+		fmt.Printf("  transport:   %s\n", sanitizeCell(result.Transport, 0))
 		if result.Install.URL != "" {
-			fmt.Printf("  install url: %s\n", result.Install.URL)
+			fmt.Printf("  install url: %s\n", sanitizeCell(result.Install.URL, 0))
 		} else {
-			fmt.Printf("  install cmd: %s %s\n", result.Install.Command, strings.Join(result.Install.Args, " "))
+			fmt.Printf("  install cmd: %s\n", sanitizeCell(strings.Join(append([]string{result.Install.Command}, result.Install.Args...), " "), 0))
 		}
 		if result.Description != "" {
-			fmt.Printf("  description: %s\n", result.Description)
+			fmt.Printf("  description: %s\n", sanitizeDescriptionCell(result.Description, 0))
 		}
 		for _, in := range result.RequiredInputs {
 			secret := ""
 			if in.SecretLike {
 				secret = " (secret)"
 			}
-			fmt.Printf("  requires:    %s%s\n", in.Name, secret)
+			fmt.Printf("  requires:    %s%s\n", sanitizeCell(in.Name, 0), secret)
 		}
 		fmt.Printf("  added:       %v\n", result.Added)
 		return nil
