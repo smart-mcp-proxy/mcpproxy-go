@@ -393,6 +393,21 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 	return append(shellArgs, "--cidfile", cidFile)
 }
 
+// isDockerRunCommand reports whether a configured command is a user-supplied
+// `docker run`. The command may be bare or a path in either separator style,
+// and may carry the Windows .exe suffix (case-insensitive, as Windows lookup is).
+func isDockerRunCommand(command string, args []string) bool {
+	if len(args) == 0 || args[0] != cmdRun {
+		return false
+	}
+	base := command
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.ToLower(base)
+	return base == cmdDocker || base == cmdDocker+".exe"
+}
+
 // extractContainerNameFromArgs extracts the container name from Docker run arguments
 func (c *Client) extractContainerNameFromArgs(dockerArgs []string) string {
 	// Look for --name flag in the arguments
