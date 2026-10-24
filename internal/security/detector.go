@@ -1,6 +1,7 @@
 package security
 
 import (
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -344,6 +345,11 @@ func buildCustomPattern(cp config.CustomPattern) *Pattern {
 
 	// Set pattern (regex or keywords)
 	if cp.Regex != "" {
+		// Config is user-edited and not validated on load; an invalid regex
+		// must drop this one pattern, not panic in WithRegex's MustCompile.
+		if _, err := regexp.Compile(cp.Regex); err != nil {
+			return nil
+		}
 		builder.WithRegex(cp.Regex)
 	} else if len(cp.Keywords) > 0 {
 		builder.WithKeywords(cp.Keywords...)
