@@ -188,12 +188,14 @@ func (m *ServerEditionAuthMiddleware) authenticateFromSession(r *http.Request) (
 // Authorization header and returns an AuthContext if successful.
 // Returns (nil, nil) if no Bearer token is present.
 func (m *ServerEditionAuthMiddleware) authenticateFromBearer(r *http.Request) (*coreauth.AuthContext, error) {
+	// The auth-scheme name is case-insensitive (RFC 7235 §2.1).
 	authHeader := r.Header.Get("Authorization")
-	if !strings.HasPrefix(authHeader, "Bearer ") {
+	const scheme = "Bearer "
+	if len(authHeader) < len(scheme) || !strings.EqualFold(authHeader[:len(scheme)], scheme) {
 		return nil, nil
 	}
 
-	token := strings.TrimPrefix(authHeader, "Bearer ")
+	token := authHeader[len(scheme):]
 	if token == "" {
 		return nil, nil
 	}
