@@ -482,6 +482,15 @@ func TestBuildRFC8414MetadataURLs(t *testing.T) {
 			},
 		},
 		{
+			name:          "URL with path and query string",
+			authServerURL: "https://host.example.com/mcp?token=abc",
+			expectedURLs: []string{
+				"https://host.example.com/.well-known/oauth-authorization-server/mcp",
+				"https://host.example.com/mcp/.well-known/oauth-authorization-server",
+				"https://host.example.com/.well-known/oauth-authorization-server",
+			},
+		},
+		{
 			name:          "GitHub OAuth URL without path",
 			authServerURL: "https://github.com",
 			expectedURLs:  []string{"https://github.com/.well-known/oauth-authorization-server"},
