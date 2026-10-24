@@ -136,6 +136,9 @@ func (s *SecretSanitizer) registerDefaultPatterns() {
 			if len(parts) != 3 {
 				return "****"
 			}
+			if len(parts[2]) < 4 {
+				return parts[0] + ".***.***"
+			}
 			// Show first part (header) but mask payload and signature
 			return parts[0] + ".***." + parts[2][len(parts[2])-4:]
 		},
