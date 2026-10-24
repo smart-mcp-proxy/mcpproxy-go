@@ -6417,7 +6417,7 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id}/servers [get]
 func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6673,7 +6673,7 @@ func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request)
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id} [delete]
 func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6712,7 +6712,7 @@ func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Reque
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id} [put]
 func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6751,7 +6751,7 @@ func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request
 // @Failure      500  {object}  contracts.ErrorResponse            "Failed to refresh registry cache"
 // @Router       /api/v1/registries/{id}/refresh [post]
 func (s *Server) handleRefreshRegistryCache(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
