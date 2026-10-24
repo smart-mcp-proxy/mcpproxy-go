@@ -77,12 +77,13 @@ secrets:
 | `MCPPROXY_TRUSTED_HOSTS` | Comma-separated `Host` header allowlist for loopback listeners behind a reverse proxy (see [Reverse Proxy Deployment](/operations/reverse-proxy)) | - |
 | `MCPPROXY_TRUSTED_PROXIES` | Comma-separated CIDRs or IP addresses whose `X-Forwarded-For` / `X-Real-IP` / `X-Forwarded-Proto` / `X-Forwarded-Host` headers are honoured (overrides `trusted_proxies`). Any other peer's forwarded headers are ignored. An entry that is neither a CIDR nor an IP is refused at boot with `trusted_proxies[N] "value" is not a valid CIDR or IP address`, exactly like a file value. See [trusted_proxies](/operations/reverse-proxy#trusted_proxies-forwarded-headers) | - (trust nobody) |
 | `MCPPROXY_TLS_ENABLED` | Enable TLS/HTTPS | `false` |
-| `MCPPROXY_TLS_CERT` | Path to TLS certificate | - |
-| `MCPPROXY_TLS_KEY` | Path to TLS private key | - |
+| `MCPPROXY_TLS_CERT_FILE` | Absolute path of a PEM server certificate to serve instead of the generated one (needs `MCPPROXY_TLS_KEY_FILE`) | - |
+| `MCPPROXY_TLS_KEY_FILE` | Absolute path of the PEM private key for `MCPPROXY_TLS_CERT_FILE` | - |
+| `MCPPROXY_TLS_EXTRA_SANS` | Comma-separated host names and IP addresses added to the generated certificate (not with `MCPPROXY_TLS_CERT_FILE`) | - |
 | `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | Require client certificates for mTLS | `false` |
 | `MCPPROXY_CERTS_DIR` | Custom directory for TLS certificates | - |
 
-**Note:** TLS certificates are managed in `~/.mcpproxy/certs/` or via the `tls.certs_dir` config option. Use `mcpproxy trust-cert` to set up certificates.
+**Note:** TLS certificates are managed in `~/.mcpproxy/certs/` or via the `tls.certs_dir` config option. Use `mcpproxy trust-cert` to set up certificates. To serve a name other than `localhost`, see [Other host names](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/configuration.md#other-host-names-extra_sans-cert_file-key_file).
 
 ### Audit Log
 
