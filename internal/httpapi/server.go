@@ -679,10 +679,7 @@ func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Reques
 // global admin key, or a user JWT resolved as a session principal
 // (kind=bearer_jwt) through the edition hook.
 func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, authHeader string) {
-	var token string
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		token = strings.TrimPrefix(authHeader, "Bearer ")
-	}
+	token := bearerToken(authHeader)
 
 	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
 		s.rejectClientCredentialOnREST(w, r)
@@ -813,12 +810,8 @@ func ExtractToken(r *http.Request) string {
 	}
 
 	// 2. Check Authorization: Bearer header
-	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			if token := strings.TrimPrefix(authHeader, "Bearer "); token != "" {
-				return token
-			}
-		}
+	if token := bearerToken(r.Header.Get("Authorization")); token != "" {
+		return token
 	}
 
 	// 3. Check query parameter (for SSE and Web UI initial load)
@@ -827,6 +820,17 @@ func ExtractToken(r *http.Request) string {
 	}
 
 	return ""
+}
+
+// bearerToken returns the credential from an Authorization header value that
+// uses the Bearer scheme, or "" otherwise. The scheme name is matched
+// case-insensitively (RFC 7235 §2.1, RFC 6750 §2.1).
+func bearerToken(authHeader string) string {
+	const scheme = "Bearer "
+	if len(authHeader) < len(scheme) || !strings.EqualFold(authHeader[:len(scheme)], scheme) {
+		return ""
+	}
+	return authHeader[len(scheme):]
 }
 
 // correlationIDMiddleware injects correlation ID and request source into context
