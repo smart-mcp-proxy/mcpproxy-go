@@ -5059,7 +5059,7 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	name := chi.URLParam(r, "name")
+	name := decodePathParam(chi.URLParam(r, "name"))
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Secret name is required")
 		return
