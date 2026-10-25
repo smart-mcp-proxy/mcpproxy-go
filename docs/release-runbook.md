@@ -462,6 +462,60 @@ recent stable release succeeded, the delta is code — not infra:
 
 ---
 
+## Windows package managers (one-time setup)
+
+Spec 121 / experiment E7. After the first stable release that contains it,
+`publish-windows-packages.yml` keeps a scoop bucket and the winget community
+repository current with **no per-release action**. Both jobs *skip with a
+notice* (never fail the release) until the setup below is done, so nothing is
+lost by doing it later.
+
+| Surface | Needs once | Secret |
+|---|---|---|
+| scoop | Create the public repo `smart-mcp-proxy/scoop-bucket` (any initial commit, e.g. a README) | `SCOOP_BUCKET_TOKEN` — fine-grained PAT, **Contents: read/write on that repo only** |
+| winget | Fork `microsoft/winget-pkgs`, then submit the **first** version by hand (below) | `WINGET_TOKEN` — classic PAT with `public_repo`, owned by the account that owns the fork |
+
+Store both as **repository secrets** of `smart-mcp-proxy/mcpproxy-go`
+(the workflow reads them via `secrets: inherit`).
+
+**First winget submission** (Microsoft moderates a new package id; expect days
+to weeks of review latency):
+
+```powershell
+# Windows, once. Generates the manifests exactly as the workflow will.
+gh release download vX.Y.Z -R smart-mcp-proxy/mcpproxy-go -p checksums.txt
+bash scripts/gen-winget-manifest.sh vX.Y.Z checksums.txt out
+winget validate --manifest out
+winget install --manifest out        # local smoke test (installs MCPProxy; uninstall afterwards)
+wingetcreate submit --token <WINGET_TOKEN> out    # or open the PR from your fork by hand
+```
+
+Once the PR merges, the `winget` job takes over: it detects that
+`manifests/s/smart-mcp-proxy/mcpproxy` exists upstream and opens one PR per
+release from the fork (skipping a version that is already merged or has an
+open PR).
+
+**Re-running for a release** (recovery, or after finishing the setup): Actions →
+*Publish Windows packages* → *Run workflow* → tag `vX.Y.Z`. The scoop commit is
+a no-op when the manifest is unchanged.
+
+**Verify a release** (after the job ran):
+
+```powershell
+scoop bucket add mcpproxy https://github.com/smart-mcp-proxy/scoop-bucket
+scoop install mcpproxy ; mcpproxy --version ; scoop update mcpproxy
+winget search smart-mcp-proxy.mcpproxy
+```
+
+The installer reads `/CHANNEL=winget` (passed through the manifest's
+`InstallerSwitches.Custom`) and writes an `install-channel` marker beside
+`mcpproxy.exe`; telemetry then reports `install_channel: winget`.
+`.github/workflows/installer-channel-test.yml` exercises that lifecycle
+(install, reinstall, uninstall, silent install with an over-long PATH) on a
+disposable Windows runner whenever `scripts/installer.iss` changes.
+
+---
+
 ## Tag-cutting cheat sheet
 
 Bundled for reference; full detail in [`docs/releasing.md`](./releasing.md).
@@ -485,7 +539,8 @@ Expected green jobs on tag push:
 6. `publish-linux-repos` (apt + rpm to R2)
 7. `deploy-docs` (Docusaurus → Cloudflare Pages, non-blocking)
 8. `trigger-marketing-update` (non-blocking)
-9. `mcp-registry` (non-blocking)
+9. `mcp-registry` (non-blocking; stamps `server.json`, runs `scripts/registry-preflight.sh`)
+10. `publish-windows-packages` (non-blocking; scoop bucket + winget, skips until configured)
 
 If any of 1–6 go red, consult the matching SPOF section above. 7–9 are marked
 `continue-on-error: true` — they do not block the release but should be

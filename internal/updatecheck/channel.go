@@ -47,6 +47,7 @@ const (
 	ChannelDocker           = "docker"
 	ChannelGoInstall        = "go-install"
 	ChannelWindowsInstaller = "windows-installer"
+	ChannelScoop            = "scoop"
 	ChannelTarball          = "tarball"
 	ChannelUnknown          = "unknown"
 )
@@ -61,6 +62,7 @@ var knownChannels = map[string]bool{
 	ChannelDocker:           true,
 	ChannelGoInstall:        true,
 	ChannelWindowsInstaller: true,
+	ChannelScoop:            true,
 	ChannelTarball:          true,
 	ChannelUnknown:          true,
 }
@@ -221,6 +223,17 @@ func (d *channelDetector) detect() string {
 		return ChannelDMG
 	}
 
+	// (4b) Scoop (Spec 121 FR-016). Scoop installs the very same release zip
+	// that carries the weak "tarball" stamp, so without this branch a
+	// scoop-owned executable would be classified as a self-updatable tarball
+	// install and `mcpproxy update` would overwrite a file scoop tracks
+	// (version, hash). The apps/<name>/ layout is scoop's own and is checked
+	// on a slash-normalised, lower-cased path so it holds for both the
+	// per-user (~\scoop) and global (C:\ProgramData\scoop) roots.
+	if d.isScoopInstall(path) {
+		return ChannelScoop
+	}
+
 	// (5) go install: the Go toolchain stamps the module version into build
 	// info for `go install module@version` builds, while such builds carry no
 	// -X ldflags version (the checker then receives the "development"
@@ -311,4 +324,34 @@ func (d *channelDetector) isGoInstall() bool {
 	// Tagged installs ("v0.47.0") and pseudo-versions
 	// ("v0.0.0-20260701123456-abcdef123456") are both valid semver.
 	return semver.IsValid(v)
+}
+
+// isScoopInstall reports whether the resolved executable path is scoop-owned.
+// Two independent signals, either of which suffices:
+//   - the default layout <root>/scoop/apps/mcpproxy/..., or
+//   - a custom root ($SCOOP / $SCOOP_GLOBAL): <root>/apps/mcpproxy/<ver>/ with
+//     scoop's own scoop-install.json (legacy: install.json) beside the executable (scoop writes it into
+//     every version directory; `current` is a junction that EvalSymlinks has
+//     already resolved to that directory).
+//
+// Known limitation: the update command is always the per-user
+// `scoop update mcpproxy`; a global install (C:\ProgramData\scoop) needs
+// `--global`, which the channel identifier does not carry. The install is still
+// protected from self-update, which is the safety property that matters.
+//
+// Windows paths are normalised so the check also works when the detector is
+// exercised on another OS. A bare apps/mcpproxy directory without that
+// evidence is NOT scoop: guessing would withhold self-update from an
+// unrelated extracted archive (FR-009: never guess).
+func (d *channelDetector) isScoopInstall(path string) bool {
+	p := strings.ToLower(strings.ReplaceAll(path, `\`, "/"))
+	if strings.Contains(p, "/scoop/apps/mcpproxy/") {
+		return true
+	}
+	if !strings.Contains(p, "/apps/mcpproxy/") {
+		return false
+	}
+	dir := path[:strings.LastIndexAny(path, `\/`)+1]
+	// scoop-install.json is the current name; install.json is the legacy one.
+	return d.statFile(dir+"scoop-install.json") == nil || d.statFile(dir+"install.json") == nil
 }

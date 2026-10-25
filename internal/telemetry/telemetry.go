@@ -292,6 +292,14 @@ type HeartbeatPayload struct {
 	// the installer_heartbeat_pending BBolt flag (cleared after first heartbeat).
 	LaunchSource string `json:"launch_source,omitempty"`
 
+	// InstallChannel (Spec 121): how this install was obtained, as a member of
+	// the closed InstallChannel set (brew, dmg, winget, scoop, windows-installer,
+	// deb, rpm, docker, registry, curl, tarball, go-install, unknown). Additive
+	// and always populated on an enabled heartbeat, so SchemaVersion is NOT
+	// bumped; consumers detect it by presence. Never a path or free text: the
+	// anonymity scanner re-validates it against the closed set before send.
+	InstallChannel string `json:"install_channel,omitempty"`
+
 	// AutostartEnabled: tri-state login-item status.
 	//   - *true  : tray reports the app IS registered as a login item
 	//   - *false : tray reports the app is NOT registered
@@ -1607,6 +1615,20 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 	// MCPPROXY_LAUNCHED_BY=installer was observed. Otherwise the runtime
 	// detector result (tray/login_item/cli/unknown) is emitted.
 	payload.LaunchSource = string(s.resolveLaunchSource(consumeOneShots))
+
+	// Spec 121: install channel. Resolved only when telemetry is effectively
+	// enabled so a disabled install (or a payload preview of one) never reads
+	// a channel marker from disk.
+	// Eligibility is read live under s.mu (telemetryEnabledLive), not from the
+	// cfg snapshot taken at the top of this function: a disable that lands
+	// mid-build must stop the marker read, and the snapshot may predate it.
+	if s.envDisabledReason == EnvDisabledNone && s.telemetryEnabledLive() {
+		dataDir := ""
+		if cfg != nil {
+			dataDir = cfg.DataDir
+		}
+		payload.InstallChannel = string(installChannelResolver(s.version, dataDir))
+	}
 
 	// Spec 044 (T051): AutostartEnabled. Tri-state; nil when the tray sidecar
 	// is absent/unreachable/malformed (Linux always falls here).

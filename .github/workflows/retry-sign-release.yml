@@ -999,6 +999,18 @@ jobs:
           event-type: update-version
           client-payload: '{"version": "${{ inputs.tag }}"}'
 
+  # Spec 121: scoop bucket + winget; same reusable workflow as release.yml.
+  publish-windows-packages:
+    name: Publish Windows packages
+    needs: [release]
+    if: ${{ !cancelled() && (needs.release.result == 'success' || inputs.post_release_only) && !contains(inputs.tag, '-') && github.repository == 'smart-mcp-proxy/mcpproxy-go' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/publish-windows-packages.yml
+    with:
+      tag: ${{ inputs.tag }}
+    secrets: inherit
+
   # Publish to the official MCP Registry. Mirrors release.yml's mcp-registry
   # job; continue-on-error because a registry hiccup must not block a release.
   mcp-registry:
@@ -1012,12 +1024,6 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
 
-      - name: Extract version from tag
-        id: version
-        run: echo "VERSION=${TAG#v}" >> "$GITHUB_OUTPUT"
-        env:
-          TAG: ${{ inputs.tag }}
-
       - name: Install mcp-publisher
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_linux_amd64.tar.gz" | tar xz mcp-publisher
@@ -1025,9 +1031,20 @@ jobs:
       - name: Authenticate to MCP Registry
         run: ./mcp-publisher login github-oidc
 
-      - name: Update version in server.json
+      # Spec 121: same stamping + pre-publish checks as release.yml.
+      - name: Stamp server.json for the tag
         run: |
-          jq --arg v "${{ steps.version.outputs.VERSION }}" '.version = $v' server.json > server.tmp && mv server.tmp server.json
+          scripts/stamp-server-json.sh "${TAG}" server.json > server.tmp && mv server.tmp server.json
+        env:
+          TAG: ${{ inputs.tag }}
+
+      - name: Pre-publish checks (image, label, MCP smoke test)
+        run: scripts/registry-preflight.sh "${TAG}"
+        env:
+          TAG: ${{ inputs.tag }}
+
+      - name: Validate server.json
+        run: ./mcp-publisher validate server.json
 
       - name: Publish to MCP Registry
         run: ./mcp-publisher publish

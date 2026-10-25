@@ -1177,3 +1177,4 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) | — | — |
 | [118-pin-visibility-boundary](./specs/118-pin-visibility-boundary/) | — | — |
 | [119-scan-default-trust](./specs/119-scan-default-trust/) | — | — |
+| [121-install-surfaces](./specs/121-install-surfaces/) | `drafted` | 0/34 (0%) |

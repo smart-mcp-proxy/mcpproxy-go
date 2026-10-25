@@ -88,6 +88,9 @@ type anonymityScanEnvelope struct {
 	PreviousShutdown  *json.RawMessage `json:"previous_shutdown"`
 	LastErrorCode     *json.RawMessage `json:"last_error_code"`
 
+	// Spec 121: install_channel must be a member of the closed InstallChannel set.
+	InstallChannel *json.RawMessage `json:"install_channel"`
+
 	// Schema v8 structural check: the security-scanner sub-object must be
 	// counts-and-fixed-enum-keys only. Deliberately NOT a pointer: JSON null
 	// sets a *RawMessage pointer to nil, which is indistinguishable from an
@@ -722,6 +725,9 @@ func ScanForPII(payloadJSON []byte) error {
 	if v := scanV7Fields(&env); v != nil {
 		return v
 	}
+	if v := scanInstallChannel(env.InstallChannel); v != nil {
+		return v
+	}
 
 	// Rule 5: schema-v8 tpa_scanner must be counts + fixed severity keys only.
 	if v := scanV8TPAScanner(env.TPAScanner); v != nil {
@@ -832,4 +838,15 @@ func populateBlockedValuesFrom(
 	}
 
 	BlockedValues = out
+}
+
+// scanInstallChannel enforces Spec 121 FR-035: install_channel, when present,
+// is a string drawn from the closed InstallChannel set. A path, free text or a
+// widened type is a privacy violation.
+func scanInstallChannel(raw *json.RawMessage) *AnonymityViolation {
+	allowed := make([]string, 0, len(AllInstallChannels()))
+	for _, c := range AllInstallChannels() {
+		allowed = append(allowed, string(c))
+	}
+	return scanV7Enum(raw, "install_channel", allowed...)
 }

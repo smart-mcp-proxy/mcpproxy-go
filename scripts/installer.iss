@@ -75,6 +75,10 @@ Source: "{#BinPath}\mcpproxy-tray.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#ReleaseNotesPath}"; DestDir: "{app}\docs"; DestName: "RELEASE_NOTES.md"; Flags: ignoreversion
 #endif
 
+[UninstallDelete]
+; Spec 121: the channel marker is installer-owned and removed with the app.
+Type: files; Name: "{app}\install-channel"
+
 [Icons]
 ; Start Menu shortcut (FR-004)
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"
@@ -146,9 +150,33 @@ begin
   // PATH length validation (FR-015) - Windows limit is 2047 characters
   if Result and (Length(OrigPath) + Length(Param) + 1 > 2047) then
   begin
-    MsgBox('Warning: Adding MCPProxy to PATH would exceed Windows limit (2047 characters).' + #13#10 +
-           'You may need to manually clean up your PATH environment variable.', mbError, MB_OK);
+    // Spec 121 FR-014: winget (and any /VERYSILENT deployment) must never block
+    // on a dialog. In silent mode the PATH is left untouched and the install
+    // still succeeds; `mcpproxy.exe` remains reachable from the install dir.
+    if not WizardSilent then
+      MsgBox('Warning: Adding MCPProxy to PATH would exceed Windows limit (2047 characters).' + #13#10 +
+             'You may need to manually clean up your PATH environment variable.', mbError, MB_OK);
     Result := False;
+  end;
+end;
+
+// Install-channel marker (Spec 121 FR-014). winget runs this installer with
+// /CHANNEL=winget; the marker beside the installed executable lets the core
+// report the winget channel in telemetry. Any other run (a direct download,
+// an upgrade over a winget install) removes a stale marker so attribution
+// can never outlive the channel it described. Only the exact token "winget"
+// is ever written; any other /CHANNEL value is ignored.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  MarkerPath: string;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    MarkerPath := ExpandConstant('{app}\install-channel');
+    if Lowercase(ExpandConstant('{param:CHANNEL|}')) = 'winget' then
+      SaveStringToFile(MarkerPath, 'winget', False)
+    else
+      DeleteFile(MarkerPath);
   end;
 end;
 

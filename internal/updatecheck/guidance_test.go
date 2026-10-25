@@ -14,6 +14,8 @@ func TestUpdateCommand_ExactPerChannel(t *testing.T) {
 		{ChannelDeb, "sudo apt update && sudo apt install --only-upgrade mcpproxy"},
 		{ChannelRPM, "sudo dnf upgrade mcpproxy"},
 		{ChannelGoInstall, "go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest"},
+		// Spec 121 FR-016: scoop owns its executable; never self-update it.
+		{ChannelScoop, "scoop update mcpproxy"},
 		// Spec 092 FR-020/FR-024: a positively identified tarball install is
 		// self-managed, so its "command" is mcpproxy's own verified
 		// self-update.

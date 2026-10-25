@@ -3491,7 +3491,7 @@ components:
           type: string
         install_channel:
           description: Detected install channel (homebrew, dmg, deb, rpm, docker,
-            go-install, windows-installer, tarball, unknown) — Spec 079 FR-008
+            go-install, windows-installer, scoop, tarball, unknown) — Spec 079 FR-008
           type: string
         is_prerelease:
           description: Whether the latest version is a prerelease

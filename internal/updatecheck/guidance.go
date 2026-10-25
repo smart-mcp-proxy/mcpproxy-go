@@ -19,6 +19,10 @@ func UpdateCommand(channel string) string {
 		return "sudo dnf upgrade mcpproxy"
 	case ChannelGoInstall:
 		return "go install github.com/smart-mcp-proxy/mcpproxy-go/cmd/mcpproxy@latest"
+	case ChannelScoop:
+		// Spec 121 FR-016: scoop owns the executable and its version/hash
+		// bookkeeping; point at scoop, never at self-update.
+		return "scoop update mcpproxy"
 	case ChannelTarball:
 		// Spec 092 FR-020: a positively identified tarball install is the one
 		// channel mcpproxy owns end-to-end, so the command is our own
