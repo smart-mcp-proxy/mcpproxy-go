@@ -572,12 +572,16 @@ func walkCombinator(path string, b, a map[string]any, keyword string, growWidens
 		if growWidens {
 			*out = append(*out, sig)
 		}
-	case len(aList) == len(bList):
-		for i := range bList {
+	default:
+		// The retained branches are compared pairwise whatever the length
+		// change, so a default or type moved inside branch 0 is not hidden by
+		// an appended branch (review r6 P1); the length rule applies on top.
+		for i := 0; i < len(bList) && i < len(aList); i++ {
 			walkSchemaNode(childPath(path, keyword+"/"+fmt.Sprint(i)), bList[i], aList[i], out)
 		}
-	case (len(aList) > len(bList)) == growWidens:
-		*out = append(*out, sig)
+		if len(aList) != len(bList) && (len(aList) > len(bList)) == growWidens {
+			*out = append(*out, sig)
+		}
 	}
 }
 
@@ -633,27 +637,43 @@ func carriesSteering(node any) bool {
 	return false
 }
 
+// validationKeywords are the JSON Schema keywords that can reject a value.
+// Anything else (text, default, examples, $id, vendor x-* annotations) is
+// not a constraint (review r6 P2).
+var validationKeywords = map[string]bool{
+	"type": true, "$ref": true, "enum": true, "const": true, "pattern": true, "format": true,
+	"minimum": true, "maximum": true, "exclusiveMinimum": true, "exclusiveMaximum": true, "multipleOf": true,
+	"minLength": true, "maxLength": true, "minItems": true, "maxItems": true, "minProperties": true, "maxProperties": true,
+	"uniqueItems": true, "required": true, "properties": true, "patternProperties": true, "additionalProperties": true,
+	"items": true, "prefixItems": true, "additionalItems": true, "contains": true, "minContains": true, "maxContains": true,
+	"not": true, "anyOf": true, "oneOf": true, "allOf": true, "if": true, "then": true, "else": true,
+	"dependencies": true, "dependentRequired": true, "dependentSchemas": true, "propertyNames": true,
+	"unevaluatedProperties": true, "unevaluatedItems": true,
+}
+
 // schemaIsUnconstrained reports whether a schema object constrains nothing
-// once its text keywords are removed (`{}` accepts every value, like `true`).
+// (`{}` accepts every value, like `true`): no validation keyword with a
+// non-empty value. Text, default, examples and unknown annotation keywords do
+// not count; an empty required list or an empty properties map does not either
+// (review r5).
 func schemaIsUnconstrained(schema map[string]any) bool {
-	stripped, _ := asObject(stripText(schema))
-	// default steers but validates nothing, and its removal passes (FR-004).
-	delete(stripped, "default")
-	// Empty collections constrain nothing either (review r5): required: [],
-	// properties: {} and the other name maps with no entries.
-	for k, v := range stripped {
+	for k, v := range schema {
+		if !validationKeywords[k] {
+			continue
+		}
 		switch t := v.(type) {
 		case []any:
-			if len(t) == 0 && (k == "required" || k == "allOf" || k == "anyOf" || k == "oneOf" || k == "prefixItems" || k == "examples") {
-				delete(stripped, k)
+			if len(t) == 0 {
+				continue
 			}
 		case map[string]any:
 			if len(t) == 0 && nameMapKeywords[k] {
-				delete(stripped, k)
+				continue
 			}
 		}
+		return false
 	}
-	return len(stripped) == 0
+	return true
 }
 
 func hasKey(m map[string]any, key string) bool {
