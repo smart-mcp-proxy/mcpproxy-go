@@ -3882,6 +3882,173 @@
     "additionalProperties": true
    },
    "signals": []
+  },
+  {
+   "name": "allOf introduced that requires an existing optional parameter (review r9)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "allOf": [
+     {
+      "required": [
+       "subject"
+      ]
+     }
+    ]
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:new-required:allOf/subject"
+   ]
+  },
+  {
+   "name": "allOf gains a branch that requires a parameter (review r9)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "allOf": [
+     {
+      "maxProperties": 10
+     }
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "allOf": [
+     {
+      "maxProperties": 10
+     },
+     {
+      "required": [
+       "subject"
+      ]
+     }
+    ]
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:new-required:allOf/1/subject"
+   ]
+  },
+  {
+   "name": "allOf gains a branch requiring a nested field",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "allOf": [
+     {
+      "maxProperties": 10
+     }
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "allOf": [
+     {
+      "maxProperties": 10
+     },
+     {
+      "properties": {
+       "options": {
+        "required": [
+         "forward_to"
+        ]
+       }
+      }
+     }
+    ]
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:new-required:allOf/1/forward_to"
+   ]
   }
  ]
 }

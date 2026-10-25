@@ -571,10 +571,11 @@ func walkCombinator(path string, b, a map[string]any, keyword string, growWidens
 	case !bHas && aHas:
 		if growWidens {
 			*out = append(*out, sig)
-		} else if carriesSteering(aList) {
+		} else {
 			// A new allOf narrows, but a default/const/enum in it steers
-			// (review r8 P1).
-			*out = append(*out, shape("new-property", childPath(path, keyword)))
+			// (review r8 P1) and a required in it makes a parameter
+			// mandatory (review r9 P1).
+			newBranchSignals(childPath(path, keyword), aList, out)
 		}
 	default:
 		// Branches that survive unchanged are matched by VALUE first (a
@@ -587,16 +588,68 @@ func walkCombinator(path string, b, a map[string]any, keyword string, growWidens
 			walkSchemaNode(childPath(path, keyword+"/"+fmt.Sprint(aRest[i].index)), bRest[i].node, aRest[i].node, out)
 		}
 		// Live branches with no counterpart: a new allOf branch narrows, but
-		// one that carries a default/const/enum steers (review r8 P1).
+		// one that carries a default/const/enum steers (review r8 P1) and one
+		// that carries a required makes a parameter mandatory (review r9 P1).
 		for i := len(bRest); i < len(aRest); i++ {
-			if carriesSteering(aRest[i].node) {
-				*out = append(*out, shape("new-property", childPath(path, keyword+"/"+fmt.Sprint(aRest[i].index))))
-			}
+			newBranchSignals(childPath(path, keyword+"/"+fmt.Sprint(aRest[i].index)), aRest[i].node, out)
 		}
 		if len(aList) != len(bList) && (len(aList) > len(bList)) == growWidens {
 			*out = append(*out, sig)
 		}
 	}
+}
+
+// newBranchSignals reports what a schema (or schema list) that has no
+// approved counterpart would change about what the model sends: a
+// default/const/enum anywhere (new-property) and every required name
+// anywhere (new-required).
+func newBranchSignals(path string, node any, out *[]Signal) {
+	if carriesSteering(node) {
+		*out = append(*out, shape("new-property", path))
+	}
+	for _, name := range requiredAnywhere(node) {
+		*out = append(*out, shape("new-required", childPath(path, name)))
+	}
+}
+
+// requiredAnywhere lists, sorted and deduplicated, every name a schema
+// subtree requires (schema-aware walk, like carriesSteering).
+func requiredAnywhere(node any) []string {
+	seen := map[string]bool{}
+	var walk func(any)
+	walk = func(n any) {
+		if list, isList := n.([]any); isList {
+			for _, item := range list {
+				walk(item)
+			}
+			return
+		}
+		schema, ok := asObject(n)
+		if !ok {
+			return
+		}
+		for _, name := range sortedStrings(schema["required"]) {
+			seen[name] = true
+		}
+		for _, k := range schemaKeys(schema) {
+			switch {
+			case nameMapKeywords[k]:
+				names, _ := asObject(schema[k])
+				for _, name := range schemaKeys(names) {
+					walk(names[name])
+				}
+			case subschemaKeywords[k]:
+				walk(schema[k])
+			}
+		}
+	}
+	walk(node)
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
 }
 
 type indexedBranch struct {
