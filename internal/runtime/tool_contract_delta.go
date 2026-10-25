@@ -639,6 +639,20 @@ func schemaIsUnconstrained(schema map[string]any) bool {
 	stripped, _ := asObject(stripText(schema))
 	// default steers but validates nothing, and its removal passes (FR-004).
 	delete(stripped, "default")
+	// Empty collections constrain nothing either (review r5): required: [],
+	// properties: {} and the other name maps with no entries.
+	for k, v := range stripped {
+		switch t := v.(type) {
+		case []any:
+			if len(t) == 0 && (k == "required" || k == "allOf" || k == "anyOf" || k == "oneOf" || k == "prefixItems" || k == "examples") {
+				delete(stripped, k)
+			}
+		case map[string]any:
+			if len(t) == 0 && nameMapKeywords[k] {
+				delete(stripped, k)
+			}
+		}
+	}
 	return len(stripped) == 0
 }
 
