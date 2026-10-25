@@ -319,8 +319,8 @@
    "title": "Spec 120 schema rule off: a new property carrying a default, const or enum is treated as the benign optional addition",
    "requirement": "QP-20",
    "file": "internal/runtime/tool_contract_delta.go",
-   "find": "func carriesSteering(node any) bool {\n\tswitch v := node.(type) {",
-   "replace": "func carriesSteering(node any) bool {\n\tif node != nil {\n\t\treturn false\n\t}\n\tswitch v := node.(type) {",
+   "find": "\tschema, ok := asObject(node)\n\tif !ok {\n\t\treturn false\n\t}\n\tfor _, kw := range []string{\"default\", \"const\", \"enum\"} {",
+   "replace": "\tschema, ok := asObject(node)\n\tif ok || !ok {\n\t\treturn false\n\t}\n\tfor _, kw := range []string{\"default\", \"const\", \"enum\"} {",
    "required": true,
    "tests": [
     {

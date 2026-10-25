@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
 	"sort"
 	"strings"
@@ -319,6 +320,11 @@ func decodeSchema(raw string) (any, bool) {
 	if err := dec.Decode(&v); err != nil {
 		return nil, false
 	}
+	if _, err := dec.Token(); err != io.EOF {
+		// Trailing content after the first value: not one JSON document
+		// (review r2 P2).
+		return nil, false
+	}
 	return v, true
 }
 
@@ -328,7 +334,7 @@ var nameMapKeywords = map[string]bool{"properties": true, "patternProperties": t
 
 // subschemaKeywords are the keywords whose value is a schema or a list of
 // schemas (walked by the steering and text-stripping passes).
-var subschemaKeywords = map[string]bool{"items": true, "additionalProperties": true, "not": true, "anyOf": true, "oneOf": true, "allOf": true, "if": true, "then": true, "else": true, "contains": true, "propertyNames": true, "additionalItems": true, "unevaluatedProperties": true, "unevaluatedItems": true}
+var subschemaKeywords = map[string]bool{"items": true, "prefixItems": true, "additionalProperties": true, "not": true, "anyOf": true, "oneOf": true, "allOf": true, "if": true, "then": true, "else": true, "contains": true, "propertyNames": true, "additionalItems": true, "unevaluatedProperties": true, "unevaluatedItems": true}
 
 func asObject(v any) (map[string]any, bool) {
 	m, ok := v.(map[string]any)
@@ -405,11 +411,14 @@ func walkSchemaNode(path string, before, after any, out *[]Signal) {
 		if !aHasAP || aAP != false {
 			*out = append(*out, shape("additional-properties", path))
 		}
-	} else if bAPObj, ok := asObject(bAP); ok && !schemaIsUnconstrained(bAPObj) {
+	} else if bAPObj, ok := asObject(bAP); ok {
 		if aAPObj, ok := asObject(aAP); ok {
+			// Two schemas recurse, an unconstrained `{}` included: a default,
+			// const or pattern added under it is a widening (review r2 P1).
 			walkSchemaNode(childPath(path, "additionalProperties"), bAPObj, aAPObj, out)
-		} else if !aHasAP || aAP != false {
-			// A constraining schema disappeared (or became `true`).
+		} else if !schemaIsUnconstrained(bAPObj) && (!aHasAP || aAP != false) {
+			// A constraining schema disappeared (or became `true`); `{}`
+			// constrained nothing, so its disappearance is neutral.
 			*out = append(*out, shape("additional-properties", path))
 		}
 	}
@@ -537,6 +546,15 @@ func walkCombinator(path string, b, a map[string]any, keyword string, growWidens
 // and text keywords (examples, description) are data, so a property NAMED
 // "default" or an example containing one does not count.
 func carriesSteering(node any) bool {
+	if list, isList := node.([]any); isList {
+		// A schema list (a new tuple-form items, review r2 P1).
+		for _, item := range list {
+			if carriesSteering(item) {
+				return true
+			}
+		}
+		return false
+	}
 	schema, ok := asObject(node)
 	if !ok {
 		return false
@@ -632,16 +650,25 @@ func enumGainedMember(before, after any) bool {
 	aList, _ := after.([]any)
 	seen := make(map[string]bool, len(bList))
 	for _, item := range bList {
-		raw, _ := json.Marshal(item)
-		seen[string(raw)] = true
+		seen[enumMemberKey(item)] = true
 	}
 	for _, item := range aList {
-		raw, _ := json.Marshal(item)
-		if !seen[string(raw)] {
+		if !seen[enumMemberKey(item)] {
 			return true
 		}
 	}
 	return false
+}
+
+// enumMemberKey identifies an enum member by VALUE: numbers by their exact
+// rational value (1 and 1.0 are one member, review r2 P2), everything else by
+// its JSON form.
+func enumMemberKey(item any) string {
+	if n, ok := numberOf(item); ok {
+		return "n:" + n.RatString()
+	}
+	raw, _ := json.Marshal(item)
+	return "j:" + string(raw)
 }
 
 // boundLoosened reports whether a numeric bound keyword got looser or

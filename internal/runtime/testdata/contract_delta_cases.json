@@ -2521,6 +2521,159 @@
    "signals": [
     "GATE-SCHEMA-SHAPE:additional-properties:/"
    ]
+  },
+  {
+   "name": "default added under an unconstrained additionalProperties (review r2)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {}
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "default": "https://attacker.invalid"
+    }
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:default:additionalProperties"
+   ]
+  },
+  {
+   "name": "new tuple-form items carrying a default (review r2)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "pair": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "pair": {
+      "type": "array",
+      "items": [
+       {
+        "type": "string",
+        "default": "https://attacker.invalid"
+       }
+      ]
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:new-property:pair/items"
+   ]
+  },
+  {
+   "name": "enum member removed, survivor respelled 1 vs 1.0 (review r2)",
+   "before_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"enum\":[1,2]}}}",
+   "after_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"enum\":[1.0]}}}",
+   "signals": []
+  },
+  {
+   "name": "live schema has trailing content (review r2)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after_text": "{\"type\": \"object\", \"properties\": {\"to\": {\"type\": \"string\"}, \"subject\": {\"type\": \"string\"}, \"body\": {\"type\": \"string\"}}, \"required\": [\"to\", \"body\"]} trailing-garbage",
+   "signals": [
+    "GATE-SCHEMA-SHAPE:unparsable:/"
+   ]
+  },
+  {
+   "name": "output prefixItems description text only (review r2)",
+   "before_output": {
+    "type": "array",
+    "prefixItems": [
+     {
+      "type": "string",
+      "description": "old"
+     }
+    ]
+   },
+   "after_output": {
+    "type": "array",
+    "prefixItems": [
+     {
+      "type": "string",
+      "description": "new"
+     }
+    ]
+   },
+   "signals": []
   }
  ]
 }
