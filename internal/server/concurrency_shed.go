@@ -10,23 +10,17 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
-// asShed reports whether err is a concurrency-limiter SHED — queue full or
-// queue timeout. A server-unavailable rejection is not a shed: it means the
-// target was disabled/removed while the call was queued, which keeps the
-// existing "server not available" semantics (FR-009).
+// asShed reports whether err is a limiter SHED — queue full, queue timeout, or
+// an agent token over its call budget (rate_limited). A server-unavailable
+// rejection is not a shed: it means the target was disabled/removed while the
+// call was queued, which keeps the existing "server not available" semantics
+// (FR-009).
 func asShed(err error) (*limiter.LimitError, bool) {
 	var limitErr *limiter.LimitError
-	if !errors.As(err, &limitErr) {
+	if !errors.As(err, &limitErr) || !limitErr.Shed() {
 		return nil, false
 	}
-	switch limitErr.Reason {
-	case limiter.ReasonQueueFull, limiter.ReasonQueueTimeout:
-		return limitErr, true
-	case limiter.ReasonServerUnavailable:
-		return nil, false
-	default:
-		return nil, false
-	}
+	return limitErr, true
 }
 
 // shedMessage renders the agent-facing explanation of a shed (FR-010). The
