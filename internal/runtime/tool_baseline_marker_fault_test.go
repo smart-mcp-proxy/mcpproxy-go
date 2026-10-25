@@ -121,8 +121,10 @@ func TestToolBaselineMarkerFault_ReplacementAbortsDestructiveHalf(t *testing.T) 
 	}
 }
 
-// FR-027a: a hint update on an approved tool and a failing marker write leave
-// the stored record byte-identical (the marker step precedes every write).
+// FR-027a: an annotation update on an approved tool (a title: the same hash
+// and dispatch tier, so the record stays approved — a hint move is held since
+// spec 120) and a failing marker write leave the stored record byte-identical
+// (the marker step precedes every write).
 func TestToolBaselineMarkerFault_HintUpdateWritesNothing(t *testing.T) {
 	rt := olderStoreWithApprovedReadNote(t)
 	before := lastGood(rt)
@@ -144,8 +146,7 @@ func TestToolBaselineMarkerFault_HintUpdateWritesNothing(t *testing.T) {
 	assert.Equal(t, toolreview.BaselineSourceInferred, d.Source)
 	rec := approvalOf(t, rt, "read_note")
 	require.NotNil(t, rec.CurrentAnnotations)
-	require.NotNil(t, rec.CurrentAnnotations.DestructiveHint)
-	assert.True(t, *rec.CurrentAnnotations.DestructiveHint, "the healed pass records the new hints")
+	assert.Equal(t, "Read a note (renamed)", rec.CurrentAnnotations.Title, "the healed pass records the new annotations")
 }
 
 // FR-027a: a failed prior-record listing must not read as "no baseline" (main
