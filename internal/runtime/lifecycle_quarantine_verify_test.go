@@ -32,8 +32,18 @@ func seedRT05Approval(t *testing.T, rt *Runtime) {
 		ApprovedBy:         "operator",
 		CurrentDescription: "Lists calendar events.",
 		CurrentSchema:      approvedSchema,
+		// mcp-go's NewTool serves the MCP default hints explicitly; the
+		// approved snapshot must say so too (spec 120 FR-009).
+		CurrentAnnotations: mcpGoDefaultAnnotations(),
 		IdentityKeyed:      true,
 	}))
+}
+
+// mcpGoDefaultAnnotations are the hints mcp-go's NewTool serves for a tool
+// that declares none: the MCP defaults, stated explicitly.
+func mcpGoDefaultAnnotations() *config.ToolAnnotations {
+	f, tr := false, true
+	return &config.ToolAnnotations{ReadOnlyHint: &f, DestructiveHint: &tr, IdempotentHint: &f, OpenWorldHint: &tr}
 }
 
 func requireRT05Changed(t *testing.T, rt *Runtime, msg string) {

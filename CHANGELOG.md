@@ -10,14 +10,27 @@ Releases follow [Semantic Versioning](https://semver.org/).
 - **trust mode / tool approvals (Spec 119):** `scan` is now the default per-server trust mode, and under
   `scan` a **changed** tool contract whose offline TPA scan is clean is approved automatically in the same
   discovery pass (reason `scan_approved`, activity event `tool_auto_approved`) instead of being held. A
-  finding, a tool the scan could not cover, or a change that re-labels the tool as safer (`readOnlyHint`
-  false→true, `destructiveHint` true→false; held with signal `GATE-HINT-SAFER-FLIP`) is still held with the
-  evidence attached. A server whose `trust_mode` is unset now runs under `scan` from its next discovery
-  pass, so clean-scanned holds it accumulated are released without a click. The 2026-10-11 rule that a clean
-  verdict never approves a changed contract now applies to `manual` only. **Migration:** set
-  `trust_mode: "manual"` on any server whose tool changes you want a person to review; nothing changes for
-  servers with an explicit `trust_mode` or `auto_approve_tool_changes`. New servers added with no trust mode
-  are quarantined, scanned and released automatically on a clean verdict, as `scan` always did.
+  finding or a tool the scan could not cover is still held with the evidence attached. **Structural
+  change gate (Spec 120, same release):** before the scan verdict counts, a deterministic structural
+  comparison with the approved contract holds, whatever the verdict, any safety-hint change in either
+  direction (`GATE-HINT-CHANGE`; the two safer flips also `GATE-HINT-SAFER-FLIP`), a widened input schema
+  (`GATE-SCHEMA-SHAPE:<reason>:<path>`: a new required parameter, a type change, an enum member added or an
+  enum dropped, a loosened constraint, a default/const added or changed, a new parameter carrying a
+  default/const/enum), an output-schema change (`GATE-OUTPUT-SCHEMA`), and a change that moves the tool's
+  `call_tool` variant while its hash stays equal (explicit default hints dropped). Narrowing edits pass. No
+  word lists, thresholds or classifier. The `tool_auto_approved` event now carries the replaced contract
+  (`old_hash`, `old_description`, `old_schema`, `old_output_schema`, `old_annotations`), `approved_by`,
+  `gate_signals`, `scan_verdict` and `scan_bundle`. A server whose `trust_mode` is unset now runs under
+  `scan` from its next discovery pass, so clean-scanned holds it accumulated are released without a click:
+  the first start after the upgrade logs one WARN naming such servers, and `mcpproxy doctor` names them on
+  every run. The 2026-10-11 rule that a clean verdict never approves a changed contract now applies to
+  `manual` only. Not caught by any of this: a paraphrase, a one-word edit, slow text drift, behaviour that
+  changes behind an unchanged definition. **Migration:** set `trust_mode: "manual"` on any server whose
+  tool changes you want a person to review; nothing changes for servers with an explicit `trust_mode` or
+  `auto_approve_tool_changes`. A record whose stored annotation snapshot differs from the live hints in
+  dispatch tier only (a server last seen before hints were captured) is held once for review. New servers
+  added with no trust mode are quarantined, scanned and released automatically on a clean verdict, as
+  `scan` always did.
 
 - **connect / disconnect:** `mcpproxy disconnect`, `DELETE /api/v1/connect/{client}`, and the Web UI
   and tray Disconnect now also revoke the client's credential (`client-<id>`), so a secret copied out

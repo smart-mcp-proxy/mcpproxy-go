@@ -94,7 +94,7 @@ func qapilotTools(inventory map[string]qapilot.Contract) []*config.ToolMetadata 
 			panic("qapilot: contract without text: " + c.Key)
 		}
 		tools = append(tools, &config.ToolMetadata{
-			ServerName: qapilotServer, Name: n, Description: text, ParamsJSON: `{"type":"object"}`,
+			ServerName: qapilotServer, Name: n, Description: text, ParamsJSON: qapilot.ContractInputSchema(c.Key),
 		})
 	}
 	return tools
@@ -243,7 +243,7 @@ func (h *qapilotHarness) actual() (qapilot.Snapshot, []string) {
 // never presented).
 func qapilotContractKey(toolName, hash string) string {
 	for _, c := range qapilot.FixtureContracts() {
-		h := calculateToolApprovalHashWithOutputSchema(toolName, qapilot.ContractText[c.Key], normalizeJSON(`{"type":"object"}`), normalizeJSON(""), nil)
+		h := calculateToolApprovalHashWithOutputSchema(toolName, qapilot.ContractText[c.Key], normalizeJSON(qapilot.ContractInputSchema(c.Key)), normalizeJSON(""), nil)
 		if h == hash {
 			return c.Key
 		}
@@ -315,7 +315,7 @@ func TestQAPilot_Scenarios(t *testing.T) {
 func TestQAPilot_FixtureVerdicts(t *testing.T) {
 	qapilot.Track(t, "fixture/verdicts", "QP-19")
 	for _, c := range qapilot.FixtureContracts() {
-		tool := &config.ToolMetadata{ServerName: qapilotServer, Name: "probe", Description: qapilot.ContractText[c.Key], ParamsJSON: `{"type":"object"}`}
+		tool := &config.ToolMetadata{ServerName: qapilotServer, Name: "probe", Description: qapilot.ContractText[c.Key], ParamsJSON: qapilot.ContractInputSchema(c.Key)}
 		verdict, _, coverageOK := scanner.ScanToolMetadataVerdict(qapilotServer, []*config.ToolMetadata{tool}, nil)
 		require.True(t, coverageOK, "fixture %s: scanner coverage must be complete", c.Key)
 		switch c.Verdict {

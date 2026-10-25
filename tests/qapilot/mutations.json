@@ -1,280 +1,374 @@
 {
-  "version": 1,
-  "mutations": [
+ "version": 2,
+ "mutations": [
+  {
+   "id": "M01",
+   "title": "Remove the agent-token denial for unquarantine (agents may release a server over REST)",
+   "requirement": "QP-05",
+   "file": "internal/auth/server_ops.go",
+   "find": "\tServerOpUnquarantine:    {},\n",
+   "replace": "",
+   "required": true,
+   "tests": [
     {
-      "id": "M01",
-      "title": "Remove the agent-token denial for unquarantine (agents may release a server over REST)",
-      "requirement": "QP-05",
-      "file": "internal/auth/server_ops.go",
-      "find": "\tServerOpUnquarantine:    {},\n",
-      "replace": "",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/httpapi",
-          "run": "TestQAPilot_AgentAuthorizationTable",
-          "detect": [
-            "TestQAPilot_AgentAuthorizationTable"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M02",
-      "title": "Drop the agent deny-list entirely (every caller is treated as admin)",
-      "requirement": "QP-05",
-      "file": "internal/auth/server_ops.go",
-      "find": "\treturn !AgentDeniedServerOp(op)\n}",
-      "replace": "\treturn true\n}",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/httpapi",
-          "run": "TestQAPilot_AgentAuthorizationTable",
-          "detect": [
-            "TestQAPilot_AgentAuthorizationTable"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M03",
-      "title": "Dispatch ignores server-level quarantine",
-      "requirement": "QP-02",
-      "file": "internal/preflight/classify.go",
-      "find": "\tif in.Server.Quarantined {\n\t\treturn ToolClassServerQuarantined\n\t}\n",
-      "replace": "",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/preflight",
-          "run": "TestQAPilot_ClassifyTable",
-          "detect": [
-            "TestQAPilot_ClassifyTable"
-          ]
-        },
-        {
-          "package": "./internal/server",
-          "run": "TestQAPilot_DispatchCountingUpstream",
-          "detect": [
-            "TestQAPilot_DispatchCountingUpstream"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M04",
-      "title": "Tool-level quarantine gate never applies (pending and changed tools become callable)",
-      "requirement": "QP-14",
-      "file": "internal/preflight/classify.go",
-      "find": "\treturn in.QuarantineEnabled && !in.Server.AutoApproveToolChanges\n",
-      "replace": "\treturn false\n",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/preflight",
-          "run": "TestQAPilot_ClassifyTable",
-          "detect": [
-            "TestQAPilot_ClassifyTable"
-          ]
-        },
-        {
-          "package": "./internal/runtime",
-          "run": "TestQAPilot_Scenarios",
-          "detect": [
-            "TestQAPilot_Scenarios"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M05",
-      "title": "A changed (rug-pulled) tool classifies as ready",
-      "requirement": "QP-16",
-      "file": "internal/preflight/classify.go",
-      "find": "\tcase ApprovalStatusChanged:\n\t\treturn ToolClassChanged\n",
-      "replace": "\tcase ApprovalStatusChanged:\n\t\treturn ToolClassReady\n",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/preflight",
-          "run": "TestQAPilot_ClassifyTable",
-          "detect": [
-            "TestQAPilot_ClassifyTable"
-          ]
-        },
-        {
-          "package": "./internal/server",
-          "run": "TestQAPilot_DispatchCountingUpstream",
-          "detect": [
-            "TestQAPilot_DispatchCountingUpstream"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M06",
-      "title": "trust_mode scan accepts a non-clean verdict as scan evidence (dangerous new tools auto-approved)",
-      "requirement": "QP-09",
-      "file": "internal/runtime/tool_quarantine.go",
-      "find": "\tif coverageOK && verdict == \"clean\" {\n\t\treturn true, &scanHoldEvidence{Reason: storage.ToolHeldReasonAwaitingReview, Verdict: \"clean\"}\n\t}",
-      "replace": "\tif coverageOK || verdict == \"clean\" {\n\t\treturn true, &scanHoldEvidence{Reason: storage.ToolHeldReasonAwaitingReview, Verdict: \"clean\"}\n\t}",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/runtime",
-          "run": "TestQAPilot_Scenarios",
-          "detect": [
-            "TestQAPilot_Scenarios/S12"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M07",
-      "title": "The transition guard lets the plain auto_approve reason (pending-only) clear a changed record",
-      "requirement": "QP-13",
-      "file": "internal/runtime/tool_quarantine.go",
-      "find": "\t\t\tReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,\n\t\t\tReasonAutoApproveChanges, ReasonScanApproved:\n\t\t\treturn nil",
-      "replace": "\t\t\tReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,\n\t\t\tReasonAutoApproveChanges, ReasonScanApproved, ReasonAutoApprove:\n\t\t\treturn nil",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/runtime",
-          "run": "TestQAPilot_InvariantTable",
-          "detect": [
-            "TestQAPilot_InvariantTable"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M08",
-      "title": "A quarantined server's first discovery is treated as a trusted baseline (tools auto-approved while quarantined)",
-      "requirement": "QP-07",
-      "file": "internal/runtime/tool_quarantine.go",
-      "find": "\tisBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline\n",
-      "replace": "\tisBaselinePass := enforceNewTools && !serverHasBaseline\n",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/runtime",
-          "run": "TestQAPilot_Scenarios",
-          "detect": [
-            "TestQAPilot_Scenarios/S01",
-            "TestQAPilot_Scenarios/S02"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M09",
-      "title": "Releasing a server no longer promotes its pending tools (release leaves tools held)",
-      "requirement": "QP-03",
-      "file": "internal/runtime/lifecycle.go",
-      "find": "\t\tif err := r.approveBaselineToolsForServerAt(serverName, inc); err != nil && !errors.Is(err, ErrServerReplaced) {",
-      "replace": "\t\tif err := func() error { return nil }(); err != nil && !errors.Is(err, ErrServerReplaced) {",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/runtime",
-          "run": "TestQAPilot_Scenarios",
-          "detect": [
-            "TestQAPilot_Scenarios/S02"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M10",
-      "title": "A recorded quarantine is not retained across a restart whose config file omits the key (admission gate retain rule removed)",
-      "requirement": "QP-15",
-      "file": "internal/runtime/config_load_admission_gate.go",
-      "find": "\t\t\tif prev != nil && prev.Quarantined && !sc.QuarantineExplicitlySet() {",
-      "replace": "\t\t\tif prev != nil && false {",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/runtime",
-          "run": "TestQAPilot_Scenarios",
-          "detect": [
-            "TestQAPilot_Scenarios/S26",
-            "TestQAPilot_Scenarios/S27"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M11",
-      "title": "New manual-trust servers are admitted unquarantined",
-      "requirement": "QP-01",
-      "file": "internal/config/config.go",
-      "find": "\treturn sc.EffectiveTrustMode() != TrustModeAuto\n}",
-      "replace": "\treturn sc.EffectiveTrustMode() == TrustModeScan\n}",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/config",
-          "run": "TestQAPilot_AdmissionTable",
-          "detect": [
-            "TestQAPilot_AdmissionTable"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M12",
-      "title": "MCP upstream_servers patch honours quarantined:false (an agent-reachable release path)",
-      "requirement": "QP-06",
-      "file": "internal/server/mcp.go",
-      "find": "\t\tif !requestedQuarantined && existingServer.Quarantined {\n\t\t\tp.logger.Warn(",
-      "replace": "\t\tif false {\n\t\t\tp.logger.Warn(",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/server",
-          "run": "TestQAPilot_MCPCannotReleaseServer",
-          "detect": [
-            "TestQAPilot_MCPCannotReleaseServer"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M13",
-      "title": "Security approval ignores hard-tier findings without force",
-      "requirement": "QP-04",
-      "file": "internal/security/scanner/service.go",
-      "find": "\tif aggReport != nil && !force {\n\t\tblocking := 0",
-      "replace": "\tif false {\n\t\tblocking := 0",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/server",
-          "run": "TestQAPilot_SecurityApprovalTable",
-          "detect": [
-            "TestQAPilot_SecurityApprovalTable"
-          ]
-        }
-      ]
-    },
-    {
-      "id": "M14",
-      "title": "Security approval no longer requires a scan report without force",
-      "requirement": "QP-04",
-      "file": "internal/security/scanner/service.go",
-      "find": "\tif err != nil {\n\t\tif !force {\n\t\t\treturn fmt.Errorf(\"no scan results found; run a scan first or use --force\")\n\t\t}\n\t}",
-      "replace": "\tif err != nil {\n\t\tif false {\n\t\t\treturn fmt.Errorf(\"no scan results found; run a scan first or use --force\")\n\t\t}\n\t}",
-      "required": true,
-      "tests": [
-        {
-          "package": "./internal/server",
-          "run": "TestQAPilot_SecurityApprovalTable",
-          "detect": [
-            "TestQAPilot_SecurityApprovalTable"
-          ]
-        }
-      ]
+     "package": "./internal/httpapi",
+     "run": "TestQAPilot_AgentAuthorizationTable",
+     "detect": [
+      "TestQAPilot_AgentAuthorizationTable"
+     ]
     }
-  ]
+   ]
+  },
+  {
+   "id": "M02",
+   "title": "Drop the agent deny-list entirely (every caller is treated as admin)",
+   "requirement": "QP-05",
+   "file": "internal/auth/server_ops.go",
+   "find": "\treturn !AgentDeniedServerOp(op)\n}",
+   "replace": "\treturn true\n}",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/httpapi",
+     "run": "TestQAPilot_AgentAuthorizationTable",
+     "detect": [
+      "TestQAPilot_AgentAuthorizationTable"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M03",
+   "title": "Dispatch ignores server-level quarantine",
+   "requirement": "QP-02",
+   "file": "internal/preflight/classify.go",
+   "find": "\tif in.Server.Quarantined {\n\t\treturn ToolClassServerQuarantined\n\t}\n",
+   "replace": "",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/preflight",
+     "run": "TestQAPilot_ClassifyTable",
+     "detect": [
+      "TestQAPilot_ClassifyTable"
+     ]
+    },
+    {
+     "package": "./internal/server",
+     "run": "TestQAPilot_DispatchCountingUpstream",
+     "detect": [
+      "TestQAPilot_DispatchCountingUpstream"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M04",
+   "title": "Tool-level quarantine gate never applies (pending and changed tools become callable)",
+   "requirement": "QP-14",
+   "file": "internal/preflight/classify.go",
+   "find": "\treturn in.QuarantineEnabled && !in.Server.AutoApproveToolChanges\n",
+   "replace": "\treturn false\n",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/preflight",
+     "run": "TestQAPilot_ClassifyTable",
+     "detect": [
+      "TestQAPilot_ClassifyTable"
+     ]
+    },
+    {
+     "package": "./internal/runtime",
+     "run": "TestQAPilot_Scenarios",
+     "detect": [
+      "TestQAPilot_Scenarios"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M05",
+   "title": "A changed (rug-pulled) tool classifies as ready",
+   "requirement": "QP-16",
+   "file": "internal/preflight/classify.go",
+   "find": "\tcase ApprovalStatusChanged:\n\t\treturn ToolClassChanged\n",
+   "replace": "\tcase ApprovalStatusChanged:\n\t\treturn ToolClassReady\n",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/preflight",
+     "run": "TestQAPilot_ClassifyTable",
+     "detect": [
+      "TestQAPilot_ClassifyTable"
+     ]
+    },
+    {
+     "package": "./internal/server",
+     "run": "TestQAPilot_DispatchCountingUpstream",
+     "detect": [
+      "TestQAPilot_DispatchCountingUpstream"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M06",
+   "title": "trust_mode scan accepts a non-clean verdict as scan evidence (dangerous new tools auto-approved)",
+   "requirement": "QP-09",
+   "file": "internal/runtime/tool_quarantine.go",
+   "find": "\tif coverageOK && verdict == \"clean\" {\n\t\treturn true, &scanHoldEvidence{Reason: storage.ToolHeldReasonAwaitingReview, Verdict: \"clean\"}\n\t}",
+   "replace": "\tif coverageOK || verdict == \"clean\" {\n\t\treturn true, &scanHoldEvidence{Reason: storage.ToolHeldReasonAwaitingReview, Verdict: \"clean\"}\n\t}",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestQAPilot_Scenarios",
+     "detect": [
+      "TestQAPilot_Scenarios/S12"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M07",
+   "title": "The transition guard lets the plain auto_approve reason (pending-only) clear a changed record",
+   "requirement": "QP-13",
+   "file": "internal/runtime/tool_quarantine.go",
+   "find": "\t\t\tReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,\n\t\t\tReasonAutoApproveChanges, ReasonScanApproved:\n\t\t\treturn nil",
+   "replace": "\t\t\tReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,\n\t\t\tReasonAutoApproveChanges, ReasonScanApproved, ReasonAutoApprove:\n\t\t\treturn nil",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestQAPilot_InvariantTable",
+     "detect": [
+      "TestQAPilot_InvariantTable"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M08",
+   "title": "A quarantined server's first discovery is treated as a trusted baseline (tools auto-approved while quarantined)",
+   "requirement": "QP-07",
+   "file": "internal/runtime/tool_quarantine.go",
+   "find": "\tisBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline\n",
+   "replace": "\tisBaselinePass := enforceNewTools && !serverHasBaseline\n",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestQAPilot_Scenarios",
+     "detect": [
+      "TestQAPilot_Scenarios/S01",
+      "TestQAPilot_Scenarios/S02"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M09",
+   "title": "Releasing a server no longer promotes its pending tools (release leaves tools held)",
+   "requirement": "QP-03",
+   "file": "internal/runtime/lifecycle.go",
+   "find": "\t\tif err := r.approveBaselineToolsForServerAt(serverName, inc); err != nil && !errors.Is(err, ErrServerReplaced) {",
+   "replace": "\t\tif err := func() error { return nil }(); err != nil && !errors.Is(err, ErrServerReplaced) {",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestQAPilot_Scenarios",
+     "detect": [
+      "TestQAPilot_Scenarios/S02"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M10",
+   "title": "A recorded quarantine is not retained across a restart whose config file omits the key (admission gate retain rule removed)",
+   "requirement": "QP-15",
+   "file": "internal/runtime/config_load_admission_gate.go",
+   "find": "\t\t\tif prev != nil && prev.Quarantined && !sc.QuarantineExplicitlySet() {",
+   "replace": "\t\t\tif prev != nil && false {",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestQAPilot_Scenarios",
+     "detect": [
+      "TestQAPilot_Scenarios/S26",
+      "TestQAPilot_Scenarios/S27"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M11",
+   "title": "New manual-trust servers are admitted unquarantined",
+   "requirement": "QP-01",
+   "file": "internal/config/config.go",
+   "find": "\treturn sc.EffectiveTrustMode() != TrustModeAuto\n}",
+   "replace": "\treturn sc.EffectiveTrustMode() == TrustModeScan\n}",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/config",
+     "run": "TestQAPilot_AdmissionTable",
+     "detect": [
+      "TestQAPilot_AdmissionTable"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M12",
+   "title": "MCP upstream_servers patch honours quarantined:false (an agent-reachable release path)",
+   "requirement": "QP-06",
+   "file": "internal/server/mcp.go",
+   "find": "\t\tif !requestedQuarantined && existingServer.Quarantined {\n\t\t\tp.logger.Warn(",
+   "replace": "\t\tif false {\n\t\t\tp.logger.Warn(",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/server",
+     "run": "TestQAPilot_MCPCannotReleaseServer",
+     "detect": [
+      "TestQAPilot_MCPCannotReleaseServer"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M13",
+   "title": "Security approval ignores hard-tier findings without force",
+   "requirement": "QP-04",
+   "file": "internal/security/scanner/service.go",
+   "find": "\tif aggReport != nil && !force {\n\t\tblocking := 0",
+   "replace": "\tif false {\n\t\tblocking := 0",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/server",
+     "run": "TestQAPilot_SecurityApprovalTable",
+     "detect": [
+      "TestQAPilot_SecurityApprovalTable"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M14",
+   "title": "Security approval no longer requires a scan report without force",
+   "requirement": "QP-04",
+   "file": "internal/security/scanner/service.go",
+   "find": "\tif err != nil {\n\t\tif !force {\n\t\t\treturn fmt.Errorf(\"no scan results found; run a scan first or use --force\")\n\t\t}\n\t}",
+   "replace": "\tif err != nil {\n\t\tif false {\n\t\t\treturn fmt.Errorf(\"no scan results found; run a scan first or use --force\")\n\t\t}\n\t}",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/server",
+     "run": "TestQAPilot_SecurityApprovalTable",
+     "detect": [
+      "TestQAPilot_SecurityApprovalTable"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M15",
+   "title": "Spec 120 hint rule off: an effective safety-hint change no longer records GATE-HINT-CHANGE (any hint flip is scan-approved)",
+   "requirement": "QP-20",
+   "file": "internal/runtime/tool_contract_delta.go",
+   "find": "\tflip := func(name string, before, after bool) {\n\t\tif before != after {",
+   "replace": "\tflip := func(name string, before, after bool) {\n\t\tif false && before != after {",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestHintDelta|TestScanMode_Gate_OpenWorldFlip_Held",
+     "detect": [
+      "TestHintDelta",
+      "TestScanMode_Gate_OpenWorldFlip_Held"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M16",
+   "title": "Spec 120 schema rule off: a new required parameter is not a structural signal",
+   "requirement": "QP-20",
+   "file": "internal/runtime/tool_contract_delta.go",
+   "find": "\t\tif !bReq[name] {\n\t\t\t*out = append(*out, shape(\"new-required\", childPath(path, name)))\n\t\t}",
+   "replace": "\t\tif false && !bReq[name] {\n\t\t\t*out = append(*out, shape(\"new-required\", childPath(path, name)))\n\t\t}",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestContractDelta_SharedFixture|TestScanMode_Gate_NewRequiredParameter_Held",
+     "detect": [
+      "TestContractDelta_SharedFixture",
+      "TestScanMode_Gate_NewRequiredParameter_Held"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M17",
+   "title": "Spec 120 schema rule off: a new property carrying a default, const or enum is treated as the benign optional addition",
+   "requirement": "QP-20",
+   "file": "internal/runtime/tool_contract_delta.go",
+   "find": "func carriesSteering(node any) bool {\n\tswitch v := node.(type) {",
+   "replace": "func carriesSteering(node any) bool {\n\tif node != nil {\n\t\treturn false\n\t}\n\tswitch v := node.(type) {",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestQAPilot_Scenarios|TestContractDelta_SharedFixture",
+     "detect": [
+      "TestQAPilot_Scenarios/S28",
+      "TestContractDelta_SharedFixture"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M18",
+   "title": "Spec 120 output-schema rule off: an output schema that appears is not a structural signal",
+   "requirement": "QP-20",
+   "file": "internal/runtime/tool_contract_delta.go",
+   "find": "\tcase approvedJSON == \"\":\n\t\treturn sig(\"added\")",
+   "replace": "\tcase approvedJSON == \"\":\n\t\treturn nil",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestContractDelta_SharedFixture|TestScanMode_Gate_OutputSchemaAdded_Held",
+     "detect": [
+      "TestContractDelta_SharedFixture",
+      "TestScanMode_Gate_OutputSchemaAdded_Held"
+     ]
+    }
+   ]
+  },
+  {
+   "id": "M19",
+   "title": "Spec 120 FR-009 off: a hash-equal dispatch-tier change takes the hash-match shortcut (explicit default hints dropped \u2192 routed as read, still approved)",
+   "requirement": "QP-20",
+   "file": "internal/runtime/tool_quarantine.go",
+   "find": "\t\thashMatches := existing.ApprovedHash == currentHash && !dispatchDrift &&",
+   "replace": "\t\thashMatches := existing.ApprovedHash == currentHash &&",
+   "required": true,
+   "tests": [
+    {
+     "package": "./internal/runtime",
+     "run": "TestHashEqualDispatchDrop_Bites",
+     "detect": [
+      "TestHashEqualDispatchDrop_Bites"
+     ]
+    }
+   ]
+  }
+ ]
 }

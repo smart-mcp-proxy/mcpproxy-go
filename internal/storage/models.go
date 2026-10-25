@@ -189,6 +189,23 @@ type BaselineSweepState struct {
 	Findings int `json:"findings"`
 }
 
+// ScanDefaultNoticeDoneKey holds the ScanDefaultNoticeState marker in
+// MetaBucket (spec 120 FR-011): the one-time startup notice that servers with
+// no trust_mode now run under scan has been logged (or found nothing to say).
+const ScanDefaultNoticeDoneKey = "scan_default_notice_done"
+
+// ScanDefaultNoticeState records that the one-time scan-default startup notice
+// ran on this installation. Absence means "never evaluated with at least one
+// configured server": a fresh install with no servers leaves it unset so the
+// first start that has servers still gets the notice.
+type ScanDefaultNoticeState struct {
+	// NoticedAt is when the notice ran.
+	NoticedAt time.Time `json:"noticed_at"`
+	// Servers names the enabled servers that were running under the scan
+	// default at that time (empty when there was nothing to warn about).
+	Servers []string `json:"servers,omitempty"`
+}
+
 // BundleReprotectDoneKey holds the BundleReprotectState marker in MetaBucket.
 const BundleReprotectDoneKey = "tpa_bundle_reprotect_done"
 

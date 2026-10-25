@@ -430,6 +430,17 @@ export type ClientPresenceState =
   | typeof ClientPresenceNotInstalled
   | typeof ClientPresenceOther;
 
+// Structural-gate hold signal ids (held_signals prefixes, spec 120) - generated from internal/contracts/terminology.go
+export const HoldSignalGateHintSaferFlip = 'GATE-HINT-SAFER-FLIP' as const;
+export const HoldSignalGateHintChange = 'GATE-HINT-CHANGE' as const;
+export const HoldSignalGateSchemaShape = 'GATE-SCHEMA-SHAPE' as const;
+export const HoldSignalGateOutputSchema = 'GATE-OUTPUT-SCHEMA' as const;
+export type HoldSignal =
+  | typeof HoldSignalGateHintSaferFlip
+  | typeof HoldSignalGateHintChange
+  | typeof HoldSignalGateSchemaShape
+  | typeof HoldSignalGateOutputSchema;
+
 export interface Tool {
   name: string;
   server_name: string;
