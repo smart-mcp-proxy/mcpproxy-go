@@ -1350,8 +1350,9 @@ components:
             TrustMode is the per-server trust tier: auto|scan|manual. Supersedes
             auto_approve_tool_changes (spec 086). An empty value is derived from the
             legacy fields at load via normalizeServerQuarantineFlags; the single
-            resolution point is EffectiveTrustMode(), which treats an empty or
-            unrecognized value as manual (secure by default). Read via
+            resolution point is EffectiveTrustMode(), which treats an empty value as
+            scan (DefaultTrustMode, spec 119) and an unrecognized value as manual
+            (fail closed). Read via
             EffectiveTrustMode(), never the raw string.
           type: string
         updated:

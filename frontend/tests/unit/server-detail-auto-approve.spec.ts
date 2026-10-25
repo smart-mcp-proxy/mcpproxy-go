@@ -104,9 +104,9 @@ describe('ServerDetail — trust-mode control (Spec 088 US1, T009)', () => {
     expect(wrapper.findAll('[data-test^="trust-mode-option-"]')).toHaveLength(3)
   })
 
-  it('presents manual as the current default when no trust mode is configured', async () => {
+  it('presents scan as the current default when no trust mode is configured (spec 119)', async () => {
     const { wrapper } = await mountDetail('config')
-    expect(isChecked(wrapper, 'manual')).toBe(true)
+    expect(isChecked(wrapper, 'scan')).toBe(true)
     expect(wrapper.find('[data-test="trust-mode-default-note"]').exists()).toBe(true)
   })
 
@@ -128,9 +128,9 @@ describe('ServerDetail — trust-mode control (Spec 088 US1, T009)', () => {
 
   it('saves a selection via PATCH {trust_mode} and never sends legacy fields', async () => {
     const { wrapper, api } = await mountDetail('config')
-    await selectMode(wrapper, 'scan')
+    await selectMode(wrapper, 'manual')
     await flushPromises()
-    expect(api.patchServer).toHaveBeenCalledWith('github', { trust_mode: 'scan' })
+    expect(api.patchServer).toHaveBeenCalledWith('github', { trust_mode: 'manual' })
     const patch = (api.patchServer as unknown as { mock: { calls: unknown[][] } }).mock.calls[0][1]
     expect(Object.keys(patch as object)).toEqual(['trust_mode'])
   })
@@ -138,7 +138,7 @@ describe('ServerDetail — trust-mode control (Spec 088 US1, T009)', () => {
   it('refreshes the server projection after a successful save', async () => {
     const { wrapper, api } = await mountDetail('config')
     const before = (api.getServers as unknown as { mock: { calls: unknown[] } }).mock.calls.length
-    await selectMode(wrapper, 'scan')
+    await selectMode(wrapper, 'manual')
     await flushPromises()
     expect(
       (api.getServers as unknown as { mock: { calls: unknown[] } }).mock.calls.length
@@ -169,7 +169,7 @@ describe('ServerDetail — trust-mode control (Spec 088 US1, T009)', () => {
     patchResponse = { success: true, data: { message: 'ok', restart_required: true } }
     const { wrapper } = await mountDetail('config')
     expect(wrapper.find('[data-test="trust-mode-restart-notice"]').exists()).toBe(false)
-    await selectMode(wrapper, 'scan')
+    await selectMode(wrapper, 'manual')
     await flushPromises()
     expect(wrapper.find('[data-test="trust-mode-restart-notice"]').exists()).toBe(true)
   })
@@ -177,7 +177,7 @@ describe('ServerDetail — trust-mode control (Spec 088 US1, T009)', () => {
   it('shows no restart notice when the response does not report one', async () => {
     patchResponse = { success: true, data: { message: 'ok' } }
     const { wrapper } = await mountDetail('config')
-    await selectMode(wrapper, 'scan')
+    await selectMode(wrapper, 'manual')
     await flushPromises()
     expect(wrapper.find('[data-test="trust-mode-restart-notice"]').exists()).toBe(false)
   })
