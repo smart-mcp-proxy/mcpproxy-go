@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
-  title: MCPProxy Spec 119 - starter offer and onboarding marks (additive)
-  version: "119"
+  title: MCPProxy Spec 122 - starter offer and onboarding marks (additive)
+  version: "122"
   description: All responses use the standard envelope {success, data} (internal/httpapi/server.go writeSuccess); schemas below describe `data`. Errors are {success:false, error, code}.
 paths:
   /api/v1/onboarding/starter:
@@ -52,7 +52,7 @@ paths:
           description: "agent token / insufficient server-op permission; nothing resolved, added or recorded"
   /api/v1/onboarding/mark:
     post:
-      summary: Existing endpoint; Spec 119 adds optional sticky booleans and a failure enum.
+      summary: Existing endpoint; Spec 122 adds optional sticky booleans and a failure enum.
       requestBody:
         content:
           application/json:

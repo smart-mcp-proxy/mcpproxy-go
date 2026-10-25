@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "mcpproxy/telemetry/schema-15/day_two",
-  "title": "Heartbeat schema 15 additions (Spec 119)",
+  "$id": "mcpproxy/telemetry/schema-17/day_two",
+  "title": "Heartbeat schema 17 additions (Spec 122)",
   "type": "object",
   "properties": {
     "activation_additions": {

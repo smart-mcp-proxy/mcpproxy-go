@@ -1,6 +1,6 @@
-# Tasks: Day-Two Activation, Experiment E3 (Spec 119)
+# Tasks: Day-Two Activation, Experiment E3 (Spec 122)
 
-**Input**: the design documents in `/specs/119-day-two-activation/`
+**Input**: the design documents in `/specs/122-day-two-activation/`
 **Prerequisites**: plan.md, spec.md, research.md (R1-R12), data-model.md, contracts/, quickstart.md
 
 **TDD rule (constitution V)**: write each `test` task first. It must FAIL for the stated behavioural reason on a build that compiles, before its paired `impl` task starts. Where a new symbol is needed, add a stub, so the failure is behavioural and not a compile error. Record the failing output in the PR description.
@@ -19,7 +19,7 @@
 
 ---
 
-## Phase 1: Setup (PR-A branch `119-pr-a-measure`)
+## Phase 1: Setup (PR-A branch `122-pr-a-measure`)
 
 - [ ] T001 Branch from `origin/main`. Record baseline timings (artifact: the PR-A description) for `go test -race ./internal/storage/... ./internal/telemetry/... ./internal/runtime/... ./internal/httpapi/...` in the PR description.
 - [ ] T002 [P] Create the empty package `internal/onboarding/` (`doc.go` with the package contract: pure domain logic, no storage or HTTP imports). Add an import-boundary test, `internal/onboarding/imports_test.go`, that fails if the package imports `internal/storage`, `internal/httpapi` or `internal/server`.
@@ -28,8 +28,8 @@
 
 ## Phase 2: User Story 5, measure first (P1; foundational, blocks Phases 3-6; PR-A) 🎯 ships first
 
-**Goal**: persist every local fact and send schema 15, with no visible UI change. This gives a release of baseline data (research R12).
-**Independent test**: schema-15 payload tests, plus quickstart L4.
+**Goal**: persist every local fact and send schema 17, with no visible UI change. This gives a release of baseline data (research R12).
+**Independent test**: schema-17 payload tests, plus quickstart L4.
 
 ### Install anchor and onboarding state
 
@@ -75,15 +75,15 @@
   - Agent tokens are denied (the existing `requireAdminRead` rule).
 - [ ] T010 [US5] impl: in `internal/httpapi/onboarding.go` and `internal/httpapi/connect.go`, add the mark fields, observation calls, and the `day_two` local-facts block in the state response (contracts/onboarding-starter.openapi.yaml).
 
-### Telemetry schema 15
+### Telemetry schema 17
 
 - [ ] T011 [P] [US5] test: `internal/telemetry/activation_tool_indexed_test.go`.
   - `MarkFirstToolIndexed` is sticky.
   - `first_tool_indexed_at` is stored and **never** serialised.
   - `first_tool_indexed_after` is derived correctly, and `""` without an anchor.
   - Every fake `ActivationStore` in the repo compiles with the new method; grep the test tree.
-- [ ] T012 [P] [US5] test: `internal/telemetry/payload_v15_test.go` (`TestPayloadV15`).
-  - `schema_version == 15`.
+- [ ] T012 [P] [US5] test: `internal/telemetry/payload_v17_test.go` (`TestPayloadV17`).
+  - `schema_version == 17`.
   - The `day_two` keys match `contracts/telemetry-day-two.schema.json` exactly.
   - Server edition omits `day_two`.
   - Opt-out sends nothing.
@@ -101,15 +101,15 @@
 - [ ] T014 [US5] impl:
   - `internal/telemetry/activation.go`: key, field, load, save, `MarkFirstToolIndexed`.
   - `internal/telemetry/day_two.go`: `DayTwoPayload`, `SetDayTwoProvider`, summary-view counter with an atomic per-surface 1-hour debounce, bucketing.
-  - `internal/telemetry/telemetry.go`: `SchemaVersion = 15`, a change-log paragraph, payload mapping.
+  - `internal/telemetry/telemetry.go`: `SchemaVersion = 17`, a change-log paragraph, payload mapping.
   - `internal/telemetry/anonymity.go`: `scanDayTwo` plus the activation enum rule.
   - Provider wiring in `internal/server/server.go`, next to `SetOnboardingProvider` (~3234).
-- [ ] T015 [US5] Move every schema-14 pin to 15 (research R11 list). Re-run `grep -rnE 'schema_version.{0,3}14|want 14' internal/telemetry docs` and get no hits. Keep `schema_version_guard_test.go` green.
+- [ ] T015 [US5] Move every pin of the then-current schema (16 on `origin/main` at 2026-10-25) to the new version. List them with `grep -rnE 'schema_version.{0,3}16|want 16' internal/telemetry docs` and get no hits afterwards. If main has bumped again, use the next free version and update this spec. Keep `schema_version_guard_test.go` green.
 
 ### Docs (PR-A)
 
 - [ ] T016 [P] [US5] Docs:
-  - `docs/features/telemetry.md`: schema 15, `day_two` and activation fields under "What is collected", privacy notes, the comparability note for `tool_count` versus `first_tool_indexed_ever`.
+  - `docs/features/telemetry.md`: schema 17, `day_two` and activation fields under "What is collected", privacy notes, the comparability note for `tool_count` versus `first_tool_indexed_ever`.
   - `docs/features/connect-clients.md`: client observation.
   - A `CLAUDE.md` "Recent Changes" line.
 - [ ] T017 [US5] PR-A verification:
@@ -118,11 +118,11 @@
   - Sol 6.1 review loop;
   - merge.
 
-**Checkpoint**: PR-A merged. Facts and schema 15 are live; no UI has changed.
+**Checkpoint**: PR-A merged. Facts and schema 17 are live; no UI has changed.
 
 ---
 
-## Phase 3: User Story 1 + User Story 2 (Web): starter (PR-B branch `119-pr-b-starter`) 🎯 MVP
+## Phase 3: User Story 1 + User Story 2 (Web): starter (PR-B branch `122-pr-b-starter`) 🎯 MVP
 
 **Goal**: a fresh install reaches indexed tools through add → inspect → bound approval, with the security model unchanged.
 **Independent test**: quickstart L1 and L2 (steps 2-4).
@@ -228,7 +228,7 @@
 
 ---
 
-## Phase 4: User Story 3 (Web): second client (PR-C branch `119-pr-c-second-client`)
+## Phase 4: User Story 3 (Web): second client (PR-C branch `122-pr-c-second-client`)
 
 **Goal**: offer every detected, unconnected client right after the first one connects.
 **Independent test**: quickstart L2 step 1.
@@ -257,7 +257,7 @@
 
 ---
 
-## Phase 5: User Story 4: weekly digest, core + Web + CLI (PR-D branch `119-pr-d-digest`)
+## Phase 5: User Story 4: weekly digest, core + Web + CLI (PR-D branch `122-pr-d-digest`)
 
 **Goal**: a local "what MCPProxy did" summary, identical on every surface.
 **Independent test**: quickstart L3.
@@ -353,7 +353,7 @@
 
 ---
 
-## Phase 6: Native macOS: US2, US3 and US4 native (PR-E branch `119-pr-e-native`)
+## Phase 6: Native macOS: US2, US3 and US4 native (PR-E branch `122-pr-e-native`)
 
 **Goal**: the same starter, second-client and weekly surfaces in the tray app, with bound approvals.
 **Independent test**: quickstart L5.

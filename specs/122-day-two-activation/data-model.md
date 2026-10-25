@@ -1,4 +1,4 @@
-# Data Model: Day-Two Activation (Spec 119)
+# Data Model: Day-Two Activation (Spec 122)
 
 All persisted additions are additive and `omitempty`. An older binary ignores them (downgrade-safe), and a newer binary treats their absence as "unknown" or "false".
 
@@ -126,7 +126,7 @@ All REST bodies use the standard `{"success": true, "data": …}` envelope (`int
 - `held_for_review.coverage` is `partial` while legacy records without `entered_hold` exist in the window.
 - `new + changed` may exceed `entered`: a tool counts once in `entered` but may appear under both kinds if it entered twice with different kinds.
 
-### 4c. `telemetry.DayTwoPayload` (`day_two` in the heartbeat, schema 15, personal edition only)
+### 4c. `telemetry.DayTwoPayload` (`day_two` in the heartbeat, schema 17, personal edition only)
 
 ```json
 "day_two": {

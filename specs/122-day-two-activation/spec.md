@@ -1,6 +1,6 @@
 # Feature Specification: Day-Two Activation (Experiment E3)
 
-**Feature Branch**: `119-day-two-activation` (PR branch `claude/spec-day-two-activation-1fad2a`)
+**Feature Branch**: `122-day-two-activation` (PR branch `claude/spec-day-two-activation-1fad2a`)
 **Created**: 2026-10-20
 **Status**: Draft (design only; implementation not started)
 **Input**: Growth experiment E3 from the Q4 2026 promotion strategy (maintainer-approved). Three product changes: (1) first run always ends with a working tool indexed, (2) the connect wizard offers a second client, (3) a weekly "what MCPProxy did" summary gives users a reason to come back. A fourth part adds the telemetry needed to judge the experiment.
@@ -29,12 +29,12 @@ What the product does today:
 | Web onboarding wizard | Modal with Clients, Servers and Verify tabs. The Clients tab is complete once **any** client is connected. The wizard never auto-opens again after the first dismissal. | `frontend/src/components/OnboardingWizard.vue` (tabs ~:967, `pickInitialTab` ~:1146), `internal/httpapi/onboarding.go:276,342` |
 | Starter server | None. A fresh install with zero servers sees a "Get started" card on Home. | `frontend/src/views/Home.vue:10-40` |
 | Catalog | Curated reference servers are compiled in: filesystem, memory, everything, sequentialthinking, fetch, git, time. They need no credentials. Runtime is implicit in the install command (`uvx` or `npx -y`). | `internal/registries/reference.go:26` |
-| Quarantine on add | Every catalog add is quarantined unless quarantine is globally off. Trust mode defaults to `manual`. Provenance never bypasses quarantine. A new quarantined server gets a 1-hour inspection exemption, so it connects and its tool definitions are captured for review. | `internal/config/config.go:2060,2173`, `internal/server/add_from_registry.go:~120-131`, `internal/server/server.go:2059`, `internal/server/review_capture.go:28` |
+| Quarantine on add | Every catalog add is quarantined unless quarantine is globally off. Provenance never bypasses quarantine. **Update 2026-10-25**: Spec 119 (`specs/119-scan-default-trust`, implemented on main) makes `scan` the default trust mode. A clean admission scan now unquarantines a new server through the normal door, and `manual` always holds. A new quarantined server gets a 1-hour inspection exemption, so it connects and its tool definitions are captured for review. | `internal/config/config.go:2060,2173`, `internal/server/add_from_registry.go:~120-131`, `internal/server/server.go:2059`, `internal/server/review_capture.go:28` |
 | Docker isolation | Off by default. | `internal/config/config.go:1644-1646` |
 | "Tools indexed" | `tool_count` = search-index document count, sampled when the heartbeat is built. Quarantined or held tools are not in the index. | `internal/runtime/runtime.go:~4026`, `internal/telemetry/telemetry.go:189` |
 | Activity summary | `GET /api/v1/activity/summary?period=1h|24h|7d|30d` and `mcpproxy activity summary --period` exist. They return totals, status counts, top servers and tools, and per-server counts. They have no held-for-review, blocked-by-reason, by-client or sensitive-data breakdown. | `internal/httpapi/activity.go:~886`, `internal/contracts/activity.go:132`, `cmd/mcpproxy/activity_cmd.go` |
 | Tray | The AppKit menu has a glance block with a 24h activity line and an "Open Activity…" row. There is no weekly view. The native app has no onboarding wizard and never calls `/onboarding/*`. | `native/macos/MCPProxy/MCPProxy/MCPProxyApp.swift:~1041-1450`, `Menu/Glance/GlanceSection.swift` |
-| Telemetry | Schema 14. It reports wizard fields (`wizard_engaged`, `wizard_connect_step`, `wizard_server_step`, `wizard_shown`), `connected_client_count` / `connected_client_ids` and `activation.*` first-ever flags. It has nothing for a starter offer, a second-client step, summary views, or a sticky "a tool was ever indexed" flag. | `internal/telemetry/telemetry.go:163-190`, `internal/telemetry/activation.go:42` |
+| Telemetry | Schema 16 on `origin/main` as of 2026-10-25; it was 14 when this spec was drafted, and 101-tpa-db added 15 and 16. This feature therefore bumps to schema 17. It reports wizard fields (`wizard_engaged`, `wizard_connect_step`, `wizard_server_step`, `wizard_shown`), `connected_client_count` / `connected_client_ids` and `activation.*` first-ever flags. It has nothing for a starter offer, a second-client step, summary views, or a sticky "a tool was ever indexed" flag. | `internal/telemetry/telemetry.go:163-190`, `internal/telemetry/activation.go:42` |
 
 The experiment's success bar comes from the strategy report:
 - at least 82% of post-release new installs reach "tools indexed";
@@ -62,7 +62,7 @@ Answered by the spec author under the zero-interruption policy; each answer is t
 | The same starter offer, not pre-selected, on the Web Home "Get started" card and the native macOS Home empty state, whenever the install has zero indexed tools. | A starter on the CLI. `mcpproxy catalog add reference/time` already exists. |
 | A **"Connect another client"** step after the first client connects, in the Web wizard and the native Connect Client sheet. It lists detected, supported, unconnected clients from the Spec 075 registry. | Auto-writing any client config. Every write stays an explicit, previewed action. |
 | A **weekly "what MCPProxy did" summary**: a Web Home card, a tray glance line, and the CLI `mcpproxy activity summary --since 7d`. It is computed locally from the activity log and the current review queue. | Push notifications or e-mail digests (follow-up O2). |
-| Additive **telemetry**: schema 15, with bucketed counters and closed enums that show starter offer and outcome, second-client outcome, clients connected on day 0, a sticky first-tool-indexed flag, and summary views. | New identifiers, server/tool/client names beyond the existing closed `connected_client_ids` list, and receiver or dashboard changes. Those live in the telemetry repo; quickstart.md gives the queries. |
+| Additive **telemetry**: schema 17, with bucketed counters and closed enums that show starter offer and outcome, second-client outcome, clients connected on day 0, a sticky first-tool-indexed flag, and summary views. | New identifiers, server/tool/client names beyond the existing closed `connected_client_ids` list, and receiver or dashboard changes. Those live in the telemetry repo; quickstart.md gives the queries. |
 | Personal edition. | Server edition. Its onboarding, starter and summary surfaces stay as they are. The REST additions are available in both editions under the existing activity auth rules. |
 
 ## Definitions
@@ -107,7 +107,7 @@ They click "Add and inspect". MCPProxy adds the server through the normal catalo
 5. **Given** the user unchecks the card or clicks "Skip", **When** they continue, **Then** nothing is added or run. The decline is remembered, and the wizard never pre-selects the starter again.
 6. **Given** the user closes the wizard while the card is selected, before clicking "Add and inspect", **Then** nothing is added or run.
 7. **Given** a definition changes between capture and approval, **When** the user clicks "Approve and enable", **Then** the 409 `review_out_of_date` response reloads the tool list and nothing is approved. This is Spec 117 behaviour, surfaced in place.
-8. **Given** `quarantine_enabled: false`, **When** the starter is added, **Then** its tools are indexed without an approval step, exactly as for any other catalog add, and the step skips straight to "ready".
+8. **Given** `quarantine_enabled: false`, or the default `scan` trust mode with a clean admission scan (Spec 119), **When** the starter is added, **Then** its tools are indexed without an approval step, exactly as for any other catalog add, and the step skips straight to "ready".
 9. **Given** no candidate's launcher resolves (neither `uvx` nor `npx`), **Then** the card is replaced with "To try a starter server, install uv or Node.js", with links. The eligibility result is recorded as `launcher_missing`.
 
 ---
@@ -188,7 +188,7 @@ The maintainer queries the telemetry store for post-release cohorts. Without any
 
 **Why this priority**: without it the experiment cannot be judged or killed.
 
-**Independent Test**: schema-15 payload tests assert the new fields' presence, enum closure, bucket edges and stickiness. The PII scan rejects unknown keys and values in every new object.
+**Independent Test**: schema-17 payload tests assert the new fields' presence, enum closure, bucket edges and stickiness. The PII scan rejects unknown keys and values in every new object.
 
 **Acceptance Scenarios**:
 
@@ -237,10 +237,10 @@ The maintainer queries the telemetry store for post-release cohorts. Without any
   2. `reference/sequentialthinking` (`npx -y @modelcontextprotocol/server-sequential-thinking`; expected tool `sequentialthinking`).
 
   `fetch` (arbitrary URL fetching), `everything` (it ships `get-env`, which returns all environment variables, plus LLM-sampling test tools), `filesystem`, `memory` and `git` MUST NOT be candidates.
-- **FR-003**: Accepting the offer MUST add the server through the same catalog add door as a normal catalog add, with no request fields beyond what that door already accepts. Immediately before the add, the core MUST re-resolve the catalog entry and abort, adding nothing, if the resolved command differs from the command shown to the user (Definitions: starter candidate). Quarantine default, trust mode (catalog adds resolve to `manual`), inspection exemption, admission scan and definition capture MUST be applied exactly as for that door. The starter MUST NOT pass any quarantine, trust-mode or approval override.
+- **FR-003**: Accepting the offer MUST add the server through the same catalog add door as a normal catalog add, with no request fields beyond what that door already accepts. Immediately before the add, the core MUST re-resolve the catalog entry and abort, adding nothing, if the resolved command differs from the command shown to the user (Definitions: starter candidate). Quarantine default, trust mode (whatever the door resolves; `scan` by default since Spec 119), inspection exemption, admission scan and definition capture MUST be applied exactly as for that door. The starter MUST NOT pass any quarantine, trust-mode or approval override.
 - **FR-004**: Before the add, the offer MUST show the exact command, the isolation mode and the statement that it will be downloaded and run for inspection. The button MUST name that action ("Add and inspect"), not a generic Continue.
 - **FR-005**: When the added starter is quarantined, the offer surface MUST show the **captured** tools with their review tiers. It MUST require an explicit "Approve and enable" action, bound to the shown definitions and the server incarnation (Spec 117). No approval MUST happen without that click. If the captured tool names differ from the audited set, the starter copy MUST be replaced by the plain review with a "differs from the reviewed version" notice.
-- **FR-006**: The surface MUST skip the review and go straight to the ready state only when the unchanged catalog door produced an unquarantined server, which today means quarantine is globally off.
+- **FR-006**: The surface MUST skip the review and go straight to the ready state only when the unchanged catalog door produced an unquarantined server. Today that happens in two cases: quarantine is globally off, or under Spec 119's default `scan` trust mode the admission scan settles clean and the existing scan-gate path unquarantines the server. Under `manual`, or after a non-clean verdict, the in-place bound approval (FR-005) applies. Either way the starter adds no path of its own.
 - **FR-007**: Closing the wizard, unchecking the card or clicking Skip MUST add and run nothing. Skip and uncheck MUST persist `starter_declined` in the onboarding state.
 - **FR-008**: The Web Home "Get started" card and a new native Home empty-state card MUST offer the starter, never pre-selected, when zero tools are indexed, no held tools await review and no starter is configured. If held tools await review, they MUST show the review call-to-action instead.
 - **FR-009**: Launcher resolution MUST search the PATH that stdio spawning effectively uses: the login-shell PATH (`shellwrap.LoginShellPATH`) plus the process PATH. It MUST NOT spawn the launcher. Results MAY be cached for 60 s.
@@ -300,7 +300,7 @@ The maintainer queries the telemetry store for post-release cohorts. Without any
 
 ### Functional Requirements: telemetry (US5)
 
-- **FR-027**: The heartbeat MUST bump to schema 15 and add:
+- **FR-027**: The heartbeat MUST bump to schema 17 and add:
   - `activation.first_tool_indexed_ever`: bool, sticky and persisted, stamped per the Definitions;
   - `activation.first_tool_indexed_after`: enum `"" | lt_10m | 10m_1h | 1h_24h | 1d_7d | gt_7d`, measured from the install anchor and set once; `""` when there is no anchor.
 - **FR-028**: The heartbeat MUST add a `day_two` object, in the personal edition only. It contains only booleans, closed enums and buckets:
@@ -354,16 +354,16 @@ The release-to-release comparison is pre/post. It is associative, not causal: re
 - **SC-003 (diagnostic)**:
   - Launcher availability: `starter_launcher = none` is below 15% of installs with a non-empty `starter_launcher`. That field is evaluated independently of every other eligibility outcome, so `tools_present` or `name_taken` installs never dilute it. Above 15%, follow-up O1 (an embedded starter) is triggered.
   - Conversion: at least 60% of installs with `starter_offered` reach `starter_live`.
-- **SC-004 (diagnostic)**: the share of cohort installs with at least one connected client whose day-0 heartbeats show at least two distinct ids rises by at least 8 points over the pre-release baseline. Both sides use the same instrument: the union of `connected_client_ids` over heartbeats received within 26 h of the identity's first heartbeat. Today that is the startup heartbeat at about 5 minutes and the first daily one. The baseline uses v14 cohorts; the comparison uses schema-15 cohorts. The richer `clients_day0` / `clients_day0_final` fields are a separate diagnostic with no pre-release baseline. Their first release cohort becomes the baseline for later releases.
+- **SC-004 (diagnostic)**: the share of cohort installs with at least one connected client whose day-0 heartbeats show at least two distinct ids rises by at least 8 points over the pre-release baseline. Both sides use the same instrument: the union of `connected_client_ids` over heartbeats received within 26 h of the identity's first heartbeat. Today that is the startup heartbeat at about 5 minutes and the first daily one. The baseline uses pre-release cohorts (schema 16 or older); the comparison uses schema-17 cohorts. The richer `clients_day0` / `clients_day0_final` fields are a separate diagnostic with no pre-release baseline. Their first release cohort becomes the baseline for later releases.
 - **SC-005 (safety)**: no code path makes a starter tool callable without an explicit user approval when a normal catalog add of the same server would be quarantined. A test asserts this for the wizard, Web Home and native doors. No starter code runs before the user clicks "Add and inspect".
 - **SC-006 (performance)**: the 7-day summary with digest returns in under 1.5 s on a 100k-record activity log, measured with a new benchmark next to the summary handler tests. The Home card renders its figures within 2 s of Home load.
-- **SC-007 (privacy)**: the schema-15 privacy tests pass. There are no new identifier fields. Every new field is enum-closed, and unknown keys are rejected.
+- **SC-007 (privacy)**: the schema-17 privacy tests pass. There are no new identifier fields. Every new field is enum-closed, and unknown keys are rejected.
 - **Kill rule**: if SC-001 and SC-002 show no movement beyond the noise rule after two releases and four weeks of cohort data, the starter pre-selection and the summary card revert to opt-in. The telemetry stays.
 
 ## Assumptions
 
 - **A1**: The starter is `time` when `uvx` resolves, otherwise `sequentialthinking` when `npx` resolves. `time` is preferred because it is useful in a real prompt and makes no network calls after the first package download. The other reference servers are excluded (FR-002).
-- **A2**: "Lands in quarantine-exempt trusted state only if the catalog marks it trusted": no catalog source marks a server quarantine-exempt today (MCP-1072: provenance is informational), and this spec adds no such marker. So the starter is quarantined under the default config, and the in-place review (FR-005) is what gets its tools indexed. The security model is unchanged, at the cost of one extra click.
+- **A2**: "Lands in quarantine-exempt trusted state only if the catalog marks it trusted": no catalog source marks a server quarantine-exempt today (MCP-1072: provenance is informational), and this spec adds no such marker. Under Spec 119's `scan` default, a starter whose admission scan settles clean is unquarantined by the existing scan gate, exactly as any catalog add would be. Under `manual`, or after a non-clean verdict, the in-place review (FR-005) is what gets its tools indexed. The security model is unchanged in both cases.
 - **A3**: Pre-selecting the add is acceptable only with informed consent. The add starts the 1-hour inspection exemption, which downloads and runs the package as a host process (Docker isolation is off by default) before any approval. This is true of every catalog add today. So the card states the command and isolation mode, the button names the action (FR-004), and nothing runs on close or Skip. Tool *calls* stay blocked until approval by the existing tool gate.
 - **A4**: The experiment is judged pre/post on release cohorts, not with a randomised holdout. Weekly new installs (about 75-230, depending on the key) make a 10% holdout too small to read within the kill window. Cohort retention has been flat for four months, which gives a stable baseline.
 - **A5**: Day-7 return is measured by heartbeat presence, which needs the core running. The summary helps D7 only through users who keep MCPProxy running or reopen it. This is why US4 is P3 and US1 carries the primary metric.

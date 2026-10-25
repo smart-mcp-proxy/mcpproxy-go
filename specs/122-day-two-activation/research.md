@@ -1,4 +1,4 @@
-# Research: Day-Two Activation (Spec 119)
+# Research: Day-Two Activation (Spec 122)
 
 Every decision below resolves a design unknown from spec.md. Code references are to `origin/main` at `9dfdb2f19`.
 
@@ -41,6 +41,8 @@ A candidate is selected only if all of these hold:
 - Process PATH only: wrong for Finder-launched cores.
 
 ## R3. Starter add door, authorization and consent binding
+
+**Trust mode (2026-10-25)**: since Spec 119 (`specs/119-scan-default-trust`) the door resolves new servers to `scan` by default. The starter changes nothing about that, and the UI handles both outcomes: an unquarantined server after a clean admission scan, or a held server needing the bound in-place approval.
 
 **Decision**:
 - `GET /api/v1/onboarding/starter` is wrapped in `requireAdminRead`.
@@ -204,21 +206,21 @@ Mapping table (`internal/storage/activity_digest.go`, `BlockClass(rec)`):
 
 **Rationale**: one aggregation path (A6). No client-side telemetry.
 
-## R11. Telemetry schema 15
+## R11. Telemetry schema 17
 
 **Decision**:
-- `SchemaVersion = 15` (`internal/telemetry/telemetry.go:163`), with a change-log paragraph.
+- `SchemaVersion = 17` (`internal/telemetry/telemetry.go:194` on 2026-10-25), with a change-log paragraph.
 - `ActivationState` gains `FirstToolIndexedEver` (`activationKeyFirstToolIndexedEver`) and a derived `FirstToolIndexedAfter` bucket. The latter is computed at payload build from the stored `first_tool_indexed_at` and the install anchor, and is never stored as a timestamp on the wire.
 - A new `DayTwoSnapshot` provider, mirroring `SetOnboardingProvider` (`telemetry.go:863`), builds `HeartbeatPayload.DayTwo *DayTwoPayload` (personal edition only; nil on server). The `day_two` keys are omitted when nil.
 - `ScanForPII` gains `scanDayTwo`, modelled on `scanTrustModeDistribution` (`internal/telemetry/anonymity.go:317-357`). It enforces a closed key set, closed enums, booleans only for flags, and a closed `summary_views` object. It also covers `activation.first_tool_indexed_after`.
-- Every schema-14 pin moves to 15. The list is from `grep -rnE 'schema_version.{0,3}14|want 14' internal/telemetry docs`: `telemetry_test.go:315,323`, `payload_v2_test.go:91,138`, `payload_v7_test.go:11,20,81,112`, `payload_privacy_test.go:147`, `tpa_scanner_test.go:267`, `current_error_codes_test.go:268`, `tpa_funnel_v9_test.go:263`, `docs/features/telemetry.md:13,166-175`.
+- Every pin of the then-current schema moves to the new version. On `origin/main` at 2026-10-25 the current schema is **16** (101-tpa-db added 15 and 16), so this feature bumps to **17**. Regenerate the pin list at implementation time with `grep -rnE 'schema_version.{0,3}16|want 16' internal/telemetry docs` and include `docs/features/telemetry.md`. If main has bumped again, use the next free version.
 
 **Rationale**: this follows the house convention for every schema bump. The receiver stores payloads wholesale, so unknown fields are accepted (`docs/features/telemetry.md:~348`).
 
 ## R12. Release order: measure before exposing
 
-**Decision**: PR-A, which carries telemetry and the onboarding facts, merges first and ships in a release before the starter UI. This gives one release of schema-15 baseline data for `clients_day0` and `first_tool_indexed_ever` (spec SC-004).
+**Decision**: PR-A, which carries telemetry and the onboarding facts, merges first and ships in a release before the starter UI. This gives one release of schema-17 baseline data for `clients_day0` and `first_tool_indexed_ever` (spec SC-004).
 
-**Rationale**: SC-004's richer diagnostic has no pre-release baseline otherwise. The primary metrics (SC-001, SC-002) use v14-comparable instruments and do not depend on this.
+**Rationale**: SC-004's richer diagnostic has no pre-release baseline otherwise. The primary metrics (SC-001, SC-002) use pre-release-comparable instruments and do not depend on this.
 
 **Risk accepted**: if the starter and PR-A must ship in the same release because of the strategy calendar ("E3 shipped in the next release", W5-W8), the diagnostic baseline comes from the first release cohort. The plan allows that order.

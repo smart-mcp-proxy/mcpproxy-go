@@ -1,17 +1,17 @@
-# Quickstart: verifying Spec 119 (Day-Two Activation)
+# Quickstart: verifying Spec 122 (Day-Two Activation)
 
 Live checks run on an isolated scratch instance: high port, scratch data dir, own log dir. Never run them against the maintainer's live app. Kill any scratch core before you rebuild, because the core locks the DB.
 
 ```bash
-go build -o /tmp/s119/mcpproxy ./cmd/mcpproxy
-mkdir -p /tmp/s119/data /tmp/s119/logs
-echo '{"listen":"127.0.0.1:18919","api_key":"s119-test-key","mcpServers":[]}' > /tmp/s119/mcp_config.json
+go build -o /tmp/s122/mcpproxy ./cmd/mcpproxy
+mkdir -p /tmp/s122/data /tmp/s122/logs
+echo '{"listen":"127.0.0.1:18919","api_key":"s122-test-key","mcpServers":[]}' > /tmp/s122/mcp_config.json
 # --config is mandatory: --data-dir alone still reads ~/.mcpproxy/mcp_config.json
-MCPPROXY_TELEMETRY=false /tmp/s119/mcpproxy serve --config /tmp/s119/mcp_config.json \
-  --data-dir /tmp/s119/data --log-dir /tmp/s119/logs &
-# Stop only this instance: pkill -f 'mcpproxy serve.*s119'
+MCPPROXY_TELEMETRY=false /tmp/s122/mcpproxy serve --config /tmp/s122/mcp_config.json \
+  --data-dir /tmp/s122/data --log-dir /tmp/s122/logs &
+# Stop only this instance: pkill -f 'mcpproxy serve.*s122'
 set -euo pipefail   # every assertion below stops the run on failure
-K='X-API-Key: s119-test-key'; B=http://127.0.0.1:18919/api/v1
+K='X-API-Key: s122-test-key'; B=http://127.0.0.1:18919/api/v1
 ```
 
 ## L1. Starter offer → add → bound approval → indexed (US1, SC-005)
@@ -35,11 +35,11 @@ N0=$(curl -s -H "$K" "$B/activity?type=policy_decision&server=time&tool=get_curr
 # If the core is on mcp-go >= v1.0, also send `Mcp-Method: <method>` on each POST.
 # Use the daemon's MCP endpoint, NOT `mcpproxy call` (it falls back to a standalone mode that bypasses the daemon).
 M=http://127.0.0.1:18919/mcp; HJ='Content-Type: application/json'; HA='Accept: application/json, text/event-stream'
-SID=$(curl -s -D - -o /dev/null -H "$HJ" -H "$HA" $M -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"s119-qa","version":"0"}}}' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}' | tr -d '\r')
+SID=$(curl -s -D - -o /dev/null -H "$HJ" -H "$HA" $M -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"s122-qa","version":"0"}}}' | awk -F': ' 'tolower($1)=="mcp-session-id"{print $2}' | tr -d '\r')
 curl -s -H "$HJ" -H "$HA" -H "Mcp-Session-Id: $SID" $M -d '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
 curl -s -H "$HJ" -H "$HA" -H "Mcp-Session-Id: $SID" $M -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"call_tool_read","arguments":{"name":"time:get_current_time","args_json":"{\"timezone\":\"UTC\"}"}}}' \
-  | tee /tmp/s119/refused.txt | grep -q '"isError":true'      # must be refused
-grep -qi 'quarantin' /tmp/s119/refused.txt                      # names quarantine
+  | tee /tmp/s122/refused.txt | grep -q '"isError":true'      # must be refused
+grep -qi 'quarantin' /tmp/s122/refused.txt                      # names quarantine
 # The quarantine gate writes a policy_decision (no tool_call completion). Zero upstream dispatch is proven by the SC-005 safety test's upstream spy, not here.
 N1=$(curl -s -H "$K" "$B/activity?type=policy_decision&server=time&tool=get_current_time&status=blocked&limit=1000" | jq '.data.activities | length')
 [ "$N1" -eq $((N0 + 1)) ]   # exactly one NEW blocked decision, for this attempt
@@ -79,9 +79,9 @@ Seed the activity log with the fixture from task T052 (`internal/storage/testdat
 ```bash
 curl -s -H "$K" "$B/activity/summary?period=7d&view=cli" | jq .data.digest
 # Pin the CLI to the scratch instance; without these it may query the live daemon via the default socket.
-MCPPROXY_TRAY_ENDPOINT=http://127.0.0.1:18919 MCPPROXY_API_KEY=s119-test-key \
-  /tmp/s119/mcpproxy activity summary --since 7d -o json \
-  --config /tmp/s119/mcp_config.json --data-dir /tmp/s119/data | jq .digest     # identical
+MCPPROXY_TRAY_ENDPOINT=http://127.0.0.1:18919 MCPPROXY_API_KEY=s122-test-key \
+  /tmp/s122/mcpproxy activity summary --since 7d -o json \
+  --config /tmp/s122/mcp_config.json --data-dir /tmp/s122/data | jq .digest     # identical
 ```
 
 The figures must equal the fixture's expected values (`internal/storage/testdata/digest_expected.json`).
@@ -89,7 +89,7 @@ The figures must equal the fixture's expected values (`internal/storage/testdata
 ## L4. Telemetry payload (US5, SC-007)
 
 ```bash
-go test ./internal/telemetry -run TestPayloadV15 -v              # T012: asserts and logs a sample schema-15 payload
+go test ./internal/telemetry -run TestPayloadV17 -v              # T012: asserts and logs a sample schema-17 payload
 go test ./internal/telemetry -run 'TestScanForPII.*DayTwo' -v
 ```
 
@@ -121,10 +121,10 @@ SELECT AVG(ever_tools) FROM (
 
 ```sql
 SELECT json_extract(payload,'$.day_two.starter_launcher') l, COUNT(DISTINCT cont_id)
-FROM hb_noci WHERE schema_version >= 15 AND l != '' GROUP BY l;
+FROM hb_noci WHERE schema_version >= 17 AND l != '' GROUP BY l;
 -- conversion: share of cont_ids with any starter_offered=1 that ever have starter_live=1
 ```
 
-**SC-004: day-0 clients, same instrument on both sides.** Take the union of `connected_client_ids` over heartbeats with `created_at <= first_seen + 26h`, and compute the share with at least 2 distinct IDs among those with at least 1. Run it for v14 cohorts (baseline) and for schema-15 cohorts.
+**SC-004: day-0 clients, same instrument on both sides.** Take the union of `connected_client_ids` over heartbeats with `created_at <= first_seen + 26h`, and compute the share with at least 2 distinct IDs among those with at least 1. Run it for pre-release cohorts (schema 16 or older) (baseline) and for schema-17 cohorts.
 
 **SC-002: D7 return on the IP key.** Use the existing retention script (`telemetry_data_method_scripts.py.txt`), restricted to cohorts first seen on version >= `:release_v`.

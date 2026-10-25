@@ -1,11 +1,11 @@
 openapi: 3.0.3
 info:
-  title: MCPProxy Spec 119 - activity summary digest (additive)
-  version: "119"
+  title: MCPProxy Spec 122 - activity summary digest (additive)
+  version: "122"
 paths:
   /api/v1/activity/summary:
     get:
-      summary: Existing endpoint. Spec 119 adds `view` (telemetry view counting, FR-032) and the `digest` response section (FR-018). Existing params and fields unchanged.
+      summary: Existing endpoint. Spec 122 adds `view` (telemetry view counting, FR-032) and the `digest` response section (FR-018). Existing params and fields unchanged.
       parameters:
         - { name: period, in: query, schema: { type: string, enum: ["1h", "24h", "7d", "30d"] } }
         - { name: view, in: query, required: false, schema: { type: string, enum: [web, tray, cli] }, description: "Unknown values ignored (no error). Counted at most once per surface per hour." }

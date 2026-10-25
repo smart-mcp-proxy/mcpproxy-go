@@ -1,6 +1,6 @@
 # Implementation Plan: Day-Two Activation (Experiment E3)
 
-**Branch**: `119-day-two-activation` (design; PR branch `claude/spec-day-two-activation-1fad2a`) → implementation branches `119-pr-a-measure`, `119-pr-b-starter`, `119-pr-c-second-client`, `119-pr-d-digest`, `119-pr-e-native` | **Date**: 2026-10-20 | **Spec**: [spec.md](spec.md)
+**Branch**: `122-day-two-activation` (design; PR branch `claude/spec-day-two-activation-1fad2a`) → implementation branches `122-pr-a-measure`, `122-pr-b-starter`, `122-pr-c-second-client`, `122-pr-d-digest`, `122-pr-e-native` | **Date**: 2026-10-20 | **Spec**: [spec.md](spec.md)
 **Input**: spec.md, which the OpenCode Sol 6.1 review approved in round 3, and research.md R1-R12.
 
 ## Summary
@@ -10,10 +10,10 @@ Five PRs. PR-A (measurement) goes first. PR-B, PR-C and PR-D depend only on PR-A
 1. **PR-A: measure first (US5).** All local facts and telemetry, with no visible UI:
    - Onboarding state additions: the install anchor, the client-observation map, and the starter and second-client facts.
    - Index-commit stamping of `first_tool_indexed_ever`.
-   - Telemetry schema 15: `day_two`, the activation additions, and closed-object PII rules.
+   - Telemetry schema 17: `day_two`, the activation additions, and closed-object PII rules.
    - Docs.
 
-   Shipped alone, it yields a release of schema-15 data before exposure (R12).
+   Shipped alone, it yields a release of schema-17 data before exposure (R12).
 2. **PR-B: starter (US1, US2 Web).**
    - `internal/onboarding` starter allowlist and resolver (R1, R2).
    - `GET/POST /api/v1/onboarding/starter` (R3).
@@ -91,7 +91,7 @@ No violations, so Complexity Tracking is empty.
 ### Documentation (this feature)
 
 ```text
-specs/119-day-two-activation/
+specs/122-day-two-activation/
 ├── spec.md          # approved spec (Sol r3)
 ├── plan.md          # this file
 ├── research.md      # R1-R12 decisions
@@ -126,7 +126,7 @@ internal/telemetry/
 ├── activation.go                    # first_tool_indexed_ever / _at, MarkFirstToolIndexed
 ├── anonymity.go                     # scanDayTwo + activation enum rule
 ├── day_two.go                       # NEW summary-view counter + bucketing
-└── payload_v15_test.go              # NEW; schema pins moved 14→15 (R11 list)
+└── payload_v17_test.go              # NEW; schema pins moved 16→17 (R11)
 internal/runtime/
 ├── absent_tool_removal.go           # post-success non-blocking wake (R4)
 ├── onboarding_facts.go              # NEW onboardingFactsLoop: observe clients, reconcile live/indexed, abandonment
