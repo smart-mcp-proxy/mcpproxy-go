@@ -677,8 +677,13 @@ type LogConfig struct {
 //   - TrustModeScan   — auto-approve a change ONLY when a synchronous, offline
 //     TPA scan of the changed tool returns a green (clean) verdict; otherwise
 //     the record is held for human review (fail closed).
-//   - TrustModeManual — never auto-approve; every change/addition is held
-//     (secure by default).
+//   - TrustModeManual — never auto-approve; every change/addition is held.
+//
+// Spec 119: an UNSET trust_mode resolves to scan (DefaultTrustMode); under
+// scan a CHANGED contract that scans clean is auto-approved too (reason
+// scan_approved) — the 2026-10-11 RT-02 "never approve a changed contract"
+// rule now applies to manual only. An unrecognized value still fails closed to
+// manual.
 type TrustMode string
 
 const (
@@ -726,8 +731,9 @@ type ServerConfig struct {
 	// TrustMode is the per-server trust tier: auto|scan|manual. Supersedes
 	// auto_approve_tool_changes (spec 086). An empty value is derived from the
 	// legacy fields at load via normalizeServerQuarantineFlags; the single
-	// resolution point is EffectiveTrustMode(), which treats an empty or
-	// unrecognized value as manual (secure by default). Read via
+	// resolution point is EffectiveTrustMode(), which treats an empty value as
+	// scan (DefaultTrustMode, spec 119) and an unrecognized value as manual
+	// (fail closed). Read via
 	// EffectiveTrustMode(), never the raw string.
 	TrustMode      string           `json:"trust_mode,omitempty" mapstructure:"trust-mode"` // Per-server trust tier: auto|scan|manual. Supersedes auto_approve_tool_changes (086)
 	Shared         bool             `json:"shared,omitempty" mapstructure:"shared"`         // Server edition: shared with all users
@@ -1359,7 +1365,7 @@ func normalizeServerQuarantineFlags(cfg *Config) {
 		// trust_mode is never touched (guard on empty). AutoApproveToolChanges is
 		// left UNTOUCHED here — only trust_mode is written — so the explicit-false
 		// invariant is preserved. A nil AutoApproveToolChanges leaves trust_mode
-		// empty; EffectiveTrustMode() resolves empty -> manual.
+		// empty; EffectiveTrustMode() resolves empty -> scan (DefaultTrustMode).
 		if s.TrustMode == "" && s.AutoApproveToolChanges != nil {
 			if *s.AutoApproveToolChanges {
 				s.TrustMode = string(TrustModeAuto)
@@ -2190,15 +2196,16 @@ func NormalizeTrustModes(c *Config) []TrustModeNormalization {
 }
 
 // EffectiveTrustMode is the single resolution point for a server's trust tier
-// (spec 086). It returns one of TrustModeAuto/Scan/Manual, defaulting to manual
-// (secure by default) for empty OR unrecognized trust_mode values (FR-009 —
-// fail closed on a typo like "Scan" or "off").
+// (spec 086). It returns one of TrustModeAuto/Scan/Manual: an EMPTY trust_mode
+// with no legacy flags is the default tier, scan (DefaultTrustMode, spec 119);
+// an unrecognized value fails closed to manual (FR-009 — a typo like "Scan" or
+// "off" never widens trust).
 //
 // Because normalizeServerQuarantineFlags populates TrustMode at config load,
 // the legacy-field fallback here only matters for in-memory structs that
 // bypassed the loader (tests, REST-constructed configs): an explicit
 // auto_approve_tool_changes maps true->auto / false->manual, else a legacy
-// skip_quarantine:true maps to auto, else manual. This keeps the accessor
+// skip_quarantine:true maps to auto, else the default. This keeps the accessor
 // correct even when the migration has not run.
 func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
 	switch TrustMode(sc.TrustMode) {
@@ -2223,8 +2230,17 @@ func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
 	if sc.SkipQuarantine {
 		return TrustModeAuto
 	}
-	return TrustModeManual
+	// Spec 119: an unset trust_mode with no legacy flags is the DEFAULT tier,
+	// scan — quarantined and scanned on add, released on a clean verdict, tool
+	// changes approved on a clean verdict and held on findings. Operators who
+	// want every change reviewed by a person set trust_mode: manual explicitly.
+	return TrustModeScan
 }
+
+// DefaultTrustMode is the tier an unset trust_mode resolves to (spec 119):
+// scan. It is the single source of truth for every surface that names the
+// default (CLI help, MCP tool schema, Web UI, docs examples).
+const DefaultTrustMode = TrustModeScan
 
 // IsQuarantineSkipped returns whether this server should skip tool-level
 // quarantine. Thin wrapper over EffectiveTrustMode(): only trust_mode auto

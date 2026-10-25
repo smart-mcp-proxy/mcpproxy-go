@@ -65,7 +65,7 @@ func TestRT05_QuarantinedServer_ContractChangeDetectedOnConnect(t *testing.T) {
 	upstream := httptest.NewServer(captureTestServer("armed", "calendar_get_events"))
 	t.Cleanup(upstream.Close)
 
-	cfg := &config.ServerConfig{Name: "quarantined", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	cfg := &config.ServerConfig{Name: "quarantined", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)}
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfg}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
@@ -93,7 +93,7 @@ func TestRT05_QuarantinedServer_ContractChangeDetectedOnListChanged(t *testing.T
 	upstream := httptest.NewServer(mcpserver.NewStreamableHTTPServer(mcpSrv))
 	t.Cleanup(upstream.Close)
 
-	cfg := &config.ServerConfig{Name: "quarantined", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	cfg := &config.ServerConfig{Name: "quarantined", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)}
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfg}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
@@ -130,7 +130,7 @@ func TestRT05_NeverApprovedQuarantinedServer_ReviewStaysUncaptured(t *testing.T)
 	upstream := httptest.NewServer(captureTestServer("fresh", "some_tool"))
 	t.Cleanup(upstream.Close)
 
-	cfg := &config.ServerConfig{Name: "quarantined", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	cfg := &config.ServerConfig{Name: "quarantined", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)}
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfg}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
@@ -159,7 +159,7 @@ func TestRT05_QuarantinedVerification_ReplacedClientIsReverified(t *testing.T) {
 	second := httptest.NewServer(captureTestServer("armed", "calendar_get_events"))
 	t.Cleanup(second.Close)
 
-	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)}
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
@@ -242,7 +242,7 @@ func TestRT05_ListChangedDuringInFlightVerification_IsFollowedUp(t *testing.T) {
 	upstream := httptest.NewServer(mcpserver.NewStreamableHTTPServer(mcpSrv))
 	t.Cleanup(upstream.Close)
 
-	cfg := &config.ServerConfig{Name: "quarantined", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	cfg := &config.ServerConfig{Name: "quarantined", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)}
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfg}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
