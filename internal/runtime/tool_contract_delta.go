@@ -458,11 +458,12 @@ func walkSchemaNode(path string, before, after any, out *[]Signal) {
 			// constrained nothing, so its disappearance is neutral.
 			*out = append(*out, shape("additional-properties", path))
 		}
-	} else if aAPObj, ok := asObject(aAP); ok && carriesSteering(aAPObj) {
+	} else if aAPObj, ok := asObject(aAP); ok {
 		// A schema introduced where additional properties were unconstrained
 		// (absent or true) narrows them, but a default/const/enum under it
-		// steers what the model sends (review r3 P1).
-		*out = append(*out, shape("new-property", childPath(path, "additionalProperties")))
+		// steers what the model sends (review r3 P1), a required makes a
+		// field mandatory and a pattern/format is never narrowing (r10).
+		newBranchSignals(childPath(path, "additionalProperties"), aAPObj, out)
 	}
 	// default / const
 	if _, hasA := a["default"]; hasA && (!hasKey(b, "default") || !sameJSON(b["default"], a["default"])) {
@@ -531,9 +532,9 @@ func walkItems(path string, bItems any, bHas bool, aItems any, aHas bool, out *[
 		*out = append(*out, shape("type", p))
 		return
 	case !bHas:
-		if carriesSteering(aItems) {
-			*out = append(*out, shape("new-property", p))
-		}
+		// A new items schema narrows the array, but what it carries can
+		// steer, require or constrain by text (review r10).
+		newBranchSignals(p, aItems, out)
 		return
 	}
 	bList, bIsList := bItems.([]any)
@@ -600,9 +601,11 @@ func walkCombinator(path string, b, a map[string]any, keyword string, growWidens
 }
 
 // newBranchSignals reports what a schema (or schema list) that has no
-// approved counterpart would change about what the model sends: a
-// default/const/enum anywhere (new-property) and every required name
-// anywhere (new-required).
+// approved counterpart would change: a default/const/enum anywhere
+// (new-property), every required name anywhere (new-required), and a pattern
+// or format anywhere (never narrowing, FR-004; review r10). Used by every path
+// that introduces a subschema: a new items or additionalProperties schema, a
+// new combinator branch, a newly introduced allOf.
 func newBranchSignals(path string, node any, out *[]Signal) {
 	if carriesSteering(node) {
 		*out = append(*out, shape("new-property", path))
@@ -610,6 +613,47 @@ func newBranchSignals(path string, node any, out *[]Signal) {
 	for _, name := range requiredAnywhere(node) {
 		*out = append(*out, shape("new-required", childPath(path, name)))
 	}
+	for _, kw := range []string{"pattern", "format"} {
+		if keywordAnywhere(node, kw) {
+			*out = append(*out, shape(kw, path))
+		}
+	}
+}
+
+// keywordAnywhere reports whether a schema subtree uses the keyword at any
+// schema node (schema-aware walk, like carriesSteering).
+func keywordAnywhere(node any, keyword string) bool {
+	if list, isList := node.([]any); isList {
+		for _, item := range list {
+			if keywordAnywhere(item, keyword) {
+				return true
+			}
+		}
+		return false
+	}
+	schema, ok := asObject(node)
+	if !ok {
+		return false
+	}
+	if _, has := schema[keyword]; has {
+		return true
+	}
+	for _, k := range schemaKeys(schema) {
+		switch {
+		case nameMapKeywords[k]:
+			names, _ := asObject(schema[k])
+			for _, name := range schemaKeys(names) {
+				if keywordAnywhere(names[name], keyword) {
+					return true
+				}
+			}
+		case subschemaKeywords[k]:
+			if keywordAnywhere(schema[k], keyword) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // requiredAnywhere lists, sorted and deduplicated, every name a schema

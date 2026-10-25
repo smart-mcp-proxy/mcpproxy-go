@@ -4049,6 +4049,260 @@
    "signals": [
     "GATE-SCHEMA-SHAPE:new-required:allOf/1/forward_to"
    ]
+  },
+  {
+   "name": "new items schema requiring a field (review r10)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "rows": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "rows": {
+      "type": "array",
+      "items": {
+       "type": "object",
+       "required": [
+        "bcc"
+       ]
+      }
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:new-required:rows/items/bcc"
+   ]
+  },
+  {
+   "name": "additionalProperties true to a schema requiring a field (review r10)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": true
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "type": "object",
+     "required": [
+      "bcc"
+     ]
+    }
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:new-required:additionalProperties/bcc"
+   ]
+  },
+  {
+   "name": "allOf introduced with a format (review r10)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string",
+      "allOf": [
+       {
+        "format": "email"
+       }
+      ]
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:format:to/allOf"
+   ]
+  },
+  {
+   "name": "allOf gains a branch with a pattern (review r10)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string",
+      "allOf": [
+       {
+        "maxLength": 5
+       }
+      ]
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string",
+      "allOf": [
+       {
+        "maxLength": 5
+       },
+       {
+        "pattern": ".*"
+       }
+      ]
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:pattern:to/allOf/1"
+   ]
+  },
+  {
+   "name": "new items schema with a plain type passes",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "rows": {
+      "type": "array"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "rows": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": []
   }
  ]
 }
