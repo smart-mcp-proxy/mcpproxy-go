@@ -174,6 +174,16 @@ type Supervisor struct {
 	// Inspection exemptions for temporary connections to quarantined servers
 	inspectionExemptions   map[string]time.Time
 	inspectionExemptionsMu sync.RWMutex
+	// exemptionHold reports whether serverName's exemption must be held past
+	// its expiry (GH #1722: an OAuth login for the server is in flight, and the
+	// expiry-driven disconnect would invalidate it). Nil: no hold. Set once at
+	// construction (SetInspectionExemptionHold), read under
+	// inspectionExemptionsMu; it must be cheap and must not call back into the
+	// supervisor.
+	exemptionHold func(serverName string) bool
+	// exemptionHoldGrace is how far a held exemption is extended each time its
+	// expiry is reached, and the most it outlives the login that held it.
+	exemptionHoldGrace time.Duration
 
 	// Circuit breaker for inspection failures (Phase 2: Issue #105 stability)
 	inspectionFailures   map[string]*inspectionFailureInfo
@@ -265,6 +275,7 @@ func New(configSvc *configsvc.Service, upstream UpstreamInterface, logger *zap.L
 		eventCh:              make(chan Event, 500), // Phase 6: Increased buffer for async operations
 		listeners:            make([]chan Event, 0),
 		inspectionExemptions: make(map[string]time.Time),
+		exemptionHoldGrace:   inspectionExemptionHoldGrace,
 		inspectionFailures:   make(map[string]*inspectionFailureInfo),
 		ctx:                  ctx,
 		cancel:               cancel,
@@ -401,16 +412,7 @@ func (s *Supervisor) exemptionCleanupLoop() {
 			return
 
 		case <-ticker.C:
-			// Check for expired exemptions
-			s.inspectionExemptionsMu.Lock()
-			expiredServers := make([]string, 0)
-			for serverName, expiryTime := range s.inspectionExemptions {
-				if time.Now().After(expiryTime) {
-					expiredServers = append(expiredServers, serverName)
-					delete(s.inspectionExemptions, serverName)
-				}
-			}
-			s.inspectionExemptionsMu.Unlock()
+			expiredServers := s.collectExpiredExemptions(time.Now())
 
 			// Trigger reconciliation for each expired exemption to disconnect servers
 			for _, serverName := range expiredServers {
@@ -1854,12 +1856,75 @@ func (s *Supervisor) ReconcileQuiescent() bool {
 	return s.startupReconciled.Load() && s.actionsInFlight.Load() == 0
 }
 
+// inspectionExemptionHoldGrace is the default exemptionHoldGrace: a held
+// exemption is extended by this much each time it reaches its expiry while
+// the login is in flight, so once the login completes the freshly
+// authenticated connection has this long to be reviewed before the quarantine
+// policy disconnects it again.
+const inspectionExemptionHoldGrace = 5 * time.Minute
+
+// SetInspectionExemptionHold installs the predicate that holds a server's
+// inspection exemption past its expiry (GH #1722). The runtime passes "an
+// OAuth login is in flight for this server". Call it before Start.
+func (s *Supervisor) SetInspectionExemptionHold(hold func(serverName string) bool) {
+	s.inspectionExemptionsMu.Lock()
+	defer s.inspectionExemptionsMu.Unlock()
+	s.exemptionHold = hold
+}
+
+// heldPastExpiryLocked is the one place an expired exemption is either
+// extended (the hold predicate says a login is in flight: the expiry moves out
+// by exemptionHoldGrace and the entry stays) or reported expired. Caller holds
+// inspectionExemptionsMu.
+func (s *Supervisor) heldPastExpiryLocked(serverName string, now time.Time) bool {
+	if s.exemptionHold == nil || !s.exemptionHold(serverName) {
+		return false
+	}
+	grace := s.exemptionHoldGrace
+	if grace <= 0 {
+		grace = inspectionExemptionHoldGrace
+	}
+	s.inspectionExemptions[serverName] = now.Add(grace)
+	s.logger.Info("Inspection exemption held: an OAuth login for the server is in flight",
+		zap.String("server", serverName),
+		zap.Duration("extended_by", grace))
+	return true
+}
+
+// collectExpiredExemptions removes and returns the exemptions whose expiry
+// has passed as of now, skipping (and extending) the ones the hold predicate
+// keeps alive. The cleanup loop disconnects what it returns.
+func (s *Supervisor) collectExpiredExemptions(now time.Time) []string {
+	s.inspectionExemptionsMu.Lock()
+	defer s.inspectionExemptionsMu.Unlock()
+	expiredServers := make([]string, 0)
+	for serverName, expiryTime := range s.inspectionExemptions {
+		if !now.After(expiryTime) {
+			continue
+		}
+		if s.heldPastExpiryLocked(serverName, now) {
+			continue
+		}
+		expiredServers = append(expiredServers, serverName)
+		delete(s.inspectionExemptions, serverName)
+	}
+	return expiredServers
+}
+
 // RequestInspectionExemption grants temporary connection permission for a quarantined server.
 // This allows security inspection to temporarily connect to quarantined servers.
 // Triggers immediate reconciliation to connect the server.
+//
+// A grant never shortens an exemption that is already in force (GH #1722):
+// the admission scan's 15-minute grant used to overwrite the hour a new
+// server's add had granted, and the operator's login then ran into the
+// shortened expiry.
 func (s *Supervisor) RequestInspectionExemption(serverName string, duration time.Duration) error {
 	s.inspectionExemptionsMu.Lock()
 	expiryTime := time.Now().Add(duration)
+	if current, exists := s.inspectionExemptions[serverName]; exists && current.After(expiryTime) {
+		expiryTime = current
+	}
 	s.inspectionExemptions[serverName] = expiryTime
 	s.inspectionExemptionsMu.Unlock()
 
@@ -1927,7 +1992,10 @@ func (s *Supervisor) IsInspectionExempted(serverName string) bool {
 	}
 
 	// Check if exemption has expired
-	if time.Now().After(expiryTime) {
+	if now := time.Now(); now.After(expiryTime) {
+		if s.heldPastExpiryLocked(serverName, now) {
+			return true
+		}
 		delete(s.inspectionExemptions, serverName)
 		s.logger.Warn("⚠️ Inspection exemption expired, forcing disconnect",
 			zap.String("server", serverName))

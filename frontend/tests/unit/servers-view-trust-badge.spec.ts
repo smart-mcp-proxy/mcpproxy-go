@@ -93,10 +93,11 @@ describe('Servers list — trust-mode badge (spec 088 FR-007)', () => {
     }
   )
 
-  it('shows the effective default (Manual) when trust_mode is unset, with no invalid marker', async () => {
+  it('shows the effective default (Scan, spec 119) when trust_mode is unset, with no invalid marker', async () => {
     const wrapper = await mountServers([makeServer('unset')])
     const badge = wrapper.find('[data-test="server-trust-mode"]')
-    expect(badge.attributes('data-tip')).toContain('Manual')
+    expect(badge.attributes('data-tip')).toContain('Scan')
+    expect(badge.attributes('data-tip')).toContain('default')
     expect(badge.attributes('data-trust-invalid')).toBeUndefined()
   })
 

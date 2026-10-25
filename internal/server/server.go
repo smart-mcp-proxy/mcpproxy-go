@@ -4586,8 +4586,8 @@ func (s *Server) GetActivity(id string) (*storage.ActivityRecord, error) {
 }
 
 // StreamActivities returns a channel that yields activity records matching the filter.
-func (s *Server) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
-	return s.runtime.StreamActivities(filter)
+func (s *Server) StreamActivities(ctx context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+	return s.runtime.StreamActivities(ctx, filter)
 }
 
 // AggregateToolUsage rolls up tool_call activity per (server,tool) since the
@@ -5310,6 +5310,16 @@ func (p *configServerInfoProvider) EnsureConnected(ctx context.Context, serverNa
 	}
 
 	return p.server.runtime.RestartServer(serverName)
+}
+
+// AwaitingOAuthLogin implements the scanner's optional oauthLoginAwareProvider
+// capability (GH #1722): the scan must not restart a server that is waiting on
+// a person's OAuth login, because the restart retires the pending flow.
+func (p *configServerInfoProvider) AwaitingOAuthLogin(serverName string) bool {
+	if p.server == nil || p.server.runtime == nil {
+		return false
+	}
+	return p.server.runtime.ServerAwaitsOAuthLogin(serverName)
 }
 
 // IsConnected checks if the server has an active MCP connection via the stateview.

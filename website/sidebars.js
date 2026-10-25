@@ -33,6 +33,17 @@ const sidebars = {
     },
     {
       type: 'category',
+      label: 'Guides',
+      link: { type: 'doc', id: 'guides/index' },
+      items: [
+        'guides/two-clients-one-setup',
+        'guides/diagnose-unavailable-tool',
+        'guides/discover-tools-on-demand',
+        'guides/review-tool-before-use',
+      ],
+    },
+    {
+      type: 'category',
       label: 'Configuration',
       // See the note on Getting Started above — same reason.
       link: { type: 'generated-index', slug: '/configuration', description: 'Configure MCPProxy, upstream servers, environment variables and sensitive data detection.' },

@@ -33,6 +33,7 @@ MCPProxy uses platform-specific local IPC for secure, low-latency communication 
 - **Socket/Pipe connections**: Trusted by default (skip API key validation)
 - **TCP connections**: Require API key authentication
 - **Middleware**: `internal/httpapi/server.go` checks connection source via context
+- **Trust boundary**: "trusted by default" means every process running as the same user — including the stdio MCP servers mcpproxy itself spawns under isolation `none` or `sandbox` (Landlock confines writes only). Such a server can mint agent tokens over the socket without a key. On headless installs set `enable_socket: false` (the tray is the only socket client); run stdio servers you do not trust under `docker` isolation, which does not mount the data directory. `mcpproxy doctor` reports the combination. See [What the sandbox does not hide](/features/sandbox-isolation#what-the-sandbox-does-not-hide).
 
 ## File Locations
 

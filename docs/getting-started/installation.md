@@ -310,7 +310,7 @@ sudo tee /etc/mcpproxy/mcp_config.json >/dev/null <<EOF
   "listen": "0.0.0.0:8080",
   "api_key": "${API_KEY}",
   "data_dir": "/var/lib/mcpproxy",
-  "enable_socket": true,
+  "enable_socket": false,
   "enable_web_ui": true,
   "require_mcp_auth": false,
   "mcpServers": []
@@ -329,6 +329,7 @@ curl -H "X-API-Key: ${API_KEY}" http://<server-ip>:8080/api/v1/status
 - **Always set a non-empty `api_key`.** The REST API enforces it, but a network-reachable instance with an obvious or empty key is one `curl` away from full tool execution.
 - **Put a firewall in front.** If only one workstation needs access, prefer binding to a single LAN IP (e.g. `"listen": "192.168.1.10:8080"`) or restrict port 8080 in `ufw`/`firewalld` to known source addresses.
 - **Consider `require_mcp_auth: true`** if you also want the `/mcp` endpoint to require the API key. It's `false` by default for AI-client compatibility.
+- **Headless? Set `enable_socket: false` and use `docker` isolation for stdio servers.** The Unix socket in the data directory trusts every same-user connection without a key, and a stdio server under isolation `none` or `sandbox` runs as the service user: it can read `mcp_config.json` and `config.db` and mint agent tokens over the socket. The tray is the only socket client, so a headless service loses nothing by turning it off; `docker` isolation keeps the data directory out of the server's view. `mcpproxy doctor` warns about the combination. See [What the sandbox does not hide](/features/sandbox-isolation#what-the-sandbox-does-not-hide).
 - **Don't expose to the public internet without TLS in front.** Run nginx/Caddy/Traefik as a reverse proxy with HTTPS, or tunnel via Tailscale/WireGuard/SSH. The built-in HTTP server is not designed to be a public ingress.
 
 :::

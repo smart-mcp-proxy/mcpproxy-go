@@ -70,7 +70,7 @@ func TestModel_TrustedBaselineThenPendingAdditions(t *testing.T) {
 	}
 }
 
-func TestModel_ScanModeGatesAdditionsHoldsChanges(t *testing.T) {
+func TestModel_ScanModeGatesAdditionsAndChanges(t *testing.T) {
 	s := NewServer("srv", false, true, TrustScan, true)
 	s.Discover(map[string]Contract{"t1": Benign})
 	s.Discover(map[string]Contract{"t1": Benign, "t2": Benign, "t3": Malicious})
@@ -80,9 +80,22 @@ func TestModel_ScanModeGatesAdditionsHoldsChanges(t *testing.T) {
 	if got := s.Tools["t3"].Status; got != StatusPending {
 		t.Fatalf("dangerous addition in scan mode: want pending, got %q", got)
 	}
-	s.Discover(map[string]Contract{"t1": BenignV2, "t2": Benign, "t3": Malicious})
-	if got := s.Tools["t1"].Status; got != StatusChanged {
-		t.Fatalf("benign change in scan mode: want changed, got %q", got)
+	// Spec 119: a clean change is scan-approved on its new definition, a
+	// dangerous one is held; a held change that moves to a clean definition
+	// is approved on the next pass.
+	s.Discover(map[string]Contract{"t1": BenignV2, "t2": Malicious, "t3": Malicious})
+	if got := s.Tools["t1"].Status; got != StatusApproved {
+		t.Fatalf("benign change in scan mode: want approved, got %q", got)
+	}
+	if got := s.Tools["t1"].Approved.Key; got != BenignV2.Key {
+		t.Fatalf("scan-approved change must move the approved definition, got %q", got)
+	}
+	if got := s.Tools["t2"].Status; got != StatusChanged {
+		t.Fatalf("dangerous change in scan mode: want changed, got %q", got)
+	}
+	s.Discover(map[string]Contract{"t1": BenignV2, "t2": BenignV2, "t3": Malicious})
+	if got := s.Tools["t2"].Status; got != StatusApproved {
+		t.Fatalf("held change moving to a clean definition in scan mode: want approved, got %q", got)
 	}
 }
 
@@ -150,8 +163,11 @@ func TestPolicy_Tables(t *testing.T) {
 	if Authorize(CallerAgent, "unquarantine") || Authorize(CallerAgent, "approve_tools") || !Authorize(CallerAdmin, "unquarantine") || !Authorize(CallerAgent, "list") {
 		t.Fatal("authorization table")
 	}
-	if TransitionAllowed(StatusChanged, StatusApproved, "scan_approved") {
-		t.Fatal("a clean scan must never clear a changed record")
+	if !TransitionAllowed(StatusChanged, StatusApproved, "scan_approved") {
+		t.Fatal("a clean scan under trust_mode scan may clear a changed record (spec 119)")
+	}
+	if TransitionAllowed(StatusChanged, StatusApproved, "auto_approve") || TransitionAllowed(StatusChanged, StatusApproved, "baseline_trust") {
+		t.Fatal("pending-only reasons must never clear a changed record")
 	}
 	if !TransitionAllowed(StatusChanged, StatusApproved, "user_approve") || !TransitionAllowed(StatusPending, StatusApproved, "scan_approved") {
 		t.Fatal("permitted reasons")
