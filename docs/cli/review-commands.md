@@ -83,7 +83,7 @@ Changed since approval: create_issue
 To let a server you trust update its tools without review, set auto_approve_tool_changes: true on it (https://docs.mcpproxy.app/features/security-quarantine).
 ```
 
-Scan mode holds every changed contract; the diff and a one-step approval are what keeps that cheap. The Web review screen shows the same changes and an **Approve update (N changed tools)** button that approves exactly the changed tools on screen.
+Manual mode holds every changed contract; scan mode (the default) holds the ones the offline scan flags, cannot cover, or that re-label the tool as safer, and approves the rest. The diff and a one-step approval are what keeps review cheap. The Web review screen shows the same changes and an **Approve update (N changed tools)** button that approves exactly the changed tools on screen.
 
 Descriptions and schemas come from the upstream server and are shown as plain text; they are not verified. Without `--full` only the first line of each description is shown and the schemas are left out.
 

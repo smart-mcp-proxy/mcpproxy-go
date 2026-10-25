@@ -16,9 +16,10 @@ import (
 // Informational Pass-1 baseline scanning.
 //
 // The spec-086 admission scan (maybeStartAdmissionScan) only fires for
-// trust_mode:"scan" servers, which is never the default — so on a stock install
-// nothing ever triggered the free, in-process TPA baseline scan and the security
-// badges stayed empty forever. This file adds the two paths that fix that:
+// trust_mode:"scan" servers. Before spec 119 made scan the default tier, a stock
+// install never triggered the free, in-process TPA baseline scan and the
+// security badges stayed empty forever; manual and auto servers still need
+// these two paths:
 //
 //  1. every NEW server, in ANY trust mode, gets one baseline scan when it is
 //     admitted (maybeStartInformationalScans, driven by servers.changed), and

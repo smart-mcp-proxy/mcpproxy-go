@@ -1,12 +1,13 @@
 /**
- * Per-server trust mode (spec 086 backend, spec 088 Web UI).
+ * Per-server trust mode (spec 086 backend, spec 088 Web UI, spec 119 default).
  *
  * A server's `trust_mode` governs BOTH behaviors an operator cares about:
- *  - tool changes: auto = trusted unscanned, scan = auto-approved only on a
- *    clean offline scan verdict (otherwise held), manual = every change held;
+ *  - tool changes: auto = trusted unscanned, scan = new tools AND changed
+ *    contracts auto-approved only on a clean offline scan verdict (otherwise
+ *    held with the findings), manual = every change held;
  *  - new-server admission: auto = admitted without quarantine or scan,
- *    scan = quarantined on add with a fail-closed automatic scan,
- *    manual = quarantined on add for human review (secure default).
+ *    scan = quarantined on add with a fail-closed automatic scan (the
+ *    default), manual = quarantined on add for human review.
  *
  * The raw value delivered by `GET /api/v1/servers` may be absent (unset), a
  * value migrated from the legacy `auto_approve_tool_changes` / `skip_quarantine`
@@ -15,8 +16,9 @@
  *
  * Derivation mirrors the backend accessor `ServerConfig.EffectiveTrustMode()`
  * (`internal/config/config.go`) for DISPLAY only: matching is case-sensitive and
- * untrimmed, and anything unrecognized fails closed to `manual`. The UI writes
- * `trust_mode` only — never the legacy fields (FR-004/FR-005).
+ * untrimmed; an unset value is the default (`scan`, spec 119) and anything
+ * unrecognized fails closed to `manual`. The UI writes `trust_mode` only —
+ * never the legacy fields (FR-004/FR-005).
  */
 
 export type TrustMode = 'auto' | 'scan' | 'manual'
@@ -27,13 +29,17 @@ function isTrustMode(raw: string): raw is TrustMode {
   return (RECOGNIZED as readonly string[]).includes(raw)
 }
 
+/** The tier an unset `trust_mode` resolves to (backend `config.DefaultTrustMode`). */
+export const DEFAULT_TRUST_MODE: TrustMode = 'scan'
+
 /**
- * Fail-closed resolution of a raw configured trust-mode value.
- * Unset, empty, mis-cased ("Scan"), padded (" scan ") and unknown values all
- * resolve to `manual`.
+ * Resolution of a raw configured trust-mode value, mirroring the backend.
+ * Unset and empty resolve to the default (`scan`); mis-cased ("Scan"), padded
+ * (" scan ") and unknown values fail closed to `manual`.
  */
 export function effectiveTrustMode(raw?: string): TrustMode {
-  if (raw && isTrustMode(raw)) return raw
+  if (raw === undefined || raw === '') return DEFAULT_TRUST_MODE
+  if (isTrustMode(raw)) return raw
   return 'manual'
 }
 
@@ -42,7 +48,7 @@ export interface TrustModeState {
   raw?: string
   /** Fail-closed resolution used for every behavioral decision in the UI. */
   effective: TrustMode
-  /** No value configured — the UI presents `manual` as the default selection. */
+  /** No value configured — the UI presents the default tier (`scan`) as the selection. */
   isDefault: boolean
   /** A non-empty but unrecognized value — the UI shows raw + effective (US1 scenario 4). */
   isInvalid: boolean
@@ -86,9 +92,9 @@ export const TRUST_MODES: readonly TrustModeMeta[] = [
     mode: 'scan',
     label: 'Scan',
     description:
-      'New tools are approved automatically only when the offline security scan returns a clean verdict. Changes to an approved tool are always held for your review, with the scan findings attached.',
+      'New tools and changes to approved tools are approved automatically when the offline security scan returns a clean verdict. Anything the scan flags — or cannot cover — is held for your review with the findings attached.',
     admissionNote:
-      'At add time the server is quarantined and scanned automatically; a scan that is not clean — or cannot complete — keeps it quarantined (fail closed).',
+      'At add time the server is quarantined and scanned automatically; a scan that is not clean — or cannot complete — keeps it quarantined (fail closed). The default.',
     warnsOnSelect: false,
   },
   {
@@ -97,7 +103,7 @@ export const TRUST_MODES: readonly TrustModeMeta[] = [
     description:
       'Every tool change is held for your review — nothing is approved automatically.',
     admissionNote:
-      'At add time the server is quarantined until you approve it — the secure default.',
+      'At add time the server is quarantined until you approve it.',
     warnsOnSelect: false,
   },
 ] as const

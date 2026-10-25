@@ -172,13 +172,13 @@ func TestBuildTrustModeDistribution(t *testing.T) {
 			want: map[string]int{"auto": 1, "scan": 2, "manual": 1},
 		},
 		{
-			name: "empty mode inherits manual; typo fails closed to manual",
+			name: "empty mode inherits the scan default (spec 119); typo fails closed to manual",
 			cfg: &config.Config{Servers: []*config.ServerConfig{
 				{Name: "a"},
 				{Name: "b", TrustMode: "Scan"},
 				{Name: "c", TrustMode: "off"},
 			}},
-			want: map[string]int{"auto": 0, "scan": 0, "manual": 3},
+			want: map[string]int{"auto": 0, "scan": 1, "manual": 2},
 		},
 		{
 			name: "legacy auto_approve_tool_changes fallback",
@@ -220,7 +220,7 @@ func TestPayloadV9_TrustModeDistributionAndFunnelCounters(t *testing.T) {
 	svc := newV9PayloadTestService(t, []*config.ServerConfig{
 		{Name: "a", TrustMode: "auto"},
 		{Name: "b", TrustMode: "scan"},
-		{Name: "c"},
+		{Name: "c", TrustMode: "manual"},
 	})
 	reg := svc.Registry()
 	reg.RecordTPAToolChangeGateScan()

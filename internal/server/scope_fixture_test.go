@@ -163,6 +163,16 @@ func startCountingUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runt
 	up.URL = fmt.Sprintf("http://%s", ln.Addr().String())
 
 	serverCfg := &config.ServerConfig{Name: server, URL: up.URL, Protocol: "streamable-http", Enabled: true}
+	// Keep the trust mode the test configured for this server (an unset one
+	// is the scan tier since spec 119, under which a clean new tool is
+	// scan-approved rather than filed pending).
+	if cfg := proxy.currentConfig(); cfg != nil {
+		for _, sc := range cfg.Servers {
+			if sc != nil && sc.Name == server {
+				serverCfg.TrustMode = sc.TrustMode
+			}
+		}
+	}
 	require.NoError(t, proxy.storage.SaveUpstreamServer(serverCfg))
 	rt.Supervisor().StateView().UpdateServer(server, func(s *stateview.ServerStatus) {
 		s.Name = server

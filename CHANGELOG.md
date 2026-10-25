@@ -7,6 +7,18 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Breaking Changes
 
+- **trust mode / tool approvals (Spec 119):** `scan` is now the default per-server trust mode, and under
+  `scan` a **changed** tool contract whose offline TPA scan is clean is approved automatically in the same
+  discovery pass (reason `scan_approved`, activity event `tool_auto_approved`) instead of being held. A
+  finding, a tool the scan could not cover, or a change that re-labels the tool as safer (`readOnlyHint`
+  false→true, `destructiveHint` true→false; held with signal `GATE-HINT-SAFER-FLIP`) is still held with the
+  evidence attached. A server whose `trust_mode` is unset now runs under `scan` from its next discovery
+  pass, so clean-scanned holds it accumulated are released without a click. The 2026-10-11 rule that a clean
+  verdict never approves a changed contract now applies to `manual` only. **Migration:** set
+  `trust_mode: "manual"` on any server whose tool changes you want a person to review; nothing changes for
+  servers with an explicit `trust_mode` or `auto_approve_tool_changes`. New servers added with no trust mode
+  are quarantined, scanned and released automatically on a clean verdict, as `scan` always did.
+
 - **connect / disconnect:** `mcpproxy disconnect`, `DELETE /api/v1/connect/{client}`, and the Web UI
   and tray Disconnect now also revoke the client's credential (`client-<id>`), so a secret copied out
   of the removed config stops authenticating. The result reports `credential_revoked`, or
