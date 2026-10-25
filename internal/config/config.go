@@ -3179,6 +3179,13 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	// api_key may itself be a secret reference (api_key: "${file:/run/secrets/k}"),
+	// so the key can come from a Docker/Kubernetes secret or a systemd credential
+	// without being written into this file.
+	if err := resolveAPIKeyRef(c); err != nil {
+		return err
+	}
+
 	// Handle API key generation if not configured
 	// Empty string means authentication disabled, nil means auto-generate
 	if c.APIKey == "" {
