@@ -811,7 +811,8 @@ safer), `GATE-HINT-CHANGE:<hint>:<old>>:<new>` (any safety-hint change, also
 `GATE-SCHEMA-SHAPE:new-required:bcc`) and `GATE-OUTPUT-SCHEMA:added|removed|changed`.
 They are recorded with `held_reason: scan_findings` and the scan's verdict as it
 was (`clean` when the scan found nothing), so the review screen says why the
-clean-scanned change is still held. The Web UI labels them ("Input schema
+clean-scanned change is still held. A very large delta is compacted per rule
+(`GATE-SCHEMA-SHAPE:more:+7`) so the record's 16-signal cap never hides a rule. The Web UI labels them ("Input schema
 widened: new-required bcc"); the CLI prints the raw id.
 
 `held_reason` has a third value, `awaiting_review`, recorded in `manual` mode

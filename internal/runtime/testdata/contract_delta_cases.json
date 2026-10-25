@@ -1,5 +1,5 @@
 {
- "_comment": "Spec 120 shared fixture: structural-gate cases for the Go contractDelta table test (exact signals) and the Web schemaLines parity test (every held input/output case produces at least one review line). before/after are input schemas (objects) or before_text/after_text (raw strings); *_output* the output schema. Hint cases live in TestHintDelta.",
+ "_comment": "Spec 120 shared fixture: structural-gate cases for the Go contractDelta table test (exact signals) and the Web schemaLines parity test (every held input/output case produces at least one review line). before/after are input schemas (objects) or before_text/after_text (raw strings); *_output* the output schema. Hint cases live in TestHintDelta. A row with web_invisible:true is held by the Go gate but cannot be shown by the Web differ (JavaScript numbers lose integer precision beyond 2^53); the parity test skips it and the review screen shows the signal chip instead.",
  "cases": [
   {
    "name": "new required parameter bcc",
@@ -2163,6 +2163,364 @@
     }
    },
    "signals": []
+  },
+  {
+   "name": "maximum raised beyond float64 precision (review r1)",
+   "before_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\",\"maximum\":9007199254740992}}}",
+   "after_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"integer\",\"maximum\":9007199254740993}}}",
+   "signals": [
+    "GATE-SCHEMA-SHAPE:bound:n:maximum"
+   ],
+   "web_invisible": true
+  },
+  {
+   "name": "enum gains a member beyond float64 precision (review r1)",
+   "before_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"enum\":[9007199254740992]}}}",
+   "after_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"enum\":[9007199254740992,9007199254740993]}}}",
+   "signals": [
+    "GATE-SCHEMA-SHAPE:enum-added:n"
+   ],
+   "web_invisible": true
+  },
+  {
+   "name": "output property named description changes type (review r1)",
+   "before_output": {
+    "type": "object",
+    "properties": {
+     "description": {
+      "type": "string"
+     }
+    }
+   },
+   "after_output": {
+    "type": "object",
+    "properties": {
+     "description": {
+      "type": "integer"
+     }
+    }
+   },
+   "signals": [
+    "GATE-OUTPUT-SCHEMA:changed"
+   ]
+  },
+  {
+   "name": "new optional object whose child is NAMED default (review r1)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "options": {
+      "type": "object",
+      "properties": {
+       "default": {
+        "type": "string"
+       }
+      }
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": []
+  },
+  {
+   "name": "new optional property whose examples mention default (review r1)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     },
+     "note": {
+      "type": "string",
+      "examples": [
+       {
+        "default": "sample"
+       }
+      ]
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": []
+  },
+  {
+   "name": "description inside not changes (review r1)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "not": {
+       "type": "integer",
+       "description": "old"
+      }
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "not": {
+       "type": "integer",
+       "description": "new"
+      }
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": []
+  },
+  {
+   "name": "not gains a constraint (widening of the complement)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "not": {
+       "type": "integer"
+      }
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "not": {
+       "type": "integer",
+       "minimum": 1
+      }
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:combinator:to:not"
+   ]
+  },
+  {
+   "name": "additionalProperties {} to true (review r1)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {}
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": true
+   },
+   "signals": []
+  },
+  {
+   "name": "additionalProperties {} removed (review r1)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {}
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": []
+  },
+  {
+   "name": "additionalProperties schema relaxed to true",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "type": "string"
+    }
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": true
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:additional-properties:/"
+   ]
   }
  ]
 }

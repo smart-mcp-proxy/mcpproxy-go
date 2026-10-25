@@ -34,7 +34,10 @@ them whatever the scan says. `manual` is unchanged (RT-02 still governs it); `au
   branch (against `existing.Previous*`). Under `scan` a clean, full-coverage verdict approves the change only
   when `contractDelta` returns no signal. Otherwise the change is held with `held_reason: scan_findings`,
   the verdict as scanned (`clean` when the scan was clean) and the gate signals PREPENDED to the scan's own
-  signals, so `storage.MaxToolHeldSignals` never drops them. The signals are re-evaluated and re-recorded on
+  signals, so `storage.MaxToolHeldSignals` never drops them. A delta with more signals than the record keeps
+  (`maxGateSignals`, 12) is compacted per rule: the first signal of every rule stays, the remaining slots fill
+  in order, and each rule that lost signals gets one `<rule>:more:+<n>` marker, so no rule family is ever
+  silently dropped (review r1). The signals are re-evaluated and re-recorded on
   every pass the delta stands; a later pass whose delta is empty and whose scan is clean approves (FR-006
   of spec 119).
 - **FR-003 `GATE-HINT-CHANGE`** — any change to the EFFECTIVE value of any of the four MCP safety hints

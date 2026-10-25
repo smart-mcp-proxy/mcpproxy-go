@@ -15,6 +15,8 @@ interface Case {
   before?: unknown; after?: unknown; before_text?: string; after_text?: string
   before_output?: unknown; after_output?: unknown; before_output_text?: string; after_output_text?: string
   signals: string[]
+  /** Held by the Go gate but not representable by the Web differ (JS number precision); the chip carries the signal. */
+  web_invisible?: boolean
 }
 
 const fixture = JSON.parse(readFileSync(resolve(__dirname, '../../../internal/runtime/testdata/contract_delta_cases.json'), 'utf8')) as { cases: Case[] }
@@ -44,7 +46,7 @@ describe('contract_delta_cases.json against the Web review differ', () => {
   })
 
   for (const c of fixture.cases) {
-    if (!c.signals.length) continue
+    if (!c.signals.length || c.web_invisible) continue
     const schemaSignal = c.signals.some(s => s.startsWith('GATE-SCHEMA-SHAPE') || s.startsWith('GATE-OUTPUT-SCHEMA'))
     if (!schemaSignal) continue
     it(`held: ${c.name} is visible on the review screen`, () => {

@@ -1,8 +1,10 @@
 package runtime
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"sort"
 	"strings"
 
@@ -113,13 +115,71 @@ func signalStrings(signals []Signal) []string {
 	return out
 }
 
+// maxGateSignals is how many gate signals a hold records verbatim; the rest
+// are summarised per rule (compactGateSignals) so that storage's
+// MaxToolHeldSignals cap never silently drops a rule family (review r1 P2).
+const maxGateSignals = storage.MaxToolHeldSignals - 4
+
+// compactGateSignals keeps the recorded gate signals within maxGateSignals
+// while keeping every rule family visible: the first signal of each rule is
+// always kept, the remaining slots are filled in order, and each rule that lost
+// signals gets one `<rule>:more:+<n>` marker. Short lists pass through.
+func compactGateSignals(all []string) []string {
+	if len(all) <= maxGateSignals {
+		return all
+	}
+	ruleOf := func(s string) string {
+		if i := strings.IndexByte(s, ':'); i >= 0 {
+			return s[:i]
+		}
+		return s
+	}
+	keep := make(map[int]bool, maxGateSignals)
+	seenRule := map[string]bool{}
+	for i, s := range all {
+		if r := ruleOf(s); !seenRule[r] {
+			seenRule[r] = true
+			keep[i] = true
+		}
+	}
+	budget := maxGateSignals - len(seenRule) // slots left after one per rule; the markers come on top
+	for i := range all {
+		if budget <= 0 {
+			break
+		}
+		if !keep[i] {
+			keep[i] = true
+			budget--
+		}
+	}
+	dropped := map[string]int{}
+	var rules []string
+	out := make([]string, 0, maxGateSignals+len(seenRule))
+	for i, s := range all {
+		if keep[i] {
+			out = append(out, s)
+			continue
+		}
+		r := ruleOf(s)
+		if dropped[r] == 0 {
+			rules = append(rules, r)
+		}
+		dropped[r]++
+	}
+	for _, r := range rules {
+		out = append(out, fmt.Sprintf("%s:more:+%d", r, dropped[r]))
+	}
+	return out
+}
+
 // withGateSignals prepends the gate's signals to the scan's evidence (FR-002:
 // recorded whatever the verdict). A clean verdict becomes a scan_findings hold
 // with those signals; a non-clean one keeps its verdict and its own signals
-// after them. The gate signals go FIRST so storage.MaxToolHeldSignals never
-// drops them. The result is never nil and shares no slice with the input.
+// after them. The gate signals go FIRST, compacted per rule, so
+// storage.MaxToolHeldSignals never drops a rule family. The result is never
+// nil and shares no slice with the input.
 func withGateSignals(evidence *scanHoldEvidence, signals []Signal) *scanHoldEvidence {
-	gate := signalStrings(signals)
+	gate := compactGateSignals(signalStrings(signals))
 	if evidence == nil {
 		return &scanHoldEvidence{Reason: storage.ToolHeldReasonScanFindings, Verdict: "clean", Signals: gate}
 	}
@@ -228,9 +288,8 @@ func inputSchemaDelta(approvedJSON, liveJSON string) []Signal {
 	if approvedJSON == "" && liveJSON == "" {
 		return nil
 	}
-	var before, after any
-	approvedOK := approvedJSON != "" && json.Unmarshal([]byte(approvedJSON), &before) == nil
-	liveOK := liveJSON != "" && json.Unmarshal([]byte(liveJSON), &after) == nil
+	before, approvedOK := decodeSchema(approvedJSON)
+	after, liveOK := decodeSchema(liveJSON)
 	switch {
 	case !approvedOK && liveJSON != "":
 		return []Signal{shape("approved-unknown", schemaRootPath)}
@@ -248,6 +307,29 @@ func inputSchemaDelta(approvedJSON, liveJSON string) []Signal {
 	return out
 }
 
+// decodeSchema parses a schema with numbers kept as json.Number, so a bound or
+// an enum member beyond float64 precision compares exactly (review r1 P1).
+func decodeSchema(raw string) (any, bool) {
+	if raw == "" {
+		return nil, false
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return nil, false
+	}
+	return v, true
+}
+
+// nameMapKeywords are the keywords whose object value maps NAMES to schemas:
+// the keys are property names or definition names, never schema keywords.
+var nameMapKeywords = map[string]bool{"properties": true, "patternProperties": true, "$defs": true, "definitions": true, "dependentSchemas": true}
+
+// subschemaKeywords are the keywords whose value is a schema or a list of
+// schemas (walked by the steering and text-stripping passes).
+var subschemaKeywords = map[string]bool{"items": true, "additionalProperties": true, "not": true, "anyOf": true, "oneOf": true, "allOf": true, "if": true, "then": true, "else": true, "contains": true, "propertyNames": true, "additionalItems": true, "unevaluatedProperties": true, "unevaluatedItems": true}
+
 func asObject(v any) (map[string]any, bool) {
 	m, ok := v.(map[string]any)
 	return m, ok
@@ -256,7 +338,7 @@ func asObject(v any) (map[string]any, bool) {
 func sameJSON(a, b any) bool {
 	ab, errA := json.Marshal(a)
 	bb, errB := json.Marshal(b)
-	return errA == nil && errB == nil && string(ab) == string(bb)
+	return errA == nil && errB == nil && bytes.Equal(ab, bb)
 }
 
 func schemaKeys(m map[string]any) []string {
@@ -323,7 +405,7 @@ func walkSchemaNode(path string, before, after any, out *[]Signal) {
 		if !aHasAP || aAP != false {
 			*out = append(*out, shape("additional-properties", path))
 		}
-	} else if bAPObj, ok := asObject(bAP); ok {
+	} else if bAPObj, ok := asObject(bAP); ok && !schemaIsUnconstrained(bAPObj) {
 		if aAPObj, ok := asObject(aAP); ok {
 			walkSchemaNode(childPath(path, "additionalProperties"), bAPObj, aAPObj, out)
 		} else if !aHasAP || aAP != false {
@@ -356,7 +438,7 @@ func walkSchemaNode(path string, before, after any, out *[]Signal) {
 	walkCombinator(path, b, a, "anyOf", true, out)
 	walkCombinator(path, b, a, "oneOf", true, out)
 	walkCombinator(path, b, a, "allOf", false, out)
-	if hasKey(b, "not") != hasKey(a, "not") || !sameJSON(b["not"], a["not"]) {
+	if hasKey(b, "not") != hasKey(a, "not") || !sameJSON(stripText(b["not"]), stripText(a["not"])) {
 		*out = append(*out, shape("combinator", path+":not"))
 	}
 }
@@ -449,29 +531,53 @@ func walkCombinator(path string, b, a map[string]any, keyword string, growWidens
 }
 
 // carriesSteering reports whether a schema subtree carries a default, const
-// or enum anywhere: the keywords that steer what a model sends without the
-// operator reading a description.
+// or enum at any schema node: the keywords that steer what a model sends
+// without the operator reading a description. The walk is schema-aware
+// (review r1 P2): the keys of a properties/$defs map are names, not keywords,
+// and text keywords (examples, description) are data, so a property NAMED
+// "default" or an example containing one does not count.
 func carriesSteering(node any) bool {
-	switch v := node.(type) {
-	case map[string]any:
-		for _, kw := range []string{"default", "const", "enum"} {
-			if _, ok := v[kw]; ok {
-				return true
-			}
+	schema, ok := asObject(node)
+	if !ok {
+		return false
+	}
+	for _, kw := range []string{"default", "const", "enum"} {
+		if _, ok := schema[kw]; ok {
+			return true
 		}
-		for _, k := range schemaKeys(v) {
-			if carriesSteering(v[k]) {
-				return true
+	}
+	for _, k := range schemaKeys(schema) {
+		switch {
+		case nameMapKeywords[k]:
+			names, _ := asObject(schema[k])
+			for _, name := range schemaKeys(names) {
+				if carriesSteering(names[name]) {
+					return true
+				}
 			}
-		}
-	case []any:
-		for _, item := range v {
-			if carriesSteering(item) {
-				return true
+		case subschemaKeywords[k]:
+			switch child := schema[k].(type) {
+			case []any:
+				for _, item := range child {
+					if carriesSteering(item) {
+						return true
+					}
+				}
+			default:
+				if carriesSteering(child) {
+					return true
+				}
 			}
 		}
 	}
 	return false
+}
+
+// schemaIsUnconstrained reports whether a schema object constrains nothing
+// once its text keywords are removed (`{}` accepts every value, like `true`).
+func schemaIsUnconstrained(schema map[string]any) bool {
+	stripped, _ := asObject(stripText(schema))
+	return len(stripped) == 0
 }
 
 func hasKey(m map[string]any, key string) bool {
@@ -551,15 +657,29 @@ func boundLoosened(b, a map[string]any, kw string, isMin bool) bool {
 	if !aHas {
 		return true
 	}
-	bf, bNum := bv.(float64)
-	af, aNum := av.(float64)
+	bf, bNum := numberOf(bv)
+	af, aNum := numberOf(av)
 	if !bNum || !aNum {
 		return !sameJSON(bv, av)
 	}
+	cmp := af.Cmp(bf)
 	if isMin {
-		return af < bf
+		return cmp < 0
 	}
-	return af > bf
+	return cmp > 0
+}
+
+// numberOf reads a JSON number (json.Number from decodeSchema, or a float64)
+// exactly.
+func numberOf(v any) (*big.Rat, bool) {
+	switch n := v.(type) {
+	case json.Number:
+		r, ok := new(big.Rat).SetString(n.String())
+		return r, ok
+	case float64:
+		return new(big.Rat).SetFloat64(n), true
+	}
+	return nil, false
 }
 
 // ---- output schema ---------------------------------------------------------
@@ -591,36 +711,55 @@ var textKeywords = map[string]bool{"description": true, "title": true, "examples
 // structuralForm is a schema with its text keywords removed at every level,
 // serialized with sorted keys; unparsable input is returned as normalized text.
 func structuralForm(raw string) string {
-	var v any
-	if err := json.Unmarshal([]byte(raw), &v); err != nil {
+	v, ok := decodeSchema(raw)
+	if !ok {
 		return normalizeJSON(raw)
 	}
-	stripped := stripText(v)
-	out, err := json.Marshal(stripped)
+	out, err := json.Marshal(stripText(v))
 	if err != nil {
 		return normalizeJSON(raw)
 	}
 	return string(out)
 }
 
+// stripText removes the text keywords from a SCHEMA node and from every
+// subschema under it. It is schema-aware (review r1 P1): the keys of a
+// properties/$defs map are names and are kept even when a property is called
+// "description"; only schema-keyword positions are stripped.
 func stripText(v any) any {
-	switch t := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, child := range t {
-			if textKeywords[k] {
-				continue
-			}
-			out[k] = stripText(child)
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i, child := range t {
-			out[i] = stripText(child)
-		}
-		return out
-	default:
+	schema, ok := asObject(v)
+	if !ok {
 		return v
 	}
+	out := make(map[string]any, len(schema))
+	for k, child := range schema {
+		switch {
+		case textKeywords[k]:
+			continue
+		case nameMapKeywords[k]:
+			names, isMap := asObject(child)
+			if !isMap {
+				out[k] = child
+				continue
+			}
+			kept := make(map[string]any, len(names))
+			for name, sub := range names {
+				kept[name] = stripText(sub)
+			}
+			out[k] = kept
+		case subschemaKeywords[k]:
+			if list, isList := child.([]any); isList {
+				stripped := make([]any, len(list))
+				for i, item := range list {
+					stripped[i] = stripText(item)
+				}
+				out[k] = stripped
+			} else {
+				out[k] = stripText(child)
+			}
+		default:
+			out[k] = child
+		}
+	}
+	return out
 }
