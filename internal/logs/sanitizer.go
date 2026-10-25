@@ -52,10 +52,12 @@ func (s *SecretSanitizer) registerDefaultPatterns() {
 		},
 	})
 
-	// OpenAI API keys (sk-...)
+	// OpenAI API keys: legacy sk-..., and the current sk-proj-/sk-svcacct-/
+	// sk-admin- forms whose suffix also carries '_' and '-'. The legacy branch
+	// stays alphanumeric so sk-ant- keys still reach anthropic_key below.
 	s.patterns = append(s.patterns, &secretPattern{
 		name:  "openai_key",
-		regex: regexp.MustCompile(`\b(sk-[A-Za-z0-9]{20,})\b`),
+		regex: regexp.MustCompile(`\b(sk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}|[A-Za-z0-9]{20,}))\b`),
 		maskFunc: func(key string) string {
 			if len(key) <= 5 {
 				return "****"
