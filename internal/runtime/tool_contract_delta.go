@@ -330,7 +330,7 @@ func decodeSchema(raw string) (any, bool) {
 
 // nameMapKeywords are the keywords whose object value maps NAMES to schemas:
 // the keys are property names or definition names, never schema keywords.
-var nameMapKeywords = map[string]bool{"properties": true, "patternProperties": true, "$defs": true, "definitions": true, "dependentSchemas": true}
+var nameMapKeywords = map[string]bool{"properties": true, "patternProperties": true, "$defs": true, "definitions": true, "dependentSchemas": true, "dependencies": true}
 
 // subschemaKeywords are the keywords whose value is a schema or a list of
 // schemas (walked by the steering and text-stripping passes).
@@ -421,6 +421,11 @@ func walkSchemaNode(path string, before, after any, out *[]Signal) {
 			// constrained nothing, so its disappearance is neutral.
 			*out = append(*out, shape("additional-properties", path))
 		}
+	} else if aAPObj, ok := asObject(aAP); ok && carriesSteering(aAPObj) {
+		// A schema introduced where additional properties were unconstrained
+		// (absent or true) narrows them, but a default/const/enum under it
+		// steers what the model sends (review r3 P1).
+		*out = append(*out, shape("new-property", childPath(path, "additionalProperties")))
 	}
 	// default / const
 	if _, hasA := a["default"]; hasA && (!hasKey(b, "default") || !sameJSON(b["default"], a["default"])) {
@@ -595,6 +600,8 @@ func carriesSteering(node any) bool {
 // once its text keywords are removed (`{}` accepts every value, like `true`).
 func schemaIsUnconstrained(schema map[string]any) bool {
 	stripped, _ := asObject(stripText(schema))
+	// default steers but validates nothing, and its removal passes (FR-004).
+	delete(stripped, "default")
 	return len(stripped) == 0
 }
 
@@ -660,15 +667,36 @@ func enumGainedMember(before, after any) bool {
 	return false
 }
 
-// enumMemberKey identifies an enum member by VALUE: numbers by their exact
-// rational value (1 and 1.0 are one member, review r2 P2), everything else by
-// its JSON form.
+// enumMemberKey identifies an enum member by VALUE: every number in it, at
+// any depth, by its exact rational value (1 and 1.0 are one member, review r2
+// P2 / r3 P2), the rest by its JSON form.
 func enumMemberKey(item any) string {
-	if n, ok := numberOf(item); ok {
-		return "n:" + n.RatString()
+	raw, _ := json.Marshal(canonicalNumbers(item))
+	return string(raw)
+}
+
+// canonicalNumbers rewrites every number in a decoded JSON value to its
+// RatString form so equal values spell the same.
+func canonicalNumbers(v any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, child := range t {
+			out[k] = canonicalNumbers(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, child := range t {
+			out[i] = canonicalNumbers(child)
+		}
+		return out
+	default:
+		if n, ok := numberOf(v); ok {
+			return "n:" + n.RatString()
+		}
+		return v
 	}
-	raw, _ := json.Marshal(item)
-	return "j:" + string(raw)
 }
 
 // boundLoosened reports whether a numeric bound keyword got looser or

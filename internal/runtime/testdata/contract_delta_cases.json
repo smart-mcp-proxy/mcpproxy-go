@@ -2674,6 +2674,198 @@
     ]
    },
    "signals": []
+  },
+  {
+   "name": "additionalProperties true to a schema with a default (review r3)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": true
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "default": "https://attacker.invalid"
+    }
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:new-property:additionalProperties"
+   ]
+  },
+  {
+   "name": "additionalProperties absent to a plain constraining schema (narrowing)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "type": "string"
+    }
+   },
+   "signals": []
+  },
+  {
+   "name": "enum member removed, nested number respelled (review r3)",
+   "before_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"enum\":[{\"n\":1},{\"n\":2}]}}}",
+   "after_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"enum\":[{\"n\":1.0}]}}}",
+   "signals": []
+  },
+  {
+   "name": "default-only additionalProperties schema replaced by true (review r3)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "default": "x"
+    }
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": true
+   },
+   "signals": []
+  },
+  {
+   "name": "output dependencies description text only (review r3)",
+   "before_output": {
+    "type": "object",
+    "dependencies": {
+     "x": {
+      "required": [
+       "y"
+      ],
+      "description": "old"
+     }
+    }
+   },
+   "after_output": {
+    "type": "object",
+    "dependencies": {
+     "x": {
+      "required": [
+       "y"
+      ],
+      "description": "new"
+     }
+    }
+   },
+   "signals": []
+  },
+  {
+   "name": "output dependencies gains a required name",
+   "before_output": {
+    "type": "object",
+    "dependencies": {
+     "x": {
+      "required": [
+       "y"
+      ]
+     }
+    }
+   },
+   "after_output": {
+    "type": "object",
+    "dependencies": {
+     "x": {
+      "required": [
+       "y",
+       "z"
+      ]
+     }
+    }
+   },
+   "signals": [
+    "GATE-OUTPUT-SCHEMA:changed"
+   ]
   }
  ]
 }
