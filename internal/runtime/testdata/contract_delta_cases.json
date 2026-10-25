@@ -3238,6 +3238,408 @@
    "signals": [
     "GATE-SCHEMA-SHAPE:additional-properties:/"
    ]
+  },
+  {
+   "name": "additionalProperties {const: []} replaced by true (review r7)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "const": []
+    }
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": true
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:additional-properties:/"
+   ]
+  },
+  {
+   "name": "additionalProperties {additionalProperties: true} replaced by true (review r7)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "additionalProperties": true
+    }
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": true
+   },
+   "signals": []
+  },
+  {
+   "name": "additionalProperties {properties: {x: {}}} replaced by true (review r7)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "properties": {
+      "x": {}
+     }
+    }
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": true
+   },
+   "signals": []
+  },
+  {
+   "name": "additionalProperties {anyOf: [{}, {type: string}]} replaced by true",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "anyOf": [
+      {},
+      {
+       "type": "string"
+      }
+     ]
+    }
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": true
+   },
+   "signals": []
+  },
+  {
+   "name": "additionalProperties {allOf: [{type: string}]} replaced by true stays held",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": {
+     "allOf": [
+      {
+       "type": "string"
+      }
+     ]
+    }
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "type": "string"
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ],
+    "additionalProperties": true
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:additional-properties:/"
+   ]
+  },
+  {
+   "name": "anyOf loses its first branch (review r7)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "integer"
+       }
+      ]
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "anyOf": [
+       {
+        "type": "integer"
+       }
+      ]
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": []
+  },
+  {
+   "name": "anyOf gains a branch in front",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "anyOf": [
+       {
+        "type": "integer"
+       }
+      ]
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "anyOf": [
+       {
+        "type": "string"
+       },
+       {
+        "type": "integer"
+       }
+      ]
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:combinator:to:anyOf"
+   ]
+  },
+  {
+   "name": "allOf loses its first branch while the survivor changes default (held; residual branches pair by index)",
+   "before": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "allOf": [
+       {
+        "type": "string"
+       },
+       {
+        "maxLength": 5,
+        "default": "a"
+       }
+      ]
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "after": {
+    "type": "object",
+    "properties": {
+     "to": {
+      "allOf": [
+       {
+        "maxLength": 5,
+        "default": "b"
+       }
+      ]
+     },
+     "subject": {
+      "type": "string"
+     },
+     "body": {
+      "type": "string"
+     }
+    },
+    "required": [
+     "to",
+     "body"
+    ]
+   },
+   "signals": [
+    "GATE-SCHEMA-SHAPE:type:to/allOf/0",
+    "GATE-SCHEMA-SHAPE:default:to/allOf/0",
+    "GATE-SCHEMA-SHAPE:combinator:to:allOf"
+   ]
+  },
+  {
+   "name": "output maximum respelled 1 vs 1.0 (review r7)",
+   "before_output_text": "{\"type\":\"number\",\"maximum\":1}",
+   "after_output_text": "{\"type\":\"number\",\"maximum\":1.0}",
+   "signals": []
   }
  ]
 }

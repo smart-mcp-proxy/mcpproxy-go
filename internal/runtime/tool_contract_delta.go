@@ -573,16 +573,50 @@ func walkCombinator(path string, b, a map[string]any, keyword string, growWidens
 			*out = append(*out, sig)
 		}
 	default:
-		// The retained branches are compared pairwise whatever the length
-		// change, so a default or type moved inside branch 0 is not hidden by
-		// an appended branch (review r6 P1); the length rule applies on top.
-		for i := 0; i < len(bList) && i < len(aList); i++ {
-			walkSchemaNode(childPath(path, keyword+"/"+fmt.Sprint(i)), bList[i], aList[i], out)
+		// Branches that survive unchanged are matched by VALUE first (a
+		// removed non-final branch must not shift the comparison, review r7
+		// P2); the remaining branches are compared pairwise in order, so a
+		// default or type moved inside a branch is not hidden by an appended
+		// one (review r6 P1). The length rule applies on top.
+		bRest, aRest := unmatchedBranches(bList, aList)
+		for i := 0; i < len(bRest) && i < len(aRest); i++ {
+			walkSchemaNode(childPath(path, keyword+"/"+fmt.Sprint(aRest[i].index)), bRest[i].node, aRest[i].node, out)
 		}
 		if len(aList) != len(bList) && (len(aList) > len(bList)) == growWidens {
 			*out = append(*out, sig)
 		}
 	}
+}
+
+type indexedBranch struct {
+	index int
+	node  any
+}
+
+// unmatchedBranches removes, from both lists, the branches that have an
+// identical (text-stripped) counterpart on the other side, each matched once,
+// and returns what is left in order.
+func unmatchedBranches(before, after []any) (bRest, aRest []indexedBranch) {
+	used := make([]bool, len(before))
+	for i, a := range after {
+		matched := false
+		for j, b := range before {
+			if !used[j] && sameJSON(stripText(b), stripText(a)) {
+				used[j] = true
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			aRest = append(aRest, indexedBranch{index: i, node: a})
+		}
+	}
+	for j, b := range before {
+		if !used[j] {
+			bRest = append(bRest, indexedBranch{index: j, node: b})
+		}
+	}
+	return bRest, aRest
 }
 
 // carriesSteering reports whether a schema subtree carries a default, const
@@ -651,27 +685,84 @@ var validationKeywords = map[string]bool{
 	"unevaluatedProperties": true, "unevaluatedItems": true,
 }
 
-// schemaIsUnconstrained reports whether a schema object constrains nothing
-// (`{}` accepts every value, like `true`): no validation keyword with a
-// non-empty value. Text, default, examples and unknown annotation keywords do
-// not count; an empty required list or an empty properties map does not either
-// (review r5).
+// schemaIsUnconstrained reports whether a schema accepts every value, like
+// `true` or `{}`: no validation keyword constrains. Text, default, examples
+// and unknown annotation keywords do not count (review r6); an empty
+// required list, an empty applicator list or an empty name map does not
+// either (review r5); `const`/`enum` always constrain, an empty list included
+// (review r7 P1); nested subschemas are read the same way, so
+// {"additionalProperties": true} or {"properties": {"x": {}}} is unconstrained
+// (review r7 P2).
 func schemaIsUnconstrained(schema map[string]any) bool {
 	for k, v := range schema {
 		if !validationKeywords[k] {
 			continue
 		}
-		switch t := v.(type) {
-		case []any:
-			if len(t) == 0 {
+		switch k {
+		case "const", "enum", "not", "$ref":
+			return false
+		case "required", "allOf", "anyOf", "oneOf", "prefixItems":
+			list, _ := v.([]any)
+			if len(list) == 0 {
 				continue
 			}
-		case map[string]any:
-			if len(t) == 0 && nameMapKeywords[k] {
-				continue
+			if k == "required" {
+				return false
+			}
+			if !branchesUnconstrained(list, k == "anyOf" || k == "oneOf") {
+				return false
+			}
+		case "properties", "patternProperties", "dependentSchemas", "dependencies":
+			names, _ := asObject(v)
+			for _, child := range names {
+				if !subschemaUnconstrained(child) {
+					return false
+				}
+			}
+		case "additionalProperties", "items", "additionalItems", "unevaluatedProperties", "unevaluatedItems", "propertyNames", "contains", "if", "then", "else":
+			if !subschemaUnconstrained(v) {
+				return false
+			}
+		case "uniqueItems":
+			if b, ok := v.(bool); !ok || b {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// subschemaUnconstrained reads a subschema value: `true` and an unconstrained
+// object accept everything; `false`, a constraining object or anything else
+// does not.
+func subschemaUnconstrained(v any) bool {
+	switch t := v.(type) {
+	case bool:
+		return t
+	case map[string]any:
+		return schemaIsUnconstrained(t)
+	}
+	return false
+}
+
+// branchesUnconstrained: an anyOf/oneOf accepts everything when some branch
+// does (oneOf strictly needs exactly one, which the gate reads as "accepts
+// everything" only when every branch does); an allOf/prefixItems when all do.
+func branchesUnconstrained(list []any, anyBranch bool) bool {
+	if anyBranch {
+		for _, item := range list {
+			if subschemaUnconstrained(item) {
+				return true
 			}
 		}
 		return false
+	}
+	for _, item := range list {
+		if !subschemaUnconstrained(item) {
+			return false
+		}
 	}
 	return true
 }
@@ -817,7 +908,8 @@ func structuralForm(raw string) string {
 	if !ok {
 		return normalizeJSON(raw)
 	}
-	out, err := json.Marshal(stripText(v))
+	// Numbers by value (1 and 1.0 are one schema, review r7 P2).
+	out, err := json.Marshal(canonicalValue(stripText(v)))
 	if err != nil {
 		return normalizeJSON(raw)
 	}
