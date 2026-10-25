@@ -975,9 +975,11 @@ components:
             debounced informational server rescan that brings the review screen's scan
             coverage back to "current".
 
-            Evidence and freshness ONLY: a clean verdict never approves a changed
-            contract (RT-02); every change is still held for review in scan and manual
-            trust modes. Runs in every trust mode except "auto".
+            Evidence and freshness ONLY: this switch approves nothing. Under "manual"
+            every change is held for review whatever the verdict (RT-02); under
+            "scan" the gate's own synchronous scan approves a clean change that
+            passes the spec 120 structural gate (spec 119 FR-004), and this switch
+            does not affect that path. Runs in every trust mode except "auto".
 
             Default (nil) is ENABLED. It only takes effect while auto_baseline_scan is
             also enabled, so a user can keep the admission scan and turn off per-change
