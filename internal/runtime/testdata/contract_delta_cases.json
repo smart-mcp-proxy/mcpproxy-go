@@ -2866,6 +2866,48 @@
    "signals": [
     "GATE-OUTPUT-SCHEMA:changed"
    ]
+  },
+  {
+   "name": "enum gains a string member that spells a number tag (review r4)",
+   "before_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"enum\":[1]}}}",
+   "after_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"enum\":[1,\"n:1\"]}}}",
+   "signals": [
+    "GATE-SCHEMA-SHAPE:enum-added:n"
+   ]
+  },
+  {
+   "name": "enum gains a string member equal to a number's digits",
+   "before_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"enum\":[1]}}}",
+   "after_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"enum\":[1,\"1\"]}}}",
+   "signals": [
+    "GATE-SCHEMA-SHAPE:enum-added:n"
+   ]
+  },
+  {
+   "name": "multipleOf respelled 1 vs 1.0 (review r4)",
+   "before_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"number\",\"multipleOf\":1}}}",
+   "after_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"number\",\"multipleOf\":1.0}}}",
+   "signals": []
+  },
+  {
+   "name": "default respelled 1 vs 1.0 (review r4)",
+   "before_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"number\",\"default\":1}}}",
+   "after_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"type\":\"number\",\"default\":1.0}}}",
+   "signals": []
+  },
+  {
+   "name": "const nested number respelled",
+   "before_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"const\":{\"v\":[2]}}}}",
+   "after_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"const\":{\"v\":[2.0]}}}}",
+   "signals": []
+  },
+  {
+   "name": "const changes from number to its string spelling",
+   "before_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"const\":1}}}",
+   "after_text": "{\"type\":\"object\",\"properties\":{\"n\":{\"const\":\"1\"}}}",
+   "signals": [
+    "GATE-SCHEMA-SHAPE:const:n"
+   ]
   }
  ]
 }

@@ -341,10 +341,47 @@ func asObject(v any) (map[string]any, bool) {
 	return m, ok
 }
 
+// sameJSON compares two decoded JSON values by VALUE: numbers by their exact
+// rational value at any depth (1 and 1.0 are equal, review r4 P2), object keys
+// sorted, every other scalar by type and content.
 func sameJSON(a, b any) bool {
-	ab, errA := json.Marshal(a)
-	bb, errB := json.Marshal(b)
+	ab, errA := json.Marshal(canonicalValue(a))
+	bb, errB := json.Marshal(canonicalValue(b))
 	return errA == nil && errB == nil && bytes.Equal(ab, bb)
+}
+
+// canonicalValue rewrites a decoded JSON value into an injective tagged form:
+// every value becomes a two-element list [tag, payload] so a number can never
+// collide with a string that spells the same (review r4 P1): numbers are
+// ["n", RatString], strings ["s", v], booleans ["b", v], null ["z"], lists
+// ["a", items...], objects ["o", {key: canonical}] (json.Marshal sorts keys).
+func canonicalValue(v any) any {
+	switch t := v.(type) {
+	case nil:
+		return []any{"z"}
+	case bool:
+		return []any{"b", t}
+	case string:
+		return []any{"s", t}
+	case []any:
+		out := make([]any, 0, len(t)+1)
+		out = append(out, "a")
+		for _, child := range t {
+			out = append(out, canonicalValue(child))
+		}
+		return out
+	case map[string]any:
+		obj := make(map[string]any, len(t))
+		for k, child := range t {
+			obj[k] = canonicalValue(child)
+		}
+		return []any{"o", obj}
+	default:
+		if n, ok := numberOf(v); ok {
+			return []any{"n", n.RatString()}
+		}
+		return []any{"x", fmt.Sprint(v)}
+	}
 }
 
 func schemaKeys(m map[string]any) []string {
@@ -667,36 +704,12 @@ func enumGainedMember(before, after any) bool {
 	return false
 }
 
-// enumMemberKey identifies an enum member by VALUE: every number in it, at
-// any depth, by its exact rational value (1 and 1.0 are one member, review r2
-// P2 / r3 P2), the rest by its JSON form.
+// enumMemberKey identifies an enum member by VALUE (canonicalValue): every
+// number in it, at any depth, by its exact rational value, and a number never
+// collides with a string (review r2 P2 / r3 P2 / r4 P1).
 func enumMemberKey(item any) string {
-	raw, _ := json.Marshal(canonicalNumbers(item))
+	raw, _ := json.Marshal(canonicalValue(item))
 	return string(raw)
-}
-
-// canonicalNumbers rewrites every number in a decoded JSON value to its
-// RatString form so equal values spell the same.
-func canonicalNumbers(v any) any {
-	switch t := v.(type) {
-	case map[string]any:
-		out := make(map[string]any, len(t))
-		for k, child := range t {
-			out[k] = canonicalNumbers(child)
-		}
-		return out
-	case []any:
-		out := make([]any, len(t))
-		for i, child := range t {
-			out[i] = canonicalNumbers(child)
-		}
-		return out
-	default:
-		if n, ok := numberOf(v); ok {
-			return "n:" + n.RatString()
-		}
-		return v
-	}
 }
 
 // boundLoosened reports whether a numeric bound keyword got looser or
