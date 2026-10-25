@@ -129,6 +129,29 @@ func resolveAPIKeyRef(c *Config) error {
 	if resolved == "" {
 		return fmt.Errorf("api_key: the reference resolved to an empty value")
 	}
+	// api_key is fixed for the life of the process (a reload pins the running
+	// value), and this load may be one that never becomes the live config, such
+	// as the disk re-read of a server restart. Once a reference has been
+	// resolved, later loads carry the key the process runs with, not what the
+	// file holds now: recording a rotated value as the process value would make
+	// the running key look like an edit, and the next save would write it over
+	// the reference. The file is still read above, so an unusable reference
+	// fails the load; a rotated key takes effect on the next start.
+	if running, ok := runningAPIKeyFromReference(); ok {
+		resolved = running
+	}
 	OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, resolved)
 	return nil
+}
+
+// runningAPIKeyFromReference returns the api_key this process runs with when it
+// was resolved from a secret reference.
+func runningAPIKeyFromReference() (string, bool) {
+	processOverridesMu.RLock()
+	defer processOverridesMu.RUnlock()
+	o, ok := processOverrides[overrideKey{FieldAPIKey.Name, OverrideSourceEnv}].(typedOverride[string])
+	if !ok || !secret.IsSecretRef(o.loaded) {
+		return "", false
+	}
+	return o.process, true
 }

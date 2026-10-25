@@ -71,8 +71,8 @@ The proxy's own `api_key` accepts the same reference (`"api_key": "${file:/run/s
 and so does the `MCPPROXY_API_KEY_FILE` environment variable (see
 [API key from a file](../configuration/environment-variables.md#api-key-from-a-file)). An `api_key`
 reference that cannot be resolved stops startup: mcpproxy does not generate a key over it. The
-reference is resolved when the config is loaded, so a rotated key file takes effect on the next restart
-or config reload. An API key from the environment overrides the config file's, and then the reference
+reference is resolved when the config is loaded and the key then stays fixed while the process runs (as for
+every `api_key` change), so a rotated key file takes effect on the next restart. An API key from the environment overrides the config file's, and then the reference
 is not read.
 
 A `${file:}` reference reads any file the mcpproxy process can read, so treat who can edit server

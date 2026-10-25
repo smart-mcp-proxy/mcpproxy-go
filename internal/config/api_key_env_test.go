@@ -337,6 +337,38 @@ func TestPersistableConfig_APIKeyReferenceSurvivesAnUnrelatedEdit(t *testing.T) 
 	assert.Equal(t, 7, persisted.ToolsLimit, "the edit itself is kept")
 }
 
+// A load that never becomes the live config (a server restart re-reads the
+// whole file) after the key file was rotated must not make the running key look
+// like an edit: the next save would write it over the reference.
+func TestPersistableConfig_APIKeyReferenceSurvivesARotationAndAnotherLoad(t *testing.T) {
+	t.Cleanup(ResetProcessOverrides)
+	ResetProcessOverrides()
+	keyFile := writeKeyFile(t, "key-A-running\n")
+	ref := "${file:" + keyFile + "}"
+	path := writeAPIKeyConfig(t, ref)
+	unsetEnv(t, EnvAPIKey)
+	t.Setenv(EnvAPIKeyFile, "")
+
+	live, err := LoadFromFile(path)
+	require.NoError(t, err)
+	require.Equal(t, "key-A-running", live.APIKey)
+
+	require.NoError(t, os.WriteFile(keyFile, []byte("key-B-rotated\n"), 0o600))
+	again, err := LoadFromFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "key-A-running", again.APIKey, "a rotated key takes effect on the next start, as the running config's does")
+
+	edited := *live
+	edited.ToolsLimit = 7
+	persisted := PersistableConfig(&edited, path)
+	assert.Equal(t, ref, persisted.APIKey, "the running key is not written over the reference")
+	require.NoError(t, SaveConfig(&edited, path))
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "key-A-running")
+	assert.NotContains(t, string(raw), "key-B-rotated")
+}
+
 func TestPersistableConfig_EditingAPIKeyUnderAReferenceIsPersisted(t *testing.T) {
 	t.Cleanup(ResetProcessOverrides)
 	ResetProcessOverrides()
