@@ -571,6 +571,10 @@ func walkCombinator(path string, b, a map[string]any, keyword string, growWidens
 	case !bHas && aHas:
 		if growWidens {
 			*out = append(*out, sig)
+		} else if carriesSteering(aList) {
+			// A new allOf narrows, but a default/const/enum in it steers
+			// (review r8 P1).
+			*out = append(*out, shape("new-property", childPath(path, keyword)))
 		}
 	default:
 		// Branches that survive unchanged are matched by VALUE first (a
@@ -581,6 +585,13 @@ func walkCombinator(path string, b, a map[string]any, keyword string, growWidens
 		bRest, aRest := unmatchedBranches(bList, aList)
 		for i := 0; i < len(bRest) && i < len(aRest); i++ {
 			walkSchemaNode(childPath(path, keyword+"/"+fmt.Sprint(aRest[i].index)), bRest[i].node, aRest[i].node, out)
+		}
+		// Live branches with no counterpart: a new allOf branch narrows, but
+		// one that carries a default/const/enum steers (review r8 P1).
+		for i := len(bRest); i < len(aRest); i++ {
+			if carriesSteering(aRest[i].node) {
+				*out = append(*out, shape("new-property", childPath(path, keyword+"/"+fmt.Sprint(aRest[i].index))))
+			}
 		}
 		if len(aList) != len(bList) && (len(aList) > len(bList)) == growWidens {
 			*out = append(*out, sig)
@@ -709,7 +720,16 @@ func schemaIsUnconstrained(schema map[string]any) bool {
 			if k == "required" {
 				return false
 			}
-			if !branchesUnconstrained(list, k == "anyOf" || k == "oneOf") {
+			if k == "oneOf" {
+				// Exactly one branch must match: an unconstrained branch next
+				// to any other rejects what the other accepts (review r8 P2),
+				// so only a single unconstrained branch accepts everything.
+				if len(list) != 1 || !subschemaUnconstrained(list[0]) {
+					return false
+				}
+				continue
+			}
+			if !branchesUnconstrained(list, k == "anyOf") {
 				return false
 			}
 		case "properties", "patternProperties", "dependentSchemas", "dependencies":
@@ -747,9 +767,8 @@ func subschemaUnconstrained(v any) bool {
 	return false
 }
 
-// branchesUnconstrained: an anyOf/oneOf accepts everything when some branch
-// does (oneOf strictly needs exactly one, which the gate reads as "accepts
-// everything" only when every branch does); an allOf/prefixItems when all do.
+// branchesUnconstrained: an anyOf accepts everything when some branch does;
+// an allOf/prefixItems when all do (oneOf is handled by the caller).
 func branchesUnconstrained(list []any, anyBranch bool) bool {
 	if anyBranch {
 		for _, item := range list {
