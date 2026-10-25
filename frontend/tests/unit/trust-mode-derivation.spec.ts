@@ -22,8 +22,8 @@ interface DerivationCase {
 }
 
 const cases: DerivationCase[] = [
-  { name: 'unset (field omitted)', raw: undefined, effective: 'manual', isDefault: true, isInvalid: false },
-  { name: 'empty string', raw: '', effective: 'manual', isDefault: true, isInvalid: false },
+  { name: 'unset (field omitted)', raw: undefined, effective: 'scan', isDefault: true, isInvalid: false },
+  { name: 'empty string', raw: '', effective: 'scan', isDefault: true, isInvalid: false },
   { name: 'explicit auto', raw: 'auto', effective: 'auto', isDefault: false, isInvalid: false },
   { name: 'explicit scan', raw: 'scan', effective: 'scan', isDefault: false, isInvalid: false },
   { name: 'explicit manual', raw: 'manual', effective: 'manual', isDefault: false, isInvalid: false },
@@ -104,8 +104,8 @@ describe('TRUST_MODES metadata table (spec 088 FR-002/FR-003)', () => {
     },
     {
       mode: 'scan',
-      // auto-approved only on a clean offline scan verdict, otherwise held
-      descriptionIncludes: [/chang/, /clean/, /scan/, /held|hold/],
+      // new tools and changes auto-approved on a clean offline scan verdict, otherwise held
+      descriptionIncludes: [/chang/, /clean/, /scan/, /held|hold/, /approved automatically/],
       // quarantined on add with a fail-closed automatic scan
       admissionIncludes: [/add/, /quarantin/, /scan/],
     },
@@ -113,7 +113,7 @@ describe('TRUST_MODES metadata table (spec 088 FR-002/FR-003)', () => {
       mode: 'manual',
       // every change held
       descriptionIncludes: [/chang/, /every/, /held|hold/],
-      // quarantined on add for human review (secure default)
+      // quarantined on add for human review
       admissionIncludes: [/add/, /quarantin/, /review|approv/],
     },
   ]

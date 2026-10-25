@@ -5,8 +5,8 @@ package qapilot
 
 // AdmissionQuarantined is the add-time quarantine default (spec 086 FR-011,
 // spec 088 FR-006): a new server is quarantined unless global quarantine is
-// off or its trust mode is auto. An unknown trust mode is manual (spec 088
-// FR-002: empty or unrecognised resolves to manual).
+// off or its trust mode is auto. An empty trust mode is the default tier,
+// scan (spec 119); an unrecognised one is manual (spec 088 FR-002).
 func AdmissionQuarantined(globalQuarantine bool, trust TrustMode) bool {
 	if !globalQuarantine {
 		return false
@@ -14,12 +14,15 @@ func AdmissionQuarantined(globalQuarantine bool, trust TrustMode) bool {
 	return EffectiveTrust(trust) != TrustAuto
 }
 
-// EffectiveTrust resolves a raw trust_mode value: auto and scan are
-// themselves, everything else (including empty and garbage) is manual.
+// EffectiveTrust resolves a raw trust_mode value the way
+// config.ServerConfig.EffectiveTrustMode does: auto, scan and manual are
+// themselves, empty is the default tier (scan, spec 119), garbage is manual.
 func EffectiveTrust(raw TrustMode) TrustMode {
 	switch raw {
-	case TrustAuto, TrustScan:
+	case TrustAuto, TrustScan, TrustManual:
 		return raw
+	case "":
+		return TrustScan
 	default:
 		return TrustManual
 	}
@@ -67,13 +70,15 @@ func Authorize(caller Caller, op string) bool {
 // (MCP-2931/2930) and scan_approved (spec 086 stage 2)).
 var (
 	// ChangedToApprovedReasons may clear a changed (rug-pull) record: the
-	// operator, proof the content did not actually change, or the operator's
-	// standing opt-in to auto-approve changes. scan_approved is deliberately
-	// absent: a clean verdict never re-approves a changed contract (RT-02).
+	// operator, proof the content did not actually change, the operator's
+	// standing opt-in to auto-approve changes, or — since spec 119 — a clean
+	// offline scan under trust_mode scan. Under manual a clean verdict never
+	// re-approves a changed contract (RT-02); that is a trust-mode rule the
+	// gate applies, not a reason the table refuses.
 	ChangedToApprovedReasons = []string{
 		"hash_match", "description_revert", "formula_migration",
 		"content_match", "description_match", "user_approve",
-		"auto_approve_changes",
+		"auto_approve_changes", "scan_approved",
 	}
 	// PendingToApprovedReasons may promote a never-reviewed record.
 	PendingToApprovedReasons = []string{

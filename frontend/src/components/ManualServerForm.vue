@@ -115,7 +115,7 @@ import TrustModeSelector from '@/components/TrustModeSelector.vue'
 import { resolveSecretFields, rollbackSecrets } from '@/composables/useSecretFields'
 import { useServersStore } from '@/stores/servers'
 import { serverDetailPath } from '@/utils/serverRoute'
-import type { TrustMode } from '@/utils/trustMode'
+import { DEFAULT_TRUST_MODE, type TrustMode } from '@/utils/trustMode'
 
 const props = withDefaults(defineProps<{
   navigateAfterAdd?: boolean
@@ -140,7 +140,7 @@ const errorEl = ref<HTMLElement | null>(null)
 
 const name = ref('')
 const protocol = ref<'stdio' | 'http'>('stdio')
-const trustMode = ref<TrustMode>('manual')
+const trustMode = ref<TrustMode>(DEFAULT_TRUST_MODE)
 const trustModeConfirmationPending = ref(false)
 const url = ref('')
 const command = ref('')
