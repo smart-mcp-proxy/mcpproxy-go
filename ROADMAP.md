@@ -1176,4 +1176,5 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [117-review-bound-approvals](./specs/117-review-bound-approvals/) | `in-flight` | 46/50 (92%) |
 | [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) | — | — |
 | [118-pin-visibility-boundary](./specs/118-pin-visibility-boundary/) | — | — |
-| [119-mcp-router-import](./specs/119-mcp-router-import/) | `drafted` | 0/66 (0%) |
+| [119-scan-default-trust](./specs/119-scan-default-trust/) | — | — |
+| [120-mcp-router-import](./specs/120-mcp-router-import/) | `drafted` | 0/66 (0%) |

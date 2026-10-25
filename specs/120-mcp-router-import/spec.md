@@ -1,11 +1,11 @@
 # Feature Specification: MCP Router Importer (`mcpproxy import --from mcp-router`)
 
-**Feature Branch**: `claude/spec-mcp-router-import-7ae3fb` (spec directory `119-mcp-router-import`)
+**Feature Branch**: `claude/spec-mcp-router-import-7ae3fb` (spec directory `120-mcp-router-import`)
 **Created**: 2026-10-20
 **Status**: Draft
 **Input**: Growth experiment E4 from the Q4 2026 promotion strategy. MCP Router (a 2,135-star desktop MCP manager) was archived on 2026-09-18; its README says new adoption is not recommended, so its users have no maintained tool. MCPProxy offers a one-command way across.
 
-**Related**: `research.md` in this directory (verified MCP Router storage format, with file paths and commit SHAs). Existing import machinery: `mcpproxy upstream import`, `internal/configimport`, REST `/api/v1/servers/import*`, Web UI `ImportServersPanel`. Spec 109 (catalog-first Add, import preview, FR-064/065 secret handling), Spec 032 / MCP-2931 (quarantine), Spec 108 (profiles), telemetry schema v14.
+**Related**: `research.md` in this directory (verified MCP Router storage format, with file paths and commit SHAs). Existing import machinery: `mcpproxy upstream import`, `internal/configimport`, REST `/api/v1/servers/import*`, Web UI `ImportServersPanel`. Spec 109 (catalog-first Add, import preview, FR-064/065 secret handling), Spec 032 / MCP-2931 (quarantine), Spec 108 (profiles), telemetry schema v16.
 
 ## Context and Motivation
 

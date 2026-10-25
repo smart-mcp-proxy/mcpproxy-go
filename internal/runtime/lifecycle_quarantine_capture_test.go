@@ -102,7 +102,7 @@ func TestCaptureQuarantinedToolDefinitions_RelistsAfterClientReplacement(t *test
 	second := httptest.NewServer(captureTestServer("second", "current_definition"))
 	t.Cleanup(second.Close)
 
-	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)}
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
@@ -194,7 +194,7 @@ func TestCaptureQuarantinedToolDefinitions_DropsReplacementBeforePersist(t *test
 	second := httptest.NewServer(captureTestServer("second", "current_definition"))
 	t.Cleanup(second.Close)
 
-	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)}
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
@@ -240,7 +240,7 @@ func TestCaptureQuarantinedToolDefinitions_SerializesReplacementWithPersistence(
 	second := httptest.NewServer(captureTestServer("second", "current_definition"))
 	t.Cleanup(second.Close)
 
-	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true}
+	cfgA := &config.ServerConfig{Name: "quarantined", URL: first.URL, Protocol: "streamable-http", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)}
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfgA}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })

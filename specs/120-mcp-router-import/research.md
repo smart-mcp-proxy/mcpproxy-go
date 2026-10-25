@@ -136,7 +136,7 @@ So the importer can **detect which clients still route through MCP Router** by l
 | REST | `POST /api/v1/servers/import`, `/import/json`, `/import/path`; `GET /import/paths` (`internal/httpapi/server.go:1096-1100`, `internal/httpapi/import.go`). `handleGetCanonicalConfigPaths` lists well-known client config paths. |
 | Web UI | `frontend/src/components/ImportServersPanel.vue`, `ImportServers.vue`, `AddMenu.vue`, `AddServer.vue`. |
 | Secret storage | `internal/secret` + `${keyring:<ref>}`, `cmd/mcpproxy/upstream_add_secret.go` (`--secret-env`, `--secret-header`, refuses if keyring unavailable). |
-| Telemetry | `internal/telemetry` `CounterRegistry` (`Record*On(reg, ...)`), `SchemaVersion = 14`, `ScanForPII`. Closed-enum, count-only counters. |
+| Telemetry | `internal/telemetry` `CounterRegistry` (`Record*On(reg, ...)`), `SchemaVersion` (14 when researched; 16 on main at merge time), `ScanForPII`. Closed-enum, count-only counters. |
 | Connect | `mcpproxy connect <client>`, `internal/connect/clients.go` (claude-desktop, cursor, windsurf, vscode, codex, ...). |
 
 **There is no SQLite driver in `mcpproxy-go/go.mod`** (storage is BBolt). Reading `mcprouter.db` therefore needs either a new pure-Go SQLite dependency or a restricted fallback; this is the one real dependency decision (see plan.md).

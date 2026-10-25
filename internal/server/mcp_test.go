@@ -828,6 +828,10 @@ func TestE2E_QuarantineFunctionality(t *testing.T) {
 		"protocol":    "streamable-http",
 		"enabled":     true,
 		"quarantined": true,
+		// manual: this test pins the server-level quarantine path; under the
+		// default tier (scan, spec 119) the admission scan would settle clean
+		// and release the server mid-test.
+		"trust_mode": "manual",
 	}
 
 	addResult, err := mcpClient.CallTool(ctx, addRequest)
@@ -992,6 +996,10 @@ func TestE2E_PatchCannotUnquarantineServer(t *testing.T) {
 		"protocol":    "streamable-http",
 		"enabled":     true,
 		"quarantined": true,
+		// manual: this test pins the server-level quarantine path; under the
+		// default tier (scan, spec 119) the admission scan would settle clean
+		// and release the server mid-test.
+		"trust_mode": "manual",
 	}
 
 	addResult, err := mcpClient.CallTool(ctx, addRequest)

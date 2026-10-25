@@ -1,6 +1,6 @@
 # Implementation Plan: MCP Router Importer
 
-**Branch**: `claude/spec-mcp-router-import-7ae3fb` (spec dir `119-mcp-router-import`) | **Date**: 2026-10-20 | **Spec**: [spec.md](spec.md)
+**Branch**: `claude/spec-mcp-router-import-7ae3fb` (spec dir `120-mcp-router-import`) | **Date**: 2026-10-20 | **Spec**: [spec.md](spec.md)
 **Input**: spec.md (clarified, two Sol review rounds applied), research.md (verified MCP Router format)
 
 ## Summary
@@ -98,8 +98,8 @@ Everything after that goes through `os.OpenRoot(root)`: containment is component
 
 ### D7. Telemetry (FR-022 to FR-024)
 
-- `telemetry.ImportSource` closed enum `{mcp-router, other}` (extensible); `Service.RecordImportRun(src)` is a **service-owned** operation that evaluates event-time eligibility (`EffectiveTelemetryEnabled` plus env overrides) under the service's own synchronisation, the way the heartbeat path does (see the race documented near `telemetry.go:771`), and only then increments `CounterRegistry.importCounts`. The registry counter participates in `Drain()`/`Snapshot()`/`Reset()`/`HasPendingCounters()`. The payload field is `import_source_counts` (object, omitted when empty, keys from the fixed enum, non-negative integer values). `ScanForPII` gets the structural rule `import_source_field_invalid`. `SchemaVersion` becomes 15.
-- **Schema bump hygiene.** The existing guard test only hunts obsolete v12 spellings. The bump task enumerates the current v14 pins by `rg` over code, tests, fixtures (`internal/telemetry/testdata`) and docs, updates them, extends the guard to the v14 to v15 transition, and leaves historical v14 activation/cohort thresholds alone. Its own commit.
+- `telemetry.ImportSource` closed enum `{mcp-router, other}` (extensible); `Service.RecordImportRun(src)` is a **service-owned** operation that evaluates event-time eligibility (`EffectiveTelemetryEnabled` plus env overrides) under the service's own synchronisation, the way the heartbeat path does (see the race documented near `telemetry.go:771`), and only then increments `CounterRegistry.importCounts`. The registry counter participates in `Drain()`/`Snapshot()`/`Reset()`/`HasPendingCounters()`. The payload field is `import_source_counts` (object, omitted when empty, keys from the fixed enum, non-negative integer values). `ScanForPII` gets the structural rule `import_source_field_invalid`. `SchemaVersion` takes the next value (16 on main when written, so 17; re-check at implementation time).
+- **Schema bump hygiene.** The existing guard test only hunts obsolete v12 spellings. The bump task enumerates the current-version (v16 at the time of writing) pins by `rg` over code, tests, fixtures (`internal/telemetry/testdata`) and docs, updates them, extends the guard to the current to next transition, and leaves historical activation/cohort thresholds alone. Its own commit.
 - **Endpoint** `POST /api/v1/servers/import/report` with body `{"source":"mcp-router"}` only (the count of servers is *not* sent: unnecessary, and the daemon client can target a non-loopback endpoint). Auth `requireServerOp(auth.ServerOpAdd, handler)`; unknown `source` returns 400; otherwise 204, whether or not the event was recorded (the response never reveals opt-out state). The handler calls `Service.RecordImportRun`.
 - The CLI calls it once, only when the daemon sink was used and at least one outcome is `added`. A daemonless run is not counted (clarified). The Web UI path calls `Service.RecordImportRun` in-process from its own handler.
 - Race test under `-race`: opt-out toggled concurrently with recording; disabled → import → enabled emits nothing.
@@ -126,7 +126,7 @@ A new band 20-24, assigned centrally in `classifyError` (`cmd/mcpproxy/main.go`)
 ### Documentation (this feature)
 
 ```text
-specs/119-mcp-router-import/
+specs/120-mcp-router-import/
 ├── spec.md  research.md  plan.md  data-model.md  quickstart.md  tasks.md
 ├── checklists/requirements.md
 └── contracts/
@@ -148,7 +148,7 @@ internal/mcprouter/                 # NEW, the only importer of modernc.org/sqli
 ├── apply.go         # secrets + Sink + outcomes (D4, D6)
 └── *_test.go + testdata/ (JSON only; DB fixtures are built in-test)
 internal/configimport/               # small exports: ClassifyEnv/Headers, Sanitize already exported
-internal/telemetry/                  # ImportSource, RecordImportOn, payload field, scan rule, v15
+internal/telemetry/                  # ImportSource, RecordImportOn, payload field, scan rule, schema bump
 internal/cliclient/client.go         # AddServerRequest.DisabledTools, ReportImport()
 internal/httpapi/server.go           # AddServerRequest.DisabledTools; POST /servers/import/report (requireServerOp)
 cmd/mcpproxy/import_cmd.go          # NEW cobra command, rendering, prompt, exit mapping
@@ -165,7 +165,7 @@ scripts/test-api-e2e.sh              # +1 import step
 1. **P0 Gate and skeleton**: dependency measurement (T003), package skeleton, fixture builder.
 2. **P1 Read and plan** (no writes): locate, snapshot, reader, export parser, resolver, plan/mapping/conflicts, clients. Milestone is package-test level (the command arrives in P2).
 3. **P2 Apply and CLI**: secrets, sinks, `disabled_tools` plumbing, command, prompts, exit codes, JSON output.
-4. **P3 Telemetry**: registry, payload, scan rule, v15, endpoint, doc.
+4. **P3 Telemetry**: registry, payload, scan rule, schema bump, endpoint, doc.
 5. **P4 Docs, E2E and acceptance**: user page, CLI docs, E2E, recorded acceptance checks (SC-001 timed single-confirmation run, SC-002 50-server timing, SC-009 one manual reconnect check per supported client: Claude Desktop, Cursor, Windsurf, VS Code, Codex), QA pass against a real MCP Router 0.6.4 database in a scratch home, and the hand-off to the website session (final command text, flags, docs URL) so the migration page links to and matches the shipped behavior (FR-026).
 6. **P5 Web UI (non-gating, droppable)**: its own request shape (contracts/rest.md), detection row, panel entry. Does not alter the existing endpoints' contracts.
 

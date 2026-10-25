@@ -302,7 +302,7 @@ func (m *MockServerController) AggregateToolUsage(_ time.Time) (map[string]stora
 	return map[string]storage.ToolUsageStat{}, nil
 }
 func (m *MockServerController) UsageSnapshot() *internalRuntime.UsageAggregate { return nil }
-func (m *MockServerController) StreamActivities(_ storage.ActivityFilter) <-chan *storage.ActivityRecord {
+func (m *MockServerController) StreamActivities(_ context.Context, _ storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	ch := make(chan *storage.ActivityRecord)
 	close(ch)
 	return ch
