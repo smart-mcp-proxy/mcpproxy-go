@@ -3165,7 +3165,7 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q has no value to store", req.Scope, req.Key))
 		return
 	}
-	if strings.HasPrefix(value, "${keyring:") || strings.HasPrefix(value, "${env:") {
+	if secret.IsSecretRef(value) {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference (%s); nothing to convert", req.Scope, req.Key, value))
 		return
 	}

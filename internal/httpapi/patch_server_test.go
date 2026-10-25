@@ -477,6 +477,26 @@ func TestHandleConvertConfigToSecret_ValidationErrors(t *testing.T) {
 			wantInBody: "already a reference",
 		},
 		{
+			name: "value is already a file reference",
+			existing: &config.ServerConfig{
+				Name: "synapbus", Protocol: "stdio", Enabled: true,
+				Env: map[string]string{"GITHUB_TOKEN": "${file:/run/secrets/github-token}"},
+			},
+			body:       `{"scope": "env", "key": "GITHUB_TOKEN", "secret_name": "synapbus-auth"}`,
+			wantStatus: 400,
+			wantInBody: "already a reference",
+		},
+		{
+			name: "value embeds a keyring reference",
+			existing: &config.ServerConfig{
+				Name: "synapbus", Protocol: "http", Enabled: true,
+				Headers: map[string]string{"Authorization": "Bearer ${keyring:github-token}"},
+			},
+			body:       `{"scope": "header", "key": "Authorization", "secret_name": "synapbus-auth"}`,
+			wantStatus: 400,
+			wantInBody: "already a reference",
+		},
+		{
 			name: "empty value",
 			existing: &config.ServerConfig{
 				Name: "synapbus", Protocol: "http", Enabled: true,
