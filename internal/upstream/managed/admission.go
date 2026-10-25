@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/auth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 )
 
@@ -61,6 +62,13 @@ func (mc *Client) acquireAdmission(ctx context.Context, toolName string) (func()
 		serverName = serverCfg.Name
 	}
 
+	// Issue #1699: an agent token's call budget is spent before the call takes
+	// (or queues for) a concurrency slot, so a caller that is over budget costs
+	// the proxy nothing and cannot crowd the queue.
+	if err := mc.admitTokenRate(ctx, adm, serverName, toolName); err != nil {
+		return nil, err
+	}
+
 	// The registry resolves everything this admission needs — both limiter
 	// tiers and the ONE absolute queue deadline spanning them (FR-004) — from a
 	// single published generation, so no value here can come from a different
@@ -74,10 +82,50 @@ func (mc *Client) acquireAdmission(ctx context.Context, toolName string) (func()
 	return release, nil
 }
 
+// admitTokenRate charges one call to the calling agent token's budget. It
+// refuses with a *limiter.LimitError{ScopeToken, ReasonRateLimited} when the
+// token is over it, after reporting the rejection to the observer.
+//
+// Only an agent-token caller has a budget. The admin API key, the unix socket,
+// an unauthenticated /mcp caller and every in-process call (activity replay
+// under the admin's own context, a call with no request context at all) carry
+// no agent identity and pass straight through.
+func (mc *Client) admitTokenRate(ctx context.Context, adm *admissionControl, serverName, toolName string) error {
+	rates := adm.registry.TokenRates()
+	if rates == nil {
+		return nil
+	}
+	ac := auth.AuthContextFromContext(ctx)
+	if ac == nil || ac.Type != auth.AuthTypeAgent || ac.AgentName == "" {
+		return nil
+	}
+
+	var override *limiter.RateSpec
+	if ac.RateLimit != nil {
+		override = &limiter.RateSpec{PerMinute: ac.RateLimit.PerMinute, Burst: ac.RateLimit.Burst}
+	}
+	// Names are unique per owner, not globally (server edition), so the owner
+	// is part of the key.
+	decision := rates.Allow(ac.UserID+"/"+ac.AgentName, override)
+	if decision.Allowed {
+		return nil
+	}
+
+	limitErr := &limiter.LimitError{
+		Scope:      limiter.ScopeToken,
+		Reason:     limiter.ReasonRateLimited,
+		Limit:      decision.Spec.PerMinute,
+		Burst:      decision.Spec.Burst,
+		RetryAfter: decision.RetryAfter,
+	}
+	mc.reportRejection(ctx, adm, serverName, toolName, 0, limitErr)
+	return limitErr
+}
+
 // reportRejection forwards a shed to the origin-independent observer. Only
-// queue_full / queue_timeout are sheds; server_unavailable is the existing
-// "server went away" semantics (FR-009) and is reported through the normal
-// error path, not as a rejection.
+// queue_full / queue_timeout / rate_limited are sheds; server_unavailable is
+// the existing "server went away" semantics (FR-009) and is reported through
+// the normal error path, not as a rejection.
 func (mc *Client) reportRejection(ctx context.Context, adm *admissionControl, serverName, toolName string, waited time.Duration, err error) {
 	if adm.observe == nil {
 		return
@@ -86,17 +134,27 @@ func (mc *Client) reportRejection(ctx context.Context, adm *admissionControl, se
 	if !errors.As(err, &limitErr) {
 		return
 	}
-	if limitErr.Reason != limiter.ReasonQueueFull && limitErr.Reason != limiter.ReasonQueueTimeout {
+	if !limitErr.Shed() {
 		return
 	}
-	adm.observe(ctx, limiter.Rejection{
+	rej := limiter.Rejection{
 		Server:     serverName,
 		Tool:       toolName,
 		Scope:      limitErr.Scope,
 		Reason:     limitErr.Reason,
 		Limit:      limitErr.Limit,
+		Burst:      limitErr.Burst,
 		RetryAfter: limitErr.RetryAfter,
 		Waited:     waited,
 		Message:    limitErr.Error(),
-	})
+	}
+	if limitErr.Reason == limiter.ReasonRateLimited {
+		if ac := auth.AuthContextFromContext(ctx); ac != nil {
+			rej.Token = limiter.TokenIdentity{Name: ac.AgentName, Prefix: ac.TokenPrefix}
+			if ac.IsClientCredential() {
+				rej.Token.ClientID = ac.ClientID
+			}
+		}
+	}
+	adm.observe(ctx, rej)
 }

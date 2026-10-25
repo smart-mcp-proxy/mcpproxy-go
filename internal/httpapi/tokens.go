@@ -65,6 +65,11 @@ type createTokenRequest struct {
 	// Purpose is the stated, unenforced task brief (Spec 115), at most 500
 	// characters; screened for secrets before anything is stored.
 	Purpose string `json:"purpose,omitempty"`
+	// RateLimit is this token's own call budget (issue #1699): per_minute calls
+	// a minute, bursts of up to burst. It replaces agent_token_rate_limit for
+	// this token; per_minute 0 exempts the token from it. Omitted = follow the
+	// config default.
+	RateLimit *auth.TokenRateLimit `json:"rate_limit,omitempty"`
 }
 
 // createTokenResponse is the JSON response for POST /api/v1/tokens.
@@ -76,6 +81,8 @@ type createTokenResponse struct {
 	ExpiresAt      time.Time `json:"expires_at"`
 	CreatedAt      time.Time `json:"created_at"`
 	ProfilePin     string    `json:"profile_pin,omitempty"`
+	// RateLimit echoes the token's own call budget when it has one.
+	RateLimit *auth.TokenRateLimit `json:"rate_limit,omitempty"`
 }
 
 // tokenInfoResponse is the JSON response for GET endpoints (no secret).
@@ -106,6 +113,9 @@ type tokenInfoResponse struct {
 	Purpose      string                 `json:"purpose,omitempty"`
 	Lease        bool                   `json:"lease"`
 	ProfileState string                 `json:"profile_state"`
+	// RateLimit is the token's own call budget (issue #1699); absent when it
+	// follows agent_token_rate_limit.
+	RateLimit *auth.TokenRateLimit `json:"rate_limit,omitempty"`
 }
 
 // regenerateTokenResponse is the JSON response for POST /api/v1/tokens/{name}/regenerate.
@@ -199,7 +209,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 	res, err := s.credentials().IssueToken(r.Context(), actorFromRequest(r), internalRuntime.IssueTokenRequest{
 		Name: req.Name, Profile: req.Profile, ProfilePin: req.ProfilePin, Purpose: req.Purpose,
 		AllowedServers: req.AllowedServers, Permissions: req.Permissions,
-		ExpiresIn: req.ExpiresIn, Expiry: internalRuntime.ExpiryTokenDefault,
+		ExpiresIn: req.ExpiresIn, Expiry: internalRuntime.ExpiryTokenDefault, RateLimit: req.RateLimit,
 		ValidateServers: func(servers []string) error { return validateAllowedServers(servers, s.controller) },
 	})
 	if err != nil {
@@ -216,6 +226,7 @@ func (s *Server) handleCreateToken(w http.ResponseWriter, r *http.Request) {
 		AllowedServers: allowed,
 		Permissions:    perms,
 		ProfilePin:     res.View.Profile,
+		RateLimit:      res.View.RateLimit,
 	}
 	if res.View.ExpiresAt != nil {
 		resp.ExpiresAt = *res.View.ExpiresAt
@@ -587,5 +598,6 @@ func tokenToInfoResponse(t auth.AgentToken) tokenInfoResponse {
 		Purpose:        t.Purpose,
 		Lease:          t.IsLease(),
 		ProfileState:   internalRuntime.ProfileStateNone,
+		RateLimit:      t.RateLimit,
 	}
 }
