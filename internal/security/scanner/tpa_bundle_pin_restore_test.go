@@ -106,3 +106,32 @@ func TestPin_RestoreWithoutItsFilesFallsBackToEmbedded(t *testing.T) {
 	assert.True(t, info.CoverageDegraded)
 	assert.Equal(t, DegradedOperatorBundleMissing, info.DegradedReason)
 }
+
+// US3 judge finding 10: removing tpa_bundle_path removes a FILE bundle, pinned
+// or not, even with fetch on; the rollback pin must not resurrect it from its
+// last-known-good files on the next run or after a restart.
+func TestPin_RemovedFilePathDoesNotResurrectAPinnedFileBundleWithFetchOn(t *testing.T) {
+	f := newRTFixture(t, rtOpts{Sec: func(s *config.SecurityConfig) {
+		s.TPAActiveRoot = config.TPARootOperator
+		s.TPAOperatorBaseline = u64p(1)
+		s.TPAFetchEnabled = true
+	}})
+	a := signedCandidate(t, keyOperator, bundleOpts{Seq: 5, Tag: "A"})
+	b := signedCandidate(t, keyOperator, bundleOpts{Seq: 6, Tag: "B"})
+	aPath := f.drop + "/previous.json"
+	f.putAt(aPath, a)
+	f.activate(a)
+	f.activate(b)
+	info, err := RollbackBundle(BundleRollbackRequest{Path: aPath, Digest: digestOf(a.Bundle)}, f.log)
+	require.NoError(t, err)
+	require.True(t, info.Pinned)
+
+	f.sec.TPABundlePath = ""
+	for i := 0; i < 2; i++ {
+		info = f.run()
+		assert.Equal(t, BundleSourceEmbedded, info.Source, "run %d: the removed file bundle must stay gone", i+1)
+	}
+	f.restart()
+	info = f.run()
+	assert.Equal(t, BundleSourceEmbedded, info.Source, "and across a restart")
+}

@@ -7,6 +7,18 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Breaking Changes
 
+- **trust mode / tool approvals (Spec 119):** `scan` is now the default per-server trust mode, and under
+  `scan` a **changed** tool contract whose offline TPA scan is clean is approved automatically in the same
+  discovery pass (reason `scan_approved`, activity event `tool_auto_approved`) instead of being held. A
+  finding, a tool the scan could not cover, or a change that re-labels the tool as safer (`readOnlyHint`
+  false→true, `destructiveHint` true→false; held with signal `GATE-HINT-SAFER-FLIP`) is still held with the
+  evidence attached. A server whose `trust_mode` is unset now runs under `scan` from its next discovery
+  pass, so clean-scanned holds it accumulated are released without a click. The 2026-10-11 rule that a clean
+  verdict never approves a changed contract now applies to `manual` only. **Migration:** set
+  `trust_mode: "manual"` on any server whose tool changes you want a person to review; nothing changes for
+  servers with an explicit `trust_mode` or `auto_approve_tool_changes`. New servers added with no trust mode
+  are quarantined, scanned and released automatically on a clean verdict, as `scan` always did.
+
 - **connect / disconnect:** `mcpproxy disconnect`, `DELETE /api/v1/connect/{client}`, and the Web UI
   and tray Disconnect now also revoke the client's credential (`client-<id>`), so a secret copied out
   of the removed config stops authenticating. The result reports `credential_revoked`, or
@@ -78,6 +90,17 @@ Releases follow [Semantic Versioning](https://semver.org/).
   [Home and Navigation](https://docs.mcpproxy.app/web-ui/dashboard))
 
 ### Features
+
+- **profiles:** `mcpproxy access suggest` turns the calls your profiles blocked into reviewed profile
+  changes (#1700). It reads the profile refusals in the audit log (`--since`, default 24h), groups them
+  by profile, tool and block reason, re-checks each group with the access explainer so tools that are
+  reachable now drop out, and prints the command that would fix each one. A deny rule is reported and
+  never offered for widening, an unannotated tool is never given a tier, and `code_execution` and
+  management refusals carry a warning. Nothing is applied. `--patch` adds the proposed profile
+  document per profile, in mcpproxy's own profile format. Also `GET /api/v1/access/suggest` and the
+  `suggest` operation of the `profiles` MCP tool (administrators only).
+- **`mcp_reject_query_apikey` refuses query-parameter credentials on MCP endpoints.** Set it to `true` and every MCP endpoint (`/mcp`, `/mcp/p/<slug>`, `/mcp/all`, `/mcp/code`, `/mcp/call` and the legacy `/v1/tool_code` aliases) answers a request carrying `?apikey=` with a 401 instead of honouring it, which forces every client onto `Authorization: Bearer` or `X-API-Key`. It cannot stop a URL that was already sent from being logged by whatever sits in front of the proxy; it makes sure such a client stops working until it is migrated, so the token stops appearing in access logs, proxy logs and browser history from then on. The refusal is explicit rather than "no credential" because, with `require_mcp_auth` off, an unrecognised credential would otherwise be served as the anonymous administrator. Default `false`, so nothing changes unless you opt in; the REST API, the Web UI and its `/events` stream are not affected. Live, no restart. **Caveat:** the Connect wizard writes Codex (and the generic fallback) entries with `?apikey=<credential>` in the URL, so a client connected that way gets a 401 once the option is on: remove the query parameter and carry the credential in a header instead (`env_http_headers` or `http_headers`, see the Connect clients guide); Connect itself is not yet aware of the option.
+- **config: `MCPPROXY_API_KEY_FILE` reads the API key from a file (#1706).** The `*_FILE` form of Docker Compose/Swarm secrets, Kubernetes secret volumes and systemd `LoadCredential=`: the key is not in the process environment (`docker inspect`, `/proc/<pid>/environ`) and is never written to `mcp_config.json`. The path must be absolute; one trailing LF or CRLF is removed; at most 64 KiB is read. Setting both `MCPPROXY_API_KEY` and `MCPPROXY_API_KEY_FILE` (both non-empty) is an error: mcpproxy refuses to start with a message naming both variables (never a key or file contents), and the CLI commands and the tray stop the same way. An empty value is treated as unset. A file that is named but cannot be used stops startup with an error naming the variable and path: mcpproxy does not fall back to the config file or a generated key. `mcpproxy status`, the other CLI commands and the tray read it too, and a tray-launched core reads the file itself instead of receiving the key in its environment. `Config.EnsureAPIKey` now also returns an error. (refs #1706, spec 111 FR-014/FR-030/US7)
 
 - **catalog:** a catalog source whose live search times out or fails is now answered from the listing
   the daemon last saw from it (at most 24 hours old, kept in memory). Those results are marked
@@ -174,6 +197,9 @@ Releases follow [Semantic Versioning](https://semver.org/).
     ([Home and Navigation](https://docs.mcpproxy.app/web-ui/dashboard))
 
 ### Bug Fixes
+
+- **`serve --data-dir` (and `MCPPROXY_DATA_DIR`) now reads `<data-dir>/mcp_config.json`.** Until now `serve` looked for its config only in the working directory and `$HOME/.mcpproxy` and applied the data dir afterwards, so a config on a mounted volume was ignored and a fresh one (new listen address, new API key) was written under `$HOME`, while every management command already read the config from the data dir. `serve` now resolves it the same way: an explicit `--config` wins, then `<data-dir>/mcp_config.json` if it exists, and on a first run with no config anywhere the default is seeded inside the data dir. `MCPPROXY_DATA_DIR`, documented but never implemented, now works as an alias of `--data-dir` (the legacy `MCPPROXY_DATA` keeps relocating only the data directory, and loses when both are set). If you already export `MCPPROXY_DATA_DIR`, it takes effect for the first time on this upgrade: the data directory, and so the database, search index and socket, move to it. **Migration:** an instance started with `--data-dir X` that relied on the config under `$HOME/.mcpproxy` while a stale `X/mcp_config.json` also exists will now read the one in `X`.
+- **audit: a profile tool-policy refusal now names its rule (#1703).** The `authz` audit line for a call refused by a profile's tier cap, deny rule or unannotated-tool policy used to read `reason: other`; it now reads `profile_tier`, `profile_rule` or `profile_unannotated` (`disclosed: true`), matching the `block_reason` of the same call in the activity log. A refusal inside a `code_execution` script used to be written as `token_scope` with `disclosed: false` and now uses the same three reasons. `profile_scope` is unchanged, and `profile_code_execution` / `profile_management` are not audit reasons because those built-in tools are not audited per call. The `reason` enum in `docs/schemas/audit-line-v1.schema.json` gains the three members, so a consumer that validates audit lines against the enum must accept them. (refs #1703)
 
 - **Upgrade no longer admits a server an older release held in quarantine (RC-UPG-001).** A v0.69 restart (including the baseline security scan shortly after startup) wrote a keyless server's un-gated config over its recorded quarantine, while v0.69 kept holding it in memory. On upgrade the config-load admission gate read that record as already admitted and auto-baseline approved all of its tools. The gate now also requires an approval baseline: a server recorded as unquarantined whose tools were never approved is quarantined again for review. Servers with approved tools are unaffected; vetted servers with no tool records (zero-tool servers, servers that never connected while live, servers last vetted before v0.21) are also held once — approve them, or set `"quarantined": false` before upgrading.
 

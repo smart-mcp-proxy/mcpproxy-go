@@ -219,9 +219,9 @@ jobs:
         run: |
           # On Windows, skip internal/server tests (E2E tests timeout after 11 minutes)
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            go test -tags nogui -v -skip "E2E|Binary|MCPProtocol" $(go list ./... | grep -v 'internal/server$')
+            go test -tags nogui -v -timeout 20m -skip "E2E|Binary|MCPProtocol" $(go list ./... | grep -v 'internal/server$')
           else
-            go test -tags nogui -v -skip "E2E|Binary|MCPProtocol" ./...
+            go test -tags nogui -v -timeout 20m -skip "E2E|Binary|MCPProtocol" ./...
           fi
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken

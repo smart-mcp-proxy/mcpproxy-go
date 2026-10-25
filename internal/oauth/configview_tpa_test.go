@@ -3,6 +3,7 @@ package oauth
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,4 +55,91 @@ func TestRedactedConfig_LeavesTPATrustRootUnmasked(t *testing.T) {
 
 	// The source config is not mutated by the redaction walk.
 	assert.Equal(t, []string{signer}, cfg.Security.TPAOperatorSigners)
+}
+
+// TestRedactedConfig_LeavesTPARefreshKeysUnmasked (Spec 087 FR-016 / Spec 101
+// US3 B1): the four refresh keys are an interval, a flag, a plain https URL and
+// a day count - none is a secret. GET /api/v1/config must serve them verbatim
+// so an operator can read back what they set, and a mask here would be
+// rewritten into config on a write-back. The key names deliberately avoid the
+// masked substrings (KEY, AUTH, TOKEN, PASS, CERT, SECRET), which is why the
+// URL is tpa_fetch_url and there is no per-fetch key field.
+func TestRedactedConfig_LeavesTPARefreshKeysUnmasked(t *testing.T) {
+	const fetchURL = "https://api.github.com/repos/smart-mcp-proxy/tpa-db/releases/latest"
+	zero := 0
+	cfg := config.DefaultConfig()
+	cfg.Security = &config.SecurityConfig{
+		TPARefreshInterval: config.Duration(12 * time.Hour),
+		TPAFetchEnabled:    true,
+		TPAFetchURL:        fetchURL,
+		TPAStaleAfterDays:  &zero,
+	}
+
+	masked := RedactedConfig(cfg)
+	require.NotNil(t, masked)
+	require.NotNil(t, masked.Security)
+
+	assert.Equal(t, config.Duration(12*time.Hour), masked.Security.TPARefreshInterval)
+	assert.True(t, masked.Security.TPAFetchEnabled)
+	assert.Equal(t, fetchURL, masked.Security.TPAFetchURL, "a plain https URL is not masked")
+	require.NotNil(t, masked.Security.TPAStaleAfterDays)
+	assert.Equal(t, 0, *masked.Security.TPAStaleAfterDays, "an explicit 0 survives the walk")
+
+	raw, err := json.Marshal(masked.Security)
+	require.NoError(t, err)
+	var wire map[string]any
+	require.NoError(t, json.Unmarshal(raw, &wire))
+	assert.Equal(t, "12h0m0s", wire["tpa_refresh_interval"])
+	assert.Equal(t, true, wire["tpa_fetch_enabled"])
+	assert.Equal(t, fetchURL, wire["tpa_fetch_url"])
+	assert.EqualValues(t, 0, wire["tpa_stale_after_days"])
+
+	assert.Equal(t, fetchURL, cfg.Security.TPAFetchURL, "the source config is not mutated by the redaction walk")
+}
+
+// TestRedactedConfig_TPARefreshKeysRoundTripGetThenPatch: the raw-JSON editor
+// GETs the config, changes one field and POSTs the whole document back. The
+// refresh keys must come back identical, with no mask written over them and no
+// absent key turning into an explicit value.
+func TestRedactedConfig_TPARefreshKeysRoundTripGetThenPatch(t *testing.T) {
+	const fetchURL = "https://mirror.example.com/tpa/scanner-bundle.json"
+	zero := 0
+	stored := config.DefaultConfig()
+	stored.Security = &config.SecurityConfig{
+		TPARefreshInterval: config.Duration(6 * time.Hour),
+		TPAFetchEnabled:    true,
+		TPAFetchURL:        fetchURL,
+		TPAStaleAfterDays:  &zero,
+	}
+
+	masked := RedactedConfig(stored)
+	require.NotNil(t, masked)
+	raw, err := json.Marshal(masked)
+	require.NoError(t, err)
+	var incoming map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &incoming))
+
+	resolved, err := UnmaskLiveConfigDocument(incoming, stored)
+	require.NoError(t, err)
+	require.NotNil(t, resolved.Security)
+	assert.Equal(t, config.Duration(6*time.Hour), resolved.Security.TPARefreshInterval)
+	assert.True(t, resolved.Security.TPAFetchEnabled)
+	assert.Equal(t, fetchURL, resolved.Security.TPAFetchURL)
+	require.NotNil(t, resolved.Security.TPAStaleAfterDays)
+	assert.Equal(t, 0, *resolved.Security.TPAStaleAfterDays)
+
+	// A config that never set the keys stays absent through the same trip.
+	bare := config.DefaultConfig()
+	bare.Security = &config.SecurityConfig{}
+	rawBare, err := json.Marshal(RedactedConfig(bare))
+	require.NoError(t, err)
+	var incomingBare map[string]interface{}
+	require.NoError(t, json.Unmarshal(rawBare, &incomingBare))
+	resolvedBare, err := UnmaskLiveConfigDocument(incomingBare, bare)
+	require.NoError(t, err)
+	require.NotNil(t, resolvedBare.Security)
+	assert.Zero(t, resolvedBare.Security.TPARefreshInterval)
+	assert.False(t, resolvedBare.Security.TPAFetchEnabled)
+	assert.Empty(t, resolvedBare.Security.TPAFetchURL)
+	assert.Nil(t, resolvedBare.Security.TPAStaleAfterDays)
 }

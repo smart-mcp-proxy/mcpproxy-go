@@ -995,7 +995,7 @@ func (p *MCPProxyServer) emitActivityPolicyDecisionWithBlockReason(ctx context.C
 		if isPostDispatchBlockKey(reasonKey) {
 			p.auditToolCall(ctx, "blocked", reasonKey, "", auditDurationMs(ctx), nil, nil)
 		} else {
-			p.auditAuthz(ctx, "deny", reasonKey)
+			p.auditAuthzWithProfileReason(ctx, "deny", reasonKey, blockReason)
 		}
 	}
 	if p.mainServer != nil && p.mainServer.runtime != nil {
@@ -1510,7 +1510,7 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 				mcp.Description("Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch."),
 			),
 			mcp.WithString("trust_mode",
-				mcp.Description("Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch."),
+				mcp.Description("Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = new tools and changed tools auto-approve only when the fast offline TPA scan is clean, else hold for review; 'manual' = human reviews every change. Empty → scan (the default). Used with add/update/patch."),
 				mcp.Enum("auto", "scan", "manual"),
 			),
 			mcp.WithBoolean("expose_prompts",
@@ -7264,6 +7264,16 @@ func (p *MCPProxyServer) monitorConnectionStatusAt(ctx context.Context, serverNa
 // CallToolDirect calls a tool directly without going through the MCP server's request handling
 // This is used for REST API calls that bypass the MCP protocol layer
 func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToolRequest) (interface{}, error) {
+	return p.callToolDirect(ctx, request, false)
+}
+
+// CallToolDirectResult keeps the MCP result envelope for the REST tool-call
+// endpoint. Other direct callers retain the historical content-only return.
+func (p *MCPProxyServer) CallToolDirectResult(ctx context.Context, request mcp.CallToolRequest) (interface{}, error) {
+	return p.callToolDirect(ctx, request, true)
+}
+
+func (p *MCPProxyServer) callToolDirect(ctx context.Context, request mcp.CallToolRequest, preserveResult bool) (interface{}, error) {
 	toolName := request.Params.Name
 
 	// Spec 093 FR-011: the REST surface must answer a concurrency-limiter shed
@@ -7333,30 +7343,40 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 		if limitErr := shed.take(); limitErr != nil {
 			return nil, &shedDispatchError{limitErr: limitErr, message: shedMessage(limitErr)}
 		}
+		message := "tool call failed"
 		if len(result.Content) > 0 {
 			if textContent, ok := result.Content[0].(mcp.TextContent); ok {
-				if refusal := profileToolRefusal.take(); refusal != nil {
-					return nil, refusal
-				}
-				// Quarantine / pending-approval / changed-tool blocks keep their
-				// typed identity so REST answers 403 with the payload, not a 500.
-				if refusal := quarantineRefusal.take(); refusal != nil {
-					return nil, refusal
-				}
-				// A code_execution refusal keeps its typed identity so the HTTP
-				// layer can answer 403/404/400 (Spec 097). The message stays the
-				// agent-readable one either way.
-				if refusal := codeExecRefusal.take(); refusal != nil {
-					return nil, &codeExecDispatchError{err: refusal, message: textContent.Text}
-				}
-				return nil, fmt.Errorf("%s", textContent.Text)
+				message = textContent.Text
 			}
 		}
-		return nil, fmt.Errorf("tool call failed")
+		if refusal := profileToolRefusal.take(); refusal != nil {
+			return nil, refusal
+		}
+		// Quarantine / pending-approval / changed-tool blocks keep their
+		// typed identity so REST answers 403 with the payload, not a 500.
+		if refusal := quarantineRefusal.take(); refusal != nil {
+			return nil, refusal
+		}
+		// A code_execution refusal keeps its typed identity so the HTTP
+		// layer can answer 403/404/400 (Spec 097).
+		if refusal := codeExecRefusal.take(); refusal != nil {
+			return nil, &codeExecDispatchError{err: refusal, message: message}
+		}
+		return directToolErrorPayload(result, preserveResult, message)
 	}
 
-	// Return the content as the result
+	if preserveResult {
+		return result, nil
+	}
+	// Return the content as the result for existing direct callers.
 	return result.Content, nil
+}
+
+func directToolErrorPayload(result *mcp.CallToolResult, preserveResult bool, message string) (interface{}, error) {
+	if preserveResult {
+		return result, nil
+	}
+	return nil, fmt.Errorf("%s", message)
 }
 
 // ============================================================================

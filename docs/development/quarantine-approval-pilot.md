@@ -44,7 +44,7 @@ The IDs, titles and sources are in `internal/qapilot/requirements.go`
 | QP-07 | New tool on a quarantined manual/scan server is pending and stays pending across reconnects | S01, S02, S18, S26 |
 | QP-08 | Trusted server's first discovery is the baseline; durable baseline decision recorded | S04 |
 | QP-09 | Post-baseline additions: manual → pending; scan → clean approved / dangerous pending; auto or global off → approved | S05, S11, S12, S15, S16, S17 |
-| QP-10 | Changed definition held in manual **and** scan (whatever the verdict); auto approves | S03, S06, S08, S09, S13, S14, S16 |
+| QP-10 | Changed definition held in manual (whatever the verdict); scan approves it on a clean verdict and holds it on a dangerous one; auto approves | S03, S06, S08, S09, S13, S14, S16 |
 | QP-11 | Changed stays changed across reconnects; revert restores approved | S06, S07, S19 |
 | QP-12 | Operator approval approves the *current* definition; reverting afterwards is a change | S09, S10, S25 |
 | QP-13 | Permitted transition reasons for changed→approved and pending→approved | invariant table (99 combinations) |
@@ -60,10 +60,10 @@ The IDs, titles and sources are in `internal/qapilot/requirements.go`
 The sources disagree or are silent in a few places. The model encodes the
 reading below; each is also recorded in the requirement's `Note`.
 
-- **Scan mode and a changed tool.** Spec 086 US1 says a clean scan re-approves
-  a changed tool; `docs/features/security-quarantine.md` and the RT-02 red-team
-  finding say a changed contract is always held. The pilot encodes the docs
-  (held). Spec 086 is stale here.
+- **Scan mode and a changed tool.** Spec 119 (2026-10-22) approves a changed
+  tool on a clean verdict under `scan` and keeps the RT-02 hold under `manual`;
+  the pilot encodes that split. The safer-direction hint flip hold (spec 119
+  FR-007) is outside the model: no scenario flips hints.
 - **Baseline marker.** The snapshot compares the durable marker on its own
   (`baseline_decided`) as well as `has_baseline`, so a marker that is never
   written or is lost across a restart cannot hide behind the approved records.
@@ -186,7 +186,7 @@ is by test name, so a designated test must be the one that fails.
 | M04 | QP-14 | Tool-level quarantine gate never applies (pending and changed tools become callable) | `TestQAPilot_ClassifyTable, TestQAPilot_Scenarios` | detected | 13.015s |
 | M05 | QP-16 | A changed (rug-pulled) tool classifies as ready | `TestQAPilot_ClassifyTable, TestQAPilot_DispatchCountingUpstream` | detected | 23.576s |
 | M06 | QP-09 | trust_mode scan accepts a non-clean verdict as scan evidence (dangerous new tools auto-approved) | `TestQAPilot_Scenarios/S12` | detected | 11.262s |
-| M07 | QP-13 | The transition guard lets a clean scan clear a changed record | `TestQAPilot_InvariantTable` | detected | 7.397s |
+| M07 | QP-13 | The transition guard lets the plain auto_approve reason (pending-only) clear a changed record | `TestQAPilot_InvariantTable` | detected | 7.397s |
 | M08 | QP-07 | A quarantined server's first discovery is treated as a trusted baseline (tools auto-approved while quarantined) | `TestQAPilot_Scenarios/S01, TestQAPilot_Scenarios/S02` | detected | 8.639s |
 | M09 | QP-03 | Releasing a server no longer promotes its pending tools (release leaves tools held) | `TestQAPilot_Scenarios/S02` | detected | 12.532s |
 | M10 | QP-15 | A recorded quarantine is not retained across a restart whose config file omits the key (admission gate retain rule removed) | `TestQAPilot_Scenarios/S26, TestQAPilot_Scenarios/S27` | detected | 11.603s |

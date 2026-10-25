@@ -6,6 +6,8 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // nonEmptyPathValue is the pflag.Value behind every --config / --data-dir flag.
@@ -49,5 +51,15 @@ func addConfigFlag(fs *pflag.FlagSet, p *string, usage string) {
 // -d/--data-dir flags.
 func registerRootPathFlags(root *cobra.Command) {
 	root.PersistentFlags().VarP(newPathFlag(&configFile), "config", "c", "Configuration file path")
+	// MCPPROXY_DATA_DIR seeds --data-dir so every command (serve and the
+	// management commands that find the daemon through the data dir) agrees on
+	// the directory; an explicit flag still wins because it is parsed later.
+	if dataDir == "" {
+		dataDir = config.DataDirFromEnv()
+	}
 	root.PersistentFlags().VarP(newPathFlag(&dataDir), "data-dir", "d", "Data directory path (default: ~/.mcpproxy)")
+	// Keep --help identical whether or not the variable is set.
+	if f := root.PersistentFlags().Lookup("data-dir"); f != nil {
+		f.DefValue = ""
+	}
 }

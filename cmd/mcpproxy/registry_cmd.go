@@ -559,7 +559,7 @@ func renderRegistries(formatter clioutput.OutputFormatter, regs []map[string]int
 		headers := []string{"ID", "NAME", "DESCRIPTION"}
 		rows := make([][]string, 0, len(regs))
 		for _, r := range regs {
-			rows = append(rows, []string{mapString(r, "id"), mapString(r, "name"), truncateStr(mapString(r, "description"), 60)})
+			rows = append(rows, []string{mapString(r, "id"), mapString(r, "name"), truncateCell(mapString(r, "description"), 60)})
 		}
 		out, err := formatter.FormatTable(headers, rows)
 		if err != nil {
@@ -586,7 +586,7 @@ func renderRegistryServers(formatter clioutput.OutputFormatter, servers []map[st
 			if installCmd == "" {
 				installCmd = "-"
 			}
-			rows = append(rows, []string{mapString(s, "id"), mapString(s, "name"), truncateStr(mapString(s, "description"), 45), installCmd})
+			rows = append(rows, []string{mapString(s, "id"), mapString(s, "name"), truncateCell(mapString(s, "description"), 45), installCmd})
 		}
 		out, err := formatter.FormatTable(headers, rows)
 		if err != nil {
@@ -609,13 +609,6 @@ func mapString(m map[string]interface{}, key string) string {
 		return v
 	}
 	return ""
-}
-
-func truncateStr(s string, max int) string {
-	if len(s) > max {
-		return s[:max-3] + "..."
-	}
-	return s
 }
 
 // loadRegistryConfig loads config for the registry commands, honoring the

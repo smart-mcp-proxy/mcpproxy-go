@@ -204,7 +204,8 @@ func TestEnsureAPIKey_EnvKeyOverFileKeyIsNotPersisted(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "file-key", cfg.APIKey, "Validate only fills an EMPTY api_key from env")
 
-	key, generated, source := cfg.EnsureAPIKey()
+	key, generated, source, keyErr := cfg.EnsureAPIKey()
+	require.NoError(t, keyErr)
 	require.Equal(t, "env-key", key)
 	require.False(t, generated)
 	require.Equal(t, APIKeySourceEnvironment, source)
@@ -222,7 +223,8 @@ func TestEnsureAPIKey_GeneratedKeyIsPersisted(t *testing.T) {
 
 	cfg, err := LoadFromFile(path)
 	require.NoError(t, err)
-	key, generated, _ := cfg.EnsureAPIKey()
+	key, generated, _, keyErr := cfg.EnsureAPIKey()
+	require.NoError(t, keyErr)
 	require.True(t, generated)
 
 	require.NoError(t, SaveConfig(cfg, path))

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/csv"
 	"encoding/json"
 	"net/http"
@@ -52,7 +53,7 @@ func (c *scopeParamsController) ListActivities(f storage.ActivityFilter) ([]*sto
 	return out, total, nil
 }
 
-func (c *scopeParamsController) StreamActivities(f storage.ActivityFilter) <-chan *storage.ActivityRecord {
+func (c *scopeParamsController) StreamActivities(_ context.Context, f storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	c.lastFilter = f
 	ch := make(chan *storage.ActivityRecord, len(c.records))
 	for _, r := range c.records {

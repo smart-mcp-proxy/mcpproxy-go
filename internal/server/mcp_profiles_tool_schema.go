@@ -17,7 +17,7 @@ import (
 // profilesOperations is the `operation` enum, in documentation order.
 var profilesOperations = []string{
 	"list", "get", "create", "update", "delete", "rename", "classify", "assign",
-	"list_clients", "effective_tools", "explain",
+	"list_clients", "effective_tools", "explain", "suggest",
 }
 
 // profilesTierNone is the advertised sentinel that removes a classification.
@@ -49,11 +49,13 @@ var profilesOpArgs = []struct {
 	{name: "tool", typ: "string", desc: "classify, explain: upstream tool as server:tool."},
 	{name: "tier", typ: "string", enum: []string{"read", "write", "destructive", profilesTierNone}, desc: "classify: tier to assign; \"none\" removes the classification."},
 	{name: "client", typ: "string", desc: "assign, explain, effective_tools, list_clients: client id."},
-	{name: "profile", typ: "string", desc: "assign: profile to bind (\"\" = All servers). explain, list_clients: profile name (list_clients \"-\" = All servers)."},
+	{name: "profile", typ: "string", desc: "assign: profile to bind (\"\" = All servers). explain, suggest, list_clients: profile name (list_clients \"-\" = All servers)."},
 	{name: "mode", typ: "string", enum: []string{"locked", "switchable"}, desc: "assign: binding mode; omitted keeps the current mode (profile \"\" is switchable)."},
 	{name: "from_profile", typ: "string", desc: "assign (bulk): move every client bound to this profile (\"\" = All servers)."},
 	{name: "to_profile", typ: "string", desc: "assign (bulk): the profile they move to (\"\" = All servers)."},
-	{name: "token", typ: "string", desc: "explain: regular agent token name."},
+	{name: "token", typ: "string", desc: "explain: regular agent token name. suggest: only this token's blocks."},
+	{name: "since", typ: "string", desc: "suggest: look-back window such as 90m, 24h or 7d (default 24h)."},
+	{name: "patch", typ: "boolean", desc: "suggest: also return the proposed profile document per profile."},
 	{name: "anonymous", typ: "boolean", desc: "explain: explain a caller with no credential."},
 	{name: "server", typ: "string", desc: "effective_tools: keep only this server's rows."},
 	{name: "reason", typ: "string", desc: "effective_tools: keep only rows with this access reason."},

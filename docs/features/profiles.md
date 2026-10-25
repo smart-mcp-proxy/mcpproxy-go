@@ -154,12 +154,15 @@ It lists the bindings concerned and two fixes: turn `require_mcp_auth` on, or se
 | Classify a tool | Editor table | Editor table | `profile classify` | `profiles classify` | `PUT /profiles/{name}` |
 | Try a draft | Try it | Try it | `profile try` | not offered | `POST /profiles/try` |
 | Explain access | Explain access | Explain access | `access explain` | `profiles explain` | `GET /access/explain` |
+| Suggest changes from blocked calls | not offered | not offered | `access suggest` | `profiles suggest` | `GET /access/suggest` |
 
 **Try it** runs a real `retrieve_tools` under the unsaved draft and shows what is returned and what is hidden with reasons, without saving anything. The tool table and its counts show the saved profile: *allowed by profile* is the profile's policy only; for administrators each row is also marked *Callable now* or *Held* (allowed here but waiting on a later gate such as tool approval, with the reason and an **Explain access** button), and the header counts callable and held tools. A caller who is not an administrator sees only *allowed by profile* and *hidden*. The same words are used by `mcpproxy profile show --effective` and `mcpproxy tools list --profile`; while you have unsaved edits they are labelled "Saved profile". Try it says whether it used your unsaved edits.
 
 **Deleting a profile** that clients, tokens or `anonymous_profile` still use is refused with `409 profile_in_use` (listing who) until you give `reassign_to`; `force` leaves the references dangling, which denies everything and never widens. A profile that is the `anonymous_profile` is refused even with `force`. **Renaming** moves every pin, binding, `switchable_to` and `anonymous_profile` reference to the new name.
 
 The **access explainer** answers "why can't Cursor use `github:create_issue`?" by walking the chain in the order enforcement uses: credential, profile, server in scope, tool rule, tier cap, token permission, global gate, server state, tool approval. It stops at the first failing link, names the fix, and its verdict (`allowed`, `blocked`, `hidden`) is computed by the same predicate as an actual call.
+
+**Suggesting changes.** `mcpproxy access suggest` reads the profile refusals in the audit log, groups them by profile, tool and block reason, re-checks each group with the explainer so fixed tools drop out, and lists the command that would fix each one. It never applies anything, never offers to widen a deny rule, and never picks a tier for an unannotated tool. See [`access suggest`](../cli/profile-commands.md#mcpproxy-access-suggest).
 
 ## Attribution and filters
 

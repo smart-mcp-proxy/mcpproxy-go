@@ -5,8 +5,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/zap"
@@ -113,11 +116,23 @@ type bundleRuntime struct {
 
 	embedded *embeddedEntry
 
+	// refusedOffer is the negative cache of the fetch leg (tasks B7): the key of
+	// the last offered pair the pipeline refused, so the same pair offered again
+	// costs no compile, no self-check and no second log line. It is cleared by
+	// every committed state change and keyed by the policy fingerprint, so a
+	// trust or watermark change always re-evaluates.
+	refusedOffer string
+
 	// histMu guards history and histStore, so BundleHistory never waits on a
 	// run that is blocked in a (budget-bounded) file read.
 	histMu    sync.Mutex
 	histStore TPABundleStateStore   // mirror of store for BundleHistory
 	history   []TPABundleActivation // kept only when store == nil
+
+	// disp is the read-time status (refresh settings and status, last_checked_at,
+	// stale threshold, re-protection); it has its own mutex and is merged into
+	// the copies BundleStatus returns (tasks B15).
+	disp bundleDisplay
 }
 
 var bundleRT bundleRuntime
@@ -142,10 +157,13 @@ func (rt *bundleRuntime) resetLocked() {
 	rt.degradedKey = ""
 	rt.warnedFP = ""
 	rt.embedded = nil
+	rt.refusedOffer = ""
 	rt.histMu.Lock()
 	rt.history = nil
 	rt.histStore = nil
 	rt.histMu.Unlock()
+	rt.disp.reset()
+	bundleFacts.Store(nil)
 }
 
 // SetBundleRuntime injects the persistent state store and the data directory the
@@ -173,23 +191,137 @@ func ConfigureBundleFromConfig(sec *config.SecurityConfig, logger *zap.Logger) {
 	configureWithPolicy(policyFromConfig(sec), logger)
 }
 
-// configureWithPolicy runs the pipeline for an already-built policy.
+// configureWithPolicy runs the pipeline for an already-built policy. The
+// display settings (stale threshold, interval, fetch host) are refreshed first,
+// on every apply, so an edit shows on the next status read even when the
+// pipeline has nothing to redo.
 func configureWithPolicy(policy *bundlePolicy, logger *zap.Logger) {
+	applyPolicy(policy, logger, "")
+}
+
+// applyPolicy is configureWithPolicy with an explicit trigger label ("" means a
+// configure: startup the first time in this process, config afterwards) and
+// the leg's outcome.
+func applyPolicy(policy *bundlePolicy, logger *zap.Logger, trigger string) runOutcome {
+	out, _ := applyPolicyIf(policy, logger, trigger, nil)
+	return out
+}
+
+// applyPolicyIf is applyPolicy for a policy captured earlier (the refresher's
+// file leg). When still is non-nil it is evaluated under bundleRT.mu, before
+// anything is applied: a policy a newer reload already replaced must not be
+// re-applied (it could activate what the live policy forbids and would leave
+// the stale policy serving). It reports whether the policy was applied. still
+// must not call back into the bundle runtime.
+func applyPolicyIf(policy *bundlePolicy, logger *zap.Logger, trigger string, still func() bool) (runOutcome, bool) {
 	log := bundleLogger(logger)
+	var out runOutcome
 	bundleRT.mu.Lock()
 	defer bundleRT.mu.Unlock()
-	bundleRT.runLocked(policy, log, runOptions{})
+	if still != nil && !still() {
+		return out, false
+	}
+	// The display settings are published under the same lock as the policy
+	// transition they describe, so a reload that captured the previous policy
+	// cannot overwrite the settings of a configure that is waiting behind it.
+	bundleRT.disp.applySettings(policy)
+	bundleRT.disp.noteTrigger(trigger, policy)
+	bundleRT.runLocked(policy, log, runOptions{out: &out})
+	return out, true
 }
 
 // ReloadBundle re-runs the pipeline with the last applied policy and returns the
-// resulting status. It is the single-flight refresh the REST/CLI reload action
-// and Spec 087's fetch tick share (FR-018).
+// resulting status. It is the local, network-free refresh the REST/CLI reload
+// action uses (B20): it never issues a request, whatever the fetch settings.
 func ReloadBundle(logger *zap.Logger) BundleInfo {
+	info, _ := reloadLastPolicy(logger, RefreshTriggerManual)
+	return info
+}
+
+// reloadLastPolicy re-runs the pipeline with the last applied policy and
+// returns the resulting status and the run's outcome.
+func reloadLastPolicy(logger *zap.Logger, trigger string) (BundleInfo, runOutcome) {
 	log := bundleLogger(logger)
 	bundleRT.mu.Lock()
 	defer bundleRT.mu.Unlock()
-	bundleRT.runLocked(bundleRT.policyOrDefaultLocked(), log, runOptions{})
-	return statusFromSnapshot()
+	policy := bundleRT.policyOrDefaultLocked()
+	bundleRT.disp.applySettings(policy)
+	bundleRT.disp.noteTrigger(trigger, policy)
+	var out runOutcome
+	bundleRT.runLocked(policy, log, runOptions{out: &out})
+	return statusFromSnapshot(), out
+}
+
+// runOffered runs the pipeline with c as the freshly offered candidate (the
+// fetch adapter's entry point, tasks B7): it evaluates ONLY c, never re-reads
+// the configured file, and on refusal leaves the serving bundle in place. It
+// returns the resulting status.
+func runOffered(c Candidate, logger *zap.Logger) BundleInfo {
+	info, _ := offerCandidate(c, logger)
+	return info
+}
+
+// offerResult is what an offered (fetch) run decided about its candidate.
+type offerResult struct {
+	// Outcome is RefreshOutcomeActivated, RefreshOutcomeUnchanged or
+	// RefreshOutcomeRejected.
+	Outcome string
+	// Rejection is the refusal when Outcome is RefreshOutcomeRejected.
+	Rejection *BundleRejection
+	// Refused is true when Outcome is RefreshOutcomeUnchanged only because the
+	// pair equals one the pipeline refused earlier under this policy (the
+	// negative cache), not because it equals what serves.
+	Refused bool
+}
+
+// offerCandidate is runOffered plus the decision, for the refresher.
+func offerCandidate(c Candidate, logger *zap.Logger) (BundleInfo, offerResult) {
+	info, res, _ := offerCandidateIf(c, logger, nil)
+	return info, res
+}
+
+// offerCandidateIf is offerCandidate with the supersession check made inside
+// the serialized offer: when still is non-nil it is evaluated under bundleRT.mu
+// immediately before the run, so no configuration transition can slip between
+// the check and the activation. It reports whether the candidate was offered;
+// when it was not, nothing ran. still must not call back into the bundle
+// runtime.
+func offerCandidateIf(c Candidate, logger *zap.Logger, still func() bool) (BundleInfo, offerResult, bool) {
+	log := bundleLogger(logger)
+	var out runOutcome
+	bundleRT.mu.Lock()
+	defer bundleRT.mu.Unlock()
+	if still != nil && !still() {
+		return statusFromSnapshot(), offerResult{}, false
+	}
+	bundleRT.runLocked(bundleRT.policyOrDefaultLocked(), log, runOptions{offered: &c, out: &out})
+	return statusFromSnapshot(), out.offerResult(), true
+}
+
+// runOutcome is what one run decided, for the refresher's status: the file leg
+// (a configured-path run) and the fetch leg (an offered run) share it.
+type runOutcome struct {
+	// Activated is true when the run durably activated a new bundle.
+	Activated bool
+	// Rejection is the refusal of the leg's candidate (the configured file, or
+	// the offered pair); nil when it was accepted or there was none.
+	Rejection *BundleRejection
+	// RejectionNew is true when Rejection is a refusal this run recorded for
+	// the first time (not the same refusal repeated).
+	RejectionNew bool
+	// RepeatRefusal is true when an offered run did nothing because the pair
+	// equals one refused earlier under this policy.
+	RepeatRefusal bool
+}
+
+func (o runOutcome) offerResult() offerResult {
+	switch {
+	case o.Activated:
+		return offerResult{Outcome: RefreshOutcomeActivated}
+	case o.Rejection != nil:
+		return offerResult{Outcome: RefreshOutcomeRejected, Rejection: o.Rejection}
+	}
+	return offerResult{Outcome: RefreshOutcomeUnchanged, Refused: o.RepeatRefusal}
 }
 
 // BundleCoverageDegraded reports whether the active bundle demotes the install to
@@ -221,6 +353,12 @@ type runOptions struct {
 	// force skips the idempotence short-circuit (unpin re-validates the serving
 	// bundle even though no input file changed).
 	force bool
+	// offered, when non-nil, is the single freshly offered candidate (fetch
+	// leg). The run evaluates only it as the fresh one: it never reads the
+	// configured file and never touches the file leg's load_error (tasks B7).
+	offered *Candidate
+	// out, when non-nil, receives what the run decided.
+	out *runOutcome
 }
 
 // selection is what a run chose to serve and why.
@@ -245,23 +383,52 @@ type selection struct {
 	// restored is the Active record put back from the active root's rollback
 	// pin (restorePinLocked); serving is then that pin's bundle.
 	restored *TPABundleActiveRecord
+	// offeredRej is the refusal of the offered (fetch) candidate and
+	// offeredDigest the candidate's digest; they are kept apart from attempt
+	// so a fetch refusal never sets the file leg's load_error (tasks B7).
+	offeredRej    *BundleRejection
+	offeredDigest string
 }
 
 // runLocked is one pipeline run (design §6). The caller holds rt.mu.
 func (rt *bundleRuntime) runLocked(policy *bundlePolicy, log *zap.Logger, opts runOptions) {
-	now := time.Now()
+	now := bundleClock()
+	// Every run is a check, including the no-op ones the idempotence
+	// short-circuit skips (last_checked_at, tasks B15).
+	defer func() { rt.disp.markChecked(bundleClock()) }()
 	rt.ensureLoadedLocked(log)
 	rt.warnPolicyLocked(policy, log)
 
 	var (
 		cand    *Candidate
 		readRej *BundleRejection
+		// fileAbsent: the configured path does not exist yet. That is still
+		// recorded as the file leg's read_error (US1), but it is "nothing
+		// dropped", not a refusal, for the refresh status.
+		fileAbsent bool
 	)
-	if policy.Path != "" {
-		cand, readRej = readFileCandidate(policy.Path)
-	}
-	if !opts.force && rt.canSkipLocked(policy, cand) {
-		return
+	if opts.offered != nil {
+		// The fetch leg: no file is read. The "same as serving" and "already
+		// refused" comparisons happen here, under the lock and before any
+		// compile or self-check, so an unchanged channel costs nothing.
+		if rt.offerUnchangedLocked(policy, opts.offered) {
+			if opts.out != nil {
+				opts.out.RepeatRefusal = rt.refusedOffer != "" && rt.refusedOffer == offerKey(policy, opts.offered)
+			}
+			return
+		}
+	} else {
+		if policy.Path != "" {
+			cand, readRej = readFileCandidate(policy.Path)
+			fileAbsent = readRej != nil && pathMissing(policy.Path)
+		}
+		if !opts.force && rt.canSkipLocked(policy, cand) {
+			// Nothing to decide, but the policy object carries the display
+			// settings (stale threshold, interval): keep the newer one, or the
+			// next ReloadBundle re-applies the old values.
+			rt.policy = policy
+			return
+		}
 	}
 
 	nst, normLogs := normalizeState(rt.state, policy)
@@ -269,12 +436,13 @@ func (rt *bundleRuntime) runLocked(policy *bundlePolicy, log *zap.Logger, opts r
 		log.Warn(line)
 	}
 
-	sel := rt.chooseLocked(policy, nst, cand, readRej, log)
+	sel := rt.chooseLocked(policy, nst, cand, readRej, opts.offered, log)
 	rt.restorePinLocked(policy, nst, &sel, log, now)
 
 	st := nst
 	var row *TPABundleActivation
 	activation := false
+	activated := false
 	needCommit := len(normLogs) > 0
 	switch {
 	case sel.restored != nil:
@@ -304,7 +472,11 @@ func (rt *bundleRuntime) runLocked(policy *bundlePolicy, log *zap.Logger, opts r
 			clean = false
 			st = nst
 			failed := sel
-			sel = selection{attempt: rej, attemptDigest: failed.serving.digest}
+			if opts.offered != nil {
+				sel = selection{offeredRej: rej, offeredDigest: failed.serving.digest}
+			} else {
+				sel = selection{attempt: rej, attemptDigest: failed.serving.digest}
+			}
 			rt.fallbackLocked(policy, nst, &sel, log)
 			if sel.serving != nil && sel.serving.embedded && nst.Active != nil && !sel.keepActive {
 				st = cloneState(nst)
@@ -314,6 +486,8 @@ func (rt *bundleRuntime) runLocked(policy *bundlePolicy, log *zap.Logger, opts r
 					st = nst
 				}
 			}
+		} else {
+			activated = true
 		}
 	case needCommit:
 		if err := rt.persistLocked(st, nil, nil, log); err != nil {
@@ -329,20 +503,80 @@ func (rt *bundleRuntime) runLocked(policy *bundlePolicy, log *zap.Logger, opts r
 		}
 	}
 
-	rt.finishLocked(policy, st, sel, clean, log, now)
+	rt.finishLocked(policy, st, sel, clean, opts, log, now)
+
+	if opts.out != nil {
+		opts.out.Activated = activated
+		if opts.offered != nil {
+			opts.out.Rejection = sel.offeredRej
+		} else if !fileAbsent {
+			opts.out.Rejection = sel.attempt
+		}
+	}
+	if activated {
+		// After the publish, and on its own goroutine: no observer ever runs
+		// under bundleRT.mu.
+		fireBundleActivation(BundleActivation{
+			Digest:         row.FullDigest,
+			Sequence:       row.Sequence,
+			Authority:      row.Authority,
+			Source:         row.Source,
+			PreviousDigest: previousDigest(nst.Active),
+			ActivatedAt:    row.ActivatedAt,
+		})
+	}
+}
+
+// pathMissing reports whether path does not exist, as opposed to existing but
+// being unreadable.
+func pathMissing(path string) bool {
+	_, err := os.Lstat(path)
+	return errors.Is(err, fs.ErrNotExist)
+}
+
+// previousDigest is the digest of the external bundle that served before rec's
+// replacement ("" for the embedded default).
+func previousDigest(rec *TPABundleActiveRecord) string {
+	if rec == nil {
+		return ""
+	}
+	return rec.FullDigest
 }
 
 // finishLocked records rejections, then builds and publishes the status.
-func (rt *bundleRuntime) finishLocked(policy *bundlePolicy, st *TPABundleState, sel selection, clean bool, log *zap.Logger, now time.Time) {
+func (rt *bundleRuntime) finishLocked(policy *bundlePolicy, st *TPABundleState, sel selection, clean bool, opts runOptions, log *zap.Logger, now time.Time) {
 	loadErr := ""
-	if policy.Path != "" && sel.attempt != nil {
+	var fileRejNew bool
+	switch {
+	case opts.offered != nil:
+		// An offered run neither reads nor clears the file leg's load_error.
+		loadErr = rt.loadErr
+	case policy.Path != "" && sel.attempt != nil:
 		loadErr = sel.attempt.Reason + ": " + sel.attempt.Detail
-		if rt.recordRejectionLocked(sel.attempt, sel.attemptDigest, false) {
+		fileRejNew = rt.recordRejectionLocked(sel.attempt, sel.attemptDigest, false)
+		if opts.out != nil {
+			opts.out.RejectionNew = fileRejNew
+		}
+		if fileRejNew {
 			log.Error("configured TPA scanner bundle refused; keeping the last-known-good corpus",
 				zap.String("path", policy.Path),
 				zap.String("reason", sel.attempt.Reason),
 				zap.String("detail", sel.attempt.Detail),
 				zap.String("candidate_digest", sel.attemptDigest))
+		}
+	}
+	if sel.offeredRej != nil {
+		// The origin is scheme and host only (B12); the detail names a key id,
+		// an epoch or a sequence, never a URL.
+		if rt.recordRejectionLocked(sel.offeredRej, sel.offeredDigest, false) {
+			log.Warn("fetched TPA scanner bundle refused; keeping the last-known-good corpus",
+				zap.String("origin", opts.offered.Path),
+				zap.String("reason", sel.offeredRej.Reason),
+				zap.String("detail", sel.offeredRej.Detail),
+				zap.String("candidate_digest", sel.offeredDigest))
+		}
+		if sel.offeredRej.Reason != RejectStateCommitFailed {
+			rt.refusedOffer = offerKey(policy, opts.offered)
 		}
 	}
 	if sel.deactivated != nil {
@@ -422,8 +656,19 @@ func (rt *bundleRuntime) canSkipLocked(policy *bundlePolicy, cand *Candidate) bo
 	if !rt.clean || rt.policy == nil || rt.policy.Fingerprint != policy.Fingerprint || rt.loadErr != "" {
 		return false
 	}
-	if policy.Path == "" {
+	if !externalConfigured(policy, rt.state) {
 		return rt.active == nil
+	}
+	if policy.Path == "" {
+		// A fetch-only install has no file to compare. The run is a no-op iff
+		// the serving external bundle is the one the committed state records
+		// (or neither exists); a recorded bundle that is not serving (a
+		// transient LKG read failure) is retried (tasks B9).
+		recorded := rt.state != nil && rt.state.Active != nil
+		if rt.active == nil {
+			return !recorded
+		}
+		return recorded && sameActive(rt.state.Active, rt.active)
 	}
 	if cand == nil || rt.active == nil {
 		return false
@@ -433,18 +678,57 @@ func (rt *bundleRuntime) canSkipLocked(policy *bundlePolicy, cand *Candidate) bo
 		bytes.Equal(rt.active.cand.Sidecar, cand.Sidecar)
 }
 
+// offerKey identifies an offered pair under a policy, for the negative cache.
+func offerKey(policy *bundlePolicy, c *Candidate) string {
+	return policy.Fingerprint + "|" + digestHex(c.Bundle) + "|" + digestHex(c.Sidecar) + "|" + strconv.FormatBool(c.SidecarPresent)
+}
+
+// offerUnchangedLocked is the fetch leg's idempotence check, made under the
+// lock and before anything is parsed or compiled: the offered pair is
+// byte-identical to the serving external bundle, or to the pair the pipeline
+// refused last time under this very policy (tasks B7). Either way there is
+// nothing to decide.
+//
+// The serving-pair shortcut holds only for a signature-verified serving bundle:
+// an offered pair is always evaluated signed-only (MustSign), so an unsigned
+// serving file bundle with identical bytes must reach that gate and be refused,
+// not be reported as unchanged (which would also cache its validator).
+func (rt *bundleRuntime) offerUnchangedLocked(policy *bundlePolicy, c *Candidate) bool {
+	if a := rt.active; a != nil && a.verified &&
+		a.cand.SidecarPresent == c.SidecarPresent &&
+		bytes.Equal(a.cand.Bundle, c.Bundle) &&
+		bytes.Equal(a.cand.Sidecar, c.Sidecar) {
+		return true
+	}
+	return rt.refusedOffer != "" && rt.refusedOffer == offerKey(policy, c)
+}
+
 // chooseLocked picks what serves, first that succeeds (design §6.4):
 //
-//	a. the configured-path candidate (read once, evaluated in normal mode);
+//	a. the fresh candidate: the configured-path candidate (read once, evaluated
+//	   in normal mode), or, for an offered run, the offered fetch candidate;
 //	b. the bundle already serving, re-validated under the new policy and state;
 //	c. the active record from the LKG files (a fresh process);
 //	d. the embedded default.
 //
-// With no configured path the operator removed the external bundle, so b and c
-// are skipped too.
-func (rt *bundleRuntime) chooseLocked(policy *bundlePolicy, nst *TPABundleState, cand *Candidate, readRej *BundleRejection, log *zap.Logger) selection {
+// With no external source configured (no path, no fetch, no fetched bundle
+// serving) the operator removed the external bundle, so b and c are skipped too
+// (externalConfigured).
+func (rt *bundleRuntime) chooseLocked(policy *bundlePolicy, nst *TPABundleState, cand *Candidate, readRej *BundleRejection, offered *Candidate, log *zap.Logger) selection {
 	var sel selection
-	if policy.Path != "" {
+	if offered != nil {
+		// Signed-only is enforced for THIS evaluation (MustSign), never by
+		// mutating the policy: a policy copy with RequireSigned would also reach
+		// fallback step b and deactivate a serving unsigned file-drop bundle.
+		acc, rej := evaluateCandidate(*offered, evalEnv{Policy: policy, State: nst, Mode: evalNormal, MustSign: true})
+		if rej != nil {
+			sel.offeredRej, sel.offeredDigest = rej, digestHex(offered.Bundle)
+		} else {
+			sel.serving = newExternalServing(*offered, acc)
+			sel.fromPath = true
+			return sel
+		}
+	} else if policy.Path != "" {
 		switch {
 		case readRej != nil:
 			sel.attempt = readRej
@@ -466,7 +750,7 @@ func (rt *bundleRuntime) chooseLocked(policy *bundlePolicy, nst *TPABundleState,
 // fallbackLocked fills sel.serving from steps b, c and d.
 func (rt *bundleRuntime) fallbackLocked(policy *bundlePolicy, nst *TPABundleState, sel *selection, log *zap.Logger) {
 	sel.serving, sel.fromPath = nil, false
-	if policy.Path != "" {
+	if externalConfigured(policy, nst) {
 		switch {
 		case rt.active != nil:
 			acc, rej := evaluateCandidate(rt.active.cand, evalEnv{Policy: policy, State: nst, Mode: evalLKG, Reuse: rt.active.acc})
@@ -515,7 +799,7 @@ func (rt *bundleRuntime) fallbackLocked(policy *bundlePolicy, nst *TPABundleStat
 // switching back must restore the pinned bundle unchanged rather than leave the
 // install on the embedded default while the pin still binds.
 func (rt *bundleRuntime) restorePinLocked(policy *bundlePolicy, nst *TPABundleState, sel *selection, log *zap.Logger, now time.Time) {
-	if policy.Path == "" || rt.dataDir == "" || rt.loadFailed || sel.keepActive || sel.serving == nil || !sel.serving.embedded {
+	if !externalConfigured(policy, nst) || rt.dataDir == "" || rt.loadFailed || sel.keepActive || sel.serving == nil || !sel.serving.embedded {
 		return
 	}
 	a := nst.Authorities[policy.ActiveRoot]
@@ -526,6 +810,12 @@ func (rt *bundleRuntime) restorePinLocked(policy *bundlePolicy, nst *TPABundleSt
 	source := pin.Source
 	if source == "" {
 		source = BundleSourceFile
+	}
+	// A pinned FILE bundle belongs to the configured path: with the path
+	// removed the operator removed the bundle, and an enabled fetch does not
+	// make the pin a reason to bring it back (see externalConfigured).
+	if source == BundleSourceFile && policy.Path == "" {
+		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), bundleReadBudget)
 	defer cancel()
@@ -641,6 +931,9 @@ func (rt *bundleRuntime) persistLocked(st *TPABundleState, row *TPABundleActivat
 		rt.histMu.Unlock()
 	}
 	rt.state = st
+	// The state moved (a watermark, a pin, a deny entry, the active record): a
+	// refusal made against the old state is not evidence about the new one.
+	rt.refusedOffer = ""
 	if stateAfterCommitHook != nil {
 		stateAfterCommitHook()
 	}
@@ -664,6 +957,7 @@ func (rt *bundleRuntime) recordRejectionLocked(rej *BundleRejection, digest stri
 // publishLocked builds the BundleInfo for sv and publishes (check, info) under
 // one activeBundleMu acquisition.
 func (rt *bundleRuntime) publishLocked(policy *bundlePolicy, st *TPABundleState, sv *servingBundle, log *zap.Logger, now time.Time) {
+	rt.publishFactsLocked(st, sv)
 	if sv == nil {
 		// The embedded default itself is broken: as before, serve without
 		// bundle-backed checks and say so.
@@ -688,6 +982,58 @@ func (rt *bundleRuntime) publishLocked(policy *bundlePolicy, st *TPABundleState,
 		logBundle(log, info)
 	}
 	rt.logDegradedLocked(log, info)
+}
+
+// publishedFacts is the small, immutable snapshot the fetch leg reads WITHOUT
+// bundleRT.mu (tasks B7, B10): per-authority "already satisfied" sequences for
+// the pre-download hint skip, and whether the anti-downgrade state is
+// unreadable. Nothing outside the runtime reads rt.state or rt.active directly.
+type publishedFacts struct {
+	satisfied  map[string]uint64
+	loadFailed bool
+}
+
+var bundleFacts atomic.Pointer[publishedFacts]
+
+// publishFactsLocked refreshes the snapshot from the state being published.
+// An authority's satisfied sequence is its watermark, except when the release
+// that set the watermark is not the one serving: then that release itself is
+// still wanted (a lost last-known-good file heals by re-fetching it), so
+// satisfied is one below.
+func (rt *bundleRuntime) publishFactsLocked(st *TPABundleState, sv *servingBundle) {
+	f := &publishedFacts{satisfied: make(map[string]uint64, len(bundleAuthorities)), loadFailed: rt.loadFailed}
+	if st != nil {
+		for name, a := range st.Authorities {
+			if a == nil {
+				continue
+			}
+			v := a.Watermark
+			serving := sv != nil && !sv.embedded && sv.verified && sv.authority == name && sv.hasSequence && sv.sequence == a.Watermark
+			if a.WatermarkSetBy != "" && !serving && v > 0 {
+				v--
+			}
+			f.satisfied[name] = v
+		}
+	}
+	bundleFacts.Store(f)
+}
+
+// publishedWatermark returns the sequence authority already satisfies, for the
+// fetch leg's hint skip.
+func publishedWatermark(authority string) (uint64, bool) {
+	f := bundleFacts.Load()
+	if f == nil {
+		return 0, false
+	}
+	v, ok := f.satisfied[authority]
+	return v, ok
+}
+
+// publishedStateUnavailable reports whether the last published run could not
+// read the anti-downgrade state.
+func publishedStateUnavailable() bool {
+	f := bundleFacts.Load()
+	return f != nil && f.loadFailed
 }
 
 func (rt *bundleRuntime) lastRejCopy() *BundleRejection {
@@ -751,8 +1097,17 @@ func (rt *bundleRuntime) buildInfoLocked(policy *bundlePolicy, st *TPABundleStat
 	if sv.embedded {
 		info.Source = BundleSourceEmbedded
 	} else {
-		info.Source = BundleSourceFile
+		info.Source = sv.cand.Source
+		if info.Source == "" {
+			info.Source = BundleSourceFile
+		}
+		// A fetched candidate's Path is scheme://host (B12); a file's is the
+		// configured path.
 		info.Path = sv.cand.Path
+		if st != nil && st.Active != nil && st.Active.FullDigest == sv.digest && !st.Active.ActivatedAt.IsZero() {
+			at := st.Active.ActivatedAt
+			info.LastActivatedAt = &at
+		}
 	}
 
 	// The embedded default IS the publisher baseline: when its manifest carries

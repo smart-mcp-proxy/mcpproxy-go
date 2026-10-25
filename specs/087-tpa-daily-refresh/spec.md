@@ -2,8 +2,24 @@
 
 **Feature Branch**: `087-tpa-daily-refresh`
 **Created**: 2026-07-16
-**Status**: Draft
+**Status**: Implemented by Spec 101 US3 (specs/101-tpa-db/tasks.md T300+)
+**Implementation note (2026-10-21)**: `plan.md` names a package `internal/security/bundle` (and a nested `security.bundle` config block). Neither exists and neither will be built. Spec 101 US1 shipped the bundle pipeline as `internal/security/scanner/tpa_*.go` plus `internal/security/bundlesig`, with flat `security.tpa_*` config keys. Under Spec 101 D11 this feature is a thin adapter on that pipeline: the daily scheduler and the optional fetch build a source-neutral `Candidate` (`internal/security/scanner/tpa_candidate.go`) and hand it to the same `evaluateCandidate` verifier, which is never forked. The FR-to-task mapping and the amendments to this spec are listed in Spec 101 tasks.md, US3 section. Release awareness (User Story 3, FR-018, FR-019, SC-007) is already covered by Spec 079.
 **Input**: A once-per-day, non-blocking, offline-FIRST refresh that (a) updates the tpa-db signature bundle — bundled-with-binary default, manual file-drop override, and an OPTIONAL verified/signed network fetch, versioned against the tpa-db `SCHEMA_VERSION`, failing safe to last-known-good; and (b) checks for a new mcpproxy release and surfaces it, respecting the existing update-check/distribution mechanism (no auto-installer).
+
+## Mapping note (2026-10-21, Spec 101 US3)
+
+This spec is implemented by Spec 101 US3 (`specs/101-tpa-db/tasks.md`, T300 onward). User Story 3, FR-018, FR-019 and SC-007 (mcpproxy release awareness) are covered by Spec 079 (`internal/updatecheck`), unchanged; US3 adds no task for them.
+
+| Spec 087 | Delivered by |
+|---|---|
+| FR-001, FR-002, FR-005, FR-006, FR-007 | Spec 101 US1 (shipped) |
+| FR-003, FR-004, FR-008 to FR-017 | Spec 101 US3 (T320 to T377) |
+| FR-018, FR-019, SC-007, User Story 3 | Spec 079, unchanged |
+| FR-020, FR-022 | Spec 101 US1, unchanged |
+| FR-021 | Spec 101 US3 (T341, provenance guard) |
+| SC-001, SC-008 | Spec 101 US1 and the CI eval gate, unchanged |
+| SC-002 to SC-006 | Spec 101 US3 (T321 to T329, T340, T391) |
+| SC-009 | Spec 101 US3 (T391) |
 
 ## User Scenarios & Testing *(mandatory)*
 
@@ -56,7 +72,7 @@ An operator on a connected host wants signatures to stay current without manual 
 
 ---
 
-### User Story 3 - Daily mcpproxy release-availability awareness (Priority: P3)
+### User Story 3 - Daily mcpproxy release-availability awareness (Priority: P3) *(covered by Spec 079, unchanged)*
 
 An operator wants to know when a newer mcpproxy release is available — including releases that ship updated built-in detections — without the proxy silently reaching out or, worse, auto-installing anything. mcpproxy checks for a newer release on a daily cadence using the existing update-check mechanism and surfaces the result (current version, latest version, whether an update is available, and the channel-appropriate upgrade command) on the surfaces that mechanism already feeds. It never downloads or installs a binary; it respects the existing opt-out.
 
@@ -82,7 +98,7 @@ An operator wants to know when a newer mcpproxy release is available — includi
 - **Activation self-check corpus would be vacuous** (no gated-malicious sample or no hard-negative sample available to the self-check): the self-check fails closed — the candidate is NOT activated, mirroring the eval gate's exit-4 vacuity guard.
 - **Clock skew / suspended laptop**: the daily cadence is a best-effort interval, not a wall-clock guarantee; a missed tick simply runs at the next opportunity and never runs more than one activation per candidate.
 - **Signed-fetch enabled but no public key configured**: the fetch refuses to run (fail-closed) rather than accept an unverified bundle; a clear configuration error is surfaced.
-- **Hot-reload flips the bundle path or fetch source**: the running refresher re-applies the new settings without a restart; an in-flight refresh completes against the settings it started with.
+- **Hot-reload flips the bundle path or fetch source**: the running refresher re-applies the new settings without a restart; an in-flight download finishes, but its candidate is offered under the live policy; if any fetch or trust setting changed meanwhile, it is discarded as `superseded` (Spec 101 tasks Δ30/B8).
 
 ## Requirements *(mandatory)*
 
@@ -100,13 +116,13 @@ An operator wants to know when a newer mcpproxy release is available — includi
 - **FR-010**: Bundle activation MUST be atomic with respect to concurrent scans: a scan MUST see either the fully-previous or the fully-new rule set, never a partially-swapped state; refresh MUST be single-flight (concurrent triggers coalesce).
 - **FR-011**: Refresh MUST be idempotent: a candidate byte-identical to the active bundle MUST NOT trigger re-activation or duplicate log output, preserving the contract's byte-identical determinism guarantee (Contract §3).
 - **FR-012**: The optional network fetch MUST be disabled by default and strictly opt-in via configuration; when disabled, the system MUST issue no bundle-fetch network request at any time.
-- **FR-013**: When the network fetch is enabled, the system MUST verify a detached cryptographic signature of the fetched bundle against an operator-configured trusted public key BEFORE compiling patterns or activating, and MUST reject any bundle that is unsigned, signed by a non-configured key, or altered. The signing/verification scheme (signature format, algorithm, key distribution) MUST be specified in the design; the constitution does not define one.
-- **FR-014**: When the network fetch is enabled but no trusted public key is configured, the fetch MUST fail closed (refuse to activate any fetched bundle) rather than accept an unverified one.
+- **FR-013**: When the network fetch is enabled, the system MUST verify a detached cryptographic signature of the fetched bundle against an operator-configured trusted public key BEFORE compiling patterns or activating, and MUST reject any bundle that is unsigned, signed by a non-configured key, or altered. The signing/verification scheme (signature format, algorithm, key distribution) MUST be specified in the design; the constitution does not define one. **Amended (Spec 101 US3)**: the trusted-key set is Spec 101 FR-004/FR-004b (the active root's publisher anchors or `tpa_operator_signers`); there is no per-fetch key setting, and a fetched pair is verified by the same pipeline as a file drop.
+- **FR-014**: When the network fetch is enabled but no trusted public key is configured, the fetch MUST fail closed (refuse to activate any fetched bundle) rather than accept an unverified one. **Amended (Spec 101 US3)**: "no key configured" means the active root's trust set is empty; the fetch then issues zero requests and the configuration error is surfaced in status and doctor (`disabled/no_trusted_signer`, tasks Δ24/B10).
 - **FR-015**: The network fetch MUST bound its blast radius: a maximum response size, a request timeout, and log-rate-limiting on repeated failures; failures MUST fail closed to the active bundle and retry on the next daily tick.
-- **FR-016**: All bundle-refresh behavior MUST be configuration-driven via `mcp_config.json` (bundle path, refresh enable/interval, fetch enable, source URL, trusted public key) with environment-variable override and hot-reload without restart, consistent with the existing security config block.
-- **FR-017**: The system MUST surface bundle status — active `bundle_version`, source (embedded/file/fetch), last refresh timestamp and outcome, last-known-good version, and skipped/rejected reasons — on an existing observability surface (the info/status endpoint and logs), so operators can see whether signatures are current and why a candidate was rejected.
-- **FR-018**: The daily cycle MUST check for a newer mcpproxy release using the existing update-check mechanism (`internal/updatecheck`, Spec 079) and MUST surface current version, latest version, update-available state, release URL, and the channel-appropriate upgrade command; it MUST NOT download, verify, or install any binary (no auto-installer) and MUST respect the existing opt-out (`update_check.enabled=false` / `MCPPROXY_DISABLE_AUTO_UPDATE`).
-- **FR-019**: Bundle-update status and mcpproxy-release status MUST be surfaced as distinct, clearly-labeled items so a signature-database update is never conflated with a binary release update.
+- **FR-016**: All bundle-refresh behavior MUST be configuration-driven via `mcp_config.json` (bundle path, refresh enable/interval, fetch enable, source URL, trusted public key) with environment-variable override and hot-reload without restart, consistent with the existing security config block. **Amended (Spec 101 US3)**: there is no refresh-enable key (the file leg is network-free, idempotent and always on; only its interval, `tpa_refresh_interval`, is configurable); the fetch leg has its own enable, `tpa_fetch_enabled`; the trusted keys are the Spec 101 trust set; the environment override covers fetch enable only (`MCPPROXY_TPA_FETCH_ENABLED`) so the environment cannot redirect the fetch (tasks Δ29/Δ31/B1/B2).
+- **FR-017**: The system MUST surface bundle status — active `bundle_version`, source (embedded/file/fetch), last refresh timestamp and outcome, last-known-good version, and skipped/rejected reasons — on an existing observability surface (the info/status endpoint and logs), so operators can see whether signatures are current and why a candidate was rejected. **Amended (Spec 101 US3)**: the surfaces are `GET /api/v1/security/bundle`, `GET /api/v1/security/overview`, the CLI, doctor and the Web UI, not `/api/v1/info`, which is readable by agent tokens while bundle status is admin-only (tasks Δ19/B15).
+- **FR-018**: The daily cycle MUST check for a newer mcpproxy release using the existing update-check mechanism (`internal/updatecheck`, Spec 079) and MUST surface current version, latest version, update-available state, release URL, and the channel-appropriate upgrade command; it MUST NOT download, verify, or install any binary (no auto-installer) and MUST respect the existing opt-out (`update_check.enabled=false` / `MCPPROXY_DISABLE_AUTO_UPDATE`). *(Covered by Spec 079, unchanged.)*
+- **FR-019**: Bundle-update status and mcpproxy-release status MUST be surfaced as distinct, clearly-labeled items so a signature-database update is never conflated with a binary release update. *(Covered by Spec 079, unchanged.)*
 - **FR-020**: The bundle check MUST integrate with the deterministic detect engine as one additional check in the existing in-process scanner check set, emitting hard-tier signals for rule hits (fail-closed: any single rule hit denies auto-approve), so bundle hits drive the same quarantine gate as the built-in hard checks with no separate verdict plumbing.
 - **FR-021**: The embedded self-check corpus and any redistributed bundle MUST carry provenance/license metadata sufficient to redistribute (matching the corpus provenance requirement of the eval foundation); community-contributed signatures without a redistributable license MUST NOT be embedded.
 - **FR-022**: Existing scan entry points (CLI `security scan`, the REST scan endpoint, the `quarantine_security` MCP tool) MUST continue to function unchanged from the caller's perspective, now additionally informed by the active bundle's signatures.
@@ -132,8 +148,9 @@ An operator wants to know when a newer mcpproxy release is available — includi
 - **SC-004**: No candidate bundle that would drop recall below 0.90 over gated categories or raise hard-negative false-positive rate above 0.05 on the embedded self-check corpus is ever activated — measured by rejecting a deliberately-regressing fixture bundle.
 - **SC-005**: With the network fetch disabled, no bundle-fetch network request is observed over a full day of operation; with it enabled, a bundle whose signature does not verify against the configured key is never activated.
 - **SC-006**: A refresh (including fetch, verify, and self-check) never blocks a scan or tool call: p99 scan latency during an active refresh is indistinguishable from steady state.
-- **SC-007**: When a newer release exists, the surfaced status reports it with the correct channel-appropriate upgrade command and release URL, and no binary is ever downloaded or executed by this feature.
+- **SC-007**: When a newer release exists, the surfaced status reports it with the correct channel-appropriate upgrade command and release URL, and no binary is ever downloaded or executed by this feature. *(Covered by Spec 079, unchanged.)*
 - **SC-008**: The CI eval gate (`cmd/scan-eval --gate --min-recall 0.90 --max-fp 0.05`) continues to pass with the embedded default bundle's rules layered onto the built-in checks, proving the shipped default cannot regress the build.
+- **SC-009**: A newly published signature reaches detection within one daily refresh cycle on a fetch-enabled install, measured end to end: publish → active → the new signature's fixture fires. (Moved from Spec 101 SC-007; verified by tasks T391.)
 
 ## Assumptions
 

@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -376,6 +378,14 @@ type Config struct {
 	// Security settings
 	APIKey         string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
 	RequireMCPAuth bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"` // Require authentication on /mcp endpoint (default: false)
+	// MCPRejectQueryAPIKey makes every MCP endpoint (/mcp*) refuse a request that
+	// carries a ?apikey= query parameter, with a 401, instead of honouring it. A credential in a URL ends up in access logs,
+	// proxy logs and browser history; MCP clients can send Authorization:
+	// Bearer or X-API-Key instead. Default false (the query form keeps
+	// working, for clients that can only configure a URL). It covers only the
+	// MCP endpoints: the Web UI and its SSE stream (/events) still use the
+	// query form. Live, no restart needed.
+	MCPRejectQueryAPIKey bool `json:"mcp_reject_query_apikey,omitempty" mapstructure:"mcp-reject-query-apikey"`
 	// TrustedHosts lists non-loopback Host header values accepted on loopback
 	// listeners (GH #898). DNS-rebinding protection rejects requests whose Host
 	// header is not a loopback address when mcpproxy listens on loopback; a
@@ -667,8 +677,13 @@ type LogConfig struct {
 //   - TrustModeScan   — auto-approve a change ONLY when a synchronous, offline
 //     TPA scan of the changed tool returns a green (clean) verdict; otherwise
 //     the record is held for human review (fail closed).
-//   - TrustModeManual — never auto-approve; every change/addition is held
-//     (secure by default).
+//   - TrustModeManual — never auto-approve; every change/addition is held.
+//
+// Spec 119: an UNSET trust_mode resolves to scan (DefaultTrustMode); under
+// scan a CHANGED contract that scans clean is auto-approved too (reason
+// scan_approved) — the 2026-10-11 RT-02 "never approve a changed contract"
+// rule now applies to manual only. An unrecognized value still fails closed to
+// manual.
 type TrustMode string
 
 const (
@@ -716,8 +731,9 @@ type ServerConfig struct {
 	// TrustMode is the per-server trust tier: auto|scan|manual. Supersedes
 	// auto_approve_tool_changes (spec 086). An empty value is derived from the
 	// legacy fields at load via normalizeServerQuarantineFlags; the single
-	// resolution point is EffectiveTrustMode(), which treats an empty or
-	// unrecognized value as manual (secure by default). Read via
+	// resolution point is EffectiveTrustMode(), which treats an empty value as
+	// scan (DefaultTrustMode, spec 119) and an unrecognized value as manual
+	// (fail closed). Read via
 	// EffectiveTrustMode(), never the raw string.
 	TrustMode      string           `json:"trust_mode,omitempty" mapstructure:"trust-mode"` // Per-server trust tier: auto|scan|manual. Supersedes auto_approve_tool_changes (086)
 	Shared         bool             `json:"shared,omitempty" mapstructure:"shared"`         // Server edition: shared with all users
@@ -1349,7 +1365,7 @@ func normalizeServerQuarantineFlags(cfg *Config) {
 		// trust_mode is never touched (guard on empty). AutoApproveToolChanges is
 		// left UNTOUCHED here — only trust_mode is written — so the explicit-false
 		// invariant is preserved. A nil AutoApproveToolChanges leaves trust_mode
-		// empty; EffectiveTrustMode() resolves empty -> manual.
+		// empty; EffectiveTrustMode() resolves empty -> scan (DefaultTrustMode).
 		if s.TrustMode == "" && s.AutoApproveToolChanges != nil {
 			if *s.AutoApproveToolChanges {
 				s.TrustMode = string(TrustModeAuto)
@@ -1926,6 +1942,7 @@ const (
 	APIKeySourceEnvironment APIKeySource = iota
 	APIKeySourceConfig
 	APIKeySourceGenerated
+	APIKeySourceEnvironmentFile
 )
 
 // String returns a human-readable representation of the API key source
@@ -1937,6 +1954,8 @@ func (s APIKeySource) String() string {
 		return "configuration file"
 	case APIKeySourceGenerated:
 		return "auto-generated"
+	case APIKeySourceEnvironmentFile:
+		return "file named by " + EnvAPIKeyFile
 	default:
 		return "unknown"
 	}
@@ -2112,6 +2131,14 @@ func IsValidTrustMode(s string) bool {
 // loader's env pass.
 const EnvTPABundlePath = "MCPPROXY_TPA_BUNDLE_PATH"
 
+// EnvTPAFetchEnabled is the environment override for the optional TPA bundle
+// network fetch (`security.tpa_fetch_enabled`, Spec 087 FR-016 / Spec 101 US3
+// B2). It is read inside SecurityConfig.IsTPAFetchEnabled, bidirectional
+// ("true"/"1" force on, "false"/"0" force off), and is never persisted. It
+// enables only the config-resident URL, verified against config-resident keys,
+// so the environment cannot redirect the fetch.
+const EnvTPAFetchEnabled = "MCPPROXY_TPA_FETCH_ENABLED"
+
 // EnvAutoBaselineScan is the environment kill-switch for the automatic,
 // informational Pass-1 baseline scan (`security.auto_baseline_scan`). Like the
 // bundle path, precedence is enforced in the accessor
@@ -2169,15 +2196,16 @@ func NormalizeTrustModes(c *Config) []TrustModeNormalization {
 }
 
 // EffectiveTrustMode is the single resolution point for a server's trust tier
-// (spec 086). It returns one of TrustModeAuto/Scan/Manual, defaulting to manual
-// (secure by default) for empty OR unrecognized trust_mode values (FR-009 —
-// fail closed on a typo like "Scan" or "off").
+// (spec 086). It returns one of TrustModeAuto/Scan/Manual: an EMPTY trust_mode
+// with no legacy flags is the default tier, scan (DefaultTrustMode, spec 119);
+// an unrecognized value fails closed to manual (FR-009 — a typo like "Scan" or
+// "off" never widens trust).
 //
 // Because normalizeServerQuarantineFlags populates TrustMode at config load,
 // the legacy-field fallback here only matters for in-memory structs that
 // bypassed the loader (tests, REST-constructed configs): an explicit
 // auto_approve_tool_changes maps true->auto / false->manual, else a legacy
-// skip_quarantine:true maps to auto, else manual. This keeps the accessor
+// skip_quarantine:true maps to auto, else the default. This keeps the accessor
 // correct even when the migration has not run.
 func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
 	switch TrustMode(sc.TrustMode) {
@@ -2202,8 +2230,17 @@ func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
 	if sc.SkipQuarantine {
 		return TrustModeAuto
 	}
-	return TrustModeManual
+	// Spec 119: an unset trust_mode with no legacy flags is the DEFAULT tier,
+	// scan — quarantined and scanned on add, released on a clean verdict, tool
+	// changes approved on a clean verdict and held on findings. Operators who
+	// want every change reviewed by a person set trust_mode: manual explicitly.
+	return TrustModeScan
 }
+
+// DefaultTrustMode is the tier an unset trust_mode resolves to (spec 119):
+// scan. It is the single source of truth for every surface that names the
+// default (CLI help, MCP tool schema, Web UI, docs examples).
+const DefaultTrustMode = TrustModeScan
 
 // IsQuarantineSkipped returns whether this server should skip tool-level
 // quarantine. Thin wrapper over EffectiveTrustMode(): only trust_mode auto
@@ -2286,29 +2323,43 @@ func (sc *ServerConfig) IsToolAllowedByConfig(toolName string) bool {
 // EnsureAPIKey ensures the API key is set, generating one if needed
 // Returns the API key, whether it was auto-generated, and the source
 // SECURITY: Empty API keys are never allowed - always auto-generates if empty or missing
-func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKeySource) {
-	// Check environment variable for API key first - this overrides config file
-	// Use LookupEnv to distinguish between "not set" and "set to empty string"
-	if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists && envAPIKey != "" {
+//
+// The error is non-nil only when MCPPROXY_API_KEY and MCPPROXY_API_KEY_FILE are
+// both set (ErrAPIKeyBothSet), or MCPPROXY_API_KEY_FILE names a file that cannot
+// be used. The caller must stop in that case: no key is generated and nothing
+// is saved, so a typo in a secret path can never replace the key the operator
+// meant to run with.
+func (c *Config) EnsureAPIKey() (apiKey string, wasGenerated bool, source APIKeySource, err error) {
+	// The environment (MCPPROXY_API_KEY_FILE or MCPPROXY_API_KEY, never both)
+	// overrides the config file. Use the result's Set/Key to distinguish
+	// "not set" from "set to empty string".
+	envKey, err := ResolveEnvAPIKey()
+	if err != nil {
+		return "", false, APIKeySourceEnvironment, err
+	}
+	if envKey.Set && envKey.Key != "" {
 		// A process-only override of whatever the file holds: no save path
 		// may replace the file's key with it (see process_overrides.go).
 		// Already equal means Validate recorded it (or the file literally
 		// holds the env key); re-recording would lose the file value.
-		if c.APIKey != envAPIKey {
-			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envAPIKey)
+		if c.APIKey != envKey.Key {
+			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envKey.Key)
 		}
-		return c.APIKey, false, APIKeySourceEnvironment
+		if envKey.FromFile {
+			return c.APIKey, false, APIKeySourceEnvironmentFile, nil
+		}
+		return c.APIKey, false, APIKeySourceEnvironment, nil
 	}
 
 	// If API key was explicitly set in config and is non-empty, use it
 	if c.apiKeyExplicitlySet && c.APIKey != "" {
-		return c.APIKey, false, APIKeySourceConfig
+		return c.APIKey, false, APIKeySourceConfig, nil
 	}
 
 	// Generate a new API key if missing or empty (never allow empty for security)
 	c.APIKey = generateAPIKey()
 	c.apiKeyExplicitlySet = true
-	return c.APIKey, true, APIKeySourceGenerated
+	return c.APIKey, true, APIKeySourceGenerated, nil
 }
 
 // ValidationError represents a configuration validation error
@@ -2351,6 +2402,7 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	errors = append(errors, c.forwardHeadersErrors()...)
 	errors = append(errors, c.oauthEndpointOverrideErrors()...)
 	errors = append(errors, c.tpaTrustRootErrors()...)
+	errors = append(errors, c.tpaRefreshErrors()...)
 	if _, err := ValidateProfiles(c); err != nil {
 		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
 	}
@@ -2416,6 +2468,102 @@ func (c *Config) tpaTrustRootErrors() []ValidationError {
 		})
 	}
 	return errors
+}
+
+// tpaRefreshErrors validates the Spec 087 / Spec 101 US3 refresh keys under
+// `security` (tpa_refresh_interval, tpa_fetch_enabled, tpa_fetch_url,
+// tpa_stale_after_days). Write-time only, like tpaTrustRootErrors: it is
+// appended to ValidateDetailed and never reached from the boot-fatal
+// validateDetailedCore, so a hand-edited bad value on disk cannot brick a load;
+// the runtime treats it as "fetch off". Messages never echo the URL.
+//
+// The publisher-root-with-empty-built-in-set case cannot be seen here
+// (internal/config must not import the scanner); the runtime reports it as
+// no_trusted_signer and doctor surfaces it.
+func (c *Config) tpaRefreshErrors() []ValidationError {
+	sc := c.Security
+	if sc == nil {
+		return nil
+	}
+	var errors []ValidationError
+
+	if sc.TPARefreshInterval != 0 && sc.TPARefreshInterval.Duration() < MinTPARefreshInterval {
+		errors = append(errors, ValidationError{
+			Field:   "security.tpa_refresh_interval",
+			Message: fmt.Sprintf("must be at least %s (leave unset for the %s default)", MinTPARefreshInterval, DefaultTPARefreshInterval),
+		})
+	}
+
+	if msg := tpaFetchURLProblem(sc.TPAFetchURL); msg != "" {
+		errors = append(errors, ValidationError{Field: "security.tpa_fetch_url", Message: msg})
+	}
+
+	if sc.TPAFetchEnabled {
+		if sc.TPAFetchURL == "" {
+			errors = append(errors, ValidationError{
+				Field:   "security.tpa_fetch_url",
+				Message: "tpa_fetch_enabled requires a tpa_fetch_url (there is no built-in default URL)",
+			})
+		}
+		if sc.TPAActiveRoot == TPARootOperator && len(sc.TPAOperatorSigners) == 0 {
+			errors = append(errors, ValidationError{
+				Field:   "security.tpa_fetch_enabled",
+				Message: "tpa_fetch_enabled with the operator root requires tpa_operator_signers",
+			})
+		}
+	}
+
+	if sc.TPAStaleAfterDays != nil && *sc.TPAStaleAfterDays < 0 {
+		errors = append(errors, ValidationError{
+			Field:   "security.tpa_stale_after_days",
+			Message: "must not be negative (0 disables the stale flag)",
+		})
+	}
+	return errors
+}
+
+// tpaFetchURLProblem returns a fixed, value-free description of what is wrong
+// with a configured fetch URL, or "" when it is acceptable (including empty,
+// which means "no URL"). https is required; http is allowed only for a
+// loopback literal or "localhost" (test rigs and LAN-local mirrors behind a
+// loopback forwarder). Userinfo, query and fragment are refused: the URL is
+// logged by host only and a credential in it would be one typo from a leak.
+func tpaFetchURLProblem(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || u.Hostname() == "" {
+		return "must be an absolute https URL"
+	}
+	host := u.Hostname()
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+	case "http":
+		if !tpaLoopbackHost(host) {
+			return "must use https (http is allowed only for localhost or a loopback address)"
+		}
+	default:
+		return "must use https (http is allowed only for localhost or a loopback address)"
+	}
+	switch {
+	case u.User != nil:
+		return "must not contain credentials"
+	case u.RawQuery != "" || u.ForceQuery || strings.Contains(raw, "?"):
+		return "must not contain a query string"
+	case u.Fragment != "" || strings.Contains(raw, "#"):
+		return "must not contain a fragment"
+	}
+	return ""
+}
+
+// tpaLoopbackHost reports whether host is "localhost" or a loopback IP literal.
+func tpaLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // ValidateServerForLoad runs the per-server checks config.Load applies at boot
@@ -3012,16 +3160,28 @@ func (c *Config) Validate() error {
 	}
 	c.profileWarnings = profileWarnings
 
+	// Both key variables set is an error whether or not the config file
+	// carries an api_key: one rule, checked on every load.
+	if err := checkEnvAPIKeyConflict(); err != nil {
+		return err
+	}
+
 	// Handle API key generation if not configured
 	// Empty string means authentication disabled, nil means auto-generate
 	if c.APIKey == "" {
-		// Check environment variable for API key
-		// Use LookupEnv to distinguish between "not set" and "set to empty string"
-		if envAPIKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists {
+		// Check the environment for an API key (MCPPROXY_API_KEY_FILE or
+		// MCPPROXY_API_KEY; both set is an error). A file that is named but
+		// unusable fails the load:
+		// continuing would auto-generate a key and save it.
+		envKey, err := ResolveEnvAPIKey()
+		if err != nil {
+			return err
+		}
+		if envKey.Set {
 			// Allow empty string to explicitly disable authentication. A
 			// process-only override: no save path may write it into api_key
 			// (see process_overrides.go).
-			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envAPIKey)
+			OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, envKey.Key)
 		}
 	}
 
@@ -3318,6 +3478,30 @@ type SecurityConfig struct {
 	// watermark and retires prior-epoch pins. Absent means 0.
 	TPAOperatorEpoch *uint64 `json:"tpa_operator_epoch,omitempty" mapstructure:"tpa-operator-epoch"`
 
+	// --- Spec 087 / Spec 101 US3: daily refresh and optional fetch ---
+	//
+	// Flat keys, none containing a masked substring (KEY, AUTH, TOKEN, PASS,
+	// CERT, SECRET), so GET /api/v1/config returns them verbatim. The trust set
+	// a fetched pair is verified against is the Spec 101 one above; there is no
+	// per-fetch key.
+
+	// TPARefreshInterval is the cadence of the refresh cycle (the network-free
+	// file leg, then the optional fetch leg). Absent or 0 means 24h; the runtime
+	// clamps to at least 1h. There is no refresh-enable key: the file leg is
+	// idempotent and always on.
+	TPARefreshInterval Duration `json:"tpa_refresh_interval,omitempty" mapstructure:"tpa-refresh-interval" swaggertype:"string"`
+	// TPAFetchEnabled opts in to the network fetch leg. Default false; the
+	// environment override is MCPPROXY_TPA_FETCH_ENABLED (EnvTPAFetchEnabled).
+	TPAFetchEnabled bool `json:"tpa_fetch_enabled" mapstructure:"tpa-fetch-enabled"`
+	// TPAFetchURL is the channel URL: a GitHub Releases "latest" API URL or a
+	// direct bundle URL. Empty (the default) means the fetch leg is off; no URL
+	// is compiled into the binary.
+	TPAFetchURL string `json:"tpa_fetch_url,omitempty" mapstructure:"tpa-fetch-url"`
+	// TPAStaleAfterDays is the age in days after which the active bundle reads
+	// as stale. Absent means 30; an explicit 0 disables the stale flag and the
+	// doctor stale warning.
+	TPAStaleAfterDays *int `json:"tpa_stale_after_days,omitempty" mapstructure:"tpa-stale-after-days"`
+
 	// DeepScan is the opt-in "deep scan" layer (Spec 077 US3). It subsumes the
 	// deprecated top-level scanner_fetch_package_source / scanner_disable_no_new_privileges
 	// keys (migrated on load) and gates the heavy Docker-based scanners + source
@@ -3457,6 +3641,68 @@ func (sc *SecurityConfig) EffectiveTPAOperatorEpoch() uint64 {
 		return 0
 	}
 	return *sc.TPAOperatorEpoch
+}
+
+// Defaults for the Spec 087 / Spec 101 US3 refresh keys.
+const (
+	// DefaultTPARefreshInterval is the refresh cadence when none is configured.
+	DefaultTPARefreshInterval = 24 * time.Hour
+	// MinTPARefreshInterval is the floor for the refresh cadence (B1). A
+	// configured value below it is refused at write time and clamped at read
+	// time.
+	MinTPARefreshInterval = time.Hour
+	// DefaultTPAStaleAfterDays is the stale threshold when none is configured.
+	DefaultTPAStaleAfterDays = 30
+)
+
+// EffectiveTPARefreshInterval returns the configured refresh cadence: 24h when
+// absent or non-positive, and never below MinTPARefreshInterval (a hand-edited
+// sub-hour value is clamped, not honoured). Nil-safe. A runtime test seam may
+// go lower; this accessor does not.
+func (sc *SecurityConfig) EffectiveTPARefreshInterval() time.Duration {
+	if sc == nil || sc.TPARefreshInterval <= 0 {
+		return DefaultTPARefreshInterval
+	}
+	if d := sc.TPARefreshInterval.Duration(); d >= MinTPARefreshInterval {
+		return d
+	}
+	return MinTPARefreshInterval
+}
+
+// IsTPAFetchEnabled reports whether the optional TPA bundle network fetch is
+// on. Default false; nil-safe. MCPPROXY_TPA_FETCH_ENABLED outranks the file
+// value on every path (bidirectional: "true"/"1" force on, "false"/"0" force
+// off), like EffectiveTPABundlePath. The env is read here and never mirrored
+// into the struct or process_overrides.go, so no save path can persist it, and
+// it enables only the config-resident URL (the environment cannot redirect the
+// fetch).
+func (sc *SecurityConfig) IsTPAFetchEnabled() bool {
+	switch os.Getenv(EnvTPAFetchEnabled) {
+	case "true", "1":
+		return true
+	case "false", "0":
+		return false
+	}
+	return sc != nil && sc.TPAFetchEnabled
+}
+
+// EffectiveTPAFetchURL returns the configured fetch URL, "" when none.
+// Nil-safe.
+func (sc *SecurityConfig) EffectiveTPAFetchURL() string {
+	if sc == nil {
+		return ""
+	}
+	return sc.TPAFetchURL
+}
+
+// EffectiveTPAStaleAfterDays returns the stale threshold in days: 30 when
+// absent or negative (malformed), 0 (never stale) when explicitly zero.
+// Nil-safe.
+func (sc *SecurityConfig) EffectiveTPAStaleAfterDays() int {
+	if sc == nil || sc.TPAStaleAfterDays == nil || *sc.TPAStaleAfterDays < 0 {
+		return DefaultTPAStaleAfterDays
+	}
+	return *sc.TPAStaleAfterDays
 }
 
 // IsAutoBaselineScanEnabled reports whether mcpproxy may run the automatic,

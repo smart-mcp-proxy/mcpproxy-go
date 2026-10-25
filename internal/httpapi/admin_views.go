@@ -102,3 +102,24 @@ func (s *Server) ExplainAccess(ctx context.Context, q ExplainRequest) (*internal
 	}
 	return s.profiles().Explain(ctx, subject, q.Tool)
 }
+
+// SuggestRequest is the query of GET /access/suggest: Since is a duration (90m,
+// 24h, 7d; empty = 24h); Profile and Token narrow the run; Patch adds the
+// proposed profile documents.
+type SuggestRequest struct {
+	Since   string
+	Profile string
+	Token   string
+	Patch   bool
+}
+
+// SuggestAccess is GET /access/suggest for an administrator.
+func (s *Server) SuggestAccess(ctx context.Context, q SuggestRequest) (*internalRuntime.AccessSuggestions, error) {
+	window, err := internalRuntime.ParseSuggestWindow(q.Since)
+	if err != nil {
+		return nil, &requestError{http.StatusBadRequest, err.Error()}
+	}
+	return s.profiles().Suggest(ctx, internalRuntime.SuggestRequest{
+		Since: window, Profile: q.Profile, Token: q.Token, IncludePatch: q.Patch,
+	})
+}

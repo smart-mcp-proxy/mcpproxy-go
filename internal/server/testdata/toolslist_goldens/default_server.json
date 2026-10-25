@@ -317,7 +317,7 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "Administrator tool to manage profiles and client bindings; every operation takes the REST argument names and returns the REST data (/api/v1/profiles, /clients, /access/explain). Operations: list, get, create, update (full replace), delete, rename, classify, assign (one client to a profile, or bulk from_profile to to_profile), list_clients, effective_tools, explain. Writes are refused under read_only_mode or disable_management and by the binding guard (binding_bypassable_without_auth); errors carry the REST error body.",
+    "description": "Administrator tool to manage profiles and client bindings; every operation takes the REST argument names and returns the REST data (/api/v1/profiles, /clients, /access/explain, /access/suggest). Operations: list, get, create, update (full replace), delete, rename, classify, assign (one client to a profile, or bulk from_profile to to_profile), list_clients, effective_tools, explain, suggest (read-only: profile changes proposed from blocked calls). Writes are refused under read_only_mode or disable_management and by the binding guard (binding_bypassable_without_auth); errors carry the REST error body.",
     "inputSchema": {
       "properties": {
         "anonymous": {
@@ -386,12 +386,17 @@
             "assign",
             "list_clients",
             "effective_tools",
-            "explain"
+            "explain",
+            "suggest"
           ],
           "type": "string"
         },
+        "patch": {
+          "description": "suggest: also return the proposed profile document per profile.",
+          "type": "boolean"
+        },
         "profile": {
-          "description": "assign: profile to bind (\"\" = All servers). explain, list_clients: profile name (list_clients \"-\" = All servers).",
+          "description": "assign: profile to bind (\"\" = All servers). explain, suggest, list_clients: profile name (list_clients \"-\" = All servers).",
           "type": "string"
         },
         "reason": {
@@ -412,6 +417,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "since": {
+          "description": "suggest: look-back window such as 90m, 24h or 7d (default 24h).",
+          "type": "string"
         },
         "switchable_to": {
           "description": "create, update: profile names a session may set_profile into; [] = none, omitted = unset.",
@@ -439,7 +448,7 @@
           "type": "string"
         },
         "token": {
-          "description": "explain: regular agent token name.",
+          "description": "explain: regular agent token name. suggest: only this token's blocks.",
           "type": "string"
         },
         "tool": {
@@ -792,7 +801,7 @@
           "type": "string"
         },
         "trust_mode": {
-          "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch.",
+          "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = new tools and changed tools auto-approve only when the fast offline TPA scan is clean, else hold for review; 'manual' = human reviews every change. Empty → scan (the default). Used with add/update/patch.",
           "enum": [
             "auto",
             "scan",

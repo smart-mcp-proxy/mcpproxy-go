@@ -1,8 +1,7 @@
 import type { ReviewScan, ReviewTool, ServerReviewResponse } from '@/types'
 
-// Pure presentation rules for the review screen. The strings are the shared
-// vocabulary of Spec 109 (fix-review-screen): the macOS app (ReviewPresentation
-// in ReviewQueueView.swift) and `mcpproxy review show` use the same sentences.
+// Pure presentation rules for the web review screen. The native app maintains
+// its own presentation and should be updated separately for wording parity.
 
 export type ScanBannerSeverity = 'error' | 'warning' | 'success' | 'info'
 export type ScanBannerAction = 'rescan' | 'scan-now' | 'none'
@@ -70,20 +69,27 @@ export function reviewHeadline(review: ServerReviewResponse): ReviewHeadline {
   }
   const tools = review.tools
   const pending = tools.filter(needsReview).length
+  const approvedUnblocked = tools.filter(t => t.approval_status === 'approved' && !t.disabled).length
+  const blocked = tools.filter(t => t.disabled).length
+  const readiness = review.server.readiness === 'disabled' ? 'Server disabled.'
+    : review.server.readiness === 'connecting' ? 'Upstream connecting; retry after discovery.'
+      : review.server.readiness === 'connected' ? 'Upstream connected; tool discovery may still be in progress.'
+        : review.server.readiness === 'auth_required' ? 'Upstream authentication required.'
+          : review.server.readiness === 'error' ? 'Upstream connection error; check the server status.'
+            : review.server.readiness === 'disconnected' ? 'Upstream disconnected; check the server status.'
+              : 'Approval does not confirm upstream readiness.'
   if (pending > 0) {
     return {
       state: 'review',
       title: `Review ${name}`,
-      subtitle: `${pending} ${plural(pending, 'tool needs', 'tools need')} review. Agents cannot call ${plural(pending, 'it', 'them')} until approved.`,
+      subtitle: `${pending} ${plural(pending, 'tool needs', 'tools need')} review · ${approvedUnblocked} approved and unblocked · ${blocked} blocked. ${readiness}`,
     }
   }
   if (tools.length === 0) {
     // Approved without seeing tools: still an approved server, just with nothing captured yet.
-    return { state: 'approved', title: `${name} is approved`, subtitle: 'No tool definitions have been captured yet. New or changed tools come back here for review.' }
+    return { state: 'approved', title: `${name} is approved`, subtitle: `No tool definitions have been captured yet. ${readiness}` }
   }
-  const blocked = tools.filter(t => t.disabled).length
-  const summary = `All ${tools.length} ${plural(tools.length, 'tool', 'tools')} approved${blocked > 0 ? ` (${blocked} blocked)` : ''}.`
-  return { state: 'approved', title: `${name} is approved`, subtitle: `${summary} New or changed tools come back here for review.` }
+  return { state: 'approved', title: `${name} is approved`, subtitle: `${approvedUnblocked} approved and unblocked · ${blocked} blocked of ${tools.length}. ${readiness}` }
 }
 
 export type ToolControl = 'allow-toggle' | 'approve-reject' | 'approved' | 'blocked'

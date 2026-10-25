@@ -328,3 +328,76 @@ func TestScanForPII_AllBlockedPrefixes(t *testing.T) {
 		})
 	}
 }
+
+// tpaRefreshCounterKeys are the five schema-v16 (Spec 087 / Spec 101 US3)
+// integer counters inside tpa_scanner.
+var tpaRefreshCounterKeys = []string{
+	"bundle_refresh_cycles", "bundle_refresh_activations", "bundle_refresh_rejections",
+	"bundle_refresh_unavailable", "bundle_reprotect_hits",
+}
+
+// TestScanForPII_TPARefreshCountersAcceptedAsNonNegativeInts: each v16 counter
+// is whitelisted and accepts zero and positive integers.
+func TestScanForPII_TPARefreshCountersAcceptedAsNonNegativeInts(t *testing.T) {
+	withoutBlockedValues(t)
+	for _, key := range tpaRefreshCounterKeys {
+		for _, val := range []string{"0", "1", "9007199254740991"} {
+			js := `{"anonymous_id":"abc","schema_version":16,"tpa_scanner":{"` + key + `":` + val + `}}`
+			if err := ScanForPII([]byte(js)); err != nil {
+				t.Errorf("%s=%s rejected: %v", key, val, err)
+			}
+		}
+	}
+	all := `{"anonymous_id":"abc","schema_version":16,"tpa_scanner":{` +
+		`"scans_completed":1,"bundle_refresh_cycles":3,"bundle_refresh_activations":1,` +
+		`"bundle_refresh_rejections":1,"bundle_refresh_unavailable":1,"bundle_reprotect_hits":2,` +
+		`"bundle_source":"fetch","bundle_signature_verified":true,"bundle_version":"other"}}`
+	if err := ScanForPII([]byte(all)); err != nil {
+		t.Errorf("counters beside the provenance tuple rejected: %v", err)
+	}
+}
+
+// TestScanForPII_TPARefreshCountersRejectNonIntegers: strings, negatives,
+// floats, null and booleans never pass for any of the v16 counters, and the
+// violation never echoes the offending value.
+func TestScanForPII_TPARefreshCountersRejectNonIntegers(t *testing.T) {
+	withoutBlockedValues(t)
+	for _, key := range tpaRefreshCounterKeys {
+		for _, val := range []string{`"3"`, `"https://example.test/x"`, `-1`, `1.5`, `2.0`, `null`, `true`, `{}`, `[]`} {
+			js := `{"anonymous_id":"abc","schema_version":16,"tpa_scanner":{"` + key + `":` + val + `}}`
+			err := ScanForPII([]byte(js))
+			if err == nil {
+				t.Errorf("%s=%s accepted, want an anonymity violation", key, val)
+				continue
+			}
+			var v *AnonymityViolation
+			if !errors.As(err, &v) {
+				t.Errorf("%s=%s: got %T, want *AnonymityViolation", key, val, err)
+				continue
+			}
+			if strings.Contains(v.Reason, "example.test") {
+				t.Errorf("%s: violation echoes the offending value: %s", key, v.Reason)
+			}
+		}
+	}
+}
+
+// TestScanForPII_TPARefreshForbiddenKeys: the heartbeat must never carry the
+// age, freshness timestamps, URL, host, reason strings or digests of a refresh
+// (FR-021, SC-006). Any such key stays outside the tpa_scanner whitelist.
+func TestScanForPII_TPARefreshForbiddenKeys(t *testing.T) {
+	withoutBlockedValues(t)
+	for _, key := range []string{
+		"bundle_age_days", "bundle_age", "bundle_generated_at", "bundle_last_checked_at",
+		"bundle_last_activated_at", "bundle_next_check_at", "bundle_url", "bundle_host",
+		"bundle_refresh_reason", "bundle_refresh_outcome", "bundle_digest", "bundle_stale",
+		"bundle_refresh_failures", "bundle_reprotect_servers",
+	} {
+		for _, val := range []string{`1`, `"x"`} {
+			js := `{"anonymous_id":"abc","tpa_scanner":{"` + key + `":` + val + `}}`
+			if err := ScanForPII([]byte(js)); err == nil {
+				t.Errorf("tpa_scanner key %q=%s accepted, want a whitelist violation", key, val)
+			}
+		}
+	}
+}

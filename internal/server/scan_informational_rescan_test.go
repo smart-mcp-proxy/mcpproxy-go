@@ -39,6 +39,17 @@ func (s *Server) rescanPending(name string) bool {
 	return s.infoRescanTimers[name] != nil
 }
 
+// rescanSeq is the sequence number of the server's armed rescan timer, 0 when
+// none is armed (also for the moment between a fire and its re-arm).
+func (s *Server) rescanSeq(name string) uint64 {
+	s.infoScanMu.Lock()
+	defer s.infoScanMu.Unlock()
+	if pending := s.infoRescanTimers[name]; pending != nil {
+		return pending.seq
+	}
+	return 0
+}
+
 func TestInformationalRescan_DebouncedAndCoalesced(t *testing.T) {
 	fake := newFakeSecurityScanner()
 	// The server was scanned before: a rescan is for exactly that case.
@@ -139,10 +150,19 @@ func TestInformationalRescan_BusyServerIsRetriedNotDropped(t *testing.T) {
 	s.infoScanQueued["srv"] = true // an informational scan holds the claim
 	s.infoScanMu.Unlock()
 
+	// Every arm takes the next sequence number: the change itself takes
+	// before+1, so anything above that is a re-arm by a busy fire.
+	s.infoScanMu.Lock()
+	before := s.infoRescanSeq
+	s.infoScanMu.Unlock()
 	s.scheduleInformationalRescan("srv")
-	time.Sleep(4 * testRescanDebounce)
+	// The timer entry is dropped when the timer fires and re-created only after
+	// the gates and the claim ran, so "is a timer armed right now" is false for a
+	// moment on every busy fire. Wait for the proof of a re-arm (a newer sequence
+	// number) instead of sampling the map at a fixed instant.
+	require.Eventually(t, func() bool { return s.rescanSeq("srv") > before+1 }, 3*time.Second, 5*time.Millisecond,
+		"re-armed while busy")
 	assert.Empty(t, fake.startScanAttempts(), "must not scan on top of a claimed slot")
-	assert.True(t, s.rescanPending("srv"), "re-armed while busy")
 
 	s.infoScanMu.Lock()
 	delete(s.infoScanQueued, "srv")
