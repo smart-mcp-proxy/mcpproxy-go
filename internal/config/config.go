@@ -2226,6 +2226,14 @@ func NormalizeTrustModes(c *Config) []TrustModeNormalization {
 // auto_approve_tool_changes maps true->auto / false->manual, else a legacy
 // skip_quarantine:true maps to auto, else the default. This keeps the accessor
 // correct even when the migration has not run.
+// TrustModeDefaulted reports whether the server's trust mode is the DEFAULT
+// (scan) by omission: no trust_mode and no legacy flag that resolves one.
+// Spec 120 FR-011/FR-012 name such servers at startup and in `mcpproxy doctor`,
+// because the default moved from manual to scan in spec 119.
+func (sc *ServerConfig) TrustModeDefaulted() bool {
+	return sc != nil && sc.TrustMode == "" && sc.AutoApproveToolChanges == nil && !sc.SkipQuarantine
+}
+
 func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
 	switch TrustMode(sc.TrustMode) {
 	case TrustModeAuto, TrustModeScan, TrustModeManual:
@@ -3561,9 +3569,11 @@ type SecurityConfig struct {
 	// debounced informational server rescan that brings the review screen's scan
 	// coverage back to "current".
 	//
-	// Evidence and freshness ONLY: a clean verdict never approves a changed
-	// contract (RT-02); every change is still held for review in scan and manual
-	// trust modes. Runs in every trust mode except "auto".
+	// Evidence and freshness ONLY: this switch approves nothing. Under "manual"
+	// every change is held for review whatever the verdict (RT-02); under
+	// "scan" the gate's own synchronous scan approves a clean change that
+	// passes the spec 120 structural gate (spec 119 FR-004), and this switch
+	// does not affect that path. Runs in every trust mode except "auto".
 	//
 	// Default (nil) is ENABLED. It only takes effect while auto_baseline_scan is
 	// also enabled, so a user can keep the admission scan and turn off per-change

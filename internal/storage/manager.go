@@ -964,6 +964,52 @@ func (m *Manager) SaveBundleReprotectState(state BundleReprotectState) error {
 	})
 }
 
+// SaveScanDefaultNoticeState persists the one-time scan-default startup
+// notice marker (spec 120 FR-011). Installation-wide; no server purge touches it.
+func (m *Manager) SaveScanDefaultNoticeState(state ScanDefaultNoticeState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
+		if err != nil {
+			return fmt.Errorf("failed to create meta bucket: %w", err)
+		}
+		data, err := json.Marshal(state)
+		if err != nil {
+			return fmt.Errorf("failed to marshal scan default notice state: %w", err)
+		}
+		return bucket.Put([]byte(ScanDefaultNoticeDoneKey), data)
+	})
+}
+
+// LoadScanDefaultNoticeState returns the scan-default notice marker, or
+// (nil, nil) when the notice has never run here. A value that cannot be
+// decoded is an error, never a silent nil.
+func (m *Manager) LoadScanDefaultNoticeState() (*ScanDefaultNoticeState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var state *ScanDefaultNoticeState
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(MetaBucket))
+		if bucket == nil {
+			return nil
+		}
+		data := bucket.Get([]byte(ScanDefaultNoticeDoneKey))
+		if data == nil {
+			return nil
+		}
+		parsed := &ScanDefaultNoticeState{}
+		if err := json.Unmarshal(data, parsed); err != nil {
+			return fmt.Errorf("failed to decode scan default notice state: %w", err)
+		}
+		state = parsed
+		return nil
+	})
+	return state, err
+}
+
 // LoadBundleReprotectState returns the re-protection marker, or the zero value
 // when no sweep has ever completed. A read never creates the bucket. A value
 // that cannot be decoded is an error, never a silent zero: the caller decides

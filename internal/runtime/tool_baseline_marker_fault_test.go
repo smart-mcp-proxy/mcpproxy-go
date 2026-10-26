@@ -121,13 +121,15 @@ func TestToolBaselineMarkerFault_ReplacementAbortsDestructiveHalf(t *testing.T) 
 	}
 }
 
-// FR-027a: a hint update on an approved tool and a failing marker write leave
-// the stored record byte-identical (the marker step precedes every write).
+// FR-027a: an annotation update on an approved tool (a title: the same hash
+// and dispatch tier, so the record stays approved — a hint move is held since
+// spec 120) and a failing marker write leave the stored record byte-identical
+// (the marker step precedes every write).
 func TestToolBaselineMarkerFault_HintUpdateWritesNothing(t *testing.T) {
 	rt := olderStoreWithApprovedReadNote(t)
 	before := lastGood(rt)
 	recBefore := recordJSON(t, rt, "read_note")
-	destructiveRead := baselineTool("read_note", "Read a note", true)
+	destructiveRead := readNoteRetitled()
 
 	failBaseline(rt, "write")
 	err := commitTools(t, rt, destructiveRead)
@@ -144,8 +146,7 @@ func TestToolBaselineMarkerFault_HintUpdateWritesNothing(t *testing.T) {
 	assert.Equal(t, toolreview.BaselineSourceInferred, d.Source)
 	rec := approvalOf(t, rt, "read_note")
 	require.NotNil(t, rec.CurrentAnnotations)
-	require.NotNil(t, rec.CurrentAnnotations.DestructiveHint)
-	assert.True(t, *rec.CurrentAnnotations.DestructiveHint, "the healed pass records the new hints")
+	assert.Equal(t, "Read a note (renamed)", rec.CurrentAnnotations.Title, "the healed pass records the new annotations")
 }
 
 // FR-027a: a failed prior-record listing must not read as "no baseline" (main
@@ -199,6 +200,19 @@ func stateViewTools(t *testing.T, rt *Runtime) (tools []stateview.ToolInfo, disc
 	return append([]stateview.ToolInfo(nil), st.Tools...), st.ToolsDiscovered, st.DiscoveryEpoch
 }
 
+// titleOf is the published annotation title of a StateView tool.
+func titleOf(tools []stateview.ToolInfo, name string) (title string, found bool) {
+	for _, ti := range tools {
+		if ti.Name == name || ti.Name == baselineServer+":"+name {
+			if ti.Annotations != nil {
+				return ti.Annotations.Title, true
+			}
+			return "", true
+		}
+	}
+	return "", false
+}
+
 func destructiveHintOf(tools []stateview.ToolInfo, name string) (hint, found bool) {
 	for _, ti := range tools {
 		if ti.Name == name || ti.Name == baselineServer+":"+name {
@@ -222,7 +236,7 @@ func TestToolBaselineMarkerFault_CaptureIsNotPublished(t *testing.T) {
 		name  string
 		tools []*config.ToolMetadata
 	}{
-		{"destructive hint update", []*config.ToolMetadata{baselineTool("read_note", "Read a note", true)}},
+		{"title update", []*config.ToolMetadata{readNoteRetitled()}},
 		{"replaced inventory", []*config.ToolMetadata{wipeAll()}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -237,9 +251,9 @@ func TestToolBaselineMarkerFault_CaptureIsNotPublished(t *testing.T) {
 
 			svBefore, discBefore, epochBefore := stateViewTools(t, rt)
 			require.True(t, discBefore)
-			hint, found := destructiveHintOf(svBefore, "read_note")
+			title, found := titleOf(svBefore, "read_note")
 			require.True(t, found, "seed publishes read_note")
-			require.False(t, hint)
+			require.Empty(t, title)
 			snapBefore := lastGood(rt)
 			recBefore := recordJSON(t, rt, "read_note")
 
@@ -254,8 +268,8 @@ func TestToolBaselineMarkerFault_CaptureIsNotPublished(t *testing.T) {
 			assert.Equal(t, svBefore, svAfter, "StateView tools unchanged")
 			assert.Equal(t, discBefore, discAfter, "discovery completion unchanged")
 			assert.Equal(t, epochBefore, epochAfter, "discovery identity unchanged")
-			hint, _ = destructiveHintOf(svAfter, "read_note")
-			assert.False(t, hint, "the failed capture's destructive hint is not published")
+			title, _ = titleOf(svAfter, "read_note")
+			assert.Empty(t, title, "the failed capture's retitled definition is not published")
 			_, found = destructiveHintOf(svAfter, "wipe_all_notes")
 			assert.False(t, found, "the failed capture's new tool is not published")
 			assert.Equal(t, recBefore, recordJSON(t, rt, "read_note"), "record untouched")

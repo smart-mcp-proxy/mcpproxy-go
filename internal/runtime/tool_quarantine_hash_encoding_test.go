@@ -156,19 +156,16 @@ func TestToolApprovalHashMigration_CollidingV4ContractIsHeld(t *testing.T) {
 			require.NoError(t, err)
 			rec, err := rt.storageManager.GetToolApproval("notes", "read_note")
 			require.NoError(t, err)
-			if srv.EffectiveTrustMode() == config.TrustModeScan {
-				// The collision is still seen as a CHANGE (never matched to the
-				// approved contract); under scan the clean new definition is
-				// then scan-approved on its own hash (spec 119).
-				assert.False(t, result.BlockedTools["read_note"])
-				assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-				assert.Equal(t, "scan-approved", rec.ApprovedBy)
-				assert.Equal(t, rec.CurrentHash, rec.ApprovedHash)
-				return
-			}
+			// The collision is still seen as a CHANGE (never matched to the
+			// approved contract). Under scan the clean text would approve it
+			// (spec 119), but B's input schema is another TYPE and its output
+			// schema is gone, so the structural gate (spec 120) holds it.
 			assert.True(t, result.BlockedTools["read_note"])
 			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
 			assert.Equal(t, collisionDesc, rec.PreviousDescription)
+			if srv.EffectiveTrustMode() == config.TrustModeScan {
+				assert.Equal(t, []string{"GATE-SCHEMA-SHAPE:type:/", "GATE-OUTPUT-SCHEMA:removed"}, rec.HeldSignals)
+			}
 		})
 	}
 }
