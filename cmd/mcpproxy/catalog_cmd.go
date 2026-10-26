@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -429,7 +430,7 @@ func printCatalogTable(formatter clioutput.OutputFormatter, results []registries
 		if r.FromCache {
 			source += " (cached)"
 		}
-		rows = append(rows, []string{source, sanitizeCell(r.ID, 0), sanitizeDescriptionCell(r.Title, 40), sanitizeCell(r.Transport, 0), added})
+		rows = append(rows, []string{source, escapeCatalogText(r.ID), sanitizeDescriptionCell(r.Title, 40), escapeCatalogText(r.Transport), added})
 	}
 	out, err := formatter.FormatTable(headers, rows)
 	if err == nil {
@@ -438,32 +439,71 @@ func printCatalogTable(formatter clioutput.OutputFormatter, results []registries
 	fmt.Printf("Found %d results. Add one with: mcpproxy catalog add <source>/<id>\n", len(results))
 }
 
+// escapeCatalogText escapes control and format runes in registry-supplied
+// text (GH #938) WITHOUT truncating it. sanitizeCell(s, 0) still caps at
+// detect.MaxEvidenceLen (200 runes), which would cut catalog IDs that
+// `catalog add` must match exactly and hide the tail of an install command
+// the operator is reviewing.
+func escapeCatalogText(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			fmt.Fprintf(&b, "\\u%04x", r)
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+// escapeCatalogProse is escapeCatalogText for free text: runs of ASCII
+// whitespace collapse to one space first, as sanitizeDescriptionCell does.
+func escapeCatalogProse(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	pendingSpace := false
+	for _, r := range s {
+		switch r {
+		case ' ', '\n', '\r', '\t', '\v', '\f':
+			pendingSpace = b.Len() > 0
+			continue
+		}
+		if pendingSpace {
+			b.WriteByte(' ')
+			pendingSpace = false
+		}
+		b.WriteRune(r)
+	}
+	return escapeCatalogText(b.String())
+}
+
 func renderCatalogShow(formatter clioutput.OutputFormatter, result registries.CatalogResult) error {
 	if _, isTable := formatter.(*clioutput.TableFormatter); isTable {
 		// Every string below comes from a remote registry; escape it like
 		// upstream tool text so it cannot drive the terminal (GH #938).
-		fmt.Printf("%s\n", sanitizeDescriptionCell(result.Title, 0))
-		fmt.Printf("  ref:         %s/%s\n", result.Source, sanitizeCell(result.ID, 0))
+		fmt.Printf("%s\n", escapeCatalogProse(result.Title))
+		fmt.Printf("  ref:         %s/%s\n", result.Source, escapeCatalogText(result.ID))
 		if result.Publisher != "" {
-			fmt.Printf("  publisher:   %s\n", sanitizeCell(result.Publisher, 0))
+			fmt.Printf("  publisher:   %s\n", escapeCatalogText(result.Publisher))
 		}
 		fmt.Printf("  official:    %v\n", result.Official)
 		fmt.Printf("  verified:    %v\n", result.Verified)
-		fmt.Printf("  transport:   %s\n", sanitizeCell(result.Transport, 0))
+		fmt.Printf("  transport:   %s\n", escapeCatalogText(result.Transport))
 		if result.Install.URL != "" {
-			fmt.Printf("  install url: %s\n", sanitizeCell(result.Install.URL, 0))
+			fmt.Printf("  install url: %s\n", escapeCatalogText(result.Install.URL))
 		} else {
-			fmt.Printf("  install cmd: %s\n", sanitizeCell(strings.Join(append([]string{result.Install.Command}, result.Install.Args...), " "), 0))
+			fmt.Printf("  install cmd: %s\n", escapeCatalogText(strings.Join(append([]string{result.Install.Command}, result.Install.Args...), " ")))
 		}
 		if result.Description != "" {
-			fmt.Printf("  description: %s\n", sanitizeDescriptionCell(result.Description, 0))
+			fmt.Printf("  description: %s\n", escapeCatalogProse(result.Description))
 		}
 		for _, in := range result.RequiredInputs {
 			secret := ""
 			if in.SecretLike {
 				secret = " (secret)"
 			}
-			fmt.Printf("  requires:    %s%s\n", sanitizeCell(in.Name, 0), secret)
+			fmt.Printf("  requires:    %s%s\n", escapeCatalogText(in.Name), secret)
 		}
 		fmt.Printf("  added:       %v\n", result.Added)
 		return nil

