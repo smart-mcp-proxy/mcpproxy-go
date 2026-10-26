@@ -55,9 +55,13 @@ func TestParseSANs(t *testing.T) {
 		"empty label":    {"a..b", "empty label"},
 		"leading hyphen": {"-a.example", "starts or ends with '-'"},
 		"non-ascii":      {"mcp.exämple.com", "not a valid host name"},
-		"space inside":   {"mcp example", "not a valid host name"},
-		"long label":     {strings.Repeat("a", 64) + ".example", "longer than 63"},
-		"long name":      {strings.Repeat("a.", 130) + "b", "longer than 253"},
+		// Unicode lower-casing would turn these into the ASCII names
+		// i.example and k.example: a name the operator did not write.
+		"dotted capital I": {"\u0130.example", "not a valid host name"},
+		"kelvin sign":      {"\u212a.example", "not a valid host name"},
+		"space inside":     {"mcp example", "not a valid host name"},
+		"long label":       {strings.Repeat("a", 64) + ".example", "longer than 63"},
+		"long name":        {strings.Repeat("a.", 130) + "b", "longer than 253"},
 	}
 	for name, tc := range invalid {
 		t.Run(name, func(t *testing.T) {

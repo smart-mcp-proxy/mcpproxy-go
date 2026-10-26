@@ -42,7 +42,7 @@ func ParseSANs(entries []string) (dnsNames []string, ips []net.IP, err error) {
 			}
 			continue
 		}
-		name := strings.ToLower(entry)
+		name := asciiLower(entry)
 		if err := checkDNSName(name); err != nil {
 			return nil, nil, fmt.Errorf("extra_sans[%d] %q: %w", i, raw, err)
 		}
@@ -110,4 +110,17 @@ func sameSet(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// asciiLower lower-cases A-Z only. strings.ToLower would also fold some
+// non-ASCII letters (U+0130, the Kelvin sign) into ASCII ones, so a name that
+// should be refused would be accepted as a different name.
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + ('a' - 'A')
+		}
+	}
+	return string(b)
 }
