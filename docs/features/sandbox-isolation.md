@@ -15,6 +15,15 @@ sandboxes, Landlock does **not** require unprivileged user namespaces, so it is
 not blocked by `kernel.apparmor_restrict_unprivileged_userns=1` (default on
 Ubuntu 23.10+).
 
+:::caution The sandbox confines writes, not identity
+A stdio server under `sandbox` (or `none`) still runs as the proxy's user. It can
+read `mcp_config.json` and `config.db`, and while `enable_socket` is on it can
+connect to the admin socket **without a key and mint itself an agent token**, in
+both modes. If you run stdio servers you do not fully trust outside `docker`
+isolation, **`enable_socket: false` is the setting that matters**. Details and
+the verified matrix: [What the sandbox does not hide](#what-the-sandbox-does-not-hide).
+:::
+
 ## Enabling
 
 Set the isolation **mode** to `sandbox`, globally or per server:
@@ -111,8 +120,9 @@ readable in `none` and `sandbox`.
 
 What to do:
 
-- **Headless installs** (no tray): set `enable_socket: false`. The tray is the
-  only socket client, so a headless service loses nothing.
+- **Set `enable_socket: false`** unless you use the tray. This is the one
+  setting that closes the token-minting path in both `none` and `sandbox`; the
+  tray is the only socket client, so a headless service loses nothing.
 - **Servers you do not trust**: use `docker` isolation
   (`docker_isolation.mode: "docker"`, or per-server `isolation.mode`). The
   container does not mount the data directory, so neither the files nor the

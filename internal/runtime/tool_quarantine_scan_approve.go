@@ -1,70 +1,21 @@
 package runtime
 
 import (
+	"encoding/json"
 	"time"
 
 	"go.uber.org/zap"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Spec 119: under trust_mode scan a CHANGED contract that scans clean is
-// approved in the same discovery pass. This file holds the two pieces the
-// change gate (checkToolApprovals) calls for that: the safer-direction hint
-// flip rule, which the offline scanner does not cover, and the approval write.
-
-// SignalHintSaferFlip is the deterministic gate signal recorded when a changed
-// contract re-labels itself as SAFER than the approved one (readOnlyHint
-// false→true or destructiveHint true→false). Such a flip is held for review
-// whatever the scan verdict (spec 119 FR-007): a tool that calls itself
-// read-only is exactly what a profile tier cap and call_tool_read trust, and a
-// flip with no description change is invisible to the capability-mismatch
-// check. Not a TPA signature id on purpose: the Web UI lists it with the
-// heuristic check ids.
-const SignalHintSaferFlip = "GATE-HINT-SAFER-FLIP"
-
-// saferHintFlip reports whether live re-labels the tool as safer than approved.
-// Absent hints take the MCP defaults (readOnlyHint false, destructiveHint
-// true), so a tool that GAINS readOnlyHint:true, or gains an explicit
-// destructiveHint:false, counts as a flip; losing a hint toward the default is
-// not safer and does not. An approved snapshot that is nil as a whole is read
-// as "no hints" too: the upgrade wildcard for pre-annotation records is applied
-// before the change gate runs, so by the time a hash mismatch reaches it the
-// hints are part of the approved contract.
-func saferHintFlip(approved, live *config.ToolAnnotations) bool {
-	readOnly := func(a *config.ToolAnnotations) bool {
-		return a != nil && a.ReadOnlyHint != nil && *a.ReadOnlyHint
-	}
-	destructive := func(a *config.ToolAnnotations) bool {
-		return a == nil || a.DestructiveHint == nil || *a.DestructiveHint
-	}
-	if !readOnly(approved) && readOnly(live) {
-		return true
-	}
-	if destructive(approved) && !destructive(live) {
-		return true
-	}
-	return false
-}
-
-// withHintFlip adds the gate's safer-flip signal to the scan's evidence (FR-007:
-// the signal is recorded whatever the verdict). A clean verdict becomes a
-// finding with that one signal; a non-clean one keeps its verdict and
-// signals. The flip goes FIRST: SetScanHold keeps at most
-// storage.MaxToolHeldSignals signals, and a bundle matching that many would
-// otherwise drop the flip (review round 2, P2). Display ordering (TPA ids
-// first) is the surfaces' job. The result is never nil and shares no slice
-// with the input.
-func withHintFlip(evidence *scanHoldEvidence) *scanHoldEvidence {
-	if evidence == nil {
-		return &scanHoldEvidence{Reason: storage.ToolHeldReasonScanFindings, Verdict: "clean", Signals: []string{SignalHintSaferFlip}}
-	}
-	out := *evidence
-	out.Reason = storage.ToolHeldReasonScanFindings
-	out.Signals = append([]string{SignalHintSaferFlip}, evidence.Signals...)
-	return &out
-}
+// approved in the same discovery pass. This file holds the approval write the
+// change gate (checkToolApprovals) calls for that; the structural rules that
+// run in front of it (spec 120, formerly the safer-direction hint flip) live in
+// tool_contract_delta.go.
 
 // scanApproveChangedContract approves a changed contract that scanned clean
 // under trust_mode scan (spec 119 FR-004/FR-006): the record becomes approved
@@ -77,7 +28,11 @@ func withHintFlip(evidence *scanHoldEvidence) *scanHoldEvidence {
 // must not carry the approved hash or the cleared Previous* evidence of an
 // approval that never landed, or the next pass's hash-match shortcut would
 // approve the contract with no scan and no operator (review round 1, P2).
-func (r *Runtime) scanApproveChangedContract(serverName, toolName string, existing *storage.ToolApprovalRecord, wasUnstamped bool, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON, currentHash string) bool {
+//
+// evidence is the scan's verdict and signals are the structural-gate signals
+// evaluated (empty on an approval); both go into the tool_auto_approved audit
+// event together with the approved contract being replaced (spec 120 FR-010).
+func (r *Runtime) scanApproveChangedContract(serverName, toolName string, existing *storage.ToolApprovalRecord, wasUnstamped bool, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON, currentHash string, evidence *scanHoldEvidence, signals []Signal) bool {
 	if invErr := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonScanApproved); invErr != nil {
 		return false
 	}
@@ -110,7 +65,58 @@ func (r *Runtime) scanApproveChangedContract(serverName, toolName string, existi
 		zap.String("server", serverName),
 		zap.String("tool", toolName),
 		zap.String("current_hash", currentHash))
-	r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
-		"", tool.Description, "", schemaJSON)
+	verdict := ""
+	if evidence != nil {
+		verdict = evidence.Verdict
+	}
+	r.emitToolAutoApprovedChange(serverName, toolName, &before, tool, schemaJSON, outputSchemaJSON, currentHash, "scan-approved", signals, verdict)
 	return true
+}
+
+// emitToolAutoApprovedChange emits tool_auto_approved for a CHANGED contract
+// with the approved contract it replaces (spec 120 FR-010): old/new hash,
+// description, input and output schema and annotations, who approved, the
+// structural-gate signals evaluated, and the scan verdict and bundle when a
+// scan ran (approvedBy scan-approved). before is the record as it was before
+// the approval write: Current* is the approved contract while the record was
+// approved, Previous* once it had been marked changed.
+func (r *Runtime) emitToolAutoApprovedChange(serverName, toolName string, before *storage.ToolApprovalRecord, tool *config.ToolMetadata, schemaJSON, outputSchemaJSON, currentHash, approvedBy string, signals []Signal, verdict string) {
+	old := approvedSnapshotOf(before)
+	oldDesc := before.CurrentDescription
+	if before.Status == storage.ToolApprovalStatusChanged {
+		oldDesc = before.PreviousDescription
+	}
+	extra := map[string]any{
+		"approved_by":  approvedBy,
+		"gate_signals": append([]string{}, signalStrings(signals)...),
+	}
+	if old.OutputSchema != "" {
+		extra["old_output_schema"] = truncateEventText(old.OutputSchema)
+	}
+	if outputSchemaJSON != "" {
+		extra["new_output_schema"] = truncateEventText(outputSchemaJSON)
+	}
+	if old.Annotations != nil {
+		if raw, err := json.Marshal(old.Annotations); err == nil {
+			extra["old_annotations"] = string(raw)
+		}
+	}
+	if tool != nil && tool.Annotations != nil {
+		if raw, err := json.Marshal(tool.Annotations); err == nil {
+			extra["new_annotations"] = string(raw)
+		}
+	}
+	if verdict != "" {
+		extra["scan_verdict"] = verdict
+		info := scanner.BundleStatus()
+		bundle := info.Fingerprint
+		if bundle == "" {
+			bundle = info.BundleVersion
+		}
+		if bundle != "" {
+			extra["scan_bundle"] = bundle
+		}
+	}
+	r.emitToolQuarantineEventWith(serverName, toolName, "tool_auto_approved", before.ApprovedHash, currentHash,
+		oldDesc, tool.Description, old.InputSchema, schemaJSON, extra)
 }

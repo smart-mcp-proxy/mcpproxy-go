@@ -15,6 +15,15 @@ func toLimiterLimits(r config.ResolvedConcurrency) limiter.Limits {
 	}
 }
 
+// toRateSpec converts the agent_token_rate_limit config block into the
+// limiter's shape. An absent block is "no default budget".
+func toRateSpec(r *config.AgentTokenRateLimit) limiter.RateSpec {
+	if r == nil {
+		return limiter.RateSpec{}
+	}
+	return limiter.RateSpec{PerMinute: r.PerMinute, Burst: r.Burst}
+}
+
 // limiterEligible reports whether a server should own a limiter instance at all.
 // A disabled or quarantined server must not: FR-009 requires its queued calls to
 // fail promptly with the server-unavailable semantics rather than sit until the
@@ -90,6 +99,11 @@ func (m *Manager) applyConcurrencyLimits(cfg *config.Config) {
 	if cfg == nil {
 		cfg = &config.Config{}
 	}
+
+	// Issue #1699: the per-agent-token call budget rides the same hot-reload
+	// fan-out. Its buckets survive the republish, so a reload neither refunds
+	// nor locks out a token that is part-way through its allowance.
+	m.limiters.TokenRates().SetDefault(toRateSpec(cfg.AgentTokenRateLimit))
 
 	servers := make(map[string]limiter.Limits)
 	for _, sc := range cfg.Servers {

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -431,9 +432,28 @@ func (mm *MetricsManager) HTTPMiddleware() func(http.Handler) http.Handler {
 
 			// Record metrics
 			duration := time.Since(start)
-			mm.RecordHTTPRequest(r.Method, r.URL.Path, http.StatusText(ww.statusCode), duration)
+			mm.RecordHTTPRequest(r.Method, routeLabel(r), http.StatusText(ww.statusCode), duration)
 		})
 	}
+}
+
+// unmatchedRouteLabel is the path label for a request no route matched.
+const unmatchedRouteLabel = "unmatched"
+
+// routeLabel is the path label for r: the chi route pattern it matched
+// ("/api/v1/servers/{name}"), never the raw path. The middleware runs before
+// authentication, so a raw-path label would let any caller add a counter and
+// a histogram series per distinct path it sends. Outside a chi router the raw
+// path is kept.
+func routeLabel(r *http.Request) string {
+	rctx := chi.RouteContext(r.Context())
+	if rctx == nil {
+		return r.URL.Path
+	}
+	if pattern := rctx.RoutePattern(); pattern != "" {
+		return pattern
+	}
+	return unmatchedRouteLabel
 }
 
 // responseWriter wraps http.ResponseWriter to capture status code
@@ -512,7 +532,7 @@ func (mm *MetricsManager) RecordQuarantineEvent(scope, action string) {
 }
 
 // RecordToolCallRejected counts one call shed by a concurrency limiter (spec
-// 093 FR-013). reason is queue_full | queue_timeout; scope is server | global.
+// 093 FR-013). reason is queue_full | queue_timeout | rate_limited; scope is server | global | token.
 // server is the call's TARGET even for a global shed — a rejection an operator
 // cannot attribute to a workload is not actionable.
 func (mm *MetricsManager) RecordToolCallRejected(server, reason, scope string) {

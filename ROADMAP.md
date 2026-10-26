@@ -1177,4 +1177,5 @@ Legend: `shipped` ≥95% checked · `in-flight` 1–94% · `drafted` 0% · `—`
 | [118-auto-rescan-on-change](./specs/118-auto-rescan-on-change/) | — | — |
 | [118-pin-visibility-boundary](./specs/118-pin-visibility-boundary/) | — | — |
 | [119-scan-default-trust](./specs/119-scan-default-trust/) | — | — |
+| [120-scan-structural-gate](./specs/120-scan-structural-gate/) | — | — |
 | [122-day-two-activation](./specs/122-day-two-activation/) | `drafted` | 0/78 (0%) |

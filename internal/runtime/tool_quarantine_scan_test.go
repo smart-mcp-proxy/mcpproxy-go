@@ -106,7 +106,7 @@ func TestScanMode_SaferHintFlip_HeldDespiteCleanScan(t *testing.T) {
 		assert.NotEqual(t, "scan-approved", rec.ApprovedBy)
 		assert.Equal(t, storage.ToolHeldReasonScanFindings, rec.HeldReason)
 		assert.Equal(t, "clean", rec.HeldVerdict)
-		assert.Equal(t, []string{SignalHintSaferFlip}, rec.HeldSignals)
+		assert.Equal(t, []string{SignalHintSaferFlip, "GATE-HINT-CHANGE:readOnlyHint:false>true"}, rec.HeldSignals)
 	}
 
 	require.NoError(t, rt.ApproveTools("github", []string{"delete_repo"}, "operator"))
@@ -191,16 +191,17 @@ func TestScanMode_SaferHintFlipWithFindings_SignalRecorded(t *testing.T) {
 	}
 }
 
-// TestWithHintFlip_SurvivesSignalCap (review round 2, P2): the flip signal is
-// placed first so SetScanHold's MaxToolHeldSignals cap never drops it, and the
-// input evidence is not mutated.
-func TestWithHintFlip_SurvivesSignalCap(t *testing.T) {
+// TestWithGateSignals_SurvivesSignalCap (review round 2, P2; spec 120 FR-002):
+// the gate's signals are placed first so SetScanHold's MaxToolHeldSignals cap
+// never drops them, and the input evidence is not mutated.
+func TestWithGateSignals_SurvivesSignalCap(t *testing.T) {
 	many := make([]string, 0, storage.MaxToolHeldSignals+4)
 	for i := 0; i < storage.MaxToolHeldSignals+4; i++ {
 		many = append(many, fmt.Sprintf("tpa.TPA-2026-%04d.detector", i))
 	}
+	flip := []Signal{{Rule: SignalHintSaferFlip}}
 	in := &scanHoldEvidence{Reason: storage.ToolHeldReasonScanFindings, Verdict: "dangerous", Signals: many}
-	out := withHintFlip(in)
+	out := withGateSignals(in, flip)
 	assert.Equal(t, SignalHintSaferFlip, out.Signals[0])
 	assert.Len(t, in.Signals, storage.MaxToolHeldSignals+4, "input evidence is not mutated")
 	assert.Equal(t, many[0], in.Signals[0])
@@ -210,35 +211,53 @@ func TestWithHintFlip_SurvivesSignalCap(t *testing.T) {
 	assert.Len(t, rec.HeldSignals, storage.MaxToolHeldSignals)
 	assert.Contains(t, rec.HeldSignals, SignalHintSaferFlip, "the flip survives the cap")
 
-	clean := withHintFlip(&scanHoldEvidence{Reason: storage.ToolHeldReasonAwaitingReview, Verdict: "clean"})
+	clean := withGateSignals(&scanHoldEvidence{Reason: storage.ToolHeldReasonAwaitingReview, Verdict: "clean"}, flip)
 	assert.Equal(t, storage.ToolHeldReasonScanFindings, clean.Reason)
 	assert.Equal(t, []string{SignalHintSaferFlip}, clean.Signals)
+
+	// No gate signal: the scan's evidence passes through untouched (a copy).
+	same := withGateSignals(&scanHoldEvidence{Reason: storage.ToolHeldReasonAwaitingReview, Verdict: "clean"}, nil)
+	assert.Equal(t, storage.ToolHeldReasonAwaitingReview, same.Reason)
+	assert.Empty(t, same.Signals)
+	assert.Equal(t, []string{SignalHintSaferFlip}, withGateSignals(nil, flip).Signals)
 }
 
-// TestSaferHintFlip pins the rule's table, MCP defaults included.
-func TestSaferHintFlip(t *testing.T) {
+// TestHintDelta pins the hint table (spec 120 FR-003/FR-009), MCP defaults
+// included: every effective change in either direction holds, the two safer
+// flips also carry GATE-HINT-SAFER-FLIP, and a dispatch-variant change is
+// reported even with equal effective hints.
+func TestHintDelta(t *testing.T) {
 	b := func(v bool) *bool { return &v }
-	ann := func(ro, destr *bool) *config.ToolAnnotations {
-		return &config.ToolAnnotations{ReadOnlyHint: ro, DestructiveHint: destr}
+	ann := func(ro, destr, idem, ow *bool) *config.ToolAnnotations {
+		return &config.ToolAnnotations{ReadOnlyHint: ro, DestructiveHint: destr, IdempotentHint: idem, OpenWorldHint: ow}
 	}
 	cases := []struct {
 		name           string
 		approved, live *config.ToolAnnotations
-		flip           bool
+		want           []string
 	}{
-		{"no hints either side", nil, nil, false},
-		{"gains readOnlyHint:true", nil, ann(b(true), nil), true},
-		{"gains readOnlyHint:false", nil, ann(b(false), nil), false},
-		{"readOnlyHint false→true", ann(b(false), nil), ann(b(true), nil), true},
-		{"readOnlyHint true→false (less safe, scanner's business)", ann(b(true), nil), ann(b(false), nil), false},
-		{"destructiveHint true→false", ann(nil, b(true)), ann(nil, b(false)), true},
-		{"gains destructiveHint:false (default is true)", nil, ann(nil, b(false)), true},
-		{"destructiveHint false→true", ann(nil, b(false)), ann(nil, b(true)), false},
-		{"destructiveHint false dropped (back to default true)", ann(nil, b(false)), nil, false},
-		{"readOnlyHint true dropped", ann(b(true), nil), nil, false},
+		{"no hints either side", nil, nil, nil},
+		{"title only", &config.ToolAnnotations{Title: "A"}, &config.ToolAnnotations{Title: "B"}, nil},
+		{"gains readOnlyHint:true", nil, ann(b(true), nil, nil, nil), []string{"GATE-HINT-SAFER-FLIP", "GATE-HINT-CHANGE:readOnlyHint:false>true"}},
+		{"readOnlyHint false→true", ann(b(false), nil, nil, nil), ann(b(true), nil, nil, nil), []string{"GATE-HINT-SAFER-FLIP", "GATE-HINT-CHANGE:readOnlyHint:false>true", "GATE-HINT-CHANGE:dispatch:write>read"}},
+		{"readOnlyHint true→false (less safe, held too)", ann(b(true), nil, nil, nil), ann(b(false), nil, nil, nil), []string{"GATE-HINT-CHANGE:readOnlyHint:true>false", "GATE-HINT-CHANGE:dispatch:read>write"}},
+		{"readOnlyHint true dropped", ann(b(true), nil, nil, nil), nil, []string{"GATE-HINT-CHANGE:readOnlyHint:true>false"}},
+		{"destructiveHint true→false", ann(nil, b(true), nil, nil), ann(nil, b(false), nil, nil), []string{"GATE-HINT-SAFER-FLIP", "GATE-HINT-CHANGE:destructiveHint:true>false", "GATE-HINT-CHANGE:dispatch:destructive>read"}},
+		{"gains destructiveHint:false (default is true)", nil, ann(nil, b(false), nil, nil), []string{"GATE-HINT-SAFER-FLIP", "GATE-HINT-CHANGE:destructiveHint:true>false"}},
+		{"destructiveHint false→true", ann(nil, b(false), nil, nil), ann(nil, b(true), nil, nil), []string{"GATE-HINT-CHANGE:destructiveHint:false>true", "GATE-HINT-CHANGE:dispatch:read>destructive"}},
+		{"destructiveHint false dropped (back to default true)", ann(nil, b(false), nil, nil), nil, []string{"GATE-HINT-CHANGE:destructiveHint:false>true"}},
+		{"idempotentHint false→true", nil, ann(nil, nil, b(true), nil), []string{"GATE-HINT-CHANGE:idempotentHint:false>true"}},
+		{"idempotentHint true→false", ann(nil, nil, b(true), nil), ann(nil, nil, b(false), nil), []string{"GATE-HINT-CHANGE:idempotentHint:true>false"}},
+		{"openWorldHint true→false (output becomes trusted)", nil, ann(nil, nil, nil, b(false)), []string{"GATE-HINT-CHANGE:openWorldHint:true>false"}},
+		{"openWorldHint false→true", ann(nil, nil, nil, b(false)), ann(nil, nil, nil, b(true)), []string{"GATE-HINT-CHANGE:openWorldHint:false>true"}},
+		{"openWorldHint false dropped (back to default true)", ann(nil, nil, nil, b(false)), nil, []string{"GATE-HINT-CHANGE:openWorldHint:false>true"}},
+		{"explicit defaults dropped: hash-equal dispatch drop", ann(b(false), b(true), nil, nil), nil, []string{"GATE-HINT-CHANGE:dispatch:destructive>read"}},
+		{"explicit readOnly:false dropped: write→read", ann(b(false), nil, nil, nil), nil, []string{"GATE-HINT-CHANGE:dispatch:write>read"}},
+		{"explicit defaults added: read→destructive", nil, ann(b(false), b(true), nil, nil), []string{"GATE-HINT-CHANGE:dispatch:read>destructive"}},
+		{"explicit defaults unchanged", ann(b(false), b(true), nil, nil), ann(b(false), b(true), nil, nil), nil},
 	}
 	for _, tc := range cases {
-		assert.Equal(t, tc.flip, saferHintFlip(tc.approved, tc.live), tc.name)
+		assert.Equal(t, tc.want, signalStrings(hintDelta(tc.approved, tc.live)), tc.name)
 	}
 }
 
@@ -296,7 +315,9 @@ func TestScanMode_StillChanged_MaliciousStaysHeld(t *testing.T) {
 // TestScanMode_StillChanged_BenignScanApproved (spec 119 FR-006): a record
 // already in the changed state (held before this release, or on a finding the
 // definition has since moved past) whose live tool scans clean is approved on
-// its current definition by the next pass.
+// its current definition by the next pass. The record carries the approved
+// input schema as before-evidence (PreviousSchema), as every mark-changed
+// write since output-schema capture does.
 func TestScanMode_StillChanged_BenignScanApproved(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{scanServer("github")})
 
@@ -311,6 +332,7 @@ func TestScanMode_StillChanged_BenignScanApproved(t *testing.T) {
 		CurrentDescription:  desc,
 		PreviousDescription: "Creates issues",
 		CurrentSchema:       schema,
+		PreviousSchema:      schema,
 	}))
 
 	tools := []*config.ToolMetadata{{ServerName: "github", Name: "create_issue", Description: desc, ParamsJSON: `{"type":"object"}`}}

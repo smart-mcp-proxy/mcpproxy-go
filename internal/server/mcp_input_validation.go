@@ -141,6 +141,9 @@ func compileInputSchema(paramsJSON string) *inputSchemaEntry {
 		return &inputSchemaEntry{sentinel: true}
 	}
 	c := jsonschema.NewCompiler()
+	// The schema is upstream-controlled: an empty loader stops a $ref from
+	// reading local files (the default loader serves file:// URLs).
+	c.UseLoader(jsonschema.SchemeURLLoader{})
 	if err := c.AddResource(inputSchemaURI, doc); err != nil {
 		return &inputSchemaEntry{sentinel: true}
 	}

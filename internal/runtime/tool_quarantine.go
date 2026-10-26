@@ -602,7 +602,8 @@ func (g toolQuarantineGate) active() bool {
 
 // resolveToolQuarantineGate resolves the gate for a server (trust mode:
 // manual → every change/addition held; auto → all auto-approved; scan →
-// additions green-scan-gated, changes held).
+// additions green-scan-gated, changes approved on a clean verdict when the
+// spec 120 structural gate returns no signal, held otherwise).
 //
 // Spec 116 D16: the policy is read from STORAGE — the server's row and
 // meta.quarantine_enabled, which the config commit writes in its storage step
@@ -1078,7 +1079,16 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 		// A CHANGED record's stamp describes its current (changed) hash, not
 		// its possibly hint-free ApprovedHash, so its hash match must also
 		// agree with the approved hints recorded as before-evidence.
-		hashMatches := existing.ApprovedHash == currentHash &&
+		// Spec 120 FR-009: the hash folds the hints in as their EFFECTIVE
+		// values, but dispatch (contracts.DeriveCallWith) reads an explicit
+		// default differently from an absent hint. An approved record whose
+		// live hints route the tool to another call_tool variant is a contract
+		// change even with an equal hash: every no-review shortcut below is
+		// closed for it and it reaches the change gate. Under auto the change
+		// is approved anyway, so the shortcut stands.
+		dispatchDrift := existing.Status == storage.ToolApprovalStatusApproved && !autoApproveChanges &&
+			hintSnapshotCaptured(existing) && dispatchVariantChanged(existing.CurrentAnnotations, tool.Annotations)
+		hashMatches := existing.ApprovedHash == currentHash && !dispatchDrift &&
 			!legacyHintsKnownToDiffer(existing.CurrentAnnotations, existing.HashSchemaVersion, tool.Annotations) &&
 			(existing.Status != storage.ToolApprovalStatusChanged || previousHintsProveRevert(existing.PreviousAnnotations, tool.Annotations))
 		if hashMatches {
@@ -1286,6 +1296,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 					result.ChangedCount++
 					continue
 				}
+				before := *existing
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
@@ -1306,8 +1317,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 					r.logger.Info("Changed tool auto-approved (auto_approve_tool_changes enabled)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
-					r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
-						"", tool.Description, "", schemaJSON)
+					r.emitToolAutoApprovedChange(serverName, toolName, &before, tool, schemaJSON, outputSchemaJSON, currentHash, "auto-approve-changes", nil, "")
 				}
 				continue
 			}
@@ -1322,10 +1332,11 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			}
 			// trust_mode: scan (spec 119 FR-006): a still-changed record is
 			// re-evaluated on every pass against its CURRENT definition. A clean,
-			// full-coverage verdict approves it (a hold written before this
-			// release, or on a finding the definition has since moved past,
-			// clears without a click); a safer-direction hint flip (FR-007) or
-			// a non-green verdict keeps it held with the evidence refreshed.
+			// full-coverage verdict with an empty structural delta (spec 120)
+			// approves it (a hold written before this release, or on a finding
+			// the definition has since moved past, clears without a click); a
+			// structural signal or a non-green verdict keeps it held with the
+			// evidence refreshed.
 			//
 			// Manual mode runs the evidence scan only (evidenceScan): the held
 			// change carries a verdict for the definition it holds, refreshed on
@@ -1333,17 +1344,15 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			// (RT-02 applies to manual).
 			if scanMode {
 				clean, evidence := r.scanChangeIsClean(serverName, tool)
-				// PreviousAnnotations is the approved contract's snapshot
-				// (refreshHeldContractSnapshot leaves it untouched).
-				flip := saferHintFlip(existing.PreviousAnnotations, tool.Annotations)
-				if clean && !flip && scanApprovesChanges &&
-					r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
+				// Previous* is the approved contract's snapshot
+				// (refreshHeldContractSnapshot leaves it untouched); the
+				// structural gate (spec 120) compares the live contract with it.
+				signals := contractDelta(approvedSnapshotOf(existing), liveSnapshotOf(tool, schemaJSON, outputSchemaJSON))
+				if clean && len(signals) == 0 && scanApprovesChanges &&
+					r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash, evidence, signals) {
 					continue
 				}
-				if flip {
-					evidence = withHintFlip(evidence)
-				}
-				r.recordScanHold(serverName, toolName, existing, wasUnstamped, evidence)
+				r.recordScanHold(serverName, toolName, existing, wasUnstamped, withGateSignals(evidence, signals))
 			} else if evidenceScan {
 				r.recordScanHold(serverName, toolName, existing, wasUnstamped, r.scanHeldToolEvidence(serverName, tool, false))
 			}
@@ -1407,7 +1416,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			// shortcut below is closed and the record is held as changed.
 			storedApprovalProven := v4ApprovedHashCoversStored(existing, toolName)
 
-			isFormulaChange := storedApprovalProven && rehashedFromStored == currentHash
+			isFormulaChange := storedApprovalProven && rehashedFromStored == currentHash && !dispatchDrift
 			if existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion && hintsMatch {
 				// The legacy formulas are hashed from the LIVE contract and carry
 				// no (or raw, unnormalized) hints: they only prove a formula
@@ -1474,7 +1483,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			} else {
 				outputSchemaMatch = normalizeJSON(outputSchemaJSON) == normalizeJSON(existing.CurrentOutputSchema)
 			}
-			if storedApprovalProven && descMatch && schemaMatch && outputSchemaMatch && hintsMatch {
+			if storedApprovalProven && descMatch && schemaMatch && outputSchemaMatch && hintsMatch && !dispatchDrift {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonContentMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1528,7 +1537,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			// that normalizeJSON does not absorb, such as the order of the
 			// "required" list, may differ). Any structural difference falls
 			// through to the change gate below and is held for review.
-			if storedApprovalProven && descMatch && outputSchemaMatch && hintsMatch && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
+			if storedApprovalProven && descMatch && outputSchemaMatch && hintsMatch && !dispatchDrift && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1565,6 +1574,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 					result.ChangedCount++
 					continue
 				}
+				before := *existing
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
@@ -1591,8 +1601,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 				r.logger.Info("Tool change auto-approved (auto_approve_tool_changes enabled)",
 					zap.String("server", serverName),
 					zap.String("tool", toolName))
-				r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
-					"", tool.Description, "", schemaJSON)
+				r.emitToolAutoApprovedChange(serverName, toolName, &before, tool, schemaJSON, outputSchemaJSON, currentHash, "auto-approve-changes", nil, "")
 				continue
 			}
 
@@ -1600,11 +1609,14 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			// TPA scan of the new definition runs in scan and manual mode.
 			//
 			// trust_mode: scan (spec 119 FR-004): a clean, full-coverage verdict
-			// approves the new contract in this pass, unless it re-labels the
-			// tool as safer (FR-007, held with GATE-HINT-SAFER-FLIP). A non-green
-			// ("warnings"/"dangerous"), degraded or absent verdict holds the
-			// change with the evidence (verdict + matched TPA/check ids) on the
-			// record so the tool-approval surfaces can explain the hold (FR-018).
+			// approves the new contract in this pass, unless the structural gate
+			// (spec 120: any safety-hint change, a widened input schema, an
+			// output-schema change, a dispatch-tier change) returns a signal; a
+			// signal holds the change with GATE-* ids in front of the scan's. A
+			// non-green ("warnings"/"dangerous"), degraded or absent verdict
+			// holds the change with the evidence (verdict + matched TPA/check
+			// ids) on the record so the tool-approval surfaces can explain the
+			// hold (FR-018).
 			//
 			// trust_mode: manual (RT-02, red-team 2026-10-11): the detector is
 			// defeatable by paraphrase, so the change is ALWAYS held; the scan
@@ -1617,17 +1629,16 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			}
 			if scanMode {
 				clean, evidence := r.scanChangeIsClean(serverName, tool)
-				// CurrentAnnotations is still the approved contract's snapshot
-				// here: the record is approved and Current* = Approved*.
-				flip := saferHintFlip(existing.CurrentAnnotations, tool.Annotations)
-				if clean && !flip && scanApprovesChanges &&
-					r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
+				// Current* is still the approved contract's snapshot here: the
+				// record is approved and Current* = Approved*. The structural
+				// gate (spec 120) runs in front of the verdict: any signal holds
+				// the change whatever the scan said.
+				signals := contractDelta(approvedSnapshotOf(existing), liveSnapshotOf(tool, schemaJSON, outputSchemaJSON))
+				if clean && len(signals) == 0 && scanApprovesChanges &&
+					r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash, evidence, signals) {
 					continue
 				}
-				if flip {
-					evidence = withHintFlip(evidence)
-				}
-				holdEvidence = evidence
+				holdEvidence = withGateSignals(evidence, signals)
 			}
 
 			oldDesc := existing.CurrentDescription
@@ -1845,7 +1856,11 @@ func previousHintsProveRevert(previous, live *config.ToolAnnotations) bool {
 	if previous == nil {
 		return safetyHintsFingerprint(live) == ""
 	}
-	return safetyHintsFingerprint(previous) == safetyHintsFingerprint(live)
+	// Spec 120 FR-009: equal effective hints with a different call_tool
+	// variant (explicit defaults vs none) is the hash-equal change the gate
+	// held; only the explicit hints coming back prove the revert.
+	return safetyHintsFingerprint(previous) == safetyHintsFingerprint(live) &&
+		!dispatchVariantChanged(previous, live)
 }
 
 // saveToolApproval persists an approval record through the ONLY write seam
@@ -3472,41 +3487,50 @@ func (r *Runtime) RecordToolBlocksForSecurityApproval(serverName string, toolNam
 
 // emitToolQuarantineEvent emits an activity event for tool quarantine changes.
 func (r *Runtime) emitToolQuarantineEvent(serverName, toolName, action, oldHash, newHash, oldDesc, newDesc, oldSchema, newSchema string) {
+	r.emitToolQuarantineEventWith(serverName, toolName, action, oldHash, newHash, oldDesc, newDesc, oldSchema, newSchema, nil)
+}
+
+// maxToolEventTextLen caps every text field of a tool-quarantine activity
+// event at 64 KiB for storage.
+const maxToolEventTextLen = 64 * 1024
+
+func truncateEventText(s string) string {
+	if len(s) > maxToolEventTextLen {
+		return s[:maxToolEventTextLen]
+	}
+	return s
+}
+
+// emitToolQuarantineEventWith is emitToolQuarantineEvent with extra metadata
+// keys (spec 120 FR-010: the before-state of an automatic approval). Extra keys
+// never override the base ones.
+func (r *Runtime) emitToolQuarantineEventWith(serverName, toolName, action, oldHash, newHash, oldDesc, newDesc, oldSchema, newSchema string, extra map[string]any) {
 	metadata := map[string]interface{}{
 		"action":    action,
 		"tool_name": toolName,
 	}
+	for k, v := range extra {
+		metadata[k] = v
+	}
+	metadata["action"] = action
+	metadata["tool_name"] = toolName
 	if oldHash != "" {
 		metadata["old_hash"] = oldHash
 	}
 	if newHash != "" {
 		metadata["new_hash"] = newHash
 	}
-	// Truncate descriptions at 64KB for storage
-	const maxDescLen = 64 * 1024
 	if oldDesc != "" {
-		if len(oldDesc) > maxDescLen {
-			oldDesc = oldDesc[:maxDescLen]
-		}
-		metadata["old_description"] = oldDesc
+		metadata["old_description"] = truncateEventText(oldDesc)
 	}
 	if newDesc != "" {
-		if len(newDesc) > maxDescLen {
-			newDesc = newDesc[:maxDescLen]
-		}
-		metadata["new_description"] = newDesc
+		metadata["new_description"] = truncateEventText(newDesc)
 	}
 	if oldSchema != "" {
-		if len(oldSchema) > maxDescLen {
-			oldSchema = oldSchema[:maxDescLen]
-		}
-		metadata["old_schema"] = oldSchema
+		metadata["old_schema"] = truncateEventText(oldSchema)
 	}
 	if newSchema != "" {
-		if len(newSchema) > maxDescLen {
-			newSchema = newSchema[:maxDescLen]
-		}
-		metadata["new_schema"] = newSchema
+		metadata["new_schema"] = truncateEventText(newSchema)
 	}
 
 	// Marshal metadata to JSON string for the event payload

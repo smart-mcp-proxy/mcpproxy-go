@@ -88,7 +88,7 @@ A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enable_socket` | boolean | `true` | Enable Unix socket (macOS/Linux) or named pipe (Windows) for secure local IPC between tray and core |
+| `enable_socket` | boolean | `true` | Enable the Unix socket (macOS/Linux) or named pipe (Windows) the tray uses to talk to the core. **Connections over it are trusted without the API key**, and that includes every stdio server the proxy itself spawns under `none` or `sandbox` isolation: such a server can call the admin API and mint agent tokens with no credential. The tray is the only socket client, so **set `false` on headless installs, and whenever a stdio server you do not fully trust runs outside `docker` isolation**. `mcpproxy doctor` warns about the combination. See [What the sandbox does not hide](features/sandbox-isolation.md#what-the-sandbox-does-not-hide). |
 | `tray_endpoint` | string | `""` | Override socket/pipe path (advanced, usually not needed) |
 
 ### Search & Tool Limits
@@ -338,7 +338,7 @@ saturated upstream. The separate-process CLI debug client is out of scope.
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `mcpproxy_tool_calls_rejected_total` | counter | `server`, `reason`, `scope` | Calls shed by a limit. `reason` = `queue_full` \| `queue_timeout`; `scope` = `server` \| `global`. `server` is the call's target even for a global shed. |
+| `mcpproxy_tool_calls_rejected_total` | counter | `server`, `reason`, `scope` | Calls shed by a limit. `reason` = `queue_full` \| `queue_timeout` \| `rate_limited`; `scope` = `server` \| `global` \| `token`. `server` is the call's target even for a global or token shed. |
 | `mcpproxy_concurrency_active` | gauge | `scope`, `server` | Calls currently holding a slot. |
 | `mcpproxy_concurrency_queue_depth` | gauge | `scope`, `server` | Calls currently waiting for a slot. |
 
@@ -349,6 +349,44 @@ sheds cannot lose increments. The same sheds also appear in the activity log
 per shed — including the ones from `code_execution` and replay: the rejection is
 recorded at the limiter, below the MCP dispatch layer, so no origin can bypass
 it and none can double-report it.
+
+### Agent Token Call Rate Limit
+
+Caps how many upstream tool calls one [agent token](features/agent-tokens.md)
+may make per minute, so a runaway agent loop cannot burn through an upstream's
+quota (GitHub [#1699](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1699)).
+**Off by default.**
+
+```json
+{
+  "agent_token_rate_limit": { "per_minute": 60, "burst": 10 }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `agent_token_rate_limit.per_minute` | integer | unset (off) | Calls a minute each agent token may make. `0` or unset = no limit. Maximum `100000`. |
+| `agent_token_rate_limit.burst` | integer | `per_minute` | Calls a token may make at once after a quiet spell. Needs `per_minute` above `0`. |
+
+The limit is a token bucket kept per token: it starts full, spends one call per
+upstream tool call and refills at `per_minute` calls a minute. It is checked at
+the same admission point as the concurrency limits, so it covers the `call_tool_*`
+variants, direct-routing mode, `code_execution` and the REST tool-call endpoint.
+It applies to agent tokens only: the admin API key and unauthenticated local
+callers are never limited. A token created with `--rate-limit` uses its own budget
+instead of this default (`--rate-limit 0` exempts it); see
+[Call Rate Limit](features/agent-tokens.md#call-rate-limit).
+
+A refused call never reaches the upstream and takes no concurrency slot. MCP
+callers get an error tool result, REST callers get `429` with `Retry-After`, and
+the activity log records a `tool_call` with status `rejected`, reason
+`rate_limited` and the token's name. Metrics: `mcpproxy_tool_calls_rejected_total`
+with `reason="rate_limited"`, `scope="token"` (see the table above).
+
+Buckets are held in memory, so a restart refills them. The block is hot-reloadable;
+a changed budget keeps the calls a token has already spent. Negative values, a
+value above the maximum, and a `burst` without a `per_minute` are rejected, and
+the error names the field.
 
 ### Debug & Development
 
@@ -965,7 +1003,7 @@ block** — off by default, best-effort, and unable to change the baseline verdi
 | `tpa_fetch_url` | string | `""` | Where the fetch step looks. **There is no working default URL**: empty means the fetch makes no request (`disabled`, reason `no_url`), and no URL is compiled into the binary until a release ships the first publisher key. Two shapes are recognised from the URL path: a GitHub Releases `…/repos/<owner>/<repo>/releases/latest` API URL (the release must carry one `scanner-bundle-<sequence>.json` asset with a sibling `.sig`), or any other path, fetched as the bundle with `<url>.sig` as its signature. Must be `https` (plain `http` only for `localhost` or a loopback address) and must not contain credentials, a query string or a fragment; the URL is never logged beyond its host. Rejected on write when `tpa_fetch_enabled` is on and the URL is empty. |
 | `tpa_stale_after_days` | integer | absent (`30`) | Age in days of the active bundle (from its signed `generated_at`) after which it is flagged stale in `GET /api/v1/security/bundle`, `mcpproxy security bundle status` and `mcpproxy doctor`. An explicit `0` disables the stale flag and the doctor warning, and is different from absent. Negative values are rejected on write. |
 | `auto_baseline_scan` | boolean | `true` | Kill switch for the **automatic informational baseline scan**. When on (the default), every newly added server gets one free in-process Pass-1 TPA scan, and once per installation a background sweep scans pre-existing enabled servers that have never been scanned (marker persisted in BBolt, so it runs exactly once and never delays startup). The result only populates the security badge / scan summary: it **never** quarantines, approves, or otherwise gates a server. Disabled servers are skipped, and so are `trust_mode: "scan"` servers — that mode's own admission gate scans them and auto-approves on a clean verdict, so the informational path stays out of it entirely rather than risk feeding that gate; this flag does not affect that separate path. Set to `false` to suppress all automatic scans; manual scans keep working. Hot-reloadable — the flag is read live at each decision point. Env override: `MCPPROXY_AUTO_BASELINE_SCAN` (`true`/`1`/`false`/`0`), which wins over this field on every path. |
-| `auto_rescan_on_change` | boolean | `true` | Finer switch for the **automatic rescan after a tool definition changes** (Spec 118), in every trust mode except `auto`. When on, a changed tool, a tool added after the baseline, or a changed definition that moves again gets the in-process TPA scan of its current definition recorded as hold evidence (`held_reason`/`held_verdict`/`held_signals`, so the review screen shows a per-tool verdict without a click), and a debounced (about 5 s, coalesced per server) informational rescan of the server brings the review screen's scan line back to "current". Evidence and freshness only: this switch controls the `manual`-mode evidence scan and the server rescan, not the approval decision, which belongs to the trust-mode gate (under `scan`, the default, the gate's own synchronous scan approves a clean change; under `manual` nothing is approved automatically). It only takes effect while `auto_baseline_scan` is also on, so set this to `false` to keep the admission scan and turn off per-change rescans. The `trust_mode: "scan"` gate's own admission-time scan of new tools is not affected. Hot-reloadable. Env override: `MCPPROXY_AUTO_RESCAN_ON_CHANGE` (`true`/`1`/`false`/`0`), which wins over this field on every path. |
+| `auto_rescan_on_change` | boolean | `true` | Finer switch for the **automatic rescan after a tool definition changes** (Spec 118), in every trust mode except `auto`. When on, a changed tool, a tool added after the baseline, or a changed definition that moves again gets the in-process TPA scan of its current definition recorded as hold evidence (`held_reason`/`held_verdict`/`held_signals`, so the review screen shows a per-tool verdict without a click), and a debounced (about 5 s, coalesced per server) informational rescan of the server brings the review screen's scan line back to "current". Evidence and freshness only: this switch controls the `manual`-mode evidence scan and the server rescan, not the approval decision, which belongs to the trust-mode gate (under `scan`, the default, the gate's own synchronous scan approves a clean change that passes the spec 120 structural gate — no safety-hint change, no widened input schema, no output-schema change; under `manual` nothing is approved automatically). It only takes effect while `auto_baseline_scan` is also on, so set this to `false` to keep the admission scan and turn off per-change rescans. The `trust_mode: "scan"` gate's own admission-time scan of new tools is not affected. Hot-reloadable. Env override: `MCPPROXY_AUTO_RESCAN_ON_CHANGE` (`true`/`1`/`false`/`0`), which wins over this field on every path. |
 | `deep_scan.enabled` | boolean | `false` | Master opt-in for the heavy layer. When `false`, no Docker scanner runs and no source extraction is attempted — only the in-process baseline scanner executes. |
 | `deep_scan.fetch_package_source` | boolean | `true` (when deep scan is on) | Whether the scanner fetches (never executes) the published source of `npx`/`uvx` package-runner servers when no local source is available. Set `false` for air-gapped deployments. |
 | `deep_scan.disable_no_new_privileges` | boolean | `false` | Omits `--security-opt no-new-privileges` from scanner container runs (snap-docker/AppArmor escape hatch). |
@@ -1106,7 +1144,10 @@ The tokenizer automatically maps model names to encodings:
     "enabled": false,
     "require_client_cert": false,
     "certs_dir": "",
-    "hsts": true
+    "hsts": true,
+    "extra_sans": [],
+    "cert_file": "",
+    "key_file": ""
   }
 }
 ```
@@ -1114,9 +1155,12 @@ The tokenizer automatically maps model names to encodings:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable HTTPS/TLS |
-| `require_client_cert` | boolean | `false` | Enable mutual TLS (mTLS) for client authentication |
+| `require_client_cert` | boolean | `false` | Enable mutual TLS (mTLS) for client authentication. Client certificates are verified against the local CA (`ca.pem` in `certs_dir`), also when `cert_file` is set |
 | `certs_dir` | string | `""` | Custom certificate directory (defaults to `${data_dir}/certs`) |
 | `hsts` | boolean | `true` | Enable HTTP Strict Transport Security headers |
+| `extra_sans` | string array | `[]` | DNS names and IP addresses added to the generated server certificate, next to `localhost`, `127.0.0.1` and `::1`. See [Other host names](#other-host-names-extra_sans-cert_file-key_file) |
+| `cert_file` | string | `""` | Absolute path of a server certificate (PEM) to serve instead of the generated one. Needs `key_file` |
+| `key_file` | string | `""` | Absolute path of the private key (PEM) for `cert_file`. Needs `cert_file` |
 
 **Quick Setup:**
 1. Trust certificate: `mcpproxy trust-cert`
@@ -1124,6 +1168,36 @@ The tokenizer automatically maps model names to encodings:
 3. Update client URLs to use `https://`
 
 See [Setup Guide - HTTPS](setup.md#optional-https-setup) for complete details.
+
+### Other host names (`extra_sans`, `cert_file`, `key_file`)
+
+The generated server certificate is valid for `localhost`, `127.0.0.1` and `::1` only. A client that reaches mcpproxy by another name (a Docker or Kubernetes service name, a VM host name, a tailnet name) cannot verify it. Either of these fixes that; without either, startup is unchanged.
+
+**`extra_sans`**: names for the generated certificate.
+
+```json
+{ "tls": { "enabled": true, "extra_sans": ["mcp.internal", "mcpproxy.tail1234.ts.net", "10.0.0.5"] } }
+```
+
+- Each entry is a host name or an IP address. Wildcards (`*.example.com`), URLs, ports and empty entries are refused at startup with an error that names the entry. Host names are lower-cased; non-ASCII names must be given in punycode.
+- When `localhost.pem` does not carry exactly `localhost`, `127.0.0.1`, `::1` and the listed names, it is replaced with a new certificate and key signed by the **same** CA. `ca.pem` and `ca.key` are never regenerated, so clients that trust `ca.pem` (`mcpproxy trust-cert`, `NODE_EXTRA_CA_CERTS`) keep working with no new step. A restart with an unchanged list rewrites nothing, and emptying the list replaces it with a plain `localhost` certificate (one the local CA did not sign is left as it is).
+- With an empty list an existing `localhost.pem` is used as it is. If `localhost.pem` was not issued by the local CA and does not carry the listed names (for example one you placed there by hand), startup stops instead of overwriting it; use `cert_file` and `key_file` for such a certificate.
+- The new certificate is valid for one year from the day it is written. There is no automatic renewal.
+- Environment variable: `MCPPROXY_TLS_EXTRA_SANS` (comma-separated).
+
+**`cert_file` and `key_file`**: serve a certificate you provide (a public or internal CA, `certbot`, a Docker or Kubernetes secret mount).
+
+```json
+{ "tls": { "enabled": true, "cert_file": "/run/secrets/mcpproxy.crt", "key_file": "/run/secrets/mcpproxy.key" } }
+```
+
+- Set both or neither, as absolute paths to PEM files. A certificate chain goes in `cert_file`, leaf first. The files are read with the same rules as `MCPPROXY_API_KEY_FILE`: a symlink is followed (Kubernetes secret volumes), the target must be a regular file of at most 64 KiB.
+- If only one is set, a file cannot be read, or the key does not belong to the certificate, startup stops with an error that names the setting and never shows file content.
+- Nothing is generated and `extra_sans` is refused alongside it, since the certificate you provide decides the names. The local CA is created only when `require_client_cert` is on, because client certificates are verified against it.
+- The files are read once at startup. After the certificate is renewed, restart mcpproxy.
+- Environment variables: `MCPPROXY_TLS_CERT_FILE` and `MCPPROXY_TLS_KEY_FILE`.
+
+Changing any of the three settings needs a restart.
 
 ---
 
@@ -1867,6 +1941,9 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_TLS_ENABLED` | `tls.enabled` | Enable HTTPS/TLS |
 | `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | `tls.require_client_cert` | Enable mTLS |
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |
+| `MCPPROXY_TLS_EXTRA_SANS` | `tls.extra_sans` | Comma-separated host names and IP addresses added to the generated certificate |
+| `MCPPROXY_TLS_CERT_FILE` | `tls.cert_file` | Absolute path of a server certificate to serve instead of the generated one |
+| `MCPPROXY_TLS_KEY_FILE` | `tls.key_file` | Absolute path of the private key for `MCPPROXY_TLS_CERT_FILE` |
 | `MCPPROXY_DATA_DIR` | `data_dir` | Override data directory; also where `serve` looks for `mcp_config.json` (same as `--data-dir`) |
 | `MCPPROXY_DATA` | `data_dir` | Override data directory only (legacy name; `MCPPROXY_DATA_DIR` wins) |
 | `MCPPROXY_TOOL_RESPONSE_MODE` | `tool_response_mode` | `retrieve_tools` serialization: `full` (default) or `compact` |
