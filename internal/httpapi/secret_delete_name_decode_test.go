@@ -47,3 +47,35 @@ func TestDeleteSecret_DecodesNameParam(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
 	assert.Equal(t, []string{"openai:prod"}, kr.deleted)
 }
+
+// A name whose only escape is a literal %XX (e.g. "a%41", sent by the Web UI as
+// "a%2541") leaves RawPath empty, so chi matches the already-decoded Path and
+// {name} must not be decoded a second time, or another entry ("aA") is deleted.
+func TestDeleteSecret_LiteralPercentNameNotDoubleDecoded(t *testing.T) {
+	cases := map[string]string{
+		"/api/v1/secrets/a%2541":        "a%41",
+		"/api/v1/secrets/k%253Ap":       "k%3Ap",
+		"/api/v1/secrets/a%252Fb":       "a%2Fb",
+		"/api/v1/secrets/openai%3Aprod": "openai:prod",
+		"/api/v1/secrets/x%2Fy":         "x/y",
+		"/api/v1/secrets/100%25":        "100%",
+		"/api/v1/secrets/plain":         "plain",
+	}
+	for path, want := range cases {
+		t.Run(want, func(t *testing.T) {
+			kr := &recordingKeyring{}
+			res := secret.NewResolver()
+			res.RegisterProvider(secretTypeKeyring, kr)
+			ctrl := &secretResolverController{MockServerController: &MockServerController{}, resolver: res}
+			srv := NewServer(ctrl, zaptest.NewLogger(t).Sugar(), nil)
+
+			req := httptest.NewRequest(http.MethodDelete, path+"?type=keyring", http.NoBody)
+			req.Header.Set("X-API-Key", mockControllerAPIKey)
+			w := httptest.NewRecorder()
+			srv.ServeHTTP(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+			assert.Equal(t, []string{want}, kr.deleted)
+		})
+	}
+}
