@@ -38,6 +38,48 @@ func NewSecretSanitizer(core zapcore.Core) *SecretSanitizer {
 
 // registerDefaultPatterns registers patterns for common secret formats
 func (s *SecretSanitizer) registerDefaultPatterns() {
+	// Patterns run in order over the already-rewritten string, and every mask
+	// inserts "***", which no pattern's character class accepts. A pattern
+	// whose match can contain another pattern's match must therefore run
+	// first, or it stops at the inserted mask and logs the rest in clear.
+
+	// Generic Bearer tokens. First: the credential may start with a known key
+	// prefix (sk-, ghp_, ...) and carry more after it.
+	s.patterns = append(s.patterns, &secretPattern{
+		name:  "bearer_token",
+		regex: regexp.MustCompile(`\b(Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*)\b`),
+		maskFunc: func(token string) string {
+			parts := strings.SplitN(token, " ", 2)
+			if len(parts) != 2 {
+				return "Bearer ****"
+			}
+			if len(parts[1]) <= 4 {
+				return "Bearer ****"
+			}
+			return "Bearer " + parts[1][:4] + "***" + parts[1][len(parts[1])-2:]
+		},
+	})
+
+	// JWT tokens (eyJ...). Before the key patterns, whose \b can fire after a
+	// '-' inside a segment, and before high_entropy, which stops at the first
+	// '.' and masks only the header. The signature may be empty (alg: none);
+	// no trailing \b, since nothing but a non-word char can follow a '.'.
+	s.patterns = append(s.patterns, &secretPattern{
+		name:  "jwt",
+		regex: regexp.MustCompile(`\b(eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]*)`),
+		maskFunc: func(jwt string) string {
+			parts := strings.Split(jwt, ".")
+			if len(parts) != 3 {
+				return "****"
+			}
+			if len(parts[2]) < 4 {
+				return parts[0] + ".***.***"
+			}
+			// Show first part (header) but mask payload and signature
+			return parts[0] + ".***." + parts[2][len(parts[2])-4:]
+		},
+	})
+
 	// GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_)
 	// Open-ended length ({36,}): the new stateless token format can be ~520 chars,
 	// and an alphanumeric run has no \b boundary mid-token to stop a fixed upper bound.
@@ -78,47 +120,12 @@ func (s *SecretSanitizer) registerDefaultPatterns() {
 		},
 	})
 
-	// Generic Bearer tokens
-	s.patterns = append(s.patterns, &secretPattern{
-		name:  "bearer_token",
-		regex: regexp.MustCompile(`\b(Bearer\s+[A-Za-z0-9\-\._~\+\/]+=*)\b`),
-		maskFunc: func(token string) string {
-			parts := strings.SplitN(token, " ", 2)
-			if len(parts) != 2 {
-				return "Bearer ****"
-			}
-			if len(parts[1]) <= 4 {
-				return "Bearer ****"
-			}
-			return "Bearer " + parts[1][:4] + "***" + parts[1][len(parts[1])-2:]
-		},
-	})
-
 	// AWS keys (AKIA...)
 	s.patterns = append(s.patterns, &secretPattern{
 		name:  "aws_key",
 		regex: regexp.MustCompile(`\b(AKIA[0-9A-Z]{16})\b`),
 		maskFunc: func(key string) string {
 			return key[:8] + "***" + key[len(key)-2:]
-		},
-	})
-
-	// JWT tokens (eyJ...). Must run before high_entropy: that pattern stops
-	// at the first '.', masks only the header, and leaves nothing for this
-	// regex to match, so the payload and signature would be logged in clear.
-	s.patterns = append(s.patterns, &secretPattern{
-		name:  "jwt",
-		regex: regexp.MustCompile(`\b(eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)\b`),
-		maskFunc: func(jwt string) string {
-			parts := strings.Split(jwt, ".")
-			if len(parts) != 3 {
-				return "****"
-			}
-			if len(parts[2]) < 4 {
-				return parts[0] + ".***.***"
-			}
-			// Show first part (header) but mask payload and signature
-			return parts[0] + ".***." + parts[2][len(parts[2])-4:]
 		},
 	})
 
