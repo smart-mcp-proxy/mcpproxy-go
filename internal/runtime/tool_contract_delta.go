@@ -364,8 +364,7 @@ func canonicalValue(v any) any {
 	case string:
 		return []any{"s", t}
 	case []any:
-		out := make([]any, 0, len(t)+1)
-		out = append(out, "a")
+		out := []any{"a"}
 		for _, child := range t {
 			out = append(out, canonicalValue(child))
 		}
