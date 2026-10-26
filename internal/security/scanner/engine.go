@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"io"
 	"os"
 	"path/filepath"
@@ -16,6 +15,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 )
 
 // SecretResolverFunc resolves a secret reference like ${keyring:name} to its value
@@ -170,6 +171,19 @@ type ScanRequest struct {
 	// it is failed, while scanners independent of tool metadata (supply-chain
 	// / CVE analysis) still run.
 	ToolDefinitionsUnavailable bool
+	// pinnedBundle, when set, is the TPA signature bundle the in-process
+	// scanner must use instead of resolving the active one when it finally
+	// runs. A cached re-protection scan (Spec 101 B17) is labelled with the
+	// digest of the bundle it covers; pinning the (check, info) pair it was
+	// admitted against keeps that label true even if a newer bundle activates
+	// between registration and the asynchronous detector read.
+	pinnedBundle *pinnedBundle
+}
+
+// pinnedBundle is one consistent (check, info) snapshot of the active bundle.
+type pinnedBundle struct {
+	check *BundleCheck
+	info  BundleInfo
 }
 
 // toolMetadataIndependentScanners are the scanners whose analysis never uses
@@ -322,7 +336,27 @@ var ErrScanInProgress = errors.New("scan already in progress")
 
 // StartScan begins a scan of the specified server
 // Returns the scan job immediately; scanning runs in the background
-func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCallback) (*ScanJob, error) {
+func (e *Engine) StartScan(_ context.Context, req ScanRequest, callback ScanCallback) (*ScanJob, error) {
+	// Detached on purpose: the HTTP request context that usually reaches here
+	// may be cancelled once the response is sent, which must not kill the scan.
+	return e.startScan(context.Background(), req, callback)
+}
+
+// StartScanBound is StartScan with a caller-owned execution context: the scan
+// runs under execCtx instead of a detached one, so the caller's lifecycle
+// (a sweep, a shutdown) ends it. The returned job's Done channel closes once
+// the scan goroutine has returned, i.e. after its completion callback ran, so
+// the caller can join the worker before the stores it writes to close.
+func (e *Engine) StartScanBound(execCtx context.Context, req ScanRequest, callback ScanCallback) (*ScanJob, error) {
+	return e.startScan(execCtx, req, callback)
+}
+
+func (e *Engine) startScan(execCtx context.Context, req ScanRequest, callback ScanCallback) (*ScanJob, error) {
+	// A lifecycle that already ended starts nothing (no job is registered, no
+	// callback fires), so a stopping caller leaves no record behind.
+	if err := execCtx.Err(); err != nil {
+		return nil, err
+	}
 	if callback == nil {
 		callback = &NoopCallback{}
 	}
@@ -377,6 +411,7 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 		ScanContext: req.ScanContext,
 		Incarnation: req.Incarnation,
 	}
+	finish := job.TrackCompletion()
 	for i, rs := range resolved {
 		job.Scanners[i] = rs.plugin.ID
 		job.ScannerStatuses = append(job.ScannerStatuses, ScannerJobStatus{
@@ -394,9 +429,11 @@ func (e *Engine) StartScan(ctx context.Context, req ScanRequest, callback ScanCa
 
 	callback.OnScanStarted(started)
 
-	// Run scanners in background with detached context
-	// (the HTTP request context may be cancelled after the response is sent)
-	go e.executeScan(context.Background(), job, resolved, req, callback)
+	// Run scanners in the background under execCtx (detached for StartScan).
+	go func() {
+		defer finish()
+		e.executeScan(execCtx, job, resolved, req, callback)
+	}()
 
 	return returned, nil
 }

@@ -185,3 +185,33 @@ func TestServersProfileCallerPin(t *testing.T) {
 		})
 	}
 }
+
+// Issue #1682: a bare GET /servers (no ?profile=) by a profile-pinned token must
+// be held to the caller's own pin, as GET /tools is. Before the fix the token's
+// AllowedServers ("*") was the only gate, so every configured server listed.
+func TestServersBareListHeldToCallerPin(t *testing.T) {
+	for _, branch := range []struct {
+		name           string
+		withManagement bool
+	}{{"management service", true}, {"legacy fallback", false}} {
+		t.Run(branch.name, func(t *testing.T) {
+			srv, token := callerPinServer(t, branch.withManagement)
+
+			data := callerPinGet(t, srv, "/api/v1/servers", token)
+			assert.Equal(t, map[string]float64{"github": 1}, serverRows(data),
+				"notion and filesystem are outside the caller's pin; github counts only read_* tools")
+
+			stats := data["stats"].(map[string]interface{})
+			assert.Equal(t, float64(1), stats["total_servers"], "stats must narrow with the list")
+			assert.Equal(t, float64(1), stats["total_tools"])
+
+			// Bare listing equals the listing the same caller gets for its own pin.
+			own := serverRows(callerPinGet(t, srv, "/api/v1/servers?profile=work-readonly", token))
+			assert.Equal(t, own, serverRows(data))
+
+			// The administrator path is unchanged.
+			admin := serverRows(callerPinGet(t, srv, "/api/v1/servers", scopeAdminAPIKey))
+			assert.Len(t, admin, 3, "an administrator still lists every configured server")
+		})
+	}
+}

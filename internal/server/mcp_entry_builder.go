@@ -15,7 +15,7 @@ import (
 // "hint") to every compact-mode retrieve_tools response (Spec 085 FR-009).
 // It explains the lossy marker and the describe_tool second stage; being part
 // of the serialized payload it counts toward every measured response size.
-const compactModeHint = "sig legend: name*:type = required param, ~ = collapsed/lossy (details omitted), (~) = schema unavailable. Before calling a tool whose entry is lossy:true, call describe_tool with its id to get the full input schema."
+const compactModeHint = "sig legend: name*:type = required param, ~ = collapsed/lossy (details omitted), (~) = schema unavailable. Follow the call_with route exactly; it matches the full tool result, including the existing read fallback when no tier annotations are available. Never infer a route from the name, description, command text, or requested outcome. Before calling a lossy entry, call describe_tool for its full input schema."
 
 // toolEntryOpts carries the per-request options that shape one retrieve_tools
 // result entry (Spec 085 entry-builder seam, research.md R5).
@@ -47,8 +47,9 @@ type toolEntryOpts struct {
 //     built inline before the extraction — byte-identical under
 //     json.Marshal, guarded by the T011 golden test (FR-006/SC-003).
 //   - mode compact (US1, FR-002): {id, score, sig, desc, lossy} rendered
-//     from the shared p.sigCache — no inputSchema, no full description, no
-//     annotations (those move to describe_tool / self-healing errors).
+//     from the shared p.sigCache, plus the same call_with route as full mode.
+//     No inputSchema, full description, or annotations
+//     (those move to describe_tool / self-healing errors).
 //
 // Cross-cutting response sections (usage_instructions, disabled/remediation,
 // notice, session_risk, debug, usage_summary) intentionally stay in
@@ -69,8 +70,9 @@ func (p *MCPProxyServer) buildToolEntry(result *config.SearchResult, mode string
 // here.
 //
 // include_stats is intentionally ignored in compact mode: the compact entry
-// shape is fixed at exactly {id, score, sig, desc, lossy} (data-model §4);
-// the top-level usage_summary section still renders in the handler.
+// shape is {id, score, sig, desc, lossy, call_with}, with call_with derived
+// from the same annotations and fallback as full mode; the top-level
+// usage_summary section still renders in the handler.
 func (p *MCPProxyServer) buildCompactToolEntry(result *config.SearchResult) map[string]interface{} {
 	tool := result.Tool
 
@@ -94,13 +96,34 @@ func (p *MCPProxyServer) buildCompactToolEntry(result *config.SearchResult) map[
 		}
 	}
 
-	return map[string]interface{}{
+	entry := map[string]interface{}{
 		"id":    tool.Name,
 		"score": result.Score,
 		"sig":   sig.Sig,
 		"desc":  sig.Desc,
 		"lossy": sig.Lossy,
 	}
+	entry["call_with"] = p.compactToolCallWith(result)
+	return entry
+}
+
+// compactToolCallWith mirrors buildFullToolEntry's route selection so compact
+// entries preserve the existing dispatch classification, including its read
+// fallback when no upstream tier hints are available.
+func (p *MCPProxyServer) compactToolCallWith(result *config.SearchResult) string {
+	if result == nil || result.Tool == nil {
+		return contracts.ToolVariantRead
+	}
+	serverName := result.Tool.ServerName
+	toolName := result.Tool.Name
+	if serverName == "" {
+		parts := strings.SplitN(result.Tool.Name, ":", 2)
+		if len(parts) != 2 {
+			return contracts.ToolVariantRead
+		}
+		serverName, toolName = parts[0], parts[1]
+	}
+	return contracts.DeriveCallWith(p.lookupToolAnnotations(serverName, toolName))
 }
 
 // buildFullToolEntry reproduces today's full-mode entry exactly

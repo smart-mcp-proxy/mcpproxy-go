@@ -91,7 +91,7 @@ describe('ManualServerForm', () => {
       name: 'fs-server',
       protocol: 'stdio',
       enabled: true,
-      trust_mode: 'manual',
+      trust_mode: 'scan',
       command: 'npx',
       args_json: JSON.stringify(['-y', '@scope/server', '/tmp']),
     })
@@ -115,7 +115,7 @@ describe('ManualServerForm', () => {
       name: 'remote',
       protocol: 'http',
       enabled: true,
-      trust_mode: 'manual',
+      trust_mode: 'scan',
       url: 'https://api.example.com/mcp',
     })
     expect(wrapper.emitted('added')).toEqual([['remote']])

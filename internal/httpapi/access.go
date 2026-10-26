@@ -36,6 +36,35 @@ func (s *Server) handleAccessExplain(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, res)
 }
 
+// handleAccessSuggest godoc
+// @Summary Suggest profile changes from blocked calls
+// @Description Reads the profile refusals in the activity log over a look-back window and groups them by profile, tool and block reason. Each group is re-checked with the access explainer, so tools that are already reachable drop out, and carries the explainer's fixes. A deny-rule block is reported and never offered for widening; an unannotated tool is never given a tier. Nothing is applied. patch=true also returns the proposed profile document per profile (the body PUT /api/v1/profiles/{name} takes).
+// @Tags access
+// @Produce json
+// @Param since query string false "Look-back window: a duration such as 90m, 24h or 7d (default 24h; the audit-log retention is the only limit)"
+// @Param profile query string false "Only refusals under this profile"
+// @Param token query string false "Only refusals of this token"
+// @Param patch query boolean false "Also return the proposed profile document per profile"
+// @Security ApiKeyAuth
+// @Security ApiKeyQuery
+// @Success 200 {object} contracts.APIResponse{data=AccessSuggestionsData} "The suggestions"
+// @Failure 400 {object} contracts.ErrorResponse "Invalid since"
+// @Failure 403 {object} contracts.ErrorResponse "Administrator credentials required"
+// @Failure 503 {object} contracts.ErrorResponse "Service unavailable"
+// @Router /api/v1/access/suggest [get]
+func (s *Server) handleAccessSuggest(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	res, err := s.SuggestAccess(r.Context(), SuggestRequest{
+		Since: q.Get("since"), Profile: q.Get("profile"), Token: q.Get("token"),
+		Patch: q.Get("patch") == "true",
+	})
+	if err != nil {
+		s.writeProfileServiceError(w, r, err)
+		return
+	}
+	s.writeSuccess(w, res)
+}
+
 // looksLikeUpstreamTool reports whether tool is "server:tool" with both parts
 // non-empty. A built-in management tool (upstream_servers, retrieve_tools, ...)
 // has no server segment.

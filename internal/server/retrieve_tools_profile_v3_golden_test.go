@@ -8,10 +8,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Spec 108 (Profiles v3) T021: the one new golden this PR adds
-// (contracts/mcp-tools.md "Frozen goldens"). Legacy goldens
-// (retrieve_full_default.golden.json etc.) are untouched (SC-003) — this
-// file adds a NEW golden for the NEW non-legacy response shape only.
+// Spec 108 (Profiles v3) T021: profile-surface golden for the new response
+// shape (contracts/mcp-tools.md "Frozen goldens"). This golden is refreshed
+// alongside the other retrieve_tools response goldens when the compact
+// routing guidance changes.
 // Regenerate with: UPDATE_GOLDEN=1 go test ./internal/server -run
 // TestRetrieveToolsProfileV3_GoldenByteIdentity
 func TestRetrieveToolsProfileV3_GoldenByteIdentity(t *testing.T) {

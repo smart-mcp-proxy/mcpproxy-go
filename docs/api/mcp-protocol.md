@@ -34,7 +34,23 @@ Each routing mode has a dedicated endpoint that is always available regardless o
 
 See [Routing Modes](../features/routing-modes.md) for details on each mode.
 
-**Note:** MCP endpoints do not require API key authentication for client compatibility.
+### Authentication
+
+Authentication depends on the deployment and transport:
+
+| Surface | Authentication |
+| --- | --- |
+| Local MCP over HTTP, default configuration | Authentication is optional (`require_mcp_auth: false`). Anonymous callers retain admin-level tool and management access for compatibility, subject to enabled tools and configuration gates; they cannot use the opt-in raw secret-header reveal. |
+| MCP over HTTP with `require_mcp_auth: true` | Requires a valid credential, such as an admin API key or a scoped agent token. Enable this before exposing MCP beyond localhost. |
+| Server edition with `server_edition.enabled: true` | Forces MCP authentication on, even if `require_mcp_auth` is explicitly false. |
+| REST API over HTTP | Requires authentication independently of `require_mcp_auth`. |
+| Local Unix socket / Windows named pipe | Uses OS-level access control; trusted local connections do not need an API key. |
+
+See [configuration defaults](/configuration/config-file#server-settings),
+[agent tokens and MCP authentication](/features/agent-tokens#enforcing-authentication-on-mcp),
+[REST authentication](/api/rest-api#authentication), and
+[Server edition authentication](/development/server-edition-multiuser-auth)
+for credential formats and access rules.
 
 ## Built-in Tools
 

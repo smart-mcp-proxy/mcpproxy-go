@@ -165,7 +165,16 @@ type CallbackServer struct {
 	waitersMu         sync.Mutex
 	waiters           map[string]chan map[string]string
 	remoteCallbackURL string // protected by waitersMu
+	// invalidated maps a state whose flow gave up (its instance was retired
+	// while it waited, GH #1722) to the reason, so the callback that arrives
+	// later can say why the login was invalidated. Protected by waitersMu;
+	// bounded by maxInvalidatedStates, oldest dropped first.
+	invalidated      map[string]string
+	invalidatedOrder []string
 }
+
+// maxInvalidatedStates bounds CallbackServer.invalidated.
+const maxInvalidatedStates = 16
 
 var globalCallbackManager = &CallbackServerManager{
 	servers: make(map[string]*CallbackServer),
@@ -1832,6 +1841,42 @@ func (c *CallbackServer) UnregisterState(state string) {
 	}
 }
 
+// InvalidateState drops the waiter for a state whose flow cannot finish any
+// more (GH #1722: the instance that owns it was retired while the person was
+// still signing in) and remembers reason, so the browser callback that lands
+// afterwards renders a failure page that says so instead of the generic
+// "unknown or expired state". A state nobody is waiting for is left alone.
+func (c *CallbackServer) InvalidateState(state, reason string) {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+	if _, exists := c.waiters[state]; !exists {
+		return
+	}
+	delete(c.waiters, state)
+	if c.invalidated == nil {
+		c.invalidated = make(map[string]string)
+	}
+	if _, known := c.invalidated[state]; !known {
+		c.invalidatedOrder = append(c.invalidatedOrder, state)
+		for len(c.invalidatedOrder) > maxInvalidatedStates {
+			delete(c.invalidated, c.invalidatedOrder[0])
+			c.invalidatedOrder = c.invalidatedOrder[1:]
+		}
+	}
+	c.invalidated[state] = reason
+	c.logger.Warn("OAuth login invalidated while waiting for the callback",
+		zap.String("state", StateFingerprint(state)),
+		zap.String("reason", reason))
+}
+
+// invalidationReason returns why a state's flow was invalidated, "" when it
+// was not.
+func (c *CallbackServer) invalidationReason(state string) string {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+	return c.invalidated[state]
+}
+
 // waiterCount reports how many flows are currently parked on this server.
 // Used to decide whether a cached server may be torn down: replacing one that
 // still has a waiter drops a live flow, whose browser then lands on a closed
@@ -1892,29 +1937,6 @@ func (c *CallbackServer) dropAllWaiters() int {
 	return dropped
 }
 
-// callbackPage renders the page the user's browser lands on. Success is only
-// ever reported when the authorization code was actually delivered to the flow
-// that asked for it (issue #975).
-func callbackPage(title, message string) string {
-	closeScript := ""
-	if title == "Authorization Successful" {
-		closeScript = `
-				<script>
-					setTimeout(function() {
-						window.close();
-					}, 2000);
-				</script>`
-	}
-	return fmt.Sprintf(`
-		<html>
-			<body>
-				<h1>%s</h1>
-				<p>%s</p>%s
-			</body>
-		</html>
-	`, html.EscapeString(title), html.EscapeString(message), closeScript)
-}
-
 // handleRequest is the callback listener's only handler: it logs the request,
 // then either delivers a real callback or renders the debug page. A method
 // rather than a closure in StartCallbackServerOnHost so the log fields it
@@ -1943,7 +1965,7 @@ func (c *CallbackServer) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	debugPage := fmt.Sprintf(`
 		<html>
 			<body>
@@ -2016,10 +2038,13 @@ func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWr
 			GetTokenStoreManager().RecordOAuthFailure(c.ServerName, reason)
 		}
 
-		c.writePage(w, http.StatusBadRequest, callbackPage(
-			"Authorization Failed",
-			fmt.Sprintf("mcpproxy is not waiting for this sign-in (unknown or expired state). "+
-				"Nothing was signed in. Start the login again from mcpproxy for '%s'.", c.ServerName)))
+		message := fmt.Sprintf("mcpproxy is not waiting for this sign-in (unknown or expired state). "+
+			"Nothing was signed in. Start the login again from mcpproxy for '%s'.", c.ServerName)
+		if why := c.invalidationReason(state); why != "" {
+			message = fmt.Sprintf("This sign-in was invalidated before it could finish: %s. "+
+				"Nothing was signed in. Start the login again from mcpproxy for '%s'.", why, c.ServerName)
+		}
+		c.writePage(w, http.StatusBadRequest, callbackPage(callbackTitleFailed, message))
 		return
 	}
 
@@ -2034,19 +2059,19 @@ func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWr
 			message = providerErr + ": " + desc
 		}
 		c.writePage(w, http.StatusBadRequest, callbackPage(
-			"Authorization Failed",
+			callbackTitleFailed,
 			fmt.Sprintf("The authorization server rejected the request (%s). You can close this window and try again.", message)))
 		return
 	}
 
 	c.writePage(w, http.StatusOK, callbackPage(
-		"Authorization Successful",
+		callbackTitleSuccess,
 		"You can now close this window and return to the application."))
 }
 
 // writePage writes an HTML response for the callback browser window.
 func (c *CallbackServer) writePage(w http.ResponseWriter, status int, page string) {
-	w.Header().Set("Content-Type", "text/html")
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(status)
 	if _, err := w.Write([]byte(page)); err != nil {
 		c.logger.Error("Error writing OAuth callback response", zap.Error(err))

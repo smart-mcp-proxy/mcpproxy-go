@@ -84,7 +84,7 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 	upstream := httptest.NewServer(held)
 	t.Cleanup(upstream.Close)
 
-	cfg := &config.ServerConfig{Name: "trusted", URL: upstream.URL, Protocol: "streamable-http", Enabled: true}
+	cfg := &config.ServerConfig{Name: "trusted", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, TrustMode: string(config.TrustModeManual)}
 	rt, err := New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0", Servers: []*config.ServerConfig{cfg}}, "", zap.NewNop())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
@@ -92,7 +92,7 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 	// A server that already went through admission: known to config.db,
 	// unquarantined, with the approved baseline.
 	require.NoError(t, rt.storageManager.SaveUpstreamServer(&config.ServerConfig{
-		Name: "trusted", URL: upstream.URL, Protocol: "streamable-http", Enabled: true,
+		Name: "trusted", URL: upstream.URL, Protocol: "streamable-http", Enabled: true, TrustMode: string(config.TrustModeManual),
 	}))
 	approvedSchema := normalizeJSON(`{"type":"object","properties":{},"required":[]}`)
 	approvedHash := calculateToolApprovalHashWithOutputSchema("calendar_get_events", "Lists calendar events.", approvedSchema, "", nil)

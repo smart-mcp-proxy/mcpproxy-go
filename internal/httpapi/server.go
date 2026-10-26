@@ -264,7 +264,7 @@ type ServerController interface {
 	// Activity logging (RFC-003)
 	ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error)
 	GetActivity(id string) (*storage.ActivityRecord, error)
-	StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord
+	StreamActivities(ctx context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord
 	// AggregateToolUsage rolls up tool_call activity per (server,tool) since the
 	// given time. Backs the global tools page usage columns (spec 050).
 	AggregateToolUsage(since time.Time) (map[string]storage.ToolUsageStat, error)
@@ -1076,6 +1076,7 @@ func (s *Server) setupRoutes() {
 		r.Post("/profiles/{name}/rename", s.requireServerOp(auth.ServerOpConfigWrite, s.handleRenameProfile)) // guarded: MutateConfig
 		r.Get("/profiles/{name}/effective-tools", s.handleProfileEffectiveTools)
 		r.Get("/access/explain", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAccessExplain))
+		r.Get("/access/suggest", s.requireServerOp(auth.ServerOpConfigWrite, s.handleAccessSuggest)) // read-only: applies nothing
 		// #1166 round 11: the ONLY mutating route in this group, and it was
 		// ungated. The active profile is server-level shared state — it decides
 		// which servers the Web UI and the tray render — so a READ-scoped agent
@@ -1313,6 +1314,16 @@ func (s *Server) setupRoutes() {
 			r.Put("/scanners/{id}/config", s.requireServerOp(auth.ServerOpScan, s.handleConfigureScanner))
 			r.Get("/scanners/{id}/status", s.handleGetScannerStatus)
 			r.Get("/overview", s.handleSecurityOverview)
+
+			// Spec 101 TPA signature bundle. Status and history are admin-read;
+			// the mutations (a rollback overrides the downgrade watermark) are
+			// refused to agent tokens.
+			r.Get("/bundle", s.handleGetSecurityBundle)
+			r.Get("/bundle/history", s.handleGetSecurityBundleHistory)
+			r.Post("/bundle/rollback", s.requireServerOp(auth.ServerOpBundleManage, s.handleRollbackSecurityBundle))
+			r.Post("/bundle/unpin", s.requireServerOp(auth.ServerOpBundleManage, s.handleUnpinSecurityBundle))
+			r.Post("/bundle/reload", s.requireServerOp(auth.ServerOpBundleManage, s.handleReloadSecurityBundle))
+			r.Post("/bundle/refresh", s.requireServerOp(auth.ServerOpBundleManage, s.handleRefreshSecurityBundle))
 
 			// Legacy routes (backwards compatibility)
 			r.Post("/scanners/install", s.requireServerOp(auth.ServerOpScan, s.handleInstallScanner))
@@ -2012,6 +2023,9 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 		if viewAsEval != nil {
 			serverValues = s.limitServersToProfile(r.Context(), serverValues, viewAs, viewAsEval)
 			statsValue = statsForServers(serverValues)
+		} else if limited, ok := s.limitServersToCallerPin(r.Context(), serverValues); ok {
+			serverValues = limited
+			statsValue = statsForServers(serverValues)
 		}
 
 		response := contracts.GetServersResponse{
@@ -2049,6 +2063,9 @@ func (s *Server) handleGetServers(w http.ResponseWriter, r *http.Request) {
 	stats := contracts.ConvertUpstreamStatsToServerStats(filterUpstreamStatsServers(r.Context(), s.controller.GetUpstreamStats()))
 	if viewAsEval != nil {
 		servers = s.limitServersToProfile(r.Context(), servers, viewAs, viewAsEval)
+		stats = statsForServers(servers)
+	} else if limited, ok := s.limitServersToCallerPin(r.Context(), servers); ok {
+		servers = limited
 		stats = statsForServers(servers)
 	}
 
@@ -5602,7 +5619,7 @@ func (s *Server) maskToolCallRecord(record *contracts.ToolCallRecord) {
 // @Failure      400      {object}  contracts.ErrorResponse             "Tool call ID required or invalid JSON payload"
 // @Failure      401      {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
 // @Failure      405      {object}  contracts.ErrorResponse             "Method not allowed"
-// @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit (Retry-After header carries the wait hint)"
+// @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure      500      {object}  contracts.ErrorResponse             "Failed to replay tool call"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
@@ -5658,8 +5675,7 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 		// and certainly not the 200 success:true it used to produce when the
 		// rejection was flattened into the record's error field.
 		var limitErr *limiter.LimitError
-		if errors.As(err, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(err, &limitErr) && limitErr.Shed() {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
 			s.logger.Warnw("Tool call replay shed by concurrency limiter",
 				"id", id,
@@ -6248,7 +6264,7 @@ func deepMergeJSON(base, patch map[string]interface{}) {
 // @Param request body object{tool_name=string,arguments=object} true "Tool call request with tool name and arguments"
 // @Success 200 {object} contracts.SuccessResponse "Tool call result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (invalid payload or missing tool name)"
-// @Failure 429 {object} contracts.ErrorResponse "Shed by a concurrency limit (Retry-After header carries the wait hint)"
+// @Failure 429 {object} contracts.ErrorResponse "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error or tool execution failure"
 // @Router /api/v1/tools/call [post]
 func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
@@ -6278,6 +6294,9 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	// logged every Web-UI tool call — and every shed of one — as if it came from
 	// the CLI. The surface header the clients already send is the discriminator.
 	ctx := reqcontext.WithRequestSource(r.Context(), toolCallRequestSource(r))
+	if r.Header.Get("X-MCPProxy-Result-Envelope") == "1" {
+		ctx = reqcontext.WithToolResultEnvelope(ctx)
+	}
 
 	// Call tool via controller
 	result, err := s.controller.CallTool(ctx, request.ToolName, request.Arguments)
@@ -6298,8 +6317,7 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 		// server fault — answer 429 with a Retry-After derived from the shedding
 		// scope's effective queue_timeout so a client can back off correctly.
 		var limitErr *limiter.LimitError
-		if errors.As(err, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(err, &limitErr) && limitErr.Shed() {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
 			s.logger.Warnw("Tool call shed by concurrency limiter",
 				"tool", request.ToolName,

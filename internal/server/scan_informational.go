@@ -9,22 +9,28 @@ import (
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Informational Pass-1 baseline scanning.
 //
 // The spec-086 admission scan (maybeStartAdmissionScan) only fires for
-// trust_mode:"scan" servers, which is never the default — so on a stock install
-// nothing ever triggered the free, in-process TPA baseline scan and the security
-// badges stayed empty forever. This file adds the two paths that fix that:
+// trust_mode:"scan" servers. Before spec 119 made scan the default tier, a stock
+// install never triggered the free, in-process TPA baseline scan and the
+// security badges stayed empty forever; manual and auto servers still need
+// these two paths:
 //
 //  1. every NEW server, in ANY trust mode, gets one baseline scan when it is
 //     admitted (maybeStartInformationalScans, driven by servers.changed), and
 //  2. once per installation, pre-existing never-scanned servers are swept
 //     (runBaselineSweep, driven by startup behind a persisted marker).
 //
-// Both are INFORMATIONAL: the result is stored through the normal scan-summary
+// A third path (Spec 118, see maybeStartInformationalRescan below) re-scans a
+// server a debounce after its tool inventory moves, so the review screen's scan
+// coverage returns to "current" instead of "stale".
+//
+// All are INFORMATIONAL: the result is stored through the normal scan-summary
 // path so the UI verdict/badge lights up, and it drives NO gating whatsoever.
 // Quarantine and approval semantics are untouched — servers the scan-mode
 // admission gate owns are deliberately skipped here so they are never scanned
@@ -315,6 +321,10 @@ func (s *Server) forgetInformationalScan(name string) {
 	delete(s.infoScanQueued, name)
 	delete(s.infoScanKnown, name)
 	delete(s.infoScanAttempts, name)
+	if pending := s.infoRescanTimers[name]; pending != nil {
+		pending.timer.Stop()
+		delete(s.infoRescanTimers, name)
+	}
 }
 
 // forgetInformationalScansOnPurge registers the purge observer that forgets a
@@ -391,6 +401,13 @@ func (s *Server) startInformationalScan(ctx context.Context, sc *config.ServerCo
 // informational scan in the process (admission scans and sweep alike), which is
 // what keeps the sweep from launching every server's scan at once.
 func (s *Server) runInformationalScan(ctx context.Context, name string) (int, error) {
+	return s.runInformationalScanGated(ctx, name, s.informationalScansEnabled)
+}
+
+// runInformationalScanGated is runInformationalScan with the kill switch it
+// re-reads at the last decision point supplied by the caller: the per-change
+// rescan also honours security.auto_rescan_on_change.
+func (s *Server) runInformationalScanGated(ctx context.Context, name string, enabled func() bool) (int, error) {
 	s.infoScanRunMu.Lock()
 	defer s.infoScanRunMu.Unlock()
 
@@ -404,7 +421,7 @@ func (s *Server) runInformationalScan(ctx context.Context, name string) (int, er
 	// the automatic scans they just switched off fire one by one. The documented
 	// contract is that the flag is read live at each decision point; this is the
 	// last decision point before a scan actually starts.
-	if !s.informationalScansEnabled() {
+	if !enabled() {
 		return 0, errInformationalScansDisabled
 	}
 	scanSvc := s.securityScannerSvc()
@@ -583,4 +600,217 @@ func (s *Server) runBaselineSweep(ctx context.Context) {
 		zap.Int("findings", findings),
 		zap.Int("servers_failed", failed),
 		zap.Int("servers_considered", len(servers)))
+}
+
+// ---------------------------------------------------------------------------
+// Spec 118: informational rescan after a tool-definition change.
+//
+// The admission scan and the one-shot sweep scan a server once. After that, a
+// tool whose definition changes (or a tool added after the baseline) is newer
+// than the last scan, and the review screen reports "Scan out of date ...
+// Rescan" until someone clicks. The runtime reports every post-baseline
+// inventory move (AddToolDefinitionsChangedObserver); this path re-scans the
+// server a few seconds later so the scan line returns to "current".
+//
+// Informational ONLY, like the other two paths: it starts a scan and nothing
+// else. It approves nothing, unquarantines nothing and changes no tool's
+// status (RT-02: a clean verdict never approves a changed contract). It reuses
+// the admission machinery: the per-server claim (infoScanQueued), execution
+// serialized behind infoScanRunMu, and the maxInformationalScanAttempts cap on
+// failed starts.
+// ---------------------------------------------------------------------------
+
+const (
+	// informationalRescanDebounce coalesces a burst of tool changes (one
+	// reconnect re-listing many tools, a server that keeps editing a
+	// description) into one rescan per server.
+	informationalRescanDebounce = 5 * time.Second
+	// maxRescanBusyRetries bounds how often a rescan that found the server's
+	// scan slot taken (a manual scan, the admission scan, Pass 2) is re-armed.
+	// A busy slot says nothing about the server, so it never consumes the
+	// failure budget; 36 x 5s outlasts the 2-minute informational settle wait.
+	maxRescanBusyRetries = 36
+)
+
+// infoRescanTimer is one server's pending debounce timer. seq identifies the
+// arming that created it, so a firing timer only clears its own entry.
+type infoRescanTimer struct {
+	timer *time.Timer
+	seq   uint64
+}
+
+// registerToolChangeRescan subscribes the debounced rescan to the runtime's
+// post-baseline tool-inventory changes. Registered at construction, like the
+// purge observer, so no change can slip in before HTTP startup.
+func (s *Server) registerToolChangeRescan() {
+	if s.runtime == nil {
+		return
+	}
+	s.runtime.AddToolDefinitionsChangedObserver(s.scheduleInformationalRescan)
+}
+
+// autoRescanEnabled resolves security.auto_baseline_scan AND
+// security.auto_rescan_on_change (each with its env override) against the live
+// config, and requires a scanner service.
+func (s *Server) autoRescanEnabled() bool {
+	if s.securityScannerSvc() == nil {
+		return false
+	}
+	var sec *config.SecurityConfig
+	if cfg := s.runtime.Config(); cfg != nil {
+		sec = cfg.Security
+	}
+	return sec.IsAutoChangeScanEnabled()
+}
+
+// rescanEligible reports whether a server may be rescanned after a tool change:
+// enabled (a scan would have to start it), not trust_mode auto (changes
+// auto-approve there, nothing is held for review), and not a quarantined
+// scan-mode server — the spec-086 admission gate owns those, and an
+// informational verdict must never reach its settle-driven auto-approval.
+// A scan-mode server that is NOT quarantined has no auto-approval to reach and
+// is rescanned; the residual window described on scanModeAdmissionOwns (an
+// operator who quarantines it mid-scan) applies to it unchanged.
+func rescanEligible(sc *config.ServerConfig) bool {
+	if sc == nil || sc.Name == "" || !sc.Enabled {
+		return false
+	}
+	if sc.EffectiveTrustMode() == config.TrustModeAuto {
+		return false
+	}
+	return !scanModeAdmissionOwns(sc) || !sc.Quarantined
+}
+
+// scheduleInformationalRescan arms (or re-arms) the server's debounce timer.
+// It runs on the discovery goroutine under the server's approval lock, so it
+// only reads the config and sets a timer.
+func (s *Server) scheduleInformationalRescan(name string) {
+	if name == "" || !s.autoRescanEnabled() {
+		return
+	}
+	s.armInformationalRescan(name, 0)
+}
+
+func (s *Server) armInformationalRescan(name string, busyRetries int) {
+	debounce := s.infoRescanDebounce
+	if debounce <= 0 {
+		debounce = informationalRescanDebounce
+	}
+	s.infoScanMu.Lock()
+	defer s.infoScanMu.Unlock()
+	if s.infoRescanTimers == nil {
+		s.infoRescanTimers = make(map[string]*infoRescanTimer)
+	}
+	if pending := s.infoRescanTimers[name]; pending != nil {
+		pending.timer.Stop() // coalesce: the newest change restarts the window
+	}
+	s.infoRescanSeq++
+	seq := s.infoRescanSeq
+	s.infoRescanTimers[name] = &infoRescanTimer{
+		seq: seq,
+		timer: time.AfterFunc(debounce, func() {
+			s.fireInformationalRescan(name, seq, busyRetries)
+		}),
+	}
+}
+
+// fireInformationalRescan is the debounce timer's callback: it re-evaluates
+// every gate (the switches, the server's state) at fire time, claims the
+// server and runs one informational scan.
+func (s *Server) fireInformationalRescan(name string, seq uint64, busyRetries int) {
+	s.infoScanMu.Lock()
+	if pending := s.infoRescanTimers[name]; pending != nil && pending.seq == seq {
+		delete(s.infoRescanTimers, name)
+	}
+	s.infoScanMu.Unlock()
+
+	ctx := s.informationalScanContext()
+	if ctx.Err() != nil || !s.autoRescanEnabled() {
+		return
+	}
+	var sc *config.ServerConfig
+	for _, candidate := range s.listStoredServers() {
+		if candidate != nil && candidate.Name == name {
+			sc = candidate
+			break
+		}
+	}
+	if !rescanEligible(sc) {
+		return
+	}
+
+	switch s.claimInformationalRescan(name) {
+	case rescanClaimed:
+	case rescanBusy:
+		// A scan of this server is queued or running. The change may have landed
+		// after that scan read the tool list, so look again after the window.
+		if busyRetries < maxRescanBusyRetries {
+			s.armInformationalRescan(name, busyRetries+1)
+		}
+		return
+	default:
+		return
+	}
+
+	s.logger.Info("queueing informational rescan after tool definition change",
+		zap.String("server", name),
+		zap.String("trust_mode", string(sc.EffectiveTrustMode())))
+	_, err := s.runInformationalScanGated(ctx, name, s.autoRescanEnabled)
+	s.infoScanMu.Lock()
+	delete(s.infoScanQueued, name)
+	s.infoScanMu.Unlock()
+	switch {
+	case err == nil:
+	case errors.Is(err, errInformationalScansDisabled), errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		// Says nothing about the server: no failed attempt.
+	case errors.Is(err, scanner.ErrScanInProgress):
+		if busyRetries < maxRescanBusyRetries {
+			s.armInformationalRescan(name, busyRetries+1)
+		}
+	default:
+		s.logger.Debug("informational rescan did not run", zap.String("server", name), zap.Error(err))
+		s.countRescanFailure(name)
+	}
+}
+
+type rescanClaim int
+
+const (
+	rescanSkipped rescanClaim = iota // retired: the failure cap was reached
+	rescanBusy                       // another informational scan holds the claim
+	rescanClaimed
+)
+
+// claimInformationalRescan applies the shared claim rules to a rescan. Unlike
+// the admission claim it does not require "never scanned" (that is the point),
+// but it honours the same per-server claim and the failure cap.
+func (s *Server) claimInformationalRescan(name string) rescanClaim {
+	s.infoScanMu.Lock()
+	defer s.infoScanMu.Unlock()
+	if s.infoScanAttempts[name] >= maxInformationalScanAttempts {
+		return rescanSkipped
+	}
+	if s.infoScanQueued == nil {
+		s.infoScanQueued = make(map[string]bool)
+	}
+	if s.infoScanQueued[name] {
+		return rescanBusy
+	}
+	s.infoScanQueued[name] = true
+	return rescanClaimed
+}
+
+// countRescanFailure spends one of the server's bounded attempts. Past the cap
+// the server is left to a manual scan, exactly as for the admission scan.
+func (s *Server) countRescanFailure(name string) {
+	s.infoScanMu.Lock()
+	defer s.infoScanMu.Unlock()
+	if s.infoScanAttempts == nil {
+		s.infoScanAttempts = make(map[string]int)
+	}
+	s.infoScanAttempts[name]++
+	if s.infoScanAttempts[name] >= maxInformationalScanAttempts {
+		s.logger.Debug("informational rescan retired after repeated start failures",
+			zap.String("server", name), zap.Int("attempts", s.infoScanAttempts[name]))
+	}
 }

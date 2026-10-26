@@ -739,6 +739,20 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
 		}
 
+		// Spec 054 Track B (pre-forward): redact secrets, strip control sequences
+		// or block on a critical detection, exactly as the call_tool_* handlers
+		// do. Direct mode previously skipped this, so output_sanitisation never
+		// applied to /mcp/all. Applied to the RAW result before the activity
+		// classification and truncation below; a non-nil result means blocked.
+		if blockResult := p.applyOutputSanitisation(ctx, serverName, toolName, requestID, directContentTrust, result); blockResult != nil {
+			// The upstream ran, so the started record is closed with the block
+			// message, never the response (direct mode keeps no history).
+			blockMsg := firstTextOf(blockResult)
+			callerr.NoteOutcome(ctx, callerr.Outcome{Class: callerr.ClassProxyPolicy, Domain: callerr.DomainProxy})
+			p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", blockMsg, durationMs, enrichedArgs, "", false, contracts.DeriveCallWith(annotations), nil, directContentTrust, "", 0, 0, "", nil, "")
+			return blockResult, nil
+		}
+
 		// Determine tool variant for activity logging
 		toolVariant := contracts.DeriveCallWith(annotations)
 
@@ -811,6 +825,13 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			}
 			forwarded = mcp.NewToolResultText(responseText)
 		}
+
+		// Spec 054 Track B (post-forward): spotlight untrusted text in
+		// source-identifying delimiters. Lossless, applied after truncation;
+		// responseText is refreshed so the activity record matches what the
+		// agent receives.
+		p.spotlightForwarded(serverName, toolName, directContentTrust, forwarded)
+		responseText = forwardedText(forwarded, responseText)
 
 		// Emit completion activity (success, or error when the upstream itself
 		// reported one — issue #935).

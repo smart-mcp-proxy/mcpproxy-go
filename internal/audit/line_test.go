@@ -251,6 +251,7 @@ func TestNewToolCall_BlockedAndRejectedReasons(t *testing.T) {
 		{"blocked", "output_schema"},
 		{"rejected", "limiter_queue_full"},
 		{"rejected", "limiter_queue_timeout"},
+		{"rejected", "rate_limited"},
 	}
 	for _, tc := range cases {
 		line, err := audit.NewToolCall(audit.ToolCallInput{

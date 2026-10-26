@@ -71,6 +71,13 @@ const (
 	// records.
 	ToolBaselineDecisionsBucket = "tool_baseline_decisions"
 
+	// TPABundleStateBucket holds the installation-wide Spec 101 anti-downgrade
+	// state of the signed TPA bundle: key "state" (scanner.TPABundleState) and a
+	// nested "history" bucket of activation rows. It is keyed by signing
+	// authority, not by server, so server removal never purges it. Created
+	// lazily on the first write, never by a read.
+	TPABundleStateBucket = "tpa_bundle_state"
+
 	// Onboarding wizard bucket (Spec 046)
 	OnboardingBucket = "onboarding"
 )
@@ -180,6 +187,21 @@ type BaselineSweepState struct {
 	ServersScanned int `json:"servers_scanned"`
 	// Findings is the total number of findings the sweep's scans produced.
 	Findings int `json:"findings"`
+}
+
+// BundleReprotectDoneKey holds the BundleReprotectState marker in MetaBucket.
+const BundleReprotectDoneKey = "tpa_bundle_reprotect_done"
+
+// BundleReprotectState records the last TPA bundle for which the post-activation
+// re-protection sweep (Spec 101 FR-019, tasks B17) completed with zero failures.
+// Stored in MetaBucket under BundleReprotectDoneKey. Absence (the zero value)
+// means "no sweep has completed here". It is installation-wide state and is not
+// touched by server purge.
+type BundleReprotectState struct {
+	// FullDigest is the full SHA-256 of the bundle the sweep covered.
+	FullDigest string `json:"full_digest"`
+	// CompletedAt is when the sweep finished.
+	CompletedAt time.Time `json:"completed_at"`
 }
 
 // Current schema version
@@ -327,6 +349,12 @@ const (
 	// failed, or the signature bundle was unavailable), so the gate failed closed
 	// with no findings to show.
 	ToolHeldReasonScanCoverage = "scan_coverage"
+	// ToolHeldReasonAwaitingReview: the in-process scan of the tool's current
+	// definition came back clean (HeldVerdict "clean", no signals), yet the tool
+	// stays held — a changed or newly pending contract is always reviewed by an
+	// operator in manual and scan trust modes (RT-02), and a clean verdict never
+	// approves it. Evidence only: it is neither a threat nor a precaution.
+	ToolHeldReasonAwaitingReview = "awaiting_review"
 )
 
 // MaxToolHeldSignals caps how many matched check ids are persisted on an

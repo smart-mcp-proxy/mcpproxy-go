@@ -40,12 +40,43 @@ All secrets are stored under the service name **`mcpproxy`**.
 
 ## Secret Reference Syntax
 
-MCPProxy supports two types of secret references that can be used anywhere in your configuration where a string value is expected:
+MCPProxy supports three types of secret references that can be used anywhere in your configuration where a string value is expected:
 
 | Syntax | Provider | Description |
 |--------|----------|-------------|
 | `${keyring:name}` | OS Keyring | Resolves from macOS Keychain, Linux Secret Service, or Windows Credential Manager |
 | `${env:VAR_NAME}` | Environment | Resolves from environment variables |
+| `${file:/absolute/path}` | File | Reads the secret from a file, as Docker/Compose secrets (`/run/secrets/<name>`), Kubernetes secret volumes and systemd `LoadCredential=` provide it |
+
+### File references
+
+`${file:/absolute/path}` keeps a secret out of the config file and out of the process environment
+(`docker inspect`, `/proc/<pid>/environ`). The same rules apply wherever it is used:
+
+- The path must be absolute. A symlink is followed (Kubernetes secret volumes are symlinks) but must
+  point at a regular file. On Windows an absolute path has a drive letter (`C:\ProgramData\mcpproxy\key`
+  or `C:/ProgramData/mcpproxy/key`); a path that starts with `/` and has no drive is not absolute. In
+  `mcp_config.json` a backslash must be escaped (`"${file:C:\\ProgramData\\mcpproxy\\key}"`), so forward
+  slashes are easier.
+- At most 64 KiB is read. A larger file is an error, never a truncated secret.
+- One trailing newline is removed, LF or CRLF, so a file written on Windows resolves to the same value
+  as one written on Linux. Leading and inner whitespace are kept.
+- A NUL byte, an empty file, a missing file and an unreadable file are errors. The error names the
+  reference and the reason, never the file's content.
+- The file is read each time the reference is resolved, which for an upstream server is when its
+  connection is set up. A rotated secret is picked up when the server is next restarted.
+- The stored config keeps the reference; the value exists only in memory, on a copy.
+
+The proxy's own `api_key` accepts the same reference (`"api_key": "${file:/run/secrets/mcpproxy_api_key}"`),
+and so does the `MCPPROXY_API_KEY_FILE` environment variable (see
+[API key from a file](../configuration/environment-variables.md#api-key-from-a-file)). An `api_key`
+reference that cannot be resolved stops startup: mcpproxy does not generate a key over it. The
+reference is resolved when the config is loaded and the key then stays fixed while the process runs (as for
+every `api_key` change), so a rotated key file takes effect on the next restart. An API key from the environment overrides the config file's, and then the reference
+is not read.
+
+A `${file:}` reference reads any file the mcpproxy process can read, so treat who can edit server
+configuration as you would for `${env:}`.
 
 References can be used in:
 

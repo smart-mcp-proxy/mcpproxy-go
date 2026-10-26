@@ -316,10 +316,7 @@ func (s *ProfilesService) Stats24h(ctx context.Context, viewer ViewerScope) Acti
 		StartTime:      now.Add(-24 * time.Hour),
 		AllowedServers: filterServers,
 	}
-	for rec := range s.rt.StreamActivities(filter) {
-		if ctx.Err() != nil {
-			break
-		}
+	for rec := range s.rt.StreamActivities(ctx, filter) {
 		blocked := rec.Status == "blocked"
 		isCall := rec.Type == storage.ActivityTypeToolCall
 		if !isCall && !blocked {
@@ -340,6 +337,10 @@ func (s *ProfilesService) Stats24h(ctx context.Context, viewer ViewerScope) Acti
 		}
 		add(stats.ByProfile, rec.EffectiveProfile())
 		add(stats.ByClient, rec.ClientID)
+	}
+	if ctx.Err() != nil {
+		// The stream closed early: a truncated rollup is not worth caching.
+		return stats
 	}
 
 	s.statsMu.Lock()

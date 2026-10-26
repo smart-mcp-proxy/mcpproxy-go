@@ -105,7 +105,12 @@ func ScanToolMetadataVerdict(serverName string, tools []*config.ToolMetadata, pe
 
 	engineChecks := baselineEngineChecks()
 	bundlePresent := false
-	if bundleCheck := defaultBundleCheck(); bundleCheck != nil {
+	// ONE snapshot: the check that scans and the coverage verdict that gates
+	// auto-approval must describe the same corpus, so they are never taken from
+	// two lock acquisitions (a reload in between could pair a fresh check with
+	// a stale coverage flag).
+	bundleCheck, bundleInfo := activeBundleSnapshot()
+	if bundleCheck != nil {
 		engineChecks = append(engineChecks, bundleCheck)
 		bundlePresent = true
 	}
@@ -127,8 +132,12 @@ func ScanToolMetadataVerdict(serverName string, tools []*config.ToolMetadata, pe
 
 	verdict, _ = deriveBaselineVerdict(out)
 	// Fail closed on degraded coverage or a missing bundle: only a fully-covered,
-	// bundle-backed scan may yield an auto-approvable verdict (FR-014).
-	coverageOK = bundlePresent && result.Coverage.ChecksFailed == 0
+	// bundle-backed scan may yield an auto-approvable verdict (FR-014). A bundle
+	// that is present but demoted (unsigned external, embedded below the
+	// retained watermark, a lost operator bundle, an unbaselined operator
+	// authority: spec 101 FR-007/FR-009a/FR-009b) is NOT full coverage either --
+	// the verdict itself is unchanged, the caller just must not auto-approve it.
+	coverageOK = bundlePresent && !bundleInfo.CoverageDegraded && result.Coverage.ChecksFailed == 0
 	return verdict, out, coverageOK
 }
 
@@ -169,6 +178,12 @@ type toolDef struct {
 // the cross-server shadowing check a real multi-server RegistryView; nil/empty
 // means only the scanned server's tools are in view (no cross-server detection).
 func inProcessToolScan(toolsJSON []byte, serverName string, peerTools map[string][]toolDef, scannerID string) []ScanFinding {
+	return inProcessToolScanPinned(toolsJSON, serverName, peerTools, scannerID, nil)
+}
+
+// inProcessToolScanPinned is inProcessToolScan over a pinned bundle snapshot
+// (nil = resolve the active bundle now).
+func inProcessToolScanPinned(toolsJSON []byte, serverName string, peerTools map[string][]toolDef, scannerID string, pin *pinnedBundle) []ScanFinding {
 	var doc struct {
 		Tools []toolDef `json:"tools"`
 	}
@@ -176,7 +191,7 @@ func inProcessToolScan(toolsJSON []byte, serverName string, peerTools map[string
 		return nil
 	}
 
-	return detectEngineFindings(doc.Tools, serverName, peerTools, scannerID)
+	return detectEngineFindings(doc.Tools, serverName, peerTools, scannerID, pin)
 }
 
 // detectEngineFindings runs the Spec-076 offline detect.Engine over the scanned
@@ -186,7 +201,7 @@ func inProcessToolScan(toolsJSON []byte, serverName string, peerTools map[string
 // what lets shadowing.cross_server fire end-to-end (it only emits when a
 // collision/reference points at a *different* server). Findings are filtered to
 // the scanned server so a peer's own issues aren't reported under this scan.
-func detectEngineFindings(tools []toolDef, serverName string, peerTools map[string][]toolDef, scannerID string) []ScanFinding {
+func detectEngineFindings(tools []toolDef, serverName string, peerTools map[string][]toolDef, scannerID string, pin *pinnedBundle) []ScanFinding {
 	views := make([]detect.ToolView, 0, len(tools))
 	for _, t := range tools {
 		views = append(views, toolView(serverName, t))
@@ -210,7 +225,8 @@ func detectEngineFindings(tools []toolDef, serverName string, peerTools map[stri
 	// loaded once (embedded default) at package init; if the bundle failed to
 	// load we log and continue WITHOUT it — a bundle problem must never break
 	// scanning. A live bundle is the expected path.
-	if bundleCheck := defaultBundleCheck(); bundleCheck != nil {
+	bundleCheck := defaultBundleCheckOr(pin)
+	if bundleCheck != nil {
 		engineChecks = append(engineChecks, bundleCheck)
 	}
 
@@ -345,7 +361,7 @@ func (e *Engine) runInProcessScanner(s *ScannerPlugin, req ScanRequest) (*ScanRe
 		data = fileData
 	}
 
-	findings := inProcessToolScan(data, req.ServerName, peerToolDefs(req.PeerTools), s.ID)
+	findings := inProcessToolScanPinned(data, req.ServerName, peerToolDefs(req.PeerTools), s.ID, req.pinnedBundle)
 	// Findings already carry threat_type/threat_level; this is a no-op safety
 	// net consistent with how Docker scanner output is normalized.
 	ClassifyAllFindings(findings)

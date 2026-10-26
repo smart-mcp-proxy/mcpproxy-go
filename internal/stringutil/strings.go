@@ -79,6 +79,10 @@ func isWrapperPhrase(s string) bool {
 // does not end in the middle of a multi-byte UTF-8 sequence. Slicing a string
 // at a raw byte offset (s[:n]) can leave a partial rune at the end, which is
 // invalid UTF-8 and is rewritten to U+FFFD by JSON encoding.
+//
+// Only a rune that actually straddles the cut is dropped: malformed input (a
+// stray continuation byte) is cut at n rather than discarding the complete
+// runes before it.
 func UTF8Prefix(s string, n int) string {
 	if n <= 0 {
 		return ""
@@ -86,9 +90,17 @@ func UTF8Prefix(s string, n int) string {
 	if len(s) <= n {
 		return s
 	}
-	// A rune is at most utf8.UTFMax bytes, so the boundary is within 3 bytes.
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
+	// The rune containing byte n starts at most utf8.UTFMax-1 bytes earlier.
+	for i := n; i >= 0 && i > n-utf8.UTFMax; i-- {
+		if !utf8.RuneStart(s[i]) {
+			continue
+		}
+		if i < n {
+			if _, size := utf8.DecodeRuneInString(s[i:]); i+size > n {
+				return s[:i]
+			}
+		}
+		break
 	}
 	return s[:n]
 }

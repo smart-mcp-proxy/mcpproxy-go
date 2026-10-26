@@ -539,7 +539,10 @@ func TestCheckToolApprovals_NamespacedTool_InheritsLegacyCollapsedBlock(t *testi
 	// name). Under a lifted gate the lock never bound and the tool is
 	// promoted as today.
 	t.Run("baseline pass: a pending collapsed lock is adopted with its evidence, not auto-baselined", func(t *testing.T) {
-		rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{manualTrustServer("a")})
+		// Automatic change scans (Spec 118) would re-scan the live definition and
+		// replace the adopted evidence; this subtest pins the adoption itself.
+		off := false
+		rt := rescanRuntime(t, &config.SecurityConfig{AutoRescanOnChange: &off}, manualTrustServer("a"))
 		// The pre-105 store of a server that was unquarantined while its
 		// upstream had bumped descriptions: every record pending with a
 		// stale hash, no approved/changed record anywhere — a baseline pass.

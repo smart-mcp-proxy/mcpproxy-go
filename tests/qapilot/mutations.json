@@ -117,8 +117,8 @@
       "title": "trust_mode scan accepts a non-clean verdict as scan evidence (dangerous new tools auto-approved)",
       "requirement": "QP-09",
       "file": "internal/runtime/tool_quarantine.go",
-      "find": "\tif coverageOK && verdict == \"clean\" {\n\t\treturn true, nil\n\t}",
-      "replace": "\tif coverageOK || verdict == \"clean\" {\n\t\treturn true, nil\n\t}",
+      "find": "\tif coverageOK && verdict == \"clean\" {\n\t\treturn true, &scanHoldEvidence{Reason: storage.ToolHeldReasonAwaitingReview, Verdict: \"clean\"}\n\t}",
+      "replace": "\tif coverageOK || verdict == \"clean\" {\n\t\treturn true, &scanHoldEvidence{Reason: storage.ToolHeldReasonAwaitingReview, Verdict: \"clean\"}\n\t}",
       "required": true,
       "tests": [
         {
@@ -132,11 +132,11 @@
     },
     {
       "id": "M07",
-      "title": "The transition guard lets a clean scan clear a changed record",
+      "title": "The transition guard lets the plain auto_approve reason (pending-only) clear a changed record",
       "requirement": "QP-13",
       "file": "internal/runtime/tool_quarantine.go",
-      "find": "\t\t\tReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,\n\t\t\tReasonAutoApproveChanges:\n\t\t\treturn nil",
-      "replace": "\t\t\tReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,\n\t\t\tReasonAutoApproveChanges, ReasonScanApproved:\n\t\t\treturn nil",
+      "find": "\t\t\tReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,\n\t\t\tReasonAutoApproveChanges, ReasonScanApproved:\n\t\t\treturn nil",
+      "replace": "\t\t\tReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,\n\t\t\tReasonAutoApproveChanges, ReasonScanApproved, ReasonAutoApprove:\n\t\t\treturn nil",
       "required": true,
       "tests": [
         {

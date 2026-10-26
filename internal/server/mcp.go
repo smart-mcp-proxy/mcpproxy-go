@@ -995,7 +995,7 @@ func (p *MCPProxyServer) emitActivityPolicyDecisionWithBlockReason(ctx context.C
 		if isPostDispatchBlockKey(reasonKey) {
 			p.auditToolCall(ctx, "blocked", reasonKey, "", auditDurationMs(ctx), nil, nil)
 		} else {
-			p.auditAuthz(ctx, "deny", reasonKey)
+			p.auditAuthzWithProfileReason(ctx, "deny", reasonKey, blockReason)
 		}
 	}
 	if p.mainServer != nil && p.mainServer.runtime != nil {
@@ -1165,7 +1165,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 
 	switch variant {
 	case contracts.ToolVariantRead:
-		description = "Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only."
+		description = "Execute a READ-ONLY tool. Use this variant only when retrieve_tools returns call_with=call_tool_read. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first)."
 		title = "Call Tool (Read)"
 		nameExample = "github:get_user"
 		sensitivityDesc = "Classify data being accessed: public, internal, private, or unknown. Helps track sensitive data access patterns."
@@ -1176,7 +1176,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 			mcp.WithOpenWorldHintAnnotation(true),
 		}
 	case contracts.ToolVariantWrite:
-		description = "Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state."
+		description = "Execute a STATE-MODIFYING tool. Use this variant only when retrieve_tools returns call_with=call_tool_write. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first)."
 		title = "Call Tool (Write)"
 		nameExample = "github:create_issue"
 		sensitivityDesc = "Classify data being modified: public, internal, private, or unknown. Helps track sensitive data changes."
@@ -1187,7 +1187,7 @@ func buildCallToolVariantTool(variant string) mcp.Tool {
 			mcp.WithOpenWorldHintAnnotation(true),
 		}
 	case contracts.ToolVariantDestructive:
-		description = "Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations."
+		description = "Execute a DESTRUCTIVE tool. Use this variant only when retrieve_tools returns call_with=call_tool_destructive. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. This variant does not bypass authorization, quarantine, approval, or other dispatch gates. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first)."
 		title = "Call Tool (Destructive)"
 		nameExample = "github:delete_repo"
 		sensitivityDesc = "Classify data being deleted: public, internal, private, or unknown. Important for tracking destructive operations on sensitive data."
@@ -1343,7 +1343,7 @@ const retrieveToolsDiagnosticsNote = " ANNOTATION FILTERS: read_only_only, exclu
 func (p *MCPProxyServer) registerTools(_ bool) {
 	// retrieve_tools - THE PRIMARY TOOL FOR DISCOVERING TOOLS - Enhanced with clear instructions
 	retrieveToolsOpts := []mcp.ToolOption{
-		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers." + retrieveToolsReachNote + retrieveToolsDiagnosticsNote),
+		mcp.WithDescription("🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Follow each result's call_with route exactly; upstream annotations determine that route and take precedence over tool names, descriptions, command text, and requested outcome. Compact results preserve the same call_with route as full results, including the existing read fallback when upstream tier annotations are unavailable. Never infer a route from a tool's name or intent. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers." + retrieveToolsReachNote + retrieveToolsDiagnosticsNote),
 		mcp.WithTitleAnnotation("Retrieve Tools"),
 		mcp.WithReadOnlyHintAnnotation(true),
 		mcp.WithDestructiveHintAnnotation(false),
@@ -1510,7 +1510,7 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 				mcp.Description("Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch."),
 			),
 			mcp.WithString("trust_mode",
-				mcp.Description("Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch."),
+				mcp.Description("Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = new tools and changed tools auto-approve only when the fast offline TPA scan is clean, else hold for review; 'manual' = human reviews every change. Empty → scan (the default). Used with add/update/patch."),
 				mcp.Enum("auto", "scan", "manual"),
 			),
 			mcp.WithBoolean("expose_prompts",
@@ -2402,7 +2402,8 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// construction lives in buildToolEntry (Spec 085 entry-builder seam) —
 	// full mode is byte-identical to the pre-extraction inline code, guarded
 	// by the T011 golden test (FR-006/SC-003); compact mode renders
-	// {id, score, sig, desc, lossy} from the shared signature cache. The
+	// {id, score, sig, desc, lossy, call_with} from the shared signature cache
+	// (call_with added by #1668 so compact routing never falls back to names). The
 	// ranked order of `results` is already final here — the mode selects
 	// serialization only (FR-007).
 	entryOpts := toolEntryOpts{includeStats: includeStats}
@@ -2439,11 +2440,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			"Do NOT use call_tool_read, call_tool_write, or call_tool_destructive — they are not available in code execution mode."
 	default:
 		// Default instructions for retrieve_tools mode and backward-compatible callers
-		usageInstructions = "TOOL SELECTION GUIDE: Check the 'call_with' field for each tool, then use the matching tool variant. " +
-			"DECISION RULES BY TOOL NAME: " +
-			"(1) READ (call_tool_read): search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. DEFAULT choice when unsure. " +
-			"(2) WRITE (call_tool_write): create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. " +
-			"(3) DESTRUCTIVE (call_tool_destructive): delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. " +
+		usageInstructions = "TOOL SELECTION GUIDE: Use each result's 'call_with' value as the exact variant to call (call_tool_read, call_tool_write, or call_tool_destructive). The route comes from upstream annotations and overrides tool names, descriptions, command wording, and apparent user intent. When no upstream tier annotations exist, call_with preserves the existing read fallback; do not infer a different route from tool names or intent. " +
 			"INTENT TRACKING: Always provide intent_reason (why you're calling this tool) and intent_data_sensitivity (public/internal/private/unknown) to enable activity auditing."
 	}
 
@@ -3564,6 +3561,16 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 	// holds an unredacted secret and a blocked response is never cached. A
 	// non-nil result means the call was blocked.
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
+		// The upstream ran, so the started record is closed: history and the
+		// tool_call completion carry the block message, never the response.
+		blockMsg := p.recordOutputBlocked(ctx, toolCallRecord, callInc, blockResult)
+		var intentMap map[string]interface{}
+		if intent != nil {
+			intentMap = intent.ToMap()
+		}
+		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, storage.ActivityStatusError, blockMsg, duration.Milliseconds(), activityArgs, "", false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
+		internalToolName := "call_tool_" + intent.OperationType
+		p.emitActivityInternalToolCall(ctx, internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, storage.ActivityStatusError, blockMsg, time.Since(internalStartTime).Milliseconds(), activityArgs, nil, intentMap, "")
 		return blockResult, nil
 	}
 	// Spec 112: sanitisation mutates result in place, so the scrubbed record
@@ -4054,6 +4061,9 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 	// holds an unredacted secret and a blocked response is never cached. A
 	// non-nil result means the call was blocked.
 	if blockResult := p.applyOutputSanitisation(ctx, serverName, actualToolName, requestID, contentTrust, result); blockResult != nil {
+		// The upstream ran: close the started record (see handleCallToolVariant).
+		blockMsg := p.recordOutputBlocked(ctx, toolCallRecord, callInc, blockResult)
+		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, storage.ActivityStatusError, blockMsg, duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0, "", nil, "")
 		return blockResult, nil
 	}
 	// Spec 112: sanitisation mutates result in place, so the scrubbed record
@@ -4125,6 +4135,24 @@ func (p *MCPProxyServer) toolCallIncarnation(serverName string) int64 {
 		}
 	}
 	return 0
+}
+
+// recordOutputBlocked is the bookkeeping a dispatch owes a call whose result
+// an output policy (Spec 054 block mode) refused to hand over: the upstream
+// ran, so the tool-call history gets the attempt, with the block message in
+// place of the response it must never store. It notes the outcome as a proxy
+// policy refusal (the upstream answered fine) and returns the message for the
+// caller's tool_call completion, which closes the started record. The audit
+// tool_call line is already written by the block's policy_decision.
+func (p *MCPProxyServer) recordOutputBlocked(ctx context.Context, rec *storage.ToolCallRecord, inc int64, blockResult *mcp.CallToolResult) string {
+	msg := firstTextOf(blockResult)
+	rec.Response = nil
+	rec.Error = msg
+	if err := p.recordToolCallAt(rec, inc); err != nil {
+		p.logger.Warn("Failed to record blocked tool call", zap.Error(err))
+	}
+	callerr.NoteOutcome(ctx, callerr.Outcome{Class: callerr.ClassProxyPolicy, Domain: callerr.DomainProxy})
+	return msg
 }
 
 // recordToolCallAt records a call's history only while its server still has
@@ -7236,6 +7264,16 @@ func (p *MCPProxyServer) monitorConnectionStatusAt(ctx context.Context, serverNa
 // CallToolDirect calls a tool directly without going through the MCP server's request handling
 // This is used for REST API calls that bypass the MCP protocol layer
 func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToolRequest) (interface{}, error) {
+	return p.callToolDirect(ctx, request, false)
+}
+
+// CallToolDirectResult keeps the MCP result envelope for the REST tool-call
+// endpoint. Other direct callers retain the historical content-only return.
+func (p *MCPProxyServer) CallToolDirectResult(ctx context.Context, request mcp.CallToolRequest) (interface{}, error) {
+	return p.callToolDirect(ctx, request, true)
+}
+
+func (p *MCPProxyServer) callToolDirect(ctx context.Context, request mcp.CallToolRequest, preserveResult bool) (interface{}, error) {
 	toolName := request.Params.Name
 
 	// Spec 093 FR-011: the REST surface must answer a concurrency-limiter shed
@@ -7305,30 +7343,40 @@ func (p *MCPProxyServer) CallToolDirect(ctx context.Context, request mcp.CallToo
 		if limitErr := shed.take(); limitErr != nil {
 			return nil, &shedDispatchError{limitErr: limitErr, message: shedMessage(limitErr)}
 		}
+		message := "tool call failed"
 		if len(result.Content) > 0 {
 			if textContent, ok := result.Content[0].(mcp.TextContent); ok {
-				if refusal := profileToolRefusal.take(); refusal != nil {
-					return nil, refusal
-				}
-				// Quarantine / pending-approval / changed-tool blocks keep their
-				// typed identity so REST answers 403 with the payload, not a 500.
-				if refusal := quarantineRefusal.take(); refusal != nil {
-					return nil, refusal
-				}
-				// A code_execution refusal keeps its typed identity so the HTTP
-				// layer can answer 403/404/400 (Spec 097). The message stays the
-				// agent-readable one either way.
-				if refusal := codeExecRefusal.take(); refusal != nil {
-					return nil, &codeExecDispatchError{err: refusal, message: textContent.Text}
-				}
-				return nil, fmt.Errorf("%s", textContent.Text)
+				message = textContent.Text
 			}
 		}
-		return nil, fmt.Errorf("tool call failed")
+		if refusal := profileToolRefusal.take(); refusal != nil {
+			return nil, refusal
+		}
+		// Quarantine / pending-approval / changed-tool blocks keep their
+		// typed identity so REST answers 403 with the payload, not a 500.
+		if refusal := quarantineRefusal.take(); refusal != nil {
+			return nil, refusal
+		}
+		// A code_execution refusal keeps its typed identity so the HTTP
+		// layer can answer 403/404/400 (Spec 097).
+		if refusal := codeExecRefusal.take(); refusal != nil {
+			return nil, &codeExecDispatchError{err: refusal, message: message}
+		}
+		return directToolErrorPayload(result, preserveResult, message)
 	}
 
-	// Return the content as the result
+	if preserveResult {
+		return result, nil
+	}
+	// Return the content as the result for existing direct callers.
 	return result.Content, nil
+}
+
+func directToolErrorPayload(result *mcp.CallToolResult, preserveResult bool, message string) (interface{}, error) {
+	if preserveResult {
+		return result, nil
+	}
+	return nil, fmt.Errorf("%s", message)
 }
 
 // ============================================================================

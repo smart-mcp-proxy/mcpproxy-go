@@ -132,7 +132,9 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Ensure API key exists
-	cfg.EnsureAPIKey()
+	if _, _, _, keyErr := cfg.EnsureAPIKey(); keyErr != nil {
+		return keyErr
+	}
 
 	configPath := config.GetConfigPath(cfg.DataDir)
 
@@ -149,8 +151,12 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		fmt.Fprintln(os.Stderr)
 
 		// Check if env var overrides
-		if envKey, exists := os.LookupEnv("MCPPROXY_API_KEY"); exists && envKey != "" {
-			fmt.Fprintln(os.Stderr, "Warning: MCPPROXY_API_KEY environment variable is set and will override the config file key.")
+		if envKey, envErr := config.ResolveEnvAPIKey(); envErr == nil && envKey.Set && envKey.Key != "" {
+			if envKey.FromFile {
+				fmt.Fprintf(os.Stderr, "Warning: %s is set and the key in %s will override the config file key.\n", config.EnvAPIKeyFile, envKey.Path)
+			} else {
+				fmt.Fprintln(os.Stderr, "Warning: MCPPROXY_API_KEY environment variable is set and will override the config file key.")
+			}
 			fmt.Fprintln(os.Stderr)
 		}
 

@@ -26,7 +26,7 @@ Machine-readable form: [`audit-line.schema.json`](audit-line.schema.json) (draft
 | `surface` | ✔ | | `call_tool_read|write|destructive` \| `direct` \| `code_execution` (nested child) \| `rest` |
 | `server`, `tool`, `operation` | ✔ | | canonical pair; recorded even when the refusal was non-disclosing |
 | `decision` | ✔ | | `allow` written after the last gate and before the upstream call; `deny` at the refusing gate |
-| `reason` | ✔ | | `none` iff `allow`; else one pre-dispatch gate: `intent_invalid`, `intent_rejected`, `profile_scope`, `token_scope`, `token_permission`, `server_quarantined`, `tool_pending_approval`, `tool_changed_approval`, `tool_not_callable`, `other` (= `telemetry.BlockReason*` minus `output_sanitisation|output_schema`) |
+| `reason` | ✔ | | `none` iff `allow`; else one pre-dispatch gate: `intent_invalid`, `intent_rejected`, `profile_scope`, `profile_tier`, `profile_rule`, `profile_unannotated` (added after Spec 108: a profile tool-policy refusal, `disclosed:true`), `token_scope`, `token_permission`, `server_quarantined`, `tool_pending_approval`, `tool_changed_approval`, `tool_not_callable`, `other` (= `telemetry.BlockReason*` minus `output_sanitisation|output_schema`) |
 | `disclosed` | ✔ when `deny` | | `false` for non-disclosing refusals (Spec 105 FR-010 shapes) |
 | `args_sha256`, `args_bytes` | ✔ | | from the attempt record |
 | `parent_id` | opt | | nested children only |
@@ -41,7 +41,7 @@ Gate → reason mapping (all in `handleCallToolVariant` unless noted; anchors sh
 |---|---|---|---|
 | `surface`, `server`, `tool`, `operation`, `args_sha256`, `args_bytes` | ✔ | | same values as the paired `authz` line |
 | `outcome` | ✔ | | `success` \| `error` \| `blocked` (post-dispatch output sanitisation/schema) \| `rejected` (limiter shed, `*limiter.LimitError` returned to the completion path) |
-| `reason` | ✔ iff `blocked`/`rejected` | forbidden on `success`/`error` | `output_sanitisation` \| `output_schema` \| `limiter_queue_full` \| `limiter_queue_timeout` |
+| `reason` | ✔ iff `blocked`/`rejected` | forbidden on `success`/`error` | `output_sanitisation` \| `output_schema` \| `limiter_queue_full` \| `limiter_queue_timeout` \| `rate_limited` |
 | `error_class` | ✔ iff `error` | forbidden on every other outcome (`success`, `blocked`, `rejected`) | `upstream_error` \| `upstream_timeout` \| `upstream_unavailable` \| `validation` \| `sanitisation` \| `internal` \| `cancelled` — a bounded class, never message text |
 | `duration_ms` | ✔ | | |
 | `request_bytes`, `response_bytes` | opt | | as measured by the completion path (`RequestBytes` pre-truncation) |

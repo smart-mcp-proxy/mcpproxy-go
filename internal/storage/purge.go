@@ -23,7 +23,10 @@ import (
 // all, and a later re-add starts with nothing.
 //
 // Not purged (A5): activity records (audit history), agent tokens, client
-// credentials and toolstats (aggregate counters, not trust).
+// credentials and toolstats (aggregate counters, not trust), and the Spec 101
+// TPA bundle state (TPABundleStateBucket): it is installation-wide anti-downgrade
+// state keyed by signing authority, not by server, so removing a server must
+// never reset a watermark, pin or deny-list.
 
 // Purge-set report keys that are not bucket names.
 const (

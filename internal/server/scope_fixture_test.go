@@ -102,6 +102,9 @@ type countingUpstream struct {
 	// errBody, when set, makes every tool answer an upstream isError result
 	// carrying that text (an approved upstream failing on its own).
 	errBody atomic.Pointer[string]
+	// okBody, when set, replaces the default "ok" text of a successful answer
+	// (for tests that need the upstream to return a particular payload).
+	okBody atomic.Pointer[string]
 }
 
 // serve registers one more tool on the running stub upstream, for tests
@@ -130,6 +133,9 @@ func (u *countingUpstream) serve(spec toolSpec) {
 			if body := u.errBody.Load(); body != nil {
 				return mcp.NewToolResultError(*body), nil
 			}
+			if body := u.okBody.Load(); body != nil {
+				return mcp.NewToolResultText(*body), nil
+			}
 			return mcp.NewToolResultText("ok"), nil
 		})
 }
@@ -157,6 +163,16 @@ func startCountingUpstream(t *testing.T, proxy *MCPProxyServer, rt *runtime.Runt
 	up.URL = fmt.Sprintf("http://%s", ln.Addr().String())
 
 	serverCfg := &config.ServerConfig{Name: server, URL: up.URL, Protocol: "streamable-http", Enabled: true}
+	// Keep the trust mode the test configured for this server (an unset one
+	// is the scan tier since spec 119, under which a clean new tool is
+	// scan-approved rather than filed pending).
+	if cfg := proxy.currentConfig(); cfg != nil {
+		for _, sc := range cfg.Servers {
+			if sc != nil && sc.Name == server {
+				serverCfg.TrustMode = sc.TrustMode
+			}
+		}
+	}
 	require.NoError(t, proxy.storage.SaveUpstreamServer(serverCfg))
 	rt.Supervisor().StateView().UpdateServer(server, func(s *stateview.ServerStatus) {
 		s.Name = server

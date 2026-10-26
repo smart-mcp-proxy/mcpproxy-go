@@ -35,6 +35,11 @@ func (s *Server) maybeCaptureReviewDefinitions(serverName, status string) {
 	if !s.runtime.ShouldCaptureReviewDefinitionsAfterScan(serverName) {
 		return
 	}
+	// A re-protection job scanned stored contracts, not the live tool list this
+	// capture follows up on.
+	if scanSvc := s.securityScannerSvc(); scanSvc != nil && latestScanIsReprotect(context.Background(), scanSvc, serverName) {
+		return
+	}
 	if _, inFlight := s.reviewCaptureInFlight.LoadOrStore(serverName, struct{}{}); inFlight {
 		return
 	}

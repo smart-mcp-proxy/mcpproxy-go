@@ -13,15 +13,17 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
 // Spec 085 T011 — full-mode byte-identity golden (FR-006/SC-003).
 //
-// The golden files under testdata/ were captured from the retrieve_tools
-// handler BEFORE the entry-builder extraction (T012) and the shared-visibility
-// rewiring (T010), so any post-refactor byte difference in the full-mode
-// response is a regression. Regenerate ONLY when a deliberate, spec-approved
+// The golden files under testdata/ began as captures of the retrieve_tools
+// handler BEFORE the entry-builder extraction (T012) and shared-visibility
+// rewiring (T010). They pin the current full-mode bytes, including approved
+// routing-guidance updates. Regenerate ONLY when a deliberate, spec-approved
 // response change lands: UPDATE_GOLDEN=1 go test ./internal/server -run
 // TestRetrieveToolsFullMode_GoldenByteIdentity
 //
@@ -110,7 +112,7 @@ func compareGolden(t *testing.T, goldenPath, got string) {
 	assert.Equal(t,
 		strings.TrimRight(string(want), "\n"),
 		strings.TrimRight(got, "\n"),
-		"full-mode retrieve_tools response must be byte-identical to the pre-refactor capture (FR-006/SC-003)")
+		"full-mode retrieve_tools response must be byte-identical to its committed golden (FR-006/SC-003)")
 }
 
 func TestRetrieveToolsFullMode_GoldenByteIdentity(t *testing.T) {
@@ -227,11 +229,10 @@ func TestRetrieveToolsFullMode_MergeBaseFilterSemantics(t *testing.T) {
 
 // --- Spec 085 US1 T018 (FR-002): compact entry shape ---
 //
-// A compact entry carries EXACTLY {id, score, sig, desc, lossy}: no
-// inputSchema, no full description, no annotations block — those move to
-// describe_tool / self-healing errors. id is derived exactly as the
-// full-mode "name" (result.Tool.Name), so ranked order and identity are
-// untouched by construction.
+// A compact entry carries {id, score, sig, desc, lossy, call_with}: no
+// inputSchema, full description, or annotations block — those move to
+// describe_tool / self-healing errors. id is derived exactly as the full-mode
+// "name" (result.Tool.Name), so ranked order and identity remain unchanged.
 
 func TestBuildToolEntry_CompactShape(t *testing.T) {
 	proxy := createTestMCPProxyServer(t)
@@ -254,9 +255,82 @@ func TestBuildToolEntry_CompactShape(t *testing.T) {
 	assert.Equal(t, "Create an issue to track work.", entry["desc"], "desc must be the verbatim first sentence")
 	assert.Equal(t, false, entry["lossy"])
 
-	assert.Len(t, entry, 5, "compact entry must carry exactly {id, score, sig, desc, lossy}")
-	for _, forbidden := range []string{"inputSchema", "description", "annotations", "name", "server", "call_with", "usage_count", "last_used"} {
+	assert.Equal(t, "call_tool_read", entry["call_with"], "unannotated tools preserve the full-mode read fallback")
+	assert.Len(t, entry, 6, "compact entries add the dispatch route to their five data fields")
+	for _, forbidden := range []string{"inputSchema", "description", "annotations", "name", "server", "usage_count", "last_used"} {
 		assert.NotContains(t, entry, forbidden, "compact entries must not leak full-mode field %q", forbidden)
+	}
+}
+
+func TestBuildToolEntry_CompactPreservesExplicitCallRoute(t *testing.T) {
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "windows", Enabled: true}})
+	tests := []struct {
+		name        string
+		annotations *config.ToolAnnotations
+		want        string
+	}{
+		{name: "annotated read", annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(true), DestructiveHint: boolPtr(false)}, want: "call_tool_read"},
+		{name: "annotated write", annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(false), DestructiveHint: boolPtr(false)}, want: "call_tool_write"},
+		{name: "annotated destructive", annotations: &config.ToolAnnotations{ReadOnlyHint: boolPtr(false), DestructiveHint: boolPtr(true)}, want: "call_tool_destructive"},
+		{name: "unannotated fallback", want: "call_tool_read"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rt.Supervisor().StateView().UpdateServer("windows", func(status *stateview.ServerStatus) {
+				status.Enabled = true
+				status.Connected = true
+				status.ToolsDiscovered = true
+				status.Tools = []stateview.ToolInfo{{Name: "PowerShell", Annotations: tc.annotations}}
+			})
+			for _, identity := range []struct {
+				name       string
+				toolName   string
+				serverName string
+			}{
+				{name: "canonical id with server", toolName: "windows:PowerShell", serverName: "windows"},
+				{name: "server inferred from canonical id", toolName: "windows:PowerShell"},
+				{name: "bare name with server", toolName: "PowerShell", serverName: "windows"},
+			} {
+				t.Run(identity.name, func(t *testing.T) {
+					result := &config.SearchResult{Tool: &config.ToolMetadata{
+						Name: identity.toolName, ServerName: identity.serverName,
+						Description: "Run a PowerShell command.",
+						ParamsJSON:  `{"type":"object","properties":{"command":{"type":"string"}},"required":["command"]}`,
+						Hash:        "hash-powershell-route",
+					}}
+
+					compact := proxy.buildToolEntry(result, config.ToolResponseModeCompact, toolEntryOpts{})
+					full := proxy.buildToolEntry(result, config.ToolResponseModeFull, toolEntryOpts{})
+					assert.Equal(t, tc.want, compact["call_with"])
+					assert.Equal(t, full["call_with"], compact["call_with"], "compact and full routes must match")
+					assert.NotContains(t, compact, "annotations")
+					assert.NotContains(t, compact, "inputSchema")
+				})
+			}
+		})
+	}
+}
+
+func TestCompactToolCallWith_MissingIdentityFallsBackToRead(t *testing.T) {
+	proxy := createTestMCPProxyServer(t)
+	for _, tc := range []struct {
+		name   string
+		result *config.SearchResult
+	}{
+		{name: "missing result"},
+		{name: "missing tool", result: &config.SearchResult{}},
+		{name: "empty identity", result: &config.SearchResult{Tool: &config.ToolMetadata{}}},
+		{name: "bare name without server", result: &config.SearchResult{Tool: &config.ToolMetadata{Name: "PowerShell"}}},
+		{name: "unknown server", result: &config.SearchResult{Tool: &config.ToolMetadata{Name: "unknown:PowerShell"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, contracts.ToolVariantRead, proxy.compactToolCallWith(tc.result))
+			if tc.result != nil && tc.result.Tool != nil {
+				full := proxy.buildToolEntry(tc.result, config.ToolResponseModeFull, toolEntryOpts{})
+				compact := proxy.buildToolEntry(tc.result, config.ToolResponseModeCompact, toolEntryOpts{})
+				assert.Equal(t, full["call_with"], compact["call_with"])
+			}
+		})
 	}
 }
 
