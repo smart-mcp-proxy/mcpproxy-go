@@ -23,11 +23,12 @@ func TestSanitizer_GitHubTokens(t *testing.T) {
 	}{
 		{"classic ghp_ (40 chars)", "ghp_1234567890abcdefghijABCDEFGHIJ123456"},
 		{"installation ghs_ (40 chars)", "ghs_1234567890abcdefghijABCDEFGHIJ123456"},
+		{"fine-grained github_pat_", "github_pat_11ABCDEFG0123456789abcd_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			out := s.sanitizeString("token=" + tt.token)
-			if strings.Contains(out, tt.token) {
+			if strings.Contains(out, tt.token[12:]) {
 				t.Fatalf("token leaked unmasked: %q", out)
 			}
 		})
