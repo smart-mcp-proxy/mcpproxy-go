@@ -86,7 +86,7 @@ func TestCaptureFault_RecordWriteFailureMarksServerDirty(t *testing.T) {
 	// unchanged, so only the record's hint refresh records it) and that
 	// write fails.
 	failWrites(rt, "read_note", "save")
-	_, err := captureAt(t, rt, 2, baselineTool("read_note", "Read a note", true))
+	_, err := captureAt(t, rt, 2, readNoteRetitled())
 	require.ErrorIs(t, err, errCaptureIncomplete)
 
 	applied, dirtyAt, dirty := lockState(rt)
@@ -133,16 +133,16 @@ func TestCaptureFault_RecordWriteFailureMarksServerDirty(t *testing.T) {
 
 	// (e) a complete capture newer than the failed one clears dirty and
 	// publishes the recorded definition.
-	_, err = captureAt(t, rt, 4, baselineTool("read_note", "Read a note", true))
+	_, err = captureAt(t, rt, 4, readNoteRetitled())
 	require.NoError(t, err)
 	assert.False(t, rt.ToolReviewDirty(baselineServer), "a complete newer capture clears dirty")
 	require.NoError(t, rt.SetToolEnabled(baselineServer, "read_note", true, "operator"))
-	_, err = captureAt(t, rt, 5, baselineTool("read_note", "Read a note", true))
+	_, err = captureAt(t, rt, 5, readNoteRetitled())
 	require.NoError(t, err)
 	svHealed, _, _ := stateViewTools(t, rt)
-	hint, found := destructiveHintOf(svHealed, "read_note")
+	title, found := titleOf(svHealed, "read_note")
 	require.True(t, found)
-	assert.True(t, hint, "the healed capture publishes the destructive hint")
+	assert.Equal(t, "Read a note (renamed)", title, "the healed capture publishes the retitled definition")
 }
 
 // A pending tool's approval is refused while dirty, from every entry point.
@@ -185,17 +185,17 @@ func TestCaptureFault_IndexWriteFailureMarksServerDirty(t *testing.T) {
 	svBefore, _, _ := stateViewTools(t, rt)
 	rt.testHooks.toolIndexWriteFault = func(string) error { return errInjectedWrite }
 
-	_, err := captureAt(t, rt, 2, baselineTool("read_note", "Read a note", true))
+	_, err := captureAt(t, rt, 2, readNoteRetitled())
 	require.Error(t, err)
 	assert.True(t, rt.ToolReviewDirty(baselineServer))
 	svAfter, _, _ := stateViewTools(t, rt)
 	assert.Equal(t, svBefore, svAfter, "nothing published after a failed index write")
 
 	healWrites(rt)
-	_, err = captureAt(t, rt, 2, baselineTool("read_note", "Read a note", true))
+	_, err = captureAt(t, rt, 2, readNoteRetitled())
 	require.NoError(t, err)
 	assert.True(t, rt.ToolReviewDirty(baselineServer), "a capture at the failed seq does not clear dirty")
-	_, err = captureAt(t, rt, 3, baselineTool("read_note", "Read a note", true))
+	_, err = captureAt(t, rt, 3, readNoteRetitled())
 	require.NoError(t, err)
 	assert.False(t, rt.ToolReviewDirty(baselineServer))
 }
@@ -216,7 +216,7 @@ func TestCaptureFault_PublicationFailureMarksServerDirty(t *testing.T) {
 			snapBefore := lastGood(rt)
 			rt.testHooks.discoveryPublishFault = tc.fault
 
-			published, err := captureAt(t, rt, 2, baselineTool("read_note", "Read a note", true))
+			published, err := captureAt(t, rt, 2, readNoteRetitled())
 			assert.False(t, published)
 			if tc.wantErr {
 				require.ErrorIs(t, err, errCaptureIncomplete)
@@ -229,7 +229,7 @@ func TestCaptureFault_PublicationFailureMarksServerDirty(t *testing.T) {
 			assert.True(t, snapBefore.at.Equal(snapAfter.at), "stamp not committed")
 
 			healWrites(rt)
-			published, err = captureAt(t, rt, 3, baselineTool("read_note", "Read a note", true))
+			published, err = captureAt(t, rt, 3, readNoteRetitled())
 			require.NoError(t, err)
 			assert.True(t, published)
 			assert.False(t, rt.ToolReviewDirty(baselineServer))
@@ -355,7 +355,7 @@ func TestCaptureFault_MarkerAbortMarksServerDirty(t *testing.T) {
 	rt := seedApproved(t)
 	dropBaselineMarkers(t, rt)
 	failBaseline(rt, "write")
-	_, err := captureAt(t, rt, 2, baselineTool("read_note", "Read a note", true))
+	_, err := captureAt(t, rt, 2, readNoteRetitled())
 	require.ErrorIs(t, err, errBaselineMarker)
 	applied, dirtyAt, dirty := lockState(rt)
 	assert.Equal(t, uint64(2), applied)
@@ -366,7 +366,7 @@ func TestCaptureFault_MarkerAbortMarksServerDirty(t *testing.T) {
 	_, err = captureAt(t, rt, 1, readNote())
 	require.NoError(t, err)
 	assert.True(t, rt.ToolReviewDirty(baselineServer), "the older capture is stale and cannot clear dirty")
-	_, err = captureAt(t, rt, 3, baselineTool("read_note", "Read a note", true))
+	_, err = captureAt(t, rt, 3, readNoteRetitled())
 	require.NoError(t, err)
 	assert.False(t, rt.ToolReviewDirty(baselineServer))
 	_, ok := baselineDecision(t, rt)
@@ -483,17 +483,17 @@ func TestCaptureFault_FailedIndexDeleteKeepsRecord(t *testing.T) {
 func TestCaptureFault_ReviewCaptureOfEligibleServerDoesNotClearDirty(t *testing.T) {
 	rt := seedApproved(t)
 	rt.testHooks.toolIndexWriteFault = func(string) error { return errInjectedWrite }
-	_, err := captureAt(t, rt, 2, baselineTool("read_note", "Read a note", true))
+	_, err := captureAt(t, rt, 2, readNoteRetitled())
 	require.Error(t, err)
 	require.True(t, rt.ToolReviewDirty(baselineServer))
 	healWrites(rt)
 
-	_, err = rt.persistInventoryDefinitions(baselineServer, []*config.ToolMetadata{baselineTool("read_note", "Read a note", true)},
+	_, err = rt.persistInventoryDefinitions(baselineServer, []*config.ToolMetadata{readNoteRetitled()},
 		rt.committedGenForTest(baselineServer), managed.InventoryCapture{Seq: 3})
 	require.NoError(t, err)
 	assert.True(t, rt.ToolReviewDirty(baselineServer), "a review capture of an eligible server does not clear dirty")
 
-	_, err = captureAt(t, rt, 4, baselineTool("read_note", "Read a note", true))
+	_, err = captureAt(t, rt, 4, readNoteRetitled())
 	require.NoError(t, err)
 	assert.False(t, rt.ToolReviewDirty(baselineServer))
 }
@@ -507,20 +507,20 @@ func TestCaptureFault_UnpublishedSweepCaptureDoesNotClearDirty(t *testing.T) {
 	require.NotNil(t, rt.supervisor, "the fixture publishes into a StateView")
 	svBefore, _, _ := stateViewTools(t, rt)
 	rt.testHooks.toolIndexWriteFault = func(string) error { return errInjectedWrite }
-	_, err := captureAt(t, rt, 2, baselineTool("read_note", "Read a note", true))
+	_, err := captureAt(t, rt, 2, readNoteRetitled())
 	require.Error(t, err)
 	require.True(t, rt.ToolReviewDirty(baselineServer))
 	healWrites(rt)
 
 	// The sweep's no-generation case: capture == nil.
-	_, _, err = rt.commitInventoryAt(context.Background(), baselineServer, []*config.ToolMetadata{baselineTool("read_note", "Read a note", true)},
+	_, _, err = rt.commitInventoryAt(context.Background(), baselineServer, []*config.ToolMetadata{readNoteRetitled()},
 		rt.committedGenForTest(baselineServer), nil, inventoryRef{capture: managed.InventoryCapture{Seq: 3}})
 	require.NoError(t, err)
 	svAfter, _, _ := stateViewTools(t, rt)
 	require.Equal(t, svBefore, svAfter, "the pass published nothing into the StateView")
 	assert.True(t, rt.ToolReviewDirty(baselineServer), "an unpublished capture does not clear dirty")
 
-	published, err := captureAt(t, rt, 4, baselineTool("read_note", "Read a note", true))
+	published, err := captureAt(t, rt, 4, readNoteRetitled())
 	require.NoError(t, err)
 	require.True(t, published)
 	assert.False(t, rt.ToolReviewDirty(baselineServer), "the published re-list clears it")

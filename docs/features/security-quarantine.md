@@ -209,7 +209,7 @@ Manage held prompts with the `quarantine_security` MCP tool:
 What it does, with quarantine enabled (the default):
 
 - **Withholds unapproved servers and tools.** A quarantined server's tools are not indexed, not returned by `retrieve_tools`, and calls to them are refused (the refusal carries a security analysis of the tool). A new or changed tool on a trusted server is held separately until approved.
-- **Holds changed definitions for review.** Each tool's name, description, input schema, output schema (when declared) and safety-relevant annotation hints are hashed. A different hash after approval is held as "changed" instead of being silently trusted (see [Tool-Level Quarantine](./tool-quarantine.md)), in every trust mode except `auto`. Only serialization noise is absorbed without a hold: an input schema that differs from the approved one only in key order or the order of its `required` list (same properties, types, constraints and required set) is re-baselined, while any structural input-schema difference (an added, removed or retyped parameter) is held. An output schema or description added to a tool approved without one is held as a change too: the empty stored value is the declared contract, not a wildcard. Two upgrade wildcards remain, both for approval records written by older releases. A record written before complete contract capture treats an empty stored field as "never captured", and the live value stands in once during the upgrade migration. Separately, any record approved before annotation hints joined the hash (hash schema below v4, including records that did capture the full description and schemas) and that never stored an annotation snapshot has unknown hints: the first discovery under the new release accepts and baselines the live hints instead of holding them, so a hint flip that lands before that first pass is not held. After that pass, hint flips are held like any other change. In `scan` mode (the default) the offline scan of the changed contract decides: a clean, full-coverage verdict approves the new contract in the same discovery pass (reason `scan_approved`, activity event `tool_auto_approved`); a finding, or a scan that could not cover the tool, holds it with the evidence attached; and a change that re-labels the tool as safer (`readOnlyHint` false→true or `destructiveHint` true→false) is held whatever the verdict, with the signal `GATE-HINT-SAFER-FLIP`. In `manual` mode a changed contract is always held: the scan runs and its findings are recorded as hold evidence, but a clean verdict does not approve the change.
+- **Holds changed definitions for review.** Each tool's name, description, input schema, output schema (when declared) and safety-relevant annotation hints are hashed. A different hash after approval is held as "changed" instead of being silently trusted (see [Tool-Level Quarantine](./tool-quarantine.md)), in every trust mode except `auto`. Only serialization noise is absorbed without a hold: an input schema that differs from the approved one only in key order or the order of its `required` list (same properties, types, constraints and required set) is re-baselined, while any structural input-schema difference (an added, removed or retyped parameter) is held. An output schema or description added to a tool approved without one is held as a change too: the empty stored value is the declared contract, not a wildcard. Two upgrade wildcards remain, both for approval records written by older releases. A record written before complete contract capture treats an empty stored field as "never captured", and the live value stands in once during the upgrade migration. Separately, any record approved before annotation hints joined the hash (hash schema below v4, including records that did capture the full description and schemas) and that never stored an annotation snapshot has unknown hints: the first discovery under the new release accepts and baselines the live hints instead of holding them, so a hint flip that lands before that first pass is not held. After that pass, hint flips are held like any other change. In `scan` mode (the default) a deterministic structural gate runs first and then the offline scan of the changed contract decides: a clean, full-coverage verdict with no structural signal approves the new contract in the same discovery pass (reason `scan_approved`, activity event `tool_auto_approved` carrying the replaced contract); a finding, a scan that could not cover the tool, or any structural signal (see [Structural changes are held](#structural-gate)) holds it with the evidence attached. In `manual` mode a changed contract is always held: the scan runs and its findings are recorded as hold evidence, but a clean verdict does not approve the change.
 
   Since hash schema v5 every hashed field is length-prefixed and a missing output schema is encoded explicitly. Under v4, fields were joined with `|`, so moving text between the description and a schema could produce another contract with the same hash. On upgrade, a v4 approval is re-hashed without review only when its stored v4 hash covers the stored definition and that definition is exactly what the server serves now. Any other definition is held as "changed". `mcpproxy tools preflight --pin` values (`sha256/v<N>:…`) carry the schema version, so pins taken before the upgrade report `hash_mismatch` until re-pinned.
 - **Keeps server release in human hands.** There is no server-level approve over MCP, so an agent cannot release a quarantined server. This applies to server admission only. Tool approval is different: an MCP client with admin access (for example the main `/mcp` connection with the API key, not a scoped agent token) can call `quarantine_security` with `approve_tool` or `approve_all_tools` and release a pending or changed tool on an already-admitted server, with no human confirmation step. Agent tokens are refused ("Agent tokens cannot perform quarantine security operations"). Treat any admin-level MCP client as able to approve tool changes.
@@ -218,7 +218,8 @@ What it does not do:
 
 - **It is not proof of safety.** Review is only as good as the reviewer, and the offline scanners can miss attacks. A clean scan means the checks found nothing in the captured definitions; it is not evidence that a server or tool is safe. Manual review, scanner-assisted review and agent-assisted inspection (`inspect_quarantined`) are inputs to your decision. None of them approves anything by itself.
 - **It does not see behavior outside the definition.** The hash covers name, description, schemas and the safety-relevant annotation hints. A server whose implementation or backend changes while its definitions stay identical is not detected, and neither is a malicious tool result returned at call time.
-- **Trust modes change the guarantee.** `scan` (the default since spec 119) admits a new server, a new tool and a changed tool contract automatically when the offline scan is clean, so a detector miss — including a paraphrased rug pull that scans clean — is admitted at that point; findings, uncovered tools and safer-direction hint flips are held. `manual` holds every new server and every tool contract change until it is approved: server release needs a person, while tool approval can also come from an admin-access MCP client. `auto` admits without scanning or holding at all and trusts tool changes (rug-pull risk). Server admission and tool-change review are separate controls: `"quarantined": false` on a server entry only releases the server-level quarantine, and under `manual` trust a new or changed tool on that server is still held after its baseline. Tool-change holds are removed by `trust_mode: auto`, the legacy `auto_approve_tool_changes: true` (which an explicit `trust_mode` overrides), or `quarantine_enabled: false` globally. See [Trust modes](#trust-modes-auto--scan--manual).
+- **Trust modes change the guarantee.** `scan` (the default since spec 119) admits a new server, a new tool and a changed tool contract automatically when the offline scan is clean, so a detector miss — including a paraphrased rug pull that scans clean — is admitted at that point; findings, uncovered tools and every structural change (a safety-hint change in either direction, a widened input schema, an output-schema change, a dispatch-tier change) are held. `manual` holds every new server and every tool contract change until it is approved: server release needs a person, while tool approval can also come from an admin-access MCP client. `auto` admits without scanning or holding at all and trusts tool changes (rug-pull risk). Server admission and tool-change review are separate controls: `"quarantined": false` on a server entry only releases the server-level quarantine, and under `manual` trust a new or changed tool on that server is still held after its baseline. Tool-change holds are removed by `trust_mode: auto`, the legacy `auto_approve_tool_changes: true` (which an explicit `trust_mode` overrides), or `quarantine_enabled: false` globally. See [Trust modes](#trust-modes-auto--scan--manual).
+- **It gates definitions, not processes.** Quarantine decides which tool definitions agents may see and call. A stdio server the proxy spawns under `none` or `sandbox` isolation still runs as the proxy's user: it can read the data directory and, while `enable_socket` is on, mint agent tokens over the admin socket with no key, whatever its quarantine state. For such servers `enable_socket: false` or `docker` isolation is the control, not approval. See [What the sandbox does not hide](./sandbox-isolation.md#what-the-sandbox-does-not-hide).
 - **It is not data-loss prevention.** See [Sensitive Data Detection](./sensitive-data-detection.md) and [Output Sanitisation](./output-sanitisation.md) for what is flagged and what, if anything, is blocked.
 
 ## Managing Quarantine
@@ -572,7 +573,7 @@ new-server admission and tool-change approval (superseding the binary
 | Mode | Add time | Tool changes |
 |------|----------|--------------|
 | `auto` | Admitted without quarantine or scanning | Trusted without scanning (rug-pull risk) |
-| `scan` (default) | Quarantined, then a fail-closed automatic TPA scan admits it on a clean verdict | New tools and **changed** tool contracts are auto-approved when the offline scan verdict is clean with full coverage (spec 119). A finding or an uncovered tool is held for review with the evidence attached; a change that re-labels the tool as safer (`readOnlyHint` false→true, `destructiveHint` true→false) is held whatever the verdict. A paraphrased rug pull that scans clean is admitted: that is the accepted residual risk of the default tier — use `manual` on servers where it is not acceptable |
+| `scan` (default) | Quarantined, then a fail-closed automatic TPA scan admits it on a clean verdict | New tools and **changed** tool contracts are auto-approved when the offline scan verdict is clean with full coverage (spec 119) **and** the structural gate finds nothing (spec 120): any safety-hint change in either direction, a new required parameter, a type change, an enum member added or an enum dropped, a loosened or removed constraint, a default or const added or changed, a new parameter that carries a default, const or enum, an output-schema change, or a dispatch-tier change with an equal hash is held whatever the verdict ([details](#structural-gate)). A finding or an uncovered tool is held for review with the evidence attached. A paraphrased rug pull that scans clean and changes nothing structural is admitted: that is the accepted residual risk of the default tier — use `manual` on servers where it is not acceptable |
 | `manual` | Quarantined for human review | Every change held for review, including input-schema-only changes, an added output schema, an added description and annotation-hint flips (see [What quarantine does and does not cover](#what-quarantine-does-and-does-not-cover)); a clean scan verdict is recorded as evidence and approves nothing |
 
 Config field: per-server `trust_mode`; REST: `trust_mode` on
@@ -803,6 +804,18 @@ The quarantine banner distinguishes four states: scan running, scan verdict
 blocked automatic approval, scan could not complete (retry offered), and
 awaiting manual review.
 
+`held_signals` can also carry the structural gate's own ids (spec 120), listed
+ahead of the scanner's: `GATE-HINT-SAFER-FLIP` (the tool re-labelled itself as
+safer), `GATE-HINT-CHANGE:<hint>:<old>>:<new>` (any safety-hint change, also
+`GATE-HINT-CHANGE:dispatch:<old>>:<new>` when the `call_tool` variant moved),
+`GATE-SCHEMA-SHAPE:<reason>:<path>` (for example
+`GATE-SCHEMA-SHAPE:new-required:bcc`) and `GATE-OUTPUT-SCHEMA:added|removed|changed`.
+They are recorded with `held_reason: scan_findings` and the scan's verdict as it
+was (`clean` when the scan found nothing), so the review screen says why the
+clean-scanned change is still held. A very large delta is compacted per rule
+(`GATE-SCHEMA-SHAPE:more:+7`) so the record's 16-signal cap never hides a rule. The Web UI labels them ("Input schema
+widened: new-required bcc"); the CLI prints the raw id.
+
 `held_reason` has a third value, `awaiting_review`, recorded in `manual` mode
 when the automatic scan of a changed or newly pending tool's current definition
 came back **clean** (`held_verdict: "clean"`, no signals). It is evidence, not a
@@ -817,9 +830,57 @@ not from this field, and is unchanged.
 
 ### Reviewing a held change {#reviewing-a-held-change}
 
-Every changed tool contract is held in `manual` mode; in `scan` mode (the default) a change is held when the offline scan flags it, cannot cover it, or it re-labels the tool as safer. To keep review cheap, the Web review screen and `mcpproxy review show <server>` show what differs from the approved definition: the description, parameters added, removed, retyped or newly required, output schema changes, and flips of the four safety hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). **Approve update (N changed tools)** on the Web review screen approves exactly those tools in one click. The approval is bound to the definitions and the server incarnation on screen, so if a tool changes again, or the server is removed and re-added, between viewing and clicking, the request is refused with 409 and nothing is approved; reload and review again.
+Every changed tool contract is held in `manual` mode; in `scan` mode (the default) a change is held when the offline scan flags it, cannot cover it, or the [structural gate](#structural-gate) returns a signal (a hint change, a widened input schema, an output-schema change). To keep review cheap, the Web review screen and `mcpproxy review show <server>` show what differs from the approved definition: the description, parameters added, removed, retyped or newly required, output schema changes, and flips of the four safety hints (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`). **Approve update (N changed tools)** on the Web review screen approves exactly those tools in one click. The approval is bound to the definitions and the server incarnation on screen, so if a tool changes again, or the server is removed and re-added, between viewing and clicking, the request is refused with 409 and nothing is approved; reload and review again.
 
 A server you trust to update freely can opt out of the hold with `auto_approve_tool_changes: true` on its entry (or `trust_mode: auto`). The hold messages in the Web UI, the CLI and the refusal an MCP client receives name this option.
+
+### Structural changes are held {#structural-gate}
+
+Since spec 120 the `scan` gate compares the changed contract with the approved
+one **before** it trusts a clean scan. The comparison is deterministic and
+structural (no word list, no similarity score, no classifier): it reads the
+four safety hints and walks both schemas keyword by keyword. Any of these holds
+the change whatever the scan says, with the signal recorded on the record:
+
+| Signal | Held when |
+|--------|-----------|
+| `GATE-HINT-CHANGE` | the effective value of `readOnlyHint`, `destructiveHint`, `idempotentHint` or `openWorldHint` changed in either direction (MCP defaults applied); the two safer flips also carry `GATE-HINT-SAFER-FLIP`. `openWorldHint` true→false matters most here: it marks the tool's output as trusted. Also when the `call_tool` variant the tool is routed to moves while the hash does not (an explicit `destructiveHint: true` dropped to no hints routes the tool as read) |
+| `GATE-SCHEMA-SHAPE` | a new `required` entry; a `type` or `$ref` change; an `enum` that gained a member or was dropped; any `pattern` or `format` change; a `minimum`/`maximum`/length/items/properties bound loosened or removed; `additionalProperties: false` relaxed; a `default` added or changed, a `const` added, changed or removed; a new property (or `$defs` entry) whose subtree carries a `default`, `const` or `enum`; `anyOf`/`oneOf` gained a branch, `allOf` lost one; the approved input schema is unknown (a record from before full capture) |
+| `GATE-OUTPUT-SCHEMA` | the output schema was added, removed or structurally changed (descriptions and titles inside it are ignored) |
+
+Narrowing edits pass and leave the decision to the scan: a property removed, a
+`required` entry removed, an enum member removed, a bound tightened or added,
+`additionalProperties` set to `false`, a `default` removed, and a new optional
+property that carries no default, const or enum. Text keywords (`description`,
+`title`, `examples`) are the scanner's business everywhere. The walk recurses
+through `properties`, `items`, `$defs`, `anyOf`/`oneOf`/`allOf` and
+`patternProperties`, so a widening three levels down is held like one at the
+root, and every structural step is compared with the **last approved**
+contract, so splitting a change across releases does not help. The same rules
+are pinned by a fixture shared with the Web review differ, so a held change is
+always visible on the review screen.
+
+**What the gate does not catch, said plainly.** A well-written paraphrase of a
+description, a one-word edit, slow text drift over several releases, a server
+whose behaviour changes while its definition does not, and structural keywords
+the walk does not name (`dependentRequired`, `if`/`then`/`else`, `contains`,
+`uniqueItems`). No offline gate catches those. The controls that remain are
+`trust_mode: manual` on the servers you do not trust, a profile `max_tier`, the
+response pipeline, and the per-token rate limit.
+
+**Audit.** Every automatic approval of a changed contract (`tool_auto_approved`,
+scan-approved or `auto_approve_tool_changes`) carries the contract it replaced:
+`old_hash`, `old_description`, `old_schema`, `old_output_schema`,
+`old_annotations`, the new values, `approved_by`, the gate signals evaluated
+(`gate_signals`, empty on an approval), and for a scan-approval `scan_verdict`
+and `scan_bundle` (the active TPA bundle), so what the gate let through can be
+reconstructed afterwards from `mcpproxy activity list`.
+
+**Upgrade.** A server whose `trust_mode` is empty runs under `scan` by default.
+The first start after the upgrade logs one `WARN` naming every such enabled
+server (persisted marker in `config.db`; a fresh install with no servers logs
+nothing), and `mcpproxy doctor` names them on every run. Set `trust_mode:
+"manual"` on a server whose tool changes a person should review.
 
 ### Block (approve + disable)
 

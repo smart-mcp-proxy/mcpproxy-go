@@ -104,6 +104,9 @@ func TestToolsListChanged_TrustedServer_DoesNotJoinPreChangeList(t *testing.T) {
 		ApprovedBy:         "operator",
 		CurrentDescription: "Lists calendar events.",
 		CurrentSchema:      approvedSchema,
+		// mcp-go's NewTool serves the MCP default hints explicitly; the
+		// approved snapshot must say so too (spec 120 FR-009).
+		CurrentAnnotations: mcpGoDefaultAnnotations(),
 		IdentityKeyed:      true,
 	}))
 

@@ -575,7 +575,7 @@ func writeArchiveFile(target string, src io.Reader, limit int64) (int64, error) 
 // the toolchain is missing, the host is offline, or the fetch/extract fails —
 // guaranteeing no regression versus today's behavior.
 func (r *SourceResolver) resolveFromPackageFetch(ctx context.Context, info ServerInfo) (*ResolvedSource, error) {
-	cmdBase := strings.ToLower(filepath.Base(info.Command))
+	cmdBase := runnerBase(info.Command)
 	spec := runnerPackageSpec(cmdBase, info.Args)
 	if spec == "" {
 		return nil, fmt.Errorf("no package spec in args for %s", info.Name)
