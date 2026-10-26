@@ -859,6 +859,24 @@ func applyTLSEnvOverrides(cfg *Config) {
 	value = os.Getenv("MCPPROXY_CERTS_DIR")
 	envOverride(b, cfg, FieldTLSCertsDir, value != "", value)
 
+	// Extra names for the generated server certificate: comma-separated DNS
+	// names and IP addresses. An empty variable leaves the file value; entries
+	// are validated like file values (Validate runs after the overrides).
+	var sans []string
+	value = os.Getenv("MCPPROXY_TLS_EXTRA_SANS")
+	for _, e := range strings.Split(value, ",") {
+		if e = strings.TrimSpace(e); e != "" {
+			sans = append(sans, e)
+		}
+	}
+	envOverride(b, cfg, FieldTLSExtraSANs, len(sans) > 0, sans)
+
+	// Operator-provided server certificate and key (absolute paths).
+	value = os.Getenv("MCPPROXY_TLS_CERT_FILE")
+	envOverride(b, cfg, FieldTLSCertFile, value != "", value)
+	value = os.Getenv("MCPPROXY_TLS_KEY_FILE")
+	envOverride(b, cfg, FieldTLSKeyFile, value != "", value)
+
 	// Override data directory from environment. MCPPROXY_DATA_DIR is the
 	// documented name; MCPPROXY_DATA is kept for backward compatibility and
 	// loses when both are set.
