@@ -7275,7 +7275,7 @@ func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
 	}
 
 	serverID := chi.URLParam(r, "id")
-	toolName := chi.URLParam(r, "tool")
+	toolName := decodePathParam(chi.URLParam(r, "tool"))
 	if serverID == "" || toolName == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")
 		return
@@ -7402,7 +7402,7 @@ func (s *Server) handleSetAllToolsEnabled(enabled bool) http.HandlerFunc {
 
 func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
-	toolName := chi.URLParam(r, "tool")
+	toolName := decodePathParam(chi.URLParam(r, "tool"))
 
 	if serverID == "" || toolName == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")
