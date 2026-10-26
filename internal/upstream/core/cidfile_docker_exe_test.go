@@ -50,3 +50,42 @@ func TestInsertCidfile_DockerExe(t *testing.T) {
 	out := c.insertCidfileIntoShellDockerCommand([]string{"/c", "echo docker run"}, cid)
 	assert.False(t, strings.Contains(out[len(out)-1], "--cidfile"))
 }
+
+// The cidfile path is spliced into a string the shell re-parses, so it must be
+// quoted in that shell's dialect (review finding on #1773).
+func TestInsertCidfile_QuotesPathForShell(t *testing.T) {
+	c := newIsolatedTestClient()
+
+	cases := []struct {
+		name string
+		args []string
+		cid  string
+		want string
+	}{
+		{
+			name: "cmd.exe with a space in TEMP",
+			args: []string{"/c", `"C:\Program Files\Docker\docker.exe" run --rm -i img`},
+			cid:  `C:\Users\John Smith\AppData\Local\Temp\mcpproxy-cid-1.txt`,
+			want: `"C:\Program Files\Docker\docker.exe" run --cidfile "C:\Users\John Smith\AppData\Local\Temp\mcpproxy-cid-1.txt" --rm -i img`,
+		},
+		{
+			name: "git bash keeps backslashes",
+			args: []string{"-l", "-c", `'C:/Program Files/Docker/docker.exe' run --rm -i img`},
+			cid:  `C:\Users\jsmith\AppData\Local\Temp\mcpproxy-cid-1.txt`,
+			want: `'C:/Program Files/Docker/docker.exe' run --cidfile 'C:\Users\jsmith\AppData\Local\Temp\mcpproxy-cid-1.txt' --rm -i img`,
+		},
+		{
+			name: "plain unix path stays unquoted",
+			args: []string{"-l", "-c", `docker run --rm -i img`},
+			cid:  `/tmp/mcpproxy-cid-1.txt`,
+			want: `docker run --cidfile /tmp/mcpproxy-cid-1.txt --rm -i img`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := c.insertCidfileIntoShellDockerCommand(tc.args, tc.cid)
+			require.Len(t, out, len(tc.args))
+			assert.Equal(t, tc.want, out[len(out)-1])
+		})
+	}
+}

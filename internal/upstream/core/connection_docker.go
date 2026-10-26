@@ -372,7 +372,11 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 	// A literal search for "docker run" misses docker.exe, and the fallback
 	// below then appends --cidfile as extra shell argv, where docker never
 	// sees it (it lands after the image and is passed into the container).
-	if dockerCmdWithCid, ok := insertCidfileAfterDockerRun(dockerCmd, cidFile); ok {
+	// The cidfile path is spliced into a string the shell re-parses, so quote it
+	// in that shell's dialect: a %TEMP% with a space would otherwise split the
+	// path under cmd.exe, and bash -c would strip a Windows path's backslashes.
+	quotedCid := quoteCidfileForShell(cidFile, secondToLast == "/c")
+	if dockerCmdWithCid, ok := insertCidfileAfterDockerRun(dockerCmd, quotedCid); ok {
 		newArgs := make([]string, len(shellArgs))
 		copy(newArgs, shellArgs)
 		newArgs[len(newArgs)-1] = dockerCmdWithCid
@@ -390,6 +394,22 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 		zap.String("server", c.config.Name),
 		zap.String("docker_cmd", logSafeCommand(dockerCmd)))
 	return append(shellArgs, "--cidfile", cidFile)
+}
+
+// quoteCidfileForShell quotes cidFile for the shell that will parse the
+// wrapped command string: cmd.exe (/c) or a POSIX shell (-c, including Git
+// Bash on Windows).
+func quoteCidfileForShell(cidFile string, cmdExe bool) string {
+	if cmdExe {
+		if strings.ContainsAny(cidFile, " \t&|<>()^%") {
+			return `"` + cidFile + `"`
+		}
+		return cidFile
+	}
+	if !strings.ContainsAny(cidFile, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
+		return cidFile
+	}
+	return "'" + strings.ReplaceAll(cidFile, "'", `'"'"'`) + "'"
 }
 
 // insertCidfileAfterDockerRun returns the command with "--cidfile <file>"
