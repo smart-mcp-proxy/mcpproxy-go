@@ -1610,8 +1610,8 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 	// scan: a sibling entry that genuinely points at us wins over it.
 	var nameOnly *entryLocation
 
-	for name, v := range serversMap {
-		entry, ok := v.(map[string]interface{})
+	for _, name := range entryScanOrder(serversMap) {
+		entry, ok := serversMap[name].(map[string]interface{})
 		if !ok {
 			continue
 		}
@@ -1644,6 +1644,25 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		return *nameOnly, true, true
 	}
 	return entryLocation{}, false, true
+}
+
+// entryScanOrder is the order the entry finders inspect serversMap in: the
+// default "mcpproxy" key first, then the rest sorted. Go randomizes map
+// iteration, and with two entries pointing here (an old ?apikey= one left
+// beside the current one) GetStatus's server name and ClientSecret's
+// credential would otherwise flip between calls.
+func entryScanOrder(serversMap map[string]interface{}) []string {
+	names := make([]string, 0, len(serversMap))
+	for name := range serversMap {
+		if name != defaultServerName {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if _, ok := serversMap[defaultServerName]; ok {
+		names = append([]string{defaultServerName}, names...)
+	}
+	return names
 }
 
 // classifyEndpointMatch turns a matched entry into the EndpointMatch value the
@@ -1859,8 +1878,8 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, pars
 
 	var nameOnly *entryLocation
 
-	for name, v := range serversMap {
-		entry, ok := v.(map[string]interface{})
+	for _, name := range entryScanOrder(serversMap) {
+		entry, ok := serversMap[name].(map[string]interface{})
 		if !ok {
 			continue
 		}
