@@ -3702,6 +3702,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		tlsCfg, err := tlslocal.EnsureServerTLSConfig(tlslocal.Options{
 			Dir:               certsDir,
 			RequireClientCert: cfg.TLS.RequireClientCert,
+			ExtraSANs:         cfg.TLS.ExtraSANs,
+			CertFile:          cfg.TLS.CertFile,
+			KeyFile:           cfg.TLS.KeyFile,
 		})
 		if err != nil {
 			return fmt.Errorf("TLS initialization failed: %w", err)
@@ -3722,6 +3725,8 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 		s.logger.Info("Starting HTTPS server with TLS configuration",
 			zap.String("certs_dir", certsDir),
+			zap.Strings("extra_sans", cfg.TLS.ExtraSANs),
+			zap.String("cert_file", cfg.TLS.CertFile),
 			zap.Bool("require_client_cert", cfg.TLS.RequireClientCert),
 			zap.Bool("hsts", cfg.TLS.HSTS),
 			zap.Bool("tray_plain_http", trayListener != nil),
@@ -4433,8 +4438,7 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 
 	var limitErr *limiter.LimitError
 	switch {
-	case errors.As(err, &limitErr) &&
-		(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout):
+	case errors.As(err, &limitErr) && limitErr.Shed():
 		// Spec 093 FR-011: a shed never reached the upstream, so it is the
 		// tool_call half of the authz-allow pair, never a second authz —
 		// mirrors auditToolCallShed's use at every other dispatch site.

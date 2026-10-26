@@ -171,6 +171,48 @@ type AgentToken struct {
 	// guard evaluation (Spec 115 FR-012a). Never set on client records or on
 	// REST/CLI tokens; immutable after mint.
 	GuardBound bool `json:"guard_bound,omitempty"`
+
+	// RateLimit is this token's own call budget (issue #1699). Nil means the
+	// token has none of its own and inherits agent_token_rate_limit from the
+	// config; a non-nil value replaces that default for this token, and a
+	// PerMinute of 0 opts the token out of it. Additive and omitempty: a binary
+	// that predates it ignores the field.
+	RateLimit *TokenRateLimit `json:"rate_limit,omitempty"`
+}
+
+// TokenRateLimit is a per-token call budget: PerMinute calls a minute on
+// average, with room for Burst calls at once. It is a token bucket that refills
+// continuously, so a caller that has used its burst regains one call every
+// 60/PerMinute seconds. PerMinute 0 means no limit. Burst 0 means "as many as
+// PerMinute".
+type TokenRateLimit struct {
+	PerMinute int `json:"per_minute"`
+	Burst     int `json:"burst,omitempty"`
+}
+
+// MaxRateLimitPerMinute bounds TokenRateLimit.PerMinute and Burst. It is far
+// above any sane agent budget; it only keeps the arithmetic and a typo
+// ("600000000") from silently meaning "unlimited".
+const MaxRateLimitPerMinute = 100000
+
+// Validate checks a rate limit supplied by a caller. A nil limit is valid.
+func (r *TokenRateLimit) Validate() error {
+	if r == nil {
+		return nil
+	}
+	switch {
+	case r.PerMinute < 0:
+		return fmt.Errorf("per_minute cannot be negative: use 0 for no limit")
+	case r.PerMinute > MaxRateLimitPerMinute:
+		return fmt.Errorf("per_minute cannot exceed %d", MaxRateLimitPerMinute)
+	case r.Burst < 0:
+		return fmt.Errorf("burst cannot be negative: use 0 for the per_minute value")
+	case r.Burst > MaxRateLimitPerMinute:
+		return fmt.Errorf("burst cannot exceed %d", MaxRateLimitPerMinute)
+	case r.PerMinute == 0 && r.Burst > 0:
+		return fmt.Errorf("burst needs a per_minute above 0")
+	}
+	return nil
 }
 
 // CredentialIssuer records who issued a credential, using the Actor fields of
@@ -280,6 +322,7 @@ func (t *AgentToken) AuthContext() *AuthContext {
 		TokenKind:      normalizeKind(t.Kind),
 		ClientID:       t.ClientID,
 		ProfileMode:    t.ProfileMode,
+		RateLimit:      t.RateLimit.clone(),
 		// UserID carries the owning tenant (server edition). Without it an
 		// agent-token request had no tenant identity at all, so its activity
 		// could not be attributed or scoped. It does NOT confer the user tier:
@@ -288,6 +331,16 @@ func (t *AgentToken) AuthContext() *AuthContext {
 		// non-empty UserID.
 		UserID: t.UserID,
 	}
+}
+
+// clone returns an independent copy, so an AuthContext never aliases the
+// record it was built from. Nil-safe.
+func (r *TokenRateLimit) clone() *TokenRateLimit {
+	if r == nil {
+		return nil
+	}
+	c := *r
+	return &c
 }
 
 // IsExpired returns true if the token has passed its expiry time.

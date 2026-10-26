@@ -171,3 +171,56 @@ func TestTokenShow_LegacyScopeHintAndClientKind(t *testing.T) {
 	require.Contains(t, out, "Manage with:    mcpproxy client show cursor")
 	require.NotContains(t, out, "Legacy scope")
 }
+
+// Issue #1699: --rate-limit / --rate-burst set the token's own call budget.
+
+func TestTokenCreate_RateLimitFlags(t *testing.T) {
+	const withLimit = `{"name":"ci","token":"mcp_agt_0123456789abcdef","allowed_servers":["*"],"permissions":["read"],"expires_at":"2026-10-30T00:00:00Z","rate_limit":{"per_minute":60,"burst":10}}`
+	rec := newTokenRecorder(t, map[string]cannedResponse{"POST /api/v1/tokens": createdResp(withLimit)})
+	out, _, err := runCLI(t, tokenCommandForTest, "table", "create", "--name", "ci", "--profile", "work-ro2", "--rate-limit", "60", "--rate-burst", "10")
+	require.NoError(t, err)
+	body := rec.only(t).jsonBody(t)
+	require.Equal(t, map[string]any{"per_minute": float64(60), "burst": float64(10)}, body["rate_limit"])
+	require.Contains(t, out, "Rate limit:  60 calls/minute, bursts of up to 10")
+}
+
+func TestTokenCreate_RateLimitOmittedByDefault(t *testing.T) {
+	rec := newTokenRecorder(t, map[string]cannedResponse{"POST /api/v1/tokens": createdResp(createdToken)})
+	out, _, err := runCLI(t, tokenCommandForTest, "table", "create", "--name", "ci", "--profile", "work-ro2")
+	require.NoError(t, err)
+	require.NotContains(t, rec.only(t).jsonBody(t), "rate_limit", "no flag, no member: the config default applies")
+	require.NotContains(t, out, "Rate limit:")
+}
+
+func TestTokenCreate_RateLimitZeroIsSentAsAnExemption(t *testing.T) {
+	rec := newTokenRecorder(t, map[string]cannedResponse{"POST /api/v1/tokens": createdResp(createdToken)})
+	_, _, err := runCLI(t, tokenCommandForTest, "table", "create", "--name", "ci", "--profile", "work-ro2", "--rate-limit", "0")
+	require.NoError(t, err)
+	require.Equal(t, map[string]any{"per_minute": float64(0)}, rec.only(t).jsonBody(t)["rate_limit"])
+}
+
+func TestTokenCreate_RateLimitRefusedLocally(t *testing.T) {
+	for name, args := range map[string][]string{
+		"negative rate":        {"--rate-limit", "-5"},
+		"negative burst":       {"--rate-limit", "5", "--rate-burst", "-1"},
+		"burst without rate":   {"--rate-burst", "5"},
+		"burst with zero rate": {"--rate-limit", "0", "--rate-burst", "5"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			rec := newTokenRecorder(t, map[string]cannedResponse{})
+			_, _, err := runCLI(t, tokenCommandForTest, "table", append([]string{"create", "--name", "ci", "--profile", "p"}, args...)...)
+			require.Error(t, err)
+			require.Equal(t, ExitCodeGeneralError, classifyError(err))
+			require.Empty(t, rec.all(), "a bad number exits before anything is sent")
+		})
+	}
+}
+
+func TestFormatTokenRateLimit(t *testing.T) {
+	require.Equal(t, "", formatTokenRateLimit(nil))
+	require.Equal(t, "", formatTokenRateLimit("junk"))
+	require.Equal(t, "none (exempt from the config default)", formatTokenRateLimit(map[string]interface{}{"per_minute": float64(0)}))
+	require.Equal(t, "30 calls/minute", formatTokenRateLimit(map[string]interface{}{"per_minute": float64(30)}))
+	require.Equal(t, "30 calls/minute", formatTokenRateLimit(map[string]interface{}{"per_minute": float64(30), "burst": float64(30)}))
+	require.Equal(t, "30 calls/minute, bursts of up to 5", formatTokenRateLimit(map[string]interface{}{"per_minute": float64(30), "burst": float64(5)}))
+}

@@ -41,7 +41,7 @@ Gate → reason mapping (all in `handleCallToolVariant` unless noted; anchors sh
 |---|---|---|---|
 | `surface`, `server`, `tool`, `operation`, `args_sha256`, `args_bytes` | ✔ | | same values as the paired `authz` line |
 | `outcome` | ✔ | | `success` \| `error` \| `blocked` (post-dispatch output sanitisation/schema) \| `rejected` (limiter shed, `*limiter.LimitError` returned to the completion path) |
-| `reason` | ✔ iff `blocked`/`rejected` | forbidden on `success`/`error` | `output_sanitisation` \| `output_schema` \| `limiter_queue_full` \| `limiter_queue_timeout` |
+| `reason` | ✔ iff `blocked`/`rejected` | forbidden on `success`/`error` | `output_sanitisation` \| `output_schema` \| `limiter_queue_full` \| `limiter_queue_timeout` \| `rate_limited` |
 | `error_class` | ✔ iff `error` | forbidden on every other outcome (`success`, `blocked`, `rejected`) | `upstream_error` \| `upstream_timeout` \| `upstream_unavailable` \| `validation` \| `sanitisation` \| `internal` \| `cancelled` — a bounded class, never message text |
 | `duration_ms` | ✔ | | |
 | `request_bytes`, `response_bytes` | opt | | as measured by the completion path (`RequestBytes` pre-truncation) |

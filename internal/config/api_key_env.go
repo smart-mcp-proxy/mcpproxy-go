@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -92,4 +93,65 @@ func ResolveEnvAPIKey() (EnvAPIKeyResult, error) {
 	}
 
 	return EnvAPIKeyResult{Set: envSet, Key: envKey}, nil
+}
+
+// resolveAPIKeyRef replaces an api_key that is a secret reference with the
+// value it points at, as a process-only override: the effective config runs
+// with the secret, while every save writes the reference (never the secret)
+// back, whatever else the save is about (see process_overrides.go).
+//
+// The reference is resolved here, once per load, and a reference that cannot be
+// resolved fails the load. Generating a key instead would start the proxy
+// under a credential the operator did not choose and save it over the
+// reference.
+//
+// A key from the environment (MCPPROXY_API_KEY_FILE or MCPPROXY_API_KEY)
+// overrides the config file's key, so with one present the reference is left
+// as written, unread, for EnsureAPIKey's override to replace.
+func resolveAPIKeyRef(c *Config) error {
+	if !secret.IsSecretRef(c.APIKey) {
+		return nil
+	}
+	envKey, err := ResolveEnvAPIKey()
+	if err != nil {
+		return err
+	}
+	if envKey.Set && envKey.Key != "" {
+		return nil
+	}
+	resolved, err := secret.NewResolver().ExpandSecretRefs(context.Background(), c.APIKey)
+	if err != nil {
+		// The error is deliberately a fixed sentence: ExpandSecretRefs' own
+		// text quotes the reference, and the api_key field is the one value
+		// no error or log line may carry. The operator knows which field it is.
+		return errors.New("api_key: could not resolve the secret reference; check that the referenced file, environment variable or keyring entry exists and is readable")
+	}
+	if resolved == "" {
+		return fmt.Errorf("api_key: the reference resolved to an empty value")
+	}
+	// api_key is fixed for the life of the process (a reload pins the running
+	// value), and this load may be one that never becomes the live config, such
+	// as the disk re-read of a server restart. Once a reference has been
+	// resolved, later loads carry the key the process runs with, not what the
+	// file holds now: recording a rotated value as the process value would make
+	// the running key look like an edit, and the next save would write it over
+	// the reference. The file is still read above, so an unusable reference
+	// fails the load; a rotated key takes effect on the next start.
+	if running, ok := runningAPIKeyFromReference(); ok {
+		resolved = running
+	}
+	OverrideForProcess(c, FieldAPIKey, OverrideSourceEnv, resolved)
+	return nil
+}
+
+// runningAPIKeyFromReference returns the api_key this process runs with when it
+// was resolved from a secret reference.
+func runningAPIKeyFromReference() (string, bool) {
+	processOverridesMu.RLock()
+	defer processOverridesMu.RUnlock()
+	o, ok := processOverrides[overrideKey{FieldAPIKey.Name, OverrideSourceEnv}].(typedOverride[string])
+	if !ok || !secret.IsSecretRef(o.loaded) {
+		return "", false
+	}
+	return o.process, true
 }
