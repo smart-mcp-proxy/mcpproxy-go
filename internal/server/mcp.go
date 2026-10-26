@@ -781,7 +781,11 @@ func getAuthMetadata(ctx context.Context) map[string]string {
 // Uses "_auth_" prefix to clearly separate auth metadata from tool arguments.
 // Returns a new map — the original args map is never mutated, so it remains
 // safe to forward to upstream servers without leaking internal metadata.
+// Caller-sent `_auth_*` keys are dropped first: internal/runtime copies
+// `_auth_user_id` / `_auth_user_email` onto the activity record, so a key the
+// caller supplied would otherwise stand in for one the proxy never set.
 func injectAuthMetadata(ctx context.Context, args map[string]interface{}) map[string]interface{} {
+	args = security.StripInternalArgs(args)
 	authMeta := getAuthMetadata(ctx)
 	if authMeta == nil {
 		return args
