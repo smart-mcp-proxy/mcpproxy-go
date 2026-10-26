@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -1701,8 +1700,6 @@ func entryPointsToBridge(entry map[string]interface{}, baseURL string) bool {
 	return hasBridgePkg && pointsToUs
 }
 
-var trailingCommaPattern = regexp.MustCompile(`,\s*([}\]])`)
-
 func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	if err := json.Unmarshal(raw, out); err == nil {
 		normalizeNilConfigMap(out)
@@ -1715,7 +1712,7 @@ func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	if cerr != nil {
 		return cerr
 	}
-	cleaned = trailingCommaPattern.ReplaceAll(cleaned, []byte(`$1`))
+	cleaned = stripTrailingCommas(cleaned)
 	if err := json.Unmarshal(cleaned, out); err != nil {
 		return err
 	}
@@ -1789,6 +1786,44 @@ func stripJSONComments(raw []byte) ([]byte, error) {
 		}
 	}
 	return out, nil
+}
+
+// stripTrailingCommas drops a ',' that is followed (after whitespace) by '}'
+// or ']'. It is string-aware like stripJSONComments: a ", }" inside a JSON
+// string value (a shell snippet in args, say) is content and must survive,
+// because connect writes the parsed document back to the client's file.
+func stripTrailingCommas(raw []byte) []byte {
+	out := make([]byte, 0, len(raw))
+	inString := false
+	escaped := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			out = append(out, c)
+			continue
+		}
+		if c == '"' {
+			inString = true
+		} else if c == ',' {
+			j := i + 1
+			for j < len(raw) && (raw[j] == ' ' || raw[j] == '\t' || raw[j] == '\n' || raw[j] == '\r') {
+				j++
+			}
+			if j < len(raw) && (raw[j] == '}' || raw[j] == ']') {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // jsonHasComments reports whether stripping comments would change the content —
