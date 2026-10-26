@@ -6900,6 +6900,7 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
+	sessionFilter.Offset = offset
 
 	// Get recent sessions from controller
 	sessions, total, err := s.controller.GetRecentSessions(sessionFilter)
