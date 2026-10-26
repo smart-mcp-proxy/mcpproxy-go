@@ -66,10 +66,10 @@ func (s *SecretSanitizer) registerDefaultPatterns() {
 		},
 	})
 
-	// Anthropic API keys (sk-ant-...)
+	// Anthropic API keys (sk-ant-...); the body is base64url, so it carries '_'.
 	s.patterns = append(s.patterns, &secretPattern{
 		name:  "anthropic_key",
-		regex: regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9\-]{30,})\b`),
+		regex: regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9_\-]{30,})\b`),
 		maskFunc: func(key string) string {
 			if len(key) <= 10 {
 				return "****"
