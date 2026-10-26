@@ -1532,6 +1532,7 @@ type SessionRecord struct {
 // TokenName are the credential at initialize.
 type SessionFilter struct {
 	Limit     int
+	Offset    int // matching sessions to skip, applied after sort and filter
 	Status    string
 	Profile   string
 	ClientID  string
@@ -1747,6 +1748,7 @@ func (m *Manager) GetRecentSessions(limit int, status string) ([]*SessionRecord,
 // never truncated out by a page of newer non-matching ones.
 func (m *Manager) GetRecentSessionsFiltered(f SessionFilter) ([]*SessionRecord, int, error) {
 	limit := f.Limit
+	offset := max(f.Offset, 0)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -1792,17 +1794,18 @@ func (m *Manager) GetRecentSessionsFiltered(f SessionFilter) ([]*SessionRecord, 
 				continue
 			}
 			total++
-			if len(sessions) < limit {
+			if total > offset && len(sessions) < limit {
 				sessions = append(sessions, session)
 			}
 		}
 		return sessions, total, nil
 	}
 
-	if limit < len(all) {
-		return all[:limit], len(all), nil
+	page := all[min(offset, len(all)):]
+	if limit < len(page) {
+		page = page[:limit]
 	}
-	return all, len(all), nil
+	return page, len(all), nil
 }
 
 // GetSessionByID retrieves a session by its ID
