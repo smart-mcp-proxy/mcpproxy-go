@@ -611,7 +611,7 @@ var undiffedHotConfigFields = []string{
 	"ToolCallMaxResponseSize", "ToolCallMaxRecordsPerServer",
 	"IntentDeclaration", "SensitiveDataDetection", "OutputValidation",
 	"OutputSanitisation", "Telemetry",
-	"QuarantineEnabled", "RevealSecretHeaders",
+	"QuarantineEnabled", "RevealSecretHeaders", "AgentTokenRateLimit",
 }
 
 // restartGatedConfigFields are bound once at startup; see pinRestartGated.

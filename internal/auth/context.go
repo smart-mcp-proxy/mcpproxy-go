@@ -49,6 +49,12 @@ type AuthContext struct {
 	ClientID    string
 	ProfileMode string
 
+	// RateLimit is the calling agent token's own call budget (issue #1699),
+	// copied from AgentToken at authentication. Nil for every other context
+	// and for a token with none of its own; the managed-client admission seam
+	// then falls back to the agent_token_rate_limit default.
+	RateLimit *TokenRateLimit
+
 	// Multi-user OAuth fields (server edition). Empty for non-user auth types.
 	UserID      string // User's unique ULID identifier
 	Email       string // User's email from OAuth provider

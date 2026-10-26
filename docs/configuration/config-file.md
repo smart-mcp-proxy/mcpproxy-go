@@ -268,6 +268,30 @@ Full reference — validation rules, metrics, and which origins are limited —
 lives in [`docs/configuration.md`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/configuration.md#concurrency-limits--request-queueing)
 in the repository.
 
+### Agent Token Call Rate Limit
+
+Caps how many upstream tool calls one agent token may make per minute. **Off by
+default.**
+
+```json
+{
+  "agent_token_rate_limit": { "per_minute": 60, "burst": 10 }
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `agent_token_rate_limit.per_minute` | integer | unset (off) | Calls a minute each agent token may make. `0` or unset = no limit; maximum `100000` |
+| `agent_token_rate_limit.burst` | integer | `per_minute` | Calls a token may make at once after a quiet spell; needs `per_minute` above `0` |
+
+Each token has its own bucket. Admin API key and unauthenticated callers are not
+limited. A token created with `mcpproxy token create --rate-limit N` uses its own
+budget instead (`--rate-limit 0` exempts it). A refused call gets a retry-friendly
+error (HTTP 429 with `Retry-After` over REST) and a `rejected` activity record
+with the reason `rate_limited`. Hot-reloadable.
+
+Full reference: [Call Rate Limit](/features/agent-tokens#call-rate-limit).
+
 ### Server Edition (`server_edition`) {#server-edition}
 
 The `server_edition` block configures multi-user SSO in the **Server edition**

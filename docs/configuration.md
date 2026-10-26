@@ -338,7 +338,7 @@ saturated upstream. The separate-process CLI debug client is out of scope.
 
 | Metric | Type | Labels | Meaning |
 |--------|------|--------|---------|
-| `mcpproxy_tool_calls_rejected_total` | counter | `server`, `reason`, `scope` | Calls shed by a limit. `reason` = `queue_full` \| `queue_timeout`; `scope` = `server` \| `global`. `server` is the call's target even for a global shed. |
+| `mcpproxy_tool_calls_rejected_total` | counter | `server`, `reason`, `scope` | Calls shed by a limit. `reason` = `queue_full` \| `queue_timeout` \| `rate_limited`; `scope` = `server` \| `global` \| `token`. `server` is the call's target even for a global or token shed. |
 | `mcpproxy_concurrency_active` | gauge | `scope`, `server` | Calls currently holding a slot. |
 | `mcpproxy_concurrency_queue_depth` | gauge | `scope`, `server` | Calls currently waiting for a slot. |
 
@@ -349,6 +349,44 @@ sheds cannot lose increments. The same sheds also appear in the activity log
 per shed — including the ones from `code_execution` and replay: the rejection is
 recorded at the limiter, below the MCP dispatch layer, so no origin can bypass
 it and none can double-report it.
+
+### Agent Token Call Rate Limit
+
+Caps how many upstream tool calls one [agent token](features/agent-tokens.md)
+may make per minute, so a runaway agent loop cannot burn through an upstream's
+quota (GitHub [#1699](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1699)).
+**Off by default.**
+
+```json
+{
+  "agent_token_rate_limit": { "per_minute": 60, "burst": 10 }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `agent_token_rate_limit.per_minute` | integer | unset (off) | Calls a minute each agent token may make. `0` or unset = no limit. Maximum `100000`. |
+| `agent_token_rate_limit.burst` | integer | `per_minute` | Calls a token may make at once after a quiet spell. Needs `per_minute` above `0`. |
+
+The limit is a token bucket kept per token: it starts full, spends one call per
+upstream tool call and refills at `per_minute` calls a minute. It is checked at
+the same admission point as the concurrency limits, so it covers the `call_tool_*`
+variants, direct-routing mode, `code_execution` and the REST tool-call endpoint.
+It applies to agent tokens only: the admin API key and unauthenticated local
+callers are never limited. A token created with `--rate-limit` uses its own budget
+instead of this default (`--rate-limit 0` exempts it); see
+[Call Rate Limit](features/agent-tokens.md#call-rate-limit).
+
+A refused call never reaches the upstream and takes no concurrency slot. MCP
+callers get an error tool result, REST callers get `429` with `Retry-After`, and
+the activity log records a `tool_call` with status `rejected`, reason
+`rate_limited` and the token's name. Metrics: `mcpproxy_tool_calls_rejected_total`
+with `reason="rate_limited"`, `scope="token"` (see the table above).
+
+Buckets are held in memory, so a restart refills them. The block is hot-reloadable;
+a changed budget keeps the calls a token has already spent. Negative values, a
+value above the maximum, and a `burst` without a `per_minute` are rejected, and
+the error names the field.
 
 ### Debug & Development
 

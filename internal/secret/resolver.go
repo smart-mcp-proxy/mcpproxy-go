@@ -15,6 +15,7 @@ func NewResolver() *Resolver {
 
 	// Register default providers
 	r.RegisterProvider("env", NewEnvProvider())
+	r.RegisterProvider(SecretTypeFile, NewFileProvider())
 	r.RegisterProvider("keyring", NewKeyringProvider())
 
 	return r

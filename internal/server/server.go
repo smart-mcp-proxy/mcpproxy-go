@@ -4438,8 +4438,7 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 
 	var limitErr *limiter.LimitError
 	switch {
-	case errors.As(err, &limitErr) &&
-		(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout):
+	case errors.As(err, &limitErr) && limitErr.Shed():
 		// Spec 093 FR-011: a shed never reached the upstream, so it is the
 		// tool_call half of the authz-allow pair, never a second authz —
 		// mirrors auditToolCallShed's use at every other dispatch site.

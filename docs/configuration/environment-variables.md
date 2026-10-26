@@ -50,6 +50,8 @@ from the file at start, so it is not in the process environment (`docker inspect
   variables: `MCPPROXY_API_KEY and MCPPROXY_API_KEY_FILE are both set; set only one of them`. The
   check does not open the file, and the error never contains a key or file contents. An empty
   variable counts as unset.
+- The same file can instead be referenced from the config as `"api_key": "${file:/run/secrets/mcpproxy_api_key}"`
+  (see [File references](../features/keyring-integration.md#file-references)).
 - A file that is named but cannot be used (missing, unreadable, not absolute, too large, empty) stops
   startup with an error that names the variable and path. mcpproxy does **not** fall back to
   the config file or a generated key, so a typo in a secret path cannot start the
