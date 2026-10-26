@@ -3166,7 +3166,7 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	if secret.IsSecretRef(value) {
-		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference (%s); nothing to convert", req.Scope, req.Key, value))
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference; nothing to convert", req.Scope, req.Key))
 		return
 	}
 
