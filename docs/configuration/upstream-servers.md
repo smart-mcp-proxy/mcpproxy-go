@@ -304,13 +304,14 @@ endpoint that backs the "Convert to secret" affordance.
 
 ### Secret references
 
-`headers` and `env` values support two reference shapes that get resolved
+`headers` and `env` values support three reference shapes that get resolved
 at request time rather than stored in plaintext:
 
 | Reference | Source | Lifetime |
 |---|---|---|
 | `${keyring:NAME}` | OS keyring entry called `NAME` | Persists across restarts; managed via the Secrets page or `mcpproxy secrets` CLI |
 | `${env:VAR}` | The `VAR` environment variable on the mcpproxy process | Tied to the shell/launcher that started mcpproxy |
+| `${file:/absolute/path}` | The contents of a file (Docker/Kubernetes secret, systemd credential), one trailing newline removed | Read each time the server's connection is set up, so a rotated secret is picked up when the server is next restarted |
 
 When mcpproxy connects to an upstream it substitutes the reference with
 the actual secret. The reference itself never reaches the upstream MCP

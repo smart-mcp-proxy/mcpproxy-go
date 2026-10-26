@@ -655,6 +655,15 @@ type TLSConfig struct {
 	RequireClientCert bool   `json:"require_client_cert" mapstructure:"require_client_cert"` // Enable mTLS
 	CertsDir          string `json:"certs_dir,omitempty" mapstructure:"certs_dir"`           // Directory for certificates
 	HSTS              bool   `json:"hsts" mapstructure:"hsts"`                               // Enable HTTP Strict Transport Security
+
+	// ExtraSANs are DNS names and IP addresses added to the generated server
+	// certificate, which is signed by the same local CA. Not used with CertFile.
+	ExtraSANs []string `json:"extra_sans,omitempty" mapstructure:"extra_sans"`
+	// CertFile is the absolute path of an operator-provided server certificate
+	// (PEM, leaf first), served instead of a generated one. Needs KeyFile.
+	CertFile string `json:"cert_file,omitempty" mapstructure:"cert_file"`
+	// KeyFile is the absolute path of the private key for CertFile (PEM).
+	KeyFile string `json:"key_file,omitempty" mapstructure:"key_file"`
 }
 
 // TokenizerConfig represents tokenizer configuration for token counting
@@ -3052,6 +3061,7 @@ func (c *Config) validateDetailedCore() []ValidationError {
 				})
 			}
 		}
+		errors = append(errors, validateTLSCertSettings(c.TLS)...)
 	}
 
 	// Validate logging configuration
@@ -3176,6 +3186,13 @@ func (c *Config) Validate() error {
 	// Both key variables set is an error whether or not the config file
 	// carries an api_key: one rule, checked on every load.
 	if err := checkEnvAPIKeyConflict(); err != nil {
+		return err
+	}
+
+	// api_key may itself be a secret reference (api_key: "${file:/run/secrets/k}"),
+	// so the key can come from a Docker/Kubernetes secret or a systemd credential
+	// without being written into this file.
+	if err := resolveAPIKeyRef(c); err != nil {
 		return err
 	}
 

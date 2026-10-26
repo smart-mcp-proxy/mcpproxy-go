@@ -117,6 +117,21 @@ var (
 		Get:  func(c *Config) string { return tlsOf(c).CertsDir },
 		Set:  func(c *Config, v string) { t := cowTLS(c); t.CertsDir = v },
 	}
+	FieldTLSExtraSANs = Field[[]string]{
+		Name: "tls.extra_sans",
+		Get:  func(c *Config) []string { return tlsOf(c).ExtraSANs },
+		Set:  func(c *Config, v []string) { t := cowTLS(c); t.ExtraSANs = v },
+	}
+	FieldTLSCertFile = Field[string]{
+		Name: "tls.cert_file",
+		Get:  func(c *Config) string { return tlsOf(c).CertFile },
+		Set:  func(c *Config, v string) { t := cowTLS(c); t.CertFile = v },
+	}
+	FieldTLSKeyFile = Field[string]{
+		Name: "tls.key_file",
+		Get:  func(c *Config) string { return tlsOf(c).KeyFile },
+		Set:  func(c *Config, v string) { t := cowTLS(c); t.KeyFile = v },
+	}
 	FieldTPABundlePath = Field[string]{
 		Name: "security.tpa_bundle_path",
 		Get:  func(c *Config) string { return securityOf(c).TPABundlePath },
