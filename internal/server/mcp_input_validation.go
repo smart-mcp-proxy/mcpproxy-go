@@ -165,16 +165,6 @@ func hashInputSchema(paramsJSON string) uint64 {
 
 // --- Self-healing error rendering (shared by Path A and Path B) ------------
 
-// invalidParamsErrorResult renders the contract error body: full stored
-// schema + deterministic one-line hint, via mcp.NewToolResultError (same
-// envelope as the existing detailed errors). Mode-independent by construction
-// — it never consults tool_response_mode (US3 scenario 3). Deterministic:
-// json.Marshal sorts map keys and the detail line is stable for a given
-// failure.
-func invalidParamsErrorResult(toolID, paramsJSON, detail string) *mcp.CallToolResult {
-	return invalidParamsErrorResultWithMode(toolID, paramsJSON, detail, "")
-}
-
 const redactedToolArgumentError = "Invalid tool arguments."
 
 // argumentErrorMode reads only the dispatch gate's captured configuration.
@@ -186,6 +176,11 @@ func argumentErrorMode(serverConfig *config.ServerConfig) string {
 	return serverConfig.ToolArgumentErrorMode
 }
 
+// invalidParamsErrorResultWithMode renders the contract error body: full stored
+// schema + deterministic one-line hint, via mcp.NewToolResultError (same
+// envelope as the existing detailed errors). It never consults tool_response_mode
+// (US3 scenario 3). json.Marshal sorts map keys and the detail line is stable
+// for a given failure; the captured argument-error policy selects the message.
 func invalidParamsErrorResultWithMode(toolID, paramsJSON, detail, mode string) *mcp.CallToolResult {
 	message := fmt.Sprintf("invalid arguments for %s: %s", toolID, detail)
 	if mode == config.ToolArgumentErrorModeRedacted {
