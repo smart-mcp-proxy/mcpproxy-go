@@ -180,12 +180,19 @@ func (p *MCPProxyServer) directToolCallabilityBlockWithReason(ctx context.Contex
 		return nil, ""
 	}
 
-	decision := newDirectCallabilityEvaluator(p).evaluate(serverName, toolName)
+	return p.directToolCallabilityBlockForDecision(ctx, newDirectCallabilityEvaluator(p).evaluate(serverName, toolName), args)
+}
+
+// directToolCallabilityBlockForDecision answers one already-evaluated decision.
+// Direct dispatch evaluates the decision itself so it can capture the same
+// persisted record's argument-error policy; every refusal shape, reason key and
+// refusal precedence is unchanged.
+func (p *MCPProxyServer) directToolCallabilityBlockForDecision(ctx context.Context, decision directCallabilityDecision, args map[string]interface{}) (*mcp.CallToolResult, string) {
 	if decision.callable {
 		if decision.reviewDirty {
 			// Spec 117 FR-018: the tool reaches the handler (it stays listed)
 			// and the call is refused with no upstream call.
-			return mcp.NewToolResultError(reviewNotRecordedMessage(serverName)), telemetry.BlockReasonToolNotCallable
+			return mcp.NewToolResultError(reviewNotRecordedMessage(decision.serverName)), telemetry.BlockReasonToolNotCallable
 		}
 		return nil, ""
 	}

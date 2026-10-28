@@ -189,9 +189,10 @@ func TestToolsListSnapshot_MatchesMergeBaseGoldens(t *testing.T) {
 //     surface that registers the tool (all three).
 //   - upstream_servers     — issue #1146: update/patch now mask secret-bearing
 //     values in the `changes` diff they return, which an agent reading the diff
-//     back can observe, so the description says so. DESCRIPTION ONLY — no
-//     parameter moves, which assertUpstreamServersDelta in
-//     mcp_menu_surface_test.go pins field by field.
+//     back can observe, so the description says so. Spec 112 additionally adds
+//     forward_headers_json; argument privacy adds tool_argument_error_mode.
+//     assertUpstreamServersDelta in mcp_menu_surface_test.go pins these two
+//     optional inputs and every remaining schema field.
 //   - code_execution       — v0.66.0 ships enable_code_execution=true. The frozen
 //     goldens were captured with the flag off, when the two routing-mode
 //     surfaces advertised a refusing "Code Execution (Disabled)" stub (retired
@@ -456,19 +457,21 @@ func TestCodeExecutionDescriptions_EnumerationIsAdminOnly(t *testing.T) {
 					continue
 				}
 				if name == "upstream_servers" {
-					// Spec 112 adds exactly one optional parameter,
-					// forward_headers_json. With that property removed the
+					// Spec 112 and argument privacy add the two explicitly
+					// checked optional inputs. With only those removed the
 					// entry must still equal the frozen pre-105 capture.
 					var postM map[string]interface{}
 					require.NoError(t, json.Unmarshal(after[name], &postM))
 					props := schemaProps(postM)
 					assert.Contains(t, props, "forward_headers_json",
 						"surface %s: upstream_servers carries the Spec 112 parameter", surface)
+					assertArgumentErrorModeSchema(t, surface, postM)
 					delete(props, "forward_headers_json")
+					delete(props, "tool_argument_error_mode")
 					trimmed, err := json.Marshal(postM)
 					require.NoError(t, err)
 					assert.JSONEq(t, string(pre), string(trimmed),
-						"surface %s: upstream_servers may differ from the pre-105 golden only by the Spec 112 forward_headers_json parameter", surface)
+						"surface %s: upstream_servers may differ from pre-105 only by forward_headers_json and tool_argument_error_mode", surface)
 					continue
 				}
 				if name == "retrieve_tools" {

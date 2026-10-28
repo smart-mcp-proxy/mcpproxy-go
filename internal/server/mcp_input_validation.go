@@ -17,6 +17,8 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
 
 // inputSchemaURI is the opaque in-memory resource URI used when compiling a
@@ -170,8 +172,27 @@ func hashInputSchema(paramsJSON string) uint64 {
 // json.Marshal sorts map keys and the detail line is stable for a given
 // failure.
 func invalidParamsErrorResult(toolID, paramsJSON, detail string) *mcp.CallToolResult {
+	return invalidParamsErrorResultWithMode(toolID, paramsJSON, detail, "")
+}
+
+const redactedToolArgumentError = "Invalid tool arguments."
+
+// argumentErrorMode reads only the dispatch gate's captured configuration.
+// A nil record and any mode other than explicit redacted retain diagnostics.
+func argumentErrorMode(serverConfig *config.ServerConfig) string {
+	if serverConfig == nil {
+		return ""
+	}
+	return serverConfig.ToolArgumentErrorMode
+}
+
+func invalidParamsErrorResultWithMode(toolID, paramsJSON, detail, mode string) *mcp.CallToolResult {
+	message := fmt.Sprintf("invalid arguments for %s: %s", toolID, detail)
+	if mode == config.ToolArgumentErrorModeRedacted {
+		message = redactedToolArgumentError
+	}
 	body := map[string]interface{}{
-		"error":      fmt.Sprintf("invalid arguments for %s: %s", toolID, detail),
+		"error":      message,
 		"error_type": "invalid_params",
 		"tool":       toolID,
 		"hint": fmt.Sprintf(

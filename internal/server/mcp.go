@@ -1523,6 +1523,10 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			mcp.WithString("forward_headers_json",
 				mcp.Description("Client header forwarding allowlist (Spec 112) as a JSON array of inbound MCP client header NAMES to copy into this server's tools/call requests, e.g. [\"X-User-Id\",\"X-Tenant-Id\"]. Names only, never values; exact names, case-insensitive, at most 32, no wildcards. Authorization, Host, Cookie, X-API-Key, hop-by-hop and proxy headers are never forwarded. Only HTTP-based upstreams forward. Patch: omit to leave unchanged, '[]' to clear (the array replaces entirely). Used with add/update/patch."),
 			),
+			mcp.WithString("tool_argument_error_mode",
+				mcp.Description("Per-server tool argument error policy: omitted or detailed preserves detailed errors; redacted opts into redaction. On update/patch, omit to leave the policy unchanged; detailed explicitly resets a redacted policy. Used with add/update/patch."),
+				mcp.Enum(config.ToolArgumentErrorModeDetailed, config.ToolArgumentErrorModeRedacted),
+			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
 	}
@@ -3224,7 +3228,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			callerr.NoteOutcome(ctx, callerr.ValidationOutcome())
 			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
-			return invalidParamsErrorResult(toolName, meta.ParamsJSON, detail), nil
+			return invalidParamsErrorResultWithMode(toolName, meta.ParamsJSON, detail, argumentErrorMode(gate.serverConfig)), nil
 		}
 	}
 
@@ -3511,7 +3515,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
 		p.emitActivityInternalToolCall(ctx, internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, "error", err.Error(), time.Since(internalStartTime).Milliseconds(), activityArgs, nil, intentMap, "")
 
-		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
+		return p.createToolErrorResponse(err, serverName, actualToolName, argumentErrorMode(gate.serverConfig)), nil
 	}
 
 	// Issue #935: the transport hop succeeded, but the upstream may still have
@@ -4018,7 +4022,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		// Emit activity completed event for error with determined source (legacy - no intent)
 		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0, "", nil, "")
 
-		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
+		return p.createToolErrorResponse(err, serverName, actualToolName, argumentErrorMode(gate.serverConfig)), nil
 	}
 
 	// Issue #935: an upstream that answered isError:true failed, even though the
@@ -4920,6 +4924,9 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		if server.TrustMode != "" {
 			serverMap["trust_mode"] = server.TrustMode
 		}
+		if server.ToolArgumentErrorMode != "" {
+			serverMap["tool_argument_error_mode"] = server.ToolArgumentErrorMode
+		}
 
 		// Add connection status information and calculate health
 		var connState string
@@ -5799,6 +5806,10 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
 	}
+	argumentErrorMode, err := argumentErrorModeFromRequest(request)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	url := request.GetString("url", "")
 	command := request.GetString("command", "")
@@ -5964,21 +5975,22 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	}
 
 	serverConfig := &config.ServerConfig{
-		Name:        name,
-		URL:         url,
-		Command:     command,
-		Args:        args,
-		WorkingDir:  workingDir,
-		Env:         env,
-		Headers:     headers,
-		Protocol:    protocol,
-		Enabled:     enabled,
-		Quarantined: quarantined, // Respect user's quarantine setting (defaults to true for security)
-		Created:     time.Now(),
-		Isolation:   isolation,
-		OAuth:       oauth,
-		InitTimeout: initTimeout,
-		TrustMode:   trustMode, // spec 086: carry the per-server trust_mode through on create
+		Name:                  name,
+		URL:                   url,
+		Command:               command,
+		Args:                  args,
+		WorkingDir:            workingDir,
+		Env:                   env,
+		Headers:               headers,
+		Protocol:              protocol,
+		Enabled:               enabled,
+		Quarantined:           quarantined, // Respect user's quarantine setting (defaults to true for security)
+		Created:               time.Now(),
+		Isolation:             isolation,
+		OAuth:                 oauth,
+		InitTimeout:           initTimeout,
+		TrustMode:             trustMode, // spec 086: carry the per-server trust_mode through on create
+		ToolArgumentErrorMode: argumentErrorMode,
 	}
 
 	// F9: optional per-server expose_prompts override on add. GetBool can't tell
@@ -6366,6 +6378,11 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		Quarantined: existingServer.Quarantined,
 	}
 	opts := config.DefaultMergeOptions()
+	argumentErrorMode, err := argumentErrorModeFromRequest(request)
+	if err != nil {
+		return nil, opts, err
+	}
+	patch.ToolArgumentErrorMode = argumentErrorMode
 
 	// Scalar fields - only set if provided in request
 	if url := request.GetString("url", ""); url != "" {
@@ -6971,15 +6988,38 @@ func classifyUpstreamInvalidParams(err error) (detail string, ok bool) {
 
 // createDetailedErrorResponse creates an enhanced error response with HTTP and troubleshooting context
 func (p *MCPProxyServer) createDetailedErrorResponse(err error, serverName, toolName string) *mcp.CallToolResult {
+	return p.createToolErrorResponse(err, serverName, toolName, "")
+}
+
+// createToolErrorResponse applies only this dispatch's captured argument-error
+// policy. Existing callers without a policy keep the detailed renderer above.
+func (p *MCPProxyServer) createToolErrorResponse(err error, serverName, toolName, argumentMode string) *mcp.CallToolResult {
 	// Spec 085 FR-013 (Path B): upstream invalid-params failures get the same
 	// self-healing error Path A renders — full stored schema + hint — when a
 	// schema source exists in the index. Without a stored schema the existing
-	// shapes below apply unchanged (a self-healing error without a schema
-	// would be an empty promise). Non-argument failures never reach this
-	// branch (classification is conservative by construction).
-	if detail, isInvalidParams := classifyUpstreamInvalidParams(err); isInvalidParams {
+	// envelopes below apply, with untrusted argument details suppressed only
+	// under the explicit redacted policy. No schema or retry hint is invented.
+	// Non-argument failures never reach this conservative classification branch.
+	if detail, isInvalidParams := argumentErrorDetail(err, argumentMode); isInvalidParams {
 		if meta := p.lookupIndexedTool(serverName, toolName); meta != nil && meta.ParamsJSON != "" {
-			return invalidParamsErrorResult(serverName+":"+toolName, meta.ParamsJSON, detail)
+			return invalidParamsErrorResultWithMode(serverName+":"+toolName, meta.ParamsJSON, detail, argumentMode)
+		}
+		if argumentMode == config.ToolArgumentErrorModeRedacted {
+			// Copy typed errors: their message/data/body can contain rejected
+			// arguments, and another caller may still own the original error.
+			var rpcErr *transport.JSONRPCError
+			if errors.As(err, &rpcErr) {
+				redacted := &transport.JSONRPCError{Code: rpcErr.Code, Message: redactedToolArgumentError}
+				if rpcErr.HTTPError != nil {
+					httpContext := *rpcErr.HTTPError
+					httpContext.Body = ""
+					httpContext.Err = nil
+					redacted.HTTPError = &httpContext
+				}
+				err = redacted
+			} else {
+				err = errors.New(redactedToolArgumentError) //nolint:staticcheck // ST1005: exact public MCP error sentence includes the terminal period.
+			}
 		}
 	}
 
@@ -7061,6 +7101,18 @@ func (p *MCPProxyServer) createDetailedErrorResponse(err error, serverName, tool
 
 	jsonResponse, _ := json.Marshal(errorDetails)
 	return mcp.NewToolResultError(string(jsonResponse))
+}
+
+// The SDK drops JSON-RPC numbers but preserves these non-argument identities.
+// They veto only the new trusted-wrapper cause selection, never positively
+// classify an error or bypass the existing classifier's deny controls.
+func isKnownSDKNonArgumentError(err error) bool {
+	return errors.Is(err, mcp.ErrParseError) ||
+		errors.Is(err, mcp.ErrInvalidRequest) ||
+		errors.Is(err, mcp.ErrMethodNotFound) ||
+		errors.Is(err, mcp.ErrInternalError) ||
+		errors.Is(err, mcp.ErrRequestInterrupted) ||
+		errors.Is(err, mcp.ErrResourceNotFound)
 }
 
 // extractStatusCodeFromError attempts to extract HTTP status code from error message
