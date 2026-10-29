@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -94,6 +95,15 @@ func TestResolveDockerSpawnHonorsConfiguredRelativeDocker(t *testing.T) {
 
 	cmd, _, shellWrapped, _ := c.resolveDockerSpawn(c.config.Args)
 	require.False(t, shellWrapped)
+	require.Equal(t, configured, cmd)
+
+	// A relative working_dir is itself relative to the process directory.
+	wd, err := os.Getwd()
+	require.NoError(t, err)
+	rel, err := filepath.Rel(wd, filepath.Dir(filepath.Dir(configured)))
+	require.NoError(t, err)
+	c.config.WorkingDir = rel
+	cmd, _, _, _ = c.resolveDockerSpawn(c.config.Args)
 	require.Equal(t, configured, cmd)
 
 	// A bare name is a PATH lookup, so the resolver still decides.

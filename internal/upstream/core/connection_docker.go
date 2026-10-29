@@ -417,7 +417,11 @@ func (c *Client) configuredDockerBinary() (string, error) {
 			}
 			base = wd
 		}
-		command = filepath.Join(base, command)
+		abs, err := filepath.Abs(filepath.Join(base, command))
+		if err != nil {
+			return "", nil
+		}
+		command = abs
 	}
 	if !isDirectExecutable(command) {
 		return "", nil
