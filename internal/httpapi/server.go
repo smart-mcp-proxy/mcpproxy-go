@@ -5063,7 +5063,14 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// chi routes on RawPath only when Go set it (the client's encoding differs
+	// from the default one); then {name} is still encoded and must be decoded
+	// once. Otherwise chi already matched the decoded Path, and decoding again
+	// would turn a literal "a%41" into "aA" and delete the wrong entry.
 	name := chi.URLParam(r, "name")
+	if r.URL.RawPath != "" {
+		name = decodePathParam(name)
+	}
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Secret name is required")
 		return
