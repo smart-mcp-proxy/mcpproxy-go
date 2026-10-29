@@ -82,7 +82,14 @@ func BuildRFC8414MetadataURLs(authServerURL string) []string {
 
 		// Also try legacy path (appending .well-known after path) for backward compatibility
 		// Example: https://auth.smithery.ai/googledrive/.well-known/oauth-authorization-server
-		legacyURL := strings.TrimSuffix(authServerURL, "/") + "/.well-known/oauth-authorization-server"
+		// Strip only the query and fragment: the userinfo (basic-auth
+		// credentials) must stay, as it did before.
+		legacy := *u
+		legacy.RawQuery = ""
+		legacy.ForceQuery = false
+		legacy.Fragment = ""
+		legacy.RawFragment = ""
+		legacyURL := strings.TrimSuffix(legacy.String(), "/") + "/.well-known/oauth-authorization-server"
 		urls = append(urls, legacyURL)
 
 		// Also try base URL without path suffix for servers like Cloudflare that host
