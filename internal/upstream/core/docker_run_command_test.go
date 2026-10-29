@@ -76,3 +76,28 @@ func TestResolveDockerSpawnHonorsConfiguredAbsoluteDocker(t *testing.T) {
 		})
 	}
 }
+
+// A relative docker path (./bin/docker, .\bin\docker.exe) names a binary too,
+// relative to the server's working_dir; it must not be swapped for whichever
+// docker the resolver finds (Sol review round 2 of #1777).
+func TestResolveDockerSpawnHonorsConfiguredRelativeDocker(t *testing.T) {
+	configured := writeFakeDockerExecutable(t)
+	other := writeFakeDockerExecutable(t)
+	orig := resolveDockerBinary
+	t.Cleanup(func() { resolveDockerBinary = orig })
+	resolveDockerBinary = func(*zap.Logger) (string, error) { return other, nil }
+	forceDockerDaemonEnvGOOS(t, osDarwin)
+
+	c := newUserSuppliedDockerTestClient()
+	c.config.WorkingDir = filepath.Dir(filepath.Dir(configured))
+	c.config.Command = "." + string(filepath.Separator) + filepath.Join(filepath.Base(filepath.Dir(configured)), filepath.Base(configured))
+
+	cmd, _, shellWrapped, _ := c.resolveDockerSpawn(c.config.Args)
+	require.False(t, shellWrapped)
+	require.Equal(t, configured, cmd)
+
+	// A bare name is a PATH lookup, so the resolver still decides.
+	c.config.Command = "docker"
+	cmd, _, _, _ = c.resolveDockerSpawn(c.config.Args)
+	require.Equal(t, other, cmd)
+}

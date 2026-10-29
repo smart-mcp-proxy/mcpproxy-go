@@ -397,14 +397,32 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 }
 
 // configuredDockerBinary returns the server's own command when it is a
-// user-supplied `docker run` naming the docker CLI by an absolute path to an
-// executable, so that binary is spawned instead of whichever docker the
+// user-supplied `docker run` naming the docker CLI by an absolute or relative
+// path to an executable, so that binary is spawned instead of whichever docker the
 // resolver finds. "" means resolve as usual.
 func (c *Client) configuredDockerBinary() (string, error) {
-	if c.config == nil || !isDockerRunCommand(c.config.Command, c.config.Args) || !isDirectExecutable(c.config.Command) {
+	if c.config == nil || !isDockerRunCommand(c.config.Command, c.config.Args) {
 		return "", nil
 	}
-	return c.config.Command, nil
+	command := c.config.Command
+	// A relative path is evaluated against working_dir, as exec does with
+	// Cmd.Dir (or the process directory without one). A bare name is a PATH
+	// lookup, which the resolver handles.
+	if !filepath.IsAbs(command) && strings.ContainsAny(command, `/\`) {
+		base := c.config.WorkingDir
+		if base == "" {
+			wd, err := os.Getwd()
+			if err != nil {
+				return "", nil
+			}
+			base = wd
+		}
+		command = filepath.Join(base, command)
+	}
+	if !isDirectExecutable(command) {
+		return "", nil
+	}
+	return command, nil
 }
 
 // isDockerRunCommand reports whether a configured command is a user-supplied
