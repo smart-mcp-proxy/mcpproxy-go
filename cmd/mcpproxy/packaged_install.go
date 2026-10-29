@@ -112,7 +112,9 @@ To run a separate per-user instance instead, start it with: mcpproxy serve`,
 // to fall back to legacy discovery (no --config, no --data-dir) on a packaged
 // install where the user has no config yet.
 func checkPackagedInstall() error {
-	if systemMode || dataDir != "" || !packagedPaths.detected() || legacyConfigExists() {
+	// MCPP_CONFIG names a config for config.Load (viper), like --config.
+	if systemMode || dataDir != "" || os.Getenv("MCPP_CONFIG") != "" ||
+		!packagedPaths.detected() || legacyConfigExists() {
 		return nil
 	}
 	return &packagedInstallError{paths: packagedPaths, hint: systemHintCommand(os.Args[1:])}

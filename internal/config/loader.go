@@ -420,7 +420,20 @@ func parseUpstreamServer(upstream string, cfg *Config) error {
 	return nil
 }
 
-// atomicWriteFile writes data to path atomically using temp file + rename pattern.
+// skipWriteSync drops the fsync from atomicWriteFileMode. Only tests set it,
+// through DisableWriteSyncForTesting; production writes always sync.
+var skipWriteSync atomic.Bool
+
+// DisableWriteSyncForTesting makes config file writes skip the fsync before
+// the atomic rename for the rest of the process. The written bytes are still
+// visible to every reader in the process; only crash durability is lost, which
+// no unit test exercises. Call it from TestMain in packages whose tests write
+// configs heavily: FlushFileBuffers on the Windows CI runner costs tens of
+// milliseconds per write and dominated internal/runtime's test time. Never
+// call it from production code.
+func DisableWriteSyncForTesting() { skipWriteSync.Store(true) }
+
+// atomicWriteFileMode writes data to path atomically using temp file + rename pattern.
 // This prevents race conditions where readers might see partially written files.
 //
 // The atomic write pattern:
@@ -435,26 +448,10 @@ func parseUpstreamServer(upstream string, cfg *Config) error {
 // On Windows, rename atomicity is not guaranteed when target exists, but this
 // approach is still much safer than truncate+write (reduces race window from
 // ~50ms to <1ms).
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	return atomicWriteFileMode(path, data, perm, false)
-}
-
-// skipWriteSync drops the fsync from atomicWriteFileMode. Only tests set it,
-// through DisableWriteSyncForTesting; production writes always sync.
-var skipWriteSync atomic.Bool
-
-// DisableWriteSyncForTesting makes config file writes skip the fsync before
-// the atomic rename for the rest of the process. The written bytes are still
-// visible to every reader in the process; only crash durability is lost, which
-// no unit test exercises. Call it from TestMain in packages whose tests write
-// configs heavily: FlushFileBuffers on the Windows CI runner costs tens of
-// milliseconds per write and dominated internal/runtime's test time. Never
-// call it from production code.
-func DisableWriteSyncForTesting() { skipWriteSync.Store(true) }
-
-// atomicWriteFileMode is atomicWriteFile; with exactMode the temp file is
-// chmod-ed to perm before the rename, so the result carries perm itself and
-// not perm filtered by the process umask (which OpenFile applies).
+//
+// With exactMode the temp file is chmod-ed to perm before the rename, so the
+// result carries perm itself and not perm filtered by the process umask
+// (which OpenFile applies).
 func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode bool) error {
 	// Generate random suffix for temp file
 	randBytes := make([]byte, 8)
@@ -583,11 +580,26 @@ func writeConfigFile(cfg *Config, path string) error {
 
 	// Atomic write with fsync to prevent race conditions
 	// This ensures core never reads partially written config files
-	if err := atomicWriteFile(path, data, 0600); err != nil {
+	perm, exact := configFileSaveMode(path)
+	if err := atomicWriteFileMode(path, data, perm, exact); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
 	return nil
+}
+
+// configFileSaveMode is the mode a config save writes: 0600, except that a
+// file which already grants its group read and nothing else beyond the owner
+// (0640) keeps that. The deb/rpm package ships /etc/mcpproxy/mcp_config.json
+// as 0640 root:mcpproxy so the mcpproxy group can run `mcpproxy --system`; a
+// 0600 rewrite (the service persisting its generated API key, or a save under
+// sudo) would lock the group out or leave a root-owned file the service cannot
+// read (GH discussion #1678). exact=true applies the mode past the umask.
+func configFileSaveMode(path string) (perm os.FileMode, exact bool) {
+	if info, err := os.Stat(path); err == nil && info.Mode().Perm()&0o077 == 0o040 {
+		return 0o640, true
+	}
+	return 0o600, false
 }
 
 // SaveConfigToDataDir saves configuration to the data directory

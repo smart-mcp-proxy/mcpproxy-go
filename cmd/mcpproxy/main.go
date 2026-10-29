@@ -354,8 +354,9 @@ Examples:
 
 			ctx := context.Background()
 
-			// Create config to check if repository guessing is enabled
-			cfg, err := config.LoadFromFile("")
+			// Create config to check if repository guessing is enabled. The
+			// global -c/--config/--system choose the file; defaults otherwise.
+			cfg, err := config.LoadFromFile(resolveCLIConfigPath(""))
 			if err != nil {
 				// Use default config if loading fails
 				cfg = config.DefaultConfig()
@@ -435,8 +436,8 @@ Examples:
 }
 
 func listAllRegistriesFormatted(logger *zap.Logger, formatter clioutput.OutputFormatter) {
-	// Load config and initialize registries
-	cfg, err := config.LoadFromFile("")
+	// Load config (global -c/--config/--system, else defaults) and initialize registries
+	cfg, err := config.LoadFromFile(resolveCLIConfigPath(""))
 	if err != nil {
 		// Use default config if loading fails
 		cfg = config.DefaultConfig()

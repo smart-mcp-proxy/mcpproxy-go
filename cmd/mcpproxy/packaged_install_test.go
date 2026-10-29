@@ -140,6 +140,27 @@ func TestLoadersOnPackagedInstallUseExistingUserConfig(t *testing.T) {
 	}
 }
 
+func TestLoadersOnPackagedInstallHonorMCPPConfigEnv(t *testing.T) {
+	resetLoaderGlobals(t)
+	fakePackagedInstall(t, "linux", true, true)
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	own := filepath.Join(t.TempDir(), "own.json")
+	body := `{"mcpServers":[{"name":"from-mcpp-config","url":"http://127.0.0.1:1/mcp","protocol":"http"}]}`
+	if err := os.WriteFile(own, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MCPP_CONFIG", own)
+
+	cfg, err := loadUpstreamConfig()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if len(cfg.Servers) != 1 || cfg.Servers[0].Name != "from-mcpp-config" {
+		t.Errorf("servers = %+v, want the MCPP_CONFIG file's", cfg.Servers)
+	}
+}
+
 func TestLoadersOffLinuxKeepCreatingHomeConfig(t *testing.T) {
 	resetLoaderGlobals(t)
 	fakePackagedInstall(t, "darwin", true, true)
