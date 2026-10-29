@@ -549,17 +549,42 @@ func (e *profileTestEnv) callSetProfile(ctx context.Context, c *client.Client, s
 	return resp.ActiveProfile, resp.Servers, false, text
 }
 
-// TestProfile_SetProfileSessionScoped exercises the core T2 flow: a base /mcp
-// session selects a profile via set_profile, retrieve_tools is then scoped to
-// that profile (no re-index), switching swaps the scope, and clearing restores
-// all servers — all within one MCP session.
+// clientAtEra is clientAt pinned to one protocol era (Spec 058 era harness,
+// protocol_era_test.go). Pinning is what makes the era an explicit input: an
+// unpinned v1.0.0 client negotiates DOWN under the FR-028 pin, so a "modern"
+// test built on clientAt would silently run on the legacy path.
+func (e *profileTestEnv) clientAtEra(url string, era protocolEra) *client.Client {
+	e.t.Helper()
+	tr, err := transport.NewStreamableHTTP(url)
+	require.NoError(e.t, err)
+	return client.NewClient(tr, era.options...)
+}
+
+// eraEndpoint serves the default /mcp server over an UNPINNED transport behind
+// the production auth middleware, so the modern era is reachable before T041
+// lifts the pin on the listening endpoint (see unpinnedProxyEndpoint).
+func (e *profileTestEnv) eraEndpoint() string {
+	e.t.Helper()
+	return unpinnedProxyEndpoint(e.t, e.proxyServer, e.proxyServer.mcpProxy.GetMCPServer())
+}
+
+// TestProfile_SetProfileSessionScoped exercises the core T2 flow on a LEGACY
+// session: a base /mcp session selects a profile via set_profile,
+// retrieve_tools is then scoped to that profile (no re-index), switching swaps
+// the scope, and clearing restores all servers — all within one MCP session.
+//
+// Spec 058 US3 (T027) split this into era variants. This one keeps the
+// original name because the spec names it as the Spec-057 reconciliation gate;
+// the modern variant is TestProfile_SetProfileModernRequestIsStateless.
 func TestProfile_SetProfileSessionScoped(t *testing.T) {
 	env := newProfileTestEnv(t)
 	ctx := context.Background()
 
-	// Single base /mcp client → one stable MCP session across calls.
-	c := env.CreateProxyClient()
+	// Single base /mcp client, explicitly on the legacy era → one stable MCP
+	// session across calls.
+	c := env.clientAtEra(env.proxyAddr, legacyEra())
 	env.initClient(c)
+	requireEra(t, c, legacyEra())
 
 	// Switch to "research".
 	active, servers, isErr, text := env.callSetProfile(ctx, c, "research")
@@ -604,18 +629,59 @@ func TestProfile_SetProfileSessionScoped(t *testing.T) {
 		"after clearing the profile, retrieve_tools should see both servers; got: %v", names)
 }
 
-// TestProfile_SetProfileUnknown verifies set_profile rejects an unknown slug and
-// lists the available profiles.
-func TestProfile_SetProfileUnknown(t *testing.T) {
+// TestProfile_SetProfileModernRequestIsStateless is the 2026-07-28 variant of
+// TestProfile_SetProfileSessionScoped (Spec 058 US3, T027). That era binds no
+// session, so set_profile cannot persist a selection: it is refused with
+// guidance naming /mcp/p/<slug>, retrieve_tools stays unscoped, and nothing
+// is stored.
+func TestProfile_SetProfileModernRequestIsStateless(t *testing.T) {
 	env := newProfileTestEnv(t)
 	ctx := context.Background()
 
-	c := env.CreateProxyClient()
+	c := env.clientAtEra(env.eraEndpoint(), modernEra())
 	env.initClient(c)
+	requireEra(t, c, modernEra())
 
-	_, _, isErr, text := env.callSetProfile(ctx, c, "nonexistent")
-	assert.True(t, isErr, "set_profile with an unknown slug must error")
-	assert.Contains(t, text, "unknown profile 'nonexistent'", "error must name the bad slug: %s", text)
+	_, _, isErr, text := env.callSetProfile(ctx, c, "research")
+	require.True(t, isErr, "a modern request must not be able to select a session profile: %s", text)
+	assert.Contains(t, text, "/mcp/p/research", "the refusal must name the per-request form: %s", text)
+
+	names := env.retrieveTools(ctx, c, "search deploy papers rollback app")
+	hasResearch, hasDeploy := false, false
+	for _, n := range names {
+		if strings.Contains(n, "search_papers") || strings.Contains(n, "fetch_article") {
+			hasResearch = true
+		}
+		if strings.Contains(n, "deploy_app") || strings.Contains(n, "rollback") {
+			hasDeploy = true
+		}
+	}
+	assert.True(t, hasResearch && hasDeploy,
+		"after a refused set_profile, retrieve_tools must still see both servers; got: %v", names)
+
+	_, _, isErr, text = env.callSetProfile(ctx, c, "")
+	assert.True(t, isErr, "clearing is refused too — there is no session selection to clear: %s", text)
+}
+
+// TestProfile_SetProfileUnknown verifies set_profile rejects an unknown slug
+// with the same message in both eras (Spec 058 US3, T028): slug validation runs
+// before the session guard, so a modern request is told the slug is unknown,
+// not handed a /mcp/p/<slug> URL for a profile that does not exist.
+func TestProfile_SetProfileUnknown(t *testing.T) {
+	env := newProfileTestEnv(t)
+	ctx := context.Background()
+	url := env.eraEndpoint()
+
+	forEachEra(t, func(t *testing.T, era protocolEra) {
+		c := env.clientAtEra(url, era)
+		env.initClient(c)
+		requireEra(t, c, era)
+
+		_, _, isErr, text := env.callSetProfile(ctx, c, "nonexistent")
+		assert.True(t, isErr, "set_profile with an unknown slug must error")
+		assert.Contains(t, text, "unknown profile 'nonexistent'", "error must name the bad slug: %s", text)
+		assert.NotContains(t, text, "/mcp/p/", "an unknown slug must not be handed a URL: %s", text)
+	})
 }
 
 // ---------------------------------------------------------------------------
