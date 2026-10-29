@@ -70,7 +70,9 @@ var allClients = []ClientDef{
 		Bridge:    true,
 		Icon:      "claude-desktop",
 		// "claude-ai" is Anthropic's published clientInfo.name for the Claude
-		// Desktop app's MCP client.
+		// Desktop app's MCP client. Through the mcp-remote bridge Connect
+		// writes, it arrives as "claude-ai (via mcp-remote <version>)";
+		// clientidentity.AliasCandidate strips that tag before matching.
 		ClientInfoNames: []string{"claude-ai", "Claude"},
 		ReloadHint:      "Restart Claude Desktop to load MCPProxy",
 	},
@@ -105,13 +107,14 @@ var allClients = []ClientDef{
 		ReloadHint:      "Run \"MCP: List Servers\" → Restart (or reload the window) in VS Code to load MCPProxy",
 	},
 	{
-		ID:              "codex",
-		Name:            "Codex CLI",
-		Format:          "toml",
-		ServerKey:       "mcp_servers",
-		Supported:       true,
-		Icon:            "codex",
-		ClientInfoNames: []string{"codex", "codex-cli"},
+		ID:        "codex",
+		Name:      "Codex CLI",
+		Format:    "toml",
+		ServerKey: "mcp_servers",
+		Supported: true,
+		Icon:      "codex",
+		// Codex CLI's rmcp client sends "codex-mcp-client" (GH #1786).
+		ClientInfoNames: []string{"codex", "codex-cli", "codex-mcp-client"},
 		ReloadHint:      "Restart Codex CLI to load MCPProxy",
 	},
 	{

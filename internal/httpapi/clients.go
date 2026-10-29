@@ -568,7 +568,7 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 	}
 	for _, session := range sessions {
 		identity := clientidentity.FromRaw(session.ClientName)
-		if identity.Key == "" || known[identity.RawNormalized] {
+		if identity.Key == "" || known[clientidentity.AliasCandidate(session.ClientName)] {
 			continue
 		}
 		id := "other:" + identity.PublicID
@@ -599,7 +599,9 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 	// omitting configuration paths: MCP clientInfo has no trustworthy path.
 	for name, seenAt := range state.ClientLastSeen {
 		identity := clientidentity.FromStoredKey(name)
-		if identity.Key == "" || known[identity.RawNormalized] {
+		// A bridged known client recorded by an earlier release under its full
+		// name is credited to that client, not listed as other:.
+		if identity.Key == "" || known[identity.RawNormalized] || known[clientidentity.AliasCandidate(identity.RawNormalized)] {
 			continue
 		}
 		id := "other:" + identity.PublicID
@@ -635,8 +637,9 @@ func latestClientSeen(seen map[string]time.Time, aliases []string) *time.Time {
 	return &latest
 }
 func clientMatches(name string, aliases []string) bool {
+	candidate := clientidentity.AliasCandidate(name)
 	for _, alias := range aliases {
-		if strings.EqualFold(strings.TrimSpace(name), alias) {
+		if candidate == clientidentity.NormalizeRaw(alias) {
 			return true
 		}
 	}

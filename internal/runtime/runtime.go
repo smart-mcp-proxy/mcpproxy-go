@@ -4567,8 +4567,8 @@ func sanitizeClientName(raw string) string {
 	if identity.Key == "" {
 		return ""
 	}
-	if isKnownClientAlias(identity.RawNormalized) {
-		return identity.RawNormalized
+	if alias := clientidentity.AliasCandidate(raw); isKnownClientAlias(alias) {
+		return alias
 	}
 	return identity.Key
 }
