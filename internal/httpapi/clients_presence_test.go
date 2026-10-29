@@ -526,8 +526,6 @@ func TestClientsPresence_CreditsBridgedClaudeDesktopAndCodex(t *testing.T) {
 	rt.RecordClientSeen("codex-mcp-client")
 	state, err := rt.GetOnboardingState()
 	require.NoError(t, err)
-	// An other: row recorded by an earlier release under the bridged name.
-	state.ClientLastSeen["claude-ai (via mcp-remote 0.14.3)"] = time.Now().Add(-time.Hour)
 	ctrl := &clientPresenceController{state: state, sessions: []*contracts.MCPSession{
 		{ID: "desktop", ClientName: "claude-ai (via mcp-remote 0.15.2)", Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now()},
 		{ID: "codex", ClientName: "codex-mcp-client", Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now()},

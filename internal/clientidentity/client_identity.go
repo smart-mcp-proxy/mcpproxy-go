@@ -129,8 +129,10 @@ func NormalizeRaw(raw string) string {
 }
 
 // mcpRemoteSuffix matches the " (via mcp-remote <version>)" tag mcp-remote
-// appends to the clientInfo.name of the client it bridges (GH #1786).
-var mcpRemoteSuffix = regexp.MustCompile(`\s+\(via mcp-remote(?:\s+[^()]*)?\)$`)
+// appends to the clientInfo.name of the client it bridges (GH #1786). The
+// separators are single spaces and the version is printable ASCII without
+// parentheses, so a tag carrying a control character never matches.
+var mcpRemoteSuffix = regexp.MustCompile(`^(.*[^ ]) \(via mcp-remote(?: [!-'*-~]+)?\)$`)
 
 // AliasCandidate is NormalizeRaw with one trailing mcp-remote bridge tag
 // removed, so "claude-ai (via mcp-remote 0.15.2)" classifies as the client
@@ -138,8 +140,8 @@ var mcpRemoteSuffix = regexp.MustCompile(`\s+\(via mcp-remote(?:\s+[^()]*)?\)$`)
 // NormalizeRaw it preserves controls, and unknown names keep their exact key.
 func AliasCandidate(raw string) string {
 	normalized := NormalizeRaw(raw)
-	if stripped := mcpRemoteSuffix.ReplaceAllString(normalized, ""); stripped != "" {
-		return stripped
+	if m := mcpRemoteSuffix.FindStringSubmatch(normalized); m != nil {
+		return m[1]
 	}
 	return normalized
 }

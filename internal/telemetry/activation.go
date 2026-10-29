@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"go.etcd.io/bbolt"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
 )
 
 // ActivationBucketName is the BBolt bucket that stores retention activation
@@ -452,7 +454,8 @@ var clientNameRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 //
 // Valid names are lowercased and returned unchanged.
 func sanitizeClientName(raw string) string {
-	trimmed := strings.TrimSpace(raw)
+	// A client behind the mcp-remote bridge reports as the client it bridges.
+	trimmed := strings.TrimSpace(clientidentity.AliasCandidate(raw))
 	if trimmed == "" {
 		return "unknown"
 	}

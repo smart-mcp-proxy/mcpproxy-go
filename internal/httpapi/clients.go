@@ -599,9 +599,7 @@ func (s *Server) clientPresence(withSessions bool, detailID string) ([]clientPre
 	// omitting configuration paths: MCP clientInfo has no trustworthy path.
 	for name, seenAt := range state.ClientLastSeen {
 		identity := clientidentity.FromStoredKey(name)
-		// A bridged known client recorded by an earlier release under its full
-		// name is credited to that client, not listed as other:.
-		if identity.Key == "" || known[identity.RawNormalized] || known[clientidentity.AliasCandidate(identity.RawNormalized)] {
+		if identity.Key == "" || known[identity.RawNormalized] {
 			continue
 		}
 		id := "other:" + identity.PublicID

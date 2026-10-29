@@ -42,4 +42,15 @@ func TestAliasCandidateStripsOneMCPRemoteBridgeSuffix(t *testing.T) {
 	// Controls survive, so an escape-prefixed bridged name cannot pass as a
 	// supported alias once the suffix is removed.
 	require.Equal(t, "\x1bclaude-ai", AliasCandidate("\x1bclaude-ai (via mcp-remote 0.15.2)"))
+	for _, raw := range []string{
+		"claude-ai\n(via mcp-remote 0.15.2)",
+		"claude-ai\t(via mcp-remote 0.15.2)",
+		"claude-ai  (via mcp-remote 0.15.2)",
+		"claude-ai (via mcp-remote \x00)",
+		"claude-ai (via mcp-remote 0.15\x1b2)",
+		"claude-ai (via mcp-remote 0.15.2\n)",
+		"claude-ai (via mcp-remote  0.15.2)",
+	} {
+		require.Equal(t, NormalizeRaw(raw), AliasCandidate(raw), "%q must not strip to a supported alias", raw)
+	}
 }
