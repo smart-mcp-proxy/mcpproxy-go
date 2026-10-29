@@ -452,7 +452,11 @@ func DisableWriteSyncForTesting() { skipWriteSync.Store(true) }
 // With exactMode the temp file is chmod-ed to perm before the rename, so the
 // result carries perm itself and not perm filtered by the process umask
 // (which OpenFile applies).
-func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode bool) error {
+//
+// sameGroupAs (may be nil) is the file being replaced when perm grants its
+// group access: if the new inode would land in a different group, the write
+// falls back to 0600 rather than open the file to a group nobody chose.
+func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode bool, sameGroupAs os.FileInfo) error {
 	// Generate random suffix for temp file
 	randBytes := make([]byte, 8)
 	if _, err := rand.Read(randBytes); err != nil {
@@ -484,6 +488,9 @@ func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode b
 	}
 
 	if exactMode {
+		if sameGroupAs != nil && !sameFileGroup(tmpFile, sameGroupAs) {
+			perm = 0o600
+		}
 		if err := tmpFile.Chmod(perm); err != nil {
 			return fmt.Errorf("failed to set temp file mode: %w", err)
 		}
@@ -559,7 +566,7 @@ var saveConfigTestHook func()
 func RestoreConfigFileBytes(path string, data []byte, perm os.FileMode) error {
 	saveConfigMu.Lock()
 	defer saveConfigMu.Unlock()
-	if err := atomicWriteFileMode(path, data, perm.Perm(), true); err != nil {
+	if err := atomicWriteFileMode(path, data, perm.Perm(), true, nil); err != nil {
 		return fmt.Errorf("failed to restore config file: %w", err)
 	}
 	return nil
@@ -580,8 +587,8 @@ func writeConfigFile(cfg *Config, path string) error {
 
 	// Atomic write with fsync to prevent race conditions
 	// This ensures core never reads partially written config files
-	perm, exact := configFileSaveMode(path)
-	if err := atomicWriteFileMode(path, data, perm, exact); err != nil {
+	perm, keepGroupOf := configFileSaveMode(path)
+	if err := atomicWriteFileMode(path, data, perm, keepGroupOf != nil, keepGroupOf); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
@@ -594,12 +601,13 @@ func writeConfigFile(cfg *Config, path string) error {
 // as 0640 root:mcpproxy so the mcpproxy group can run `mcpproxy --system`; a
 // 0600 rewrite (the service persisting its generated API key, or a save under
 // sudo) would lock the group out or leave a root-owned file the service cannot
-// read (GH discussion #1678). exact=true applies the mode past the umask.
-func configFileSaveMode(path string) (perm os.FileMode, exact bool) {
-	if info, err := os.Stat(path); err == nil && info.Mode().Perm()&0o077 == 0o040 {
-		return 0o640, true
+// read (GH discussion #1678). keepGroupOf is the existing file when 0640 is
+// kept, so the write can check the replacement lands in the same group.
+func configFileSaveMode(path string) (perm os.FileMode, keepGroupOf os.FileInfo) {
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o077 == 0o040 {
+		return 0o640, info
 	}
-	return 0o600, false
+	return 0o600, nil
 }
 
 // SaveConfigToDataDir saves configuration to the data directory

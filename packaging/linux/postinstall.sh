@@ -22,16 +22,6 @@ install -d -m 0750 -o mcpproxy -g mcpproxy /var/lib/mcpproxy
 # on hosts that installed an earlier package.
 install -d -m 2770 -o root -g mcpproxy /etc/mcpproxy
 
-# The config is 0640 so the mcpproxy group can read it: the service itself and
-# admins who run `mcpproxy --system` without sudo. Releases before the CLI kept
-# group read on save rewrote it 0600 the first time the service persisted its
-# generated API key, which locked the group out; restore the shipped mode on
-# upgrade. Group write and anything for others stay off (it holds API keys).
-if [ -f /etc/mcpproxy/mcp_config.json ]; then
-    chgrp mcpproxy /etc/mcpproxy/mcp_config.json || true
-    chmod g+r,g-wx,o-rwx /etc/mcpproxy/mcp_config.json || true
-fi
-
 if command -v systemctl >/dev/null 2>&1; then
     systemctl daemon-reload || true
     if [ -d /run/systemd/system ]; then

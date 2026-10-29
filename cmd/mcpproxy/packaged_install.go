@@ -173,10 +173,11 @@ func applySystemFlag(cmd *cobra.Command) error {
 	f, err := os.Open(packagedPaths.ConfigPath)
 	switch {
 	case errors.Is(err, fs.ErrPermission):
-		return fmt.Errorf(`cannot read %s: permission denied.
+		return fmt.Errorf(`cannot read %[1]s: permission denied.
 The service config is readable only by root and the mcpproxy group. Either:
-    run with sudo:   %s
-    or join the group once: sudo usermod -aG mcpproxy $USER   (then log out and back in)`,
+    run with sudo:   %[2]s
+    or join the group once: sudo usermod -aG mcpproxy $USER   (then log out and back in;
+    if the file is -rw------- also run: sudo chmod 0640 %[1]s)`,
 			packagedPaths.ConfigPath, systemHintCommand(os.Args[1:]))
 	case errors.Is(err, fs.ErrNotExist):
 		return fmt.Errorf("--system: service config %s not found; is the mcpproxy deb/rpm package installed?", packagedPaths.ConfigPath)
