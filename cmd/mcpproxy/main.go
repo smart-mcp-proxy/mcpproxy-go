@@ -260,6 +260,12 @@ func newRootCmd() *cobra.Command {
 	registerServerEditionCommands(rootCmd)
 	registerQADebugCommands(rootCmd)
 
+	// --system (packaged Linux service) resolves to --config/--data-dir after
+	// flag parsing; SetupHelpJSON below wraps this hook.
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		return applySystemFlag(cmd)
+	}
+
 	// Setup --help-json for machine-readable help discovery
 	// This must be called AFTER all commands are added
 	clioutput.SetupHelpJSON(rootCmd)
