@@ -469,7 +469,13 @@ func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode b
 	tmpPath := filepath.Join(dir, filepath.Base(path)+".tmp."+suffix)
 
 	// Write to temp file
-	tmpFile, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	// With exactMode the final mode is applied by Chmod below, after the group
+	// check, so nothing beyond the owner can open the file before then.
+	createPerm := perm
+	if exactMode {
+		createPerm = perm & 0o600
+	}
+	tmpFile, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, createPerm)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -481,6 +487,10 @@ func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode b
 			os.Remove(tmpPath)
 		}
 	}()
+
+	if saveConfigTempHook != nil {
+		saveConfigTempHook(tmpPath)
+	}
 
 	// Write data
 	if _, err := tmpFile.Write(data); err != nil {
@@ -557,6 +567,10 @@ var saveConfigMu sync.Mutex
 // saveConfigTestHook, when set, runs between a save's base read and its write
 // (under saveConfigMu). Tests only.
 var saveConfigTestHook func()
+
+// saveConfigTempHook, when set by a test, sees each temp file path right after
+// it is created.
+var saveConfigTempHook func(tmpPath string)
 
 // RestoreConfigFileBytes writes raw bytes back to the config file atomically
 // with exactly the given permission bits (the process umask does not apply,

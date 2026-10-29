@@ -99,3 +99,29 @@ func TestSaveConfigDropsGroupReadWhenGroupWouldChange(t *testing.T) {
 		t.Errorf("mode = %#o with the group changed from %d to %d, want 0600", got, other, fileGIDForTest(t, path))
 	}
 }
+
+// The temp file must not be readable beyond its owner before the group check
+// has run: an open() in that window keeps access after a later chmod.
+func TestAtomicWriteExactModeCreatesOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX permission bits")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mcp_config.json")
+	var seen os.FileMode
+	saveConfigTempHook = func(tmp string) {
+		if info, err := os.Stat(tmp); err == nil {
+			seen = info.Mode().Perm()
+		}
+	}
+	t.Cleanup(func() { saveConfigTempHook = nil })
+	if err := atomicWriteFileMode(path, []byte(`{}`), 0o640, true, nil); err != nil {
+		t.Fatal(err)
+	}
+	if seen&0o077 != 0 {
+		t.Errorf("temp file mode while written = %#o, want owner-only", seen)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o640 {
+		t.Errorf("final mode = %#o, want 0640", info.Mode().Perm())
+	}
+}
