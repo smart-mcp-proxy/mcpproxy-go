@@ -220,8 +220,13 @@ func (im *IsolationManager) warnPerServerIgnoredOnce(serverName string) {
 
 // DetectRuntimeType detects the runtime type based on the command
 func (im *IsolationManager) DetectRuntimeType(command string) string {
-	// Extract just the command name without path
-	cmdName := filepath.Base(command)
+	// Extract just the command name without path or a Windows executable
+	// suffix (uvx.exe, npx.cmd), compared case-insensitively as Windows does.
+	cmdName := strings.ToLower(filepath.Base(command))
+	switch filepath.Ext(cmdName) {
+	case ".exe", ".cmd", ".bat":
+		cmdName = strings.TrimSuffix(cmdName, filepath.Ext(cmdName))
+	}
 
 	// Handle common runtime commands
 	switch cmdName {
@@ -472,8 +477,13 @@ func (im *IsolationManager) ResolveDefaults(serverConfig *config.ServerConfig) *
 
 // buildFullImageName constructs the full image name with registry if needed
 func (im *IsolationManager) buildFullImageName(image string) string {
-	// If image already contains a registry (has a slash before the first colon), use as-is
-	if strings.Contains(image, "/") && strings.Index(image, "/") < strings.Index(image, ":") {
+	if imageHasRegistryHost(image) {
+		return image
+	}
+
+	// Without a configured registry, a namespaced Docker Hub reference
+	// (org/image) is already pullable as written.
+	if im.globalConfig.Registry == "" && strings.Contains(image, "/") {
 		return image
 	}
 
@@ -483,17 +493,24 @@ func (im *IsolationManager) buildFullImageName(image string) string {
 		registry = "docker.io"
 	}
 
-	// Don't prepend registry if image already contains one
-	if strings.Contains(image, "/") {
-		return image
-	}
-
 	// For official images (no slash), prepend library/
 	if !strings.Contains(image, "/") {
 		return fmt.Sprintf("%s/library/%s", registry, image)
 	}
 
 	return fmt.Sprintf("%s/%s", registry, image)
+}
+
+// imageHasRegistryHost applies Docker's reference rule: the first path
+// component names a registry only if it contains '.' or ':' or is
+// "localhost"; otherwise it is a Docker Hub namespace (org/image).
+func imageHasRegistryHost(image string) bool {
+	i := strings.Index(image, "/")
+	if i < 0 {
+		return false
+	}
+	host := image[:i]
+	return strings.ContainsAny(host, ".:") || host == "localhost"
 }
 
 // BuildDockerArgs constructs Docker run arguments for isolation

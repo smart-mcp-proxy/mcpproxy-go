@@ -1,0 +1,71 @@
+name: Contributor Thanks
+
+# Experiment E5: when an external contributor's PR is merged, post one
+# thank-you comment (as github-actions[bot]) with an optional, copy-paste
+# share snippet. Consent-based: nothing is ever posted on the contributor's
+# behalf. Logic lives in scripts/contributors.sh (unit-tested by
+# scripts/test-contributors.sh).
+#
+# SECURITY: pull_request_target runs with a write token. This workflow
+# checks out only the DEFAULT branch (trusted code), never the PR head, and
+# reads the PR through the API. PR text is data and is never interpolated
+# into a shell command.
+#
+# ROLLOUT: until the repository variable CONTRIBUTOR_THANKS_LIVE is set to
+# "true" (Settings > Secrets and variables > Actions > Variables), every run
+# is a dry run: the comment is printed in the job log and nothing is posted.
+# Manual dry run for any merged PR: Actions > Contributor Thanks > Run
+# workflow (posting from there needs live=true AND dry_run=false).
+
+on:
+  pull_request_target:
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: Merged PR number to render the comment for
+        required: true
+      dry_run:
+        description: Print the comment instead of posting it
+        type: boolean
+        default: true
+
+permissions: {}
+
+jobs:
+  thank:
+    # Cheap pre-filter; the script re-checks everything from the API.
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       github.event.pull_request.user.type != 'Bot' &&
+       !endsWith(github.event.pull_request.user.login, '[bot]') &&
+       github.event.pull_request.user.login != 'Dumbris' &&
+       github.event.pull_request.user.login != 'algis-dumbris' &&
+       github.event.pull_request.author_association != 'OWNER' &&
+       github.event.pull_request.author_association != 'MEMBER')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+    concurrency:
+      group: contributor-thanks-${{ github.event.pull_request.number || inputs.pr_number }}
+      cancel-in-progress: false
+    steps:
+      - name: Checkout trusted scripts (default branch only)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          sparse-checkout: scripts/contributors.sh
+          persist-credentials: false
+
+      - name: Post thank-you comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          # Live only when the repo variable is "true" AND this is not a manual dry run.
+          DRY_RUN: ${{ (vars.CONTRIBUTOR_THANKS_LIVE == 'true' && inputs.dry_run != true) && 'false' || 'true' }}
+        run: bash scripts/contributors.sh thanks "$PR_NUMBER"

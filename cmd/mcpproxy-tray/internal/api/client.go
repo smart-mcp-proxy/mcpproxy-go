@@ -586,9 +586,9 @@ func (c *Client) GetServers() ([]Server, error) {
 func (c *Client) EnableServer(serverName string, enabled bool) error {
 	var endpoint string
 	if enabled {
-		endpoint = fmt.Sprintf("/api/v1/servers/%s/enable", serverName)
+		endpoint = fmt.Sprintf("/api/v1/servers/%s/enable", url.PathEscape(serverName))
 	} else {
-		endpoint = fmt.Sprintf("/api/v1/servers/%s/disable", serverName)
+		endpoint = fmt.Sprintf("/api/v1/servers/%s/disable", url.PathEscape(serverName))
 	}
 
 	resp, err := c.makeRequest("POST", endpoint, nil)
@@ -605,7 +605,7 @@ func (c *Client) EnableServer(serverName string, enabled bool) error {
 
 // RestartServer restarts a server
 func (c *Client) RestartServer(serverName string) error {
-	endpoint := fmt.Sprintf("/api/v1/servers/%s/restart", serverName)
+	endpoint := fmt.Sprintf("/api/v1/servers/%s/restart", url.PathEscape(serverName))
 
 	resp, err := c.makeRequest("POST", endpoint, nil)
 	if err != nil {
@@ -640,7 +640,7 @@ func (c *Client) ForceReconnectAllServers(reason string) error {
 
 // TriggerOAuthLogin triggers OAuth login for a server
 func (c *Client) TriggerOAuthLogin(serverName string) error {
-	endpoint := fmt.Sprintf("/api/v1/servers/%s/login", serverName)
+	endpoint := fmt.Sprintf("/api/v1/servers/%s/login", url.PathEscape(serverName))
 
 	resp, err := c.makeRequest("POST", endpoint, nil)
 	if err != nil {
@@ -713,7 +713,7 @@ func (c *Client) SetActiveProfile(name string) error {
 
 // GetServerTools gets tools for a specific server
 func (c *Client) GetServerTools(serverName string) ([]Tool, error) {
-	endpoint := fmt.Sprintf("/api/v1/servers/%s/tools", serverName)
+	endpoint := fmt.Sprintf("/api/v1/servers/%s/tools", url.PathEscape(serverName))
 
 	resp, err := c.makeRequest("GET", endpoint, nil)
 	if err != nil {
@@ -754,7 +754,7 @@ func (c *Client) GetServerTools(serverName string) ([]Tool, error) {
 
 // QuarantineServer places a server in quarantine
 func (c *Client) QuarantineServer(serverName string) error {
-	endpoint := fmt.Sprintf("/api/v1/servers/%s/quarantine", serverName)
+	endpoint := fmt.Sprintf("/api/v1/servers/%s/quarantine", url.PathEscape(serverName))
 
 	resp, err := c.makeRequest("POST", endpoint, nil)
 	if err != nil {

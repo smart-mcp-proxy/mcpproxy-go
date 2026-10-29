@@ -102,7 +102,7 @@
         "required": ["request_id", "surface", "server", "tool", "operation", "decision", "reason", "args_sha256", "args_bytes"],
         "properties": {
           "surface": { "enum": ["call_tool_read", "call_tool_write", "call_tool_destructive", "direct", "code_execution", "rest"] },
-          "reason": { "enum": ["none", "intent_invalid", "intent_rejected", "profile_scope", "token_scope", "token_permission", "server_quarantined", "tool_pending_approval", "tool_changed_approval", "tool_not_callable", "other"] },
+          "reason": { "enum": ["none", "intent_invalid", "intent_rejected", "profile_scope", "profile_tier", "profile_rule", "profile_unannotated", "token_scope", "token_permission", "server_quarantined", "tool_pending_approval", "tool_changed_approval", "tool_not_callable", "other"] },
           "caller": { "properties": { "kind": { "enum": ["api_key", "socket", "stdio", "anonymous", "agent_token", "session_admin", "internal"] } }, "not": { "required": ["email_hash"] } }
         },
         "not": { "anyOf": [
@@ -121,13 +121,13 @@
         "required": ["request_id", "surface", "server", "tool", "operation", "outcome", "duration_ms", "args_sha256", "args_bytes"],
         "properties": {
           "surface": { "enum": ["call_tool_read", "call_tool_write", "call_tool_destructive", "direct", "code_execution", "rest"] },
-          "reason": { "enum": ["output_sanitisation", "output_schema", "limiter_queue_full", "limiter_queue_timeout"] },
+          "reason": { "enum": ["output_sanitisation", "output_schema", "limiter_queue_full", "limiter_queue_timeout", "rate_limited"] },
           "caller": { "properties": { "kind": { "enum": ["api_key", "socket", "stdio", "anonymous", "agent_token", "session_admin", "internal"] } }, "not": { "required": ["email_hash"] } }
         },
         "not": { "anyOf": [ { "required": ["decision"] }, { "required": ["disclosed"] }, { "required": ["flags"] } ] },
         "allOf": [
           { "if": { "properties": { "outcome": { "const": "blocked" } } }, "then": { "required": ["reason"], "properties": { "reason": { "enum": ["output_sanitisation", "output_schema"] } } } },
-          { "if": { "properties": { "outcome": { "const": "rejected" } } }, "then": { "required": ["reason"], "properties": { "reason": { "enum": ["limiter_queue_full", "limiter_queue_timeout"] } } } },
+          { "if": { "properties": { "outcome": { "const": "rejected" } } }, "then": { "required": ["reason"], "properties": { "reason": { "enum": ["limiter_queue_full", "limiter_queue_timeout", "rate_limited"] } } } },
           { "if": { "properties": { "outcome": { "enum": ["success", "error"] } } }, "then": { "not": { "required": ["reason"] } } },
           { "if": { "properties": { "outcome": { "const": "error" } } }, "then": { "required": ["error_class"] } },
           { "if": { "properties": { "outcome": { "not": { "const": "error" } } } }, "then": { "not": { "required": ["error_class"] } } }

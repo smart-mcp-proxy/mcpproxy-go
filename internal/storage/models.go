@@ -71,6 +71,13 @@ const (
 	// records.
 	ToolBaselineDecisionsBucket = "tool_baseline_decisions"
 
+	// TPABundleStateBucket holds the installation-wide Spec 101 anti-downgrade
+	// state of the signed TPA bundle: key "state" (scanner.TPABundleState) and a
+	// nested "history" bucket of activation rows. It is keyed by signing
+	// authority, not by server, so server removal never purges it. Created
+	// lazily on the first write, never by a read.
+	TPABundleStateBucket = "tpa_bundle_state"
+
 	// Onboarding wizard bucket (Spec 046)
 	OnboardingBucket = "onboarding"
 )
@@ -180,6 +187,38 @@ type BaselineSweepState struct {
 	ServersScanned int `json:"servers_scanned"`
 	// Findings is the total number of findings the sweep's scans produced.
 	Findings int `json:"findings"`
+}
+
+// ScanDefaultNoticeDoneKey holds the ScanDefaultNoticeState marker in
+// MetaBucket (spec 120 FR-011): the one-time startup notice that servers with
+// no trust_mode now run under scan has been logged (or found nothing to say).
+const ScanDefaultNoticeDoneKey = "scan_default_notice_done"
+
+// ScanDefaultNoticeState records that the one-time scan-default startup notice
+// ran on this installation. Absence means "never evaluated with at least one
+// configured server": a fresh install with no servers leaves it unset so the
+// first start that has servers still gets the notice.
+type ScanDefaultNoticeState struct {
+	// NoticedAt is when the notice ran.
+	NoticedAt time.Time `json:"noticed_at"`
+	// Servers names the enabled servers that were running under the scan
+	// default at that time (empty when there was nothing to warn about).
+	Servers []string `json:"servers,omitempty"`
+}
+
+// BundleReprotectDoneKey holds the BundleReprotectState marker in MetaBucket.
+const BundleReprotectDoneKey = "tpa_bundle_reprotect_done"
+
+// BundleReprotectState records the last TPA bundle for which the post-activation
+// re-protection sweep (Spec 101 FR-019, tasks B17) completed with zero failures.
+// Stored in MetaBucket under BundleReprotectDoneKey. Absence (the zero value)
+// means "no sweep has completed here". It is installation-wide state and is not
+// touched by server purge.
+type BundleReprotectState struct {
+	// FullDigest is the full SHA-256 of the bundle the sweep covered.
+	FullDigest string `json:"full_digest"`
+	// CompletedAt is when the sweep finished.
+	CompletedAt time.Time `json:"completed_at"`
 }
 
 // Current schema version

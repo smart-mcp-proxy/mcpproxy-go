@@ -46,6 +46,23 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.logger.Info("Telemetry service background process started")
 	}
 
+	// Start the TPA bundle refresher (Spec 087 / Spec 101 US3, B19) on every
+	// transport and build, bound to the app context. Same shape as the
+	// telemetry service: launched on a goroutine, Start after Stop is a no-op,
+	// so a Close racing this launch leaves nothing running.
+	r.mu.RLock()
+	refresher := r.bundleRefresher
+	r.mu.RUnlock()
+	if refresher != nil {
+		go refresher.Start(r.appCtx)
+		r.logger.Info("TPA bundle refresher background process started")
+	}
+
+	// Spec 120 FR-011: one-time notice that servers with no trust_mode run
+	// under the scan default (spec 119) and that their clean-scanned holds
+	// are released. Persisted marker; nothing on a fresh install.
+	r.warnScanDefaultOnce()
+
 	// Clean up orphaned OAuth tokens before starting the refresh manager
 	// This removes tokens for servers that were deleted while mcpproxy was not running
 	if r.storageManager != nil {

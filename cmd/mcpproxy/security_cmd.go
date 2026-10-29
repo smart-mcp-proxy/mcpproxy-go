@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -57,7 +60,8 @@ Examples:
   mcpproxy security disable mcp-scan
   mcpproxy security scan github-server
   mcpproxy security report github-server
-  mcpproxy security overview`,
+  mcpproxy security overview
+  mcpproxy security bundle`,
 	}
 
 	securityCmd.AddCommand(newSecurityScannersCmd())
@@ -76,6 +80,7 @@ Examples:
 	securityCmd.AddCommand(newSecurityOverviewCmd())
 	securityCmd.AddCommand(newSecurityIntegrityCmd())
 	securityCmd.AddCommand(newSecurityCancelAllCmd())
+	securityCmd.AddCommand(newSecurityBundleCmd())
 
 	return securityCmd
 }
@@ -639,7 +644,7 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), hardTimeout)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/servers/"+serverName+"/scan", body)
+	resp, err := client.DoRaw(ctx, http.MethodPost, serverAPIPath(serverName, "/scan"), body)
 	if err != nil {
 		return fmt.Errorf("failed to start scan: %w", err)
 	}
@@ -713,7 +718,7 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 		case <-ticker.C:
 		}
 
-		statusResp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/status", nil)
+		statusResp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/status"), nil)
 		if err != nil {
 			return fmt.Errorf("failed to check scan status: %w", err)
 		}
@@ -901,7 +906,7 @@ func printScanDryRunPlan(client *cliclient.Client, serverName, scannerFlag strin
 	// 3. Best-effort: fetch the server's last scan context for source info.
 	//    This may 404 if the server has never been scanned — that's fine.
 	var scanContext map[string]interface{}
-	filesResp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/files", nil)
+	filesResp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/files"), nil)
 	if err == nil {
 		filesRaw, _ := io.ReadAll(filesResp.Body)
 		filesResp.Body.Close()
@@ -1385,7 +1390,7 @@ func runSecurityStatus(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/status", nil)
+	resp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/status"), nil)
 	if err != nil {
 		return fmt.Errorf("failed to get scan status: %w", err)
 	}
@@ -1449,7 +1454,7 @@ func runSecurityReport(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/report", nil)
+	resp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/report"), nil)
 	if err != nil {
 		return fmt.Errorf("failed to get scan report: %w", err)
 	}
@@ -1518,7 +1523,7 @@ type failedScannerInfo struct {
 // complete in the most recent scan job for `serverName`. Returns nil on any
 // error so the caller can render the report without per-scanner names.
 func fetchFailedScannerInfo(client *cliclient.Client, ctx context.Context, serverName string) []failedScannerInfo {
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/status", nil)
+	resp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/status"), nil)
 	if err != nil {
 		return nil
 	}
@@ -1577,7 +1582,7 @@ func runSecurityApprove(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/servers/"+serverName+"/security/approve", body)
+	resp, err := client.DoRaw(ctx, http.MethodPost, serverAPIPath(serverName, "/security/approve"), body)
 	if err != nil {
 		return fmt.Errorf("failed to approve server: %w", err)
 	}
@@ -1624,7 +1629,7 @@ func runSecurityReject(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/servers/"+serverName+"/security/reject", nil)
+	resp, err := client.DoRaw(ctx, http.MethodPost, serverAPIPath(serverName, "/security/reject"), nil)
 	if err != nil {
 		return fmt.Errorf("failed to reject server: %w", err)
 	}
@@ -1737,7 +1742,7 @@ func runSecurityIntegrity(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/integrity", nil)
+	resp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/integrity"), nil)
 	if err != nil {
 		return fmt.Errorf("failed to check integrity: %w", err)
 	}
@@ -1811,7 +1816,7 @@ func runSecurityIntegrity(_ *cobra.Command, args []string) error {
 
 // printScanSummary fetches and prints a compact summary after a scan completes.
 func printScanSummary(client *cliclient.Client, ctx context.Context, serverName string) error {
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/report", nil)
+	resp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/report"), nil)
 	if err != nil {
 		fmt.Println("Scan completed. Use 'mcpproxy security report " + serverName + "' to view results.")
 		return nil
@@ -2284,40 +2289,208 @@ func signatureBundleLines(overview map[string]interface{}) []string {
 		return nil
 	}
 
-	source, _ := bundle["source"].(string)
+	field := func(label, value string) string {
+		return fmt.Sprintf("    %-16s %s", label+":", value)
+	}
+
+	rawSource, _ := bundle["source"].(string)
+	source := rawSource
 	if path, _ := bundle["path"].(string); path != "" {
 		source = fmt.Sprintf("%s (%s)", source, path)
 	}
 
 	lines := []string{
 		"  Signature bundle:",
-		fmt.Sprintf("    Source:      %s", source),
+		field("Source", source),
 	}
 	if version, _ := bundle["bundle_version"].(string); version != "" {
-		lines = append(lines, fmt.Sprintf("    Version:     %s", version))
+		lines = append(lines, field("Version", version))
 	}
 	if generated, _ := bundle["generated_at"].(string); generated != "" {
-		lines = append(lines, fmt.Sprintf("    Generated:   %s", generated))
+		if days, ok := bundle["staleness_days"].(float64); ok {
+			generated = fmt.Sprintf("%s (%d days old)", generated, int(days))
+		}
+		lines = append(lines, field("Generated", generated))
 	}
+	lines = append(lines, bundleFreshnessLines(bundle, field)...)
 	if fingerprint, _ := bundle["fingerprint"].(string); fingerprint != "" {
-		lines = append(lines, fmt.Sprintf("    Fingerprint: %s", fingerprint))
+		lines = append(lines, field("Fingerprint", fingerprint))
 	}
-	lines = append(lines, fmt.Sprintf("    Rules:       %s runnable, %s skipped, %s declared-skipped",
+	if digest, _ := bundle["full_digest"].(string); digest != "" {
+		// Shown in FULL: it is the only value `security bundle rollback` accepts.
+		lines = append(lines, field("Full digest", digest))
+	}
+	if seq, _ := bundle["sequence"].(string); seq != "" {
+		lines = append(lines, field("Sequence", seq))
+	}
+	authority, _ := bundle["authority"].(string)
+	verified, _ := bundle["signature_verified"].(bool)
+	switch {
+	case authority != "":
+		auth := authority
+		if epoch, ok := bundle["trust_epoch"].(float64); ok {
+			auth = fmt.Sprintf("%s (epoch %d)", authority, int(epoch))
+		}
+		lines = append(lines, field("Authority", auth))
+	case rawSource != "" && rawSource != "embedded":
+		lines = append(lines, field("Authority", "none (unsigned external bundle)"))
+	}
+	switch {
+	case verified:
+		lines = append(lines, field("Signature", "verified"))
+	case rawSource == "embedded":
+		lines = append(lines, field("Signature", "binary-trusted (embedded default)"))
+	case rawSource != "":
+		lines = append(lines, field("Signature", "unsigned - not verified"))
+	}
+	lines = append(lines, field("Rules", fmt.Sprintf("%s runnable, %s skipped, %s declared-skipped",
 		secFormatInt(bundle, "runnable_rules"),
 		secFormatInt(bundle, "skipped_rules"),
-		secFormatInt(bundle, "declared_skipped")))
+		secFormatInt(bundle, "declared_skipped"))))
+	if degraded, _ := bundle["coverage_degraded"].(bool); degraded {
+		// scan-mode auto-approval is suspended while coverage is degraded; a
+		// silent flag is indistinguishable from a quiet install.
+		reason, _ := bundle["degraded_reason"].(string)
+		if reason == "" {
+			reason = "unspecified"
+		}
+		lines = append(lines, field("Coverage", "DEGRADED: "+reason+" (scan-mode auto-approval is suspended)"))
+	}
+	if stale, _ := bundle["stale"].(bool); stale {
+		// An age number alone reads as trivia; a stale corpus is a missing-
+		// signature risk, so it gets its own loud line (Spec 087 FR-017).
+		lines = append(lines, field("STALE", bundleStaleText(bundle)))
+	}
+	if reprotect := bundleReprotectText(bundle); reprotect != "" {
+		lines = append(lines, field("Re-protection", reprotect))
+	}
+	if pinned, _ := bundle["pinned"].(bool); pinned {
+		lines = append(lines, field("Pinned", "yes - pinned by an operator rollback (`security bundle unpin` clears it)"))
+	}
+	if rollback, _ := bundle["rollback"].(bool); rollback {
+		lines = append(lines, field("Rollback", "the serving bundle was activated by an explicit rollback"))
+	}
 	if loadErr, _ := bundle["load_error"].(string); loadErr != "" {
 		// A configured bundle that failed to load keeps the previous corpus
 		// live; say so loudly rather than letting the counts imply all is well.
-		lines = append(lines, fmt.Sprintf("    load error:  %s", loadErr))
+		lines = append(lines, field("load error", loadErr))
+	}
+	if rej, ok := bundle["last_rejection"].(map[string]interface{}); ok && len(rej) > 0 {
+		reason, _ := rej["reason"].(string)
+		text := reason
+		if detail, _ := rej["detail"].(string); detail != "" {
+			text += ": " + detail
+		}
+		if at, _ := rej["at"].(string); at != "" {
+			text += " (" + formatTimestamp(at) + ")"
+		}
+		lines = append(lines, field("Last rejection", text))
 	}
 	if runnable, _ := bundle["runnable_rules"].(float64); runnable == 0 {
 		// Zero runnable rules means offline TPA coverage is OFF. Printed in the
 		// same tone as a healthy count, it read as "fine" — the exact class of
 		// "the runtime is right but the operator is misled" bug #938 is about.
-		lines = append(lines, "    WARNING:     no TPA signatures are running — offline scan coverage is OFF")
+		lines = append(lines, field("WARNING", "no TPA signatures are running — offline scan coverage is OFF"))
 	}
 	return append(lines, "")
+}
+
+// bundleFreshnessLines renders when the corpus was last checked and activated
+// and how the last refresh cycle went (Spec 087 FR-017, tasks B15). Everything
+// is optional: an older daemon, or an embedded default that never refreshed,
+// yields no lines at all.
+func bundleFreshnessLines(bundle map[string]interface{}, field func(label, value string) string) []string {
+	var lines []string
+	if checked, _ := bundle["last_checked_at"].(string); checked != "" {
+		lines = append(lines, field("Last checked", formatTimestamp(checked)))
+	}
+	if activated, _ := bundle["last_activated_at"].(string); activated != "" {
+		lines = append(lines, field("Last activated", formatTimestamp(activated)))
+	}
+	refresh, ok := bundle["refresh"].(map[string]interface{})
+	if !ok || len(refresh) == 0 {
+		return lines
+	}
+	outcome, _ := refresh["last_outcome"].(string)
+	text := "no cycle has run yet"
+	if outcome != "" {
+		text = outcome
+		if reason, _ := refresh["last_reason"].(string); reason != "" {
+			text += " (" + reason + ")"
+		}
+	}
+	if failures, _ := refresh["consecutive_failures"].(float64); failures > 0 {
+		noun := "failures"
+		if int(failures) == 1 {
+			noun = "failure"
+		}
+		text += fmt.Sprintf(", %d consecutive %s", int(failures), noun)
+	}
+	if next, _ := refresh["next_check_at"].(string); next != "" {
+		text += ", next check " + formatTimestamp(next)
+	}
+	lines = append(lines, field("Refresh", text))
+	// The host is shown only while fetch is on and a host is known. The URL is
+	// never reported by the daemon (host-only logging, tasks B12).
+	if enabled, _ := refresh["fetch_enabled"].(bool); enabled {
+		if host, _ := refresh["fetch_host"].(string); host != "" {
+			lines = append(lines, field("Fetch host", host))
+		}
+	}
+	return lines
+}
+
+// bundleStaleText is the STALE line: age, threshold and the way out.
+func bundleStaleText(bundle map[string]interface{}) string {
+	age := "older than the threshold"
+	if days, ok := bundle["staleness_days"].(float64); ok {
+		age = fmt.Sprintf("%d days old", int(days))
+	}
+	threshold := ""
+	if after, ok := bundle["stale_after_days"].(float64); ok {
+		threshold = fmt.Sprintf(" (threshold %d days)", int(after))
+	}
+	return age + threshold + " - run `mcpproxy security bundle refresh`, or check that the refresh source is reachable"
+}
+
+// bundleReprotectText describes the post-activation re-protection sweep (Spec 101
+// FR-019): its state, why it is suspended, and how many scanned servers matched
+// the newly active corpus. Empty when the daemon reports no sweep status.
+func bundleReprotectText(bundle map[string]interface{}) string {
+	rp, ok := bundle["reprotect"].(map[string]interface{})
+	if !ok || len(rp) == 0 {
+		return ""
+	}
+	state, _ := rp["state"].(string)
+	if state == "" {
+		return ""
+	}
+	text := state
+	if reason, _ := rp["reason"].(string); reason != "" {
+		text += " (" + reason + ")"
+	}
+	scanned, _ := rp["servers_scanned"].(float64)
+	hits, _ := rp["servers_with_hits"].(float64)
+	if scanned > 0 {
+		text += fmt.Sprintf(", %d of %d servers matched the active corpus", int(hits), int(scanned))
+	}
+	if done, _ := rp["last_completed_at"].(string); done != "" {
+		text += ", last completed " + formatLocalTimestamp(done)
+	}
+	return text
+}
+
+// formatLocalTimestamp is formatTimestamp rendered in the host's local zone.
+// The daemon stamps the re-protection completion in UTC while the cycle
+// timestamps carry the host's local offset, so the human line converts it to
+// keep every time in the block on the same clock.
+func formatLocalTimestamp(ts string) string {
+	for _, layout := range []string{time.RFC3339, time.RFC3339Nano} {
+		if t, err := time.Parse(layout, ts); err == nil {
+			return t.Local().Format("2006-01-02 15:04:05")
+		}
+	}
+	return ts
 }
 
 func secFormatInt(m map[string]interface{}, key string) string {
@@ -2325,6 +2498,367 @@ func secFormatInt(m map[string]interface{}, key string) string {
 		return fmt.Sprintf("%d", int(v))
 	}
 	return "0"
+}
+
+// --- security bundle (Spec 101 US1: status, history, rollback, unpin, reload; US3: refresh) ---
+
+// bundleFullDigestPattern is the only digest grammar rollback accepts: the
+// complete SHA-256 as 64 lowercase hex characters. The daemon enforces the same
+// rule; checking here refuses a typo before any request is made.
+var bundleFullDigestPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func newSecurityBundleCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "bundle",
+		Short: "Show and manage the offline TPA signature bundle",
+		Long: `Show which TPA signature corpus this proxy is running and whether it is current
+and verified, or stuck on last-known-good and why.
+
+The status shows the full SHA-256 digest (the value "rollback" requires), the
+sequence, the signing authority and trust epoch, whether the signature
+verified, staleness (with a STALE line past the configured threshold), when the
+bundle was last checked and activated, how the last refresh cycle went, the
+post-activation re-protection sweep, a DEGRADED coverage line with its reason
+when scan-mode auto-approval is suspended, the rollback pin, and the last
+refused candidate.
+
+Examples:
+  mcpproxy security bundle
+  mcpproxy security bundle -o json
+  mcpproxy security bundle history
+  mcpproxy security bundle rollback --embedded --digest <64-hex>
+  mcpproxy security bundle rollback --path /var/lib/tpa/known-good.json --digest <64-hex>
+  mcpproxy security bundle unpin
+  mcpproxy security bundle reload
+  mcpproxy security bundle refresh`,
+		Args: cobra.NoArgs,
+		RunE: runSecurityBundleStatus,
+	}
+	cmd.AddCommand(newSecurityBundleHistoryCmd())
+	cmd.AddCommand(newSecurityBundleRollbackCmd())
+	cmd.AddCommand(newSecurityBundleUnpinCmd())
+	cmd.AddCommand(newSecurityBundleReloadCmd())
+	cmd.AddCommand(newSecurityBundleRefreshCmd())
+	return cmd
+}
+
+func newSecurityBundleHistoryCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "history",
+		Short: "List the bundle activation history (oldest first)",
+		Long: `List every bundle activation on this install, oldest first, with its full
+SHA-256 digest. This is the trustworthy place to learn the digest of a
+known-good artifact to name in "bundle rollback".
+
+Examples:
+  mcpproxy security bundle history
+  mcpproxy security bundle history -o json`,
+		Args: cobra.NoArgs,
+		RunE: runSecurityBundleHistory,
+	}
+}
+
+func newSecurityBundleRollbackCmd() *cobra.Command {
+	var (
+		embedded bool
+		path     string
+		digest   string
+	)
+	cmd := &cobra.Command{
+		Use:   "rollback (--embedded | --path PATH) --digest <64-hex>",
+		Short: "Roll the bundle back to a named artifact (overrides the downgrade watermark)",
+		Long: `Roll the signature bundle back to an older artifact. This is the one operator
+override of the anti-downgrade watermark, so it is authorized by the COMPLETE
+SHA-256 digest of the target bytes (64 lowercase hex characters), never by a
+path or the 12-character fingerprint. The path only says where to find the
+bytes. Find full digests with "mcpproxy security bundle history".
+
+Give exactly one of --embedded (the corpus compiled into this binary) or
+--path. A refused rollback (for example rollback_target_mismatch) leaves the
+last-known-good bundle serving and prints the reason.
+
+Examples:
+  mcpproxy security bundle rollback --embedded --digest <64-hex>
+  mcpproxy security bundle rollback --path /var/lib/tpa/known-good.json --digest <64-hex>`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := validateBundleRollbackFlags(embedded, path, cmd.Flags().Changed("path"), digest); err != nil {
+				return err
+			}
+			return runSecurityBundleRollback(embedded, path, digest)
+		},
+	}
+	cmd.Flags().BoolVar(&embedded, "embedded", false, "Roll back to the bundle compiled into this binary")
+	cmd.Flags().StringVar(&path, "path", "", "Path to the target bundle file (a hint for where to find the bytes; a relative path is resolved against the current directory; it must sit directly in the directory of security.tpa_bundle_path)")
+	cmd.Flags().StringVar(&digest, "digest", "", "Full SHA-256 of the target as 64 lowercase hex characters (required)")
+	return cmd
+}
+
+func newSecurityBundleUnpinCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unpin",
+		Short: "Clear the rollback pin and return to normal downgrade protection",
+		Long: `Clear the rollback pin and re-validate the serving bundle under the normal
+watermark. A rolled-back target below the watermark no longer serves; the
+install falls back as a restart would. A quiet no-op when nothing is pinned.
+
+Examples:
+  mcpproxy security bundle unpin`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runSecurityBundleMutation("/api/v1/security/bundle/unpin", "unpin bundle", "Rollback pin cleared. Now serving:")
+		},
+	}
+}
+
+func newSecurityBundleReloadCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "reload",
+		Short: "Re-run the bundle pipeline against the configured source",
+		Long: `Re-read the configured bundle source and run it through the same
+verification pipeline as startup. A refused candidate leaves last-known-good
+serving and is reported as the last rejection. Reload never makes a network
+request; use "refresh" to also check the fetch channel.
+
+Examples:
+  mcpproxy security bundle reload`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runSecurityBundleMutation("/api/v1/security/bundle/reload", "reload bundle", "Bundle reloaded. Now serving:")
+		},
+	}
+}
+
+func newSecurityBundleRefreshCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "refresh",
+		Short: "Check for a newer bundle now (local file, then the optional fetch)",
+		Long: `Run one refresh cycle immediately: re-read the configured bundle file, then,
+when security.tpa_fetch_enabled is on and a trusted signer and security.tpa_fetch_url
+are configured, check the fetch channel for a newer signed bundle. Everything
+goes through the same verification pipeline as startup; a refused candidate
+leaves last-known-good serving and is reported as the last rejection.
+
+The status shows what the cycle did on the "Refresh" line: activated, unchanged,
+not_modified, rejected, fetch_unavailable (a network or rate-limit problem, never
+a rejection), channel_invalid, superseded or disabled (with the reason).
+
+"refresh" may make one outbound request when fetch is enabled; "reload" never
+does - it only re-reads the local file.
+
+Examples:
+  mcpproxy security bundle refresh
+  mcpproxy security bundle refresh -o json`,
+		Args: cobra.NoArgs,
+		RunE: func(_ *cobra.Command, _ []string) error {
+			return runSecurityBundleMutation("/api/v1/security/bundle/refresh", "refresh bundle", "Bundle refresh finished. Now serving:")
+		},
+	}
+}
+
+// validateBundleRollbackFlags enforces the rollback grammar locally, so a
+// malformed request is refused before any request is made.
+func validateBundleRollbackFlags(embedded bool, path string, pathChanged bool, digest string) error {
+	hasPath := pathChanged || path != ""
+	if embedded == hasPath {
+		return newFlagValidationError("give exactly one of --embedded or --path PATH")
+	}
+	if hasPath && path == "" {
+		return newFlagValidationError("--path must not be empty")
+	}
+	if !bundleFullDigestPattern.MatchString(digest) {
+		return newFlagValidationError("--digest must be the full SHA-256 of the target: 64 lowercase hex characters (got %d characters); the 12-character fingerprint is a label, not an authorization - the full digest is required, see `mcpproxy security bundle history`", len(digest))
+	}
+	return nil
+}
+
+// bundleDaemonRequest sends one bundle request and returns the status and body.
+func bundleDaemonRequest(method, path string, body []byte, operation string) (int, []byte, error) {
+	client, _, err := newSecurityCLIClient()
+	if err != nil {
+		return 0, nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	resp, err := client.DoRaw(ctx, method, path, body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to %s: %w", operation, err)
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("failed to read response: %w", err)
+	}
+	return resp.StatusCode, respBody, nil
+}
+
+// bundleData runs a bundle request that must answer 200 and returns the
+// envelope's data payload.
+func bundleData(method, path string, body []byte, operation string) ([]byte, error) {
+	status, respBody, err := bundleDaemonRequest(method, path, body, operation)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, parseAPIError(respBody, status, operation)
+	}
+	data, err := unwrapAPIResponse(respBody)
+	if err != nil {
+		return nil, fmt.Errorf("API error: %w", err)
+	}
+	return data, nil
+}
+
+func printBundleStatus(bundle map[string]interface{}) {
+	for _, line := range signatureBundleLines(map[string]interface{}{"signature_bundle": bundle}) {
+		fmt.Println(line)
+	}
+}
+
+func runSecurityBundleStatus(_ *cobra.Command, _ []string) error {
+	data, err := bundleData(http.MethodGet, "/api/v1/security/bundle", nil, "get bundle status")
+	if err != nil {
+		return err
+	}
+	var bundle map[string]interface{}
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+	if format := ResolveOutputFormat(); format == "json" || format == "yaml" {
+		return formatAndPrint(format, bundle)
+	}
+	printBundleStatus(bundle)
+	return nil
+}
+
+func runSecurityBundleHistory(_ *cobra.Command, _ []string) error {
+	data, err := bundleData(http.MethodGet, "/api/v1/security/bundle/history", nil, "get bundle history")
+	if err != nil {
+		return err
+	}
+	var rows []map[string]interface{}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+	if rows == nil {
+		rows = []map[string]interface{}{}
+	}
+	if format := ResolveOutputFormat(); format == "json" || format == "yaml" {
+		return formatAndPrint(format, rows)
+	}
+	if len(rows) == 0 {
+		fmt.Println("No bundle activations recorded.")
+		return nil
+	}
+	// The digest column is last and unpadded: it is the rollback input and must
+	// never be truncated or wrapped by a column width.
+	fmt.Printf("%-9s %-10s %-6s %-19s %-9s %-17s %s\n", "SEQUENCE", "AUTHORITY", "EPOCH", "ACTIVATED", "SOURCE", "FLAGS", "FULL DIGEST")
+	for _, row := range rows {
+		seq := getMapString(row, "sequence")
+		if seq == "" {
+			seq = "-"
+		}
+		authority := getMapString(row, "authority")
+		if authority == "" {
+			authority = "-"
+		}
+		var flags []string
+		if v, _ := row["signature_verified"].(bool); v {
+			flags = append(flags, "verified")
+		}
+		if v, _ := row["rollback"].(bool); v {
+			flags = append(flags, "rollback")
+		}
+		flagText := strings.Join(flags, ",")
+		if flagText == "" {
+			flagText = "-"
+		}
+		fmt.Printf("%-9s %-10s %-6s %-19s %-9s %-17s %s\n",
+			seq, authority, secFormatInt(row, "trust_epoch"),
+			formatTimestamp(getMapString(row, "activated_at")),
+			getMapString(row, "source"), flagText, getMapString(row, "full_digest"))
+	}
+	return nil
+}
+
+func runSecurityBundleRollback(embedded bool, path, digest string) error {
+	// The daemon is another process with its own working directory, so a
+	// relative path is resolved here, against the shell the operator typed it in.
+	if path != "" {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return fmt.Errorf("resolve --path %q: %w", path, err)
+		}
+		path = abs
+	}
+	reqBody, err := json.Marshal(map[string]interface{}{"embedded": embedded, "path": path, "digest": digest})
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+	status, respBody, err := bundleDaemonRequest(http.MethodPost, "/api/v1/security/bundle/rollback", reqBody, "roll back bundle")
+	if err != nil {
+		return err
+	}
+	if status == http.StatusConflict {
+		return bundleRollbackRefusal(respBody)
+	}
+	if status != http.StatusOK {
+		return parseAPIError(respBody, status, "roll back bundle")
+	}
+	data, err := unwrapAPIResponse(respBody)
+	if err != nil {
+		return fmt.Errorf("API error: %w", err)
+	}
+	return printBundleMutationResult(data, "Rolled back and pinned. Now serving:")
+}
+
+// bundleRollbackRefusal turns the daemon's 409 into an error that names the
+// rejection reason, so an operator can tell a wrong digest from a tamper
+// attempt from a stale epoch.
+func bundleRollbackRefusal(respBody []byte) error {
+	var resp struct {
+		Error     string `json:"error"`
+		ErrorCode string `json:"error_code"`
+		Rejection struct {
+			Reason string `json:"reason"`
+			Detail string `json:"detail"`
+		} `json:"rejection"`
+	}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return cliRefusalError{fmt.Errorf("bundle rollback refused: HTTP 409: %s", string(respBody))}
+	}
+	reason := resp.Rejection.Reason
+	if reason == "" {
+		reason = resp.ErrorCode
+	}
+	msg := "bundle rollback refused (" + reason + ")"
+	if resp.Rejection.Detail != "" {
+		msg += ": " + resp.Rejection.Detail
+	} else if resp.Error != "" {
+		msg += ": " + resp.Error
+	}
+	return cliRefusalError{fmt.Errorf("%s; the last-known-good bundle keeps serving", msg)}
+}
+
+func runSecurityBundleMutation(path, operation, successLine string) error {
+	data, err := bundleData(http.MethodPost, path, nil, operation)
+	if err != nil {
+		return err
+	}
+	return printBundleMutationResult(data, successLine)
+}
+
+func printBundleMutationResult(data []byte, successLine string) error {
+	var bundle map[string]interface{}
+	if err := json.Unmarshal(data, &bundle); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+	if format := ResolveOutputFormat(); format == "json" || format == "yaml" {
+		return formatAndPrint(format, bundle)
+	}
+	fmt.Println(successLine)
+	printBundleStatus(bundle)
+	return nil
 }
 
 // scannerDisplayStatus normalizes the scanner status to a single vocabulary
@@ -2439,4 +2973,11 @@ func formatTimestamp(ts string) string {
 		return t.Format("2006-01-02 15:04:05")
 	}
 	return ts
+}
+
+// serverAPIPath returns the REST path of a per-server sub-resource. The name is
+// path-escaped: official-registry ids are namespace/name, and the daemon only
+// decodes a %2F-encoded {id} (MCP-1118).
+func serverAPIPath(serverName, suffix string) string {
+	return "/api/v1/servers/" + url.PathEscape(serverName) + suffix
 }

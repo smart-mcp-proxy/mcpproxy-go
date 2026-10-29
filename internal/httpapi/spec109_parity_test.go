@@ -56,6 +56,7 @@ type p109Terminology struct {
 	ToolApproval   p109Family `json:"tool_approval"`
 	ActivityView   p109Family `json:"activity_view"`
 	ClientPresence p109Family `json:"client_presence"`
+	HoldSignal     p109Family `json:"hold_signal"`
 }
 
 // families returns every family keyed by its golden name, with the generated
@@ -74,6 +75,7 @@ func (g *p109Terminology) families() []struct {
 		{"tool_approval", "ToolApproval", "ToolApprovalState", &g.ToolApproval},
 		{"activity_view", "ActivityView", "ActivityView", &g.ActivityView},
 		{"client_presence", "ClientPresence", "ClientPresenceState", &g.ClientPresence},
+		{"hold_signal", "HoldSignal", "HoldSignal", &g.HoldSignal},
 	}
 }
 
@@ -102,6 +104,7 @@ func p109GoValues() map[string][]string {
 		"tool_approval":   contracts.AllToolApprovalStates(),
 		"activity_view":   contracts.AllActivityViews(),
 		"client_presence": contracts.AllClientPresenceStates(),
+		"hold_signal":     contracts.AllHoldSignals(),
 	}
 }
 
@@ -202,11 +205,11 @@ func TestSpec109TerminologyGolden(t *testing.T) {
 }
 
 // p109CamelValue turns a wire value into its generated TypeScript suffix:
-// sign_in_required -> SignInRequired.
+// sign_in_required -> SignInRequired, GATE-HINT-CHANGE -> GateHintChange.
 func p109CamelValue(v string) string {
 	var b strings.Builder
-	for _, w := range strings.Split(v, "_") {
-		b.WriteString(strings.ToUpper(w[:1]) + w[1:])
+	for _, w := range strings.FieldsFunc(v, func(r rune) bool { return r == '_' || r == '-' }) {
+		b.WriteString(strings.ToUpper(w[:1]) + strings.ToLower(w[1:]))
 	}
 	return b.String()
 }

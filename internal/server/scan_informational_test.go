@@ -28,7 +28,12 @@ func newInformationalTestServer(t *testing.T, fake securityScannerService, sec *
 	cfg.Security = sec
 	rt, err := runtime.New(cfg, "", zap.NewNop())
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = rt.Close() })
+	t.Cleanup(func() {
+		// A test that drives Server.Shutdown has already closed the runtime,
+		// and a second Close is not idempotent (cache manager): tolerate it.
+		defer func() { _ = recover() }()
+		_ = rt.Close()
+	})
 	for _, sc := range servers {
 		if sc != nil {
 			require.NoError(t, rt.StorageManager().SaveUpstreamServer(sc))
@@ -578,7 +583,9 @@ func TestScanModeAdmissionOwns(t *testing.T) {
 		{"scan+not quarantined+baseline", &config.ServerConfig{TrustMode: "scan"}, true, true},
 		{"manual+quarantined", &config.ServerConfig{TrustMode: "manual", Quarantined: true}, false, false},
 		{"auto+quarantined", &config.ServerConfig{TrustMode: "auto", Quarantined: true}, false, false},
-		{"empty trust mode (manual) + quarantined", &config.ServerConfig{Quarantined: true}, false, false},
+		// Spec 119: an unset trust_mode is the default tier, scan, so the
+		// admission gate owns it.
+		{"empty trust mode (scan, the default) + quarantined", &config.ServerConfig{Quarantined: true}, false, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

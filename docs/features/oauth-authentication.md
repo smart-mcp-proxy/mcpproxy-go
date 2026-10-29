@@ -337,6 +337,35 @@ Without `callback_base_url`, loopback callbacks behave as before. A configured
 `redirect_uri` continues to pin the private loopback listener; the external
 callback takes precedence for provider registration and token exchange.
 
+### The browser says the sign-in was invalidated
+
+The callback page reports **Authorization Failed** with "This sign-in was
+invalidated before it could finish: the server's connection was retired
+(restarted, replaced, removed or quarantined) while the sign-in was in
+progress" when the upstream's instance was torn down between the moment you
+started the login and the moment the provider redirected back. The code it
+delivered belongs to a flow that no longer exists, so nothing was signed in;
+start the login again and approve it.
+
+Two background paths used to cause this on their own (GH #1722) and no longer
+do:
+
+- A security scan (the admission scan, the informational rescan after a tool
+  change, or a manual scan) does not restart a server that is waiting on your
+  OAuth login — a login flow in flight, or a server parked in **Pending Auth** —
+  because the restart would retire the pending flow. The scan runs with what it
+  can export without a reconnect and logs
+  `Server is waiting on an OAuth login; scanning without reconnecting it`.
+- A new server starts quarantined with a temporary review connection. That
+  connection window is held open while a login for the server is in flight (it
+  is extended in 5-minute steps and outlives the login by at most that grace),
+  and a later, shorter grant never cuts an earlier one short. The log line is
+  `Inspection exemption held: an OAuth login for the server is in flight`.
+
+An operator action that retires the instance during the login — removing or
+restarting the server by hand, or quarantining it — still invalidates the
+flow; the page above is how you learn about it.
+
 ### Browser Doesn't Open
 
 ```bash

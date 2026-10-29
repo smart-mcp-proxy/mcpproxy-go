@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -288,6 +289,17 @@ func outputCallResultPretty(result interface{}) {
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 }
 
+func outputPrettyCallResult(result interface{}, isError bool) error {
+	if isError {
+		fmt.Fprintln(os.Stderr, "⚠️  Tool call returned an error.")
+		outputCallResultPretty(result)
+		return callResultError{}
+	}
+	fmt.Fprintf(os.Stderr, "✅ Tool call completed successfully!\n\n")
+	outputCallResultPretty(result)
+	return nil
+}
+
 // createLogger creates a zap logger with the specified level
 func createLogger(level string) (*zap.Logger, error) {
 	var zapLevel zap.AtomicLevel
@@ -317,22 +329,33 @@ func createLogger(level string) (*zap.Logger, error) {
 }
 
 // runCallToolRead handles the tool-read command (Spec 018)
-func runCallToolRead(_ *cobra.Command, _ []string) error {
-	return runCallToolVariant("call_tool_read", "read")
+func runCallToolRead(cmd *cobra.Command, _ []string) error {
+	return runCallToolVariant(cmd, "call_tool_read", "read")
 }
 
 // runCallToolWrite handles the tool-write command (Spec 018)
-func runCallToolWrite(_ *cobra.Command, _ []string) error {
-	return runCallToolVariant("call_tool_write", "write")
+func runCallToolWrite(cmd *cobra.Command, _ []string) error {
+	return runCallToolVariant(cmd, "call_tool_write", "write")
 }
 
 // runCallToolDestructive handles the tool-destructive command (Spec 018)
-func runCallToolDestructive(_ *cobra.Command, _ []string) error {
-	return runCallToolVariant("call_tool_destructive", "destructive")
+func runCallToolDestructive(cmd *cobra.Command, _ []string) error {
+	return runCallToolVariant(cmd, "call_tool_destructive", "destructive")
 }
 
 // runCallToolVariant is the common implementation for intent-based tool calls
-func runCallToolVariant(toolVariant, operationType string) error {
+func runCallToolVariant(cmd *cobra.Command, toolVariant, operationType string) (callErr error) {
+	// Cobra validates required flags before RunE. Runtime failures in JSON mode
+	// get one machine-readable document on stdout and retain a nonzero exit.
+	if callOutputFormat == outputFormatJSON {
+		cmd.SilenceUsage = true
+		defer func() {
+			var resultErr callResultError
+			if callErr != nil && !errors.As(callErr, &resultErr) {
+				writeCallJSONError(callErr)
+			}
+		}()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 	defer cancel()
 
@@ -391,6 +414,29 @@ func runCallToolVariant(toolVariant, operationType string) error {
 	return runCallToolVariantStandalone(ctx, toolVariant, variantArgs, globalConfig)
 }
 
+// callResultError retains the nonzero process status after a complete MCP
+// isError result has already been written to stdout.
+type callResultError struct{}
+
+func (callResultError) Error() string { return "tool returned an error result" }
+
+type callDaemonError struct{ cause error }
+
+func (e callDaemonError) Error() string {
+	return "failed to call tool via daemon: " + formatErrorWithRequestID(e.cause)
+}
+
+func (e callDaemonError) Unwrap() error { return e.cause }
+
+func writeCallJSONError(err error) {
+	structured := output.NewStructuredError(output.ErrCodeOperationFailed, err.Error())
+	var apiErr *cliclient.APIError
+	if errors.As(err, &apiErr) && apiErr.RequestID != "" {
+		structured = structured.WithRequestID(apiErr.RequestID)
+	}
+	_ = outputCallResultAsJSON(structured)
+}
+
 // runCallToolVariantClientMode calls tool variant via the daemon HTTP API
 func runCallToolVariantClientMode(client *cliclient.Client, toolVariant string, args map[string]interface{}, logger *zap.Logger) error {
 	// Ping daemon to verify connectivity
@@ -416,22 +462,25 @@ func runCallToolVariantClientMode(client *cliclient.Client, toolVariant string, 
 	// For tool variants, we call the variant tool directly
 	result, err := client.CallTool(callCtx, toolVariant, args)
 	if err != nil {
-		// T028: Use cliError to include request_id in error output
-		return cliError("failed to call tool via daemon", err)
+		// Keep the API error wrapped so JSON output can retain request_id.
+		return callDaemonError{cause: err}
 	}
 
 	// Output results based on format
 	switch callOutputFormat {
 	case outputFormatJSON:
-		return outputCallResultAsJSON(result)
+		if err := outputCallResultAsJSON(result); err != nil {
+			return err
+		}
+		if result.IsError {
+			return callResultError{}
+		}
+		return nil
 	case outputFormatPretty, "":
 		fallthrough
 	default:
-		fmt.Fprintf(os.Stderr, "✅ Tool call completed successfully!\n\n")
-		outputCallResultPretty(result)
+		return outputPrettyCallResult(result, result.IsError)
 	}
-
-	return nil
 }
 
 // runCallToolVariantStandalone calls tool variant directly without daemon
@@ -499,13 +548,16 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 	// Output results based on format
 	switch callOutputFormat {
 	case outputFormatJSON:
-		return outputCallResultAsJSON(result)
+		if err := outputCallResultAsJSON(result); err != nil {
+			return err
+		}
+		if result.IsError {
+			return callResultError{}
+		}
+		return nil
 	case outputFormatPretty, "":
 		fallthrough
 	default:
-		fmt.Fprintf(os.Stderr, "✅ Tool call completed successfully!\n\n")
-		outputCallResultPretty(result)
+		return outputPrettyCallResult(result, result.IsError)
 	}
-
-	return nil
 }

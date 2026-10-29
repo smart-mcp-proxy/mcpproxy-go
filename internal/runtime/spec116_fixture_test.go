@@ -27,6 +27,9 @@ func newSpec116Runtime(t *testing.T, mutate func(*config.Config), servers ...*co
 	cfg := config.DefaultConfig()
 	cfg.DataDir = dir
 	cfg.Listen = "127.0.0.1:0"
+	// Fixtures here predate the scan default (spec 119): pin manual, see
+	// setupQuarantineRuntime.
+	pinManualTrustForFixtures(servers)
 	cfg.Servers = servers
 	if mutate != nil {
 		mutate(cfg)

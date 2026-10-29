@@ -35,6 +35,7 @@ type fakeProfiles struct {
 	calls     []string
 	actor     internalRuntime.Actor
 	lastDraft config.ProfileConfig
+	suggest   *internalRuntime.AccessSuggestions
 }
 
 func (f *fakeProfiles) view(p *config.ProfileConfig) internalRuntime.ProfileView {
@@ -132,6 +133,17 @@ func (f *fakeProfiles) Explain(_ context.Context, subject profile.AccessSubject,
 		Subject: internalRuntime.ExplainSubjectView{Kind: subject.Kind}, Tool: tool,
 		Steps: []internalRuntime.ExplainStepView{}, Verdict: profile.ExplainVerdictAllowed, Fixes: []internalRuntime.Fix{},
 	}, nil
+}
+
+func (f *fakeProfiles) Suggest(_ context.Context, req internalRuntime.SuggestRequest) (*internalRuntime.AccessSuggestions, error) {
+	f.calls = append(f.calls, "suggest:"+req.Since.String()+":"+req.Profile+":"+req.Token+":"+boolStr(req.IncludePatch))
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.suggest != nil {
+		return f.suggest, nil
+	}
+	return &internalRuntime.AccessSuggestions{Suggestions: []internalRuntime.AccessSuggestion{}}, nil
 }
 
 func boolStr(b bool) string {

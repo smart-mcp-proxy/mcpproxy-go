@@ -333,16 +333,6 @@ func renderCredentialDetail(c cliclient.CredentialStatus) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
-func truncateCell(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	if maxLen <= 3 {
-		return s[:maxLen]
-	}
-	return s[:maxLen-3] + "..."
-}
-
 // printCredentialBanner emits the FR-034 honesty line. Human-readable output
 // begins with it on stdout (contracts/rest-endpoints.md §12); structured
 // json/yaml output must stay machine-parseable, so there it goes to stderr.

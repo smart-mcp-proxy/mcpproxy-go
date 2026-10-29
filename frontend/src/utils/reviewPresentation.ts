@@ -1,8 +1,7 @@
 import type { ReviewScan, ReviewTool, ServerReviewResponse } from '@/types'
 
-// Pure presentation rules for the review screen. The strings are the shared
-// vocabulary of Spec 109 (fix-review-screen): the macOS app (ReviewPresentation
-// in ReviewQueueView.swift) and `mcpproxy review show` use the same sentences.
+// Pure presentation rules for the web review screen. The native app maintains
+// its own presentation and should be updated separately for wording parity.
 
 export type ScanBannerSeverity = 'error' | 'warning' | 'success' | 'info'
 export type ScanBannerAction = 'rescan' | 'scan-now' | 'none'
@@ -70,20 +69,27 @@ export function reviewHeadline(review: ServerReviewResponse): ReviewHeadline {
   }
   const tools = review.tools
   const pending = tools.filter(needsReview).length
+  const approvedUnblocked = tools.filter(t => t.approval_status === 'approved' && !t.disabled).length
+  const blocked = tools.filter(t => t.disabled).length
+  const readiness = review.server.readiness === 'disabled' ? 'Server disabled.'
+    : review.server.readiness === 'connecting' ? 'Upstream connecting; retry after discovery.'
+      : review.server.readiness === 'connected' ? 'Upstream connected; tool discovery may still be in progress.'
+        : review.server.readiness === 'auth_required' ? 'Upstream authentication required.'
+          : review.server.readiness === 'error' ? 'Upstream connection error; check the server status.'
+            : review.server.readiness === 'disconnected' ? 'Upstream disconnected; check the server status.'
+              : 'Approval does not confirm upstream readiness.'
   if (pending > 0) {
     return {
       state: 'review',
       title: `Review ${name}`,
-      subtitle: `${pending} ${plural(pending, 'tool needs', 'tools need')} review. Agents cannot call ${plural(pending, 'it', 'them')} until approved.`,
+      subtitle: `${pending} ${plural(pending, 'tool needs', 'tools need')} review · ${approvedUnblocked} approved and unblocked · ${blocked} blocked. ${readiness}`,
     }
   }
   if (tools.length === 0) {
     // Approved without seeing tools: still an approved server, just with nothing captured yet.
-    return { state: 'approved', title: `${name} is approved`, subtitle: 'No tool definitions have been captured yet. New or changed tools come back here for review.' }
+    return { state: 'approved', title: `${name} is approved`, subtitle: `No tool definitions have been captured yet. ${readiness}` }
   }
-  const blocked = tools.filter(t => t.disabled).length
-  const summary = `All ${tools.length} ${plural(tools.length, 'tool', 'tools')} approved${blocked > 0 ? ` (${blocked} blocked)` : ''}.`
-  return { state: 'approved', title: `${name} is approved`, subtitle: `${summary} New or changed tools come back here for review.` }
+  return { state: 'approved', title: `${name} is approved`, subtitle: `${approvedUnblocked} approved and unblocked · ${blocked} blocked of ${tools.length}. ${readiness}` }
 }
 
 export type ToolControl = 'allow-toggle' | 'approve-reject' | 'approved' | 'blocked'
@@ -242,6 +248,30 @@ export function isStaleReviewError(message: string | undefined | null): boolean 
 // ---------------------------------------------------------------------------
 
 export const HELD_CHANGE_DOCS = 'https://docs.mcpproxy.app/features/security-quarantine'
+
+/**
+ * Structural-gate hold signals (spec 120): the `held_signals` entries that
+ * start with one of these ids come from the deterministic change gate, not
+ * from the scanner. Labels mirror internal/contracts/testdata/terminology.json
+ * (family hold_signal); the parity test pins them.
+ */
+export const HOLD_SIGNAL_LABELS: Record<string, string> = {
+  'GATE-HINT-SAFER-FLIP': 'Re-labelled as safer',
+  'GATE-HINT-CHANGE': 'Safety hint changed',
+  'GATE-SCHEMA-SHAPE': 'Input schema widened',
+  'GATE-OUTPUT-SCHEMA': 'Output schema changed',
+}
+
+/**
+ * Short label for a gate signal (`GATE-SCHEMA-SHAPE:new-required:bcc` →
+ * "Input schema widened: new-required bcc"), or null for any other signal.
+ */
+export function gateSignalLabel(signal: string): string | null {
+  const [id, ...rest] = signal.split(':')
+  const label = HOLD_SIGNAL_LABELS[id]
+  if (!label) return null
+  return rest.length ? `${label}: ${rest.join(' ')}` : label
+}
 export const HELD_CHANGE_HINT = 'Changed tools stay blocked until you approve the update. To let a server you trust update its tools without review, set auto_approve_tool_changes: true on it.'
 
 export type ChangeKind = 'added' | 'removed' | 'changed'

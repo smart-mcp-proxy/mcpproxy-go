@@ -9,6 +9,26 @@ components:
         surface:
           type: string
       type: object
+    config.AgentTokenRateLimit:
+      description: |-
+        AgentTokenRateLimit caps how many upstream tool calls ONE agent token may
+        make: PerMinute on average, Burst at once (issue #1699). Every token is
+        counted separately, and a token's own rate_limit (set when it is created)
+        replaces this default for that token. Only agent-token callers are
+        limited; the admin API key, the unix socket and an unauthenticated /mcp
+        caller are not. Absent or per_minute 0 = no limit (default, zero behavior
+        change). The counters are in memory: a restart gives every token a full
+        allowance again. Hot-reloadable. File/API-configured only, no env scheme.
+      properties:
+        burst:
+          description: |-
+            Burst is how many calls a token may make at once after a quiet spell.
+            0 = the PerMinute value.
+          type: integer
+        per_minute:
+          description: PerMinute is the sustained rate. 0 = no limit.
+          type: integer
+      type: object
     config.AuditLogConfig:
       description: |-
         AuditLog configures the Spec 107 edition-neutral audit sink
@@ -74,6 +94,8 @@ components:
             filtered to the caller's profile and agent-token scope. Default true;
             set false to keep server names out of client context. Read live.
           type: boolean
+        agent_token_rate_limit:
+          $ref: '#/components/schemas/config.AgentTokenRateLimit'
         aggregate_upstream_prompts:
           description: |-
             AggregateUpstreamPrompts, when true, aggregates every connected upstream
@@ -266,6 +288,16 @@ components:
             inline-response ceiling from 50k to up to 500k chars. Omit the key for
             the 500000 default; set it to 0 to disable the annotation.
           type: integer
+        mcp_reject_query_apikey:
+          description: |-
+            MCPRejectQueryAPIKey makes every MCP endpoint (/mcp*) refuse a request that
+            carries a ?apikey= query parameter, with a 401, instead of honouring it. A credential in a URL ends up in access logs,
+            proxy logs and browser history; MCP clients can send Authorization:
+            Bearer or X-API-Key instead. Default false (the query form keeps
+            working, for clients that can only configure a URL). It covers only the
+            MCP endpoints: the Web UI and its SSE stream (/events) still use the
+            query form. Live, no restart needed.
+          type: boolean
         mcpServers:
           items:
             $ref: '#/components/schemas/config.ServerConfig'
@@ -965,9 +997,11 @@ components:
             debounced informational server rescan that brings the review screen's scan
             coverage back to "current".
 
-            Evidence and freshness ONLY: a clean verdict never approves a changed
-            contract (RT-02); every change is still held for review in scan and manual
-            trust modes. Runs in every trust mode except "auto".
+            Evidence and freshness ONLY: this switch approves nothing. Under "manual"
+            every change is held for review whatever the verdict (RT-02); under
+            "scan" the gate's own synchronous scan approves a clean change that
+            passes the spec 120 structural gate (spec 119 FR-004), and this switch
+            does not affect that path. Runs in every trust mode except "auto".
 
             Default (nil) is ENABLED. It only takes effect while auto_baseline_scan is
             also enabled, so a user can keep the admission scan and turn off per-change
@@ -979,6 +1013,13 @@ components:
         integrity_check_interval:
           type: string
         integrity_check_on_restart:
+          type: boolean
+        require_signed_bundle:
+          description: |-
+            RequireSignedBundle makes the detached signature sidecar mandatory for
+            file-dropped bundles (FR-007). Default false (maintainer decision D2):
+            existing unsigned drops keep working, but an unsigned external bundle
+            always runs with DEGRADED coverage (scan-mode auto-approval suspended).
           type: boolean
         runtime_read_only:
           type: boolean
@@ -1039,6 +1080,14 @@ components:
           type: boolean
         scanner_registry_url:
           type: string
+        tpa_active_root:
+          description: |-
+            TPAActiveRoot declares which signing authority's bundles may activate
+            (FR-004b): "publisher" (default, the keys embedded in this binary) or
+            "operator" (TPAOperatorSigners). A bundle verified by the other root is
+            refused as authority_not_active, so whoever can write the bundle path
+            cannot choose the authority.
+          type: string
         tpa_bundle_path:
           description: |-
             TPABundlePath is the filesystem path to the tpa-db scanner-bundle.json
@@ -1054,6 +1103,54 @@ components:
             fail-empty); the reason is logged and surfaced in the security overview's
             signature_bundle.load_error.
           type: string
+        tpa_fetch_enabled:
+          description: |-
+            TPAFetchEnabled opts in to the network fetch leg. Default false; the
+            environment override is MCPPROXY_TPA_FETCH_ENABLED (EnvTPAFetchEnabled).
+          type: boolean
+        tpa_fetch_url:
+          description: |-
+            TPAFetchURL is the channel URL: a GitHub Releases "latest" API URL or a
+            direct bundle URL. Empty (the default) means the fetch leg is off; no URL
+            is compiled into the binary.
+          type: string
+        tpa_operator_baseline:
+          description: |-
+            TPAOperatorBaseline seeds the operator authority's anti-downgrade
+            watermark (FR-009b): an operator-signed bundle must carry a sequence
+            ABOVE it (a rollback target may sit at it). It survives a data-directory
+            wipe because it lives here. Absent means the operator authority has no
+            anti-downgrade floor and an active operator bundle runs DEGRADED.
+          type: integer
+        tpa_operator_epoch:
+          description: |-
+            TPAOperatorEpoch is the operator authority's trust epoch (FR-005a).
+            Bumping it (after an operator key compromise) re-baselines the operator
+            watermark and retires prior-epoch pins. Absent means 0.
+          type: integer
+        tpa_operator_signers:
+          description: |-
+            TPAOperatorSigners lists operator Ed25519 public keys, each the standard
+            base64 encoding of the 32 raw key bytes (FR-004). Their key ids are the
+            lowercase-hex SHA-256 of those bytes. Malformed or duplicate entries are
+            rejected on write and dropped (with a log) on load.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        tpa_refresh_interval:
+          description: |-
+            TPARefreshInterval is the cadence of the refresh cycle (the network-free
+            file leg, then the optional fetch leg). Absent or 0 means 24h; the runtime
+            clamps to at least 1h. There is no refresh-enable key: the file leg is
+            idempotent and always on.
+          type: string
+        tpa_stale_after_days:
+          description: |-
+            TPAStaleAfterDays is the age in days after which the active bundle reads
+            as stale. Absent means 30; an explicit 0 disables the stale flag and the
+            doctor stale warning.
+          type: integer
       type: object
     config.SensitiveDataDetectionConfig:
       description: Sensitive data detection settings (Spec 026)
@@ -1255,8 +1352,9 @@ components:
             TrustMode is the per-server trust tier: auto|scan|manual. Supersedes
             auto_approve_tool_changes (spec 086). An empty value is derived from the
             legacy fields at load via normalizeServerQuarantineFlags; the single
-            resolution point is EffectiveTrustMode(), which treats an empty or
-            unrecognized value as manual (secure by default). Read via
+            resolution point is EffectiveTrustMode(), which treats an empty value as
+            scan (DefaultTrustMode, spec 119) and an unrecognized value as manual
+            (fail closed). Read via
             EffectiveTrustMode(), never the raw string.
           type: string
         updated:
@@ -1270,15 +1368,32 @@ components:
     config.TLSConfig:
       description: TLS configuration
       properties:
+        cert_file:
+          description: |-
+            CertFile is the absolute path of an operator-provided server certificate
+            (PEM, leaf first), served instead of a generated one. Needs KeyFile.
+          type: string
         certs_dir:
           description: Directory for certificates
           type: string
         enabled:
           description: Enable HTTPS
           type: boolean
+        extra_sans:
+          description: |-
+            ExtraSANs are DNS names and IP addresses added to the generated server
+            certificate, which is signed by the same local CA. Not used with CertFile.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         hsts:
           description: Enable HTTP Strict Transport Security
           type: boolean
+        key_file:
+          description: KeyFile is the absolute path of the private key for CertFile
+            (PEM).
+          type: string
         require_client_cert:
           description: Enable mTLS
           type: boolean
@@ -1708,10 +1823,12 @@ components:
           type: string
         rejected_count:
           description: |-
-            RejectedCount is the number of calls shed by a concurrency limiter before
-            they reached an upstream (spec 093). Counted separately from errors: it is
-            proxy backpressure, not an upstream fault, and it is the signal an
-            operator right-sizes max_concurrent_requests against.
+            RejectedCount is the number of calls shed by a concurrency limiter, or
+            refused because an agent token was over its call budget, before they
+            reached an upstream (spec 093, issue #1699). Counted separately from
+            errors: it is proxy backpressure, not an upstream fault, and it is the
+            signal an operator right-sizes max_concurrent_requests and the rate
+            limits against.
           type: integer
         start_time:
           description: Start of the period (RFC3339)
@@ -3165,6 +3282,8 @@ components:
           type: integer
       type: object
     contracts.SuccessResponse:
+      allOf:
+      - $ref: '#/components/schemas/data'
       properties:
         data:
           type: object
@@ -3677,6 +3796,44 @@ components:
         verdict:
           $ref: '#/components/schemas/profile.ExplainVerdict'
       type: object
+    httpapi.AccessSuggestionsData:
+      properties:
+        already_fixed:
+          description: AlreadyFixed counts groups the explainer now allows (they drop
+            out).
+          type: integer
+        blocked_calls:
+          description: BlockedCalls counts every profile-refused call in the window.
+          type: integer
+        non_profile_blocked:
+          description: NonProfileBlocked counts blocked calls with a cause outside
+            profiles.
+          type: integer
+        patches:
+          items:
+            $ref: '#/components/schemas/runtime.ProfilePatch'
+          type: array
+          uniqueItems: false
+        profile_removed:
+          description: ProfileRemoved counts groups whose profile no longer exists
+            (they drop out).
+          type: integer
+        since:
+          type: string
+        suggestions:
+          items:
+            $ref: '#/components/schemas/runtime.AccessSuggestion'
+          type: array
+          uniqueItems: false
+        unattributed:
+          description: Unattributed counts profile refusals whose record names no
+            profile.
+          type: integer
+        until:
+          type: string
+        window:
+          type: string
+      type: object
     httpapi.AddServerRequest:
       properties:
         args:
@@ -3823,6 +3980,19 @@ components:
           type: string
         error:
           type: string
+      type: object
+    httpapi.BundleRollbackRefusedResponse:
+      properties:
+        error:
+          type: string
+        error_code:
+          type: string
+        rejection:
+          $ref: '#/components/schemas/scanner.BundleRejection'
+        request_id:
+          type: string
+        success:
+          type: boolean
       type: object
     httpapi.CanonicalConfigPath:
       properties:
@@ -4706,6 +4876,19 @@ components:
           type: array
           uniqueItems: false
       type: object
+    httpapi.bundleRollbackRequest:
+      properties:
+        digest:
+          description: Digest is the full 64-character lowercase hex SHA-256 of the
+            target.
+          type: string
+        embedded:
+          description: Embedded rolls back to the corpus compiled into this binary.
+          type: boolean
+        path:
+          description: Path is where to find the target bundle (a hint only).
+          type: string
+      type: object
     httpapi.clientPresence:
       properties:
         active_sessions:
@@ -4915,6 +5098,15 @@ components:
       - AccessSubjectProfile
       - AccessSubjectToken
       - AccessSubjectAnonymous
+    profile.BlockReason:
+      type: string
+      x-enum-varnames:
+      - BlockReasonTier
+      - BlockReasonRule
+      - BlockReasonUnannotated
+      - BlockReasonCodeExecution
+      - BlockReasonManagement
+      - BlockReasonServerScope
     profile.CredentialState:
       description: |-
         Spec 108-f ClientView additions (data-model §7). The Spec 109 fields above
@@ -4976,6 +5168,59 @@ components:
       x-enum-varnames:
       - WarningSeverityWarn
       - WarningSeverityInfo
+    runtime.AccessSuggestion:
+      properties:
+        block_reason:
+          $ref: '#/components/schemas/profile.BlockReason'
+        clients:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        count:
+          type: integer
+        first_seen:
+          type: string
+        fixes:
+          description: |-
+            Fixes are the access explainer's remediations of the first failing step,
+            in preference order. Empty for a deny rule and for the built-in tools.
+          items:
+            $ref: '#/components/schemas/runtime.Fix'
+          type: array
+          uniqueItems: false
+        last_seen:
+          type: string
+        needs_input:
+          description: |-
+            NeedsInput names what a person must supply before a change is
+            apply-ready (classify: "tier").
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        note:
+          type: string
+        profile:
+          type: string
+        server:
+          type: string
+        suggestion:
+          $ref: '#/components/schemas/runtime.SuggestionKind'
+        tokens:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        tool:
+          description: '"server:tool", or the built-in name'
+          type: string
+        warning:
+          description: |-
+            Warning is set for profile_code_execution and profile_management: both
+            change what a profile can do beyond tool access.
+          type: string
+      type: object
     runtime.BindingRef:
       properties:
         client_id:
@@ -5085,6 +5330,18 @@ components:
           type: array
           uniqueItems: false
       type: object
+    runtime.ProfilePatch:
+      properties:
+        changes:
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+        profile:
+          type: string
+        proposed:
+          $ref: '#/components/schemas/config.ProfileConfig'
+      type: object
     runtime.ProfileView:
       properties:
         blocked_24h:
@@ -5138,6 +5395,13 @@ components:
         used_by:
           $ref: '#/components/schemas/runtime.UsedBy'
       type: object
+    runtime.SuggestionKind:
+      type: string
+      x-enum-varnames:
+      - SuggestAllow
+      - SuggestAddServer
+      - SuggestClassify
+      - SuggestNone
     runtime.ToolAccessView:
       properties:
         callable:
@@ -5194,6 +5458,198 @@ components:
         kind:
           type: string
         target:
+          type: string
+      type: object
+    scanner.BundleInfo:
+      properties:
+        authority:
+          description: |-
+            Authority is the signing root serving this bundle: "publisher" (the
+            embedded default, or verified against a publisher key), "operator", or ""
+            for an unsigned external bundle.
+          type: string
+        bundle_version:
+          description: BundleVersion / SchemaVersion are the corpus's own declared
+            versions.
+          type: string
+        coverage_degraded:
+          description: |-
+            CoverageDegraded suspends scan-mode auto-approval; DegradedReason says
+            why (one of the Degraded* constants).
+          type: boolean
+        declared_skipped:
+          type: integer
+        degraded_reason:
+          type: string
+        fingerprint:
+          description: |-
+            Fingerprint is the first 12 hex chars of the SHA-256 of the corpus bytes:
+            a stable identity an operator (or automation) can compare across hosts
+            without shipping the whole file around.
+          type: string
+        full_digest:
+          description: |-
+            FullDigest is the complete lowercase-hex SHA-256 of the bundle bytes —
+            the ONLY value rollback accepts (FR-010). Fingerprint stays the 12-hex
+            human label beside it.
+          type: string
+        generated_at:
+          description: |-
+            GeneratedAt is the corpus freshness stamp. It is the bundle's own
+            `generated_at` key when present; for a file-sourced bundle without one it
+            falls back to the file's modification time, so a years-stale corpus is
+            distinguishable from a fresh export.
+          type: string
+        last_activated_at:
+          description: |-
+            LastActivatedAt is when the serving external bundle was activated; nil
+            for the embedded default.
+          type: string
+        last_checked_at:
+          description: |-
+            LastCheckedAt is the end of the most recent pipeline run, including
+            no-op runs the idempotence short-circuit skipped.
+          type: string
+        last_rejection:
+          $ref: '#/components/schemas/scanner.BundleRejection'
+        load_error:
+          description: |-
+            LoadError is the reason the LAST configured-path load failed, if any. The
+            previously active (or embedded) corpus stays live — a bundle problem must
+            never leave the scanner with no signatures — but the failure is surfaced
+            here rather than swallowed.
+          type: string
+        loaded_at:
+          description: LoadedAt is when this corpus became active in this process.
+          type: string
+        path:
+          description: Path is the configured filesystem path, when Source is "file".
+          type: string
+        pinned:
+          description: Pinned is true while an operator rollback pin governs activation.
+          type: boolean
+        refresh:
+          $ref: '#/components/schemas/scanner.BundleRefreshStatus'
+        reprotect:
+          $ref: '#/components/schemas/scanner.BundleReprotectStatus'
+        rollback:
+          description: |-
+            Rollback is true when the active bundle was activated by an explicit
+            rollback.
+          type: boolean
+        runnable_rules:
+          description: |-
+            RunnableRules is how many rules are LIVE in the offline tier; SkippedRules
+            and DeclaredSkipped are the not-runnable / bundle-declared-skipped
+            remainder (FR-006/FR-007) — un-evaluated coverage, never clean coverage.
+          type: integer
+        schema_version:
+          type: string
+        sequence:
+          description: |-
+            Sequence is the manifest sequence as published (decimal string), "" when
+            the bundle carries none.
+          type: string
+        signature_count:
+          description: SignatureCount is the bundle's self-declared signature count.
+          type: integer
+        signature_verified:
+          description: |-
+            SignatureVerified reports whether the active bundle's detached signature
+            verified. Always false for the embedded default (it is binary-trusted).
+          type: boolean
+        skipped_rules:
+          type: integer
+        source:
+          description: Source is BundleSourceEmbedded, BundleSourceFile or BundleSourceFetch.
+          type: string
+        stale:
+          description: |-
+            Stale and StaleAfterDays are computed at read time next to
+            StalenessDays; a future generated_at is never stale. StaleAfterDays nil
+            means the flag is not evaluated.
+          type: boolean
+        stale_after_days:
+          type: integer
+        staleness_days:
+          description: StalenessDays is the whole days since GeneratedAt (nil when
+            unknown).
+          type: integer
+        trust_epoch:
+          description: TrustEpoch is the epoch the bundle was published under.
+          type: integer
+      type: object
+    scanner.BundleRefreshStatus:
+      description: |-
+        Refresh is the refresh-cycle status (nil before any cycle or setting is
+        known). Reprotect is the post-activation re-protection sweep status,
+        set from the server through SetReprotectStatus.
+      properties:
+        consecutive_failures:
+          type: integer
+        fetch_enabled:
+          type: boolean
+        fetch_host:
+          description: FetchHost is the host of the configured fetch URL ("" when
+            none).
+          type: string
+        fetch_reason:
+          type: string
+        fetch_state:
+          description: |-
+            FetchState and FetchReason are the fetch leg's own last answer (one of the
+            RefreshOutcome* values and its reason), kept apart from LastOutcome: a file
+            activation owns the merged cycle outcome but must not hide a fetch leg that
+            cannot run (B16 warning 3).
+          type: string
+        interval_seconds:
+          type: integer
+        last_attempt_at:
+          type: string
+        last_outcome:
+          type: string
+        last_reason:
+          type: string
+        last_trigger:
+          description: LastTrigger, LastOutcome and LastReason use the closed vocabularies
+            above.
+          type: string
+        next_check_at:
+          type: string
+      type: object
+    scanner.BundleRejection:
+      description: |-
+        LastRejection is the most recent refused candidate. It is retained
+        across a later successful load so "what did it refuse, and when"
+        survives.
+      properties:
+        at:
+          type: string
+        detail:
+          description: |-
+            Detail is a short human string (which ceiling, which key id, which
+            epoch, the bundlesig contract code). Never parsed.
+          type: string
+        reason:
+          description: Reason is one of the Reject* constants; the only field to branch
+            on.
+          type: string
+      type: object
+    scanner.BundleReprotectStatus:
+      properties:
+        last_completed_at:
+          type: string
+        reason:
+          description: |-
+            Reason qualifies suspended and failed (for example
+            ReprotectReasonAutoBaselineScanOff).
+          type: string
+        servers_scanned:
+          type: integer
+        servers_with_hits:
+          type: integer
+        state:
+          description: State is one of the ReprotectState* constants.
           type: string
       type: object
     secureenv.EnvConfig:
@@ -5444,6 +5900,79 @@ paths:
       - ApiKeyAuth: []
       - ApiKeyQuery: []
       summary: Explain why a tool is or is not reachable
+      tags:
+      - access
+  /api/v1/access/suggest:
+    get:
+      description: Reads the profile refusals in the activity log over a look-back
+        window and groups them by profile, tool and block reason. Each group is re-checked
+        with the access explainer, so tools that are already reachable drop out, and
+        carries the explainer's fixes. A deny-rule block is reported and never offered
+        for widening; an unannotated tool is never given a tier. Nothing is applied.
+        patch=true also returns the proposed profile document per profile (the body
+        PUT /api/v1/profiles/{name} takes).
+      parameters:
+      - description: 'Look-back window: a duration such as 90m, 24h or 7d (default
+          24h; the audit-log retention is the only limit)'
+        in: query
+        name: since
+        schema:
+          type: string
+      - description: Only refusals under this profile
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Only refusals of this token
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Also return the proposed profile document per profile
+        in: query
+        name: patch
+        schema:
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  error:
+                    type: string
+                  request_id:
+                    type: string
+                  success:
+                    type: boolean
+                type: object
+          description: The suggestions
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Invalid since
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Administrator credentials required
+        "503":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Service unavailable
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Suggest profile changes from blocked calls
       tags:
       - access
   /api/v1/activity:
@@ -8815,6 +9344,251 @@ paths:
       summary: Delete a secret from OS keyring
       tags:
       - secrets
+  /api/v1/security/bundle:
+    get:
+      description: 'Reports the offline TPA signature corpus this install is serving:
+        full SHA-256 digest, sequence, authority, trust epoch, signature verification,
+        staleness (with the stale flag and its threshold), degraded coverage with
+        its reason, rollback pin, and the last refused candidate. Also carries the
+        refresh status (last checked and activated times, last cycle outcome, next
+        check, consecutive failures; the fetch host only, never the URL) and the post-activation
+        re-protection sweep status. Admin only.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  success:
+                    type: boolean
+                type: object
+          description: Bundle status
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the TPA signature bundle status
+      tags:
+      - security
+  /api/v1/security/bundle/history:
+    get:
+      description: Append-only list of bundle activations, oldest first, each with
+        its full SHA-256 digest. It is the trustworthy source of the digest to name
+        in a rollback. Admin only.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Activation history (data is an array of TPABundleActivation)
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: History could not be read
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get the TPA signature bundle activation history
+      tags:
+      - security
+  /api/v1/security/bundle/refresh:
+    post:
+      description: 'Runs one refresh cycle immediately: the local file leg (always
+        network-free) followed by the optional fetch leg when security.tpa_fetch_enabled
+        is on and a trusted signer and URL are configured. A cycle already in flight
+        is joined, so one download and at most one activation happen per distinct
+        candidate. The response is the resulting bundle status; the cycle outcome
+        is in its refresh block (activated, unchanged, not_modified, rejected, fetch_unavailable,
+        channel_invalid, superseded, disabled). Network failures are reported as fetch_unavailable
+        and never as a rejection; last-known-good keeps serving. Unlike reload, refresh
+        may make an outbound request. Admin API key only.'
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  success:
+                    type: boolean
+                type: object
+          description: Updated bundle status; the refresh block holds the cycle outcome
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Refresh the TPA signature bundle now
+      tags:
+      - security
+  /api/v1/security/bundle/reload:
+    post:
+      description: Re-runs the single-flight bundle pipeline against the configured
+        source and current policy. A refused candidate leaves last-known-good serving
+        and is reported as last_rejection in the returned status. Admin API key only.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Updated bundle status
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Reload the TPA signature bundle
+      tags:
+      - security
+  /api/v1/security/bundle/rollback:
+    post:
+      description: The one operator override of the downgrade watermark. Exactly one
+        of embedded or path must be given, and digest must be the FULL 64-character
+        lowercase hex SHA-256 of the target (the 12-character fingerprint is refused).
+        On success the target serves and is pinned. A refusal (for example rollback_target_mismatch)
+        returns 409 with the rejection reason and last-known-good keeps serving. Admin
+        API key only; agent tokens are refused.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/httpapi.bundleRollbackRequest'
+        description: Rollback target
+        required: true
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Updated bundle status
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: 'Usage error: both or neither of embedded/path, or digest is
+            not 64 lowercase hex'
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "409":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/httpapi.BundleRollbackRefusedResponse'
+          description: Rollback refused; the response carries the rejection reason
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Internal error
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Roll the TPA signature bundle back to a named artifact
+      tags:
+      - security
+  /api/v1/security/bundle/unpin:
+    post:
+      description: Clears the rollback pin and re-validates the serving bundle under
+        the normal downgrade watermark, so a rolled-back target below the watermark
+        no longer serves. A quiet no-op when nothing is pinned. Admin API key only.
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.SuccessResponse'
+          description: Updated bundle status
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Admin credentials required
+        "500":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: The unpin could not be recorded
+        "501":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Security scanner not configured
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Clear the TPA signature bundle rollback pin
+      tags:
+      - security
   /api/v1/servers:
     get:
       description: Get a list of all configured upstream MCP servers with their connection
@@ -10675,8 +11449,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Shed by a concurrency limit (Retry-After header carries the
-            wait hint)
+          description: Shed by a concurrency limit or an agent token call rate limit
+            (Retry-After header carries the wait hint)
         "500":
           content:
             application/json:
@@ -10782,8 +11556,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Shed by a concurrency limit (Retry-After header carries the
-            wait hint)
+          description: Shed by a concurrency limit or an agent token call rate limit
+            (Retry-After header carries the wait hint)
         "500":
           content:
             application/json:

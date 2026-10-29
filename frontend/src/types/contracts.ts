@@ -294,7 +294,7 @@ export interface Server {
   token_expires_at?: string; // ISO date string when OAuth token expires
   user_logged_out?: boolean; // True if user explicitly logged out (prevents auto-reconnection)
   health?: HealthStatus; // Unified health status calculated by the backend
-  trust_mode?: string; // Per-server approval trust mode (spec 086): 'auto' | 'scan' | 'manual'; raw configured value, absent when unset (effective default: manual)
+  trust_mode?: string; // Per-server approval trust mode (spec 086): 'auto' | 'scan' | 'manual'; raw configured value, absent when unset (effective default: scan, spec 119)
   expose_prompts?: boolean; // F9 per-server prompt-aggregation override; absent = inherit default aggregation, false = exclude this server's prompts
   forward_headers?: string[]; // Spec 112 allowlist of inbound MCP client header names forwarded to this server on tools/call (names only, never values)
   security_scan?: SecurityScanSummary; // Latest scan summary (spec 086); ABSENT when no scan has ever run
@@ -429,6 +429,17 @@ export type ClientPresenceState =
   | typeof ClientPresenceInstalled
   | typeof ClientPresenceNotInstalled
   | typeof ClientPresenceOther;
+
+// Structural-gate hold signal ids (held_signals prefixes, spec 120) - generated from internal/contracts/terminology.go
+export const HoldSignalGateHintSaferFlip = 'GATE-HINT-SAFER-FLIP' as const;
+export const HoldSignalGateHintChange = 'GATE-HINT-CHANGE' as const;
+export const HoldSignalGateSchemaShape = 'GATE-SCHEMA-SHAPE' as const;
+export const HoldSignalGateOutputSchema = 'GATE-OUTPUT-SCHEMA' as const;
+export type HoldSignal =
+  | typeof HoldSignalGateHintSaferFlip
+  | typeof HoldSignalGateHintChange
+  | typeof HoldSignalGateSchemaShape
+  | typeof HoldSignalGateOutputSchema;
 
 export interface Tool {
   name: string;

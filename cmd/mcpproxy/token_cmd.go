@@ -26,6 +26,11 @@ var (
 	tokenExpires     string
 	tokenProfilePin  string
 	tokenProfile     string
+	// tokenRateLimit / tokenRateBurst are the token's own call budget (issue
+	// #1699). Only sent when the flag was given, so an omitted --rate-limit
+	// leaves the token on the agent_token_rate_limit default.
+	tokenRateLimit int
+	tokenRateBurst int
 
 	// token list filters (Spec 108-g, FR-031)
 	tokenListProfile string
@@ -82,7 +87,14 @@ without --profile at least one of them is required.
 Examples:
   mcpproxy token create --name ci --profile work-readonly
   mcpproxy token create --name deploy-bot --servers github,gitlab --permissions read,write
-  mcpproxy token create --name ci-agent --servers "*" --permissions read --expires 7d`,
+  mcpproxy token create --name ci-agent --servers "*" --permissions read --expires 7d
+  mcpproxy token create --name loop-guard --profile work-readonly --rate-limit 60 --rate-burst 10
+
+--rate-limit caps how many upstream tool calls the token may make: that many a
+minute on average, --rate-burst at once (default: the same number). A call over
+the budget is refused with a rate_limited error and a retry hint, and is
+recorded as a rejected call. 0 exempts the token from the agent_token_rate_limit
+default in the config; leave the flag out to follow that default.`,
 		RunE: runTokenCreate,
 	}
 
@@ -91,6 +103,8 @@ Examples:
 	cmd.Flags().StringVar(&tokenServers, "servers", "", "Legacy scope: comma-separated allowed server names, or \"*\" for all (use --profile instead)")
 	cmd.Flags().StringVar(&tokenPermissions, "permissions", "", "Legacy scope: comma-separated permission tiers read, write, destructive (use --profile instead)")
 	cmd.Flags().StringVar(&tokenExpires, "expires", "30d", "Token expiry duration (e.g., 7d, 30d, 90d, 365d)")
+	cmd.Flags().IntVar(&tokenRateLimit, "rate-limit", 0, "Limit this token to N upstream tool calls per minute (0 = no limit, overriding the config default)")
+	cmd.Flags().IntVar(&tokenRateBurst, "rate-burst", 0, "Calls this token may make at once after a quiet spell (default: the --rate-limit value)")
 	cmd.Flags().StringVar(&tokenProfilePin, "profile-pin", "", "Deprecated alias of --profile")
 	_ = cmd.Flags().MarkHidden("profile-pin")
 	_ = cmd.MarkFlagRequired("name")
@@ -170,7 +184,7 @@ func newTokenCLIClient() (*cliclient.Client, *config.Config, error) {
 	return client, cfg, nil
 }
 
-func runTokenCreate(_ *cobra.Command, _ []string) error {
+func runTokenCreate(cmd *cobra.Command, _ []string) error {
 	// Validate locally before any request (exit 1, nothing sent).
 	profileName := tokenProfile
 	if tokenProfilePin != "" {
@@ -186,6 +200,15 @@ func runTokenCreate(_ *cobra.Command, _ []string) error {
 	}
 	if profileName == "" && legacyScope {
 		fmt.Fprintln(os.Stderr, "hint: consider --profile <name> instead of --servers/--permissions (legacy scope)")
+	}
+
+	var limitSet, burstSet bool
+	if cmd != nil {
+		limitSet, burstSet = cmd.Flags().Changed("rate-limit"), cmd.Flags().Changed("rate-burst")
+	}
+	rateLimit, err := tokenRateLimitFromFlags(limitSet, burstSet)
+	if err != nil {
+		return err
 	}
 
 	client, _, err := newTokenCLIClient()
@@ -207,6 +230,9 @@ func runTokenCreate(_ *cobra.Command, _ []string) error {
 	}
 	if tokenPermissions != "" {
 		body["permissions"] = splitAndTrim(tokenPermissions)
+	}
+	if rateLimit != nil {
+		body["rate_limit"] = rateLimit
 	}
 
 	bodyJSON, err := json.Marshal(body)
@@ -257,8 +283,53 @@ func runTokenCreate(_ *cobra.Command, _ []string) error {
 		fmt.Printf("  Profile:     %s\n", pin)
 	}
 	printField("  Expires:     ", result, "expires_at")
+	if line := formatTokenRateLimit(result["rate_limit"]); line != "" {
+		fmt.Printf("  Rate limit:  %s\n", line)
+	}
 
 	return nil
+}
+
+// tokenRateLimitFromFlags builds the rate_limit request member from the
+// --rate-limit / --rate-burst flags, or nil when neither was given. It checks
+// the numbers locally so a typo exits 1 before anything is sent.
+func tokenRateLimitFromFlags(limitSet, burstSet bool) (map[string]int, error) {
+	if !limitSet && !burstSet {
+		return nil, nil
+	}
+	if tokenRateLimit < 0 {
+		return nil, newFlagValidationError("--rate-limit cannot be negative: use 0 for no limit")
+	}
+	if tokenRateBurst < 0 {
+		return nil, newFlagValidationError("--rate-burst cannot be negative")
+	}
+	if burstSet && tokenRateLimit == 0 {
+		return nil, newFlagValidationError("--rate-burst needs --rate-limit above 0")
+	}
+	out := map[string]int{"per_minute": tokenRateLimit}
+	if tokenRateBurst > 0 {
+		out["burst"] = tokenRateBurst
+	}
+	return out, nil
+}
+
+// formatTokenRateLimit renders a token's rate_limit response member, or "" when
+// the token has none of its own.
+func formatTokenRateLimit(v interface{}) string {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	perMinute, _ := m["per_minute"].(float64)
+	burst, _ := m["burst"].(float64)
+	switch {
+	case perMinute <= 0:
+		return "none (exempt from the config default)"
+	case burst > 0 && burst != perMinute:
+		return fmt.Sprintf("%d calls/minute, bursts of up to %d", int(perMinute), int(burst))
+	default:
+		return fmt.Sprintf("%d calls/minute", int(perMinute))
+	}
 }
 
 // printTokenStructured prints a token response as json or yaml.
@@ -427,6 +498,9 @@ func runTokenShow(_ *cobra.Command, args []string) error {
 	}
 	if revoked, ok := result["revoked"].(bool); ok {
 		fmt.Printf("Revoked:        %v\n", revoked)
+	}
+	if line := formatTokenRateLimit(result["rate_limit"]); line != "" {
+		fmt.Printf("Rate limit:     %s\n", line)
 	}
 	printField("Created:        ", result, "created_at")
 	printField("Expires:        ", result, "expires_at")
@@ -668,8 +742,8 @@ func joinInterfaceSlice(m map[string]interface{}, key string, maxLen int) string
 		strs[i] = fmt.Sprintf("%v", s)
 	}
 	result := strings.Join(strs, ",")
-	if maxLen > 0 && len(result) > maxLen {
-		result = result[:maxLen-3] + "..."
+	if maxLen > 0 {
+		result = truncateCell(result, maxLen)
 	}
 	return result
 }

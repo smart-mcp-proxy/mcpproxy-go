@@ -942,6 +942,100 @@ func (m *Manager) LoadBaselineSweepState() (*BaselineSweepState, error) {
 	return state, nil
 }
 
+// TPA bundle re-protection sweep marker
+
+// SaveBundleReprotectState persists the marker written when a re-protection
+// sweep completes with zero failures (Spec 101 FR-019, B17). The record is
+// installation-wide, so no server purge touches it.
+func (m *Manager) SaveBundleReprotectState(state BundleReprotectState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
+		if err != nil {
+			return fmt.Errorf("failed to create meta bucket: %w", err)
+		}
+		data, err := json.Marshal(state)
+		if err != nil {
+			return fmt.Errorf("failed to marshal bundle reprotect state: %w", err)
+		}
+		return bucket.Put([]byte(BundleReprotectDoneKey), data)
+	})
+}
+
+// SaveScanDefaultNoticeState persists the one-time scan-default startup
+// notice marker (spec 120 FR-011). Installation-wide; no server purge touches it.
+func (m *Manager) SaveScanDefaultNoticeState(state ScanDefaultNoticeState) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		bucket, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
+		if err != nil {
+			return fmt.Errorf("failed to create meta bucket: %w", err)
+		}
+		data, err := json.Marshal(state)
+		if err != nil {
+			return fmt.Errorf("failed to marshal scan default notice state: %w", err)
+		}
+		return bucket.Put([]byte(ScanDefaultNoticeDoneKey), data)
+	})
+}
+
+// LoadScanDefaultNoticeState returns the scan-default notice marker, or
+// (nil, nil) when the notice has never run here. A value that cannot be
+// decoded is an error, never a silent nil.
+func (m *Manager) LoadScanDefaultNoticeState() (*ScanDefaultNoticeState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var state *ScanDefaultNoticeState
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(MetaBucket))
+		if bucket == nil {
+			return nil
+		}
+		data := bucket.Get([]byte(ScanDefaultNoticeDoneKey))
+		if data == nil {
+			return nil
+		}
+		parsed := &ScanDefaultNoticeState{}
+		if err := json.Unmarshal(data, parsed); err != nil {
+			return fmt.Errorf("failed to decode scan default notice state: %w", err)
+		}
+		state = parsed
+		return nil
+	})
+	return state, err
+}
+
+// LoadBundleReprotectState returns the re-protection marker, or the zero value
+// when no sweep has ever completed. A read never creates the bucket. A value
+// that cannot be decoded is an error, never a silent zero: the caller decides
+// whether to re-run the sweep.
+func (m *Manager) LoadBundleReprotectState() (BundleReprotectState, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var state BundleReprotectState
+	err := m.db.db.View(func(tx *bbolt.Tx) error {
+		bucket := tx.Bucket([]byte(MetaBucket))
+		if bucket == nil {
+			return nil
+		}
+		data := bucket.Get([]byte(BundleReprotectDoneKey))
+		if data == nil {
+			return nil
+		}
+		return json.Unmarshal(data, &state)
+	})
+	if err != nil {
+		return BundleReprotectState{}, fmt.Errorf("failed to load bundle reprotect state: %w", err)
+	}
+	return state, nil
+}
+
 // Maintenance operations
 
 // Backup creates a backup of the database
@@ -1484,6 +1578,7 @@ type SessionRecord struct {
 // TokenName are the credential at initialize.
 type SessionFilter struct {
 	Limit     int
+	Offset    int // matching sessions to skip, applied after sort and filter
 	Status    string
 	Profile   string
 	ClientID  string
@@ -1699,6 +1794,7 @@ func (m *Manager) GetRecentSessions(limit int, status string) ([]*SessionRecord,
 // never truncated out by a page of newer non-matching ones.
 func (m *Manager) GetRecentSessionsFiltered(f SessionFilter) ([]*SessionRecord, int, error) {
 	limit := f.Limit
+	offset := max(f.Offset, 0)
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
@@ -1744,17 +1840,18 @@ func (m *Manager) GetRecentSessionsFiltered(f SessionFilter) ([]*SessionRecord, 
 				continue
 			}
 			total++
-			if len(sessions) < limit {
+			if total > offset && len(sessions) < limit {
 				sessions = append(sessions, session)
 			}
 		}
 		return sessions, total, nil
 	}
 
-	if limit < len(all) {
-		return all[:limit], len(all), nil
+	page := all[min(offset, len(all)):]
+	if limit < len(page) {
+		page = page[:limit]
 	}
-	return all, len(all), nil
+	return page, len(all), nil
 }
 
 // GetSessionByID retrieves a session by its ID

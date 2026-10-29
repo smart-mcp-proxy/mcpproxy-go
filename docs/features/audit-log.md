@@ -44,6 +44,8 @@ unchanged.
 A limiter shed is **not** a second authorization decision: admission runs after
 every gate, so the `authz allow` line already exists; the shed is recorded on the
 `tool_call` line (`outcome: rejected`, `reason: limiter_queue_full|limiter_queue_timeout`).
+An agent token over its call budget ([rate limits](agent-tokens.md#call-rate-limit))
+is the same: `outcome: rejected`, `reason: rate_limited`.
 A post-dispatch output-sanitisation or output-schema block is likewise a
 `tool_call` line (`outcome: blocked`), never a second `authz` line — the call was
 authorized.
@@ -163,17 +165,26 @@ entry for this page — see `verification.md`.)
 
 #### `authz` reason vocabulary
 
-`intent_invalid` · `intent_rejected` · `profile_scope` · `token_scope` ·
-`token_permission` · `server_quarantined` · `tool_pending_approval` ·
+`intent_invalid` · `intent_rejected` · `profile_scope` · `profile_tier` ·
+`profile_rule` · `profile_unannotated` · `token_scope` · `token_permission` · `server_quarantined` · `tool_pending_approval` ·
 `tool_changed_approval` · `tool_not_callable` · `other`
+
+`profile_scope` is a profile refusing a server outside its scope (non-disclosing,
+`disclosed: false`). `profile_tier`, `profile_rule` and `profile_unannotated` are
+a profile's tool policy refusing a tool inside its scope: the tier cap, a deny
+rule, or an unannotated tool under a fail-closed policy. They are disclosed
+refusals (`disclosed: true`) and match the `block_reason` of the same call in the
+activity log. The same reasons are written for a refusal inside a
+`code_execution` script. `profile_code_execution` and `profile_management` are
+not audit reasons: those built-in tools are not audited per call.
 
 ### `tool_call` — one per `authz allow`, at completion
 
 | Key | Required | Notes |
 |---|---|---|
 | `surface`, `server`, `tool`, `operation`, `args_sha256`, `args_bytes` | ✔ | Same values as the paired `authz` line |
-| `outcome` | ✔ | `success`\|`error`\|`blocked` (post-dispatch output sanitisation/schema)\|`rejected` (limiter shed) |
-| `reason` | required iff `blocked`/`rejected`; forbidden on `success`/`error` | `output_sanitisation`\|`output_schema`\|`limiter_queue_full`\|`limiter_queue_timeout` |
+| `outcome` | ✔ | `success`\|`error`\|`blocked` (post-dispatch output sanitisation/schema)\|`rejected` (limiter shed or token rate limit) |
+| `reason` | required iff `blocked`/`rejected`; forbidden on `success`/`error` | `output_sanitisation`\|`output_schema`\|`limiter_queue_full`\|`limiter_queue_timeout`\|`rate_limited` |
 | `error_class` | required iff `error`; forbidden otherwise | `upstream_error`\|`upstream_timeout`\|`upstream_unavailable`\|`validation`\|`sanitisation`\|`internal`\|`cancelled` — a bounded class, never message text |
 | `duration_ms` | ✔ | |
 | `request_bytes`, `response_bytes` | optional | As measured by the completion path (pre-truncation) |

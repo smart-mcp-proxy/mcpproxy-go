@@ -7,7 +7,7 @@
       "idempotentHint": false,
       "openWorldHint": true
     },
-    "description": "Execute a DESTRUCTIVE tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: delete, remove, drop, revoke, disable, destroy, purge, reset, clear, unsubscribe, cancel, terminate, close, archive, ban, block, disconnect, kill, wipe, truncate, force, hard. Examples: delete_repo, remove_user, drop_table, revoke_access, clear_cache, terminate_session. Use for irreversible or high-impact operations. Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
+    "description": "Execute a DESTRUCTIVE tool. Use this variant only when retrieve_tools returns call_with=call_tool_destructive. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. This variant does not bypass authorization, quarantine, approval, or other dispatch gates. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
     "inputSchema": {
       "properties": {
         "args": {
@@ -47,7 +47,7 @@
       "idempotentHint": false,
       "openWorldHint": true
     },
-    "description": "Execute a READ-ONLY tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: search, query, list, get, fetch, find, check, view, read, show, describe, lookup, retrieve, browse, explore, discover, scan, inspect, analyze, examine, validate, verify. Examples: search_files, get_user, list_repositories, query_database, find_issues, check_status. This is the DEFAULT choice when unsure - most tools are read-only. Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
+    "description": "Execute a READ-ONLY tool. Use this variant only when retrieve_tools returns call_with=call_tool_read. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
     "inputSchema": {
       "properties": {
         "args": {
@@ -87,7 +87,7 @@
       "idempotentHint": false,
       "openWorldHint": true
     },
-    "description": "Execute a STATE-MODIFYING tool. WORKFLOW: 1) Call retrieve_tools first to find tools, 2) Use the exact 'name' field from results, 3) Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). DECISION RULE: Use this when the tool name contains: create, update, modify, add, set, send, edit, change, write, post, put, patch, insert, upload, submit, assign, configure, enable, register, subscribe, publish, move, copy, rename, merge. Examples: create_issue, update_file, send_message, add_comment, set_status, edit_page. Use only when explicitly modifying state. Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
+    "description": "Execute a STATE-MODIFYING tool. Use this variant only when retrieve_tools returns call_with=call_tool_write. The upstream annotations and call_with are authoritative over a tool's name, description, command text, or the requested outcome. Build args from the 'sig' signature ('*'=required; if lossy '~', call describe_tool first). Result blocks may be prefixed by the marker line: [mcpproxy:toon/v1] TOON-encoded JSON (toon-format.org); decode to JSON before reuse - tool arguments must still be sent as JSON.",
     "inputSchema": {
       "properties": {
         "args": {
@@ -317,7 +317,7 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "Administrator tool to manage profiles and client bindings; every operation takes the REST argument names and returns the REST data (/api/v1/profiles, /clients, /access/explain). Operations: list, get, create, update (full replace), delete, rename, classify, assign (one client to a profile, or bulk from_profile to to_profile), list_clients, effective_tools, explain. Writes are refused under read_only_mode or disable_management and by the binding guard (binding_bypassable_without_auth); errors carry the REST error body.",
+    "description": "Administrator tool to manage profiles and client bindings; every operation takes the REST argument names and returns the REST data (/api/v1/profiles, /clients, /access/explain, /access/suggest). Operations: list, get, create, update (full replace), delete, rename, classify, assign (one client to a profile, or bulk from_profile to to_profile), list_clients, effective_tools, explain, suggest (read-only: profile changes proposed from blocked calls). Writes are refused under read_only_mode or disable_management and by the binding guard (binding_bypassable_without_auth); errors carry the REST error body.",
     "inputSchema": {
       "properties": {
         "anonymous": {
@@ -386,12 +386,17 @@
             "assign",
             "list_clients",
             "effective_tools",
-            "explain"
+            "explain",
+            "suggest"
           ],
           "type": "string"
         },
+        "patch": {
+          "description": "suggest: also return the proposed profile document per profile.",
+          "type": "boolean"
+        },
         "profile": {
-          "description": "assign: profile to bind (\"\" = All servers). explain, list_clients: profile name (list_clients \"-\" = All servers).",
+          "description": "assign: profile to bind (\"\" = All servers). explain, suggest, list_clients: profile name (list_clients \"-\" = All servers).",
           "type": "string"
         },
         "reason": {
@@ -412,6 +417,10 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "since": {
+          "description": "suggest: look-back window such as 90m, 24h or 7d (default 24h).",
+          "type": "string"
         },
         "switchable_to": {
           "description": "create, update: profile names a session may set_profile into; [] = none, omitted = unset.",
@@ -439,7 +448,7 @@
           "type": "string"
         },
         "token": {
-          "description": "explain: regular agent token name.",
+          "description": "explain: regular agent token name. suggest: only this token's blocks.",
           "type": "string"
         },
         "tool": {
@@ -583,7 +592,7 @@
       "idempotentHint": false,
       "openWorldHint": false
     },
-    "description": "🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Results include 'annotations' (tool behavior hints like destructiveHint) and 'call_with' recommendation indicating which tool variant to use (call_tool_read/write/destructive). Then use the recommended variant with an 'intent' parameter. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers. Upstream servers' tools are reachable ONLY through this tool — search here before using a shell CLI (gh, aws, kubectl, curl) or a raw HTTP API for an external service. ANNOTATION FILTERS: read_only_only, exclude_destructive and exclude_open_world self-restrict discovery. When they withhold tools that matched your query, the response carries a 'filter_diagnostics' block with per-filter counts (split into missing upstream annotations vs. explicitly unsafe ones) and one suggestion; it is absent when nothing was withheld. Filter diagnostics describe this call's candidate window, not the whole catalog.",
+    "description": "🔍 CALL THIS FIRST to discover relevant tools! This is the primary tool discovery mechanism that searches across ALL upstream MCP servers using intelligent BM25 full-text search. Always use this before attempting to call any specific tools. Use natural language to describe what you want to accomplish (e.g., 'create GitHub repository', 'query database', 'weather forecast'). Follow each result's call_with route exactly; upstream annotations determine that route and take precedence over tool names, descriptions, command text, and requested outcome. Compact results preserve the same call_with route as full results, including the existing read fallback when upstream tier annotations are unavailable. Never infer a route from a tool's name or intent. Compact mode returns one-line signatures ('sig': '*'=required, '~'=lossy) with first-sentence 'desc'; call describe_tool for full schemas. NOTE: Quarantined servers are excluded from search results for security. Use 'quarantine_security' tool to examine and manage quarantined servers. TO ADD NEW SERVERS: Use 'list_registries' then 'search_servers' to find and add new MCP servers. Upstream servers' tools are reachable ONLY through this tool — search here before using a shell CLI (gh, aws, kubectl, curl) or a raw HTTP API for an external service. ANNOTATION FILTERS: read_only_only, exclude_destructive and exclude_open_world self-restrict discovery. When they withhold tools that matched your query, the response carries a 'filter_diagnostics' block with per-filter counts (split into missing upstream annotations vs. explicitly unsafe ones) and one suggestion; it is absent when nothing was withheld. Filter diagnostics describe this call's candidate window, not the whole catalog.",
     "inputSchema": {
       "properties": {
         "debug": {
@@ -792,7 +801,7 @@
           "type": "string"
         },
         "trust_mode": {
-          "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch.",
+          "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = new tools and changed tools auto-approve only when the fast offline TPA scan is clean, else hold for review; 'manual' = human reviews every change. Empty → scan (the default). Used with add/update/patch.",
           "enum": [
             "auto",
             "scan",

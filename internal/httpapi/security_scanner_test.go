@@ -51,6 +51,9 @@ type mockSecurityController struct {
 	reviewedExpected map[string]string
 	reviewedInc      int64
 
+	// Spec 101 TPA bundle surface (methods in security_bundle_test.go).
+	bundle bundleMock
+
 	// What the last ConfigureScanner call carried.
 	configuredEnv   map[string]string
 	configuredImage string

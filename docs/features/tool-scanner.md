@@ -304,10 +304,73 @@ path have been removed. The engine's two-tier semantics therefore describe the
 entire in-process detection behavior, with `phrase.injection` (hard) carrying the
 approval-blocking posture the removed rules used to provide.
 
+## Signature corpus and coverage
+
+Alongside the seven checks, the `scan` trust mode matches tool text against an
+offline corpus of known-attack signatures (the tpa-db `scanner-bundle.json`).
+The build embeds one; `security.tpa_bundle_path` points the scanner at another
+from disk. A corpus can be signed with an operator Ed25519 key, and a signed
+corpus is protected against downgrade by a sequence watermark.
+
+If a candidate corpus is refused, the previous one keeps serving; the scanner is
+never left with an empty or partial rule set. The state of the corpus is
+reported by `mcpproxy security bundle`, including **degraded coverage**:
+an unsigned external corpus, an operator corpus with no baseline, a lost operator
+corpus, or an embedded corpus older than one seen before. **While coverage is
+degraded, `scan`-mode auto-approval is suspended** and changes are held for
+human review (held reason `scan_coverage`). The detect engine itself is
+unaffected and keeps scanning.
+
+A configured corpus is also re-read about once a day (`tpa_refresh_interval`),
+and an opt-in, default-off fetch can download a signed one from a URL you choose.
+Both feed the same checks as a file drop.
+
+### Activation self-check {#activation-self-check}
+
+A bundle can be well formed, correctly signed and newer, and still be a bad
+corpus: a signature that matches every tool description would flag benign tools,
+and a corpus that lost its attack signatures would stop detecting known attacks.
+Before a new corpus replaces the serving one, MCPProxy scores it on a labeled
+corpus compiled into the binary, with the same decision rule as
+[the eval gate](#the-eval-gate-ci-enforced-reliability):
+
+- malicious **recall** over the gated categories must be at least **0.90**, and
+- the **false-positive rate** over the hard-negative set must be at most **0.05**.
+
+The scoring runs the four hard-tier built-in checks plus the candidate corpus.
+A candidate that fails is refused as `gate_failure`, the previous corpus keeps
+serving, and `last_rejection` says how many hard negatives it flagged or how
+many attacks it missed, naming corpus ids only (never the candidate's patterns).
+
+- It applies to every source: a dropped file, a fetched bundle, and a rollback.
+  An operator-signed bundle is **not** exempt, because a valid signature proves
+  who published a corpus, not that it detects well.
+- It does not run when MCPProxy restores a last-known-good bundle at startup (it
+  already passed), and the corpus embedded in the binary is not checked.
+- It fails closed. A scoring corpus that cannot be read, has no gated malicious
+  entry or no hard negative (so the rates would mean nothing), or a check that
+  crashed while scoring, refuses the candidate rather than passing it.
+- It runs once per distinct candidate. A pair that was refused is remembered and
+  is not re-scored on the next cycle.
+- Until the scoring corpus carries signature-category (`tpa_*`) attack samples
+  (Spec 101 US2), the recall leg measures only the built-in checks, which gives
+  every candidate the same recall. The false-positive leg is the one that tells
+  candidates apart, so a corpus that is too broad is caught and one that is too
+  narrow is not yet.
+
+The scoring code is a copy of the gate's rule inside the server, because the CI
+tool is a separate program that cannot be imported. Parity tests compare the two
+and the embedded scoring corpus against the dataset in the repository, so they
+cannot drift apart unnoticed.
+
+See [Signed TPA Bundles](/features/tpa-bundle-signing) for signing, rollback,
+the refresh cycle and the full list of reasons.
+
 ## Related reading
 
 - [Security Scanner Plugins](/features/security-scanner-plugins) — the plugin framework hosting the `tpa-descriptions` scanner
 - [Security Quarantine](/features/security-quarantine) — the quarantine mechanism hard-tier findings drive
 - [Tool Quarantine (Spec 032)](/features/tool-quarantine) — per-tool hash-based approval
+- [Signed TPA Bundles](/features/tpa-bundle-signing) — signing, dropping, rolling back and monitoring the signature corpus
 - [Sensitive-Data Detection](/features/sensitive-data-detection) — the shared secret matchers the embedded-secret check reuses
 - Spec: `specs/076-deterministic-tool-scanner/spec.md` · engine contract: `internal/security/detect/doc.go`

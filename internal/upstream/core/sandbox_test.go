@@ -48,3 +48,17 @@ func TestBuildSandboxSpec_NoWorkingDir(t *testing.T) {
 		t.Errorf("ReadWritePaths %v contains an empty path", spec.ReadWritePaths)
 	}
 }
+
+// GH #1704: the default ruleset grants "/" read-only, so without an explicit
+// grant a confined shell cannot open /dev/null for writing — `2>/dev/null`
+// fails with EACCES, which breaks launch scripts and the runtimes' own
+// stdio-to-devnull plumbing. The grant must be the device itself, not /dev.
+func TestBuildSandboxSpec_DevNullWritable(t *testing.T) {
+	spec := buildSandboxSpec(&config.ServerConfig{Name: "srv"})
+	if !contains(spec.ReadWritePaths, "/dev/null") {
+		t.Errorf("ReadWritePaths %v missing /dev/null", spec.ReadWritePaths)
+	}
+	if contains(spec.ReadWritePaths, "/dev") {
+		t.Errorf("ReadWritePaths %v grants all of /dev; only /dev/null is needed", spec.ReadWritePaths)
+	}
+}

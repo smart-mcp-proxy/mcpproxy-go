@@ -11,6 +11,8 @@ import (
 
 	"github.com/santhosh-tekuri/jsonschema/v6"
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 )
 
 // compileCount counts how many times a schema is actually compiled (vs served
@@ -206,6 +208,9 @@ func compile(schemaJSON string) *cacheEntry {
 	// validation error messages (which are surfaced in audit records).
 	const schemaURI = "mem://outputschema/schema"
 	c := jsonschema.NewCompiler()
+	// The schema is upstream-controlled: an empty loader stops a $ref from
+	// reading local files (the default loader serves file:// URLs).
+	c.UseLoader(jsonschema.SchemeURLLoader{})
 	if err := c.AddResource(schemaURI, doc); err != nil {
 		return &cacheEntry{sentinel: true}
 	}
@@ -225,10 +230,15 @@ func hashSchema(schemaJSON string) uint64 {
 	return h.Sum64()
 }
 
-// truncate shortens s to at most maxLen characters, appending "..." if truncated.
+// truncate shortens s to at most maxLen bytes, appending "..." if truncated.
+//
+// The cut goes through stringutil.UTF8Prefix: a jsonschema message quotes the
+// offending instance location, so a non-ASCII property name or value puts
+// multi-byte runes astride the cut, and a raw byte slice leaves the Reason
+// invalid UTF-8 (U+FFFD once JSON-encoded for the agent and the audit line).
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
 	}
-	return s[:maxLen-3] + "..."
+	return stringutil.UTF8Prefix(s, maxLen-3) + "..."
 }

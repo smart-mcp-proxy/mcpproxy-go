@@ -281,7 +281,7 @@ sudo tee /etc/mcpproxy/mcp_config.json >/dev/null <<EOF
   "listen": "0.0.0.0:8080",
   "api_key": "${API_KEY}",
   "data_dir": "/var/lib/mcpproxy",
-  "enable_socket": true,
+  "enable_socket": false,
   "enable_web_ui": true,
   "require_mcp_auth": false,
   "mcpServers": []
@@ -300,6 +300,7 @@ curl -H "X-API-Key: ${API_KEY}" http://<server-ip>:8080/api/v1/status
 - **Always set a non-empty `api_key`.** The REST API enforces it, but a network-reachable instance with an obvious or empty key is one `curl` away from full tool execution.
 - **Put a firewall in front.** If only one workstation needs access, prefer binding to a single LAN IP (e.g. `"listen": "192.168.1.10:8080"`) or restrict port 8080 in `ufw`/`firewalld` to known source addresses.
 - **Consider `require_mcp_auth: true`** if you also want the `/mcp` endpoint to require the API key. It's `false` by default for AI-client compatibility.
+- **Headless? Set `enable_socket: false` and use `docker` isolation for stdio servers.** The Unix socket in the data directory trusts every same-user connection without a key, and a stdio server under isolation `none` or `sandbox` runs as the service user: it can read `mcp_config.json` and `config.db` and mint agent tokens over the socket. The tray is the only socket client, so a headless service loses nothing by turning it off; `docker` isolation keeps the data directory out of the server's view. `mcpproxy doctor` warns about the combination. See [What the sandbox does not hide](/features/sandbox-isolation#what-the-sandbox-does-not-hide).
 - **Don't expose to the public internet without TLS in front.** Run nginx/Caddy/Traefik as a reverse proxy with HTTPS, or tunnel via Tailscale/WireGuard/SSH. The built-in HTTP server is not designed to be a public ingress.
 
 :::
@@ -383,11 +384,15 @@ docker run -d --name mcpproxy \
 - **State survives restarts, not replacement**: `docker restart` keeps everything. Removing and
   re-running the container, upgrading the tag, or rescheduling the pod destroys whatever is not
   on the volume — so mount one before you configure anything.
-- **Don't use `MCPPROXY_DATA` or a bare `--data-dir` to relocate state.** The data-dir override is
-  applied after the config file is resolved, so the config in that directory is never read and is
-  overwritten with a fresh default (rotating the API key) on every boot. Mount the volume at the
-  default `/root/.mcpproxy` path instead. (`MCPPROXY_DATA_DIR`, referenced elsewhere in the docs,
-  is not implemented at all.)
+- **Relocating state**: `--data-dir` and `MCPPROXY_DATA_DIR` move the data directory and also
+  decide where `serve` looks for `mcp_config.json` — `<data-dir>/mcp_config.json` is read when it
+  exists, and seeded there on a first run with no config anywhere — so the config and its API key
+  live on the same volume as the database. If the data dir has no config but a legacy one exists in
+  the working directory or `$HOME/.mcpproxy`, `serve` keeps using that legacy file and moves only the
+  data. An explicit `--config` still wins. The legacy `MCPPROXY_DATA` only relocates the data
+  directory: with it the config is still looked up in the working directory and `$HOME/.mcpproxy`
+  (`/root/.mcpproxy` in this image). Releases before this change ignored `<data-dir>/mcp_config.json`
+  under `serve`, so on those, mount the volume at the default `/root/.mcpproxy` path instead.
 - **Port**: the entrypoint is `mcpproxy serve --listen 0.0.0.0:8080`, so the container listens on
   `8080` inside the network namespace. The `-p 127.0.0.1:8080:8080` above keeps it reachable only
   from the host; drop the `127.0.0.1:` prefix only if you deliberately want it on the network, and
@@ -397,6 +402,9 @@ docker run -d --name mcpproxy \
 - **API key**: the REST API and Web UI require one. Set `MCPPROXY_API_KEY` explicitly and keep a
   copy — the image is distroless (no shell), so reading an auto-generated key back out of the
   container is awkward.
+  To keep the key out of `docker inspect` and the process environment, mount it as a secret and set
+  `MCPPROXY_API_KEY_FILE=/run/secrets/<name>` instead of `MCPPROXY_API_KEY` (setting both is an error; see
+  [API key from a file](/configuration/environment-variables#api-key-from-a-file)).
 - **Web UI**: `http://localhost:8080/ui/`.
 
 ### Behind an ingress with SSO

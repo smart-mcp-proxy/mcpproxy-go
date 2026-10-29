@@ -41,6 +41,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/supervisor"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server/tokens"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
@@ -53,6 +54,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
+	upstreamtypes "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // Status captures high-level state for API consumers.
@@ -191,6 +193,16 @@ type Runtime struct {
 	refreshManager   *oauth.RefreshManager // Proactive OAuth token refresh
 	updateChecker    *updatecheck.Checker  // Background version checking
 	telemetryService *telemetry.Service    // Anonymous usage telemetry (Spec 036)
+
+	// bundleRefresher is the TPA bundle refresh scheduler (Spec 087 / Spec 101
+	// US3 B19), registered by the server and started in
+	// StartBackgroundInitialization. Close stops and joins it before
+	// storageManager.StopAsync. Guarded by r.mu.
+	bundleRefresher bundleRefresherLifecycle
+	// closeOrderHook, when non-nil, is called with a step name at the ordered
+	// points of Close ("bundle_refresher_stopped", "storage_stop_async") so a
+	// test can assert the shutdown order. Test seam only.
+	closeOrderHook func(step string)
 
 	// Spec 080 (US3): pre-churn snapshot. prechurnStore owns the BBolt
 	// shutdown marker + last_error_code record; previousShutdown is the
@@ -493,6 +505,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// Phase 7.3: Initialize Supervisor with ActorPoolSimple (delegates to UpstreamManager)
 	actorPool := supervisor.NewActorPoolSimple(upstreamManager, logger)
 	supervisorInstance := supervisor.New(configSvc, actorPool, logger)
+	// GH #1722: a quarantined server's inspection exemption must not expire
+	// underneath an OAuth login the operator is completing for it.
+	supervisorInstance.SetInspectionExemptionHold(oauth.IsManualFlowActive)
 
 	// Initialize OAuth refresh manager for proactive token refresh
 	// Uses storageManager as the token store and global coordinator for flow coordination
@@ -1149,6 +1164,16 @@ func (r *Runtime) Close() error {
 		r.telemetryService.Stop()
 	}
 
+	// Spec 087 / Spec 101 US3 (B19): the TPA bundle refresher writes BBolt
+	// state (the activation transaction) and LKG files from its own goroutine,
+	// so it is stopped AND joined here, before the storage manager starts to
+	// stop. appCancel above already ended its context; Stop cancels an
+	// in-flight HTTP fetch and returns once the loop goroutine exited. The
+	// scanner slot is cleared only while it still points at this runtime's
+	// instance, so RefreshBundle falls back to ReloadBundle afterwards without
+	// evicting a replacement installed by someone else.
+	r.stopBundleRefresher()
+
 	// The index closes AFTER the telemetry flush above, not before it. That
 	// flush builds one last heartbeat, and tool_count is read from this index
 	// (GetToolCount). Closing first made GetDocumentCount fail, which sent the
@@ -1179,6 +1204,7 @@ func (r *Runtime) Close() error {
 	if r.storageManager != nil {
 		// (1) Stop + drain queued async DB operations — the last DB writes
 		// other than the marker resolve itself.
+		r.notifyCloseStep("storage_stop_async")
 		r.storageManager.StopAsync()
 
 		// (2) Resolve the marker to clean, now that no other DB work remains.
@@ -1765,8 +1791,7 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	// upstream errors keep the existing "replay ran, the tool failed" contract.
 	if callErr != nil {
 		var limitErr *limiter.LimitError
-		if errors.As(callErr, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(callErr, &limitErr) && limitErr.Shed() {
 			return nil, callErr
 		}
 	}
@@ -2773,7 +2798,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					zap.Bool("token_nil", token == nil),
 					zap.Error(err))
 
-				if err == nil && token != nil {
+				// DCR persists client credentials before the code exchange. Like
+				// PersistentTokenStore.GetToken, require an actual access token.
+				if err == nil && token != nil && token.AccessToken != "" {
 					authenticated = true
 					tokenExpiresAt = token.ExpiresAt
 					hasRefreshToken = token.RefreshToken != ""
@@ -2807,7 +2834,12 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 						oauthStatus = string(oauth.OAuthStatusAuthenticated)
 					}
 				} else {
-					// No token found - check if OAuth config exists to determine status
+					// A DCR-only record still identifies an autodiscovered OAuth
+					// server, but is not evidence of a completed login.
+					if err == nil && token != nil && oauthConfig == nil {
+						oauthConfig = map[string]interface{}{"autodiscovery": true}
+					}
+					// No access token - check if OAuth config exists to determine status
 					if oauthConfig != nil {
 						oauthStatus = string(oauth.OAuthStatusNone)
 					}
@@ -3393,6 +3425,25 @@ func (r *Runtime) TriggerOAuthLogin(serverName string) error {
 	return nil
 }
 
+// ServerAwaitsOAuthLogin reports whether the named server cannot connect until
+// a person completes its OAuth login: a manual login flow is in flight for it,
+// or its live instance is parked in Pending Auth (GH #1722). Background
+// restarts (the security scan's reconnect) stand down for such a server,
+// because replacing its instance retires the pending flow.
+func (r *Runtime) ServerAwaitsOAuthLogin(serverName string) bool {
+	if serverName == "" {
+		return false
+	}
+	if oauth.IsManualFlowActive(serverName) {
+		return true
+	}
+	if r.upstreamManager == nil {
+		return false
+	}
+	client, exists := r.upstreamManager.GetClient(serverName)
+	return exists && client != nil && !client.Retired() && client.GetState() == upstreamtypes.StatePendingAuth
+}
+
 // TriggerOAuthLoginQuick implements RuntimeOperations interface for management service.
 // Returns OAuthStartResult with actual browser status, auth URL, and any errors.
 // This is the synchronous version that provides immediate feedback about browser opening.
@@ -3567,6 +3618,54 @@ func (r *Runtime) RefreshOAuthToken(serverName string) error {
 	}
 
 	return nil
+}
+
+// bundleRefresherLifecycle is the part of *scanner.BundleRefresher the runtime
+// drives: Start runs the cycle loop under ctx, Stop cancels it and returns only
+// after the loop exited, and a Start after Stop is a no-op. An interface so the
+// lifecycle is testable without a network scheduler.
+type bundleRefresherLifecycle interface {
+	Start(ctx context.Context)
+	Stop()
+}
+
+// stopBundleRefresher stops and joins the registered TPA bundle refresher and
+// detaches it from the scanner's package-level slot. Safe to call twice and with
+// no refresher registered.
+func (r *Runtime) stopBundleRefresher() {
+	r.mu.RLock()
+	refresher := r.bundleRefresher
+	r.mu.RUnlock()
+	if refresher == nil {
+		return
+	}
+	refresher.Stop()
+	if own, ok := refresher.(*scanner.BundleRefresher); ok && scanner.CurrentBundleRefresher() == own {
+		scanner.SetBundleRefresher(nil)
+	}
+	r.notifyCloseStep("bundle_refresher_stopped")
+}
+
+// notifyCloseStep reports an ordered point of Close to the test seam.
+func (r *Runtime) notifyCloseStep(step string) {
+	if r.closeOrderHook != nil {
+		r.closeOrderHook(step)
+	}
+}
+
+// SetBundleRefresher registers the TPA bundle refresher so the runtime owns its
+// lifecycle: StartBackgroundInitialization starts it with the app context and
+// Close stops and joins it (Spec 087 / Spec 101 US3 B19). Call it once during
+// server construction, before StartBackgroundInitialization; nil clears it.
+func (r *Runtime) SetBundleRefresher(refresher *scanner.BundleRefresher) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if refresher == nil {
+		// A typed nil pointer must not become a non-nil interface.
+		r.bundleRefresher = nil
+		return
+	}
+	r.bundleRefresher = refresher
 }
 
 // SetVersion initializes the update checker with the given version.
@@ -4272,14 +4371,16 @@ func (r *Runtime) UsageSnapshot() *UsageAggregate {
 	return r.activityService.UsageSnapshot()
 }
 
-// StreamActivities returns a channel that yields activity records matching the filter.
-func (r *Runtime) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+// StreamActivities returns a channel that yields activity records matching the
+// filter. A consumer that stops reading early must cancel ctx so the producer
+// releases its read transaction (see storage.Manager.StreamActivities).
+func (r *Runtime) StreamActivities(ctx context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	if r.storageManager == nil {
 		ch := make(chan *storage.ActivityRecord)
 		close(ch)
 		return ch
 	}
-	return r.storageManager.StreamActivities(filter)
+	return r.storageManager.StreamActivities(ctx, filter)
 }
 
 // ListToolApprovals returns all tool approval records for a server (Spec 032).

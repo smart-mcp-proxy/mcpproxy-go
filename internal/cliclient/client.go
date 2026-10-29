@@ -359,9 +359,10 @@ func (c *Client) GetCodeScripts(ctx context.Context) (dir string, entries []code
 
 // CallToolResult represents tool call result.
 type CallToolResult struct {
-	Content  []interface{}          `json:"content"`
-	IsError  bool                   `json:"isError"`
-	Metadata map[string]interface{} `json:"_meta,omitempty"`
+	Content           []interface{}          `json:"content"`
+	IsError           bool                   `json:"isError"`
+	StructuredContent interface{}            `json:"structuredContent,omitempty"`
+	Metadata          map[string]interface{} `json:"_meta,omitempty"`
 }
 
 // CallTool calls a tool on an upstream server via daemon API.
@@ -388,6 +389,7 @@ func (c *Client) CallTool(
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-MCPProxy-Result-Envelope", "1")
 
 	// Send request
 	resp, err := c.httpClient.Do(req)
@@ -429,16 +431,25 @@ func (c *Client) CallTool(
 	// Convert data to CallToolResult format
 	result := &CallToolResult{}
 
-	// Try to extract as map with content field
-	if dataMap, ok := apiResp.Data.(map[string]interface{}); ok {
+	// Older daemons return the MCP content array directly.
+	if content, ok := apiResp.Data.([]interface{}); ok {
+		result.Content = content
+	} else if dataMap, ok := apiResp.Data.(map[string]interface{}); ok {
 		if content, hasContent := dataMap["content"].([]interface{}); hasContent {
 			result.Content = content
+		} else if _, hasStructured := dataMap["structuredContent"]; hasStructured {
+			// Structured-only MCP results can omit content.
+			result.Content = []interface{}{}
 		} else {
-			// Wrap data in content array if not already in that format
+			// Legacy non-MCP object payloads remain available as JSON text.
+			dataJSON, err := json.Marshal(apiResp.Data)
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal tool result: %w", err)
+			}
 			result.Content = []interface{}{
 				map[string]interface{}{
 					"type": "text",
-					"text": fmt.Sprintf("%v", apiResp.Data),
+					"text": string(dataJSON),
 				},
 			}
 		}
@@ -446,16 +457,27 @@ func (c *Client) CallTool(
 		if isError, ok := dataMap["isError"].(bool); ok {
 			result.IsError = isError
 		}
+		if structured, ok := dataMap["structuredContent"]; ok {
+			result.StructuredContent = structured
+		}
 
 		if meta, ok := dataMap["_meta"].(map[string]interface{}); ok {
 			result.Metadata = meta
 		}
 	} else {
-		// Fallback: wrap data in content array
+		// Fallback for legacy scalar payloads.
+		dataJSON, err := json.Marshal(apiResp.Data)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal tool result: %w", err)
+		}
+		text := string(dataJSON)
+		if raw, ok := apiResp.Data.(string); ok {
+			text = raw
+		}
 		result.Content = []interface{}{
 			map[string]interface{}{
 				"type": "text",
-				"text": fmt.Sprintf("%v", apiResp.Data),
+				"text": text,
 			},
 		}
 	}
@@ -585,21 +607,17 @@ func (c *Client) GetServerLogs(ctx context.Context, serverName string, tail int)
 
 // ServerAction performs an action on a server (enable, disable, restart).
 func (c *Client) ServerAction(ctx context.Context, serverName, action string) error {
-	var url string
+	var reqURL string
 	method := http.MethodPost
 
 	switch action {
-	case "enable":
-		url = fmt.Sprintf("%s/api/v1/servers/%s/enable", c.baseURL, serverName)
-	case "disable":
-		url = fmt.Sprintf("%s/api/v1/servers/%s/disable", c.baseURL, serverName)
-	case "restart":
-		url = fmt.Sprintf("%s/api/v1/servers/%s/restart", c.baseURL, serverName)
+	case "enable", "disable", "restart":
+		reqURL = fmt.Sprintf("%s/api/v1/servers/%s/%s", c.baseURL, url.PathEscape(serverName), action)
 	default:
 		return fmt.Errorf("unknown action: %s", action)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, method, url, nil)
+	req, err := http.NewRequestWithContext(ctx, method, reqURL, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
 	}
@@ -1187,7 +1205,7 @@ func (c *Client) GetGlobalToolsView(ctx context.Context, query url.Values) ([]ma
 
 // GetServerTools retrieves tools for a specific server from daemon.
 func (c *Client) GetServerTools(ctx context.Context, serverName string) ([]map[string]interface{}, error) {
-	url := fmt.Sprintf("%s/api/v1/servers/%s/tools", c.baseURL, serverName)
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools", c.baseURL, url.PathEscape(serverName))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -1234,7 +1252,7 @@ func (c *Client) GetServerTools(ctx context.Context, serverName string) ([]map[s
 // quarantined or toggled before — see Runtime.SetToolEnabled.
 func (c *Client) SetToolEnabled(ctx context.Context, serverName, toolName string, enabled bool) error {
 	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/%s/enabled",
-		c.baseURL, serverName, toolName)
+		c.baseURL, url.PathEscape(serverName), url.PathEscape(toolName))
 	body, err := json.Marshal(map[string]bool{"enabled": enabled})
 	if err != nil {
 		return fmt.Errorf("failed to marshal request: %w", err)
@@ -1282,7 +1300,7 @@ func (c *Client) SetAllToolsEnabled(ctx context.Context, serverName string, enab
 	if enabled {
 		path = "enable_all"
 	}
-	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/%s", c.baseURL, serverName, path)
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/%s", c.baseURL, url.PathEscape(serverName), path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return 0, fmt.Errorf("failed to create request: %w", err)
@@ -1345,7 +1363,7 @@ func (c *Client) TriggerOAuthLogin(ctx context.Context, serverName string) error
 // the browser could not be opened (headless hosts, SSH sessions).
 // Returns *contracts.OAuthFlowError for structured OAuth errors (Spec 020).
 func (c *Client) TriggerOAuthLoginWithResult(ctx context.Context, serverName string) (*OAuthLoginResult, error) {
-	url := fmt.Sprintf("%s/api/v1/servers/%s/login", c.baseURL, serverName)
+	url := fmt.Sprintf("%s/api/v1/servers/%s/login", c.baseURL, url.PathEscape(serverName))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -1432,7 +1450,7 @@ func (c *Client) TriggerOAuthLoginWithResult(ctx context.Context, serverName str
 
 // TriggerOAuthLogout clears OAuth token and disconnects a server.
 func (c *Client) TriggerOAuthLogout(ctx context.Context, serverName string) error {
-	url := fmt.Sprintf("%s/api/v1/servers/%s/logout", c.baseURL, serverName)
+	url := fmt.Sprintf("%s/api/v1/servers/%s/logout", c.baseURL, url.PathEscape(serverName))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -1575,7 +1593,7 @@ func (c *Client) AddServer(ctx context.Context, req *AddServerRequest) (*AddServ
 //	{"headers": {"X-Set": "v", "X-Old": null}}       -- combined
 //	{"env": {"API_KEY": null}, "enabled": true}      -- env delete + enable
 func (c *Client) PatchServer(ctx context.Context, serverName string, body []byte) error {
-	url := fmt.Sprintf("%s/api/v1/servers/%s", c.baseURL, serverName)
+	url := fmt.Sprintf("%s/api/v1/servers/%s", c.baseURL, url.PathEscape(serverName))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, url, bytes.NewReader(body))
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -1617,7 +1635,7 @@ func (c *Client) PatchServer(ctx context.Context, serverName string, body []byte
 
 // RemoveServer removes an upstream server via the daemon API.
 func (c *Client) RemoveServer(ctx context.Context, serverName string) error {
-	url := fmt.Sprintf("%s/api/v1/servers/%s", c.baseURL, serverName)
+	url := fmt.Sprintf("%s/api/v1/servers/%s", c.baseURL, url.PathEscape(serverName))
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, url, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create request: %w", err)
@@ -1843,7 +1861,7 @@ type ToolApprovalRecord struct {
 
 // GetToolApprovals fetches tool approval records for a server (Spec 032).
 func (c *Client) GetToolApprovals(ctx context.Context, serverName string) ([]ToolApprovalRecord, error) {
-	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/export", c.baseURL, serverName)
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/export", c.baseURL, url.PathEscape(serverName))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -1887,7 +1905,7 @@ func (c *Client) GetToolApprovals(ctx context.Context, serverName string) ([]Too
 
 // GetToolDiff fetches the diff for a changed tool (Spec 032).
 func (c *Client) GetToolDiff(ctx context.Context, serverName, toolName string) (*ToolApprovalRecord, error) {
-	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/%s/diff", c.baseURL, serverName, toolName)
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/%s/diff", c.baseURL, url.PathEscape(serverName), url.PathEscape(toolName))
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
@@ -1929,7 +1947,7 @@ func (c *Client) GetToolDiff(ctx context.Context, serverName, toolName string) (
 
 // ApproveTools approves specific tools or all tools for a server (Spec 032).
 func (c *Client) ApproveTools(ctx context.Context, serverName string, toolNames []string, approveAll bool) (int, error) {
-	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/approve", c.baseURL, serverName)
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/approve", c.baseURL, url.PathEscape(serverName))
 
 	reqBody := struct {
 		Tools      []string `json:"tools,omitempty"`
@@ -1990,7 +2008,7 @@ func (c *Client) ApproveTools(ctx context.Context, serverName string, toolNames 
 // (Spec 032). Block atomically approves AND disables the tool so it is never
 // left in the approved+enabled state — mirroring the Web UI "Block" action.
 func (c *Client) BlockTools(ctx context.Context, serverName string, toolNames []string, blockAll bool) (int, error) {
-	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/block", c.baseURL, serverName)
+	url := fmt.Sprintf("%s/api/v1/servers/%s/tools/block", c.baseURL, url.PathEscape(serverName))
 
 	reqBody := struct {
 		Tools    []string `json:"tools,omitempty"`

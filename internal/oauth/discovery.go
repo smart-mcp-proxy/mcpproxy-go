@@ -82,7 +82,14 @@ func BuildRFC8414MetadataURLs(authServerURL string) []string {
 
 		// Also try legacy path (appending .well-known after path) for backward compatibility
 		// Example: https://auth.smithery.ai/googledrive/.well-known/oauth-authorization-server
-		legacyURL := strings.TrimSuffix(authServerURL, "/") + "/.well-known/oauth-authorization-server"
+		// Strip only the query and fragment: the userinfo (basic-auth
+		// credentials) must stay, as it did before.
+		legacy := *u
+		legacy.RawQuery = ""
+		legacy.ForceQuery = false
+		legacy.Fragment = ""
+		legacy.RawFragment = ""
+		legacyURL := strings.TrimSuffix(legacy.String(), "/") + "/.well-known/oauth-authorization-server"
 		urls = append(urls, legacyURL)
 
 		// Also try base URL without path suffix for servers like Cloudflare that host
@@ -278,25 +285,72 @@ func discoverAuthServerURL(env Env, serverURL string, timeout time.Duration, fet
 
 // ExtractResourceMetadataURL parses WWW-Authenticate header to extract resource_metadata URL
 // Format: Bearer error="invalid_request", resource_metadata="https://..."
+//
+// Parameters are scanned per RFC 7235 section 2.1: names are case-insensitive,
+// whitespace may surround "=", and quoted values of other parameters are
+// skipped rather than searched, so only a real resource_metadata parameter
+// with a quoted-string value is returned.
 func ExtractResourceMetadataURL(wwwAuthHeader string) string {
-	// Look for resource_metadata parameter
-	if !strings.Contains(wwwAuthHeader, "resource_metadata") {
-		return ""
+	h := wwwAuthHeader
+	n := len(h)
+	skipWS := func(i int) int {
+		for i < n && (h[i] == ' ' || h[i] == '\t') {
+			i++
+		}
+		return i
 	}
-
-	// Split on resource_metadata=" to find the URL
-	parts := strings.Split(wwwAuthHeader, "resource_metadata=\"")
-	if len(parts) < 2 {
-		return ""
+	i := 0
+	for i < n {
+		for i < n && (h[i] == ' ' || h[i] == '\t' || h[i] == ',') {
+			i++
+		}
+		start := i
+		for i < n && isAuthTokenChar(h[i]) {
+			i++
+		}
+		name := h[start:i]
+		if name == "" {
+			i++
+			continue
+		}
+		j := skipWS(i)
+		if j >= n || h[j] != '=' {
+			continue
+		}
+		j = skipWS(j + 1)
+		if j < n && h[j] == '"' {
+			var b strings.Builder
+			k := j + 1
+			for ; k < n && h[k] != '"'; k++ {
+				if h[k] == '\\' && k+1 < n {
+					k++
+				}
+				b.WriteByte(h[k])
+			}
+			if k >= n {
+				return ""
+			}
+			if strings.EqualFold(name, "resource_metadata") {
+				return b.String()
+			}
+			i = k + 1
+			continue
+		}
+		for j < n && h[j] != ',' && h[j] != ' ' && h[j] != '\t' {
+			j++
+		}
+		i = j
 	}
+	return ""
+}
 
-	// Find the closing quote
-	endIdx := strings.Index(parts[1], "\"")
-	if endIdx == -1 {
-		return ""
+// isAuthTokenChar reports whether c is an RFC 7230 tchar.
+func isAuthTokenChar(c byte) bool {
+	switch {
+	case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		return true
 	}
-
-	return parts[1][:endIdx]
+	return strings.IndexByte("!#$%&'*+-.^_`|~", c) >= 0
 }
 
 // DiscoverProtectedResourceMetadata fetches RFC 9728 Protected Resource Metadata

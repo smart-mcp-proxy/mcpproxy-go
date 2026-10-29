@@ -62,7 +62,8 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 | `trusted_hosts` | string[] | `[]` | Non-loopback `Host` header values accepted on a loopback listener. Needed when running behind a reverse proxy — see [Reverse Proxy Deployment](/operations/reverse-proxy). This is DNS-rebinding protection only; it is **not** the control for forwarded headers (see `trusted_proxies`) |
 | `trusted_proxies` | string[] | `[]` (trust nobody) | CIDRs or IP addresses whose `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` and `X-Forwarded-Host` headers are believed. Headers from any other peer are ignored and the direct `RemoteAddr` is used. Env `MCPPROXY_TRUSTED_PROXIES` (comma list). Live (hot-reload, no restart). Validation: `trusted_proxies[N] "value" is not a valid CIDR or IP address` — refused identically at boot, `PATCH /api/v1/config` and `/config/apply`. See [Reverse Proxy Deployment](/operations/reverse-proxy#trusted_proxies-forwarded-headers) |
 | `require_mcp_auth` | boolean | `false` | Require an API key on the `/mcp` endpoint (off by default for client compatibility). Enable when exposing MCPProxy beyond localhost. **Server edition:** forced to `true` whenever `server_edition.enabled` is `true` — an explicit `false` is not an error, but boot logs `require_mcp_auth: false is overridden to true because server_edition.enabled is true` and `mcpproxy doctor` reports the same finding |
-| `enable_socket` | boolean | `true` | Enable Unix socket/named pipe for local communication |
+| `mcp_reject_query_apikey` | boolean | `false` | Refuse a `?apikey=` query parameter on every MCP endpoint (`/mcp*` and the legacy `/v1/tool_code` aliases) with a 401, forcing clients onto `Authorization: Bearer <token>` or `X-API-Key` so tokens stop appearing in access logs, proxy logs and browser history (a URL already sent is still logged in transit; the option makes the client fail until it is migrated). MCP endpoints only: the REST API, the Web UI and `/events` keep accepting the query form. Clients connected by the Connect wizard with `?apikey=` in the URL (Codex, the generic fallback) must be switched to a header carrier first. Live, no restart |
+| `enable_socket` | boolean | `true` | Enable the Unix socket/named pipe the tray uses. Socket connections are trusted **without the API key**, including stdio servers spawned under `none` or `sandbox` isolation, which can then mint agent tokens. Set `false` on headless installs and whenever untrusted stdio servers run outside `docker` isolation. |
 | `forward_client_headers` | boolean | `true` | Master switch for [client header forwarding](/configuration/upstream-servers#client-header-forwarding). Nothing is forwarded until a server lists names in `forward_headers`. Env `MCPPROXY_FORWARD_CLIENT_HEADERS=false` disables it for the process (never persisted). |
 
 ### `audit_log` (edition-neutral JSONL audit record)
@@ -266,6 +267,30 @@ most SDK servers use a small worker pool.
 Full reference — validation rules, metrics, and which origins are limited —
 lives in [`docs/configuration.md`](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/docs/configuration.md#concurrency-limits--request-queueing)
 in the repository.
+
+### Agent Token Call Rate Limit
+
+Caps how many upstream tool calls one agent token may make per minute. **Off by
+default.**
+
+```json
+{
+  "agent_token_rate_limit": { "per_minute": 60, "burst": 10 }
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `agent_token_rate_limit.per_minute` | integer | unset (off) | Calls a minute each agent token may make. `0` or unset = no limit; maximum `100000` |
+| `agent_token_rate_limit.burst` | integer | `per_minute` | Calls a token may make at once after a quiet spell; needs `per_minute` above `0` |
+
+Each token has its own bucket. Admin API key and unauthenticated callers are not
+limited. A token created with `mcpproxy token create --rate-limit N` uses its own
+budget instead (`--rate-limit 0` exempts it). A refused call gets a retry-friendly
+error (HTTP 429 with `Retry-After` over REST) and a `rejected` activity record
+with the reason `rate_limited`. Hot-reloadable.
+
+Full reference: [Call Rate Limit](/features/agent-tokens#call-rate-limit).
 
 ### Server Edition (`server_edition`) {#server-edition}
 
