@@ -111,3 +111,15 @@ func TestSessionsScope_RowsCarryAttributionAndFiltersReachStorage(t *testing.T) 
 	assert.Contains(t, w.Body.String(), "client_name is not supported on this endpoint; filter by client")
 	assert.Zero(t, ctrl.callCount, "the check runs before any storage read")
 }
+
+func TestSessions_OffsetReachesStorage(t *testing.T) {
+	ctrl := &scopedSessionController{mockSessionController{apiKey: "test-key", sessions: scopeTestSessions()}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/sessions?limit=1&offset=2", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, 2, ctrl.gotFilter.Offset, "offset query param must be passed to the session filter")
+}

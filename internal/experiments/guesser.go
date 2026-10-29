@@ -278,7 +278,6 @@ func (g *Guesser) checkNPMPackageWithClient(ctx context.Context, packageName str
 	req, err := http.NewRequestWithContext(ctx, "GET", npmURL, http.NoBody)
 	if err != nil {
 		info.Error = fmt.Sprintf("Failed to create request: %v", err)
-		g.cacheInfo(cacheKey, info)
 		return info
 	}
 
@@ -288,11 +287,13 @@ func (g *Guesser) checkNPMPackageWithClient(ctx context.Context, packageName str
 	resp, err := client.Do(req)
 	if err != nil {
 		info.Error = fmt.Sprintf("Request failed: %v", err)
-		g.cacheInfo(cacheKey, info)
 		return info
 	}
 	defer resp.Body.Close()
 
+	// Only a 200 or a 404 is cached. A failed lookup (timeout, network error,
+	// 5xx, 429) says nothing about the package, and caching it would hide the
+	// npm hint for the whole TTL, past a registry cache refresh.
 	if resp.StatusCode == 404 {
 		// Package doesn't exist
 		g.cacheInfo(cacheKey, info)
@@ -301,14 +302,12 @@ func (g *Guesser) checkNPMPackageWithClient(ctx context.Context, packageName str
 
 	if resp.StatusCode != 200 {
 		info.Error = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, resp.Status)
-		g.cacheInfo(cacheKey, info)
 		return info
 	}
 
 	var npmInfo NPMPackageInfo
 	if err := json.NewDecoder(resp.Body).Decode(&npmInfo); err != nil {
 		info.Error = fmt.Sprintf("Failed to parse response: %v", err)
-		g.cacheInfo(cacheKey, info)
 		return info
 	}
 

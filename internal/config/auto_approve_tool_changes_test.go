@@ -140,11 +140,12 @@ func TestNormalizeServerQuarantineFlags(t *testing.T) {
 		assert.Equal(t, string(TrustModeAuto), cfg.Servers[0].TrustMode)
 	})
 
-	t.Run("neither legacy field set leaves trust_mode empty (resolves manual)", func(t *testing.T) {
+	t.Run("neither legacy field set leaves trust_mode empty (resolves scan, the default)", func(t *testing.T) {
 		cfg := &Config{Servers: []*ServerConfig{{Name: "none"}}}
 		normalizeServerQuarantineFlags(cfg)
 		assert.Equal(t, "", cfg.Servers[0].TrustMode, "nil auto_approve leaves trust_mode empty")
-		assert.Equal(t, TrustModeManual, cfg.Servers[0].EffectiveTrustMode(), "empty resolves to manual (secure by default)")
+		assert.Equal(t, TrustModeScan, cfg.Servers[0].EffectiveTrustMode(), "empty resolves to scan (DefaultTrustMode, spec 119)")
+		assert.Equal(t, DefaultTrustMode, cfg.Servers[0].EffectiveTrustMode())
 	})
 
 	t.Run("explicit trust_mode scan wins over legacy skip_quarantine true (not clobbered)", func(t *testing.T) {
@@ -175,7 +176,7 @@ func TestServerConfig_EffectiveTrustMode(t *testing.T) {
 		{"explicit auto", ServerConfig{TrustMode: "auto"}, TrustModeAuto},
 		{"explicit scan", ServerConfig{TrustMode: "scan"}, TrustModeScan},
 		{"explicit manual", ServerConfig{TrustMode: "manual"}, TrustModeManual},
-		{"empty resolves manual", ServerConfig{}, TrustModeManual},
+		{"empty resolves scan (the default)", ServerConfig{}, TrustModeScan},
 		{"unknown value fails closed to manual", ServerConfig{TrustMode: "off"}, TrustModeManual},
 		{"case-typo fails closed to manual", ServerConfig{TrustMode: "Scan"}, TrustModeManual},
 		{"in-memory legacy auto_approve true -> auto", ServerConfig{AutoApproveToolChanges: boolPtr(true)}, TrustModeAuto},

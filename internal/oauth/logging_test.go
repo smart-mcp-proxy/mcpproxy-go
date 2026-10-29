@@ -17,6 +17,13 @@ func TestRedactSensitiveData(t *testing.T) {
 		assert.NotContains(t, result, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9")
 	})
 
+	t.Run("redacts the whole of a base64 bearer token", func(t *testing.T) {
+		// RFC 6750 b64token: '+', '/', '~' and trailing '=' are all legal.
+		input := "upstream rejected Bearer dGhpcy1pcy1h+c2VjcmV0/dG9rZW4~cGFydA== (401)"
+		result := RedactSensitiveData(input)
+		assert.Equal(t, "upstream rejected Bearer ***REDACTED*** (401)", result)
+	})
+
 	t.Run("redacts secrets in key=value format", func(t *testing.T) {
 		input := "client_secret=my-super-secret-value"
 		result := RedactSensitiveData(input)

@@ -82,6 +82,36 @@ func TestRedactDockerCommandString(t *testing.T) {
 	}
 }
 
+// The glued spellings are masked as separate argv elements; they must be
+// masked the same way once a login-shell wrap folds them into one -c string.
+func TestRedactDockerCommandString_GluedForms(t *testing.T) {
+	cases := map[string]struct{ in, keep string }{
+		"long glued":         {"docker run --rm --env=SLACK_TOKEN=" + secretValueSlack + " myimage", "--env=SLACK_TOKEN="},
+		"short glued":        {"docker run --rm -eSLACK_TOKEN=" + secretValueSlack + " myimage", "-eSLACK_TOKEN="},
+		"shellescaped glued": {"docker run --rm '--env=SLACK_TOKEN=" + secretValueSlack + " x' myimage", "'--env=SLACK_TOKEN="},
+		"double quoted":      {`docker run --rm "-eSLACK_TOKEN=` + secretValueSlack + `" myimage`, `"-eSLACK_TOKEN=`},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			out := RedactDockerCommandString(tc.in)
+			assertNoSecret(t, out)
+			for _, want := range []string{"docker run", "--rm", "myimage", tc.keep} {
+				if !strings.Contains(out, want) {
+					t.Errorf("expected %q preserved in %q", want, out)
+				}
+			}
+			args := RedactDockerArgs([]string{"-l", "-c", tc.in})
+			assertNoSecret(t, strings.Join(args, " "))
+		})
+	}
+	// Flags that merely start with -e and carry no KEY=VALUE are untouched.
+	for _, in := range []string{"node -e console.log(1)", "grep -enum file", "docker run --entrypoint /bin/sh img"} {
+		if out := RedactDockerCommandString(in); out != in {
+			t.Errorf("non-env command altered: %q -> %q", in, out)
+		}
+	}
+}
+
 func TestRedactDockerArgs_NoEnvFlagsUnchanged(t *testing.T) {
 	in := []string{"run", "--rm", "-i", "ghcr.io/foo/bar:latest", "--config", "/etc/x.json"}
 	out := RedactDockerArgs(in)

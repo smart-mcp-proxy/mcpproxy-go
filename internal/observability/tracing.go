@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
@@ -15,6 +16,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.4.0"
 	oteltrace "go.opentelemetry.io/otel/trace"
 	"go.uber.org/zap"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 )
 
 // OTLP transport protocols.
@@ -169,7 +172,7 @@ func (tm *TracingManager) HTTPMiddleware() func(http.Handler) http.Handler {
 			ctx, span := tm.tracer.Start(ctx, spanName,
 				oteltrace.WithAttributes(
 					semconv.HTTPMethodKey.String(r.Method),
-					semconv.HTTPURLKey.String(r.URL.String()),
+					semconv.HTTPURLKey.String(traceSafeURL(r.URL)),
 					semconv.HTTPSchemeKey.String(r.URL.Scheme),
 					semconv.HTTPHostKey.String(r.Host),
 					semconv.HTTPTargetKey.String(r.URL.Path),
@@ -198,6 +201,16 @@ func (tm *TracingManager) HTTPMiddleware() func(http.Handler) http.Handler {
 			}
 		})
 	}
+}
+
+// traceSafeURL renders the request URL for the http.url span attribute with
+// credential-bearing query parameters masked. ?apikey= is an accepted
+// credential (the Web UI's SSE stream and the tray send the admin key that
+// way), and spans are exported to an external collector.
+func traceSafeURL(u *url.URL) string {
+	safe := *u
+	safe.RawQuery = oauth.LogSafeQueryString(u.RawQuery)
+	return safe.String()
 }
 
 // tracingResponseWriter wraps http.ResponseWriter to capture status code for tracing

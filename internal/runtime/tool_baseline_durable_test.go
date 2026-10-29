@@ -39,6 +39,15 @@ func baselineTool(name, desc string, destructive bool) *config.ToolMetadata {
 }
 
 func readNote() *config.ToolMetadata { return baselineTool("read_note", "Read a note", false) }
+
+// readNoteRetitled is readNote with a title-only annotation change: the same
+// rug-pull hash, the same dispatch tier (a hint move would be held since spec
+// 120 FR-009), so the record stays approved and the capture publishes it.
+func readNoteRetitled() *config.ToolMetadata {
+	t := readNote()
+	t.Annotations = &config.ToolAnnotations{Title: "Read a note (renamed)"}
+	return t
+}
 func wipeAll() *config.ToolMetadata {
 	return baselineTool("wipe_all_notes", "Delete every note", true)
 }
@@ -49,7 +58,8 @@ func newBaselineRuntime(t *testing.T, dataDir string, quarantined bool) *Runtime
 	cfg := &config.Config{
 		DataDir: dataDir,
 		Listen:  "127.0.0.1:0",
-		Servers: []*config.ServerConfig{{Name: baselineServer, Enabled: true, Quarantined: quarantined}},
+		// manual: these fixtures encode manual-mode holds (see setupQuarantineRuntime).
+		Servers: []*config.ServerConfig{{Name: baselineServer, Enabled: true, Quarantined: quarantined, TrustMode: string(config.TrustModeManual)}},
 	}
 	rt, err := New(cfg, "", zap.NewNop())
 	require.NoError(t, err)

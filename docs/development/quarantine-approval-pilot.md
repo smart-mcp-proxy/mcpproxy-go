@@ -16,8 +16,8 @@ does not prove the implementation correct.
 |---|---|
 | `internal/qapilot/model.go` | The reference state machine (server quarantine, enablement, trust mode, tool records, dispatch classification). Imports no production package; computes every expectation from its own state, the action and the encoded policy. |
 | `internal/qapilot/policy.go` | Decision tables: add-time admission, the agent deny-list, permitted approval-transition reasons, the 896-cell dispatch classification table. |
-| `internal/qapilot/scenarios.go` | The **mandatory deterministic scenario inventory** (S01…S26), fixture contracts, and the recorded known deviations. |
-| `internal/qapilot/requirements.go` | Selected requirements QP-01…QP-19 with their policy sources, and the list of mandatory standalone checks. |
+| `internal/qapilot/scenarios.go` | The **mandatory deterministic scenario inventory** (S01…S29), fixture contracts, and the recorded known deviations. |
+| `internal/qapilot/requirements.go` | Selected requirements QP-01…QP-20 with their policy sources, and the list of mandatory standalone checks. |
 | `internal/qapilot/ledger.go` | `qapilot.Track(t, id, reqs…)` records each check's real outcome (passed / failed / skipped) to `$QAPILOT_REPORT_DIR`. |
 | `internal/runtime/qapilot_conformance_test.go` | Runtime **adapter**: maps model actions onto `checkToolApprovals`, `ApproveTools`, `ApproveAllTools`, `QuarantineServer`, `EnableServer`, `BlockTools`, `SetToolEnabled` and a real close/reopen restart; projects storage into a snapshot and compares after every step. Also the invariant table, the stale-review and server-replaced denial checks, the fixture-verdict check, the known-deviation test and the rapid exploration lane. |
 | `internal/preflight/qapilot_classify_test.go` | Every dispatch decision cell against the model. |
@@ -44,7 +44,7 @@ The IDs, titles and sources are in `internal/qapilot/requirements.go`
 | QP-07 | New tool on a quarantined manual/scan server is pending and stays pending across reconnects | S01, S02, S18, S26 |
 | QP-08 | Trusted server's first discovery is the baseline; durable baseline decision recorded | S04 |
 | QP-09 | Post-baseline additions: manual → pending; scan → clean approved / dangerous pending; auto or global off → approved | S05, S11, S12, S15, S16, S17 |
-| QP-10 | Changed definition held in manual **and** scan (whatever the verdict); auto approves | S03, S06, S08, S09, S13, S14, S16 |
+| QP-10 | Changed definition held in manual (whatever the verdict); scan approves it on a clean verdict when the structural gate finds nothing and holds it on a dangerous one; auto approves | S03, S06, S08, S09, S13, S14, S16, S28, S29 |
 | QP-11 | Changed stays changed across reconnects; revert restores approved | S06, S07, S19 |
 | QP-12 | Operator approval approves the *current* definition; reverting afterwards is a change | S09, S10, S25 |
 | QP-13 | Permitted transition reasons for changed→approved and pending→approved | invariant table (99 combinations) |
@@ -54,16 +54,21 @@ The IDs, titles and sources are in `internal/qapilot/requirements.go`
 | QP-17 | Stale `expected_hashes` → `review_out_of_date`, nothing written | stale-hash check |
 | QP-18 | Wrong `expected_incarnation` → `server_replaced`, nothing written | server-replaced check |
 | QP-19 | Fixture contracts carry the scan verdict the model assumes | fixture-verdict check |
+| QP-20 | Under scan a change that widens the approved contract (spec 120 structural gate) is held whatever the verdict; a narrowing with a clean verdict is approved | S28, S29 |
 
 ### Policy readings the pilot had to choose
 
 The sources disagree or are silent in a few places. The model encodes the
 reading below; each is also recorded in the requirement's `Note`.
 
-- **Scan mode and a changed tool.** Spec 086 US1 says a clean scan re-approves
-  a changed tool; `docs/features/security-quarantine.md` and the RT-02 red-team
-  finding say a changed contract is always held. The pilot encodes the docs
-  (held). Spec 086 is stale here.
+- **Scan mode and a changed tool.** Spec 119 (2026-10-22) approves a changed
+  tool on a clean verdict under `scan` and keeps the RT-02 hold under `manual`;
+  the pilot encodes that split. Spec 120 adds the structural gate in front of
+  the verdict: the model carries one widening shape (`BenignWide`, a new
+  defaulted `webhook_url` parameter) and holds a scan-mode change that widens
+  the approved shape (QP-20); the per-keyword rules are pinned by
+  `TestContractDelta_SharedFixture` in `internal/runtime`, and hint flips stay
+  outside the model (no scenario flips hints).
 - **Baseline marker.** The snapshot compares the durable marker on its own
   (`baseline_decided`) as well as `has_baseline`, so a marker that is never
   written or is lost across a restart cannot hide behind the approved records.
@@ -186,7 +191,7 @@ is by test name, so a designated test must be the one that fails.
 | M04 | QP-14 | Tool-level quarantine gate never applies (pending and changed tools become callable) | `TestQAPilot_ClassifyTable, TestQAPilot_Scenarios` | detected | 13.015s |
 | M05 | QP-16 | A changed (rug-pulled) tool classifies as ready | `TestQAPilot_ClassifyTable, TestQAPilot_DispatchCountingUpstream` | detected | 23.576s |
 | M06 | QP-09 | trust_mode scan accepts a non-clean verdict as scan evidence (dangerous new tools auto-approved) | `TestQAPilot_Scenarios/S12` | detected | 11.262s |
-| M07 | QP-13 | The transition guard lets a clean scan clear a changed record | `TestQAPilot_InvariantTable` | detected | 7.397s |
+| M07 | QP-13 | The transition guard lets the plain auto_approve reason (pending-only) clear a changed record | `TestQAPilot_InvariantTable` | detected | 7.397s |
 | M08 | QP-07 | A quarantined server's first discovery is treated as a trusted baseline (tools auto-approved while quarantined) | `TestQAPilot_Scenarios/S01, TestQAPilot_Scenarios/S02` | detected | 8.639s |
 | M09 | QP-03 | Releasing a server no longer promotes its pending tools (release leaves tools held) | `TestQAPilot_Scenarios/S02` | detected | 12.532s |
 | M10 | QP-15 | A recorded quarantine is not retained across a restart whose config file omits the key (admission gate retain rule removed) | `TestQAPilot_Scenarios/S26, TestQAPilot_Scenarios/S27` | detected | 11.603s |

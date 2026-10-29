@@ -38,12 +38,12 @@ func NewSecretSanitizer(core zapcore.Core) *SecretSanitizer {
 
 // registerDefaultPatterns registers patterns for common secret formats
 func (s *SecretSanitizer) registerDefaultPatterns() {
-	// GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_)
+	// GitHub tokens (ghp_, gho_, ghu_, ghs_, ghr_, and fine-grained github_pat_)
 	// Open-ended length ({36,}): the new stateless token format can be ~520 chars,
 	// and an alphanumeric run has no \b boundary mid-token to stop a fixed upper bound.
 	s.patterns = append(s.patterns, &secretPattern{
 		name:  "github_token",
-		regex: regexp.MustCompile(`\b(gh[poushr]_[A-Za-z0-9]{36,})\b`),
+		regex: regexp.MustCompile(`\b(gh[poushr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9]+_[A-Za-z0-9]{30,})\b`),
 		maskFunc: func(token string) string {
 			if len(token) <= 7 {
 				return "****"
@@ -52,10 +52,12 @@ func (s *SecretSanitizer) registerDefaultPatterns() {
 		},
 	})
 
-	// OpenAI API keys (sk-...)
+	// OpenAI API keys: legacy sk-..., and the current sk-proj-/sk-svcacct-/
+	// sk-admin- forms whose suffix also carries '_' and '-'. The legacy branch
+	// stays alphanumeric so sk-ant- keys still reach anthropic_key below.
 	s.patterns = append(s.patterns, &secretPattern{
 		name:  "openai_key",
-		regex: regexp.MustCompile(`\b(sk-[A-Za-z0-9]{20,})\b`),
+		regex: regexp.MustCompile(`\b(sk-(?:(?:proj|svcacct|admin)-[A-Za-z0-9_\-]{20,}|[A-Za-z0-9]{20,}))\b`),
 		maskFunc: func(key string) string {
 			if len(key) <= 5 {
 				return "****"
@@ -64,10 +66,10 @@ func (s *SecretSanitizer) registerDefaultPatterns() {
 		},
 	})
 
-	// Anthropic API keys (sk-ant-...)
+	// Anthropic API keys (sk-ant-...); the body is base64url, so it carries '_'.
 	s.patterns = append(s.patterns, &secretPattern{
 		name:  "anthropic_key",
-		regex: regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9\-]{30,})\b`),
+		regex: regexp.MustCompile(`\b(sk-ant-[A-Za-z0-9_\-]{30,})\b`),
 		maskFunc: func(key string) string {
 			if len(key) <= 10 {
 				return "****"
@@ -101,6 +103,25 @@ func (s *SecretSanitizer) registerDefaultPatterns() {
 		},
 	})
 
+	// JWT tokens (eyJ...). Must run before high_entropy: that pattern stops
+	// at the first '.', masks only the header, and leaves nothing for this
+	// regex to match, so the payload and signature would be logged in clear.
+	s.patterns = append(s.patterns, &secretPattern{
+		name:  "jwt",
+		regex: regexp.MustCompile(`\b(eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)\b`),
+		maskFunc: func(jwt string) string {
+			parts := strings.Split(jwt, ".")
+			if len(parts) != 3 {
+				return "****"
+			}
+			if len(parts[2]) < 4 {
+				return parts[0] + ".***.***"
+			}
+			// Show first part (header) but mask payload and signature
+			return parts[0] + ".***." + parts[2][len(parts[2])-4:]
+		},
+	})
+
 	// Generic high-entropy strings (likely tokens/passwords)
 	// Only mask if they appear in suspicious contexts (after = : or in quotes)
 	s.patterns = append(s.patterns, &secretPattern{
@@ -124,20 +145,6 @@ func (s *SecretSanitizer) registerDefaultPatterns() {
 				return prefix + openQuote + masked + closeQuote
 			}
 			return match
-		},
-	})
-
-	// JWT tokens (eyJ...)
-	s.patterns = append(s.patterns, &secretPattern{
-		name:  "jwt",
-		regex: regexp.MustCompile(`\b(eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+)\b`),
-		maskFunc: func(jwt string) string {
-			parts := strings.Split(jwt, ".")
-			if len(parts) != 3 {
-				return "****"
-			}
-			// Show first part (header) but mask payload and signature
-			return parts[0] + ".***." + parts[2][len(parts[2])-4:]
 		},
 	})
 }

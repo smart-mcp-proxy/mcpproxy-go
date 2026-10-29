@@ -276,7 +276,7 @@ const trustModeMeta = computed(
 const trustBadgeLabel = computed(() => trustModeMeta.value.label)
 
 // Auto is the least-safe mode (unscanned tool changes) and reads amber; scan
-// reads informational; manual — the secure default — stays neutral.
+// reads informational; scan (the default) and manual stay neutral.
 const trustBadgeClass = computed(() => {
   if (trustModeState.value.isInvalid) return 'text-warning'
   switch (trustModeState.value.effective) {
