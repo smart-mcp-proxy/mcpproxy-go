@@ -157,7 +157,10 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 // as the wrapped command (it sidesteps the login shell's PATH re-derivation),
 // dropping to bare "docker" only when resolution failed.
 func (c *Client) resolveDockerSpawn(finalArgs []string) (dockerCommand string, dockerArgs []string, shellWrapped bool, dockerDir string) {
-	resolved, resErr := resolveDockerBinary(c.logger)
+	resolved, resErr := c.configuredDockerBinary()
+	if resolved == "" {
+		resolved, resErr = resolveDockerBinary(c.logger)
+	}
 	switch {
 	case resErr == nil && isDirectExecutable(resolved) && dockerDaemonEnvGuaranteed():
 		// INFO (not Debug): make the spawn decision observable in main.log so a
@@ -391,6 +394,17 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 		zap.String("server", c.config.Name),
 		zap.String("docker_cmd", logSafeCommand(dockerCmd)))
 	return append(shellArgs, "--cidfile", cidFile)
+}
+
+// configuredDockerBinary returns the server's own command when it is a
+// user-supplied `docker run` naming the docker CLI by an absolute path to an
+// executable, so that binary is spawned instead of whichever docker the
+// resolver finds. "" means resolve as usual.
+func (c *Client) configuredDockerBinary() (string, error) {
+	if c.config == nil || !isDockerRunCommand(c.config.Command, c.config.Args) || !isDirectExecutable(c.config.Command) {
+		return "", nil
+	}
+	return c.config.Command, nil
 }
 
 // isDockerRunCommand reports whether a configured command is a user-supplied
