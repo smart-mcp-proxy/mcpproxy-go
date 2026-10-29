@@ -129,7 +129,10 @@ wait_status_not() {
   echo "$s"
 }
 
-unquarantine() { curl -s -X POST -H "X-API-Key: $API_KEY" "$API_URL/servers/tpa-lab-attacker/unquarantine" >/dev/null; }
+# unquarantine fails on a non-2xx answer, so an experiment cannot report HOLDS
+# while the server stayed quarantined (server-level quarantine would then be
+# what blocked the call, not the protection under test).
+unquarantine() { curl -sf -X POST -H "X-API-Key: $API_KEY" "$API_URL/servers/tpa-lab-attacker/unquarantine" >/dev/null; }
 
 # mcp_call <tool-name> <args-json> — one-shot MCP session over streamable HTTP.
 # args_json is passed as a JSON-ENCODED STRING (call_tool_read's contract).
@@ -203,10 +206,11 @@ if [[ -z "$ONLY" || "$ONLY" == "R2-2" ]]; then
   log "R2-2 (control): rug pull while quarantined → immediate call after unquarantine (race window)"
   CURRENT_CFG="$(make_cfg r2-2 facade 1 "$RUN_DIR/r2-2-data" yes)" || { record "R2-2 INCONCLUSIVE: lab config refused"; exit 1; }
   start_daemon "$CURRENT_CFG" "$RUN_DIR/r2-2.log" || { record "R2-2: INCONCLUSIVE (daemon)"; exit 1; }
-  unquarantine
+  unquarantine || { record "R2-2 INCONCLUSIVE: stage-1 unquarantine refused"; stop_daemon; exit 1; }
   s="$(wait_status calendar_get_events)"
-  curl -s -X POST -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' -d '{"approve_all":true}' \
-    "$API_URL/servers/tpa-lab-attacker/tools/approve" >/dev/null
+  curl -sf -X POST -H "X-API-Key: $API_KEY" -H 'Content-Type: application/json' -d '{"approve_all":true}' \
+    "$API_URL/servers/tpa-lab-attacker/tools/approve" >/dev/null \
+    || { record "R2-2 INCONCLUSIVE: stage-1 facade approval refused"; stop_daemon; exit 1; }
   log "stage-1 facade approved (calendar=$s)"
   stop_daemon
 
@@ -216,7 +220,7 @@ if [[ -z "$ONLY" || "$ONLY" == "R2-2" ]]; then
   during="$(tool_status calendar_get_events)"
   log "while still quarantined, armed contract state: calendar=$during (RT-05 verification)"
 
-  unquarantine
+  unquarantine || { record "R2-2 INCONCLUSIVE: stage-2 unquarantine refused"; stop_daemon; exit 1; }
   # Call IMMEDIATELY — before the re-discovery sweep could have run.
   call_out="$(mcp_call calendar_get_events '{"date":"2026-10-20"}')"
   if echo "$call_out" | grep -qiE "blocked|changed|security|pending|not approved"; then

@@ -537,6 +537,16 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	bestSoftReason := ""
 	bestDeobfuscated := false
 	bestMixed := false
+	// The fold wording reads the whole tool text, so name it once per
+	// inspection: per occurrence, a repeated negated directive made the scan
+	// quadratic in attacker-controlled text (Sol review of #1714).
+	wording := ""
+	wordingOnce := func() string {
+		if wording == "" {
+			wording = foldWording(tool.RawText())
+		}
+		return wording
+	}
 	for ti, t := range texts {
 		for _, fam := range allPhraseFamilies {
 			mt := t
@@ -581,7 +591,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				// prohibition, which stays review-only (SEC-01 corpus bn-r10-1).
 				if ti == mixedIndex && negatedBefore(t, start) && conf > deobfuscatedMaxConfidence {
 					conf = deobfuscatedMaxConfidence
-					softReason = "negated directive written with " + mixedFoldWording(tool.RawText())
+					softReason = "negated directive written with " + wordingOnce()
 				}
 				// A credential-file directive governed by a negation in its own
 				// clause is a prohibition on any view (Sol r15 P2). An
@@ -649,7 +659,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		obfuscated = " after de-obfuscation (homoglyphs, leet digits or letter spacing)"
 	}
 	if bestMixed {
-		obfuscated = " once " + mixedFoldWording(tool.RawText()) + " are folded"
+		obfuscated = " once " + wordingOnce() + " are folded"
 	}
 
 	// Instruction-position clears the hard floor and auto-quarantine-gates. A
@@ -682,6 +692,9 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 // mixedFoldWording names what the mixed-script view folded in raw, for a
 // finding's detail: look-alike letters when a word really mixes scripts,
 // otherwise the accents that R2-4 strips (the view reports a change for both).
+// foldWording is mixedFoldWording; tests swap it to count calls.
+var foldWording = mixedFoldWording
+
 func mixedFoldWording(raw string) string {
 	if detect.HasMixedScriptWords(raw) {
 		return "mixed-script look-alike letters (homoglyphs)"
