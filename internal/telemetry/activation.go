@@ -455,7 +455,9 @@ var clientNameRegex = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // Valid names are lowercased and returned unchanged.
 func sanitizeClientName(raw string) string {
 	// A client behind the mcp-remote bridge reports as the client it bridges.
-	trimmed := strings.TrimSpace(clientidentity.AliasCandidate(raw))
+	// AliasCandidate already trims the raw name; trimming its result again
+	// would drop a control that sat before the bridge tag.
+	trimmed := clientidentity.AliasCandidate(raw)
 	if trimmed == "" {
 		return "unknown"
 	}

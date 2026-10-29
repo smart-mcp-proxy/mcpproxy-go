@@ -269,6 +269,9 @@ func TestSanitizeClientName(t *testing.T) {
 		{"claude-ai (via mcp-remote 0.15.2)", "claude-ai"}, // bridged client (GH #1786)
 		{"user@host (via mcp-remote 0.15.2)", "unknown"},   // bridge tag does not launder a bad name
 		{"claude-ai\n(via mcp-remote 0.15.2)", "unknown"},  // control separator is not a bridge tag
+		{"claude-ai\t (via mcp-remote 0.15.2)", "unknown"}, // control before the tag survives stripping
+		{"claude-ai\n (via mcp-remote 0.15.2)", "unknown"},
+		{"claude-ai\r (via mcp-remote 0.15.2)", "unknown"},
 	}
 	for _, tc := range cases {
 		got := sanitizeClientName(tc.in)
