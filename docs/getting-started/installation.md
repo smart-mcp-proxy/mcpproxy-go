@@ -270,7 +270,15 @@ mcpproxy --system upstream list
 
 Older releases rewrote the config as `0600` the first time the service saved it (for example, to store its generated API key), which hides it from the group. If `ls -l /etc/mcpproxy/mcp_config.json` shows `-rw-------`, restore group read once with `sudo chmod 0640 /etc/mcpproxy/mcp_config.json`. Saves keep `0640` from then on.
 
-Without that access, `--system` stops with a permission error that names both options. Changes go through the running service, so keep it running while you manage it (`sudo systemctl start mcpproxy`); `--system` is refused for `serve` — the service is started by systemd.
+Without that access, `--system` stops with a permission error that names both options.
+
+`--system` only talks to the **running** service: if it is stopped, the command exits and tells you to `sudo systemctl start mcpproxy`. It never falls back to the CLI's offline mode, which would launch your stdio servers or rewrite the service's files as root. For offline maintenance with the service stopped (for example `db compact`), or when the service listens on HTTPS (`tls.enabled`), which the HTTP fallback does not speak yet, run the command as the service user:
+
+```bash
+sudo -u mcpproxy mcpproxy --config /etc/mcpproxy/mcp_config.json --data-dir /var/lib/mcpproxy db compact
+```
+
+`--system` is refused for `serve`: systemd starts the service.
 
 On a host with the package installed, a plain management command that finds **no config of your own** does not create `~/.mcpproxy/mcp_config.json` any more. It exits with an error that names the service config and the `--system` command to run. If you do want a separate per-user instance, start it with `mcpproxy serve`. When you already have a `~/.mcpproxy` instance and `mcpproxy.service` is active, `mcpproxy status` and `mcpproxy doctor` print a warning that you are inspecting a different instance, with the `--system` command to inspect the service.
 

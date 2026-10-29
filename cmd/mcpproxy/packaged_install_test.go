@@ -36,9 +36,10 @@ func fakePackagedInstall(t *testing.T, goos string, withConfig, withUnit bool) p
 			t.Fatal(err)
 		}
 	}
-	old, oldSystem := packagedPaths, systemMode
+	old, oldSystem, oldReach := packagedPaths, systemMode, systemDaemonReachable
 	packagedPaths, systemMode = p, false
-	t.Cleanup(func() { packagedPaths, systemMode = old, oldSystem })
+	systemDaemonReachable = func(*config.Config) bool { return true }
+	t.Cleanup(func() { packagedPaths, systemMode, systemDaemonReachable = old, oldSystem, oldReach })
 	return p
 }
 
@@ -231,6 +232,30 @@ func TestApplySystemFlag_SetsServicePaths(t *testing.T) {
 	}
 }
 
+// --system never runs offline: a standalone fallback would launch the
+// service's stdio upstreams (or rewrite its database) as root instead of as
+// the mcpproxy user.
+func TestApplySystemFlag_RequiresRunningService(t *testing.T) {
+	resetLoaderGlobals(t)
+	p := fakePackagedInstall(t, "linux", true, true)
+	var probed *config.Config
+	systemDaemonReachable = func(cfg *config.Config) bool { probed = cfg; return false }
+	cmd := newSystemFlagCmd(t, "--system", "upstream")
+
+	err := applySystemFlag(cmd)
+	if err == nil {
+		t.Fatal("applySystemFlag with the service down: want an error")
+	}
+	for _, want := range []string{"sudo systemctl start mcpproxy", "sudo -u mcpproxy mcpproxy --config " + p.ConfigPath + " --data-dir " + p.DataDir} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error lacks %q:\n%v", want, err)
+		}
+	}
+	if probed == nil || probed.Listen != "127.0.0.1:18777" || probed.DataDir != p.DataDir {
+		t.Errorf("probe got %+v, want the service config with its data dir", probed)
+	}
+}
+
 func TestApplySystemFlag_NoOpWithoutFlag(t *testing.T) {
 	resetLoaderGlobals(t)
 	fakePackagedInstall(t, "linux", true, true)
@@ -347,6 +372,13 @@ func TestDifferentInstanceWarning(t *testing.T) {
 		t.Errorf("warning while reading the service config: %q", w)
 	}
 	configFile = ""
+
+	// MCPP_CONFIG naming the service config is reading the service config.
+	t.Setenv("MCPP_CONFIG", p.ConfigPath)
+	if w := differentInstanceWarning("", []string{"doctor"}); w != "" {
+		t.Errorf("warning while MCPP_CONFIG names the service config: %q", w)
+	}
+	t.Setenv("MCPP_CONFIG", "")
 
 	// Off Linux the probe is never consulted.
 	packagedPaths.GOOS = "darwin"

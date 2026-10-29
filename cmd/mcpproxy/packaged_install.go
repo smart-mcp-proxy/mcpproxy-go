@@ -56,6 +56,13 @@ var packagedPaths = packagedInstallPaths{
 // systemMode is the global --system flag.
 var systemMode bool
 
+// systemDaemonReachable reports whether the service answers (socket or HTTP).
+// A variable so tests do not need a running daemon.
+var systemDaemonReachable = func(cfg *config.Config) bool {
+	_, _, ok := daemonEndpoint(cfg)
+	return ok
+}
+
 // systemServiceActive reports whether mcpproxy.service is running. A variable
 // so tests can stub systemd.
 var systemServiceActive = func() bool {
@@ -188,6 +195,26 @@ The service config is readable only by root and the mcpproxy group. Either:
 
 	configFile = packagedPaths.ConfigPath
 	dataDir = packagedPaths.DataDir
+
+	// --system only manages the running service. Without it, commands would
+	// fall back to their standalone/offline paths under the caller's identity:
+	// launching the service's stdio upstreams as root, or rewriting its
+	// config/database as root-owned files the service cannot open.
+	cfg, err := config.LoadFromFile(configFile)
+	if err != nil {
+		return fmt.Errorf("--system: %w", err)
+	}
+	cfg.DataDir = dataDir
+	if !systemDaemonReachable(cfg) {
+		return fmt.Errorf(`--system: the mcpproxy service is not reachable at %s.
+Start it first:  sudo systemctl start mcpproxy
+--system talks to the running service only. If the service is running with
+an HTTPS (tls.enabled) listener, or for offline maintenance such as
+'db compact' with the service stopped, run as the service user instead:
+    sudo -u mcpproxy mcpproxy --config %s --data-dir %s %s`,
+			cfg.Listen, configFile, dataDir,
+			strings.TrimPrefix(systemHintCommand(os.Args[1:]), "sudo mcpproxy --system "))
+	}
 	return nil
 }
 
@@ -196,6 +223,9 @@ The service config is readable only by root and the mcpproxy group. Either:
 func cliConfigPathInUse(local string) string {
 	if p := resolveCLIConfigPath(local); p != "" {
 		return p
+	}
+	if p := os.Getenv("MCPP_CONFIG"); p != "" && dataDir == "" {
+		return p // config.Load (viper) reads it
 	}
 	if dataDir != "" {
 		return config.GetConfigPath(dataDir)
