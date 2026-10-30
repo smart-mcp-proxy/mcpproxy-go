@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -1611,8 +1610,8 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 	// scan: a sibling entry that genuinely points at us wins over it.
 	var nameOnly *entryLocation
 
-	for name, v := range serversMap {
-		entry, ok := v.(map[string]interface{})
+	for _, name := range entryScanOrder(serversMap) {
+		entry, ok := serversMap[name].(map[string]interface{})
 		if !ok {
 			continue
 		}
@@ -1645,6 +1644,25 @@ func (s *Service) findEntryJSONBytes(client ClientDef, raw []byte) (loc entryLoc
 		return *nameOnly, true, true
 	}
 	return entryLocation{}, false, true
+}
+
+// entryScanOrder is the order the entry finders inspect serversMap in: the
+// default "mcpproxy" key first, then the rest sorted. Go randomizes map
+// iteration, and with two entries pointing here (an old ?apikey= one left
+// beside the current one) GetStatus's server name and ClientSecret's
+// credential would otherwise flip between calls.
+func entryScanOrder(serversMap map[string]interface{}) []string {
+	names := make([]string, 0, len(serversMap))
+	for name := range serversMap {
+		if name != defaultServerName {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	if _, ok := serversMap[defaultServerName]; ok {
+		names = append([]string{defaultServerName}, names...)
+	}
+	return names
 }
 
 // classifyEndpointMatch turns a matched entry into the EndpointMatch value the
@@ -1701,8 +1719,6 @@ func entryPointsToBridge(entry map[string]interface{}, baseURL string) bool {
 	return hasBridgePkg && pointsToUs
 }
 
-var trailingCommaPattern = regexp.MustCompile(`,\s*([}\]])`)
-
 func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	if err := json.Unmarshal(raw, out); err == nil {
 		normalizeNilConfigMap(out)
@@ -1715,7 +1731,7 @@ func unmarshalLenientJSON(raw []byte, out interface{}) error {
 	if cerr != nil {
 		return cerr
 	}
-	cleaned = trailingCommaPattern.ReplaceAll(cleaned, []byte(`$1`))
+	cleaned = stripTrailingCommas(cleaned)
 	if err := json.Unmarshal(cleaned, out); err != nil {
 		return err
 	}
@@ -1791,6 +1807,44 @@ func stripJSONComments(raw []byte) ([]byte, error) {
 	return out, nil
 }
 
+// stripTrailingCommas drops a ',' that is followed (after whitespace) by '}'
+// or ']'. It is string-aware like stripJSONComments: a ", }" inside a JSON
+// string value (a shell snippet in args, say) is content and must survive,
+// because connect writes the parsed document back to the client's file.
+func stripTrailingCommas(raw []byte) []byte {
+	out := make([]byte, 0, len(raw))
+	inString := false
+	escaped := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if inString {
+			switch {
+			case escaped:
+				escaped = false
+			case c == '\\':
+				escaped = true
+			case c == '"':
+				inString = false
+			}
+			out = append(out, c)
+			continue
+		}
+		if c == '"' {
+			inString = true
+		} else if c == ',' {
+			j := i + 1
+			for j < len(raw) && (raw[j] == ' ' || raw[j] == '\t' || raw[j] == '\n' || raw[j] == '\r') {
+				j++
+			}
+			if j < len(raw) && (raw[j] == '}' || raw[j] == ']') {
+				continue
+			}
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
 // jsonHasComments reports whether stripping comments would change the content —
 // i.e. the file actually uses JSONC comments (not just slashes inside strings).
 // An unterminated block comment counts as commented (the write guard refuses).
@@ -1824,8 +1878,8 @@ func (s *Service) findEntryTOMLBytes(raw []byte) (loc entryLocation, found, pars
 
 	var nameOnly *entryLocation
 
-	for name, v := range serversMap {
-		entry, ok := v.(map[string]interface{})
+	for _, name := range entryScanOrder(serversMap) {
+		entry, ok := serversMap[name].(map[string]interface{})
 		if !ok {
 			continue
 		}

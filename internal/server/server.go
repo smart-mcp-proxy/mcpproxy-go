@@ -573,6 +573,10 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 	// Harmless on every endpoint but /mcp/all, whose filters are the only
 	// consumers.
 	next = directRequestKindMiddleware(next)
+	// Spec 058 US3 (R1): drop a modern client's separately posted
+	// notifications/cancelled before mcp-go can match it against another
+	// client's in-flight request — every modern request shares session id "".
+	next = modernCancellationGuard(next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// mcp_reject_query_apikey: refuse a URL-borne credential outright. It
 		// must be a 401 and not "no token": with require_mcp_auth off a request
@@ -3158,15 +3162,15 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 // /mcp/call and /mcp/p/<slug>) — a pin applied to four of five would leave one
 // door open on a different protocol era.
 //
-// SCOPE, precisely: this covers the Streamable HTTP surfaces and nothing else.
-// mcp-go offers no equivalent option for stdio (server/stdio.go exposes only
-// error-logger, context-func and worker-pool options), and the protocol era is
-// decided per request from params._meta by the shared handler, with the version
-// gate living inside the Streamable HTTP transport. So a client speaking stdio
-// to `mcpproxy serve` in stdio mode can still opt into 2026-07-28 and be served
-// it. That gap is tracked with the rest of the stateless work (spec 058 US3);
-// it is not reachable by default, since an empty listen address is rewritten to
-// the HTTP default during config validation.
+// SCOPE, precisely: this covers the Streamable HTTP surfaces. mcp-go offers no
+// equivalent option for stdio (server/stdio.go exposes only error-logger,
+// context-func and worker-pool options), and the protocol era is decided per
+// request from params._meta by the shared handler, with the version gate living
+// inside the Streamable HTTP transport. The stdio surface is therefore pinned
+// separately, by rejectUnservedProtocolOnStdio (mcp.go), which reads the SAME
+// set — clientFacingProtocolVersions — so lifting the pin lifts both at once
+// (spec 058 T036a). Stdio is not reachable by default anyway, since an empty
+// listen address is rewritten to the HTTP default during config validation.
 //
 // The options are deliberately not configurable:
 //
@@ -3191,9 +3195,20 @@ func (s *Server) streamingNoDeadline(next http.Handler) http.Handler {
 func clientFacingStreamableOptions(cfgProvider func() *config.Config) []server.StreamableHTTPOption {
 	return []server.StreamableHTTPOption{
 		server.WithDisableLocalhostProtection(true),
-		server.WithStreamableHTTPProtocolVersions(mcp.LegacyProtocolVersions()...),
+		server.WithStreamableHTTPProtocolVersions(clientFacingProtocolVersions()...),
 		server.WithHTTPContextFunc(captureClientHeaders(cfgProvider)),
 	}
+}
+
+// clientFacingProtocolVersions is the ONE definition of the protocol eras the
+// client-facing surfaces serve (Spec 058 FR-028): the legacy set, until the
+// stateless work has landed and T041 lifts the pin. Both the Streamable HTTP
+// transport option above and the stdio guard (rejectUnservedProtocolOnStdio)
+// read it, so the two surfaces cannot disagree about what is served. A
+// function, not a variable, for the same reason as its caller: it must not be
+// flippable at runtime or from a test.
+func clientFacingProtocolVersions() []string {
+	return mcp.LegacyProtocolVersions()
 }
 
 // liveConfig returns the runtime's current config, tolerating a nil runtime.
@@ -3702,6 +3717,9 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 		tlsCfg, err := tlslocal.EnsureServerTLSConfig(tlslocal.Options{
 			Dir:               certsDir,
 			RequireClientCert: cfg.TLS.RequireClientCert,
+			ExtraSANs:         cfg.TLS.ExtraSANs,
+			CertFile:          cfg.TLS.CertFile,
+			KeyFile:           cfg.TLS.KeyFile,
 		})
 		if err != nil {
 			return fmt.Errorf("TLS initialization failed: %w", err)
@@ -3722,6 +3740,8 @@ func (s *Server) startCustomHTTPServer(ctx context.Context, streamableServer *se
 
 		s.logger.Info("Starting HTTPS server with TLS configuration",
 			zap.String("certs_dir", certsDir),
+			zap.Strings("extra_sans", cfg.TLS.ExtraSANs),
+			zap.String("cert_file", cfg.TLS.CertFile),
 			zap.Bool("require_client_cert", cfg.TLS.RequireClientCert),
 			zap.Bool("hsts", cfg.TLS.HSTS),
 			zap.Bool("tray_plain_http", trayListener != nil),
@@ -4433,8 +4453,7 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 
 	var limitErr *limiter.LimitError
 	switch {
-	case errors.As(err, &limitErr) &&
-		(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout):
+	case errors.As(err, &limitErr) && limitErr.Shed():
 		// Spec 093 FR-011: a shed never reached the upstream, so it is the
 		// tool_call half of the authz-allow pair, never a second authz —
 		// mirrors auditToolCallShed's use at every other dispatch site.

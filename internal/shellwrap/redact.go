@@ -15,6 +15,12 @@ import (
 // flags or image names.
 var dockerEnvFlagRegex = regexp.MustCompile(`(^|\s)(--env|-e)(\s+)('[^']*'|"[^"]*"|\S+)`)
 
+// dockerGluedEnvRegex matches the glued spellings (`--env=KEY=VALUE`,
+// `-eKEY=VALUE`) within a command STRING, either bare or as one quoted word
+// (Shellescape wraps the whole token when the value holds whitespace). Group 2
+// is the opening quote, if any; group 3 the flag; group 4 the KEY=VALUE text.
+var dockerGluedEnvRegex = regexp.MustCompile(`(^|\s)(?:(')(--env=|-e)([^']*)'|(")(--env=|-e)([^"]*)"|()(--env=|-e)([^\s'"]\S*))`)
+
 // RedactDockerArgs returns a copy of a docker-style argv slice with the VALUE
 // of every `KEY=VALUE` env injection masked, leaving keys, flags, image names,
 // and other args untouched. It handles three shapes the spawn path produces:
@@ -84,10 +90,21 @@ func RedactDockerCommandString(s string) string {
 // RedactDockerCommandStringWith is RedactDockerCommandString with a
 // caller-chosen mask rendering. See RedactDockerArgsWith.
 func RedactDockerCommandStringWith(s string, mask func(string) string) string {
-	return dockerEnvFlagRegex.ReplaceAllStringFunc(s, func(m string) string {
+	s = dockerEnvFlagRegex.ReplaceAllStringFunc(s, func(m string) string {
 		sub := dockerEnvFlagRegex.FindStringSubmatch(m)
 		// sub[1]=lead, sub[2]=flag, sub[3]=whitespace, sub[4]=value token
 		return sub[1] + sub[2] + sub[3] + maskEnvTokenWith(sub[4], mask)
+	})
+	return dockerGluedEnvRegex.ReplaceAllStringFunc(s, func(m string) string {
+		sub := dockerGluedEnvRegex.FindStringSubmatch(m)
+		// Exactly one of the three (quote, flag, KEY=VALUE) triples matched.
+		for i := 2; i+2 < len(sub); i += 3 {
+			if sub[i+1] != "" {
+				q := sub[i]
+				return sub[1] + q + sub[i+1] + maskEnvTokenWith(sub[i+2], mask) + q
+			}
+		}
+		return m
 	})
 }
 

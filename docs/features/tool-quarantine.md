@@ -39,9 +39,17 @@ A **trusted** server is one that is *not* under server-level quarantine
 (`quarantined: false`) — whether you added it that way, loaded it from config,
 or approved it out of quarantine. When a trusted server is discovered and it has
 **no prior tool-approval baseline**, its current toolset is treated as that
-baseline: every current tool auto-approves (status `approved`,
-`approved_by: "auto-baseline"`) rather than stranding as `pending`. Approving a
-server *is* trusting the tools it ships with.
+baseline — after an offline TPA scan of it (round-2 red team, R2-1). The scan
+runs once over the whole first-seen toolset (the same `scan`-mode engine, with
+every other connected server's tools as cross-server context) and the verdict
+is read per tool: a tool with no finding auto-approves (status `approved`,
+`approved_by: "auto-baseline"`) rather than stranding as `pending`; a tool with
+a hard (`dangerous`) or soft (`warnings`) finding lands `pending` with the
+verdict and matched check ids recorded as hold evidence (`held_reason:
+scan_findings`), and stays pending on every later pass until a person
+approves it; if the scan itself could not be trusted, every tool of that pass
+is held (`held_reason: scan_coverage`). Approving a server *is* trusting the
+tools it ships with — once they have been scanned.
 
 Once the baseline exists, tool-level quarantine guards against later changes:
 
@@ -58,7 +66,8 @@ then promotes them to the baseline.
 Server connects → Tools discovered → For each tool:
   ├─ Quarantine disabled / per-server auto-approve  → Status: "approved" (auto)
   ├─ Trusted server, no baseline yet (this pass IS the baseline)
-  │                                                 → Status: "approved" (auto-baseline)
+  │     ├─ offline scan clean for this tool          → Status: "approved" (auto-baseline)
+  │     └─ scan finding / scan not trustworthy       → Status: "pending"  (held, evidence recorded)
   ├─ No existing record, baseline already exists    → Status: "pending"  (new tool)
   ├─ Hash matches approved hash                      → Status: "approved" (unchanged)
   └─ Hash differs from approved hash                 → Status: "changed"  (rug pull detected)
@@ -125,7 +134,9 @@ Tools are automatically approved (no manual review needed) when:
   deprecated `skip_quarantine: true` — recorded with `approved_by: "auto"`.
 - A **trusted server establishes its baseline** (first discovery with no prior
   baseline, or migrating already-stranded `pending` tools whose hash is
-  unchanged) — recorded with `approved_by: "auto-baseline"`.
+  unchanged) **and the offline TPA scan is clean for the tool** — recorded with
+  `approved_by: "auto-baseline"`. A flagged first-seen tool is never
+  auto-baselined, on that pass or any repeat (R2-1).
 - The server has `auto_approve_tool_changes: true` and a post-baseline change or
   addition occurs — recorded with `approved_by: "auto-approve-changes"`.
 

@@ -43,11 +43,28 @@ const (
 
 // Contract is one tool definition as the policy sees it: an identity (two
 // definitions with the same Key hash identically; a different Key is a
-// changed contract) and its scan verdict.
+// changed contract), its scan verdict, and its structural shape.
+//
+// Shape is the spec 120 structural-gate label: "" is the base shape every
+// fixture shares, "wide" a shape that WIDENS the base (a new defaulted
+// parameter). Under scan a changed contract is approved on a clean verdict
+// only when it does not widen the approved shape (Widens); a narrowing back to
+// the base passes. The model knows two shapes, so the label is exact for it;
+// the implementation decides per keyword (internal/runtime/tool_contract_delta.go).
 type Contract struct {
 	Key     string
 	Verdict Verdict
+	Shape   string
 }
+
+// Widens reports whether live widens approved's structural shape (spec 120
+// FR-004): the gate holds it whatever the verdict.
+func Widens(approved, live Contract) bool {
+	return live.Shape == ShapeWide && approved.Shape != ShapeWide
+}
+
+// ShapeWide is the one widening shape the fixtures use.
+const ShapeWide = "wide"
 
 // Status is the tool-approval status (spec 041: exactly three states).
 type Status string
@@ -170,14 +187,15 @@ func (s *Server) HasBaseline() bool {
 //     record (the scan gate applies to the pass that files the record).
 //   - An approved tool whose definition changed becomes changed (the
 //     rug-pull guard, spec 041 FR-001) unless the gate is off, in which case
-//     the new definition is approved (trust auto: auto_approve_changes). In
-//     scan mode a changed definition is ALWAYS held, whatever its verdict
-//     (docs/features/security-quarantine.md "a clean verdict is not proof a
-//     changed contract is safe"; spec 086's contrary wording is stale, see
-//     requirements.go A-1).
-//   - A changed tool returns to approved only when the live definition is
-//     the approved one again (description revert, spec 041 US2) or the gate
-//     is off; otherwise it stays changed with the live definition recorded.
+//     the new definition is approved (trust auto: auto_approve_changes), or
+//     the server is in scan mode and the new definition scans clean, in
+//     which case it is scan-approved (spec 119 FR-004). In manual mode a
+//     changed definition is ALWAYS held, whatever its verdict (RT-02).
+//   - A changed tool returns to approved when the live definition is the
+//     approved one again (description revert, spec 041 US2), when the gate
+//     is off, or in scan mode when its current definition scans clean (spec
+//     119 FR-006); otherwise it stays changed with the live definition
+//     recorded.
 //   - The baseline marker is set by a pass that leaves at least one approved
 //     or changed record (spec 117 FR-022).
 func (s *Server) Discover(inventory map[string]Contract) {
@@ -214,9 +232,12 @@ func (s *Server) Discover(inventory map[string]Contract) {
 		case StatusApproved:
 			t.Current = c
 			if c.Key != t.Approved.Key {
-				if !gate {
+				switch {
+				case !gate:
 					t.approve("auto")
-				} else {
+				case s.Trust == TrustScan && c.Verdict == VerdictClean && !Widens(t.Approved, c):
+					t.approve("scan")
+				default:
 					t.Status = StatusChanged
 				}
 			}
@@ -227,6 +248,8 @@ func (s *Server) Discover(inventory map[string]Contract) {
 				t.approve("revert")
 			case !gate:
 				t.approve("auto")
+			case s.Trust == TrustScan && c.Verdict == VerdictClean && !Widens(t.Approved, c):
+				t.approve("scan")
 			}
 		}
 	}

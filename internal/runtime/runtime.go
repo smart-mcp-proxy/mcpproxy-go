@@ -1791,8 +1791,7 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	// upstream errors keep the existing "replay ran, the tool failed" contract.
 	if callErr != nil {
 		var limitErr *limiter.LimitError
-		if errors.As(callErr, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(callErr, &limitErr) && limitErr.Shed() {
 			return nil, callErr
 		}
 	}
@@ -4568,8 +4567,8 @@ func sanitizeClientName(raw string) string {
 	if identity.Key == "" {
 		return ""
 	}
-	if isKnownClientAlias(identity.RawNormalized) {
-		return identity.RawNormalized
+	if alias := clientidentity.AliasCandidate(raw); isKnownClientAlias(alias) {
+		return alias
 	}
 	return identity.Key
 }

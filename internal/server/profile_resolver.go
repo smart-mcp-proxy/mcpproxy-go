@@ -11,16 +11,57 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 )
 
-// sessionIDFromContext returns the stable mcp-go per-session id available at
-// tool-call time, or "" when no session is bound to the request. This is the
-// id confirmed (Profiles v2 T2 first subtask) to be exposed by mcp-go via
-// server.ClientSessionFromContext for both streamable-HTTP and SSE transports;
-// no synthetic fallback is required.
+// sessionIDFromContext returns the mcp-go session id bound to the request, or
+// "" when none is. Only a LEGACY (2025-11-25 and earlier) streamable-HTTP or
+// SSE connection binds a stable per-session id. A 2026-07-28 request is served
+// by an ephemeral session whose id is "" (mcp-go server/streamable_http.go), and
+// the stdio transport reports the constant "stdio" in both eras — so this id is
+// attribution-grade only. Nothing that persists per-connection state may key
+// on it without the era gate in profileSessionIDFromContext (Spec 058 US3).
 func sessionIDFromContext(ctx context.Context) string {
 	if sess := mcpserver.ClientSessionFromContext(ctx); sess != nil {
 		return sess.SessionID()
 	}
 	return ""
+}
+
+// listOnlyProfileResolutionKey marks a context whose profile resolution must
+// skip the session tier (and record nothing on the session): the `*/list`
+// filters use it, because FR-012 (Spec 058) forbids a list result from varying
+// with a connection's set_profile selection. Carried on the context rather
+// than as a separate resolver because BOTH resolvers — the v2 precedence in
+// resolveActiveProfileWithSourceFromIndex and the Spec 108 resolveProfileV3 —
+// read the session tier through profileSessionIDFromContext, so one marker
+// gates both and the two cannot drift.
+type listOnlyProfileResolutionKey struct{}
+
+// listOnlyProfileResolution returns ctx marked for list-only resolution. It
+// also carries noResolutionRecordKey: a list-time resolution that skipped the
+// session tier is not the session's effective profile and must not overwrite
+// the record profile edits use to find the sessions they notify (Spec 108
+// FR-028).
+func listOnlyProfileResolution(ctx context.Context) context.Context {
+	ctx = context.WithValue(ctx, listOnlyProfileResolutionKey{}, struct{}{})
+	return context.WithValue(ctx, noResolutionRecordKey{}, struct{}{})
+}
+
+// profileSessionIDFromContext is the session id the profile resolver's session
+// tier may key on, or "" when that tier must not apply (Spec 058 US3):
+//
+//   - a modern (2026-07-28) request binds no session, whatever the transport
+//     reports — stdio's constant "stdio" included (FR-011; research D1 graft 1),
+//     so a modern request can neither read nor persist a selection;
+//   - a list-only resolution (listOnlyProfileResolution) skips the tier so
+//     `*/list` cannot vary per connection (FR-012; research D1 graft 2).
+//
+// Execution-time callers (retrieve_tools, call_tool_*, code_execution,
+// prompts/get) keep the tier for legacy sessions, which is what the
+// set_profile deprecation window promises them.
+func profileSessionIDFromContext(ctx context.Context) string {
+	if mcpserver.IsModernRequest(ctx) || ctx.Value(listOnlyProfileResolutionKey{}) != nil {
+		return ""
+	}
+	return sessionIDFromContext(ctx)
 }
 
 // profilePinFromContext returns the agent-token profile_pin bound to the
@@ -189,6 +230,18 @@ func (p *MCPProxyServer) resolveActiveProfileWithIndex(ctx context.Context) (str
 	return name, scope, idx
 }
 
+// resolveActiveProfileForList is resolveActiveProfileWithIndex for a `*/list`
+// response (Spec 058 US3, FR-012): identical precedence, except that the
+// session tier — the legacy set_profile selection, the one piece of connection
+// state mcpproxy holds — is skipped, so two connections receive the same list
+// whatever either of them selected. Pin, URL and the Spec 108 binding/anonymous
+// tiers are request-carried identity and still apply. Callers that also run
+// the Spec 108 resolution for the same list must pass listOnlyProfileResolution
+// (ctx) to ResolveProfileV3 so both resolvers skip the same tier.
+func (p *MCPProxyServer) resolveActiveProfileForList(ctx context.Context) (string, *profile.ProfileScope, *profileIndex) {
+	return p.resolveActiveProfileWithIndex(listOnlyProfileResolution(ctx))
+}
+
 // resolveActiveProfileWithSource is resolveActiveProfileWithIndex, additionally
 // reporting which resolution tier produced the (name, scope) pair (Spec 108
 // FR-011): retrieve_tools needs this to decide whether its `profile` field may
@@ -292,8 +345,10 @@ func (p *MCPProxyServer) resolveActiveProfileWithSourceFromIndex(ctx context.Con
 	}
 
 	// 3. Session selection set via the set_profile tool on the base /mcp endpoint.
+	//    Legacy sessions only, and never for a `*/list` resolution — see
+	//    profileSessionIDFromContext (Spec 058 US3).
 	if p.sessionStore != nil {
-		if sid := sessionIDFromContext(ctx); sid != "" {
+		if sid := profileSessionIDFromContext(ctx); sid != "" {
 			if name := p.sessionStore.GetActiveProfile(sid); name != "" {
 				if scope := profileScopeFromIndex(idx, name); scope != nil {
 					return name, scope, profile.SourceSession

@@ -7,6 +7,31 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Breaking Changes
 
+- **trust mode / tool approvals (Spec 119):** `scan` is now the default per-server trust mode, and under
+  `scan` a **changed** tool contract whose offline TPA scan is clean is approved automatically in the same
+  discovery pass (reason `scan_approved`, activity event `tool_auto_approved`) instead of being held. A
+  finding or a tool the scan could not cover is still held with the evidence attached. **Structural
+  change gate (Spec 120, same release):** before the scan verdict counts, a deterministic structural
+  comparison with the approved contract holds, whatever the verdict, any safety-hint change in either
+  direction (`GATE-HINT-CHANGE`; the two safer flips also `GATE-HINT-SAFER-FLIP`), a widened input schema
+  (`GATE-SCHEMA-SHAPE:<reason>:<path>`: a new required parameter, a type change, an enum member added or an
+  enum dropped, a loosened constraint, a default/const added or changed, a new parameter carrying a
+  default/const/enum), an output-schema change (`GATE-OUTPUT-SCHEMA`), and a change that moves the tool's
+  `call_tool` variant while its hash stays equal (explicit default hints dropped). Narrowing edits pass. No
+  word lists, thresholds or classifier. The `tool_auto_approved` event now carries the replaced contract
+  (`old_hash`, `old_description`, `old_schema`, `old_output_schema`, `old_annotations`), `approved_by`,
+  `gate_signals`, `scan_verdict` and `scan_bundle`. A server whose `trust_mode` is unset now runs under
+  `scan` from its next discovery pass, so clean-scanned holds it accumulated are released without a click:
+  the first start after the upgrade logs one WARN naming such servers, and `mcpproxy doctor` names them on
+  every run. The 2026-10-11 rule that a clean verdict never approves a changed contract now applies to
+  `manual` only. Not caught by any of this: a paraphrase, a one-word edit, slow text drift, behaviour that
+  changes behind an unchanged definition. **Migration:** set `trust_mode: "manual"` on any server whose
+  tool changes you want a person to review; nothing changes for servers with an explicit `trust_mode` or
+  `auto_approve_tool_changes`. A record whose stored annotation snapshot differs from the live hints in
+  dispatch tier only (a server last seen before hints were captured) is held once for review. New servers
+  added with no trust mode are quarantined, scanned and released automatically on a clean verdict, as
+  `scan` always did.
+
 - **connect / disconnect:** `mcpproxy disconnect`, `DELETE /api/v1/connect/{client}`, and the Web UI
   and tray Disconnect now also revoke the client's credential (`client-<id>`), so a secret copied out
   of the removed config stops authenticating. The result reports `credential_revoked`, or
@@ -79,6 +104,7 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Features
 
+- **agent tokens: per-token call rate limit (#1699).** Cap how many upstream tool calls one agent token may make per minute, so a runaway agent loop cannot burn through an upstream's quota. Off by default. `agent_token_rate_limit` (`per_minute`, optional `burst`) sets a default for every agent token and is live-reloadable; `mcpproxy token create --rate-limit N [--rate-burst M]` (or `rate_limit` on `POST /api/v1/tokens`) gives one token its own budget, and `--rate-limit 0` exempts it. It is enforced where the concurrency limits are, so it covers `call_tool_*`, direct routing mode, `code_execution` and the REST tool-call endpoint, and never applies to the admin API key or unauthenticated local callers. A refused call never reaches the upstream: MCP callers get an error result, REST callers get `429` with `Retry-After`, the activity log records a `tool_call` with status `rejected`, reason `rate_limited` and the token's name, and `mcpproxy_tool_calls_rejected_total` counts it with `reason="rate_limited"`, `scope="token"`. The audit-line `reason` vocabulary gains `rate_limited`. Buckets are in memory, so a restart refills them.
 - **profiles:** `mcpproxy access suggest` turns the calls your profiles blocked into reviewed profile
   changes (#1700). It reads the profile refusals in the audit log (`--since`, default 24h), groups them
   by profile, tool and block reason, re-checks each group with the access explainer so tools that are
@@ -88,7 +114,10 @@ Releases follow [Semantic Versioning](https://semver.org/).
   document per profile, in mcpproxy's own profile format. Also `GET /api/v1/access/suggest` and the
   `suggest` operation of the `profiles` MCP tool (administrators only).
 - **`mcp_reject_query_apikey` refuses query-parameter credentials on MCP endpoints.** Set it to `true` and every MCP endpoint (`/mcp`, `/mcp/p/<slug>`, `/mcp/all`, `/mcp/code`, `/mcp/call` and the legacy `/v1/tool_code` aliases) answers a request carrying `?apikey=` with a 401 instead of honouring it, which forces every client onto `Authorization: Bearer` or `X-API-Key`. It cannot stop a URL that was already sent from being logged by whatever sits in front of the proxy; it makes sure such a client stops working until it is migrated, so the token stops appearing in access logs, proxy logs and browser history from then on. The refusal is explicit rather than "no credential" because, with `require_mcp_auth` off, an unrecognised credential would otherwise be served as the anonymous administrator. Default `false`, so nothing changes unless you opt in; the REST API, the Web UI and its `/events` stream are not affected. Live, no restart. **Caveat:** the Connect wizard writes Codex (and the generic fallback) entries with `?apikey=<credential>` in the URL, so a client connected that way gets a 401 once the option is on: remove the query parameter and carry the credential in a header instead (`env_http_headers` or `http_headers`, see the Connect clients guide); Connect itself is not yet aware of the option.
+- **secrets: `${file:/absolute/path}` references (#1706, spec 111 FR-030).** A secret can be read from a file, as Docker/Compose secrets, Kubernetes secret volumes and systemd `LoadCredential=` provide it, wherever `${env:}` and `${keyring:}` are accepted: an upstream server's `env`, `args` and `headers`, `data_dir`, and the proxy's own `api_key`. The path must be absolute, a symlink must lead to a regular file, at most 64 KiB is read, one trailing LF or CRLF is removed, and a missing, unreadable or empty file is an error that names the reference, never the content. A server shows a missing-secret error and the proxy stays up; an `api_key` reference that does not resolve stops startup (no key is generated over it). The stored config keeps the reference: the value is resolved on a copy, and the `api_key` secret is a process-only override that no save, including `PATCH /api/v1/config`, writes back. (refs #1706)
+
 - **config: `MCPPROXY_API_KEY_FILE` reads the API key from a file (#1706).** The `*_FILE` form of Docker Compose/Swarm secrets, Kubernetes secret volumes and systemd `LoadCredential=`: the key is not in the process environment (`docker inspect`, `/proc/<pid>/environ`) and is never written to `mcp_config.json`. The path must be absolute; one trailing LF or CRLF is removed; at most 64 KiB is read. Setting both `MCPPROXY_API_KEY` and `MCPPROXY_API_KEY_FILE` (both non-empty) is an error: mcpproxy refuses to start with a message naming both variables (never a key or file contents), and the CLI commands and the tray stop the same way. An empty value is treated as unset. A file that is named but cannot be used stops startup with an error naming the variable and path: mcpproxy does not fall back to the config file or a generated key. `mcpproxy status`, the other CLI commands and the tray read it too, and a tray-launched core reads the file itself instead of receiving the key in its environment. `Config.EnsureAPIKey` now also returns an error. (refs #1706, spec 111 FR-014/FR-030/US7)
+- **tls: serve a certificate for names other than `localhost` (#1719).** `tls.extra_sans` lists DNS names and IP addresses to add to the generated server certificate; when `localhost.pem` does not carry exactly those names plus `localhost`, `127.0.0.1` and `::1`, it is regenerated and signed by the same local CA, so `ca.pem` and `mcpproxy trust-cert` keep working. `tls.cert_file` and `tls.key_file` (absolute paths, both or neither) serve a certificate you provide instead, for a real or internal CA, `certbot` or a Docker/Kubernetes secret mount; nothing is generated, and a missing, unreadable or mismatched file stops startup with an error naming the setting. Environment variables `MCPPROXY_TLS_EXTRA_SANS`, `MCPPROXY_TLS_CERT_FILE` and `MCPPROXY_TLS_KEY_FILE`. Changing any of them needs a restart; with none set, startup is unchanged. Removes `MCPPROXY_TLS_CERT` and `MCPPROXY_TLS_KEY` from the environment-variable reference, which no code ever read.
 
 - **catalog:** a catalog source whose live search times out or fails is now answered from the listing
   the daemon last saw from it (at most 24 hours old, kept in memory). Those results are marked

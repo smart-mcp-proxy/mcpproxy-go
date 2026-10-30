@@ -5,6 +5,7 @@ package clientidentity
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"regexp"
 	"strings"
 )
 
@@ -125,6 +126,24 @@ func storedTransformedDisplay(key string) (string, string, bool) {
 // a supported alias merely because its display label removes the escape.
 func NormalizeRaw(raw string) string {
 	return strings.ToLower(strings.TrimSpace(raw))
+}
+
+// mcpRemoteSuffix matches the " (via mcp-remote <version>)" tag mcp-remote
+// appends to the clientInfo.name of the client it bridges (GH #1786). The
+// separators are single spaces and the version is printable ASCII without
+// parentheses, so a tag carrying a control character never matches.
+var mcpRemoteSuffix = regexp.MustCompile(`^(.*[^ ]) \(via mcp-remote(?: [!-'*-~]+)?\)$`)
+
+// AliasCandidate is NormalizeRaw with one trailing mcp-remote bridge tag
+// removed, so "claude-ai (via mcp-remote 0.15.2)" classifies as the client
+// behind the bridge. Use it only to look up supported aliases: like
+// NormalizeRaw it preserves controls, and unknown names keep their exact key.
+func AliasCandidate(raw string) string {
+	normalized := NormalizeRaw(raw)
+	if m := mcpRemoteSuffix.FindStringSubmatch(normalized); m != nil {
+		return m[1]
+	}
+	return normalized
 }
 
 // SanitizeDisplay keeps rendered names safe and bounded.

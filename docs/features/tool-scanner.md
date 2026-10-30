@@ -120,12 +120,23 @@ all servers' tools:
 
 1. **Impersonation clone** — a tool whose name *and* near-duplicate description
    both match another server's tool (one impersonating the other so an agent
-   calls the wrong one). A name collision **alone is never flagged**: mcpproxy
-   exists to unify many servers, every tool is namespaced `server:tool`, and
-   ordinary compound names (`list_models`, `search_issues`, …) legitimately
-   collide across servers — `retrieve_tools`' BM25 ranking disambiguates them.
-   The near-duplicate description (cosmetic edits — case, punctuation,
-   whitespace — do not launder a copy) is the impersonation evidence.
+   calls the wrong one). A name collision **alone is never a hard finding**:
+   mcpproxy exists to unify many servers, every tool is namespaced
+   `server:tool`, and ordinary compound names (`list_models`, `search_issues`,
+   …) legitimately collide across servers — `retrieve_tools`' BM25 ranking
+   disambiguates them. The near-duplicate description (cosmetic edits — case,
+   punctuation, whitespace — do not launder a copy) is the impersonation
+   evidence.
+   - **Name squat (soft, review only; round-2 red team R2-5)** — a
+     *distinctive* name another server also exposes, with a genuinely
+     *different* description. This is the shape a clone check cannot see
+     (keep the victim's `filesystem_read`, rewrite the prose). It is surfaced
+     for review — it holds a `trust_mode: scan` change and a first-seen
+     baseline tool, never auto-quarantines — **unless the description names
+     its own server** ("Lists ElevenLabs voices and models", "Browse Kaggle's
+     model registry"), which is how honest servers that share a compound name
+     describe themselves and what an impersonator cannot afford to write.
+     Common/short names and identical sub-floor descriptions are not flagged.
 2. **Cross-server reference** — a tool whose description names a *distinctive*
    tool that lives *only* on different servers (steering the agent's tool
    selection). A name the tool's own server also exposes is ordinary
@@ -218,7 +229,7 @@ example as easily as a planted one.
 | Check ID | Tier | Catches |
 |----------|------|---------|
 | `unicode.hidden` | hard | Zero-width / bidi / TAG-block / PUA character smuggling (raw text) |
-| `shadowing.cross_server` | hard | Impersonation clone (same name + near-duplicate description) or exclusive cross-server reference |
+| `shadowing.cross_server` | hard / soft | Hard: impersonation clone (same name + near-duplicate description) or exclusive cross-server reference. Soft: name squat (distinctive shared name, different description, no own-server provenance) |
 | `payload.decoded` | hard | base64/hex blob that decodes to a shell/exfil command |
 | `phrase.injection` | hard | Curated instruction-override / exfiltration directives (position-discounted; blocks approval) |
 | `directive.imperative` | soft | Injection directives, secrecy imperatives, instruction overrides (normalized, position-discounted) |

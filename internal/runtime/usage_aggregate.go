@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -119,7 +121,9 @@ func (t *ToolUsage) Percentile(p float64) (ms int64, exceeds bool) {
 	if total == 0 {
 		return 0, false
 	}
-	target := int64(float64(total) * p)
+	// Nearest-rank: truncating would land one rank low for small totals and
+	// hide the slow tail (9 fast calls + 1 slow one would report p95 as fast).
+	target := int64(math.Ceil(float64(total) * p))
 	if target < 1 {
 		target = 1
 	}
@@ -277,6 +281,9 @@ func (a *UsageAggregate) applyClientCalls(rec *storage.ActivityRecord) {
 	client := strings.ToLower(strings.TrimSpace(raw))
 	if client == "" {
 		return
+	}
+	if alias := clientidentity.AliasCandidate(raw); alias != client && knownClientAliases()[alias] {
+		client = alias
 	}
 	if a.ClientCalls == nil {
 		a.ClientCalls = make(map[string]map[int64]int64)

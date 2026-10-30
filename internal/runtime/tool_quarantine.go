@@ -11,6 +11,7 @@ import (
 	"io"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -225,11 +226,12 @@ const (
 	// besides explicit user action, that may clear a changed (rug-pull) record —
 	// because the operator opted into auto-approving changes for that server.
 	ReasonAutoApproveChanges TransitionReason = "auto_approve_changes"
-	// ReasonScanApproved marks a NEW tool auto-approved because the server runs
-	// in trust_mode: scan AND a synchronous, offline TPA scan of the tool
-	// returned a green (clean) verdict (spec 086 stage 2). It never clears a
-	// changed (rug-pull) record (RT-02): a clean verdict is not proof a changed
-	// contract is safe, so changed→approved needs an operator.
+	// ReasonScanApproved marks a tool auto-approved because the server runs in
+	// trust_mode: scan AND a synchronous, offline TPA scan of its current
+	// definition returned a green (clean) verdict: a NEW tool (spec 086 stage
+	// 2) and, since spec 119, a CHANGED contract too. Under manual the 2026-10-11
+	// RT-02 rule still applies (a changed contract is held whatever the
+	// verdict); the gate uses this reason only under scan.
 	ReasonScanApproved TransitionReason = "scan_approved"
 )
 
@@ -237,9 +239,10 @@ const (
 // to quarantine safety rules. Returns nil for valid transitions.
 //
 // Invariants:
-//   - changed→approved: requires user action, description revert, or proof that
+//   - changed→approved: requires user action, description revert, proof that
 //     the tool content hasn't actually changed (hash match, formula migration,
-//     content match).
+//     content match), the operator's standing auto_approve_tool_changes opt-in,
+//     or a clean scan under trust_mode scan (spec 119).
 //   - pending→approved: requires explicit user action or auto-approve (when
 //     quarantine is disabled for the server).
 func assertToolApprovalInvariant(oldStatus, newStatus string, reason TransitionReason) error {
@@ -252,7 +255,7 @@ func assertToolApprovalInvariant(oldStatus, newStatus string, reason TransitionR
 		switch reason {
 		case ReasonHashMatch, ReasonDescriptionRevert, ReasonFormulaMigration,
 			ReasonContentMatch, ReasonDescriptionMatch, ReasonUserApprove,
-			ReasonAutoApproveChanges:
+			ReasonAutoApproveChanges, ReasonScanApproved:
 			return nil
 		default:
 			return fmt.Errorf("invariant violation: changed→approved with reason %q "+
@@ -366,6 +369,94 @@ func (r *Runtime) autoChangeScanEnabled() bool {
 		return true
 	}
 	return cfg.Security.IsAutoChangeScanEnabled()
+}
+
+// baselineScanResult is the per-tool outcome of the first-seen (baseline)
+// toolset scan (R2-1, round-2 red team). It is computed ONCE per baseline pass,
+// before the record loop, from a single engine run over the whole toolset.
+type baselineScanResult struct {
+	// held maps a tool name (config.ToolMetadata.Name, as scanned) to the hold
+	// evidence that keeps it pending. A tool absent from the map is clean.
+	held map[string]*scanHoldEvidence
+	// coverageOK mirrors scanner.ScanToolMetadataVerdict's coverage flag. When
+	// false EVERY tool of the pass is held (fail closed, FR-014), with
+	// ToolHeldReasonScanCoverage for tools that carried no finding of their own.
+	coverageOK bool
+	verdict    string
+}
+
+// holdFor returns the evidence that holds tool (nil when the tool may be
+// auto-baselined). A nil result (no scan ran) holds nothing — callers only
+// consult it on a baseline pass, where scanBaselineToolset always runs.
+func (b *baselineScanResult) holdFor(tool string) *scanHoldEvidence {
+	if b == nil {
+		return nil
+	}
+	if e, ok := b.held[tool]; ok {
+		return e
+	}
+	if !b.coverageOK {
+		return &scanHoldEvidence{Reason: storage.ToolHeldReasonScanCoverage, Verdict: b.verdict}
+	}
+	return nil
+}
+
+// scanBaselineToolset runs the same synchronous, offline TPA scan the
+// trust_mode: scan change gate uses (scanChangeIsClean) over a trusted server's
+// FIRST-SEEN toolset, so the MCP-2931 baseline auto-approval never admits a
+// poisoned contract unscanned (round-2 red team, R2-1: an unquarantined
+// first-seen server auto-baselined an 18-vector poisoned catalog and the
+// poisoned tools were callable; only an operator-triggered scan afterwards
+// said "dangerous").
+//
+// The whole toolset is scanned in ONE engine run, with every OTHER connected
+// server's tools as peers, so the cross-server shadowing/impersonation checks
+// see the same context the async full-server scan gets, and sibling tools of
+// the same server see each other (a clone of a peer's tool is a finding on the
+// clone). The verdict is then read PER TOOL from the findings' locations: a
+// tool with no finding of its own is clean and auto-baselines exactly as
+// before (no new friction for a clean server), a tool with a hard finding
+// ("dangerous") or a soft one ("warnings") lands pending with the findings
+// recorded as hold evidence (FR-018), and a degraded or bundle-less scan holds
+// every tool (fail closed, FR-014) — the same green-only rule as the change
+// gate. Pure in-process string work: no Docker, network or filesystem I/O,
+// so it is safe under the server's approval lock (the caller holds it; see
+// checkToolApprovals).
+func (r *Runtime) scanBaselineToolset(serverName string, tools []*config.ToolMetadata) *baselineScanResult {
+	peers := r.collectPeerToolMetadata(serverName)
+	verdict, findings, coverageOK := scanner.ScanToolMetadataVerdict(serverName, tools, peers)
+	res := &baselineScanResult{held: make(map[string]*scanHoldEvidence), coverageOK: coverageOK, verdict: verdict}
+	prefix := serverName + ":"
+	for _, f := range findings {
+		if f.Tier != scanner.TierHard && f.Tier != scanner.TierSoft {
+			continue // only tiered (baseline) findings gate approval (FR-021)
+		}
+		name := strings.TrimPrefix(f.Location, prefix)
+		e := res.held[name]
+		if e == nil {
+			e = &scanHoldEvidence{Reason: storage.ToolHeldReasonScanFindings, Verdict: "warnings"}
+			res.held[name] = e
+		}
+		if f.Tier == scanner.TierHard {
+			e.Verdict = "dangerous"
+		}
+		e.Signals = append(e.Signals, f.Signals...)
+	}
+	if coverageOK && len(res.held) == 0 {
+		return res
+	}
+	heldNames := make([]string, 0, len(res.held))
+	for name := range res.held {
+		heldNames = append(heldNames, name)
+	}
+	sort.Strings(heldNames)
+	r.logger.Info("baseline scan held first-seen tools for review (non-green verdict)",
+		zap.String("server", serverName),
+		zap.String("verdict", verdict),
+		zap.Bool("coverage_ok", coverageOK),
+		zap.Int("tools", len(tools)),
+		zap.Strings("held_tools", heldNames))
+	return res
 }
 
 // scanHoldEvidence is the compact, serializable explanation of a trust_mode:
@@ -574,10 +665,9 @@ type toolQuarantineGate struct {
 	// autoApproveChanges: trust_mode auto (today's behavior — every change
 	// and addition auto-approves).
 	autoApproveChanges bool
-	// scanMode: trust_mode scan — a NEW tool auto-approves ONLY on a green
-	// in-process TPA verdict, else it is held (fail closed). A CHANGED
-	// contract is always held for operator confirmation, whatever the
-	// verdict (RT-02); the scan only contributes hold evidence.
+	// scanMode: trust_mode scan — a NEW tool, and since spec 119 a CHANGED
+	// contract, auto-approve ONLY on a green in-process TPA verdict; anything
+	// else is held (fail closed) with the scan's evidence attached.
 	scanMode bool
 	// enforceNewTools: block NEW tools for review (unless quarantine is
 	// disabled globally or the server is skipped). Even trusted
@@ -601,7 +691,8 @@ func (g toolQuarantineGate) active() bool {
 
 // resolveToolQuarantineGate resolves the gate for a server (trust mode:
 // manual → every change/addition held; auto → all auto-approved; scan →
-// additions green-scan-gated, changes held).
+// additions green-scan-gated, changes approved on a clean verdict when the
+// spec 120 structural gate returns no signal, held otherwise).
 //
 // Spec 116 D16: the policy is read from STORAGE — the server's row and
 // meta.quarantine_enabled, which the config commit writes in its storage step
@@ -695,6 +786,12 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 	// scans switched on — hold evidence is recorded for changed and pending tools.
 	// Evidence only; no approval decision reads it.
 	evidenceScan := !scanMode && !autoApproveChanges && r.autoChangeScanEnabled()
+	// scanApprovesChanges: the spec 119 approval of a clean-scanned CHANGED
+	// contract. Only while quarantine is enforced: with quarantine off globally
+	// nothing is blocked anyway, and the record keeps its provenance (changed,
+	// unblocked) exactly as under manual, instead of being re-stamped by a scan
+	// that gates nothing.
+	scanApprovesChanges := scanMode && globalEnabled
 	// definitionsChanged: this pass saw the tool inventory move after the
 	// baseline (a tool changed or was added). Reported to the
 	// tool-definitions-changed observers once the pass has finished.
@@ -734,6 +831,21 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 	priorByName := baseline.prior
 	serverHasBaseline := baseline.hasBaseline
 	isBaselinePass := enforceNewTools && !serverQuarantined && !serverHasBaseline
+
+	// R2-1: the baseline is no longer trusted blind. The first-seen toolset is
+	// scanned once (offline, in-process) and only tools with a green verdict
+	// auto-baseline; the rest land pending with the scan evidence. Computed
+	// before the loop so the decision is one snapshot for the whole pass.
+	//
+	// trust_mode: auto never reaches this scan: auto is a lifted gate
+	// (ServerConfig.IsQuarantineSkipped → !enforceNewTools, so isBaselinePass is
+	// false and new tools are approved "auto"), which is the operator's
+	// explicit opt-out of scanning and holding. Pinned by
+	// TestCheckToolApprovals_AutoTrustMode_IsNotScanGated.
+	var baselineScan *baselineScanResult
+	if isBaselinePass {
+		baselineScan = r.scanBaselineToolset(serverName, tools)
+	}
 
 	result := &ToolApprovalResult{
 		BlockedTools: make(map[string]bool),
@@ -913,7 +1025,14 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			case !enforceNewTools:
 				autoApprove, approvedBy = true, "auto"
 			case isBaselinePass:
-				autoApprove, approvedBy = true, "auto-baseline"
+				// Green-only, like the scan-mode change gate below: a first-seen
+				// tool the offline scan flagged (or could not cover) is pending
+				// with its evidence, never baselined (R2-1).
+				if evidence := baselineScan.holdFor(tool.Name); evidence == nil {
+					autoApprove, approvedBy = true, "auto-baseline"
+				} else {
+					holdEvidence = evidence
+				}
 			case autoApproveChanges:
 				autoApprove, approvedBy = true, "auto-approve-changes"
 			case scanMode:
@@ -1071,7 +1190,16 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 		// A CHANGED record's stamp describes its current (changed) hash, not
 		// its possibly hint-free ApprovedHash, so its hash match must also
 		// agree with the approved hints recorded as before-evidence.
-		hashMatches := existing.ApprovedHash == currentHash &&
+		// Spec 120 FR-009: the hash folds the hints in as their EFFECTIVE
+		// values, but dispatch (contracts.DeriveCallWith) reads an explicit
+		// default differently from an absent hint. An approved record whose
+		// live hints route the tool to another call_tool variant is a contract
+		// change even with an equal hash: every no-review shortcut below is
+		// closed for it and it reaches the change gate. Under auto the change
+		// is approved anyway, so the shortcut stands.
+		dispatchDrift := existing.Status == storage.ToolApprovalStatusApproved && !autoApproveChanges &&
+			hintSnapshotCaptured(existing) && dispatchVariantChanged(existing.CurrentAnnotations, tool.Annotations)
+		hashMatches := existing.ApprovedHash == currentHash && !dispatchDrift &&
 			!legacyHintsKnownToDiffer(existing.CurrentAnnotations, existing.HashSchemaVersion, tool.Annotations) &&
 			(existing.Status != storage.ToolApprovalStatusChanged || previousHintsProveRevert(existing.PreviousAnnotations, tool.Annotations))
 		if hashMatches {
@@ -1148,15 +1276,35 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 
 			// Decide whether this pending record is promoted to approved:
 			//   - baseline migration: trusted server, no prior baseline, hash unchanged (MCP-2931 #4)
+			//     AND the baseline scan is green for this tool (R2-1). A first-seen
+			//     tool the scan held is a pending record on a server that still
+			//     has no baseline (an all-held pass writes no marker, FR-025), so
+			//     without this gate the very next identical list would promote it
+			//     as a "stranded" pending record and clear the scan evidence —
+			//     the EXP-4 TOCTOU lab run found exactly that. The evidence on the
+			//     record is refreshed against the LIVE contract below, so it
+			//     always describes what the operator is looking at.
 			//   - auto_approve_tool_changes: operator opted in (MCP-2931 #3)
+			var baselineHold *scanHoldEvidence
+			if isBaselinePass {
+				baselineHold = baselineScan.holdFor(tool.Name)
+			}
 			promote := false
 			var promoteReason TransitionReason
 			var promoteBy string
 			switch {
-			case isBaselinePass && priorHashMatches:
+			case isBaselinePass && priorHashMatches && baselineHold == nil:
 				promote, promoteReason, promoteBy = true, ReasonBaselineTrust, "auto-baseline"
 			case autoApproveChanges:
 				promote, promoteReason, promoteBy = true, ReasonAutoApproveChanges, "auto-approve-changes"
+			}
+			if baselineHold != nil {
+				// Record why the LIVE contract is held. Evidence the record
+				// already carries from elsewhere (a legacy collapsed lock, a
+				// hold from an earlier contract) is left in place when this
+				// scan is clean: it is cleared on promotion (ClearScanHold
+				// below), never by a pass that does not promote.
+				baselineHold.applyTo(existing)
 			}
 
 			if promote {
@@ -1279,6 +1427,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 					result.ChangedCount++
 					continue
 				}
+				before := *existing
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
@@ -1299,8 +1448,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 					r.logger.Info("Changed tool auto-approved (auto_approve_tool_changes enabled)",
 						zap.String("server", serverName),
 						zap.String("tool", toolName))
-					r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
-						"", tool.Description, "", schemaJSON)
+					r.emitToolAutoApprovedChange(serverName, toolName, &before, tool, schemaJSON, outputSchemaJSON, currentHash, "auto-approve-changes", nil, "")
 				}
 				continue
 			}
@@ -1313,19 +1461,31 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			if r.refreshHeldContractSnapshot(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash) {
 				definitionsChanged = true
 			}
-			// trust_mode: scan (spec 086 stage 2, tightened by RT-02): a
-			// still-changed record is never re-baselined by the scan. The scan
-			// re-runs only to keep the hold evidence current (FR-018): matched
-			// TPA/check ids on a non-green verdict, cleared on a green one.
+			// trust_mode: scan (spec 119 FR-006): a still-changed record is
+			// re-evaluated on every pass against its CURRENT definition. A clean,
+			// full-coverage verdict with an empty structural delta (spec 120)
+			// approves it (a hold written before this release, or on a finding
+			// the definition has since moved past, clears without a click); a
+			// structural signal or a non-green verdict keeps it held with the
+			// evidence refreshed.
 			//
-			// Manual mode runs the same scan (evidenceScan): the held change
-			// carries a verdict for the definition it holds, refreshed on every
-			// further change.
-			if scanMode || evidenceScan {
-				// RT-02: a clean verdict never re-approves a changed contract;
-				// it only refreshes the hold evidence (awaiting_review when
-				// clean). The record stays changed until an operator confirms it.
-				r.recordScanHold(serverName, toolName, existing, wasUnstamped, r.scanHeldToolEvidence(serverName, tool, scanMode))
+			// Manual mode runs the evidence scan only (evidenceScan): the held
+			// change carries a verdict for the definition it holds, refreshed on
+			// every further change, and stays held until an operator confirms it
+			// (RT-02 applies to manual).
+			if scanMode {
+				clean, evidence := r.scanChangeIsClean(serverName, tool)
+				// Previous* is the approved contract's snapshot
+				// (refreshHeldContractSnapshot leaves it untouched); the
+				// structural gate (spec 120) compares the live contract with it.
+				signals := contractDelta(approvedSnapshotOf(existing), liveSnapshotOf(tool, schemaJSON, outputSchemaJSON))
+				if clean && len(signals) == 0 && scanApprovesChanges &&
+					r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash, evidence, signals) {
+					continue
+				}
+				r.recordScanHold(serverName, toolName, existing, wasUnstamped, withGateSignals(evidence, signals))
+			} else if evidenceScan {
+				r.recordScanHold(serverName, toolName, existing, wasUnstamped, r.scanHeldToolEvidence(serverName, tool, false))
 			}
 			// Tool still has the changed description — keep it blocked. A
 			// pre-105 record that stays changed still RESTRICTS, so there is
@@ -1387,7 +1547,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			// shortcut below is closed and the record is held as changed.
 			storedApprovalProven := v4ApprovedHashCoversStored(existing, toolName)
 
-			isFormulaChange := storedApprovalProven && rehashedFromStored == currentHash
+			isFormulaChange := storedApprovalProven && rehashedFromStored == currentHash && !dispatchDrift
 			if existing.HashSchemaVersion < storage.OutputSchemaHashSchemaVersion && hintsMatch {
 				// The legacy formulas are hashed from the LIVE contract and carry
 				// no (or raw, unnormalized) hints: they only prove a formula
@@ -1454,7 +1614,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			} else {
 				outputSchemaMatch = normalizeJSON(outputSchemaJSON) == normalizeJSON(existing.CurrentOutputSchema)
 			}
-			if storedApprovalProven && descMatch && schemaMatch && outputSchemaMatch && hintsMatch {
+			if storedApprovalProven && descMatch && schemaMatch && outputSchemaMatch && hintsMatch && !dispatchDrift {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonContentMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1508,7 +1668,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 			// that normalizeJSON does not absorb, such as the order of the
 			// "required" list, may differ). Any structural difference falls
 			// through to the change gate below and is held for review.
-			if storedApprovalProven && descMatch && outputSchemaMatch && hintsMatch && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
+			if storedApprovalProven && descMatch && outputSchemaMatch && hintsMatch && !dispatchDrift && inputSchemaSerializationEquivalent(existing.CurrentSchema, schemaJSON) {
 				if err := r.enforceInvariant(serverName, toolName, existing.Status, storage.ToolApprovalStatusApproved, ReasonDescriptionMatch); err != nil {
 					result.BlockedTools[toolName] = true
 					result.ChangedCount++
@@ -1545,6 +1705,7 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 					result.ChangedCount++
 					continue
 				}
+				before := *existing
 				existing.Status = storage.ToolApprovalStatusApproved
 				existing.ApprovedHash = currentHash
 				existing.CurrentHash = currentHash
@@ -1571,42 +1732,44 @@ func (r *Runtime) checkToolApprovalsResolved(serverName string, tools []*config.
 				r.logger.Info("Tool change auto-approved (auto_approve_tool_changes enabled)",
 					zap.String("server", serverName),
 					zap.String("tool", toolName))
-				r.emitToolQuarantineEvent(serverName, toolName, "tool_auto_approved", "", currentHash,
-					"", tool.Description, "", schemaJSON)
+				r.emitToolAutoApprovedChange(serverName, toolName, &before, tool, schemaJSON, outputSchemaJSON, currentHash, "auto-approve-changes", nil, "")
 				continue
 			}
 
-			// trust_mode: scan (spec 086 stage 2, tightened by RT-02) — a genuine
-			// tool change (rug pull) is ALWAYS held for human review, exactly as in
-			// manual mode. A synchronous, offline TPA scan of the new definition
-			// still runs so a non-green ("warnings"/"dangerous"), degraded or
-			// absent verdict is recorded as hold evidence; a green verdict no
-			// longer auto-approves, because paraphrased pulls scan clean.
-			// The hold evidence (verdict + matched TPA/check ids) rides along onto
-			// the changed record so the tool-approval surfaces can explain the hold
-			// (FR-018).
+			// A genuine tool change (the rug-pull guard). A synchronous, offline
+			// TPA scan of the new definition runs in scan and manual mode.
+			//
+			// trust_mode: scan (spec 119 FR-004): a clean, full-coverage verdict
+			// approves the new contract in this pass, unless the structural gate
+			// (spec 120: any safety-hint change, a widened input schema, an
+			// output-schema change, a dispatch-tier change) returns a signal; a
+			// signal holds the change with GATE-* ids in front of the scan's. A
+			// non-green ("warnings"/"dangerous"), degraded or absent verdict
+			// holds the change with the evidence (verdict + matched TPA/check
+			// ids) on the record so the tool-approval surfaces can explain the
+			// hold (FR-018).
+			//
+			// trust_mode: manual (RT-02, red-team 2026-10-11): the detector is
+			// defeatable by paraphrase, so the change is ALWAYS held; the scan
+			// only records the verdict of the new definition (awaiting_review
+			// when clean).
 			definitionsChanged = true
 			var holdEvidence *scanHoldEvidence
 			if evidenceScan {
-				// trust_mode manual: hold as always; the scan only records the
-				// verdict of the new definition (awaiting_review when clean).
 				_, holdEvidence = r.scanToolEvidence(serverName, tool)
 			}
 			if scanMode {
 				clean, evidence := r.scanChangeIsClean(serverName, tool)
-				if clean {
-					// RT-02 (red-team 2026-10-11): the detector is defeatable by
-					// paraphrase, so a clean verdict is not proof that a changed
-					// contract is safe. Hold it for operator confirmation exactly
-					// like manual mode, and say so loudly: the mark-changed path
-					// below also emits the tool_description_changed activity event.
-					r.logger.Warn("Tool change held for operator confirmation (trust_mode: scan, clean verdict does not auto-approve a changed contract)",
-						zap.String("server", serverName),
-						zap.String("tool", toolName),
-						zap.String("approved_hash", existing.ApprovedHash),
-						zap.String("current_hash", currentHash))
+				// Current* is still the approved contract's snapshot here: the
+				// record is approved and Current* = Approved*. The structural
+				// gate (spec 120) runs in front of the verdict: any signal holds
+				// the change whatever the scan said.
+				signals := contractDelta(approvedSnapshotOf(existing), liveSnapshotOf(tool, schemaJSON, outputSchemaJSON))
+				if clean && len(signals) == 0 && scanApprovesChanges &&
+					r.scanApproveChangedContract(serverName, toolName, existing, wasUnstamped, tool, schemaJSON, outputSchemaJSON, currentHash, evidence, signals) {
+					continue
 				}
-				holdEvidence = evidence
+				holdEvidence = withGateSignals(evidence, signals)
 			}
 
 			oldDesc := existing.CurrentDescription
@@ -1824,7 +1987,11 @@ func previousHintsProveRevert(previous, live *config.ToolAnnotations) bool {
 	if previous == nil {
 		return safetyHintsFingerprint(live) == ""
 	}
-	return safetyHintsFingerprint(previous) == safetyHintsFingerprint(live)
+	// Spec 120 FR-009: equal effective hints with a different call_tool
+	// variant (explicit defaults vs none) is the hash-equal change the gate
+	// held; only the explicit hints coming back prove the revert.
+	return safetyHintsFingerprint(previous) == safetyHintsFingerprint(live) &&
+		!dispatchVariantChanged(previous, live)
 }
 
 // saveToolApproval persists an approval record through the ONLY write seam
@@ -3451,41 +3618,50 @@ func (r *Runtime) RecordToolBlocksForSecurityApproval(serverName string, toolNam
 
 // emitToolQuarantineEvent emits an activity event for tool quarantine changes.
 func (r *Runtime) emitToolQuarantineEvent(serverName, toolName, action, oldHash, newHash, oldDesc, newDesc, oldSchema, newSchema string) {
+	r.emitToolQuarantineEventWith(serverName, toolName, action, oldHash, newHash, oldDesc, newDesc, oldSchema, newSchema, nil)
+}
+
+// maxToolEventTextLen caps every text field of a tool-quarantine activity
+// event at 64 KiB for storage.
+const maxToolEventTextLen = 64 * 1024
+
+func truncateEventText(s string) string {
+	if len(s) > maxToolEventTextLen {
+		return s[:maxToolEventTextLen]
+	}
+	return s
+}
+
+// emitToolQuarantineEventWith is emitToolQuarantineEvent with extra metadata
+// keys (spec 120 FR-010: the before-state of an automatic approval). Extra keys
+// never override the base ones.
+func (r *Runtime) emitToolQuarantineEventWith(serverName, toolName, action, oldHash, newHash, oldDesc, newDesc, oldSchema, newSchema string, extra map[string]any) {
 	metadata := map[string]interface{}{
 		"action":    action,
 		"tool_name": toolName,
 	}
+	for k, v := range extra {
+		metadata[k] = v
+	}
+	metadata["action"] = action
+	metadata["tool_name"] = toolName
 	if oldHash != "" {
 		metadata["old_hash"] = oldHash
 	}
 	if newHash != "" {
 		metadata["new_hash"] = newHash
 	}
-	// Truncate descriptions at 64KB for storage
-	const maxDescLen = 64 * 1024
 	if oldDesc != "" {
-		if len(oldDesc) > maxDescLen {
-			oldDesc = oldDesc[:maxDescLen]
-		}
-		metadata["old_description"] = oldDesc
+		metadata["old_description"] = truncateEventText(oldDesc)
 	}
 	if newDesc != "" {
-		if len(newDesc) > maxDescLen {
-			newDesc = newDesc[:maxDescLen]
-		}
-		metadata["new_description"] = newDesc
+		metadata["new_description"] = truncateEventText(newDesc)
 	}
 	if oldSchema != "" {
-		if len(oldSchema) > maxDescLen {
-			oldSchema = oldSchema[:maxDescLen]
-		}
-		metadata["old_schema"] = oldSchema
+		metadata["old_schema"] = truncateEventText(oldSchema)
 	}
 	if newSchema != "" {
-		if len(newSchema) > maxDescLen {
-			newSchema = newSchema[:maxDescLen]
-		}
-		metadata["new_schema"] = newSchema
+		metadata["new_schema"] = truncateEventText(newSchema)
 	}
 
 	// Marshal metadata to JSON string for the event payload

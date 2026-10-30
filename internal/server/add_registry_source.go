@@ -226,7 +226,7 @@ func buildRegistrySourceEntry(rawURL, protocol, id, name string) (config.Registr
 			ErrUnsupportedRegistryProtocol, protocol, defaultRegistryProtocol)
 	}
 	if id == "" {
-		id = deriveRegistryID(u.Host)
+		id = deriveRegistryID(u.Hostname())
 	}
 	if name == "" {
 		name = id
@@ -272,13 +272,11 @@ func validateNewRegistrySource(cfg *config.Config, entry config.RegistryEntry) e
 	return nil
 }
 
-// deriveRegistryID slugifies a host into a stable registry id, dropping a
-// leading "www." and a trailing port, and replacing non-alphanumerics with "-".
+// deriveRegistryID slugifies a hostname (no port, no IPv6 brackets) into a
+// stable registry id, dropping a leading "www." and replacing non-alphanumerics
+// with "-".
 func deriveRegistryID(host string) string {
 	host = strings.ToLower(host)
-	if h, _, ok := strings.Cut(host, ":"); ok {
-		host = h
-	}
 	host = strings.TrimPrefix(host, "www.")
 	var b strings.Builder
 	for _, r := range host {

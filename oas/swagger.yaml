@@ -9,6 +9,26 @@ components:
         surface:
           type: string
       type: object
+    config.AgentTokenRateLimit:
+      description: |-
+        AgentTokenRateLimit caps how many upstream tool calls ONE agent token may
+        make: PerMinute on average, Burst at once (issue #1699). Every token is
+        counted separately, and a token's own rate_limit (set when it is created)
+        replaces this default for that token. Only agent-token callers are
+        limited; the admin API key, the unix socket and an unauthenticated /mcp
+        caller are not. Absent or per_minute 0 = no limit (default, zero behavior
+        change). The counters are in memory: a restart gives every token a full
+        allowance again. Hot-reloadable. File/API-configured only, no env scheme.
+      properties:
+        burst:
+          description: |-
+            Burst is how many calls a token may make at once after a quiet spell.
+            0 = the PerMinute value.
+          type: integer
+        per_minute:
+          description: PerMinute is the sustained rate. 0 = no limit.
+          type: integer
+      type: object
     config.AuditLogConfig:
       description: |-
         AuditLog configures the Spec 107 edition-neutral audit sink
@@ -74,6 +94,8 @@ components:
             filtered to the caller's profile and agent-token scope. Default true;
             set false to keep server names out of client context. Read live.
           type: boolean
+        agent_token_rate_limit:
+          $ref: '#/components/schemas/config.AgentTokenRateLimit'
         aggregate_upstream_prompts:
           description: |-
             AggregateUpstreamPrompts, when true, aggregates every connected upstream
@@ -975,9 +997,11 @@ components:
             debounced informational server rescan that brings the review screen's scan
             coverage back to "current".
 
-            Evidence and freshness ONLY: a clean verdict never approves a changed
-            contract (RT-02); every change is still held for review in scan and manual
-            trust modes. Runs in every trust mode except "auto".
+            Evidence and freshness ONLY: this switch approves nothing. Under "manual"
+            every change is held for review whatever the verdict (RT-02); under
+            "scan" the gate's own synchronous scan approves a clean change that
+            passes the spec 120 structural gate (spec 119 FR-004), and this switch
+            does not affect that path. Runs in every trust mode except "auto".
 
             Default (nil) is ENABLED. It only takes effect while auto_baseline_scan is
             also enabled, so a user can keep the admission scan and turn off per-change
@@ -1328,8 +1352,9 @@ components:
             TrustMode is the per-server trust tier: auto|scan|manual. Supersedes
             auto_approve_tool_changes (spec 086). An empty value is derived from the
             legacy fields at load via normalizeServerQuarantineFlags; the single
-            resolution point is EffectiveTrustMode(), which treats an empty or
-            unrecognized value as manual (secure by default). Read via
+            resolution point is EffectiveTrustMode(), which treats an empty value as
+            scan (DefaultTrustMode, spec 119) and an unrecognized value as manual
+            (fail closed). Read via
             EffectiveTrustMode(), never the raw string.
           type: string
         updated:
@@ -1343,15 +1368,32 @@ components:
     config.TLSConfig:
       description: TLS configuration
       properties:
+        cert_file:
+          description: |-
+            CertFile is the absolute path of an operator-provided server certificate
+            (PEM, leaf first), served instead of a generated one. Needs KeyFile.
+          type: string
         certs_dir:
           description: Directory for certificates
           type: string
         enabled:
           description: Enable HTTPS
           type: boolean
+        extra_sans:
+          description: |-
+            ExtraSANs are DNS names and IP addresses added to the generated server
+            certificate, which is signed by the same local CA. Not used with CertFile.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         hsts:
           description: Enable HTTP Strict Transport Security
           type: boolean
+        key_file:
+          description: KeyFile is the absolute path of the private key for CertFile
+            (PEM).
+          type: string
         require_client_cert:
           description: Enable mTLS
           type: boolean
@@ -1781,10 +1823,12 @@ components:
           type: string
         rejected_count:
           description: |-
-            RejectedCount is the number of calls shed by a concurrency limiter before
-            they reached an upstream (spec 093). Counted separately from errors: it is
-            proxy backpressure, not an upstream fault, and it is the signal an
-            operator right-sizes max_concurrent_requests against.
+            RejectedCount is the number of calls shed by a concurrency limiter, or
+            refused because an agent token was over its call budget, before they
+            reached an upstream (spec 093, issue #1699). Counted separately from
+            errors: it is proxy backpressure, not an upstream fault, and it is the
+            signal an operator right-sizes max_concurrent_requests and the rate
+            limits against.
           type: integer
         start_time:
           description: Start of the period (RFC3339)
@@ -11405,8 +11449,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Shed by a concurrency limit (Retry-After header carries the
-            wait hint)
+          description: Shed by a concurrency limit or an agent token call rate limit
+            (Retry-After header carries the wait hint)
         "500":
           content:
             application/json:
@@ -11512,8 +11556,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Shed by a concurrency limit (Retry-After header carries the
-            wait hint)
+          description: Shed by a concurrency limit or an agent token call rate limit
+            (Retry-After header carries the wait hint)
         "500":
           content:
             application/json:

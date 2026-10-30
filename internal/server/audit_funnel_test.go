@@ -510,6 +510,7 @@ func TestAuditFunnel_LimiterShedIsToolCallRejected(t *testing.T) {
 	for reason, want := range map[limiter.Reason]string{
 		limiter.ReasonQueueFull:    "limiter_queue_full",
 		limiter.ReasonQueueTimeout: "limiter_queue_timeout",
+		limiter.ReasonRateLimited:  "rate_limited",
 	} {
 		ctx := proxy.installAuditAttempt(adminCtx(), auditAttemptSpec{
 			RequestID: "req-shed-" + string(reason), Server: "db", Tool: "query", Operation: "read", Surface: contracts.ToolVariantRead,

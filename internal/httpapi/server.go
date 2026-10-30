@@ -679,10 +679,7 @@ func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Reques
 // global admin key, or a user JWT resolved as a session principal
 // (kind=bearer_jwt) through the edition hook.
 func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, authHeader string) {
-	var token string
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		token = strings.TrimPrefix(authHeader, "Bearer ")
-	}
+	token := bearerToken(authHeader)
 
 	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
 		s.rejectClientCredentialOnREST(w, r)
@@ -813,12 +810,8 @@ func ExtractToken(r *http.Request) string {
 	}
 
 	// 2. Check Authorization: Bearer header
-	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			if token := strings.TrimPrefix(authHeader, "Bearer "); token != "" {
-				return token
-			}
-		}
+	if token := bearerToken(r.Header.Get("Authorization")); token != "" {
+		return token
 	}
 
 	// 3. Check query parameter (for SSE and Web UI initial load)
@@ -827,6 +820,17 @@ func ExtractToken(r *http.Request) string {
 	}
 
 	return ""
+}
+
+// bearerToken returns the credential from an Authorization header value that
+// uses the Bearer scheme, or "" otherwise. The scheme name is matched
+// case-insensitively (RFC 7235 §2.1, RFC 6750 §2.1).
+func bearerToken(authHeader string) string {
+	const scheme = "Bearer "
+	if len(authHeader) < len(scheme) || !strings.EqualFold(authHeader[:len(scheme)], scheme) {
+		return ""
+	}
+	return authHeader[len(scheme):]
 }
 
 // correlationIDMiddleware injects correlation ID and request source into context
@@ -3165,8 +3169,8 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q has no value to store", req.Scope, req.Key))
 		return
 	}
-	if strings.HasPrefix(value, "${keyring:") || strings.HasPrefix(value, "${env:") {
-		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference (%s); nothing to convert", req.Scope, req.Key, value))
+	if secret.IsSecretRef(value) {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference; nothing to convert", req.Scope, req.Key))
 		return
 	}
 
@@ -5059,7 +5063,14 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// chi routes on RawPath only when Go set it (the client's encoding differs
+	// from the default one); then {name} is still encoded and must be decoded
+	// once. Otherwise chi already matched the decoded Path, and decoding again
+	// would turn a literal "a%41" into "aA" and delete the wrong entry.
 	name := chi.URLParam(r, "name")
+	if r.URL.RawPath != "" {
+		name = decodePathParam(name)
+	}
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Secret name is required")
 		return
@@ -5619,7 +5630,7 @@ func (s *Server) maskToolCallRecord(record *contracts.ToolCallRecord) {
 // @Failure      400      {object}  contracts.ErrorResponse             "Tool call ID required or invalid JSON payload"
 // @Failure      401      {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
 // @Failure      405      {object}  contracts.ErrorResponse             "Method not allowed"
-// @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit (Retry-After header carries the wait hint)"
+// @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure      500      {object}  contracts.ErrorResponse             "Failed to replay tool call"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
@@ -5675,8 +5686,7 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 		// and certainly not the 200 success:true it used to produce when the
 		// rejection was flattened into the record's error field.
 		var limitErr *limiter.LimitError
-		if errors.As(err, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(err, &limitErr) && limitErr.Shed() {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
 			s.logger.Warnw("Tool call replay shed by concurrency limiter",
 				"id", id,
@@ -6265,7 +6275,7 @@ func deepMergeJSON(base, patch map[string]interface{}) {
 // @Param request body object{tool_name=string,arguments=object} true "Tool call request with tool name and arguments"
 // @Success 200 {object} contracts.SuccessResponse "Tool call result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (invalid payload or missing tool name)"
-// @Failure 429 {object} contracts.ErrorResponse "Shed by a concurrency limit (Retry-After header carries the wait hint)"
+// @Failure 429 {object} contracts.ErrorResponse "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error or tool execution failure"
 // @Router /api/v1/tools/call [post]
 func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
@@ -6318,8 +6328,7 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 		// server fault — answer 429 with a Retry-After derived from the shedding
 		// scope's effective queue_timeout so a client can back off correctly.
 		var limitErr *limiter.LimitError
-		if errors.As(err, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(err, &limitErr) && limitErr.Shed() {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
 			s.logger.Warnw("Tool call shed by concurrency limiter",
 				"tool", request.ToolName,
@@ -6417,7 +6426,7 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id}/servers [get]
 func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6673,7 +6682,7 @@ func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request)
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id} [delete]
 func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6712,7 +6721,7 @@ func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Reque
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id} [put]
 func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6751,7 +6760,7 @@ func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request
 // @Failure      500  {object}  contracts.ErrorResponse            "Failed to refresh registry cache"
 // @Router       /api/v1/registries/{id}/refresh [post]
 func (s *Server) handleRefreshRegistryCache(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6898,6 +6907,7 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
+	sessionFilter.Offset = offset
 
 	// Get recent sessions from controller
 	sessions, total, err := s.controller.GetRecentSessions(sessionFilter)
@@ -7277,7 +7287,7 @@ func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
 	}
 
 	serverID := chi.URLParam(r, "id")
-	toolName := chi.URLParam(r, "tool")
+	toolName := decodePathParam(chi.URLParam(r, "tool"))
 	if serverID == "" || toolName == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")
 		return
@@ -7404,7 +7414,7 @@ func (s *Server) handleSetAllToolsEnabled(enabled bool) http.HandlerFunc {
 
 func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
-	toolName := chi.URLParam(r, "tool")
+	toolName := decodePathParam(chi.URLParam(r, "tool"))
 
 	if serverID == "" || toolName == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")
