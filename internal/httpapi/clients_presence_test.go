@@ -516,3 +516,54 @@ func successData(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
 	require.True(t, envelope.Success)
 	return envelope.Data
 }
+
+func TestClientsPresence_CreditsBridgedClaudeDesktopAndCodex(t *testing.T) {
+	rt, err := proxyRuntime.New(&config.Config{DataDir: t.TempDir(), Listen: "127.0.0.1:0"}, "", zap.NewNop())
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, rt.Close()) })
+
+	rt.RecordClientSeen("claude-ai (via mcp-remote 0.15.2)")
+	rt.RecordClientSeen("codex-mcp-client")
+	state, err := rt.GetOnboardingState()
+	require.NoError(t, err)
+	ctrl := &clientPresenceController{state: state, sessions: []*contracts.MCPSession{
+		{ID: "desktop", ClientName: "claude-ai (via mcp-remote 0.15.2)", Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now()},
+		{ID: "codex", ClientName: "codex-mcp-client", Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now()},
+	}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	rows := map[string]map[string]any{}
+	for _, raw := range successData(t, rec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		require.NotEqual(t, "other", row["kind"], "bridged and Codex sessions must not become other: rows: %v", row["id"])
+		rows[row["id"].(string)] = row
+	}
+	for _, id := range []string{"claude-desktop", "codex"} {
+		require.Contains(t, rows, id)
+		require.NotNil(t, rows[id]["last_seen"], id)
+		require.Equal(t, float64(1), rows[id]["active_sessions"], id)
+	}
+}
+
+func TestClientsPresence_EscapePrefixedBridgedAliasRemainsOtherClient(t *testing.T) {
+	ctrl := &clientPresenceController{sessions: []*contracts.MCPSession{{
+		ID: "escaped", ClientName: "\x1bclaude-ai (via mcp-remote 0.15.2)", Status: "active", StartTime: time.Now().Add(-time.Minute), LastActivity: time.Now(),
+	}}}
+	srv := NewServer(ctrl, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/clients", nil)
+	req.Header.Set("X-API-Key", "clients-admin-key")
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	for _, raw := range successData(t, rec)["clients"].([]any) {
+		row := raw.(map[string]any)
+		if row["id"] == "claude-desktop" {
+			require.Equal(t, float64(0), row["active_sessions"], "escaped name must not credit Claude Desktop")
+		}
+	}
+}

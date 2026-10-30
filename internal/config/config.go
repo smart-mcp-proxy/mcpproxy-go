@@ -754,12 +754,16 @@ type ServerConfig struct {
 	// scan (DefaultTrustMode, spec 119) and an unrecognized value as manual
 	// (fail closed). Read via
 	// EffectiveTrustMode(), never the raw string.
-	TrustMode      string           `json:"trust_mode,omitempty" mapstructure:"trust-mode"` // Per-server trust tier: auto|scan|manual. Supersedes auto_approve_tool_changes (086)
-	Shared         bool             `json:"shared,omitempty" mapstructure:"shared"`         // Server edition: shared with all users
-	Created        time.Time        `json:"created" mapstructure:"created"`
-	Updated        time.Time        `json:"updated,omitempty" mapstructure:"updated"`
-	Isolation      *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
-	ReconnectOnUse bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
+	TrustMode string `json:"trust_mode,omitempty" mapstructure:"trust-mode"` // Per-server trust tier: auto|scan|manual. Supersedes auto_approve_tool_changes (086)
+	// ToolArgumentErrorMode stores the per-upstream argument-error policy.
+	// Empty and detailed retain detailed errors; redacted opts into redaction.
+	// Updates omit/keep an empty value; detailed explicitly resets the policy.
+	ToolArgumentErrorMode string           `json:"tool_argument_error_mode,omitempty" mapstructure:"tool_argument_error_mode"`
+	Shared                bool             `json:"shared,omitempty" mapstructure:"shared"` // Server edition: shared with all users
+	Created               time.Time        `json:"created" mapstructure:"created"`
+	Updated               time.Time        `json:"updated,omitempty" mapstructure:"updated"`
+	Isolation             *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
+	ReconnectOnUse        bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
 
 	// ExposePrompts overrides whether this server's advertised MCP prompts are
 	// aggregated into mcpproxy's prompts/list. nil (default) inherits the
@@ -2923,6 +2927,9 @@ func (c *Config) validateDetailedCore() []ValidationError {
 	serverNames := make(map[string]bool)
 	for i, server := range c.Servers {
 		fieldPrefix := fmt.Sprintf("mcpServers[%d]", i)
+		if err := ValidateToolArgumentErrorMode(server.ToolArgumentErrorMode); err != nil {
+			errors = append(errors, ValidationError{Field: fieldPrefix + ".tool_argument_error_mode", Message: err.Error()})
+		}
 
 		// Validate per-server isolation mode override (MCP-34.2).
 		if server.Isolation != nil && server.Isolation.Mode != nil && !server.Isolation.Mode.IsValid() {

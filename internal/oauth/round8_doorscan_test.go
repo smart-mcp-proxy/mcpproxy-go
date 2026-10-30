@@ -137,7 +137,7 @@ var routedDoors = map[string]string{
 		"redactedServerView, isolation + global docker_isolation from the shared walk, last_error via scrubUpstreamText",
 	"internal/server/mcp.go:(m).handleAddServerFromRegistry": "add_from_registry echo — command/url from redactedServerView, args via liveRedaction.Argv",
 	"internal/server/mcp.go:(m).handleListRegistries":        "list_registries — registry source url via liveRedaction.URLValue",
-	"internal/server/mcp.go:(m).createDetailedErrorResponse": "MCP error payload — server_url via liveRedaction.URLValue; error/response_body/error_data scrubbed",
+	"internal/server/mcp.go:(m).createToolErrorResponse":     "MCP error payload — server_url via liveRedaction.URLValue; error/response_body via scrubUpstreamText; structured error_data via redactValueWith/normalizeForRedaction with liveRedaction",
 	"internal/server/mcp.go:(m).handleListQuarantinedUpstreams": "quarantine_security list_quarantined — the " +
 		"ORIGINAL #1148 door. Whole server blocks via redactedServerViews (the shared walk).",
 	"internal/server/mcp.go:(m).handleInspectQuarantinedTools": "quarantine_security inspect — the analysis " +

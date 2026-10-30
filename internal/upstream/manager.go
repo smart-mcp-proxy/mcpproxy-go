@@ -1596,7 +1596,7 @@ func (m *Manager) callTool(ctx context.Context, toolName string, args map[string
 		}
 
 		// Generic error with helpful context
-		return nil, fmt.Errorf("tool '%s' on server '%s' failed: %w. Check server configuration, authentication, and tool parameters", actualToolName, serverName, err)
+		return nil, &genericToolCallError{server: serverName, tool: actualToolName, cause: err}
 	}
 
 	return result, nil

@@ -220,8 +220,13 @@ func (im *IsolationManager) warnPerServerIgnoredOnce(serverName string) {
 
 // DetectRuntimeType detects the runtime type based on the command
 func (im *IsolationManager) DetectRuntimeType(command string) string {
-	// Extract just the command name without path
-	cmdName := filepath.Base(command)
+	// Extract just the command name without path or a Windows executable
+	// suffix (uvx.exe, npx.cmd), compared case-insensitively as Windows does.
+	cmdName := strings.ToLower(filepath.Base(command))
+	switch filepath.Ext(cmdName) {
+	case ".exe", ".cmd", ".bat":
+		cmdName = strings.TrimSuffix(cmdName, filepath.Ext(cmdName))
+	}
 
 	// Handle common runtime commands
 	switch cmdName {

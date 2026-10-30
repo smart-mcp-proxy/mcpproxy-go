@@ -157,7 +157,10 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 // as the wrapped command (it sidesteps the login shell's PATH re-derivation),
 // dropping to bare "docker" only when resolution failed.
 func (c *Client) resolveDockerSpawn(finalArgs []string) (dockerCommand string, dockerArgs []string, shellWrapped bool, dockerDir string) {
-	resolved, resErr := resolveDockerBinary(c.logger)
+	resolved, resErr := c.configuredDockerBinary()
+	if resolved == "" {
+		resolved, resErr = resolveDockerBinary(c.logger)
+	}
 	switch {
 	case resErr == nil && isDirectExecutable(resolved) && dockerDaemonEnvGuaranteed():
 		// INFO (not Debug): make the spawn decision observable in main.log so a
@@ -367,13 +370,16 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 	// Get the Docker command string (last argument)
 	dockerCmd := shellArgs[len(shellArgs)-1]
 
-	// Insert --cidfile into the Docker command string
-	// Look for "docker run" and insert --cidfile right after
-	if strings.Contains(dockerCmd, "docker run") {
-		// Replace "docker run" with "docker run --cidfile /path/to/file"
-		dockerCmdWithCid := strings.Replace(dockerCmd, "docker run", fmt.Sprintf("docker run --cidfile %s", cidFile), 1)
-
-		// Create new args with the modified command
+	// Insert --cidfile immediately after the run verb. The executable may be the
+	// bare name "docker", "docker.exe" (Windows), or a quoted path to either.
+	// A literal search for "docker run" misses docker.exe, and the fallback
+	// below then appends --cidfile as extra shell argv, where docker never
+	// sees it (it lands after the image and is passed into the container).
+	// The cidfile path is spliced into a string the shell re-parses, so quote it
+	// in that shell's dialect: a %TEMP% with a space would otherwise split the
+	// path under cmd.exe, and bash -c would strip a Windows path's backslashes.
+	quotedCid := quoteCidfileForShell(cidFile, secondToLast == "/c")
+	if dockerCmdWithCid, ok := insertCidfileAfterDockerRun(dockerCmd, quotedCid); ok {
 		newArgs := make([]string, len(shellArgs))
 		copy(newArgs, shellArgs)
 		newArgs[len(newArgs)-1] = dockerCmdWithCid
@@ -386,11 +392,157 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 		return newArgs
 	}
 
-	// If we can't find "docker run", fall back to appending
+	// If we can't find a docker run verb, fall back to appending
 	c.logger.Warn("Could not find 'docker run' in shell command for cidfile insertion",
 		zap.String("server", c.config.Name),
 		zap.String("docker_cmd", logSafeCommand(dockerCmd)))
 	return append(shellArgs, "--cidfile", cidFile)
+}
+
+// quoteCidfileForShell quotes cidFile for the shell that will parse the
+// wrapped command string: cmd.exe (/c) or a POSIX shell (-c, including Git
+// Bash on Windows).
+func quoteCidfileForShell(cidFile string, cmdExe bool) string {
+	if cmdExe {
+		if strings.ContainsAny(cidFile, " \t&|<>()^%") {
+			return `"` + cidFile + `"`
+		}
+		return cidFile
+	}
+	if !strings.ContainsAny(cidFile, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
+		return cidFile
+	}
+	return "'" + strings.ReplaceAll(cidFile, "'", `'"'"'`) + "'"
+}
+
+// insertCidfileAfterDockerRun returns the command with "--cidfile <file>"
+// placed immediately after the run verb of a docker or docker.exe invocation.
+// The executable may be bare or a quoted path. ok is false when the command
+// does not start with one.
+func insertCidfileAfterDockerRun(dockerCmd, cidFile string) (string, bool) {
+	end, ok := dockerRunVerbEnd(dockerCmd)
+	if !ok {
+		return "", false
+	}
+	return dockerCmd[:end] + " --cidfile " + cidFile + dockerCmd[end:], true
+}
+
+// dockerRunVerbEnd reports the index just past the "run" verb when cmd's first
+// token is a docker or docker.exe executable (bare, a path, or quoted).
+func dockerRunVerbEnd(cmd string) (int, bool) {
+	i := skipShellSpace(cmd, 0)
+	tok, next, ok := readShellToken(cmd, i)
+	if !ok || !isDockerExecutableToken(tok) {
+		return 0, false
+	}
+	i = skipShellSpace(cmd, next)
+	const verb = "run"
+	if i+len(verb) > len(cmd) || cmd[i:i+len(verb)] != verb {
+		return 0, false
+	}
+	end := i + len(verb)
+	if end < len(cmd) && cmd[end] != ' ' && cmd[end] != '\t' {
+		return 0, false
+	}
+	return end, true
+}
+
+func skipShellSpace(s string, i int) int {
+	for i < len(s) && (s[i] == ' ' || s[i] == '\t') {
+		i++
+	}
+	return i
+}
+
+// readShellToken reads one shell word starting at i. A leading quote consumes
+// until the matching closer; the returned token is the word without quotes.
+func readShellToken(s string, i int) (string, int, bool) {
+	if i >= len(s) {
+		return "", i, false
+	}
+	if s[i] == '"' || s[i] == '\'' {
+		q := s[i]
+		j := i + 1
+		for j < len(s) && s[j] != q {
+			j++
+		}
+		if j >= len(s) {
+			return "", i, false
+		}
+		return s[i+1 : j], j + 1, true
+	}
+	j := i
+	for j < len(s) && s[j] != ' ' && s[j] != '\t' {
+		j++
+	}
+	if j == i {
+		return "", i, false
+	}
+	return s[i:j], j, true
+}
+
+// isDockerExecutableToken reports whether tok names the docker CLI, including
+// a path and the Windows docker.exe form. Comparison is case-insensitive
+// because Windows executable lookup is.
+func isDockerExecutableToken(tok string) bool {
+	base := tok
+	if k := strings.LastIndexAny(base, `/\`); k >= 0 {
+		base = base[k+1:]
+	}
+	switch strings.ToLower(base) {
+	case "docker", "docker.exe":
+		return true
+	default:
+		return false
+	}
+}
+
+// configuredDockerBinary returns the server's own command when it is a
+// user-supplied `docker run` naming the docker CLI by an absolute or relative
+// path to an executable, so that binary is spawned instead of whichever docker the
+// resolver finds. "" means resolve as usual.
+func (c *Client) configuredDockerBinary() (string, error) {
+	if c.config == nil || !isDockerRunCommand(c.config.Command, c.config.Args) {
+		return "", nil
+	}
+	command := c.config.Command
+	// A relative path is evaluated against working_dir, as exec does with
+	// Cmd.Dir (or the process directory without one). A bare name is a PATH
+	// lookup, which the resolver handles.
+	if !filepath.IsAbs(command) && strings.ContainsAny(command, `/\`) {
+		base := c.config.WorkingDir
+		if base == "" {
+			wd, err := os.Getwd()
+			if err != nil {
+				return "", nil
+			}
+			base = wd
+		}
+		abs, err := filepath.Abs(filepath.Join(base, command))
+		if err != nil {
+			return "", nil
+		}
+		command = abs
+	}
+	if !isDirectExecutable(command) {
+		return "", nil
+	}
+	return command, nil
+}
+
+// isDockerRunCommand reports whether a configured command is a user-supplied
+// `docker run`. The command may be bare or a path in either separator style,
+// and may carry the Windows .exe suffix (case-insensitive, as Windows lookup is).
+func isDockerRunCommand(command string, args []string) bool {
+	if len(args) == 0 || args[0] != cmdRun {
+		return false
+	}
+	base := command
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.ToLower(base)
+	return base == cmdDocker || base == cmdDocker+".exe"
 }
 
 // extractContainerNameFromArgs extracts the container name from Docker run arguments

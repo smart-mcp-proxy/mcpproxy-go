@@ -14,13 +14,27 @@ import (
 //
 //  1. Impersonation clone: a tool whose name AND near-duplicate description
 //     both match another server's tool (one impersonating the other so an
-//     agent calls the wrong one). A name collision ALONE is never flagged:
-//     mcpproxy exists to unify many servers, every tool is namespaced
-//     server:tool, and ordinary compound names (list_models, search_issues…)
-//     legitimately collide across servers — retrieve_tools' ranking is what
-//     disambiguates them, and no fixed "distinctive name" heuristic can
-//     separate those from attacks (MCP-3520: ElevenLabs vs kaggle
-//     list_models). The description clone is the evidence.
+//     agent calls the wrong one). The description clone is the HARD evidence.
+//     A name collision ALONE is never HARD: mcpproxy exists to unify many
+//     servers, every tool is namespaced server:tool, and ordinary compound
+//     names (list_models, search_issues…) legitimately collide across servers
+//     — retrieve_tools' ranking is what disambiguates them, and no fixed
+//     "distinctive name" heuristic can separate those from attacks (MCP-3520:
+//     ElevenLabs vs kaggle list_models).
+//     1b. Name squat (SOFT, review-only; round-2 red team R2-5): a DISTINCTIVE
+//     name that another server also exposes, with a DIFFERENT description.
+//     Round 1 and round 2 both showed this is the one offline bypass that
+//     stays open under the clone rule: an attacker keeps the victim's tool
+//     name and rewrites the prose ("Fetch a file from disk…" for the
+//     victim's filesystem_read). It is surfaced for review — it holds a
+//     trust_mode: scan change and a first-seen baseline tool (R2-1 gate),
+//     never auto-quarantines — UNLESS the description explains the overlap
+//     by naming its own server (provenance: "Lists ElevenLabs voices and
+//     models", "Browse Kaggle's model registry"), which is how honest servers
+//     that share a compound name actually describe themselves and exactly
+//     what an impersonator cannot afford to write. The MCP-3520 pair stays
+//     clean under that rule; a squat on a name like filesystem_read with no
+//     provenance in the text does not.
 //  2. Cross-server reference: a tool whose description names a DISTINCTIVE
 //     tool that lives ONLY on different servers (steering the agent's tool
 //     selection). A name the tool's own server also exposes is ordinary
@@ -67,6 +81,11 @@ type Shadowing struct{}
 // above.
 const shadowingConfidence = 0.85
 
+// nameSquatConfidence rates the SOFT name-squat shape (1b). It sits well below
+// shadowingConfidence: a bare name collision with different prose is weak
+// evidence on its own, and detect.aggregate sums confidences per tool.
+const nameSquatConfidence = 0.4
+
 // ID implements detect.Check.
 func (*Shadowing) ID() string { return "shadowing.cross_server" }
 
@@ -102,8 +121,13 @@ func (c *Shadowing) Inspect(tool detect.ToolView, reg detect.RegistryView) []det
 	// 1. Impersonation clone: same name on another server AND a near-duplicate
 	// description. The clone is the evidence — a bare name coincidence is the
 	// proxy's normal operating condition, not a finding.
+	cloned := false
+	var squatOf string // first other server sharing the name without a clone
 	for _, other := range reg.ToolsByName[tool.Name] {
-		if other.Server != tool.Server && cloneDescriptions(tool.Description, other.Description) {
+		if other.Server == tool.Server {
+			continue
+		}
+		if cloneDescriptions(tool.Description, other.Description) {
 			sigs = append(sigs, detect.Signal{
 				CheckID:    c.ID(),
 				Tier:       detect.TierHard,
@@ -119,12 +143,100 @@ func (c *Shadowing) Inspect(tool detect.ToolView, reg detect.RegistryView) []det
 				// UI's honest fallback for a span-less finding already exists.
 				Detail: fmt.Sprintf("Tool %q clones server %q's tool — same name and near-identical description — possible impersonation.", tool.Name, other.Server),
 			})
+			cloned = true
 			break // one clone signal is enough
 		}
+		if squatOf == "" {
+			squatOf = other.Server
+		}
+	}
+
+	// 1b. Name squat: the name is shared with another server, the description
+	// is GENUINELY different (not a clone, and not identical text too short to
+	// evidence one — "Create." == "Create." is neither shape), the name is
+	// distinctive, and the description does not name its own server.
+	// Review-only (SOFT); see the type comment.
+	if !cloned && squatOf != "" && distinctiveName(tool.Name) && !mentionsOwnServer(tool) &&
+		!sameTokens(tool.Description, reg.ToolsByName[tool.Name], squatOf) {
+		sigs = append(sigs, detect.Signal{
+			CheckID:    c.ID(),
+			Tier:       detect.TierSoft,
+			ThreatType: detect.ThreatToolPoisoning,
+			Confidence: nameSquatConfidence,
+			Evidence:   detect.CapEvidence(fmt.Sprintf("tool %q shares its name with server %q's tool but describes it differently", tool.Name, squatOf)),
+			// No Spans: like the clone shape, the evidence is the (server, name)
+			// pair against the whole description, not a located substring.
+			Detail: fmt.Sprintf("Tool %q has the same name as server %q's tool with a different description — possible name squat (an impersonator keeps the trusted name and rewrites the prose). Review which one you intend to expose; mentioning the owning server in the description clears this.", tool.Name, squatOf),
+		})
 	}
 
 	sigs = append(sigs, c.referenceSignals(tool, reg)...)
 	return sigs
+}
+
+// sameTokens reports whether desc has exactly the token set of the colliding
+// tool on server other — identical prose modulo case/punctuation, which the
+// clone shape already judged too short to be evidence and the squat shape must
+// not re-label as "describes it differently".
+func sameTokens(desc string, owners []detect.ToolView, other string) bool {
+	mine := descTokens(desc)
+	for _, o := range owners {
+		if o.Server != other {
+			continue
+		}
+		theirs := descTokens(o.Description)
+		if len(theirs) != len(mine) {
+			return false
+		}
+		for tok := range mine {
+			if _, ok := theirs[tok]; !ok {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// mentionsOwnServer reports whether a tool's description names the server it
+// belongs to — the provenance that explains an honest name collision ("Lists
+// ElevenLabs voices and models" on server "elevenlabs"). Every letter/digit
+// run of the server name (split on "-", "_", ".", spaces, case-folded) of
+// three or more characters counts; a run shorter than that ("ai", "db") is
+// too common a token to be provenance. The description is tokenized the same
+// way, so "Kaggle's" and "kaggle-mcp" both match the server token "kaggle".
+func mentionsOwnServer(tool detect.ToolView) bool {
+	serverToks := nameTokens(tool.Server)
+	if len(serverToks) == 0 {
+		return false
+	}
+	descToks := nameTokens(tool.Description)
+	for tok := range serverToks {
+		if _, ok := descToks[tok]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// nameTokens splits s into its lowercased letter/digit runs of three or more
+// characters, dropping generic connective words that appear in server names
+// without identifying anyone ("mcp", "server", "tool(s)", "api").
+func nameTokens(s string) map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, tok := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if len([]rune(tok)) < 3 {
+			continue
+		}
+		switch tok {
+		case "mcp", "server", "tool", "tools", "api", "the", "and", "for", "with", "from", "local", "remote", "official":
+			continue
+		}
+		out[tok] = struct{}{}
+	}
+	return out
 }
 
 // cloneDescriptions reports whether two descriptions are near-duplicates after
@@ -135,11 +247,14 @@ func (c *Shadowing) Inspect(tool detect.ToolView, reg detect.RegistryView) []det
 //
 // Accepted, deliberate limits (owner decision, MCP-3520):
 //   - An attacker who writes a genuinely DIFFERENT description for a colliding
-//     name is out of this check's scope — by name alone that case is
+//     name is out of THIS (hard) shape's scope — by name alone that case is
 //     indistinguishable from two honest servers sharing a compound name
 //     (list_models on every model host), which is the proxy's normal
-//     condition. The defenses there are admission quarantine for new servers,
-//     server:tool namespacing, and server provenance in retrieve_tools.
+//     condition. Since the round-2 red team (R2-5) that case is surfaced for
+//     review by the SOFT name-squat shape (1b) in Inspect, unless the
+//     description names its own server; the other defenses there remain
+//     admission quarantine for new servers, server:tool namespacing, and
+//     server provenance in retrieve_tools.
 //   - Descriptions with fewer than three tokens carry too little information
 //     to distinguish a clone from a coincidence ("Create" == "Create" says
 //     nothing) and never match; empty descriptions likewise.

@@ -420,7 +420,20 @@ func parseUpstreamServer(upstream string, cfg *Config) error {
 	return nil
 }
 
-// atomicWriteFile writes data to path atomically using temp file + rename pattern.
+// skipWriteSync drops the fsync from atomicWriteFileMode. Only tests set it,
+// through DisableWriteSyncForTesting; production writes always sync.
+var skipWriteSync atomic.Bool
+
+// DisableWriteSyncForTesting makes config file writes skip the fsync before
+// the atomic rename for the rest of the process. The written bytes are still
+// visible to every reader in the process; only crash durability is lost, which
+// no unit test exercises. Call it from TestMain in packages whose tests write
+// configs heavily: FlushFileBuffers on the Windows CI runner costs tens of
+// milliseconds per write and dominated internal/runtime's test time. Never
+// call it from production code.
+func DisableWriteSyncForTesting() { skipWriteSync.Store(true) }
+
+// atomicWriteFileMode writes data to path atomically using temp file + rename pattern.
 // This prevents race conditions where readers might see partially written files.
 //
 // The atomic write pattern:
@@ -435,27 +448,15 @@ func parseUpstreamServer(upstream string, cfg *Config) error {
 // On Windows, rename atomicity is not guaranteed when target exists, but this
 // approach is still much safer than truncate+write (reduces race window from
 // ~50ms to <1ms).
-func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
-	return atomicWriteFileMode(path, data, perm, false)
-}
-
-// skipWriteSync drops the fsync from atomicWriteFileMode. Only tests set it,
-// through DisableWriteSyncForTesting; production writes always sync.
-var skipWriteSync atomic.Bool
-
-// DisableWriteSyncForTesting makes config file writes skip the fsync before
-// the atomic rename for the rest of the process. The written bytes are still
-// visible to every reader in the process; only crash durability is lost, which
-// no unit test exercises. Call it from TestMain in packages whose tests write
-// configs heavily: FlushFileBuffers on the Windows CI runner costs tens of
-// milliseconds per write and dominated internal/runtime's test time. Never
-// call it from production code.
-func DisableWriteSyncForTesting() { skipWriteSync.Store(true) }
-
-// atomicWriteFileMode is atomicWriteFile; with exactMode the temp file is
-// chmod-ed to perm before the rename, so the result carries perm itself and
-// not perm filtered by the process umask (which OpenFile applies).
-func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode bool) error {
+//
+// With exactMode the temp file is chmod-ed to perm before the rename, so the
+// result carries perm itself and not perm filtered by the process umask
+// (which OpenFile applies).
+//
+// sameGroupAs (may be nil) is the file being replaced when perm grants its
+// group access: if the new inode would land in a different group, the write
+// falls back to 0600 rather than open the file to a group nobody chose.
+func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode bool, sameGroupAs os.FileInfo) error {
 	// Generate random suffix for temp file
 	randBytes := make([]byte, 8)
 	if _, err := rand.Read(randBytes); err != nil {
@@ -468,7 +469,13 @@ func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode b
 	tmpPath := filepath.Join(dir, filepath.Base(path)+".tmp."+suffix)
 
 	// Write to temp file
-	tmpFile, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	// With exactMode the final mode is applied by Chmod below, after the group
+	// check, so nothing beyond the owner can open the file before then.
+	createPerm := perm
+	if exactMode {
+		createPerm = perm & 0o600
+	}
+	tmpFile, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, createPerm)
 	if err != nil {
 		return fmt.Errorf("failed to create temp file: %w", err)
 	}
@@ -481,12 +488,19 @@ func atomicWriteFileMode(path string, data []byte, perm os.FileMode, exactMode b
 		}
 	}()
 
+	if saveConfigTempHook != nil {
+		saveConfigTempHook(tmpPath)
+	}
+
 	// Write data
 	if _, err := tmpFile.Write(data); err != nil {
 		return fmt.Errorf("failed to write temp file: %w", err)
 	}
 
 	if exactMode {
+		if sameGroupAs != nil && !sameFileGroup(tmpFile, sameGroupAs) {
+			perm = 0o600
+		}
 		if err := tmpFile.Chmod(perm); err != nil {
 			return fmt.Errorf("failed to set temp file mode: %w", err)
 		}
@@ -536,6 +550,9 @@ func SaveConfig(cfg *Config, path string) error {
 // telemetry.persistConfig documents — but a field it merely carries from an
 // override is restored from the file, never from that stale copy.)
 func SaveConfigWithEdits(cfg, mergeBase *Config, path string) error {
+	if err := cfg.validateToolArgumentErrorModes(); err != nil {
+		return err
+	}
 	saveConfigMu.Lock()
 	defer saveConfigMu.Unlock()
 	persisted := PersistableConfigWithEdits(cfg, mergeBase, path)
@@ -554,6 +571,10 @@ var saveConfigMu sync.Mutex
 // (under saveConfigMu). Tests only.
 var saveConfigTestHook func()
 
+// saveConfigTempHook, when set by a test, sees each temp file path right after
+// it is created.
+var saveConfigTempHook func(tmpPath string)
+
 // RestoreConfigFileBytes writes raw bytes back to the config file atomically
 // with exactly the given permission bits (the process umask does not apply,
 // and 0000 is a mode like any other), under the same lock as every in-process
@@ -562,7 +583,7 @@ var saveConfigTestHook func()
 func RestoreConfigFileBytes(path string, data []byte, perm os.FileMode) error {
 	saveConfigMu.Lock()
 	defer saveConfigMu.Unlock()
-	if err := atomicWriteFileMode(path, data, perm.Perm(), true); err != nil {
+	if err := atomicWriteFileMode(path, data, perm.Perm(), true, nil); err != nil {
 		return fmt.Errorf("failed to restore config file: %w", err)
 	}
 	return nil
@@ -583,11 +604,27 @@ func writeConfigFile(cfg *Config, path string) error {
 
 	// Atomic write with fsync to prevent race conditions
 	// This ensures core never reads partially written config files
-	if err := atomicWriteFile(path, data, 0600); err != nil {
+	perm, keepGroupOf := configFileSaveMode(path)
+	if err := atomicWriteFileMode(path, data, perm, keepGroupOf != nil, keepGroupOf); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
 	return nil
+}
+
+// configFileSaveMode is the mode a config save writes: 0600, except that a
+// file which already grants its group read and nothing else beyond the owner
+// (0640) keeps that. The deb/rpm package ships /etc/mcpproxy/mcp_config.json
+// as 0640 root:mcpproxy so the mcpproxy group can run `mcpproxy --system`; a
+// 0600 rewrite (the service persisting its generated API key, or a save under
+// sudo) would lock the group out or leave a root-owned file the service cannot
+// read (GH discussion #1678). keepGroupOf is the existing file when 0640 is
+// kept, so the write can check the replacement lands in the same group.
+func configFileSaveMode(path string) (perm os.FileMode, keepGroupOf os.FileInfo) {
+	if info, err := os.Stat(path); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o077 == 0o040 {
+		return 0o640, info
+	}
+	return 0o600, nil
 }
 
 // SaveConfigToDataDir saves configuration to the data directory

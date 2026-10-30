@@ -412,11 +412,12 @@ func TestHandleConvertConfigToSecret_ValidationErrors(t *testing.T) {
 	logger := zap.NewNop().Sugar()
 
 	cases := []struct {
-		name       string
-		existing   *config.ServerConfig
-		body       string
-		wantStatus int
-		wantInBody string
+		name          string
+		existing      *config.ServerConfig
+		body          string
+		wantStatus    int
+		wantInBody    string
+		wantNotInBody string
 	}{
 		{
 			name:       "missing scope",
@@ -477,6 +478,37 @@ func TestHandleConvertConfigToSecret_ValidationErrors(t *testing.T) {
 			wantInBody: "already a reference",
 		},
 		{
+			name: "value is already a file reference",
+			existing: &config.ServerConfig{
+				Name: "synapbus", Protocol: "stdio", Enabled: true,
+				Env: map[string]string{"GITHUB_TOKEN": "${file:/run/secrets/github-token}"},
+			},
+			body:       `{"scope": "env", "key": "GITHUB_TOKEN", "secret_name": "synapbus-auth"}`,
+			wantStatus: 400,
+			wantInBody: "already a reference",
+		},
+		{
+			name: "value embeds a keyring reference",
+			existing: &config.ServerConfig{
+				Name: "synapbus", Protocol: "http", Enabled: true,
+				Headers: map[string]string{"Authorization": "Bearer ${keyring:github-token}"},
+			},
+			body:       `{"scope": "header", "key": "Authorization", "secret_name": "synapbus-auth"}`,
+			wantStatus: 400,
+			wantInBody: "already a reference",
+		},
+		{
+			name: "mixed value does not echo the literal part",
+			existing: &config.ServerConfig{
+				Name: "synapbus", Protocol: "stdio", Enabled: true,
+				Env: map[string]string{"DATABASE_URL": "postgres://app:hunter2@${env:DB_HOST}/app"},
+			},
+			body:          `{"scope": "env", "key": "DATABASE_URL", "secret_name": "synapbus-db"}`,
+			wantStatus:    400,
+			wantInBody:    "already a reference",
+			wantNotInBody: "hunter2",
+		},
+		{
 			name: "empty value",
 			existing: &config.ServerConfig{
 				Name: "synapbus", Protocol: "http", Enabled: true,
@@ -504,6 +536,9 @@ func TestHandleConvertConfigToSecret_ValidationErrors(t *testing.T) {
 
 			require.Equal(t, tc.wantStatus, w.Code, "body=%s", w.Body.String())
 			require.Contains(t, w.Body.String(), tc.wantInBody)
+			if tc.wantNotInBody != "" {
+				require.NotContains(t, w.Body.String(), tc.wantNotInBody)
+			}
 			// The update path must not have been invoked when validation
 			// rejects the request.
 			assert.Nil(t, mockCtrl.capturedUpdates, "validation errors must not call UpdateServer")

@@ -654,7 +654,7 @@ func codeConfigFilePath() (string, error) {
 	if p := resolveCLIConfigPath(codeConfigPath); p != "" {
 		return p, nil
 	}
-	return defaultHomeConfigPath()
+	return loaderHomeConfigPath()
 }
 
 // loadCodeConfig loads the MCP configuration file for code command

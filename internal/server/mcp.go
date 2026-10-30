@@ -1,11 +1,15 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -405,6 +409,160 @@ func (p *MCPProxyServer) currentTruncator() *truncate.Truncator {
 	return p.truncatorFn()
 }
 
+// rejectUnservedProtocolOnStdio is the stdio half of the FR-028 era pin (Spec
+// 058 T036a). The Streamable HTTP transport refuses a request whose declared
+// protocol version it has not been configured to serve, but mcp-go has no such
+// option for stdio, and the shared handler chooses the era per request from
+// params._meta — so without this a stdio client could opt into 2026-07-28 while
+// every HTTP door refused it. Registered as an OnRequestInitialization hook, it
+// runs before the era is read and before any dispatch; returning an error makes
+// mcp-go answer INVALID_REQUEST without touching a handler.
+//
+// Scoped to the stdio transport (the context tag stdioAuthContext installs) and
+// to requests that DECLARE a version in _meta: a legacy request carries none
+// and passes. The served set is clientFacingProtocolVersions, the same constant
+// the HTTP pin reads, so lifting one lifts the other.
+func rejectUnservedProtocolOnStdio(ctx context.Context, message any) error {
+	if transport.GetConnectionSource(ctx) != transport.ConnectionSourceStdio {
+		return nil
+	}
+	raw, ok := message.(json.RawMessage)
+	if !ok {
+		return nil
+	}
+	var wrapper struct {
+		Params struct {
+			Meta *mcp.Meta `json:"_meta"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(raw, &wrapper) != nil {
+		return nil // a malformed body is reported by the per-method unmarshal
+	}
+	version := wrapper.Params.Meta.ProtocolVersion()
+	if version == "" || slices.Contains(clientFacingProtocolVersions(), version) {
+		return nil
+	}
+	return fmt.Errorf("protocol version %s is not served on the stdio surface: the client-facing era is pinned to %s (Spec 058 FR-028); send a legacy initialize instead",
+		version, strings.Join(clientFacingProtocolVersions(), ", "))
+}
+
+// modernClientRecorder debounces the per-request client identity of modern
+// (2026-07-28) requests, so the activation funnel and the client-seen presence
+// are fed once per distinct client per window rather than once per request.
+//
+// The identity is client-supplied, so the map is bounded explicitly rather
+// than by trust: at modernClientRecorderCap entries, sightings older than the
+// window are swept, and if the map is still full the new identity is NOT
+// recorded (and not fed to the funnels). A client inventing a fresh name per
+// request therefore costs one map entry per name up to the cap and nothing
+// after, instead of unbounded memory plus a BBolt write per request.
+type modernClientRecorder struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+	now  func() time.Time
+}
+
+// modernClientRecorderCap bounds distinct (name, version) pairs tracked at
+// once. Real deployments see a handful of client identities; the cap only
+// matters under a flood of invented names.
+const modernClientRecorderCap = 1024
+
+func newModernClientRecorder() *modernClientRecorder {
+	return &modernClientRecorder{seen: map[string]time.Time{}, now: time.Now}
+}
+
+// firstSightingWithin reports whether (name, version) has not been recorded in
+// the last window, recording it when so. It returns false, recording nothing,
+// when the map is at capacity with no stale entry to evict.
+func (r *modernClientRecorder) firstSightingWithin(name, version string, window time.Duration) bool {
+	key := name + "\x00" + version
+	now := r.now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if last, ok := r.seen[key]; ok {
+		if now.Sub(last) < window {
+			return false
+		}
+		r.seen[key] = now
+		return true
+	}
+	if len(r.seen) >= modernClientRecorderCap {
+		for k, last := range r.seen {
+			if now.Sub(last) >= window {
+				delete(r.seen, k)
+			}
+		}
+		if len(r.seen) >= modernClientRecorderCap {
+			return false
+		}
+	}
+	r.seen[key] = now
+	return true
+}
+
+// modernCancellationGuard closes the cross-client cancellation hole the
+// 2026-07-28 era opens in mcp-go (Spec 058 US3, plan risk R1). The upstream
+// report is drafted at specs/058-mcp-2026-upgrade/upstream-issues/
+// mcp-go-inflight-cancel-collision.md — mark3labs/mcp-go restricted
+// interactions to collaborators when this landed, so it could not be filed.
+//
+// mcp-go keys in-flight request cancels as "<sessionID>:<requestID>"
+// (server/server.go inflightKey) and registers every request under that key.
+// A modern request is served by an ephemeral session whose id is "", so every
+// modern client shares the key space ":<id>": two clients that both use
+// JSON-RPC id 1 — the common case — collide, and a `notifications/cancelled`
+// from one cancels the other's in-flight call. The notification path runs
+// before any hook (request_handler.go: `if baseMessage.ID == nil { ... }`), so
+// the only place mcpproxy can intervene is the HTTP chain.
+//
+// The guard acknowledges (202, exactly as mcp-go answers a notification) and
+// drops a cancellation notification carried by a MODERN POST. Nothing is lost:
+// that era has no session to correlate a separately posted notification with,
+// so it could never have targeted the right request except by accident, and a
+// client that wants to abandon a call closes its connection, which cancels the
+// handler's context through the transport. Legacy requests, which the session
+// id keys correctly, pass through untouched.
+//
+// The era is read from the Mcp-Protocol-Version header: a modern POST must
+// carry it (mcp-go's validateModernRequest refuses one without it), and a
+// legacy POST never carries a modern value. Only then is the body buffered and
+// inspected — a cancellation notification is a notification with that method
+// — and re-attached for the transport, which reads it in full anyway.
+func modernCancellationGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !mcp.IsModernProtocol(r.Header.Get(mcp.HeaderProtocolVersion)) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		if err != nil {
+			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if isCancelledNotification(body) {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isCancelledNotification reports whether body is a JSON-RPC
+// notifications/cancelled notification (no id, or a null one — mcp-go treats
+// both as a notification).
+func isCancelledNotification(body []byte) bool {
+	var msg struct {
+		Method string          `json:"method"`
+		ID     json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(body, &msg) != nil || msg.Method != string(mcp.MethodNotificationCancelled) {
+		return false
+	}
+	return len(msg.ID) == 0 || bytes.Equal(msg.ID, []byte("null"))
+}
+
 // NewMCPProxyServer creates a new MCP proxy server
 func NewMCPProxyServer(
 	storage *storage.Manager,
@@ -461,10 +619,35 @@ func NewMCPProxyServer(
 
 	// Create hooks to capture session information
 	hooks := &mcpserver.Hooks{}
+	// Spec 058 T036a: pin the stdio surface to the same protocol eras as the
+	// Streamable HTTP transports. This hook runs before mcp-go reads the era,
+	// which is why it parses _meta itself.
+	hooks.AddOnRequestInitialization(func(ctx context.Context, _ any, message any) error {
+		return rejectUnservedProtocolOnStdio(ctx, message)
+	})
 	// Update session activity on every MCP message to prevent premature cleanup.
 	// Without this, sessions that only do retrieve_tools (not tool calls) would
 	// appear inactive and get closed by the background cleanup.
+	// Spec 058 US3 (T033): a 2026-07-28 request never runs initialize, so the
+	// AfterInitialize hook below — which feeds the Spec 044 activation funnel
+	// and the client-seen presence — never fires for a modern client. The
+	// identity travels on every request instead (research D5), so it is read
+	// here, once per client identity per minute (the same window
+	// RecordClientSeen itself debounces on), never once per request.
+	modernClients := newModernClientRecorder()
 	hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+		if name, version := requestClientInfo(ctx); name != "" && modernClients.firstSightingWithin(name, version, time.Minute) {
+			if mainServer != nil && mainServer.runtime != nil {
+				mainServer.runtime.RecordMCPClientForActivation(name)
+				mainServer.runtime.RecordClientSeen(name)
+			}
+			logger.Info("MCP client identified from request metadata",
+				zap.String("client_name", name),
+				zap.String("client_version", version),
+				zap.String("protocol_version", mcpserver.RequestProtocolVersion(ctx)),
+			)
+		}
+
 		session := mcpserver.ClientSessionFromContext(ctx)
 		if session == nil {
 			return
@@ -512,9 +695,13 @@ func NewMCPProxyServer(
 		)
 	})
 
-	// Add hook to capture client capabilities after initialize completes
-	// This hook is called for ALL transports (including HTTP POST), and receives the
-	// InitializeRequest with client info and capabilities.
+	// Add hook to capture client capabilities after initialize completes.
+	// It fires for every transport (including HTTP POST) — but only in the
+	// LEGACY protocol era: `initialize` is METHOD_NOT_FOUND under 2026-07-28,
+	// so a modern client never reaches it. Client identity for that era is
+	// read per request in the BeforeAny hook above (Spec 058 US3); everything
+	// else recorded here (capabilities, credential, serving instance) is
+	// session-scoped and has no modern counterpart by design.
 	hooks.AddAfterInitialize(func(ctx context.Context, id any, request *mcp.InitializeRequest, result *mcp.InitializeResult) {
 		// Get session from context
 		session := mcpserver.ClientSessionFromContext(ctx)
@@ -1522,6 +1709,10 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			),
 			mcp.WithString("forward_headers_json",
 				mcp.Description("Client header forwarding allowlist (Spec 112) as a JSON array of inbound MCP client header NAMES to copy into this server's tools/call requests, e.g. [\"X-User-Id\",\"X-Tenant-Id\"]. Names only, never values; exact names, case-insensitive, at most 32, no wildcards. Authorization, Host, Cookie, X-API-Key, hop-by-hop and proxy headers are never forwarded. Only HTTP-based upstreams forward. Patch: omit to leave unchanged, '[]' to clear (the array replaces entirely). Used with add/update/patch."),
+			),
+			mcp.WithString("tool_argument_error_mode",
+				mcp.Description("Per-server tool argument error policy: omitted or detailed preserves detailed errors; redacted opts into redaction. On update/patch, omit to leave the policy unchanged; detailed explicitly resets a redacted policy. Used with add/update/patch."),
+				mcp.Enum(config.ToolArgumentErrorModeDetailed, config.ToolArgumentErrorModeRedacted),
 			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
@@ -3224,7 +3415,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			callerr.NoteOutcome(ctx, callerr.ValidationOutcome())
 			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
-			return invalidParamsErrorResult(toolName, meta.ParamsJSON, detail), nil
+			return invalidParamsErrorResultWithMode(toolName, meta.ParamsJSON, detail, argumentErrorMode(gate.serverConfig)), nil
 		}
 	}
 
@@ -3511,7 +3702,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
 		p.emitActivityInternalToolCall(ctx, internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, "error", err.Error(), time.Since(internalStartTime).Milliseconds(), activityArgs, nil, intentMap, "")
 
-		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
+		return p.createToolErrorResponse(err, serverName, actualToolName, argumentErrorMode(gate.serverConfig)), nil
 	}
 
 	// Issue #935: the transport hop succeeded, but the upstream may still have
@@ -4018,7 +4209,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		// Emit activity completed event for error with determined source (legacy - no intent)
 		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0, "", nil, "")
 
-		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
+		return p.createToolErrorResponse(err, serverName, actualToolName, argumentErrorMode(gate.serverConfig)), nil
 	}
 
 	// Issue #935: an upstream that answered isError:true failed, even though the
@@ -4920,6 +5111,9 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		if server.TrustMode != "" {
 			serverMap["trust_mode"] = server.TrustMode
 		}
+		if server.ToolArgumentErrorMode != "" {
+			serverMap["tool_argument_error_mode"] = server.ToolArgumentErrorMode
+		}
 
 		// Add connection status information and calculate health
 		var connState string
@@ -5799,6 +5993,10 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
 	}
+	argumentErrorMode, err := argumentErrorModeFromRequest(request)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	url := request.GetString("url", "")
 	command := request.GetString("command", "")
@@ -5964,21 +6162,22 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	}
 
 	serverConfig := &config.ServerConfig{
-		Name:        name,
-		URL:         url,
-		Command:     command,
-		Args:        args,
-		WorkingDir:  workingDir,
-		Env:         env,
-		Headers:     headers,
-		Protocol:    protocol,
-		Enabled:     enabled,
-		Quarantined: quarantined, // Respect user's quarantine setting (defaults to true for security)
-		Created:     time.Now(),
-		Isolation:   isolation,
-		OAuth:       oauth,
-		InitTimeout: initTimeout,
-		TrustMode:   trustMode, // spec 086: carry the per-server trust_mode through on create
+		Name:                  name,
+		URL:                   url,
+		Command:               command,
+		Args:                  args,
+		WorkingDir:            workingDir,
+		Env:                   env,
+		Headers:               headers,
+		Protocol:              protocol,
+		Enabled:               enabled,
+		Quarantined:           quarantined, // Respect user's quarantine setting (defaults to true for security)
+		Created:               time.Now(),
+		Isolation:             isolation,
+		OAuth:                 oauth,
+		InitTimeout:           initTimeout,
+		TrustMode:             trustMode, // spec 086: carry the per-server trust_mode through on create
+		ToolArgumentErrorMode: argumentErrorMode,
 	}
 
 	// F9: optional per-server expose_prompts override on add. GetBool can't tell
@@ -6366,6 +6565,11 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		Quarantined: existingServer.Quarantined,
 	}
 	opts := config.DefaultMergeOptions()
+	argumentErrorMode, err := argumentErrorModeFromRequest(request)
+	if err != nil {
+		return nil, opts, err
+	}
+	patch.ToolArgumentErrorMode = argumentErrorMode
 
 	// Scalar fields - only set if provided in request
 	if url := request.GetString("url", ""); url != "" {
@@ -6971,15 +7175,38 @@ func classifyUpstreamInvalidParams(err error) (detail string, ok bool) {
 
 // createDetailedErrorResponse creates an enhanced error response with HTTP and troubleshooting context
 func (p *MCPProxyServer) createDetailedErrorResponse(err error, serverName, toolName string) *mcp.CallToolResult {
+	return p.createToolErrorResponse(err, serverName, toolName, "")
+}
+
+// createToolErrorResponse applies only this dispatch's captured argument-error
+// policy. Existing callers without a policy keep the detailed renderer above.
+func (p *MCPProxyServer) createToolErrorResponse(err error, serverName, toolName, argumentMode string) *mcp.CallToolResult {
 	// Spec 085 FR-013 (Path B): upstream invalid-params failures get the same
 	// self-healing error Path A renders — full stored schema + hint — when a
 	// schema source exists in the index. Without a stored schema the existing
-	// shapes below apply unchanged (a self-healing error without a schema
-	// would be an empty promise). Non-argument failures never reach this
-	// branch (classification is conservative by construction).
-	if detail, isInvalidParams := classifyUpstreamInvalidParams(err); isInvalidParams {
+	// envelopes below apply, with untrusted argument details suppressed only
+	// under the explicit redacted policy. No schema or retry hint is invented.
+	// Non-argument failures never reach this conservative classification branch.
+	if detail, isInvalidParams := argumentErrorDetail(err, argumentMode); isInvalidParams {
 		if meta := p.lookupIndexedTool(serverName, toolName); meta != nil && meta.ParamsJSON != "" {
-			return invalidParamsErrorResult(serverName+":"+toolName, meta.ParamsJSON, detail)
+			return invalidParamsErrorResultWithMode(serverName+":"+toolName, meta.ParamsJSON, detail, argumentMode)
+		}
+		if argumentMode == config.ToolArgumentErrorModeRedacted {
+			// Copy typed errors: their message/data/body can contain rejected
+			// arguments, and another caller may still own the original error.
+			var rpcErr *transport.JSONRPCError
+			if errors.As(err, &rpcErr) {
+				redacted := &transport.JSONRPCError{Code: rpcErr.Code, Message: redactedToolArgumentError}
+				if rpcErr.HTTPError != nil {
+					httpContext := *rpcErr.HTTPError
+					httpContext.Body = ""
+					httpContext.Err = nil
+					redacted.HTTPError = &httpContext
+				}
+				err = redacted
+			} else {
+				err = errors.New(redactedToolArgumentError) //nolint:staticcheck // ST1005: exact public MCP error sentence includes the terminal period.
+			}
 		}
 	}
 
@@ -7061,6 +7288,18 @@ func (p *MCPProxyServer) createDetailedErrorResponse(err error, serverName, tool
 
 	jsonResponse, _ := json.Marshal(errorDetails)
 	return mcp.NewToolResultError(string(jsonResponse))
+}
+
+// The SDK drops JSON-RPC numbers but preserves these non-argument identities.
+// They veto only the new trusted-wrapper cause selection, never positively
+// classify an error or bypass the existing classifier's deny controls.
+func isKnownSDKNonArgumentError(err error) bool {
+	return errors.Is(err, mcp.ErrParseError) ||
+		errors.Is(err, mcp.ErrInvalidRequest) ||
+		errors.Is(err, mcp.ErrMethodNotFound) ||
+		errors.Is(err, mcp.ErrInternalError) ||
+		errors.Is(err, mcp.ErrRequestInterrupted) ||
+		errors.Is(err, mcp.ErrResourceNotFound)
 }
 
 // extractStatusCodeFromError attempts to extract HTTP status code from error message

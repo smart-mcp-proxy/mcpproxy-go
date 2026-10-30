@@ -362,8 +362,16 @@ func (p *MCPProxyServer) filterDirectModeToolsForAuth(ctx context.Context, tools
 	}
 
 	authCtx := auth.AuthContextFromContext(ctx)
-	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(ctx)
-	profileResolution := p.ResolveProfileV3(ctx, profileIdx)
+	// Spec 058 US3 (FR-012): at tools/list the session tier is skipped, so the
+	// list never varies with a connection's set_profile selection. The
+	// call-time re-evaluation of this same chain is an execution gate and
+	// keeps the full precedence, exactly like the handler it admits to.
+	resolveCtx := ctx
+	if !isDirectCallTimeRequest(ctx) {
+		resolveCtx = listOnlyProfileResolution(ctx)
+	}
+	profileName, profileScope, profileIdx := p.resolveActiveProfileWithIndex(resolveCtx)
+	profileResolution := p.ResolveProfileV3(resolveCtx, profileIdx)
 	if profileResolution.Scope != nil {
 		profileName = profileResolution.Name
 		profileScope = profileResolution.Scope
@@ -563,7 +571,11 @@ func (p *MCPProxyServer) filterAggregatedPromptsForAuth(ctx context.Context, pro
 	}
 
 	authCtx := auth.AuthContextFromContext(ctx)
-	_, profileScope := p.resolveActiveProfile(ctx)
+	// Spec 058 US3 (FR-012): the list-only resolver skips the session tier, so
+	// prompts/list no longer varies with a connection's set_profile selection
+	// (the pre-existing violation research D1 named). prompts/get still runs
+	// authorizeAggregatedPromptServer with the full precedence.
+	_, profileScope, _ := p.resolveActiveProfileForList(ctx)
 	isScopeRestricted := isScopeRestrictedCaller(authCtx)
 	enforce := isScopeRestricted || profileScope != nil
 	allowed := promptServerAllowed(authCtx, profileScope)

@@ -1338,6 +1338,12 @@ components:
             informational (MCP-1072) — surfaced so a reviewer can see a server's origin
             — and no longer gates quarantine or skip_quarantine.
           type: string
+        tool_argument_error_mode:
+          description: |-
+            ToolArgumentErrorMode stores the per-upstream argument-error policy.
+            Empty and detailed retain detailed errors; redacted opts into redaction.
+            Updates omit/keep an empty value; detailed explicitly resets the policy.
+          type: string
         tool_discovery_interval:
           type: string
         toon_output:
@@ -3203,6 +3209,8 @@ components:
         token_expires_at:
           description: When the OAuth token expires (ISO 8601)
           type: string
+        tool_argument_error_mode:
+          type: string
         tool_count:
           type: integer
         tool_list_token_size:
@@ -3912,6 +3920,10 @@ components:
           type: string
         reconnect_on_use:
           type: boolean
+        tool_argument_error_mode:
+          description: Empty preserves an update; detailed explicitly resets a redacted
+            policy.
+          type: string
         trust_mode:
           description: |-
             TrustMode is the per-server trust tier (spec 086): "auto", "scan", or

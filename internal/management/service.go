@@ -592,6 +592,9 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		if trustMode, ok := srvRaw["trust_mode"].(string); ok {
 			srv.TrustMode = trustMode
 		}
+		if mode, ok := srvRaw["tool_argument_error_mode"].(string); ok {
+			srv.ToolArgumentErrorMode = mode
+		}
 
 		// MCP-3322: project the per-server init_timeout override. The runtime
 		// emits it as a duration string; accept a typed *config.Duration too in

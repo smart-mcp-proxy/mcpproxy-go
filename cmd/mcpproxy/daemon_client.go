@@ -104,7 +104,12 @@ func daemonEndpoint(cfg *config.Config) (endpoint, apiKey string, ok bool) {
 	}
 	socketPath := socket.DetectSocketPath(dataDir)
 	if socket.IsSocketAvailable(socketPath) {
-		return socketPath, "", true
+		// Under --system the socket belongs to the mcpproxy user and refuses
+		// any other uid (root included), so its presence proves nothing:
+		// use it only when it answers, else fall through to HTTP.
+		if !systemMode || probeDaemon(socketPath, "") {
+			return socketPath, "", true
+		}
 	}
 
 	key := resolveAPIKey(cfg)

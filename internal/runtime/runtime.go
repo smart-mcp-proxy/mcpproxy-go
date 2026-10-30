@@ -2961,6 +2961,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		if serverStatus.Config != nil && len(serverStatus.Config.ForwardHeaders) > 0 {
 			serverMap["forward_headers"] = append([]string(nil), serverStatus.Config.ForwardHeaders...)
 		}
+		if serverStatus.Config != nil && serverStatus.Config.ToolArgumentErrorMode != "" {
+			serverMap["tool_argument_error_mode"] = serverStatus.Config.ToolArgumentErrorMode
+		}
 
 		// Spec 086: surface the per-server trust tier so the REST GET payload
 		// (and SSE servers.changed embed) can read back the persisted mode, in
@@ -3265,6 +3268,9 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		// Spec 112: forward_headers allowlist in parity with the StateView path.
 		if len(srv.ForwardHeaders) > 0 {
 			serverInfo["forward_headers"] = append([]string(nil), srv.ForwardHeaders...)
+		}
+		if srv.ToolArgumentErrorMode != "" {
+			serverInfo["tool_argument_error_mode"] = srv.ToolArgumentErrorMode
 		}
 
 		// Spec 086: per-server trust tier in parity with the StateView path.
@@ -4567,8 +4573,8 @@ func sanitizeClientName(raw string) string {
 	if identity.Key == "" {
 		return ""
 	}
-	if isKnownClientAlias(identity.RawNormalized) {
-		return identity.RawNormalized
+	if alias := clientidentity.AliasCandidate(raw); isKnownClientAlias(alias) {
+		return alias
 	}
 	return identity.Key
 }

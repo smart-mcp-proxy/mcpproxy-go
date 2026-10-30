@@ -50,6 +50,20 @@ scenario 2).
   HTTP/JSON-RPC error shapes `createDetailedErrorResponse` already emits.
 - Returned via `mcp.NewToolResultError(json)` — same envelope as existing detailed errors.
 
+### Optional per-upstream redaction
+
+The persisted `tool_argument_error_mode` setting adds an opt-in policy. Empty/unset and `detailed` keep the error above. Explicit `redacted` changes only its `error` string to `Invalid tool arguments.`; the complete static schema, tool, error type, hint and outer `isError` stay intact in both response modes. The management schema advertises `detailed`/`redacted` only (an empty-string enum member is rejected by some clients, #1576); an empty value is still accepted and treated as omitted. The `call_tool_*` variants and the legacy `call_tool` handler use the server configuration captured by that request's `toolGate`; direct routing mode captures the same persisted record at its own dispatch gate, so a settings change never alters a request already in flight on either surface.
+
+Direct routing mode uses this contract on both of its argument-error paths. Its pre-dispatch local schema rejection names the direct id the caller used (`server__tool`); an eligible upstream argument error renders through this same shared envelope and names the canonical `server:tool` id. Default/detailed, and every non-argument direct failure (authentication, transport, timeout, known SDK identities), keep direct mode's pre-existing plain `Error calling server:tool: …` text — the shared renderer is never applied broadly there.
+
+This policy applies to proxy-generated local schema errors and eligible transport/JSON-RPC failures. Upstream `CallToolResult` responses, including `isError: true`, retain the existing result-processing behavior; their content is outside this argument-error redaction policy.
+
+For an eligible upstream argument error without an indexed schema, redacted mode suppresses untrusted message/data and nested HTTP response-body details while preserving the existing envelope and any available numeric code. It adds no schema or repair hint and does not mutate the original error. The conservative upstream classifier still excludes authentication, HTTP transport, timeout and internal errors. See [configuration](../../../docs/configuration.md#tool-argument-errors) for update/reset semantics.
+
+Only redacted mode may classify the cause of the manager's exact top-level generic diagnostic wrapper. The wrapper preserves its previous error text and unwrap contract; other outer/authentication wrappers retain their context, and default/detailed rendering keeps its prior classification. The HTTP SDK currently discards numeric JSON-RPC code/data when converting to Go errors, so generic `Invalid params` wording alone remains noneligible. Typed code/data preservation tests cover MCPProxy's owned transport-error boundary; they do not establish end-to-end SDK preservation.
+
+The same cause-selection boundary vetoes the SDK's six known non-argument identities: `ErrParseError`, `ErrInvalidRequest`, `ErrMethodNotFound`, `ErrInternalError`, `ErrRequestInterrupted` and `ErrResourceNotFound`. This negative guard retains the original wrapper and response even if the cause contains schema-validation wording. It adds no positive `ErrInvalidParams` recognition and leaves the classifier and its regexes unchanged.
+
 ## Guarantees
 
 - **Zero happy-path cost (SC-006)**: the schema is built only on the error branch. Successful

@@ -64,27 +64,27 @@ Single Go project. Backend paths are repo-relative: `internal/`, `cmd/`, `bench/
 
 **Independent test**: two differently-scoped agent tokens connect concurrently; each sees only its permitted tools; the canonical list facade is identical across connections; nothing relies on a session id.
 
-- [ ] T020 [P] [US3] Write failing tests that `tools/list` is byte-identical across two connections in both eras, in `internal/server/stateless_list_test.go`
-- [ ] T021 [P] [US3] Write a failing test that `prompts/list` does not change after `set_profile` — this fails on `main` today (FR-012) — in `internal/server/stateless_list_test.go`
-- [ ] T022 [P] [US3] Write a failing test that a modern **stdio** request cannot persist a profile selection despite its non-empty session id, in `internal/server/profile_era_test.go`
-- [ ] T023 [US3] Add `resolveActiveProfileForList` that skips the session tier, in `internal/server/profile_resolver.go`
-- [ ] T024 [US3] Switch the two list filters to the list-only resolver in `internal/server/mcp_direct_scope.go`
-- [ ] T025 [US3] Gate the session tier on `!server.IsModernRequest(ctx)` in addition to a non-empty id, in `internal/server/profile_resolver.go`
-- [ ] T026 [US3] Validate the slug before the session guard, and return machine-actionable guidance naming the `/mcp/p/<slug>` form on modern requests, in `internal/server/profile_tool.go`
-- [ ] T027 [US3] Split `TestProfile_SetProfileSessionScoped` into legacy and modern variants, keeping the original name for the legacy case so the spec's named gate still resolves, in `internal/server/profile_integration_test.go`
-- [ ] T028 [US3] Fix `TestProfile_SetProfileUnknown` to assert the unknown-slug message in both eras, in `internal/server/profile_integration_test.go`
-- [ ] T029 [P] [US3] Write a failing test that one client cannot cancel another's in-flight request when both use the same JSON-RPC id, in `internal/server/cancel_isolation_test.go`
-- [ ] T030 [US3] Add the cross-client cancellation guard (R1) and file the upstream mcp-go issue, touching `internal/server/mcp.go`
-- [ ] T031 [P] [US3] Write a failing `-tags server` test that two OAuth users with differing entitlements are isolated with no session, in `internal/serveredition/api/entitlement_stateless_test.go`
-- [ ] T032 [P] [US3] Write a failing test that modern-era client name/version reach the activity record via `RequestProtocolInfoFromContext`, in `internal/server/modern_attribution_test.go`
-- [ ] T033 [US3] Capture client identity from request protocol info in the `BeforeAny` hook so activation telemetry survives the loss of `AfterInitialize`, in `internal/server/mcp.go`
-- [ ] T034 [P] [US3] Correct the false "stable session id" comment in `internal/server/profile_resolver.go` and the false "background cleanup calls RemoveSession" comment in `internal/server/session_store.go`
-- [ ] T035 [P] [US3] Update the profile docs for era behaviour in `docs/features/profiles.md`
-- [ ] T036 [US3] Decide and record whether per-session token stats become legacy-only or are re-keyed on request-carried identity, in `specs/058-mcp-2026-upgrade/research.md`
-- [ ] T036a [US3] Close the stdio era gap: mcp-go offers no stdio equivalent of the Streamable HTTP version pin, and the era is chosen per request by the shared handler, so a stdio client can opt into `2026-07-28` today. Reject a modern `_meta` protocol version on the stdio surface (an `onRequestInitialization` hook or middleware on the server at `internal/server/server.go:985`), with a failing test first
-- [ ] T036b [US3] Assert the direct-mode handler actually calls `proxyResultEnvelope` (FR-016b on `/mcp/all`): today nothing does, because reaching that handler needs a fully wired proxy with a live upstream manager. Build on the harness this phase adds, in `internal/server/mcp_routing_test.go`
+- [x] T020 [P] [US3] Write failing tests that `tools/list` is byte-identical across two connections in both eras, in `internal/server/stateless_list_test.go`
+- [x] T021 [P] [US3] Write a failing test that `prompts/list` does not change after `set_profile` — this fails on `main` today (FR-012) — in `internal/server/stateless_list_test.go`
+- [x] T022 [P] [US3] Write a failing test that a modern **stdio** request cannot persist a profile selection despite its non-empty session id, in `internal/server/profile_era_test.go`
+- [x] T023 [US3] Add `resolveActiveProfileForList` that skips the session tier, in `internal/server/profile_resolver.go`
+- [x] T024 [US3] Switch the two list filters to the list-only resolver in `internal/server/mcp_direct_scope.go`
+- [x] T025 [US3] Gate the session tier on `!server.IsModernRequest(ctx)` in addition to a non-empty id, in `internal/server/profile_resolver.go`
+- [x] T026 [US3] Validate the slug before the session guard, and return machine-actionable guidance naming the `/mcp/p/<slug>` form on modern requests, in `internal/server/profile_tool.go`
+- [x] T027 [US3] Split `TestProfile_SetProfileSessionScoped` into legacy and modern variants, keeping the original name for the legacy case so the spec's named gate still resolves, in `internal/server/profile_integration_test.go`
+- [x] T028 [US3] Fix `TestProfile_SetProfileUnknown` to assert the unknown-slug message in both eras, in `internal/server/profile_integration_test.go`
+- [x] T029 [P] [US3] Write a failing test that one client cannot cancel another's in-flight request when both use the same JSON-RPC id, in `internal/server/cancel_isolation_test.go`
+- [x] T030 [US3] Add the cross-client cancellation guard (R1) and file the upstream mcp-go issue, touching `internal/server/mcp.go` — guard landed (`modernCancellationGuard`); the issue is DRAFTED in `upstream-issues/mcp-go-inflight-cancel-collision.md` because `mark3labs/mcp-go` restricted interactions to collaborators on 2026-10-20; file it when the restriction lifts
+- [x] T031 [P] [US3] Write a failing `-tags server` test that two OAuth users with differing entitlements are isolated with no session, in `internal/serveredition/api/entitlement_stateless_test.go`
+- [x] T032 [P] [US3] Write a failing test that modern-era client name/version reach the activity record via `RequestProtocolInfoFromContext`, in `internal/server/modern_attribution_test.go`
+- [x] T033 [US3] Capture client identity from request protocol info in the `BeforeAny` hook so activation telemetry survives the loss of `AfterInitialize`, in `internal/server/mcp.go`
+- [x] T034 [P] [US3] Correct the false "stable session id" comment in `internal/server/profile_resolver.go` and the false "background cleanup calls RemoveSession" comment in `internal/server/session_store.go` — the second had already been removed by #1497; the `AfterInitialize` hook comment in `mcp.go` was corrected instead (it never fires in the modern era)
+- [x] T035 [P] [US3] Update the profile docs for era behaviour in `docs/features/profiles.md`
+- [x] T036 [US3] Decide and record whether per-session token stats become legacy-only or are re-keyed on request-carried identity, in `specs/058-mcp-2026-upgrade/research.md` — legacy-only (research D11)
+- [x] T036a [US3] Close the stdio era gap: mcp-go offers no stdio equivalent of the Streamable HTTP version pin, and the era is chosen per request by the shared handler, so a stdio client can opt into `2026-07-28` today. Reject a modern `_meta` protocol version on the stdio surface (an `onRequestInitialization` hook or middleware on the server at `internal/server/server.go:985`), with a failing test first
+- [x] T036b [US3] Assert the direct-mode handler actually calls `proxyResultEnvelope` (FR-016b on `/mcp/all`): today nothing does, because reaching that handler needs a fully wired proxy with a live upstream manager. Build on the harness this phase adds, in `internal/server/mcp_routing_test.go`
 
-**Checkpoint**: US3 independently testable and complete. Only now may a pin lift.
+**Checkpoint**: US3 independently testable and complete (landed 2026-10-20, research D11). Only now may a pin lift.
 
 ---
 

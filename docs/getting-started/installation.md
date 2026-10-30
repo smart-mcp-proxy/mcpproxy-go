@@ -244,9 +244,43 @@ Things to watch for after step 6:
 
 - **Secrets files referenced from the config**: if any of your stdio servers `source` an env file from your home directory (e.g. `set -a; source ~/.mcpproxy/foo.env; ...`), copy that file to `/etc/mcpproxy/` with `root:mcpproxy 0640` ownership and update the path inside `mcp_config.json`. `ProtectHome=true` will otherwise make the file invisible to the service.
 - **Custom data_dir or cache paths**: the same `sed` pattern as step 4 — anything under `$HOME` becomes invisible.
-- **Snap-installed Docker**: on Ubuntu hosts where Docker came from snap (the default on 24.04), `mcpproxy doctor` will warn about additional one-time host setup (`loginctl enable-linger mcpproxy`, `snap set system homedirs=/var/lib`, and a systemd drop-in). Follow the snippet `doctor` prints, then `sudo systemctl restart mcpproxy`. The error you'd see otherwise is `cannot create XDG_RUNTIME_DIR folder "/run/user/<uid>/snap.docker"`.
+- **Snap-installed Docker**: on Ubuntu hosts where Docker came from snap (the default on 24.04), `sudo mcpproxy --system doctor` will warn about additional one-time host setup (`loginctl enable-linger mcpproxy`, `snap set system homedirs=/var/lib`, and a systemd drop-in). Follow the snippet `doctor` prints, then `sudo systemctl restart mcpproxy`. The error you'd see otherwise is `cannot create XDG_RUNTIME_DIR folder "/run/user/<uid>/snap.docker"`.
 
-Once you've confirmed the new service is healthy (`mcpproxy doctor` reports no issues), you can delete the backups under `~/mcpproxy-backup-*` — but the deb keeps your config intact across future upgrades regardless.
+Once you've confirmed the new service is healthy (`sudo mcpproxy --system doctor` reports no issues), you can delete the backups under `~/mcpproxy-backup-*` — but the deb keeps your config intact across future upgrades regardless.
+
+### Manage the packaged service from the CLI
+
+The packaged service and your own shell use **different instances**: the service runs as the `mcpproxy` user with `/etc/mcpproxy/mcp_config.json` and `/var/lib/mcpproxy`, while a plain `mcpproxy …` command uses your own `~/.mcpproxy`. Add the global `--system` flag to point any management command at the service:
+
+```bash
+sudo mcpproxy --system status
+sudo mcpproxy --system upstream list
+sudo mcpproxy --system upstream add my-server --url https://example.com/mcp
+sudo mcpproxy --system doctor
+```
+
+`--system` is shorthand for `--config /etc/mcpproxy/mcp_config.json --data-dir /var/lib/mcpproxy` and cannot be combined with either flag. It reaches the running service over its Unix socket when that answers (only when you run as the `mcpproxy` user — the socket refuses every other user, root included), and otherwise over HTTP at the config's `listen` address with its `api_key`. So it also works with `enable_socket: false`.
+
+To drop `sudo`, add yourself to the `mcpproxy` group once (the config is `0640 root:mcpproxy`), then log out and back in:
+
+```bash
+sudo usermod -aG mcpproxy "$USER"
+mcpproxy --system upstream list
+```
+
+Older releases rewrote the config as `0600` the first time the service saved it (for example, to store its generated API key), which hides it from the group. If `ls -l /etc/mcpproxy/mcp_config.json` shows `-rw-------`, restore group read once with `sudo chmod 0640 /etc/mcpproxy/mcp_config.json`. Saves keep `0640` from then on.
+
+Without that access, `--system` stops with a permission error that names both options.
+
+`--system` only talks to the **running** service: if it is stopped, the command exits and tells you to `sudo systemctl start mcpproxy`. It never falls back to the CLI's offline mode, which would launch your stdio servers or rewrite the service's files as root. For offline maintenance with the service stopped (for example `db compact`), or when the service listens on HTTPS (`tls.enabled`), which the HTTP fallback does not speak yet, run the command as the service user:
+
+```bash
+sudo -u mcpproxy mcpproxy --config /etc/mcpproxy/mcp_config.json --data-dir /var/lib/mcpproxy db compact
+```
+
+`--system` is refused for `serve`: systemd starts the service.
+
+On a host with the package installed, a plain management command that finds **no config of your own** does not create `~/.mcpproxy/mcp_config.json` any more. It exits with an error that names the service config and the `--system` command to run. If you do want a separate per-user instance, start it with `mcpproxy serve`. When you already have a `~/.mcpproxy` instance and `mcpproxy.service` is active, `mcpproxy status` and `mcpproxy doctor` print a warning that you are inspecting a different instance, with the `--system` command to inspect the service.
 
 ### Network exposure: localhost by default
 
