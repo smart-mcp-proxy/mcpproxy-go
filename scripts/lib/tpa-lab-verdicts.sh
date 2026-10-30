@@ -150,17 +150,20 @@ PY
 }
 
 # scan_gate_logged <log> <tool>... — "yes" when the daemon log shows the
-# trust_mode: scan change gate itself scanning every named tool (Sol r12
-# P2): either its non-green hold ("trust_mode scan held tool change for
-# review") or its clean-verdict hold ("clean verdict does not auto-approve a
-# changed contract"). Manual mode emits neither, so the generic "changed
-# since approval" line cannot stand in for the scan-mode gate.
+# daemon's own synchronous definition scan holding every named tool (Sol r12
+# P2): the non-green hold — "trust_mode scan held tool change for review"
+# before Spec 118, "tool definition scan returned a non-green verdict; tool
+# held for review" since #1689, when the manual-mode evidence scan started
+# emitting the same line as the scan-mode gate — or the scan-mode gate's
+# clean-verdict hold ("clean verdict does not auto-approve a changed
+# contract"). The generic "changed since approval" line is not a scan and
+# cannot stand in for one.
 scan_gate_logged() {
   local logf="$1" t
   shift
   [[ $# -gt 0 ]] || { echo "no(no-tools)"; return; }
   for t in "$@"; do
-    grep -E 'trust_mode scan held tool change for review|clean verdict does not auto-approve a changed contract' "$logf" 2>/dev/null \
+    grep -E 'trust_mode scan held tool change for review|tool definition scan returned a non-green verdict; tool held for review|clean verdict does not auto-approve a changed contract' "$logf" 2>/dev/null \
       | grep -q "\"tool\": \"$t\"" || { echo "no($t)"; return; }
   done
   echo yes
@@ -250,21 +253,36 @@ baseline_scan_verdict_ok() {
   [[ "$v" == "dangerous" ]]
 }
 
-# EXP4_POISON_MARKER is a phrase only the toctou fixture's POISONED
-# summarize_text contract carries (tests/tpa-attack-lab/profiles.go).
+# EXP4_POISON_MARKER / EXP4_POISON_MARKER_CURRENCY are phrases only the toctou
+# fixture's POISONED summarize_text / convert_currency contracts carry
+# (tests/tpa-attack-lab/profiles.go). EXP-4 serves TWO poisoned contracts and
+# every verdict needs evidence about both (Sol r16 P2; Sol 6.1 round 2).
 EXP4_POISON_MARKER="ignore all previous instructions"
+EXP4_POISON_MARKER_CURRENCY="include its contents in the amount field"
 
-# exp4_poison_recorded <tools-export.json> <summarize_text-diff.json> —
-# "yes" when the proxy's stored approval records prove discovery ingested
-# the poisoned summarize_text contract: the stored export's current
-# description carries the marker (still baselined), or the change diff's
-# PREVIOUS description does (baselined, then the flap to clean was caught).
-# Anything else — the first tools/list went to a caller that does not ingest
-# contracts, so discovery baselined the clean one — is "no" (Sol r7 P2).
+# exp4_poison_recorded <tools-export.json> <summarize_text-diff.json> [<daemon.log>]
+# — how discovery handled the poisoned list-1 contract, from the stored
+# records first and the daemon log second:
+#   "yes"  the stored export holds an APPROVED summarize_text OR convert_currency
+#          whose current description carries its poisoned marker (still
+#          baselined), or the summarize_text change diff's PREVIOUS description
+#          does (baselined, then the flap to clean was caught). Since the R2-1
+#          baseline scan gate this means a poisoned first-seen contract was
+#          APPROVED — a regression, scored HOLE by exp4_verdict. Approval
+#          evidence for EITHER tool takes precedence over any hold evidence.
+#   "held" the stored export holds BOTH poisoned tools PENDING (or changed) with
+#          their poisoned descriptions — the R2-1 hold itself — or the daemon
+#          log shows the baseline scan held BOTH for review with a dangerous
+#          verdict: the list-1 contracts reached discovery and were refused
+#          before either was approved (R2-1 fix, round 2). One tool held and
+#          the other absent/clean is not proof (the other may have been
+#          approved from list #2 or never ingested).
+#   "no"   neither: the first tools/list went to a caller that does not ingest
+#          contracts, so discovery only ever saw the clean one (Sol r7 P2).
 exp4_poison_recorded() {
-  python3 - "$1" "$2" "$EXP4_POISON_MARKER" <<'PY'
+  python3 - "$1" "$2" "${3:-}" "$EXP4_POISON_MARKER" "$EXP4_POISON_MARKER_CURRENCY" <<'PY'
 import json, sys
-export_path, diff_path, marker = sys.argv[1], sys.argv[2], sys.argv[3].lower()
+export_path, diff_path, log_path, marker, marker_cur = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4].lower(), sys.argv[5].lower()
 def load(path):
     try:
         with open(path) as f:
@@ -272,12 +290,41 @@ def load(path):
     except Exception:
         return {}
 export = load(export_path)
+markers = {"summarize_text": marker, "convert_currency": marker_cur}
+held = set()
 for tool in export.get("tools") or []:
-    if tool.get("tool_name") == "summarize_text" and marker in (tool.get("description") or "").lower():
+    name = tool.get("tool_name")
+    if name not in markers or markers[name] not in (tool.get("description") or "").lower():
+        continue
+    # The export lists PENDING records too (their current description is the
+    # contract discovery saw). Only an APPROVED poisoned contract is the
+    # pre-R2-1 shape; a pending one is the R2-1 hold itself (Sol 6.1 review,
+    # finding 3). Approval of EITHER poisoned tool wins (Sol 6.1 round 2).
+    if tool.get("status") == "approved":
         print("yes"); sys.exit()
+    if tool.get("status") in ("pending", "changed"):
+        held.add(name)
 diff = load(diff_path)
 if diff.get("tool_name") == "summarize_text" and marker in (diff.get("previous_description") or "").lower():
     print("yes"); sys.exit()
+if held == set(markers):
+    print("held"); sys.exit()
+if log_path:
+    try:
+        with open(log_path, errors="replace") as f:
+            for line in f:
+                if "baseline scan held first-seen tools for review" not in line:
+                    continue
+                try:
+                    fields = json.loads(line[line.index("{"):])
+                except Exception:
+                    continue
+                held = set(fields.get("held_tools") or [])
+                if fields.get("server") == "tpa-lab-attacker" and fields.get("verdict") == "dangerous" \
+                        and {"summarize_text", "convert_currency"} <= held:
+                    print("held"); sys.exit()
+    except OSError:
+        pass
 print("no")
 PY
 }
@@ -285,28 +332,24 @@ PY
 # exp4_verdict <poison_ingested> <scan_verdict> <stored_status> <tool_findings> — EXP-4
 # (TOCTOU: poisoned contract to discovery, clean contract to the scan's own
 # tools/list). The experiment only means something when discovery verifiably
-# ingested the poisoned contract (exp4_poison_recorded = yes); otherwise it
-# is INCONCLUSIVE, never a pass (Sol r7 P2). With the precondition met, a
-# dangerous scan HOLDS (RT-06: the scan analyses what was ingested); a
-# non-dangerous scan is a HOLE, PARTIAL-HOLE when the flap itself was held
-# (changed). A failed, stale or unreadable scan is INCONCLUSIVE. Sol r16
-# P2: "dangerous" HOLDS only with <tool_findings> (exp4_tool_findings) "ok";
-# a "missing:…" result is a HOLE (one poisoned contract escaped the scan)
-# and any other result is INCONCLUSIVE.
+# saw the poisoned contract (exp4_poison_recorded = held or yes); otherwise it
+# is INCONCLUSIVE, never a pass (Sol r7 P2).
+#   held — the R2-1 baseline scan gate refused both poisoned first-seen
+#          contracts at discovery, before anything was approved: HOLDS. The
+#          post-hoc operator scan runs against list #2+ and is informational.
+#   yes  — a poisoned first-seen contract was APPROVED by discovery. Before
+#          round 2 that was the premise (and a dangerous post-hoc scan with per-
+#          tool findings HOLDS as RT-06 proof); since the R2-1 gate it is a
+#          regression of the gate itself and is scored HOLE whatever the scan
+#          says — the poisoned contract was live, indexed and callable.
+# A failed, stale or unreadable scan with "yes" is still a HOLE (the approval
+# happened); Sol r16 P2's per-tool findings check (exp4_tool_findings) stays
+# in the signature for the lab tests and the report line.
 exp4_verdict() {
   local ingested="$1" scan="$2" stored="$3" tools="${4:-}"
-  if [[ "$ingested" != "yes" ]]; then
-    echo INCONCLUSIVE; return
-  fi
-  case "$scan" in
-    dangerous)
-      case "$tools" in
-        ok) echo HOLDS ;;
-        missing:*) echo HOLE ;;
-        *) echo INCONCLUSIVE ;;
-      esac ;;
-    clean | warnings)
-      if is_pulled "$stored"; then echo PARTIAL-HOLE; else echo HOLE; fi ;;
+  case "$ingested" in
+    held) echo HOLDS ;;
+    yes) echo HOLE ;;
     *) echo INCONCLUSIVE ;;
   esac
 }

@@ -487,16 +487,16 @@ if want_only EXP-3; then
 fi
 
 # ==================================================================== EXP-4
-# exp4_ingested <out-prefix> — polls (≤30s) the stored approval records for
-# proof that discovery ingested the poisoned list-1 contract
-# (exp4_poison_recorded); echoes yes/no.
+# exp4_ingested <out-prefix> — polls (≤30s) the stored approval records and
+# the daemon log ($EXP4_LOG) for proof that discovery saw the poisoned list-1
+# contract (exp4_poison_recorded); echoes held/yes/no.
 exp4_ingested() {
   local got="no"
   for i in $(seq 1 30); do
     curl -s -H "X-API-Key: $API_KEY" "$API_URL/servers/tpa-lab-attacker/tools/export" >"$1-export.json" 2>/dev/null
     curl -s -H "X-API-Key: $API_KEY" "$API_URL/servers/tpa-lab-attacker/tools/summarize_text/diff" >"$1-diff.json" 2>/dev/null
-    got="$(exp4_poison_recorded "$1-export.json" "$1-diff.json")"
-    [[ "$got" == "yes" ]] && break
+    got="$(exp4_poison_recorded "$1-export.json" "$1-diff.json" "$EXP4_LOG")"
+    [[ "$got" == "yes" || "$got" == "held" ]] && break
     sleep 1
   done
   echo "$got"
@@ -504,7 +504,7 @@ exp4_ingested() {
 
 if want_only EXP-4; then
   log "EXP-4 (hole B): TOCTOU — poisoned contract at discovery (list #1), clean contract to the scan export (list #2+)"
-  log "server runs UNQUARANTINED so discovery's auto-baseline ingests list #1"
+  log "server runs UNQUARANTINED so discovery's baseline pass receives list #1 (since R2-1 it is scanned and held, not approved)"
   # The fixture answers its FIRST tools/list with the poisoned contract. When
   # that list goes to a caller that does not ingest contracts (a REST tool
   # listing, the token-savings count), discovery baselines the clean one and
@@ -512,18 +512,18 @@ if want_only EXP-4; then
   # records before scanning, and retry with a fresh process and data dir
   # (bounded) instead of reporting an unverified result (Sol r7 P2).
   ingested="no"; attempt=0; EXP4_ATTEMPTS="${EXP4_ATTEMPTS:-4}"
-  while [[ "$ingested" != "yes" && $attempt -lt $EXP4_ATTEMPTS ]]; do
+  while [[ "$ingested" != "yes" && "$ingested" != "held" && $attempt -lt $EXP4_ATTEMPTS ]]; do
     attempt=$((attempt + 1))
     sfx=""; [[ $attempt -gt 1 ]] && sfx="-retry$attempt"
     cfg="$(make_config "exp4$sfx" toctou 1 "$RUN_DIR/exp4$sfx-data" "" noquarantine)" || config_failed EXP-4; CURRENT_CONFIG="$cfg"
     EXP4_LOG="$RUN_DIR/exp4$sfx.log"
     start_daemon "$cfg" "$EXP4_LOG" || { record "EXP-4: INCONCLUSIVE (daemon)"; exit 1; }
     ingested="$(exp4_ingested "$RUN_DIR/exp4$sfx-precondition")"
-    log "attempt $attempt: poisoned list-1 contract ingested by discovery: $ingested"
-    [[ "$ingested" == "yes" ]] || stop_daemon
+    log "attempt $attempt: poisoned list-1 contract seen by discovery: $ingested (held = refused by the R2-1 baseline scan; yes = approved)"
+    [[ "$ingested" == "yes" || "$ingested" == "held" ]] || stop_daemon
   done
-  if [[ "$ingested" != "yes" ]]; then
-    record "EXP-4 INCONCLUSIVE: precondition not met in $attempt attempts (discovery never ingested the poisoned list-1 contract)"
+  if [[ "$ingested" != "yes" && "$ingested" != "held" ]]; then
+    record "EXP-4 INCONCLUSIVE: precondition not met in $attempt attempts (discovery never saw the poisoned list-1 contract)"
   else
     v="$(scan_and_verdict "$cfg" "$RUN_DIR/exp4-scan.txt")"
     log "scan verdict: $v (the scan's export call saw the CLEAN contract — list #2+)"
@@ -536,14 +536,11 @@ if want_only EXP-4; then
     log "per-tool findings (summarize_text, convert_currency hard): $tf"
     case "$(exp4_verdict "$ingested" "$v" "$stored" "$tf")" in
       HOLDS)
-        pass "EXP-4 scan flagged both poisoned discovery contracts ($v, $tf)"
-        record "EXP-4 HOLDS: ingested=yes (attempt $attempt), scan=$v, findings=$tf, stored=$stored" ;;
-      PARTIAL-HOLE)
-        hole "EXP-4 PARTIAL: scan export is attacker-controllable (verdict=$v on a poisoned server; poisoned contract WAS ingested) — the flap was caught, but a session-fingerprinting variant would scan clean without flapping"
-        record "EXP-4 PARTIAL-HOLE: scan=$v on poisoned server; poisoned list ingested; flap caught ($stored)" ;;
+        pass "EXP-4 baseline scan refused both poisoned list-1 contracts at discovery (held, never approved); post-hoc scan=$v"
+        record "EXP-4 HOLDS: ingested=held (attempt $attempt; R2-1 gate held summarize_text+convert_currency, dangerous), post-hoc scan=$v, findings=$tf, stored=$stored" ;;
       HOLE)
-        hole "EXP-4 scan=$v ($tf) on a server whose poisoned contracts were ingested, and stored=$stored"
-        record "EXP-4 HOLE: scan=$v, findings=$tf, stored=$stored (poisoned list ingested)" ;;
+        hole "EXP-4 a poisoned first-seen contract was APPROVED by discovery (R2-1 regression): scan=$v ($tf), stored=$stored"
+        record "EXP-4 HOLE: poisoned list-1 contract approved (ingested=yes), scan=$v, findings=$tf, stored=$stored" ;;
       *)
         record "EXP-4 INCONCLUSIVE: scan=$v, findings=$tf, stored=$stored" ;;
     esac

@@ -153,7 +153,11 @@ When a server is unquarantined (approved):
    the server are **auto-promoted to approved** — approving a server means you
    trust its current tool snapshot (baseline trust). Tools whose description or
    schema later **changes** (`changed`, i.e. rug-pull) are *not* affected and
-   stay blocked until you re-approve them explicitly.
+   stay blocked until you re-approve them explicitly. Note that this
+   server-approval promotion does not re-scan the pending tools: the informed
+   review (`security/approve` with `expected_hashes`) shows you the scan
+   findings first; the plain unquarantine door does not (see the round-2
+   red-team report, "R2-1's second reach").
 
 ### Security Analysis
 
@@ -450,7 +454,7 @@ block approval, and three **soft** checks that raise a human-review item:
 | Check | Tier | Catches |
 |-------|------|---------|
 | `unicode.hidden` | hard | Zero-width / bidi / TAG-block / PUA character smuggling |
-| `shadowing.cross_server` | hard | Impersonation clone (same name + near-duplicate description on another server) or exclusive cross-server reference |
+| `shadowing.cross_server` | hard / soft | Hard: impersonation clone (same name + near-duplicate description on another server) or exclusive cross-server reference. Soft (review only, R2-5): a distinctive name another server also exposes with a genuinely different description that does not name its own server (name squat) |
 | `payload.decoded` | hard | base64/hex blob that decodes to a shell/exfil command |
 | `phrase.injection` | hard | Curated instruction-override / exfiltration directives |
 | `directive.imperative` | soft | Injection directives, secrecy imperatives, instruction overrides |
@@ -482,9 +486,25 @@ See [Tool Quarantine](./tool-quarantine.md) for complete documentation on:
 ### Durable tool baseline {#durable-tool-baseline}
 
 A trusted (non-quarantined) server whose tools were never approved treats its
-first non-empty tool list as its **baseline**: those tools are approved
-automatically (`approved_by: auto-baseline`). From then on, under `manual`
-trust, every new or replaced tool waits for review.
+first non-empty tool list as its **baseline**. Since the round-2 red team
+(2026-10-20, finding R2-1) that baseline is **scanned before it is trusted**:
+the same synchronous, offline TPA scan the `scan` trust mode runs on a new tool
+(`scanner.ScanToolMetadataVerdict`, with every other connected server's tools
+as cross-server context) runs once over the whole first-seen toolset, and the
+verdict is read per tool. A tool with no finding is approved automatically
+(`approved_by: auto-baseline`), exactly as before, so a clean server sees no
+new friction. A tool with a **hard** finding (verdict `dangerous`) or a
+**soft** one (`warnings`) lands **pending** instead — blocked, not indexed, not
+callable — with the verdict and the matched check ids recorded on its approval
+record as hold evidence (`held_reason: scan_findings`), so the review screen
+says why. If the scan itself could not be trusted (a check failed or the
+embedded signature bundle is unavailable) every tool of that pass is held
+(`held_reason: scan_coverage`): fail closed, like the change gate. Before R2-1
+the whole toolset was approved blind, so a hand-written `"quarantined": false`
+entry (or an operator unquarantining before scanning) put an 18-vector
+poisoned catalog live, indexed and callable, and only a later operator-run
+scan said `dangerous`. From the baseline on, under `manual` trust, every new or
+replaced tool waits for review.
 
 MCPProxy records that the baseline was decided in its database, per server
 (bucket `tool_baseline_decisions`), so the decision survives everything that
