@@ -550,6 +550,9 @@ func SaveConfig(cfg *Config, path string) error {
 // telemetry.persistConfig documents — but a field it merely carries from an
 // override is restored from the file, never from that stale copy.)
 func SaveConfigWithEdits(cfg, mergeBase *Config, path string) error {
+	if err := cfg.validateToolArgumentErrorModes(); err != nil {
+		return err
+	}
 	saveConfigMu.Lock()
 	defer saveConfigMu.Unlock()
 	persisted := PersistableConfigWithEdits(cfg, mergeBase, path)

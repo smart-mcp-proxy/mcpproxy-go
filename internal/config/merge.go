@@ -158,6 +158,11 @@ func (d *ConfigDiff) IsEmpty() bool {
 //   - diff: Changes made during merge (nil if opts.GenerateDiff is false)
 //   - error: Validation or merge error
 func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerConfig, *ConfigDiff, error) {
+	if patch != nil {
+		if err := ValidateToolArgumentErrorMode(patch.ToolArgumentErrorMode); err != nil {
+			return nil, nil, fmt.Errorf("%w: %v", ErrInvalidConfig, err)
+		}
+	}
 	if base == nil {
 		// If no base, patch becomes the new config
 		if patch == nil {
@@ -235,6 +240,13 @@ func MergeServerConfig(base, patch *ServerConfig, opts MergeOptions) (*ServerCon
 			diff.Modified["trust_mode"] = FieldChange{Path: "trust_mode", From: base.TrustMode, To: patch.TrustMode}
 		}
 		merged.TrustMode = patch.TrustMode
+	}
+
+	if patch.ToolArgumentErrorMode != "" && patch.ToolArgumentErrorMode != base.ToolArgumentErrorMode {
+		if diff != nil {
+			diff.Modified["tool_argument_error_mode"] = FieldChange{Path: "tool_argument_error_mode", From: base.ToolArgumentErrorMode, To: patch.ToolArgumentErrorMode}
+		}
+		merged.ToolArgumentErrorMode = patch.ToolArgumentErrorMode
 	}
 
 	// Boolean fields - use reflection to detect if explicitly set
@@ -630,6 +642,7 @@ func CopyServerConfig(src *ServerConfig) *ServerConfig {
 		Quarantined:              src.Quarantined,
 		SkipQuarantine:           src.SkipQuarantine,
 		TrustMode:                src.TrustMode,
+		ToolArgumentErrorMode:    src.ToolArgumentErrorMode,
 		Shared:                   src.Shared,
 		Created:                  src.Created,
 		Updated:                  src.Updated,
