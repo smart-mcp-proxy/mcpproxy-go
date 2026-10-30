@@ -5765,19 +5765,93 @@ components:
           description: 'ServerStepStatus is one of: "", "completed", "skipped".'
           type: string
       type: object
+    telemetry.DiagnosticsCounters:
+      properties:
+        current_error_codes:
+          additionalProperties:
+            type: integer
+          description: |-
+            CurrentErrorCodes is the STANDING state at heartbeat time: stable MCPX_
+            code -> number of configured servers currently in that state. It is not
+            a counter and is never persisted — it is recomputed each heartbeat from
+            the supervisor's live stateview.
+
+            Schema v11 (MCP-2967). It exists because error_code_counts_24h became
+            edge-triggered in the same change: previously the supervisor re-counted
+            every standing failure on its 30s reconcile ticker, so a parked install
+            inflated the counter by ~2880/day/server. Edge-triggering alone would
+            have swung the error to the other side — the 24h window decays, this
+            struct is omitempty via isZero(), so a permanently broken install would
+            emit once and then disappear from the payload entirely, and absent reads
+            as zero. The two fields answer different questions and are only correct
+            together: "how often did something newly break" and "how many servers
+            are broken right now".
+
+            Safe: only MCPX_* enum constants as keys, never server names, URLs,
+            commands, or free text; values are non-negative server counts.
+          type: object
+        error_code_counts_24h:
+          additionalProperties:
+            type: integer
+          description: |-
+            ErrorCodeCounts24h maps stable MCPX_ code strings to 24h occurrence counts.
+            Safe: only MCPX_* enum constants are stored here, never free text, paths,
+            server names, or user-entered values.
+          type: object
+        fix_attempted_24h:
+          description: FixAttempted24h counts POST /api/v1/diagnostics/fix calls in
+            the last 24h.
+          type: integer
+        fix_succeeded_24h:
+          description: FixSucceeded24h counts fix invocations with outcome="success"
+            in the last 24h.
+          type: integer
+        unique_codes_ever:
+          description: |-
+            UniqueCodesEver is the cardinality of the all-time error code set.
+            Bounded by the MCPX_ catalog size (~30 codes), never approaches PII risk.
+          type: integer
+      type: object
     telemetry.FeedbackContext:
       properties:
+        anonymous_id:
+          description: |-
+            Everything below is sent only while telemetry is enabled. AnonymousID and
+            MachineID are the same values the heartbeat reports, so a maintainer can
+            join a report to its install's telemetry; the worker stores them
+            privately and never prints them in the public issue. The diagnostics are
+            the heartbeat's enum-only fields (MCPX_* codes, fixed outcome words).
+          type: string
         arch:
           type: string
         connected_server_count:
           type: integer
+        diagnostics:
+          $ref: '#/components/schemas/telemetry.DiagnosticsCounters'
         edition:
           type: string
+        go_version:
+          type: string
+        last_error_code:
+          type: string
+        last_startup_outcome:
+          type: string
+        machine_id:
+          type: string
         os:
+          type: string
+        previous_shutdown:
           type: string
         routing_mode:
           type: string
         server_count:
+          type: integer
+        tool_count:
+          type: integer
+        uptime_minutes:
+          description: |-
+            UptimeMinutes is the daemon's uptime. Omitted from short-lived CLI
+            submissions, where the process uptime says nothing about the daemon.
           type: integer
         version:
           type: string
