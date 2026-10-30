@@ -587,7 +587,7 @@ func loadAuthConfig() (*config.Config, error) {
 	cfgPath := resolveCLIConfigPath(authConfigPath)
 	if cfgPath == "" {
 		var err error
-		if cfgPath, err = defaultHomeConfigPath(); err != nil {
+		if cfgPath, err = loaderHomeConfigPath(); err != nil {
 			return nil, err
 		}
 	}
