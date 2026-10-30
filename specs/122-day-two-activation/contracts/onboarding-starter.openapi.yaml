@@ -1,0 +1,102 @@
+openapi: 3.0.3
+info:
+  title: MCPProxy Spec 122 - starter offer and onboarding marks (additive)
+  version: "122"
+  description: All responses use the standard envelope {success, data} (internal/httpapi/server.go writeSuccess); schemas below describe `data`. Errors are {success:false, error, code}.
+paths:
+  /api/v1/onboarding/starter:
+    get:
+      summary: Starter offer decision (FR-012). Gated by requireAdminRead. Personal edition; server edition returns eligible=false reason=server_edition.
+      responses:
+        "200":
+          description: Offer
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data: { $ref: "#/components/schemas/StarterOffer" }
+    post:
+      summary: Add the selected starter through the catalog door's add step, using ONE resolved entry snapshot that was validated against shown_command (FR-003, research R3). Gated by requireServerOp(ServerOpAddFromRegistry), exactly like the catalog door; agent tokens get 403 with no side effects. Never approves.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [kind, surface, shown_command]
+              properties:
+                kind: { type: string, enum: [time, sequentialthinking] }
+                surface: { type: string, enum: [wizard, home_web, home_native] }
+                shown_command: { type: string, description: "Exact command the user saw; must equal the add-time resolution." }
+      responses:
+        "200":
+          description: Added (quarantined unless quarantine is globally off)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success: { type: boolean }
+                  data:
+                    type: object
+                    properties:
+                      server: { type: object, properties: { name: {type: string}, quarantined: {type: boolean}, incarnation: {type: integer} } }
+                      offer: { $ref: "#/components/schemas/StarterOffer" }
+        "409":
+          description: "code=starter_changed (resolved command differs from shown_command; nothing added; body carries fresh offer) or code=not_eligible"
+        "400":
+          description: "code=duplicate_name (passed through from the catalog door) or invalid kind/surface"
+        "403":
+          description: "agent token / insufficient server-op permission; nothing resolved, added or recorded"
+  /api/v1/onboarding/mark:
+    post:
+      summary: Existing endpoint; Spec 122 adds optional sticky booleans and a failure enum.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                starter_offered: { type: boolean, enum: [true] }
+                starter_declined: { type: boolean, enum: [true] }
+                starter_failure: { type: string, enum: [connect_failed, capture_timeout] }
+                second_client_offered: { type: boolean, enum: [true] }
+                second_client_none_detected: { type: boolean, enum: [true] }
+                second_client_skipped: { type: boolean, enum: [true] }
+  /api/v1/onboarding/state:
+    get:
+      summary: Existing endpoint; response gains `day_two` (local facts, same shape as data-model 4c minus summary_views) and `detected_unconnected_clients` (registry ids, FR-013).
+components:
+  schemas:
+    StarterOffer:
+      type: object
+      required: [eligible, reason, preselect, facts]
+      properties:
+        eligible: { type: boolean }
+        reason: { type: string, enum: [eligible, launcher_missing, name_taken, reference_overridden, tools_present, held_tools, already_configured, server_edition] }
+        preselect: { type: boolean }
+        launcher: { type: string, enum: [uvx, npx_only, none] }
+        candidate:
+          nullable: true
+          type: object
+          properties:
+            kind: { type: string, enum: [time, sequentialthinking] }
+            catalog_id: { type: string }
+            command: { type: string }
+            isolation: { type: string, enum: [host, docker] }
+            expected_tools: { type: array, items: { type: string } }
+            first_prompt: { type: string }
+        starter_server:
+          nullable: true
+          type: object
+          properties: { name: {type: string}, quarantined: {type: boolean} }
+        facts:
+          type: object
+          properties:
+            offered: { type: boolean }
+            added: { type: boolean }
+            live: { type: boolean }
+            declined: { type: boolean }
+            last_failure: { type: string, enum: ["", connect_failed, capture_timeout, approval_abandoned] }

@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcpproxy/telemetry/schema-17/day_two",
+  "title": "Heartbeat schema 17 additions (Spec 122)",
+  "type": "object",
+  "properties": {
+    "activation_additions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "first_tool_indexed_ever": { "type": "boolean" },
+        "first_tool_indexed_after": { "enum": ["", "lt_10m", "10m_1h", "1h_24h", "1d_7d", "gt_7d"] }
+      }
+    },
+    "day_two": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "starter_eligibility": { "enum": ["", "eligible", "launcher_missing", "name_taken", "reference_overridden", "already_configured", "tools_present", "held_tools", "not_fresh"] },
+        "starter_launcher": { "enum": ["", "uvx", "npx_only", "none"] },
+        "starter_offered": { "type": "boolean" },
+        "starter_added": { "type": "boolean" },
+        "starter_live": { "type": "boolean" },
+        "starter_declined": { "type": "boolean" },
+        "starter_last_failure": { "enum": ["", "connect_failed", "capture_timeout", "approval_abandoned"] },
+        "starter_kind": { "enum": ["", "time", "sequentialthinking"] },
+        "starter_surface": { "enum": ["", "wizard", "home_web", "home_native"] },
+        "second_client_offered": { "type": "boolean" },
+        "second_client_none_detected": { "type": "boolean" },
+        "second_client_skipped": { "type": "boolean" },
+        "second_client_connected": { "type": "boolean" },
+        "clients_day0": { "enum": ["", "0", "1", "2", "3_plus"] },
+        "clients_day0_final": { "type": "boolean" },
+        "summary_views": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "web": { "enum": ["0", "1", "2_5", "6_plus"] },
+            "tray": { "enum": ["0", "1", "2_5", "6_plus"] },
+            "cli": { "enum": ["0", "1", "2_5", "6_plus"] }
+          }
+        }
+      }
+    }
+  }
+}
