@@ -988,9 +988,11 @@ func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName str
 		return
 	}
 	mode := sc.EffectiveTrustMode()
-	// Cheap trust-mode gate before the (cached) verdict read: only scan-mode,
-	// still-quarantined servers can possibly auto-approve.
-	if mode != config.TrustModeScan || !sc.Quarantined {
+	// Cheap trust-mode gate before the (cached) verdict read: only an explicit
+	// trust_mode: scan, still-quarantined server can possibly auto-approve. The
+	// default tier (no trust_mode) also resolves to scan, but its admission
+	// stays with a person.
+	if !sc.AdmitsOnCleanScan() || !sc.Quarantined {
 		return
 	}
 	// Spec 101 US3: a post-activation re-protection job analyses the stored
@@ -1027,7 +1029,7 @@ func (s *Server) maybeAutoApproveScanSettled(ctx context.Context, serverName str
 			zap.String("verdict", verdict))
 		return
 	}
-	if err := scanSvc.ApproveServer(ctx, serverName, false, "scan-auto"); err != nil {
+	if err := scanSvc.ApproveServer(ctx, serverName, false, config.ScanAutoApprovedBy); err != nil {
 		// ApproveServer's own hard-tier/missing-report gate can reject; that is the
 		// intended fail-closed outcome, not a fatal error. Log and leave quarantined.
 		s.logger.Warn("auto-approve of scan-mode server after green scan was rejected",
@@ -1118,7 +1120,7 @@ func (s *Server) maybeStartAdmissionScan(ctx context.Context, sc *config.ServerC
 	if sc == nil || scanSvc == nil {
 		return
 	}
-	if sc.EffectiveTrustMode() != config.TrustModeScan || !sc.Quarantined {
+	if !sc.AdmitsOnCleanScan() || !sc.Quarantined {
 		return
 	}
 	// Already scanned (scanning/clean/failed/…): the admission scan already ran

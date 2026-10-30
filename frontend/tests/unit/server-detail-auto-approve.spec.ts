@@ -104,9 +104,9 @@ describe('ServerDetail — trust-mode control (Spec 088 US1, T009)', () => {
     expect(wrapper.findAll('[data-test^="trust-mode-option-"]')).toHaveLength(3)
   })
 
-  it('presents scan as the current default when no trust mode is configured (spec 119)', async () => {
+  it('marks scan as the current default, with no mode checked, when no trust mode is configured (spec 119)', async () => {
     const { wrapper } = await mountDetail('config')
-    expect(isChecked(wrapper, 'scan')).toBe(true)
+    expect(isChecked(wrapper, 'scan')).toBe(false)
     expect(wrapper.find('[data-test="trust-mode-default-note"]').exists()).toBe(true)
   })
 

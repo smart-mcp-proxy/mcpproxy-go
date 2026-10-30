@@ -232,3 +232,36 @@ func TestCommitServerApproval_BoundMatchFlipsStorageUnderTheLock(t *testing.T) {
 	}
 	assert.True(t, rvRecord(t, rt, "x").Disabled)
 }
+
+// A clean-scan admission (approver config.ScanAutoApprovedBy) re-checks the
+// trust mode inside the commit: only an explicit trust_mode: scan server is
+// released; a manual or default-tier server stays quarantined even if the scan
+// settled while it was still scan.
+func TestCommitServerApproval_ScanAutoRequiresExplicitScan(t *testing.T) {
+	rt := newReviewRuntime(t, true)
+	setTrustMode := func(mode string) {
+		t.Helper()
+		_, err := rt.Commit("test_trust_mode", func(tx *CommitTx) error {
+			return tx.UpdateServer(rvServer, func(cur *config.ServerConfig) error {
+				cur.TrustMode = mode
+				return nil
+			})
+		})
+		require.NoError(t, err)
+	}
+
+	for _, mode := range []string{string(config.TrustModeManual), ""} {
+		setTrustMode(mode)
+		save, calls := baselineSave(t, rt)
+		_, err := rt.CommitServerApproval(rvServer, nil, nil, config.ScanAutoApprovedBy, save)
+		require.Error(t, err, "trust_mode %q must not admit on a clean scan", mode)
+		requireNothingApproved(t, rt, calls)
+	}
+
+	setTrustMode(string(config.TrustModeScan))
+	save, calls := baselineSave(t, rt)
+	_, err := rt.CommitServerApproval(rvServer, nil, nil, config.ScanAutoApprovedBy, save)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), calls.Load())
+	assert.False(t, rt.serverQuarantinedInStorage(rvServer))
+}

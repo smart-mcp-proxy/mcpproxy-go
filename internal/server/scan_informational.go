@@ -84,8 +84,10 @@ func isTerminalScanStatus(status string) bool {
 // gate — and the settle-driven auto-approval behind it — is responsible for this
 // server. Those servers must NOT be picked up by the informational path.
 //
-// The rule is deliberately the blunt one: EVERY trust_mode:"scan" server belongs
-// to the gating path, whatever its quarantine state or approval history.
+// The rule is deliberately the blunt one: EVERY explicit trust_mode:"scan" server
+// belongs to the gating path, whatever its quarantine state or approval history.
+// A server with no trust_mode (the default tier, which resolves to scan for tool
+// changes) is never admitted by a scan, so it is the informational path's.
 //
 // Narrower predicates were tried and are unsafe, because every input the settle
 // handler gates on is MUTABLE while a scan is in flight, and
@@ -132,7 +134,7 @@ func scanModeAdmissionOwns(sc *config.ServerConfig) bool {
 	if sc == nil {
 		return false
 	}
-	return sc.EffectiveTrustMode() == config.TrustModeScan
+	return sc.AdmitsOnCleanScan()
 }
 
 // informationalScansEnabled resolves the security.auto_baseline_scan kill switch

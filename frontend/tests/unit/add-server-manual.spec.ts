@@ -91,7 +91,6 @@ describe('ManualServerForm', () => {
       name: 'fs-server',
       protocol: 'stdio',
       enabled: true,
-      trust_mode: 'scan',
       command: 'npx',
       args_json: JSON.stringify(['-y', '@scope/server', '/tmp']),
     })
@@ -115,7 +114,6 @@ describe('ManualServerForm', () => {
       name: 'remote',
       protocol: 'http',
       enabled: true,
-      trust_mode: 'scan',
       url: 'https://api.example.com/mcp',
     })
     expect(wrapper.emitted('added')).toEqual([['remote']])
@@ -144,6 +142,23 @@ describe('ManualServerForm', () => {
 
     const [, payload] = vi.mocked(api.callTool).mock.calls[0] as [string, Record<string, unknown>]
     expect(JSON.parse(payload.env_json as string)).toEqual({ API_TOKEN: 'fake-secret-value' })
+  })
+
+  it('sends trust_mode scan only when the operator picks it', async () => {
+    vi.mocked(api.callTool).mockResolvedValue({ success: true, data: {} })
+    vi.mocked(api.getServers).mockResolvedValue({ success: true, data: { servers: [] } })
+    const wrapper = await mountManual()
+
+    await wrapper.find('[data-test="manual-name-input"]').setValue('scan-server')
+    await wrapper.find('[data-test="manual-command-input"]').setValue('npx')
+    await wrapper.find('[data-test="trust-mode-option-scan"] input').setValue(true)
+    await wrapper.find('[data-test="manual-server-form"]').trigger('submit')
+    await flushPromises()
+
+    expect(api.callTool).toHaveBeenCalledWith('upstream_servers', expect.objectContaining({
+      name: 'scan-server',
+      trust_mode: 'scan',
+    }))
   })
 
   it('requires confirmation before adding with auto trust mode and submits the chosen mode', async () => {
