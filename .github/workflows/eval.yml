@@ -5,6 +5,9 @@ name: Eval (Spec 065 regression gate)
 # masks or blocks the deterministic D2 (security) gate.
 #
 #   security-d2  — Go + Python only, no live upstreams. HARD gate (blocking).
+#                  The detect-engine gate scores the EMBEDDED signature bundle
+#                  (scanner-bundle.json, Spec 101 FR-016a), and a negative control
+#                  proves that scoring is not vacuous (FR-016b).
 #   retrieval-d1 — needs a live mcpproxy serving 7 reference servers; network
 #                  dependent. Report-only on PRs, blocking on the nightly
 #                  schedule (promote to PR-blocking after a green soak — see the
@@ -29,6 +32,7 @@ on:
       - "cmd/mcpproxy/**"
       # Eval harness + frozen datasets + this workflow
       - "cmd/scan-eval/**"
+      - "cmd/tpa-corpus/**"
       - "specs/065-evaluation-foundation/datasets/**"
       - "scripts/eval-ci-smoke.sh"
       - ".github/workflows/eval.yml"
@@ -62,12 +66,28 @@ jobs:
       # labeled detect corpus. It runs the production detect.Engine and fails the
       # build if malicious recall drops below 0.90 or the hard-negative
       # false-positive rate climbs above 0.05. No mcp-eval/Python needed — runs
-      # first so a detector regression fails fast.
+      # first so a detector regression fails fast. With no --bundle flag the gate
+      # scores the signature bundle embedded in this build (the production TPA
+      # corpus, FR-016a), so a corpus regression fails here, not only a built-in one.
       - name: Run Spec-076 detect-engine gate (offline, blocking)
         run: |
           go run ./cmd/scan-eval \
             --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json \
             --gate --min-recall 0.90 --max-fp 0.05
+
+      # Spec 101 US2 (FR-016a/b): the corpus must be reproducible from its sources
+      # (verify), pass the policy against the eval dataset (validate), and the gate
+      # must be provably non-vacuous: TestBundleControl removes the control
+      # signature TPA-2026-0044 and requires the gate to breach (exit 6), while
+      # the other tests pin the class coverage and the SC-004 production-path check.
+      - name: Verify TPA corpus and gate non-vacuity (blocking)
+        run: |
+          go run ./cmd/tpa-corpus verify
+          go run ./cmd/tpa-corpus validate \
+            --bundle internal/security/scanner/bundled/scanner-bundle.json \
+            --dataset specs/065-evaluation-foundation/datasets/detect_corpus_v1.json
+          go test -count=1 -run 'TestBundleControl|TestCategoryCheck|TestSC004|TestEmbeddedCorpus' \
+            ./cmd/scan-eval/ ./internal/security/scanner/ ./internal/security/tpacorpus/
 
       - name: Checkout mcp-eval (public, pinned)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

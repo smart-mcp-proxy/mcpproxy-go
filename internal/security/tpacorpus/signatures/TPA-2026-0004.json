@@ -1,0 +1,74 @@
+{
+  "category": "tpa_tool_shadowing",
+  "gating": true,
+  "id": "TPA-2026-0004",
+  "license": "MIT",
+  "provenance": {
+    "note": "Description that redirects or overrides how another tool is used (shadowing).",
+    "published": "2025-04-01",
+    "source": "https://invariantlabs.ai/blog/mcp-security-notification-tool-poisoning-attacks"
+  },
+  "rules": [
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.9,
+      "detector": "exfil_redirect",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0004",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$atk",
+          "type": "string",
+          "value": "attkr@pwnd.com"
+        },
+        {
+          "context": "tool_description",
+          "id": "$tgt",
+          "type": "string",
+          "value": "send_email"
+        }
+      ],
+      "level": "critical",
+      "pattern": "(?is)send_email.*?attkr@pwnd\\.com",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.92,
+      "detector": "shadow_directive",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0004",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$imp",
+          "type": "regex",
+          "value": "<IMPORTANT>|<SYSTEM>"
+        },
+        {
+          "context": "tool_description",
+          "id": "$tgt",
+          "type": "string",
+          "value": "send_email"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)<important>.*?send_email.*?</important>",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

@@ -1,0 +1,48 @@
+{
+  "category": "tpa_conversation_exfil",
+  "gating": true,
+  "id": "TPA-2026-0032",
+  "license": "MIT",
+  "provenance": {
+    "note": "Out-of-scope parameter that makes the client fill in session data such as the calling model's name.",
+    "published": "2026-03-24",
+    "source": "https://github.com/dongsenzhang/MSB/blob/main/data/tools/attack_tools/academic_search/PubMed_MCP_Server/pubmed_server-out_of_scope_parameter.py"
+  },
+  "rules": [
+    {
+      "category": "exfiltration",
+      "confidence": 0.8,
+      "detector": "caller_model_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0032",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(llm[_ ]?model[_ ]?name|model[_ ]?name)\\s*:[^\\n]{0,60}?\\b(?:that|which)\\s+(?:calls|invokes|is\\s+calling|is\\s+invoking)\\s+this\\s+tool[.]?[ \\t]*(?:\\n|\\z)",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.8,
+      "detector": "session_data_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0032",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)\\b(system[_ ]?prompt|tools?[_ ]?list|conversation[_ ]?(?:history|context))\\s*:[^\\n]{0,60}?\\b(?:of\\s+the\\s+(?:caller|calling\\s+\\w+|agent|assistant)|currently\\s+(?:used|running)(?:\\s+by\\s+the\\s+(?:agent|assistant|model|caller))?|all\\s+(?:available\\s+)?tools\\s+(?:you|the\\s+agent)[^\\n]{0,25}?)[.]?[ \\t]*(?:\\n|\\z)",
+      "severity": "medium",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}
