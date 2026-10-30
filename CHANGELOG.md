@@ -28,9 +28,11 @@ Releases follow [Semantic Versioning](https://semver.org/).
   changes behind an unchanged definition. **Migration:** set `trust_mode: "manual"` on any server whose
   tool changes you want a person to review; nothing changes for servers with an explicit `trust_mode` or
   `auto_approve_tool_changes`. A record whose stored annotation snapshot differs from the live hints in
-  dispatch tier only (a server last seen before hints were captured) is held once for review. New servers
-  added with no trust mode are quarantined, scanned and released automatically on a clean verdict, as
-  `scan` always did.
+  dispatch tier only (a server last seen before hints were captured) is held once for review. Server
+  admission stays with a person: a new server added with no trust mode is quarantined and stays
+  quarantined until someone approves it. Only an explicit `trust_mode: "scan"` lets a clean admission
+  scan release a server, and the approval re-checks that under the commit lock. The Web UI add form sends
+  a trust mode only when one is picked.
 
 - **connect / disconnect:** `mcpproxy disconnect`, `DELETE /api/v1/connect/{client}`, and the Web UI
   and tray Disconnect now also revoke the client's credential (`client-<id>`), so a secret copied out

@@ -2238,6 +2238,20 @@ func (sc *ServerConfig) TrustModeDefaulted() bool {
 	return sc != nil && sc.TrustMode == "" && sc.AutoApproveToolChanges == nil && !sc.SkipQuarantine
 }
 
+// AdmitsOnCleanScan reports whether a clean admission scan may release this
+// server from quarantine (spec 086 FR-011). Only an EXPLICIT trust_mode: scan
+// opts in. The default tier resolves to scan for tool changes (spec 119) but
+// server admission stays with a person: a server with no trust_mode stays
+// quarantined until someone approves it.
+// ScanAutoApprovedBy is the approver recorded when a clean admission scan
+// releases an explicit trust_mode: scan server. The approval commit re-checks
+// AdmitsOnCleanScan for it under the commit lock.
+const ScanAutoApprovedBy = "scan-auto"
+
+func (sc *ServerConfig) AdmitsOnCleanScan() bool {
+	return sc != nil && TrustMode(sc.TrustMode) == TrustModeScan
+}
+
 func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
 	switch TrustMode(sc.TrustMode) {
 	case TrustModeAuto, TrustModeScan, TrustModeManual:
@@ -2262,8 +2276,10 @@ func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
 		return TrustModeAuto
 	}
 	// Spec 119: an unset trust_mode with no legacy flags is the DEFAULT tier,
-	// scan — quarantined and scanned on add, released on a clean verdict, tool
-	// changes approved on a clean verdict and held on findings. Operators who
+	// scan — tool changes approved on a clean verdict and held on findings.
+	// Server admission is NOT part of the default: only an explicit
+	// trust_mode: scan releases a quarantined server on a clean verdict
+	// (AdmitsOnCleanScan). Operators who
 	// want every change reviewed by a person set trust_mode: manual explicitly.
 	return TrustModeScan
 }

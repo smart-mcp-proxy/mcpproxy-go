@@ -172,7 +172,14 @@ func TestLoadersOffLinuxKeepCreatingHomeConfig(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
-	t.Chdir(t.TempDir())
+	// Not t.TempDir: on Windows CI the former cwd can stay locked for a moment
+	// after t.Chdir restores it, and TempDir's RemoveAll then fails the test.
+	cwd, err := os.MkdirTemp("", "mcpproxy-cwd-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(cwd) }) // best effort; runs after the chdir is undone
+	t.Chdir(cwd)
 
 	if _, err := loadUpstreamConfig(); err != nil {
 		t.Fatalf("load: %v", err)

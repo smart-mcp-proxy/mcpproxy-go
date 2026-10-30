@@ -583,9 +583,9 @@ func TestScanModeAdmissionOwns(t *testing.T) {
 		{"scan+not quarantined+baseline", &config.ServerConfig{TrustMode: "scan"}, true, true},
 		{"manual+quarantined", &config.ServerConfig{TrustMode: "manual", Quarantined: true}, false, false},
 		{"auto+quarantined", &config.ServerConfig{TrustMode: "auto", Quarantined: true}, false, false},
-		// Spec 119: an unset trust_mode is the default tier, scan, so the
-		// admission gate owns it.
-		{"empty trust mode (scan, the default) + quarantined", &config.ServerConfig{Quarantined: true}, false, true},
+		// An unset trust_mode is the default tier: scan for tool changes, but a
+		// scan never admits the server, so the informational path owns it.
+		{"empty trust mode (the default) + quarantined", &config.ServerConfig{Quarantined: true}, false, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

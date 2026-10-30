@@ -332,6 +332,18 @@ func TestMaybeAutoApproveScanSettled(t *testing.T) {
 		assert.Equal(t, []string{"srv"}, fake.approvedServers())
 	})
 
+	t.Run("default tier (no trust_mode) + clean: never approves (server release stays human)", func(t *testing.T) {
+		fake := newFakeSecurityScanner()
+		fake.summaries["srv"] = &scanner.ScanSummary{Status: "clean"}
+		defaulted := &config.ServerConfig{Name: "srv", Quarantined: true}
+		require.Equal(t, config.TrustModeScan, defaulted.EffectiveTrustMode(), "precondition: the default tier is scan")
+		s := newAdmissionTestServer(t, fake, defaulted)
+
+		s.maybeAutoApproveScanSettled(context.Background(), "srv")
+
+		assert.Empty(t, fake.approvedServers(), "only an explicit trust_mode: scan admits a server on a clean scan")
+	})
+
 	t.Run("missing config entry: never approves", func(t *testing.T) {
 		fake := newFakeSecurityScanner()
 		fake.summaries["ghost"] = &scanner.ScanSummary{Status: "clean"}
@@ -413,6 +425,15 @@ func TestMaybeStartAdmissionScans(t *testing.T) {
 		fake := newFakeSecurityScanner()
 		manual := &config.ServerConfig{Name: "srv", TrustMode: string(config.TrustModeManual), Quarantined: true}
 		s := newAdmissionTestServer(t, fake, manual)
+
+		s.maybeStartAdmissionScans(context.Background())
+		time.Sleep(50 * time.Millisecond)
+		assert.Empty(t, fake.startedScans())
+	})
+
+	t.Run("default tier (no trust_mode): no admission scan", func(t *testing.T) {
+		fake := newFakeSecurityScanner()
+		s := newAdmissionTestServer(t, fake, &config.ServerConfig{Name: "srv", Quarantined: true})
 
 		s.maybeStartAdmissionScans(context.Background())
 		time.Sleep(50 * time.Millisecond)
