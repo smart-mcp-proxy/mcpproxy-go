@@ -97,7 +97,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 	var cidFile string
 
 	// Check if this will be a Docker command (either explicit or through isolation)
-	willUseDocker := (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun
+	willUseDocker := isDockerRunCommand(c.config.Command, args)
 	if !willUseDocker && c.isolationManager != nil {
 		willUseDocker = c.isolationManager.ShouldIsolate(c.config)
 	}
@@ -172,7 +172,7 @@ func (c *Client) connectStdio(ctx context.Context) error {
 				finalArgs = c.insertCidfileIntoDockerArgs(finalArgs, cidFile)
 			}
 		}
-	} else if isDirectDockerRun := (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun; isDirectDockerRun {
+	} else if isDirectDockerRun := isDockerRunCommand(c.config.Command, args); isDirectDockerRun {
 		// USER-SUPPLIED `docker run …` upstream (config.Command IS `docker`).
 		// Inject env vars as -e flags, then reuse the SAME resolve→spawn decision
 		// as the isolation path (resolveDockerSpawn) so this path also direct-execs
