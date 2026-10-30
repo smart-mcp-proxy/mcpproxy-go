@@ -93,6 +93,7 @@ func TestLoadersOnPackagedInstallWithoutUserConfigPointAtService(t *testing.T) {
 			p := fakePackagedInstall(t, "linux", true, true)
 			home := t.TempDir()
 			t.Setenv("HOME", home)
+			t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 			t.Chdir(t.TempDir())
 
 			_, err := tc.load()
@@ -129,6 +130,7 @@ func TestLoadersOnPackagedInstallUseExistingUserConfig(t *testing.T) {
 	fakePackagedInstall(t, "linux", true, true)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	t.Chdir(t.TempDir())
 	writeListenConfig(t, filepath.Join(home, ".mcpproxy", "mcp_config.json"), "127.0.0.1:18666")
 
@@ -144,7 +146,9 @@ func TestLoadersOnPackagedInstallUseExistingUserConfig(t *testing.T) {
 func TestLoadersOnPackagedInstallHonorMCPPConfigEnv(t *testing.T) {
 	resetLoaderGlobals(t)
 	fakePackagedInstall(t, "linux", true, true)
-	t.Setenv("HOME", t.TempDir())
+	emptyHome := t.TempDir()
+	t.Setenv("HOME", emptyHome)
+	t.Setenv("USERPROFILE", emptyHome)
 	t.Chdir(t.TempDir())
 	own := filepath.Join(t.TempDir(), "own.json")
 	body := `{"mcpServers":[{"name":"from-mcpp-config","url":"http://127.0.0.1:1/mcp","protocol":"http"}]}`
@@ -167,6 +171,7 @@ func TestLoadersOffLinuxKeepCreatingHomeConfig(t *testing.T) {
 	fakePackagedInstall(t, "darwin", true, true)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	t.Chdir(t.TempDir())
 
 	if _, err := loadUpstreamConfig(); err != nil {
@@ -344,6 +349,7 @@ func TestDifferentInstanceWarning(t *testing.T) {
 	p := fakePackagedInstall(t, "linux", true, true)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	t.Chdir(t.TempDir())
 	userCfg := filepath.Join(home, ".mcpproxy", "mcp_config.json")
 	writeListenConfig(t, userCfg, "127.0.0.1:18666")
@@ -391,6 +397,7 @@ func TestCLIConfigPathInUse(t *testing.T) {
 	resetLoaderGlobals(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home) // os.UserHomeDir on Windows
 	t.Chdir(t.TempDir())
 
 	if got, want := cliConfigPathInUse(""), filepath.Join(home, ".mcpproxy", config.ConfigFileName); got != want {
