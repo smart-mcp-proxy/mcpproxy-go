@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -98,11 +97,11 @@ func TestResolveDockerSpawnHonorsConfiguredRelativeDocker(t *testing.T) {
 	require.Equal(t, configured, cmd)
 
 	// A relative working_dir is itself relative to the process directory.
-	wd, err := os.Getwd()
-	require.NoError(t, err)
-	rel, err := filepath.Rel(wd, filepath.Dir(filepath.Dir(configured)))
-	require.NoError(t, err)
-	c.config.WorkingDir = rel
+	// Chdir next to it: on Windows the temp dir and the checkout can sit on
+	// different drives, where no relative path between them exists.
+	workDir := filepath.Dir(filepath.Dir(configured))
+	t.Chdir(filepath.Dir(workDir))
+	c.config.WorkingDir = filepath.Base(workDir)
 	cmd, _, _, _ = c.resolveDockerSpawn(c.config.Args)
 	require.Equal(t, configured, cmd)
 
