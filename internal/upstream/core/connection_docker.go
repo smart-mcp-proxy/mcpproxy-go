@@ -157,7 +157,10 @@ func (c *Client) setupDockerIsolation(command string, args []string) (dockerComm
 // as the wrapped command (it sidesteps the login shell's PATH re-derivation),
 // dropping to bare "docker" only when resolution failed.
 func (c *Client) resolveDockerSpawn(finalArgs []string) (dockerCommand string, dockerArgs []string, shellWrapped bool, dockerDir string) {
-	resolved, resErr := resolveDockerBinary(c.logger)
+	resolved, resErr := c.configuredDockerBinary()
+	if resolved == "" {
+		resolved, resErr = resolveDockerBinary(c.logger)
+	}
 	switch {
 	case resErr == nil && isDirectExecutable(resolved) && dockerDaemonEnvGuaranteed():
 		// INFO (not Debug): make the spawn decision observable in main.log so a
@@ -391,6 +394,54 @@ func (c *Client) insertCidfileIntoShellDockerCommand(shellArgs []string, cidFile
 		zap.String("server", c.config.Name),
 		zap.String("docker_cmd", logSafeCommand(dockerCmd)))
 	return append(shellArgs, "--cidfile", cidFile)
+}
+
+// configuredDockerBinary returns the server's own command when it is a
+// user-supplied `docker run` naming the docker CLI by an absolute or relative
+// path to an executable, so that binary is spawned instead of whichever docker the
+// resolver finds. "" means resolve as usual.
+func (c *Client) configuredDockerBinary() (string, error) {
+	if c.config == nil || !isDockerRunCommand(c.config.Command, c.config.Args) {
+		return "", nil
+	}
+	command := c.config.Command
+	// A relative path is evaluated against working_dir, as exec does with
+	// Cmd.Dir (or the process directory without one). A bare name is a PATH
+	// lookup, which the resolver handles.
+	if !filepath.IsAbs(command) && strings.ContainsAny(command, `/\`) {
+		base := c.config.WorkingDir
+		if base == "" {
+			wd, err := os.Getwd()
+			if err != nil {
+				return "", nil
+			}
+			base = wd
+		}
+		abs, err := filepath.Abs(filepath.Join(base, command))
+		if err != nil {
+			return "", nil
+		}
+		command = abs
+	}
+	if !isDirectExecutable(command) {
+		return "", nil
+	}
+	return command, nil
+}
+
+// isDockerRunCommand reports whether a configured command is a user-supplied
+// `docker run`. The command may be bare or a path in either separator style,
+// and may carry the Windows .exe suffix (case-insensitive, as Windows lookup is).
+func isDockerRunCommand(command string, args []string) bool {
+	if len(args) == 0 || args[0] != cmdRun {
+		return false
+	}
+	base := command
+	if i := strings.LastIndexAny(base, `/\`); i >= 0 {
+		base = base[i+1:]
+	}
+	base = strings.ToLower(base)
+	return base == cmdDocker || base == cmdDocker+".exe"
 }
 
 // extractContainerNameFromArgs extracts the container name from Docker run arguments
