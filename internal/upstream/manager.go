@@ -1196,6 +1196,10 @@ func (m *Manager) DiscoverToolsDue(ctx context.Context) ([]*config.ToolMetadata,
 	return tools, err
 }
 
+// discoveryListConcurrency bounds how many upstream tools/list requests one
+// discovery sweep runs at once.
+const discoveryListConcurrency = 8
+
 func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, map[string]managed.InventoryCapture, error) {
 	type clientSnapshot struct {
 		id          string
@@ -1247,6 +1251,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 	connectedCount := 0
 	skippedNotDue := 0
 	known := make(map[string]struct{}, len(snapshots))
+	var due []clientSnapshot
 
 	for _, snapshot := range snapshots {
 		client := snapshot.client
@@ -1293,9 +1298,32 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		}
 
 		connectedCount++
+		due = append(due, snapshot)
+	}
 
-		tools, capture, err := client.ListToolsCaptured(ctx)
-		if err != nil {
+	// List the due servers concurrently: one slow or large upstream must not
+	// hold up every other server's tools/list until its own timeout.
+	type listResult struct {
+		tools   []*config.ToolMetadata
+		capture managed.InventoryCapture
+		err     error
+	}
+	results := make([]listResult, len(due))
+	sem := make(chan struct{}, discoveryListConcurrency)
+	var wg sync.WaitGroup
+	for i, snapshot := range due {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			tools, capture, err := snapshot.client.ListToolsCaptured(ctx)
+			results[i] = listResult{tools: tools, capture: capture, err: err}
+		})
+	}
+	wg.Wait()
+
+	for i, snapshot := range due {
+		res := results[i]
+		if res.err != nil {
 			// Warn, not Error: markSwept below is deliberately skipped so the
 			// next sweep retries this server. A failure the code already plans
 			// to retry is not an error — and on a healthy install with several
@@ -1304,7 +1332,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 			m.logger.Warn("Failed to list tools from client",
 				zap.String("id", snapshot.id),
 				zap.String("server", snapshot.name),
-				zap.Error(err))
+				zap.Error(res.err))
 			continue
 		}
 
@@ -1313,11 +1341,11 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		m.markSwept(snapshot.name, now)
 		if snapshot.name != "" {
 			listed = append(listed, snapshot.name)
-			captures[snapshot.name] = capture
+			captures[snapshot.name] = res.capture
 		}
 
-		if tools != nil {
-			allTools = append(allTools, tools...)
+		if res.tools != nil {
+			allTools = append(allTools, res.tools...)
 		}
 	}
 
