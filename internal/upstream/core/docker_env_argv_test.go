@@ -52,6 +52,12 @@ func TestInjectEnvVarsIntoDockerArgs_PathStaysInline(t *testing.T) {
 
 	assertNoSecretInArgv(t, args)
 	assert.Equal(t, []string{cmdRun, "-e", "PATH=/opt/tool/bin:/usr/bin", "-e", "SLACK_TOKEN", "-i", "--rm", "mcp/example"}, args)
+
+	// Windows spells it `Path`; the match is case-insensitive and the configured
+	// spelling is kept.
+	c.config.Env = map[string]string{"Path": `C:\tool;C:\Windows`}
+	args = c.injectEnvVarsIntoDockerArgs(c.config.Args, c.config.Env)
+	assert.Equal(t, []string{cmdRun, "-e", `Path=C:\tool;C:\Windows`, "-i", "--rm", "mcp/example"}, args)
 }
 
 func TestBuildDockerArgs_IsolationKeyOnlyNoValueInArgv(t *testing.T) {
