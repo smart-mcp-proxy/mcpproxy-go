@@ -2690,7 +2690,7 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 	// Prefer the last-good snapshot so the reindex is a pure local diff with no
 	// network round-trip. It is populated by the full sweep and by
 	// DiscoverAndIndexToolsForServer. Selection and application happen under one
-	// captureSnapMu hold so a concurrent capture cannot be overwritten by a
+	// captureSnapLock hold so a concurrent capture cannot be overwritten by a
 	// stale snapshot (which would look like a revert and clear a changed hold).
 	if r.reindexFromLastGoodSnapshot(serverName) {
 		return
@@ -2707,14 +2707,14 @@ func (r *Runtime) reindexServerToolsAfterApprovalChange(serverName string) {
 }
 
 // reindexFromLastGoodSnapshot re-runs the differential update from the
-// last-good snapshot under captureSnapMu. It reports false when no snapshot
+// last-good snapshot under captureSnapLock. It reports false when no snapshot
 // exists yet, or (Spec 117 PR-3, FR-037) when the snapshot no longer
 // describes the live connection — its client was replaced, retired or
 // reconnected, or a newer capture with definitions was applied — so the caller
 // re-lists the server instead of re-applying older definitions.
 func (r *Runtime) reindexFromLastGoodSnapshot(serverName string) bool {
-	r.captureSnapMu.Lock()
-	defer r.captureSnapMu.Unlock()
+	r.captureSnapLock(serverName).Lock()
+	defer r.captureSnapLock(serverName).Unlock()
 
 	snapshot, inv, seq, snapshotGen := r.lastGoodSnapshotWithCaptureGen(serverName)
 	if len(snapshot) == 0 {

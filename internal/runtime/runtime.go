@@ -309,10 +309,12 @@ type Runtime struct {
 	lastGoodCapture map[string]managed.InventoryCapture
 	// pruneAfterSnapshot is a test hook run after the prune snapshot.
 	pruneAfterSnapshot func(toolName string)
-	// captureSnapMu makes "records persisted + pruned + stamp published" one
-	// unit for readers: a capture holds the write lock for all of it, a review
-	// holds the read lock while it reads records and live state.
-	captureSnapMu sync.RWMutex
+	// captureSnapLocks holds one *sync.RWMutex per server (captureSnapLock).
+	// It makes "records persisted + pruned + stamp published" one unit for
+	// readers: a capture holds the server's write lock for all of it, a
+	// review holds its read lock while it reads records and live state. The
+	// lock is per server so one server's long pass never blocks another's.
+	captureSnapLocks sync.Map
 	// reviewAfterRecords is a test hook run after GetServerReview lists records.
 	reviewAfterRecords func()
 	// captureAfterPrune is a test hook run after a capture persisted and
