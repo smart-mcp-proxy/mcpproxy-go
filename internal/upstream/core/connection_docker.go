@@ -350,6 +350,16 @@ func (c *Client) injectEnvVarsIntoDockerArgs(args []string, envVars map[string]s
 // dockerEnvKeyFlags renders config.Env as key-only `-e KEY` docker flags, in
 // sorted key order so argv and its log line are deterministic. The values
 // travel in the docker process environment, never in argv (#1809).
+//
+// PATH is the one exception: the spawn paths rewrite the docker client's PATH
+// after the config.Env merge (prependDockerDirToPath, #715), so `-e PATH` would
+// forward that host-side value into the container instead of the configured
+// one. PATH is never a secret, so it is inlined as `-e PATH=<value>`.
+//
+// On the login-shell fallback (resolveDockerSpawn, docker not resolvable to a
+// verified absolute path) a profile that exports or unsets one of these names
+// before docker runs wins over the configured value; the direct-exec path has
+// no such step.
 func dockerEnvKeyFlags(envVars map[string]string) []string {
 	keys := make([]string, 0, len(envVars))
 	for key := range envVars {
@@ -358,6 +368,10 @@ func dockerEnvKeyFlags(envVars map[string]string) []string {
 	sort.Strings(keys)
 	flags := make([]string, 0, len(keys)*2)
 	for _, key := range keys {
+		if key == "PATH" {
+			flags = append(flags, "-e", "PATH="+envVars[key])
+			continue
+		}
 		flags = append(flags, "-e", key)
 	}
 	return flags

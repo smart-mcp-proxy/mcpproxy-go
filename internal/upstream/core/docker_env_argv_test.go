@@ -42,6 +42,18 @@ func TestInjectEnvVarsIntoDockerArgs_KeyOnlyNoValueInArgv(t *testing.T) {
 	assert.Equal(t, []string{cmdRun, "-e", "A_FIRST", "-e", "SLACK_TOKEN", "-i", "--rm", "mcp/example"}, args)
 }
 
+// PATH is rewritten by prependDockerDirToPath after the env merge, so a
+// configured container PATH must be inlined to stay exact; it is not a secret.
+func TestInjectEnvVarsIntoDockerArgs_PathStaysInline(t *testing.T) {
+	c := newUserSuppliedDockerTestClient()
+	c.config.Env = map[string]string{"PATH": "/opt/tool/bin:/usr/bin", "SLACK_TOKEN": argvSecret}
+
+	args := c.injectEnvVarsIntoDockerArgs(c.config.Args, c.config.Env)
+
+	assertNoSecretInArgv(t, args)
+	assert.Equal(t, []string{cmdRun, "-e", "PATH=/opt/tool/bin:/usr/bin", "-e", "SLACK_TOKEN", "-i", "--rm", "mcp/example"}, args)
+}
+
 func TestBuildDockerArgs_IsolationKeyOnlyNoValueInArgv(t *testing.T) {
 	im := NewIsolationManager(config.DefaultDockerIsolationConfig())
 	serverConfig := &config.ServerConfig{
