@@ -623,10 +623,10 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 		args = append(args, "--workdir", serverConfig.Isolation.WorkingDir)
 	}
 
-	// Add environment variables from server config
-	for key, value := range serverConfig.Env {
-		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
-	}
+	// Add environment variables from server config as key-only `-e KEY` flags.
+	// The values are in the docker process environment (the connect paths merge
+	// config.Env into the spawn env), never in argv (#1809).
+	args = append(args, dockerEnvKeyFlags(serverConfig.Env)...)
 
 	// Add global extra args
 	args = append(args, im.globalConfig.ExtraArgs...)
