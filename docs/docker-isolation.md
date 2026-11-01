@@ -321,7 +321,17 @@ Environment variables from server configuration are automatically passed to cont
 }
 ```
 
-These become Docker arguments: `-e API_KEY=your-secret-key -e DEBUG=true`
+These become key-only Docker arguments, `-e API_KEY -e DEBUG`, and the values are set in the
+environment of the `docker` process, which reads them from there. The same applies to a server
+whose `command` is `docker run …` itself. A value never appears in the `docker` command line, so
+`ps aux` and `/proc/<pid>/cmdline`, which every local user can read, do not show it
+([#1809](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1809)). It is still visible to the
+process owner and root in `/proc/<pid>/environ` of the `docker` client, and inside the container
+(`docker inspect`), as any container environment variable is. `PATH` is the one value still passed
+inline (`-e PATH=…`), so a configured container `PATH` is exact; it is not a secret. Whenever
+`docker` is started through your login shell (it could not be resolved to an absolute path, or on
+Linux with neither `DOCKER_HOST` nor `DOCKER_CONTEXT` exported), a profile that exports or unsets
+one of these names before `docker` runs wins over the configured value.
 
 ## Docker-in-Docker Prevention
 

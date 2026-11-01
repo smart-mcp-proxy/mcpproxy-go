@@ -1,10 +1,10 @@
 package core
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
@@ -324,7 +324,13 @@ func (c *Client) insertCidfileIntoDockerArgs(args []string, cidFile string) []st
 
 // injectEnvVarsIntoDockerArgs injects environment variables as -e flags into Docker run args
 // The flags are inserted after "run" but before the image name
-// Example: ["run", "-i", "--rm", "image"] -> ["run", "-e", "KEY=VAL", "-i", "--rm", "image"]
+// Example: ["run", "-i", "--rm", "image"] -> ["run", "-e", "KEY", "-i", "--rm", "image"]
+//
+// Only the KEY is placed in argv (#1809). Docker's `-e KEY` form reads the
+// value from the docker CLI's own environment, which the spawn paths populate
+// from config.Env (connection_stdio.go / connection_launcher.go env merge).
+// A `-e KEY=VALUE` token would land in the docker process's argv, where
+// `ps aux` and /proc/<pid>/cmdline expose resolved secrets to every local user.
 func (c *Client) injectEnvVarsIntoDockerArgs(args []string, envVars map[string]string) []string {
 	if len(args) < 2 || args[0] != cmdRun {
 		return args
@@ -333,16 +339,45 @@ func (c *Client) injectEnvVarsIntoDockerArgs(args []string, envVars map[string]s
 	// Build new args with env vars injected after "run"
 	newArgs := make([]string, 0, len(args)+len(envVars)*2)
 	newArgs = append(newArgs, args[0]) // "run"
-
-	// Add -e flags for each env var
-	for key, value := range envVars {
-		newArgs = append(newArgs, "-e", fmt.Sprintf("%s=%s", key, value))
-	}
+	newArgs = append(newArgs, dockerEnvKeyFlags(envVars)...)
 
 	// Add remaining args (flags and image name)
 	newArgs = append(newArgs, args[1:]...)
 
 	return newArgs
+}
+
+// dockerEnvKeyFlags renders config.Env as key-only `-e KEY` docker flags, in
+// sorted key order so argv and its log line are deterministic. The values
+// travel in the docker process environment, never in argv (#1809).
+//
+// PATH is the one exception: the spawn paths rewrite the docker client's PATH
+// after the config.Env merge (prependDockerDirToPath, #715), so `-e PATH` would
+// forward that host-side value into the container instead of the configured
+// one. PATH is never a secret, so it is inlined as `-e PATH=<value>`. The match
+// is case-insensitive (Windows treats `Path` and `PATH` as one variable) and
+// keeps the configured spelling.
+//
+// Whenever docker is started through the user's login shell (resolveDockerSpawn:
+// docker not resolvable to a verified absolute path, or a non-Darwin host with
+// neither DOCKER_HOST nor DOCKER_CONTEXT exported) a profile that exports or
+// unsets one of these names before docker runs wins over the configured value;
+// the direct-exec path has no such step.
+func dockerEnvKeyFlags(envVars map[string]string) []string {
+	keys := make([]string, 0, len(envVars))
+	for key := range envVars {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	flags := make([]string, 0, len(keys)*2)
+	for _, key := range keys {
+		if strings.EqualFold(key, "PATH") {
+			flags = append(flags, "-e", key+"="+envVars[key])
+			continue
+		}
+		flags = append(flags, "-e", key)
+	}
+	return flags
 }
 
 // insertCidfileIntoShellDockerCommand inserts --cidfile into a shell-wrapped Docker command
