@@ -1748,6 +1748,14 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 		return incomplete(err)
 	}
 
+	// Make this inventory peer context for other servers' scans from before
+	// its own scan until this function returns, which is after complete()
+	// published it to the StateView (or after the pass failed). With
+	// per-server capture locks another server's pass can scan while this one
+	// runs; without the registration neither pass would see the other's new
+	// tools until both published (see Runtime.inflightInventories).
+	defer r.registerInflightInventory(serverName, newTools)()
+
 	// Check tool-level quarantine approvals before indexing. Any error
 	// (errCaptureIncomplete: a record write failed; errBaselineMarker) leaves
 	// the capture incomplete: nothing below runs and nothing is published.
@@ -2076,10 +2084,15 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 // later compact retrieve_tools is a pure cache read — never a per-request
 // compile. Hashless tools are skipped: warming them would memoize distinct
 // schemas under one "" key (indexed tools always carry a hash).
+//
+// It holds sigReconcileMu, so a warm never lands inside a concurrent
+// reconcile's enumerate-then-retain window (see reconcileSignatureCache).
 func (r *Runtime) warmSignatureCache(tools []*config.ToolMetadata) {
 	if r.sigCache == nil {
 		return
 	}
+	r.sigReconcileMu.Lock()
+	defer r.sigReconcileMu.Unlock()
 	for _, tool := range tools {
 		if tool == nil || tool.Hash == "" {
 			continue
@@ -2094,10 +2107,19 @@ func (r *Runtime) warmSignatureCache(tools []*config.ToolMetadata) {
 // would otherwise accumulate for the life of the process. Called after index
 // rebuilds and differential updates; enumerates the SHARED index only —
 // per-profile indexes hold subsets of the same tools, hence the same hashes.
+//
+// sigReconcileMu is held from the enumeration through RetainHashes. Discovery
+// passes of different servers run concurrently, and a pass indexes a tool
+// before it warms its hash; holding the lock across both steps means a warm
+// either completes before the enumeration starts (so its tool is already
+// indexed and enumerated) or waits until RetainHashes is done, so a live hash
+// is never evicted by a reconcile that enumerated too early.
 func (r *Runtime) reconcileSignatureCache() {
 	if r.sigCache == nil || r.indexManager == nil {
 		return
 	}
+	r.sigReconcileMu.Lock()
+	defer r.sigReconcileMu.Unlock()
 	serverNames, err := r.indexManager.GetAllIndexedServerNames()
 	if err != nil {
 		r.logger.Debug("signature cache reconcile skipped: cannot enumerate indexed servers", zap.Error(err))

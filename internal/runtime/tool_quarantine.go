@@ -595,6 +595,51 @@ func (r *Runtime) refreshHeldContractSnapshot(serverName, toolName string, exist
 	return true
 }
 
+// inflightInventory is one server's in-flight inventory as peer context: the
+// tools its running discovery pass will publish, already projected the way
+// collectPeerToolMetadata reads the StateView. The pointer identifies the
+// registration, so a finished pass never unregisters a newer one.
+type inflightInventory struct {
+	tools []*config.ToolMetadata
+}
+
+// registerInflightInventory makes the inventory a discovery pass of
+// serverName is applying visible as peer context to other servers' scans
+// (Runtime.inflightInventories) and returns its idempotent unregister. The
+// tools are copied into the peer projection here, by the pass's own
+// goroutine, so concurrent readers never touch the pass's metadata. Like the
+// StateView publish, only tools whose ServerName is serverName are kept.
+func (r *Runtime) registerInflightInventory(serverName string, tools []*config.ToolMetadata) func() {
+	metas := make([]*config.ToolMetadata, 0, len(tools))
+	for _, t := range tools {
+		if t == nil || t.ServerName != serverName {
+			continue
+		}
+		metas = append(metas, &config.ToolMetadata{
+			ServerName:       serverName,
+			Name:             t.Name,
+			RawName:          config.RawToolName(t),
+			Description:      t.Description,
+			ParamsJSON:       t.ParamsJSON,
+			OutputSchemaJSON: t.OutputSchemaJSON,
+		})
+	}
+	entry := &inflightInventory{tools: metas}
+	r.inflightInventoryMu.Lock()
+	if r.inflightInventories == nil {
+		r.inflightInventories = make(map[string]*inflightInventory)
+	}
+	r.inflightInventories[serverName] = entry
+	r.inflightInventoryMu.Unlock()
+	return func() {
+		r.inflightInventoryMu.Lock()
+		if r.inflightInventories[serverName] == entry {
+			delete(r.inflightInventories, serverName)
+		}
+		r.inflightInventoryMu.Unlock()
+	}
+}
+
 // collectPeerToolMetadata returns every OTHER connected server's current tools,
 // keyed by server name, projected onto config.ToolMetadata for the synchronous
 // scan gate. It is the cross-server context that lets the peer-dependent
@@ -602,6 +647,15 @@ func (r *Runtime) refreshHeldContractSnapshot(serverName, toolName string, exist
 // scan). Sourced from the lock-free StateView snapshot; returns nil when no
 // supervisor/snapshot is available (best effort — a genuinely single-server
 // deployment has no peers to shadow anyway).
+//
+// Discovery passes of different servers run concurrently (the capture lock is
+// per server) and publish to the StateView only at their end, so the
+// in-flight inventories of OTHER servers (Runtime.inflightInventories) are
+// overlaid on the snapshot: a peer's in-flight tool replaces its published
+// tool of the same raw name, and published tools the pass does not carry
+// stay. The union is deliberately conservative — it is what this scan would
+// have seen with the peer's pass ordered either before or after it — so a
+// pass that later fails cannot make a scan miss a still-published tool.
 func (r *Runtime) collectPeerToolMetadata(serverName string) map[string][]*config.ToolMetadata {
 	if r.supervisor == nil {
 		return nil
@@ -637,10 +691,36 @@ func (r *Runtime) collectPeerToolMetadata(serverName string) map[string][]*confi
 			peers[name] = metas
 		}
 	}
+	r.overlayInflightPeers(serverName, peers)
 	if len(peers) == 0 {
 		return nil
 	}
 	return peers
+}
+
+// overlayInflightPeers merges the in-flight inventories of every server but
+// serverName into peers (see collectPeerToolMetadata): an in-flight tool
+// replaces a published tool of the same raw name, other published tools stay.
+func (r *Runtime) overlayInflightPeers(serverName string, peers map[string][]*config.ToolMetadata) {
+	r.inflightInventoryMu.Lock()
+	defer r.inflightInventoryMu.Unlock()
+	for name, entry := range r.inflightInventories {
+		if name == serverName || entry == nil || len(entry.tools) == 0 {
+			continue
+		}
+		inflight := make(map[string]struct{}, len(entry.tools))
+		merged := make([]*config.ToolMetadata, 0, len(entry.tools)+len(peers[name]))
+		for _, t := range entry.tools {
+			inflight[t.RawName] = struct{}{}
+			merged = append(merged, t)
+		}
+		for _, t := range peers[name] {
+			if _, ok := inflight[config.RawToolName(t)]; !ok {
+				merged = append(merged, t)
+			}
+		}
+		peers[name] = merged
+	}
 }
 
 // ToolApprovalResult contains the result of checking tool approvals for a server.
