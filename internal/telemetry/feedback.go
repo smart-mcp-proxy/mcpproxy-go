@@ -39,17 +39,24 @@ type FeedbackContext struct {
 	// submissions, where the process uptime says nothing about the daemon.
 	UptimeMinutes int `json:"uptime_minutes,omitempty"`
 
-	// Everything below is sent only while telemetry is enabled. AnonymousID and
-	// MachineID are the same values the heartbeat reports, so a maintainer can
-	// join a report to its install's telemetry; the worker stores them
-	// privately and never prints them in the public issue. The diagnostics are
-	// the heartbeat's enum-only fields (MCPX_* codes, fixed outcome words).
-	AnonymousID        string               `json:"anonymous_id,omitempty"`
-	MachineID          string               `json:"machine_id,omitempty"`
-	LastStartupOutcome string               `json:"last_startup_outcome,omitempty"`
-	PreviousShutdown   string               `json:"previous_shutdown,omitempty"`
-	LastErrorCode      string               `json:"last_error_code,omitempty"`
-	Diagnostics        *DiagnosticsCounters `json:"diagnostics,omitempty"`
+	// The fields below are sent only with telemetry consent: telemetry enabled
+	// (config and env), no latched opt-out, and a release (semver) build.
+	// AnonymousID and MachineID are the same values the heartbeat reports, so a
+	// maintainer can join a report to its install's telemetry; the worker stores
+	// them privately and never prints them in the public issue. The diagnostics
+	// are the heartbeat's enum-only fields (MCPX_* codes, fixed outcome words).
+
+	// AnonymousID is the install's telemetry anonymous ID (heartbeat value).
+	AnonymousID string `json:"anonymous_id,omitempty"`
+	// MachineID is the hashed machine identifier (heartbeat value).
+	MachineID string `json:"machine_id,omitempty"`
+	// LastStartupOutcome is the previous startup's outcome word.
+	LastStartupOutcome string `json:"last_startup_outcome,omitempty"`
+	// PreviousShutdown is how the previous run ended (clean, crash, ...).
+	PreviousShutdown string `json:"previous_shutdown,omitempty"`
+	// LastErrorCode is the most recent MCPX_* error code.
+	LastErrorCode string               `json:"last_error_code,omitempty"`
+	Diagnostics   *DiagnosticsCounters `json:"diagnostics,omitempty"`
 }
 
 // FeedbackResponse is the response from the telemetry backend.
@@ -221,9 +228,11 @@ func (s *Service) feedbackContext() FeedbackContext {
 
 // feedbackTelemetryConsent reports whether a feedback submission may carry the
 // install's telemetry ids and diagnostics: telemetry resolves as enabled (config
-// and env) and no opt-out has latched — the same gates the heartbeat honours.
+// and env), no opt-out has latched, and the build is a release (semver) build.
+// These are the same gates the heartbeat (Start) and the opt-out beacon apply;
+// development builds never send telemetry, so their feedback is basic-only.
 func (s *Service) feedbackTelemetryConsent() bool {
-	return !s.optedOut.Load() && s.telemetryEnabledLive()
+	return isValidSemver(s.version) && !s.optedOut.Load() && s.telemetryEnabledLive()
 }
 
 // withoutTelemetry clears every field that is sent only with telemetry consent.

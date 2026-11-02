@@ -5815,12 +5815,8 @@ components:
     telemetry.FeedbackContext:
       properties:
         anonymous_id:
-          description: |-
-            Everything below is sent only while telemetry is enabled. AnonymousID and
-            MachineID are the same values the heartbeat reports, so a maintainer can
-            join a report to its install's telemetry; the worker stores them
-            privately and never prints them in the public issue. The diagnostics are
-            the heartbeat's enum-only fields (MCPX_* codes, fixed outcome words).
+          description: AnonymousID is the install's telemetry anonymous ID (heartbeat
+            value).
           type: string
         arch:
           type: string
@@ -5833,14 +5829,19 @@ components:
         go_version:
           type: string
         last_error_code:
+          description: LastErrorCode is the most recent MCPX_* error code.
           type: string
         last_startup_outcome:
+          description: LastStartupOutcome is the previous startup's outcome word.
           type: string
         machine_id:
+          description: MachineID is the hashed machine identifier (heartbeat value).
           type: string
         os:
           type: string
         previous_shutdown:
+          description: PreviousShutdown is how the previous run ended (clean, crash,
+            ...).
           type: string
         routing_mode:
           type: string

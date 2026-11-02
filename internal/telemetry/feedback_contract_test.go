@@ -179,31 +179,154 @@ func wireAllFeedbackStores(t *testing.T, svc *Service) {
 	svc.startTime = time.Now().Add(-95 * time.Minute)
 }
 
-// TestSubmitFeedback_NoTelemetryRefAfterOptOutLatch: once the opt-out has
-// latched, feedback carries no ids even if the config still reads enabled.
-func TestSubmitFeedback_NoTelemetryRefAfterOptOutLatch(t *testing.T) {
-	clearTelemetryEnv(t)
-	withFixedMachineID(t, strings.Repeat("e", 64))
+// consentOnlyFeedbackKeys are the wire key paths that must appear only when the
+// install has telemetry consent.
+var consentOnlyFeedbackKeys = []string{
+	"context.anonymous_id",
+	"context.machine_id",
+	"context.last_startup_outcome",
+	"context.previous_shutdown",
+	"context.last_error_code",
+	"context.diagnostics",
+}
 
-	var got FeedbackRequest
+// submitFeedbackCaptureKeys submits through svc (built by build against a test
+// endpoint) and returns the key paths of the HTTP body actually sent.
+func submitFeedbackCaptureKeys(t *testing.T, build func(endpoint string) *Service) map[string]bool {
+	t.Helper()
+	var body []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&got)
+		body, _ = readAll(r)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(FeedbackResponse{Success: true})
 	}))
 	defer server.Close()
 
-	svc := newFeedbackTestService(t, server.URL, true)
-	svc.optedOut.Store(true)
+	svc := build(server.URL)
 	if _, err := svc.SubmitFeedback(context.Background(), &FeedbackRequest{
 		Category: "bug",
 		Message:  "High CPU usage while idle, please help",
 	}); err != nil {
 		t.Fatalf("SubmitFeedback: %v", err)
 	}
-	if got.Context.AnonymousID != "" || got.Context.MachineID != "" || got.Context.PreviousShutdown != "" {
-		t.Errorf("opt-out latched but telemetry fields sent: %+v", got.Context)
+	var sent any
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatalf("decode sent body %q: %v", body, err)
 	}
+	keys := map[string]bool{}
+	jsonKeyPaths("", sent, keys)
+	return keys
+}
+
+// assertNoConsentOnlyKeys fails for every consent-only key present on the wire,
+// and checks the basic context still went out.
+func assertNoConsentOnlyKeys(t *testing.T, keys map[string]bool) {
+	t.Helper()
+	for _, k := range consentOnlyFeedbackKeys {
+		if keys[k] {
+			t.Errorf("consent-only key %q was sent", k)
+		}
+	}
+	if !keys["context.version"] || !keys["context.server_count"] {
+		t.Errorf("basic context missing from body: %v", sortedKeys(keys))
+	}
+}
+
+// TestSubmitFeedback_NoTelemetryRefAfterOptOutLatch: once the opt-out has
+// latched, feedback carries no ids or diagnostics even if the config still
+// reads enabled. Every store is wired, so an absent key proves the gate, not
+// an empty source.
+func TestSubmitFeedback_NoTelemetryRefAfterOptOutLatch(t *testing.T) {
+	clearTelemetryEnv(t)
+	withFixedMachineID(t, strings.Repeat("e", 64))
+
+	keys := submitFeedbackCaptureKeys(t, func(endpoint string) *Service {
+		svc := newFeedbackTestService(t, endpoint, true)
+		wireAllFeedbackStores(t, svc)
+		svc.optedOut.Store(true)
+		return svc
+	})
+	assertNoConsentOnlyKeys(t, keys)
+}
+
+// TestSubmitFeedback_NoTelemetryRefOnDevBuild: development (non-semver) builds
+// never send telemetry, so their feedback carries none of the consent-only
+// fields even with telemetry enabled in config and an anonymous id on file.
+func TestSubmitFeedback_NoTelemetryRefOnDevBuild(t *testing.T) {
+	for _, version := range []string{"dev", "development", ""} {
+		t.Run("version="+version, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			withFixedMachineID(t, strings.Repeat("f", 64))
+
+			keys := submitFeedbackCaptureKeys(t, func(endpoint string) *Service {
+				svc := newFeedbackTestService(t, endpoint, true)
+				svc.version = version
+				wireAllFeedbackStores(t, svc)
+				return svc
+			})
+			for _, k := range consentOnlyFeedbackKeys {
+				if keys[k] {
+					t.Errorf("dev build %q sent consent-only key %q", version, k)
+				}
+			}
+			if !keys["context.edition"] || !keys["context.server_count"] {
+				t.Errorf("basic context missing: %v", sortedKeys(keys))
+			}
+		})
+	}
+}
+
+// TestSubmitFeedback_NoTelemetryRefWhenEnvOptsOut: the env-level opt-outs
+// (MCPPROXY_TELEMETRY=false, DO_NOT_TRACK, CI) override a config that says
+// enabled, exactly as they do for the heartbeat.
+func TestSubmitFeedback_NoTelemetryRefWhenEnvOptsOut(t *testing.T) {
+	cases := []struct{ name, key, value string }{
+		{"mcpproxy_telemetry_false", "MCPPROXY_TELEMETRY", "false"},
+		{"do_not_track", "DO_NOT_TRACK", "1"},
+		{"ci", "CI", "true"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearTelemetryEnv(t)
+			t.Setenv(tc.key, tc.value) // after clearTelemetryEnv, which blanks all three
+			withFixedMachineID(t, strings.Repeat("a", 64))
+
+			keys := submitFeedbackCaptureKeys(t, func(endpoint string) *Service {
+				svc := newFeedbackTestService(t, endpoint, true)
+				wireAllFeedbackStores(t, svc)
+				return svc
+			})
+			assertNoConsentOnlyKeys(t, keys)
+		})
+	}
+}
+
+// TestSubmitFeedback_RecheckStripsWhenOptOutLandsMidBuild proves the
+// last-moment consent recheck in SubmitFeedback bites: the opt-out latches from
+// inside a provider that feedbackContext calls after its own gate (the
+// current-error-codes provider), so the context was built with consent and only
+// the recheck can strip it.
+func TestSubmitFeedback_RecheckStripsWhenOptOutLandsMidBuild(t *testing.T) {
+	clearTelemetryEnv(t)
+	withFixedMachineID(t, strings.Repeat("9", 64))
+
+	var svcRef *Service
+	var flipped bool
+	keys := submitFeedbackCaptureKeys(t, func(endpoint string) *Service {
+		svc := newFeedbackTestService(t, endpoint, true)
+		wireAllFeedbackStores(t, svc)
+		svc.SetCurrentErrorCodesProvider(func() map[string]int {
+			flipped = true
+			svcRef.optedOut.Store(true)
+			return map[string]int{"MCPX_OAUTH_REFRESH_EXPIRED": 1}
+		})
+		svcRef = svc
+		return svc
+	})
+	if !flipped {
+		t.Fatal("provider never ran; the test no longer exercises the recheck")
+	}
+	assertNoConsentOnlyKeys(t, keys)
 }
 
 // TestFeedbackContext_WithoutTelemetryClearsEveryConsentField guards the
@@ -285,31 +408,12 @@ func TestSubmitFeedback_NoTelemetryRefWhenDisabled(t *testing.T) {
 	clearTelemetryEnv(t)
 	withFixedMachineID(t, strings.Repeat("d", 64))
 
-	var got FeedbackRequest
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewDecoder(r.Body).Decode(&got)
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(FeedbackResponse{Success: true})
-	}))
-	defer server.Close()
-
-	svc := newFeedbackTestService(t, server.URL, false)
-	if _, err := svc.SubmitFeedback(context.Background(), &FeedbackRequest{
-		Category: "bug",
-		Message:  "High CPU usage while idle, please help",
-	}); err != nil {
-		t.Fatalf("SubmitFeedback: %v", err)
-	}
-
-	if got.Context.AnonymousID != "" || got.Context.MachineID != "" {
-		t.Errorf("telemetry disabled but ids sent: anonymous_id=%q machine_id=%q", got.Context.AnonymousID, got.Context.MachineID)
-	}
-	if got.Context.LastStartupOutcome != "" || got.Context.PreviousShutdown != "" || got.Context.Diagnostics != nil {
-		t.Errorf("telemetry disabled but diagnostics sent: %+v", got.Context)
-	}
-	if got.Context.Version != "v1.0.0" || got.Context.ServerCount != 3 {
-		t.Errorf("basic context missing: %+v", got.Context)
-	}
+	keys := submitFeedbackCaptureKeys(t, func(endpoint string) *Service {
+		svc := newFeedbackTestService(t, endpoint, false)
+		wireAllFeedbackStores(t, svc)
+		return svc
+	})
+	assertNoConsentOnlyKeys(t, keys)
 }
 
 const testFeedbackAnonID = "550e8400-e29b-41d4-a716-446655440000"

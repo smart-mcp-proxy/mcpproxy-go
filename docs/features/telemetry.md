@@ -332,7 +332,14 @@ enum-only diagnostics (`last_startup_outcome`, `previous_shutdown`,
 match a report to your install's telemetry. The ids and your optional email are
 stored privately by the telemetry service (pruned after 180 days) and never
 appear in the public issue; the issue shows only a reference such as
-`fb-123`. With telemetry disabled, the ids and diagnostics are not sent.
+`fb-123`. With telemetry disabled (including by `DO_NOT_TRACK`, `CI` or
+`MCPPROXY_TELEMETRY=false`), or in a development build, the ids and diagnostics
+are not sent.
+
+Feedback submitted through the running daemon (the Web UI or REST API) carries
+the full set above. A `mcpproxy feedback` CLI submission has no access to the
+daemon's runtime state, so it carries the ids and `last_startup_outcome` but no
+counts, diagnostics, `previous_shutdown`, `last_error_code` or uptime.
 
 The wire format is pinned by `internal/telemetry/testdata/feedback_contract.json`,
 which the telemetry worker keeps a copy of.
