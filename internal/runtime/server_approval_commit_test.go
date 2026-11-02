@@ -122,20 +122,31 @@ func TestCommitServerApproval_MissingBlockTarget(t *testing.T) {
 }
 
 // An approved+enabled tool whose hints moved (here: unset -> spelled-out
-// default, which keeps the rug-pull hash and the approved status) is in the
-// activation set and fails the binding.
+// default, which keeps the rug-pull hash) used to stay approved and fail the
+// binding as "changed" (spec 117). Since spec 120 FR-009 the move itself is
+// held: the explicit destructiveHint routes the tool to call_tool_destructive
+// where it was read, so the record becomes `changed` with the gate's signal and
+// leaves the server approval's reachable set. The bound commit of the review
+// then goes through (nothing it reaches moved) and promotes nothing; the held
+// change is a tool review of its own.
 func TestCommitServerApproval_ApprovedEnabledHintMoveIsChanged(t *testing.T) {
 	rt := newReviewRuntime(t, true)
 	capture(t, rt, rvTool("read_note", "Read a note", nil))
 	require.NoError(t, rt.ApproveTools(rvServer, []string{"read_note"}, "api"))
 	h := reviewHashes(t, rt)
 	capture(t, rt, rvTool("read_note", "Read a note", &config.ToolAnnotations{DestructiveHint: fpBool(true)}))
-	require.Equal(t, storage.ToolApprovalStatusApproved, rvRecord(t, rt, "read_note").Status, "the effective hints did not move")
+	rec := rvRecord(t, rt, "read_note")
+	require.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "a hash-equal dispatch-tier change is held (spec 120)")
+	assert.Equal(t, rec.ApprovedHash, rec.CurrentHash, "the rug-pull hash did not move")
+	// Manual mode: the evidence scan records the clean verdict; the gate's
+	// GATE-* signals are scan mode's (the review diff shows the hint move).
+	assert.Equal(t, storage.ToolHeldReasonAwaitingReview, rec.HeldReason)
 
-	save, calls := baselineSave(t, rt)
-	_, err := rt.CommitServerApproval(rvServer, nil, h, "api", save)
-	assert.Equal(t, []string{"read_note"}, requireStale(t, err).Changed)
-	requireNothingApprovedMarker(t, rt, calls, true)
+	save, _ := baselineSave(t, rt)
+	n, err := rt.CommitServerApproval(rvServer, nil, h, "api", save)
+	require.NoError(t, err, "the changed record is not in the server approval's reachable set")
+	assert.Zero(t, n)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, rvRecord(t, rt, "read_note").Status, "server approval never promotes a changed record")
 }
 
 // US1 scenario 3 (composition with PR-1's marker): an empty review binds to
@@ -220,4 +231,37 @@ func TestCommitServerApproval_BoundMatchFlipsStorageUnderTheLock(t *testing.T) {
 		assert.Equal(t, storage.ToolApprovalStatusApproved, rvRecord(t, rt, name).Status, name)
 	}
 	assert.True(t, rvRecord(t, rt, "x").Disabled)
+}
+
+// A clean-scan admission (approver config.ScanAutoApprovedBy) re-checks the
+// trust mode inside the commit: only an explicit trust_mode: scan server is
+// released; a manual or default-tier server stays quarantined even if the scan
+// settled while it was still scan.
+func TestCommitServerApproval_ScanAutoRequiresExplicitScan(t *testing.T) {
+	rt := newReviewRuntime(t, true)
+	setTrustMode := func(mode string) {
+		t.Helper()
+		_, err := rt.Commit("test_trust_mode", func(tx *CommitTx) error {
+			return tx.UpdateServer(rvServer, func(cur *config.ServerConfig) error {
+				cur.TrustMode = mode
+				return nil
+			})
+		})
+		require.NoError(t, err)
+	}
+
+	for _, mode := range []string{string(config.TrustModeManual), ""} {
+		setTrustMode(mode)
+		save, calls := baselineSave(t, rt)
+		_, err := rt.CommitServerApproval(rvServer, nil, nil, config.ScanAutoApprovedBy, save)
+		require.Error(t, err, "trust_mode %q must not admit on a clean scan", mode)
+		requireNothingApproved(t, rt, calls)
+	}
+
+	setTrustMode(string(config.TrustModeScan))
+	save, calls := baselineSave(t, rt)
+	_, err := rt.CommitServerApproval(rvServer, nil, nil, config.ScanAutoApprovedBy, save)
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), calls.Load())
+	assert.False(t, rt.serverQuarantinedInStorage(rvServer))
 }

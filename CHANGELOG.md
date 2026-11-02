@@ -10,14 +10,29 @@ Releases follow [Semantic Versioning](https://semver.org/).
 - **trust mode / tool approvals (Spec 119):** `scan` is now the default per-server trust mode, and under
   `scan` a **changed** tool contract whose offline TPA scan is clean is approved automatically in the same
   discovery pass (reason `scan_approved`, activity event `tool_auto_approved`) instead of being held. A
-  finding, a tool the scan could not cover, or a change that re-labels the tool as safer (`readOnlyHint`
-  false→true, `destructiveHint` true→false; held with signal `GATE-HINT-SAFER-FLIP`) is still held with the
-  evidence attached. A server whose `trust_mode` is unset now runs under `scan` from its next discovery
-  pass, so clean-scanned holds it accumulated are released without a click. The 2026-10-11 rule that a clean
-  verdict never approves a changed contract now applies to `manual` only. **Migration:** set
-  `trust_mode: "manual"` on any server whose tool changes you want a person to review; nothing changes for
-  servers with an explicit `trust_mode` or `auto_approve_tool_changes`. New servers added with no trust mode
-  are quarantined, scanned and released automatically on a clean verdict, as `scan` always did.
+  finding or a tool the scan could not cover is still held with the evidence attached. **Structural
+  change gate (Spec 120, same release):** before the scan verdict counts, a deterministic structural
+  comparison with the approved contract holds, whatever the verdict, any safety-hint change in either
+  direction (`GATE-HINT-CHANGE`; the two safer flips also `GATE-HINT-SAFER-FLIP`), a widened input schema
+  (`GATE-SCHEMA-SHAPE:<reason>:<path>`: a new required parameter, a type change, an enum member added or an
+  enum dropped, a loosened constraint, a default/const added or changed, a new parameter carrying a
+  default/const/enum), an output-schema change (`GATE-OUTPUT-SCHEMA`), and a change that moves the tool's
+  `call_tool` variant while its hash stays equal (explicit default hints dropped). Narrowing edits pass. No
+  word lists, thresholds or classifier. The `tool_auto_approved` event now carries the replaced contract
+  (`old_hash`, `old_description`, `old_schema`, `old_output_schema`, `old_annotations`), `approved_by`,
+  `gate_signals`, `scan_verdict` and `scan_bundle`. A server whose `trust_mode` is unset now runs under
+  `scan` from its next discovery pass, so clean-scanned holds it accumulated are released without a click:
+  the first start after the upgrade logs one WARN naming such servers, and `mcpproxy doctor` names them on
+  every run. The 2026-10-11 rule that a clean verdict never approves a changed contract now applies to
+  `manual` only. Not caught by any of this: a paraphrase, a one-word edit, slow text drift, behaviour that
+  changes behind an unchanged definition. **Migration:** set `trust_mode: "manual"` on any server whose
+  tool changes you want a person to review; nothing changes for servers with an explicit `trust_mode` or
+  `auto_approve_tool_changes`. A record whose stored annotation snapshot differs from the live hints in
+  dispatch tier only (a server last seen before hints were captured) is held once for review. Server
+  admission stays with a person: a new server added with no trust mode is quarantined and stays
+  quarantined until someone approves it. Only an explicit `trust_mode: "scan"` lets a clean admission
+  scan release a server, and the approval re-checks that under the commit lock. The Web UI add form sends
+  a trust mode only when one is picked.
 
 - **connect / disconnect:** `mcpproxy disconnect`, `DELETE /api/v1/connect/{client}`, and the Web UI
   and tray Disconnect now also revoke the client's credential (`client-<id>`), so a secret copied out
@@ -104,6 +119,7 @@ Releases follow [Semantic Versioning](https://semver.org/).
 - **secrets: `${file:/absolute/path}` references (#1706, spec 111 FR-030).** A secret can be read from a file, as Docker/Compose secrets, Kubernetes secret volumes and systemd `LoadCredential=` provide it, wherever `${env:}` and `${keyring:}` are accepted: an upstream server's `env`, `args` and `headers`, `data_dir`, and the proxy's own `api_key`. The path must be absolute, a symlink must lead to a regular file, at most 64 KiB is read, one trailing LF or CRLF is removed, and a missing, unreadable or empty file is an error that names the reference, never the content. A server shows a missing-secret error and the proxy stays up; an `api_key` reference that does not resolve stops startup (no key is generated over it). The stored config keeps the reference: the value is resolved on a copy, and the `api_key` secret is a process-only override that no save, including `PATCH /api/v1/config`, writes back. (refs #1706)
 
 - **config: `MCPPROXY_API_KEY_FILE` reads the API key from a file (#1706).** The `*_FILE` form of Docker Compose/Swarm secrets, Kubernetes secret volumes and systemd `LoadCredential=`: the key is not in the process environment (`docker inspect`, `/proc/<pid>/environ`) and is never written to `mcp_config.json`. The path must be absolute; one trailing LF or CRLF is removed; at most 64 KiB is read. Setting both `MCPPROXY_API_KEY` and `MCPPROXY_API_KEY_FILE` (both non-empty) is an error: mcpproxy refuses to start with a message naming both variables (never a key or file contents), and the CLI commands and the tray stop the same way. An empty value is treated as unset. A file that is named but cannot be used stops startup with an error naming the variable and path: mcpproxy does not fall back to the config file or a generated key. `mcpproxy status`, the other CLI commands and the tray read it too, and a tray-launched core reads the file itself instead of receiving the key in its environment. `Config.EnsureAPIKey` now also returns an error. (refs #1706, spec 111 FR-014/FR-030/US7)
+- **tls: serve a certificate for names other than `localhost` (#1719).** `tls.extra_sans` lists DNS names and IP addresses to add to the generated server certificate; when `localhost.pem` does not carry exactly those names plus `localhost`, `127.0.0.1` and `::1`, it is regenerated and signed by the same local CA, so `ca.pem` and `mcpproxy trust-cert` keep working. `tls.cert_file` and `tls.key_file` (absolute paths, both or neither) serve a certificate you provide instead, for a real or internal CA, `certbot` or a Docker/Kubernetes secret mount; nothing is generated, and a missing, unreadable or mismatched file stops startup with an error naming the setting. Environment variables `MCPPROXY_TLS_EXTRA_SANS`, `MCPPROXY_TLS_CERT_FILE` and `MCPPROXY_TLS_KEY_FILE`. Changing any of them needs a restart; with none set, startup is unchanged. Removes `MCPPROXY_TLS_CERT` and `MCPPROXY_TLS_KEY` from the environment-variable reference, which no code ever read.
 
 - **catalog:** a catalog source whose live search times out or fails is now answered from the listing
   the daemon last saw from it (at most 24 hours old, kept in memory). Those results are marked
@@ -201,6 +217,7 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Bug Fixes
 
+- **Core no longer burns a CPU core while idle on installs with many held tool changes (#1724).** The per-tool change-gate scan (`trust_mode: scan` approval, and the hold evidence in `manual`) fed every other connected server's tools to the detector as cross-server context and then ran all checks, phrase/regex detection included, over that whole fleet for each held tool, discarding the peer findings afterwards. With a few hundred tools and a few dozen held changes each 5-minute discovery pass re-scanned tools × fleet (one report: 471 tools, 108 held, ~11 minutes at 100% CPU per pass). The detector now inspects only the scanned server's tools; peers stay in the cross-server index so the shadowing and impersonation checks see the same context and the verdict for the scanned tool is unchanged. One held-tool scan against a 470-tool fleet went from ~3 s to ~5 ms.
 - **`serve --data-dir` (and `MCPPROXY_DATA_DIR`) now reads `<data-dir>/mcp_config.json`.** Until now `serve` looked for its config only in the working directory and `$HOME/.mcpproxy` and applied the data dir afterwards, so a config on a mounted volume was ignored and a fresh one (new listen address, new API key) was written under `$HOME`, while every management command already read the config from the data dir. `serve` now resolves it the same way: an explicit `--config` wins, then `<data-dir>/mcp_config.json` if it exists, and on a first run with no config anywhere the default is seeded inside the data dir. `MCPPROXY_DATA_DIR`, documented but never implemented, now works as an alias of `--data-dir` (the legacy `MCPPROXY_DATA` keeps relocating only the data directory, and loses when both are set). If you already export `MCPPROXY_DATA_DIR`, it takes effect for the first time on this upgrade: the data directory, and so the database, search index and socket, move to it. **Migration:** an instance started with `--data-dir X` that relied on the config under `$HOME/.mcpproxy` while a stale `X/mcp_config.json` also exists will now read the one in `X`.
 - **audit: a profile tool-policy refusal now names its rule (#1703).** The `authz` audit line for a call refused by a profile's tier cap, deny rule or unannotated-tool policy used to read `reason: other`; it now reads `profile_tier`, `profile_rule` or `profile_unannotated` (`disclosed: true`), matching the `block_reason` of the same call in the activity log. A refusal inside a `code_execution` script used to be written as `token_scope` with `disclosed: false` and now uses the same three reasons. `profile_scope` is unchanged, and `profile_code_execution` / `profile_management` are not audit reasons because those built-in tools are not audited per call. The `reason` enum in `docs/schemas/audit-line-v1.schema.json` gains the three members, so a consumer that validates audit lines against the enum must accept them. (refs #1703)
 

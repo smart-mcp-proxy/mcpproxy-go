@@ -58,6 +58,11 @@ func (r *Runtime) StartBackgroundInitialization() {
 		r.logger.Info("TPA bundle refresher background process started")
 	}
 
+	// Spec 120 FR-011: one-time notice that servers with no trust_mode run
+	// under the scan default (spec 119) and that their clean-scanned holds
+	// are released. Persisted marker; nothing on a fresh install.
+	r.warnScanDefaultOnce()
+
 	// Clean up orphaned OAuth tokens before starting the refresh manager
 	// This removes tokens for servers that were deleted while mcpproxy was not running
 	if r.storageManager != nil {

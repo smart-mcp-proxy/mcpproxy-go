@@ -105,6 +105,9 @@ type countingUpstream struct {
 	// okBody, when set, replaces the default "ok" text of a successful answer
 	// (for tests that need the upstream to return a particular payload).
 	okBody atomic.Pointer[string]
+	// okMeta, when set, is attached as the successful answer's result _meta
+	// (Spec 058 FR-016b: what the proxy relays, and what it must strip).
+	okMeta atomic.Pointer[mcp.Meta]
 }
 
 // serve registers one more tool on the running stub upstream, for tests
@@ -133,10 +136,13 @@ func (u *countingUpstream) serve(spec toolSpec) {
 			if body := u.errBody.Load(); body != nil {
 				return mcp.NewToolResultError(*body), nil
 			}
-			if body := u.okBody.Load(); body != nil {
-				return mcp.NewToolResultText(*body), nil
+			body := "ok"
+			if custom := u.okBody.Load(); custom != nil {
+				body = *custom
 			}
-			return mcp.NewToolResultText("ok"), nil
+			res := mcp.NewToolResultText(body)
+			res.Meta = u.okMeta.Load()
+			return res, nil
 		})
 }
 

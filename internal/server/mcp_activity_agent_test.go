@@ -218,6 +218,41 @@ func TestInjectAuthMetadata_UserIdentity(t *testing.T) {
 	assert.Equal(t, "alice@example.com", result["_auth_user_email"])
 }
 
+// TestInjectAuthMetadata_DropsCallerSuppliedAuthKeys verifies a caller cannot
+// stamp an identity onto its own activity row by sending `_auth_*` arguments.
+// An agent token without an owner carries no user_id, so a forged
+// `_auth_user_id` used to survive and become ActivityRecord.UserID.
+func TestInjectAuthMetadata_DropsCallerSuppliedAuthKeys(t *testing.T) {
+	agentCtx := &auth.AuthContext{
+		Type:        auth.AuthTypeAgent,
+		AgentName:   "ci-bot",
+		TokenPrefix: "mcp_ci0000000",
+	}
+	ctx := auth.WithAuthContext(context.Background(), agentCtx)
+
+	args := map[string]interface{}{
+		"query":              "x",
+		"_auth_user_id":      "01HVICTIM",
+		"_auth_user_email":   "victim@example.com",
+		"_auth_agent_name":   "someone-else",
+		"_auth_token_prefix": "mcp_other0000",
+	}
+
+	result := injectAuthMetadata(ctx, args)
+	assert.Equal(t, "x", result["query"])
+	assert.Equal(t, "agent", result["_auth_auth_type"])
+	assert.Equal(t, "ci-bot", result["_auth_agent_name"])
+	assert.Equal(t, "mcp_ci0000000", result["_auth_token_prefix"])
+	_, hasUserID := result["_auth_user_id"]
+	assert.False(t, hasUserID, "caller-supplied _auth_user_id must not reach the activity record")
+	_, hasEmail := result["_auth_user_email"]
+	assert.False(t, hasEmail, "caller-supplied _auth_user_email must not reach the activity record")
+	assert.Len(t, args, 5, "original args must not be modified")
+
+	noAuth := injectAuthMetadata(context.Background(), args)
+	assert.Equal(t, map[string]interface{}{"query": "x"}, noAuth)
+}
+
 // TestInjectAuthMetadata_NoAuthContext verifies no injection when no auth context.
 func TestInjectAuthMetadata_NoAuthContext(t *testing.T) {
 	ctx := context.Background()

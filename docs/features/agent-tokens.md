@@ -408,10 +408,12 @@ construction and this invariant does not change them; a hidden server can still
 - **Shared call limiter** — the proxy-wide concurrency limit is global, so calls
   held on a hidden server can make a call to an authorized server fail with the
   existing "proxy-wide limit saturated" response.
-- **Cross-server security-scan admission** — under `trust_mode: scan`, a
-  same-name near-identical tool on a hidden server can hold an authorized
-  server's newly added tool pending as a shadowing finding, changing that
-  tool's discovery and dispatch outcome (see
+- **Cross-server security-scan admission** — under `trust_mode: scan` (and on
+  a trusted server's first-seen baseline), a same-name tool on a hidden server
+  — near-identical, or a distinctive name with a different description that
+  does not name its own server — can hold an authorized server's newly added
+  tool pending as a shadowing finding, changing that tool's discovery and
+  dispatch outcome (see
   [Security Quarantine](https://docs.mcpproxy.app/features/security-quarantine/)).
 - **Shared prompt-refresh deadline** — prompts are collected under one
   fleet-wide deadline, so a slow hidden server can exhaust it before an

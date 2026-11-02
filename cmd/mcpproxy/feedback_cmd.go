@@ -91,11 +91,12 @@ func runFeedback(cmd *cobra.Command, args []string) error {
 			if resp.IssueURL != "" {
 				fmt.Printf("Track your feedback: %s\n", resp.IssueURL)
 			}
-		} else {
-			fmt.Printf("Feedback submission failed: %s\n", resp.Error)
 		}
 	}
 
+	if !resp.Success {
+		return fmt.Errorf("feedback submission failed: %s", resp.Error)
+	}
 	return nil
 }
 

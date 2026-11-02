@@ -73,7 +73,7 @@ func shellescapeFor(s string, windowsStyle bool) string {
 	}
 
 	// Unix shell special characters: if none present, return as-is.
-	if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
+	if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~#") {
 		return s
 	}
 	// Use single quotes and escape any embedded single quotes.

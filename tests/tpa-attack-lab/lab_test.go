@@ -320,10 +320,13 @@ func TestStageThreeParaphrasedPullScansClean(t *testing.T) {
 //     override families SOFT by design (negation and descriptive use cannot
 //     be ruled out), and a soft finding still holds a change under scan trust;
 //   - the renamed data-sink parameter (M06) is caught by parameter SHAPE;
-//   - the name-squat with a rewritten description (M05) stays out of scope:
-//     a same-name collision without a cloned description is the proxy's
-//     normal multi-server condition (owner decision MCP-3520, see
-//     internal/security/detect/checks/shadowing.go).
+//   - the name-squat with a rewritten description (M05) is surfaced for
+//     review only (round-2 red team R2-5): a same-name collision without a
+//     cloned description is still never HARD — it is the proxy's normal
+//     multi-server condition (owner decision MCP-3520) — but a distinctive
+//     name squatted with different prose that does not name its own server
+//     is now a SOFT shadowing finding (see
+//     internal/security/detect/checks/shadowing.go, shape 1b).
 func TestMutantsProfileTightenedAfterRT04(t *testing.T) {
 	tools := mutantTools()
 	verdict, findings := scan(t, testAttackerServer, tools,
@@ -343,8 +346,14 @@ func TestMutantsProfileTightenedAfterRT04(t *testing.T) {
 			t.Errorf("mutant %q must be surfaced for review; got no findings", name)
 		}
 	}
-	if fs := findingsFor(findings, "filesystem_read"); len(fs) > 0 {
-		t.Errorf("name-squat without a cloned description is out of scope (MCP-3520) and should stay unflagged; got:%s", dumpFindings(fs))
+	fs := findingsFor(findings, "filesystem_read")
+	if len(fs) == 0 {
+		t.Errorf("name-squat with a rewritten description must be surfaced for review (R2-5); got no findings")
+	}
+	for _, f := range fs {
+		if f.ThreatLevel == "dangerous" {
+			t.Errorf("name-squat without a cloned description must never be HARD (MCP-3520); got:%s", dumpFindings(fs))
+		}
 	}
 }
 

@@ -997,9 +997,11 @@ components:
             debounced informational server rescan that brings the review screen's scan
             coverage back to "current".
 
-            Evidence and freshness ONLY: a clean verdict never approves a changed
-            contract (RT-02); every change is still held for review in scan and manual
-            trust modes. Runs in every trust mode except "auto".
+            Evidence and freshness ONLY: this switch approves nothing. Under "manual"
+            every change is held for review whatever the verdict (RT-02); under
+            "scan" the gate's own synchronous scan approves a clean change that
+            passes the spec 120 structural gate (spec 119 FR-004), and this switch
+            does not affect that path. Runs in every trust mode except "auto".
 
             Default (nil) is ENABLED. It only takes effect while auto_baseline_scan is
             also enabled, so a user can keep the admission scan and turn off per-change
@@ -1336,6 +1338,12 @@ components:
             informational (MCP-1072) — surfaced so a reviewer can see a server's origin
             — and no longer gates quarantine or skip_quarantine.
           type: string
+        tool_argument_error_mode:
+          description: |-
+            ToolArgumentErrorMode stores the per-upstream argument-error policy.
+            Empty and detailed retain detailed errors; redacted opts into redaction.
+            Updates omit/keep an empty value; detailed explicitly resets the policy.
+          type: string
         tool_discovery_interval:
           type: string
         toon_output:
@@ -1366,15 +1374,32 @@ components:
     config.TLSConfig:
       description: TLS configuration
       properties:
+        cert_file:
+          description: |-
+            CertFile is the absolute path of an operator-provided server certificate
+            (PEM, leaf first), served instead of a generated one. Needs KeyFile.
+          type: string
         certs_dir:
           description: Directory for certificates
           type: string
         enabled:
           description: Enable HTTPS
           type: boolean
+        extra_sans:
+          description: |-
+            ExtraSANs are DNS names and IP addresses added to the generated server
+            certificate, which is signed by the same local CA. Not used with CertFile.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         hsts:
           description: Enable HTTP Strict Transport Security
           type: boolean
+        key_file:
+          description: KeyFile is the absolute path of the private key for CertFile
+            (PEM).
+          type: string
         require_client_cert:
           description: Enable mTLS
           type: boolean
@@ -3184,6 +3209,8 @@ components:
         token_expires_at:
           description: When the OAuth token expires (ISO 8601)
           type: string
+        tool_argument_error_mode:
+          type: string
         tool_count:
           type: integer
         tool_list_token_size:
@@ -3893,6 +3920,10 @@ components:
           type: string
         reconnect_on_use:
           type: boolean
+        tool_argument_error_mode:
+          description: Empty preserves an update; detailed explicitly resets a redacted
+            policy.
+          type: string
         trust_mode:
           description: |-
             TrustMode is the per-server trust tier (spec 086): "auto", "scan", or

@@ -248,6 +248,30 @@ export function isStaleReviewError(message: string | undefined | null): boolean 
 // ---------------------------------------------------------------------------
 
 export const HELD_CHANGE_DOCS = 'https://docs.mcpproxy.app/features/security-quarantine'
+
+/**
+ * Structural-gate hold signals (spec 120): the `held_signals` entries that
+ * start with one of these ids come from the deterministic change gate, not
+ * from the scanner. Labels mirror internal/contracts/testdata/terminology.json
+ * (family hold_signal); the parity test pins them.
+ */
+export const HOLD_SIGNAL_LABELS: Record<string, string> = {
+  'GATE-HINT-SAFER-FLIP': 'Re-labelled as safer',
+  'GATE-HINT-CHANGE': 'Safety hint changed',
+  'GATE-SCHEMA-SHAPE': 'Input schema widened',
+  'GATE-OUTPUT-SCHEMA': 'Output schema changed',
+}
+
+/**
+ * Short label for a gate signal (`GATE-SCHEMA-SHAPE:new-required:bcc` →
+ * "Input schema widened: new-required bcc"), or null for any other signal.
+ */
+export function gateSignalLabel(signal: string): string | null {
+  const [id, ...rest] = signal.split(':')
+  const label = HOLD_SIGNAL_LABELS[id]
+  if (!label) return null
+  return rest.length ? `${label}: ${rest.join(' ')}` : label
+}
 export const HELD_CHANGE_HINT = 'Changed tools stay blocked until you approve the update. To let a server you trust update its tools without review, set auto_approve_tool_changes: true on it.'
 
 export type ChangeKind = 'added' | 'removed' | 'changed'

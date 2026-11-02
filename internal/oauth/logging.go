@@ -137,8 +137,10 @@ var sensitiveParams = []string{
 	"credential",
 }
 
-// tokenPattern matches Bearer tokens and other sensitive token patterns.
-var tokenPattern = regexp.MustCompile(`(?i)(bearer\s+)[a-zA-Z0-9\-_\.]+`)
+// tokenPattern matches Bearer tokens and other sensitive token patterns. The
+// value class is RFC 6750's b64token, so a standard-base64 token is not cut at
+// its first '+' or '/'.
+var tokenPattern = regexp.MustCompile(`(?i)(bearer\s+)[a-zA-Z0-9\-_\.~+/]+=*`)
 
 // secretPattern matches common secret patterns.
 var secretPattern = regexp.MustCompile(`(?i)(secret|password|token|key)["']?\s*[:=]\s*["']?[a-zA-Z0-9\-_\.]+`)

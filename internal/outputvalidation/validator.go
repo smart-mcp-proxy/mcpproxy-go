@@ -208,6 +208,9 @@ func compile(schemaJSON string) *cacheEntry {
 	// validation error messages (which are surfaced in audit records).
 	const schemaURI = "mem://outputschema/schema"
 	c := jsonschema.NewCompiler()
+	// The schema is upstream-controlled: an empty loader stops a $ref from
+	// reading local files (the default loader serves file:// URLs).
+	c.UseLoader(jsonschema.SchemeURLLoader{})
 	if err := c.AddResource(schemaURI, doc); err != nil {
 		return &cacheEntry{sentinel: true}
 	}

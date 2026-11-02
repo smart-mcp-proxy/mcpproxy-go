@@ -24,7 +24,52 @@ func DoctorFindings(cfg *Config) []string {
 	if f := StdioSocketExposureFinding(cfg); f != "" {
 		out = append(out, f)
 	}
+	if f := ScanDefaultTrustFinding(cfg); f != "" {
+		out = append(out, f)
+	}
 	return append(out, serverEditionDoctorFindings(cfg)...)
+}
+
+// ScanDefaultTrustServers lists, in config order, the enabled servers whose
+// trust mode is the scan DEFAULT by omission (TrustModeDefaulted): no
+// trust_mode, no legacy flag.
+func ScanDefaultTrustServers(cfg *Config) []string {
+	if cfg == nil {
+		return nil
+	}
+	var names []string
+	for _, s := range cfg.Servers {
+		if s != nil && s.Enabled && s.TrustModeDefaulted() {
+			names = append(names, s.Name)
+		}
+	}
+	return names
+}
+
+// ScanDefaultTrustFinding is the spec 120 FR-012 doctor finding: every enabled
+// server with no trust_mode runs under scan (the default since spec 119), so a
+// changed tool contract that scans clean and passes the structural gate is
+// approved without a person. Returns "" when no server is defaulted.
+func ScanDefaultTrustFinding(cfg *Config) string {
+	names := ScanDefaultTrustServers(cfg)
+	if len(names) == 0 {
+		return ""
+	}
+	return ScanDefaultTrustMessage(names)
+}
+
+// ScanDefaultTrustMessage renders the scan-default notice for the named
+// servers; the startup WARN (spec 120 FR-011) and doctor share it.
+func ScanDefaultTrustMessage(names []string) string {
+	noun, verb := "server has", "runs"
+	if len(names) != 1 {
+		noun, verb = "servers have", "run"
+	}
+	return fmt.Sprintf("%d enabled %s no trust_mode and %s under scan, the default: %s. "+
+		"A changed tool contract that scans clean and passes the structural gate is approved automatically, "+
+		"and held changes already in the review queue are released on the next discovery pass. "+
+		"Set \"trust_mode\": \"manual\" on a server whose tool changes a person should review.",
+		len(names), noun, verb, strings.Join(names, ", "))
 }
 
 // StdioSocketExposureFinding is the GH #1704 doctor finding: every enabled

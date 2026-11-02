@@ -11,7 +11,9 @@ import (
 // stdioServer is an enabled stdio server with an optional per-server isolation
 // mode override (empty = inherit the global mode).
 func stdioServer(name string, mode IsolationMode) *ServerConfig {
-	s := &ServerConfig{Name: name, Command: "npx", Args: []string{"-y", name}, Protocol: "stdio", Enabled: true}
+	// An explicit trust mode keeps the spec 120 scan-default finding out of
+	// these socket-exposure fixtures.
+	s := &ServerConfig{Name: name, Command: "npx", Args: []string{"-y", name}, Protocol: "stdio", Enabled: true, TrustMode: string(TrustModeScan)}
 	if mode != "" {
 		m := mode
 		s.Isolation = &IsolationConfig{Mode: &m}
@@ -31,9 +33,9 @@ func TestDoctorFindings_StdioSocketExposure_NamesUnisolatedServers(t *testing.T)
 			stdioServer("inherits-none", ""),
 			stdioServer("explicit-sandbox", IsolationModeSandbox),
 			stdioServer("explicit-docker", IsolationModeDocker),
-			{Name: "remote-http", URL: "https://example.com/mcp", Protocol: "http", Enabled: true},
+			{Name: "remote-http", URL: "https://example.com/mcp", Protocol: "http", Enabled: true, TrustMode: string(TrustModeScan)},
 			{Name: "disabled-stdio", Command: "uvx", Protocol: "stdio", Enabled: false},
-			{Name: "runs-docker-itself", Command: "docker", Args: []string{"run", "img"}, Protocol: "stdio", Enabled: true},
+			{Name: "runs-docker-itself", Command: "docker", Args: []string{"run", "img"}, Protocol: "stdio", Enabled: true, TrustMode: string(TrustModeScan)},
 		},
 	}
 	findings := DoctorFindings(cfg)
@@ -90,7 +92,51 @@ func TestDoctorFindings_StdioSocketExposure_NoStdioServers(t *testing.T) {
 	cfg := &Config{
 		Listen:       "127.0.0.1:8080",
 		EnableSocket: true,
-		Servers:      []*ServerConfig{{Name: "remote", URL: "https://example.com/mcp", Protocol: "http", Enabled: true}},
+		Servers:      []*ServerConfig{{Name: "remote", URL: "https://example.com/mcp", Protocol: "http", Enabled: true, TrustMode: string(TrustModeScan)}},
 	}
 	assert.Empty(t, DoctorFindings(cfg))
+}
+
+// TestScanDefaultTrustFinding (spec 120 FR-012): enabled servers with no
+// trust_mode and no legacy flag are named, in config order; disabled servers
+// and servers with an explicit mode or a legacy flag are not; no servers, no
+// finding.
+func TestScanDefaultTrustFinding(t *testing.T) {
+	f := false
+	cfg := &Config{Servers: []*ServerConfig{
+		{Name: "a", Enabled: true},
+		{Name: "b", Enabled: true, TrustMode: "manual"},
+		{Name: "c", Enabled: false},
+		{Name: "d", Enabled: true, AutoApproveToolChanges: &f},
+		{Name: "e", Enabled: true, SkipQuarantine: true},
+		{Name: "f", Enabled: true, TrustMode: "scan"},
+		{Name: "g", Enabled: true},
+	}}
+	if got := ScanDefaultTrustServers(cfg); len(got) != 2 || got[0] != "a" || got[1] != "g" {
+		t.Fatalf("ScanDefaultTrustServers = %v, want [a g]", got)
+	}
+	finding := ScanDefaultTrustFinding(cfg)
+	for _, want := range []string{"2 enabled servers have no trust_mode", "a, g", "structural gate", `"trust_mode": "manual"`} {
+		if !strings.Contains(finding, want) {
+			t.Errorf("finding %q lacks %q", finding, want)
+		}
+	}
+	found := false
+	for _, line := range DoctorFindings(cfg) {
+		if line == finding {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("DoctorFindings does not carry the scan-default finding: %v", DoctorFindings(cfg))
+	}
+	if ScanDefaultTrustFinding(&Config{Servers: []*ServerConfig{{Name: "b", Enabled: true, TrustMode: "manual"}}}) != "" {
+		t.Error("an explicit mode is not defaulted")
+	}
+	if ScanDefaultTrustFinding(&Config{}) != "" || ScanDefaultTrustFinding(nil) != "" {
+		t.Error("no servers, no finding")
+	}
+	if ScanDefaultTrustMessage([]string{"only"}) == "" || !strings.Contains(ScanDefaultTrustMessage([]string{"only"}), "1 enabled server has") {
+		t.Error("singular form")
+	}
 }

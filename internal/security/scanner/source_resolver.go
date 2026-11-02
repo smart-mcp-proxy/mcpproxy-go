@@ -342,8 +342,19 @@ func (r *SourceResolver) Resolve(ctx context.Context, info ServerInfo) (*Resolve
 // `bun server.ts` as a runner by name alone would route a local invocation into
 // the package cache/fetch path and scan the wrong token. We decide this up front
 // rather than relying on a later parser failure.
-func isPackageRunnerCommand(command string, args []string) bool {
+// runnerBase returns a command's lowercased base name without a Windows
+// executable suffix, so npx.cmd and uvx.exe classify as npx and uvx.
+func runnerBase(command string) string {
 	base := strings.ToLower(filepath.Base(command))
+	switch filepath.Ext(base) {
+	case ".exe", ".cmd", ".bat":
+		base = strings.TrimSuffix(base, filepath.Ext(base))
+	}
+	return base
+}
+
+func isPackageRunnerCommand(command string, args []string) bool {
+	base := runnerBase(command)
 	switch base {
 	case "npx", "uvx", "bunx":
 		return true
@@ -853,7 +864,7 @@ func extractNpxPackageDir(path, targetPkg string) string {
 // stripped) that an npx-based server launches. Returns "" if the command is
 // not npx or no package name can be determined.
 func npxTargetPackage(info ServerInfo) string {
-	if info.Command == "" || filepath.Base(info.Command) != "npx" {
+	if info.Command == "" || runnerBase(info.Command) != "npx" {
 		return ""
 	}
 	name, _ := parsePackageSpec(runnerPackageSpec("npx", info.Args))
@@ -865,7 +876,7 @@ func npxTargetPackage(info ServerInfo) string {
 // Git URLs (git+https://...) are reduced to the repo name. Returns "" if the
 // command is not uvx or no package name can be determined.
 func uvxTargetPackage(info ServerInfo) string {
-	if info.Command == "" || filepath.Base(info.Command) != "uvx" {
+	if info.Command == "" || runnerBase(info.Command) != "uvx" {
 		return ""
 	}
 	// runnerPackageSpec skips `--with <dep>` / `-p <python>` values so the target
@@ -1364,7 +1375,7 @@ func (r *SourceResolver) EnrichWithFileList(resolved *ResolvedSource) {
 // resolveFromPackageCache attempts to find server source in local package manager caches.
 // Supports npx (npm), uvx (uv/pip), and pipx.
 func (r *SourceResolver) resolveFromPackageCache(ctx context.Context, info ServerInfo) (*ResolvedSource, error) {
-	cmdBase := filepath.Base(info.Command)
+	cmdBase := runnerBase(info.Command)
 
 	switch cmdBase {
 	case "npx":
@@ -1380,7 +1391,7 @@ func (r *SourceResolver) resolveFromPackageCache(ctx context.Context, info Serve
 func (r *SourceResolver) resolveNpxCache(info ServerInfo) (*ResolvedSource, error) {
 	// Extract the target package spec (handles `npx -p <pkg>`, `pnpm dlx <pkg>`,
 	// version pins, etc.) then split name from any exact version pin.
-	spec := runnerPackageSpec(strings.ToLower(filepath.Base(info.Command)), info.Args)
+	spec := runnerPackageSpec(runnerBase(info.Command), info.Args)
 	if spec == "" {
 		return nil, fmt.Errorf("no package name found in npx args")
 	}
@@ -1563,7 +1574,7 @@ func (r *SourceResolver) resolveUvxCache(info ServerInfo) (*ResolvedSource, erro
 	// `uvx --from <pkg> <cmd>`, `uvx git+<url>`, and crucially skips `--with <dep>`
 	// / `-p <python>` values so the additional dependency or python version is not
 	// mistaken for the target (MCP-2445).
-	pkgName := runnerPackageSpec(strings.ToLower(filepath.Base(info.Command)), info.Args)
+	pkgName := runnerPackageSpec(runnerBase(info.Command), info.Args)
 	if pkgName == "" {
 		return nil, fmt.Errorf("no package name found in uvx args")
 	}

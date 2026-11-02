@@ -1,7 +1,8 @@
 # Feature Specification: Scan is the default trust mode; a clean-scanned change auto-approves
 
 **Feature Branch**: `119-scan-default-trust`
-**Status**: Implemented in one PR
+**Status**: Implemented in one PR (#1740). FR-007 amended by spec 120 (`120-scan-structural-gate`), which ships in
+the same release: the single safer-flip rule became the structural change gate.
 **Input**: Maintainer decision 2026-10-22 (UI feedback session, verbatim): "by default we don't need to
 challenge user with approvals. If contract changed and scan shows OK - auto-approve it. If user switched to
 manual mode - it always asks for approval of changed tools." It supersedes the 2026-10-11 red-team decision
@@ -47,13 +48,14 @@ that scans clean (red-team EXP-6); operators who do not accept it keep `trust_mo
   whose definition has since moved) is re-evaluated on every discovery pass under `scan`: a clean verdict of
   the CURRENT definition approves it (same transition as FR-004). This is what clears a queue of
   clean-scanned holds after upgrading.
-- **FR-007** Safety-hint flips toward a SAFER tier are never auto-approved, whatever the verdict:
-  `readOnlyHint` false→true or `destructiveHint` true→false on a changed contract is held with
-  `held_reason: scan_findings` and the deterministic signal `GATE-HINT-SAFER-FLIP`, appended to the scan's own
-  signals when the verdict is not clean (the signal is recorded on every pass the flip stands). A tool that re-labels
-  itself read-only is exactly the change a profile `max_tier` cap and the `call_tool_read` dispatch trust;
-  the scanner's `capability_mismatch` check does not cover a flip without a description change. (Builder's
-  call, kept small; the review diff already renders hint flips.)
+- **FR-007** (amended by spec 120) A changed contract that carries a structural hold signal is never
+  auto-approved, whatever the verdict: `contractDelta` (spec 120 FR-001..FR-005, FR-009) holds any safety-hint
+  change in either direction (`GATE-HINT-CHANGE`, the two safer flips also as `GATE-HINT-SAFER-FLIP`), a
+  widened input schema (`GATE-SCHEMA-SHAPE:<reason>:<path>`), an output-schema change (`GATE-OUTPUT-SCHEMA`)
+  and a hash-equal dispatch-tier change, with `held_reason: scan_findings`, the signals prepended to the
+  scan's own and re-recorded on every pass the delta stands. The original FR-007 covered only the two safer
+  flips; the reasoning stands (a tool that re-labels itself read-only is exactly the change a profile
+  `max_tier` cap and the `call_tool_read` dispatch trust, and the scanner reads a schema as text).
 - **FR-007a** A failed approval write (FR-004/FR-006) leaves the record exactly as it was before the
   attempt: the hold written afterwards must not carry the new approved hash or cleared `Previous*` evidence,
   or the next pass's hash-match shortcut would approve the contract with no scan and no operator.
@@ -86,6 +88,7 @@ never holds).
    agents keep calling it, Activity shows `tool_auto_approved`, Home shows nothing.
 3. Same with a TPA payload in the new description: `changed`, blocked, `held_reason: scan_findings`, Home
    shows the review item.
-4. Same with `readOnlyHint` flipped false→true and nothing else: held, signal `GATE-HINT-SAFER-FLIP`.
+4. Same with `readOnlyHint` flipped false→true and nothing else: held, signals `GATE-HINT-SAFER-FLIP`,
+   `GATE-HINT-CHANGE:readOnlyHint:false>true` (spec 120).
 5. `manual` server, benign re-wording: held `changed`, `held_verdict: clean`, `held_reason: awaiting_review`.
 6. `go run ./cmd/qapilot report` coverage gate and `qapilot mutate` pass with the updated model.

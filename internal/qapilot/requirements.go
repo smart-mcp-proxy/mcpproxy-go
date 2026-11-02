@@ -37,7 +37,7 @@ var Requirements = []Requirement{
 		Note:    "Scan-mode approval of a new tool applies whether or not the server is quarantined; dispatch stays refused by the server-level verdict (reading chosen for S15, see pilot doc)."},
 	{ID: "QP-10", Mandatory: true, Title: "A changed definition of an approved tool is held as changed in manual mode whatever its verdict; in scan mode it is approved on a clean verdict and held on a dangerous one; auto mode approves it",
 		Sources: []string{"specs/041-quarantine-invariants/spec.md FR-001", "specs/119-scan-default-trust/spec.md FR-004..FR-006, FR-009", "docs/features/security-quarantine.md trust-mode table"},
-		Note:    "Spec 119 (2026-10-22) reversed RT-02 for scan mode; manual keeps it. The safer-direction hint flip hold (spec 119 FR-007) is outside the model: no scenario flips hints."},
+		Note:    "Spec 119 (2026-10-22) reversed RT-02 for scan mode; manual keeps it. The structural gate in front of the scan verdict is QP-20; hint flips are outside the model (no scenario flips hints)."},
 	{ID: "QP-11", Mandatory: true, Title: "A changed tool stays changed across reconnects and returns to approved only when the approved definition returns",
 		Sources: []string{"specs/041-quarantine-invariants/spec.md US2, FR-001"}},
 	{ID: "QP-12", Mandatory: true, Title: "Explicit operator approval (per tool or approve_all) approves the current definition; a later reversion to an older definition is a change",
@@ -58,6 +58,9 @@ var Requirements = []Requirement{
 	{ID: "QP-19", Mandatory: true, Title: "The fixture contracts carry the scan verdict the model assumes (benign → clean, poisoned → dangerous)",
 		Sources: []string{"specs/086-tpa-scanner-approval/spec.md FR-012 (offline synchronous scan)"},
 		Note:    "A fixture check, not a policy rule: it keeps the model's Verdict labels honest against the real scanner."},
+	{ID: "QP-20", Mandatory: true, Title: "Under scan, a changed definition that widens the approved contract (new required parameter, type change, enum member added or enum dropped, loosened constraint, default/const added or changed, output schema change, any safety-hint change) is held whatever the scan verdict; a narrowing or neutral change with a clean verdict is approved",
+		Sources: []string{"specs/120-scan-structural-gate/spec.md FR-002..FR-005, FR-009", "docs/features/security-quarantine.md 'Structural changes are held'"},
+		Note:    "The model carries one widening shape (BenignWide: a new defaulted parameter); the per-keyword rules are pinned by TestContractDelta_SharedFixture in internal/runtime."},
 }
 
 // RequirementByID looks a requirement up.

@@ -301,12 +301,13 @@ func TestRT03_AnnotationFlip_HeldAsChanged(t *testing.T) {
 // TestRT03_NonSafetyAnnotationChanges_DoNotHold: the title is free-form
 // metadata, and omitting a hint is the same as stating its default — neither is
 // a contract change.
-// TestRT03_ScanMode_SaferFlipHeld_LessSafeFlipApproved pins how the default
-// tier treats EXP-5 after spec 119: a flip toward SAFER hints (the readOnly lie)
-// is held with GATE-HINT-SAFER-FLIP whatever the verdict, while a flip toward
-// LESS safe hints (an honest downgrade) scans clean and is scan-approved like
-// any other clean change.
-func TestRT03_ScanMode_SaferFlipHeld_LessSafeFlipApproved(t *testing.T) {
+// TestRT03_ScanMode_AnyHintFlipHeld pins how the default tier treats EXP-5
+// after spec 120: a flip toward SAFER hints (the readOnly lie) is held with
+// GATE-HINT-SAFER-FLIP first, and a flip toward LESS safe hints (an honest
+// downgrade) is held too — any effective hint change holds whatever the
+// verdict (FR-003), and both move the dispatch tier. Spec 119 approved the
+// honest direction; spec 120 asks a person for both.
+func TestRT03_ScanMode_AnyHintFlipHeld(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{scanServer("notes")})
 	_, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(rt03Annotations(false, true))})
 	require.NoError(t, err)
@@ -318,7 +319,9 @@ func TestRT03_ScanMode_SaferFlipHeld_LessSafeFlipApproved(t *testing.T) {
 	rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
 	require.NoError(t, err)
 	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
-	assert.Equal(t, []string{SignalHintSaferFlip}, rec.HeldSignals)
+	assert.Equal(t, []string{SignalHintSaferFlip,
+		"GATE-HINT-CHANGE:readOnlyHint:false>true", "GATE-HINT-CHANGE:destructiveHint:true>false",
+		"GATE-HINT-CHANGE:dispatch:destructive>read"}, rec.HeldSignals)
 
 	// Reverting to the honest hints restores the approval.
 	result, err = rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(rt03Annotations(false, true))})
@@ -326,19 +329,25 @@ func TestRT03_ScanMode_SaferFlipHeld_LessSafeFlipApproved(t *testing.T) {
 	assert.False(t, result.BlockedTools["notes_export"])
 
 	// The honest direction: a tool approved as readOnly that now admits it is
-	// destructive is a clean change and is scan-approved.
+	// destructive is held as well (no safer-flip label).
 	rt2 := setupQuarantineRuntime(t, nil, []*config.ServerConfig{scanServer("notes")})
 	_, err = rt2.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(rt03Annotations(true, false))})
 	require.NoError(t, err)
 	result, err = rt2.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(rt03Annotations(false, true))})
 	require.NoError(t, err)
-	assert.False(t, result.BlockedTools["notes_export"])
+	assert.True(t, result.BlockedTools["notes_export"])
 	rec, err = rt2.storageManager.GetToolApproval("notes", "notes_export")
 	require.NoError(t, err)
-	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-	assert.Equal(t, "scan-approved", rec.ApprovedBy)
+	assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
+	assert.Equal(t, []string{"GATE-HINT-CHANGE:readOnlyHint:true>false", "GATE-HINT-CHANGE:destructiveHint:false>true",
+		"GATE-HINT-CHANGE:dispatch:read>destructive"}, rec.HeldSignals)
 }
 
+// TestRT03_NonSafetyAnnotationChanges_DoNotHold: the title is free-form
+// metadata and is never a contract change. Omitting a hint that was stated at
+// its default used to be absorbed too; since spec 120 FR-009 it is held when it
+// moves the dispatch tier (TestHashEqualDispatchDrop_Bites), so only the title
+// case stays here.
 func TestRT03_NonSafetyAnnotationChanges_DoNotHold(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{rt03Server()})
 	_, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(rt03Annotations(false, true))})
@@ -346,14 +355,13 @@ func TestRT03_NonSafetyAnnotationChanges_DoNotHold(t *testing.T) {
 
 	retitled := rt03Annotations(false, true)
 	retitled.Title = "Export all notes"
-	for _, ann := range []*config.ToolAnnotations{retitled, nil, {}} {
-		result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(ann)})
-		require.NoError(t, err)
-		assert.False(t, result.BlockedTools["notes_export"])
-		rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
-		require.NoError(t, err)
-		assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
-	}
+	result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{rt03Tool(retitled)})
+	require.NoError(t, err)
+	assert.False(t, result.BlockedTools["notes_export"])
+	rec, err := rt.storageManager.GetToolApproval("notes", "notes_export")
+	require.NoError(t, err)
+	assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status)
+	assert.Equal(t, "Export all notes", rec.CurrentAnnotations.Title)
 }
 
 // rt03SingleFlips are the four safety hints of the annotation contract, each
@@ -894,14 +902,15 @@ func TestRT01_LegacyChangedRecord_EmptyPreviousSchema_NotWildcard(t *testing.T) 
 				rec, err := rt.storageManager.GetToolApproval("fin", "stock_quote")
 				require.NoError(t, err)
 				if mode == "scan" {
-					// Spec 119: the gate sees a change (not a revert to the
-					// approved contract) and, the new schema scanning clean,
-					// approves it on the NEW definition — the approved hash
-					// moves to the exfil schema, never to the stale wildcard.
-					assert.False(t, result.BlockedTools["stock_quote"], "pass %d", pass)
-					assert.Equal(t, storage.ToolApprovalStatusApproved, rec.Status, "pass %d", pass)
-					assert.Equal(t, "scan-approved", rec.ApprovedBy, "pass %d", pass)
-					assert.Equal(t, calculateToolApprovalHashWithOutputSchema("stock_quote", desc, normalizeJSON(exfilSchema), "", nil), rec.ApprovedHash, "pass %d: approved on the new schema, not matched to the old one", pass)
+					// Spec 119 saw a change (not a revert) and, the new schema
+					// scanning clean, approved it on the NEW definition. Spec
+					// 120: the approved input schema is unknown, which is not
+					// a wildcard — the structural gate holds the change until
+					// an operator confirms it (GATE-SCHEMA-SHAPE:approved-unknown).
+					assert.True(t, result.BlockedTools["stock_quote"], "pass %d", pass)
+					assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status, "pass %d", pass)
+					assert.NotEqual(t, "scan-approved", rec.ApprovedBy, "pass %d", pass)
+					assert.Contains(t, rec.HeldSignals, "GATE-SCHEMA-SHAPE:approved-unknown:/", "pass %d", pass)
 					continue
 				}
 				assert.True(t, result.BlockedTools["stock_quote"], "pass %d", pass)

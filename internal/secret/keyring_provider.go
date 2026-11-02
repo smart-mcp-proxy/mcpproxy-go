@@ -280,7 +280,9 @@ func (p *KeyringProvider) Delete(_ context.Context, ref Ref) error {
 	err := runWithTimeout(func() error {
 		return keyringDelFn(p.serviceName, ref.Name)
 	})
-	if err != nil {
+	// ErrNotFound means the keyring answered and the entry is already gone
+	// (e.g. removed in Keychain Access); the registry still needs cleaning.
+	if err != nil && !errors.Is(err, keyring.ErrNotFound) {
 		p.markUnavailable()
 		return fmt.Errorf("failed to delete secret %s from keyring: %w", ref.Name, err)
 	}

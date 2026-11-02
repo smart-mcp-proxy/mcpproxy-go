@@ -679,10 +679,7 @@ func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Reques
 // global admin key, or a user JWT resolved as a session principal
 // (kind=bearer_jwt) through the edition hook.
 func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, authHeader string) {
-	var token string
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		token = strings.TrimPrefix(authHeader, "Bearer ")
-	}
+	token := bearerToken(authHeader)
 
 	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
 		s.rejectClientCredentialOnREST(w, r)
@@ -813,12 +810,8 @@ func ExtractToken(r *http.Request) string {
 	}
 
 	// 2. Check Authorization: Bearer header
-	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			if token := strings.TrimPrefix(authHeader, "Bearer "); token != "" {
-				return token
-			}
-		}
+	if token := bearerToken(r.Header.Get("Authorization")); token != "" {
+		return token
 	}
 
 	// 3. Check query parameter (for SSE and Web UI initial load)
@@ -827,6 +820,17 @@ func ExtractToken(r *http.Request) string {
 	}
 
 	return ""
+}
+
+// bearerToken returns the credential from an Authorization header value that
+// uses the Bearer scheme, or "" otherwise. The scheme name is matched
+// case-insensitively (RFC 7235 §2.1, RFC 6750 §2.1).
+func bearerToken(authHeader string) string {
+	const scheme = "Bearer "
+	if len(authHeader) < len(scheme) || !strings.EqualFold(authHeader[:len(scheme)], scheme) {
+		return ""
+	}
+	return authHeader[len(scheme):]
 }
 
 // correlationIDMiddleware injects correlation ID and request source into context
@@ -2237,6 +2241,8 @@ type AddServerRequest struct {
 	// manual). This is the REST seam for changing the trust tier via
 	// POST/PATCH /api/v1/servers.
 	TrustMode string `json:"trust_mode,omitempty"`
+	// Empty preserves an update; detailed explicitly resets a redacted policy.
+	ToolArgumentErrorMode string `json:"tool_argument_error_mode,omitempty"`
 	// InitTimeout is the per-server MCP `initialize` handshake deadline override
 	// (MCP-3322 / GH #760), serialized as a duration string (e.g. "120s"). A nil
 	// pointer means "leave unchanged" on PATCH; a present value is applied.
@@ -2469,6 +2475,10 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
+	if err := config.ValidateToolArgumentErrorMode(req.ToolArgumentErrorMode); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Validate required fields
 	if req.Name == "" {
@@ -2550,16 +2560,17 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// ADD ignores null entries — `null` is JSON Merge Patch's "delete"
 	// signal which has no meaning on create. Drop nils when flattening.
 	serverConfig := &config.ServerConfig{
-		Name:        req.Name,
-		URL:         req.URL,
-		Command:     req.Command,
-		Args:        req.Args,
-		Env:         flattenNullableMap(req.Env),
-		Headers:     flattenNullableMap(req.Headers),
-		WorkingDir:  req.WorkingDir,
-		Protocol:    protocol,
-		Enabled:     enabled,
-		Quarantined: quarantined,
+		ToolArgumentErrorMode: req.ToolArgumentErrorMode,
+		Name:                  req.Name,
+		URL:                   req.URL,
+		Command:               req.Command,
+		Args:                  req.Args,
+		Env:                   flattenNullableMap(req.Env),
+		Headers:               flattenNullableMap(req.Headers),
+		WorkingDir:            req.WorkingDir,
+		Protocol:              protocol,
+		Enabled:               enabled,
+		Quarantined:           quarantined,
 	}
 	if req.Quarantined != nil {
 		// The caller stated the value: record it as an operator statement so
@@ -2725,6 +2736,10 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 	// Build partial update config - only set fields that were provided
 	updates := &config.ServerConfig{Name: serverName}
 	hasUpdates := false
+	if req.ToolArgumentErrorMode != "" {
+		updates.ToolArgumentErrorMode = req.ToolArgumentErrorMode
+		hasUpdates = true
+	}
 
 	if req.URL != "" {
 		// #872: the read path masks secrets in the URL query string / userinfo
@@ -3002,6 +3017,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	if err := config.ValidateToolArgumentErrorMode(req.ToolArgumentErrorMode); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// GH #938: reject an unrecognized trust_mode before anything is persisted.
 	// A PATCH that omits trust_mode sends "" and is unaffected ("" = leave
@@ -3165,8 +3184,8 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q has no value to store", req.Scope, req.Key))
 		return
 	}
-	if strings.HasPrefix(value, "${keyring:") || strings.HasPrefix(value, "${env:") {
-		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference (%s); nothing to convert", req.Scope, req.Key, value))
+	if secret.IsSecretRef(value) {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference; nothing to convert", req.Scope, req.Key))
 		return
 	}
 
@@ -5059,7 +5078,14 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// chi routes on RawPath only when Go set it (the client's encoding differs
+	// from the default one); then {name} is still encoded and must be decoded
+	// once. Otherwise chi already matched the decoded Path, and decoding again
+	// would turn a literal "a%41" into "aA" and delete the wrong entry.
 	name := chi.URLParam(r, "name")
+	if r.URL.RawPath != "" {
+		name = decodePathParam(name)
+	}
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Secret name is required")
 		return
@@ -6415,7 +6441,7 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id}/servers [get]
 func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6671,7 +6697,7 @@ func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request)
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id} [delete]
 func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6710,7 +6736,7 @@ func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Reque
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id} [put]
 func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6749,7 +6775,7 @@ func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request
 // @Failure      500  {object}  contracts.ErrorResponse            "Failed to refresh registry cache"
 // @Router       /api/v1/registries/{id}/refresh [post]
 func (s *Server) handleRefreshRegistryCache(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6896,6 +6922,7 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
+	sessionFilter.Offset = offset
 
 	// Get recent sessions from controller
 	sessions, total, err := s.controller.GetRecentSessions(sessionFilter)
@@ -7275,7 +7302,7 @@ func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
 	}
 
 	serverID := chi.URLParam(r, "id")
-	toolName := chi.URLParam(r, "tool")
+	toolName := decodePathParam(chi.URLParam(r, "tool"))
 	if serverID == "" || toolName == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")
 		return
@@ -7402,7 +7429,7 @@ func (s *Server) handleSetAllToolsEnabled(enabled bool) http.HandlerFunc {
 
 func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
-	toolName := chi.URLParam(r, "tool")
+	toolName := decodePathParam(chi.URLParam(r, "tool"))
 
 	if serverID == "" || toolName == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")

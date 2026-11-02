@@ -83,11 +83,7 @@ func sessionCredentialValue(r *http.Request, kind auth.CredentialKind) string {
 		}
 		return ""
 	case auth.CredentialKindBearerJWT:
-		authHeader := r.Header.Get("Authorization")
-		if len(authHeader) > len("Bearer ") && authHeader[:7] == "Bearer " {
-			return authHeader[7:]
-		}
-		return ""
+		return bearerToken(r.Header.Get("Authorization"))
 	default:
 		return ""
 	}

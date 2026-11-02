@@ -655,6 +655,15 @@ type TLSConfig struct {
 	RequireClientCert bool   `json:"require_client_cert" mapstructure:"require_client_cert"` // Enable mTLS
 	CertsDir          string `json:"certs_dir,omitempty" mapstructure:"certs_dir"`           // Directory for certificates
 	HSTS              bool   `json:"hsts" mapstructure:"hsts"`                               // Enable HTTP Strict Transport Security
+
+	// ExtraSANs are DNS names and IP addresses added to the generated server
+	// certificate, which is signed by the same local CA. Not used with CertFile.
+	ExtraSANs []string `json:"extra_sans,omitempty" mapstructure:"extra_sans"`
+	// CertFile is the absolute path of an operator-provided server certificate
+	// (PEM, leaf first), served instead of a generated one. Needs KeyFile.
+	CertFile string `json:"cert_file,omitempty" mapstructure:"cert_file"`
+	// KeyFile is the absolute path of the private key for CertFile (PEM).
+	KeyFile string `json:"key_file,omitempty" mapstructure:"key_file"`
 }
 
 // TokenizerConfig represents tokenizer configuration for token counting
@@ -745,12 +754,16 @@ type ServerConfig struct {
 	// scan (DefaultTrustMode, spec 119) and an unrecognized value as manual
 	// (fail closed). Read via
 	// EffectiveTrustMode(), never the raw string.
-	TrustMode      string           `json:"trust_mode,omitempty" mapstructure:"trust-mode"` // Per-server trust tier: auto|scan|manual. Supersedes auto_approve_tool_changes (086)
-	Shared         bool             `json:"shared,omitempty" mapstructure:"shared"`         // Server edition: shared with all users
-	Created        time.Time        `json:"created" mapstructure:"created"`
-	Updated        time.Time        `json:"updated,omitempty" mapstructure:"updated"`
-	Isolation      *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
-	ReconnectOnUse bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
+	TrustMode string `json:"trust_mode,omitempty" mapstructure:"trust-mode"` // Per-server trust tier: auto|scan|manual. Supersedes auto_approve_tool_changes (086)
+	// ToolArgumentErrorMode stores the per-upstream argument-error policy.
+	// Empty and detailed retain detailed errors; redacted opts into redaction.
+	// Updates omit/keep an empty value; detailed explicitly resets the policy.
+	ToolArgumentErrorMode string           `json:"tool_argument_error_mode,omitempty" mapstructure:"tool_argument_error_mode"`
+	Shared                bool             `json:"shared,omitempty" mapstructure:"shared"` // Server edition: shared with all users
+	Created               time.Time        `json:"created" mapstructure:"created"`
+	Updated               time.Time        `json:"updated,omitempty" mapstructure:"updated"`
+	Isolation             *IsolationConfig `json:"isolation,omitempty" mapstructure:"isolation"`               // Per-server isolation settings
+	ReconnectOnUse        bool             `json:"reconnect_on_use,omitempty" mapstructure:"reconnect-on-use"` // Attempt reconnection when a tool call targets a disconnected server
 
 	// ExposePrompts overrides whether this server's advertised MCP prompts are
 	// aggregated into mcpproxy's prompts/list. nil (default) inherits the
@@ -2217,6 +2230,28 @@ func NormalizeTrustModes(c *Config) []TrustModeNormalization {
 // auto_approve_tool_changes maps true->auto / false->manual, else a legacy
 // skip_quarantine:true maps to auto, else the default. This keeps the accessor
 // correct even when the migration has not run.
+// TrustModeDefaulted reports whether the server's trust mode is the DEFAULT
+// (scan) by omission: no trust_mode and no legacy flag that resolves one.
+// Spec 120 FR-011/FR-012 name such servers at startup and in `mcpproxy doctor`,
+// because the default moved from manual to scan in spec 119.
+func (sc *ServerConfig) TrustModeDefaulted() bool {
+	return sc != nil && sc.TrustMode == "" && sc.AutoApproveToolChanges == nil && !sc.SkipQuarantine
+}
+
+// AdmitsOnCleanScan reports whether a clean admission scan may release this
+// server from quarantine (spec 086 FR-011). Only an EXPLICIT trust_mode: scan
+// opts in. The default tier resolves to scan for tool changes (spec 119) but
+// server admission stays with a person: a server with no trust_mode stays
+// quarantined until someone approves it.
+// ScanAutoApprovedBy is the approver recorded when a clean admission scan
+// releases an explicit trust_mode: scan server. The approval commit re-checks
+// AdmitsOnCleanScan for it under the commit lock.
+const ScanAutoApprovedBy = "scan-auto"
+
+func (sc *ServerConfig) AdmitsOnCleanScan() bool {
+	return sc != nil && TrustMode(sc.TrustMode) == TrustModeScan
+}
+
 func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
 	switch TrustMode(sc.TrustMode) {
 	case TrustModeAuto, TrustModeScan, TrustModeManual:
@@ -2241,8 +2276,10 @@ func (sc *ServerConfig) EffectiveTrustMode() TrustMode {
 		return TrustModeAuto
 	}
 	// Spec 119: an unset trust_mode with no legacy flags is the DEFAULT tier,
-	// scan — quarantined and scanned on add, released on a clean verdict, tool
-	// changes approved on a clean verdict and held on findings. Operators who
+	// scan — tool changes approved on a clean verdict and held on findings.
+	// Server admission is NOT part of the default: only an explicit
+	// trust_mode: scan releases a quarantined server on a clean verdict
+	// (AdmitsOnCleanScan). Operators who
 	// want every change reviewed by a person set trust_mode: manual explicitly.
 	return TrustModeScan
 }
@@ -2906,6 +2943,9 @@ func (c *Config) validateDetailedCore() []ValidationError {
 	serverNames := make(map[string]bool)
 	for i, server := range c.Servers {
 		fieldPrefix := fmt.Sprintf("mcpServers[%d]", i)
+		if err := ValidateToolArgumentErrorMode(server.ToolArgumentErrorMode); err != nil {
+			errors = append(errors, ValidationError{Field: fieldPrefix + ".tool_argument_error_mode", Message: err.Error()})
+		}
 
 		// Validate per-server isolation mode override (MCP-34.2).
 		if server.Isolation != nil && server.Isolation.Mode != nil && !server.Isolation.Mode.IsValid() {
@@ -3052,6 +3092,7 @@ func (c *Config) validateDetailedCore() []ValidationError {
 				})
 			}
 		}
+		errors = append(errors, validateTLSCertSettings(c.TLS)...)
 	}
 
 	// Validate logging configuration
@@ -3551,9 +3592,11 @@ type SecurityConfig struct {
 	// debounced informational server rescan that brings the review screen's scan
 	// coverage back to "current".
 	//
-	// Evidence and freshness ONLY: a clean verdict never approves a changed
-	// contract (RT-02); every change is still held for review in scan and manual
-	// trust modes. Runs in every trust mode except "auto".
+	// Evidence and freshness ONLY: this switch approves nothing. Under "manual"
+	// every change is held for review whatever the verdict (RT-02); under
+	// "scan" the gate's own synchronous scan approves a clean change that
+	// passes the spec 120 structural gate (spec 119 FR-004), and this switch
+	// does not affect that path. Runs in every trust mode except "auto".
 	//
 	// Default (nil) is ENABLED. It only takes effect while auto_baseline_scan is
 	// also enabled, so a user can keep the admission scan and turn off per-change

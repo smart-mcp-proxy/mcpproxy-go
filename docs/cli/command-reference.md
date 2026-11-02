@@ -20,6 +20,7 @@ These flags are available for all commands:
 | `--config` | Path to configuration file |
 | `--log-level` | Log level (debug, info, warn, error) |
 | `--data-dir, -d` | Data directory path (default: ~/.mcpproxy). Also the place `serve` reads `mcp_config.json` from when `--config` is not given. Env: `MCPPROXY_DATA_DIR` |
+| `--system` | Linux packaged installs (deb/rpm): manage the `mcpproxy.service` system service. Same as `--config /etc/mcpproxy/mcp_config.json --data-dir /var/lib/mcpproxy`; reaches the service over its socket or, when the socket refuses the caller, over HTTP with the config's `listen` + `api_key`. Needs `sudo` or membership in the `mcpproxy` group. See [Manage the packaged service from the CLI](../getting-started/installation.md#manage-the-packaged-service-from-the-cli) |
 | `--log-to-file` | Enable logging to file in standard OS location |
 | `--log-dir` | Custom log directory path (overrides standard OS location) |
 | `--help` | Show help for command |

@@ -43,11 +43,28 @@ const (
 
 // Contract is one tool definition as the policy sees it: an identity (two
 // definitions with the same Key hash identically; a different Key is a
-// changed contract) and its scan verdict.
+// changed contract), its scan verdict, and its structural shape.
+//
+// Shape is the spec 120 structural-gate label: "" is the base shape every
+// fixture shares, "wide" a shape that WIDENS the base (a new defaulted
+// parameter). Under scan a changed contract is approved on a clean verdict
+// only when it does not widen the approved shape (Widens); a narrowing back to
+// the base passes. The model knows two shapes, so the label is exact for it;
+// the implementation decides per keyword (internal/runtime/tool_contract_delta.go).
 type Contract struct {
 	Key     string
 	Verdict Verdict
+	Shape   string
 }
+
+// Widens reports whether live widens approved's structural shape (spec 120
+// FR-004): the gate holds it whatever the verdict.
+func Widens(approved, live Contract) bool {
+	return live.Shape == ShapeWide && approved.Shape != ShapeWide
+}
+
+// ShapeWide is the one widening shape the fixtures use.
+const ShapeWide = "wide"
 
 // Status is the tool-approval status (spec 041: exactly three states).
 type Status string
@@ -218,7 +235,7 @@ func (s *Server) Discover(inventory map[string]Contract) {
 				switch {
 				case !gate:
 					t.approve("auto")
-				case s.Trust == TrustScan && c.Verdict == VerdictClean:
+				case s.Trust == TrustScan && c.Verdict == VerdictClean && !Widens(t.Approved, c):
 					t.approve("scan")
 				default:
 					t.Status = StatusChanged
@@ -231,7 +248,7 @@ func (s *Server) Discover(inventory map[string]Contract) {
 				t.approve("revert")
 			case !gate:
 				t.approve("auto")
-			case s.Trust == TrustScan && c.Verdict == VerdictClean:
+			case s.Trust == TrustScan && c.Verdict == VerdictClean && !Widens(t.Approved, c):
 				t.approve("scan")
 			}
 		}

@@ -321,7 +321,17 @@ Environment variables from server configuration are automatically passed to cont
 }
 ```
 
-These become Docker arguments: `-e API_KEY=your-secret-key -e DEBUG=true`
+These become key-only Docker arguments, `-e API_KEY -e DEBUG`, and the values are set in the
+environment of the `docker` process, which reads them from there. The same applies to a server
+whose `command` is `docker run …` itself. A value never appears in the `docker` command line, so
+`ps aux` and `/proc/<pid>/cmdline`, which every local user can read, do not show it
+([#1809](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1809)). It is still visible to the
+process owner and root in `/proc/<pid>/environ` of the `docker` client, and inside the container
+(`docker inspect`), as any container environment variable is. `PATH` is the one value still passed
+inline (`-e PATH=…`), so a configured container `PATH` is exact; it is not a secret. Whenever
+`docker` is started through your login shell (it could not be resolved to an absolute path, or on
+Linux with neither `DOCKER_HOST` nor `DOCKER_CONTEXT` exported), a profile that exports or unsets
+one of these names before `docker` runs wins over the configured value.
 
 ## Docker-in-Docker Prevention
 
@@ -454,7 +464,7 @@ Your options on such a host:
 - **No uid/gid drop.** Dropping to an unprivileged uid/gid requires `CAP_SETUID`/`CAP_SETGID` (i.e. running as root). When mcpproxy runs unprivileged, the uid/gid drop is **best-effort and typically a no-op** — the sandboxed process keeps the launching user's identity. Landlock (filesystem) and `setrlimit` (resource caps) still apply. Docker mode does drop to a container user. This is an honest trade-off, not a bug.
 - **Linux-only.** Landlock is a Linux 5.13+ feature. On older kernels the launcher degrades best-effort (fewer access-right bits enforced on ABI 1). On macOS/Windows `sandbox` is a documented **no-op** and behaves like `none`.
 - **Filesystem + resources only.** Landlock confines the filesystem write-allowlist; it does not provide network namespacing. Pair with care for network-sensitive servers, or use `docker` mode with `network_mode: none`.
-- **`none` and `sandbox` do not hide the data directory or the Unix socket.** A stdio server runs as the proxy's user, so it can read `mcp_config.json` (holds `api_key`) and `config.db` (holds the upstream OAuth tokens), and while `enable_socket` is on it can connect to `<data-dir>/mcpproxy.sock` without a key — a sandboxed child minted an agent token over it ([#1704](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1704)). Landlock does block `/proc/<pid>/environ`, so the key is safe in the environment but not on disk or over the socket. Set `enable_socket: false` for headless installs and use `docker` isolation for servers you do not trust; `mcpproxy doctor` warns when an enabled stdio server resolves to `none` or `sandbox` with the socket on. Verification table: [What the sandbox does not hide](features/sandbox-isolation.md#what-the-sandbox-does-not-hide).
+- **`none` and `sandbox` do not hide the data directory or the Unix socket.** A stdio server runs as the proxy's user, so it can read `mcp_config.json` (holds `api_key`) and `config.db` (holds the upstream OAuth tokens), and while `enable_socket` is on it can connect to `<data-dir>/mcpproxy.sock` without a key — a sandboxed child minted an agent token over it ([#1704](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1704)). Landlock does block `/proc/<pid>/environ`, so the key is safe in the environment but not on disk or over the socket. **`enable_socket: false` is the setting that matters** when a stdio server you do not fully trust runs outside `docker` isolation (headless installs lose nothing: the tray is the only socket client); use `docker` isolation for such servers where you can; `mcpproxy doctor` warns when an enabled stdio server resolves to `none` or `sandbox` with the socket on. Verification table: [What the sandbox does not hide](features/sandbox-isolation.md#what-the-sandbox-does-not-hide).
 - **Docker-based scanners do not run under `sandbox`/`none`.** They are skipped and the skip is surfaced via the informational `deep_scan` descriptor — it never downgrades the baseline verdict (Spec 077 FR-008). A native scanner runtime is a future enhancement (D3 option a).
 
 ## Platform support matrix

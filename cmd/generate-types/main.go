@@ -472,6 +472,7 @@ export type Tier =
 	sb.WriteString(enumBlock("ToolApproval", "ToolApprovalState", "Tool review states (approval_status)", contracts.AllToolApprovalStates()))
 	sb.WriteString(enumBlock("ActivityView", "ActivityView", "Activity views (the `view` URL parameter; the CLI has no `sessions`)", contracts.AllActivityViews()))
 	sb.WriteString(enumBlock("ClientPresence", "ClientPresenceState", "Client presence states (GET /clients row state)", contracts.AllClientPresenceStates()))
+	sb.WriteString(enumBlock("HoldSignal", "HoldSignal", "Structural-gate hold signal ids (held_signals prefixes, spec 120)", contracts.AllHoldSignals()))
 
 	// Tool types
 	sb.WriteString(`export interface Tool {
@@ -1142,11 +1143,10 @@ func enumBlock(prefix, typeName, comment string, values []string) string {
 	names := make([]string, 0, len(values))
 	for _, v := range values {
 		name := prefix
-		for _, w := range strings.Split(v, "_") {
-			if w == "" {
-				continue // a leading, trailing or repeated underscore adds no word
-			}
-			name += strings.ToUpper(w[:1]) + w[1:]
+		for _, w := range strings.FieldsFunc(v, func(r rune) bool { return r == '_' || r == '-' }) {
+			// snake_case and KEBAB-CASE ids (the GATE-* hold signals) both
+			// become one CamelCase word per segment.
+			name += strings.ToUpper(w[:1]) + strings.ToLower(w[1:])
 		}
 		names = append(names, name)
 		sb.WriteString("export const " + name + " = '" + v + "' as const;\n")

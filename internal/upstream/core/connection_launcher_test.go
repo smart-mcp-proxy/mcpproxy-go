@@ -47,8 +47,8 @@ func TestBuildLauncherCmdUserSuppliedDockerRunDirectExec(t *testing.T) {
 		"second argv token must be the raw 'run' token, not a shell -c string, got: %v", cmd.Args)
 
 	// Injected -e env flag must survive into the docker run argv.
-	assert.Subset(t, cmd.Args, []string{"-e", "SLACK_TOKEN=xoxb-secret"},
-		"injected -e env flags must be present in the direct-exec argv, got: %v", cmd.Args)
+	assert.Subset(t, cmd.Args, []string{"-e", "SLACK_TOKEN"},
+		"injected key-only -e env flags must be present in the direct-exec argv, got: %v", cmd.Args)
 
 	// cidfile inserted right after 'run' via the args-based helper.
 	require.NotEmpty(t, cidFile)
@@ -92,8 +92,8 @@ func TestBuildLauncherCmdUserSuppliedDockerRunShellWrapFallback(t *testing.T) {
 	last := cmd.Args[len(cmd.Args)-1]
 	assert.Contains(t, last, "docker run",
 		"fallback must shell-wrap a 'docker run' command string, got: %s", last)
-	assert.Contains(t, last, "-e SLACK_TOKEN=xoxb-secret",
-		"injected -e env flag must survive into the shell command string, got: %s", last)
+	assert.Contains(t, last, "-e SLACK_TOKEN ",
+		"injected key-only -e env flag must survive into the shell command string, got: %s", last)
 }
 
 // TestBuildLauncherCmdPlainCommandStillShellWraps is the no-regression guard: a

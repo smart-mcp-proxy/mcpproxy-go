@@ -3,6 +3,7 @@ package truncate
 import (
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 	"unicode/utf8"
 
@@ -137,8 +138,16 @@ func (t *Truncator) findArraysRecursive(data interface{}, currentPath string, de
 		}
 
 	case map[string]interface{}:
-		// Traverse object fields
-		for key, val := range v {
+		// Traverse object fields in sorted order: chooseBestArray keeps the
+		// first of equally good arrays, so map order would otherwise pick a
+		// different record path for the same payload on each call.
+		keys := make([]string, 0, len(v))
+		for key := range v {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			val := v[key]
 			newPath := key
 			if currentPath != "" {
 				newPath = currentPath + "." + key

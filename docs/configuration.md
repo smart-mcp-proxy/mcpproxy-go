@@ -88,7 +88,7 @@ A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `enable_socket` | boolean | `true` | Enable Unix socket (macOS/Linux) or named pipe (Windows) for secure local IPC between tray and core |
+| `enable_socket` | boolean | `true` | Enable the Unix socket (macOS/Linux) or named pipe (Windows) the tray uses to talk to the core. **Connections over it are trusted without the API key**, and that includes every stdio server the proxy itself spawns under `none` or `sandbox` isolation: such a server can call the admin API and mint agent tokens with no credential. The tray is the only socket client, so **set `false` on headless installs, and whenever a stdio server you do not fully trust runs outside `docker` isolation**. `mcpproxy doctor` warns about the combination. See [What the sandbox does not hide](features/sandbox-isolation.md#what-the-sandbox-does-not-hide). |
 | `tray_endpoint` | string | `""` | Override socket/pipe path (advanced, usually not needed) |
 
 ### Search & Tool Limits
@@ -453,13 +453,28 @@ the error names the field.
 | `oauth` | object | No | OAuth configuration (see [OAuth Configuration](#oauth-configuration)) |
 | `isolation` | object | No | Per-server Docker isolation settings (see [Docker Isolation](#docker-isolation)) |
 | `enabled` | boolean | No | Enable/disable server (default: `true`) |
-| `quarantined` | boolean | No | Security quarantine status. The default depends on how the server arrives. A server added through the UI, CLI, REST API or an AI agent follows its [trust mode](features/security-quarantine.md#trust-modes-auto--scan--manual) at add time (quarantined under the default `scan` mode, then released automatically on a clean scan). A server you add by editing this file, with no `quarantined` key and no prior `config.db` record, is **held for review** on first load when quarantine is enabled and its trust mode is not `auto` (no `trust_mode` means `scan`, unless a legacy `auto_approve_tool_changes` resolves it — `true` to `auto`, `false` to `manual` — or `skip_quarantine: true` resolves it to `auto`). An explicit `"quarantined": false` admits it, and an explicit `true` holds it. A server that is already recorded in `config.db` keeps its recorded state. See [Servers added by hand-editing `mcp_config.json`](features/security-quarantine.md#servers-added-by-hand-editing-mcp_configjson) for the full admission rules. |
+| `quarantined` | boolean | No | Security quarantine status. The default depends on how the server arrives. A server added through the UI, CLI, REST API or an AI agent follows its [trust mode](features/security-quarantine.md#trust-modes-auto--scan--manual) at add time (quarantined under the default tier until you approve it; an explicit `trust_mode: scan` releases it automatically on a clean scan). A server you add by editing this file, with no `quarantined` key and no prior `config.db` record, is **held for review** on first load when quarantine is enabled and its trust mode is not `auto` (no `trust_mode` means `scan`, unless a legacy `auto_approve_tool_changes` resolves it — `true` to `auto`, `false` to `manual` — or `skip_quarantine: true` resolves it to `auto`). An explicit `"quarantined": false` admits it, and an explicit `true` holds it. A server that is already recorded in `config.db` keeps its recorded state. See [Servers added by hand-editing `mcp_config.json`](features/security-quarantine.md#servers-added-by-hand-editing-mcp_configjson) for the full admission rules. |
 | `reconnect_on_use` | boolean | No | When `true`, tool calls to a disconnected server trigger an immediate reconnect attempt (15s timeout) before failing (default: `false`) |
 | `expose_prompts` | boolean | No | Per-server override for whether this server's MCP prompts are aggregated into mcpproxy's `prompts/list`. Only takes effect when the global `aggregate_upstream_prompts` master switch is on. Omit to expose prompts whenever the server advertises `Capabilities.Prompts`; `false` opts this server out even if it does. |
 | `toon_output` | string | No | Per-server override for the global [`toon_output`](#toon-output-adaptive-result-encoding): `off`, `adaptive`, or `always`. Non-empty value wins over the global for this server's tools; omit to inherit. See [TOON Output](features/toon-output.md). |
+| `tool_argument_error_mode` | string | No | Argument-error policy for this upstream: omitted, empty, or `detailed` retains diagnostic messages; `redacted` replaces eligible argument-error messages with `Invalid tool arguments.`. See [Tool Argument Errors](#tool-argument-errors). |
 | `forward_headers` | array | No | Names of inbound MCP client HTTP headers to forward to this server on `tools/call`. Exact names only. See [Client Header Forwarding](#client-header-forwarding). Ignored for `stdio` and `sse`. `[]` clears it. |
 | `created` | string | No | ISO 8601 timestamp (auto-generated) |
 | `updated` | string | No | ISO 8601 timestamp (auto-updated) |
+
+### Tool Argument Errors
+
+Set `"tool_argument_error_mode": "redacted"` on each upstream that needs this policy. For indexed argument failures, MCPProxy returns `isError: true` with the exact message `Invalid tool arguments.` and retains `error_type: "invalid_params"`, the tool identifier, the static retry hint, and the full stored `input_schema`. The response has the same fields in `full` and `compact` tool-response modes. MCPProxy rejects arguments that fail its stored-schema validation before sending a tool call upstream.
+
+The policy covers proxy-generated argument-error responses on the `call_tool_*` variants, the legacy `call_tool` handler, and direct routing mode (`routing_mode: "direct"`). This includes local schema rejections and eligible transport/JSON-RPC failures. Upstream `CallToolResult` responses, including those with `isError: true`, continue through the existing result-processing pipeline; this setting does not redact their content. Direct mode validates against the same stored schema before dispatch and applies the same upstream-argument policy, with two deliberate differences: its local rejection names the direct id it was called by (`server__tool`), while a shared rendered upstream error names the canonical id (`server:tool`); and every non-argument direct failure — authentication, transport, timeout, and the SDK identities the classifier cannot treat as argument errors — keeps the plain `Error calling server:tool: …` text it has always returned. The default and `detailed` policies never change direct-mode text.
+
+Omitting the setting or using an empty value on create retains detailed errors. For partial updates through MCP or REST, omission and an empty string preserve the current setting; send `"detailed"` to reset a redacted policy. An empty value is treated as omitted. The `upstream_servers` tool advertises only the two explicit values (`detailed`, `redacted`): omitting the parameter is the supported way to leave the policy alone, because an empty-string enum member is rejected by some clients (#1576). REST still accepts an empty string as omitted. A REST PATCH with no effective update fields returns `400` (`No fields to update`). Unknown values reject before configuration writes. A request uses the policy captured at its dispatch gate; a later settings change applies to subsequent requests.
+
+Upstream error redaction uses the existing conservative argument-error classifier. For eligible errors without an indexed schema, MCPProxy keeps the existing envelope and any available numeric code, suppresses untrusted message/data and nested HTTP body details, and adds no schema or repair hint. Authentication, transport, timeout, internal errors, and other noneligible errors retain their established responses. This setting does not suppress activity records or server logs.
+
+In redacted mode, MCPProxy classifies the cause of its own top-level generic upstream-error wrapper so proxy-added authentication advice cannot mask a validation failure. It preserves arbitrary outer wrappers and genuine authentication context. Known non-argument SDK error identities remain ineligible even when their messages mention schema validation. The installed HTTP SDK converts JSON-RPC errors to Go errors and drops their code/data; a generic `Invalid params` message without recognized schema-validation wording remains noneligible and can retain diagnostics. This policy does not guarantee redaction of every upstream `-32602` response.
+
+Scope: the setting is accepted through REST (`POST`/`PATCH /api/v1/servers`) and the `upstream_servers` MCP tool. `mcpproxy upstream add` has no flag for it, registry installs do not carry it, and the web/tray forms do not expose it, so servers created those ways default to `detailed` until updated. Code-execution sandbox calls hand the upstream error back to the running script instead of rendering a proxy MCP error result, so this policy does not apply there.
 
 ### Client Header Forwarding
 
@@ -1003,7 +1018,7 @@ block** — off by default, best-effort, and unable to change the baseline verdi
 | `tpa_fetch_url` | string | `""` | Where the fetch step looks. **There is no working default URL**: empty means the fetch makes no request (`disabled`, reason `no_url`), and no URL is compiled into the binary until a release ships the first publisher key. Two shapes are recognised from the URL path: a GitHub Releases `…/repos/<owner>/<repo>/releases/latest` API URL (the release must carry one `scanner-bundle-<sequence>.json` asset with a sibling `.sig`), or any other path, fetched as the bundle with `<url>.sig` as its signature. Must be `https` (plain `http` only for `localhost` or a loopback address) and must not contain credentials, a query string or a fragment; the URL is never logged beyond its host. Rejected on write when `tpa_fetch_enabled` is on and the URL is empty. |
 | `tpa_stale_after_days` | integer | absent (`30`) | Age in days of the active bundle (from its signed `generated_at`) after which it is flagged stale in `GET /api/v1/security/bundle`, `mcpproxy security bundle status` and `mcpproxy doctor`. An explicit `0` disables the stale flag and the doctor warning, and is different from absent. Negative values are rejected on write. |
 | `auto_baseline_scan` | boolean | `true` | Kill switch for the **automatic informational baseline scan**. When on (the default), every newly added server gets one free in-process Pass-1 TPA scan, and once per installation a background sweep scans pre-existing enabled servers that have never been scanned (marker persisted in BBolt, so it runs exactly once and never delays startup). The result only populates the security badge / scan summary: it **never** quarantines, approves, or otherwise gates a server. Disabled servers are skipped, and so are `trust_mode: "scan"` servers — that mode's own admission gate scans them and auto-approves on a clean verdict, so the informational path stays out of it entirely rather than risk feeding that gate; this flag does not affect that separate path. Set to `false` to suppress all automatic scans; manual scans keep working. Hot-reloadable — the flag is read live at each decision point. Env override: `MCPPROXY_AUTO_BASELINE_SCAN` (`true`/`1`/`false`/`0`), which wins over this field on every path. |
-| `auto_rescan_on_change` | boolean | `true` | Finer switch for the **automatic rescan after a tool definition changes** (Spec 118), in every trust mode except `auto`. When on, a changed tool, a tool added after the baseline, or a changed definition that moves again gets the in-process TPA scan of its current definition recorded as hold evidence (`held_reason`/`held_verdict`/`held_signals`, so the review screen shows a per-tool verdict without a click), and a debounced (about 5 s, coalesced per server) informational rescan of the server brings the review screen's scan line back to "current". Evidence and freshness only: this switch controls the `manual`-mode evidence scan and the server rescan, not the approval decision, which belongs to the trust-mode gate (under `scan`, the default, the gate's own synchronous scan approves a clean change; under `manual` nothing is approved automatically). It only takes effect while `auto_baseline_scan` is also on, so set this to `false` to keep the admission scan and turn off per-change rescans. The `trust_mode: "scan"` gate's own admission-time scan of new tools is not affected. Hot-reloadable. Env override: `MCPPROXY_AUTO_RESCAN_ON_CHANGE` (`true`/`1`/`false`/`0`), which wins over this field on every path. |
+| `auto_rescan_on_change` | boolean | `true` | Finer switch for the **automatic rescan after a tool definition changes** (Spec 118), in every trust mode except `auto`. When on, a changed tool, a tool added after the baseline, or a changed definition that moves again gets the in-process TPA scan of its current definition recorded as hold evidence (`held_reason`/`held_verdict`/`held_signals`, so the review screen shows a per-tool verdict without a click), and a debounced (about 5 s, coalesced per server) informational rescan of the server brings the review screen's scan line back to "current". Evidence and freshness only: this switch controls the `manual`-mode evidence scan and the server rescan, not the approval decision, which belongs to the trust-mode gate (under `scan`, the default, the gate's own synchronous scan approves a clean change that passes the spec 120 structural gate — no safety-hint change, no widened input schema, no output-schema change; under `manual` nothing is approved automatically). It only takes effect while `auto_baseline_scan` is also on, so set this to `false` to keep the admission scan and turn off per-change rescans. The `trust_mode: "scan"` gate's own admission-time scan of new tools is not affected. Hot-reloadable. Env override: `MCPPROXY_AUTO_RESCAN_ON_CHANGE` (`true`/`1`/`false`/`0`), which wins over this field on every path. |
 | `deep_scan.enabled` | boolean | `false` | Master opt-in for the heavy layer. When `false`, no Docker scanner runs and no source extraction is attempted — only the in-process baseline scanner executes. |
 | `deep_scan.fetch_package_source` | boolean | `true` (when deep scan is on) | Whether the scanner fetches (never executes) the published source of `npx`/`uvx` package-runner servers when no local source is available. Set `false` for air-gapped deployments. |
 | `deep_scan.disable_no_new_privileges` | boolean | `false` | Omits `--security-opt no-new-privileges` from scanner container runs (snap-docker/AppArmor escape hatch). |
@@ -1144,7 +1159,10 @@ The tokenizer automatically maps model names to encodings:
     "enabled": false,
     "require_client_cert": false,
     "certs_dir": "",
-    "hsts": true
+    "hsts": true,
+    "extra_sans": [],
+    "cert_file": "",
+    "key_file": ""
   }
 }
 ```
@@ -1152,9 +1170,12 @@ The tokenizer automatically maps model names to encodings:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable HTTPS/TLS |
-| `require_client_cert` | boolean | `false` | Enable mutual TLS (mTLS) for client authentication |
+| `require_client_cert` | boolean | `false` | Enable mutual TLS (mTLS) for client authentication. Client certificates are verified against the local CA (`ca.pem` in `certs_dir`), also when `cert_file` is set |
 | `certs_dir` | string | `""` | Custom certificate directory (defaults to `${data_dir}/certs`) |
 | `hsts` | boolean | `true` | Enable HTTP Strict Transport Security headers |
+| `extra_sans` | string array | `[]` | DNS names and IP addresses added to the generated server certificate, next to `localhost`, `127.0.0.1` and `::1`. See [Other host names](#other-host-names-extra_sans-cert_file-key_file) |
+| `cert_file` | string | `""` | Absolute path of a server certificate (PEM) to serve instead of the generated one. Needs `key_file` |
+| `key_file` | string | `""` | Absolute path of the private key (PEM) for `cert_file`. Needs `cert_file` |
 
 **Quick Setup:**
 1. Trust certificate: `mcpproxy trust-cert`
@@ -1162,6 +1183,36 @@ The tokenizer automatically maps model names to encodings:
 3. Update client URLs to use `https://`
 
 See [Setup Guide - HTTPS](setup.md#optional-https-setup) for complete details.
+
+### Other host names (`extra_sans`, `cert_file`, `key_file`)
+
+The generated server certificate is valid for `localhost`, `127.0.0.1` and `::1` only. A client that reaches mcpproxy by another name (a Docker or Kubernetes service name, a VM host name, a tailnet name) cannot verify it. Either of these fixes that; without either, startup is unchanged.
+
+**`extra_sans`**: names for the generated certificate.
+
+```json
+{ "tls": { "enabled": true, "extra_sans": ["mcp.internal", "mcpproxy.tail1234.ts.net", "10.0.0.5"] } }
+```
+
+- Each entry is a host name or an IP address. Wildcards (`*.example.com`), URLs, ports and empty entries are refused at startup with an error that names the entry. Host names are lower-cased; non-ASCII names must be given in punycode.
+- When `localhost.pem` does not carry exactly `localhost`, `127.0.0.1`, `::1` and the listed names, it is replaced with a new certificate and key signed by the **same** CA. `ca.pem` and `ca.key` are never regenerated, so clients that trust `ca.pem` (`mcpproxy trust-cert`, `NODE_EXTRA_CA_CERTS`) keep working with no new step. A restart with an unchanged list rewrites nothing, and emptying the list replaces it with a plain `localhost` certificate (one the local CA did not sign is left as it is).
+- With an empty list an existing `localhost.pem` is used as it is. If `localhost.pem` was not issued by the local CA and does not carry the listed names (for example one you placed there by hand), startup stops instead of overwriting it; use `cert_file` and `key_file` for such a certificate.
+- The new certificate is valid for one year from the day it is written. There is no automatic renewal.
+- Environment variable: `MCPPROXY_TLS_EXTRA_SANS` (comma-separated).
+
+**`cert_file` and `key_file`**: serve a certificate you provide (a public or internal CA, `certbot`, a Docker or Kubernetes secret mount).
+
+```json
+{ "tls": { "enabled": true, "cert_file": "/run/secrets/mcpproxy.crt", "key_file": "/run/secrets/mcpproxy.key" } }
+```
+
+- Set both or neither, as absolute paths to PEM files. A certificate chain goes in `cert_file`, leaf first. The files are read with the same rules as `MCPPROXY_API_KEY_FILE`: a symlink is followed (Kubernetes secret volumes), the target must be a regular file of at most 64 KiB.
+- If only one is set, a file cannot be read, or the key does not belong to the certificate, startup stops with an error that names the setting and never shows file content.
+- Nothing is generated and `extra_sans` is refused alongside it, since the certificate you provide decides the names. The local CA is created only when `require_client_cert` is on, because client certificates are verified against it.
+- The files are read once at startup. After the certificate is renewed, restart mcpproxy.
+- Environment variables: `MCPPROXY_TLS_CERT_FILE` and `MCPPROXY_TLS_KEY_FILE`.
+
+Changing any of the three settings needs a restart.
 
 ---
 
@@ -1905,6 +1956,9 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_TLS_ENABLED` | `tls.enabled` | Enable HTTPS/TLS |
 | `MCPPROXY_TLS_REQUIRE_CLIENT_CERT` | `tls.require_client_cert` | Enable mTLS |
 | `MCPPROXY_CERTS_DIR` | `tls.certs_dir` | Custom certificates directory |
+| `MCPPROXY_TLS_EXTRA_SANS` | `tls.extra_sans` | Comma-separated host names and IP addresses added to the generated certificate |
+| `MCPPROXY_TLS_CERT_FILE` | `tls.cert_file` | Absolute path of a server certificate to serve instead of the generated one |
+| `MCPPROXY_TLS_KEY_FILE` | `tls.key_file` | Absolute path of the private key for `MCPPROXY_TLS_CERT_FILE` |
 | `MCPPROXY_DATA_DIR` | `data_dir` | Override data directory; also where `serve` looks for `mcp_config.json` (same as `--data-dir`) |
 | `MCPPROXY_DATA` | `data_dir` | Override data directory only (legacy name; `MCPPROXY_DATA_DIR` wins) |
 | `MCPPROXY_TOOL_RESPONSE_MODE` | `tool_response_mode` | `retrieve_tools` serialization: `full` (default) or `compact` |

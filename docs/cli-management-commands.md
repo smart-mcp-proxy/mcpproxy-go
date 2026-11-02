@@ -20,6 +20,14 @@ one. With only `-d DIR`, management commands read `DIR/mcp_config.json` when it
 exists; they never create a default configuration under `~/.mcpproxy` when a
 path was given.
 
+`--system` (Linux deb/rpm installs) selects the packaged service:
+`--config /etc/mcpproxy/mcp_config.json --data-dir /var/lib/mcpproxy`, reached
+over HTTP when the service's owner-only socket refuses the caller. On such a
+host a management command with no path flags and no `~/.mcpproxy` config exits
+with a pointer to `sudo mcpproxy --system …` instead of creating an empty
+per-user config. See
+[Manage the packaged service from the CLI](getting-started/installation.md#manage-the-packaged-service-from-the-cli).
+
 ## Command Reference
 
 ### `mcpproxy upstream list`

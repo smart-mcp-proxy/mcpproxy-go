@@ -535,6 +535,35 @@ After enabling HTTPS, update your client configurations to use `https://` URLs:
 - `require_client_cert`: Enable mutual TLS (mTLS) for client authentication
 - `certs_dir`: Custom directory for certificates (default: `{data_dir}/certs`)
 - `hsts`: Enable HTTP Strict Transport Security headers
+- `extra_sans`: Host names and IP addresses to add to the generated certificate (see below)
+- `cert_file`, `key_file`: Serve your own certificate instead of the generated one (see below)
+
+**Reaching mcpproxy by a name other than `localhost`:**
+
+The generated certificate is valid for `localhost`, `127.0.0.1` and `::1`. For a Docker service name, a VM host name or a tailnet name, add it:
+
+```json
+{
+  "tls": {
+    "enabled": true,
+    "extra_sans": ["mcp.internal", "10.0.0.5"]
+  }
+}
+```
+
+On the next start `localhost.pem` is replaced with a certificate that carries these names, signed by the same CA, so a client that already trusts `ca.pem` needs no change. Or serve a certificate you provide, for instance from a Docker or Kubernetes secret:
+
+```json
+{
+  "tls": {
+    "enabled": true,
+    "cert_file": "/run/secrets/mcpproxy.crt",
+    "key_file": "/run/secrets/mcpproxy.key"
+  }
+}
+```
+
+Both settings are described in [Configuration Documentation - Other host names](configuration.md#other-host-names-extra_sans-cert_file-key_file).
 
 **📚 For complete TLS configuration reference:** See [Configuration Documentation - TLS/HTTPS](configuration.md#tlshttps-configuration).
 
