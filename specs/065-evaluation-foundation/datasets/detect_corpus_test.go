@@ -14,8 +14,12 @@ package datasets
 import (
 	"encoding/json"
 	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/tpacorpus"
 )
 
 const detectCorpusFile = "detect_corpus_v1.json"
@@ -26,17 +30,34 @@ const detectCorpusFile = "detect_corpus_v1.json"
 // intentionally excluded — its check is soft/measured-not-gated, so the corpus
 // may carry samples but the gate must not enforce them (the gate handles this
 // via its category→check registration map).
-var gatedDetectCategories = []string{"unicode_smuggling", "decoded_payload", "shadowing", "phrase_injection"}
+//
+// Spec 101 US2 adds the signature-bundle classes: every tpacorpus.Classes entry
+// is a gated category (its check is tpa.bundle, registered by the gate through
+// categoryCheck) and owns the hard-negative prefix hn_<class>_.
+var gatedDetectCategories = append(
+	[]string{"unicode_smuggling", "decoded_payload", "shadowing", "phrase_injection"},
+	tpacorpus.Classes...)
 
 // hardNegPrefix maps a gated category to the id prefix its resembling
 // hard-negatives use, so INV-3 (which attack a benign FP mimics) stays
 // machine-readable for the detect corpus.
-var hardNegPrefix = map[string]string{
-	"unicode_smuggling": "hn_unicode",
-	"decoded_payload":   "hn_decoded",
-	"shadowing":         "hn_shadowing",
-	"phrase_injection":  "hn_phrase",
-}
+var hardNegPrefix = func() map[string]string {
+	m := map[string]string{
+		"unicode_smuggling": "hn_unicode",
+		"decoded_payload":   "hn_decoded",
+		"shadowing":         "hn_shadowing",
+		"phrase_injection":  "hn_phrase",
+	}
+	for _, class := range tpacorpus.Classes {
+		m[class] = tpacorpus.HardNegativePrefix(class)
+	}
+	return m
+}()
+
+// tpaIDPattern is the signature id format a dataset entry's tpa_id must use.
+var tpaIDPattern = regexp.MustCompile(`^TPA-\d{4}-\d{4}$`)
+
+func isBundleClass(category string) bool { return slices.Contains(tpacorpus.Classes, category) }
 
 type detectTool struct {
 	Name        string          `json:"name"`
@@ -54,6 +75,8 @@ type detectEntry struct {
 	Label      string       `json:"label"`
 	Category   string       `json:"category"`
 	Resembles  string       `json:"resembles"`
+	TPAID      string       `json:"tpa_id"`    // Spec 101 US2: signature a malicious bundle-class sample exercises
+	Canonical  bool         `json:"canonical"` // Spec 101 US2: the one sample per class the SC-004 test scans
 	Server     string       `json:"server"`
 	Tool       detectTool   `json:"tool"`
 	Peers      []detectPeer `json:"peers"`
@@ -73,6 +96,7 @@ func validDetectCategory(label, category string) bool {
 		case "unicode_smuggling", "decoded_payload", "shadowing", "phrase_injection", "capability_mismatch":
 			return true
 		}
+		return isBundleClass(category)
 	case "benign":
 		return category == "benign" || category == "hard_negative"
 	}
@@ -119,6 +143,22 @@ func TestDetectCorpus_SchemaAndProvenance(t *testing.T) {
 		}
 		if !validDetectCategory(e.Label, e.Category) {
 			t.Errorf("entry %q: incoherent label/category %q/%q", e.ID, e.Label, e.Category)
+		}
+
+		// Spec 101 US2: tpa_id and canonical are optional keys with strict
+		// semantics. tpa_id names the signature a malicious bundle-class sample
+		// exercises (hard negatives never carry it: tpacorpus.ValidatePolicy
+		// rejects it), and every such sample must name one.
+		switch {
+		case e.TPAID != "" && !tpaIDPattern.MatchString(e.TPAID):
+			t.Errorf("entry %q: tpa_id %q is not of the form TPA-YYYY-NNNN", e.ID, e.TPAID)
+		case e.TPAID != "" && (e.Label != "malicious" || !isBundleClass(e.Category)):
+			t.Errorf("entry %q: tpa_id is only valid on a malicious bundle-class entry (label %q, category %q)", e.ID, e.Label, e.Category)
+		case e.TPAID == "" && e.Label == "malicious" && isBundleClass(e.Category):
+			t.Errorf("entry %q: malicious bundle-class entry has no tpa_id", e.ID)
+		}
+		if e.Canonical && (e.TPAID == "" || e.Label != "malicious") {
+			t.Errorf("entry %q: canonical is only valid on a malicious entry that names a tpa_id", e.ID)
 		}
 
 		// Peers must point at a DIFFERENT server to be meaningful cross-server
@@ -179,6 +219,47 @@ func TestDetectCorpus_GatedCoverage(t *testing.T) {
 		}
 		if hardNegByCat[cat] == 0 {
 			t.Errorf("gated category %q has no resembling hard-negative (id prefix %q)", cat, hardNegPrefix[cat])
+		}
+	}
+}
+
+// TestDetectCorpus_HardNegPrefixesDoNotNest guards the id-prefix convention that
+// attributes a hard-negative to its category: if one registered prefix were a
+// prefix of another (hn_phrase vs hn_phrase_x), an id could satisfy two
+// categories and a false positive would be attributed ambiguously.
+func TestDetectCorpus_HardNegPrefixesDoNotNest(t *testing.T) {
+	for catA, a := range hardNegPrefix {
+		for catB, b := range hardNegPrefix {
+			if catA != catB && strings.HasPrefix(b, a) {
+				t.Errorf("hardNegPrefix[%q]=%q is a prefix of hardNegPrefix[%q]=%q", catA, a, catB, b)
+			}
+		}
+	}
+	for _, class := range tpacorpus.Classes {
+		if got, want := hardNegPrefix[class], tpacorpus.HardNegativePrefix(class); got != want {
+			t.Errorf("hardNegPrefix[%q]=%q, want %q", class, got, want)
+		}
+	}
+}
+
+// TestDetectCorpus_OneCanonicalPerClass: the SC-004 test scans the single
+// canonical sample of each bundle class, so a class needs exactly one.
+func TestDetectCorpus_OneCanonicalPerClass(t *testing.T) {
+	c := loadDetectCorpus(t)
+	canonical := map[string][]string{}
+	for _, e := range c.Entries {
+		if e.Canonical {
+			canonical[e.Category] = append(canonical[e.Category], e.ID)
+		}
+	}
+	for _, class := range tpacorpus.Classes {
+		if n := len(canonical[class]); n != 1 {
+			t.Errorf("class %q has %d canonical entries %v, want exactly 1", class, n, canonical[class])
+		}
+	}
+	for cat, ids := range canonical {
+		if !isBundleClass(cat) {
+			t.Errorf("canonical entries %v are in non-bundle category %q", ids, cat)
 		}
 	}
 }

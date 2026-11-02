@@ -1,0 +1,48 @@
+{
+  "category": "tpa_exfil_redirect",
+  "gating": true,
+  "id": "TPA-2026-0019",
+  "license": "MIT",
+  "provenance": {
+    "note": "Taxonomy scenario where sensitive data is encoded into DNS subdomain queries against an attacker nameserver.",
+    "published": "2026-03-18",
+    "source": "https://arxiv.org/abs/2603.18063"
+  },
+  "rules": [
+    {
+      "category": "exfiltration",
+      "confidence": 0.88,
+      "detector": "dns_encode_dns_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0019",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?:;,\\n]\\s*|[-*]\\s+|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you|(?:is|are)\\s+required\\s+to|required\\s+to|needs\\s+to)\\s+)(?:base32|base64|hex(?:adecimal)?|encod\\w*)\\b(?:[^.;]|\\.\\w){0,80}(?:\\b(?:as|into|in|under|inside|within)\\s+(?:a |the |each |every |one |separate )?dns\\s+(?:lookups?|quer(?:y|ies)|requests?)\\b|\\bdns\\s+(?:lookups?|quer(?:y|ies)|requests?)\\b[^.;]{0,40}\\b(?:for each|per|every)\\b|\\bsubdomains?\\b)(?:[^.;]|\\.\\w){0,160}?(?:(?:\\.aws|\\.ssh)(?:(?:/[\\w.-]+)*/(?:[\\w.-]*[a-ac-z0-9_.-]|(?:[\\w.-]*[a-tv-z0-9_.-])?b|(?:[\\w.-]*[a-oq-z0-9_.-])?ub|(?:[\\w.-]*[a-z0-9_-])?pub))?|\\.env\\b|\\bid_rsa\\b|\\bprivate keys?\\b|\\b(?:contents?|values?) of (?:the |your |their |any |all )?(?:user'?s? )?(?:credentials?|secrets?|tokens?|api[ _-]?keys?)\\b)['\\\"`}\\]>]*(?:\\s*[,:)]|\\.\\s|\\s+(?:and|into|as|to|then|under|using|via|with|file|files|contents?|data|value|values|bytes)\\b|\\s*$)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "exfiltration",
+      "confidence": 0.9,
+      "detector": "dns_encode_sensitive_first",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0019",
+      "indicators": [],
+      "level": "critical",
+      "pattern": "(?is)(?:(?:^|[.!?:;,\\n]\\s*|[-*]\\s+|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you|(?:is|are)\\s+required\\s+to|required\\s+to|needs\\s+to)\\s+)(?:base32|base64|hex(?:adecimal)?|encod\\w*)\\b(?:[^.;]|\\.\\w){0,80}(?:(?:\\.aws|\\.ssh)(?:(?:/[\\w.-]+)*/(?:[\\w.-]*[a-ac-z0-9_.-]|(?:[\\w.-]*[a-tv-z0-9_.-])?b|(?:[\\w.-]*[a-oq-z0-9_.-])?ub|(?:[\\w.-]*[a-z0-9_-])?pub))?|\\.env\\b|\\bid_rsa\\b|\\bprivate keys?\\b|\\b(?:contents?|values?) of (?:the |your |their |any |all )?(?:user'?s? )?(?:credentials?|secrets?|tokens?|api[ _-]?keys?)\\b)['\\\"`}\\]>]*(?:\\s*[,:)]|\\.\\s|\\s+(?:and|into|as|to|then|under|using|via|with|file|files|contents?|data|value|values|bytes)\\b|\\s*$)(?:[^.;]|\\.\\w){0,160}?(?:\\b(?:as|into|in|under|inside|within)\\s+(?:a |the |each |every |one |separate )?(?:dns\\s+)?(?:subdomains?|labels?|hostnames?|dns names?|quer(?:y|ies)|lookups?|requests?|txt records?)\\b|\\bdns\\s+(?:lookups?|quer(?:y|ies)|requests?)\\b[^.;]{0,40}\\b(?:for each|per|every)\\b|\\b(?:for each|per|every|each)\\s+(?:piece|chunk|fragment|segment|part|block)\\b[^.;]{0,80}\\b(?:dns|nslookup|dig|resolv\\w+|lookups?|subdomains?)\\b|\\b(?:subdomains?|labels?)\\s+of\\b|<\\w+>\\.[\\w.-]+)|(?:^|[.!?:;,\\n]\\s*|[-*]\\s+|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you|(?:is|are)\\s+required\\s+to|required\\s+to|needs\\s+to)\\s+)(?:base32|base64|hex(?:adecimal)?|encod\\w*)\\b(?:[^.;]|\\.\\w){0,80}(?:(?:\\.aws|\\.ssh)(?:(?:/[\\w.-]+)*/(?:[\\w.-]*[a-ac-z0-9_.-]|(?:[\\w.-]*[a-tv-z0-9_.-])?b|(?:[\\w.-]*[a-oq-z0-9_.-])?ub|(?:[\\w.-]*[a-z0-9_-])?pub))?|\\.env\\b|\\bid_rsa\\b|\\bprivate keys?\\b|\\b(?:contents?|values?) of (?:the |your |their |any |all )?(?:user'?s? )?(?:credentials?|secrets?|tokens?|api[ _-]?keys?)\\b)['\\\"`}\\]>]*\\s+(?:\\b(?:as|into|in|under|inside|within)\\s+(?:a |the |each |every |one |separate )?(?:dns\\s+)?(?:subdomains?|labels?|hostnames?|dns names?|quer(?:y|ies)|lookups?|requests?|txt records?)\\b|\\bdns\\s+(?:lookups?|quer(?:y|ies)|requests?)\\b[^.;]{0,40}\\b(?:for each|per|every)\\b|\\b(?:for each|per|every|each)\\s+(?:piece|chunk|fragment|segment|part|block)\\b[^.;]{0,80}\\b(?:dns|nslookup|dig|resolv\\w+|lookups?|subdomains?)\\b|\\b(?:subdomains?|labels?)\\s+of\\b|<\\w+>\\.[\\w.-]+))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

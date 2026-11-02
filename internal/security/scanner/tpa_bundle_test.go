@@ -20,15 +20,17 @@ func TestLoadEmbeddedBundle(t *testing.T) {
 	if check == nil {
 		t.Fatal("loadEmbeddedBundleCheck() returned nil check")
 	}
-	// Bundle contract v0.1.0: 10 rules total. 7 are engine==regex AND
-	// target==tool_description (runnable offline); 3 rules[] entries are
-	// not-runnable (2 structural_diff/server_manifest + 1 regex/resource_content).
-	// The bundle also declares 3 skipped[] LLM/jsonpath detectors separately.
-	if stats.Runnable != 7 {
-		t.Errorf("Runnable = %d, want 7", stats.Runnable)
+	// Bundle v0.1.1 (spec 101 US2): 99 rules over 44 signatures. 95 are
+	// engine==regex AND target==tool_description (runnable offline); 4 rules[]
+	// entries are not-runnable (2 structural_diff/server_manifest from the v0.1
+	// migration + 2 regex/resource_content: TPA-2026-0002 and the non-gating
+	// TPA-2026-0010). The bundle also declares 3 skipped[] LLM/jsonpath
+	// detectors separately.
+	if stats.Runnable != 95 {
+		t.Errorf("Runnable = %d, want 95", stats.Runnable)
 	}
-	if stats.Skipped != 3 {
-		t.Errorf("Skipped (not-runnable rules) = %d, want 3", stats.Skipped)
+	if stats.Skipped != 4 {
+		t.Errorf("Skipped (not-runnable rules) = %d, want 4", stats.Skipped)
 	}
 	if stats.Declared != 3 {
 		t.Errorf("Declared (bundle skipped[]) = %d, want 3", stats.Declared)
@@ -183,5 +185,13 @@ func TestBundleCheckDeterministic(t *testing.T) {
 	b := check.Inspect(tool, detect.RegistryView{})
 	if !reflect.DeepEqual(a, b) {
 		t.Errorf("Inspect not deterministic:\n a=%+v\n b=%+v", a, b)
+	}
+}
+
+// TestBundleCategoryToThreatType_Exfiltration pins the exfiltration mapping so
+// exfil signature classes do not fall into uncategorized.
+func TestBundleCategoryToThreatType_Exfiltration(t *testing.T) {
+	if got := bundleCategoryToThreatType("exfiltration"); got != detect.ThreatExfiltration {
+		t.Errorf("bundleCategoryToThreatType(exfiltration) = %q, want %q", got, detect.ThreatExfiltration)
 	}
 }

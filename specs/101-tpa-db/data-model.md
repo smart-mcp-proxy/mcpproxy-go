@@ -107,6 +107,15 @@ Existing fields keep their meaning. `Fingerprint` stays the 12-hex short form â€
 
 The catalog unit SC-004 counts: `TPA-YYYY-NNNN` id, category, gating intent, detector(s), level, confidence, provenance reference, licence, and the `rule_ids` implementing it. Many-to-one to `rules[]` â€” one campaign class routinely needs several patterns (a hidden-instruction signature already implies distinct rules for `<IMPORTANT>` blocks, HTML comments and zero-width runs).
 
+(amended by US2, 2026-10-20:
+- `rule_ids` entries are `"<TPA-id>/<detector>"`. `rules[].id` equals the owning TPA id and `(id, detector)` is the rule's unique key. Every rule is owned by exactly one signature.
+- `category` is a `tpa_<class>` slug from `tpacorpus.Classes`.
+- `gating` is derived, not free: it is `true` exactly when the signature owns at least one runnable rule (`engine=="regex"`, `target=="tool_description"`). Non-runnable companion rules are allowed.
+- `license` is checked against the allowlist `CC0-1.0`, `CC-BY-4.0`, `MIT`, `Apache-2.0` at build and in CI only.
+- The top-level `signature_count` is `len(signatures)`, not the rule count.
+- Sources are one JSON file per signature under `internal/security/tpacorpus/signatures/`, plus a `manifest.json` carrying `bundle_version`, `schema_version`, `source_date_epoch` and a pass-through `header`. The builder sorts `rules[]` by `(id, detector)` and `signatures[]` by id.
+- Dataset entries of a bundle class gain an optional `tpa_id`; exactly one entry per class also carries `"canonical": true`. Hard negatives use the id prefix `hn_<class>_` with `resembles: "<class>"`.)
+
 ## 8. Coverage state (the derived value that matters most)
 
 `coverageOK` today is `bundlePresent && ChecksFailed == 0` (R5). It becomes:

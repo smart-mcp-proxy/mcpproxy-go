@@ -44,6 +44,14 @@ internal/httpapi/testdata/sc006_activity_recordsets.json text eol=lf
 cmd/mcpproxy/testdata/cli108/* text eol=lf
 internal/server/testdata/profiles_v3/*.json text eol=lf
 
+# Spec 101 US2: the embedded TPA bundle is byte-compared against a rebuild of
+# its signature sources (TestEmbeddedCorpus_RebuildIsByteIdentical, `tpa-corpus
+# verify`), and go:embed embeds whatever bytes the checkout has — a CRLF
+# checkout on Windows would report spurious drift.
+internal/security/scanner/bundled/scanner-bundle.json text eol=lf
+internal/security/tpacorpus/signatures/*.json text eol=lf
+internal/security/tpacorpus/testdata/*.json text eol=lf
+
 # Spec 101 sidecar conformance fixtures are byte-exact (signatures cover exact
 # bytes, the 4096/4097-byte ceilings are measured on the file, and one fixture
 # deliberately ends in CRLF). Never convert line endings on checkout.

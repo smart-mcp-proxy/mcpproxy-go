@@ -1,0 +1,48 @@
+{
+  "category": "tpa_instruction_override",
+  "gating": true,
+  "id": "TPA-2026-0029",
+  "license": "MIT",
+  "provenance": {
+    "note": "Description orders the model to put its own system prompt, tool list or reasoning into a tool argument.",
+    "published": "2025-09-24",
+    "source": "https://github.com/cisco-ai-defense/mcp-scanner/blob/main/mcpscanner/data/yara_rules/coercive_injection.yara"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "internals_into_param",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0029",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?;:\\n]\\s*|\\b(?:and|then|also|always|must|should|please|first)\\s+)(pass|send|add|provide|include|put|supply)\\b(?:[^\\w.\\n]+(?:a(?:v(?:o(?:i(?:d(?:\\w+)|[^\\Wd]\\w*|)|[^\\Wi]\\w*|)|[^\\Wo]\\w*|)|[^\\Wv]\\w*|)|b(?:e(?:s(?:i(?:d(?:e(?:s(?:\\w+)|[^\\Ws]\\w*|)|[^\\We]\\w*|)|[^\\Wd]\\w*|)|[^\\Wi]\\w*|)|[^\\Ws]\\w*|)|u(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Weu]\\w*|)|e(?:x(?:c(?:e(?:p(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Wp]\\w*|)|l(?:u(?:d(?:e(?:\\w+)|i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wei]\\w*|)|[^\\Wd]\\w*|)|[^\\Wu]\\w*|)|[^\\Wel]\\w*|)|[^\\Wc]\\w*|)|[^\\Wx]\\w*|)|i(?:n(?:s(?:t(?:e(?:a(?:d(?:\\w+)|[^\\Wd]\\w*|)|[^\\Wa]\\w*|)|[^\\We]\\w*|)|[^\\Wt]\\w*|)|[^\\Ws]\\w*|)|[^\\Wn]\\w*|)|m(?:i(?:n(?:u(?:s(?:\\w+)|[^\\Ws]\\w*|)|[^\\Wu]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|n(?:e(?:i(?:t(?:h(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|v(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wiv]\\w*|)|o(?:n(?:e(?:\\w+)|[^\\We]\\w*|)|r(?:\\w+)|t(?:h(?:i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|[^\\Wh]\\w*)|[^\\Wnrt]\\w*)|[^\\Weo]\\w*|)|o(?:m(?:i(?:t(?:t(?:i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|[^\\Wt]\\w*)|[^\\Wt]\\w*|)|[^\\Wi]\\w*|)|[^\\Wm]\\w*|)|r(?:a(?:t(?:h(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|[^\\Wa]\\w*|)|s(?:k(?:i(?:p(?:\\w+)|[^\\Wp]\\w*|)|[^\\Wi]\\w*|)|[^\\Wk]\\w*|)|t(?:h(?:a(?:n(?:\\w+)|[^\\Wn]\\w*|)|[^\\Wa]\\w*|)|[^\\Wh]\\w*)|w(?:i(?:t(?:h(?:o(?:u(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Wu]\\w*|)|[^\\Wo]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|[^\\Wi]\\w*|)|[^\\Wabeimnorstw]\\w*)){0,5}?[^\\w.\\n]+(?:your\\s+(?:own\\s+)?|the\\s+(?:full|entire|complete|current)\\s+)(system[_ ]prompt|conversation[_ ]history|chain[_ ]of[_ ]thought|tools?[_ ]list|hidden\\s+instructions)(?:\\s+and\\s+(?:your\\s+)?(?:own\\s+)?\\w+(?:[_ ]\\w+)?)*\\s+(?:as|in|into|to)\\s+(?:the\\s+|a\\s+|an\\s+|its\\s+|this\\s+)?(?:['\\\"`]?\\w+['\\\"`]?\\s+)?(?:parameter|argument|field|details|notes?)\\b['\\\"`]?(?:\\W{0,2}(?:\\z|[.;,!)])|\\s*(?:so|for|together|and|with|every|each|always|whenever)\\b)",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.82,
+      "detector": "reasoning_with_call",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0029",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?;:\\n]\\s*|\\b(?:and|then|also|always|must|should|please|first)\\s+)(?:include|attach|add|append)\\s+(?:also\\s+)?your\\s+(?:own\\s+)?(?:chain[_ ]of[_ ]thought|reasoning\\s+trace|internal\\s+reasoning|system[_ ]prompt)\\s+(?:in|into|to|as)\\s+(?:the\\s+|each\\s+|every\\s+|this\\s+)?(?:call|(?:tool\\s+)?(?:parameter|argument|field)s?|['\\\"`]?\\w+['\\\"`]?\\s+(?:parameter|argument|field))\\b['\\\"`]?(?:\\W{0,2}(?:\\z|[.;,!)])|\\s*(?:so|for|together|and|with|every|each|always|whenever)\\b)|(?:^|[.!?;:\\n]\\s*)(?:pass|send|supply|provide|submit|include|add)\\b(?:[^\\w.\\n]+(?:a(?:v(?:o(?:i(?:d(?:\\w+)|[^\\Wd]\\w*|)|[^\\Wi]\\w*|)|[^\\Wo]\\w*|)|[^\\Wv]\\w*|)|b(?:e(?:s(?:i(?:d(?:e(?:s(?:\\w+)|[^\\Ws]\\w*|)|[^\\We]\\w*|)|[^\\Wd]\\w*|)|[^\\Wi]\\w*|)|[^\\Ws]\\w*|)|u(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Weu]\\w*|)|e(?:x(?:c(?:e(?:p(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Wp]\\w*|)|l(?:u(?:d(?:e(?:\\w+)|i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wei]\\w*|)|[^\\Wd]\\w*|)|[^\\Wu]\\w*|)|[^\\Wel]\\w*|)|[^\\Wc]\\w*|)|[^\\Wx]\\w*|)|i(?:n(?:s(?:t(?:e(?:a(?:d(?:\\w+)|[^\\Wd]\\w*|)|[^\\Wa]\\w*|)|[^\\We]\\w*|)|[^\\Wt]\\w*|)|[^\\Ws]\\w*|)|[^\\Wn]\\w*|)|m(?:i(?:n(?:u(?:s(?:\\w+)|[^\\Ws]\\w*|)|[^\\Wu]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|n(?:e(?:i(?:t(?:h(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|v(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wiv]\\w*|)|o(?:n(?:e(?:\\w+)|[^\\We]\\w*|)|r(?:\\w+)|t(?:h(?:i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|[^\\Wh]\\w*)|[^\\Wnrt]\\w*)|[^\\Weo]\\w*|)|o(?:m(?:i(?:t(?:t(?:i(?:n(?:g(?:\\w+)|[^\\Wg]\\w*|)|[^\\Wn]\\w*|)|[^\\Wi]\\w*|)|[^\\Wt]\\w*)|[^\\Wt]\\w*|)|[^\\Wi]\\w*|)|[^\\Wm]\\w*|)|r(?:a(?:t(?:h(?:e(?:r(?:\\w+)|[^\\Wr]\\w*|)|[^\\We]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|[^\\Wa]\\w*|)|s(?:k(?:i(?:p(?:\\w+)|[^\\Wp]\\w*|)|[^\\Wi]\\w*|)|[^\\Wk]\\w*|)|t(?:h(?:a(?:n(?:\\w+)|[^\\Wn]\\w*|)|[^\\Wa]\\w*|)|[^\\Wh]\\w*)|w(?:i(?:t(?:h(?:o(?:u(?:t(?:\\w+)|[^\\Wt]\\w*|)|[^\\Wu]\\w*|)|[^\\Wo]\\w*|)|[^\\Wh]\\w*|)|[^\\Wt]\\w*|)|[^\\Wi]\\w*|)|[^\\Wabeimnorstw]\\w*)){0,12}?[^\\w.\\n]+together\\s+with\\s+your\\s+(?:own\\s+)?(?:chain[_ ]of[_ ]thought|reasoning\\s+trace|system[_ ]prompt)\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}
