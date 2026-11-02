@@ -297,6 +297,19 @@ actor CoreProcessManager {
             // else owns this" rather than as an invitation to spawn.
             return
         case .unusable(let reason):
+            // A socket that has refused every probe beside a database nobody
+            // holds is a dead core's leftovers, and the deadline below would
+            // reach exactly that verdict, only 60 seconds later. bbolt takes
+            // the lock before a core creates its listener, so a live core, even
+            // a saturated one (GH #933), always holds it. `.unknown` proves
+            // nothing and keeps the wait.
+            if maySpawn, socketEvidence.onlyEverRefused,
+               DataDirectoryLock.probe(path: dataDirectoryLockPath) == .free {
+                NSLog("[MCPProxy] %@ refuses every probe and nobody holds %@ — "
+                      + "a dead core's socket file; launching without waiting (%@)",
+                      socketPath, dataDirectoryLockPath, reason)
+                break
+            }
             // Something is, or may be, on the other end of that socket. Do NOT
             // unlink it and do NOT start a competing core against the same data
             // directory. Wait instead — the attach watch re-probes and attaches
@@ -326,11 +339,10 @@ actor CoreProcessManager {
         guard !shutdownRequested else { return }
 
         // Confirmed empty — and the tray does NOT unlink the socket file here.
-        // A socket file left over from a dead core never reaches this line: it
-        // probes `.refused`, which `attachIfCoreIsRunningLocked()` reports as
-        // `.unusable` above, sending us down the wait path. So the only file
-        // that could be here is one that appeared AFTER the probes — i.e. one
-        // something just bound — and unlinking that strands a live core.
+        // A socket file left over from a dead core reaches this line only when
+        // nobody holds its data directory (the `.unusable` case above); any
+        // other file could be one that something bound AFTER the probes, and
+        // unlinking that strands a live core.
         //
         // Cleaning up a genuinely stale file is the core's job anyway: it
         // removes one it can prove nobody is listening on (see

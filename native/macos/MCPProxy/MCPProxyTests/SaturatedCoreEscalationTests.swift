@@ -151,9 +151,61 @@ final class SaturatedCoreEscalationTests: XCTestCase {
                              + "dead core's leftovers and the tray has to get past it on its own")
     }
 
+    /// A dead core's leftovers are recognisable at startup: the socket refuses
+    /// every probe and nobody holds the database beside it. The tray must
+    /// launch straight away instead of sitting out the whole unresponsive-core
+    /// deadline (60 s in production) before reaching the same verdict.
+    func testAStaleSocketBesideAFreeDataDirectoryIsLaunchedOverWithoutWaitingForTheDeadline() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let socketPath = try refusingSocket()
+        FileManager.default.createFile(
+            atPath: directory.appendingPathComponent("config.db").path, contents: Data()
+        )
+
+        let appState = await MainActor.run { AppState() }
+        let manager = makeManager(appState: appState, socketPath: socketPath, unresponsiveCoreTimeout: 30)
+        self.manager = manager
+
+        await manager.start(maySpawn: true)
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+
+        let launched = await manager.coresLaunched
+        XCTAssertGreaterThan(launched, 0,
+                             "a refusing socket beside an unheld database is a dead core's "
+                             + "leftovers; waiting out the deadline only delays the launch")
+    }
+
+    /// The shortcut needs positive proof that nobody owns the data directory.
+    /// With no database beside the socket the lock says nothing either way, so
+    /// the tray keeps the old behaviour and waits for the deadline.
+    func testAStaleSocketWithNoDatabaseBesideItStillWaitsForTheDeadline() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let socketPath = try refusingSocket()
+
+        let appState = await MainActor.run { AppState() }
+        let manager = makeManager(appState: appState, socketPath: socketPath, unresponsiveCoreTimeout: 30)
+        self.manager = manager
+
+        await manager.start(maySpawn: true)
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+
+        let launched = await manager.coresLaunched
+        XCTAssertEqual(launched, 0, "an unknown lock state is not proof the socket is stale")
+        let state = await MainActor.run { appState.coreState }
+        XCTAssertEqual(state, .waitingForCore)
+    }
+
     // MARK: - Fixtures
 
-    private func makeManager(appState: AppState, socketPath: String) -> CoreProcessManager {
+    private func makeManager(
+        appState: AppState, socketPath: String, unresponsiveCoreTimeout: TimeInterval = 0.5
+    ) -> CoreProcessManager {
         CoreProcessManager(
             appState: appState,
             notificationService: NotificationService(deliveryEnabled: false),
@@ -163,7 +215,7 @@ final class SaturatedCoreEscalationTests: XCTestCase {
             socketPath: socketPath,
             refreshInterval: 60,
             probeTimeout: 0.3,
-            unresponsiveCoreTimeout: 0.5,
+            unresponsiveCoreTimeout: unresponsiveCoreTimeout,
             socketWaitTimeout: 1.0
         )
     }
