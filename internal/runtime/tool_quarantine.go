@@ -660,6 +660,13 @@ func (r *Runtime) collectPeerToolMetadata(serverName string) map[string][]*confi
 	if r.supervisor == nil {
 		return nil
 	}
+	// The in-flight registrations are read BEFORE the StateView snapshot. A
+	// pass unregisters only after it published (or failed without publishing),
+	// so a peer missing from this copy because it already unregistered is
+	// either visible in the snapshot taken next or never became a tool. Read
+	// the other way round, a peer could publish and unregister between the two
+	// reads and be seen by neither.
+	inflight := r.inflightPeerInventories(serverName)
 	snapshot := r.supervisor.StateView().Snapshot()
 	if snapshot == nil {
 		return nil
@@ -691,36 +698,75 @@ func (r *Runtime) collectPeerToolMetadata(serverName string) map[string][]*confi
 			peers[name] = metas
 		}
 	}
-	r.overlayInflightPeers(serverName, peers)
+	overlayInflightPeers(inflight, peers)
 	if len(peers) == 0 {
 		return nil
 	}
 	return peers
 }
 
-// overlayInflightPeers merges the in-flight inventories of every server but
-// serverName into peers (see collectPeerToolMetadata): an in-flight tool
-// replaces a published tool of the same raw name, other published tools stay.
-func (r *Runtime) overlayInflightPeers(serverName string, peers map[string][]*config.ToolMetadata) {
+// inflightPeerInventories copies the in-flight inventories of every server but
+// serverName (see collectPeerToolMetadata). The entries are immutable once
+// registered, so only the map is copied under the lock.
+func (r *Runtime) inflightPeerInventories(serverName string) map[string][]*config.ToolMetadata {
 	r.inflightInventoryMu.Lock()
 	defer r.inflightInventoryMu.Unlock()
+	if len(r.inflightInventories) == 0 {
+		return nil
+	}
+	out := make(map[string][]*config.ToolMetadata, len(r.inflightInventories))
 	for name, entry := range r.inflightInventories {
 		if name == serverName || entry == nil || len(entry.tools) == 0 {
 			continue
 		}
-		inflight := make(map[string]struct{}, len(entry.tools))
-		merged := make([]*config.ToolMetadata, 0, len(entry.tools)+len(peers[name]))
-		for _, t := range entry.tools {
-			inflight[t.RawName] = struct{}{}
-			merged = append(merged, t)
+		out[name] = entry.tools
+	}
+	return out
+}
+
+// overlayInflightPeers merges in-flight peer inventories into peers (see
+// collectPeerToolMetadata). It is a union: every published tool stays,
+// including one with the same raw name as an in-flight tool whose contract
+// differs (an in-flight replacement is not yet published and its pass may
+// still fail; the published contract is still what a clone would shadow), and
+// every in-flight tool is added after it. Published first: the detector's
+// per-name checks read the first entry of a server (sameTokens), and the
+// published contract is the one every pass before #1813's per-server locks
+// would have scanned against. Only an in-flight tool whose contract equals the
+// published one is skipped, so an unchanged tool is listed once.
+//
+// Known limitation (fails closed): a hold taken against a peer's in-flight
+// tool stays if that peer's pass then fails before publishing; the operator
+// reviews it like any other hold.
+func overlayInflightPeers(inflight, peers map[string][]*config.ToolMetadata) {
+	for name, tools := range inflight {
+		if len(tools) == 0 {
+			continue
 		}
+		published := make(map[string][]*config.ToolMetadata, len(peers[name]))
 		for _, t := range peers[name] {
-			if _, ok := inflight[config.RawToolName(t)]; !ok {
-				merged = append(merged, t)
+			raw := config.RawToolName(t)
+			published[raw] = append(published[raw], t)
+		}
+		merged := make([]*config.ToolMetadata, 0, len(tools)+len(peers[name]))
+		merged = append(merged, peers[name]...)
+	next:
+		for _, t := range tools {
+			for _, p := range published[t.RawName] {
+				if samePeerContract(t, p) {
+					continue next
+				}
 			}
+			merged = append(merged, t)
 		}
 		peers[name] = merged
 	}
+}
+
+// samePeerContract reports whether two peer projections carry the same
+// contract as far as the peer-dependent scan checks read it.
+func samePeerContract(a, b *config.ToolMetadata) bool {
+	return a.Description == b.Description && a.ParamsJSON == b.ParamsJSON && a.OutputSchemaJSON == b.OutputSchemaJSON
 }
 
 // ToolApprovalResult contains the result of checking tool approvals for a server.

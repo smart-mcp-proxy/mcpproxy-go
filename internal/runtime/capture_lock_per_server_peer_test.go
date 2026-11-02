@@ -203,7 +203,7 @@ func TestReconcileSignatureCache_DoesNotEvictConcurrentlyWarmedHash(t *testing.T
 // An in-flight tool replaces the peer's published tool of the same raw name;
 // published tools the in-flight inventory does not carry stay (the union is
 // what the scan would see with the peer's pass ordered before or after it).
-func TestOverlayInflightPeers_ReplacesSameNameKeepsOthers(t *testing.T) {
+func TestOverlayInflightPeers_UnionKeepsPublishedContract(t *testing.T) {
 	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{scanServer("a"), scanServer("b")})
 	unregister := rt.registerInflightInventory("b", []*config.ToolMetadata{
 		{ServerName: "b", Name: "changed", RawName: "changed", Description: "new"},
@@ -219,12 +219,30 @@ func TestOverlayInflightPeers_ReplacesSameNameKeepsOthers(t *testing.T) {
 		},
 		"c": {{ServerName: "c", Name: "c_tool", RawName: "c_tool"}},
 	}
-	rt.overlayInflightPeers("a", peers)
+	overlayInflightPeers(rt.inflightPeerInventories("a"), peers)
 
-	byName := map[string]string{}
+	descs := map[string][]string{}
 	for _, tool := range peers["b"] {
-		byName[tool.RawName] = tool.Description
+		descs[tool.RawName] = append(descs[tool.RawName], tool.Description)
 	}
-	assert.Equal(t, map[string]string{"changed": "new", "added": "added", "kept": "kept"}, byName)
+	// A replacement is not yet published and its pass may fail: BOTH contracts
+	// stay in the peer context, so a clone of either is seen.
+	assert.Equal(t, []string{"old", "new"}, descs["changed"], "published contract first: the detector reads a server's first entry per name")
+	assert.Equal(t, []string{"added"}, descs["added"])
+	assert.Equal(t, []string{"kept"}, descs["kept"])
 	assert.Len(t, peers["c"], 1, "servers without an in-flight inventory are untouched")
+	assert.Empty(t, rt.inflightPeerInventories("b"), "a server never sees its own in-flight inventory")
+
+	// An unchanged in-flight tool is listed once.
+	peers = map[string][]*config.ToolMetadata{
+		"b": {{ServerName: "b", Name: "added", RawName: "added", Description: "added"}},
+	}
+	overlayInflightPeers(rt.inflightPeerInventories("a"), peers)
+	n := 0
+	for _, tool := range peers["b"] {
+		if tool.RawName == "added" {
+			n++
+		}
+	}
+	assert.Equal(t, 1, n, "identical published and in-flight contracts are deduplicated")
 }
