@@ -65,7 +65,11 @@ var (
 	credentialAccessVerb = regexp.MustCompile(`^(?:read|load|collect|gather|harvest|extract|dump|grab|enumerat|list|scan|find|print|echo|cat|fetch|retriev|obtain|copy|steal|exfiltrat|leak|captur|log|record|inclu\w*|attach|append|forward|send|post|upload|transmit|submit|email|ship|deliver|relay|beacon|smuggle|expos|reveal|disclos|export|save|store|stash|pull|snapshot|serializ)\w*$`)
 	credentialAuthPrep   = regexp.MustCompile(`^(?:using|with|via|through|authenticat\w*|authorization|authoriz\w*|bearer|header\w*|configur\w*|provid\w*|suppli\w*|requir\w*|valid|validat\w*|verif\w*|check\w*|rotat\w*|refresh\w*|expir\w*|revok\w*|issu\w*|generat\w*|creat\w*)$`)
 	transmissionRe       = regexp.MustCompile(`\b(?:send\w*|post\w*|upload\w*|transmit\w*|forward\w*|exfiltrat\w*|submit\w*|beacon\w*|ship\w*|deliver\w*|relay\w*|smuggle\w*|leak\w*|curl (?:-x post|-d|--data\w*|-f |--form)|wget --post\w*|requests\.(?:post|put)|httpx\.(?:post|put)|axios\.post|fetch\(|http post|post request|webhook\w*)\b`)
-	commodityHostRe      = regexp.MustCompile(`(?:discord(?:app)?\.com/api/webhook\w*|api\.telegram\.org/bot|hooks\.slack\.com/servic\w*|webhook\.site|requestbin|pipedream\.net|ngrok(?:-free)?\.(?:app|io|dev)|burpcollaborator|oastify\.com|oast\.(?:fun|live|me|pro|site|online)|interact\.sh|pastebin\.com|transfer\.sh|requestcatcher|beeceptor|hookbin|mockbin|canarytokens|dnslog|postb\.in|localtunnel|serveo\.net|loca\.lt|trycloudflare\.com|webhookrelay|hookdeck|smee\.io)`)
+	// urlTokenRe finds host-like tokens; the commodity collectors are matched
+	// on the PARSED host and path (commodityCollectors), never by a hostname
+	// substring, so "notwebhook.site" or "webhook.site.evil.tld" cannot pass
+	// (CodeQL go/regex/missing-regexp-anchor).
+	urlTokenRe           = regexp.MustCompile(`(?:[a-z][a-z0-9+.-]*://)?[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:[:/][^\s"'<>),;]*)?`)
 	destinationRe        = regexp.MustCompile(`(?:h(?:tt|xx)ps?://(?:\d{1,3}\.){3}\d{1,3}|\bhxxps?://|\[\.\]|\b(?:external|remote|attacker[\w']*|adversar[\w']*|third[- ]?part[\w']*|collector[\w']*|off-?site|c2|command[- ]and[- ]control|exfil[\w']*|malicious|rogue|unknown|untrust\w*) (?:server|host|endpoint|url|collector|machine|servic\w*|api|address|location|sink|site|webhook|listener|domain)\b|\b(?:our|their|my|his|her) (?:server|endpoint|collector|webhook|url|api|listener)\b)`)
 	compositeSentenceEnd = regexp.MustCompile(`[.!?;](?:\s|$)`)
 )
@@ -214,8 +218,10 @@ func credentialNounHasAccess(t string, nounStart int) bool {
 
 func destinationIndicators(t string) []exfilIndicator {
 	var out []exfilIndicator
-	for _, loc := range commodityHostRe.FindAllStringIndex(t, compositeMaxIndicators) {
-		out = append(out, exfilIndicator{start: loc[0], end: loc[1], text: t[loc[0]:loc[1]], commodity: true})
+	for _, loc := range urlTokenRe.FindAllStringIndex(t, compositeMaxIndicators) {
+		if isCommodityCollector(t[loc[0]:loc[1]]) {
+			out = append(out, exfilIndicator{start: loc[0], end: loc[1], text: t[loc[0]:loc[1]], commodity: true})
+		}
 	}
 	for _, loc := range destinationRe.FindAllStringIndex(t, compositeMaxIndicators) {
 		out = append(out, exfilIndicator{start: loc[0], end: loc[1], text: t[loc[0]:loc[1]]})
@@ -262,4 +268,52 @@ func nearestIndicator(set []exfilIndicator, ref exfilIndicator) (exfilIndicator,
 		}
 	}
 	return best, bestDist >= 0
+}
+
+// commodityCollector is a well-known drop box: an exact host (or any
+// subdomain of it) and, where the service also hosts ordinary pages, the
+// path prefix that makes it a collector.
+type commodityCollector struct{ host, path string }
+
+// commodityCollectors are matched on parsed hosts (normalized text keeps
+// URLs lowercase; "services" stems to "servic").
+var commodityCollectors = []commodityCollector{
+	{"discord.com", "/api/webhook"}, {"discordapp.com", "/api/webhook"},
+	{"api.telegram.org", "/bot"}, {"hooks.slack.com", "/servic"},
+	{"webhook.site", ""}, {"requestbin.com", ""}, {"requestbin.net", ""}, {"pipedream.net", ""},
+	{"ngrok.app", ""}, {"ngrok.io", ""}, {"ngrok.dev", ""}, {"ngrok-free.app", ""}, {"ngrok-free.dev", ""},
+	{"burpcollaborator.net", ""}, {"oastify.com", ""}, {"oast.fun", ""}, {"oast.live", ""}, {"oast.me", ""},
+	{"oast.pro", ""}, {"oast.site", ""}, {"oast.online", ""}, {"interact.sh", ""},
+	{"pastebin.com", ""}, {"transfer.sh", ""}, {"requestcatcher.com", ""}, {"beeceptor.com", ""},
+	{"hookbin.com", ""}, {"mockbin.org", ""}, {"canarytokens.com", ""}, {"dnslog.cn", ""}, {"postb.in", ""},
+	{"localtunnel.me", ""}, {"serveo.net", ""}, {"loca.lt", ""}, {"trycloudflare.com", ""},
+	{"webhookrelay.com", ""}, {"hookdeck.com", ""}, {"smee.io", ""},
+}
+
+// isCommodityCollector parses a host-like token (optional scheme, host,
+// optional :port/path) and matches it against commodityCollectors.
+func isCommodityCollector(tok string) bool {
+	rest := tok
+	if i := strings.Index(rest, "://"); i >= 0 {
+		rest = rest[i+3:]
+	}
+	host := rest
+	path := ""
+	if i := strings.IndexAny(rest, "/:"); i >= 0 {
+		host, path = rest[:i], rest[i:]
+		if path[0] == ':' {
+			if j := strings.IndexByte(path, '/'); j >= 0 {
+				path = path[j:]
+			} else {
+				path = ""
+			}
+		}
+	}
+	host = strings.TrimSuffix(host, ".")
+	for _, c := range commodityCollectors {
+		if (host == c.host || strings.HasSuffix(host, "."+c.host)) && (c.path == "" || strings.HasPrefix(path, c.path)) {
+			return true
+		}
+	}
+	return false
 }
