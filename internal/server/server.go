@@ -114,7 +114,7 @@ type Server struct {
 	// logged once per reason rather than once per settle event.
 	bundleDegradedMu     sync.Mutex
 	bundleDegradedLogged string
-	// queryAPIKeyRejectLogged is the unix-nano time of the last
+	// queryAPIKeyRejectLogged is the unix-millisecond time of the last
 	// mcp_reject_query_apikey warning, so a client retrying in a loop logs
 	// once per queryAPIKeyRejectLogInterval, not once per request.
 	queryAPIKeyRejectLogged atomic.Int64
@@ -559,9 +559,9 @@ const queryAPIKeyRejectLogInterval = time.Minute
 // address and User-Agent and never the credential, and logs at most once per
 // queryAPIKeyRejectLogInterval.
 func (s *Server) logQueryAPIKeyRejection(r *http.Request) {
-	now := time.Now().UnixNano()
+	now := time.Now().UnixMilli()
 	last := s.queryAPIKeyRejectLogged.Load()
-	if last != 0 && now-last < int64(queryAPIKeyRejectLogInterval) {
+	if last != 0 && now-last < queryAPIKeyRejectLogInterval.Milliseconds() {
 		return
 	}
 	if !s.queryAPIKeyRejectLogged.CompareAndSwap(last, now) {
