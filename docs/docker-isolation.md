@@ -380,7 +380,7 @@ mcpproxy serve
 
 ### mcpproxy in a container with the Podman socket mounted
 
-This is the case the [host Docker socket warning](#docker-in-docker-prevention) is about, with a user-owned socket instead of a root-owned one. The proxy ran as a rootless Podman container from `docker.io/library/docker:cli` (static `docker` CLI and `sh`) with the user socket bind-mounted and `DOCKER_HOST=unix:///run/podman.sock` set. The host socket is `/run/user/<uid>/podman/podman.sock` (from `systemctl --user start podman.socket`), mode `660`, owned by the host user.
+This is the case the Spec 111 host-socket warning is about (mounting a Docker socket into the proxy container), with a user-owned socket instead of a root-owned one. The proxy ran as a rootless Podman container from `docker.io/library/docker:cli` (static `docker` CLI and `sh`) with the user socket bind-mounted and `DOCKER_HOST=unix:///run/podman.sock` set. The host socket is `/run/user/<uid>/podman/podman.sock` (from `systemctl --user start podman.socket`), mode `660`, owned by the host user.
 
 Whether the proxy can use the socket depends on the user mapping of the proxy container:
 
