@@ -423,7 +423,7 @@ func (r *Runtime) discoverAndIndexTools(ctx context.Context, dueOnly bool) error
 
 	// Prune entries for servers removed from config. Fresh snapshots are NOT
 	// published here: each server's snapshot, capture stamp and approval
-	// records are committed together under captureSnapMu by
+	// records are committed together under captureSnapLock by
 	// commitDiscoveredTools, so a concurrent review never reads one
 	// generation's records with another's stamp.
 	r.lastGoodToolsMu.Lock()
@@ -1039,13 +1039,13 @@ func (r *Runtime) persistQuarantinedToolDefinitionsAt(serverName string, tools [
 // applied for the server, or from a retired or reconnected client, persists
 // nothing.
 func (r *Runtime) persistInventoryDefinitions(serverName string, tools []*config.ToolMetadata, instanceGen int64, inv managed.InventoryCapture) (persisted bool, err error) {
-	r.captureSnapMu.Lock()
-	defer r.captureSnapMu.Unlock()
+	r.captureSnapLock(serverName).Lock()
+	defer r.captureSnapLock(serverName).Unlock()
 	return r.persistToolDefinitionsLocked(serverName, tools, instanceGen, inv)
 }
 
 // persistToolDefinitionsLocked records, prunes and publishes one review
-// capture. Caller holds captureSnapMu for writing.
+// capture. Caller holds captureSnapLock for writing.
 //
 // Spec 116 FR-008a (review R2.2): the capture's final generation check and
 // all of its writes (review records, prune, last-good snapshot, capture
@@ -1121,7 +1121,7 @@ func (r *Runtime) noteCaptureLocked(serverName string) {
 }
 
 // commitDiscoveredTools publishes a discovery result and updates the stored
-// approval records under captureSnapMu, so GetServerReview never observes the
+// approval records under captureSnapLock, so GetServerReview never observes the
 // new capture stamp with the previous generation's records (or vice versa).
 // For an eligible server the last-good snapshot and capture stamp are written,
 // together with the differential index update, in ONE hold of the server's
@@ -1156,8 +1156,8 @@ func (r *Runtime) commitDiscoveredToolsAt(ctx context.Context, serverName string
 // re-lists the current client.
 func (r *Runtime) commitInventoryAt(ctx context.Context, serverName string, tools []*config.ToolMetadata, instanceGen int64, capture *supervisor.DiscoveryCapture, inv inventoryRef) (eligible, published bool, err error) {
 	r.inventoryBeforeApply(serverName, inv.capture)
-	r.captureSnapMu.Lock()
-	defer r.captureSnapMu.Unlock()
+	r.captureSnapLock(serverName).Lock()
+	defer r.captureSnapLock(serverName).Unlock()
 	if !r.serverEligibleForIndexing(serverName) {
 		if _, perr := r.persistToolDefinitionsLocked(serverName, tools, instanceGen, inv.capture); perr != nil {
 			r.logger.Warn("Failed to capture review definitions for ineligible server",
@@ -1395,7 +1395,7 @@ func (r *Runtime) discoverAndIndexToolsForServerOnce(ctx context.Context, server
 	}
 
 	// Publish the last-good snapshot, capture stamp and approval records as
-	// one generation (captureSnapMu), then apply the differential index
+	// one generation (captureSnapLock), then apply the differential index
 	// update. The snapshot gives the approval-driven reindex (issue #873) a
 	// source without a network round-trip; on an authoritative empty refresh
 	// it stores an empty slice so no stale set lingers.
@@ -1748,6 +1748,14 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 		return incomplete(err)
 	}
 
+	// Make this inventory peer context for other servers' scans from before
+	// its own scan until this function returns, which is after complete()
+	// published it to the StateView (or after the pass failed). With
+	// per-server capture locks another server's pass can scan while this one
+	// runs; without the registration neither pass would see the other's new
+	// tools until both published (see Runtime.inflightInventories).
+	defer r.registerInflightInventory(serverName, newTools)()
+
 	// Check tool-level quarantine approvals before indexing. Any error
 	// (errCaptureIncomplete: a record write failed; errBaselineMarker) leaves
 	// the capture incomplete: nothing below runs and nothing is published.
@@ -2076,10 +2084,15 @@ func (r *Runtime) applyInventoryGuarded(ctx context.Context, serverName string, 
 // later compact retrieve_tools is a pure cache read — never a per-request
 // compile. Hashless tools are skipped: warming them would memoize distinct
 // schemas under one "" key (indexed tools always carry a hash).
+//
+// It holds sigReconcileMu, so a warm never lands inside a concurrent
+// reconcile's enumerate-then-retain window (see reconcileSignatureCache).
 func (r *Runtime) warmSignatureCache(tools []*config.ToolMetadata) {
 	if r.sigCache == nil {
 		return
 	}
+	r.sigReconcileMu.Lock()
+	defer r.sigReconcileMu.Unlock()
 	for _, tool := range tools {
 		if tool == nil || tool.Hash == "" {
 			continue
@@ -2094,10 +2107,19 @@ func (r *Runtime) warmSignatureCache(tools []*config.ToolMetadata) {
 // would otherwise accumulate for the life of the process. Called after index
 // rebuilds and differential updates; enumerates the SHARED index only —
 // per-profile indexes hold subsets of the same tools, hence the same hashes.
+//
+// sigReconcileMu is held from the enumeration through RetainHashes. Discovery
+// passes of different servers run concurrently, and a pass indexes a tool
+// before it warms its hash; holding the lock across both steps means a warm
+// either completes before the enumeration starts (so its tool is already
+// indexed and enumerated) or waits until RetainHashes is done, so a live hash
+// is never evicted by a reconcile that enumerated too early.
 func (r *Runtime) reconcileSignatureCache() {
 	if r.sigCache == nil || r.indexManager == nil {
 		return
 	}
+	r.sigReconcileMu.Lock()
+	defer r.sigReconcileMu.Unlock()
 	serverNames, err := r.indexManager.GetAllIndexedServerNames()
 	if err != nil {
 		r.logger.Debug("signature cache reconcile skipped: cannot enumerate indexed servers", zap.Error(err))
@@ -2941,13 +2963,13 @@ func configsEquivalent(a, b *config.Config) bool {
 
 // reapplyLastGoodSnapshot re-applies a server's last-good snapshot to the index
 // (the sweep fallback for a connected server missing from discovery). The
-// snapshot is selected and applied under one captureSnapMu hold: a snapshot
+// snapshot is selected and applied under one captureSnapLock hold: a snapshot
 // read outside the lock could be superseded by a concurrent capture that marks
 // a tool changed, and applying the stale one afterwards would look like a
 // genuine revert and clear that hold.
 func (r *Runtime) reapplyLastGoodSnapshot(ctx context.Context, serverName string) {
-	r.captureSnapMu.Lock()
-	defer r.captureSnapMu.Unlock()
+	r.captureSnapLock(serverName).Lock()
+	defer r.captureSnapLock(serverName).Unlock()
 
 	snapshot, inv, seq, snapshotGen := r.lastGoodSnapshotWithCaptureGen(serverName)
 	if len(snapshot) == 0 {

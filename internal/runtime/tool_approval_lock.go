@@ -88,6 +88,13 @@ func (r *Runtime) toolApprovalServerState(serverName string) *toolApprovalServer
 	return v.(*toolApprovalServerLock)
 }
 
+// captureSnapLock returns serverName's capture/review lock, creating it. Like
+// the approval locks it is never removed: a re-added server reuses it.
+func (r *Runtime) captureSnapLock(serverName string) *sync.RWMutex {
+	v, _ := r.captureSnapLocks.LoadOrStore(serverName, &sync.RWMutex{})
+	return v.(*sync.RWMutex)
+}
+
 // lockToolApprovals acquires the per-server tool-approval lock and returns its
 // unlock function.
 func (r *Runtime) lockToolApprovals(serverName string) func() {

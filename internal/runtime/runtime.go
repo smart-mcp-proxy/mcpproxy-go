@@ -309,10 +309,34 @@ type Runtime struct {
 	lastGoodCapture map[string]managed.InventoryCapture
 	// pruneAfterSnapshot is a test hook run after the prune snapshot.
 	pruneAfterSnapshot func(toolName string)
-	// captureSnapMu makes "records persisted + pruned + stamp published" one
-	// unit for readers: a capture holds the write lock for all of it, a review
-	// holds the read lock while it reads records and live state.
-	captureSnapMu sync.RWMutex
+	// captureSnapLocks holds one *sync.RWMutex per server (captureSnapLock).
+	// It makes "records persisted + pruned + stamp published" one unit for
+	// readers: a capture holds the server's write lock for all of it, a
+	// review holds its read lock while it reads records and live state. The
+	// lock is per server so one server's long pass never blocks another's.
+	captureSnapLocks sync.Map
+	// inflightInventories (guarded by inflightInventoryMu) holds, per server,
+	// the peer-context projection of the inventory a discovery pass is
+	// applying right now (registerInflightInventory). A pass publishes its
+	// tools to the StateView only at its end, and with per-server capture
+	// locks two servers' passes overlap; collectPeerToolMetadata overlays
+	// these entries so the TPA shadowing/clone check of one pass sees a peer's
+	// not-yet-published tools. Each pass registers before its approval scan
+	// and unregisters when applyInventoryGuarded returns (after its publish),
+	// so of two overlapping passes at least the later-scanning one sees the
+	// other's new tools: a same-name near-duplicate added on two servers at
+	// once is held on the second, as it was when every pass was serialized.
+	// inflightInventoryMu is a leaf lock: nothing else is taken under it.
+	inflightInventoryMu sync.Mutex
+	inflightInventories map[string]*inflightInventory
+	// sigReconcileMu serializes reconcileSignatureCache (index enumeration
+	// through RetainHashes) with warmSignatureCache. Without it a reconcile
+	// that enumerated the index before another server's pass indexed and
+	// warmed hash H would evict H afterwards, and nothing re-warms it until
+	// that server's next pass. Lock order: a server's approval lock (warm runs
+	// under it) -> sigReconcileMu -> the index manager's and cache's own
+	// locks; nothing taken under sigReconcileMu calls back into the runtime.
+	sigReconcileMu sync.Mutex
 	// reviewAfterRecords is a test hook run after GetServerReview lists records.
 	reviewAfterRecords func()
 	// captureAfterPrune is a test hook run after a capture persisted and

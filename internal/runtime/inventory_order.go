@@ -36,7 +36,7 @@ import (
 //     (FR-037); otherwise the approval reindex re-lists and the sweep fallback
 //     skips the server.
 //
-// Lock order is unchanged: captureSnapMu → approval lock → storage / index /
+// Lock order is unchanged: captureSnapLock → approval lock → storage / index /
 // supervisor state. The currency check reads two atomics of the client
 // (CaptureIsCurrent) and takes no manager or client lock.
 
