@@ -35,7 +35,7 @@ func writtenCredential(t *testing.T, svc *Service, clientID string) string {
 }
 
 // TestConnectClientCredential_EveryCarrierWritesTheMintedSecret pins FR-024:
-// every client carrier (X-API-Key header, mcp-remote --header, Codex ?apikey=)
+// every client carrier (X-API-Key header, mcp-remote --header, Codex http_headers)
 // carries the minted mcp_cli_ secret, in both auth modes, and the admin API key
 // is never written.
 func TestConnectClientCredential_EveryCarrierWritesTheMintedSecret(t *testing.T) {

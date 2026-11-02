@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -164,7 +163,8 @@ type Service struct {
 	// credential into client configs — embedding the REST-admin API key there
 	// would leak it for no benefit (Spec 078 security fix). When true, the
 	// credential is written via an HTTP header where the client config supports
-	// one, falling back to the ?apikey= query only where it cannot.
+	// one (Codex: the http_headers TOML table); no client
+	// gets the credential in the URL.
 	requireMCPAuth bool
 	// configProvider, when set, supplies the LIVE listen address, API key, and
 	// require_mcp_auth on every call instead of the startup snapshot above. The
@@ -300,8 +300,8 @@ func (s *Service) baseURL() string {
 }
 
 // serverEntryParams carries everything buildServerEntry needs. credential is the
-// value to embed in the entry (as an X-API-Key header, a --header bridge arg, or
-// an ?apikey= query, per client). It is a per-client `mcp_cli_` credential, the
+// value to embed in the entry (as an X-API-Key header or a --header bridge arg,
+// per client). It is a per-client `mcp_cli_` credential, the
 // masked or placeholder form of one in a preview, or empty for a keyless entry.
 // It is NEVER the instance admin API key.
 type serverEntryParams struct {
@@ -347,21 +347,6 @@ func (s *Service) planCredential(intent CredentialIntent) (mint bool, err error)
 		return false, nil
 	}
 	return true, nil
-}
-
-// credentialQuery appends the credential as an ?apikey= query to base, for the
-// clients whose config cannot express an HTTP header. The real secret is
-// URL-escaped; the display mask and the pending placeholder are left literal
-// so a preview renders cleanly.
-func credentialQuery(base, credential string) string {
-	if credential == "" {
-		return base
-	}
-	v := credential
-	if credential != maskClientCredential && credential != pendingCredential {
-		v = url.QueryEscape(credential)
-	}
-	return base + "?apikey=" + v
 }
 
 // defaultServerName is the key used in client config files.
