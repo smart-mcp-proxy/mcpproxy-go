@@ -2349,10 +2349,9 @@ func (r *Runtime) postConfigReload() {
 
 	r.logger.Info("Triggering immediate reconnection after config reload")
 
-	connectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-
-	if err := r.upstreamManager.ConnectAll(connectCtx); err != nil {
+	// No deadline of our own (#1772): ConnectAll bounds each client with its
+	// resolved init_timeout, and a shorter parent here would cap one above it.
+	if err := r.upstreamManager.ConnectAll(ctx); err != nil {
 		r.logger.Warn("Some servers failed to reconnect after config reload", zap.Error(err))
 	}
 
