@@ -31,6 +31,13 @@ func baselineEngineChecks() []detect.Check {
 		&checks.DirectiveImperative{},
 		&checks.CapabilityMismatch{},
 		&checks.EmbeddedSecret{},
+		// Spec 122 (SkillSpector-informed): review-tier anti-refusal, padding
+		// and composite-exfiltration checks, and the declared-marker
+		// reconstruction (whose forwarded shell match is hard).
+		&checks.AntiRefusal{},
+		&checks.PaddingHidden{},
+		&checks.CompositeExfil{},
+		&checks.MarkerReconstruction{},
 	}
 }
 

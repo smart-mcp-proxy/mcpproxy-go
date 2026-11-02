@@ -81,6 +81,7 @@ func selfCheckBuiltins() []detect.Check {
 		&checks.Shadowing{},
 		&checks.PayloadDecoded{},
 		&checks.PhraseInjection{},
+		&checks.MarkerReconstruction{},
 	}
 }
 
@@ -94,6 +95,7 @@ var selfCheckCategoryCheck = map[string]string{
 	"shadowing":           "shadowing.cross_server",
 	"phrase_injection":    "phrase.injection",
 	"capability_mismatch": "capability.mismatch",
+	"reconstruction":      "payload.reconstructed",
 }
 
 // selfCheckCheckID returns the detect check id expected to catch a malicious
