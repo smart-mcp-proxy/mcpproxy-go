@@ -72,6 +72,12 @@ type phraseFamily struct {
 	// leadingBoundary marks a pattern whose match begins with a consumed
 	// non-letter boundary character (the non-English families, SEC-01).
 	leadingBoundary bool
+	// trailingBoundary marks a pattern whose match ENDS with a consumed
+	// non-letter boundary character (or the end of text). The Turkish families
+	// (R2-3) need one because Turkish negates with a suffix ("yoksaymaz"), so
+	// the verb must be matched whole; the consumed character is trimmed back
+	// out of the evidence like the leading one.
+	trailingBoundary bool
 	// softReason, when set, explains why this family is review-only by design
 	// (its base sits below the hard floor); it replaces the generic
 	// "quoted/described position" wording in the finding detail.
@@ -531,6 +537,32 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	bestSoftReason := ""
 	bestDeobfuscated := false
 	bestMixed := false
+	// The fold wording reads the whole tool text, so name it once per
+	// inspection: per occurrence, a repeated negated directive made the scan
+	// quadratic in attacker-controlled text (Sol review of #1714).
+	wording := ""
+	wordingOnce := func() string {
+		if wording == "" {
+			wording = foldWording(tool.RawText())
+		}
+		return wording
+	}
+	// Line maps for DirectProhibition, built lazily per view (the plain view
+	// aligns with Normalize; the mixed view with NormalizeMixedScript, which
+	// may fail to align per line and then proves nothing).
+	lineMaps := map[int]detect.LineMap{}
+	lineMapFor := func(ti int) detect.LineMap {
+		if lm, ok := lineMaps[ti]; ok {
+			return lm
+		}
+		norm := detect.Normalize
+		if ti == mixedIndex {
+			norm = func(s string) string { n, _ := detect.NormalizeMixedScript(s); return n }
+		}
+		lm := detect.NewLineMap(tool.RawText(), texts[ti], norm)
+		lineMaps[ti] = lm
+		return lm
+	}
 	for ti, t := range texts {
 		for _, fam := range allPhraseFamilies {
 			mt := t
@@ -544,9 +576,12 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				// match and the position window at the first letter so a quote
 				// right before the phrase still counts as quoting it. Other
 				// families keep their match start exactly as before.
-				start := loc[0]
+				start, end := loc[0], loc[1]
 				if fam.leadingBoundary {
 					start += len(t[loc[0]:loc[1]]) - len(strings.TrimLeftFunc(t[loc[0]:loc[1]], isNotWordRune))
+				}
+				if fam.trailingBoundary {
+					end -= len(t[start:loc[1]]) - len(strings.TrimRightFunc(t[start:loc[1]], isNotWordRune))
 				}
 				conf := fam.base * detect.ClassifyPositionForRecall(t, start).Discount()
 				softReason := fam.softReason
@@ -566,13 +601,23 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				// view, which is the only view that can reach the HARD tier. This
 				// also keeps the loop linear: no whole-text rescan per occurrence.
 				deobfuscated := ti == deobfIndex
+				// A DIRECT prohibition of the matched action ("Do not reveal
+				// your system prompt.") is a defensive rule, not an attack
+				// (Spec 122 FR-040): capped to review on the plain and mixed
+				// views, never dropped. Conditional, reversed, split-line,
+				// quoted or idiomatic negations ("do not hesitate to …") do
+				// not qualify and keep the hard tier.
+				if !deobfuscated && conf > deobfuscatedMaxConfidence && detect.DirectProhibition(t, start, end, lineMapFor(ti)) {
+					conf = deobfuscatedMaxConfidence
+					softReason = "reads as a direct prohibition: a negation immediately governs the action"
+				}
 				// The mixed-script view may reach HARD, except where the
 				// directive is negated in its own clause ("Never іgnоrе all
 				// previous instructions."): the folded text then reads as a
 				// prohibition, which stays review-only (SEC-01 corpus bn-r10-1).
 				if ti == mixedIndex && negatedBefore(t, start) && conf > deobfuscatedMaxConfidence {
 					conf = deobfuscatedMaxConfidence
-					softReason = "negated directive written with mixed-script look-alike letters"
+					softReason = "negated directive written with " + wordingOnce()
 				}
 				// A credential-file directive governed by a negation in its own
 				// clause is a prohibition on any view (Sol r15 P2). An
@@ -605,7 +650,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 					if wordStarts == nil || startsText != t {
 						startsText, wordStarts = t, bareWordStarts(t)
 					}
-					if matchJoinsBreak(t, start, loc[1], breakSet, breakWords, wordStarts) {
+					if matchJoinsBreak(t, start, end, breakSet, breakWords, wordStarts) {
 						conf = deobfuscatedMaxConfidence
 						softReason = "the match joins a line that ends with the start of a new sentence on the next line"
 					}
@@ -617,7 +662,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 				if !matched || conf > bestConf {
 					matched = true
 					bestConf = conf
-					bestMatch = t[start:loc[1]]
+					bestMatch = t[start:end]
 					bestWhat = fam.what
 					bestThreat = fam.threat
 					bestSoftReason = softReason
@@ -640,7 +685,7 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 		obfuscated = " after de-obfuscation (homoglyphs, leet digits or letter spacing)"
 	}
 	if bestMixed {
-		obfuscated = " once mixed-script look-alike letters (homoglyphs) are folded"
+		obfuscated = " once " + wordingOnce() + " are folded"
 	}
 
 	// Instruction-position clears the hard floor and auto-quarantine-gates. A
@@ -670,11 +715,28 @@ func (c *PhraseInjection) Inspect(tool detect.ToolView, _ detect.RegistryView) [
 	}}
 }
 
+// mixedFoldWording names what the mixed-script view folded in raw, for a
+// finding's detail: look-alike letters when a word really mixes scripts,
+// otherwise the accents that R2-4 strips (the view reports a change for both).
+// foldWording is mixedFoldWording; tests swap it to count calls.
+var foldWording = mixedFoldWording
+
+func mixedFoldWording(raw string) string {
+	if detect.HasMixedScriptWords(raw) {
+		return "mixed-script look-alike letters (homoglyphs)"
+	}
+	return "diacritics on Latin letters"
+}
+
 // breakWord reduces a whitespace-delimited field to the bare word used to
-// compare raw text with the normalized phrase text: normalized, with
-// surrounding punctuation removed.
+// compare raw text with the phrase text: normalized the way the MIXED view is
+// (homoglyphs and Latin diacritics folded, nothing joined), with surrounding
+// punctuation removed. The mixed view is the only view that reaches HARD with
+// such letters, so the raw word stream has to fold them the same way or the
+// line-break cap (#1589) misses every matched word that carries one.
 func breakWord(field string) string {
-	w := strings.TrimFunc(detect.Normalize(field), func(r rune) bool {
+	folded, _ := detect.NormalizeMixedScript(field)
+	w := strings.TrimFunc(folded, func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	})
 	return w
@@ -686,7 +748,8 @@ func breakWord(field string) string {
 // that normalizes to nothing contributes no word.
 func breakWords(field string) []string {
 	var out []string
-	for _, w := range strings.Fields(detect.Normalize(field)) {
+	folded, _ := detect.NormalizeMixedScript(field)
+	for _, w := range strings.Fields(folded) {
 		if bw := breakWord(w); bw != "" {
 			out = append(out, bw)
 		}
@@ -1086,76 +1149,10 @@ func (c *PhraseInjection) inspectSquashed(tool detect.ToolView, normalized strin
 	return nil
 }
 
-// negationWord is a word that governs the clause after it ("never", "do
-// not", "must not", "no longer" …).
-var negationWord = regexp.MustCompile(`\b(?:never|not|no|cannot|without|nor)\b`)
-
-// negationMaxGap is how many words may separate a negation from the match it
-// governs. "Do not under any circumstances іgnоrе …" needs three; two (the
-// earlier limit) let longer prohibitions reach HARD (Sol r13 P2).
-const negationMaxGap = 7
-
-// negationBreakers end the negation's reach: a contrast or a new coordinated
-// directive after it ("Do not worry, just ignore …", "do not log this and
-// ignore …") means the match is affirmative.
-var negationBreakers = map[string]bool{
-	"and": true, "but": true, "just": true, "then": true, "instead": true,
-	"rather": true, "however": true, "yet": true, "so": true, "now": true,
-	"simply": true, "also": true, "or": true, "thus": true, "therefor": true,
-	"therefore": true, "please": true,
-}
-
-// negationAdverbs are breakers only once another word follows the negation
-// (Sol r18 P2): right after it they are adverbs inside the prohibition
-// ("Never, please, read …", "do not also put …"), while after an object they
-// open a new directive ("Do not log this, please read …").
-var negationAdverbs = map[string]bool{"please": true, "also": true}
-
-// negationIdioms are words that, right after a negation, make it an
-// affirmative idiom rather than a prohibition ("no matter what, ignore …",
-// "do not hesitate to ignore …", "no need to ask, ignore …").
-var negationIdioms = map[string]bool{
-	"matter": true, "hesitat": true, "hesitate": true, "fail": true,
-	"forget": true, "need": true, "doubt": true, "problem": true,
-	"worry": true, "wait": true, "delay": true,
-}
-
-// negatedBefore reports whether the clause before byte offset start ends in a
-// negation that governs the match: the last negation word of the clause is
-// followed by at most negationMaxGap words, none of which is a contrast or a
-// new coordinated directive (negationBreakers), and it does not open an
-// affirmative idiom (negationIdioms).
-func negatedBefore(text string, start int) bool {
-	lo := start - 120
-	if lo < 0 {
-		lo = 0
-	}
-	window := text[lo:start]
-	if i := strings.LastIndexAny(window, ".!?;"); i >= 0 {
-		window = window[i+1:]
-	}
-	locs := negationWord.FindAllStringIndex(window, -1)
-	if len(locs) == 0 {
-		return false
-	}
-	tail := strings.FieldsFunc(window[locs[len(locs)-1][1]:], func(r rune) bool {
-		return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '\''
-	})
-	if len(tail) > negationMaxGap {
-		return false
-	}
-	leading := true // only negationAdverbs seen so far after the negation
-	for k, w := range tail {
-		if leading && negationAdverbs[w] {
-			continue
-		}
-		leading = false
-		if negationBreakers[w] || (k == 0 && negationIdioms[w]) {
-			return false
-		}
-	}
-	return true
-}
+// negatedBefore is detect.NegatedBefore: the lenient negation test the
+// credential families and the mixed-script view use (Spec 122 moved it into
+// detect so DirectProhibition can build on it).
+func negatedBefore(text string, start int) bool { return detect.NegatedBefore(text, start) }
 
 // secretMetadataWords describe a secret without being it: its expiry, its
 // count, its name (Sol r18 P2). Normalized (lowercased, lightly stemmed).

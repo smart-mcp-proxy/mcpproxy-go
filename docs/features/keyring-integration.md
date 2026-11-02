@@ -50,8 +50,12 @@ MCPProxy supports three types of secret references that can be used anywhere in 
 
 ### File references
 
-`${file:/absolute/path}` keeps a secret out of the config file and out of the process environment
-(`docker inspect`, `/proc/<pid>/environ`). The same rules apply wherever it is used:
+`${file:/absolute/path}` keeps a secret out of the config file and out of mcpproxy's own process
+environment. A reference used in a server's `env` is resolved when the server connects and the value
+is passed to that server as an environment variable, which for a Docker server also means the
+container's environment (`docker inspect`) and the `docker` client's `/proc/<pid>/environ`; it is
+never put on the `docker` command line ([#1809](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1809)).
+The same rules apply wherever it is used:
 
 - The path must be absolute. A symlink is followed (Kubernetes secret volumes are symlinks) but must
   point at a regular file. On Windows an absolute path has a drive letter (`C:\ProgramData\mcpproxy\key`

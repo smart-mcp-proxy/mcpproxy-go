@@ -800,6 +800,14 @@
           "description": "Registry id to add from (e.g. 'pulse') - required for add_from_registry. Use the 'list_registries'/'search_servers' tools to discover registries and server ids.",
           "type": "string"
         },
+        "tool_argument_error_mode": {
+          "description": "Per-server tool argument error policy: omitted or detailed preserves detailed errors; redacted opts into redaction. On update/patch, omit to leave the policy unchanged; detailed explicitly resets a redacted policy. Used with add/update/patch.",
+          "enum": [
+            "detailed",
+            "redacted"
+          ],
+          "type": "string"
+        },
         "trust_mode": {
           "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = new tools and changed tools auto-approve only when the fast offline TPA scan is clean, else hold for review; 'manual' = human reviews every change. Empty → scan (the default). Used with add/update/patch.",
           "enum": [

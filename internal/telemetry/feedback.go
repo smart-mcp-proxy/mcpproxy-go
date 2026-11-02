@@ -21,14 +21,42 @@ type FeedbackRequest struct {
 }
 
 // FeedbackContext provides automatic system context alongside feedback.
+//
+// The wire shape is a contract with the telemetry worker's /v1/feedback
+// handler, pinned by testdata/feedback_contract.json (see
+// feedback_contract_test.go). Add a field there before adding it here.
 type FeedbackContext struct {
 	Version              string `json:"version"`
 	Edition              string `json:"edition"`
 	OS                   string `json:"os"`
 	Arch                 string `json:"arch"`
+	GoVersion            string `json:"go_version,omitempty"`
 	ServerCount          int    `json:"server_count"`
 	ConnectedServerCount int    `json:"connected_server_count"`
+	ToolCount            int    `json:"tool_count"`
 	RoutingMode          string `json:"routing_mode"`
+	// UptimeMinutes is the daemon's uptime. Omitted from short-lived CLI
+	// submissions, where the process uptime says nothing about the daemon.
+	UptimeMinutes int `json:"uptime_minutes,omitempty"`
+
+	// The fields below are sent only with telemetry consent: telemetry enabled
+	// (config and env), no latched opt-out, and a release (semver) build.
+	// AnonymousID and MachineID are the same values the heartbeat reports, so a
+	// maintainer can join a report to its install's telemetry; the worker stores
+	// them privately and never prints them in the public issue. The diagnostics
+	// are the heartbeat's enum-only fields (MCPX_* codes, fixed outcome words).
+
+	// AnonymousID is the install's telemetry anonymous ID (heartbeat value).
+	AnonymousID string `json:"anonymous_id,omitempty"`
+	// MachineID is the hashed machine identifier (heartbeat value).
+	MachineID string `json:"machine_id,omitempty"`
+	// LastStartupOutcome is the previous startup's outcome word.
+	LastStartupOutcome string `json:"last_startup_outcome,omitempty"`
+	// PreviousShutdown is how the previous run ended (clean, crash, ...).
+	PreviousShutdown string `json:"previous_shutdown,omitempty"`
+	// LastErrorCode is the most recent MCPX_* error code.
+	LastErrorCode string               `json:"last_error_code,omitempty"`
+	Diagnostics   *DiagnosticsCounters `json:"diagnostics,omitempty"`
 }
 
 // FeedbackResponse is the response from the telemetry backend.
@@ -116,15 +144,12 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *FeedbackRequest) (*Fe
 		return nil, fmt.Errorf("invalid message: %w", err)
 	}
 
-	// Auto-populate context
-	req.Context.Version = s.version
-	req.Context.Edition = s.edition
-	req.Context.OS = runtime.GOOS
-	req.Context.Arch = runtime.GOARCH
-	if s.stats != nil {
-		req.Context.ServerCount = s.stats.GetServerCount()
-		req.Context.ConnectedServerCount = s.stats.GetConnectedServerCount()
-		req.Context.RoutingMode = s.stats.GetRoutingMode()
+	req.Context = s.feedbackContext()
+	// Building the context reads BBolt; an opt-out can land meanwhile. Recheck
+	// consent at the last moment so a report sent after opting out never
+	// carries the install's ids or diagnostics.
+	if !s.feedbackTelemetryConsent() {
+		req.Context.withoutTelemetry()
 	}
 
 	// Marshal and send
@@ -162,4 +187,60 @@ func (s *Service) SubmitFeedback(ctx context.Context, req *FeedbackRequest) (*Fe
 	}
 
 	return &result, nil
+}
+
+// feedbackContext builds the automatic context for a feedback submission. The
+// telemetry correlation ids and diagnostics are attached only while telemetry
+// is enabled: a user who opted out has not agreed to have a report linked to
+// their install.
+func (s *Service) feedbackContext() FeedbackContext {
+	fc := FeedbackContext{
+		Version:   s.version,
+		Edition:   s.edition,
+		OS:        runtime.GOOS,
+		Arch:      runtime.GOARCH,
+		GoVersion: runtime.Version(),
+	}
+	if s.stats != nil {
+		fc.ServerCount = s.stats.GetServerCount()
+		fc.ConnectedServerCount = s.stats.GetConnectedServerCount()
+		fc.ToolCount = s.stats.GetToolCount()
+		fc.RoutingMode = s.stats.GetRoutingMode()
+		// Runtime stats are wired only inside the daemon, so this is its uptime.
+		fc.UptimeMinutes = int(time.Since(s.startTime).Minutes())
+	}
+
+	if !s.feedbackTelemetryConsent() {
+		return fc
+	}
+	anonID, _, _, lastStartupOutcome := s.telemetryCursor(s.liveConfig())
+	if anonID == "" {
+		anonID, _ = s.fallbackIdentity()
+	}
+	fc.AnonymousID = anonID
+	fc.MachineID = resolveMachineID()
+	fc.LastStartupOutcome = lastStartupOutcome
+	fc.PreviousShutdown = s.previousShutdown
+	fc.LastErrorCode = s.lastErrorCode()
+	fc.Diagnostics = s.diagnosticsSnapshot()
+	return fc
+}
+
+// feedbackTelemetryConsent reports whether a feedback submission may carry the
+// install's telemetry ids and diagnostics: telemetry resolves as enabled (config
+// and env), no opt-out has latched, and the build is a release (semver) build.
+// These are the same gates the heartbeat (Start) and the opt-out beacon apply;
+// development builds never send telemetry, so their feedback is basic-only.
+func (s *Service) feedbackTelemetryConsent() bool {
+	return isValidSemver(s.version) && !s.optedOut.Load() && s.telemetryEnabledLive()
+}
+
+// withoutTelemetry clears every field that is sent only with telemetry consent.
+func (fc *FeedbackContext) withoutTelemetry() {
+	fc.AnonymousID = ""
+	fc.MachineID = ""
+	fc.LastStartupOutcome = ""
+	fc.PreviousShutdown = ""
+	fc.LastErrorCode = ""
+	fc.Diagnostics = nil
 }

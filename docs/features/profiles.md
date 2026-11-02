@@ -110,7 +110,7 @@ When more than one source could select a profile, the highest wins:
 |---|---|---|
 | 1 | **pin** | A **locked** client credential, or an [agent token](./agent-tokens.md#profile-pinning) with a profile. Server-enforced and immutable for the connection. A pin whose profile was deleted denies everything instead of widening |
 | 2 | **url** | `/mcp/p/<slug>`. Authoritative for that request. A locked or confined caller may name only its own profile (or, if switchable, one in `switchable_to`) |
-| 3 | **session** | The `set_profile` selection. Re-checked on every request |
+| 3 | **session** | The `set_profile` selection. Re-checked on every request. Legacy protocol era only, and never consulted for a `*/list` response — see [Protocol eras](#protocol-eras) |
 | 4 | **binding** | The profile of a **switchable** client credential |
 | 5 | **anonymous** | `anonymous_profile`, for a caller with no credential |
 | 6 | **none** | No profile: all servers |
@@ -189,8 +189,8 @@ The `set_profile` MCP tool switches the active profile **inside a live session**
 { "active_profile": "research", "servers": ["research-srv"] }
 ```
 
-- The selection is keyed by the MCP session id (stable per streamable-HTTP / SSE connection) and persists for the lifetime of that session.
-- It applies to subsequent `retrieve_tools`, `call_tool_*`, `code_execution` and direct-mode (`server__tool`) calls on the base `/mcp` endpoint — `retrieve_tools` searches the profile's per-profile index directly.
+- The selection is keyed by the MCP session id of a **legacy-era** connection (MCP `2025-11-25` and earlier, where streamable-HTTP and SSE bind a stable id at `initialize`) and persists for the lifetime of that session. The `2026-07-28` revision has no sessions, so `set_profile` cannot persist anything there — see [Protocol eras](#protocol-eras).
+- It applies to subsequent `retrieve_tools`, `call_tool_*`, `code_execution`, direct-mode (`server__tool`) calls and `prompts/get` on the base `/mcp` endpoint — `retrieve_tools` searches the profile's per-profile index directly. It does **not** change what `tools/list` or `prompts/list` return: list responses are the same for every connection, whatever it selected (MCP `2026-07-28` forbids per-connection list variation, and MCPProxy applies that rule in both eras). The one exception during the deprecation window is the visibility of the built-in administration tools (`profiles`, `credentials`, `code_execution`, `upstream_servers`, `quarantine_security`), which a legacy session's selected profile still governs at list time.
 - Passing an empty string (`""`) clears the selection and returns to all servers. `active_profile` always reports the **stored session selection** — `""` after a clear, even for a token with a [`profile_pin`](./agent-tokens.md#profile-pinning) — while `servers` reports the **effective scope** the session can actually reach after the update: the pin's servers for a pinned token (nothing once the pinned profile has been deleted), the URL profile on a `/mcp/p/<slug>` endpoint, otherwise the selection or every configured server.
 - The `servers` list is always bounded by the caller's credential, using the same rule that scopes `retrieve_tools`: for an [agent token](./agent-tokens.md) scoped to specific servers it is the intersection of the effective profile (resolved pin > URL > session, see [Which profile applies](#which-profile-applies)) with the token's `allowed_servers`, so a token restricted to one server is never told about the others. On a `/mcp/p/<slug>` endpoint the URL still governs the request, so `set_profile("other")` there stores `other` as `active_profile` but reports `<slug> ∩ allowed_servers` in `servers`. API-key and socket callers see the full lists.
 - An unknown slug is rejected. An administrator (API key, socket, anonymous back-compat) gets the discovery affordance: `unknown profile '<slug>' (available: research, deploy)`. An agent token gets `unknown profile '<slug>'` with no list at all: it may select only the profiles overlapping its `allowed_servers` (or its pin while the pin still has reach), and a profile entirely outside its reach (an empty profile, a profile whose servers are all outside `allowed_servers`, or the token's own pin once it no longer exists or no longer overlaps the token's servers) is rejected with that same error rather than confirmed as existing. A pinned token asking for any profile OTHER than its pin (see [profile pinning](./agent-tokens.md#profile-pinning)) is rejected with that same `unknown profile '<slug>'` error too — never a distinct "pinned to..." message, which would let the token confirm from the wording alone that it is pinned, and to what, from a refusal aimed at a different slug. The check looks only at the requested slug (and the token's pin) and tests the token's own `allowed_servers` against that profile's precomputed server set — its cost does not depend on how many other profiles are configured, on how many servers the requested profile declares or on how many servers are configured at all, only on the size of the token's own grant — so a token cannot learn which profiles or servers exist, or whether it is pinned, from `set_profile`, by body or by timing.
@@ -198,6 +198,22 @@ The `set_profile` MCP tool switches the active profile **inside a live session**
 - Session state is cleared automatically on session close.
 
 `set_profile` is available on the default `/mcp` server and the `call_tool` / `code_execution` routing-mode servers.
+
+### Protocol eras
+
+MCPProxy serves two MCP protocol eras. They differ in exactly one thing that matters to profiles: whether a connection has a session.
+
+| Era | Session | `set_profile` | How to select a profile |
+|---|---|---|---|
+| **Legacy** — `2025-11-25` and earlier (the only era served on the client-facing surfaces today) | A session id is bound at `initialize` | Works as described above; the selection lives for the session | Pin or binding on the credential, `/mcp/p/<slug>`, or `set_profile` |
+| **Modern** — `2026-07-28` | None. Every request carries its own identity in `_meta` and headers | Refused. The reply names the per-request form, for example `connecting to /mcp/p/research`, so an agent can act on it. An unknown slug is still answered `unknown profile '<slug>'`, exactly as in the legacy era | Pin or binding on the credential, or `/mcp/p/<slug>` — both are carried by every request |
+
+Rules that hold in both eras:
+
+- `tools/list` and `prompts/list` never vary per connection. The identity-scoped parts of a response come from the request (credential, URL path, `_meta`), never from what a connection did earlier.
+- The URL form `/mcp/p/<slug>` is request-carried identity: the slug is read from every request's path, nothing is bound at `initialize`, so it keeps working without a session.
+- A stdio client is held to the same era pin as the HTTP endpoints: while the client-facing surfaces serve only the legacy era, a stdio request that declares `2026-07-28` in `_meta` is refused with an `Invalid Request` error naming the served versions, instead of being served statelessly on a transport that reports a constant session id.
+- Activity records of a modern client still carry its self-reported name and version, read from the request's `_meta` rather than from a session.
 
 ### REST API
 

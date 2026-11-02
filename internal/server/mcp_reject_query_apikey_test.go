@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -76,4 +77,39 @@ func TestMCPAuthMiddleware_QueryAPIKeyAcceptedByDefault(t *testing.T) {
 	require.NotNil(t, seen)
 	assert.True(t, seen.IsAdmin())
 	assert.False(t, seen.Anonymous, "the query credential must still authenticate by default")
+}
+
+// A refused query credential leaves a trace: one warn naming the caller's
+// address and User-Agent (never the credential), rate-limited so a client
+// retrying in a loop cannot flood the log.
+func TestMCPAuthMiddleware_RejectQueryAPIKeyLogsWarnOnce(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	cfg := config.DefaultConfig()
+	cfg.DataDir = t.TempDir()
+	cfg.Listen = "127.0.0.1:0"
+	cfg.APIKey = "test-api-key-reject-query"
+	cfg.MCPRejectQueryAPIKey = true
+	srv, err := NewServer(cfg, zap.New(core))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	logs.TakeAll() // discard startup warnings
+
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/mcp?apikey=SECRET-VALUE-123", http.NoBody)
+		req.Header.Set("User-Agent", "codex-test/1.0")
+		req.RemoteAddr = "127.0.0.1:5555"
+		_, code := captureAuthContext(t, srv, req)
+		require.Equal(t, http.StatusUnauthorized, code)
+	}
+
+	entries := logs.FilterMessageSnippet("apikey").All()
+	require.Len(t, entries, 1, "repeated rejections within the window log once")
+	ctx := entries[0].ContextMap()
+	assert.Equal(t, "127.0.0.1:5555", ctx["remote_addr"])
+	assert.Equal(t, "codex-test/1.0", ctx["user_agent"])
+	assert.Equal(t, "/mcp", ctx["path"])
+	assert.NotContains(t, entries[0].Message, "SECRET-VALUE-123")
+	for _, v := range ctx {
+		assert.NotContains(t, v, "SECRET-VALUE-123")
+	}
 }

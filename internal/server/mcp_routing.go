@@ -610,9 +610,21 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 		// The reason key comes from the gate that actually fired (quarantine,
 		// pending/changed approval, or plain not-callable) rather than from
 		// this one funnel site — see directBlockReasonKey.
-		if blocked, reasonKey := p.directToolCallabilityBlockWithReason(ctx, serverName, toolName, enrichedArgs); blocked != nil {
-			p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable", reasonKey)
-			return blocked, nil
+		//
+		// Spec 085: the decision is evaluated here, at dispatch, so the
+		// argument-error policy this call renders under is captured from the
+		// SAME persisted record the gate reads. A settings change that lands
+		// after this point cannot alter this call's response, exactly like the
+		// toolGate.serverConfig capture on the call_tool_* paths. A minimal
+		// unit-test proxy without storage keeps the default detailed behavior.
+		var argumentMode string
+		if p.storage != nil {
+			decision := newDirectCallabilityEvaluator(p).evaluate(serverName, toolName)
+			argumentMode = argumentErrorMode(decision.serverConfig)
+			if blocked, reasonKey := p.directToolCallabilityBlockForDecision(ctx, decision, enrichedArgs); blocked != nil {
+				p.emitActivityPolicyDecision(ctx, serverName, toolName, sessionID, requestID, "blocked", "direct tool is not callable", reasonKey)
+				return blocked, nil
+			}
 		}
 
 		// Spec 102 US3 (FR-013): pre-dispatch argument validation, against the
@@ -660,7 +672,7 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 				time.Since(startTime).Milliseconds(), enrichedArgs, "", false, "", nil,
 				contracts.ContentTrustForTool(annotations), "", 0, 0, "", nil, "")
 
-			return invalidParamsErrorResult(entry.DisplayName, entry.ParamsJSON, detail), nil
+			return invalidParamsErrorResultWithMode(entry.DisplayName, entry.ParamsJSON, detail, argumentMode), nil
 		}
 
 		// Spec 082: a direct tool call is real work — it earns the session a
@@ -736,6 +748,19 @@ func (p *MCPProxyServer) makeDirectModeHandler(entry *directCatalogEntry) mcpser
 			// Emit error activity
 			auditNoteError(ctx, err)
 			p.emitActivityToolCallCompleted(ctx, serverName, toolName, sessionID, requestID, "mcp", "error", err.Error(), durationMs, enrichedArgs, "", false, "", nil, directContentTrust, "", 0, 0, "", nil, "")
+			// Spec 085: the plain "Error calling <server>:<tool>: <err>" text
+			// carries the upstream message verbatim, so an explicit redacted
+			// policy renders an ELIGIBLE argument error through the same
+			// self-healing envelope call_tool_* uses. Everything else — the
+			// default/detailed policies and every non-argument failure (auth,
+			// transport, timeout, known SDK identities) — keeps this exact
+			// pre-existing text; the shared renderer must never be applied
+			// broadly here.
+			if argumentMode == config.ToolArgumentErrorModeRedacted {
+				if _, eligible := argumentErrorDetail(err, argumentMode); eligible {
+					return p.createToolErrorResponse(err, serverName, toolName, argumentMode), nil
+				}
+			}
 			return mcp.NewToolResultError(fmt.Sprintf("Error calling %s:%s: %v", serverName, toolName, err)), nil
 		}
 

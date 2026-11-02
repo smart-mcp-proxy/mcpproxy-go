@@ -27,7 +27,7 @@
   "license": "ISC",
   "dependencies": {
     "@guolao/vue-monaco-editor": "^1.5.5",
-    "chart.js": "^4.5.0",
+    "chart.js": "^4.6.1",
     "monaco-editor": "^0.57.0",
     "pinia": "^4.1.0",
     "vue": "^3.5.44",
@@ -37,7 +37,7 @@
   "devDependencies": {
     "@tailwindcss/postcss": "^4.3.3",
     "@tailwindcss/typography": "^0.5.20",
-    "@typescript-eslint/eslint-plugin": "^8.72.0",
+    "@typescript-eslint/eslint-plugin": "^8.72.1",
     "@typescript-eslint/parser": "^8.65.0",
     "@vitejs/plugin-vue": "^6.0.10",
     "@vitest/coverage-v8": "^5.0.5",
@@ -47,12 +47,12 @@
     "@vue/tsconfig": "^0.9.1",
     "daisyui": "^5.7.50",
     "eslint": "^10.13.0",
-    "eslint-plugin-vue": "^10.11.1",
+    "eslint-plugin-vue": "^10.12.0",
     "jsdom": "^30.1.3",
-    "postcss": "^8.5.31",
+    "postcss": "^8.5.32",
     "tailwindcss": "^4.1.0",
     "typescript": "^6.0.0",
-    "vite": "^8.3.4",
+    "vite": "^8.3.5",
     "vitest": "^5.0.0",
     "vue-tsc": "3.3.11"
   },

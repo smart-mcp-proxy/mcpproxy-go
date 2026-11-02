@@ -70,7 +70,9 @@ var allClients = []ClientDef{
 		Bridge:    true,
 		Icon:      "claude-desktop",
 		// "claude-ai" is Anthropic's published clientInfo.name for the Claude
-		// Desktop app's MCP client.
+		// Desktop app's MCP client. Through the mcp-remote bridge Connect
+		// writes, it arrives as "claude-ai (via mcp-remote <version>)";
+		// clientidentity.AliasCandidate strips that tag before matching.
 		ClientInfoNames: []string{"claude-ai", "Claude"},
 		ReloadHint:      "Restart Claude Desktop to load MCPProxy",
 	},
@@ -105,13 +107,14 @@ var allClients = []ClientDef{
 		ReloadHint:      "Run \"MCP: List Servers\" → Restart (or reload the window) in VS Code to load MCPProxy",
 	},
 	{
-		ID:              "codex",
-		Name:            "Codex CLI",
-		Format:          "toml",
-		ServerKey:       "mcp_servers",
-		Supported:       true,
-		Icon:            "codex",
-		ClientInfoNames: []string{"codex", "codex-cli"},
+		ID:        "codex",
+		Name:      "Codex CLI",
+		Format:    "toml",
+		ServerKey: "mcp_servers",
+		Supported: true,
+		Icon:      "codex",
+		// Codex CLI's rmcp client sends "codex-mcp-client" (GH #1786).
+		ClientInfoNames: []string{"codex", "codex-cli", "codex-mcp-client"},
 		ReloadHint:      "Restart Codex CLI to load MCPProxy",
 	},
 	{
@@ -513,13 +516,10 @@ func (s *Service) checkedPaths(clientID string) []string {
 // client's config for the mcpproxy endpoint. When p.credential is set (only when
 // require_mcp_auth is on), it is written via the carrier each client actually
 // supports — an X-API-Key header where the config schema allows one, the
-// mcp-remote --header bridge arg for Claude Desktop, and the ?apikey= query only
-// for clients whose config cannot express a header (Codex). When p.credential is
-// empty (the default), a clean, keyless entry is written.
-//
-// Server-side ExtractToken accepts, in order, the X-API-Key header, an
-// Authorization: Bearer token, and the ?apikey= query, so the header carrier and
-// the query fallback authenticate identically.
+// mcp-remote --header bridge arg for Claude Desktop, and Codex's http_headers
+// TOML table. No client gets the credential in the URL: the proxy can refuse a
+// ?apikey= query outright (mcp_reject_query_apikey). When p.credential is empty
+// (the default), a clean, keyless entry is written.
 func buildServerEntry(clientID string, p serverEntryParams) map[string]interface{} {
 	switch clientID {
 	case "claude-code", "vscode", "zcode":
@@ -568,21 +568,23 @@ func buildServerEntry(clientID string, p serverEntryParams) map[string]interface
 			"url":  p.baseURL,
 		}, p.credential)
 	case "codex":
-		// Codex speaks TOML; the entry is a single url key under
-		// [mcp_servers.<name>]. Its HTTP transport only accepts header VALUES
-		// indirectly via env-var names (http_headers / bearer_token_env_var), so
-		// a literal X-API-Key header can't be written — fall back to the ?apikey=
-		// query, which mcpproxy's /mcp accepts. Constructed here (not inline in
-		// connectTOML) so preview and write share one source of truth (FR-002).
-		return map[string]interface{}{
-			"url": credentialQuery(p.baseURL, p.credential),
+		// Codex speaks TOML: a url key plus an http_headers table of literal
+		// header values under [mcp_servers.<name>] (documented Codex MCP
+		// config; env_http_headers is the env-var-indirected variant, which
+		// would need an exported variable the wizard cannot set). Constructed
+		// here (not inline in connectTOML) so preview and write share one
+		// source of truth (FR-002).
+		entry := map[string]interface{}{"url": p.baseURL}
+		if p.credential != "" {
+			entry["http_headers"] = map[string]interface{}{"X-API-Key": p.credential}
 		}
+		return entry
 	default:
-		// Fallback: generic HTTP entry with the query carrier (no known schema).
-		return map[string]interface{}{
+		// Fallback: generic HTTP entry with the header carrier (no known schema).
+		return withAPIKeyHeader(map[string]interface{}{
 			"type": "http",
-			"url":  credentialQuery(p.baseURL, p.credential),
-		}
+			"url":  p.baseURL,
+		}, p.credential)
 	}
 }
 

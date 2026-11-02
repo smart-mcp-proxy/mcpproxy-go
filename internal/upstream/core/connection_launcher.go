@@ -58,7 +58,7 @@ func (c *Client) connectWithLauncher(ctx context.Context) error {
 	// (matches connectStdio's behaviour at internal/upstream/core/
 	// connection_stdio.go:97). Otherwise concurrent reconnects could
 	// race to create overlapping containers for the same upstream.
-	willUseDocker := (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(c.config.Args) > 0 && c.config.Args[0] == cmdRun
+	willUseDocker := isDockerRunCommand(c.config.Command, c.config.Args)
 	if !willUseDocker && c.isolationManager != nil {
 		willUseDocker = c.isolationManager.ShouldIsolate(c.config)
 	}
@@ -292,7 +292,7 @@ func (c *Client) buildLauncherCmd(_ context.Context, willUseDocker bool) (*exec.
 				finalArgs = c.insertCidfileIntoDockerArgs(finalArgs, cidFile)
 			}
 		}
-	} else if isDirectDockerRun := (c.config.Command == cmdDocker || strings.HasSuffix(c.config.Command, "/"+cmdDocker)) && len(args) > 0 && args[0] == cmdRun; isDirectDockerRun {
+	} else if isDirectDockerRun := isDockerRunCommand(c.config.Command, args); isDirectDockerRun {
 		// USER-SUPPLIED `docker run …` upstream launched via the launcher path
 		// (config.Command IS `docker`). Reuse the SAME resolve→spawn decision as the
 		// isolation path and the stdio path (resolveDockerSpawn) so this entrypoint

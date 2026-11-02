@@ -48,6 +48,9 @@ func run(args []string, stdout, stderr io.Writer) int {
 	gate := fs.Bool("gate", false, "run the Spec-076 detect.Engine over the corpus, print per-category recall/FP metrics, and exit non-zero on a recall/FP breach (CI regression gate)")
 	minRecall := fs.Float64("min-recall", 0.90, "gate: minimum malicious recall over gated categories (FR-013)")
 	maxFP := fs.Float64("max-fp", 0.05, "gate: maximum false-positive rate over benign + hard-negative samples (FR-013)")
+	reviewGate := fs.Bool("review-gate", false, "run the full baseline check set over a REVIEW-tier corpus (Spec 122): per-category recall by check id (any tier), hard-negative FP by check id, and no soft sample may become dangerous")
+	minReviewRecall := fs.Float64("min-review-recall", 0.90, "review-gate: minimum recall over the review categories")
+	maxReviewFP := fs.Float64("max-review-fp", 0.10, "review-gate: maximum false-positive rate over the review hard negatives")
 
 	if err := fs.Parse(args); err != nil {
 		return exitConfigError
@@ -60,6 +63,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 	// Gate mode is a distinct pipeline: it runs the offline detect.Engine over
 	// the labeled detect corpus and enforces recall/FP thresholds. It does not
 	// emit the per-detector verdict report (that is the default --detectors path).
+	if *reviewGate {
+		rc, err := loadReviewCorpus(*corpusPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return exitConfigError
+		}
+		return runReviewGate(rc, *minReviewRecall, *maxReviewFP, stdout, stderr)
+	}
+
 	if *gate {
 		gc, err := loadGateCorpus(*corpusPath)
 		if err != nil {

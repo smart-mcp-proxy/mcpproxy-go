@@ -408,10 +408,12 @@ construction and this invariant does not change them; a hidden server can still
 - **Shared call limiter** — the proxy-wide concurrency limit is global, so calls
   held on a hidden server can make a call to an authorized server fail with the
   existing "proxy-wide limit saturated" response.
-- **Cross-server security-scan admission** — under `trust_mode: scan`, a
-  same-name near-identical tool on a hidden server can hold an authorized
-  server's newly added tool pending as a shadowing finding, changing that
-  tool's discovery and dispatch outcome (see
+- **Cross-server security-scan admission** — under `trust_mode: scan` (and on
+  a trusted server's first-seen baseline), a same-name tool on a hidden server
+  — near-identical, or a distinctive name with a different description that
+  does not name its own server — can hold an authorized server's newly added
+  tool pending as a shadowing finding, changing that tool's discovery and
+  dispatch outcome (see
   [Security Quarantine](https://docs.mcpproxy.app/features/security-quarantine/)).
 - **Shared prompt-refresh deadline** — prompts are collected under one
   fleet-wide deadline, so a slow hidden server can exhaust it before an
@@ -801,7 +803,7 @@ as `rate_limit` when the token has one.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `require_mcp_auth` | bool | `false` | Require authentication on `/mcp` endpoint |
-| `mcp_reject_query_apikey` | bool | `false` | Refuse a `?apikey=` query parameter on every MCP endpoint (`/mcp*` and the legacy `/v1/tool_code` aliases) with a 401, forcing clients onto `Authorization: Bearer <token>` or `X-API-Key`. It does not stop a URL already sent from being logged in transit; it makes a query-form client fail until it is migrated, so tokens stop appearing in access logs, proxy logs and browser history. Applies to MCP endpoints only; the REST API, the Web UI and its `/events` stream keep accepting the query form. Clients the Connect wizard configured with `?apikey=` in the URL (Codex, the generic fallback) need a header carrier first (see [Connect clients](./connect-clients.md)). Takes effect without a restart |
+| `mcp_reject_query_apikey` | bool | `false` | Refuse a `?apikey=` query parameter on every MCP endpoint (`/mcp*` and the legacy `/v1/tool_code` aliases) with a 401, forcing clients onto `Authorization: Bearer <token>` or `X-API-Key`. It does not stop a URL already sent from being logged in transit; it makes a query-form client fail until it is migrated, so tokens stop appearing in access logs, proxy logs and browser history. Applies to MCP endpoints only; the REST API, the Web UI and its `/events` stream keep accepting the query form. Entries an older Connect wizard wrote with `?apikey=` in the URL (Codex, the generic fallback) must be reconnected first; current versions write an `X-API-Key` header (see [Connect clients](./connect-clients.md)). Takes effect without a restart |
 | `api_key` | string | auto-generated | Admin API key for full access |
 | `agent_token_rate_limit` | object | off | Default call budget for every agent token: `per_minute` (calls a minute, `0` = off, max 100000) and `burst` (optional, defaults to `per_minute`). A token created with `--rate-limit` uses its own budget instead. See [Call Rate Limit](#call-rate-limit). Takes effect without a restart |
 

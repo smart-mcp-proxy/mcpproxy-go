@@ -136,7 +136,16 @@ func runStatus(cmd *cobra.Command, _ []string) error {
 		return keyErr
 	}
 
-	configPath := config.GetConfigPath(cfg.DataDir)
+	if w := differentInstanceWarning("", os.Args[1:]); w != "" {
+		fmt.Fprintln(os.Stderr, w)
+	}
+
+	// The file actually loaded: with --config (or --system) it is not
+	// necessarily <data-dir>/mcp_config.json.
+	configPath := resolveCLIConfigPath(configFile)
+	if configPath == "" {
+		configPath = config.GetConfigPath(cfg.DataDir)
+	}
 
 	// Handle --reset-key first (before any display)
 	if statusResetKey {

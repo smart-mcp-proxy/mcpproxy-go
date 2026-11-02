@@ -68,7 +68,14 @@ func RuntimeAwareRemediation(code Code, hints ClassifierHints) string {
 // fall back to the base command name so the message still names something
 // concrete rather than a generic "interpreter".
 func detectDockerRuntimeType(command string) string {
-	cmdName := filepath.Base(command)
+	base := filepath.Base(command)
+	// Mirror core.DetectRuntimeType: case-insensitive, with a Windows
+	// launcher suffix (.exe/.cmd/.bat) stripped.
+	cmdName := strings.ToLower(base)
+	switch filepath.Ext(cmdName) {
+	case ".exe", ".cmd", ".bat":
+		cmdName = strings.TrimSuffix(cmdName, filepath.Ext(cmdName))
+	}
 	switch cmdName {
 	case "python", "python3", "python3.11", "python3.12", "python3.13":
 		return "python"
@@ -101,14 +108,13 @@ func detectDockerRuntimeType(command string) string {
 	case "composer":
 		return "composer"
 	default:
-		lower := strings.ToLower(cmdName)
-		if strings.Contains(lower, "python") {
+		if strings.Contains(cmdName, "python") {
 			return "python"
 		}
-		if strings.Contains(lower, "node") {
+		if strings.Contains(cmdName, "node") {
 			return "node"
 		}
-		return cmdName
+		return base
 	}
 }
 

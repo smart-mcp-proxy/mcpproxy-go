@@ -2241,6 +2241,8 @@ type AddServerRequest struct {
 	// manual). This is the REST seam for changing the trust tier via
 	// POST/PATCH /api/v1/servers.
 	TrustMode string `json:"trust_mode,omitempty"`
+	// Empty preserves an update; detailed explicitly resets a redacted policy.
+	ToolArgumentErrorMode string `json:"tool_argument_error_mode,omitempty"`
 	// InitTimeout is the per-server MCP `initialize` handshake deadline override
 	// (MCP-3322 / GH #760), serialized as a duration string (e.g. "120s"). A nil
 	// pointer means "leave unchanged" on PATCH; a present value is applied.
@@ -2473,6 +2475,10 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
+	if err := config.ValidateToolArgumentErrorMode(req.ToolArgumentErrorMode); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Validate required fields
 	if req.Name == "" {
@@ -2554,16 +2560,17 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// ADD ignores null entries — `null` is JSON Merge Patch's "delete"
 	// signal which has no meaning on create. Drop nils when flattening.
 	serverConfig := &config.ServerConfig{
-		Name:        req.Name,
-		URL:         req.URL,
-		Command:     req.Command,
-		Args:        req.Args,
-		Env:         flattenNullableMap(req.Env),
-		Headers:     flattenNullableMap(req.Headers),
-		WorkingDir:  req.WorkingDir,
-		Protocol:    protocol,
-		Enabled:     enabled,
-		Quarantined: quarantined,
+		ToolArgumentErrorMode: req.ToolArgumentErrorMode,
+		Name:                  req.Name,
+		URL:                   req.URL,
+		Command:               req.Command,
+		Args:                  req.Args,
+		Env:                   flattenNullableMap(req.Env),
+		Headers:               flattenNullableMap(req.Headers),
+		WorkingDir:            req.WorkingDir,
+		Protocol:              protocol,
+		Enabled:               enabled,
+		Quarantined:           quarantined,
 	}
 	if req.Quarantined != nil {
 		// The caller stated the value: record it as an operator statement so
@@ -2729,6 +2736,10 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 	// Build partial update config - only set fields that were provided
 	updates := &config.ServerConfig{Name: serverName}
 	hasUpdates := false
+	if req.ToolArgumentErrorMode != "" {
+		updates.ToolArgumentErrorMode = req.ToolArgumentErrorMode
+		hasUpdates = true
+	}
 
 	if req.URL != "" {
 		// #872: the read path masks secrets in the URL query string / userinfo
@@ -3006,6 +3017,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	if err := config.ValidateToolArgumentErrorMode(req.ToolArgumentErrorMode); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// GH #938: reject an unrecognized trust_mode before anything is persisted.
 	// A PATCH that omits trust_mode sends "" and is unaffected ("" = leave
@@ -3169,8 +3184,8 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q has no value to store", req.Scope, req.Key))
 		return
 	}
-	if strings.HasPrefix(value, "${keyring:") || strings.HasPrefix(value, "${env:") {
-		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference (%s); nothing to convert", req.Scope, req.Key, value))
+	if secret.IsSecretRef(value) {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference; nothing to convert", req.Scope, req.Key))
 		return
 	}
 
@@ -5063,7 +5078,14 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// chi routes on RawPath only when Go set it (the client's encoding differs
+	// from the default one); then {name} is still encoded and must be decoded
+	// once. Otherwise chi already matched the decoded Path, and decoding again
+	// would turn a literal "a%41" into "aA" and delete the wrong entry.
 	name := chi.URLParam(r, "name")
+	if r.URL.RawPath != "" {
+		name = decodePathParam(name)
+	}
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Secret name is required")
 		return

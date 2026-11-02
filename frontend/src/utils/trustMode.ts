@@ -6,8 +6,9 @@
  *    contracts auto-approved only on a clean offline scan verdict (otherwise
  *    held with the findings), manual = every change held;
  *  - new-server admission: auto = admitted without quarantine or scan,
- *    scan = quarantined on add with a fail-closed automatic scan (the
- *    default), manual = quarantined on add for human review.
+ *    scan = quarantined on add and released by a clean automatic scan, but
+ *    only when set EXPLICITLY; an unset mode (the default tier) is quarantined
+ *    until a person approves it, manual = quarantined on add for human review.
  *
  * The raw value delivered by `GET /api/v1/servers` may be absent (unset), a
  * value migrated from the legacy `auto_approve_tool_changes` / `skip_quarantine`
@@ -94,7 +95,7 @@ export const TRUST_MODES: readonly TrustModeMeta[] = [
     description:
       'New tools and changes to approved tools are approved automatically when the offline security scan returns a clean verdict. Anything the scan flags — or cannot cover — is held for your review with the findings attached.',
     admissionNote:
-      'At add time the server is quarantined and scanned automatically; a scan that is not clean — or cannot complete — keeps it quarantined (fail closed). The default.',
+      'At add time the server is quarantined and scanned automatically. Chosen explicitly, a clean scan releases it; a scan that is not clean — or cannot complete — keeps it quarantined (fail closed). Left unset (the default), the server stays quarantined until you approve it.',
     warnsOnSelect: false,
   },
   {

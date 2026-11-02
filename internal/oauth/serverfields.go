@@ -248,6 +248,7 @@ var ServerFieldMaskDecisions = map[string]MaskDecision{
 	"skip_quarantine":            MaskDecisionNotSecret,
 	"auto_approve_tool_changes":  MaskDecisionNotSecret,
 	"trust_mode":                 MaskDecisionNotSecret,
+	"tool_argument_error_mode":   MaskDecisionNotSecret,
 	"shared":                     MaskDecisionNotSecret,
 	"created":                    MaskDecisionNotSecret,
 	"updated":                    MaskDecisionNotSecret,

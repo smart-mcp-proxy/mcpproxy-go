@@ -282,10 +282,11 @@ type UpstreamRecord struct {
 	// for the same reason as AutoApproveToolChanges: SaveConfiguration rebuilds
 	// the JSON server list from these records, so a REST/UI/MCP-set trust_mode
 	// would be wiped on the next save without it.
-	TrustMode           string          `json:"trust_mode,omitempty"`
-	LauncherWaitTimeout config.Duration `json:"launcher_wait_timeout,omitempty"` // Spec 046: max wait for locally-launched HTTP/SSE upstream URL to become reachable
-	EnabledTools        []string        `json:"enabled_tools,omitempty"`         // Allowlist: only these tools are exposed
-	DisabledTools       []string        `json:"disabled_tools,omitempty"`        // Denylist: these tools are hidden
+	TrustMode             string          `json:"trust_mode,omitempty"`
+	ToolArgumentErrorMode string          `json:"tool_argument_error_mode,omitempty"`
+	LauncherWaitTimeout   config.Duration `json:"launcher_wait_timeout,omitempty"` // Spec 046: max wait for locally-launched HTTP/SSE upstream URL to become reachable
+	EnabledTools          []string        `json:"enabled_tools,omitempty"`         // Allowlist: only these tools are exposed
+	DisabledTools         []string        `json:"disabled_tools,omitempty"`        // Denylist: these tools are hidden
 	// MCP-866: persist a server's registry origin + provenance so the
 	// approval/quarantine view and the custom-origin skip_quarantine guard
 	// survive a restart.

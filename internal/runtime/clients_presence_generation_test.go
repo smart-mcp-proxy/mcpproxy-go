@@ -55,3 +55,21 @@ func TestRecordClientSeenCapsOtherNamesWithoutEvictingKnownAliases(t *testing.T)
 	require.LessOrEqual(t, len(state.ClientLastSeen), 32)
 	require.Contains(t, state.ClientLastSeen, "cursor")
 }
+
+func TestRecordClientSeenCreditsBridgedAndCodexClientNames(t *testing.T) {
+	mgr, err := storage.NewManager(t.TempDir(), zap.NewNop().Sugar())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = mgr.Close() })
+	r := &Runtime{storageManager: mgr, logger: zap.NewNop()}
+	r.RecordClientSeen("claude-ai (via mcp-remote 0.15.2)")
+	r.RecordClientSeen("codex-mcp-client")
+	r.RecordClientSeen("\x1bclaude-ai (via mcp-remote 0.15.2)")
+
+	state, err := mgr.GetOnboardingState()
+	require.NoError(t, err)
+	require.Contains(t, state.ClientLastSeen, "claude-ai")
+	require.Contains(t, state.ClientLastSeen, "codex-mcp-client")
+	require.NotNil(t, latestSeenForAliases(state.ClientLastSeen, []string{"claude-ai", "Claude"}))
+	require.NotContains(t, state.ClientLastSeen, "v1:p:claude-ai (via mcp-remote 0.15.2)", "a bridged known client must not keep an other: key")
+	require.Len(t, state.ClientLastSeen, 3, "the escape-prefixed name stays a distinct unknown client")
+}

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/clientidentity"
 	"math"
 	"sort"
 	"strings"
@@ -280,6 +281,9 @@ func (a *UsageAggregate) applyClientCalls(rec *storage.ActivityRecord) {
 	client := strings.ToLower(strings.TrimSpace(raw))
 	if client == "" {
 		return
+	}
+	if alias := clientidentity.AliasCandidate(raw); alias != client && knownClientAliases()[alias] {
+		client = alias
 	}
 	if a.ClientCalls == nil {
 		a.ClientCalls = make(map[string]map[int64]int64)

@@ -220,8 +220,13 @@ func (im *IsolationManager) warnPerServerIgnoredOnce(serverName string) {
 
 // DetectRuntimeType detects the runtime type based on the command
 func (im *IsolationManager) DetectRuntimeType(command string) string {
-	// Extract just the command name without path
-	cmdName := filepath.Base(command)
+	// Extract just the command name without path or a Windows executable
+	// suffix (uvx.exe, npx.cmd), compared case-insensitively as Windows does.
+	cmdName := strings.ToLower(filepath.Base(command))
+	switch filepath.Ext(cmdName) {
+	case ".exe", ".cmd", ".bat":
+		cmdName = strings.TrimSuffix(cmdName, filepath.Ext(cmdName))
+	}
 
 	// Handle common runtime commands
 	switch cmdName {
@@ -618,10 +623,10 @@ func (im *IsolationManager) BuildDockerArgs(serverConfig *config.ServerConfig, r
 		args = append(args, "--workdir", serverConfig.Isolation.WorkingDir)
 	}
 
-	// Add environment variables from server config
-	for key, value := range serverConfig.Env {
-		args = append(args, "-e", fmt.Sprintf("%s=%s", key, value))
-	}
+	// Add environment variables from server config as key-only `-e KEY` flags.
+	// The values are in the docker process environment (the connect paths merge
+	// config.Env into the spawn env), never in argv (#1809).
+	args = append(args, dockerEnvKeyFlags(serverConfig.Env)...)
 
 	// Add global extra args
 	args = append(args, im.globalConfig.ExtraArgs...)

@@ -35,6 +35,12 @@ func loadCLIConfig(explicitPath string) (*config.Config, error) {
 		cfg = config.DefaultConfig()
 		config.ApplyEnvOverrides(cfg)
 	} else {
+		// On a packaged Linux install, legacy discovery would create
+		// ~/.mcpproxy/mcp_config.json: an empty instance unrelated to the
+		// running service (#1678). Point at the service instead.
+		if err := checkPackagedInstall(); err != nil {
+			return nil, err
+		}
 		cfg, err = config.Load()
 	}
 	if err != nil {
@@ -95,6 +101,15 @@ func defaultHomeConfigPath() (string, error) {
 		return "", fmt.Errorf("failed to get user home directory: %w", err)
 	}
 	return filepath.Join(home, ".mcpproxy", "mcp_config.json"), nil
+}
+
+// loaderHomeConfigPath is defaultHomeConfigPath for the loaders that require
+// an existing file, refusing first on a packaged install without a user config.
+func loaderHomeConfigPath() (string, error) {
+	if err := checkPackagedInstall(); err != nil {
+		return "", err
+	}
+	return defaultHomeConfigPath()
 }
 
 // Per-command loaders for commands whose config flow previously used bare
