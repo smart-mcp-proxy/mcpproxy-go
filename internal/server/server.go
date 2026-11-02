@@ -14,6 +14,7 @@ import (
 	gruntime "runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -113,6 +114,10 @@ type Server struct {
 	// logged once per reason rather than once per settle event.
 	bundleDegradedMu     sync.Mutex
 	bundleDegradedLogged string
+	// queryAPIKeyRejectLogged is the unix-millisecond time of the last
+	// mcp_reject_query_apikey warning, so a client retrying in a loop logs
+	// once per queryAPIKeyRejectLogInterval, not once per request.
+	queryAPIKeyRejectLogged atomic.Int64
 	// createAfterConfigRead is a Spec 116 test seam (nil in production): it
 	// runs in the create path after the runtime configuration was read and
 	// before the new server is published.
@@ -545,6 +550,29 @@ func (s *Server) trustedProxiesProvider() config.TrustedProxiesProvider {
 	}
 }
 
+// queryAPIKeyRejectLogInterval bounds how often a refused ?apikey= credential
+// is logged.
+const queryAPIKeyRejectLogInterval = time.Minute
+
+// logQueryAPIKeyRejection warns that mcp_reject_query_apikey refused a request,
+// so an operator can tell why a client got a bare 401. It names the caller's
+// address and User-Agent and never the credential, and logs at most once per
+// queryAPIKeyRejectLogInterval.
+func (s *Server) logQueryAPIKeyRejection(r *http.Request) {
+	now := time.Now().UnixMilli()
+	last := s.queryAPIKeyRejectLogged.Load()
+	if last != 0 && now-last < queryAPIKeyRejectLogInterval.Milliseconds() {
+		return
+	}
+	if !s.queryAPIKeyRejectLogged.CompareAndSwap(last, now) {
+		return
+	}
+	s.logger.Warn("Refused MCP request carrying ?apikey= (mcp_reject_query_apikey is on); reconnect the client so it sends X-API-Key or Authorization: Bearer",
+		zap.String("remote_addr", r.RemoteAddr),
+		zap.String("user_agent", r.UserAgent()),
+		zap.String("path", r.URL.Path))
+}
+
 // mcpAuthMiddleware wraps the MCP endpoint handler to inject AuthContext into the
 // request context. The MCP endpoint is not behind the REST API key middleware, so
 // this middleware extracts tokens from the request and creates the appropriate
@@ -584,6 +612,7 @@ func (s *Server) mcpAuthMiddleware(next http.Handler) http.Handler {
 		// administrator, so silently ignoring the parameter would downgrade a
 		// caller that thinks it is authenticated.
 		if cfg := s.runtime.Config(); cfg != nil && cfg.MCPRejectQueryAPIKey && r.URL.Query().Has("apikey") {
+			s.logQueryAPIKeyRejection(r)
 			http.Error(w, `{"error":"A credential in the ?apikey= query parameter is not accepted on MCP endpoints. Send it as Authorization: Bearer <token> or X-API-Key."}`, http.StatusUnauthorized)
 			return
 		}
