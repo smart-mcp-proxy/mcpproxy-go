@@ -6,6 +6,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolreview"
 )
@@ -277,6 +278,14 @@ func (r *Runtime) commitServerApproval(serverName string, inc int64, bound bool,
 	promoted := 0
 	_, err := r.Commit("security_approve", func(tx *CommitTx) error {
 		tx.EventExtra(map[string]any{"server": serverName, "quarantined": false})
+		// A clean-scan admission was decided before this commit; the trust mode
+		// may have changed since. Re-check it here, under the same commit as the
+		// release, so a server that no longer opts in stays quarantined.
+		if by == config.ScanAutoApprovedBy {
+			if sc, ok := tx.Server(serverName); ok && (!sc.AdmitsOnCleanScan() || !sc.Quarantined) {
+				return fmt.Errorf("server %q no longer admits on a clean scan; it stays quarantined", serverName)
+			}
+		}
 		if err := tx.SetQuarantined(serverName, false); err != nil {
 			// A bound approval of a server removed since it was reviewed is a
 			// replaced server (409 server_replaced), the same answer the

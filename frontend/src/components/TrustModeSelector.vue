@@ -17,7 +17,7 @@
           class="radio radio-primary radio-sm mt-0.5 shrink-0"
           :name="groupName"
           :value="m.mode"
-          :checked="displayedMode === m.mode"
+          :checked="checkedMode === m.mode"
           @change="onSelect(m.mode)"
         />
         <span class="flex-1 min-w-0">
@@ -118,6 +118,15 @@ const pendingWarnMode = ref<TrustMode | null>(null)
 /** Tentative selection while a warning is open; otherwise the effective mode. */
 const displayedMode = computed<TrustMode>(() => pendingWarnMode.value ?? state.value.effective)
 
+/**
+ * The checked radio. An unset value (the default tier) checks none: it is not
+ * the same as an explicit Scan, which also releases a quarantined server on a
+ * clean scan, so the operator must be able to pick Scan to opt in.
+ */
+const checkedMode = computed<TrustMode | null>(() =>
+  pendingWarnMode.value ?? (state.value.isDefault ? null : state.value.effective)
+)
+
 // A value arriving from the parent (save, re-load, SSE refresh) supersedes any
 // selection still awaiting acknowledgement.
 watch(
@@ -129,7 +138,7 @@ watch(
 )
 
 function onSelect(mode: TrustMode) {
-  if (mode === state.value.effective) {
+  if (mode === state.value.effective && !state.value.isDefault) {
     // Already in effect — nothing to warn about and nothing to save.
     pendingWarnMode.value = null
     emit('confirmation-pending', false)

@@ -28,9 +28,11 @@ Releases follow [Semantic Versioning](https://semver.org/).
   changes behind an unchanged definition. **Migration:** set `trust_mode: "manual"` on any server whose
   tool changes you want a person to review; nothing changes for servers with an explicit `trust_mode` or
   `auto_approve_tool_changes`. A record whose stored annotation snapshot differs from the live hints in
-  dispatch tier only (a server last seen before hints were captured) is held once for review. New servers
-  added with no trust mode are quarantined, scanned and released automatically on a clean verdict, as
-  `scan` always did.
+  dispatch tier only (a server last seen before hints were captured) is held once for review. Server
+  admission stays with a person: a new server added with no trust mode is quarantined and stays
+  quarantined until someone approves it. Only an explicit `trust_mode: "scan"` lets a clean admission
+  scan release a server, and the approval re-checks that under the commit lock. The Web UI add form sends
+  a trust mode only when one is picked.
 
 - **connect / disconnect:** `mcpproxy disconnect`, `DELETE /api/v1/connect/{client}`, and the Web UI
   and tray Disconnect now also revoke the client's credential (`client-<id>`), so a secret copied out
@@ -215,6 +217,7 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ### Bug Fixes
 
+- **Core no longer burns a CPU core while idle on installs with many held tool changes (#1724).** The per-tool change-gate scan (`trust_mode: scan` approval, and the hold evidence in `manual`) fed every other connected server's tools to the detector as cross-server context and then ran all checks, phrase/regex detection included, over that whole fleet for each held tool, discarding the peer findings afterwards. With a few hundred tools and a few dozen held changes each 5-minute discovery pass re-scanned tools × fleet (one report: 471 tools, 108 held, ~11 minutes at 100% CPU per pass). The detector now inspects only the scanned server's tools; peers stay in the cross-server index so the shadowing and impersonation checks see the same context and the verdict for the scanned tool is unchanged. One held-tool scan against a 470-tool fleet went from ~3 s to ~5 ms.
 - **`serve --data-dir` (and `MCPPROXY_DATA_DIR`) now reads `<data-dir>/mcp_config.json`.** Until now `serve` looked for its config only in the working directory and `$HOME/.mcpproxy` and applied the data dir afterwards, so a config on a mounted volume was ignored and a fresh one (new listen address, new API key) was written under `$HOME`, while every management command already read the config from the data dir. `serve` now resolves it the same way: an explicit `--config` wins, then `<data-dir>/mcp_config.json` if it exists, and on a first run with no config anywhere the default is seeded inside the data dir. `MCPPROXY_DATA_DIR`, documented but never implemented, now works as an alias of `--data-dir` (the legacy `MCPPROXY_DATA` keeps relocating only the data directory, and loses when both are set). If you already export `MCPPROXY_DATA_DIR`, it takes effect for the first time on this upgrade: the data directory, and so the database, search index and socket, move to it. **Migration:** an instance started with `--data-dir X` that relied on the config under `$HOME/.mcpproxy` while a stale `X/mcp_config.json` also exists will now read the one in `X`.
 - **audit: a profile tool-policy refusal now names its rule (#1703).** The `authz` audit line for a call refused by a profile's tier cap, deny rule or unannotated-tool policy used to read `reason: other`; it now reads `profile_tier`, `profile_rule` or `profile_unannotated` (`disclosed: true`), matching the `block_reason` of the same call in the activity log. A refusal inside a `code_execution` script used to be written as `token_scope` with `disclosed: false` and now uses the same three reasons. `profile_scope` is unchanged, and `profile_code_execution` / `profile_management` are not audit reasons because those built-in tools are not audited per call. The `reason` enum in `docs/schemas/audit-line-v1.schema.json` gains the three members, so a consumer that validates audit lines against the enum must accept them. (refs #1703)
 

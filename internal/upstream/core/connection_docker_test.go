@@ -320,7 +320,7 @@ func TestSetupDockerIsolationDirectExecsWhenDockerHostInEnv(t *testing.T) {
 // isolation-injection path. With docker resolved to a verified absolute
 // executable and the daemon env guaranteed (macOS), the spawn must direct-exec
 // the ABSOLUTE docker path (no `$SHELL -l -c` wrap), carry the injected
-// `-e KEY=VALUE` env flags, and accept an args-based cidfile insertion. Before
+// key-only `-e KEY` env flags (#1809), and accept an args-based cidfile insertion. Before
 // this fix the user path shell-wrapped bare `docker`, producing GH #696's
 // `zsh:1: command not found: docker` on a default Docker Desktop macOS install
 // (docker CLI only inside the app bundle, not on the login-shell PATH).
@@ -346,8 +346,8 @@ func TestResolveDockerSpawnUserSuppliedDockerRunDirectExec(t *testing.T) {
 	assert.Equal(t, cmdRun, args[0],
 		"first arg must be the raw 'run' token (not a shell -c string), got: %v", args)
 	// The injected -e env flag must survive into the docker run argv.
-	assert.Subset(t, args, []string{"-e", "SLACK_TOKEN=xoxb-secret"},
-		"injected -e env flags must be present in the direct-exec argv, got: %v", args)
+	assert.Subset(t, args, []string{"-e", "SLACK_TOKEN"},
+		"injected key-only -e env flags must be present in the direct-exec argv, got: %v", args)
 	for _, a := range args {
 		assert.NotContains(t, a, " run ",
 			"args must be raw argv tokens, not a single shell command string, got: %v", args)
@@ -383,10 +383,10 @@ func TestResolveDockerSpawnUserSuppliedFallsBackToShellWrap(t *testing.T) {
 	cmdStr := shellArgs[len(shellArgs)-1]
 	assert.True(t, strings.HasPrefix(cmdStr, "docker run"),
 		"on resolution failure the spawn must fall back to bare 'docker', got: %s", cmdStr)
-	// The real command string still carries the actual env value (redaction is a
-	// log-only concern, not a spawn concern).
-	assert.Contains(t, cmdStr, "-e SLACK_TOKEN=xoxb-secret",
-		"injected -e env flag must survive into the shell command string, got: %s", cmdStr)
+	// The command string carries the key only; the value reaches docker through
+	// the spawn environment (#1809).
+	assert.Contains(t, cmdStr, "-e SLACK_TOKEN ",
+		"injected key-only -e env flag must survive into the shell command string, got: %s", cmdStr)
 }
 
 // TestDockerDaemonEnvGuaranteed unit-tests the gate directly.

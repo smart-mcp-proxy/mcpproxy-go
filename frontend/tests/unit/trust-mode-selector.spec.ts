@@ -70,9 +70,9 @@ describe('TrustModeSelector — rendering (FR-002)', () => {
 })
 
 describe('TrustModeSelector — current selection from the raw value (FR-001)', () => {
-  it('unset (field omitted) selects scan and indicates it is the default (spec 119)', () => {
+  it('unset (field omitted) checks no mode and marks scan as the current default (spec 119)', () => {
     const wrapper = mountSelector(undefined)
-    expect(isChecked(wrapper, 'scan')).toBe(true)
+    expect(isChecked(wrapper, 'scan')).toBe(false)
     expect(isChecked(wrapper, 'auto')).toBe(false)
     expect(isChecked(wrapper, 'manual')).toBe(false)
     const note = wrapper.find('[data-test="trust-mode-default-note"]')
@@ -83,7 +83,7 @@ describe('TrustModeSelector — current selection from the raw value (FR-001)', 
 
   it('empty string is also treated as unset (default scan)', () => {
     const wrapper = mountSelector('')
-    expect(isChecked(wrapper, 'scan')).toBe(true)
+    expect(isChecked(wrapper, 'scan')).toBe(false)
     expect(wrapper.find('[data-test="trust-mode-default-note"]').exists()).toBe(true)
     expect(wrapper.find('[data-test="trust-mode-invalid-note"]').exists()).toBe(false)
   })
@@ -153,6 +153,12 @@ describe('TrustModeSelector — selecting a safe mode emits immediately', () => 
     await select(wrapper, 'manual')
     expect(wrapper.emitted('update:modelValue')![0]).toEqual(['manual'])
     expect(wrapper.find('[data-test="trust-mode-auto-confirm"]').exists()).toBe(false)
+  })
+
+  it('picking scan while unset emits scan (an explicit opt-in to clean-scan admission)', async () => {
+    const wrapper = mountSelector(undefined)
+    await select(wrapper, 'scan')
+    expect(wrapper.emitted('update:modelValue')![0]).toEqual(['scan'])
   })
 
   it('re-selecting the mode already in effect does not emit', async () => {
