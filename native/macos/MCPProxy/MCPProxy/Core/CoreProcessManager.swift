@@ -901,7 +901,9 @@ actor CoreProcessManager {
     /// is gone. Launch a core rather than telling the user to quit a process that
     /// does not exist — the error we would otherwise show is unactionable, and
     /// Retry would repeat this same wait forever, because nothing else in the
-    /// system removes that file.
+    /// system removes that file. A refused socket beside a free data-directory
+    /// lock never gets here: `start()` launches at once. This covers the rest —
+    /// a lock held and then freed, or one that could not be read.
     ///
     /// Why this cannot resurrect the double-spawn hazard the tray-side unlink
     /// had. It never unlinks anything: the dangerous step is done by the core we

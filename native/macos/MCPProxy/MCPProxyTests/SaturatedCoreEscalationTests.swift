@@ -82,9 +82,10 @@ final class SaturatedCoreEscalationTests: XCTestCase {
     }
 
     /// The other half of the same rule: a socket file with NO live holder is
-    /// still escalated over, exactly as before. Without this the fix would have
-    /// traded a rare bad launch for a permanent deadlock on every stale socket —
-    /// nothing else in the system removes that file.
+    /// still launched over (via the up-front lock check in `start()`, no longer
+    /// the deadline). Without this the fix would have traded a rare bad launch
+    /// for a permanent deadlock on every stale socket — nothing else in the
+    /// system removes that file.
     func testAGenuinelyStaleSocketIsStillLaunchedOver() async throws {
         let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
         let restoreEnv = fakeCore.install()
@@ -218,6 +219,34 @@ final class SaturatedCoreEscalationTests: XCTestCase {
             unresponsiveCoreTimeout: unresponsiveCoreTimeout,
             socketWaitTimeout: 1.0
         )
+    }
+
+    /// The shortcut is a start-time decision about a socket we may not launch
+    /// over. With spawning disallowed (a tray that only attaches) an unheld
+    /// database must not launch anything: the tray waits for a core to appear.
+    func testAStaleSocketBesideAFreeDataDirectoryStillWaitsWhenSpawningIsNotAllowed() async throws {
+        let fakeCore = try FakeCoreBinary(behaviour: "sleep 30")
+        let restoreEnv = fakeCore.install()
+        defer { restoreEnv() }
+
+        let socketPath = try refusingSocket()
+        FileManager.default.createFile(
+            atPath: directory.appendingPathComponent("config.db").path, contents: Data()
+        )
+
+        let appState = await MainActor.run { AppState() }
+        let manager = makeManager(appState: appState, socketPath: socketPath, unresponsiveCoreTimeout: 30)
+        self.manager = manager
+
+        await manager.start(maySpawn: false)
+        try await Task.sleep(nanoseconds: 2_000_000_000)
+
+        let launched = await manager.coresLaunched
+        XCTAssertEqual(launched, 0, "maySpawn is false: nothing may be launched, free lock or not")
+        XCTAssertEqual(fakeCore.launchCount(), 0)
+        XCTAssertNil(manager.managedProcess)
+        let state = await MainActor.run { appState.coreState }
+        XCTAssertEqual(state, .waitingForCore)
     }
 
     /// A socket file that refuses every connection — what a saturated backlog

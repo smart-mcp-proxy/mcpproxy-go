@@ -21,6 +21,21 @@ final class CoreLivenessTests: XCTestCase {
 
     private var stub: UnixSocketHTTPStub?
     private var manager: CoreProcessManager?
+    private var privateDirectories: [URL] = []
+
+    /// A scratch directory of its own for a socket that is left REFUSING at
+    /// `start()`. The data-directory lock is derived from the socket's
+    /// directory (`DataDirectoryLock.path(forSocket:)`), so a bare `/tmp` socket
+    /// would consult a stray `/tmp/config.db`, and a free one would make the
+    /// startup shortcut launch. /tmp, not NSTemporaryDirectory(): sun_path is
+    /// 104 bytes.
+    private func refusingSocketPath() throws -> String {
+        let directory = URL(fileURLWithPath: "/tmp/mcpproxy-live-\(UUID().uuidString.prefix(8))",
+                            isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        privateDirectories.append(directory)
+        return directory.appendingPathComponent("mcpproxy.sock").path
+    }
 
     /// Async teardown so shutdown actually completes before the next test runs:
     /// a fire-and-forget `Task { await shutdown() }` would race the next test's
@@ -32,6 +47,8 @@ final class CoreLivenessTests: XCTestCase {
         manager = nil
         stub?.stop()
         stub = nil
+        for directory in privateDirectories { try? FileManager.default.removeItem(at: directory) }
+        privateDirectories = []
         try await super.tearDown()
     }
 
@@ -545,7 +562,7 @@ final class CoreLivenessTests: XCTestCase {
 
         // A socket file that refuses connections. From out here this is
         // indistinguishable from a live core with a full backlog.
-        let stub = UnixSocketHTTPStub.healthyCore()
+        let stub = UnixSocketHTTPStub.healthyCore(at: try refusingSocketPath())
         try stub.start()
         stub.stop(unlinkSocket: false)
         defer { unlink(stub.path) }
@@ -755,7 +772,7 @@ final class CoreLivenessTests: XCTestCase {
         defer { restoreEnv() }
 
         // Exactly what a killed core leaves behind: the file, and nothing on it.
-        let stub = UnixSocketHTTPStub.healthyCore()
+        let stub = UnixSocketHTTPStub.healthyCore(at: try refusingSocketPath())
         try stub.start()
         stub.stop(unlinkSocket: false)
         defer { unlink(stub.path) }
