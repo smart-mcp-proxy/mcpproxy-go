@@ -538,7 +538,12 @@ func TestSSE_InitialStatusRevalidatesAfterConnectionOpens(t *testing.T) {
 // there is no embed to narrow and the coalescer extra IS the whole payload.
 //
 // The original filter returned that payload verbatim ("nothing to scope"),
-// which is precisely when the name was the only thing in it.
+// which is precisely when the name was the only thing in it. The UNPINNED
+// scoped token keeps this delivery under Spec 118 (FR-004); the extras that
+// travelled with the hidden name — a hidden server's change counts — are now
+// withheld with it (cross-review round 1), so `reason` is all that survives.
+// A PINNED caller has the frame dropped instead (FR-007,
+// TestPinBoundary_SSEFramesHoldToThePin).
 func TestSSE_ScopedSubscriberGetsNotifyOnlyEventWithoutTheName(t *testing.T) {
 	ctrl := &scopeController{cfg: scopeFixtureConfig(false), servers: scopeFixtureServers(), withManagement: true}
 	srv, token := scopedAgentServer(t, ctrl, []string{"alpha"})
@@ -550,7 +555,7 @@ func TestSSE_ScopedSubscriberGetsNotifyOnlyEventWithoutTheName(t *testing.T) {
 	defer agentClose()
 	require.Eventually(t, func() bool { return ctrl.subscriberCount() == 1 }, 5*time.Second, 20*time.Millisecond)
 
-	payload := map[string]any{"reason": "server_disconnected", "server": "beta"}
+	payload := map[string]any{"reason": "tools_changed", "server": "beta", "added": 3, "modified": 1, "removed": 0}
 	ctrl.publishToAll(internalRuntime.Event{
 		Type:      internalRuntime.EventTypeServersChanged,
 		Payload:   payload,
@@ -560,11 +565,10 @@ func TestSSE_ScopedSubscriberGetsNotifyOnlyEventWithoutTheName(t *testing.T) {
 	got := readSSEUntil(t, agentBody, "servers.changed", time.Now().Add(10*time.Second))
 	inner, ok := got.Data["payload"].(map[string]interface{})
 	require.True(t, ok, "no payload in %#v", got.Data)
-	assert.Equal(t, "server_disconnected", inner["reason"],
-		"the notify-only event still reaches the scoped subscriber; only the name is withheld")
-	assert.NotContains(t, inner, "server",
-		"a notify-only servers.changed must not carry the name of a server the caller cannot enumerate")
+	assert.Equal(t, map[string]interface{}{"reason": "tools_changed"}, inner,
+		"the notify-only event still reaches the unpinned scoped subscriber; the hidden name AND the counts that describe its change are withheld")
 	assert.Equal(t, "beta", payload["server"], "the shared payload must never be edited in place")
+	assert.Equal(t, 3, payload["added"])
 }
 
 // TestSSE_EveryRuntimeEventTypeIsClassified reads the event-type constants out
@@ -588,7 +592,7 @@ func TestSSE_EveryRuntimeEventTypeIsClassified(t *testing.T) {
 	// subscriber (servers.changed), dropped as an admin config document, or
 	// delivered unchanged because there is nothing in it to scope.
 	noServerIdentity := map[string]string{
-		"servers.changed":          "rendered per subscriber, never dropped: coalesced last-write-wins",
+		"servers.changed":          "rendered per subscriber: coalesced last-write-wins; dropped only when nothing visible survives (Spec 118 FR-007)",
 		"attention.changed":        "rendered per subscriber, never dropped: structured items narrowed by canSeeServer (Spec 109 FR-006)",
 		"clients.presence.changed": "administrator-only local client inventory invalidation; dropped for scoped callers",
 		"client.binding_changed":   "administrator-only client -> profile binding change (Spec 108 FR-026); dropped for scoped callers",

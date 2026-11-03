@@ -51,7 +51,16 @@ type preflightController struct {
 }
 
 func (c *preflightController) GetCurrentConfig() *config.Config {
-	return &config.Config{APIKey: preflightTestAPIKey}
+	// The "pinned" profile exists and admits ctl, so a token pinned to it
+	// keeps ctl in its visible set (Spec 118: grant ∩ pin reach, resolved at
+	// authentication). A pin naming no configured profile would bind to an
+	// EMPTY set — fail closed — which is the right answer for a deleted
+	// profile, not for this fixture.
+	return &config.Config{
+		APIKey:   preflightTestAPIKey,
+		Servers:  []*config.ServerConfig{{Name: "ctl", Enabled: true}},
+		Profiles: []config.ProfileConfig{{Name: "pinned", Servers: []string{"ctl"}}},
+	}
 }
 
 func (c *preflightController) RunPreflight(ctx context.Context, params preflight.Params) (preflight.Outcome, error) {

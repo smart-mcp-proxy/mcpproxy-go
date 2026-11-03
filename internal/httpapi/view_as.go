@@ -268,17 +268,14 @@ func callerHasProfilePin(ctx context.Context) bool {
 
 // callerProfileServers lists the servers the caller's own pinned profile
 // admits; a pin naming no configured profile admits nothing (fail closed).
+// Same reach the boundary is bound from (pin_boundary.go), so the tool_count
+// narrowing here can never admit a server the predicate hides.
 func callerProfileServers(ctx context.Context, cfg *config.Config) []string {
 	ac := auth.AuthContextFromContext(ctx)
 	if ac == nil {
 		return nil
 	}
-	for i := range cfg.Profiles {
-		if cfg.Profiles[i].Name == ac.ProfilePin {
-			return cfg.Profiles[i].EffectiveServers(cfg)
-		}
-	}
-	return nil
+	return profileReach(cfg, ac.ProfilePin)
 }
 
 // serverToolNames lists the raw tool names of one server the same way the

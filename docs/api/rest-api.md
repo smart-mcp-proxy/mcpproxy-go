@@ -1725,15 +1725,19 @@ Events include:
 
 The stream is rendered **per connection**. An admin subscriber (API key, Web UI,
 tray over the unix socket) receives every event exactly as the event bus
-published it. For an agent token limited by `allowed_servers` (issue #1166):
+published it. For an agent token limited by `allowed_servers` (issue #1166) —
+and, for a token minted with `--profile`, by `allowed_servers` intersected with
+the pinned profile's servers (Spec 118, issue #1686; the same set every REST
+read door uses):
 
 | Event | Delivered to a scoped subscriber |
 |-------|----------------------------------|
 | Names a server outside the scope, through `server_name`, `server`, `target_server` or `affected_entity` — every `activity.*`, `oauth.*` and `security.*` event | **No.** The whole frame is dropped: blanking the name still discloses the mutation, its timing, and how many servers are hidden. |
-| `servers.changed` | **Yes, always** — it is coalesced last-write-wins and carries renderable state. The embedded server list is narrowed, `stats` recomputed, and a coalescer extra naming an out-of-scope server is removed. |
+| `servers.changed` | **Yes** — it is coalesced last-write-wins and carries renderable state. The embedded server list is narrowed, `stats` recomputed, and a coalescer extra naming an out-of-scope server is removed together with the extras that describe that server's change (`added`, `modified`, `removed`, `approved_count`, `changed`, `blocked_count`, …), leaving `servers`, `stats` and `reason`. For a **profile-pinned** token a frame whose narrowed list is empty (or absent) and whose every identity extra names a hidden server is dropped. |
+| `active_profile.changed` | **Yes**, but the slug is rendered per subscriber exactly as `GET /api/v1/profiles/active` answers it: `""` unless the profile is one the caller may select (a pinned token: its own pin; an unpinned scoped token: a profile its `allowed_servers` reaches). |
 | `config.reloaded`, `config.saved`, `secrets.changed` | **No.** They announce mutations of the admin config document, which `GET /api/v1/config` already answers `403` for this caller. |
 | `profiles.changed`, `client.binding_changed`, `credentials.changed` | **No.** They name profiles, clients and bindings a scoped caller may not reach. `profiles.changed {name, change: create|update|delete|anonymous, previous_name?}` is an invalidation, not a log: refetch `GET /api/v1/profiles`. One event per changed profile, published after the new configuration is live, for service writes and hand edits alike. |
-| Everything else (`active_profile.changed`, `activity.system.*`, `sensitive_data.detected`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
+| Everything else (`activity.system.*`, `sensitive_data.detected`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
 
 ## Error Responses
 
