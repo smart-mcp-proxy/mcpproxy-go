@@ -6740,8 +6740,8 @@ paths:
       description: 'One list, one count, every surface (Web UI, macOS tray/Home, CLI)
         reads from it. Filtered per caller: an administrator sees every item; a scoped
         caller (agent token, or a non-admin server-edition OAuth user session) sees
-        only server items whose server it may enumerate; every other subject type
-        (client, setting) is administrator-only.'
+        only server items whose server it may enumerate (for a profile-pinned token:
+        servers within its pin); every other subject type (client, setting) is administrator-only.'
       responses:
         "200":
           content:
@@ -9287,8 +9287,9 @@ paths:
       - registries
   /api/v1/review:
     get:
-      description: Returns one row per quarantined server or trusted server with pending
-        or changed tools. Scoped callers see only servers they may enumerate.
+      description: 'Returns one row per quarantined server or trusted server with
+        pending or changed tools. Scoped callers see only servers they may enumerate
+        (for a profile-pinned token: servers within its pin), with count recomputed.'
       responses:
         "200":
           content:
@@ -11296,7 +11297,7 @@ paths:
   /api/v1/status:
     get:
       description: |-
-        Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+        Get comprehensive server status including running state, listen address, upstream statistics, and timestamp. For a scoped caller (an agent token; for a profile-pinned token, its allowed_servers intersected with the pin) upstream_stats lists only the servers it may enumerate and every counter is recomputed over them.
         telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
       responses:
         "200":

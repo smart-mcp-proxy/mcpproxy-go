@@ -38,28 +38,39 @@ func (s *Server) handleGetActiveProfile(w http.ResponseWriter, r *http.Request) 
 	// profile back as "" (same omission handleListProfiles applies), never
 	// the real slug — the slug's existence is not itself something she may
 	// see when every server it resolves to is outside her entitlement.
-	if active != "" {
-		ac := auth.AuthContextFromContext(r.Context())
-		if ac.IsSessionPrincipal() && !ac.IsAdmin() {
-			cfg, err := s.controller.GetConfig()
-			// Fail CLOSED, not open: a config-read failure must not answer
-			// with the real slug just because visibility could not be
-			// checked (cross-review round 3 — handleListProfiles already
-			// refuses outright on the same error; this door has no such
-			// escape hatch, so it clears the value instead).
-			if err != nil || cfg == nil || !profileReachable(r.Context(), cfg, active) {
-				active = ""
-			}
+	//
+	// Spec 118 FR-009 widens the withholding to EVERY non-administrator: an
+	// agent token used to read the real slug even when the profile was
+	// outside its grant (the one deliberate FR-004 compatibility change), and
+	// a pinned token reads only its own pin, while that pin has visible reach.
+	if active != "" && auth.IsScopedCaller(r.Context()) {
+		cfg, err := s.controller.GetConfig()
+		// Fail CLOSED, not open: a config-read failure must not answer
+		// with the real slug just because visibility could not be
+		// checked (cross-review round 3 — handleListProfiles already
+		// refuses outright on the same error; this door has no such
+		// escape hatch, so it clears the value instead).
+		if err != nil || cfg == nil || !profileReachable(r.Context(), cfg, active) {
+			active = ""
 		}
 	}
 
 	s.writeSuccess(w, map[string]interface{}{"active_profile": active})
 }
 
-// profileReachable reports whether the named profile's effective server
-// set has non-empty intersection with the caller's entitlement (Spec 107
-// T085) — the same rule handleListProfiles applies per row.
+// profileReachable reports whether the caller may learn that the named
+// profile exists: for a scoped caller without a pin, the profile's effective
+// server set has non-empty intersection with the caller's entitlement (Spec
+// 107 T085, the rule handleListProfiles applies per row); for a PINNED caller
+// (Spec 118 FR-009), only its own pin, and only while the pin has visible
+// reach — exactly as set_profile and /mcp/p/<slug> treat a pinned token. A
+// profile outside the pin takes the same path and answers the same bytes as
+// one that does not exist, whether or not it happens to contain a server the
+// caller may see.
 func profileReachable(ctx context.Context, cfg *config.Config, name string) bool {
+	if ac := auth.AuthContextFromContext(ctx); authContextHasPin(ac) && name != ac.ProfilePin {
+		return false
+	}
 	for i := range cfg.Profiles {
 		if cfg.Profiles[i].Name != name {
 			continue

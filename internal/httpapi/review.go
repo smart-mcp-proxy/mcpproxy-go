@@ -18,7 +18,7 @@ type reviewReader interface {
 
 // handleGetReviewQueue godoc
 // @Summary Get the server review queue
-// @Description Returns one row per quarantined server or trusted server with pending or changed tools. Scoped callers see only servers they may enumerate.
+// @Description Returns one row per quarantined server or trusted server with pending or changed tools. Scoped callers see only servers they may enumerate (for a profile-pinned token: servers within its pin), with count recomputed.
 // @Tags review
 // @Produce json
 // @Security ApiKeyAuth
