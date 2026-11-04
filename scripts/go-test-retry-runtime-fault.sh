@@ -63,9 +63,11 @@ if [ "$status" -eq 0 ]; then
 fi
 
 # Classify every failed package from its own output block. `go test` prints
-# each package's output followed by its summary line (`ok\t<pkg>\t<dur>`,
-# `FAIL\t<pkg>\t<dur>`, `FAIL\t<pkg> [build failed]`, `?\t<pkg>\t[no test
-# files]`), so the lines since the previous summary belong to this package.
+# each package's output followed by its summary line (`ok  \t<pkg>\t<dur>`,
+# `FAIL\t<pkg>\t<dur>`, `FAIL\t<pkg> [build failed]`, `?   \t<pkg>\t[no test
+# files]` — `ok` and `?` are padded with spaces before the tab), so the lines
+# since the previous summary belong to this package. `--- FAIL:` is matched
+# with leading whitespace because subtest results are indented.
 # The fault signatures are anchored at column 0: the Go runtime prints them
 # unindented, while a test's own diagnostics are indented by `testing`.
 # Output: one `<verdict>\t<pkg>` line per failed package, verdict `retry` or
@@ -77,7 +79,7 @@ classified="$(awk '
     /^fatal error: fault$/ { fault = 1 }
     /^fatal error: unexpected signal during runtime execution/ { fault = 1 }
     /^Exception 0x[cC]0000005/ { fault = 1 }
-    /^--- FAIL: / { hard = 1 }
+    /^[ \t]*--- FAIL: / { hard = 1 }
     /^panic: test timed out/ { hard = 1 }
     /^WARNING: DATA RACE/ { hard = 1 }
     /^FAIL\t[^ \t]+ \[(build|setup) failed\]/ { print "hard\t" $2; reset(); next }
@@ -85,7 +87,7 @@ classified="$(awk '
         if (fault && !hard) print "retry\t" $2; else print "hard\t" $2
         reset(); next
     }
-    /^(ok|\?)\t/ { reset(); next }
+    /^(ok|\?) *\t/ { reset(); next }
 ' FS='\t' "$log")"
 
 retry=()

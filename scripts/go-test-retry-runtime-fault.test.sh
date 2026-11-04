@@ -197,6 +197,31 @@ printf '%s\n' "$OK_OUT" > "$d/run1.out"; echo 0 > "$d/run1.exit"
 check "no flags: exit 0" [ "$st" -eq 0 ]
 check "no flags: go ran with the packages only" [ "$(argv_line 1)" = "test ./..." ]
 
+# 17. A PASSING package whose output carries unindented fault-looking text
+#     (a println in a test), followed by a package that fails silently (no
+#     `--- FAIL:`, e.g. os.Exit(1) in TestMain): the `ok  \t` summary line
+#     must reset the block, so the silent failure is not retried.
+new_case ok_block_leak
+printf '%s\n' $'=== RUN   TestLog\nfatal error: fault\n--- PASS: TestLog (0.00s)\nok  \tgithub.com/x/y/internal/noisy\t0.100s\n=== RUN   TestMainExit\nFAIL\tgithub.com/x/y/internal/silent\t0.200s\nFAIL' > "$d/run1.out"; echo 1 > "$d/run1.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "ok block leak: exit 1 unchanged" [ "$st" -eq 1 ]
+check "ok block leak: one go invocation" [ "$(count)" = 1 ]
+
+# 18. A `?   \t<pkg>\t[no test files]` line also closes a block.
+new_case question_block
+printf '%s\n' $'fatal error: fault\n?   \tgithub.com/x/y/internal/notests\t[no test files]\nFAIL\tgithub.com/x/y/internal/silent\t0.200s\nFAIL' > "$d/run1.out"; echo 1 > "$d/run1.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "question-mark block: exit 1 unchanged" [ "$st" -eq 1 ]
+check "question-mark block: one go invocation" [ "$(count)" = 1 ]
+
+# 19. An INDENTED subtest `--- FAIL:` (the parent crashed before reporting)
+#     next to a fault in the same package: a genuine failure, never retried.
+new_case subtest_fail_then_fault
+printf '%s\n' $'=== RUN   TestParent\n=== RUN   TestParent/sub\n    p_test.go:9: boom\n    --- FAIL: TestParent/sub (0.00s)\n=== RUN   TestParent/next\nunexpected fault address 0xffffffffffffffff\nfatal error: fault\nFAIL\tgithub.com/x/y/internal/parent\t1.000s\nFAIL' > "$d/run1.out"; echo 2 > "$d/run1.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "indented subtest FAIL + fault: exit 2 unchanged" [ "$st" -eq 2 ]
+check "indented subtest FAIL + fault: one go invocation" [ "$(count)" = 1 ]
+
 # 8. Usage: no `--` separator is a usage error, go never runs.
 new_case usage
 "$SUT" -v ./... >/dev/null 2>&1; st=$?
