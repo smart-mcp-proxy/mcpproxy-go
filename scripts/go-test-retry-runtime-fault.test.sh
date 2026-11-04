@@ -222,6 +222,15 @@ printf '%s\n' $'=== RUN   TestParent\n=== RUN   TestParent/sub\n    p_test.go:9:
 check "indented subtest FAIL + fault: exit 2 unchanged" [ "$st" -eq 2 ]
 check "indented subtest FAIL + fault: one go invocation" [ "$(count)" = 1 ]
 
+# 20. CRLF log lines (a Windows pipe that converted line endings) still
+#     count as a fault, and the summary line still closes the block.
+new_case crlf
+printf '%s\r\n' '=== RUN   TestSolR2' 'unexpected fault address 0xffffffffffffffff' 'fatal error: fault' $'FAIL\tgithub.com/x/y/internal/security/scanner\t12.345s' 'FAIL' > "$d/run1.out"; echo 2 > "$d/run1.exit"
+printf '%s\n' "$OK_OUT" > "$d/run2.out"; echo 0 > "$d/run2.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "crlf: exit 0" [ "$st" -eq 0 ]
+check "crlf: two go invocations" [ "$(count)" = 2 ]
+
 # 8. Usage: no `--` separator is a usage error, go never runs.
 new_case usage
 "$SUT" -v ./... >/dev/null 2>&1; st=$?

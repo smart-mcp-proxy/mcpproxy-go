@@ -69,14 +69,16 @@ fi
 # since the previous summary belong to this package. `--- FAIL:` is matched
 # with leading whitespace because subtest results are indented.
 # The fault signatures are anchored at column 0: the Go runtime prints them
-# unindented, while a test's own diagnostics are indented by `testing`.
+# unindented, while a test's own diagnostics are indented by `testing`. The
+# end anchor tolerates a trailing \r in case the log passed through a CRLF
+# conversion on the Windows runner.
 # Output: one `<verdict>\t<pkg>` line per failed package, verdict `retry` or
 # `hard`.
 classified="$(awk '
     function reset() { fault = 0; hard = 0 }
     BEGIN { reset() }
     /^unexpected fault address 0x/ { fault = 1 }
-    /^fatal error: fault$/ { fault = 1 }
+    /^fatal error: fault\r?$/ { fault = 1 }
     /^fatal error: unexpected signal during runtime execution/ { fault = 1 }
     /^Exception 0x[cC]0000005/ { fault = 1 }
     /^[ \t]*--- FAIL: / { hard = 1 }

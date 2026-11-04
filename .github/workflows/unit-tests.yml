@@ -218,7 +218,7 @@ jobs:
       - name: Run unit tests (Windows)
         if: matrix.os == 'windows-latest'
         shell: bash
-        run: scripts/go-test-retry-runtime-fault.sh -v -race -timeout 40m -coverprofile=coverage.out -covermode=atomic -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" -- ./...
+        run: bash scripts/go-test-retry-runtime-fault.sh -v -race -timeout 40m -coverprofile=coverage.out -covermode=atomic -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" -- ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 

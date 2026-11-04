@@ -223,7 +223,7 @@ jobs:
           # Go/Windows runtime bug, golang/go#81189 and #81238 — the failed
           # packages are re-run once; real failures are never retried).
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            scripts/go-test-retry-runtime-fault.sh -tags nogui -v -timeout 20m -skip "E2E|Binary|MCPProtocol" -- $(go list ./... | grep -v 'internal/server$')
+            bash scripts/go-test-retry-runtime-fault.sh -tags nogui -v -timeout 20m -skip "E2E|Binary|MCPProtocol" -- $(go list ./... | grep -v 'internal/server$')
           else
             go test -tags nogui -v -timeout 20m -skip "E2E|Binary|MCPProtocol" ./...
           fi
