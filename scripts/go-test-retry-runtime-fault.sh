@@ -1,27 +1,31 @@
 #!/usr/bin/env bash
-# go-test-retry-runtime-fault.sh — run `go test` once and, ONLY when the run
-# died of a Go runtime fault (issue #1794: `unexpected fault address
-# 0xffffffffffffffff / fatal error: fault` inside internal/testlog.Getenv on
-# windows-latest, a Go/Windows runtime bug — golang/go#81189, #81238), re-run
-# the packages that failed, once. Ordinary assertion failures, build errors
-# and `panic: test timed out` are NOT retried: the first run's exit status is
-# returned unchanged, so a red test stays red.
+# go-test-retry-runtime-fault.sh — run `go test` once and, ONLY when every
+# failed package died of a Go runtime fault (issue #1794: `unexpected fault
+# address 0xffffffffffffffff / fatal error: fault` inside
+# internal/testlog.Getenv on windows-latest, a Go/Windows runtime bug —
+# golang/go#81189, #81238), re-run those packages, once.
+#
+# A package is retried only when its own output block carries a runtime-fault
+# line AND no sign of a genuine failure: no `--- FAIL:`, no `panic: test timed
+# out`, no `WARNING: DATA RACE`. If ANY failed package is not retryable
+# (assertion failure, timeout, data race, `[build failed]`, `[setup failed]`),
+# nothing is retried and the first run's exit status is returned unchanged —
+# a red test stays red, and a fault never buys an order-dependent failure a
+# second chance.
 #
 # Usage:
 #   scripts/go-test-retry-runtime-fault.sh [go test flags...] -- <packages...>
 #
 # The `--` separates flags from packages so the retry can keep the flags and
-# narrow the package list to the ones that printed `FAIL <pkg>`. A
-# `-coverprofile=FILE` flag is honoured on the retry by writing the retried
-# packages' profile to FILE.retry and appending it to FILE (same mode line),
-# so the coverage upload still covers them.
+# narrow the package list. A `-coverprofile=FILE` flag is honoured on the
+# retry by writing the retried packages' profile to FILE.retry and appending
+# it to FILE (one mode line), so the coverage upload still covers them.
 #
 # Every retry is announced with a GitHub `::warning::` annotation naming the
 # packages, so the flake rate stays visible instead of being silently eaten.
+# Portable to bash 3.2 (macOS) and Git Bash on windows-latest.
 # Self-test: scripts/go-test-retry-runtime-fault.test.sh
 set -uo pipefail
-
-FAULT_PATTERN='unexpected fault address 0x|fatal error: fault|unexpected signal during runtime execution|Exception 0x[cC]0000005'
 
 flags=()
 pkgs=()
@@ -47,8 +51,10 @@ trap 'rm -f "$log"' EXIT
 
 # `go test` output must stream to the job log unchanged (the -v test names
 # are what the humans and the log-grep canaries read), so tee it.
+# ${arr[@]+"${arr[@]}"} is the bash 3.2 spelling of "expand, even if empty"
+# under set -u.
 set +e
-go test "${flags[@]}" "${pkgs[@]}" 2>&1 | tee "$log"
+go test ${flags[@]+"${flags[@]}"} "${pkgs[@]}" 2>&1 | tee "$log"
 status=${PIPESTATUS[0]}
 set -e
 
@@ -56,29 +62,63 @@ if [ "$status" -eq 0 ]; then
     exit 0
 fi
 
-if ! grep -Eq "$FAULT_PATTERN" "$log"; then
-    # A real failure (assertion, build error, timeout): never retried.
+# Classify every failed package from its own output block. `go test` prints
+# each package's output followed by its summary line (`ok\t<pkg>\t<dur>`,
+# `FAIL\t<pkg>\t<dur>`, `FAIL\t<pkg> [build failed]`, `?\t<pkg>\t[no test
+# files]`), so the lines since the previous summary belong to this package.
+# The fault signatures are anchored at column 0: the Go runtime prints them
+# unindented, while a test's own diagnostics are indented by `testing`.
+# Output: one `<verdict>\t<pkg>` line per failed package, verdict `retry` or
+# `hard`.
+classified="$(awk '
+    function reset() { fault = 0; hard = 0 }
+    BEGIN { reset() }
+    /^unexpected fault address 0x/ { fault = 1 }
+    /^fatal error: fault$/ { fault = 1 }
+    /^fatal error: unexpected signal during runtime execution/ { fault = 1 }
+    /^Exception 0x[cC]0000005/ { fault = 1 }
+    /^--- FAIL: / { hard = 1 }
+    /^panic: test timed out/ { hard = 1 }
+    /^WARNING: DATA RACE/ { hard = 1 }
+    /^FAIL\t[^ \t]+ \[(build|setup) failed\]/ { print "hard\t" $2; reset(); next }
+    /^FAIL\t[^ \t]+\t/ {
+        if (fault && !hard) print "retry\t" $2; else print "hard\t" $2
+        reset(); next
+    }
+    /^(ok|\?)\t/ { reset(); next }
+' FS='\t' "$log")"
+
+retry=()
+hard=()
+while IFS=$'\t' read -r verdict pkg; do
+    [ -n "$pkg" ] || continue
+    case "$verdict" in
+        retry) retry+=("$pkg") ;;
+        *) hard+=("$pkg") ;;
+    esac
+done <<EOF_CLASSIFIED
+$classified
+EOF_CLASSIFIED
+
+if [ "${#hard[@]}" -gt 0 ]; then
+    # At least one genuine failure: never retry anything, keep the exit.
+    if [ "${#retry[@]}" -gt 0 ]; then
+        echo "go-test-retry: runtime fault in ${retry[*]} but genuine failure in ${hard[*]}; not retrying, keeping exit $status" >&2
+    fi
+    exit "$status"
+fi
+if [ "${#retry[@]}" -eq 0 ]; then
+    # Non-zero exit with no fault-only package (e.g. the fault landed outside
+    # any package block): nothing to retry, keep the exit.
     exit "$status"
 fi
 
-# Packages whose binary reported FAIL. `go test` prints `FAIL\t<pkg>\t<dur>`
-# for a package whose test binary exited non-zero, and `FAIL\t<pkg> [build
-# failed]` for a build error; the latter is not a runtime fault, skip it.
-failed=()
-while IFS= read -r pkg; do
-    [ -n "$pkg" ] && failed+=("$pkg")
-done < <(grep -E $'^FAIL\t[^ \t]+\t' "$log" | awk -F'\t' '{print $2}' | sort -u)
-if [ "${#failed[@]}" -eq 0 ]; then
-    echo "go-test-retry: runtime fault seen but no 'FAIL <pkg>' line to retry; keeping exit $status" >&2
-    exit "$status"
-fi
-
-echo "::warning title=Go runtime fault, retrying once (issue #1794)::$(printf '%s ' "${failed[@]}")"
-echo "go-test-retry: runtime fault in the first run; re-running ${#failed[@]} package(s) once: ${failed[*]}" >&2
+echo "::warning title=Go runtime fault, retrying once (issue #1794)::${retry[*]}"
+echo "go-test-retry: runtime fault in the first run; re-running ${#retry[@]} package(s) once: ${retry[*]}" >&2
 
 retry_flags=()
 cover_file=""
-for f in "${flags[@]}"; do
+for f in ${flags[@]+"${flags[@]}"}; do
     case "$f" in
         -coverprofile=*)
             cover_file="${f#-coverprofile=}"
@@ -89,7 +129,7 @@ for f in "${flags[@]}"; do
 done
 
 set +e
-go test "${retry_flags[@]}" "${failed[@]}" 2>&1 | tee -a "$log"
+go test ${retry_flags[@]+"${retry_flags[@]}"} "${retry[@]}" 2>&1 | tee -a "$log"
 retry_status=${PIPESTATUS[0]}
 set -e
 

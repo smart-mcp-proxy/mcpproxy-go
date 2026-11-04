@@ -2,10 +2,12 @@
 # go-test-retry-runtime-fault.test.sh — red/green self-test for
 # go-test-retry-runtime-fault.sh (issue #1794). Hermetic: a fake `go` on PATH
 # replays canned output, counts its invocations and records the package list
-# it was given, so the test proves the retry fires only on a runtime-fault
-# signature, re-runs only the failed packages, keeps the coverage profile and
-# never retries an ordinary assertion failure or a timeout.
-# Run directly: ./scripts/go-test-retry-runtime-fault.test.sh
+# it was given, so the test proves the retry fires only when every failed
+# package died of a runtime fault, re-runs only those packages, keeps the
+# coverage profile, and never retries when any package shows a genuine
+# failure (assertion, timeout, data race, build failure) — including a
+# genuine failure sitting next to a fault, in the same package or another.
+# Run directly: ./scripts/go-test-retry-runtime-fault.test.sh (bash 3.2 ok)
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,6 +62,16 @@ ASSERT_OUT=$'=== RUN   TestThing\n    thing_test.go:12: expected 1, got 2\n--- F
 TIMEOUT_OUT=$'panic: test timed out after 20m0s\nFAIL\tgithub.com/x/y/cmd/mcpproxy\t1200.360s\nFAIL'
 BUILD_OUT=$'# github.com/x/y/internal/broken\nbroken.go:3:1: syntax error\nFAIL\tgithub.com/x/y/internal/broken [build failed]\nFAIL'
 OK_OUT=$'ok  \tgithub.com/x/y/internal/security/scanner\t11.000s'
+# A fault in one package and a genuine failure in another, in one run.
+FAULT_PLUS_ASSERT_OUT="$ASSERT_OUT"$'\n'"$FAULT_OUT"
+FAULT_PLUS_TIMEOUT_OUT="$FAULT_OUT"$'\n'"$TIMEOUT_OUT"
+FAULT_PLUS_BUILD_OUT="$FAULT_OUT"$'\n'"$BUILD_OUT"
+# A fault AND an assertion failure inside the same package block.
+FAULT_SAME_PKG_ASSERT_OUT=$'=== RUN   TestA\n    a_test.go:9: boom\n--- FAIL: TestA (0.00s)\n=== RUN   TestB\nunexpected fault address 0xffffffffffffffff\nfatal error: fault\nFAIL\tgithub.com/x/y/internal/mixed\t3.000s\nFAIL'
+# A data race report next to a fault in the same package.
+FAULT_PLUS_RACE_OUT=$'=== RUN   TestR\nWARNING: DATA RACE\nRead at 0x00c0 by goroutine 7:\nunexpected fault address 0xffffffffffffffff\nfatal error: fault\nFAIL\tgithub.com/x/y/internal/racy\t2.000s\nFAIL'
+# Test diagnostics that merely CONTAIN the fault words (indented by testing).
+DIAG_TEXT_OUT=$'=== RUN   TestResponse\n    thing_test.go:12: expected no "fatal error: fault" in response, got unexpected fault address 0xdead\n--- FAIL: TestResponse (0.00s)\nFAIL\tgithub.com/x/y/internal/diag\t0.100s\nFAIL'
 
 # 1. Runtime fault, retry passes: exit 0, exactly two invocations, the second
 #    narrowed to the failed package, flags preserved, warning annotation out.
@@ -123,6 +135,67 @@ check "coverage: one mode line" [ "$(grep -c '^mode:' "$cov")" = 1 ]
 check "coverage: first run rows kept" grep -q 'run1.go' "$cov"
 check "coverage: retry rows appended" grep -q 'run2.go' "$cov"
 check "coverage: FILE.retry removed" [ ! -f "$cov.retry" ]
+
+# 9. Fault in one package, assertion failure in another: never retried, the
+#    first run's exit is kept (a retry could let an order-dependent failure
+#    pass).
+new_case fault_plus_assert
+printf '%s\n' "$FAULT_PLUS_ASSERT_OUT" > "$d/run1.out"; echo 1 > "$d/run1.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "fault + assertion elsewhere: exit 1 unchanged" [ "$st" -eq 1 ]
+check "fault + assertion elsewhere: one go invocation" [ "$(count)" = 1 ]
+
+# 10. Fault in one package, timeout in another: never retried.
+new_case fault_plus_timeout
+printf '%s\n' "$FAULT_PLUS_TIMEOUT_OUT" > "$d/run1.out"; echo 1 > "$d/run1.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "fault + timeout elsewhere: exit 1 unchanged" [ "$st" -eq 1 ]
+check "fault + timeout elsewhere: one go invocation" [ "$(count)" = 1 ]
+
+# 11. Fault in one package, build failure in another: never retried.
+new_case fault_plus_build
+printf '%s\n' "$FAULT_PLUS_BUILD_OUT" > "$d/run1.out"; echo 1 > "$d/run1.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "fault + build failure elsewhere: exit 1 unchanged" [ "$st" -eq 1 ]
+check "fault + build failure elsewhere: one go invocation" [ "$(count)" = 1 ]
+
+# 12. Fault and an assertion failure in the SAME package: never retried.
+new_case fault_same_pkg_assert
+printf '%s\n' "$FAULT_SAME_PKG_ASSERT_OUT" > "$d/run1.out"; echo 1 > "$d/run1.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "fault + assertion in the same package: exit 1 unchanged" [ "$st" -eq 1 ]
+check "fault + assertion in the same package: one go invocation" [ "$(count)" = 1 ]
+
+# 13. Fault next to a data race report: never retried.
+new_case fault_plus_race
+printf '%s\n' "$FAULT_PLUS_RACE_OUT" > "$d/run1.out"; echo 1 > "$d/run1.exit"
+"$SUT" -v -race -- ./... >/dev/null 2>&1; st=$?
+check "fault + data race: exit 1 unchanged" [ "$st" -eq 1 ]
+check "fault + data race: one go invocation" [ "$(count)" = 1 ]
+
+# 14. Test diagnostics that only mention the fault words (indented) are not
+#     a runtime fault: never retried.
+new_case diag_text
+printf '%s\n' "$DIAG_TEXT_OUT" > "$d/run1.out"; echo 1 > "$d/run1.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "diagnostic text only: exit 1 unchanged" [ "$st" -eq 1 ]
+check "diagnostic text only: one go invocation" [ "$(count)" = 1 ]
+
+# 15. Two faulted packages, nothing else: both retried, nothing more.
+new_case two_faults
+printf '%s\n' "$FAULT_OUT" $'unexpected fault address 0xffffffffffffffff\nfatal error: fault\nFAIL\tgithub.com/x/y/internal/second\t1.000s\nFAIL' > "$d/run1.out"; echo 2 > "$d/run1.exit"
+printf '%s\n' "$OK_OUT" $'ok  \tgithub.com/x/y/internal/second\t0.100s' > "$d/run2.out"; echo 0 > "$d/run2.exit"
+"$SUT" -v -- ./... >/dev/null 2>&1; st=$?
+check "two faults: exit 0" [ "$st" -eq 0 ]
+check "two faults: retry lists exactly the two packages" \
+    [ "$(argv_line 2)" = "test -v github.com/x/y/internal/security/scanner github.com/x/y/internal/second" ]
+
+# 16. No flags at all (`-- ./...`) must work under set -u on bash 3.2.
+new_case no_flags
+printf '%s\n' "$OK_OUT" > "$d/run1.out"; echo 0 > "$d/run1.exit"
+"$SUT" -- ./... >/dev/null 2>&1; st=$?
+check "no flags: exit 0" [ "$st" -eq 0 ]
+check "no flags: go ran with the packages only" [ "$(argv_line 1)" = "test ./..." ]
 
 # 8. Usage: no `--` separator is a usage error, go never runs.
 new_case usage
