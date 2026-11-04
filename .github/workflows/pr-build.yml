@@ -217,9 +217,13 @@ jobs:
         if: '!(matrix.goos == ''windows'' && matrix.goarch == ''arm64'')'
         shell: bash
         run: |
-          # On Windows, skip internal/server tests (E2E tests timeout after 11 minutes)
+          # On Windows, skip internal/server tests (E2E tests timeout after 11 minutes).
+          # The Windows run goes through the runtime-fault retry wrapper (issue
+          # #1794: `unexpected fault address … / fatal error: fault` is a
+          # Go/Windows runtime bug, golang/go#81189 and #81238 — the failed
+          # packages are re-run once; real failures are never retried).
           if [ "${{ matrix.goos }}" = "windows" ]; then
-            go test -tags nogui -v -timeout 20m -skip "E2E|Binary|MCPProtocol" $(go list ./... | grep -v 'internal/server$')
+            scripts/go-test-retry-runtime-fault.sh -tags nogui -v -timeout 20m -skip "E2E|Binary|MCPProtocol" -- $(go list ./... | grep -v 'internal/server$')
           else
             go test -tags nogui -v -timeout 20m -skip "E2E|Binary|MCPProtocol" ./...
           fi
