@@ -215,8 +215,13 @@ type Runtime struct {
 	// installed after New (SetManagementService) because the service is built
 	// on top of the Runtime, not because the type has to be erased: the
 	// management package does not import runtime, so the field carries the
-	// real interface and every consumer gets a compile-time contract.
-	managementService management.Service
+	// real interface and every consumer gets a compile-time contract. It is an
+	// atomic.Pointer because the servers.changed coalescer and the attention
+	// subscriber start in New and read it from their own goroutines, while the
+	// server installs it later on the startup goroutine (a plain field raced
+	// under -race once a publish landed before SetManagementService). Read it
+	// through GetManagementService.
+	managementService atomic.Pointer[management.Service]
 	activityService   *ActivityService // Activity logging service
 
 	// rejectionMetric counts a concurrency shed SYNCHRONOUSLY at the rejection
@@ -2652,13 +2657,22 @@ func (r *Runtime) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 // the Runtime (it takes one as its RuntimeOperations), not because of an
 // import cycle — internal/management does not import internal/runtime.
 func (r *Runtime) SetManagementService(svc management.Service) {
-	r.managementService = svc
+	if svc == nil {
+		r.managementService.Store(nil)
+		return
+	}
+	r.managementService.Store(&svc)
 }
 
-// GetManagementService returns the management service instance.
-// Returns nil if service hasn't been set yet.
+// GetManagementService returns the management service instance, or nil while
+// none is installed. Safe to call from any goroutine: the field is swapped
+// atomically, so a background reader (the servers.changed coalescer, the
+// attention subscriber) never tears against SetManagementService.
 func (r *Runtime) GetManagementService() management.Service {
-	return r.managementService
+	if svc := r.managementService.Load(); svc != nil {
+		return *svc
+	}
+	return nil
 }
 
 // SetRefreshMetricsRecorder sets the metrics recorder for OAuth token refresh operations.

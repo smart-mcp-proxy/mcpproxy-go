@@ -138,9 +138,10 @@ func (c *serversChangedCoalescer) start(ctx context.Context) {
 }
 
 // serversLister is the minimal slice of the management service needed by
-// emitServersChanged to fetch the current server list. The runtime stores the
-// management service as interface{} (avoiding an import cycle), so this local
-// interface is the type assertion target. Implemented by
+// emitServersChanged to fetch the current server list. The runtime holds the
+// full management.Service behind an atomic swap (GetManagementService); this
+// local interface is the type-assertion target so the event path depends on
+// one method, not the whole service. Implemented by
 // internal/management.(*service).
 type serversLister interface {
 	ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error)
@@ -289,7 +290,7 @@ func (r *Runtime) buildServersChangedPayload(parentCtx context.Context, reason s
 	}
 	payload["reason"] = reason
 
-	if lister, ok := r.managementService.(serversLister); ok && lister != nil {
+	if lister, ok := r.GetManagementService().(serversLister); ok && lister != nil {
 		ctx, cancel := context.WithTimeout(parentCtx, 2*time.Second)
 		servers, stats, err := lister.ListServers(ctx)
 		cancel()

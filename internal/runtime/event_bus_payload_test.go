@@ -47,7 +47,7 @@ func newPayloadTestRuntime(t *testing.T, lister *fakeServersLister) *Runtime {
 		eventSubs: make(map[chan Event]struct{}),
 	}
 	if lister != nil {
-		rt.managementService = lister
+		rt.SetManagementService(lister)
 	}
 	return rt
 }
@@ -283,10 +283,10 @@ func TestEmitServersChanged_PayloadPreservesSecurityScan(t *testing.T) {
 // WithTimeout.
 func TestBuildServersChangedPayload_HonoursCancelledParentCtx(t *testing.T) {
 	rt := newPayloadTestRuntime(t, nil)
-	rt.managementService = &ctxAwareLister{
+	rt.SetManagementService(&ctxAwareLister{
 		servers: []*contracts.Server{{Name: "s1"}},
 		stats:   &contracts.ServerStats{},
-	}
+	})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
