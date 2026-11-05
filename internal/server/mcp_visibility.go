@@ -263,6 +263,25 @@ func (p *MCPProxyServer) describeGateReason(serverName, toolName string) string 
 	return ""
 }
 
+// exactCandidateWithheld reports whether query is a whole canonical
+// "server:tool" id — the shape the index resolves to one document
+// (index.exactQualifiedTool) — whose server the caller may see and whose tool
+// `withheld` says the retrieve_tools loops will not return. The split is the
+// one handleCallToolVariant applies: the first colon ends the server name, the
+// rest is the raw tool name. A caller out of scope gets false: the scoped
+// searches already reject that candidate before the cut, and nothing about it
+// may be learned here.
+func exactCandidateWithheld(query string, inScope func(serverName string) bool, withheld func(serverName, toolName string) bool) bool {
+	if strings.ContainsAny(query, " \t\r\n") {
+		return false
+	}
+	serverName, toolName, ok := strings.Cut(query, ":")
+	if !ok || serverName == "" || toolName == "" || !inScope(serverName) {
+		return false
+	}
+	return withheld(serverName, toolName)
+}
+
 // normalizeServerTool strips the indexed "server:tool" prefix from toolName
 // (result.Tool.Name keeps the prefix when ServerName is set) — exactly like
 // isToolCallable, so approval/config lookups key consistently.
