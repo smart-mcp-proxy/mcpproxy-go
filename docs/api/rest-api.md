@@ -776,7 +776,13 @@ search/filter/sort over the full set. For relevance-ranked discovery use
 > **Quarantine visibility:** `GET /api/v1/index/search` withholds the tools of
 > **quarantined** servers — their descriptions/schemas are the Tool Poisoning
 > Attack payload quarantine exists to contain, so the REST search path applies
-> the same server-level visibility gate as MCP `retrieve_tools`. Response shape
+> the same server-level visibility gate as MCP `retrieve_tools`. It also
+> withholds a tool whose approval is **pending** or **changed** (tool-level
+> quarantine) while that tool's entry is still in the search index, for a
+> matching word and for its `server:tool` id alike. This follows the same
+> switches as the call path: it does not apply when `quarantine_enabled` is
+> `false` or the server's trust mode is `auto`. Such a hit is dropped after
+> ranking, so a page can hold fewer than `limit` results. Response shape
 > is unchanged (bare tool `name` + separate `server_name`); only which tools
 > appear is filtered. `GET /api/v1/tools` (above) is the unfiltered operator
 > overview and still lists quarantined servers' tools with their state.

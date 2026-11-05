@@ -263,6 +263,16 @@ func (p *MCPProxyServer) describeGateReason(serverName, toolName string) string 
 	return ""
 }
 
+// approvalLocked is describeGateReason's tool-level step (4) on its own, for a
+// read path that has already answered the server-level quarantine gate: the
+// tool's stored description and schema are held back while its approval is
+// pending or changed. A failed read of the server or approval record counts as
+// locked — the definition is not returned on a verdict that could not be read.
+func (p *MCPProxyServer) approvalLocked(serverName, toolName string) bool {
+	gate := p.evaluateExactToolGate(serverName, toolName)
+	return gate.lockStatus != "" || gate.storageErr != nil
+}
+
 // exactCandidateWithheld reports whether query is a whole canonical
 // "server:tool" id — the shape the index resolves to one document
 // (index.exactQualifiedTool) — whose server the caller may see and whose tool

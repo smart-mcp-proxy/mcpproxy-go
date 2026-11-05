@@ -4144,7 +4144,8 @@ func (s *Server) SearchToolsScoped(query string, limit int, inScope func(serverN
 }
 
 // searchResultsToMaps converts index hits to the /api/v1/index/search map
-// shape, applying the server-level quarantine gate (issue #877).
+// shape, applying the server-level quarantine gate (issue #877) and the
+// tool-level approval gate (Spec 032).
 func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[string]interface{} {
 	// SECURITY (issue #877): the MCP retrieve_tools path never surfaces a
 	// quarantined server's tools — their descriptions/schemas are withheld
@@ -4154,6 +4155,13 @@ func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[strin
 	// server-level visibility gate rather than returning raw index hits. Names
 	// stay bare (server_name is a separate field) — only which tools appear is
 	// filtered, so the /api/v1/index/search response shape is unchanged.
+	//
+	// The same holds one level down: a tool whose approval is pending or
+	// changed is removed from the index only by the next discovery pass, and
+	// until then its document is found by any matching word and, with
+	// certainty, by its canonical "server:tool" id (index.exactQualifiedTool).
+	// The hit is dropped after the ranked cut, like the quarantine gate on the
+	// unscoped path, so it costs at most one gate read per returned row.
 	withheld := s.quarantinedServerFilter()
 
 	// Convert to map format for API
@@ -4161,14 +4169,19 @@ func (s *Server) searchResultsToMaps(results []*config.SearchResult) []map[strin
 	for _, result := range results {
 		if result.Tool != nil {
 			serverName := result.Tool.ServerName
+			toolName := config.RawToolName(result.Tool)
 			if serverName == "" {
-				// Fallback: recover the server from a "server:tool" index name so
-				// the quarantine gate still applies when ServerName is unset.
+				// Fallback: recover the pair from a "server:tool" index name so
+				// both gates still apply when ServerName is unset.
 				if parts := strings.SplitN(result.Tool.Name, ":", 2); len(parts) == 2 {
 					serverName = parts[0]
+					toolName = parts[1]
 				}
 			}
 			if withheld(serverName) {
+				continue
+			}
+			if s.mcpProxy != nil && s.mcpProxy.approvalLocked(serverName, toolName) {
 				continue
 			}
 			toolData := map[string]interface{}{
