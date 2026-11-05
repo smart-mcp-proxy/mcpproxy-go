@@ -2800,6 +2800,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					"auth_url":  "",
 					"token_url": "",
 				}
+				if enabled := serverStatus.Config.OAuth.RefreshReplayEnabled; enabled != nil {
+					oauthConfig["refresh_replay_enabled"] = *enabled
+				}
 			}
 
 			// GH #1172: a token record left behind by an earlier OAuth login

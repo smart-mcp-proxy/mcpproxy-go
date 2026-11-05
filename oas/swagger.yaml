@@ -795,6 +795,10 @@ components:
           type: boolean
         redirect_uri:
           type: string
+        refresh_replay_enabled:
+          description: Opt in only when token_endpoint supports idempotent refresh
+            replay for at least 30 seconds.
+          type: boolean
         registration_endpoint:
           type: string
         scopes:
@@ -2604,6 +2608,8 @@ components:
           type: boolean
         redirect_port:
           type: integer
+        refresh_replay_enabled:
+          type: boolean
         registration_endpoint:
           type: string
         scopes:

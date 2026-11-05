@@ -634,6 +634,7 @@ explicitly to one of `http`, `sse`, or `streamable-http`.
 | `pkce_enabled` | boolean | No | PKCE is always enabled for security; this flag is currently ignored |
 | `authorization_endpoint` | string | No | Overrides the authorization endpoint the authorization server advertises (see [Overriding OAuth discovery](#overriding-oauth-discovery)) |
 | `token_endpoint` | string | No | Overrides the token endpoint |
+| `refresh_replay_enabled` | boolean | No | Disabled by default. Allows one bounded transport retry only for an explicit `token_endpoint` that supports idempotent refresh replay |
 | `registration_endpoint` | string | No | Overrides the Dynamic Client Registration endpoint |
 | `auth_server_metadata_url` | string | No | Authorization server metadata URL to use instead of discovering one |
 
@@ -683,6 +684,46 @@ refreshed. An explicit `oauth.scopes` is sent exactly as written. If the
 authorization server publishes `grant_types_supported` without `refresh_token`,
 mcpproxy logs one warning per server per run, because that login cannot be
 refreshed and will expire.
+
+#### Recovering a lost refresh response
+
+If the authorization server rotates a refresh token but its response is lost,
+the client may only have the consumed token. Retrying it is safe only when the
+server explicitly supports **idempotent refresh replay**: a matching retry
+returns the same already-issued token pair rather than rotating again or
+revoking the grant as token reuse.
+
+For such a provider, set both fields in that upstream's `oauth` block:
+
+```json
+"oauth": {
+  "token_endpoint": "https://login.example.com/token",
+  "refresh_replay_enabled": true
+}
+```
+
+This is an operator assertion of provider support, not capability detection.
+Verify a replay window of at least 30 seconds before enabling it. Ordinary
+FastMCP refresh rotation, by itself, does not imply replay support. The option
+is absent/off by default and must not be enabled for a provider that revokes a
+grant when a consumed refresh token is repeated (see [RFC 9700 §4.14.2](https://www.rfc-editor.org/rfc/rfc9700.html#section-4.14.2)).
+
+The first attempt gets up to 10 seconds. A typed transport failure (for example,
+a timeout or truncated response) permits one immediate retry inside the existing
+30-second refresh flight deadline. The effective endpoint must still match the
+explicit endpoint, and the stored grant's client, refresh token and revision
+must be unchanged. Cancellation, retirement, OAuth rejections such as
+`invalid_grant`, HTTP 429/5xx and unknown errors do not enable this retry. A
+concurrent login or credential replacement still takes precedence through the
+existing coordinator and persistence checks.
+
+Attempt logs contain only fixed outcome categories and timing, never token
+values, raw errors or endpoint URLs. Disable with `refresh_replay_enabled:
+false`. Changing this retry policy replaces the connection without clearing
+the stored grant. Changing the endpoint itself follows the existing OAuth
+reconfiguration lifecycle and can require sign-in.
+This option does not recover a grant already lost, change token lifetimes or
+scopes, or guarantee recovery after provider restarts or longer outages.
 
 #### Discovery caching
 
