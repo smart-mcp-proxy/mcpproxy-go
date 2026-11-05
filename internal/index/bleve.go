@@ -903,6 +903,54 @@ func (b *BleveIndex) augmentedToolSearchQuery(queryStr string, probeSize int) (*
 	return boolQuery, nil
 }
 
+// exactQualifiedTool resolves a whole canonical document ID without changing
+// indexed search fields or the lexical query. The existing lexical score is
+// retained when this document already matched; a newly discoverable exact ID
+// starts at zero; rankExactTool promotes its ranking score after admission.
+func (b *BleveIndex) exactQualifiedTool(query string, lexical bquery.Query) (*config.SearchResult, error) {
+	if !strings.Contains(query, ":") || strings.ContainsAny(query, " \t\r\n") {
+		return nil, nil
+	}
+	idQuery := bleve.NewDocIDQuery([]string{query})
+	hits, err := b.index.Search(newToolSearchRequest(idQuery, 0, 1))
+	if err != nil {
+		return nil, fmt.Errorf("exact ID lookup failed: %w", err)
+	}
+	if len(hits.Hits) == 0 {
+		return nil, nil
+	}
+	hit := hits.Hits[0]
+	filtered := bleve.NewBooleanQuery()
+	filtered.AddMust(lexical)
+	filtered.AddFilter(idQuery)
+	matched, err := b.index.Search(newToolSearchRequest(filtered, 0, 1))
+	if err != nil {
+		return nil, fmt.Errorf("exact ID score lookup failed: %w", err)
+	}
+	score := 0.0
+	if len(matched.Hits) != 0 {
+		score = matched.Hits[0].Score
+	}
+	return &config.SearchResult{Tool: readToolMetadata(hit.ID, hit.Fields), Score: score}, nil
+}
+
+// rankExactTool gives an admitted exact hit a ranking score above the other
+// returned hits. Only the exact score changes; hidden hits cannot affect it.
+func rankExactTool(results []*config.SearchResult, query string) {
+	if len(results) == 0 || results[0].Tool.Name != query {
+		return
+	}
+	score := 1.0
+	for _, hit := range results[1:] {
+		if hit.Score >= score {
+			score = hit.Score + 1
+		}
+	}
+	if results[0].Score < score {
+		results[0].Score = score
+	}
+}
+
 // SearchTools searches for tools using multiple query strategies for better results
 func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchResult, error) {
 	if queryStr == "" {
@@ -916,20 +964,38 @@ func (b *BleveIndex) SearchTools(queryStr string, limit int) ([]*config.SearchRe
 
 	b.logger.Debug("Searching tools with enhanced query", zap.String("query", queryStr), zap.Int("limit", limit))
 
-	searchResult, err := b.index.Search(newToolSearchRequest(boolQuery, 0, limit))
+	exact, err := b.exactQualifiedTool(queryStr, boolQuery)
+	if err != nil {
+		return nil, err
+	}
+	searchLimit := limit
+	if exact != nil && limit > 0 {
+		searchLimit++ // compensate if the exact hit is also in the lexical page
+	}
+	searchResult, err := b.index.Search(newToolSearchRequest(boolQuery, 0, searchLimit))
 	if err != nil {
 		return nil, fmt.Errorf("search failed: %w", err)
 	}
 
 	// Convert results
 	var results []*config.SearchResult
+	if exact != nil && limit > 0 {
+		results = append(results, exact)
+	}
 	for _, hit := range searchResult.Hits {
+		if len(results) >= limit {
+			break
+		}
+		if exact != nil && hit.ID == queryStr {
+			continue
+		}
 		results = append(results, &config.SearchResult{
 			Tool:  readToolMetadata(hit.ID, hit.Fields),
 			Score: hit.Score,
 		})
 	}
 
+	rankExactTool(results, queryStr)
 	b.logger.Debug("Found tools matching query", zap.Int("count", len(results)), zap.String("query", queryStr))
 	return results, nil
 }
@@ -969,6 +1035,10 @@ func (b *BleveIndex) SearchToolsScoped(queryStr string, limit int, inScope func(
 	if err != nil {
 		return nil, err
 	}
+	exact, err := b.exactQualifiedTool(queryStr, q)
+	if err != nil {
+		return nil, err
+	}
 	pageSize := limit
 	if pageSize < scopedSearchMinPage {
 		pageSize = scopedSearchMinPage
@@ -977,18 +1047,29 @@ func (b *BleveIndex) SearchToolsScoped(queryStr string, limit int, inScope func(
 	b.logger.Debug("Searching tools with scoped query", zap.String("query", queryStr), zap.Int("limit", limit))
 
 	results := make([]*config.SearchResult, 0, limit)
+	if exact != nil && inScope(exact.Tool.ServerName) {
+		results = append(results, exact)
+		if len(results) >= limit {
+			rankExactTool(results, queryStr)
+			return results, nil
+		}
+	}
 	for from := 0; ; from += pageSize {
 		searchResult, err := b.index.Search(newToolSearchRequest(q, from, pageSize))
 		if err != nil {
 			return nil, fmt.Errorf("search failed: %w", err)
 		}
 		for _, hit := range searchResult.Hits {
+			if exact != nil && hit.ID == queryStr {
+				continue
+			}
 			tool := readToolMetadata(hit.ID, hit.Fields)
 			if !inScope(tool.ServerName) {
 				continue
 			}
 			results = append(results, &config.SearchResult{Tool: tool, Score: hit.Score})
 			if len(results) >= limit {
+				rankExactTool(results, queryStr)
 				return results, nil
 			}
 		}
@@ -998,6 +1079,7 @@ func (b *BleveIndex) SearchToolsScoped(queryStr string, limit int, inScope func(
 	}
 
 	b.logger.Debug("Found scoped tools matching query", zap.Int("count", len(results)), zap.String("query", queryStr))
+	rankExactTool(results, queryStr)
 	return results, nil
 }
 
@@ -1067,6 +1149,10 @@ func (b *BleveIndex) SearchToolsAdmitted(queryStr string, limit int, admit func(
 	if err != nil {
 		return nil, 0, err
 	}
+	exact, err := b.exactQualifiedTool(queryStr, q)
+	if err != nil {
+		return nil, 0, err
+	}
 	pageSize := limit
 	if pageSize < scopedSearchMinPage {
 		pageSize = scopedSearchMinPage
@@ -1078,12 +1164,23 @@ func (b *BleveIndex) SearchToolsAdmitted(queryStr string, limit int, admit func(
 	// allocation, and result lists are small (callers clamp limit, e.g.
 	// ProfilesService.Try caps it at 50), so append growth is negligible.
 	results = []*config.SearchResult{}
+	if exact != nil {
+		switch admit(Hit{Server: exact.Tool.ServerName, Tool: config.RawToolName(exact.Tool)}) {
+		case Admit:
+			results = append(results, exact)
+		case RejectPolicy:
+			hiddenByPolicy++
+		}
+	}
 	for from := 0; ; from += pageSize {
 		searchResult, err := b.index.Search(newToolSearchRequest(q, from, pageSize))
 		if err != nil {
 			return nil, 0, fmt.Errorf("search failed: %w", err)
 		}
 		for _, hit := range searchResult.Hits {
+			if exact != nil && hit.ID == queryStr {
+				continue
+			}
 			tool := readToolMetadata(hit.ID, hit.Fields)
 			switch admit(Hit{Server: tool.ServerName, Tool: config.RawToolName(tool)}) {
 			case Admit:
@@ -1109,6 +1206,7 @@ func (b *BleveIndex) SearchToolsAdmitted(queryStr string, limit int, admit func(
 	}
 
 	b.logger.Debug("Found admitted tools matching query", zap.Int("count", len(results)), zap.Int("hidden_by_policy", hiddenByPolicy), zap.String("query", queryStr))
+	rankExactTool(results, queryStr)
 	return results, hiddenByPolicy, nil
 }
 
