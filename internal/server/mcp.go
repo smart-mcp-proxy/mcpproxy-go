@@ -2396,7 +2396,11 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// `limit:1` request whose top hit sits outside the profile would return an
 	// empty page instead of the best authorized hit. Every OTHER administrator
 	// path (unprofiled, or profiled with a working per-profile index) keeps
-	// plain Search — byte-for-byte with the pre-105 behaviour.
+	// plain Search — byte-for-byte with the pre-105 behaviour, with one
+	// exception that applies to every path alike: a query that is a whole
+	// canonical "server:tool" id is answered by the index with that document
+	// first (index.exactQualifiedTool), where the pre-105 index returned no hit
+	// for it.
 	useScopedSearch := auth.IsScopedCaller(ctx) || (profileName != "" && sharedIndexFallback)
 
 	// Spec 108 FR-011: whenever a profile is genuinely in effect (profileName
@@ -2425,42 +2429,51 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		return index.Admit
 	}
 
-	// Qualified-ID searches admit candidates before the final window, so a
-	// locked or annotation-filtered exact hit cannot displace a usable fallback.
-	qualifiedQuery := strings.Contains(query, ":") && !strings.ContainsAny(query, " \t\r\n")
-	var prefilteredAnnotations []annotatedSearchResult
-	var prefilteredLocked []contracts.LockedToolEntry
-	admitQualified := func(hit index.Hit) index.Admission {
-		if verdict := admitPolicy(hit); verdict != index.Admit {
-			return verdict
+	// A canonical "server:tool" query is resolved by the index itself (the
+	// exact document leads the page on every path below), so the search paths
+	// and their candidate window are the same as for any other query. The one
+	// addition: when the exact candidate is going to be withheld below (not
+	// callable, approval/quarantine gate closed, or annotation-filtered), the
+	// search asks for one more hit so that candidate does not cost the caller
+	// a usable fallback. Scope and profile policy already reject it before the
+	// cut inside the scoped/admitted searches.
+	//
+	// window is the page the index really cuts: a non-positive limit is passed
+	// through untouched and the index manager searches its default window.
+	window := limit
+	if window <= 0 {
+		window = index.DefaultSearchLimit
+	}
+	searchLimit := limit
+	if exactCandidateWithheld(query, serverDiscoverable, func(serverName, toolName string) bool {
+		if !p.isExactToolCallable(serverName, toolName) || p.describeGateReason(serverName, toolName) != "" {
+			return true
 		}
-		if !p.isExactToolCallable(hit.Server, hit.Tool) || p.describeGateReason(hit.Server, hit.Tool) != "" {
-			prefilteredLocked = append(prefilteredLocked, contracts.LockedToolEntry{Name: config.CanonicalToolName(hit.Server, hit.Tool), Server: hit.Server, Status: p.classifyDisabledTool(hit.Server, hit.Tool)})
-			return index.RejectScope
-		}
-		annotations, _ := p.lookupExactToolAnnotations(hit.Server, hit.Tool)
-		if shouldExclude(annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld) {
-			prefilteredAnnotations = append(prefilteredAnnotations, annotatedSearchResult{serverName: hit.Server, toolName: hit.Tool, annotations: annotations, resultIndex: -1})
-			return index.RejectScope
-		}
-		return index.Admit
+		annotations, _ := p.lookupExactToolAnnotations(serverName, toolName)
+		return shouldExclude(annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld)
+	}) {
+		searchLimit = window + 1
 	}
 	var results []*config.SearchResult
 	var hiddenByPolicy int
 	switch {
-	case qualifiedQuery:
-		results, hiddenByPolicy, err = searchIndex.SearchToolsAdmitted(query, limit, admitQualified)
 	case profileName != "":
-		results, hiddenByPolicy, err = searchIndex.SearchToolsAdmitted(query, limit, admitPolicy)
+		results, hiddenByPolicy, err = searchIndex.SearchToolsAdmitted(query, searchLimit, admitPolicy)
 	case useScopedSearch:
-		results, err = searchIndex.SearchToolsScoped(query, limit, serverDiscoverable)
+		results, err = searchIndex.SearchToolsScoped(query, searchLimit, serverDiscoverable)
 	default:
-		results, err = searchIndex.Search(query, limit)
+		results, err = searchIndex.Search(query, searchLimit)
 	}
 	if err != nil {
 		p.logger.Error("Search failed", zap.String("query", query), zap.Error(err))
 		p.emitActivityInternalToolCall(ctx, "retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
+	}
+	// The extra hit stands in for the exact candidate only. When the index
+	// holds no such document (a quarantined tool is normally absent from it),
+	// the window is the ordinary one.
+	if len(results) > window && results[0].Tool.Name != query {
+		results = results[:window]
 	}
 
 	// Spec 049: opt-in discovery of locked tools. When false (default) the
@@ -2475,10 +2488,10 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 
 	var callableResults []*config.SearchResult
 	var disabledEntries []contracts.LockedToolEntry
-	if includeDisabled {
-		disabledEntries = append(disabledEntries, prefilteredLocked...)
-	}
-	droppedCount := len(prefilteredLocked)
+	droppedCount := 0
+	// gatedExact names the exact-ID hit withheld by the approval/quarantine
+	// gate, so the quarantined-tool pass below does not count it twice.
+	gatedExact := ""
 	for _, result := range results {
 		serverName := result.Tool.ServerName
 		// The RAW tool name, derived from the index hit exactly once (Spec 105
@@ -2494,13 +2507,6 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			}
 		}
 
-		// An exact-ID lookup can find a document during the window before a
-		// quarantine or approval change has removed it from the index. Never
-		// return its stored description or schema while that gate is closed.
-		if result.Tool.Name == query && serverDiscoverable(serverName) && p.describeGateReason(serverName, toolName) != "" {
-			continue
-		}
-
 		// Spec 085 (FR-006/FR-011): the index hit runs through the shared
 		// SEARCH visibility step (scope → isToolCallable) — behavior-preserving
 		// with the merge-base inline filter (main: internal/server/mcp.go
@@ -2510,15 +2516,34 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		// would not. Results are index hits by construction, so the
 		// index-presence step is skipped here.
 		visible, reason := p.indexedToolVisible(authCtx, profileScope, policy, serverName, toolName)
-		if visible {
-			callableResults = append(callableResults, result)
-			continue
-		}
-
-		if reason == visReasonServerNotInScope || reason == visReasonToolPolicyExcluded {
+		if !visible && (reason == visReasonServerNotInScope || reason == visReasonToolPolicyExcluded) {
 			// Out-of-scope servers and profile-excluded tools are both
 			// invisible, never "locked" — FR-013 forbids naming or
 			// describing a profile-hidden tool the way a locked entry would.
+			continue
+		}
+
+		// An exact-ID lookup can find a document during the window before a
+		// quarantine or approval change has removed it from the index. Never
+		// return its stored description or schema while that gate is closed:
+		// it is reported like any other locked tool, by name only. This runs
+		// after the scope and profile-policy verdicts above, so a hit the
+		// caller may not learn about stays invisible.
+		if result.Tool.Name == query && p.describeGateReason(serverName, toolName) != "" {
+			droppedCount++
+			gatedExact = result.Tool.Name
+			if includeDisabled {
+				disabledEntries = append(disabledEntries, contracts.LockedToolEntry{
+					Name:   result.Tool.Name,
+					Server: serverName,
+					Status: p.classifyDisabledTool(serverName, toolName),
+				})
+			}
+			continue
+		}
+
+		if visible {
+			callableResults = append(callableResults, result)
 			continue
 		}
 
@@ -2564,8 +2589,8 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// so the shared min(limit,10) cap below can't truncate them away in favor of
 	// index hits. The count feeds the zero-result nudge even without the flag.
 	seen := make(map[string]bool, len(callableResults)+len(disabledEntries))
-	for _, locked := range prefilteredLocked {
-		seen[locked.Name] = true
+	if gatedExact != "" {
+		seen[gatedExact] = true
 	}
 	for _, r := range callableResults {
 		seen[r.Tool.Name] = true
@@ -2597,7 +2622,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	annotationFilterActive := readOnlyOnly || excludeDestructive || excludeOpenWorld
 	var filterDiag *filterDiagnostics
 	if annotationFilterActive {
-		annotatedResults := append([]annotatedSearchResult{}, prefilteredAnnotations...)
+		var annotatedResults []annotatedSearchResult
 		for i, result := range results {
 			serverName := result.Tool.ServerName
 			toolName := result.Tool.Name
@@ -2626,6 +2651,12 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			filteredResults = append(filteredResults, results[ar.resultIndex])
 		}
 		results = filteredResults
+	}
+
+	// The exact-candidate pre-check above reads state the loops then re-read;
+	// if the two disagree the extra hit is not owed to the caller.
+	if len(results) > window {
+		results = results[:window]
 	}
 
 	// Convert results to MCP tool format for LLM compatibility. Entry

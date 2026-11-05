@@ -112,3 +112,63 @@ func TestRetrieveToolsQualifiedIDAnnotationRefills(t *testing.T) {
 	require.Equal(t, 1, body.Diagnostics.OmittedTotal)
 	require.Equal(t, 1, body.Diagnostics.OmittedByFilter["read_only_only"].Explicit)
 }
+
+// A canonical-ID query keeps the ordinary candidate window: hits ranked below
+// the cut are neither reported as locked nor counted by the annotation
+// diagnostics, exactly as for a query without a colon.
+func TestRetrieveToolsQualifiedIDKeepsCandidateWindow(t *testing.T) {
+	t.Run("locked hit below the cut is not reported", func(t *testing.T) {
+		p := createTestMCPProxyServer(t)
+		enabled := true
+		p.config.QuarantineEnabled = &enabled
+		for _, name := range []string{"orchid", "cedar"} {
+			require.NoError(t, p.storage.SaveUpstreamServer(&config.ServerConfig{Name: name, Enabled: true}))
+		}
+		require.NoError(t, p.index.IndexTool(&config.ToolMetadata{ServerName: "orchid", Name: "read_item", Description: "Neutral"}))
+		require.NoError(t, p.index.IndexTool(&config.ToolMetadata{ServerName: "cedar", Name: "blocked", Description: "orchid:read_item"}))
+		require.NoError(t, p.storage.SaveToolApproval(&storage.ToolApprovalRecord{ServerName: "orchid", ToolName: "read_item", Status: storage.ToolApprovalStatusApproved}))
+		require.NoError(t, p.storage.SaveToolApproval(&storage.ToolApprovalRecord{ServerName: "cedar", ToolName: "blocked", Status: storage.ToolApprovalStatusApproved, Disabled: true}))
+		req := mcp.CallToolRequest{}
+		req.Params.Arguments = map[string]interface{}{"query": "orchid:read_item", "limit": float64(1), "include_disabled": true}
+		result, err := p.handleRetrieveTools(adminCtx(), req)
+		require.NoError(t, err)
+		decoded := decodeRetrieve(t, result)
+		require.Len(t, decoded.Tools, 1)
+		require.Empty(t, decoded.Disabled)
+	})
+	t.Run("non-positive limit keeps the default window", func(t *testing.T) {
+		for _, limit := range []float64{0, -5} {
+			p := createTestMCPProxyServer(t)
+			enabled := true
+			p.config.QuarantineEnabled = &enabled
+			for _, name := range []string{"orchid", "cedar"} {
+				require.NoError(t, p.storage.SaveUpstreamServer(&config.ServerConfig{Name: name, Enabled: true}))
+			}
+			require.NoError(t, p.index.IndexTool(&config.ToolMetadata{ServerName: "orchid", Name: "read_item", Description: "Neutral"}))
+			require.NoError(t, p.index.IndexTool(&config.ToolMetadata{ServerName: "cedar", Name: "fallback", Description: "orchid:read_item"}))
+			require.NoError(t, p.storage.SaveToolApproval(&storage.ToolApprovalRecord{ServerName: "orchid", ToolName: "read_item", Status: storage.ToolApprovalStatusApproved, Disabled: true}))
+			require.NoError(t, p.storage.SaveToolApproval(&storage.ToolApprovalRecord{ServerName: "cedar", ToolName: "fallback", Status: storage.ToolApprovalStatusApproved}))
+			// The exact candidate is withheld; the query has no match at all.
+			for query, want := range map[string][]string{"orchid:read_item": {"cedar:fallback"}, "orchid:absent": nil} {
+				resp := callRetrieveScoped(t, p, adminCtx(), map[string]interface{}{"query": query, "limit": limit})
+				require.ElementsMatch(t, want, toolNamesOf(resp), "query %q limit %v", query, limit)
+			}
+		}
+	})
+	t.Run("annotation diagnostics stay within the window", func(t *testing.T) {
+		p, _ := newProfilesV3Fixture(t)
+		indexEnforcementMatrixFixtureTools(t, p)
+		for _, name := range []string{"create_issue", "delete_repo"} {
+			require.NoError(t, p.index.IndexTool(&config.ToolMetadata{ServerName: "github", Name: name, Description: "github:list_issues", ParamsJSON: "{}"}))
+		}
+		req := mcp.CallToolRequest{}
+		req.Params.Arguments = map[string]interface{}{"query": "github:list_issues", "limit": float64(1), "read_only_only": true}
+		result, err := p.handleRetrieveTools(adminCtx(), req)
+		require.NoError(t, err)
+		var body map[string]json.RawMessage
+		require.NoError(t, json.Unmarshal([]byte(resultText(t, result)), &body))
+		require.Contains(t, string(body["tools"]), "github:list_issues")
+		_, reported := body["filter_diagnostics"]
+		require.False(t, reported, "a filled window must not report omissions ranked below it")
+	})
+}

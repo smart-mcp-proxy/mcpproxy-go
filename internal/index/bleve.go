@@ -936,6 +936,12 @@ func (b *BleveIndex) exactQualifiedTool(query string, lexical bquery.Query) (*co
 
 // rankExactTool gives an admitted exact hit a ranking score above the other
 // returned hits. Only the exact score changes; hidden hits cannot affect it.
+//
+// That score is a ranking priority, not a BM25 score, and it is the one
+// exception to "the scoped/admitted searches return the unfiltered search's
+// scores": it is derived from the hits this call returns, so it can differ
+// with the limit and with the caller's scope. Every other hit keeps its
+// unfiltered score on every path.
 func rankExactTool(results []*config.SearchResult, query string) {
 	if len(results) == 0 || results[0].Tool.Name != query {
 		return
@@ -1007,7 +1013,9 @@ const scopedSearchMinPage = 256
 // SearchToolsScoped is SearchTools for a caller who may see only some servers
 // (Spec 107 T075a; Spec 105 "Ranking under scope"): the result is the top-
 // `limit` of the SAME ranked search, filtered to servers `inScope` admits
-// BEFORE the cut, with the unfiltered scores. It runs the identical boolean
+// BEFORE the cut, with the unfiltered scores (except a whole canonical-ID
+// query's exact hit, which leads the page with a ranking score: see
+// rankExactTool). It runs the identical boolean
 // query — including the underscore-segment enhancement SearchTools(queryStr,
 // limit) would apply for the same query and limit (augmentedToolSearchQuery;
 // Spec 105 FR-005 G1 review finding — a scoped caller's ranking for an
