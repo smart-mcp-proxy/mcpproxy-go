@@ -2,12 +2,15 @@ package core
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"sync"
 	"syscall"
 	"testing"
@@ -181,6 +184,13 @@ func TestRefreshReplay_ErrorsAndAttemptLimit(t *testing.T) {
 		{"truncated", io.ErrUnexpectedEOF, 2},
 		{"timeout", context.DeadlineExceeded, 2},
 		{"connection_reset", &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}, 2},
+		{"http_client_connection_reset", &url.Error{Op: "Post", URL: "https://replay.example/token", Err: &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}}, 2},
+		{"http_client_timeout", &url.Error{Op: "Post", URL: "https://replay.example/token", Err: context.DeadlineExceeded}, 2},
+		// *url.Error implements net.Error for every http.Client.Do failure.
+		// The server answered a refused redirect, and no request left for a
+		// certificate failure: neither is a lost response.
+		{"refused_redirect", &url.Error{Op: "Post", URL: "https://replay.example/token", Err: errors.New("refusing cross-origin redirect of an OAuth POST")}, 1},
+		{"certificate", &url.Error{Op: "Post", URL: "https://replay.example/token", Err: x509.UnknownAuthorityError{}}, 1},
 		{"invalid_grant", transport.OAuthError{ErrorCode: "invalid_grant", ErrorDescription: "network timeout"}, 1},
 		{"invalid_client", transport.OAuthError{ErrorCode: "invalid_client"}, 1},
 		{"invalid_scope", transport.OAuthError{ErrorCode: "invalid_scope"}, 1},
@@ -386,4 +396,48 @@ func TestRefreshReplay_CancelledWaiterDoesNotCancelFlight(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "rt-1", tok.RefreshToken)
 	require.Equal(t, 2, calls)
+}
+
+// A status that arrived is an answer, even when its body is cut short: it
+// never permits a replay, on the configured-client or the stored-client path.
+func TestRefreshReplay_TruncatedErrorStatusHasNoRetry(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		for _, handlerID := range []string{"synthetic-client", ""} {
+			t.Run(strconv.Itoa(status)+"_handler_"+handlerID, func(t *testing.T) {
+				var mu sync.Mutex
+				requests := 0
+				as := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					if r.URL.Path == "/metadata" {
+						baseURL := "http://" + r.Host
+						_ = json.NewEncoder(w).Encode(map[string]string{"issuer": baseURL, "authorization_endpoint": baseURL + "/authorize", "token_endpoint": baseURL + "/token"})
+						return
+					}
+					mu.Lock()
+					defer mu.Unlock()
+					requests++
+					w.Header().Set("Content-Length", "200")
+					w.WriteHeader(status)
+					_, _ = io.WriteString(w, `{`)
+				}))
+				defer as.Close()
+				db, err := storage.NewBoltDB(t.TempDir(), zap.NewNop().Sugar())
+				require.NoError(t, err)
+				defer db.Close()
+				cfg := &config.ServerConfig{Name: "replay-fixture", URL: as.URL + "/mcp", OAuth: &config.OAuthConfig{RefreshReplayEnabled: replayEnabled(true), TokenEndpoint: as.URL + "/token"}}
+				key := oauth.GenerateServerKey(cfg.Name, cfg.URL)
+				require.NoError(t, db.SaveOAuthToken(&storage.OAuthTokenRecord{ServerName: key, DisplayName: cfg.Name, AccessToken: "at-0", RefreshToken: "rt-0", ClientID: "synthetic-client", ExpiresAt: time.Now().Add(-time.Minute)}))
+				store := oauth.NewPersistentTokenStore(cfg.Name, cfg.URL, db)
+				handler := transport.NewOAuthHandler(transport.OAuthConfig{ClientID: handlerID, TokenStore: store, AuthServerMetadataURL: as.URL + "/metadata", HTTPClient: as.Client()})
+				c := &Client{config: cfg, storage: db, logger: zap.NewNop()}
+				_, _, err = oauth.NewRefreshCoordinator().Do(context.Background(), oauth.RefreshRequest{Key: key, ServerName: cfg.Name, ObservedRefreshToken: "rt-0", Trigger: oauth.RefreshTriggerReactive, Load: func() (*storage.OAuthTokenRecord, error) { return db.GetOAuthToken(key) }, Refresh: c.oauthRefreshFunc(handler)})
+				require.Error(t, err)
+				class, got := oauth.ClassifyRefreshError(err)
+				require.NotEqual(t, oauth.RefreshClassNetwork, class)
+				require.Equal(t, status, got)
+				mu.Lock()
+				defer mu.Unlock()
+				require.Equal(t, 1, requests)
+			})
+		}
+	}
 }

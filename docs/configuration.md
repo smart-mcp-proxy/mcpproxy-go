@@ -713,9 +713,19 @@ a timeout or truncated response) permits one immediate retry inside the existing
 30-second refresh flight deadline. The effective endpoint must still match the
 explicit endpoint, and the stored grant's client, refresh token and revision
 must be unchanged. Cancellation, retirement, OAuth rejections such as
-`invalid_grant`, HTTP 429/5xx and unknown errors do not enable this retry. A
-concurrent login or credential replacement still takes precedence through the
-existing coordinator and persistence checks.
+`invalid_grant`, HTTP 429/5xx and unknown errors do not enable this retry. Any
+response with an error status counts as an answer, even when its body is cut
+short, and so does a refused redirect; a certificate or proxy error is not a
+lost response either. A provider that regularly needs more than 10 seconds to
+answer a refresh should stay opted out. A concurrent login or credential
+replacement still takes precedence through the existing coordinator and
+persistence checks.
+
+`token_endpoint` must be an `https` URL (`http` only on a loopback host). The
+flag without a valid explicit `token_endpoint` is refused by a config apply and
+by the MCP `upstream_servers` add and patch operations, and it is inert in a
+hand-edited file. Set it in the config file, through a config apply, or with
+`oauth_json` on the MCP tool.
 
 Attempt logs contain only fixed outcome categories and timing, never token
 values, raw errors or endpoint URLs. Disable with `refresh_replay_enabled:

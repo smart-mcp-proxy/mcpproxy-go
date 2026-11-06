@@ -76,6 +76,10 @@ func (c *Client) withRefreshReplay(refresh oauth.RefreshFunc, endpoint func(cont
 			c.logRefreshReplaySkipped("deadline_or_retired")
 			return nil, err
 		}
+		// The record check above is a snapshot. A login that lands after it
+		// cannot be overwritten (the persist path compares the flight
+		// generation), but the old token is still sent once, as it is when a
+		// login races the first attempt.
 		start = time.Now()
 		tok, err = refresh(budget, current)
 		c.logRefreshReplayAttempt(2, start, err)
@@ -95,8 +99,16 @@ func retryableRefreshReplayError(err error) bool {
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
+	// net.Error alone proves nothing: *url.Error implements it for every
+	// http.Client.Do failure, including a refused redirect (the server
+	// answered) and a certificate or proxy error. Require a timeout or a
+	// socket-level failure.
 	var networkError net.Error
-	return errors.As(err, &networkError)
+	if errors.As(err, &networkError) && networkError.Timeout() {
+		return true
+	}
+	var opError *net.OpError
+	return errors.As(err, &opError)
 }
 
 func (c *Client) logRefreshReplayAttempt(attempt int, start time.Time, err error) {

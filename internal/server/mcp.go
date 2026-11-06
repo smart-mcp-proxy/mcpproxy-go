@@ -6201,6 +6201,11 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		if err := oauthConfig.Validate(); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Invalid oauth_json: %v", err)), nil
 		}
+		// An add carries the complete block, so the replay opt-in is checked
+		// against its own token_endpoint here.
+		if err := oauthConfig.ValidateRefreshReplay(); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid oauth_json: %v", err)), nil
+		}
 		oauth = &oauthConfig
 	}
 
@@ -6467,6 +6472,13 @@ func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolReq
 		// collision either.
 		if patch.ForwardHeaders != nil || patch.Headers != nil {
 			if err := forwardHeadersWriteError(m.ForwardHeaders, m.Headers); err != nil {
+				return &mcpUserError{msg: err.Error()}
+			}
+		}
+		// The replay opt-in is validated on the merged block: a partial patch
+		// may inherit its token_endpoint from the stored config.
+		if patch.OAuth != nil {
+			if err := m.OAuth.ValidateRefreshReplay(); err != nil {
 				return &mcpUserError{msg: err.Error()}
 			}
 		}

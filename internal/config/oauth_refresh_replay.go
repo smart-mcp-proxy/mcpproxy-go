@@ -11,7 +11,8 @@ func (o *OAuthConfig) RefreshReplayAllowed() bool {
 }
 
 // ValidateRefreshReplay checks a complete, merged OAuth configuration. Partial
-// patches may inherit their endpoint; the write gate calls this after merging.
+// patches may inherit their endpoint, so every write gate (ValidateDetailed,
+// the MCP upstream_servers add and patch doors) calls this after merging.
 // The error deliberately excludes the endpoint value.
 func (o *OAuthConfig) ValidateRefreshReplay() error {
 	if o == nil || o.RefreshReplayEnabled == nil || !*o.RefreshReplayEnabled {
