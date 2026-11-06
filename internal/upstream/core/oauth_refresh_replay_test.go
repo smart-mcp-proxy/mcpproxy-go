@@ -43,9 +43,9 @@ func TestRefreshReplay_LostResponse(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(map[string]string{"issuer": baseURL, "authorization_endpoint": baseURL + "/authorize", "token_endpoint": baseURL + "/token"})
 					return
 				}
-				require.Equal(t, "/token", r.URL.Path)
-				require.NoError(t, r.ParseForm())
-				require.Equal(t, "rt-0", r.Form.Get("refresh_token"))
+				if !refreshReplayTokenRequest(t, w, r) {
+					return
+				}
 				require.Equal(t, "synthetic-client", r.Form.Get("client_id"))
 				mu.Lock()
 				defer mu.Unlock()
@@ -117,6 +117,21 @@ func newRefreshReplayClient(t *testing.T) (*Client, *storage.OAuthTokenRecord) {
 }
 
 func replayEnabled(v bool) *bool { return &v }
+
+// refreshReplayTokenRequest reports whether r is the fixture's own refresh:
+// POST /token carrying rt-0. Anything else is logged and answered 404, never
+// asserted on or counted. Loopback ports are reused, so a request leaked by
+// an earlier test can land on a synthetic AS (CI saw one with no
+// refresh_token, which the code under test cannot send). A replay that sent
+// another token still fails the test: it gets the 404 instead of a token.
+func refreshReplayTokenRequest(t *testing.T, w http.ResponseWriter, r *http.Request) bool {
+	if r.Method == http.MethodPost && r.URL.Path == "/token" && r.ParseForm() == nil && r.Form.Get("refresh_token") == "rt-0" {
+		return true
+	}
+	t.Logf("synthetic AS ignored an unrelated request: %s %s", r.Method, r.URL.Path)
+	http.NotFound(w, r)
+	return false
+}
 
 func TestRefreshReplay_RequiresExplicitProviderContract(t *testing.T) {
 	for _, tc := range []struct {
@@ -296,8 +311,9 @@ func TestRefreshReplay_HTTPTimeout(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]string{"issuer": base, "authorization_endpoint": base + "/authorize", "token_endpoint": base + "/token"})
 			return
 		}
-		require.NoError(t, r.ParseForm())
-		require.Equal(t, "rt-0", r.Form.Get("refresh_token"))
+		if !refreshReplayTokenRequest(t, w, r) {
+			return
+		}
 		mu.Lock()
 		requests++
 		n := requests
@@ -410,6 +426,9 @@ func TestRefreshReplay_TruncatedErrorStatusHasNoRetry(t *testing.T) {
 					if r.URL.Path == "/metadata" {
 						baseURL := "http://" + r.Host
 						_ = json.NewEncoder(w).Encode(map[string]string{"issuer": baseURL, "authorization_endpoint": baseURL + "/authorize", "token_endpoint": baseURL + "/token"})
+						return
+					}
+					if !refreshReplayTokenRequest(t, w, r) {
 						return
 					}
 					mu.Lock()
