@@ -509,6 +509,9 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			if redirectPort, ok := oauthRaw["redirect_port"].(int); ok {
 				oauthCfg.RedirectPort = redirectPort
 			}
+			if enabled, ok := oauthRaw["refresh_replay_enabled"].(bool); ok {
+				oauthCfg.RefreshReplayEnabled = &enabled
+			}
 			if pkceEnabled, ok := oauthRaw["pkce_enabled"].(bool); ok {
 				oauthCfg.PKCEEnabled = pkceEnabled
 			}

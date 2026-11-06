@@ -849,13 +849,14 @@ type ServerConfig struct {
 
 // OAuthConfig represents OAuth configuration for a server
 type OAuthConfig struct {
-	ClientID        string            `json:"client_id,omitempty" mapstructure:"client_id"`
-	ClientSecret    string            `json:"client_secret,omitempty" mapstructure:"client_secret"`
-	RedirectURI     string            `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
-	CallbackBaseURL string            `json:"callback_base_url,omitempty" mapstructure:"callback_base_url"`
-	Scopes          []string          `json:"scopes,omitempty" mapstructure:"scopes"`
-	PKCEEnabled     bool              `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
-	ExtraParams     map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"` // Additional OAuth parameters (e.g., RFC 8707 resource)
+	ClientID             string            `json:"client_id,omitempty" mapstructure:"client_id"`
+	ClientSecret         string            `json:"client_secret,omitempty" mapstructure:"client_secret"`
+	RedirectURI          string            `json:"redirect_uri,omitempty" mapstructure:"redirect_uri"`
+	CallbackBaseURL      string            `json:"callback_base_url,omitempty" mapstructure:"callback_base_url"`
+	Scopes               []string          `json:"scopes,omitempty" mapstructure:"scopes"`
+	PKCEEnabled          bool              `json:"pkce_enabled,omitempty" mapstructure:"pkce_enabled"`
+	RefreshReplayEnabled *bool             `json:"refresh_replay_enabled,omitempty" mapstructure:"refresh_replay_enabled"` // Opt in only when token_endpoint supports idempotent refresh replay for at least 30 seconds.
+	ExtraParams          map[string]string `json:"extra_params,omitempty" mapstructure:"extra_params"`                     // Additional OAuth parameters (e.g., RFC 8707 resource)
 
 	// Spec 113-b: optional per-server discovery overrides. Each is an absolute
 	// https URL (http only on a loopback host) with no query, fragment or
@@ -2448,6 +2449,7 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	errors := append(c.validateDetailedCore(), c.oauthRedirectURIErrors()...)
 	errors = append(errors, c.forwardHeadersErrors()...)
 	errors = append(errors, c.oauthEndpointOverrideErrors()...)
+	errors = append(errors, c.oauthRefreshReplayErrors()...)
 	errors = append(errors, c.tpaTrustRootErrors()...)
 	errors = append(errors, c.tpaRefreshErrors()...)
 	if _, err := ValidateProfiles(c); err != nil {
@@ -3352,7 +3354,9 @@ func OAuthConfigChanged(old, new *OAuthConfig) bool {
 		return true
 	}
 
-	// Compare all fields
+	// RefreshReplayEnabled is request policy, not credential identity. Changing
+	// it replaces the connection (ConnectionEquivalent) without clearing a grant.
+	// Compare the credential/discovery fields below.
 	if old.ClientID != new.ClientID ||
 		old.ClientSecret != new.ClientSecret ||
 		old.RedirectURI != new.RedirectURI ||

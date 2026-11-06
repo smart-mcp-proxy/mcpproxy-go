@@ -223,13 +223,14 @@ type QuarantineStats struct {
 
 // OAuthConfig represents OAuth configuration for a server
 type OAuthConfig struct {
-	AuthURL      string            `json:"auth_url"`
-	TokenURL     string            `json:"token_url"`
-	ClientID     string            `json:"client_id"`
-	Scopes       []string          `json:"scopes,omitempty"`
-	ExtraParams  map[string]string `json:"extra_params,omitempty"`
-	RedirectPort int               `json:"redirect_port,omitempty"`
-	PKCEEnabled  bool              `json:"pkce_enabled,omitempty"`
+	AuthURL              string            `json:"auth_url"`
+	TokenURL             string            `json:"token_url"`
+	ClientID             string            `json:"client_id"`
+	Scopes               []string          `json:"scopes,omitempty"`
+	ExtraParams          map[string]string `json:"extra_params,omitempty"`
+	RedirectPort         int               `json:"redirect_port,omitempty"`
+	PKCEEnabled          bool              `json:"pkce_enabled,omitempty"`
+	RefreshReplayEnabled *bool             `json:"refresh_replay_enabled,omitempty"`
 	// Spec 113-b operator overrides of OAuth discovery (https-or-loopback URLs,
 	// never credentials). Empty means "use discovery".
 	AuthorizationEndpoint string     `json:"authorization_endpoint,omitempty"`

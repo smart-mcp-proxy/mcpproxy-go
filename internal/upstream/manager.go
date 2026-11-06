@@ -235,6 +235,10 @@ func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
 
 	if cfg.OAuth != nil {
 		o := *cfg.OAuth
+		if cfg.OAuth.RefreshReplayEnabled != nil {
+			enabled := *cfg.OAuth.RefreshReplayEnabled
+			o.RefreshReplayEnabled = &enabled
+		}
 		if cfg.OAuth.Scopes != nil {
 			o.Scopes = slices.Clone(cfg.OAuth.Scopes)
 		}
