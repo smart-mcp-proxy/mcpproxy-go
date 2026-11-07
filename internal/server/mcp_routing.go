@@ -911,7 +911,7 @@ func (p *MCPProxyServer) buildCodeExecModeTools() []mcpserver.ServerTool {
 		// this mode's retrieve_tools always serializes FULL (enforced in
 		// handleRetrieveToolsWithMode) and does not expose the detail param.
 	}
-	codeExecRetrieveOpts = append(codeExecRetrieveOpts, retrieveToolsAnnotationFilterOptions()...)
+	codeExecRetrieveOpts = append(codeExecRetrieveOpts, retrieveToolsSharedOptions()...)
 	retrieveToolsTool := mcp.NewTool("retrieve_tools", codeExecRetrieveOpts...)
 	tools = append(tools, p.setProfileServerTool())
 	tools = append(tools, p.buildProfilesServerTool())    // Spec 108-h admin tool
@@ -970,7 +970,7 @@ func (p *MCPProxyServer) buildCallToolModeTools() []mcpserver.ServerTool {
 		),
 		retrieveToolsDetailOption(),
 	}
-	callToolRetrieveOpts = append(callToolRetrieveOpts, retrieveToolsAnnotationFilterOptions()...)
+	callToolRetrieveOpts = append(callToolRetrieveOpts, retrieveToolsSharedOptions()...)
 	tools = append(tools, mcpserver.ServerTool{
 		Tool:    mcp.NewTool("retrieve_tools", callToolRetrieveOpts...),
 		Handler: p.handleRetrieveToolsForMode(config.RoutingModeRetrieveTools),

@@ -1500,15 +1500,13 @@ func retrieveToolsDetailOption() mcp.ToolOption {
 	)
 }
 
-// retrieveToolsAnnotationFilterOptions returns the annotation-based safety
-// filters (Spec 035 F4) shared by every retrieve_tools registration — the
-// default server and both routing-mode builders — so the schema cannot drift
-// between surfaces. Spec 094 FR-009: the two routing builders used to declare
-// these independently and the default registration omitted them entirely, so
-// agents on the default surface could not discover filters the handler had
-// always honored. That gap is how the field report's confusion started.
-func retrieveToolsAnnotationFilterOptions() []mcp.ToolOption {
+// retrieveToolsSharedOptions declares the upstream selector and annotation
+// filters for the default server and both routing-mode builders.
+func retrieveToolsSharedOptions() []mcp.ToolOption {
 	return []mcp.ToolOption{
+		mcp.WithString("server",
+			mcp.Description("Restrict results to the exact configured upstream server name."),
+		),
 		mcp.WithBoolean("read_only_only",
 			mcp.Description("Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations."),
 		),
@@ -1563,7 +1561,7 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		),
 		retrieveToolsDetailOption(),
 	}
-	retrieveToolsOpts = append(retrieveToolsOpts, retrieveToolsAnnotationFilterOptions()...)
+	retrieveToolsOpts = append(retrieveToolsOpts, retrieveToolsSharedOptions()...)
 	retrieveToolsTool := mcp.NewTool("retrieve_tools", retrieveToolsOpts...)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
 
@@ -2218,6 +2216,15 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	}
 
 	// Get optional parameters
+	var selectedServer string
+	_, hasServer := request.GetArguments()["server"]
+	if hasServer {
+		selectedServer, err = request.RequireString("server")
+		if err != nil {
+			p.emitActivityInternalToolCall(ctx, "retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil, "")
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	}
 	limit := int(request.GetFloat("limit", float64(p.config.ToolsLimit)))
 	includeStats := request.GetBool("include_stats", false)
 	debugMode := request.GetBool("debug", false)
@@ -2263,6 +2270,9 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	args := map[string]interface{}{
 		"query": query,
 		"limit": limit,
+	}
+	if hasServer {
+		args["server"] = selectedServer
 	}
 	if includeStats {
 		args["include_stats"] = true
@@ -2368,13 +2378,20 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// Spec 057 / Profiles v2: profileScope was resolved above (token pin > URL >
 	// session) and filters independently of agent-scope (nil = allow all).
 
-	// serverDiscoverable applies the agent-scope (Spec 049 FR-007) and profile
-	// (Spec 057) filters BEFORE classification so an agent never learns a tool
-	// exists on a server it cannot access. It delegates to the shared
-	// visibility resolver's scope step (Spec 085, mcp_visibility.go) — shared
-	// by the search below, the callable-result loop, the quarantined-tool
-	// discovery pass, and describe_tool, so they never drift.
+	// A deleted upstream can still have stale index hits. Only a configured
+	// upstream in scope is eligible for explicit selection.
+	var selectedServerAvailable bool
+	if hasServer && p.serverInScope(authCtx, profileScope, selectedServer) {
+		server, lookupErr := p.storage.GetUpstreamServer(selectedServer)
+		selectedServerAvailable = lookupErr == nil && server != nil
+	}
+
+	// Use the same server selection for ranked hits and name-only locked
+	// entries. Both intersect the selector with token and profile scope.
 	serverDiscoverable := func(serverName string) bool {
+		if hasServer && (!selectedServerAvailable || serverName != selectedServer) {
+			return false
+		}
 		return p.serverInScope(authCtx, profileScope, serverName)
 	}
 
@@ -2394,14 +2411,14 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// same treatment (D3, SC-005 named exception): with no per-profile index
 	// to rely on, the shared search must filter before the cut too, or a
 	// `limit:1` request whose top hit sits outside the profile would return an
-	// empty page instead of the best authorized hit. Every OTHER administrator
-	// path (unprofiled, or profiled with a working per-profile index) keeps
-	// plain Search — byte-for-byte with the pre-105 behaviour, with one
-	// exception that applies to every path alike: a query that is a whole
+	// empty page instead of the best authorized hit. Without a selector,
+	// unprofiled administrators keep plain Search and its pre-105 behavior,
+	// apart from an exception common to all paths: a query that is a whole
 	// canonical "server:tool" id is answered by the index with that document
 	// first (index.exactQualifiedTool), where the pre-105 index returned no hit
 	// for it.
-	useScopedSearch := auth.IsScopedCaller(ctx) || (profileName != "" && sharedIndexFallback)
+	scopedOutput := hasServer || auth.IsScopedCaller(ctx)
+	useScopedSearch := scopedOutput || (profileName != "" && sharedIndexFallback)
 
 	// Spec 108 FR-011: whenever a profile is genuinely in effect (profileName
 	// != ""), search must filter by TOOL POLICY before the cut too, not only
@@ -2659,6 +2676,18 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		results = results[:window]
 	}
 
+	// A selector miss must not disclose the selected upstream through side
+	// fields. Locked and annotation-filtered matches still get their existing
+	// diagnostics because those matches are discoverable to this caller.
+	selectorMiss := hasServer && len(results) == 0 && droppedCount == 0 &&
+		(filterDiag == nil || filterDiag.OmittedTotal == 0)
+	responseServerDiscoverable := func(serverName string) bool {
+		return !selectorMiss && serverDiscoverable(serverName)
+	}
+	if selectorMiss {
+		hiddenByPolicy = 0
+	}
+
 	// Convert results to MCP tool format for LLM compatibility. Entry
 	// construction lives in buildToolEntry (Spec 085 entry-builder seam) —
 	// full mode is byte-identical to the pre-extraction inline code, guarded
@@ -2749,6 +2778,9 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// remediation map is emitted once, keyed ONLY by statuses actually present.
 	if includeDisabled && len(disabledEntries) > 0 {
 		cap := limit
+		if hasServer {
+			cap = window
+		}
 		if cap > 10 {
 			cap = 10
 		}
@@ -2800,11 +2832,11 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			// Spec 105 FR-005 G3: a scoped caller's session_risk must reflect
 			// only its own authorized servers' tool annotations — otherwise the
 			// level (and the lethal-trifecta verdict) leaks the existence and
-			// shape of a hidden server's tools. Administrators are unaffected
-			// (not a named SC-005 exception): they keep the whole-fleet view.
+			// shape of a hidden server's tools. An administrator without a
+			// selector keeps the whole-fleet view.
 			var risk SessionRisk
-			if auth.IsScopedCaller(ctx) {
-				risk = analyzeSessionRiskScoped(snapshot, serverDiscoverable)
+			if scopedOutput {
+				risk = analyzeSessionRiskScoped(snapshot, responseServerDiscoverable)
 			} else {
 				risk = analyzeSessionRisk(snapshot)
 			}
@@ -2826,10 +2858,15 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		// count — regardless of whether search itself ran against the shared
 		// index or an already-scoped per-profile one (scopedIndexedToolCount
 		// re-derives it from the shared index's server_name facet, so both
-		// paths agree). Administrators are unaffected (not an SC-005 exception).
-		totalIndexedTools := p.getIndexedToolCount()
-		if auth.IsScopedCaller(ctx) {
+		// paths agree). A selector further narrows that population.
+		var totalIndexedTools int
+		switch {
+		case selectorMiss:
+			// Leave the count at zero, as for any other selector miss.
+		case scopedOutput:
 			totalIndexedTools = p.scopedIndexedToolCount(serverDiscoverable)
+		default:
+			totalIndexedTools = p.getIndexedToolCount()
 		}
 		response["debug"] = map[string]interface{}{
 			"total_indexed_tools": totalIndexedTools,
@@ -2854,14 +2891,13 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		// still exists (mcp_direct_callability.go) — both gates are required.
 		// The sort-then-cut happens AFTER filtering (GetToolStatsFiltered), so
 		// a used-but-hidden tool can never evict an authorized one from the
-		// top-10 window. Administrators are unaffected (not an SC-005
-		// exception): GetToolStats(10) stays byte-for-byte, quarantine-blind.
+		// top-10 window. Administrators without a selector keep GetToolStats(10).
 		var stats []map[string]interface{}
 		var statsErr error
-		if auth.IsScopedCaller(ctx) {
+		if scopedOutput {
 			stats, statsErr = p.storage.GetToolStatsFiltered(func(fullToolName string) bool {
 				serverName, rawToolName, ok := splitServerTool(fullToolName)
-				if !ok {
+				if !ok || (hasServer && !responseServerDiscoverable(serverName)) {
 					return false
 				}
 				return p.usageStatEligible(authCtx, profileScope, policy, serverName, rawToolName)
