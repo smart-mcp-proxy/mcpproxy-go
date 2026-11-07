@@ -1,6 +1,6 @@
 <template>
   <div id="app" class="drawer lg:drawer-open">
-    <input id="sidebar-drawer" type="checkbox" class="drawer-toggle" />
+    <input id="sidebar-drawer" v-model="drawerOpen" type="checkbox" class="drawer-toggle" />
 
     <!-- Main content area. The left padding is bound to sidebar collapsed
          state so the content fluidly reclaims space when the sidebar shrinks
@@ -56,7 +56,7 @@
 
 <script setup lang="ts">
 import { onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { isNavigationFailure, NavigationFailureType, useRouter } from 'vue-router'
 import SidebarNav from '@/components/SidebarNav.vue'
 import TopHeader from '@/components/TopHeader.vue'
 import ViewingFilter from '@/components/ViewingFilter.vue'
@@ -73,6 +73,16 @@ const systemStore = useSystemStore()
 const serversStore = useServersStore()
 const authStore = useAuthStore()
 const router = useRouter()
+const drawerOpen = ref(false)
+
+// The checkbox controls the mobile overlay only; desktop collapse state stays
+// in the system store. Keep the destination visible after navigation, including
+// selecting the already-active link, but leave the menu open on a rejected move.
+const removeDrawerNavigationHook = router.afterEach((_to, _from, failure) => {
+  if (!failure || isNavigationFailure(failure, NavigationFailureType.duplicated)) {
+    drawerOpen.value = false
+  }
+})
 
 // Authentication modal state
 const authModal = reactive({
@@ -187,6 +197,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  removeDrawerNavigationHook()
   systemStore.disconnectEventSource()
 
   // Clean up API event listener

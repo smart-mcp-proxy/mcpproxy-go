@@ -1974,6 +1974,9 @@ func (s *Service) GetScanReport(ctx context.Context, serverName string) (*Aggreg
 	allReports = deduplicatePass2Findings(allReports)
 
 	agg := AggregateReportsWithJobStatus(primaryJob.ID, serverName, allReports, primaryJob)
+	if pass2Job != nil && pass2Job.Status == ScanJobStatusCompleted {
+		includeScanJobTimestamp(agg, pass2Job)
+	}
 
 	// Set pass completion status
 	agg.Pass1Complete = pass1Job != nil && pass1Job.Status == ScanJobStatusCompleted
@@ -2155,6 +2158,9 @@ func (s *Service) GetScanReportByJobID(ctx context.Context, jobID string) (*Aggr
 			// supply-chain scanners run in Pass 2.
 			if cj, cerr := s.storage.GetScanJob(companionID); cerr == nil {
 				companionPass2 = cj
+				if cj.Status == ScanJobStatusCompleted {
+					includeScanJobTimestamp(agg, cj)
+				}
 			}
 		}
 
