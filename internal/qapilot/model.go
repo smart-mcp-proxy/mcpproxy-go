@@ -178,13 +178,16 @@ func (s *Server) HasBaseline() bool {
 //   - A new tool is approved when the gate is off (auto mode or global
 //     quarantine disabled); when this pass is the trusted server's first
 //     baseline (gate on, server not quarantined, no baseline yet — spec 117
-//     FR-020, MCP-2931); or in scan mode when the definition scans clean
-//     (spec 086 FR-013). Otherwise it is pending (spec 041 US1).
+//     FR-020, MCP-2931) and the definition scans clean (R2-1: the baseline
+//     is scanned in every trust mode, never trusted blind); or in scan mode
+//     when the definition scans clean (spec 086 FR-013). Otherwise it is
+//     pending (spec 041 US1).
 //   - A pending tool is promoted by that same first-baseline pass only when
-//     its definition is unchanged since it was recorded (MCP-2931 #4), or
-//     when the gate is off. Otherwise it stays pending with the live
-//     definition recorded. Scan mode never promotes an existing pending
-//     record (the scan gate applies to the pass that files the record).
+//     its definition is unchanged since it was recorded (MCP-2931 #4) and
+//     scans clean (R2-1), or when the gate is off. Otherwise it stays
+//     pending with the live definition recorded. Scan mode never promotes an
+//     existing pending record (the scan gate applies to the pass that files
+//     the record).
 //   - An approved tool whose definition changed becomes changed (the
 //     rug-pull guard, spec 041 FR-001) unless the gate is off, in which case
 //     the new definition is approved (trust auto: auto_approve_changes), or
@@ -210,7 +213,7 @@ func (s *Server) Discover(inventory map[string]Contract) {
 			switch {
 			case !gate:
 				t.approve("auto")
-			case baselinePass:
+			case baselinePass && c.Verdict == VerdictClean:
 				t.approve("baseline")
 			case s.Trust == TrustScan && c.Verdict == VerdictClean:
 				t.approve("scan")
@@ -226,7 +229,7 @@ func (s *Server) Discover(inventory map[string]Contract) {
 			switch {
 			case !gate:
 				t.approve("auto")
-			case baselinePass && unchanged:
+			case baselinePass && unchanged && c.Verdict == VerdictClean:
 				t.approve("baseline")
 			}
 		case StatusApproved:
