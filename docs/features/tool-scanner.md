@@ -128,7 +128,12 @@ all servers' tools:
    …) legitimately collide across servers — `retrieve_tools`' BM25 ranking
    disambiguates them. The near-duplicate description (cosmetic edits — case,
    punctuation, whitespace — do not launder a copy) is the impersonation
-   evidence.
+   evidence. A **byte-identical definition** — same description *and* same
+   input/output schemas — on another server is not a clone either: that is one
+   MCP server installed twice (two filesystem roots, two GitHub orgs) and
+   carries no rewritten text, so neither this shape nor the name squat fires on
+   it, and a trusted server's first-seen toolset is not held for it. Any edit at
+   all — one word, one schema property — is judged as a clone as before.
    - **Name squat (soft, review only; round-2 red team R2-5)** — a
      *distinctive* name another server also exposes, with a genuinely
      *different* description. This is the shape a clone check cannot see
