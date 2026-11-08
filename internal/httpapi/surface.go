@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"net/http"
 	"strings"
 
@@ -50,4 +51,61 @@ func actorFromRequest(r *http.Request) internalRuntime.Actor {
 		a.Kind = string(auth.CredentialKindSocket)
 	}
 	return a
+}
+
+// actorContextMiddleware stamps the request's actor (actorFromRequest) into
+// the context once the API-key / token middleware has run, so a runtime
+// writer the handler calls can name the caller on its activity row without
+// each handler threading it (issue #1698; runtime.RequestActor).
+func (s *Server) actorContextMiddleware() func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := internalRuntime.ContextWithActor(r.Context(), actorFromRequest(r))
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
+	}
+}
+
+// quarantineContextController is the controller's optional capability to take
+// the request context on a quarantine toggle (issue #1698). A controller
+// without it still works; its rows just name no caller.
+type quarantineContextController interface {
+	QuarantineServerCtx(ctx context.Context, serverName string, quarantined bool) error
+	QuarantineServerAtCtx(ctx context.Context, serverName string, quarantined bool, expectedIncarnation int64) error
+}
+
+func (s *Server) quarantineServer(ctx context.Context, serverName string, quarantined bool) error {
+	if c, ok := s.controller.(quarantineContextController); ok {
+		return c.QuarantineServerCtx(ctx, serverName, quarantined)
+	}
+	return s.controller.QuarantineServer(serverName, quarantined)
+}
+
+func (s *Server) quarantineServerAt(ctx context.Context, serverName string, quarantined bool, expectedIncarnation int64) error {
+	if c, ok := s.controller.(quarantineContextController); ok {
+		return c.QuarantineServerAtCtx(ctx, serverName, quarantined, expectedIncarnation)
+	}
+	return s.incarnationController().QuarantineServerAt(serverName, quarantined, expectedIncarnation)
+}
+
+// lifecycleContextController is the controller's optional capability to take
+// the request context on the legacy enable/disable and restart fallbacks
+// (issue #1698, review round 2), used when no management service is wired.
+type lifecycleContextController interface {
+	EnableServerCtx(ctx context.Context, serverName string, enabled bool) error
+	RestartServerCtx(ctx context.Context, serverName string) error
+}
+
+func (s *Server) enableServer(ctx context.Context, serverName string, enabled bool) error {
+	if c, ok := s.controller.(lifecycleContextController); ok {
+		return c.EnableServerCtx(ctx, serverName, enabled)
+	}
+	return s.controller.EnableServer(serverName, enabled)
+}
+
+func (s *Server) restartServer(ctx context.Context, serverName string) error {
+	if c, ok := s.controller.(lifecycleContextController); ok {
+		return c.RestartServerCtx(ctx, serverName)
+	}
+	return s.controller.RestartServer(serverName)
 }

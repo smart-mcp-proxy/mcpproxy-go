@@ -436,25 +436,13 @@ func (s *Server) handleRegenerateToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Generate new token
-	newRawToken, err := auth.GenerateToken()
+	// Issue #1698: the rotation goes through the credentials service so it
+	// writes the `rotate` profile_change row naming the caller; the store's
+	// refusals keep their sentinels and so their status codes below.
+	res, err := s.credentials().Regenerate(r.Context(), actorFromRequest(r), name)
 	if err != nil {
-		s.logger.Errorf("Failed to generate agent token: %v", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to generate token")
-		return
-	}
-
-	// Get HMAC key
-	hmacKey, err := auth.GetOrCreateHMACKey(s.dataDir)
-	if err != nil {
-		s.logger.Errorf("Failed to get HMAC key: %v", err)
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to initialize token security")
-		return
-	}
-
-	_, err = s.tokenStore.RegenerateAgentToken(name, newRawToken, hmacKey)
-	if err != nil {
-		if strings.Contains(err.Error(), "not found") {
+		var ce *internalRuntime.CredentialError
+		if (errors.As(err, &ce) && ce.ErrCode == profile.CredentialErrorCodeIdentityNotFound) || strings.Contains(err.Error(), "not found") {
 			s.writeError(w, r, http.StatusNotFound, fmt.Sprintf("Token %q not found", name))
 			return
 		}
@@ -483,7 +471,7 @@ func (s *Server) handleRegenerateToken(w http.ResponseWriter, r *http.Request) {
 
 	resp := regenerateTokenResponse{
 		Name:  name,
-		Token: newRawToken,
+		Token: res.Secret,
 	}
 
 	s.writeSuccess(w, resp)

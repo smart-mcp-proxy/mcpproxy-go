@@ -823,15 +823,19 @@ func (s *ActivityService) handleQuarantineChange(evt Event) {
 		status = "quarantined"
 	}
 
+	metadata := map[string]interface{}{
+		"quarantined": quarantined,
+		"reason":      reason,
+	}
+	copyActorMetadata(evt.Payload, metadata)
+
 	record := &storage.ActivityRecord{
 		Type:       storage.ActivityTypeQuarantineChange,
 		ServerName: serverName,
 		Status:     status,
-		Metadata: map[string]interface{}{
-			"quarantined": quarantined,
-			"reason":      reason,
-		},
-		Timestamp: evt.Timestamp,
+		Metadata:   metadata,
+		Timestamp:  evt.Timestamp,
+		RequestID:  getStringPayload(evt.Payload, "request_id"),
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
@@ -1171,6 +1175,7 @@ func (s *ActivityService) handleConfigChange(evt Event) {
 	if purged := getMapPayload(evt.Payload, "purged"); purged != nil {
 		metadata["purged"] = purged
 	}
+	copyActorMetadata(evt.Payload, metadata)
 
 	record := &storage.ActivityRecord{
 		Type:       storage.ActivityTypeConfigChange,
@@ -1179,6 +1184,7 @@ func (s *ActivityService) handleConfigChange(evt Event) {
 		Status:     "success",
 		Metadata:   metadata,
 		Timestamp:  evt.Timestamp,
+		RequestID:  getStringPayload(evt.Payload, "request_id"),
 	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
@@ -1191,6 +1197,19 @@ func (s *ActivityService) handleConfigChange(evt Event) {
 			zap.String("id", record.ID),
 			zap.String("action", action),
 			zap.String("affected_entity", affectedEntity))
+	}
+}
+
+// copyActorMetadata copies the caller identity an administrative event carries
+// (issue #1698; stamped by stampActor) into the record's metadata under the
+// profile_change keys. A payload without an actor leaves the metadata as it
+// was, so rows written before this change and rows for changes with no caller
+// (file reload, admission gate) keep their shape.
+func copyActorMetadata(payload, metadata map[string]interface{}) {
+	for _, key := range []string{"actor_kind", "actor_name", "surface"} {
+		if v := getStringPayload(payload, key); v != "" {
+			metadata[key] = v
+		}
 	}
 }
 

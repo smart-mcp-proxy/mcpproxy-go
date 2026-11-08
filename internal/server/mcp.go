@@ -4550,7 +4550,7 @@ func (p *MCPProxyServer) handleAddServerFromRegistry(ctx context.Context, reques
 		return mcp.NewToolResultError("Server management is not available"), nil
 	}
 
-	cfg, rerr, err := p.mainServer.AddServerFromRegistryRef(ctx, registryID, serverID, name, env, &enabledVal)
+	cfg, rerr, err := p.mainServer.AddServerFromRegistryRef(mcpActorContext(ctx), registryID, serverID, name, env, &enabledVal)
 	if err != nil {
 		// Structured cross-surface error: same Code as REST/CLI (CN-001), only
 		// the envelope differs (JSON text + isError instead of an HTTP status).
@@ -5487,7 +5487,7 @@ func (p *MCPProxyServer) handleEnableUpstream(ctx context.Context, request mcp.C
 	// Try to use management service if available
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
-			err := mgmtSvc.EnableServer(ctx, serverName, enabled)
+			err := mgmtSvc.EnableServer(mcpActorContext(ctx), serverName, enabled)
 
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to %s server '%s': %v",
@@ -5528,7 +5528,7 @@ func (p *MCPProxyServer) handleRestartUpstream(ctx context.Context, request mcp.
 	// Try to use management service if available
 	if p.mainServer != nil && p.mainServer.runtime != nil {
 		if mgmtSvc := p.mainServer.runtime.GetManagementService(); mgmtSvc != nil {
-			err := mgmtSvc.RestartServer(ctx, serverName)
+			err := mgmtSvc.RestartServer(mcpActorContext(ctx), serverName)
 
 			if err != nil {
 				return mcp.NewToolResultError(fmt.Sprintf("Failed to restart server '%s': %v", serverName, err)), nil
@@ -6053,7 +6053,7 @@ func rawMCPReviewSchema(value string) interface{} {
 	return schema
 }
 
-func (p *MCPProxyServer) handleQuarantineUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleQuarantineUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	serverName, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
@@ -6067,7 +6067,7 @@ func (p *MCPProxyServer) handleQuarantineUpstream(_ context.Context, request mcp
 	if w == nil {
 		return mcp.NewToolResultError(errNoUpstreamWriter.Error()), nil
 	}
-	if err := w.quarantineServer(serverName); err != nil {
+	if err := w.quarantineServer(mcpActorContext(ctx), serverName); err != nil {
 		if errors.Is(err, errUpstreamNotFound) {
 			return mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", serverName)), nil
 		}
@@ -6367,7 +6367,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		if command != "" {
 			newValues["command"] = command
 		}
-		p.mainServer.runtime.EmitActivityConfigChange("server_added", name, "mcp", nil, nil, redactActivityConfigValues(newValues))
+		p.mainServer.runtime.EmitActivityConfigChangeCtx(mcpActorContext(ctx), "server_added", name, nil, nil, redactActivityConfigValues(newValues))
 	}
 
 	// Wait briefly for supervisor to reconcile and connect (if enabled)
@@ -6432,7 +6432,7 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	return mcp.NewToolResultText(string(jsonResult)), nil
 }
 
-func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (p *MCPProxyServer) handleRemoveUpstream(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	name, err := request.RequireString("name")
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
@@ -6459,7 +6459,7 @@ func (p *MCPProxyServer) handleRemoveUpstream(_ context.Context, request mcp.Cal
 
 		// Spec 024: Emit config change activity for server removal. Spec 116
 		// PR2: the record carries what the removal purged ({bucket: count}).
-		p.mainServer.runtime.EmitActivityServerRemoved(name, "mcp", purged.Deleted)
+		p.mainServer.runtime.EmitActivityServerRemovedCtx(mcpActorContext(ctx), name, purged.Deleted)
 	}
 
 	jsonResult, err := json.Marshal(map[string]interface{}{

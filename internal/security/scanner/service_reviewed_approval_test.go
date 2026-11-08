@@ -118,3 +118,30 @@ func TestApproveServerReviewed_WithoutCapabilityFailsClosedWhenBound(t *testing.
 	require.NoError(t, svc.ApproveServerReviewed(context.Background(), "qs-server", true, "api", nil, nil))
 	assert.Contains(t, steps, "unquarantine")
 }
+
+// reviewedApproverCtx is a reviewedApprover that also takes the request
+// context on finish (issue #1698): the scanner must prefer it so the
+// quarantine_change row names the approver.
+type reviewedApproverCtx struct {
+	reviewedApprover
+	finishCtx context.Context
+}
+
+func (u *reviewedApproverCtx) FinishServerApprovalCtx(ctx context.Context, _ string) error {
+	u.steps = append(u.steps, "finish-ctx")
+	u.finishCtx = ctx
+	return nil
+}
+
+func TestApproveServerReviewed_FinishCarriesRequestContext(t *testing.T) {
+	svc, _, _ := newTestService(t)
+	u := &reviewedApproverCtx{}
+	svc.SetServerUnquarantiner(u)
+
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "operator")
+	require.NoError(t, svc.ApproveServerReviewed(ctx, "qs-server", true, "api", nil, nil))
+	assert.Equal(t, []string{"commit-section", "finish-ctx"}, u.steps, "the ctx-aware finish is preferred over the bare one")
+	require.NotNil(t, u.finishCtx)
+	assert.Equal(t, "operator", u.finishCtx.Value(key{}))
+}

@@ -87,17 +87,43 @@ Configuration changes are logged for audit trails:
   "server_name": "github-server",
   "status": "success",
   "timestamp": "2025-01-15T10:10:00Z",
+  "request_id": "req_01JFXYZ",
   "metadata": {
     "action": "server_added",
     "affected_entity": "github-server",
-    "source": "mcp",
+    "source": "api",
+    "actor_kind": "api_key",
+    "surface": "web",
     "new_values": {
-      "name": "github-server",
+      "protocol": "http",
+      "enabled": true,
+      "quarantined": true,
       "url": "https://api.github.com/mcp"
     }
   }
 }
 ```
+
+One row is written per server change on every door — the REST API and the CLI
+(which calls it), the Web UI and macOS app, and the `upstream_servers` MCP tool:
+`server_added`, `server_updated` (with `changed_fields` and the before/after
+values of those fields only), `server_removed` (with what the removal purged,
+see `purged`), `server_enabled` / `server_disabled`. Credentials in `url`,
+`headers` and `env` values are redacted the same way on every row.
+
+**Who changed it.** A row written for an authenticated request carries the
+caller under the same keys a `profile_change` row uses: `actor_kind` (`api_key`,
+`socket` for the tray / CLI socket bypass, `agent_token`, `bearer_jwt`,
+`cookie`, `anonymous`), `actor_name` (the agent token name or user email, when
+there is one) and `surface` (`web`, `macos`, `cli`, `mcp`, `api`); `request_id`
+joins the row to the HTTP request (`X-Request-Id`) or MCP call that made it.
+`quarantine_change` rows carry the same three keys and `request_id` when an
+operator or agent quarantined or approved the server. A change with no caller
+behind it — a config file edited on disk and hot-reloaded, the admission gate
+quarantining a server at load — carries none of them, so an absent actor means
+"no request", never an unknown one. Filter the administrative rows with
+`type=config_change,quarantine_change,profile_change` and read the actor keys
+from `metadata`.
 
 ### Tool Call Records
 

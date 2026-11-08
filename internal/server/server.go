@@ -2249,7 +2249,8 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 
 	// Create-only: refuses an existing name (runtime config or storage) and
 	// commits it atomically. A failed add touches nothing.
-	if err := s.createServer(serverConfig); err != nil {
+	committed, err := s.createServerCommitted(serverConfig)
+	if err != nil {
 		return err
 	}
 
@@ -2257,6 +2258,13 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 	s.OnUpstreamServerChange()
 
 	s.grantNewServerInspectionExemption(serverConfig)
+
+	// Issue #1698: the REST door records the add as the MCP door does, naming
+	// the caller the request context carries. The row describes the entry as
+	// this commit published it (the admission gate may have quarantined it),
+	// with the same redaction as the MCP row: `url` routinely carries a
+	// credential in its query string.
+	s.runtime.EmitActivityConfigChangeCtx(ctx, "server_added", serverConfig.Name, nil, nil, redactActivityConfigValues(serverAddedValues(committed)))
 
 	s.logger.Info("Server added successfully",
 		zap.String("name", serverConfig.Name))
@@ -2413,7 +2421,12 @@ func (s *Server) UpdateServer(ctx context.Context, serverName string, updates *c
 func (s *Server) PatchServer(ctx context.Context, serverName string, resolve func(cur *config.ServerConfig) (*config.ServerConfig, error)) error {
 	s.logger.Info("Updating upstream server", zap.String("name", serverName))
 
-	_, err := s.runtime.Commit("update_server", func(tx *runtime.CommitTx) error {
+	// The entry before this update, for the config_change row (issue #1698):
+	// captured inside the commit, compared after it against the PUBLISHED
+	// entry, so a quarantine the admission gate applied in the same commit is
+	// part of the recorded delta.
+	var before, applied *config.ServerConfig
+	res, err := s.runtime.Commit("update_server", func(tx *runtime.CommitTx) error {
 		return tx.UpdateServer(serverName, func(cur *config.ServerConfig) error {
 			updates, err := resolve(config.CopyServerConfig(cur))
 			if err != nil {
@@ -2422,6 +2435,7 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 			if updates == nil {
 				return nil
 			}
+			before = config.CopyServerConfig(cur)
 			applyServerUpdates(cur, updates)
 			// Spec 116 review R2.1: the concurrency overrides are validated
 			// against the LIVE global defaults before anything is persisted,
@@ -2429,6 +2443,7 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 			if errs := tx.Config().ValidateServerConcurrency(cur); len(errs) > 0 {
 				return &config.InvalidServerUpdateError{Server: serverName, Errors: errs}
 			}
+			applied = config.CopyServerConfig(cur)
 			return nil
 		})
 	})
@@ -2441,6 +2456,22 @@ func (s *Server) PatchServer(ctx context.Context, serverName string, resolve fun
 
 	// Notify about change
 	s.OnUpstreamServerChange()
+
+	var changedFields []string
+	var previousValues, newValues map[string]interface{}
+	if before != nil {
+		after := applied
+		if res != nil && res.Snapshot != nil {
+			if live := res.Snapshot.GetServer(serverName); live != nil {
+				after = live
+			}
+		}
+		changedFields, previousValues, newValues = serverConfigDelta(before, after)
+	}
+	if len(changedFields) > 0 {
+		s.runtime.EmitActivityConfigChangeCtx(ctx, "server_updated", serverName, changedFields,
+			redactActivityConfigValues(previousValues), redactActivityConfigValues(newValues))
+	}
 
 	s.logger.Info("Server updated successfully", zap.String("name", serverName))
 
@@ -2470,6 +2501,10 @@ func (s *Server) RemoveServer(ctx context.Context, serverName string) error {
 	// Notify about upstream server change
 	s.OnUpstreamServerChange()
 
+	// Issue #1698: the REST door records the removal (and what it purged, Spec
+	// 116 PR2) as the MCP door does, naming the caller.
+	s.runtime.EmitActivityServerRemovedCtx(ctx, serverName, purged.Deleted)
+
 	s.logger.Info("Server removed successfully",
 		zap.String("name", serverName),
 		zap.Int("purged_records", purged.Total()))
@@ -2486,6 +2521,12 @@ func (s *Server) EnableServer(serverName string, enabled bool) error {
 // RestartServer restarts an upstream server
 func (s *Server) RestartServer(serverName string) error {
 	return s.runtime.RestartServer(serverName)
+}
+
+// RestartServerCtx is RestartServer carrying the request context (issue
+// #1698; management.RuntimeOperations).
+func (s *Server) RestartServerCtx(ctx context.Context, serverName string) error {
+	return s.runtime.RestartServerCtx(ctx, serverName)
 }
 
 // DiscoverServerTools triggers manual tool discovery for a specific server.
@@ -2508,6 +2549,23 @@ func (s *Server) ForceReconnectAllServers(reason string) error {
 // QuarantineServer quarantines/unquarantines a server
 func (s *Server) QuarantineServer(serverName string, quarantined bool) error {
 	return s.runtime.QuarantineServer(serverName, quarantined)
+}
+
+// QuarantineServerCtx is QuarantineServer naming the caller of ctx on the
+// quarantine_change row (issue #1698; the REST door's optional capability).
+func (s *Server) QuarantineServerCtx(ctx context.Context, serverName string, quarantined bool) error {
+	return s.runtime.QuarantineServerCtx(ctx, serverName, quarantined)
+}
+
+// QuarantineServerAtCtx is QuarantineServerAt naming the caller of ctx.
+func (s *Server) QuarantineServerAtCtx(ctx context.Context, serverName string, quarantined bool, expectedIncarnation int64) error {
+	return s.runtime.QuarantineServerAtCtx(ctx, serverName, quarantined, expectedIncarnation)
+}
+
+// EnableServerCtx is EnableServer naming the caller of ctx (issue #1698;
+// management.RuntimeOperations).
+func (s *Server) EnableServerCtx(ctx context.Context, serverName string, enabled bool) error {
+	return s.runtime.EnableServerCtx(ctx, serverName, enabled)
 }
 
 // getServerToolCount returns the number of tools for a specific server
@@ -4913,10 +4971,16 @@ func (a *serverUnquarantinerAdapter) CommitServerApproval(serverName string, blo
 // CommitServerApproval (Spec 117 PR-2): activity record and upstream/index
 // refresh, with no promotion of tools filed after the commit.
 func (a *serverUnquarantinerAdapter) FinishServerApproval(serverName string) error {
+	return a.FinishServerApprovalCtx(context.Background(), serverName)
+}
+
+// FinishServerApprovalCtx is FinishServerApproval naming the approver the
+// request context carries (issue #1698; scanner's optional capability).
+func (a *serverUnquarantinerAdapter) FinishServerApprovalCtx(ctx context.Context, serverName string) error {
 	if a.server == nil || a.server.runtime == nil {
 		return fmt.Errorf("server unavailable")
 	}
-	return a.server.runtime.FinishServerApproval(serverName)
+	return a.server.runtime.FinishServerApprovalCtx(ctx, serverName)
 }
 
 // CommitServerApprovalAt is CommitServerApproval bound to the reviewed server
@@ -5381,7 +5445,7 @@ func (p *configServerInfoProvider) EnsureConnected(ctx context.Context, serverNa
 		}
 	}
 
-	return p.server.runtime.RestartServer(serverName)
+	return p.server.runtime.RestartServerCtx(ctx, serverName)
 }
 
 // AwaitingOAuthLogin implements the scanner's optional oauthLoginAwareProvider

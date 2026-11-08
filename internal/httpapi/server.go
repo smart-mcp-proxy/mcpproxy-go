@@ -1048,6 +1048,9 @@ func (s *Server) setupRoutes() {
 		// forwarded IP believed only from a trusted proxy (live list).
 		r.Use(TagRequestMeta(reqcontext.MountAPI, s.trustedProxiesProvider()))
 		r.Use(s.apiKeyAuthMiddleware())
+		// Issue #1698: the authenticated caller rides in the context so the
+		// runtime names them on config_change / quarantine_change rows.
+		r.Use(s.actorContextMiddleware())
 		// Spec 042: Tier 2 telemetry middlewares. Both fetch the registry via
 		// a closure so the registry can be installed after route setup.
 		r.Use(SurfaceClassifierMiddleware(func() *telemetry.CounterRegistry { return s.telemetryRegistry }))
@@ -3311,7 +3314,7 @@ func (s *Server) handleEnableServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback to legacy async path
-	async, err := s.toggleServerAsync(serverID, true)
+	async, err := s.toggleServerAsync(r.Context(), serverID, true)
 	if err != nil {
 		s.logger.Errorw("Failed to enable server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to enable server: %v", err))
@@ -3376,7 +3379,7 @@ func (s *Server) handleDisableServer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fallback to legacy async path
-	async, err := s.toggleServerAsync(serverID, false)
+	async, err := s.toggleServerAsync(r.Context(), serverID, false)
 	if err != nil {
 		s.logger.Errorw("Failed to disable server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to disable server: %v", err))
@@ -3589,8 +3592,9 @@ func (s *Server) handleRestartServer(w http.ResponseWriter, r *http.Request) {
 	// Fallback to legacy path
 	// Use the new synchronous RestartServer method
 	done := make(chan error, 1)
+	restartCtx := context.WithoutCancel(r.Context())
 	go func() {
-		done <- s.controller.RestartServer(serverID)
+		done <- s.restartServer(restartCtx, serverID)
 	}()
 
 	select {
@@ -3741,10 +3745,13 @@ func (s *Server) handleRefreshServer(w http.ResponseWriter, r *http.Request) {
 	s.writeSuccess(w, response)
 }
 
-func (s *Server) toggleServerAsync(serverID string, enabled bool) (bool, error) {
+func (s *Server) toggleServerAsync(ctx context.Context, serverID string, enabled bool) (bool, error) {
 	errCh := make(chan error, 1)
+	// The toggle may outlive the request (the handler answers 202 on a slow
+	// one), so the caller's identity is kept and the cancellation dropped.
+	toggleCtx := context.WithoutCancel(ctx)
 	go func() {
-		errCh <- s.controller.EnableServer(serverID, enabled)
+		errCh <- s.enableServer(toggleCtx, serverID, enabled)
 	}()
 
 	select {
@@ -3938,7 +3945,7 @@ func (s *Server) handleQuarantineServer(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if err := s.controller.QuarantineServer(serverID, true); err != nil {
+	if err := s.quarantineServer(r.Context(), serverID, true); err != nil {
 		s.logger.Errorw("Failed to quarantine server", "server", serverID, "error", err)
 		s.writeError(w, r, http.StatusInternalServerError, fmt.Sprintf("Failed to quarantine server: %v", err))
 		return
@@ -3983,10 +3990,10 @@ func (s *Server) handleUnquarantineServer(w http.ResponseWriter, r *http.Request
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
-	if ic := s.incarnationController(); ic != nil && expected > 0 {
-		err = ic.QuarantineServerAt(serverID, false, expected)
+	if expected > 0 && s.incarnationController() != nil {
+		err = s.quarantineServerAt(r.Context(), serverID, false, expected)
 	} else {
-		err = s.controller.QuarantineServer(serverID, false)
+		err = s.quarantineServer(r.Context(), serverID, false)
 	}
 	if err != nil {
 		s.logger.Errorw("Failed to unquarantine server", "server", serverID, "error", err)

@@ -68,23 +68,38 @@ type ServerExistsError = runtime.ServerExistsError
 // before this returns. configCommitMu gives the exclusion the old createMu
 // gave. On any error nothing has been written.
 func (s *Server) createServer(sc *config.ServerConfig) error {
+	_, err := s.createServerCommitted(sc)
+	return err
+}
+
+// createServerCommitted is createServer returning the entry AS COMMITTED,
+// read from the create commit's own snapshot (issue #1698, review round 2):
+// the admission gate may have quarantined it, and a later commit must not
+// leak into what this add is recorded as. It falls back to sc only when the
+// commit published no snapshot naming the server.
+func (s *Server) createServerCommitted(sc *config.ServerConfig) (*config.ServerConfig, error) {
 	if h := s.createAfterConfigRead; h != nil {
 		h(sc.Name)
 	}
-	_, err := s.runtime.Commit("create_server", func(tx *runtime.CommitTx) error {
+	res, err := s.runtime.Commit("create_server", func(tx *runtime.CommitTx) error {
 		return tx.CreateServer(sc)
 	})
 	if err == nil {
-		return nil
+		if res != nil && res.Snapshot != nil {
+			if live := res.Snapshot.GetServer(sc.Name); live != nil {
+				return live, nil
+			}
+		}
+		return sc, nil
 	}
 	var exists *ServerExistsError
 	if errors.As(err, &exists) {
-		return exists
+		return nil, exists
 	}
 	if errors.Is(err, storage.ErrUpstreamExists) {
-		return &ServerExistsError{Name: sc.Name}
+		return nil, &ServerExistsError{Name: sc.Name}
 	}
-	return fmt.Errorf("failed to save server: %w", err)
+	return nil, fmt.Errorf("failed to save server: %w", err)
 }
 
 // configWithoutServer returns a NEW *config.Config that omits the named server,
