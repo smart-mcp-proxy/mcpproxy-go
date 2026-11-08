@@ -1332,6 +1332,17 @@ func (p *MCPProxyServer) initRoutingModeServers() {
 		directOpts...,
 	)
 
+	// Single-server surfaces (/mcp/s/<server>) run the SAME discovery filter
+	// chain as the direct server, in the same order with the stamp strip last,
+	// so they can never authorize more than /mcp/all would. They carry no
+	// static instructions: the caller-instructions hook substitutes the
+	// upstream server's own (instructionsForCaller).
+	p.singleServerOpts = append(append([]mcpserver.ServerOption{}, opts...),
+		mcpserver.WithToolFilter(p.filterDirectModeToolsForAuth),
+		mcpserver.WithToolFilter(p.filterDirectToolsForAgentCallability),
+		mcpserver.WithToolFilter(stripDirectToolStampFilter),
+	)
+
 	// The code-execution and call-tool servers carry the same initialize
 	// instructions as p.server. /mcp is served through GetMCPServerForMode,
 	// which returns callToolServer (retrieve_tools mode) or codeExecServer —
@@ -1524,6 +1535,7 @@ func (p *MCPProxyServer) refreshDirectModeToolsLocked() {
 	p.publishDirectCatalog(cat)
 	p.directSurfaceToolsFP = toolsFP
 	p.directSurfaceRoutingFP = routingFP
+	p.refreshSingleServerSurfacesLocked(cat)
 
 	p.logger.Info("refreshed direct mode tools",
 		zap.Int("tool_count", len(directTools)),

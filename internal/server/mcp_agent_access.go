@@ -324,6 +324,12 @@ func (p *MCPProxyServer) instructionsForCaller(ctx context.Context, srv *mcpserv
 	if srv == nil {
 		return static
 	}
+	// A single-server surface (/mcp/s/<server>) stands in for the upstream
+	// server itself, so it answers with that server's own instructions and
+	// nothing of mcpproxy's.
+	if name, ok := p.singleServerNameFor(srv); ok {
+		return p.upstreamInstructions(name)
+	}
 	access := p.callerAccessFor(ctx)
 	advertise := p.advertiseUpstreamServers()
 

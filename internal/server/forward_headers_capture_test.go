@@ -135,7 +135,7 @@ func TestAllStreamableMountsUseSharedCaptureOptions(t *testing.T) {
 		assert.True(t, found, "NewStreamableHTTPServer at %s must use clientFacingStreamableOptions", fset.Position(call.Pos()))
 		return true
 	})
-	assert.Equal(t, 5, mounts, "/mcp, /mcp/all, /mcp/code, /mcp/call and /mcp/p/<slug>")
+	assert.Equal(t, 6, mounts, "/mcp, /mcp/all, /mcp/code, /mcp/call, /mcp/p/<slug> and /mcp/s/<server>")
 
 	src, err := os.ReadFile("server.go")
 	require.NoError(t, err)

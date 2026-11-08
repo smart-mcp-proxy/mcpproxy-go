@@ -260,6 +260,15 @@ type MCPProxyServer struct {
 
 	directCatalogGeneration atomic.Uint64
 
+	// Single-server surfaces (/mcp/s/<server>, mcp_single_server.go): one MCP
+	// server per upstream that lists only that upstream's tools, under their
+	// own names. They are projections of the published direct catalog and are
+	// re-registered under directRefreshMu, after the direct surface. The lock
+	// order is directRefreshMu, then singleServersMu.
+	singleServerOpts []mcpserver.ServerOption
+	singleServersMu  sync.Mutex
+	singleServers    map[string]*singleServerSurface
+
 	// directRefreshMu serializes whole rebuilds so SetTools and the matching
 	// publishDirectCatalog cannot interleave with another rebuild's pair.
 	directRefreshMu sync.Mutex
