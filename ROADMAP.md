@@ -172,16 +172,14 @@ graph LR
   release_qa_gate_matrix --> release_qa_gate_consistency
 
   classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
-  classDef in_review fill:#9a6700,stroke:#5c3d00,color:#ffffff;
-  class release_qa_gate_matrix,release_qa_gate_playwright,release_qa_gate_consistency done;
-  class release_qa_gate_macos in_review;
+  class release_qa_gate_matrix,release_qa_gate_playwright,release_qa_gate_macos,release_qa_gate_consistency done;
 ```
 
 | Task | Status | Refs |
 | --- | --- | --- |
 | T1: tag-blocking release-gate workflow: server-type matrix (stdio/http/sse/docker/oauth) + invariants (activity-log/request-id, token+telemetry counters, quarantine flow, reconnect, upgrade-in-place), publish jobs gated on the verdict, scan-eval unconditional on tags | 🟢 Done | #819 |
 | T2: wire the Playwright Web UI sweep into the gate (currently manual-trigger only) | 🟢 Done | #1030 |
-| T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app) | 🟡 In review | #1669 |
+| T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app) | 🟢 Done | #1669 |
 | T4: surface-state consistency check (tray/Web UI/CLI agree with core on server states) | 🟢 Done | #1655 |
 
 </details>
@@ -356,6 +354,36 @@ graph LR
 > STABLE GATE CLEARED 2026-09-02: mark3labs/mcp-go v1.0.0 (stable) released; go.mod still pins v0.57.0. Raised P3->P1 on the 2026-09-02 issue-prioritization pass — PLAN LANDED 2026-09-03 (research.md, plan.md, data-model.md, contracts/, quickstart.md) from a verified probe of mcp-go v1.0.0 STABLE. Production code compiles unchanged on both editions (only test symbol NewTestStreamableHTTPServer moved to server/servertest, 32 sites); the FULL internal/server suite under v1.0.0 fails on exactly the 2 known profile tests and nothing else. The bump ALONE flips the UPSTREAM-facing default to 2026-07-28 (connection_lifecycle.go:19 uses LATEST_PROTOCOL_VERSION), so the plan pins BOTH directions in the bump PR. Spec-057 conflict DECIDED: Option A (URL path = request-carried identity) plus 2 mandatory grafts (era-gate resolver tier 3, because stdio SessionID is the constant "stdio"; list-only resolver, which also fixes a PRE-EXISTING FR-012 violation on prompts/list). MRTR FR-015/016 cannot be met through the v1.0.0 public client API (CallTool hard-wires the round-trip loop; single-shot entries unexported) -> plan proposes detect-and-frame + a spec amendment, NEEDS MAINTAINER RATIFICATION before implementation. FR-018/SC-005 vacuous (no resource proxying). New security item R1: mcp-go inflightKey is ":<id>" for every modern request, so one client can cancel another's call; masked by the FR-028 pin. Spec-032 hash drift measured: real mechanism, 0 of 1096 real tools affected, fix is a NormalizeJSON ref canonicalisation + guard test. Next step is speckit.tasks after ratification (tracker #532). Earlier: UNBLOCKED 2026-08-12: the mcp-go gate cleared — v1.0.0-beta.1 (mark3labs/mcp-go#951) ships full 2026-07-28 support with per-request era detection (the pin was v0.55.x, topping out at 2025-11-25). Spec 058 revision MERGED as PR #1033 on 2026-08-27 (kept in this note, not in pr:, because pr: is implementation evidence and a docs(specs) merge is not that): final error-code renumbering (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks & Watch Items. The cross-spec conflict named there (FR-012 vs shipped Spec 057) is the one RESOLVED above as Option A. 028 agent-token scoping is already compatible (header-carried). Tracker: #532.
 
 Spec: [058-mcp-2026-upgrade](./specs/058-mcp-2026-upgrade/)
+
+```mermaid
+graph LR
+  mcp_2026_bump["Phase 1-2: adopt mcp-go v1.0.0 pinned inert o…"]
+  mcp_2026_us3_stateless_lists["US3: stateless list surfaces — */list results…"]
+  mcp_2026_us1_negotiation["US1: lift the client-facing and upstream-faci…"]
+  mcp_2026_us2_headers["US2: Mcp-Method / Mcp-Name / MCP-Protocol-Ver…"]
+  mcp_2026_us4_input_required["US4: detect-and-frame input_required results;…"]
+  mcp_2026_us5_additive["US5: additive feature adoption — cache hints…"]
+
+  mcp_2026_bump --> mcp_2026_us3_stateless_lists
+  mcp_2026_us3_stateless_lists --> mcp_2026_us1_negotiation
+  mcp_2026_us1_negotiation --> mcp_2026_us2_headers
+  mcp_2026_us1_negotiation --> mcp_2026_us4_input_required
+  mcp_2026_us2_headers --> mcp_2026_us5_additive
+
+  classDef done fill:#1f7a1f,stroke:#0d3d0d,color:#ffffff;
+  classDef todo fill:#6e7781,stroke:#3d4248,color:#ffffff;
+  class mcp_2026_bump,mcp_2026_us3_stateless_lists done;
+  class mcp_2026_us1_negotiation,mcp_2026_us2_headers,mcp_2026_us4_input_required,mcp_2026_us5_additive todo;
+```
+
+| Task | Status | Refs |
+| --- | --- | --- |
+| Phase 1-2: adopt mcp-go v1.0.0 pinned inert on both protocol hops; era-testing harness (protocol_era_test.go) | 🟢 Done | #1204 |
+| US3: stateless list surfaces — */list results no longer vary per connection; list-only resolver | 🟢 Done | #1691 |
+| US1: lift the client-facing and upstream-facing 2025-11-25 pins; server/discover advertises both eras; -32022 on unsupported version (T037-T046) | ⚪ Todo | — |
+| US2: Mcp-Method / Mcp-Name / MCP-Protocol-Version on every forwarded request; -32020 on header/body mismatch; x-mcp-header param mirroring (T047-T054) | ⚪ Todo | — |
+| US4: detect-and-frame input_required results; reject inputResponses continuations pre-dispatch (T055-T062) — needs the MRTR spec amendment ratified first | ⚪ Todo | — |
+| US5: additive feature adoption — cache hints landed in #1691; tool ordering, trace context remain (T063-T079) | ⚪ Todo | — |
 
 </details>
 
