@@ -2264,7 +2264,7 @@ func (s *Server) AddServer(ctx context.Context, serverConfig *config.ServerConfi
 	// this commit published it (the admission gate may have quarantined it),
 	// with the same redaction as the MCP row: `url` routinely carries a
 	// credential in its query string.
-	s.runtime.EmitActivityConfigChangeCtx(ctx, "server_added", serverConfig.Name, nil, nil, redactActivityConfigValues(serverAddedValues(committed)))
+	s.runtime.EmitActivityConfigChangeCtx(ctx, "server_added", serverConfig.Name, nil, nil, serverAddedValues(committed))
 
 	s.logger.Info("Server added successfully",
 		zap.String("name", serverConfig.Name))

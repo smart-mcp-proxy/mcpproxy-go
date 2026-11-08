@@ -360,7 +360,9 @@ func maskDetectedSecrets(s string) string {
 
 // serverAddedValues is the config_change `new_values` of a server add: the
 // same keys the MCP door records (protocol, enabled, quarantined, and url or
-// command when set), before redaction.
+// command when set). The two credential-bearing leaves are redacted as they
+// are read, through the shared rule (the round-8 door scan in internal/oauth
+// requires every published server leaf to pass through it).
 func serverAddedValues(sc *config.ServerConfig) map[string]interface{} {
 	values := map[string]interface{}{
 		"protocol":    sc.Protocol,
@@ -368,10 +370,10 @@ func serverAddedValues(sc *config.ServerConfig) map[string]interface{} {
 		"quarantined": sc.Quarantined,
 	}
 	if sc.URL != "" {
-		values["url"] = sc.URL
+		values["url"] = redactActivityValue("url", normalizeForRedaction(sc.URL))
 	}
 	if sc.Command != "" {
-		values["command"] = sc.Command
+		values["command"] = redactActivityValue("command", normalizeForRedaction(sc.Command))
 	}
 	return values
 }
