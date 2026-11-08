@@ -846,7 +846,7 @@ mcpproxy serve --require-mcp-auth    # Enforce /mcp authentication
 | `--profile` | One of `--profile` or `--servers`/`--permissions` | — | Pin the token to a single profile; its scope comes from the profile (see [Profile Pinning](#profile-pinning)) |
 | `--servers` | Legacy scope | — | Comma-separated server names or `"*"` (prefer `--profile`) |
 | `--permissions` | Legacy scope | — | Comma-separated: `read`, `write`, `destructive` (prefer `--profile`) |
-| `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`) |
+| `--expires` | No | `30d` | Expiry duration (e.g., `7d`, `90d`, `365d`), or `never` for a token that does not expire |
 | `--profile-pin` | No | — | Deprecated alias of `--profile` |
 | `--rate-limit` | No | config default | Calls per minute this token may make; `0` exempts it from `agent_token_rate_limit` (see [Call Rate Limit](#call-rate-limit)) |
 | `--rate-burst` | No | `--rate-limit` | Calls the token may make at once after a quiet spell; needs `--rate-limit` above 0 |
