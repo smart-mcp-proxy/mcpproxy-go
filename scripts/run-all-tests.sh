@@ -61,17 +61,10 @@ run_test_stage() {
 cleanup() {
     echo -e "\n${YELLOW}Cleaning up...${NC}"
 
-    # Kill any remaining mcpproxy processes
-    pkill -f "mcpproxy.*serve" 2>/dev/null || true
-
-    # Clean up binary
+    # Only remove this runner's build output. The E2E stages own and clean
+    # their processes and scratch data; process-name matches and shared-path
+    # globs can affect a developer's service or another concurrent test run.
     rm -f ./mcpproxy 2>/dev/null || true
-
-    # Clean up any test data directories
-    rm -rf ./test-data 2>/dev/null || true
-
-    # Clean up temporary log files
-    rm -f /tmp/mcpproxy_*.log 2>/dev/null || true
 }
 
 # Set up cleanup trap
