@@ -54,6 +54,12 @@ type Registry struct {
 	servers map[string]*Limiter
 
 	gen atomic.Pointer[generation]
+
+	// rates is the per-agent-token call budget (issue #1699). It lives here
+	// because the registry is what every managed client already holds for
+	// admission, so the token budget reaches every dispatch path through the
+	// same seam as the concurrency limits. Its zero value limits nothing.
+	rates TokenRates
 }
 
 // generation is one immutable published set of limits. Readers load it once per
@@ -75,6 +81,14 @@ type serverScope struct {
 // NewRegistry returns an empty registry: nothing is published, so every Acquire
 // is a no-op passthrough (FR-006).
 func NewRegistry() *Registry { return &Registry{} }
+
+// TokenRates returns the per-agent-token call budget. Nil-safe.
+func (r *Registry) TokenRates() *TokenRates {
+	if r == nil {
+		return nil
+	}
+	return &r.rates
+}
 
 // Global returns the proxy-wide limiter, or nil when none was published.
 func (r *Registry) Global() *Limiter {

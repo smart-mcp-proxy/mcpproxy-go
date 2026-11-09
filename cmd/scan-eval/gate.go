@@ -68,8 +68,9 @@ var categoryCheck = map[string]string{
 	"unicode_smuggling":   "unicode.hidden",
 	"decoded_payload":     "payload.decoded",
 	"shadowing":           "shadowing.cross_server",
-	"phrase_injection":    "phrase.injection",    // Spec 077 US1 — curated hard check
-	"capability_mismatch": "capability.mismatch", // US2 (T016) — not yet registered
+	"phrase_injection":    "phrase.injection",      // Spec 077 US1 — curated hard check
+	"capability_mismatch": "capability.mismatch",   // US2 (T016) — not yet registered
+	"reconstruction":      "payload.reconstructed", // Spec 122 US3 — declared-marker reconstruction (forwarded shell match is hard)
 
 	// Spec 101 US2: every signature class of the bundle (tpacorpus.Classes) is
 	// scored by the one BundleCheck, whose ID is tpa.bundle. The entries are
@@ -100,7 +101,8 @@ func builtinGateChecks() []detect.Check {
 		&checks.UnicodeHidden{},
 		&checks.Shadowing{},
 		&checks.PayloadDecoded{},
-		&checks.PhraseInjection{}, // Spec 077 US1 — curated hard injection/exfil check
+		&checks.PhraseInjection{},      // Spec 077 US1 — curated hard injection/exfil check
+		&checks.MarkerReconstruction{}, // Spec 122 US3 — reconstructed payloads reach the hard tier through the shell matcher
 	}
 }
 

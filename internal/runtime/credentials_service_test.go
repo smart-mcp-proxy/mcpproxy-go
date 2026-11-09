@@ -832,3 +832,45 @@ func TestCredentialsService_InputScreen_ShortAPIKey(t *testing.T) {
 		}
 	}
 }
+
+// Issue #1699: a token can be minted with its own call budget, validated before
+// anything is generated or stored, and shown back in the credential view.
+func TestCredentialsService_IssueToken_RateLimit(t *testing.T) {
+	ctx := context.Background()
+	h := newCredHarness(t)
+
+	for name, rl := range map[string]*auth.TokenRateLimit{
+		"negative":       {PerMinute: -1},
+		"burst only":     {Burst: 4},
+		"over the cap":   {PerMinute: auth.MaxRateLimitPerMinute + 1},
+		"negative burst": {PerMinute: 5, Burst: -2},
+	} {
+		req := mcpTokenReq("limited", "ro", "1h")
+		req.RateLimit = rl
+		_, err := h.cs.IssueToken(ctx, mcpActor(), req)
+		require.Error(t, err, name)
+		assert.Equal(t, profile.CredentialErrorCodeInvalidArgument, codeOf(err), name)
+		assert.Contains(t, err.Error(), "rate_limit", name)
+	}
+	assert.Zero(t, h.store.creates.Load(), "a refused budget reaches neither the store")
+	assert.Zero(t, h.generated.Load(), "nor the secret generator")
+
+	req := mcpTokenReq("limited", "ro", "1h")
+	req.RateLimit = &auth.TokenRateLimit{PerMinute: 60, Burst: 10}
+	res, err := h.cs.IssueToken(ctx, mcpActor(), req)
+	require.NoError(t, err)
+	require.NotNil(t, res.View.RateLimit)
+	assert.Equal(t, auth.TokenRateLimit{PerMinute: 60, Burst: 10}, *res.View.RateLimit)
+	tok, err := h.sm.GetAgentTokenByName("limited")
+	require.NoError(t, err)
+	require.NotNil(t, tok.RateLimit)
+	assert.Equal(t, auth.TokenRateLimit{PerMinute: 60, Burst: 10}, *tok.RateLimit)
+
+	// No budget requested: the token has none of its own.
+	res, err = h.cs.IssueToken(ctx, mcpActor(), mcpTokenReq("plain", "ro", "1h"))
+	require.NoError(t, err)
+	assert.Nil(t, res.View.RateLimit)
+	tok, err = h.sm.GetAgentTokenByName("plain")
+	require.NoError(t, err)
+	assert.Nil(t, tok.RateLimit)
+}

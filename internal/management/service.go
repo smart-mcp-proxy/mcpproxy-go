@@ -509,6 +509,9 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			if redirectPort, ok := oauthRaw["redirect_port"].(int); ok {
 				oauthCfg.RedirectPort = redirectPort
 			}
+			if enabled, ok := oauthRaw["refresh_replay_enabled"].(bool); ok {
+				oauthCfg.RefreshReplayEnabled = &enabled
+			}
 			if pkceEnabled, ok := oauthRaw["pkce_enabled"].(bool); ok {
 				oauthCfg.PKCEEnabled = pkceEnabled
 			}
@@ -591,6 +594,9 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 		// leaves it empty, which contracts.Server omits from the wire.
 		if trustMode, ok := srvRaw["trust_mode"].(string); ok {
 			srv.TrustMode = trustMode
+		}
+		if mode, ok := srvRaw["tool_argument_error_mode"].(string); ok {
+			srv.ToolArgumentErrorMode = mode
 		}
 
 		// MCP-3322: project the per-server init_timeout override. The runtime

@@ -1,11 +1,15 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os/exec"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -405,6 +409,160 @@ func (p *MCPProxyServer) currentTruncator() *truncate.Truncator {
 	return p.truncatorFn()
 }
 
+// rejectUnservedProtocolOnStdio is the stdio half of the FR-028 era pin (Spec
+// 058 T036a). The Streamable HTTP transport refuses a request whose declared
+// protocol version it has not been configured to serve, but mcp-go has no such
+// option for stdio, and the shared handler chooses the era per request from
+// params._meta — so without this a stdio client could opt into 2026-07-28 while
+// every HTTP door refused it. Registered as an OnRequestInitialization hook, it
+// runs before the era is read and before any dispatch; returning an error makes
+// mcp-go answer INVALID_REQUEST without touching a handler.
+//
+// Scoped to the stdio transport (the context tag stdioAuthContext installs) and
+// to requests that DECLARE a version in _meta: a legacy request carries none
+// and passes. The served set is clientFacingProtocolVersions, the same constant
+// the HTTP pin reads, so lifting one lifts the other.
+func rejectUnservedProtocolOnStdio(ctx context.Context, message any) error {
+	if transport.GetConnectionSource(ctx) != transport.ConnectionSourceStdio {
+		return nil
+	}
+	raw, ok := message.(json.RawMessage)
+	if !ok {
+		return nil
+	}
+	var wrapper struct {
+		Params struct {
+			Meta *mcp.Meta `json:"_meta"`
+		} `json:"params"`
+	}
+	if json.Unmarshal(raw, &wrapper) != nil {
+		return nil // a malformed body is reported by the per-method unmarshal
+	}
+	version := wrapper.Params.Meta.ProtocolVersion()
+	if version == "" || slices.Contains(clientFacingProtocolVersions(), version) {
+		return nil
+	}
+	return fmt.Errorf("protocol version %s is not served on the stdio surface: the client-facing era is pinned to %s (Spec 058 FR-028); send a legacy initialize instead",
+		version, strings.Join(clientFacingProtocolVersions(), ", "))
+}
+
+// modernClientRecorder debounces the per-request client identity of modern
+// (2026-07-28) requests, so the activation funnel and the client-seen presence
+// are fed once per distinct client per window rather than once per request.
+//
+// The identity is client-supplied, so the map is bounded explicitly rather
+// than by trust: at modernClientRecorderCap entries, sightings older than the
+// window are swept, and if the map is still full the new identity is NOT
+// recorded (and not fed to the funnels). A client inventing a fresh name per
+// request therefore costs one map entry per name up to the cap and nothing
+// after, instead of unbounded memory plus a BBolt write per request.
+type modernClientRecorder struct {
+	mu   sync.Mutex
+	seen map[string]time.Time
+	now  func() time.Time
+}
+
+// modernClientRecorderCap bounds distinct (name, version) pairs tracked at
+// once. Real deployments see a handful of client identities; the cap only
+// matters under a flood of invented names.
+const modernClientRecorderCap = 1024
+
+func newModernClientRecorder() *modernClientRecorder {
+	return &modernClientRecorder{seen: map[string]time.Time{}, now: time.Now}
+}
+
+// firstSightingWithin reports whether (name, version) has not been recorded in
+// the last window, recording it when so. It returns false, recording nothing,
+// when the map is at capacity with no stale entry to evict.
+func (r *modernClientRecorder) firstSightingWithin(name, version string, window time.Duration) bool {
+	key := name + "\x00" + version
+	now := r.now()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if last, ok := r.seen[key]; ok {
+		if now.Sub(last) < window {
+			return false
+		}
+		r.seen[key] = now
+		return true
+	}
+	if len(r.seen) >= modernClientRecorderCap {
+		for k, last := range r.seen {
+			if now.Sub(last) >= window {
+				delete(r.seen, k)
+			}
+		}
+		if len(r.seen) >= modernClientRecorderCap {
+			return false
+		}
+	}
+	r.seen[key] = now
+	return true
+}
+
+// modernCancellationGuard closes the cross-client cancellation hole the
+// 2026-07-28 era opens in mcp-go (Spec 058 US3, plan risk R1). The upstream
+// report is drafted at specs/058-mcp-2026-upgrade/upstream-issues/
+// mcp-go-inflight-cancel-collision.md — mark3labs/mcp-go restricted
+// interactions to collaborators when this landed, so it could not be filed.
+//
+// mcp-go keys in-flight request cancels as "<sessionID>:<requestID>"
+// (server/server.go inflightKey) and registers every request under that key.
+// A modern request is served by an ephemeral session whose id is "", so every
+// modern client shares the key space ":<id>": two clients that both use
+// JSON-RPC id 1 — the common case — collide, and a `notifications/cancelled`
+// from one cancels the other's in-flight call. The notification path runs
+// before any hook (request_handler.go: `if baseMessage.ID == nil { ... }`), so
+// the only place mcpproxy can intervene is the HTTP chain.
+//
+// The guard acknowledges (202, exactly as mcp-go answers a notification) and
+// drops a cancellation notification carried by a MODERN POST. Nothing is lost:
+// that era has no session to correlate a separately posted notification with,
+// so it could never have targeted the right request except by accident, and a
+// client that wants to abandon a call closes its connection, which cancels the
+// handler's context through the transport. Legacy requests, which the session
+// id keys correctly, pass through untouched.
+//
+// The era is read from the Mcp-Protocol-Version header: a modern POST must
+// carry it (mcp-go's validateModernRequest refuses one without it), and a
+// legacy POST never carries a modern value. Only then is the body buffered and
+// inspected — a cancellation notification is a notification with that method
+// — and re-attached for the transport, which reads it in full anyway.
+func modernCancellationGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !mcp.IsModernProtocol(r.Header.Get(mcp.HeaderProtocolVersion)) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		if err != nil {
+			http.Error(w, "failed to read request body", http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		if isCancelledNotification(body) {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// isCancelledNotification reports whether body is a JSON-RPC
+// notifications/cancelled notification (no id, or a null one — mcp-go treats
+// both as a notification).
+func isCancelledNotification(body []byte) bool {
+	var msg struct {
+		Method string          `json:"method"`
+		ID     json.RawMessage `json:"id"`
+	}
+	if json.Unmarshal(body, &msg) != nil || msg.Method != string(mcp.MethodNotificationCancelled) {
+		return false
+	}
+	return len(msg.ID) == 0 || bytes.Equal(msg.ID, []byte("null"))
+}
+
 // NewMCPProxyServer creates a new MCP proxy server
 func NewMCPProxyServer(
 	storage *storage.Manager,
@@ -461,10 +619,35 @@ func NewMCPProxyServer(
 
 	// Create hooks to capture session information
 	hooks := &mcpserver.Hooks{}
+	// Spec 058 T036a: pin the stdio surface to the same protocol eras as the
+	// Streamable HTTP transports. This hook runs before mcp-go reads the era,
+	// which is why it parses _meta itself.
+	hooks.AddOnRequestInitialization(func(ctx context.Context, _ any, message any) error {
+		return rejectUnservedProtocolOnStdio(ctx, message)
+	})
 	// Update session activity on every MCP message to prevent premature cleanup.
 	// Without this, sessions that only do retrieve_tools (not tool calls) would
 	// appear inactive and get closed by the background cleanup.
+	// Spec 058 US3 (T033): a 2026-07-28 request never runs initialize, so the
+	// AfterInitialize hook below — which feeds the Spec 044 activation funnel
+	// and the client-seen presence — never fires for a modern client. The
+	// identity travels on every request instead (research D5), so it is read
+	// here, once per client identity per minute (the same window
+	// RecordClientSeen itself debounces on), never once per request.
+	modernClients := newModernClientRecorder()
 	hooks.AddBeforeAny(func(ctx context.Context, id any, method mcp.MCPMethod, message any) {
+		if name, version := requestClientInfo(ctx); name != "" && modernClients.firstSightingWithin(name, version, time.Minute) {
+			if mainServer != nil && mainServer.runtime != nil {
+				mainServer.runtime.RecordMCPClientForActivation(name)
+				mainServer.runtime.RecordClientSeen(name)
+			}
+			logger.Info("MCP client identified from request metadata",
+				zap.String("client_name", name),
+				zap.String("client_version", version),
+				zap.String("protocol_version", mcpserver.RequestProtocolVersion(ctx)),
+			)
+		}
+
 		session := mcpserver.ClientSessionFromContext(ctx)
 		if session == nil {
 			return
@@ -512,9 +695,13 @@ func NewMCPProxyServer(
 		)
 	})
 
-	// Add hook to capture client capabilities after initialize completes
-	// This hook is called for ALL transports (including HTTP POST), and receives the
-	// InitializeRequest with client info and capabilities.
+	// Add hook to capture client capabilities after initialize completes.
+	// It fires for every transport (including HTTP POST) — but only in the
+	// LEGACY protocol era: `initialize` is METHOD_NOT_FOUND under 2026-07-28,
+	// so a modern client never reaches it. Client identity for that era is
+	// read per request in the BeforeAny hook above (Spec 058 US3); everything
+	// else recorded here (capabilities, credential, serving instance) is
+	// session-scoped and has no modern counterpart by design.
 	hooks.AddAfterInitialize(func(ctx context.Context, id any, request *mcp.InitializeRequest, result *mcp.InitializeResult) {
 		// Get session from context
 		session := mcpserver.ClientSessionFromContext(ctx)
@@ -781,7 +968,11 @@ func getAuthMetadata(ctx context.Context) map[string]string {
 // Uses "_auth_" prefix to clearly separate auth metadata from tool arguments.
 // Returns a new map — the original args map is never mutated, so it remains
 // safe to forward to upstream servers without leaking internal metadata.
+// Caller-sent `_auth_*` keys are dropped first: internal/runtime copies
+// `_auth_user_id` / `_auth_user_email` onto the activity record, so a key the
+// caller supplied would otherwise stand in for one the proxy never set.
 func injectAuthMetadata(ctx context.Context, args map[string]interface{}) map[string]interface{} {
+	args = security.StripInternalArgs(args)
 	authMeta := getAuthMetadata(ctx)
 	if authMeta == nil {
 		return args
@@ -1309,15 +1500,13 @@ func retrieveToolsDetailOption() mcp.ToolOption {
 	)
 }
 
-// retrieveToolsAnnotationFilterOptions returns the annotation-based safety
-// filters (Spec 035 F4) shared by every retrieve_tools registration — the
-// default server and both routing-mode builders — so the schema cannot drift
-// between surfaces. Spec 094 FR-009: the two routing builders used to declare
-// these independently and the default registration omitted them entirely, so
-// agents on the default surface could not discover filters the handler had
-// always honored. That gap is how the field report's confusion started.
-func retrieveToolsAnnotationFilterOptions() []mcp.ToolOption {
+// retrieveToolsSharedOptions declares the upstream selector and annotation
+// filters for the default server and both routing-mode builders.
+func retrieveToolsSharedOptions() []mcp.ToolOption {
 	return []mcp.ToolOption{
+		mcp.WithString("server",
+			mcp.Description("Restrict results to the exact configured upstream server name."),
+		),
 		mcp.WithBoolean("read_only_only",
 			mcp.Description("Only return tools with readOnlyHint=true. Use to self-restrict to safe read operations."),
 		),
@@ -1372,7 +1561,7 @@ func (p *MCPProxyServer) registerTools(_ bool) {
 		),
 		retrieveToolsDetailOption(),
 	}
-	retrieveToolsOpts = append(retrieveToolsOpts, retrieveToolsAnnotationFilterOptions()...)
+	retrieveToolsOpts = append(retrieveToolsOpts, retrieveToolsSharedOptions()...)
 	retrieveToolsTool := mcp.NewTool("retrieve_tools", retrieveToolsOpts...)
 	p.server.AddTool(retrieveToolsTool, p.handleRetrieveTools)
 
@@ -1510,7 +1699,7 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 				mcp.Description("Per-server MCP `initialize` handshake deadline as a duration string (e.g. '120s', '3m'). Raise this for upstreams that do legitimate first-run warmup (cache/index build) before responding to `initialize`, so they are not killed mid-startup. Unset → global default (30s). Bounds: 1s–30m. Used with add/update/patch."),
 			),
 			mcp.WithString("trust_mode",
-				mcp.Description("Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch."),
+				mcp.Description("Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = new tools and changed tools auto-approve only when the fast offline TPA scan is clean, else hold for review; 'manual' = human reviews every change. Empty → scan (the default). Used with add/update/patch."),
 				mcp.Enum("auto", "scan", "manual"),
 			),
 			mcp.WithBoolean("expose_prompts",
@@ -1518,6 +1707,10 @@ func (p *MCPProxyServer) buildManagementTools() []mcpserver.ServerTool {
 			),
 			mcp.WithString("forward_headers_json",
 				mcp.Description("Client header forwarding allowlist (Spec 112) as a JSON array of inbound MCP client header NAMES to copy into this server's tools/call requests, e.g. [\"X-User-Id\",\"X-Tenant-Id\"]. Names only, never values; exact names, case-insensitive, at most 32, no wildcards. Authorization, Host, Cookie, X-API-Key, hop-by-hop and proxy headers are never forwarded. Only HTTP-based upstreams forward. Patch: omit to leave unchanged, '[]' to clear (the array replaces entirely). Used with add/update/patch."),
+			),
+			mcp.WithString("tool_argument_error_mode",
+				mcp.Description("Per-server tool argument error policy: omitted or detailed preserves detailed errors; redacted opts into redaction. On update/patch, omit to leave the policy unchanged; detailed explicitly resets a redacted policy. Used with add/update/patch."),
+				mcp.Enum(config.ToolArgumentErrorModeDetailed, config.ToolArgumentErrorModeRedacted),
 			),
 		)
 		tools = append(tools, mcpserver.ServerTool{Tool: upstreamServersTool, Handler: p.handleUpstreamServers})
@@ -2023,6 +2216,15 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	}
 
 	// Get optional parameters
+	var selectedServer string
+	_, hasServer := request.GetArguments()["server"]
+	if hasServer {
+		selectedServer, err = request.RequireString("server")
+		if err != nil {
+			p.emitActivityInternalToolCall(ctx, "retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), nil, nil, nil, "")
+			return mcp.NewToolResultError(err.Error()), nil
+		}
+	}
 	limit := int(request.GetFloat("limit", float64(p.config.ToolsLimit)))
 	includeStats := request.GetBool("include_stats", false)
 	debugMode := request.GetBool("debug", false)
@@ -2068,6 +2270,9 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	args := map[string]interface{}{
 		"query": query,
 		"limit": limit,
+	}
+	if hasServer {
+		args["server"] = selectedServer
 	}
 	if includeStats {
 		args["include_stats"] = true
@@ -2173,13 +2378,20 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// Spec 057 / Profiles v2: profileScope was resolved above (token pin > URL >
 	// session) and filters independently of agent-scope (nil = allow all).
 
-	// serverDiscoverable applies the agent-scope (Spec 049 FR-007) and profile
-	// (Spec 057) filters BEFORE classification so an agent never learns a tool
-	// exists on a server it cannot access. It delegates to the shared
-	// visibility resolver's scope step (Spec 085, mcp_visibility.go) — shared
-	// by the search below, the callable-result loop, the quarantined-tool
-	// discovery pass, and describe_tool, so they never drift.
+	// A deleted upstream can still have stale index hits. Only a configured
+	// upstream in scope is eligible for explicit selection.
+	var selectedServerAvailable bool
+	if hasServer && p.serverInScope(authCtx, profileScope, selectedServer) {
+		server, lookupErr := p.storage.GetUpstreamServer(selectedServer)
+		selectedServerAvailable = lookupErr == nil && server != nil
+	}
+
+	// Use the same server selection for ranked hits and name-only locked
+	// entries. Both intersect the selector with token and profile scope.
 	serverDiscoverable := func(serverName string) bool {
+		if hasServer && (!selectedServerAvailable || serverName != selectedServer) {
+			return false
+		}
 		return p.serverInScope(authCtx, profileScope, serverName)
 	}
 
@@ -2199,10 +2411,14 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// same treatment (D3, SC-005 named exception): with no per-profile index
 	// to rely on, the shared search must filter before the cut too, or a
 	// `limit:1` request whose top hit sits outside the profile would return an
-	// empty page instead of the best authorized hit. Every OTHER administrator
-	// path (unprofiled, or profiled with a working per-profile index) keeps
-	// plain Search — byte-for-byte with the pre-105 behaviour.
-	useScopedSearch := auth.IsScopedCaller(ctx) || (profileName != "" && sharedIndexFallback)
+	// empty page instead of the best authorized hit. Without a selector,
+	// unprofiled administrators keep plain Search and its pre-105 behavior,
+	// apart from an exception common to all paths: a query that is a whole
+	// canonical "server:tool" id is answered by the index with that document
+	// first (index.exactQualifiedTool), where the pre-105 index returned no hit
+	// for it.
+	scopedOutput := hasServer || auth.IsScopedCaller(ctx)
+	useScopedSearch := scopedOutput || (profileName != "" && sharedIndexFallback)
 
 	// Spec 108 FR-011: whenever a profile is genuinely in effect (profileName
 	// != ""), search must filter by TOOL POLICY before the cut too, not only
@@ -2230,20 +2446,51 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		return index.Admit
 	}
 
+	// A canonical "server:tool" query is resolved by the index itself (the
+	// exact document leads the page on every path below), so the search paths
+	// and their candidate window are the same as for any other query. The one
+	// addition: when the exact candidate is going to be withheld below (not
+	// callable, approval/quarantine gate closed, or annotation-filtered), the
+	// search asks for one more hit so that candidate does not cost the caller
+	// a usable fallback. Scope and profile policy already reject it before the
+	// cut inside the scoped/admitted searches.
+	//
+	// window is the page the index really cuts: a non-positive limit is passed
+	// through untouched and the index manager searches its default window.
+	window := limit
+	if window <= 0 {
+		window = index.DefaultSearchLimit
+	}
+	searchLimit := limit
+	if exactCandidateWithheld(query, serverDiscoverable, func(serverName, toolName string) bool {
+		if !p.isExactToolCallable(serverName, toolName) || p.describeGateReason(serverName, toolName) != "" {
+			return true
+		}
+		annotations, _ := p.lookupExactToolAnnotations(serverName, toolName)
+		return shouldExclude(annotations, readOnlyOnly, excludeDestructive, excludeOpenWorld)
+	}) {
+		searchLimit = window + 1
+	}
 	var results []*config.SearchResult
 	var hiddenByPolicy int
 	switch {
 	case profileName != "":
-		results, hiddenByPolicy, err = searchIndex.SearchToolsAdmitted(query, limit, admitPolicy)
+		results, hiddenByPolicy, err = searchIndex.SearchToolsAdmitted(query, searchLimit, admitPolicy)
 	case useScopedSearch:
-		results, err = searchIndex.SearchToolsScoped(query, limit, serverDiscoverable)
+		results, err = searchIndex.SearchToolsScoped(query, searchLimit, serverDiscoverable)
 	default:
-		results, err = searchIndex.Search(query, limit)
+		results, err = searchIndex.Search(query, searchLimit)
 	}
 	if err != nil {
 		p.logger.Error("Search failed", zap.String("query", query), zap.Error(err))
 		p.emitActivityInternalToolCall(ctx, "retrieve_tools", "", "", "", sessionID, requestID, "error", err.Error(), time.Since(startTime).Milliseconds(), args, nil, nil, "")
 		return mcp.NewToolResultError(fmt.Sprintf("Search failed: %v", err)), nil
+	}
+	// The extra hit stands in for the exact candidate only. When the index
+	// holds no such document (a quarantined tool is normally absent from it),
+	// the window is the ordinary one.
+	if len(results) > window && results[0].Tool.Name != query {
+		results = results[:window]
 	}
 
 	// Spec 049: opt-in discovery of locked tools. When false (default) the
@@ -2259,6 +2506,9 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	var callableResults []*config.SearchResult
 	var disabledEntries []contracts.LockedToolEntry
 	droppedCount := 0
+	// gatedExact names the exact-ID hit withheld by the approval/quarantine
+	// gate, so the quarantined-tool pass below does not count it twice.
+	gatedExact := ""
 	for _, result := range results {
 		serverName := result.Tool.ServerName
 		// The RAW tool name, derived from the index hit exactly once (Spec 105
@@ -2283,15 +2533,34 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		// would not. Results are index hits by construction, so the
 		// index-presence step is skipped here.
 		visible, reason := p.indexedToolVisible(authCtx, profileScope, policy, serverName, toolName)
-		if visible {
-			callableResults = append(callableResults, result)
-			continue
-		}
-
-		if reason == visReasonServerNotInScope || reason == visReasonToolPolicyExcluded {
+		if !visible && (reason == visReasonServerNotInScope || reason == visReasonToolPolicyExcluded) {
 			// Out-of-scope servers and profile-excluded tools are both
 			// invisible, never "locked" — FR-013 forbids naming or
 			// describing a profile-hidden tool the way a locked entry would.
+			continue
+		}
+
+		// An exact-ID lookup can find a document during the window before a
+		// quarantine or approval change has removed it from the index. Never
+		// return its stored description or schema while that gate is closed:
+		// it is reported like any other locked tool, by name only. This runs
+		// after the scope and profile-policy verdicts above, so a hit the
+		// caller may not learn about stays invisible.
+		if result.Tool.Name == query && p.describeGateReason(serverName, toolName) != "" {
+			droppedCount++
+			gatedExact = result.Tool.Name
+			if includeDisabled {
+				disabledEntries = append(disabledEntries, contracts.LockedToolEntry{
+					Name:   result.Tool.Name,
+					Server: serverName,
+					Status: p.classifyDisabledTool(serverName, toolName),
+				})
+			}
+			continue
+		}
+
+		if visible {
+			callableResults = append(callableResults, result)
 			continue
 		}
 
@@ -2337,6 +2606,9 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// so the shared min(limit,10) cap below can't truncate them away in favor of
 	// index hits. The count feeds the zero-result nudge even without the flag.
 	seen := make(map[string]bool, len(callableResults)+len(disabledEntries))
+	if gatedExact != "" {
+		seen[gatedExact] = true
+	}
 	for _, r := range callableResults {
 		seen[r.Tool.Name] = true
 	}
@@ -2396,6 +2668,24 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			filteredResults = append(filteredResults, results[ar.resultIndex])
 		}
 		results = filteredResults
+	}
+
+	// The exact-candidate pre-check above reads state the loops then re-read;
+	// if the two disagree the extra hit is not owed to the caller.
+	if len(results) > window {
+		results = results[:window]
+	}
+
+	// A selector miss must not disclose the selected upstream through side
+	// fields. Locked and annotation-filtered matches still get their existing
+	// diagnostics because those matches are discoverable to this caller.
+	selectorMiss := hasServer && len(results) == 0 && droppedCount == 0 &&
+		(filterDiag == nil || filterDiag.OmittedTotal == 0)
+	responseServerDiscoverable := func(serverName string) bool {
+		return !selectorMiss && serverDiscoverable(serverName)
+	}
+	if selectorMiss {
+		hiddenByPolicy = 0
 	}
 
 	// Convert results to MCP tool format for LLM compatibility. Entry
@@ -2488,6 +2778,9 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// remediation map is emitted once, keyed ONLY by statuses actually present.
 	if includeDisabled && len(disabledEntries) > 0 {
 		cap := limit
+		if hasServer {
+			cap = window
+		}
 		if cap > 10 {
 			cap = 10
 		}
@@ -2539,11 +2832,11 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 			// Spec 105 FR-005 G3: a scoped caller's session_risk must reflect
 			// only its own authorized servers' tool annotations — otherwise the
 			// level (and the lethal-trifecta verdict) leaks the existence and
-			// shape of a hidden server's tools. Administrators are unaffected
-			// (not a named SC-005 exception): they keep the whole-fleet view.
+			// shape of a hidden server's tools. An administrator without a
+			// selector keeps the whole-fleet view.
 			var risk SessionRisk
-			if auth.IsScopedCaller(ctx) {
-				risk = analyzeSessionRiskScoped(snapshot, serverDiscoverable)
+			if scopedOutput {
+				risk = analyzeSessionRiskScoped(snapshot, responseServerDiscoverable)
 			} else {
 				risk = analyzeSessionRisk(snapshot)
 			}
@@ -2565,10 +2858,15 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		// count — regardless of whether search itself ran against the shared
 		// index or an already-scoped per-profile one (scopedIndexedToolCount
 		// re-derives it from the shared index's server_name facet, so both
-		// paths agree). Administrators are unaffected (not an SC-005 exception).
-		totalIndexedTools := p.getIndexedToolCount()
-		if auth.IsScopedCaller(ctx) {
+		// paths agree). A selector further narrows that population.
+		var totalIndexedTools int
+		switch {
+		case selectorMiss:
+			// Leave the count at zero, as for any other selector miss.
+		case scopedOutput:
 			totalIndexedTools = p.scopedIndexedToolCount(serverDiscoverable)
+		default:
+			totalIndexedTools = p.getIndexedToolCount()
 		}
 		response["debug"] = map[string]interface{}{
 			"total_indexed_tools": totalIndexedTools,
@@ -2593,14 +2891,13 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 		// still exists (mcp_direct_callability.go) — both gates are required.
 		// The sort-then-cut happens AFTER filtering (GetToolStatsFiltered), so
 		// a used-but-hidden tool can never evict an authorized one from the
-		// top-10 window. Administrators are unaffected (not an SC-005
-		// exception): GetToolStats(10) stays byte-for-byte, quarantine-blind.
+		// top-10 window. Administrators without a selector keep GetToolStats(10).
 		var stats []map[string]interface{}
 		var statsErr error
-		if auth.IsScopedCaller(ctx) {
+		if scopedOutput {
 			stats, statsErr = p.storage.GetToolStatsFiltered(func(fullToolName string) bool {
 				serverName, rawToolName, ok := splitServerTool(fullToolName)
-				if !ok {
+				if !ok || (hasServer && !responseServerDiscoverable(serverName)) {
 					return false
 				}
 				return p.usageStatEligible(authCtx, profileScope, policy, serverName, rawToolName)
@@ -3220,7 +3517,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 			callerr.NoteOutcome(ctx, callerr.ValidationOutcome())
 			p.emitActivityToolCallStarted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, activityArgs)
 			p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", errMsg, 0, activityArgs, errMsg, false, toolVariant, intentMap, contentTrust, profileSlug, 0, 0, "", nil, "")
-			return invalidParamsErrorResult(toolName, meta.ParamsJSON, detail), nil
+			return invalidParamsErrorResultWithMode(toolName, meta.ParamsJSON, detail, argumentErrorMode(gate.serverConfig)), nil
 		}
 	}
 
@@ -3507,7 +3804,7 @@ func (p *MCPProxyServer) handleCallToolVariant(ctx context.Context, request mcp.
 		internalToolName := "call_tool_" + intent.OperationType // e.g., "call_tool_read"
 		p.emitActivityInternalToolCall(ctx, internalToolName, serverName, actualToolName, toolVariant, sessionID, requestID, "error", err.Error(), time.Since(internalStartTime).Milliseconds(), activityArgs, nil, intentMap, "")
 
-		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
+		return p.createToolErrorResponse(err, serverName, actualToolName, argumentErrorMode(gate.serverConfig)), nil
 	}
 
 	// Issue #935: the transport hop succeeded, but the upstream may still have
@@ -4014,7 +4311,7 @@ func (p *MCPProxyServer) handleCallTool(ctx context.Context, request mcp.CallToo
 		// Emit activity completed event for error with determined source (legacy - no intent)
 		p.emitActivityToolCallCompleted(ctx, serverName, actualToolName, sessionID, requestID, activitySource, "error", err.Error(), duration.Milliseconds(), activityArgs, "", false, "", nil, "", "", 0, 0, "", nil, "")
 
-		return p.createDetailedErrorResponse(err, serverName, actualToolName), nil
+		return p.createToolErrorResponse(err, serverName, actualToolName, argumentErrorMode(gate.serverConfig)), nil
 	}
 
 	// Issue #935: an upstream that answered isError:true failed, even though the
@@ -4916,6 +5213,9 @@ func (p *MCPProxyServer) handleListUpstreams(ctx context.Context) (*mcp.CallTool
 		if server.TrustMode != "" {
 			serverMap["trust_mode"] = server.TrustMode
 		}
+		if server.ToolArgumentErrorMode != "" {
+			serverMap["tool_argument_error_mode"] = server.ToolArgumentErrorMode
+		}
 
 		// Add connection status information and calculate health
 		var connState string
@@ -5795,6 +6095,10 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	if err != nil {
 		return mcp.NewToolResultError("Missing required parameter 'name'"), nil
 	}
+	argumentErrorMode, err := argumentErrorModeFromRequest(request)
+	if err != nil {
+		return mcp.NewToolResultError(err.Error()), nil
+	}
 
 	url := request.GetString("url", "")
 	command := request.GetString("command", "")
@@ -5933,6 +6237,11 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		if err := oauthConfig.Validate(); err != nil {
 			return mcp.NewToolResultError(fmt.Sprintf("Invalid oauth_json: %v", err)), nil
 		}
+		// An add carries the complete block, so the replay opt-in is checked
+		// against its own token_endpoint here.
+		if err := oauthConfig.ValidateRefreshReplay(); err != nil {
+			return mcp.NewToolResultError(fmt.Sprintf("Invalid oauth_json: %v", err)), nil
+		}
 		oauth = &oauthConfig
 	}
 
@@ -5960,21 +6269,22 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 	}
 
 	serverConfig := &config.ServerConfig{
-		Name:        name,
-		URL:         url,
-		Command:     command,
-		Args:        args,
-		WorkingDir:  workingDir,
-		Env:         env,
-		Headers:     headers,
-		Protocol:    protocol,
-		Enabled:     enabled,
-		Quarantined: quarantined, // Respect user's quarantine setting (defaults to true for security)
-		Created:     time.Now(),
-		Isolation:   isolation,
-		OAuth:       oauth,
-		InitTimeout: initTimeout,
-		TrustMode:   trustMode, // spec 086: carry the per-server trust_mode through on create
+		Name:                  name,
+		URL:                   url,
+		Command:               command,
+		Args:                  args,
+		WorkingDir:            workingDir,
+		Env:                   env,
+		Headers:               headers,
+		Protocol:              protocol,
+		Enabled:               enabled,
+		Quarantined:           quarantined, // Respect user's quarantine setting (defaults to true for security)
+		Created:               time.Now(),
+		Isolation:             isolation,
+		OAuth:                 oauth,
+		InitTimeout:           initTimeout,
+		TrustMode:             trustMode, // spec 086: carry the per-server trust_mode through on create
+		ToolArgumentErrorMode: argumentErrorMode,
 	}
 
 	// F9: optional per-server expose_prompts override on add. GetBool can't tell
@@ -6201,6 +6511,13 @@ func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolReq
 				return &mcpUserError{msg: err.Error()}
 			}
 		}
+		// The replay opt-in is validated on the merged block: a partial patch
+		// may inherit its token_endpoint from the stored config.
+		if patch.OAuth != nil {
+			if err := m.OAuth.ValidateRefreshReplay(); err != nil {
+				return &mcpUserError{msg: err.Error()}
+			}
+		}
 		m.Name = cur.Name
 		*cur = *m
 		merged = config.CopyServerConfig(m)
@@ -6362,6 +6679,11 @@ func (p *MCPProxyServer) buildPatchConfigFromRequest(request mcp.CallToolRequest
 		Quarantined: existingServer.Quarantined,
 	}
 	opts := config.DefaultMergeOptions()
+	argumentErrorMode, err := argumentErrorModeFromRequest(request)
+	if err != nil {
+		return nil, opts, err
+	}
+	patch.ToolArgumentErrorMode = argumentErrorMode
 
 	// Scalar fields - only set if provided in request
 	if url := request.GetString("url", ""); url != "" {
@@ -6967,15 +7289,38 @@ func classifyUpstreamInvalidParams(err error) (detail string, ok bool) {
 
 // createDetailedErrorResponse creates an enhanced error response with HTTP and troubleshooting context
 func (p *MCPProxyServer) createDetailedErrorResponse(err error, serverName, toolName string) *mcp.CallToolResult {
+	return p.createToolErrorResponse(err, serverName, toolName, "")
+}
+
+// createToolErrorResponse applies only this dispatch's captured argument-error
+// policy. Existing callers without a policy keep the detailed renderer above.
+func (p *MCPProxyServer) createToolErrorResponse(err error, serverName, toolName, argumentMode string) *mcp.CallToolResult {
 	// Spec 085 FR-013 (Path B): upstream invalid-params failures get the same
 	// self-healing error Path A renders — full stored schema + hint — when a
 	// schema source exists in the index. Without a stored schema the existing
-	// shapes below apply unchanged (a self-healing error without a schema
-	// would be an empty promise). Non-argument failures never reach this
-	// branch (classification is conservative by construction).
-	if detail, isInvalidParams := classifyUpstreamInvalidParams(err); isInvalidParams {
+	// envelopes below apply, with untrusted argument details suppressed only
+	// under the explicit redacted policy. No schema or retry hint is invented.
+	// Non-argument failures never reach this conservative classification branch.
+	if detail, isInvalidParams := argumentErrorDetail(err, argumentMode); isInvalidParams {
 		if meta := p.lookupIndexedTool(serverName, toolName); meta != nil && meta.ParamsJSON != "" {
-			return invalidParamsErrorResult(serverName+":"+toolName, meta.ParamsJSON, detail)
+			return invalidParamsErrorResultWithMode(serverName+":"+toolName, meta.ParamsJSON, detail, argumentMode)
+		}
+		if argumentMode == config.ToolArgumentErrorModeRedacted {
+			// Copy typed errors: their message/data/body can contain rejected
+			// arguments, and another caller may still own the original error.
+			var rpcErr *transport.JSONRPCError
+			if errors.As(err, &rpcErr) {
+				redacted := &transport.JSONRPCError{Code: rpcErr.Code, Message: redactedToolArgumentError}
+				if rpcErr.HTTPError != nil {
+					httpContext := *rpcErr.HTTPError
+					httpContext.Body = ""
+					httpContext.Err = nil
+					redacted.HTTPError = &httpContext
+				}
+				err = redacted
+			} else {
+				err = errors.New(redactedToolArgumentError) //nolint:staticcheck // ST1005: exact public MCP error sentence includes the terminal period.
+			}
 		}
 	}
 
@@ -7057,6 +7402,18 @@ func (p *MCPProxyServer) createDetailedErrorResponse(err error, serverName, tool
 
 	jsonResponse, _ := json.Marshal(errorDetails)
 	return mcp.NewToolResultError(string(jsonResponse))
+}
+
+// The SDK drops JSON-RPC numbers but preserves these non-argument identities.
+// They veto only the new trusted-wrapper cause selection, never positively
+// classify an error or bypass the existing classifier's deny controls.
+func isKnownSDKNonArgumentError(err error) bool {
+	return errors.Is(err, mcp.ErrParseError) ||
+		errors.Is(err, mcp.ErrInvalidRequest) ||
+		errors.Is(err, mcp.ErrMethodNotFound) ||
+		errors.Is(err, mcp.ErrInternalError) ||
+		errors.Is(err, mcp.ErrRequestInterrupted) ||
+		errors.Is(err, mcp.ErrResourceNotFound)
 }
 
 // extractStatusCodeFromError attempts to extract HTTP status code from error message

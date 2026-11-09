@@ -54,6 +54,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
+	upstreamtypes "github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
 // Status captures high-level state for API consumers.
@@ -214,8 +215,13 @@ type Runtime struct {
 	// installed after New (SetManagementService) because the service is built
 	// on top of the Runtime, not because the type has to be erased: the
 	// management package does not import runtime, so the field carries the
-	// real interface and every consumer gets a compile-time contract.
-	managementService management.Service
+	// real interface and every consumer gets a compile-time contract. It is an
+	// atomic.Pointer because the servers.changed coalescer and the attention
+	// subscriber start in New and read it from their own goroutines, while the
+	// server installs it later on the startup goroutine (a plain field raced
+	// under -race once a publish landed before SetManagementService). Read it
+	// through GetManagementService.
+	managementService atomic.Pointer[management.Service]
 	activityService   *ActivityService // Activity logging service
 
 	// rejectionMetric counts a concurrency shed SYNCHRONOUSLY at the rejection
@@ -308,10 +314,34 @@ type Runtime struct {
 	lastGoodCapture map[string]managed.InventoryCapture
 	// pruneAfterSnapshot is a test hook run after the prune snapshot.
 	pruneAfterSnapshot func(toolName string)
-	// captureSnapMu makes "records persisted + pruned + stamp published" one
-	// unit for readers: a capture holds the write lock for all of it, a review
-	// holds the read lock while it reads records and live state.
-	captureSnapMu sync.RWMutex
+	// captureSnapLocks holds one *sync.RWMutex per server (captureSnapLock).
+	// It makes "records persisted + pruned + stamp published" one unit for
+	// readers: a capture holds the server's write lock for all of it, a
+	// review holds its read lock while it reads records and live state. The
+	// lock is per server so one server's long pass never blocks another's.
+	captureSnapLocks sync.Map
+	// inflightInventories (guarded by inflightInventoryMu) holds, per server,
+	// the peer-context projection of the inventory a discovery pass is
+	// applying right now (registerInflightInventory). A pass publishes its
+	// tools to the StateView only at its end, and with per-server capture
+	// locks two servers' passes overlap; collectPeerToolMetadata overlays
+	// these entries so the TPA shadowing/clone check of one pass sees a peer's
+	// not-yet-published tools. Each pass registers before its approval scan
+	// and unregisters when applyInventoryGuarded returns (after its publish),
+	// so of two overlapping passes at least the later-scanning one sees the
+	// other's new tools: a same-name near-duplicate added on two servers at
+	// once is held on the second, as it was when every pass was serialized.
+	// inflightInventoryMu is a leaf lock: nothing else is taken under it.
+	inflightInventoryMu sync.Mutex
+	inflightInventories map[string]*inflightInventory
+	// sigReconcileMu serializes reconcileSignatureCache (index enumeration
+	// through RetainHashes) with warmSignatureCache. Without it a reconcile
+	// that enumerated the index before another server's pass indexed and
+	// warmed hash H would evict H afterwards, and nothing re-warms it until
+	// that server's next pass. Lock order: a server's approval lock (warm runs
+	// under it) -> sigReconcileMu -> the index manager's and cache's own
+	// locks; nothing taken under sigReconcileMu calls back into the runtime.
+	sigReconcileMu sync.Mutex
 	// reviewAfterRecords is a test hook run after GetServerReview lists records.
 	reviewAfterRecords func()
 	// captureAfterPrune is a test hook run after a capture persisted and
@@ -504,6 +534,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// Phase 7.3: Initialize Supervisor with ActorPoolSimple (delegates to UpstreamManager)
 	actorPool := supervisor.NewActorPoolSimple(upstreamManager, logger)
 	supervisorInstance := supervisor.New(configSvc, actorPool, logger)
+	// GH #1722: a quarantined server's inspection exemption must not expire
+	// underneath an OAuth login the operator is completing for it.
+	supervisorInstance.SetInspectionExemptionHold(oauth.IsManualFlowActive)
 
 	// Initialize OAuth refresh manager for proactive token refresh
 	// Uses storageManager as the token store and global coordinator for flow coordination
@@ -1787,8 +1820,7 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	// upstream errors keep the existing "replay ran, the tool failed" contract.
 	if callErr != nil {
 		var limitErr *limiter.LimitError
-		if errors.As(callErr, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(callErr, &limitErr) && limitErr.Shed() {
 			return nil, callErr
 		}
 	}
@@ -2625,13 +2657,22 @@ func (r *Runtime) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 // the Runtime (it takes one as its RuntimeOperations), not because of an
 // import cycle — internal/management does not import internal/runtime.
 func (r *Runtime) SetManagementService(svc management.Service) {
-	r.managementService = svc
+	if svc == nil {
+		r.managementService.Store(nil)
+		return
+	}
+	r.managementService.Store(&svc)
 }
 
-// GetManagementService returns the management service instance.
-// Returns nil if service hasn't been set yet.
+// GetManagementService returns the management service instance, or nil while
+// none is installed. Safe to call from any goroutine: the field is swapped
+// atomically, so a background reader (the servers.changed coalescer, the
+// attention subscriber) never tears against SetManagementService.
 func (r *Runtime) GetManagementService() management.Service {
-	return r.managementService
+	if svc := r.managementService.Load(); svc != nil {
+		return *svc
+	}
+	return nil
 }
 
 // SetRefreshMetricsRecorder sets the metrics recorder for OAuth token refresh operations.
@@ -2758,6 +2799,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					// auth_url, token_url will be populated from OAuth runtime state if available
 					"auth_url":  "",
 					"token_url": "",
+				}
+				if enabled := serverStatus.Config.OAuth.RefreshReplayEnabled; enabled != nil {
+					oauthConfig["refresh_replay_enabled"] = *enabled
 				}
 			}
 
@@ -2957,6 +3001,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// Spec 112: surface the forward_headers allowlist (names only).
 		if serverStatus.Config != nil && len(serverStatus.Config.ForwardHeaders) > 0 {
 			serverMap["forward_headers"] = append([]string(nil), serverStatus.Config.ForwardHeaders...)
+		}
+		if serverStatus.Config != nil && serverStatus.Config.ToolArgumentErrorMode != "" {
+			serverMap["tool_argument_error_mode"] = serverStatus.Config.ToolArgumentErrorMode
 		}
 
 		// Spec 086: surface the per-server trust tier so the REST GET payload
@@ -3263,6 +3310,9 @@ func (r *Runtime) getAllServersLegacy() ([]map[string]interface{}, error) {
 		if len(srv.ForwardHeaders) > 0 {
 			serverInfo["forward_headers"] = append([]string(nil), srv.ForwardHeaders...)
 		}
+		if srv.ToolArgumentErrorMode != "" {
+			serverInfo["tool_argument_error_mode"] = srv.ToolArgumentErrorMode
+		}
 
 		// Spec 086: per-server trust tier in parity with the StateView path.
 		// Raw configured value; omitted when never configured.
@@ -3420,6 +3470,25 @@ func (r *Runtime) TriggerOAuthLogin(serverName string) error {
 	}
 
 	return nil
+}
+
+// ServerAwaitsOAuthLogin reports whether the named server cannot connect until
+// a person completes its OAuth login: a manual login flow is in flight for it,
+// or its live instance is parked in Pending Auth (GH #1722). Background
+// restarts (the security scan's reconnect) stand down for such a server,
+// because replacing its instance retires the pending flow.
+func (r *Runtime) ServerAwaitsOAuthLogin(serverName string) bool {
+	if serverName == "" {
+		return false
+	}
+	if oauth.IsManualFlowActive(serverName) {
+		return true
+	}
+	if r.upstreamManager == nil {
+		return false
+	}
+	client, exists := r.upstreamManager.GetClient(serverName)
+	return exists && client != nil && !client.Retired() && client.GetState() == upstreamtypes.StatePendingAuth
 }
 
 // TriggerOAuthLoginQuick implements RuntimeOperations interface for management service.
@@ -4349,14 +4418,16 @@ func (r *Runtime) UsageSnapshot() *UsageAggregate {
 	return r.activityService.UsageSnapshot()
 }
 
-// StreamActivities returns a channel that yields activity records matching the filter.
-func (r *Runtime) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+// StreamActivities returns a channel that yields activity records matching the
+// filter. A consumer that stops reading early must cancel ctx so the producer
+// releases its read transaction (see storage.Manager.StreamActivities).
+func (r *Runtime) StreamActivities(ctx context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	if r.storageManager == nil {
 		ch := make(chan *storage.ActivityRecord)
 		close(ch)
 		return ch
 	}
-	return r.storageManager.StreamActivities(filter)
+	return r.storageManager.StreamActivities(ctx, filter)
 }
 
 // ListToolApprovals returns all tool approval records for a server (Spec 032).
@@ -4543,8 +4614,8 @@ func sanitizeClientName(raw string) string {
 	if identity.Key == "" {
 		return ""
 	}
-	if isKnownClientAlias(identity.RawNormalized) {
-		return identity.RawNormalized
+	if alias := clientidentity.AliasCandidate(raw); isKnownClientAlias(alias) {
+		return alias
 	}
 	return identity.Key
 }

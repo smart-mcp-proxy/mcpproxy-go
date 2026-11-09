@@ -12,6 +12,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/sandbox"
 )
 
@@ -159,4 +160,42 @@ func scrubEnv(env []string, key string) []string {
 		out = append(out, e)
 	}
 	return out
+}
+
+// TestSandboxWrapper_DefaultSpecAllowsDevNull reproduces the GH #1704 side
+// observation on a real kernel: under the PRODUCTION spec (buildSandboxSpec,
+// not a hand-built one) a confined shell must be able to redirect to
+// /dev/null, both as `2>/dev/null` and as an explicit write. Before the fix
+// the shell reported "Permission denied" because the read-only "/" grant does
+// not cover WRITE_FILE on the device.
+func TestSandboxWrapper_DefaultSpecAllowsDevNull(t *testing.T) {
+	if !sandbox.Available() {
+		t.Skip("Landlock unavailable on this kernel (needs 5.13+ with Landlock LSM enabled)")
+	}
+	spec := buildSandboxSpec(&config.ServerConfig{Name: "srv", WorkingDir: t.TempDir()})
+	spec.BestEffort = false // this test requires real enforcement
+
+	script := `
+echo to-stderr 1>&2 2>/dev/null || { echo REDIRECT_FAILED; exit 1; }
+echo discarded >/dev/null || { echo WRITE_FAILED; exit 1; }
+: </dev/null || { echo READ_FAILED; exit 1; }
+echo DEVNULL_OK
+`
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, args, extraEnv, err := sandbox.WrapCommand(self, spec, "/bin/sh", []string{"-c", script})
+	if err != nil {
+		t.Fatalf("WrapCommand: %v", err)
+	}
+	c := exec.Command(cmd, args...) //nolint:gosec // re-exec of this test binary by design
+	c.Env = append(os.Environ(), extraEnv...)
+	out, runErr := c.CombinedOutput()
+	if runErr != nil {
+		t.Fatalf("confined shell could not use /dev/null: %v\noutput:\n%s", runErr, out)
+	}
+	if !strings.Contains(string(out), "DEVNULL_OK") {
+		t.Errorf("expected DEVNULL_OK; output:\n%s", out)
+	}
 }

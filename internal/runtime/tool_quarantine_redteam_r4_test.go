@@ -52,7 +52,7 @@ func seedNotesBaselineSibling(t *testing.T, rt *Runtime) {
 func TestRT03_LegacyPendingRecomputed_ApprovalCarriesCurrentVersion(t *testing.T) {
 	for name, decide := range rt03LegacyApprovalPaths {
 		t.Run(name, func(t *testing.T) {
-			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{rt03Server()})
 			require.NoError(t, rt.storageManager.SetSchemaVersion(storage.CurrentSchemaVersion))
 			seedNotesBaselineSibling(t, rt)
 			schema := normalizeJSON(rt03Schema)
@@ -102,7 +102,7 @@ func TestRT03_LegacyPendingRecomputed_ApprovalCarriesCurrentVersion(t *testing.T
 func TestRT03_LegacyChangedRecomputed_ApprovalCarriesCurrentVersion(t *testing.T) {
 	for name, decide := range rt03LegacyApprovalPaths {
 		t.Run(name, func(t *testing.T) {
-			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{rt03Server()})
 			require.NoError(t, rt.storageManager.SetSchemaVersion(storage.CurrentSchemaVersion))
 			schema := normalizeJSON(rt03Schema)
 			v3Hash := calculateToolApprovalHashWithOutputSchema("notes_export", rt03Desc, schema, "", nil)

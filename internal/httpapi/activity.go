@@ -747,8 +747,12 @@ func (s *Server) handleExportActivity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+filename+"\"")
 	w.Header().Set("Cache-Control", "no-cache")
 
-	// Stream activities
-	activityCh := s.controller.StreamActivities(filter)
+	// Stream activities. The context is cancelled on return, so a write
+	// error (client gone) releases the producer's read transaction instead of
+	// leaving it parked on a full channel for the life of the process.
+	streamCtx, cancelStream := context.WithCancel(r.Context())
+	defer cancelStream()
+	activityCh := s.controller.StreamActivities(streamCtx, filter)
 
 	// Write CSV header if format is CSV
 	if format == "csv" {
@@ -939,9 +943,9 @@ func (s *Server) handleActivitySummary(w http.ResponseWriter, r *http.Request) {
 	toolCounts := make(map[string]int)
 	perServer := make(map[string]*perServerAccumulator)
 
-	// The stream holds a read transaction open until the channel is drained or
-	// closed, so this loop must always run to completion.
-	for a := range s.controller.StreamActivities(filter) {
+	// The producer releases its read transaction when the request context is
+	// cancelled, so a client that disconnects mid-scan does not pin the store.
+	for a := range s.controller.StreamActivities(r.Context(), filter) {
 		totalCount++
 
 		// "How many rows" (totalCount) and "how many calls" (callCount) are
@@ -1398,7 +1402,7 @@ func (s *Server) handleActivityUsage(w http.ResponseWriter, r *http.Request) {
 
 	var resp *contracts.UsageAggregateResponse
 	if params.scopeFiltered() {
-		resp = s.scopedUsageResponse(params, time.Now().UTC())
+		resp = s.scopedUsageResponse(r.Context(), params, time.Now().UTC())
 	} else {
 		snap := s.controller.UsageSnapshot()
 		tokens, _ := s.controller.GetTokenSavings()
@@ -1416,7 +1420,7 @@ func (s *Server) handleActivityUsage(w http.ResponseWriter, r *http.Request) {
 // admission rule instead. Per-tool metrics are therefore window-bounded here
 // (lifetime-cumulative on the unfiltered path), and the global tokens-saved
 // headline is omitted because it cannot be re-derived for a subset.
-func (s *Server) scopedUsageResponse(p usageParams, now time.Time) *contracts.UsageAggregateResponse {
+func (s *Server) scopedUsageResponse(ctx context.Context, p usageParams, now time.Time) *contracts.UsageAggregateResponse {
 	filter := storage.ActivityFilter{
 		// Every record Apply may admit, including the call_tool_* mirrors it
 		// drops itself: the population a cold-start rebuild scans.
@@ -1433,9 +1437,9 @@ func (s *Server) scopedUsageResponse(p usageParams, now time.Time) *contracts.Us
 		filter.AllowedServers = p.allowed
 	}
 	agg := internalRuntime.NewUsageAggregate()
-	// The stream holds a read transaction open until drained, so it always runs
-	// to completion.
-	for rec := range s.controller.StreamActivities(filter) {
+	// The producer releases its read transaction when the request context is
+	// cancelled, so a client that disconnects mid-scan does not pin the store.
+	for rec := range s.controller.StreamActivities(ctx, filter) {
 		agg.Apply(rec)
 	}
 	agg.UpdatedAt = now

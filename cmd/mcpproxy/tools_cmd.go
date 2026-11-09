@@ -893,7 +893,7 @@ func loadToolsConfig() (*config.Config, error) {
 	configFilePath := resolveCLIConfigPath(configPath)
 	if configFilePath == "" {
 		var err error
-		if configFilePath, err = defaultHomeConfigPath(); err != nil {
+		if configFilePath, err = loaderHomeConfigPath(); err != nil {
 			return nil, err
 		}
 	}

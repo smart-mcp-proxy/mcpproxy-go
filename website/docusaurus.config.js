@@ -11,6 +11,7 @@ const publishedDocs = {
   include: [
     'intro.md',
     'getting-started/**/*.{md,mdx}',
+    'guides/**/*.{md,mdx}',
     'configuration/**/*.{md,mdx}',
     'cli/**/*.{md,mdx}',
     'api/**/*.{md,mdx}',

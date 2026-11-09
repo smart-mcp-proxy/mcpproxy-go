@@ -35,8 +35,8 @@ MCPProxy resolves an **isolation mode** for every stdio server. Set it globally 
 | Mode | What it does | Where it works | uid/gid drop |
 |------|--------------|----------------|--------------|
 | `docker` | Wraps the server in a Docker container (process/FS/network isolation, resource limits). The default and most capable mode. | Any host with a working Docker daemon. | Yes (container user) |
-| `sandbox` | Runs the server **natively** under a Linux [Landlock](https://docs.kernel.org/userspace-api/landlock.html) filesystem allowlist + `setrlimit` resource caps — **no Docker required**. For hosts where Docker isolation is unavailable or broken (e.g. snap-docker + AppArmor). | Linux 5.13+ only (Landlock). Best-effort downgrade across ABI 1–5. macOS/Windows: documented no-op ⇒ behaves like `none`. | **No** — see [Honest limitations](#honest-limitations) |
-| `none` | No confinement; the server runs directly on the host. | Everywhere. | n/a |
+| `sandbox` | Runs the server **natively** under a Linux [Landlock](https://docs.kernel.org/userspace-api/landlock.html) filesystem allowlist + `setrlimit` resource caps — **no Docker required**. For hosts where Docker isolation is unavailable or broken (e.g. snap-docker + AppArmor). Confines **writes** only: the server still runs as the proxy's user and can read the data directory and use the admin socket (see [Honest limitations](#honest-limitations)). | Linux 5.13+ only (Landlock). Best-effort downgrade across ABI 1–5. macOS/Windows: documented no-op ⇒ behaves like `none`. | **No** — see [Honest limitations](#honest-limitations) |
+| `none` | No confinement; the server runs directly on the host as the proxy's user, with the data directory and the admin socket reachable. | Everywhere. | n/a |
 
 ```json
 {
@@ -321,7 +321,17 @@ Environment variables from server configuration are automatically passed to cont
 }
 ```
 
-These become Docker arguments: `-e API_KEY=your-secret-key -e DEBUG=true`
+These become key-only Docker arguments, `-e API_KEY -e DEBUG`, and the values are set in the
+environment of the `docker` process, which reads them from there. The same applies to a server
+whose `command` is `docker run …` itself. A value never appears in the `docker` command line, so
+`ps aux` and `/proc/<pid>/cmdline`, which every local user can read, do not show it
+([#1809](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1809)). It is still visible to the
+process owner and root in `/proc/<pid>/environ` of the `docker` client, and inside the container
+(`docker inspect`), as any container environment variable is. `PATH` is the one value still passed
+inline (`-e PATH=…`), so a configured container `PATH` is exact; it is not a secret. Whenever
+`docker` is started through your login shell (it could not be resolved to an absolute path, or on
+Linux with neither `DOCKER_HOST` nor `DOCKER_CONTEXT` exported), a profile that exports or unsets
+one of these names before `docker` runs wins over the configured value.
 
 ## Docker-in-Docker Prevention
 
@@ -342,6 +352,54 @@ MCPProxy automatically skips isolation for servers that are already Docker comma
 ```
 
 This prevents Docker-in-Docker complications.
+
+## Rootless Podman
+
+`docker` isolation only needs a daemon that answers the Docker API through the `docker` CLI, and mcpproxy only shells out to that CLI. A **rootless Podman API socket** therefore works as the backend with no code change, and it is an alternative to mounting the host Docker socket (which is root-equivalent control of the host). With rootless Podman the blast radius of a compromised proxy is one unprivileged Linux user: the socket belongs to that user, not to root, so the proxy can start containers as that user and nothing else.
+
+> **Community-verified, not CI-tested.** Both routes below were tested by [@james-crowley](https://github.com/james-crowley) ([#1705](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1705)) on Ubuntu with Podman 5.7.0 and the stock `docker` CLI 29.9.1. There is no CI job for Podman; if a newer Podman or CLI changes the behaviour, please open an issue. The `podman-docker` shim (which makes `docker` an alias for `podman`) was not tested.
+
+### Host-run mcpproxy
+
+```bash
+systemctl --user enable --now podman.socket      # or: podman system service --time=0 unix:///path/podman.sock
+export DOCKER_HOST=unix://$XDG_RUNTIME_DIR/podman/podman.sock
+mcpproxy serve
+```
+
+```json
+{
+  "docker_isolation": { "mode": "docker" }
+}
+```
+
+- `DOCKER_HOST` has to be in **mcpproxy's own environment**: an `Environment=DOCKER_HOST=unix:///run/user/<uid>/podman/podman.sock` line in the systemd unit, or `environment:` in Compose. A value that lives only in a login-shell profile is picked up by the login-shell fallback described under [Common Issues](#common-issues), not by a direct exec.
+- The availability probe (`docker info --format '{{.ServerVersion}}'`) returns the Podman version (for example `5.7.0`), so isolation reports as available.
+- The isolated server runs in a container Podman creates from the usual image (for example `ghcr.io/astral-sh/uv:python3.13-bookworm-slim` for `python`). It does not see the proxy's data directory, its loopback is not the host's, only the image's own environment is present, and uid 0 inside the container maps to the unprivileged host user.
+- If the Podman service is not running, the spawn fails with `Cannot connect to the Docker daemon at unix:///...`; start `podman.socket`.
+
+### mcpproxy in a container with the Podman socket mounted
+
+This is the case the Spec 111 host-socket warning is about (mounting a Docker socket into the proxy container), with a user-owned socket instead of a root-owned one. The proxy ran as a rootless Podman container from `docker.io/library/docker:cli` (static `docker` CLI and `sh`) with the user socket bind-mounted and `DOCKER_HOST=unix:///run/podman.sock` set. The host socket is `/run/user/<uid>/podman/podman.sock` (from `systemctl --user start podman.socket`), mode `660`, owned by the host user.
+
+Whether the proxy can use the socket depends on the user mapping of the proxy container:
+
+| Proxy container user | Result |
+|---|---|
+| default (root in the container is the host user) | works; `docker info` returns the Podman version |
+| `--user 65532:65532` | **fails**: the socket appears as `0:0` mode `660` inside the container and 65532 has no access |
+| `--userns=keep-id --user <host uid>:<host uid>` | works |
+| `--user 65532:65532 --group-add keep-groups` | works; passes the host's supplementary groups through to the container (crun) |
+
+The `group_add: [<gid>]` advice for the host Docker socket (a `docker` group GID, see [Spec 111](https://github.com/smart-mcp-proxy/mcpproxy-go/blob/main/specs/111-personal-docker-image/research.md)) **does not carry over** to rootless Podman: the usable fixes are `keep-id`, `keep-groups`, or running the proxy container as its (mapped) root.
+
+With the `keep-id` variant the proxy started a `python` isolation container as a **sibling** through the socket. The child ran as uid 0 in its own container, saw no `/data` and no socket, and its environment held only the image's own variables.
+
+Notes:
+
+- **`-v` paths resolve on the host.** The daemon is on the host, so a `-v` in `docker_isolation.extra_args` names a host path, not a path inside the proxy container.
+- **Non-root needs a writable `HOME`.** With a non-root user and no `$HOME`, the proxy logs `mkdir /.local: permission denied` for its HTTP log; set `HOME` to a writable path.
+- **The socket is the user's, not root's.** A compromised proxy can start containers as that one user and nothing else, unlike the root-equivalent host Docker socket.
 
 ## Debugging
 
@@ -454,6 +512,7 @@ Your options on such a host:
 - **No uid/gid drop.** Dropping to an unprivileged uid/gid requires `CAP_SETUID`/`CAP_SETGID` (i.e. running as root). When mcpproxy runs unprivileged, the uid/gid drop is **best-effort and typically a no-op** — the sandboxed process keeps the launching user's identity. Landlock (filesystem) and `setrlimit` (resource caps) still apply. Docker mode does drop to a container user. This is an honest trade-off, not a bug.
 - **Linux-only.** Landlock is a Linux 5.13+ feature. On older kernels the launcher degrades best-effort (fewer access-right bits enforced on ABI 1). On macOS/Windows `sandbox` is a documented **no-op** and behaves like `none`.
 - **Filesystem + resources only.** Landlock confines the filesystem write-allowlist; it does not provide network namespacing. Pair with care for network-sensitive servers, or use `docker` mode with `network_mode: none`.
+- **`none` and `sandbox` do not hide the data directory or the Unix socket.** A stdio server runs as the proxy's user, so it can read `mcp_config.json` (holds `api_key`) and `config.db` (holds the upstream OAuth tokens), and while `enable_socket` is on it can connect to `<data-dir>/mcpproxy.sock` without a key — a sandboxed child minted an agent token over it ([#1704](https://github.com/smart-mcp-proxy/mcpproxy-go/issues/1704)). Landlock does block `/proc/<pid>/environ`, so the key is safe in the environment but not on disk or over the socket. **`enable_socket: false` is the setting that matters** when a stdio server you do not fully trust runs outside `docker` isolation (headless installs lose nothing: the tray is the only socket client); use `docker` isolation for such servers where you can; `mcpproxy doctor` warns when an enabled stdio server resolves to `none` or `sandbox` with the socket on. Verification table: [What the sandbox does not hide](features/sandbox-isolation.md#what-the-sandbox-does-not-hide).
 - **Docker-based scanners do not run under `sandbox`/`none`.** They are skipped and the skip is surfaced via the informational `deep_scan` descriptor — it never downgrades the baseline verdict (Spec 077 FR-008). A native scanner runtime is a future enhancement (D3 option a).
 
 ## Platform support matrix

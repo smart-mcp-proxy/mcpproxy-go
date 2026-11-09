@@ -1,9 +1,11 @@
 package connect
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"testing"
@@ -1452,21 +1454,68 @@ func TestPlanCredential(t *testing.T) {
 	}
 }
 
-// The query carrier URL-escapes a real secret but leaves the display mask and
-// the pending placeholder literal.
-func TestCredentialQuery(t *testing.T) {
+// Codex writes a plain url plus a literal http_headers table (documented Codex
+// MCP key); the generic fallback writes a headers object. Neither carries the
+// credential in the URL, which mcp_reject_query_apikey refuses.
+func TestBuildServerEntry_CodexAndGenericUseHeaders(t *testing.T) {
 	base := "http://127.0.0.1:8080/mcp"
-	if got := credentialQuery(base, ""); got != base {
-		t.Errorf("no credential must leave the URL clean, got %s", got)
+	for _, credential := range []string{"mcp_cli_abc", maskClientCredential, pendingCredential} {
+		codex := buildServerEntry("codex", serverEntryParams{baseURL: base, credential: credential})
+		wantCodex := map[string]interface{}{
+			"url":          base,
+			"http_headers": map[string]interface{}{"X-API-Key": credential},
+		}
+		if !reflect.DeepEqual(codex, wantCodex) {
+			t.Errorf("codex entry = %v, want %v", codex, wantCodex)
+		}
+		generic := buildServerEntry("some-future-client", serverEntryParams{baseURL: base, credential: credential})
+		wantGeneric := map[string]interface{}{
+			"type":    "http",
+			"url":     base,
+			"headers": map[string]interface{}{"X-API-Key": credential},
+		}
+		if !reflect.DeepEqual(generic, wantGeneric) {
+			t.Errorf("generic entry = %v, want %v", generic, wantGeneric)
+		}
 	}
-	if got := credentialQuery(base, "a b&x=1"); strings.Contains(got, " ") || !strings.Contains(got, "apikey=a+b%26x%3D1") {
-		t.Errorf("a real credential must be URL-escaped, got %s", got)
+	for _, id := range []string{"codex", "some-future-client"} {
+		e := buildServerEntry(id, serverEntryParams{baseURL: base})
+		if _, ok := e["http_headers"]; ok {
+			t.Errorf("%s: keyless entry must carry no http_headers: %v", id, e)
+		}
+		if _, ok := e["headers"]; ok {
+			t.Errorf("%s: keyless entry must carry no headers: %v", id, e)
+		}
+		if u, _ := e["url"].(string); u != base {
+			t.Errorf("%s: keyless url = %q, want %q", id, u, base)
+		}
 	}
-	if got := credentialQuery(base, maskClientCredential); got != base+"?apikey="+maskClientCredential {
-		t.Errorf("the mask stays literal, got %s", got)
+}
+
+// Golden: the exact config.toml Connect writes for Codex.
+func TestConnect_CodexWritesHTTPHeadersTOML(t *testing.T) {
+	svc, home := testServiceWithKey(t)
+	svc.WithRequireMCPAuth(true)
+	minter := withFakeMinter(svc)
+	seedClientConfig(t, home, "codex")
+
+	if _, err := svc.Connect("codex", "mcpproxy", true); err != nil {
+		t.Fatalf("Connect: %v", err)
 	}
-	if got := credentialQuery(base, pendingCredential); got != base+"?apikey="+pendingCredential {
-		t.Errorf("the pending placeholder stays literal, got %s", got)
+	raw, err := os.ReadFile(ConfigPath("codex", home))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "[mcp_servers]\n" +
+		"  [mcp_servers.mcpproxy]\n" +
+		"    url = \"http://127.0.0.1:8080/mcp\"\n" +
+		"    [mcp_servers.mcpproxy.http_headers]\n" +
+		"      X-API-Key = \"" + minter.lastSecret() + "\"\n"
+	if string(raw) != want {
+		t.Fatalf("codex config.toml mismatch\n got:\n%s\nwant:\n%s", raw, want)
+	}
+	if bytes.Contains(raw, []byte("apikey")) {
+		t.Fatalf("codex config must not carry ?apikey=:\n%s", raw)
 	}
 }
 

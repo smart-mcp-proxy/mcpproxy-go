@@ -165,7 +165,16 @@ type CallbackServer struct {
 	waitersMu         sync.Mutex
 	waiters           map[string]chan map[string]string
 	remoteCallbackURL string // protected by waitersMu
+	// invalidated maps a state whose flow gave up (its instance was retired
+	// while it waited, GH #1722) to the reason, so the callback that arrives
+	// later can say why the login was invalidated. Protected by waitersMu;
+	// bounded by maxInvalidatedStates, oldest dropped first.
+	invalidated      map[string]string
+	invalidatedOrder []string
 }
+
+// maxInvalidatedStates bounds CallbackServer.invalidated.
+const maxInvalidatedStates = 16
 
 var globalCallbackManager = &CallbackServerManager{
 	servers: make(map[string]*CallbackServer),
@@ -1832,6 +1841,42 @@ func (c *CallbackServer) UnregisterState(state string) {
 	}
 }
 
+// InvalidateState drops the waiter for a state whose flow cannot finish any
+// more (GH #1722: the instance that owns it was retired while the person was
+// still signing in) and remembers reason, so the browser callback that lands
+// afterwards renders a failure page that says so instead of the generic
+// "unknown or expired state". A state nobody is waiting for is left alone.
+func (c *CallbackServer) InvalidateState(state, reason string) {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+	if _, exists := c.waiters[state]; !exists {
+		return
+	}
+	delete(c.waiters, state)
+	if c.invalidated == nil {
+		c.invalidated = make(map[string]string)
+	}
+	if _, known := c.invalidated[state]; !known {
+		c.invalidatedOrder = append(c.invalidatedOrder, state)
+		for len(c.invalidatedOrder) > maxInvalidatedStates {
+			delete(c.invalidated, c.invalidatedOrder[0])
+			c.invalidatedOrder = c.invalidatedOrder[1:]
+		}
+	}
+	c.invalidated[state] = reason
+	c.logger.Warn("OAuth login invalidated while waiting for the callback",
+		zap.String("state", StateFingerprint(state)),
+		zap.String("reason", reason))
+}
+
+// invalidationReason returns why a state's flow was invalidated, "" when it
+// was not.
+func (c *CallbackServer) invalidationReason(state string) string {
+	c.waitersMu.Lock()
+	defer c.waitersMu.Unlock()
+	return c.invalidated[state]
+}
+
 // waiterCount reports how many flows are currently parked on this server.
 // Used to decide whether a cached server may be torn down: replacing one that
 // still has a waiter drops a live flow, whose browser then lands on a closed
@@ -1993,10 +2038,13 @@ func (c *CallbackServer) handleCallbackWithFailureNotification(w http.ResponseWr
 			GetTokenStoreManager().RecordOAuthFailure(c.ServerName, reason)
 		}
 
-		c.writePage(w, http.StatusBadRequest, callbackPage(
-			callbackTitleFailed,
-			fmt.Sprintf("mcpproxy is not waiting for this sign-in (unknown or expired state). "+
-				"Nothing was signed in. Start the login again from mcpproxy for '%s'.", c.ServerName)))
+		message := fmt.Sprintf("mcpproxy is not waiting for this sign-in (unknown or expired state). "+
+			"Nothing was signed in. Start the login again from mcpproxy for '%s'.", c.ServerName)
+		if why := c.invalidationReason(state); why != "" {
+			message = fmt.Sprintf("This sign-in was invalidated before it could finish: %s. "+
+				"Nothing was signed in. Start the login again from mcpproxy for '%s'.", why, c.ServerName)
+		}
+		c.writePage(w, http.StatusBadRequest, callbackPage(callbackTitleFailed, message))
 		return
 	}
 

@@ -129,7 +129,7 @@ func (a *attentionSubscriber) start(ctx context.Context) {
 // wired yet (this subscriber starts at Runtime construction, same as
 // coalescer), the next servers.changed event fills a.servers instead.
 func (a *attentionSubscriber) primeFromManagement(ctx context.Context) {
-	lister, ok := a.rt.managementService.(serversLister)
+	lister, ok := a.rt.GetManagementService().(serversLister)
 	if !ok || lister == nil {
 		return
 	}

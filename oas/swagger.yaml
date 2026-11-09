@@ -9,6 +9,26 @@ components:
         surface:
           type: string
       type: object
+    config.AgentTokenRateLimit:
+      description: |-
+        AgentTokenRateLimit caps how many upstream tool calls ONE agent token may
+        make: PerMinute on average, Burst at once (issue #1699). Every token is
+        counted separately, and a token's own rate_limit (set when it is created)
+        replaces this default for that token. Only agent-token callers are
+        limited; the admin API key, the unix socket and an unauthenticated /mcp
+        caller are not. Absent or per_minute 0 = no limit (default, zero behavior
+        change). The counters are in memory: a restart gives every token a full
+        allowance again. Hot-reloadable. File/API-configured only, no env scheme.
+      properties:
+        burst:
+          description: |-
+            Burst is how many calls a token may make at once after a quiet spell.
+            0 = the PerMinute value.
+          type: integer
+        per_minute:
+          description: PerMinute is the sustained rate. 0 = no limit.
+          type: integer
+      type: object
     config.AuditLogConfig:
       description: |-
         AuditLog configures the Spec 107 edition-neutral audit sink
@@ -74,6 +94,8 @@ components:
             filtered to the caller's profile and agent-token scope. Default true;
             set false to keep server names out of client context. Read live.
           type: boolean
+        agent_token_rate_limit:
+          $ref: '#/components/schemas/config.AgentTokenRateLimit'
         aggregate_upstream_prompts:
           description: |-
             AggregateUpstreamPrompts, when true, aggregates every connected upstream
@@ -773,6 +795,10 @@ components:
           type: boolean
         redirect_uri:
           type: string
+        refresh_replay_enabled:
+          description: Opt in only when token_endpoint supports idempotent refresh
+            replay for at least 30 seconds.
+          type: boolean
         registration_endpoint:
           type: string
         scopes:
@@ -975,9 +1001,11 @@ components:
             debounced informational server rescan that brings the review screen's scan
             coverage back to "current".
 
-            Evidence and freshness ONLY: a clean verdict never approves a changed
-            contract (RT-02); every change is still held for review in scan and manual
-            trust modes. Runs in every trust mode except "auto".
+            Evidence and freshness ONLY: this switch approves nothing. Under "manual"
+            every change is held for review whatever the verdict (RT-02); under
+            "scan" the gate's own synchronous scan approves a clean change that
+            passes the spec 120 structural gate (spec 119 FR-004), and this switch
+            does not affect that path. Runs in every trust mode except "auto".
 
             Default (nil) is ENABLED. It only takes effect while auto_baseline_scan is
             also enabled, so a user can keep the admission scan and turn off per-change
@@ -1314,6 +1342,12 @@ components:
             informational (MCP-1072) — surfaced so a reviewer can see a server's origin
             — and no longer gates quarantine or skip_quarantine.
           type: string
+        tool_argument_error_mode:
+          description: |-
+            ToolArgumentErrorMode stores the per-upstream argument-error policy.
+            Empty and detailed retain detailed errors; redacted opts into redaction.
+            Updates omit/keep an empty value; detailed explicitly resets the policy.
+          type: string
         tool_discovery_interval:
           type: string
         toon_output:
@@ -1328,8 +1362,9 @@ components:
             TrustMode is the per-server trust tier: auto|scan|manual. Supersedes
             auto_approve_tool_changes (spec 086). An empty value is derived from the
             legacy fields at load via normalizeServerQuarantineFlags; the single
-            resolution point is EffectiveTrustMode(), which treats an empty or
-            unrecognized value as manual (secure by default). Read via
+            resolution point is EffectiveTrustMode(), which treats an empty value as
+            scan (DefaultTrustMode, spec 119) and an unrecognized value as manual
+            (fail closed). Read via
             EffectiveTrustMode(), never the raw string.
           type: string
         updated:
@@ -1343,15 +1378,32 @@ components:
     config.TLSConfig:
       description: TLS configuration
       properties:
+        cert_file:
+          description: |-
+            CertFile is the absolute path of an operator-provided server certificate
+            (PEM, leaf first), served instead of a generated one. Needs KeyFile.
+          type: string
         certs_dir:
           description: Directory for certificates
           type: string
         enabled:
           description: Enable HTTPS
           type: boolean
+        extra_sans:
+          description: |-
+            ExtraSANs are DNS names and IP addresses added to the generated server
+            certificate, which is signed by the same local CA. Not used with CertFile.
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         hsts:
           description: Enable HTTP Strict Transport Security
           type: boolean
+        key_file:
+          description: KeyFile is the absolute path of the private key for CertFile
+            (PEM).
+          type: string
         require_client_cert:
           description: Enable mTLS
           type: boolean
@@ -1781,10 +1833,12 @@ components:
           type: string
         rejected_count:
           description: |-
-            RejectedCount is the number of calls shed by a concurrency limiter before
-            they reached an upstream (spec 093). Counted separately from errors: it is
-            proxy backpressure, not an upstream fault, and it is the signal an
-            operator right-sizes max_concurrent_requests against.
+            RejectedCount is the number of calls shed by a concurrency limiter, or
+            refused because an agent token was over its call budget, before they
+            reached an upstream (spec 093, issue #1699). Counted separately from
+            errors: it is proxy backpressure, not an upstream fault, and it is the
+            signal an operator right-sizes max_concurrent_requests and the rate
+            limits against.
           type: integer
         start_time:
           description: Start of the period (RFC3339)
@@ -2554,6 +2608,8 @@ components:
           type: boolean
         redirect_port:
           type: integer
+        refresh_replay_enabled:
+          type: boolean
         registration_endpoint:
           type: string
         scopes:
@@ -3158,6 +3214,8 @@ components:
           type: string
         token_expires_at:
           description: When the OAuth token expires (ISO 8601)
+          type: string
+        tool_argument_error_mode:
           type: string
         tool_count:
           type: integer
@@ -3868,6 +3926,10 @@ components:
           type: string
         reconnect_on_use:
           type: boolean
+        tool_argument_error_mode:
+          description: Empty preserves an update; detailed explicitly resets a redacted
+            policy.
+          type: string
         trust_mode:
           description: |-
             TrustMode is the per-server trust tier (spec 086): "auto", "scan", or
@@ -5709,19 +5771,94 @@ components:
           description: 'ServerStepStatus is one of: "", "completed", "skipped".'
           type: string
       type: object
+    telemetry.DiagnosticsCounters:
+      properties:
+        current_error_codes:
+          additionalProperties:
+            type: integer
+          description: |-
+            CurrentErrorCodes is the STANDING state at heartbeat time: stable MCPX_
+            code -> number of configured servers currently in that state. It is not
+            a counter and is never persisted — it is recomputed each heartbeat from
+            the supervisor's live stateview.
+
+            Schema v11 (MCP-2967). It exists because error_code_counts_24h became
+            edge-triggered in the same change: previously the supervisor re-counted
+            every standing failure on its 30s reconcile ticker, so a parked install
+            inflated the counter by ~2880/day/server. Edge-triggering alone would
+            have swung the error to the other side — the 24h window decays, this
+            struct is omitempty via isZero(), so a permanently broken install would
+            emit once and then disappear from the payload entirely, and absent reads
+            as zero. The two fields answer different questions and are only correct
+            together: "how often did something newly break" and "how many servers
+            are broken right now".
+
+            Safe: only MCPX_* enum constants as keys, never server names, URLs,
+            commands, or free text; values are non-negative server counts.
+          type: object
+        error_code_counts_24h:
+          additionalProperties:
+            type: integer
+          description: |-
+            ErrorCodeCounts24h maps stable MCPX_ code strings to 24h occurrence counts.
+            Safe: only MCPX_* enum constants are stored here, never free text, paths,
+            server names, or user-entered values.
+          type: object
+        fix_attempted_24h:
+          description: FixAttempted24h counts POST /api/v1/diagnostics/fix calls in
+            the last 24h.
+          type: integer
+        fix_succeeded_24h:
+          description: FixSucceeded24h counts fix invocations with outcome="success"
+            in the last 24h.
+          type: integer
+        unique_codes_ever:
+          description: |-
+            UniqueCodesEver is the cardinality of the all-time error code set.
+            Bounded by the MCPX_ catalog size (~30 codes), never approaches PII risk.
+          type: integer
+      type: object
     telemetry.FeedbackContext:
       properties:
+        anonymous_id:
+          description: AnonymousID is the install's telemetry anonymous ID (heartbeat
+            value).
+          type: string
         arch:
           type: string
         connected_server_count:
           type: integer
+        diagnostics:
+          $ref: '#/components/schemas/telemetry.DiagnosticsCounters'
         edition:
           type: string
+        go_version:
+          type: string
+        last_error_code:
+          description: LastErrorCode is the most recent MCPX_* error code.
+          type: string
+        last_startup_outcome:
+          description: LastStartupOutcome is the previous startup's outcome word.
+          type: string
+        machine_id:
+          description: MachineID is the hashed machine identifier (heartbeat value).
+          type: string
         os:
+          type: string
+        previous_shutdown:
+          description: PreviousShutdown is how the previous run ended (clean, crash,
+            ...).
           type: string
         routing_mode:
           type: string
         server_count:
+          type: integer
+        tool_count:
+          type: integer
+        uptime_minutes:
+          description: |-
+            UptimeMinutes is the daemon's uptime. Omitted from short-lived CLI
+            submissions, where the process uptime says nothing about the daemon.
           type: integer
         version:
           type: string
@@ -6609,8 +6746,8 @@ paths:
       description: 'One list, one count, every surface (Web UI, macOS tray/Home, CLI)
         reads from it. Filtered per caller: an administrator sees every item; a scoped
         caller (agent token, or a non-admin server-edition OAuth user session) sees
-        only server items whose server it may enumerate; every other subject type
-        (client, setting) is administrator-only.'
+        only server items whose server it may enumerate (for a profile-pinned token:
+        servers within its pin); every other subject type (client, setting) is administrator-only.'
       responses:
         "200":
           content:
@@ -9156,8 +9293,9 @@ paths:
       - registries
   /api/v1/review:
     get:
-      description: Returns one row per quarantined server or trusted server with pending
-        or changed tools. Scoped callers see only servers they may enumerate.
+      description: 'Returns one row per quarantined server or trusted server with
+        pending or changed tools. Scoped callers see only servers they may enumerate
+        (for a profile-pinned token: servers within its pin), with count recomputed.'
       responses:
         "200":
           content:
@@ -11165,7 +11303,7 @@ paths:
   /api/v1/status:
     get:
       description: |-
-        Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+        Get comprehensive server status including running state, listen address, upstream statistics, and timestamp. For a scoped caller (an agent token; for a profile-pinned token, its allowed_servers intersected with the pin) upstream_stats lists only the servers it may enumerate and every counter is recomputed over them.
         telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
       responses:
         "200":
@@ -11405,8 +11543,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Shed by a concurrency limit (Retry-After header carries the
-            wait hint)
+          description: Shed by a concurrency limit or an agent token call rate limit
+            (Retry-After header carries the wait hint)
         "500":
           content:
             application/json:
@@ -11512,8 +11650,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
-          description: Shed by a concurrency limit (Retry-After header carries the
-            wait hint)
+          description: Shed by a concurrency limit or an agent token call rate limit
+            (Retry-After header carries the wait hint)
         "500":
           content:
             application/json:

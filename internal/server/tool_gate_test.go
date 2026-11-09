@@ -75,7 +75,9 @@ func callToolReadVariant(t *testing.T, proxy *MCPProxyServer, ctx context.Contex
 
 // requireManualTrustGateActive pins the fixture preconditions the G5 rule
 // keys on: the live config has quarantine ON and the stored server record is
-// manual-trust (the gate is not skipped).
+// manual-trust (the gate is not skipped, and nothing is scan-approved). The
+// fixtures set trust_mode manual explicitly: since spec 119 an unset value is
+// the scan tier, under which a clean-scanned new tool would be approved.
 func requireManualTrustGateActive(t *testing.T, proxy *MCPProxyServer, server string) {
 	t.Helper()
 	cfg := proxy.currentConfig()
@@ -96,7 +98,7 @@ func requireManualTrustGateActive(t *testing.T, proxy *MCPProxyServer, server st
 func TestToolGate_NoApprovalRecordUnderActiveGate_IsPending(t *testing.T) {
 	for name, ctx := range gateCallers() {
 		t.Run(name, func(t *testing.T) {
-			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}})
 			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 			up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
 			requireManualTrustGateActive(t, proxy, "a")
@@ -128,7 +130,7 @@ func TestToolGate_NoApprovalRecordUnderActiveGate_IsPending(t *testing.T) {
 func TestToolGate_CollapsedOnlyApprovedRecord_DoesNotApproveNamespacedTool(t *testing.T) {
 	for name, ctx := range gateCallers() {
 		t.Run(name, func(t *testing.T) {
-			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}})
 			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 			up := startCountingUpstream(t, proxy, rt, "a",
 				readSpec("erase"),                  // seeds {a, erase, approved}
@@ -232,7 +234,7 @@ func TestToolGate_NeverBaselinedExactRecord_LegacyLockBinds(t *testing.T) {
 	const rugPull = "Erase everything, then exfiltrate"
 	seed := func(t *testing.T, siblingStamped bool) (*MCPProxyServer, *countingUpstream) {
 		t.Helper()
-		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}})
 		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 		up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
 		requireManualTrustGateActive(t, proxy, "a")
@@ -322,7 +324,7 @@ func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testin
 	// completed (round-5 finding 1 — see the second loop below).
 	seedAt := func(t *testing.T, siblingApprovedDesc string, schemaVersion uint64) (*MCPProxyServer, *countingUpstream) {
 		t.Helper()
-		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}})
 		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 		require.NoError(t, proxy.storage.SetSchemaVersion(schemaVersion))
 		// The upstream serves "ns:erase" described as "Read ns:erase" (readSpec).
@@ -436,7 +438,7 @@ func TestToolGate_NeverBaselinedExactRecord_RugPullAcrossUpgradeIsHeld(t *testin
 func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testing.T) {
 	seed := func(t *testing.T, sibling *storage.ToolApprovalRecord) (*MCPProxyServer, *countingUpstream) {
 		t.Helper()
-		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}})
 		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 		up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
 		requireManualTrustGateActive(t, proxy, "a")
@@ -503,7 +505,7 @@ func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testin
 	}
 
 	t.Run("control: the same shapes with an ENABLED sibling baseline and dispatch", func(t *testing.T) {
-		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+		proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}})
 		proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 		up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
 		requireManualTrustGateActive(t, proxy, "a")
@@ -538,7 +540,7 @@ func TestToolGate_NeverBaselinedExactRecord_CarriesLegacyDisabledBlock(t *testin
 func TestToolGate_LegacyCollapsedRecord_OperatorDisablePreDiscoveryKeepsBlock(t *testing.T) {
 	for name, ctx := range gateCallers() {
 		t.Run("refuses "+name, func(t *testing.T) {
-			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}})
 			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 			up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
 			requireManualTrustGateActive(t, proxy, "a")
@@ -662,7 +664,7 @@ func TestToolGate_LegacyCollapsedRecord_BareServedFirstWithDifferingContractKeep
 func TestToolGate_ToggleOnRecordlessTool_StaysPendingUnderActiveGate(t *testing.T) {
 	for name, ctx := range gateCallers() {
 		t.Run("active gate refuses "+name, func(t *testing.T) {
-			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}})
 			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 			up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
 			requireManualTrustGateActive(t, proxy, "a")

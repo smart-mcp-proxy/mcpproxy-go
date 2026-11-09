@@ -925,6 +925,12 @@ func (c *Client) refreshTokenWithStoredCredentials(ctx context.Context, tokenEnd
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			// The status arrived even though the body did not. Keep it, so a
+			// truncated rejection is classified as the answer it is and not
+			// as a lost response.
+			return nil, &oauth.RefreshHTTPError{Status: resp.StatusCode}
+		}
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 

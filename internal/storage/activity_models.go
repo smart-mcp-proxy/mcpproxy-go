@@ -95,8 +95,8 @@ const (
 	// ActivityStatusRejected is a call shed by a concurrency limiter before it
 	// ever reached the upstream (spec 093). Distinct from "error" on purpose:
 	// nothing went wrong upstream, the proxy applied backpressure. The record's
-	// metadata carries rejection_reason (queue_full | queue_timeout) and
-	// rejection_scope (server | global).
+	// metadata carries rejection_reason (queue_full | queue_timeout |
+	// rate_limited) and rejection_scope (server | global | token).
 	ActivityStatusRejected = "rejected"
 )
 
@@ -120,9 +120,10 @@ const InternalCallToolPrefix = "call_tool_"
 
 // Metadata keys carried by an ActivityStatusRejected record (spec 093 FR-012).
 const (
-	// MetadataKeyRejectionReason is "queue_full" or "queue_timeout".
+	// MetadataKeyRejectionReason is "queue_full", "queue_timeout" or
+	// "rate_limited" (an agent token over its call budget).
 	MetadataKeyRejectionReason = "rejection_reason"
-	// MetadataKeyRejectionScope is "server" or "global".
+	// MetadataKeyRejectionScope is "server", "global" or "token".
 	MetadataKeyRejectionScope = "rejection_scope"
 	// MetadataKeyRejectionLimit is the cap that was in force in that scope.
 	MetadataKeyRejectionLimit = "rejection_limit"

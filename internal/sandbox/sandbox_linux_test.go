@@ -145,3 +145,39 @@ func TestHandledAccessFSMasksByABI(t *testing.T) {
 		t.Errorf("handledAccessFS(5) = %#x, want full set %#x", h5, uint64(accessFSReadWrite))
 	}
 }
+
+// TestAddPathRule_FileTarget pins GH #1704's /dev/null fix at the syscall
+// boundary: a ReadWritePaths entry that names a FILE (here a regular temp file
+// standing in for the /dev/null device) must be accepted. Landlock rejects a
+// rule on a non-directory that carries directory-only rights (READ_DIR,
+// MAKE_*, REMOVE_*, REFER) with EINVAL, so the adder has to mask them off.
+// Only a ruleset is created; nothing restricts the test process.
+func TestAddPathRule_FileTarget(t *testing.T) {
+	abi, err := landlockABI()
+	if err != nil || abi < 1 {
+		t.Skipf("Landlock unavailable (abi=%d, err=%v)", abi, err)
+	}
+	target := filepath.Join(t.TempDir(), "devnull-stand-in")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	handled := handledAccessFS(abi)
+	rulesetFD, err := landlockCreateRuleset(&unix.LandlockRulesetAttr{Handled_access_fs: handled})
+	if err != nil {
+		t.Fatalf("landlock_create_ruleset: %v", err)
+	}
+	defer unix.Close(rulesetFD)
+
+	ok, err := addPathRule(rulesetFD, target, uint64(accessFSReadWrite)&handled)
+	if err != nil {
+		t.Fatalf("addPathRule on a file target failed: %v", err)
+	}
+	if !ok {
+		t.Fatalf("addPathRule reported the existing file %q as missing", target)
+	}
+	// A directory target keeps the full set (regression guard for the mask).
+	ok, err = addPathRule(rulesetFD, t.TempDir(), uint64(accessFSReadWrite)&handled)
+	if err != nil || !ok {
+		t.Fatalf("addPathRule on a directory target: ok=%v err=%v", ok, err)
+	}
+}

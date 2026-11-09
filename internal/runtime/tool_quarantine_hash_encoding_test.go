@@ -154,11 +154,18 @@ func TestToolApprovalHashMigration_CollidingV4ContractIsHeld(t *testing.T) {
 
 			result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{collisionToolB()})
 			require.NoError(t, err)
-			assert.True(t, result.BlockedTools["read_note"])
 			rec, err := rt.storageManager.GetToolApproval("notes", "read_note")
 			require.NoError(t, err)
+			// The collision is still seen as a CHANGE (never matched to the
+			// approved contract). Under scan the clean text would approve it
+			// (spec 119), but B's input schema is another TYPE and its output
+			// schema is gone, so the structural gate (spec 120) holds it.
+			assert.True(t, result.BlockedTools["read_note"])
 			assert.Equal(t, storage.ToolApprovalStatusChanged, rec.Status)
 			assert.Equal(t, collisionDesc, rec.PreviousDescription)
+			if srv.EffectiveTrustMode() == config.TrustModeScan {
+				assert.Equal(t, []string{"GATE-SCHEMA-SHAPE:type:/", "GATE-OUTPUT-SCHEMA:removed"}, rec.HeldSignals)
+			}
 		})
 	}
 }
@@ -294,9 +301,18 @@ func TestToolApprovalHashMigration_V4UnprovenSnapshotNotRevertedLater(t *testing
 			for pass := 1; pass <= 3; pass++ {
 				result, err := rt.checkToolApprovals("notes", []*config.ToolMetadata{tool})
 				require.NoError(t, err)
-				assert.True(t, result.BlockedTools["read_note"], "pass %d", pass)
 				got, err := rt.storageManager.GetToolApproval("notes", "read_note")
 				require.NoError(t, err)
+				if srv.EffectiveTrustMode() == config.TrustModeScan {
+					// Never silently reverted to the unproven snapshot: under
+					// scan the live contract is approved by the gate's clean
+					// verdict, explicitly and on its own hash (spec 119).
+					assert.False(t, result.BlockedTools["read_note"], "pass %d", pass)
+					assert.Equal(t, storage.ToolApprovalStatusApproved, got.Status, "pass %d", pass)
+					assert.Equal(t, "scan-approved", got.ApprovedBy, "pass %d", pass)
+					continue
+				}
+				assert.True(t, result.BlockedTools["read_note"], "pass %d", pass)
 				assert.Equal(t, storage.ToolApprovalStatusChanged, got.Status, "pass %d: stays held for an operator", pass)
 			}
 		})

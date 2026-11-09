@@ -16,9 +16,10 @@ import (
 // Informational Pass-1 baseline scanning.
 //
 // The spec-086 admission scan (maybeStartAdmissionScan) only fires for
-// trust_mode:"scan" servers, which is never the default — so on a stock install
-// nothing ever triggered the free, in-process TPA baseline scan and the security
-// badges stayed empty forever. This file adds the two paths that fix that:
+// trust_mode:"scan" servers. Before spec 119 made scan the default tier, a stock
+// install never triggered the free, in-process TPA baseline scan and the
+// security badges stayed empty forever; manual and auto servers still need
+// these two paths:
 //
 //  1. every NEW server, in ANY trust mode, gets one baseline scan when it is
 //     admitted (maybeStartInformationalScans, driven by servers.changed), and
@@ -83,8 +84,10 @@ func isTerminalScanStatus(status string) bool {
 // gate — and the settle-driven auto-approval behind it — is responsible for this
 // server. Those servers must NOT be picked up by the informational path.
 //
-// The rule is deliberately the blunt one: EVERY trust_mode:"scan" server belongs
-// to the gating path, whatever its quarantine state or approval history.
+// The rule is deliberately the blunt one: EVERY explicit trust_mode:"scan" server
+// belongs to the gating path, whatever its quarantine state or approval history.
+// A server with no trust_mode (the default tier, which resolves to scan for tool
+// changes) is never admitted by a scan, so it is the informational path's.
 //
 // Narrower predicates were tried and are unsafe, because every input the settle
 // handler gates on is MUTABLE while a scan is in flight, and
@@ -131,7 +134,7 @@ func scanModeAdmissionOwns(sc *config.ServerConfig) bool {
 	if sc == nil {
 		return false
 	}
-	return sc.EffectiveTrustMode() == config.TrustModeScan
+	return sc.AdmitsOnCleanScan()
 }
 
 // informationalScansEnabled resolves the security.auto_baseline_scan kill switch

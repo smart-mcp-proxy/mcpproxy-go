@@ -152,6 +152,10 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 		} else if oldCfg.TLS.Enabled != newCfg.TLS.Enabled ||
 			oldCfg.TLS.RequireClientCert != newCfg.TLS.RequireClientCert ||
 			oldCfg.TLS.CertsDir != newCfg.TLS.CertsDir ||
+			// The certificate is built once when the listener starts.
+			oldCfg.TLS.CertFile != newCfg.TLS.CertFile ||
+			oldCfg.TLS.KeyFile != newCfg.TLS.KeyFile ||
+			!slices.Equal(oldCfg.TLS.ExtraSANs, newCfg.TLS.ExtraSANs) ||
 			// HSTS wraps the handler chain once, where the HTTP server is built
 			// (server.go withHSTS), so it cannot apply hot. Settings already
 			// badges tls.hsts as restart-required; this makes the backend agree
@@ -607,7 +611,7 @@ var undiffedHotConfigFields = []string{
 	"ToolCallMaxResponseSize", "ToolCallMaxRecordsPerServer",
 	"IntentDeclaration", "SensitiveDataDetection", "OutputValidation",
 	"OutputSanitisation", "Telemetry",
-	"QuarantineEnabled", "RevealSecretHeaders",
+	"QuarantineEnabled", "RevealSecretHeaders", "AgentTokenRateLimit",
 }
 
 // restartGatedConfigFields are bound once at startup; see pinRestartGated.

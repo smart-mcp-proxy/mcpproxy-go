@@ -220,12 +220,12 @@ var spec094FilterParams = []string{"exclude_destructive", "exclude_open_world", 
 const spec094WindowCaveat = "Filter diagnostics describe this call's candidate window, not the whole catalog."
 
 // addedRetrieveToolsParams is the exact allowed parameter delta per surface.
-// code_execution keeps no additions: describe_tool is absent there in v1 (so
-// no `detail`, spec 085 FR-011), and it already declared the filters.
+// All three surfaces expose the upstream selector (#1824). Code execution
+// still omits `detail` because it does not expose describe_tool (Spec 085 FR-011).
 var addedRetrieveToolsParams = map[string][]string{
-	"default_server":      {"detail", "exclude_destructive", "exclude_open_world", "read_only_only"},
-	"call_tool_mode":      {"detail"},
-	"code_execution_mode": {},
+	"default_server":      {"detail", "exclude_destructive", "exclude_open_world", "read_only_only", "server"},
+	"call_tool_mode":      {"detail", "server"},
+	"code_execution_mode": {"server"},
 }
 
 // assertRetrieveToolsDelta: the parameter delta is exactly the surface's
@@ -259,6 +259,10 @@ func assertRetrieveToolsDelta(t *testing.T, surface string, preM, curM map[strin
 		assert.Equal(t, preSchema, curProps[p],
 			"surface %s: pre-feature retrieve_tools parameter %q must be preserved unchanged (SC-003)", surface, p)
 	}
+
+	assert.Equal(t, map[string]interface{}{
+		"type": "string", "description": "Restrict results to the exact configured upstream server name.",
+	}, curProps["server"], "surface %s: the selector schema is shared", surface)
 
 	// Added params stay optional: the required list is unchanged.
 	preSchema, _ := preM["inputSchema"].(map[string]interface{})
@@ -326,14 +330,13 @@ func schemaWithout(schema map[string]interface{}, drop ...string) map[string]int
 // into something an agent would miss.
 const upstreamServersRedactionMarker = "REDACTION (update/patch):"
 
-// assertUpstreamServersDelta: upstream_servers may change by EXACTLY its
-// description, which gains the redaction note above. No parameter may be added,
-// removed or altered — this is a documentation change over an existing
-// behaviour, not a new capability.
+// assertUpstreamServersDelta permits the appended redaction note and exactly
+// the two optional inputs named below. All other schema fields remain frozen.
 //
 // Spec 112 adds exactly ONE parameter, forward_headers_json (a string holding a
 // JSON array of header names), for the per-server client header forwarding
 // allowlist. It is enumerated here so any other parameter movement still fails.
+// Argument privacy adds tool_argument_error_mode, an optional string enum.
 func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[string]interface{}) {
 	t.Helper()
 
@@ -345,7 +348,8 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 		assert.Equal(t, "string", prop["type"], "surface %s: forward_headers_json is a JSON-array string", surface)
 		assert.NotContains(t, requiredParams(curM), spec112Param, "surface %s: forward_headers_json is optional", surface)
 	}
-	// Compare the two schemas with that one added parameter removed from the
+	assertArgumentErrorModeSchema(t, surface, curM)
+	// Compare the two schemas with only the validated additions removed from the
 	// current side; everything else must be identical apart from the description.
 	curWithout := schemaWithout(curM, "description")
 	if schema, ok := curWithout["inputSchema"].(map[string]interface{}); ok {
@@ -356,7 +360,7 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 		if props, ok := schema["properties"].(map[string]interface{}); ok {
 			np := make(map[string]interface{}, len(props))
 			for k, v := range props {
-				if k != spec112Param {
+				if k != spec112Param && k != "tool_argument_error_mode" {
 					np[k] = v
 				}
 			}
@@ -365,7 +369,7 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 		curWithout["inputSchema"] = trimmed
 	}
 	assert.Equal(t, schemaWithout(preM, "description"), curWithout,
-		"surface %s: only upstream_servers' description and the Spec 112 forward_headers_json parameter may move", surface)
+		"surface %s: only upstream_servers' description, forward_headers_json and tool_argument_error_mode may move", surface)
 
 	assert.Contains(t, curM["description"], upstreamServersRedactionMarker,
 		"surface %s: upstream_servers must document that update/patch mask secret values in the diff", surface)
@@ -374,6 +378,22 @@ func assertUpstreamServersDelta(t *testing.T, surface string, preM, curM map[str
 	curDesc, _ := curM["description"].(string)
 	assert.True(t, strings.HasPrefix(curDesc, preDesc),
 		"surface %s: the redaction note is APPENDED — no pre-feature prose may be rewritten", surface)
+}
+
+// Validate the privacy exception before removing it in historical comparisons.
+func assertArgumentErrorModeSchema(t *testing.T, surface string, tool map[string]interface{}) {
+	t.Helper()
+	const name = "tool_argument_error_mode"
+	props := schemaProps(tool)
+	if assert.Contains(t, props, name, "surface %s: upstream_servers exposes the privacy policy", surface) {
+		prop, ok := props[name].(map[string]interface{})
+		if assert.True(t, ok, "surface %s: policy is a schema object", surface) {
+			assert.Equal(t, "string", prop["type"], "surface %s: policy is a string", surface)
+			// No empty-string member: Google Gemini rejects it (#1576).
+			assert.ElementsMatch(t, []string{"detailed", "redacted"}, prop["enum"], "surface %s: exact policy enum", surface)
+		}
+	}
+	assert.NotContains(t, requiredParams(tool), name, "surface %s: policy is optional", surface)
 }
 
 // assertSearchServersDelta: Spec 109 FR-067 makes 'registry' OPTIONAL (was

@@ -701,6 +701,7 @@ func (m *Manager) connectInstanceCtx(parent context.Context, name string, inst *
 	// The resolved init_timeout (MCP-3322) bounds the handshake.
 	ctx, cancel := context.WithTimeout(parent, m.resolveConnectTimeout(cfg, inst.DependsOnDocker()))
 	defer cancel()
+	m.observeConnectDeadline(serverName, ctx)
 	err := inst.Connect(ctx)
 	if err == nil {
 		return nil

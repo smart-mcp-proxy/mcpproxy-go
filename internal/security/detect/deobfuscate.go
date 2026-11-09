@@ -28,6 +28,15 @@ import (
 //   - letter spacing ("i g n o r e"): a run of three or more single letters
 //     separated by single spaces is joined; a wider gap ends the run, so
 //     "I G N O R E  A L L" yields "ignore all".
+//   - diacritics on Latin letters ("ígnore áll prévious ínstructions", written
+//     either as precomposed letters or as base letter + combining mark): the
+//     marks are dropped so the word folds to its plain spelling (R2-4, round-2
+//     red team), including a mark on a look-alike base that the homoglyph
+//     step folds to Latin ("а́ll", "ignόre"). Only marks that end up on a
+//     LATIN base letter are stripped; the
+//     breve of Cyrillic й, the diaeresis of ё/ї, Greek tonos and the kana
+//     dakuten are left alone, so the non-English families keep matching their
+//     own spellings.
 //
 // The result is consumed ONLY by the phrase matchers (phrase.injection,
 // directive.imperative) through ToolView.PhraseText. NormalizedText is unchanged,
@@ -60,7 +69,13 @@ func NormalizeForPhraseIn(s string, latinMajority bool) string {
 	}
 	s = norm.NFKC.String(s)
 	s = stripFormatRunes(s)
+	// Decompose BEFORE folding so a mark on a look-alike base ("а́" = Cyrillic
+	// а + U+0301, "ό" = Greek ο + tonos) rides along as a bare mark while the
+	// base folds to Latin, and is then dropped with every other Latin-base
+	// mark; stripLatinMarks recomposes (NFC) what it keeps.
+	s = norm.NFD.String(s)
 	s = foldConfusables(s, latinMajority, false)
+	s = stripLatinMarks(s)
 	s = foldLeetTokens(s)
 	s = joinSeparatedLetters(s)
 	s = joinSpacedLetters(s)
@@ -78,7 +93,7 @@ func FoldHomoglyphsIn(s string, latinMajority bool) string {
 	if s == "" {
 		return ""
 	}
-	return foldConfusables(stripFormatRunes(norm.NFKC.String(s)), latinMajority, false)
+	return stripLatinMarks(foldConfusables(norm.NFD.String(stripFormatRunes(norm.NFKC.String(s))), latinMajority, false))
 }
 
 // NormalizeMixedScript is Normalize preceded by homoglyph folding of MIXED-script
@@ -89,14 +104,18 @@ func FoldHomoglyphsIn(s string, latinMajority bool) string {
 // letters and does not rewrite leet digits, so word boundaries, punctuation,
 // negations and quotes are exactly those of the plain text and position
 // classification stays truthful. A single word that mixes scripts is not
-// ordinary writing; it is the homoglyph trick itself. changed reports whether
-// any word was folded.
+// ordinary writing; it is the homoglyph trick itself. Diacritics on Latin
+// letters are dropped on this view too (R2-4): the fold is letter-for-letter,
+// so every boundary, negation and quote keeps its place, and an English
+// directive dressed in accents ("ígnore áll prévious ínstructions") is no more
+// ordinary writing than one dressed in Cyrillic look-alikes. changed reports
+// whether any word was folded or any mark dropped.
 func NormalizeMixedScript(s string) (normalized string, changed bool) {
 	if s == "" {
 		return "", false
 	}
 	pre := stripFormatRunes(norm.NFKC.String(s))
-	folded := foldConfusables(pre, LatinMajority(s), true)
+	folded := stripLatinMarks(foldConfusables(norm.NFD.String(pre), LatinMajority(s), true))
 	if folded == pre {
 		return Normalize(s), false
 	}
@@ -115,6 +134,57 @@ func Squash(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// HasMixedScriptWords reports whether s contains a word that mixes Latin
+// letters with Cyrillic, Greek or Armenian look-alikes — the homoglyph trick
+// itself, as opposed to accents on Latin letters, which NormalizeMixedScript
+// also folds. Callers use it to word a finding truthfully.
+func HasMixedScriptWords(s string) bool {
+	if s == "" {
+		return false
+	}
+	pre := stripFormatRunes(norm.NFKC.String(s))
+	return foldConfusables(pre, LatinMajority(s), true) != pre
+}
+
+// stripLatinMarks removes nonspacing marks (Unicode category Mn) that sit on a
+// Latin base letter, whether the input spelled them as combining characters
+// ("i" + U+0301) or as precomposed letters ("í", which NFKC keeps composed).
+// The text is decomposed (NFD), the marks that follow a Latin letter are
+// dropped, and the rest is recomposed (NFC), so marks on every other script
+// — Cyrillic й/ё/ï, Greek tonos, kana dakuten, Devanagari vowel signs — come
+// back exactly as they went in, and a caller that hands in already-decomposed
+// text (NormalizeForPhraseIn, after folding) gets composed text back. Letters
+// that are not decomposable (ł, ø, đ) are untouched. Pure ASCII is returned
+// as is. Pure and deterministic.
+func stripLatinMarks(s string) string {
+	ascii := true
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return s
+	}
+	decomposed := norm.NFD.String(s)
+	var b strings.Builder
+	b.Grow(len(decomposed))
+	latinBase := false
+	for _, r := range decomposed {
+		if unicode.Is(unicode.Mn, r) {
+			if latinBase {
+				continue
+			}
+			b.WriteRune(r)
+			continue
+		}
+		latinBase = unicode.Is(unicode.Latin, r)
+		b.WriteRune(r)
+	}
+	return norm.NFC.String(b.String())
 }
 
 // toLatin maps Cyrillic, Greek and Armenian letters that render like a Latin

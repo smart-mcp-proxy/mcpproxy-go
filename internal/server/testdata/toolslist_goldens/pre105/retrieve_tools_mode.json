@@ -517,7 +517,7 @@
           "type": "string"
         },
         "trust_mode": {
-          "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = auto-approve only when the fast offline TPA scan is green, else hold for review; 'manual' = human reviews every change. Empty → manual (secure default). Used with add/update/patch.",
+          "description": "Per-server trust tier governing new-server admission AND tool-change approval (spec 086): 'auto' = approve without scanning; 'scan' = new tools and changed tools auto-approve only when the fast offline TPA scan is clean, else hold for review; 'manual' = human reviews every change. Empty → scan (the default). Used with add/update/patch.",
           "enum": [
             "auto",
             "scan",

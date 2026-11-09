@@ -1,10 +1,13 @@
 package observability
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,6 +56,26 @@ func TestToolCallMetric_NoPerUserCardinalityLabels(t *testing.T) {
 
 	assert.NotContains(t, body, "user_id=", "tool-call metric must not carry a user_id label")
 	assert.NotContains(t, body, "profile=", "tool-call metric must not carry a profile label")
+}
+
+// The HTTP middleware runs before authentication, so its path label must be
+// the matched route, not the raw request path: otherwise every distinct path
+// anyone sends adds a counter and a histogram series that is never freed.
+func TestHTTPMiddleware_PathLabelIsRoutePattern(t *testing.T) {
+	mm := NewMetricsManager(zap.NewNop().Sugar())
+	r := chi.NewRouter()
+	r.Use(mm.HTTPMiddleware())
+	r.Get("/api/v1/servers/{name}", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	for _, p := range []string{"/api/v1/servers/a", "/api/v1/servers/b", "/api/v1/nope-1", "/api/v1/nope-2"} {
+		r.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, p, nil))
+	}
+
+	assert.Equal(t, 2, testutil.CollectAndCount(mm.httpRequests), "one series per route plus one for unmatched paths")
+	assert.InDelta(t, 2.0, testutil.ToFloat64(mm.httpRequests.WithLabelValues(http.MethodGet, "/api/v1/servers/{name}", "OK")), 1e-9)
+	assert.InDelta(t, 2.0, testutil.ToFloat64(mm.httpRequests.WithLabelValues(http.MethodGet, "unmatched", "Not Found")), 1e-9)
 }
 
 func scrapeMetrics(t *testing.T, mm *MetricsManager) string {

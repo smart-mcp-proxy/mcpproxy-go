@@ -29,13 +29,15 @@ const detectCorpusFile = "detect_corpus_v1.json"
 // hard-tier check is registered in gateChecks). capability_mismatch is still
 // intentionally excluded — its check is soft/measured-not-gated, so the corpus
 // may carry samples but the gate must not enforce them (the gate handles this
-// via its category→check registration map).
+// via its category→check registration map). reconstruction joined the gate in
+// Spec 122 US3 (payload.reconstructed: a forwarded shell match after declared
+// marker removal is hard-tier).
 //
 // Spec 101 US2 adds the signature-bundle classes: every tpacorpus.Classes entry
 // is a gated category (its check is tpa.bundle, registered by the gate through
 // categoryCheck) and owns the hard-negative prefix hn_<class>_.
 var gatedDetectCategories = append(
-	[]string{"unicode_smuggling", "decoded_payload", "shadowing", "phrase_injection"},
+	[]string{"unicode_smuggling", "decoded_payload", "shadowing", "phrase_injection", "reconstruction"},
 	tpacorpus.Classes...)
 
 // hardNegPrefix maps a gated category to the id prefix its resembling
@@ -47,6 +49,7 @@ var hardNegPrefix = func() map[string]string {
 		"decoded_payload":   "hn_decoded",
 		"shadowing":         "hn_shadowing",
 		"phrase_injection":  "hn_phrase",
+		"reconstruction":    "hn_rc",
 	}
 	for _, class := range tpacorpus.Classes {
 		m[class] = tpacorpus.HardNegativePrefix(class)
@@ -93,7 +96,7 @@ func validDetectCategory(label, category string) bool {
 	switch label {
 	case "malicious":
 		switch category {
-		case "unicode_smuggling", "decoded_payload", "shadowing", "phrase_injection", "capability_mismatch":
+		case "unicode_smuggling", "decoded_payload", "shadowing", "phrase_injection", "capability_mismatch", "reconstruction":
 			return true
 		}
 		return isBundleClass(category)

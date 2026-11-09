@@ -187,6 +187,12 @@ type Manager struct {
 	// server's limiter. Nil in production.
 	limiterPublishHook atomic.Pointer[func(name string)]
 
+	// connectDeadlineHook is a test seam (#1772): it runs with the context a
+	// connect is about to be handed, after the resolved init_timeout was
+	// applied, so a test can read the deadline the handshake really gets.
+	// Nil in production.
+	connectDeadlineHook atomic.Pointer[func(name string, ctx context.Context)]
+
 	// committedViewCheck is the construction-time committed-view check
 	// (Spec 116 PR2b, SetCommittedViewChecker); nil skips it.
 	committedViewCheck atomic.Pointer[func(name string, sg commitview.ServerGen) error]
@@ -229,6 +235,10 @@ func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
 
 	if cfg.OAuth != nil {
 		o := *cfg.OAuth
+		if cfg.OAuth.RefreshReplayEnabled != nil {
+			enabled := *cfg.OAuth.RefreshReplayEnabled
+			o.RefreshReplayEnabled = &enabled
+		}
 		if cfg.OAuth.Scopes != nil {
 			o.Scopes = slices.Clone(cfg.OAuth.Scopes)
 		}
@@ -370,6 +380,21 @@ func (m *Manager) shouldEnableDockerRecovery() bool {
 // behavior stays consistent.
 func (m *Manager) UsesDockerIsolation() bool {
 	return m.shouldEnableDockerRecovery()
+}
+
+// SetConnectDeadlineHookForTest installs the connectDeadlineHook seam. Test-only.
+func (m *Manager) SetConnectDeadlineHookForTest(fn func(name string, ctx context.Context)) {
+	if fn == nil {
+		m.connectDeadlineHook.Store(nil)
+		return
+	}
+	m.connectDeadlineHook.Store(&fn)
+}
+
+func (m *Manager) observeConnectDeadline(name string, ctx context.Context) {
+	if h := m.connectDeadlineHook.Load(); h != nil {
+		(*h)(name, ctx)
+	}
 }
 
 // resolveConnectTimeout computes the deadline for an upstream's MCP `initialize`
@@ -1196,6 +1221,10 @@ func (m *Manager) DiscoverToolsDue(ctx context.Context) ([]*config.ToolMetadata,
 	return tools, err
 }
 
+// discoveryListConcurrency bounds how many upstream tools/list requests one
+// discovery sweep runs at once.
+const discoveryListConcurrency = 8
+
 func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.ToolMetadata, []string, map[string]managed.InventoryCapture, error) {
 	type clientSnapshot struct {
 		id          string
@@ -1247,6 +1276,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 	connectedCount := 0
 	skippedNotDue := 0
 	known := make(map[string]struct{}, len(snapshots))
+	var due []clientSnapshot
 
 	for _, snapshot := range snapshots {
 		client := snapshot.client
@@ -1293,9 +1323,32 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		}
 
 		connectedCount++
+		due = append(due, snapshot)
+	}
 
-		tools, capture, err := client.ListToolsCaptured(ctx)
-		if err != nil {
+	// List the due servers concurrently: one slow or large upstream must not
+	// hold up every other server's tools/list until its own timeout.
+	type listResult struct {
+		tools   []*config.ToolMetadata
+		capture managed.InventoryCapture
+		err     error
+	}
+	results := make([]listResult, len(due))
+	sem := make(chan struct{}, discoveryListConcurrency)
+	var wg sync.WaitGroup
+	for i, snapshot := range due {
+		wg.Go(func() {
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			tools, capture, err := snapshot.client.ListToolsCaptured(ctx)
+			results[i] = listResult{tools: tools, capture: capture, err: err}
+		})
+	}
+	wg.Wait()
+
+	for i, snapshot := range due {
+		res := results[i]
+		if res.err != nil {
 			// Warn, not Error: markSwept below is deliberately skipped so the
 			// next sweep retries this server. A failure the code already plans
 			// to retry is not an error — and on a healthy install with several
@@ -1304,7 +1357,7 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 			m.logger.Warn("Failed to list tools from client",
 				zap.String("id", snapshot.id),
 				zap.String("server", snapshot.name),
-				zap.Error(err))
+				zap.Error(res.err))
 			continue
 		}
 
@@ -1313,11 +1366,11 @@ func (m *Manager) discoverTools(ctx context.Context, dueOnly bool) ([]*config.To
 		m.markSwept(snapshot.name, now)
 		if snapshot.name != "" {
 			listed = append(listed, snapshot.name)
-			captures[snapshot.name] = capture
+			captures[snapshot.name] = res.capture
 		}
 
-		if tools != nil {
-			allTools = append(allTools, tools...)
+		if res.tools != nil {
+			allTools = append(allTools, res.tools...)
 		}
 	}
 
@@ -1596,7 +1649,7 @@ func (m *Manager) callTool(ctx context.Context, toolName string, args map[string
 		}
 
 		// Generic error with helpful context
-		return nil, fmt.Errorf("tool '%s' on server '%s' failed: %w. Check server configuration, authentication, and tool parameters", actualToolName, serverName, err)
+		return nil, &genericToolCallError{server: serverName, tool: actualToolName, cause: err}
 	}
 
 	return result, nil
@@ -1778,6 +1831,7 @@ func (m *Manager) ConnectAll(ctx context.Context) error {
 			// for Docker isolation while honoring a per-server/global override.
 			connectCtx, cancel := context.WithTimeout(ctx, m.resolveConnectTimeout(c.GetConfig(), c.DependsOnDocker()))
 			defer cancel()
+			m.observeConnectDeadline(c.GetConfig().Name, connectCtx)
 
 			if err := c.Connect(connectCtx); errors.Is(err, managed.ErrInstanceUnregistered) || errors.Is(err, managed.ErrConnectAborted) {
 				m.logger.Debug("Connect skipped: the instance was superseded while ConnectAll ran",

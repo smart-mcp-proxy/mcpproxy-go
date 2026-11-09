@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -643,7 +644,7 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), hardTimeout)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/servers/"+serverName+"/scan", body)
+	resp, err := client.DoRaw(ctx, http.MethodPost, serverAPIPath(serverName, "/scan"), body)
 	if err != nil {
 		return fmt.Errorf("failed to start scan: %w", err)
 	}
@@ -717,7 +718,7 @@ func runSecurityScan(_ *cobra.Command, args []string) error {
 		case <-ticker.C:
 		}
 
-		statusResp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/status", nil)
+		statusResp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/status"), nil)
 		if err != nil {
 			return fmt.Errorf("failed to check scan status: %w", err)
 		}
@@ -905,7 +906,7 @@ func printScanDryRunPlan(client *cliclient.Client, serverName, scannerFlag strin
 	// 3. Best-effort: fetch the server's last scan context for source info.
 	//    This may 404 if the server has never been scanned — that's fine.
 	var scanContext map[string]interface{}
-	filesResp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/files", nil)
+	filesResp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/files"), nil)
 	if err == nil {
 		filesRaw, _ := io.ReadAll(filesResp.Body)
 		filesResp.Body.Close()
@@ -1090,6 +1091,9 @@ func runSecurityScanAll() error {
 		// Check if idle (no batch in progress)
 		queueStatus := getMapString(progress, "status")
 		if queueStatus == "idle" {
+			if format == "json" || format == "yaml" {
+				return formatAndPrint(format, progress)
+			}
 			fmt.Println("No batch scan in progress.")
 			return nil
 		}
@@ -1112,7 +1116,11 @@ func runSecurityScanAll() error {
 			return nil
 		}
 
-		if tty {
+		if format == "json" || format == "yaml" {
+			// Machine-readable stdout contains the final snapshot only.
+			fmt.Fprintf(os.Stderr, "Scanning all servers: %d/%d completed\n",
+				int(getMapFloat(progress, "completed")), int(getMapFloat(progress, "total")))
+		} else if tty {
 			if prevLines > 0 {
 				clearPreviousLines(prevLines)
 			}
@@ -1389,7 +1397,7 @@ func runSecurityStatus(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/status", nil)
+	resp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/status"), nil)
 	if err != nil {
 		return fmt.Errorf("failed to get scan status: %w", err)
 	}
@@ -1453,7 +1461,7 @@ func runSecurityReport(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/report", nil)
+	resp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/report"), nil)
 	if err != nil {
 		return fmt.Errorf("failed to get scan report: %w", err)
 	}
@@ -1522,7 +1530,7 @@ type failedScannerInfo struct {
 // complete in the most recent scan job for `serverName`. Returns nil on any
 // error so the caller can render the report without per-scanner names.
 func fetchFailedScannerInfo(client *cliclient.Client, ctx context.Context, serverName string) []failedScannerInfo {
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/status", nil)
+	resp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/status"), nil)
 	if err != nil {
 		return nil
 	}
@@ -1581,7 +1589,7 @@ func runSecurityApprove(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/servers/"+serverName+"/security/approve", body)
+	resp, err := client.DoRaw(ctx, http.MethodPost, serverAPIPath(serverName, "/security/approve"), body)
 	if err != nil {
 		return fmt.Errorf("failed to approve server: %w", err)
 	}
@@ -1628,7 +1636,7 @@ func runSecurityReject(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodPost, "/api/v1/servers/"+serverName+"/security/reject", nil)
+	resp, err := client.DoRaw(ctx, http.MethodPost, serverAPIPath(serverName, "/security/reject"), nil)
 	if err != nil {
 		return fmt.Errorf("failed to reject server: %w", err)
 	}
@@ -1741,7 +1749,7 @@ func runSecurityIntegrity(_ *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/integrity", nil)
+	resp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/integrity"), nil)
 	if err != nil {
 		return fmt.Errorf("failed to check integrity: %w", err)
 	}
@@ -1815,22 +1823,28 @@ func runSecurityIntegrity(_ *cobra.Command, args []string) error {
 
 // printScanSummary fetches and prints a compact summary after a scan completes.
 func printScanSummary(client *cliclient.Client, ctx context.Context, serverName string) error {
-	resp, err := client.DoRaw(ctx, http.MethodGet, "/api/v1/servers/"+serverName+"/scan/report", nil)
-	if err != nil {
+	format := ResolveOutputFormat()
+	machineOutput := format == "json" || format == "yaml"
+	unavailable := func(err error) error {
+		if machineOutput {
+			return fmt.Errorf("scan completed but failed to get report: %w", err)
+		}
 		fmt.Println("Scan completed. Use 'mcpproxy security report " + serverName + "' to view results.")
 		return nil
+	}
+	resp, err := client.DoRaw(ctx, http.MethodGet, serverAPIPath(serverName, "/scan/report"), nil)
+	if err != nil {
+		return unavailable(err)
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		fmt.Println("Scan completed. Use 'mcpproxy security report " + serverName + "' to view results.")
-		return nil
+		return unavailable(err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		fmt.Println("Scan completed. Use 'mcpproxy security report " + serverName + "' to view results.")
-		return nil
+		return unavailable(parseAPIError(respBody, resp.StatusCode, "get scan report"))
 	}
 
 	var report map[string]interface{}
@@ -1839,8 +1853,11 @@ func printScanSummary(client *cliclient.Client, ctx context.Context, serverName 
 		return fmt.Errorf("API error: %w", err)
 	}
 	if err := json.Unmarshal(respBody, &report); err != nil {
-		fmt.Println("Scan completed. Use 'mcpproxy security report " + serverName + "' to view results.")
-		return nil
+		return unavailable(err)
+	}
+
+	if machineOutput {
+		return formatAndPrint(format, report)
 	}
 
 	fmt.Printf("Scan completed for %q.\n\n", serverName)
@@ -2972,4 +2989,11 @@ func formatTimestamp(ts string) string {
 		return t.Format("2006-01-02 15:04:05")
 	}
 	return ts
+}
+
+// serverAPIPath returns the REST path of a per-server sub-resource. The name is
+// path-escaped: official-registry ids are namespace/name, and the daemon only
+// decodes a %2F-encoded {id} (MCP-1118).
+func serverAPIPath(serverName, suffix string) string {
+	return "/api/v1/servers/" + url.PathEscape(serverName) + suffix
 }

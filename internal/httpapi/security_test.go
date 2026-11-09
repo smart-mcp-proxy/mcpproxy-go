@@ -352,7 +352,7 @@ func (m *baseController) AggregateToolUsage(_ time.Time) (map[string]storage.Too
 	return map[string]storage.ToolUsageStat{}, nil
 }
 func (m *baseController) UsageSnapshot() *runtime.UsageAggregate { return nil }
-func (m *baseController) StreamActivities(_ storage.ActivityFilter) <-chan *storage.ActivityRecord {
+func (m *baseController) StreamActivities(_ context.Context, _ storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	ch := make(chan *storage.ActivityRecord)
 	close(ch)
 	return ch

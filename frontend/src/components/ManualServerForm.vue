@@ -140,7 +140,10 @@ const errorEl = ref<HTMLElement | null>(null)
 
 const name = ref('')
 const protocol = ref<'stdio' | 'http'>('stdio')
-const trustMode = ref<TrustMode>('manual')
+// Unset until the operator picks a mode: an unset trust_mode is the default
+// tier, which never releases the server from quarantine on a clean scan; an
+// explicit Scan does.
+const trustMode = ref<TrustMode | undefined>(undefined)
 const trustModeConfirmationPending = ref(false)
 const url = ref('')
 const command = ref('')
@@ -191,8 +194,8 @@ async function handleSubmit() {
       name: name.value,
       protocol: protocol.value,
       enabled: true,
-      trust_mode: trustMode.value,
     }
+    if (trustMode.value) serverData.trust_mode = trustMode.value
     if (protocol.value === 'http') {
       serverData.url = url.value
       if (Object.keys(resolved.headers).length > 0) serverData.headers_json = JSON.stringify(resolved.headers)

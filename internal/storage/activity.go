@@ -1,6 +1,8 @@
 package storage
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"time"
@@ -287,56 +289,125 @@ func (m *Manager) AggregateToolUsage(since time.Time) (map[string]ToolUsageStat,
 	return stats, err
 }
 
+// Batch bounds for StreamActivities: each read transaction collects at most
+// streamBatchSize matching records and examines at most streamScanPerTx keys,
+// so a transaction stays short even when the filter matches little.
+const (
+	streamBatchSize = 100
+	streamScanPerTx = 1000
+)
+
 // StreamActivities returns a channel that yields activity records matching the filter.
-// The channel is closed when all matching records have been sent.
-// This is useful for streaming large exports without loading all records into memory.
-// Respects filter.Limit and filter.Offset for bounded streaming.
-func (m *Manager) StreamActivities(filter ActivityFilter) <-chan *ActivityRecord {
-	ch := make(chan *ActivityRecord, 100)
+// The channel is closed when all matching records have been sent, or as soon as
+// ctx is done. This is useful for streaming large exports without loading all
+// records into memory. Respects filter.Limit and filter.Offset for bounded streaming.
+//
+// The producer never holds a BBolt read transaction across a channel send: it
+// collects a bounded batch inside a short db.View, leaves the transaction, then
+// sends, and resumes the walk from the last key it examined in a new
+// transaction. A consumer that stalls without cancelling therefore parks only
+// the producer goroutine, not the database: an open read transaction would pin
+// the mmap, so the next write that grows the file would wait on the remap for
+// ever and every later reader would queue behind that writer (#1742). A
+// consumer that stops reading early should still cancel ctx so the goroutine
+// exits. Records written after the stream starts are not guaranteed to appear,
+// and records pruned between batches are skipped.
+func (m *Manager) StreamActivities(ctx context.Context, filter ActivityFilter) <-chan *ActivityRecord {
+	ch := make(chan *ActivityRecord, streamBatchSize)
 
 	go func() {
 		defer close(ch)
 
-		err := m.db.db.View(func(tx *bbolt.Tx) error {
-			bucket := tx.Bucket([]byte(ActivityRecordsBucket))
-			if bucket == nil {
-				return nil
+		var resume []byte // last key examined; the next batch starts strictly before it
+		skipped := 0
+		collected := 0
+
+		for {
+			if ctx.Err() != nil {
+				return
 			}
 
-			cursor := bucket.Cursor()
-			skipped := 0
-			sent := 0
-
-			for k, v := cursor.Last(); k != nil; k, v = cursor.Prev() {
-				var record ActivityRecord
-				if err := record.UnmarshalBinary(v); err != nil {
-					continue
-				}
-
-				if !filter.Matches(&record) {
-					continue
-				}
-
-				// Handle offset
-				if filter.Offset > 0 && skipped < filter.Offset {
-					skipped++
-					continue
-				}
-
-				// Handle limit — stop after sending limit records
-				if filter.Limit > 0 && sent >= filter.Limit {
+			batch := make([]*ActivityRecord, 0, streamBatchSize)
+			finished := false
+			err := m.db.db.View(func(tx *bbolt.Tx) error {
+				bucket := tx.Bucket([]byte(ActivityRecordsBucket))
+				if bucket == nil {
+					finished = true
 					return nil
 				}
 
-				ch <- &record
-				sent++
+				cursor := bucket.Cursor()
+				var k, v []byte
+				if resume == nil {
+					k, v = cursor.Last()
+				} else {
+					// Seek lands on the first key >= resume (or nil past the
+					// end); step back to the first key strictly before it.
+					k, v = cursor.Seek(resume)
+					if k == nil {
+						k, v = cursor.Last()
+					}
+					for k != nil && bytes.Compare(k, resume) >= 0 {
+						k, v = cursor.Prev()
+					}
+				}
+
+				for examined := 0; k != nil; k, v = cursor.Prev() {
+					if examined >= streamScanPerTx || len(batch) >= streamBatchSize {
+						return nil
+					}
+					examined++
+					resume = append(resume[:0], k...)
+
+					var record ActivityRecord
+					if err := record.UnmarshalBinary(v); err != nil {
+						continue
+					}
+
+					if !filter.Matches(&record) {
+						continue
+					}
+
+					// Handle offset
+					if filter.Offset > 0 && skipped < filter.Offset {
+						skipped++
+						continue
+					}
+
+					// Handle limit — stop after collecting limit records
+					if filter.Limit > 0 && collected >= filter.Limit {
+						finished = true
+						return nil
+					}
+
+					batch = append(batch, &record)
+					collected++
+				}
+
+				finished = true
+				return nil
+			})
+			if err != nil {
+				m.logger.Errorw("Error streaming activities", "error", err)
+				return
 			}
 
-			return nil
-		})
+			for _, record := range batch {
+				// A done context wins even when the buffer has room: select
+				// picks a ready case at random, so check first.
+				if ctx.Err() != nil {
+					return
+				}
+				select {
+				case ch <- record:
+				case <-ctx.Done():
+					return
+				}
+			}
 
-		if err != nil {
-			m.logger.Errorw("Error streaming activities", "error", err)
+			if finished {
+				return
+			}
 		}
 	}()
 

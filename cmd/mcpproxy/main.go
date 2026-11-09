@@ -260,6 +260,12 @@ func newRootCmd() *cobra.Command {
 	registerServerEditionCommands(rootCmd)
 	registerQADebugCommands(rootCmd)
 
+	// --system (packaged Linux service) resolves to --config/--data-dir after
+	// flag parsing; SetupHelpJSON below wraps this hook.
+	rootCmd.PersistentPreRunE = func(cmd *cobra.Command, _ []string) error {
+		return applySystemFlag(cmd)
+	}
+
 	// Setup --help-json for machine-readable help discovery
 	// This must be called AFTER all commands are added
 	clioutput.SetupHelpJSON(rootCmd)
@@ -348,8 +354,9 @@ Examples:
 
 			ctx := context.Background()
 
-			// Create config to check if repository guessing is enabled
-			cfg, err := config.LoadFromFile("")
+			// Create config to check if repository guessing is enabled. The
+			// global -c/--config/--system choose the file; defaults otherwise.
+			cfg, err := config.LoadFromFile(resolveCLIConfigPath(""))
 			if err != nil {
 				// Use default config if loading fails
 				cfg = config.DefaultConfig()
@@ -429,8 +436,8 @@ Examples:
 }
 
 func listAllRegistriesFormatted(logger *zap.Logger, formatter clioutput.OutputFormatter) {
-	// Load config and initialize registries
-	cfg, err := config.LoadFromFile("")
+	// Load config (global -c/--config/--system, else defaults) and initialize registries
+	cfg, err := config.LoadFromFile(resolveCLIConfigPath(""))
 	if err != nil {
 		// Use default config if loading fails
 		cfg = config.DefaultConfig()

@@ -43,7 +43,8 @@ func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.Docke
 		AutoApproveToolChanges: cfg.AutoApproveToolChanges,
 		// Spec 086: surface the per-server trust_mode so callers can read back the
 		// persisted trust tier they set via PATCH/POST.
-		TrustMode: cfg.TrustMode,
+		TrustMode:             cfg.TrustMode,
+		ToolArgumentErrorMode: cfg.ToolArgumentErrorMode,
 		// MCP-3322: surface the per-server init_timeout override so callers can
 		// read back a configured handshake deadline.
 		InitTimeout: cfg.InitTimeout,
@@ -67,6 +68,10 @@ func ConvertServerConfig(cfg *config.ServerConfig, globalIsolation *config.Docke
 			ClientID:    cfg.OAuth.ClientID,
 			Scopes:      cfg.OAuth.Scopes,
 			ExtraParams: nil, // TODO: Add to config.OAuthConfig
+		}
+		if cfg.OAuth.RefreshReplayEnabled != nil {
+			enabled := *cfg.OAuth.RefreshReplayEnabled
+			server.OAuth.RefreshReplayEnabled = &enabled
 		}
 	}
 
@@ -302,6 +307,9 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 		// carries []string from the runtime projection or []interface{} after a
 		// JSON round-trip.
 		server.ForwardHeaders = stringListFromAny(generic["forward_headers"])
+		if mode, ok := generic["tool_argument_error_mode"].(string); ok {
+			server.ToolArgumentErrorMode = mode
+		}
 		// Spec 086: per-server trust tier round-trips as a plain string.
 		if trustMode, ok := generic["trust_mode"].(string); ok {
 			server.TrustMode = trustMode
@@ -443,6 +451,9 @@ func ConvertGenericServersToTyped(genericServers []map[string]interface{}) []Ser
 			}
 			if redirectPort, ok := oauth["redirect_port"].(int); ok {
 				server.OAuth.RedirectPort = redirectPort
+			}
+			if enabled, ok := oauth["refresh_replay_enabled"].(bool); ok {
+				server.OAuth.RefreshReplayEnabled = &enabled
 			}
 			if pkceEnabled, ok := oauth["pkce_enabled"].(bool); ok {
 				server.OAuth.PKCEEnabled = pkceEnabled

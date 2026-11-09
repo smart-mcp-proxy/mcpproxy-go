@@ -138,9 +138,10 @@ func (c *serversChangedCoalescer) start(ctx context.Context) {
 }
 
 // serversLister is the minimal slice of the management service needed by
-// emitServersChanged to fetch the current server list. The runtime stores the
-// management service as interface{} (avoiding an import cycle), so this local
-// interface is the type assertion target. Implemented by
+// emitServersChanged to fetch the current server list. The runtime holds the
+// full management.Service behind an atomic swap (GetManagementService); this
+// local interface is the type-assertion target so the event path depends on
+// one method, not the whole service. Implemented by
 // internal/management.(*service).
 type serversLister interface {
 	ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error)
@@ -289,7 +290,7 @@ func (r *Runtime) buildServersChangedPayload(parentCtx context.Context, reason s
 	}
 	payload["reason"] = reason
 
-	if lister, ok := r.managementService.(serversLister); ok && lister != nil {
+	if lister, ok := r.GetManagementService().(serversLister); ok && lister != nil {
 		ctx, cancel := context.WithTimeout(parentCtx, 2*time.Second)
 		servers, stats, err := lister.ListServers(ctx)
 		cancel()
@@ -630,7 +631,7 @@ func (r *Runtime) EmitActivityToolCallCompletedAttributed(serverName, toolName, 
 // is recorded identically whether the call came from an MCP tool-call variant,
 // the REST endpoint, a sandboxed code-execution script or an activity replay.
 //
-// reason is queue_full | queue_timeout; scope is server | global.
+// reason is queue_full | queue_timeout | rate_limited; scope is server | global | token.
 // Unlike every other activity emission, the RECORD is written synchronously
 // here rather than by the activity service's bus subscriber: publishEvent drops
 // events for any subscriber whose channel is full, and a burst of sheds is
@@ -638,6 +639,15 @@ func (r *Runtime) EmitActivityToolCallCompletedAttributed(serverName, toolName, 
 // so live subscribers (SSE, tray) see the rejection — the durable row no longer
 // depends on it.
 func (r *Runtime) EmitActivityToolCallRejected(serverName, toolName, source, requestID, reason, scope, message string, limit int, retryAfterMs, waitedMs int64) {
+	r.EmitActivityToolCallRejectedAttributed(serverName, toolName, source, requestID, reason, scope, message, limit, retryAfterMs, waitedMs, ActivityAttribution{})
+}
+
+// EmitActivityToolCallRejectedAttributed is EmitActivityToolCallRejected for a
+// rejection that names the caller. A rate_limited rejection is about ONE agent
+// token, so its record carries the token (and client) in the attribution
+// fields; the concurrency sheds stay unattributed, as before. reason is also
+// rate_limited, and scope token, for that case.
+func (r *Runtime) EmitActivityToolCallRejectedAttributed(serverName, toolName, source, requestID, reason, scope, message string, limit int, retryAfterMs, waitedMs int64, attr ActivityAttribution) {
 	payload := map[string]any{
 		"server_name":    serverName,
 		"tool_name":      toolName,
@@ -652,6 +662,9 @@ func (r *Runtime) EmitActivityToolCallRejected(serverName, toolName, source, req
 		// Spec 113-c FR-045: same taxonomy the persisted record carries.
 		"error_class":  "proxy_policy",
 		"fault_domain": "proxy",
+	}
+	if a := attr.payload(); a != nil {
+		payload[attributionPayloadKey] = a
 	}
 	evt := newEvent(EventTypeActivityToolCallRejected, payload)
 	r.activityService.RecordToolCallRejected(evt)

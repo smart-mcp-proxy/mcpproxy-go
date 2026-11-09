@@ -4,6 +4,13 @@ import { nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
+function testRouter() {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [{ path: '/', component: { template: '<div />' } }],
+  })
+}
+
 // Spec 107 PR-C, T087 (red before T088).
 //
 // data-model.md §"Frontend surfaces" (`stores/auth.ts`): `principalKind:
@@ -205,6 +212,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     const { default: App } = await import('@/App.vue')
     const wrapper = mount(App, {
       global: {
+        plugins: [testRouter()],
         stubs: [
           'SidebarNav',
           'TopHeader',
@@ -263,7 +271,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     const failedProbe = deferred<undefined>()
     getProviderMock.mockReturnValue(failedProbe.promise)
     const { default: App } = await import('@/App.vue')
-    mount(App, { global: { stubs: ['SidebarNav', 'TopHeader', 'AppFooter', 'ToastContainer', 'ConnectionStatus', 'AuthErrorModal', 'router-view'] } })
+    mount(App, { global: { plugins: [testRouter()], stubs: ['SidebarNav', 'TopHeader', 'AppFooter', 'ToastContainer', 'ConnectionStatus', 'AuthErrorModal', 'router-view'] } })
     await Promise.resolve()
     expect(fetchInfo).not.toHaveBeenCalled()
 
@@ -363,6 +371,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     const { default: App } = await import('@/App.vue')
     const wrapper = mount(App, {
       global: {
+        plugins: [testRouter()],
         stubs: {
           TopHeader: { name: 'TopHeader', template: '<div data-test="header" />' },
           SidebarNav: { name: 'SidebarNav', template: '<div data-test="sidebar" />' },
@@ -400,7 +409,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
   it('fails closed without session or core calls when the provider probe is unavailable', async () => {
     getProviderMock.mockResolvedValue(undefined)
     const { default: App } = await import('@/App.vue')
-    mount(App, { global: { stubs: ['SidebarNav', 'TopHeader', 'AppFooter', 'ToastContainer', 'ConnectionStatus', 'AuthErrorModal', 'router-view'] } })
+    mount(App, { global: { plugins: [testRouter()], stubs: ['SidebarNav', 'TopHeader', 'AppFooter', 'ToastContainer', 'ConnectionStatus', 'AuthErrorModal', 'router-view'] } })
     await flushPromises()
 
     const { useAuthStore } = await import('@/stores/auth')
@@ -423,7 +432,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
   ])('fails closed with no protected calls after %s', async (_case, sessionResult) => {
     getSessionStatusMock.mockImplementation(sessionResult)
     const { default: App } = await import('@/App.vue')
-    mount(App, { global: { stubs: ['SidebarNav', 'TopHeader', 'AppFooter', 'ToastContainer', 'ConnectionStatus', 'AuthErrorModal', 'router-view'] } })
+    mount(App, { global: { plugins: [testRouter()], stubs: ['SidebarNav', 'TopHeader', 'AppFooter', 'ToastContainer', 'ConnectionStatus', 'AuthErrorModal', 'router-view'] } })
     await flushPromises()
 
     const { useAuthStore } = await import('@/stores/auth')
@@ -444,6 +453,7 @@ describe('App.vue gated mount-time fetches (Spec 107 FR-041, T087/T088)', () => 
     const { default: App } = await import('@/App.vue')
     const wrapper = mount(App, {
       global: {
+        plugins: [testRouter()],
         stubs: {
           TopHeader: { name: 'TopHeader', template: '<div data-test="header" />' },
           SidebarNav: { name: 'SidebarNav', template: '<div data-test="sidebar" />' },

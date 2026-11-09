@@ -163,6 +163,9 @@ type CredentialView struct {
 	Purpose      string                 `json:"purpose,omitempty"`
 	TokenPrefix  string                 `json:"token_prefix"`
 	LegacyScope  *bool                  `json:"legacy_scope,omitempty"`
+	// RateLimit is the token's own call budget (issue #1699), set at issue
+	// time. Absent when the token has none and follows agent_token_rate_limit.
+	RateLimit *auth.TokenRateLimit `json:"rate_limit,omitempty"`
 }
 
 // CredentialStateOf classifies a record: revoked over expired over active.
@@ -211,7 +214,7 @@ func ViewOf(t *auth.AgentToken, cfg *config.Config, now time.Time) CredentialVie
 		TokenName: t.Name, Profile: t.ProfilePin, ProfileState: ProfileStateOf(t.ProfilePin, cfg),
 		State: CredentialStateOf(t, now), CreatedAt: t.CreatedAt, RevokedAt: t.RevokedAt,
 		LastUsedAt: t.LastUsedAt, Lease: t.IsLease(), Issuer: t.Issuer, Purpose: t.Purpose,
-		TokenPrefix: t.TokenPrefix,
+		TokenPrefix: t.TokenPrefix, RateLimit: t.RateLimit,
 	}
 	if !t.ExpiresAt.IsZero() {
 		exp := t.ExpiresAt
@@ -311,6 +314,9 @@ type IssueTokenRequest struct {
 	// ValidateServers checks REST allowed_servers against the known servers
 	// (the REST handler supplies it so its error texts are unchanged).
 	ValidateServers func([]string) error
+	// RateLimit is the token's own call budget (issue #1699; REST/CLI only,
+	// MCP passes nil). Nil = the token follows agent_token_rate_limit.
+	RateLimit *auth.TokenRateLimit
 }
 
 // CredentialRef names exactly one credential: a custom client id or an agent
@@ -585,6 +591,11 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 		}
 	}
 
+	// 5b. Call budget (REST/CLI; the MCP tool has no such argument).
+	if err := req.RateLimit.Validate(); err != nil {
+		return nil, credErr(profile.CredentialErrorCodeInvalidArgument, "rate_limit", "invalid rate_limit: "+err.Error(), 400)
+	}
+
 	// 6. Expiry, parsed from the raw text after the screen.
 	now := s.now().UTC()
 	def := req.Expiry
@@ -663,6 +674,7 @@ func (s *CredentialsService) IssueToken(ctx context.Context, a Actor, req IssueT
 	candidate := auth.AgentToken{
 		Name: req.Name, AllowedServers: allowed, Permissions: perms, ExpiresAt: expiresAt, CreatedAt: now,
 		ProfilePin: pin, Issuer: issuerOf(a), Purpose: req.Purpose, GuardBound: req.EnforceGuard,
+		RateLimit: req.RateLimit,
 	}
 	if n := utf8.RuneCountInString(req.Purpose); n > auth.MaxCredentialPurpose {
 		return nil, credErr(profile.CredentialErrorCodeInvalidArgument, "purpose",

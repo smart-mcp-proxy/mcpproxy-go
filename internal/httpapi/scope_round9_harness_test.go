@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -93,7 +94,7 @@ func (c *scopeController) ListActivities(filter storage.ActivityFilter) ([]*stor
 	return matched, total, nil
 }
 
-func (c *scopeController) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+func (c *scopeController) StreamActivities(_ context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	ch := make(chan *storage.ActivityRecord, len(scopeActivities()))
 	for _, rec := range scopeActivities() {
 		if filter.Matches(rec) {

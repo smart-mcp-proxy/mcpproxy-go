@@ -89,6 +89,19 @@ jobs:
       - name: Check the repository
         run: bash scripts/check-no-unquarantine-callers.sh
 
+  # Issue #1794: the Windows test legs run through a wrapper that retries a
+  # Go runtime fault once. Its self-test (fake `go`, canned logs) proves the
+  # retry fires only on the fault signature and never on a real failure.
+  go-test-retry-self-test:
+    name: Go Test Retry Wrapper
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Self-test the retry wrapper
+        run: bash scripts/go-test-retry-runtime-fault.test.sh
+
   # Spec 116 FR-009 (T002): storage's upstreams rows are written only by the
   # config commit (internal/runtime/commit*.go). Hermetic grep; the self-test
   # proves the check can fail.
@@ -195,10 +208,17 @@ jobs:
       # slow runner away from "panic: test timed out" — which is how the leg
       # failed on the first green-again push after #1266. It has since grown to
       # ~1100-1200s, so the bound is 40m to leave real headroom.
+      #
+      # The run goes through scripts/go-test-retry-runtime-fault.sh: when the
+      # first run dies of a Go runtime fault (`unexpected fault address … /
+      # fatal error: fault`, issue #1794 — a Go/Windows runtime bug,
+      # golang/go#81189 and #81238), the failed packages are re-run once and a
+      # ::warning:: annotation names them. Assertion failures, build errors
+      # and timeouts are never retried.
       - name: Run unit tests (Windows)
         if: matrix.os == 'windows-latest'
-        shell: pwsh
-        run: go test -v -race -timeout 40m '-coverprofile=coverage.out' -covermode=atomic '-skip=E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint' ./...
+        shell: bash
+        run: bash scripts/go-test-retry-runtime-fault.sh -v -race -timeout 40m -coverprofile=coverage.out -covermode=atomic -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" -- ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 

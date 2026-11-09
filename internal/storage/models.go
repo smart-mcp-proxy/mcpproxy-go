@@ -189,6 +189,23 @@ type BaselineSweepState struct {
 	Findings int `json:"findings"`
 }
 
+// ScanDefaultNoticeDoneKey holds the ScanDefaultNoticeState marker in
+// MetaBucket (spec 120 FR-011): the one-time startup notice that servers with
+// no trust_mode now run under scan has been logged (or found nothing to say).
+const ScanDefaultNoticeDoneKey = "scan_default_notice_done"
+
+// ScanDefaultNoticeState records that the one-time scan-default startup notice
+// ran on this installation. Absence means "never evaluated with at least one
+// configured server": a fresh install with no servers leaves it unset so the
+// first start that has servers still gets the notice.
+type ScanDefaultNoticeState struct {
+	// NoticedAt is when the notice ran.
+	NoticedAt time.Time `json:"noticed_at"`
+	// Servers names the enabled servers that were running under the scan
+	// default at that time (empty when there was nothing to warn about).
+	Servers []string `json:"servers,omitempty"`
+}
+
 // BundleReprotectDoneKey holds the BundleReprotectState marker in MetaBucket.
 const BundleReprotectDoneKey = "tpa_bundle_reprotect_done"
 
@@ -265,10 +282,11 @@ type UpstreamRecord struct {
 	// for the same reason as AutoApproveToolChanges: SaveConfiguration rebuilds
 	// the JSON server list from these records, so a REST/UI/MCP-set trust_mode
 	// would be wiped on the next save without it.
-	TrustMode           string          `json:"trust_mode,omitempty"`
-	LauncherWaitTimeout config.Duration `json:"launcher_wait_timeout,omitempty"` // Spec 046: max wait for locally-launched HTTP/SSE upstream URL to become reachable
-	EnabledTools        []string        `json:"enabled_tools,omitempty"`         // Allowlist: only these tools are exposed
-	DisabledTools       []string        `json:"disabled_tools,omitempty"`        // Denylist: these tools are hidden
+	TrustMode             string          `json:"trust_mode,omitempty"`
+	ToolArgumentErrorMode string          `json:"tool_argument_error_mode,omitempty"`
+	LauncherWaitTimeout   config.Duration `json:"launcher_wait_timeout,omitempty"` // Spec 046: max wait for locally-launched HTTP/SSE upstream URL to become reachable
+	EnabledTools          []string        `json:"enabled_tools,omitempty"`         // Allowlist: only these tools are exposed
+	DisabledTools         []string        `json:"disabled_tools,omitempty"`        // Denylist: these tools are hidden
 	// MCP-866: persist a server's registry origin + provenance so the
 	// approval/quarantine view and the custom-origin skip_quarantine guard
 	// survive a restart.

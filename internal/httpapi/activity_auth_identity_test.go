@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -166,7 +167,7 @@ type streamingActivityController struct {
 	mockActivityController
 }
 
-func (m *streamingActivityController) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+func (m *streamingActivityController) StreamActivities(_ context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	ch := make(chan *storage.ActivityRecord, len(m.activities))
 	for _, a := range m.activities {
 		if filter.Matches(a) {

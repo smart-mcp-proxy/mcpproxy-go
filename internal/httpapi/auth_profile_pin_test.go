@@ -47,7 +47,16 @@ func TestAPIKeyAuth_AgentToken_PropagatesProfilePin(t *testing.T) {
 		},
 	}
 
-	srv := NewServer(&testControllerWithConfig{cfg: &config.Config{APIKey: "admin-key"}}, logger, nil)
+	// Spec 118: the pin is bound into AllowedServers at authentication (grant ∩
+	// the pinned profile's reach), so the fixture configures `work` to admit
+	// exactly the token's grant; a pin naming no configured profile would bind
+	// to an empty set (fail closed), which is the deleted-profile answer and
+	// not this test's premise.
+	srv := NewServer(&testControllerWithConfig{cfg: &config.Config{
+		APIKey:   "admin-key",
+		Servers:  []*config.ServerConfig{{Name: "github", Enabled: true}, {Name: "fs", Enabled: true}, {Name: "jira", Enabled: true}},
+		Profiles: []config.ProfileConfig{{Name: "work", Servers: []string{"github", "fs", "jira"}}},
+	}}, logger, nil)
 	srv.SetTokenStore(store, tmpDir)
 
 	var capturedCtx *auth.AuthContext

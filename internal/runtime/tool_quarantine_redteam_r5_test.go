@@ -25,7 +25,7 @@ import (
 func TestRT03_LegacyHeldUnchangedHash_RediscoverStampsBeforeApproval(t *testing.T) {
 	for name, decide := range rt03LegacyApprovalPaths {
 		t.Run(name, func(t *testing.T) {
-			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+			rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{rt03Server()})
 			require.NoError(t, rt.storageManager.SetSchemaVersion(storage.CurrentSchemaVersion))
 			schema := normalizeJSON(rt03Schema)
 			changedDesc := rt03Desc + " Now also exports attachments."
@@ -81,7 +81,7 @@ func TestRT03_LegacyHeldUnchangedHash_RediscoverStampsBeforeApproval(t *testing.
 // TestRT03_LegacyHeldStamp_IsIdempotent: once stamped, an unchanged held
 // contract is not re-saved on every discovery pass.
 func TestRT03_LegacyHeldStamp_IsIdempotent(t *testing.T) {
-	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{{Name: "notes", Enabled: true}})
+	rt := setupQuarantineRuntime(t, nil, []*config.ServerConfig{rt03Server()})
 	schema := normalizeJSON(rt03Schema)
 	changedDesc := rt03Desc + " v2"
 	heldHash := calculateToolApprovalHashWithOutputSchema("notes_export", changedDesc, schema, "", nil)

@@ -44,6 +44,8 @@ unchanged.
 A limiter shed is **not** a second authorization decision: admission runs after
 every gate, so the `authz allow` line already exists; the shed is recorded on the
 `tool_call` line (`outcome: rejected`, `reason: limiter_queue_full|limiter_queue_timeout`).
+An agent token over its call budget ([rate limits](agent-tokens.md#call-rate-limit))
+is the same: `outcome: rejected`, `reason: rate_limited`.
 A post-dispatch output-sanitisation or output-schema block is likewise a
 `tool_call` line (`outcome: blocked`), never a second `authz` line — the call was
 authorized.
@@ -181,8 +183,8 @@ not audit reasons: those built-in tools are not audited per call.
 | Key | Required | Notes |
 |---|---|---|
 | `surface`, `server`, `tool`, `operation`, `args_sha256`, `args_bytes` | ✔ | Same values as the paired `authz` line |
-| `outcome` | ✔ | `success`\|`error`\|`blocked` (post-dispatch output sanitisation/schema)\|`rejected` (limiter shed) |
-| `reason` | required iff `blocked`/`rejected`; forbidden on `success`/`error` | `output_sanitisation`\|`output_schema`\|`limiter_queue_full`\|`limiter_queue_timeout` |
+| `outcome` | ✔ | `success`\|`error`\|`blocked` (post-dispatch output sanitisation/schema)\|`rejected` (limiter shed or token rate limit) |
+| `reason` | required iff `blocked`/`rejected`; forbidden on `success`/`error` | `output_sanitisation`\|`output_schema`\|`limiter_queue_full`\|`limiter_queue_timeout`\|`rate_limited` |
 | `error_class` | required iff `error`; forbidden otherwise | `upstream_error`\|`upstream_timeout`\|`upstream_unavailable`\|`validation`\|`sanitisation`\|`internal`\|`cancelled` — a bounded class, never message text |
 | `duration_ms` | ✔ | |
 | `request_bytes`, `response_bytes` | optional | As measured by the completion path (pre-truncation) |

@@ -1688,38 +1688,10 @@ func (s *Service) buildHeartbeatWithOneShots(consumeOneShots bool) HeartbeatPayl
 	// the MOST RECENT stable MCPX_* code (FR-012); on any store error the
 	// field is simply omitted — the heartbeat is never blocked.
 	payload.PreviousShutdown = s.previousShutdown
-	if s.prechurnStore != nil && s.prechurnDB != nil {
-		if code, err := s.prechurnStore.LastErrorCode(s.prechurnDB); err == nil {
-			payload.LastErrorCode = code
-		} else {
-			s.logger.Debug("Failed to load last_error_code for heartbeat", zap.Error(err))
-		}
-	}
+	payload.LastErrorCode = s.lastErrorCode()
 
-	// Spec 044 Phase H: diagnostics counter snapshot. Load from BBolt (decay
-	// applied at read time); omit entirely when counters are all zero or the
-	// store is not wired (short-lived CLI commands).
-	//
-	// MCP-2967: the persisted counters are joined with the STANDING state from
-	// the supervisor before the isZero() check, so an install whose only
-	// signal is "N servers are broken right now" still emits a diagnostics
-	// object. Without that ordering, edge-triggering error_code_counts_24h
-	// would make a permanently parked install vanish from the payload once its
-	// 24h window decayed — absent, which downstream reads as zero.
-	var diagSnap DiagnosticsCounters
-	if s.diagCounterStore != nil && s.diagCounterDB != nil {
-		if snap, err := s.diagCounterStore.Snapshot(s.diagCounterDB); err == nil {
-			diagSnap = snap
-		} else {
-			s.logger.Debug("Failed to load diagnostics counters for heartbeat", zap.Error(err))
-		}
-	}
-	if s.currentErrorCodesProvider != nil {
-		diagSnap.CurrentErrorCodes = sanitizeMCPXCodeMap(s.currentErrorCodesProvider())
-	}
-	if !diagSnap.isZero() {
-		payload.Diagnostics = &diagSnap
-	}
+	// Spec 044 Phase H: diagnostics counter snapshot (see diagnosticsSnapshot).
+	payload.Diagnostics = s.diagnosticsSnapshot()
 
 	// Issue #969 (Phase 0): preflight baseline counters. Same flush shape as
 	// the Phase H diagnostics block above — load from BBolt (decay applied at
@@ -2173,4 +2145,49 @@ func normalizeVersion(v string) string {
 		return "v" + v
 	}
 	return v
+}
+
+// diagnosticsSnapshot returns the diagnostics block shared by the heartbeat and
+// the feedback context, or nil when it is empty.
+//
+// Spec 044 Phase H: diagnostics counter snapshot. Load from BBolt (decay
+// applied at read time); omit entirely when counters are all zero or the
+// store is not wired (short-lived CLI commands).
+//
+// MCP-2967: the persisted counters are joined with the STANDING state from
+// the supervisor before the isZero() check, so an install whose only
+// signal is "N servers are broken right now" still emits a diagnostics
+// object. Without that ordering, edge-triggering error_code_counts_24h
+// would make a permanently parked install vanish from the payload once its
+// 24h window decayed — absent, which downstream reads as zero.
+func (s *Service) diagnosticsSnapshot() *DiagnosticsCounters {
+	var diagSnap DiagnosticsCounters
+	if s.diagCounterStore != nil && s.diagCounterDB != nil {
+		if snap, err := s.diagCounterStore.Snapshot(s.diagCounterDB); err == nil {
+			diagSnap = snap
+		} else {
+			s.logger.Debug("Failed to load diagnostics counters for telemetry", zap.Error(err))
+		}
+	}
+	if s.currentErrorCodesProvider != nil {
+		diagSnap.CurrentErrorCodes = sanitizeMCPXCodeMap(s.currentErrorCodesProvider())
+	}
+	if diagSnap.isZero() {
+		return nil
+	}
+	return &diagSnap
+}
+
+// lastErrorCode returns the most recent stable MCPX_* code from the pre-churn
+// store, or "" when the store is not wired or unreadable.
+func (s *Service) lastErrorCode() string {
+	if s.prechurnStore == nil || s.prechurnDB == nil {
+		return ""
+	}
+	code, err := s.prechurnStore.LastErrorCode(s.prechurnDB)
+	if err != nil {
+		s.logger.Debug("Failed to load last_error_code for telemetry", zap.Error(err))
+		return ""
+	}
+	return code
 }

@@ -480,8 +480,9 @@ func auditSetOperation(ctx context.Context, op string) {
 	d.mu.Unlock()
 }
 
-// auditToolCallShed writes the tool_call line for a concurrency-limiter shed
-// (`outcome:rejected`, reason limiter_queue_full|limiter_queue_timeout). The
+// auditToolCallShed writes the tool_call line for a limiter shed
+// (`outcome:rejected`, reason limiter_queue_full|limiter_queue_timeout|
+// rate_limited — the last when an agent token is over its call budget). The
 // shed happens inside the managed client after every gate (research.md D6),
 // so it is the tool_call half of the pair, never a second authz. The
 // dispatch paths do not emit a completion record for a shed (the limiter's
@@ -491,8 +492,11 @@ func (p *MCPProxyServer) auditToolCallShed(ctx context.Context, limitErr *limite
 		return
 	}
 	reason := "limiter_queue_full"
-	if limitErr.Reason == limiter.ReasonQueueTimeout {
+	switch limitErr.Reason {
+	case limiter.ReasonQueueTimeout:
 		reason = "limiter_queue_timeout"
+	case limiter.ReasonRateLimited:
+		reason = "rate_limited"
 	}
 	p.auditToolCall(ctx, "rejected", reason, "", durationMs, nil, nil)
 }

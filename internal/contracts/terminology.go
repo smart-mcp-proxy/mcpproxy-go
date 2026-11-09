@@ -62,3 +62,22 @@ func AllClientPresenceStates() []string {
 func AllTiers() []Tier {
 	return []Tier{TierRead, TierWrite, TierDestructive, TierUnannotated, TierUnknown}
 }
+
+// Hold-signal ids (spec 120): the deterministic structural-gate signals the
+// scan-mode change gate records on a held tool (`held_signals`), ahead of the
+// scanner's own check ids. Each is a prefix: the recorded signal carries a
+// reason and a path after it (`GATE-SCHEMA-SHAPE:new-required:bcc`,
+// `GATE-HINT-CHANGE:openWorldHint:true>false`), and the surfaces label by
+// prefix. Not TPA signature ids on purpose (the Web UI lists them with the
+// heuristic check ids).
+const (
+	HoldSignalHintSaferFlip = "GATE-HINT-SAFER-FLIP"
+	HoldSignalHintChange    = "GATE-HINT-CHANGE"
+	HoldSignalSchemaShape   = "GATE-SCHEMA-SHAPE"
+	HoldSignalOutputSchema  = "GATE-OUTPUT-SCHEMA"
+)
+
+// AllHoldSignals lists the structural-gate signal prefixes in display order.
+func AllHoldSignals() []string {
+	return []string{HoldSignalHintSaferFlip, HoldSignalHintChange, HoldSignalSchemaShape, HoldSignalOutputSchema}
+}

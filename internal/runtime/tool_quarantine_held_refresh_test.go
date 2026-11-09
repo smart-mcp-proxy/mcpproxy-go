@@ -175,7 +175,9 @@ func TestRefreshHeldScanEvidence_ApprovedRecordsAreUntouched(t *testing.T) {
 
 func TestRefreshHeldScanEvidence_QuarantinedServerIsRefreshedAndStaysQuarantined(t *testing.T) {
 	useEmbeddedBundleForTest(t)
-	quarantined := &config.ServerConfig{Name: "github", Enabled: true, Quarantined: true}
+	// manual: under the default (scan) tier a clean-scanned new tool would be
+	// scan-approved instead of filed pending (spec 119).
+	quarantined := &config.ServerConfig{Name: "github", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)}
 	rt := rescanRuntime(t, nil, quarantined)
 	require.NoError(t, rt.storageManager.SaveUpstreamServer(quarantined))
 	_, err := rt.checkToolApprovals("github", []*config.ToolMetadata{

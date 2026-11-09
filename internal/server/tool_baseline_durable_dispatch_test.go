@@ -19,7 +19,7 @@ import (
 // refused without any upstream dispatch. On main the second refresh promoted
 // it by "auto-baseline" and the call reached the upstream.
 func TestToolBaselineDurable_ReplacedInventoryNeverDispatches(t *testing.T) {
-	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}})
 	proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 	up := startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("read_note")))
 	requireManualTrustGateActive(t, proxy, "a")

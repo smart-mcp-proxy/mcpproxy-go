@@ -184,7 +184,7 @@ func TestCodeExecution_DroppedServer_RecordlessHiddenTool_KeepsNotConnectedVerdi
 		"api-key admin":                 adminCtx(),
 	} {
 		t.Run(label, func(t *testing.T) {
-			serverCfg := &config.ServerConfig{Name: "a", Enabled: true, ReconnectOnUse: true}
+			serverCfg := &config.ServerConfig{Name: "a", Enabled: true, ReconnectOnUse: true, TrustMode: string(config.TrustModeManual)}
 			proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{serverCfg})
 			proxy.config.IntentDeclaration = &config.IntentDeclarationConfig{StrictServerValidation: false}
 			// The upstream really serves "hidden" (the counter would witness a

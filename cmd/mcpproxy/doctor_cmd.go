@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -99,8 +100,14 @@ func runDoctor(cmd *cobra.Command, _ []string) error {
 	// Load configuration
 	globalConfig, err := loadDoctorConfig()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		var pkgErr *packagedInstallError
+		if !errors.As(err, &pkgErr) { // that one is self-explanatory; printed once by main
+			fmt.Fprintf(os.Stderr, "Error loading configuration: %v\n", err)
+		}
 		return err
+	}
+	if w := differentInstanceWarning(doctorConfigPath, os.Args[1:]); w != "" {
+		fmt.Fprintln(os.Stderr, w)
 	}
 
 	doctorSecretLiterals = []string{globalConfig.APIKey}

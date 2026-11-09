@@ -72,3 +72,27 @@ func TestMirroredGitRuntimeGateMatchesConfig(t *testing.T) {
 		}
 	}
 }
+
+// The mirror has to normalise a Windows launcher name the way
+// core.DetectRuntimeType does, or a uvx.exe/npx.cmd server gets remediation
+// for a "uvx.exe" runtime and no git-dependency hint while the spawn path uses
+// the uvx image and the git-capable substitute.
+func TestDetectDockerRuntimeTypeWindowsLauncherSuffix(t *testing.T) {
+	cases := map[string]string{
+		"uvx.exe":     "uvx",
+		"npx.cmd":     "npx",
+		"Uvx.EXE":     "uvx",
+		"npm.bat":     "npm",
+		"my-tool.exe": "my-tool.exe",
+	}
+	for command, want := range cases {
+		if got := detectDockerRuntimeType(command); got != want {
+			t.Errorf("detectDockerRuntimeType(%q) = %q, want %q", command, got, want)
+		}
+	}
+
+	hints := ClassifierHints{DockerCommand: "uvx.exe", DockerArgs: []string{"git+https://x"}}
+	if !hintsHaveGitDependency(hints) {
+		t.Error("hintsHaveGitDependency(uvx.exe, git+) = false, want true")
+	}
+}

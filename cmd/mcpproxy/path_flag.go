@@ -58,6 +58,8 @@ func registerRootPathFlags(root *cobra.Command) {
 		dataDir = config.DataDirFromEnv()
 	}
 	root.PersistentFlags().VarP(newPathFlag(&dataDir), "data-dir", "d", "Data directory path (default: ~/.mcpproxy)")
+	root.PersistentFlags().BoolVar(&systemMode, "system", false,
+		"Manage the packaged Linux system service (mcpproxy.service): same as --config "+packagedPaths.ConfigPath+" --data-dir "+packagedPaths.DataDir)
 	// Keep --help identical whether or not the variable is set.
 	if f := root.PersistentFlags().Lookup("data-dir"); f != nil {
 		f.DefValue = ""

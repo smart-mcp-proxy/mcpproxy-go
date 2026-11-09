@@ -404,7 +404,7 @@ func TestRapidQuarantineStateMachine(t *testing.T) {
 			ToolResponseLimit: 0,
 			QuarantineEnabled: nil, // defaults to true
 			Servers: []*config.ServerConfig{
-				{Name: "test-server", Enabled: true, Quarantined: true},
+				{Name: "test-server", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)},
 			},
 		}
 		rt, err := New(cfg, "", zap.NewNop())
@@ -545,7 +545,7 @@ func TestRapidInvariant_ChangedNeverAutoApproved(t *testing.T) {
 			ToolResponseLimit: 0,
 			QuarantineEnabled: nil,
 			Servers: []*config.ServerConfig{
-				{Name: "srv", Enabled: true, Quarantined: true},
+				{Name: "srv", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)},
 			},
 		}
 		rt, err := New(cfg, "", zap.NewNop())
@@ -627,7 +627,7 @@ func TestRapidInvariant_PendingNeverAutoApproved(t *testing.T) {
 			ToolResponseLimit: 0,
 			QuarantineEnabled: nil,
 			Servers: []*config.ServerConfig{
-				{Name: "srv", Enabled: true, Quarantined: true},
+				{Name: "srv", Enabled: true, Quarantined: true, TrustMode: string(config.TrustModeManual)},
 			},
 		}
 		rt, err := New(cfg, "", zap.NewNop())

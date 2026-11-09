@@ -28,6 +28,7 @@
 // HELD column, cmd/mcpproxy/tools_cmd.go formatToolHold).
 
 import type { ToolApproval } from '@/types'
+import { gateSignalLabel } from './reviewPresentation'
 
 /** Backend hold-reason constants (internal/storage/models.go). */
 export const HOLD_REASON_SCAN_FINDINGS = 'scan_findings'
@@ -154,7 +155,7 @@ export function parseHoldEvidence(
 
 export interface DisplaySignal {
   kind: 'tpa' | 'heuristic'
-  /** What the chip shows: the TPA id, or the raw heuristic check id. */
+  /** What the chip shows: the TPA id, the structural-gate label (spec 120), or the raw heuristic check id. */
   label: string
   /** Full raw signal string, for report links. */
   raw: string
@@ -189,7 +190,7 @@ export function displaySignals(
 
   const heuristicSlots = Math.max(0, cap - visible.length)
   for (const raw of evidence.heuristics.slice(0, heuristicSlots)) {
-    visible.push({ kind: 'heuristic', label: raw, raw })
+    visible.push({ kind: 'heuristic', label: gateSignalLabel(raw) ?? raw, raw })
   }
 
   return {

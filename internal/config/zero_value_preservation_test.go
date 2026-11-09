@@ -143,6 +143,7 @@ var numericOmitemptyAllowlist = map[string]string{
 	"Config.ActivityCleanupIntervalMin":  "0 and absent both fall back to the built-in interval",
 	"Config.TopK":                        "deprecated and inert; superseded by ToolsLimit",
 	"Config.OAuthExpiryWarningHours":     "0 and absent both fall back to the 1.0h default",
+	"Config.AgentTokenRateLimit.Burst":   "0 and absent both mean 'the same as per_minute' (#1699)",
 	"Config.ToonMinSavingsPct":           "documented as '0/unset -> 15' — the two are the same value by design",
 
 	// Durations whose own doc comments say zero and unset are the same value.

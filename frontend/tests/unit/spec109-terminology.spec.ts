@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest'
 import { HEALTH_STATUS_LABELS } from '@/types/contracts'
 import { ACTIVITY_VIEW_LABELS } from '@/utils/activity'
 import { TIER_LABELS, TOOL_APPROVAL_LABELS, tierLabel, toolApprovalLabel } from '@/utils/toolQuarantine'
+import { HOLD_SIGNAL_LABELS, gateSignalLabel } from '@/utils/reviewPresentation'
 
 // Spec 109-m (FR-090, T144, M3): the six terminology enums, decoded from the
 // ONE golden internal/contracts/testdata/terminology.json that Go
@@ -25,7 +26,7 @@ const family = (name: string) => golden[name] as Family
 const contractsTs = readFileSync(resolve(__dirname, '../../src/types/contracts.ts'), 'utf8').split(/\r?\n/)
 const lineSet = new Set(contractsTs)
 
-const camel = (v: string) => v.split('_').map(w => w[0].toUpperCase() + w.slice(1)).join('')
+const camel = (v: string) => v.split(/[_-]/).filter(Boolean).map(w => w[0].toUpperCase() + w.slice(1).toLowerCase()).join('')
 
 // golden family -> [generated const prefix, generated union type]
 const TS_FAMILIES: Record<string, [string, string]> = {
@@ -35,6 +36,7 @@ const TS_FAMILIES: Record<string, [string, string]> = {
   tool_approval: ['ToolApproval', 'ToolApprovalState'],
   activity_view: ['ActivityView', 'ActivityView'],
   client_presence: ['ClientPresence', 'ClientPresenceState'],
+  hold_signal: ['HoldSignal', 'HoldSignal'],
 }
 
 function unionMembers(typeName: string): string[] {
@@ -66,6 +68,14 @@ describe('terminology.json against the generated contracts.ts', () => {
 describe('terminology.json against the Web label helpers', () => {
   it('health status labels equal the generated table', () => {
     expect(HEALTH_STATUS_LABELS).toEqual(family('health_status').labels)
+  })
+
+  it('hold-signal labels equal the golden (spec 120)', () => {
+    const f = family('hold_signal')
+    expect(Object.keys(HOLD_SIGNAL_LABELS).sort()).toEqual([...f.values].sort())
+    for (const v of f.values) expect(HOLD_SIGNAL_LABELS[v]).toBe(f.labels![v])
+    expect(gateSignalLabel('GATE-SCHEMA-SHAPE:new-required:bcc')).toBe('Input schema widened: new-required bcc')
+    expect(gateSignalLabel('tpa.TPA-2026-0001.hidden_instruction')).toBeNull()
   })
 
   it('tool review state labels equal the golden and never use a retired name', () => {

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -49,7 +50,7 @@ func (m *callParityController) GetCurrentConfig() *config.Config {
 	return &config.Config{APIKey: "test-key", Observability: config.DefaultObservabilityConfig()}
 }
 
-func (m *callParityController) StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
+func (m *callParityController) StreamActivities(_ context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	ch := make(chan *storage.ActivityRecord)
 	go func() {
 		defer close(ch)

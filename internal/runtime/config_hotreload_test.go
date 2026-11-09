@@ -1407,3 +1407,30 @@ func TestDetectConfigChanges_Issue1466Residuals(t *testing.T) {
 		assert.True(t, result.RequiresRestart)
 	})
 }
+
+// The server certificate is built once when the listener starts, so a change
+// to tls.extra_sans, tls.cert_file or tls.key_file needs a restart.
+func TestDetectConfigChanges_TLSCertSettingsRequireRestart(t *testing.T) {
+	cfgWith := func(tls config.TLSConfig) *config.Config {
+		return &config.Config{Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &tls}
+	}
+	base := config.TLSConfig{Enabled: true}
+
+	cases := map[string]config.TLSConfig{
+		"extra_sans": {Enabled: true, ExtraSANs: []string{"mcp.internal"}},
+		"cert_file":  {Enabled: true, CertFile: "/run/secrets/tls.crt"},
+		"key_file":   {Enabled: true, KeyFile: "/run/secrets/tls.key"},
+	}
+	for name, changed := range cases {
+		t.Run(name, func(t *testing.T) {
+			res := DetectConfigChanges(cfgWith(base), cfgWith(changed))
+			assert.True(t, res.RequiresRestart)
+			assert.Equal(t, []string{"tls"}, res.ChangedFields)
+		})
+	}
+
+	t.Run("nil and empty extra_sans are the same", func(t *testing.T) {
+		res := DetectConfigChanges(cfgWith(base), cfgWith(config.TLSConfig{Enabled: true, ExtraSANs: []string{}}))
+		assert.False(t, res.RequiresRestart)
+	})
+}

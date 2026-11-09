@@ -66,14 +66,18 @@ func (c *Client) wrapWithSandbox(command string, args []string) (wrappedCommand 
 // reads stay broad (read-only "/") so package-manager runtimes can load
 // interpreters, node_modules, and site-packages from anywhere on the host, while
 // WRITES are denied outside a small allowlist — the server's working directory,
-// the OS temp dir, and the common package caches the runtimes need. Tightening
+// the OS temp dir, /dev/null, and the common package caches the runtimes need. Tightening
 // reads is deliberately deferred: a read allowlist breaks tool discovery and
 // belongs to a future per-server explicit allowlist.
 //
 // BestEffort is set so a kernel without Landlock degrades to unconfined-with-
 // diagnostic instead of failing the connection outright.
 func buildSandboxSpec(cfg *config.ServerConfig) sandbox.Spec {
-	rw := []string{os.TempDir()}
+	// /dev/null is granted as a single device, not the whole of /dev: the
+	// read-only "/" rule covers reading it but not WRITE_FILE, so without this
+	// grant a confined `sh -c '... 2>/dev/null'` fails with "Permission denied"
+	// and the runtimes' own stdio-to-devnull plumbing breaks (GH #1704).
+	rw := []string{os.TempDir(), "/dev/null"}
 	if cfg != nil && cfg.WorkingDir != "" {
 		rw = append(rw, cfg.WorkingDir)
 	}

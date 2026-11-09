@@ -82,9 +82,9 @@ describe('deriveQuarantineBannerState — derivation table (spec 088 FR-013, dat
       state: 'manual-review',
     },
     {
-      name: 'unset trust mode (effective manual) with a scan in progress',
+      name: 'unset trust mode (effective scan, spec 119) with a scan in progress',
       server: quarantined({ security_scan: withScan('scanning') }),
-      state: 'manual-review',
+      state: 'scan-running',
     },
     {
       name: 'invalid trust mode fails closed to manual, so a running scan is not scan-running',

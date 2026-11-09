@@ -51,7 +51,7 @@ type commitTestHooks struct {
 	// inventoryBeforeApplyLock runs in every inventory write path (sweep,
 	// single-server discovery, quarantined review capture, lenient empty
 	// observation) after the tools/list returned and before the apply takes
-	// captureSnapMu and the server's approval lock, with the capture's
+	// captureSnapLock and the server's approval lock, with the capture's
 	// sequence (Spec 117 PR-3).
 	inventoryBeforeApplyLock func(serverName string, seq uint64)
 

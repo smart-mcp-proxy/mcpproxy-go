@@ -83,6 +83,35 @@ describe('shell survives auth recovery (#1401)', () => {
     getMeMock.mockReset()
   })
 
+  it('closes the mobile drawer on navigation, including the active link, without collapsing desktop navigation', async () => {
+    const { wrapper, router } = await mountApp()
+    const { useSystemStore } = await import('@/stores/system')
+    useSystemStore().sidebarCollapsed = false
+    const drawer = wrapper.get<HTMLInputElement>('#sidebar-drawer')
+    await drawer.setValue(true)
+    await router.push('/login')
+    await flushPromises()
+    expect(drawer.element.checked).toBe(false)
+    expect(useSystemStore().sidebarCollapsed).toBe(false)
+
+    await drawer.setValue(true)
+    await router.push('/login') // redundant link to the active destination
+    await flushPromises()
+    expect(drawer.element.checked).toBe(false)
+    wrapper.unmount()
+  })
+
+  it('keeps the drawer open when navigation is rejected', async () => {
+    const { wrapper, router } = await mountApp()
+    router.beforeEach(() => false)
+    const drawer = wrapper.get<HTMLInputElement>('#sidebar-drawer')
+    await drawer.setValue(true)
+    await router.push('/login')
+    await flushPromises()
+    expect(drawer.element.checked).toBe(true)
+    wrapper.unmount()
+  })
+
   it('keeps the same header/sidebar DOM while the fresh probe is pending', async () => {
     const { wrapper } = await mountApp()
     const header = wrapper.find('header, .navbar')

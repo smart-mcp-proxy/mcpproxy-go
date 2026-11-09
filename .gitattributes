@@ -56,3 +56,9 @@ internal/security/tpacorpus/testdata/*.json text eol=lf
 # bytes, the 4096/4097-byte ceilings are measured on the file, and one fixture
 # deliberately ends in CRLF). Never convert line endings on checkout.
 internal/security/bundlesig/testdata/* -text
+
+# Issue #1794: the Windows unit-test legs run scripts/go-test-retry-runtime-fault.sh
+# under Git Bash. A CRLF checkout (core.autocrlf=true on windows-latest) would
+# leave a \r on the shebang and every command line, so pin the CI shell
+# scripts to LF.
+scripts/*.sh text eol=lf

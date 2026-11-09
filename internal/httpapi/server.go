@@ -264,7 +264,7 @@ type ServerController interface {
 	// Activity logging (RFC-003)
 	ListActivities(filter storage.ActivityFilter) ([]*storage.ActivityRecord, int, error)
 	GetActivity(id string) (*storage.ActivityRecord, error)
-	StreamActivities(filter storage.ActivityFilter) <-chan *storage.ActivityRecord
+	StreamActivities(ctx context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord
 	// AggregateToolUsage rolls up tool_call activity per (server,tool) since the
 	// given time. Backs the global tools page usage columns (spec 050).
 	AggregateToolUsage(since time.Time) (map[string]storage.ToolUsageStat, error)
@@ -679,10 +679,7 @@ func (s *Server) authenticateExplicitToken(w http.ResponseWriter, r *http.Reques
 // global admin key, or a user JWT resolved as a session principal
 // (kind=bearer_jwt) through the edition hook.
 func (s *Server) authenticateBearer(w http.ResponseWriter, r *http.Request, next http.Handler, cfg *config.Config, authHeader string) {
-	var token string
-	if strings.HasPrefix(authHeader, "Bearer ") {
-		token = strings.TrimPrefix(authHeader, "Bearer ")
-	}
+	token := bearerToken(authHeader)
 
 	if token != "" && strings.HasPrefix(token, auth.ClientTokenPrefixStr) {
 		s.rejectClientCredentialOnREST(w, r)
@@ -783,15 +780,16 @@ func (s *Server) handleAgentTokenAuth(w http.ResponseWriter, r *http.Request, ne
 	// requested profile (preflight.ResolveScope), so a dropped pin silently
 	// widened what a pinned token could resolve there.
 	//
-	// That intersection is preflight's, not this package's ENUMERATION
-	// boundary. Every read door under /api/v1 answers from
-	// auth.CanEnumerateServer — token scope alone. The profile terms are
-	// ergonomic filters and one of them (the requested profile) is
-	// caller-selectable, so folding them into the enumeration boundary would
-	// let a caller change what it is authorized to see by switching profiles.
-	// The three notions of scope, and why only one of them is a boundary, are
-	// laid out at the top of scope_subtree.go.
-	authCtx := agentToken.AuthContext()
+	// Spec 118 (#1686): the pin is then BOUND into the context's AllowedServers
+	// (bindCallerToPin, pin_boundary.go) — grant ∩ the pinned profile's reach,
+	// resolved from the live configuration for this one request — so every
+	// read door under /api/v1, which answers from auth.CanEnumerateServer,
+	// and every grant-as-filter seam see the pinned token's visible set and
+	// not the raw "*" a --profile token is minted with. The requested
+	// ?profile= stays an ergonomic filter on top (a pinned caller may name only
+	// its own pin). The boundary and the ergonomic filters are laid out at the
+	// top of scope_subtree.go.
+	authCtx := s.bindCallerToPin(agentToken.AuthContext())
 	ctx := auth.WithAuthContext(r.Context(), authCtx)
 
 	s.logger.Debugw("Agent token authenticated",
@@ -813,12 +811,8 @@ func ExtractToken(r *http.Request) string {
 	}
 
 	// 2. Check Authorization: Bearer header
-	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			if token := strings.TrimPrefix(authHeader, "Bearer "); token != "" {
-				return token
-			}
-		}
+	if token := bearerToken(r.Header.Get("Authorization")); token != "" {
+		return token
 	}
 
 	// 3. Check query parameter (for SSE and Web UI initial load)
@@ -827,6 +821,17 @@ func ExtractToken(r *http.Request) string {
 	}
 
 	return ""
+}
+
+// bearerToken returns the credential from an Authorization header value that
+// uses the Bearer scheme, or "" otherwise. The scheme name is matched
+// case-insensitively (RFC 7235 §2.1, RFC 6750 §2.1).
+func bearerToken(authHeader string) string {
+	const scheme = "Bearer "
+	if len(authHeader) < len(scheme) || !strings.EqualFold(authHeader[:len(scheme)], scheme) {
+		return ""
+	}
+	return authHeader[len(scheme):]
 }
 
 // correlationIDMiddleware injects correlation ID and request source into context
@@ -1479,7 +1484,7 @@ func (s *Server) writeSuccess(w http.ResponseWriter, data interface{}) {
 
 // handleGetStatus godoc
 // @Summary Get server status
-// @Description Get comprehensive server status including running state, listen address, upstream statistics, and timestamp
+// @Description Get comprehensive server status including running state, listen address, upstream statistics, and timestamp. For a scoped caller (an agent token; for a profile-pinned token, its allowed_servers intersected with the pin) upstream_stats lists only the servers it may enumerate and every counter is recomputed over them.
 // @Description telemetry (admin only): effective telemetry state {enabled, source: env|config|default, disabled_by}
 // @Tags status
 // @Produce json
@@ -2237,6 +2242,8 @@ type AddServerRequest struct {
 	// manual). This is the REST seam for changing the trust tier via
 	// POST/PATCH /api/v1/servers.
 	TrustMode string `json:"trust_mode,omitempty"`
+	// Empty preserves an update; detailed explicitly resets a redacted policy.
+	ToolArgumentErrorMode string `json:"tool_argument_error_mode,omitempty"`
 	// InitTimeout is the per-server MCP `initialize` handshake deadline override
 	// (MCP-3322 / GH #760), serialized as a duration string (e.g. "120s"). A nil
 	// pointer means "leave unchanged" on PATCH; a present value is applied.
@@ -2469,6 +2476,10 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %v", err))
 		return
 	}
+	if err := config.ValidateToolArgumentErrorMode(req.ToolArgumentErrorMode); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// Validate required fields
 	if req.Name == "" {
@@ -2550,16 +2561,17 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// ADD ignores null entries — `null` is JSON Merge Patch's "delete"
 	// signal which has no meaning on create. Drop nils when flattening.
 	serverConfig := &config.ServerConfig{
-		Name:        req.Name,
-		URL:         req.URL,
-		Command:     req.Command,
-		Args:        req.Args,
-		Env:         flattenNullableMap(req.Env),
-		Headers:     flattenNullableMap(req.Headers),
-		WorkingDir:  req.WorkingDir,
-		Protocol:    protocol,
-		Enabled:     enabled,
-		Quarantined: quarantined,
+		ToolArgumentErrorMode: req.ToolArgumentErrorMode,
+		Name:                  req.Name,
+		URL:                   req.URL,
+		Command:               req.Command,
+		Args:                  req.Args,
+		Env:                   flattenNullableMap(req.Env),
+		Headers:               flattenNullableMap(req.Headers),
+		WorkingDir:            req.WorkingDir,
+		Protocol:              protocol,
+		Enabled:               enabled,
+		Quarantined:           quarantined,
 	}
 	if req.Quarantined != nil {
 		// The caller stated the value: record it as an operator statement so
@@ -2725,6 +2737,10 @@ func resolveServerPatch(serverName string, req *AddServerRequest, existingSrv *c
 	// Build partial update config - only set fields that were provided
 	updates := &config.ServerConfig{Name: serverName}
 	hasUpdates := false
+	if req.ToolArgumentErrorMode != "" {
+		updates.ToolArgumentErrorMode = req.ToolArgumentErrorMode
+		hasUpdates = true
+	}
 
 	if req.URL != "" {
 		// #872: the read path masks secrets in the URL query string / userinfo
@@ -3002,6 +3018,10 @@ func (s *Server) handlePatchServer(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid request body")
 		return
 	}
+	if err := config.ValidateToolArgumentErrorMode(req.ToolArgumentErrorMode); err != nil {
+		s.writeError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// GH #938: reject an unrecognized trust_mode before anything is persisted.
 	// A PATCH that omits trust_mode sends "" and is unaffected ("" = leave
@@ -3165,8 +3185,8 @@ func (s *Server) handleConvertConfigToSecret(w http.ResponseWriter, r *http.Requ
 		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q has no value to store", req.Scope, req.Key))
 		return
 	}
-	if strings.HasPrefix(value, "${keyring:") || strings.HasPrefix(value, "${env:") {
-		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference (%s); nothing to convert", req.Scope, req.Key, value))
+	if secret.IsSecretRef(value) {
+		s.writeError(w, r, http.StatusBadRequest, fmt.Sprintf("%s %q is already a reference; nothing to convert", req.Scope, req.Key))
 		return
 	}
 
@@ -4695,6 +4715,9 @@ func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRu
 	if evt.Type == internalRuntime.EventTypeAttentionChanged {
 		return renderAttentionChangedForCaller(ctx, payload)
 	}
+	if evt.Type == internalRuntime.EventTypeActiveProfileChanged {
+		return s.renderActiveProfileChangedForCaller(ctx, payload)
+	}
 	if evt.Type != internalRuntime.EventTypeServersChanged || len(payload) == 0 {
 		return payload
 	}
@@ -4720,9 +4743,25 @@ func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRu
 	// upstream, so there is no embed) that extra was the WHOLE payload. The
 	// copy is unconditional now for that reason: there is always something to
 	// scope, embed or not.
-	out := make(map[string]interface{}, len(payload))
+	//
+	// Spec 118 review: the extras that travel WITH a hidden identity describe
+	// that hidden server's change — `added` / `modified` / `removed`
+	// (tools_changed), `approved_count`, `changed`, `blocked_count`,
+	// `approved_by` and the like — so withholding the name alone left "a
+	// server you cannot see just gained 3 tools" on the wire, the same count
+	// oracle the embed narrowing exists to close. When an identity is
+	// withheld, every extra goes with it; only the renderable state (`servers`,
+	// `stats`) and the coalescer's `reason` survive.
+	hiddenIdentity := false
 	for k, v := range payload {
 		if isOutOfScopeIdentityField(ctx, k, v) {
+			hiddenIdentity = true
+			break
+		}
+	}
+	out := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		if hiddenIdentity && k != "servers" && k != "stats" && k != "reason" {
 			continue
 		}
 		out[k] = v
@@ -4740,6 +4779,34 @@ func (s *Server) renderEventPayloadForCaller(ctx context.Context, evt internalRu
 		recomputed := recomputeServerStats(ctx, scoped, *stats)
 		out["stats"] = &recomputed
 	}
+	return out
+}
+
+// renderActiveProfileChangedForCaller is the SSE twin of GET /profiles/active
+// (Spec 118 FR-009, cross-review round 1): the event carries the server-level
+// slug that door withholds from a scoped caller unless the profile is one the
+// caller may select (its own pin with visible reach; for an unpinned scoped
+// caller, a profile its grant reaches). The push form must not hand over what
+// the pull form refuses, so a scoped subscriber gets `""` for a slug it may
+// not learn — the same "refetch /profiles/active" invalidation, carrying
+// nothing. Administrators receive the payload untouched. Fails closed on a
+// config-read failure, as the door does.
+func (s *Server) renderActiveProfileChangedForCaller(ctx context.Context, payload map[string]interface{}) map[string]interface{} {
+	if !auth.IsScopedCaller(ctx) {
+		return payload
+	}
+	slug, _ := payload["active_profile"].(string)
+	if slug != "" {
+		cfg, err := s.controller.GetConfig()
+		if err == nil && cfg != nil && profileReachable(ctx, cfg, slug) {
+			return payload
+		}
+	}
+	out := make(map[string]interface{}, len(payload))
+	for k, v := range payload {
+		out[k] = v
+	}
+	out["active_profile"] = ""
 	return out
 }
 
@@ -5059,7 +5126,14 @@ func (s *Server) handleDeleteSecret(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// chi routes on RawPath only when Go set it (the client's encoding differs
+	// from the default one); then {name} is still encoded and must be decoded
+	// once. Otherwise chi already matched the decoded Path, and decoding again
+	// would turn a literal "a%41" into "aA" and delete the wrong entry.
 	name := chi.URLParam(r, "name")
+	if r.URL.RawPath != "" {
+		name = decodePathParam(name)
+	}
 	if name == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Secret name is required")
 		return
@@ -5619,7 +5693,7 @@ func (s *Server) maskToolCallRecord(record *contracts.ToolCallRecord) {
 // @Failure      400      {object}  contracts.ErrorResponse             "Tool call ID required or invalid JSON payload"
 // @Failure      401      {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
 // @Failure      405      {object}  contracts.ErrorResponse             "Method not allowed"
-// @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit (Retry-After header carries the wait hint)"
+// @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure      500      {object}  contracts.ErrorResponse             "Failed to replay tool call"
 // @Security     ApiKeyAuth
 // @Security     ApiKeyQuery
@@ -5675,8 +5749,7 @@ func (s *Server) handleReplayToolCall(w http.ResponseWriter, r *http.Request) {
 		// and certainly not the 200 success:true it used to produce when the
 		// rejection was flattened into the record's error field.
 		var limitErr *limiter.LimitError
-		if errors.As(err, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(err, &limitErr) && limitErr.Shed() {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
 			s.logger.Warnw("Tool call replay shed by concurrency limiter",
 				"id", id,
@@ -6265,7 +6338,7 @@ func deepMergeJSON(base, patch map[string]interface{}) {
 // @Param request body object{tool_name=string,arguments=object} true "Tool call request with tool name and arguments"
 // @Success 200 {object} contracts.SuccessResponse "Tool call result"
 // @Failure 400 {object} contracts.ErrorResponse "Bad request (invalid payload or missing tool name)"
-// @Failure 429 {object} contracts.ErrorResponse "Shed by a concurrency limit (Retry-After header carries the wait hint)"
+// @Failure 429 {object} contracts.ErrorResponse "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure 500 {object} contracts.ErrorResponse "Internal server error or tool execution failure"
 // @Router /api/v1/tools/call [post]
 func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
@@ -6318,8 +6391,7 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 		// server fault — answer 429 with a Retry-After derived from the shedding
 		// scope's effective queue_timeout so a client can back off correctly.
 		var limitErr *limiter.LimitError
-		if errors.As(err, &limitErr) &&
-			(limitErr.Reason == limiter.ReasonQueueFull || limitErr.Reason == limiter.ReasonQueueTimeout) {
+		if errors.As(err, &limitErr) && limitErr.Shed() {
 			w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(limitErr.RetryAfter)))
 			s.logger.Warnw("Tool call shed by concurrency limiter",
 				"tool", request.ToolName,
@@ -6417,7 +6489,7 @@ func (s *Server) handleListRegistries(w http.ResponseWriter, r *http.Request) {
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id}/servers [get]
 func (s *Server) handleSearchRegistryServers(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6673,7 +6745,7 @@ func (s *Server) handleAddRegistrySource(w http.ResponseWriter, r *http.Request)
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id} [delete]
 func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6712,7 +6784,7 @@ func (s *Server) handleRemoveRegistrySource(w http.ResponseWriter, r *http.Reque
 // @Security     ApiKeyQuery
 // @Router       /api/v1/registries/{id} [put]
 func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6751,7 +6823,7 @@ func (s *Server) handleEditRegistrySource(w http.ResponseWriter, r *http.Request
 // @Failure      500  {object}  contracts.ErrorResponse            "Failed to refresh registry cache"
 // @Router       /api/v1/registries/{id}/refresh [post]
 func (s *Server) handleRefreshRegistryCache(w http.ResponseWriter, r *http.Request) {
-	registryID := chi.URLParam(r, "id")
+	registryID := decodePathParam(chi.URLParam(r, "id"))
 	if registryID == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Registry ID is required")
 		return
@@ -6898,6 +6970,7 @@ func (s *Server) handleGetSessions(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
+	sessionFilter.Offset = offset
 
 	// Get recent sessions from controller
 	sessions, total, err := s.controller.GetRecentSessions(sessionFilter)
@@ -7277,7 +7350,7 @@ func (s *Server) handleSetToolEnabled(w http.ResponseWriter, r *http.Request) {
 	}
 
 	serverID := chi.URLParam(r, "id")
-	toolName := chi.URLParam(r, "tool")
+	toolName := decodePathParam(chi.URLParam(r, "tool"))
 	if serverID == "" || toolName == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")
 		return
@@ -7404,7 +7477,7 @@ func (s *Server) handleSetAllToolsEnabled(enabled bool) http.HandlerFunc {
 
 func (s *Server) handleGetToolDiff(w http.ResponseWriter, r *http.Request) {
 	serverID := chi.URLParam(r, "id")
-	toolName := chi.URLParam(r, "tool")
+	toolName := decodePathParam(chi.URLParam(r, "tool"))
 
 	if serverID == "" || toolName == "" {
 		s.writeError(w, r, http.StatusBadRequest, "Server ID and tool name required")

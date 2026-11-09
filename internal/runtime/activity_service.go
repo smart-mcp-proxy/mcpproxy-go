@@ -580,6 +580,11 @@ func (s *ActivityService) RecordToolCallRejected(evt Event) {
 		ErrorClass:  "proxy_policy",
 		FaultDomain: "proxy",
 	}
+	// A rate_limited rejection names the agent token that ran out of budget
+	// (issue #1699); the concurrency sheds carry no caller and stay as they were.
+	if attr := attributionFromPayload(evt.Payload); !attr.IsZero() {
+		applyAttribution(record, attr)
+	}
 
 	if err := s.storage.SaveActivity(record); err != nil {
 		s.logger.Error("Failed to save rejected activity record",

@@ -1084,6 +1084,10 @@ func TestE2E_InspectQuarantined(t *testing.T) {
 		"protocol":    "streamable-http",
 		"enabled":     true,
 		"quarantined": true,
+		// manual: this test pins the server-level quarantine path; under the
+		// default tier (scan, spec 119) the admission scan would settle clean
+		// and release the server mid-test.
+		"trust_mode": "manual",
 	}
 
 	addResult, err := mcpClient.CallTool(ctx, addRequest)

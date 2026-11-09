@@ -89,6 +89,15 @@ jobs:
           go test -count=1 -run 'TestBundleControl|TestCategoryCheck|TestSC004|TestEmbeddedCorpus' \
             ./cmd/scan-eval/ ./internal/security/scanner/ ./internal/security/tpacorpus/
 
+      # Spec 122: the review-tier checks (anti-refusal, padding, composite
+      # exfiltration, prohibition handling, reconstruction limits) measured by
+      # check id; a review sample must never become a quarantine verdict.
+      - name: Run Spec-122 review-tier gate (offline, blocking)
+        run: |
+          go run ./cmd/scan-eval \
+            --corpus specs/065-evaluation-foundation/datasets/detect_review_corpus_v1.json \
+            --review-gate --min-review-recall 0.90 --max-review-fp 0.10
+
       - name: Checkout mcp-eval (public, pinned)
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -97,7 +106,7 @@ jobs:
           path: mcp-eval
 
       - name: Set up uv + Python
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
@@ -161,7 +170,7 @@ jobs:
           path: mcp-eval
 
       - name: Set up uv + Python (uvx-launched servers + mcp-eval)
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 

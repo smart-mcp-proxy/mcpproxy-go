@@ -30,7 +30,7 @@ func posixShellescape(s string) string {
 	if s == "" {
 		return "''"
 	}
-	if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~") {
+	if !strings.ContainsAny(s, " \t\n\r\"'\\$`;&|<>(){}[]?*~#") {
 		return s
 	}
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"

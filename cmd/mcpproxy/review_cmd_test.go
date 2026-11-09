@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -369,27 +370,34 @@ type fetchDaemon struct {
 	statusDelay  time.Duration
 	delayRequest int
 	requestDelay time.Duration
+	// delayElapsed is set once a delayed request ran its full delay, which is
+	// when the daemon answers it.
+	delayElapsed atomic.Bool
 }
 
-func sleepOrGone(r *http.Request, d time.Duration) {
+// sleepOrGone waits d and reports whether the whole delay elapsed; false
+// means the client went away first.
+func sleepOrGone(r *http.Request, d time.Duration) bool {
 	select {
 	case <-time.After(d):
+		return true
 	case <-r.Context().Done():
+		return false
 	}
 }
 
 func (f *fetchDaemon) handler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/v1/status" {
-			if f.statusDelay > 0 {
-				sleepOrGone(r, f.statusDelay)
+			if f.statusDelay > 0 && sleepOrGone(r, f.statusDelay) {
+				f.delayElapsed.Store(true)
 			}
 			_, _ = w.Write([]byte(`{"success":true,"data":{"running":true}}`))
 			return
 		}
 		f.requests = append(f.requests, reviewRequest{method: r.Method, path: r.URL.Path})
-		if f.delayRequest > 0 && len(f.requests) == f.delayRequest {
-			sleepOrGone(r, f.requestDelay)
+		if f.delayRequest > 0 && len(f.requests) == f.delayRequest && sleepOrGone(r, f.requestDelay) {
+			f.delayElapsed.Store(true)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		switch {
@@ -608,9 +616,12 @@ func TestReviewFetchWaitBoundsWholeCommand(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			start := time.Now()
 			out, err := runFetch(t, tc.d, "json", "--wait", "1s")
-			require.Less(t, time.Since(start), 1450*time.Millisecond)
+			// Back before the daemon answers the delayed request. This is asked
+			// of the daemon, not of a stopwatch around runFetch: that also times
+			// the harness (temp dirs, config write, server start), which overran
+			// a 450ms allowance on a loaded CI runner.
+			require.False(t, tc.d.delayElapsed.Load(), "the command returned only after the delayed answer")
 			require.Error(t, err)
 			require.ErrorContains(t, err, "timed out")
 			require.ErrorContains(t, err, "--wait")

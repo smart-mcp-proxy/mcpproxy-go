@@ -83,6 +83,10 @@ func (s *Snapshot) Clone() *config.Config {
 				// Clone OAuth config if present
 				if srv.OAuth != nil {
 					oauthClone := *srv.OAuth
+					if srv.OAuth.RefreshReplayEnabled != nil {
+						enabled := *srv.OAuth.RefreshReplayEnabled
+						oauthClone.RefreshReplayEnabled = &enabled
+					}
 					if srv.OAuth.Scopes != nil {
 						oauthClone.Scopes = make([]string, len(srv.OAuth.Scopes))
 						copy(oauthClone.Scopes, srv.OAuth.Scopes)

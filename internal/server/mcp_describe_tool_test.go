@@ -586,7 +586,7 @@ func TestDescribeTool_SelfPrefixedRawName_GatedOnItsOwnRecord(t *testing.T) {
 // (toolPendingApprovalResult): the approve-flow remediation would be a dead
 // end because nothing is listed for review yet.
 func TestDescribeTool_NoApprovalRecord_AnswersRediscoveryRemediation(t *testing.T) {
-	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true}})
+	proxy, rt := createTestProxyWithRuntime(t, []*config.ServerConfig{{Name: "a", Enabled: true, TrustMode: string(config.TrustModeManual)}})
 	startCountingUpstream(t, proxy, rt, "a", noRecordSpec(readSpec("ns:erase")))
 	requireManualTrustGateActive(t, proxy, "a")
 	require.NoError(t, proxy.index.IndexTool(&config.ToolMetadata{

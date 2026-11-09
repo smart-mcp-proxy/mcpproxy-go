@@ -201,6 +201,7 @@ func (am *AsyncManager) saveServerSync(serverConfig *config.ServerConfig) error 
 		ForwardHeaders:         serverConfig.ForwardHeaders,
 		AutoApproveToolChanges: serverConfig.AutoApproveToolChanges, // MCP-2940: persist so REST/UI toggle survives save/restart
 		TrustMode:              serverConfig.TrustMode,              // spec 086: persist trust tier so REST/UI/MCP-set trust_mode survives save/restart
+		ToolArgumentErrorMode:  serverConfig.ToolArgumentErrorMode,
 
 		SourceRegistryID:         serverConfig.SourceRegistryID,
 		SourceRegistryProvenance: serverConfig.SourceRegistryProvenance,

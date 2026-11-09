@@ -554,3 +554,19 @@ func TestUsageAggregate_ClientCallsRetentionPreservesSupportedClients(t *testing
 	require.Equal(t, 1, agg.ClientCallsSince([]string{"cursor"}, base.Add(-24*time.Hour)))
 	require.LessOrEqual(t, len(agg.ClientCalls), 32)
 }
+
+func TestUsageAggregate_ClientCallsCreditBridgedKnownClient(t *testing.T) {
+	base := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	agg := newUsageAggregate()
+	for _, client := range []string{"claude-ai (via mcp-remote 0.15.2)", "claude-ai (via mcp-remote 0.15.1)", "codex-mcp-client", "zed (via mcp-remote 0.15.2)"} {
+		agg.Apply(&storage.ActivityRecord{
+			Type: storage.ActivityTypeToolCall, ServerName: "github", ToolName: "search",
+			Status: storage.ActivityStatusSuccess, Timestamp: base,
+			Metadata: map[string]interface{}{"client_name": client},
+		})
+	}
+	since := base.Add(-24 * time.Hour)
+	require.Equal(t, 2, agg.ClientCallsSince([]string{"claude-ai", "Claude"}, since))
+	require.Equal(t, 1, agg.ClientCallsSince([]string{"codex", "codex-cli", "codex-mcp-client"}, since))
+	require.Equal(t, 1, agg.ClientCallsSince([]string{"zed (via mcp-remote 0.15.2)"}, since), "an unknown bridged client keeps its exact key")
+}

@@ -103,7 +103,12 @@ func TestReadFile_FollowsSymlinkToRegularFile(t *testing.T) {
 	// Kubernetes secret volumes expose each key as a symlink into ..data/.
 	target := writeSecretFile(t, "from-target\n")
 	link := filepath.Join(t.TempDir(), "link")
-	require.NoError(t, os.Symlink(target, link))
+	if err := os.Symlink(target, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("creating a symlink needs a privilege this Windows account lacks: %v", err)
+		}
+		require.NoError(t, err)
+	}
 
 	got, err := ReadFile(link)
 	require.NoError(t, err)

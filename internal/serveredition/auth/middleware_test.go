@@ -800,3 +800,24 @@ func TestMiddleware_BearerContextFieldParity(t *testing.T) {
 		}
 	}
 }
+
+func TestMiddleware_ValidJWT_SchemeCaseInsensitive(t *testing.T) {
+	s := setupMiddlewareTest(t)
+	token := s.generateJWT(t, s.testUser.ID, s.testUser.Email, s.testUser.DisplayName, "user", s.testUser.Provider, 1*time.Hour)
+	handler := s.middleware.Middleware()(authContextHandler())
+
+	for _, scheme := range []string{"bearer", "BEARER"} {
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", nil)
+		req.Header.Set("Authorization", scheme+" "+token)
+		rr := httptest.NewRecorder()
+		handler.ServeHTTP(rr, req)
+
+		var body map[string]interface{}
+		if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+			t.Fatalf("%s: failed to unmarshal response (%d): %v", scheme, rr.Code, err)
+		}
+		if rr.Code != http.StatusOK || body["user_id"] != s.testUser.ID {
+			t.Errorf("%s: expected 200 for user %q, got %d: %s", scheme, s.testUser.ID, rr.Code, rr.Body.String())
+		}
+	}
+}

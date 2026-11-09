@@ -31,6 +31,13 @@ func baselineEngineChecks() []detect.Check {
 		&checks.DirectiveImperative{},
 		&checks.CapabilityMismatch{},
 		&checks.EmbeddedSecret{},
+		// Spec 122 (SkillSpector-informed): review-tier anti-refusal, padding
+		// and composite-exfiltration checks, and the declared-marker
+		// reconstruction (whose forwarded shell match is hard).
+		&checks.AntiRefusal{},
+		&checks.PaddingHidden{},
+		&checks.CompositeExfil{},
+		&checks.MarkerReconstruction{},
 	}
 }
 
@@ -89,12 +96,13 @@ func ScanToolMetadataVerdict(serverName string, tools []*config.ToolMetadata, pe
 		}
 	}
 	sort.Strings(peerNames)
+	var peerViews []detect.ToolView
 	for _, name := range peerNames {
 		for _, t := range peerTools[name] {
 			if t == nil {
 				continue
 			}
-			views = append(views, toolView(name, toolDef{
+			peerViews = append(peerViews, toolView(name, toolDef{
 				Name:         t.Name,
 				Description:  t.Description,
 				InputSchema:  json.RawMessage(t.ParamsJSON),
@@ -119,7 +127,13 @@ func ScanToolMetadataVerdict(serverName string, tools []*config.ToolMetadata, pe
 		ScannerID: inProcessTPAScannerID,
 		Checks:    engineChecks,
 	})
-	result := engine.Scan(detect.NewRegistryView(views))
+	// Scoped view: only serverName's tools are inspected; peers are index
+	// context for the cross-server checks. The change gate runs this once per
+	// held tool on every discovery pass, so inspecting the whole fleet each
+	// time (and discarding the peer findings below) is what pinned a core at
+	// 100% CPU on installs with a few hundred tools and a few dozen held
+	// changes.
+	result := engine.Scan(detect.NewScopedRegistryView(views, peerViews))
 
 	prefix := serverName + ":"
 	out := make([]ScanFinding, 0, len(result.Findings))
@@ -214,9 +228,10 @@ func detectEngineFindings(tools []toolDef, serverName string, peerTools map[stri
 		}
 	}
 	sort.Strings(peerNames)
+	var peerViews []detect.ToolView
 	for _, name := range peerNames {
 		for _, t := range peerTools[name] {
-			views = append(views, toolView(name, t))
+			peerViews = append(peerViews, toolView(name, t))
 		}
 	}
 
@@ -234,7 +249,9 @@ func detectEngineFindings(tools []toolDef, serverName string, peerTools map[stri
 		ScannerID: scannerID,
 		Checks:    engineChecks,
 	})
-	result := engine.Scan(detect.NewRegistryView(views))
+	// Peers are index context only (see NewScopedRegistryView): their own
+	// findings were never reported from here.
+	result := engine.Scan(detect.NewScopedRegistryView(views, peerViews))
 
 	prefix := serverName + ":"
 	out := make([]ScanFinding, 0, len(result.Findings))

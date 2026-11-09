@@ -25,7 +25,8 @@ func (r *Runtime) SetRejectionMetricSink(sink RejectionMetricSink) {
 	r.rejectionMetric.Store(&sink)
 }
 
-// installRejectionObserver wires the concurrency limiter's shed seam to the
+// installRejectionObserver wires the limiter's shed seam (concurrency sheds and
+// per-token rate limits, issue #1699) to the
 // activity log and the rejection counter (spec 093 FR-012/FR-013). The observer
 // runs at the admission point inside the managed client, which is BELOW the MCP
 // dispatch layer — that is what makes the "rejected" record origin-independent:
@@ -45,7 +46,11 @@ func (r *Runtime) installRejectionObserver() {
 		if sink := r.rejectionMetric.Load(); sink != nil {
 			(*sink)(rej.Server, string(rej.Reason), string(rej.Scope))
 		}
-		r.EmitActivityToolCallRejected(
+		var attr ActivityAttribution
+		if rej.Scope == limiter.ScopeToken {
+			attr = ActivityAttribution{TokenName: rej.Token.Name, TokenPrefix: rej.Token.Prefix, ClientID: rej.Token.ClientID}
+		}
+		r.EmitActivityToolCallRejectedAttributed(
 			rej.Server,
 			rej.Tool,
 			activitySourceFromContext(ctx),
@@ -56,6 +61,7 @@ func (r *Runtime) installRejectionObserver() {
 			rej.Limit,
 			rej.RetryAfter.Milliseconds(),
 			rej.Waited.Milliseconds(),
+			attr,
 		)
 	})
 }

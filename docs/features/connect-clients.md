@@ -106,19 +106,31 @@ The credential is shown masked everywhere except the single moment it is created
 
 **Rolling back.** Before you downgrade to a pre-profiles-v3 binary, set `require_mcp_auth: true`. A binary that predates client credentials rejects them (`401` on REST, and on MCP while authentication is required), but with `require_mcp_auth` off it treats an unrecognised credential like an omitted one and gives it unconfined access. See [Profiles, upgrading and downgrading](./profiles.md#upgrading-and-downgrading).
 
-## Codex credential limitation
+## Codex credential storage
 
 Codex stores its MCP entry in `~/.codex/config.toml`. The Connect flow writes
-the per-client credential (`mcp_cli_`) into the entry's URL as `?apikey=...`,
-because that is the only carrier it writes for Codex. This happens whether or
-not `require_mcp_auth` is on; only a `keyless` connect writes no credential.
-Other clients get an `X-API-Key` header instead.
+the per-client credential (`mcp_cli_`) as a literal `http_headers` table next
+to a clean `url`, so the secret never appears in the URL:
 
-The credential is therefore stored in plain text inside `config.toml` and can show up
-in anything that logs the URL. To reduce the exposure:
+```toml
+[mcp_servers.mcpproxy]
+url = "http://127.0.0.1:8080/mcp"
+
+[mcp_servers.mcpproxy.http_headers]
+X-API-Key = "mcp_cli_..."
+```
+
+This happens whether or not `require_mcp_auth` is on; only a `keyless` connect
+writes no credential. A client that is not in the supported list (the generic
+fallback) gets the same header shape as a `headers` object. No client is
+configured with a `?apikey=` URL, so `mcp_reject_query_apikey` never breaks a
+freshly connected client.
+
+The credential is still stored in plain text inside `config.toml`. To reduce the
+exposure:
 
 - Connect Codex with an agent token (`mcp_agt_` prefix) rather than the admin
-  API key, so a leaked URL only grants that token's scope. See
+  API key, so a leaked file only grants that token's scope. See
   [Agent tokens](https://docs.mcpproxy.app/features/agent-tokens).
 - Or edit the entry by hand to keep the secret out of the file:
 
@@ -129,8 +141,13 @@ in anything that logs the URL. To reduce the exposure:
   ```
 
   then `export MCPPROXY_API_KEY=...` in the shell that starts Codex.
-  Codex also supports `http_headers` with literal values,
-  which has the same at-rest exposure as the query string.
+
+**Entries written by an older version** carry the credential as
+`url = "...?apikey=..."`. They are still recognised as connected, but a proxy
+with `mcp_reject_query_apikey` on refuses them with a `401` (the proxy logs a
+warning naming the client's address and User-Agent). Reconnect the client from
+the Clients page (or `mcpproxy connect codex --force`) to rewrite the entry with
+the header.
 
 ## What the preview discloses (Spec 091)
 

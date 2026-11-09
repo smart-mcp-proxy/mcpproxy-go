@@ -198,12 +198,7 @@ func (s *ProfilesService) Suggest(ctx context.Context, req SuggestRequest) (*Acc
 		Profile:   req.Profile,
 		TokenName: req.Token,
 	}
-	stream := s.rt.StreamActivities(filter)
-	for rec := range stream {
-		if ctx.Err() != nil {
-			drainActivities(stream)
-			return nil, ctx.Err()
-		}
+	for rec := range s.rt.StreamActivities(ctx, filter) {
 		reason := profile.BlockReason(rec.EffectiveBlockReason())
 		if !profileBlockReasons[reason] {
 			out.NonProfileBlocked++
@@ -249,6 +244,10 @@ func (s *ProfilesService) Suggest(ctx context.Context, req SuggestRequest) (*Acc
 		if rec.ClientID != "" {
 			g.clients[rec.ClientID] = true
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		// The stream closed early; a partial window would read as a complete one.
+		return nil, err
 	}
 
 	for _, g := range groups {
@@ -376,18 +375,6 @@ func deniedByRuleNow(exp *AccessExplanation) bool {
 		}
 	}
 	return true
-}
-
-// drainActivities lets a StreamActivities producer run to its end after the
-// consumer stops early. The producer sends into a bounded channel from inside
-// a BBolt read transaction, so a consumer that walks away with records left
-// would leave that transaction open for the life of the process, and an open
-// read transaction keeps the database from remapping on a later write.
-func drainActivities(ch <-chan *storage.ActivityRecord) {
-	go func() {
-		for range ch { //nolint:revive // discard the remainder
-		}
-	}()
 }
 
 // buildPatches applies every apply-ready suggestion (allow, add_server) to a

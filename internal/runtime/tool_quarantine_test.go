@@ -17,8 +17,19 @@ func boolP(b bool) *bool {
 	return &b
 }
 
+// setupQuarantineRuntime builds a runtime over in-memory server configs.
+//
+// Trust-mode pin: the fixtures in this package were written when an unset
+// trust_mode resolved to manual, and they encode manual-mode semantics (every
+// change and addition held). Since spec 119 an unset trust_mode is the default
+// tier, scan, under which a clean-scanned tool is approved — so a literal
+// with no trust_mode and no legacy flag is pinned to manual here, exactly what
+// those fixtures meant. Tests of the default tier say so explicitly
+// (scanServer, or TrustMode: string(config.TrustModeScan)); the resolver's own
+// default is pinned in internal/config.
 func setupQuarantineRuntime(t *testing.T, quarantineEnabled *bool, servers []*config.ServerConfig) *Runtime {
 	t.Helper()
+	pinManualTrustForFixtures(servers)
 	tempDir := t.TempDir()
 	cfg := &config.Config{
 		DataDir:           tempDir,
@@ -32,6 +43,16 @@ func setupQuarantineRuntime(t *testing.T, quarantineEnabled *bool, servers []*co
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = rt.Close() })
 	return rt
+}
+
+// pinManualTrustForFixtures applies the setupQuarantineRuntime trust-mode pin
+// (see its doc comment) to a server list in place.
+func pinManualTrustForFixtures(servers []*config.ServerConfig) {
+	for _, sc := range servers {
+		if sc != nil && sc.TrustMode == "" && sc.AutoApproveToolChanges == nil && !sc.SkipQuarantine {
+			sc.TrustMode = string(config.TrustModeManual)
+		}
+	}
 }
 
 func TestCheckToolApprovals_NewTool_PendingStatus(t *testing.T) {
@@ -379,7 +400,10 @@ func TestCheckToolApprovals_AutoApproved_ThenChanged_StillBlocked(t *testing.T) 
 		ToolResponseLimit: 0,
 		QuarantineEnabled: nil, // defaults to true
 		Servers: []*config.ServerConfig{
-			{Name: "github", Enabled: true},
+			// manual: the change below scans clean and would be scan-approved
+			// under the default tier (spec 119); the hash-change detection is
+			// what this test pins.
+			{Name: "github", Enabled: true, TrustMode: string(config.TrustModeManual)},
 		},
 	}
 	rt2, err := New(cfg2, "", zap.NewNop())

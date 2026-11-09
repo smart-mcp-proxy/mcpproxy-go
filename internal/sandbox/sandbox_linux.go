@@ -35,6 +35,17 @@ const (
 		unix.LANDLOCK_ACCESS_FS_IOCTL_DEV // ABI 5
 
 	accessFSReadWrite = accessFSRead | accessFSWrite
+
+	// accessFSFile is the subset Landlock accepts on a rule whose target is a
+	// regular file or a device rather than a directory. The directory-only
+	// rights (READ_DIR, MAKE_*, REMOVE_*, REFER) make landlock_add_rule fail
+	// with EINVAL on such a target, which is how a /dev/null grant used to
+	// abort the whole confinement (GH #1704).
+	accessFSFile = unix.LANDLOCK_ACCESS_FS_EXECUTE |
+		unix.LANDLOCK_ACCESS_FS_WRITE_FILE |
+		unix.LANDLOCK_ACCESS_FS_READ_FILE |
+		unix.LANDLOCK_ACCESS_FS_TRUNCATE |
+		unix.LANDLOCK_ACCESS_FS_IOCTL_DEV
 )
 
 // handledAccessFS returns the set of filesystem access rights the ruleset
@@ -162,9 +173,11 @@ func Apply(spec Spec) (Report, error) {
 	return rep, nil
 }
 
-// addPathRule grants access to the subtree beneath path. Returns (false, nil)
-// when the path does not exist so the caller can record it as skipped rather
-// than fail the whole confinement.
+// addPathRule grants access to the subtree beneath path, or to the single
+// file when path is not a directory (then only the file-compatible rights are
+// requested; see accessFSFile). Returns (false, nil) when the path does not
+// exist so the caller can record it as skipped rather than fail the whole
+// confinement.
 func addPathRule(rulesetFD int, path string, access uint64) (bool, error) {
 	fd, err := unix.Open(path, unix.O_PATH|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -174,6 +187,14 @@ func addPathRule(rulesetFD int, path string, access uint64) (bool, error) {
 		return false, err
 	}
 	defer unix.Close(fd)
+
+	var st unix.Stat_t
+	if err := unix.Fstat(fd, &st); err != nil {
+		return false, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFDIR {
+		access &= accessFSFile
+	}
 
 	beneath := unix.LandlockPathBeneathAttr{
 		Allowed_access: access,

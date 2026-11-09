@@ -93,7 +93,8 @@ type Server struct {
 	// trust tier ("auto"/"scan"/"manual"). Surfaced on the GET path so clients can
 	// read back the persisted mode; PATCH/POST accept it via AddServerRequest.
 	// Omitted when empty (server predates the field / relies on legacy flags).
-	TrustMode string `json:"trust_mode,omitempty"`
+	TrustMode             string `json:"trust_mode,omitempty"`
+	ToolArgumentErrorMode string `json:"tool_argument_error_mode,omitempty"`
 	// InitTimeout mirrors config.ServerConfig.InitTimeout (MCP-3322 / GH #760):
 	// the per-server MCP `initialize` handshake deadline override. Serialized as
 	// a duration string (e.g. "120s"); nil/omitted means "inherit the global
@@ -222,13 +223,14 @@ type QuarantineStats struct {
 
 // OAuthConfig represents OAuth configuration for a server
 type OAuthConfig struct {
-	AuthURL      string            `json:"auth_url"`
-	TokenURL     string            `json:"token_url"`
-	ClientID     string            `json:"client_id"`
-	Scopes       []string          `json:"scopes,omitempty"`
-	ExtraParams  map[string]string `json:"extra_params,omitempty"`
-	RedirectPort int               `json:"redirect_port,omitempty"`
-	PKCEEnabled  bool              `json:"pkce_enabled,omitempty"`
+	AuthURL              string            `json:"auth_url"`
+	TokenURL             string            `json:"token_url"`
+	ClientID             string            `json:"client_id"`
+	Scopes               []string          `json:"scopes,omitempty"`
+	ExtraParams          map[string]string `json:"extra_params,omitempty"`
+	RedirectPort         int               `json:"redirect_port,omitempty"`
+	PKCEEnabled          bool              `json:"pkce_enabled,omitempty"`
+	RefreshReplayEnabled *bool             `json:"refresh_replay_enabled,omitempty"`
 	// Spec 113-b operator overrides of OAuth discovery (https-or-loopback URLs,
 	// never credentials). Empty means "use discovery".
 	AuthorizationEndpoint string     `json:"authorization_endpoint,omitempty"`

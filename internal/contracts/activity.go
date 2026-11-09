@@ -135,10 +135,12 @@ type ActivitySummaryResponse struct {
 	SuccessCount int    `json:"success_count"` // Count of successful activities
 	ErrorCount   int    `json:"error_count"`   // Count of error activities
 	BlockedCount int    `json:"blocked_count"` // Count of blocked activities
-	// RejectedCount is the number of calls shed by a concurrency limiter before
-	// they reached an upstream (spec 093). Counted separately from errors: it is
-	// proxy backpressure, not an upstream fault, and it is the signal an
-	// operator right-sizes max_concurrent_requests against.
+	// RejectedCount is the number of calls shed by a concurrency limiter, or
+	// refused because an agent token was over its call budget, before they
+	// reached an upstream (spec 093, issue #1699). Counted separately from
+	// errors: it is proxy backpressure, not an upstream fault, and it is the
+	// signal an operator right-sizes max_concurrent_requests and the rate
+	// limits against.
 	RejectedCount int `json:"rejected_count"`
 	// OtherCount is every record whose status is outside the four-value
 	// vocabulary above, so that

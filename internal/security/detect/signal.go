@@ -121,6 +121,38 @@ func NewRegistryView(tools []ToolView) RegistryView {
 	return RegistryView{Tools: out, ToolsByName: byName, ToolNames: names}
 }
 
+// NewScopedRegistryView builds a view whose scan set (Tools) is targets only,
+// while the cross-tool indexes (ToolsByName, ToolNames) cover targets AND
+// peers. The engine inspects only Tools, so a check never runs on a peer:
+// peers are pure context for the cross-server checks (Shadowing reads the
+// indexes, nothing reads a peer's normalized text). Only targets are
+// normalized. Target findings are identical to those of a full
+// NewRegistryView over targets+peers; what is dropped is the work (and the
+// findings) on the peers themselves. This is the shape the per-tool change
+// gate needs: one held tool against a fleet of hundreds must cost one tool's
+// worth of checks, not the fleet's.
+func NewScopedRegistryView(targets, peers []ToolView) RegistryView {
+	byName := make(map[string][]ToolView, len(targets)+len(peers))
+	names := make(map[string]struct{}, len(targets)+len(peers))
+	out := make([]ToolView, len(targets))
+	for i, tv := range targets {
+		if tv.NormalizedText == "" {
+			tv.NormalizedText = Normalize(combinedText(tv))
+		}
+		if tv.PhraseText == "" {
+			tv.PhraseText = NormalizeForPhrase(combinedText(tv))
+		}
+		out[i] = tv
+		byName[tv.Name] = append(byName[tv.Name], tv)
+		names[tv.Name] = struct{}{}
+	}
+	for _, tv := range peers {
+		byName[tv.Name] = append(byName[tv.Name], tv)
+		names[tv.Name] = struct{}{}
+	}
+	return RegistryView{Tools: out, ToolsByName: byName, ToolNames: names}
+}
+
 // combinedText concatenates the description with the raw schema text so the
 // soft checks see parameter names/descriptions too.
 func combinedText(tv ToolView) string {
