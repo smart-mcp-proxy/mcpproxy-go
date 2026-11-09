@@ -72,10 +72,12 @@ jobs:
       - name: Run scanner isolation-mode tests
         run: go test -v -race -run "Sandbox|sandbox|IsolationMode|isolation" ./internal/security/scanner/...
 
-      # 4. Full sandbox + scanner test set with race detector.
+      # 4. Full sandbox + scanner test set with race detector. The scanner
+      #    package scores the whole embedded TPA corpus under -race (Spec 101
+      #    US2), which outgrows go test's default 10m; 40m matches unit-tests.yml.
       - name: Run all sandbox-related tests (race)
         run: |
-          go test -race \
+          go test -race -timeout 40m \
             ./internal/sandbox/... \
             ./internal/upstream/core/... \
             ./internal/security/scanner/...
