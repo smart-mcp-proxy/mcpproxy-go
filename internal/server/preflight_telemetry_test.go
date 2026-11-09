@@ -47,13 +47,21 @@ func diagBlaming(filters ...string) *filterDiagnostics {
 	return d
 }
 
+func consumeFilterDiagFollowUpAt(p *MCPProxyServer, sessionID string, activeKeys []string, at time.Time) bool {
+	requestSeq := p.beginFilterDiagRequest()
+	return p.consumeFilterDiagFollowUp(sessionID, activeKeys, at, requestSeq)
+}
+
 // A follow-up that DROPS the blamed filter counts as followed.
 func TestFilterDiagFollowUp_DroppedFilterCounts(t *testing.T) {
 	p := &MCPProxyServer{}
 	now := time.Now()
 
+	p.beginFilterDiagRequest() // request that delivers the diagnostics block
 	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyReadOnlyOnly), now)
-	require.True(t, p.consumeFilterDiagFollowUp("sess-1", nil, now.Add(5*time.Second)))
+	followUpSeq := p.beginFilterDiagRequest()
+	require.True(t, p.consumeFilterDiagFollowUp("sess-1", nil, now, followUpSeq),
+		"a sequential follow-up counts even when both events share a timestamp")
 }
 
 // A follow-up that RELAXES one of several blamed filters still counts.
@@ -64,7 +72,7 @@ func TestFilterDiagFollowUp_RelaxedSubsetCounts(t *testing.T) {
 	p.noteFilterDiagnostics("sess-1",
 		diagBlaming(filterKeyReadOnlyOnly, filterKeyExcludeOpenWorld), now)
 	// exclude_open_world dropped, read_only_only kept.
-	require.True(t, p.consumeFilterDiagFollowUp("sess-1",
+	require.True(t, consumeFilterDiagFollowUpAt(p, "sess-1",
 		activeFilterKeys(true, false, false), now.Add(time.Second)))
 }
 
@@ -74,7 +82,7 @@ func TestFilterDiagFollowUp_SameFiltersDoNotCount(t *testing.T) {
 	now := time.Now()
 
 	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyReadOnlyOnly), now)
-	require.False(t, p.consumeFilterDiagFollowUp("sess-1",
+	require.False(t, consumeFilterDiagFollowUpAt(p, "sess-1",
 		activeFilterKeys(true, false, false), now.Add(time.Second)))
 }
 
@@ -85,8 +93,8 @@ func TestFilterDiagFollowUp_NoteConsumedOnce(t *testing.T) {
 	now := time.Now()
 
 	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyReadOnlyOnly), now)
-	require.True(t, p.consumeFilterDiagFollowUp("sess-1", nil, now.Add(time.Second)))
-	require.False(t, p.consumeFilterDiagFollowUp("sess-1", nil, now.Add(2*time.Second)))
+	require.True(t, consumeFilterDiagFollowUpAt(p, "sess-1", nil, now.Add(time.Second)))
+	require.False(t, consumeFilterDiagFollowUpAt(p, "sess-1", nil, now.Add(2*time.Second)))
 }
 
 // Follow-ups from a DIFFERENT session never match.
@@ -95,9 +103,9 @@ func TestFilterDiagFollowUp_SessionScoped(t *testing.T) {
 	now := time.Now()
 
 	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyReadOnlyOnly), now)
-	require.False(t, p.consumeFilterDiagFollowUp("sess-2", nil, now.Add(time.Second)))
+	require.False(t, consumeFilterDiagFollowUpAt(p, "sess-2", nil, now.Add(time.Second)))
 	// sess-1's note is untouched by sess-2's call.
-	require.True(t, p.consumeFilterDiagFollowUp("sess-1", nil, now.Add(2*time.Second)))
+	require.True(t, consumeFilterDiagFollowUpAt(p, "sess-1", nil, now.Add(2*time.Second)))
 }
 
 // Sessions without an id are never pooled together under "".
@@ -107,7 +115,7 @@ func TestFilterDiagFollowUp_AnonymousSessionsIgnored(t *testing.T) {
 
 	p.noteFilterDiagnostics("", diagBlaming(filterKeyReadOnlyOnly), now)
 	require.Empty(t, p.filterDiagNotes)
-	require.False(t, p.consumeFilterDiagFollowUp("", nil, now))
+	require.False(t, consumeFilterDiagFollowUpAt(p, "", nil, now))
 }
 
 // A stale note expires rather than crediting an unrelated later task.
@@ -116,7 +124,7 @@ func TestFilterDiagFollowUp_TTLExpiry(t *testing.T) {
 	now := time.Now()
 
 	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyReadOnlyOnly), now)
-	require.False(t, p.consumeFilterDiagFollowUp("sess-1", nil, now.Add(filterDiagNoteTTL+time.Minute)))
+	require.False(t, consumeFilterDiagFollowUpAt(p, "sess-1", nil, now.Add(filterDiagNoteTTL+time.Minute)))
 }
 
 // The note map is bounded: a proxy serving many sessions must not grow it
@@ -153,7 +161,7 @@ func TestFilterDiagNotes_StaleWriteDoesNotClobberNewer(t *testing.T) {
 
 	// The follow-up is therefore judged against the filters the agent actually
 	// saw last: dropping exclude_destructive counts.
-	require.True(t, p.consumeFilterDiagFollowUp("sess-1",
+	require.True(t, consumeFilterDiagFollowUpAt(p, "sess-1",
 		[]string{filterKeyReadOnlyOnly}, base.Add(2*time.Second)))
 }
 
@@ -192,16 +200,17 @@ func TestFilterDiagFollowUp_EarlierCallCannotConsumeNewerNote(t *testing.T) {
 	p := &MCPProxyServer{}
 	base := time.Now()
 
+	callStartedBeforeNote := p.beginFilterDiagRequest()
 	// Call B is handed the block at base+1s.
 	p.noteFilterDiagnostics("sess-1", diagBlaming(filterKeyReadOnlyOnly), base.Add(time.Second))
 
 	// Call A started at base — before that block existed — and drops the
 	// blamed filter for unrelated reasons. It must not count.
-	require.False(t, p.consumeFilterDiagFollowUp("sess-1", nil, base),
+	require.False(t, p.consumeFilterDiagFollowUp("sess-1", nil, base, callStartedBeforeNote),
 		"a call that predates the block cannot be a reaction to it")
 
 	// And the note must still be there for the call that genuinely follows.
-	require.True(t, p.consumeFilterDiagFollowUp("sess-1", nil, base.Add(2*time.Second)),
+	require.True(t, consumeFilterDiagFollowUpAt(p, "sess-1", nil, base.Add(2*time.Second)),
 		"the stale call must not have consumed the note")
 }
 
@@ -227,7 +236,7 @@ func TestFilterDiagNotes_OrderedByDeliveryNotStart(t *testing.T) {
 
 	// A call starting after that delivery, having dropped read_only_only,
 	// counts as the follow-up.
-	require.True(t, p.consumeFilterDiagFollowUp("sess-1", nil, aDelivered.Add(time.Millisecond)))
+	require.True(t, consumeFilterDiagFollowUpAt(p, "sess-1", nil, aDelivered.Add(time.Millisecond)))
 }
 
 // A block that tool_response_limit cut back out of the payload was never

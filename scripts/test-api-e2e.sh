@@ -12,9 +12,9 @@ BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
 # Configuration
-MCPPROXY_BINARY="./mcpproxy"
+MCPPROXY_BINARY="${MCPPROXY_BINARY:-./mcpproxy}"
 CONFIG_TEMPLATE="./test/e2e-config.template.json"
-CONFIG_FILE="./test/e2e-config.json"
+CONFIG_FILE="${MCPPROXY_E2E_CONFIG_FILE:-./test/e2e-config.json}"
 LISTEN_PORT="${LISTEN_PORT:-8081}"
 # Support both HTTP and HTTPS modes
 # Default to HTTP for E2E tests since the template config has TLS disabled
@@ -34,9 +34,20 @@ else
     CURL_CA_OPTS=""
 fi
 API_BASE="${BASE_URL}/api/v1"
-TEST_DATA_DIR="./test-data"
+TEST_DATA_DIR="${MCPPROXY_E2E_TEST_DATA_DIR:-./test-data}"
 MCPPROXY_PID=""
-TEST_RESULTS_FILE="/tmp/mcpproxy_e2e_results.json"
+TEST_RESULTS_FILE="${MCPPROXY_E2E_RESULTS_FILE:-/tmp/mcpproxy_e2e_results.json}"
+SERVER_LOG_FILE="${MCPPROXY_E2E_LOG_FILE:-/tmp/mcpproxy_e2e.log}"
+LAUNCHER_FIXTURE="${MCPPROXY_E2E_LAUNCHER_FIXTURE:-./test/launcher-server/launcher-server}"
+LAUNCHER_FIXTURE_BUILD_PATH="$LAUNCHER_FIXTURE"
+if [ -z "${MCPPROXY_E2E_LAUNCHER_FIXTURE:-}" ] && command -v cygpath >/dev/null 2>&1; then
+    # Native Windows process creation needs the PE suffix, and relative
+    # launcher commands are resolved against the proxy's working directory.
+    # Build beside this script, then give the daemon an absolute Windows path.
+    LAUNCHER_FIXTURE_BUILD_PATH="./test/launcher-server/launcher-server.exe"
+    LAUNCHER_FIXTURE="$(cygpath -w "$LAUNCHER_FIXTURE_BUILD_PATH")"
+fi
+LAUNCHER_FIXTURE_BUILD_LOG="${MCPPROXY_E2E_LAUNCHER_BUILD_LOG:-/tmp/launcher-fixture-build.log}"
 API_KEY=""
 
 # Test counters
@@ -44,6 +55,49 @@ TESTS_RUN=0
 TESTS_PASSED=0
 TESTS_FAILED=0
 TESTS_SKIPPED=0
+
+# The launcher PID is recorded by mcpproxy when it starts the configured child.
+# Read that run-owned PID instead of searching the process table by command
+# text; MSYS pgrep cannot reliably see native Windows child processes.
+launcher_child_pid() {
+    if command -v powershell.exe >/dev/null 2>&1; then
+        MCPPROXY_E2E_LAUNCHER_FIXTURE="$LAUNCHER_FIXTURE" powershell.exe -NoProfile -NonInteractive -Command '
+            $fixture = $env:MCPPROXY_E2E_LAUNCHER_FIXTURE
+            $fixtureName = Split-Path -Path $fixture -Leaf
+            Get-CimInstance Win32_Process | Where-Object {
+                $_.Name -ieq $fixtureName -and
+                $_.CommandLine -like ("*" + $fixture + "*") -and
+                $_.CommandLine -like "*39933*"
+            } | ForEach-Object { $_.ProcessId }
+        ' | tr -d '\r' | tail -n 1
+    else
+        grep 'upstream child process started' "$SERVER_LOG_FILE" |
+            grep '"launcher_server": "launcher-test"' |
+            sed -n 's/.*"pid":[[:space:]]*\([0-9][0-9]*\).*/\1/p' |
+            tail -n 1
+    fi
+}
+
+launcher_child_is_running() {
+    local pid="$1"
+    [ -n "$pid" ] || return 1
+    if command -v powershell.exe >/dev/null 2>&1; then
+        MCPPROXY_E2E_LAUNCHER_PID="$pid" \
+            MCPPROXY_E2E_LAUNCHER_FIXTURE="$LAUNCHER_FIXTURE" \
+            powershell.exe -NoProfile -NonInteractive -Command '
+                $targetPid = [int]$env:MCPPROXY_E2E_LAUNCHER_PID
+                $fixture = $env:MCPPROXY_E2E_LAUNCHER_FIXTURE
+                $fixtureName = Split-Path -Path $fixture -Leaf
+                $process = Get-CimInstance Win32_Process -Filter "ProcessId = $targetPid" -ErrorAction SilentlyContinue
+                if ($process -and $process.Name -ieq $fixtureName -and
+                    $process.CommandLine -like ("*" + $fixture + "*") -and
+                    $process.CommandLine -like "*39933*") { exit 0 }
+                exit 1
+            ' >/dev/null 2>&1
+    else
+        kill -0 "$pid" >/dev/null 2>&1
+    fi
+}
 
 echo -e "${GREEN}MCPProxy API E2E Tests${NC}"
 echo "=============================="
@@ -209,7 +263,9 @@ $(snapshot_orphans_with_comm "$MCPPROXY_PID")"
     # (fresh copy from the template + port substitution, and the audit_log
     # sub-test below adds its own scratch config next to it) — restore the
     # tracked file so the repo is left clean after every run, pass or fail.
-    git checkout -- "$CONFIG_FILE" 2>/dev/null || true
+    if [ "$CONFIG_FILE" = "./test/e2e-config.json" ]; then
+        git checkout -- "$CONFIG_FILE" 2>/dev/null || true
+    fi
 
     echo "Cleanup complete"
 }
@@ -480,8 +536,9 @@ test_sse() {
     fi
     curl_cmd="$curl_cmd \"${BASE_URL}/events\""
 
-    # Run with 5 second timeout using Perl
-    perl -e 'alarm 5; exec @ARGV' sh -c "$curl_cmd" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
+    # curl's own timeout is portable and does not depend on Perl being installed.
+    curl_cmd="$curl_cmd --max-time 5"
+    eval "$curl_cmd" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
 
     if [ -s "$TEST_RESULTS_FILE" ] && grep -q "data:" "$TEST_RESULTS_FILE"; then
         log_pass "$test_name"
@@ -503,8 +560,8 @@ test_sse_with_query_param() {
         sse_url="${sse_url}?apikey=${API_KEY}"
     fi
 
-    # Use Perl for cross-platform timeout (macOS doesn't have timeout command)
-    perl -e 'alarm 5; exec @ARGV' curl -s -N $CURL_CA_OPTS "$sse_url" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
+    # curl's own timeout is portable and does not depend on Perl being installed.
+    curl -s -N --max-time 5 $CURL_CA_OPTS "$sse_url" | head -n 10 > "$TEST_RESULTS_FILE" 2>/dev/null || true
 
     if [ -s "$TEST_RESULTS_FILE" ] && grep -q "data:" "$TEST_RESULTS_FILE"; then
         log_pass "$test_name"
@@ -581,16 +638,15 @@ test_launcher_lifecycle() {
         log_fail "tools/list missing ping tool. Response: $tools_response"
     fi
 
-    # Step 2: the child should be a real OS process. pgrep over the
-    # fixture argv signature lets us detect it without knowing the PID
-    # mcpproxy assigned. Use `pgrep -f` for arg-line matching.
-    log_test "Launcher lifecycle: child process is running (pgrep)"
+    # Step 2: check the exact child PID mcpproxy recorded. Command-line
+    # matching with pgrep does not see native Windows processes from MSYS.
+    log_test "Launcher lifecycle: child process is running"
     local before_pid
-    before_pid=$(pgrep -f 'launcher-server.*--port 39933' | head -1)
-    if [ -n "$before_pid" ]; then
+    before_pid=$(launcher_child_pid)
+    if launcher_child_is_running "$before_pid"; then
         log_pass "child running (pid=$before_pid)"
     else
-        log_fail "no launcher-server process found via pgrep"
+        log_fail "launcher child is not running (pid='${before_pid:-missing}')"
     fi
 
     # Abort-mode hook (issue #1388): scripts/test-api-e2e-cleanup-check.sh
@@ -606,9 +662,9 @@ test_launcher_lifecycle() {
     eval "$curl_cmd -X POST \"${API_BASE}/servers/launcher-test/restart\"" >/dev/null
     sleep 4
     local after_pid
-    after_pid=$(pgrep -f 'launcher-server.*--port 39933' | head -1)
-    if [ -z "$after_pid" ]; then
-        log_fail "child gone after restart — should have respawned"
+    after_pid=$(launcher_child_pid)
+    if ! launcher_child_is_running "$after_pid"; then
+        log_fail "child missing after restart (pid='${after_pid:-missing}')"
     elif [ "$after_pid" = "$before_pid" ]; then
         log_fail "child PID unchanged after restart (was $before_pid, still $after_pid)"
     else
@@ -621,16 +677,14 @@ test_launcher_lifecycle() {
     # Give the launcher up to 8s to deliver SIGTERM + wait for exit.
     local waited=0
     while [ $waited -lt 8 ]; do
-        if ! pgrep -f 'launcher-server.*--port 39933' >/dev/null 2>&1; then
+        if ! launcher_child_is_running "$after_pid"; then
             break
         fi
         sleep 1
         waited=$((waited + 1))
     done
-    if pgrep -f 'launcher-server.*--port 39933' >/dev/null 2>&1; then
-        local stragglers
-        stragglers=$(pgrep -f 'launcher-server.*--port 39933' | tr '\n' ' ')
-        log_fail "child still alive ${waited}s after disable (pids: $stragglers)"
+    if launcher_child_is_running "$after_pid"; then
+        log_fail "child still alive ${waited}s after disable (pid: $after_pid)"
     else
         log_pass "child reaped within ${waited}s of disable"
     fi
@@ -640,8 +694,8 @@ test_launcher_lifecycle() {
     eval "$curl_cmd -X POST \"${API_BASE}/servers/launcher-test/enable\"" >/dev/null
     if wait_for_launcher_test_server; then
         local reenabled_pid
-        reenabled_pid=$(pgrep -f 'launcher-server.*--port 39933' | head -1)
-        if [ -n "$reenabled_pid" ] && [ "$reenabled_pid" != "$after_pid" ]; then
+        reenabled_pid=$(launcher_child_pid)
+        if launcher_child_is_running "$reenabled_pid" && [ "$reenabled_pid" != "$after_pid" ]; then
             log_pass "child respawned after enable (pid=$reenabled_pid, different from $after_pid)"
         else
             log_fail "expected a new PID after enable; got '$reenabled_pid' (previous '$after_pid')"
@@ -694,15 +748,14 @@ fi
 # Build the launcher-test fixture. This is a tiny HTTP MCP server used
 # by the spec-046 launcher-lifecycle test below. We rebuild every run
 # so the fixture stays in lockstep with the e2e harness.
-LAUNCHER_FIXTURE="./test/launcher-server/launcher-server"
 echo -e "${YELLOW}Building launcher-test fixture (./test/launcher-server)...${NC}"
-if ! go build -o "$LAUNCHER_FIXTURE" ./test/launcher-server >/tmp/launcher-fixture-build.log 2>&1; then
+if ! go build -o "$LAUNCHER_FIXTURE_BUILD_PATH" ./test/launcher-server >"$LAUNCHER_FIXTURE_BUILD_LOG" 2>&1; then
     echo -e "${RED}Error: failed to build launcher-test fixture${NC}"
-    cat /tmp/launcher-fixture-build.log
+    cat "$LAUNCHER_FIXTURE_BUILD_LOG"
     exit 1
 fi
-if [ ! -x "$LAUNCHER_FIXTURE" ]; then
-    echo -e "${RED}Error: launcher-test fixture not executable at $LAUNCHER_FIXTURE${NC}"
+if [ ! -x "$LAUNCHER_FIXTURE_BUILD_PATH" ]; then
+    echo -e "${RED}Error: launcher-test fixture not executable at $LAUNCHER_FIXTURE_BUILD_PATH${NC}"
     exit 1
 fi
 
@@ -713,11 +766,20 @@ echo ""
 echo -e "${YELLOW}Starting mcpproxy server...${NC}"
 
 # Create test data directory
-mkdir -p "$TEST_DATA_DIR"
+mkdir -p "$TEST_DATA_DIR" "$(dirname "$CONFIG_FILE")"
 
 # Copy fresh config from template to ensure clean state
 echo "Copying fresh config from template..."
 cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
+
+# Keep the daemon's data and launcher fixture inside the selected test scope.
+if ! jq --arg data_dir "$TEST_DATA_DIR" --arg launcher "$LAUNCHER_FIXTURE" \
+    '.data_dir = $data_dir | .mcpServers |= map(if .command == "./test/launcher-server/launcher-server" then .command = $launcher else . end)' \
+    "$CONFIG_FILE" > "${CONFIG_FILE}.tmp"; then
+    echo -e "${RED}Error: failed to configure isolated E2E paths${NC}"
+    exit 1
+fi
+mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 
 # Substitute LISTEN_PORT in config file if not using default 8081
 if [ "$LISTEN_PORT" != "8081" ]; then
@@ -733,17 +795,17 @@ fi
 export MCPPROXY_CATALOG_POPULARITY=false
 
 # Start server in background
-$MCPPROXY_BINARY serve --config="$CONFIG_FILE" --log-level=info > "/tmp/mcpproxy_e2e.log" 2>&1 &
+$MCPPROXY_BINARY serve --config="$CONFIG_FILE" --log-level=info > "$SERVER_LOG_FILE" 2>&1 &
 MCPPROXY_PID=$!
 
 echo "Started mcpproxy with PID: $MCPPROXY_PID"
-echo "Log file: /tmp/mcpproxy_e2e.log"
+echo "Log file: $SERVER_LOG_FILE"
 
 # Wait for server to be ready
 if ! wait_for_server; then
     echo -e "${RED}Failed to start server${NC}"
     echo "Server logs:"
-    cat "/tmp/mcpproxy_e2e.log"
+    cat "$SERVER_LOG_FILE"
     exit 1
 fi
 
@@ -751,7 +813,7 @@ fi
 if ! wait_for_everything_server; then
     echo -e "${RED}Everything server failed to connect${NC}"
     echo "Server logs:"
-    tail -50 "/tmp/mcpproxy_e2e.log"
+    tail -50 "$SERVER_LOG_FILE"
     exit 1
 fi
 
@@ -1310,14 +1372,16 @@ echo ""
 echo -e "${YELLOW}Testing audit_log sink (Spec 107 PR-D)...${NC}"
 echo ""
 
-AUDIT_BINARY="./mcpproxy-server"
+AUDIT_BINARY="${MCPPROXY_E2E_AUDIT_BINARY:-./mcpproxy-server}"
 AUDIT_SCHEMA="./docs/schemas/audit-line-v1.schema.json"
 AUDIT_PORT="${AUDIT_LISTEN_PORT:-18181}"
 AUDIT_BASE_URL="http://localhost:${AUDIT_PORT}"
 AUDIT_MCP_URL="${AUDIT_BASE_URL}/mcp"
-AUDIT_DATA_DIR="./test-data-audit"
+AUDIT_DATA_DIR="${MCPPROXY_E2E_AUDIT_DATA_DIR:-./test-data-audit}"
 AUDIT_CONFIG_FILE="${AUDIT_DATA_DIR}/e2e-audit-config.json"
-AUDIT_SERVER_LOG="/tmp/mcpproxy_e2e_audit.log"
+AUDIT_SERVER_LOG="${MCPPROXY_E2E_AUDIT_SERVER_LOG:-/tmp/mcpproxy_e2e_audit.log}"
+AUDIT_AJV_LOG="${MCPPROXY_E2E_AUDIT_AJV_LOG:-/tmp/mcpproxy_e2e_audit_ajv.log}"
+AUDIT_BUILD_LOG="${MCPPROXY_E2E_AUDIT_BUILD_LOG:-/tmp/mcpproxy_e2e_audit_build.log}"
 # Spec 107 (round-3 cross-review finding, PR-D): `mktemp -d -t PREFIX` is
 # BSD/macOS syntax (BSD mktemp appends the random suffix itself). GNU
 # mktemp — used by the mandatory Ubuntu CI job — treats -t's argument as a
@@ -1325,8 +1389,22 @@ AUDIT_SERVER_LOG="/tmp/mcpproxy_e2e_audit.log"
 # template") without them; the script has no `set -e`, so AUDIT_JSONL_DIR
 # silently became empty and AUDIT_JSONL resolved to a root-level
 # "/audit.jsonl". The explicit XXXXXX template form is accepted by both.
-AUDIT_JSONL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mcpproxy_e2e_audit.XXXXXX")"
+if [ -n "${MCPPROXY_E2E_AUDIT_JSONL_DIR:-}" ]; then
+    AUDIT_JSONL_DIR="$MCPPROXY_E2E_AUDIT_JSONL_DIR"
+    mkdir -p "$AUDIT_JSONL_DIR"
+else
+    AUDIT_JSONL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mcpproxy_e2e_audit.XXXXXX")"
+fi
 AUDIT_JSONL="${AUDIT_JSONL_DIR}/audit.jsonl"
+# These paths are written into JSON and read by the native Go executable. On
+# Windows/MSYS, shell paths such as /d/... are not translated inside config
+# files, so normalize them before serializing the data_dir and audit_log.path.
+AUDIT_DATA_DIR_CONFIG_PATH="$AUDIT_DATA_DIR"
+AUDIT_JSONL_CONFIG_PATH="$AUDIT_JSONL"
+if command -v cygpath >/dev/null 2>&1; then
+    AUDIT_DATA_DIR_CONFIG_PATH="$(cygpath -w "$AUDIT_DATA_DIR")"
+    AUDIT_JSONL_CONFIG_PATH="$(cygpath -w "$AUDIT_JSONL")"
+fi
 AUDIT_API_KEY=""
 AUDIT_PID=""
 AUDIT_MCP_SESSION_ID=""
@@ -1386,17 +1464,24 @@ audit_mcp_call() {
 }
 
 if [ ! -x "$AUDIT_BINARY" ]; then
-    log_test "Audit log: server-edition binary present"
-    log_fail "Audit log: server-edition binary present"
-    echo "Build it first: go build -tags server -o $AUDIT_BINARY ./cmd/mcpproxy"
-else
+    log_test "Build server-edition binary for audit log test"
+    mkdir -p "$(dirname "$AUDIT_BINARY")"
+    if go build -tags server -o "$AUDIT_BINARY" ./cmd/mcpproxy >"$AUDIT_BUILD_LOG" 2>&1; then
+        log_pass "Build server-edition binary for audit log test"
+    else
+        log_fail "Build server-edition binary for audit log test"
+        cat "$AUDIT_BUILD_LOG"
+    fi
+fi
+
+if [ -x "$AUDIT_BINARY" ]; then
     rm -rf "$AUDIT_DATA_DIR"
     mkdir -p "$AUDIT_DATA_DIR"
 
     # Scratch config: template's listen/data_dir/audit_log overridden, and
     # the fixed-port launcher-test fixture dropped (it is owned by the
     # personal-instance run above and would collide on :39933).
-    jq --arg port ":${AUDIT_PORT}" --arg dir "$AUDIT_DATA_DIR" --arg path "$AUDIT_JSONL" \
+    jq --arg port ":${AUDIT_PORT}" --arg dir "$AUDIT_DATA_DIR_CONFIG_PATH" --arg path "$AUDIT_JSONL_CONFIG_PATH" \
         '.listen = $port | .data_dir = $dir | .mcpServers = [.mcpServers[] | select(.name=="everything")] | .audit_log = {enabled: true, path: $path}' \
         "$CONFIG_TEMPLATE" > "$AUDIT_CONFIG_FILE"
 
@@ -1502,10 +1587,10 @@ JSON
             ' > /dev/null 2>&1 || AUDIT_SCHEMA_OK=false
         done < "$AUDIT_JSONL"
         if command -v ajv > /dev/null 2>&1 && [ -f "$AUDIT_SCHEMA" ]; then
-            if ! ajv validate -s "$AUDIT_SCHEMA" -d "$AUDIT_JSONL" --all-errors > /tmp/mcpproxy_e2e_audit_ajv.log 2>&1; then
+            if ! ajv validate -s "$AUDIT_SCHEMA" -d "$AUDIT_JSONL" --all-errors > "$AUDIT_AJV_LOG" 2>&1; then
                 AUDIT_SCHEMA_OK=false
                 echo "ajv output:"
-                cat /tmp/mcpproxy_e2e_audit_ajv.log
+                cat "$AUDIT_AJV_LOG"
             fi
         fi
         if [ "$AUDIT_SCHEMA_OK" = "true" ]; then
@@ -1559,6 +1644,6 @@ else
     echo -e "${RED}$TESTS_FAILED test(s) failed${NC}"
     echo ""
     echo "Server logs (last 50 lines):"
-    tail -50 "/tmp/mcpproxy_e2e.log"
+    tail -50 "$SERVER_LOG_FILE"
     exit 1
 fi

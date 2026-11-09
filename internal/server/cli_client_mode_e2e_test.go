@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -24,6 +25,27 @@ func binaryName(name string) string {
 		return name + ".exe"
 	}
 	return name
+}
+
+// cliE2ETempDir keeps the Unix socket path short while giving each test run a
+// unique, platform-native directory. Windows named pipes do not need the /tmp
+// shortcut, and a literal /tmp path is drive-rooted there.
+func cliE2ETempDir(t *testing.T) string {
+	t.Helper()
+	root := "/tmp"
+	if runtime.GOOS == "windows" {
+		root = os.TempDir()
+	}
+	dir, err := os.MkdirTemp(root, "mcp-")
+	require.NoError(t, err)
+	return dir
+}
+
+func jsonPath(t *testing.T, path string) string {
+	t.Helper()
+	b, err := json.Marshal(path)
+	require.NoError(t, err)
+	return string(b)
 }
 
 // waitForServerReady polls the server health endpoint and socket file until both are ready or timeout occurs
@@ -60,9 +82,8 @@ func TestCodeExecClientModeE2E(t *testing.T) {
 		t.Skip("Skipping E2E test in short mode")
 	}
 
-	// Use /tmp with short name to avoid Unix socket path length limit (104-108 chars)
-	tmpDir := filepath.Join("/tmp", "mcpproxy-test-"+t.Name())
-	require.NoError(t, os.MkdirAll(tmpDir, 0700))
+	// Use a short path for Unix socket limits and an isolated native temp path on Windows.
+	tmpDir := cliE2ETempDir(t)
 	defer os.RemoveAll(tmpDir)
 
 	// Build mcpproxy binary
@@ -77,7 +98,7 @@ func TestCodeExecClientModeE2E(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "mcp_config.json")
 	config := `{
 		"listen": "127.0.0.1:18080",
-		"data_dir": "` + tmpDir + `",
+		"data_dir": ` + jsonPath(t, tmpDir) + `,
 		"enable_socket": true,
 		"enable_code_execution": true,
 		"mcpServers": []
@@ -139,9 +160,8 @@ func TestCallToolClientModeE2E(t *testing.T) {
 		t.Skip("Skipping E2E test in short mode")
 	}
 
-	// Use /tmp with short name to avoid Unix socket path length limit (104-108 chars)
-	tmpDir := filepath.Join("/tmp", "mcpproxy-test-"+t.Name())
-	require.NoError(t, os.MkdirAll(tmpDir, 0700))
+	// Use a short path for Unix socket limits and an isolated native temp path on Windows.
+	tmpDir := cliE2ETempDir(t)
 	defer os.RemoveAll(tmpDir)
 
 	// Build mcpproxy binary
@@ -156,7 +176,7 @@ func TestCallToolClientModeE2E(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "mcp_config.json")
 	config := `{
 		"listen": "127.0.0.1:18081",
-		"data_dir": "` + tmpDir + `",
+		"data_dir": ` + jsonPath(t, tmpDir) + `,
 		"enable_socket": true,
 		"mcpServers": []
 	}`
@@ -214,9 +234,8 @@ func TestConcurrentCLICommandsE2E(t *testing.T) {
 		t.Skip("Skipping E2E test in short mode")
 	}
 
-	// Use /tmp with short name to avoid Unix socket path length limit (104-108 chars)
-	tmpDir := filepath.Join("/tmp", "mcpproxy-test-"+t.Name())
-	require.NoError(t, os.MkdirAll(tmpDir, 0700))
+	// Use a short path for Unix socket limits and an isolated native temp path on Windows.
+	tmpDir := cliE2ETempDir(t)
 	defer os.RemoveAll(tmpDir)
 
 	// Build mcpproxy binary
@@ -231,7 +250,7 @@ func TestConcurrentCLICommandsE2E(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "mcp_config.json")
 	config := `{
 		"listen": "127.0.0.1:18082",
-		"data_dir": "` + tmpDir + `",
+		"data_dir": ` + jsonPath(t, tmpDir) + `,
 		"enable_socket": true,
 		"enable_code_execution": true,
 		"mcpServers": []

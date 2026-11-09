@@ -11,10 +11,13 @@ NC='\033[0m' # No Color
 
 # Configuration
 MCPPROXY_BINARY="./mcpproxy"
-COVERAGE_FILE="coverage.out"
-COVERAGE_HTML="coverage.html"
+if [ "$(go env GOOS)" = "windows" ]; then
+    MCPPROXY_BINARY="./mcpproxy.exe"
+fi
+COVERAGE_FILE="${MCPPROXY_TEST_COVERAGE_FILE:-coverage.out}"
+COVERAGE_HTML="${MCPPROXY_TEST_COVERAGE_HTML:-coverage.html}"
 
-export MCPPROXY_BINARY_PATH="$(pwd)/mcpproxy"
+export MCPPROXY_BINARY_PATH="$(pwd)/${MCPPROXY_BINARY#./}"
 export MCPPROXY_BINARY="$MCPPROXY_BINARY_PATH"
 
 # Test results tracking
@@ -53,7 +56,9 @@ run_test_stage() {
             exit 1
         else
             echo -e "${YELLOW}Optional stage failed. Continuing...${NC}"
-            return 1
+            # The runner uses `set -e`, so return success here and let the
+            # final summary report the optional failure without skipping later stages.
+            return 0
         fi
     fi
 }
@@ -64,7 +69,7 @@ cleanup() {
     # Only remove this runner's build output. The E2E stages own and clean
     # their processes and scratch data; process-name matches and shared-path
     # globs can affect a developer's service or another concurrent test run.
-    rm -f ./mcpproxy 2>/dev/null || true
+    rm -f ./mcpproxy ./mcpproxy.exe 2>/dev/null || true
 }
 
 # Set up cleanup trap
@@ -116,17 +121,21 @@ echo ""
 
 # Stage 1: Build
 run_test_stage "Build mcpproxy binary" \
-    "go build -o mcpproxy ./cmd/mcpproxy" \
+    "go build -o '$MCPPROXY_BINARY' ./cmd/mcpproxy" \
     "required"
 
 # Stage 2: Unit Tests (exclude E2E tests that run in dedicated stages)
+# Go applies -timeout to each package test binary. A preserved Windows race run
+# hit the 5m package deadline in internal/server while
+# TestProfile_FullMCPUnchanged had been running for about 3s. Allow more time for
+# the full package in both normal and coverage runs.
 run_test_stage "Unit tests" \
-    "go test ./internal/... -v -race -timeout=5m -skip '^Test(E2E_|Binary|MCPProtocol)'" \
+    "go test ./internal/... -v -race -timeout=20m -skip '^Test(E2E_|Binary|MCPProtocol)'" \
     "required"
 
 # Stage 3: Unit Tests with Coverage (exclude E2E tests that run in dedicated stages)
 run_test_stage "Unit tests with coverage" \
-    "go test -coverprofile=$COVERAGE_FILE -covermode=atomic ./internal/... -timeout=5m -skip '^Test(E2E_|Binary|MCPProtocol)'" \
+    "go test -coverprofile=$COVERAGE_FILE -covermode=atomic ./internal/... -timeout=20m -skip '^Test(E2E_|Binary|MCPProtocol)'" \
     "optional"
 
 # Generate coverage report if coverage file exists
@@ -148,7 +157,7 @@ run_test_stage "Code linting" \
 
 # Stage 5: Original E2E Tests (internal mocks)
 run_test_stage "Original E2E tests (mocked)" \
-    "./scripts/run-e2e-tests.sh" \
+    "TEST_TIMEOUT=20m ./scripts/run-e2e-tests.sh" \
     "required"
 
 # Stage 6: API E2E Tests (with everything server)

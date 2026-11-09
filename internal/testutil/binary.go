@@ -32,6 +32,7 @@ type BinaryTestEnv struct {
 	baseURL    string
 	apiURL     string
 	cmd        *exec.Cmd
+	serverLog  *os.File
 	cleanup    func()
 	mcpClient  *client.Client // MCP client for tool calls
 }
@@ -105,6 +106,8 @@ func NewBinaryTestEnv(t *testing.T) *BinaryTestEnv {
 	// Create test config
 	configPath := filepath.Join(tempDir, "config.json")
 	createTestConfig(t, configPath, port, dataDir)
+	serverLog, err := os.Create(filepath.Join(tempDir, "mcpproxy.log"))
+	require.NoError(t, err)
 
 	env := &BinaryTestEnv{
 		t:          t,
@@ -114,6 +117,7 @@ func NewBinaryTestEnv(t *testing.T) *BinaryTestEnv {
 		port:       port,
 		baseURL:    fmt.Sprintf("http://localhost:%d", port),
 		apiURL:     fmt.Sprintf("http://localhost:%d/api/v1", port),
+		serverLog:  serverLog,
 	}
 
 	env.cleanup = func() {
@@ -136,6 +140,9 @@ func NewBinaryTestEnv(t *testing.T) *BinaryTestEnv {
 				<-done
 			}
 		}
+		if env.serverLog != nil {
+			_ = env.serverLog.Close()
+		}
 
 		// Clean up temp directory
 		os.RemoveAll(filepath.Dir(env.configPath))
@@ -156,6 +163,8 @@ func (env *BinaryTestEnv) Start() {
 
 	// Start the binary
 	env.cmd = exec.Command(env.binaryPath, "serve", "--config="+env.configPath, "--log-level=debug")
+	env.cmd.Stdout = env.serverLog
+	env.cmd.Stderr = env.serverLog
 	env.cmd.Env = append(os.Environ(),
 		"MCPPROXY_DISABLE_OAUTH=true",  // Disable OAuth for testing
 		"MCPPROXY_API_KEY="+TestAPIKey, // Set API key for testing
@@ -179,6 +188,12 @@ func (env *BinaryTestEnv) WaitForReady() {
 	for {
 		select {
 		case <-timeout:
+			if output, err := os.ReadFile(env.serverLog.Name()); err == nil && len(output) > 0 {
+				if len(output) > 8192 {
+					output = output[len(output)-8192:]
+				}
+				env.t.Logf("mcpproxy server output before readiness timeout:\n%s", output)
+			}
 			env.t.Fatal("Timeout waiting for mcpproxy binary to be ready")
 		case <-ticker.C:
 			if env.isServerReady() {
@@ -397,9 +412,12 @@ func findAvailablePort(t *testing.T) int {
 
 // createTestConfig creates a test configuration file
 func createTestConfig(t *testing.T, configPath string, port int, dataDir string) {
+	encodedDataDir, err := json.Marshal(dataDir)
+	require.NoError(t, err)
+
 	config := fmt.Sprintf(`{
   "listen": ":%d",
-  "data_dir": "%s",
+  "data_dir": %s,
   "api_key": "%s",
   "enable_tray": false,
   "debug_search": true,
@@ -437,9 +455,9 @@ func createTestConfig(t *testing.T, configPath string, port int, dataDir string)
   "docker_isolation": {
     "enabled": false
   }
-}`, port, dataDir, TestAPIKey)
+}`, port, encodedDataDir, TestAPIKey)
 
-	err := os.WriteFile(configPath, []byte(config), 0600)
+	err = os.WriteFile(configPath, []byte(config), 0600)
 	require.NoError(t, err)
 }
 
