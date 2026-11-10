@@ -682,7 +682,7 @@ epics:
         depends_on: [release-qa-gate-matrix]
       - id: release-qa-gate-macos
         title: "T3: macOS app smoke on a macos runner, advisory until 3 consecutive passes (today zero CI automation for the tray app)"
-        status: in_review
+        status: done
         pr: "#1669"
         priority: P3
         depends_on: [release-qa-gate-matrix]
@@ -875,6 +875,38 @@ epics:
       (-32020/-32021/-32022), FR-001..006 / FR-014..016 recast as adopt-and-verify, FR-028 legacy-only transport pin as the safe merge state, plus Risks &
       Watch Items. The cross-spec conflict named there (FR-012 vs shipped Spec 057) is the one RESOLVED above as Option A. 028 agent-token scoping is already
       compatible (header-carried). Tracker: #532.'
+    tasks:
+      - id: mcp-2026-bump
+        title: "Phase 1-2: adopt mcp-go v1.0.0 pinned inert on both protocol hops; era-testing harness (protocol_era_test.go)"
+        status: done
+        pr: "#1204"
+        priority: P1
+      - id: mcp-2026-us3-stateless-lists
+        title: "US3: stateless list surfaces — */list results no longer vary per connection; list-only resolver"
+        status: done
+        pr: "#1691"
+        priority: P1
+        depends_on: [mcp-2026-bump]
+      - id: mcp-2026-us1-negotiation
+        title: "US1: lift the client-facing and upstream-facing 2025-11-25 pins; server/discover advertises both eras; -32022 on unsupported version (T037-T046)"
+        status: todo
+        priority: P1
+        depends_on: [mcp-2026-us3-stateless-lists]
+      - id: mcp-2026-us2-headers
+        title: "US2: Mcp-Method / Mcp-Name / MCP-Protocol-Version on every forwarded request; -32020 on header/body mismatch; x-mcp-header param mirroring (T047-T054)"
+        status: todo
+        priority: P1
+        depends_on: [mcp-2026-us1-negotiation]
+      - id: mcp-2026-us4-input-required
+        title: "US4: detect-and-frame input_required results; reject inputResponses continuations pre-dispatch (T055-T062) — needs the MRTR spec amendment ratified first"
+        status: todo
+        priority: P2
+        depends_on: [mcp-2026-us1-negotiation]
+      - id: mcp-2026-us5-additive
+        title: "US5: additive feature adoption — cache hints landed in #1691; tool ordering, trace context remain (T063-T079)"
+        status: todo
+        priority: P2
+        depends_on: [mcp-2026-us2-headers]
 
   - id: security-gateway-cd
     title: Security gateway Tracks C/D (per-arg least-privilege + signature provenance)
