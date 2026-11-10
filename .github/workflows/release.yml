@@ -797,16 +797,7 @@ jobs:
 
       - name: Install Inno Setup (Windows)
         if: matrix.goos == 'windows'
-        shell: pwsh
-        run: |
-          choco install innosetup -y
-          # Verify installation
-          if (Test-Path "C:\Program Files (x86)\Inno Setup 6\ISCC.exe") {
-            Write-Host "✅ Inno Setup installed successfully"
-          } else {
-            Write-Host "❌ Inno Setup installation failed"
-            exit 1
-          }
+        uses: ./.github/actions/install-inno-setup
 
       - name: Create Windows installer (Windows)
         if: matrix.goos == 'windows'
