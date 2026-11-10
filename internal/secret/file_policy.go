@@ -11,7 +11,7 @@ import (
 )
 
 // NewWildcardFilePolicy returns a policy that allows any absolute regular file.
-// Used by NewResolver() so existing tests keep #1717 behaviour.
+// Used by NewTestWildcardResolver() so existing tests keep #1717 behaviour.
 func NewWildcardFilePolicy(scope ResolveScope) *FilePolicy {
 	return &FilePolicy{Wildcard: true, Scope: scope}
 }

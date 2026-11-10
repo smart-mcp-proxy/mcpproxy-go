@@ -278,7 +278,7 @@ func connectLatencyPromptUpstream(t *testing.T, proxy *MCPProxyServer, server st
 	qOff := false
 	proxy.config.QuarantineEnabled = &qOff
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
 	mcpSrv := mcpserver.NewMCPServer(server, "1.0.0-test", mcpserver.WithPromptCapabilities(true))
 	for _, p := range prompts {

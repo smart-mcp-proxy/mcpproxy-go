@@ -35,7 +35,7 @@ func TestConnect_DisconnectDuringDialDoesNotReportReady(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	cfg := &config.ServerConfig{Name: "race-server", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
-	mc, err := NewClient("race-server", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	mc, err := NewClient("race-server", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mc.Disconnect() })
 
@@ -82,7 +82,7 @@ func TestConnect_DisconnectDuringFailingDialKeepsDisconnected(t *testing.T) {
 	ts.Close()
 
 	cfg := &config.ServerConfig{Name: "race-fail", Protocol: "streamable-http", URL: deadURL, Enabled: true}
-	mc, err := NewClient("race-fail", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	mc, err := NewClient("race-fail", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mc.Disconnect() })
 
@@ -119,7 +119,7 @@ func TestConnect_NewerAttemptSupersedesTheOlderOne(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	cfg := &config.ServerConfig{Name: "race-newer", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
-	mc, err := NewClient("race-newer", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	mc, err := NewClient("race-newer", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mc.Disconnect() })
 
@@ -166,7 +166,7 @@ func TestConnect_ReconnectTeardownSupersedesADialingAttempt(t *testing.T) {
 	t.Cleanup(ts.Close)
 
 	cfg := &config.ServerConfig{Name: "race-reconnect", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
-	mc, err := NewClient("race-reconnect", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	mc, err := NewClient("race-reconnect", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mc.Disconnect() })
 
@@ -228,7 +228,7 @@ func TestConnect_AttemptAdmittedAfterReconnectTeardownOwnsTheClient(t *testing.T
 	t.Cleanup(ts.Close)
 
 	cfg := &config.ServerConfig{Name: "race-admitted", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
-	mc, err := NewClient("race-admitted", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	mc, err := NewClient("race-admitted", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mc.Disconnect() })
 
@@ -268,7 +268,7 @@ func TestReconnectTeardown_ExcludesConnectAdmission(t *testing.T) {
 	for _, helper := range []string{"TryReconnectSync", "tryReconnect"} {
 		t.Run(helper, func(t *testing.T) {
 			cfg := &config.ServerConfig{Name: "race-window", Protocol: "streamable-http", URL: ts.URL, Enabled: true}
-			mc, err := NewClient("race-window", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+			mc, err := NewClient("race-window", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = mc.Disconnect() })
 

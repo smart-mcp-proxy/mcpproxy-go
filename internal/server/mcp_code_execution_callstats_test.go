@@ -27,7 +27,7 @@ func TestCodeExecutionToolCaller_RecordsCallOutcome(t *testing.T) {
 		QueueTimeout:          shedDurPtr(30 * time.Second),
 	}
 	cfg := &config.Config{Servers: []*config.ServerConfig{serverCfg}}
-	um := upstream.NewManager(zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	um := upstream.NewManager(zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 	require.NoError(t, um.AddServerConfig("db", serverCfg))
 	client, ok := um.GetClient("db")
 	require.True(t, ok)

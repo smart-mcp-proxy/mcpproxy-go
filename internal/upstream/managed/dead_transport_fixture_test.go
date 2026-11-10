@@ -67,7 +67,7 @@ func TestStdioChildKilled_ClientLeavesReadyAndRespawns(t *testing.T) {
 		Enabled:             true,
 		HealthCheckInterval: &interval,
 	}
-	mc, err := NewClient(cfg.Name, cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewResolver())
+	mc, err := NewClient(cfg.Name, cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

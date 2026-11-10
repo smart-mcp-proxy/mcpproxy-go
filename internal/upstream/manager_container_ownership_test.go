@@ -284,7 +284,7 @@ func newSweepManager(t *testing.T) (*Manager, *observer.ObservedLogs) {
 	t.Helper()
 	t.Setenv("CI", "")
 	mainCore, mainLogs := observer.New(zap.DebugLevel)
-	m := NewManager(zap.New(mainCore), &config.Config{}, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.New(mainCore), &config.Config{}, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 	for _, name := range []string{"a", "a/b"} {
 		require.NoError(t, m.AddServerConfig(name, &config.ServerConfig{Name: name, Protocol: "http", URL: "http://127.0.0.1:1/mcp", Enabled: false}))
@@ -483,7 +483,7 @@ func TestHasDockerContainers_AppliesCanonicalOwnership(t *testing.T) {
 func TestSweeps_NoConfiguredServers_MutateNothing(t *testing.T) {
 	fd := installManagerFakeDocker(t, sweepFixture(core.GetInstanceID()))
 	t.Setenv("CI", "")
-	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 
 	m.cleanupAllManagedContainers(context.Background())

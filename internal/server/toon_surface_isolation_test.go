@@ -127,7 +127,7 @@ func TestSurfaceIsolation_CodeExecution(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { idx.Close() })
 
-	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewResolver(), sm)
+	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewTestWildcardResolver(), sm)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)
@@ -173,7 +173,7 @@ func TestSurfaceIsolation_DirectMode(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { sm.Close() })
 
-	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewResolver(), sm)
+	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewTestWildcardResolver(), sm)
 
 	proxy := &MCPProxyServer{
 		config:          cfg,

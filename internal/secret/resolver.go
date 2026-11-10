@@ -7,9 +7,18 @@ import (
 	"strings"
 )
 
-// NewResolver creates a resolver in wildcard file mode for tests and callers
-// that have not loaded a config policy yet.
+// NewResolver returns a safe proxy-scoped resolver with file reads disabled.
+// Production code must use config.BuildSecretResolver or another explicit policy;
+// tests that need legacy wildcard upstream behaviour use NewTestWildcardResolver.
 func NewResolver() *Resolver {
+	return NewResolverWithOptions(ResolverOptions{
+		Scope:      ScopeProxy,
+		FilePolicy: NewDisabledFilePolicy(ScopeProxy),
+	})
+}
+
+// NewTestWildcardResolver is the pre-#1721 upstream wildcard resolver for tests only.
+func NewTestWildcardResolver() *Resolver {
 	return NewResolverWithOptions(ResolverOptions{
 		Scope:      ScopeUpstream,
 		FilePolicy: NewWildcardFilePolicy(ScopeUpstream),

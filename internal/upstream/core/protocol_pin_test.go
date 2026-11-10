@@ -124,7 +124,7 @@ func TestUpstreamHandshakeRequestsLegacyProtocolVersion(t *testing.T) {
 		URL:      upstream.URL,
 		Enabled:  true,
 	}
-	client, err := NewClient("pin-probe", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	client, err := NewClient("pin-probe", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -183,7 +183,7 @@ func TestUpstreamRejectsAModernNegotiatedEra(t *testing.T) {
 		URL:      upstream.URL,
 		Enabled:  true,
 	}
-	client, err := NewClient("rogue-era", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	client, err := NewClient("rogue-era", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

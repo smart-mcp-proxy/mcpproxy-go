@@ -20,7 +20,7 @@ func BenchmarkAddServer(b *testing.B) {
 	storageManager, _ := storage.NewBoltDB(tmpDir, zap.NewNop().Sugar())
 	defer storageManager.Close()
 
-	manager := NewManager(logger, cfg, storageManager, secret.NewResolver(), nil)
+	manager := NewManager(logger, cfg, storageManager, secret.NewTestWildcardResolver(), nil)
 	defer manager.DisconnectAll()
 
 	serverConfig := &config.ServerConfig{
@@ -45,7 +45,7 @@ func BenchmarkConnectAll(b *testing.B) {
 	storageManager, _ := storage.NewBoltDB(tmpDir, zap.NewNop().Sugar())
 	defer storageManager.Close()
 
-	manager := NewManager(logger, cfg, storageManager, secret.NewResolver(), nil)
+	manager := NewManager(logger, cfg, storageManager, secret.NewTestWildcardResolver(), nil)
 	defer manager.DisconnectAll()
 
 	// Add several disconnected servers
@@ -77,7 +77,7 @@ func BenchmarkDiscoverTools(b *testing.B) {
 	storageManager, _ := storage.NewBoltDB(tmpDir, zap.NewNop().Sugar())
 	defer storageManager.Close()
 
-	manager := NewManager(logger, cfg, storageManager, secret.NewResolver(), nil)
+	manager := NewManager(logger, cfg, storageManager, secret.NewTestWildcardResolver(), nil)
 	defer manager.DisconnectAll()
 
 	// Add servers (they won't connect, but structure is present)
@@ -109,7 +109,7 @@ func BenchmarkGetStats(b *testing.B) {
 	storageManager, _ := storage.NewBoltDB(tmpDir, zap.NewNop().Sugar())
 	defer storageManager.Close()
 
-	manager := NewManager(logger, cfg, storageManager, secret.NewResolver(), nil)
+	manager := NewManager(logger, cfg, storageManager, secret.NewTestWildcardResolver(), nil)
 	defer manager.DisconnectAll()
 
 	// Add several servers
@@ -138,7 +138,7 @@ func BenchmarkCallToolWithLock(b *testing.B) {
 	storageManager, _ := storage.NewBoltDB(tmpDir, zap.NewNop().Sugar())
 	defer storageManager.Close()
 
-	manager := NewManager(logger, cfg, storageManager, secret.NewResolver(), nil)
+	manager := NewManager(logger, cfg, storageManager, secret.NewTestWildcardResolver(), nil)
 	defer manager.DisconnectAll()
 
 	serverConfig := &config.ServerConfig{
@@ -167,7 +167,7 @@ func BenchmarkRemoveServer(b *testing.B) {
 	storageManager, _ := storage.NewBoltDB(tmpDir, zap.NewNop().Sugar())
 	defer storageManager.Close()
 
-	manager := NewManager(logger, cfg, storageManager, secret.NewResolver(), nil)
+	manager := NewManager(logger, cfg, storageManager, secret.NewTestWildcardResolver(), nil)
 	defer manager.DisconnectAll()
 
 	b.ResetTimer()

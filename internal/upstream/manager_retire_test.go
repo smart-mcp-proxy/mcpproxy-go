@@ -21,7 +21,7 @@ func retireTestServer(url string) *config.ServerConfig {
 
 func TestManager_EndpointReplacementRetiresOldClient(t *testing.T) {
 	t.Setenv("CI", "")
-	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 
 	require.NoError(t, m.AddServerConfig("srv", retireTestServer("http://127.0.0.1:1/a")))

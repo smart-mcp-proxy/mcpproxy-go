@@ -37,7 +37,7 @@ func createTestMCPProxyServer(t *testing.T) *MCPProxyServer {
 	require.NoError(t, err)
 	t.Cleanup(func() { idx.Close() })
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	cfg := config.DefaultConfig()
 	cfg.DataDir = tmpDir
 	cfg.ToolsLimit = 20

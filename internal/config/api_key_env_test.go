@@ -444,7 +444,7 @@ func TestServerConfig_FileReferencesExpandOnACopy(t *testing.T) {
 	}
 
 	resolved := CopyServerConfig(orig)
-	errs := secret.NewResolver().ExpandStructSecretsCollectErrors(context.Background(), resolved)
+	errs := secret.NewTestWildcardResolver().ExpandStructSecretsCollectErrors(context.Background(), resolved)
 	require.Empty(t, errs)
 
 	assert.Equal(t, "Bearer upstream-token", resolved.Headers["Authorization"])

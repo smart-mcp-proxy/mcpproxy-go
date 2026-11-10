@@ -14,7 +14,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/cliclient"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
@@ -507,8 +506,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 	}
 	defer indexManager.Close()
 
-	// Create secret resolver for command execution
-	secretResolver := secret.NewResolver()
+	secretResolver := cliUpstreamSecretResolver(globalConfig)
 
 	// Create upstream manager
 	upstreamManager := upstream.NewManager(logger, globalConfig, storageManager.GetBoltDB(), secretResolver, storageManager)

@@ -58,7 +58,7 @@ func createTestProxyWithRuntimeCfg(t *testing.T, servers []*config.ServerConfig,
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = idx.Close() })
 
-	um := upstream.NewManager(logger, cfg, nil, secret.NewResolver(), nil)
+	um := upstream.NewManager(logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)

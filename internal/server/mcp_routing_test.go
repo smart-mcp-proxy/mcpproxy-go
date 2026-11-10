@@ -1051,7 +1051,7 @@ func TestRefreshPrompts_AggregatesBuiltinsAndUpstream(t *testing.T) {
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
 	t.Cleanup(testServer.Close)
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
 	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",
@@ -1090,7 +1090,7 @@ func TestRefreshPrompts_RugPullBaseline_WithholdsFirstSeen(t *testing.T) {
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
 	t.Cleanup(testServer.Close)
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
 	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
 		Name: "server-a", Protocol: "streamable-http", URL: testServer.URL, Enabled: true,
@@ -1128,7 +1128,7 @@ func TestRefreshPrompts_AggregationDisabled_BuiltinsOnly(t *testing.T) {
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
 	t.Cleanup(testServer.Close)
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
 	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",
@@ -1179,7 +1179,7 @@ func TestRefreshPrompts_ReadsLiveAggregateFlag(t *testing.T) {
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
 	t.Cleanup(testServer.Close)
 
-	um := upstream.NewManager(zap.NewNop(), live, nil, secret.NewResolver(), nil)
+	um := upstream.NewManager(zap.NewNop(), live, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
 	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",
@@ -1204,7 +1204,7 @@ func TestRefreshPrompts_ReadsLiveAggregateFlag(t *testing.T) {
 func TestRefreshPrompts_NoUpstreamClients_RegistersOnlyBuiltins(t *testing.T) {
 	proxy, _ := createTestProxyWithRuntime(t, nil)
 	proxy.config.EnablePrompts = true
-	proxy.upstreamManager = upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	proxy.upstreamManager = upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 
 	proxy.RefreshPrompts()
 
@@ -1232,7 +1232,7 @@ func TestRefreshPrompts_PopulatesRoutingModeServers(t *testing.T) {
 	testServer := servertest.NewTestStreamableHTTPServer(upstreamSrv)
 	t.Cleanup(testServer.Close)
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
 	require.NoError(t, um.AddServerConfig("srv-a", &config.ServerConfig{
 		Name:     "server-a",

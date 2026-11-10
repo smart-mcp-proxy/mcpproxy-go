@@ -62,7 +62,7 @@ func connectedManagedTestClient(t *testing.T, url string) *Client {
 		URL:      url,
 		Enabled:  true,
 	}
-	mc, err := NewClient("test-client", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	mc, err := NewClient("test-client", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

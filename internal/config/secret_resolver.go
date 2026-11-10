@@ -54,6 +54,25 @@ func adminKeySourcePaths(cfg *Config) []string {
 	return paths
 }
 
+// BuildSecretResolverForKeyringCLI is proxy-scoped with ${file:} disabled.
+// CLI `secrets` keyring store/get/delete/list and upstream --secret-* flags only
+// touch keyring (and optional operator env names), not server-entry file refs.
+func BuildSecretResolverForKeyringCLI() *secret.Resolver {
+	return secret.NewResolverWithOptions(secret.ResolverOptions{
+		Scope:      secret.ScopeProxy,
+		FilePolicy: secret.NewDisabledFilePolicy(secret.ScopeProxy),
+	})
+}
+
+// ConfigFilePathForPolicy returns the path used for deny-list policy (load path
+// when set, otherwise the default under data_dir).
+func (c *Config) ConfigFilePathForPolicy() string {
+	if c != nil && c.loadConfigPath != "" {
+		return c.loadConfigPath
+	}
+	return ResolveConfigPath(c, "")
+}
+
 // BuildSecretResolverForDataDirExpand builds a proxy-scoped resolver used only
 // while resolving data_dir: allow-list entries are independent of data_dir, so
 // a ${file:} data_dir cannot include its own derived secrets directory.

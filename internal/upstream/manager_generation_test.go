@@ -32,7 +32,7 @@ func newGenTestManager(t *testing.T) *Manager {
 		desired:        make(map[string]desiredGen),
 		logger:         zap.NewNop(),
 		storage:        db,
-		secretResolver: secret.NewResolver(),
+		secretResolver: secret.NewTestWildcardResolver(),
 		callStats:      callstats.NewRegistry(),
 	}
 	m.globalConfig.Store(&config.Config{})

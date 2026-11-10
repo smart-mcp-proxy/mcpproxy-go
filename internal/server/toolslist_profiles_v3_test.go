@@ -45,7 +45,7 @@ func newToolsListProxy(t *testing.T, configure func(*config.Config)) *MCPProxySe
 	if configure != nil {
 		configure(cfg)
 	}
-	um := upstream.NewManager(logger, cfg, nil, secret.NewResolver(), nil)
+	um := upstream.NewManager(logger, cfg, nil, secret.NewTestWildcardResolver(), nil)
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { cm.Close() })

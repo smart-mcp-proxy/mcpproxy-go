@@ -63,7 +63,7 @@ func connectedTestClient(t *testing.T, url string, exposePrompts *bool) *Client 
 		Enabled:       true,
 		ExposePrompts: exposePrompts,
 	}
-	c, err := NewClient("test-client", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	c, err := NewClient("test-client", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -210,7 +210,7 @@ func TestClient_GetPrompt_SetExposePromptsFalse_TakesEffectWithoutReconnect(t *t
 func unconnectedTestClient(t *testing.T) *Client {
 	t.Helper()
 	cfg := &config.ServerConfig{Name: "test-server", Protocol: "streamable-http", URL: "http://127.0.0.1:1"}
-	c, err := NewClient("test-client", cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	c, err := NewClient("test-client", cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	return c
 }
