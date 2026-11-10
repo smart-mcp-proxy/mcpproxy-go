@@ -82,7 +82,7 @@ mcpproxy secrets set weather-api-key
 mcpproxy upstream add weather --env 'WEATHER_API_KEY=${keyring:weather-api-key}' -- npx -y weather-mcp
 ```
 
-For manual setup, `mcpproxy secrets set <name>` prompts for the value and stores it in the OS keyring. Reference it with `${keyring:<name>}` in `--header` or `--env`; quote the reference so the shell passes it literally. The `--secret-env KEY=VALUE` and `--secret-header "Name: value"` flags (both repeatable) also store values in the keyring, but the supplied value is still a command-line argument and may be recorded in shell history or exposed in process listings. New servers are quarantined. To pick a server from a catalog instead of typing its command, see [Catalog Commands](/cli/catalog-commands).
+For manual setup, `mcpproxy secrets set <name>` prompts for the value and stores it in the OS keyring; the current CLI prompt echoes typed characters in the terminal. Reference it with `${keyring:<name>}` in `--header` or `--env`; quote the reference so the shell passes it literally. Use `--from-stdin` with a trusted secret source when terminal echo is unsuitable. The `--secret-env KEY=VALUE` and `--secret-header "Name: value"` flags (both repeatable) also store values in the keyring, but the supplied value is still a command-line argument and may be recorded in shell history or exposed in process listings. New servers are quarantined. To pick a server from a catalog instead of typing its command, see [Catalog Commands](/cli/catalog-commands).
 
 A successful add prints the next commands, so you can review and admit the server without leaving the terminal:
 
