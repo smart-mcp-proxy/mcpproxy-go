@@ -227,6 +227,29 @@ touches:
 - **Unexplained data-sink param** — a free-form input named like an
   exfiltration channel (`sidenote`, `scratchpad`) that the description never
   explains — the model is steered to stuff stolen data into it.
+  A parameter is also a sink by shape when its own description asks for the
+  user's conversation, prompt or environment. The one exemption is narrow
+  config-precedence wording: the whole sentence holding the "environment
+  variable" phrase must be a precedence statement, i.e. an optional lead
+  ("(Optional)", "If omitted,", "Use this"), a strong precedence cue
+  ("overrides", "defaults to", "falls back to", "takes precedence over",
+  "instead of"), the phrase and an UPPER_SNAKE identifier in either order (the
+  identifier may be quoted, in backticks or `$`-prefixed), and at most a
+  condition such as "if provided" or "when omitted" and an example
+  parenthetical such as "(e.g. PROJ,OPS)". Examples: "Overrides the environment
+  variable JIRA_PROJECTS_FILTER if provided", "If omitted, falls back to the
+  `JIRA_URL` environment variable". Lines longer than 4 KiB get no exemption
+  at all. Anything else in that sentence, such as a request to send or
+  include a value or an instruction after a colon or semicolon, leaves the
+  phrase flagged, and so does a sentence with two such phrases. This is an
+  allow-list of sentence shapes, not a list of denied words. Each sentence is
+  judged on the raw text; if the raw and normalized text disagree about the
+  phrase (homoglyphs, extra spaces, invisible characters) nothing in that line
+  is exempt. Weak wording ("see", "read from", "same as") and plain words
+  (`TEAM`) do not qualify. An exempt sentence produces no finding, even when
+  the variable is token-named (`GITHUB_TOKEN`), because it only documents
+  configuration; a request in a separate sentence is not tied to the phrase and
+  is not caught by this check.
 
 The declared category is taken from the tool **name and its leading sentence**,
 not the full description, so an attacker's benign cover sentence still anchors
@@ -244,7 +267,12 @@ match's **per-match confidence**: a validated card / live cloud key is high; a
 documented placeholder (`AKIA…EXAMPLE`) collapses to near-zero and is dropped.
 Scans **raw** text (secrets are case-sensitive). Being soft, a hit raises a
 review item rather than auto-quarantining — an embedded secret may be a careless
-example as easily as a planted one.
+example as easily as a planted one. A high-entropy candidate that is a readable
+multi-segment path (`wiki/spaces/TEAM/pages/123456789/Page+Title`: at least
+three segments, each all digits or plain words joined by `+`, `-` or `_`, none
+an opaque run) is not reported. No host is trusted, so an opaque base64-style
+run is still reported wherever it appears, including in a URL on an example
+domain.
 
 ### At a glance
 
