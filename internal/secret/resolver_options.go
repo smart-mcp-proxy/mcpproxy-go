@@ -13,12 +13,13 @@ const (
 	ScopeUpstream
 )
 
-// DenyPaths lists resolved filesystem paths used for a cheap pre-open check.
-// Handle identity checks use DenyIdentities and are authoritative.
+// DenyPaths lists paths for cheap pre-open checks and for fresh stat-at-read
+// identity checks (config, admin-key sources, data-dir files).
 type DenyPaths struct {
 	ConfigFile     string
 	DataDir        string
 	DataSecretsDir string
+	AdminKeyPaths  []string
 }
 
 // FilePolicy governs ${file:} resolution for one resolver.
@@ -31,8 +32,7 @@ type FilePolicy struct {
 	// AllowedRoots are absolute, symlink-resolved directory roots.
 	AllowedRoots   []string
 	Scope          ResolveScope
-	Deny           DenyPaths
-	DenyIdentities []DenyIdentity
+	Deny DenyPaths
 }
 
 // ResolverOptions configures a production resolver.

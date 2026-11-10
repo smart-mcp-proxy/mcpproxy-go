@@ -57,6 +57,19 @@ func RestoreSecretFileDirsFromFile(dst, onDisk *Config) {
 	dst.SecretFileDirs = onDisk.SecretFileDirs
 }
 
+// SecretFileDirsManagementEditRefused reports whether incoming changes
+// secret_file_dirs relative to the file at configPath.
+func SecretFileDirsManagementEditRefused(configPath string, incoming *Config) bool {
+	if incoming == nil || configPath == "" {
+		return false
+	}
+	onDisk, err := DecodeConfigFile(configPath)
+	if err != nil {
+		return false
+	}
+	return SecretFileDirsChanged(onDisk, incoming)
+}
+
 // DefaultSecretFileDirRoots returns the platform default allow-list roots before
 // the data directory is known. The derived <data-dir>/secrets entry is added
 // separately once data_dir is resolved.

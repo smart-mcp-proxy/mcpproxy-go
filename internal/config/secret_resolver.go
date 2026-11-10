@@ -28,11 +28,11 @@ func BuildSecretResolver(cfg *Config, configPath string, scope secret.ResolveSco
 	if scope == secret.ScopeUpstream {
 		cfgPath := ResolveConfigPath(cfg, configPath)
 		policy.Deny = secret.DenyPaths{
-			ConfigFile:     resolveExistingPath(cfgPath),
-			DataDir:        resolveExistingPath(cfg.DataDir),
-			DataSecretsDir: resolveExistingPath(filepath.Join(cfg.DataDir, "secrets")),
+			ConfigFile:     cfgPath,
+			DataDir:        cfg.DataDir,
+			DataSecretsDir: filepath.Join(cfg.DataDir, "secrets"),
+			AdminKeyPaths:  adminKeySourcePaths(cfg),
 		}
-		policy.DenyIdentities = buildDenyIdentities(cfg, configPath)
 	}
 
 	return secret.NewResolverWithOptions(secret.ResolverOptions{
@@ -41,33 +41,17 @@ func BuildSecretResolver(cfg *Config, configPath string, scope secret.ResolveSco
 	})
 }
 
-func buildDenyIdentities(cfg *Config, configPath string) []secret.DenyIdentity {
-	var ids []secret.DenyIdentity
-	add := func(path string) {
-		if id, ok := secret.StatDenyIdentity(path); ok {
-			ids = append(ids, id)
-		}
-	}
-
-	cfgPath := ResolveConfigPath(cfg, configPath)
-	add(cfgPath)
-
+func adminKeySourcePaths(cfg *Config) []string {
+	var paths []string
 	if path := os.Getenv(EnvAPIKeyFile); path != "" {
-		add(path)
+		paths = append(paths, path)
 	}
 	if cfg != nil && secret.IsSecretRef(cfg.APIKey) {
 		if ref, err := secret.ParseSecretRef(cfg.APIKey); err == nil && ref.Type == secret.SecretTypeFile {
-			add(ref.Name)
+			paths = append(paths, ref.Name)
 		}
 	}
-
-	if cfg != nil && cfg.DataDir != "" {
-		add(filepath.Join(cfg.DataDir, "config.db"))
-		add(filepath.Join(cfg.DataDir, ConfigFileName))
-		add(filepath.Join(cfg.DataDir, "mcpproxy.sock"))
-	}
-
-	return ids
+	return paths
 }
 
 // BuildSecretResolverForDataDirExpand builds a proxy-scoped resolver used only
@@ -87,15 +71,4 @@ func BuildSecretResolverForDataDirExpand(cfg *Config) *secret.Resolver {
 		Scope:      secret.ScopeProxy,
 		FilePolicy: policy,
 	})
-}
-
-func resolveExistingPath(path string) string {
-	if path == "" {
-		return ""
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return filepath.Clean(path)
-	}
-	return resolved
 }

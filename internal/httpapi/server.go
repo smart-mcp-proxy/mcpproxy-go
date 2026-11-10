@@ -5985,6 +5985,13 @@ func (s *Server) handleApplyConfig(w http.ResponseWriter, r *http.Request) {
 		if err := refuseLockedTelemetryChange(stored, resolved); err != nil {
 			return err
 		}
+		cfgPath := s.controller.GetConfigPath()
+		if cfgPath != "" && config.SecretFileDirsManagementEditRefused(cfgPath, resolved) {
+			return &configMutationRefusal{
+				status: http.StatusBadRequest,
+				msg:    config.ErrSecretFileDirsNotWritable.Error(),
+			}
+		}
 		*stored = *resolved
 		return nil
 	})

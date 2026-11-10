@@ -21,12 +21,12 @@ func TestReadFileWithPolicy_AdminKeyInsideAllowedRootDenied(t *testing.T) {
 	link := filepath.Join(allowed, "via-symlink")
 	require.NoError(t, os.Symlink(admin, link))
 
-	id, ok := StatDenyIdentity(admin)
-	require.True(t, ok)
 	policy := &FilePolicy{
-		AllowedRoots:   []string{allowed},
-		Scope:          ScopeUpstream,
-		DenyIdentities: []DenyIdentity{id},
+		AllowedRoots: []string{allowed},
+		Scope:        ScopeUpstream,
+		Deny: DenyPaths{
+			AdminKeyPaths: []string{admin},
+		},
 	}
 
 	_, err := ReadFileWithPolicy(link, policy)
@@ -42,12 +42,12 @@ func TestReadFileWithPolicy_HardlinkToConfigDenied(t *testing.T) {
 	hard := filepath.Join(allowed, "alias")
 	require.NoError(t, os.Link(cfg, hard))
 
-	id, ok := StatDenyIdentity(cfg)
-	require.True(t, ok)
 	policy := &FilePolicy{
-		AllowedRoots:   []string{allowed},
-		Scope:          ScopeUpstream,
-		DenyIdentities: []DenyIdentity{id},
+		AllowedRoots: []string{allowed},
+		Scope:        ScopeUpstream,
+		Deny: DenyPaths{
+			ConfigFile: cfg,
+		},
 	}
 	_, err := ReadFileWithPolicy(hard, policy)
 	require.ErrorIs(t, err, ErrSecretFileDenied)

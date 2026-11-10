@@ -37,6 +37,22 @@ func TestSecretFileDirsChanged_detectsManagementEdit(t *testing.T) {
 	assert.True(t, SecretFileDirsChanged(base, edited))
 }
 
+func TestSecretFileDirsManagementEditRefused(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, ConfigFileName)
+	base := &Config{DataDir: dir, Listen: ":8080"}
+	w := SecretFileDirs{"/run/secrets"}
+	base.SecretFileDirs = &w
+	require.NoError(t, SaveConfig(base, path))
+
+	wild := SecretFileDirs{"*"}
+	incoming := &Config{DataDir: dir, Listen: ":8080", SecretFileDirs: &wild}
+	assert.True(t, SecretFileDirsManagementEditRefused(path, incoming))
+
+	same := &Config{DataDir: dir, Listen: ":8080", SecretFileDirs: &w, ToolsLimit: 2}
+	assert.False(t, SecretFileDirsManagementEditRefused(path, same))
+}
+
 func TestApplyPatchMap_RejectsSecretFileDirs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, ConfigFileName)

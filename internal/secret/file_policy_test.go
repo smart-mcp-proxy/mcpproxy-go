@@ -59,12 +59,7 @@ func TestReadFileWithPolicy_DenyPathsEvenInWildcard(t *testing.T) {
 		DataDir:        root,
 		DataSecretsDir: filepath.Join(root, "secrets"),
 	}
-	if id, ok := StatDenyIdentity(cfg); ok {
-		policy.DenyIdentities = append(policy.DenyIdentities, id)
-	}
-	if id, ok := StatDenyIdentity(filepath.Join(root, "config.db")); ok {
-		policy.DenyIdentities = append(policy.DenyIdentities, id)
-	}
+	policy.Deny.AdminKeyPaths = nil
 
 	_, err := ReadFileWithPolicy(cfg, policy)
 	require.ErrorIs(t, err, ErrSecretFileDenied)
