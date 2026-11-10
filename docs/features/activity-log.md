@@ -582,5 +582,5 @@ curl -N "http://127.0.0.1:8080/events?apikey=$KEY" | grep "activity.tool_call"
 Activity records are stored in BBolt database at `~/.mcpproxy/config.db`. The background cleanup process automatically prunes old records based on retention settings.
 
 :::tip Performance
-Activity logging is non-blocking and uses an event-driven architecture to minimize impact on tool call latency.
+Most runtime activity events are persisted by the background event worker, so publishing them does not wait for the database write. Some records are synchronous: for example, every executed tools-preflight check persists its audit record before the result returns ([details](./tools-preflight.md#transparency-every-preflight-is-on-the-record)).
 :::
