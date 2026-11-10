@@ -102,6 +102,20 @@ jobs:
       - name: Self-test the retry wrapper
         run: bash scripts/go-test-retry-runtime-fault.test.sh
 
+  # The macOS Build Binaries leg builds the Swift tray through
+  # scripts/build-swift-app.sh. Its self-test (fake swift/swiftc/curl, a stale
+  # SwiftPM artifact-cache entry) proves a stale Sparkle download is purged
+  # and retried once, and that a compile error is not.
+  build-swift-app-self-test:
+    name: Swift Build Script
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Self-test the SwiftPM retry
+        run: bash scripts/build-swift-app.test.sh
+
   # Spec 116 FR-009 (T002): storage's upstreams rows are written only by the
   # config commit (internal/runtime/commit*.go). Hermetic grep; the self-test
   # proves the check can fail.
