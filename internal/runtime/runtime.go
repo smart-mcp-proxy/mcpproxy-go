@@ -1401,14 +1401,18 @@ func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretNam
 		zap.String("secret_name", secretName),
 		zap.Strings("servers", affectedServers))
 
-	// Restart affected servers in the background
+	// Restart affected servers in the background. The caller's identity rides
+	// along (issue #1698: a restart that enables a disabled server records who
+	// changed the secret); the request's cancellation does not, since the
+	// restarts outlive the request.
+	restartCtx := context.WithoutCancel(ctx)
 	go func() {
 		for _, serverName := range affectedServers {
 			r.logger.Info("Restarting server due to secret change",
 				zap.String("server", serverName),
 				zap.String("secret_name", secretName))
 
-			if err := r.RestartServer(serverName); err != nil {
+			if err := r.RestartServerCtx(restartCtx, serverName); err != nil {
 				r.logger.Error("Failed to restart server after secret change",
 					zap.String("server", serverName),
 					zap.String("secret_name", secretName),

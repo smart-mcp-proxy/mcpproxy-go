@@ -733,6 +733,11 @@ mcpproxy token regenerate deploy-bot
 
 The new token is displayed once — save it immediately.
 
+A regeneration writes one `profile_change` activity record with `change: rotate`,
+the `token_name`, the actor (`actor_kind`, `actor_name`, `surface`) and a diff
+holding the old and new `token_prefix` — never the secret — so the record of who
+minted, rotated or revoked a token is complete (`issue`, `rotate`, `revoke`).
+
 ### JSON Output
 
 All commands support JSON output for scripting:
