@@ -97,12 +97,17 @@ Tool-level quarantine is enabled by default. To disable:
 |-------|------|---------|-------------|
 | `quarantine_enabled` | boolean | `true` | Enable tool-level quarantine globally |
 
-### Per-Server Auto-Approve
+### Per-Server Trust Modes
 
-By default a trusted server's baseline auto-approves, but **post-baseline
-changes and additions are still reviewed** (`changed` / `pending`). To opt a
-server out of that review entirely — auto-approving every change and addition,
-including rug-pulls — set `auto_approve_tool_changes: true`:
+The effective `trust_mode` controls how new and changed tool contracts are
+approved. The default is `scan`: tools are auto-approved only when the offline
+scan is clean; findings or scan-coverage gaps keep them pending for review.
+`manual` holds every new or changed tool for review. `auto` approves all such
+changes without scanning and disables rug-pull protection. See [Trust modes](./security-quarantine.md#trust-modes-auto--scan--manual)
+for the full behavior, including new-server admission.
+
+Older configs and API clients can still use `auto_approve_tool_changes` as a
+compatibility setting when `trust_mode` is unset:
 
 ```json
 {
@@ -118,27 +123,35 @@ including rug-pulls — set `auto_approve_tool_changes: true`:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `auto_approve_tool_changes` | boolean (tri-state) | unset (= `false`) | Auto-approve **all** post-baseline tool changes AND additions for this server, disabling per-server rug-pull protection. The active per-server control. |
-| `skip_quarantine` | boolean | `false` | **Deprecated** — superseded by `auto_approve_tool_changes`. A legacy `skip_quarantine: true` is migrated onto `auto_approve_tool_changes` on load **only when the latter is unset**, so an explicit `auto_approve_tool_changes: false` overrides a legacy `skip_quarantine: true`. |
+| `auto_approve_tool_changes` | boolean (tri-state) | unset (effective `trust_mode`: `scan`) | Compatibility setting used only when `trust_mode` is unset: `true` selects `auto`, `false` selects `manual`; an explicit `trust_mode` takes precedence. |
+| `skip_quarantine` | boolean | `false` | **Deprecated** — superseded by `auto_approve_tool_changes`. A legacy `skip_quarantine: true` is migrated onto `auto_approve_tool_changes` on load only when that field is unset; an explicit `trust_mode` still takes precedence. |
 
-> **Security:** `auto_approve_tool_changes: true` turns off rug-pull detection for
-> that server — a later malicious description/schema change is silently approved.
-> Only enable it for servers you fully control.
+> **Security:** effective `trust_mode: auto` turns off rug-pull detection for
+> that server — a later malicious description/schema change is trusted without a
+> scan. Only enable it for servers you fully control.
 
-> **REST API:** `auto_approve_tool_changes` round-trips through the server REST API. `GET /api/v1/servers` includes it on each server object (omitted when unset — the tri-state nil is preserved so the Web UI can tell "never set" from an explicit `false`), and `POST`/`PATCH /api/v1/servers/{id}` accept it. As a tri-state `*bool`, omitting it on `PATCH` leaves the stored value unchanged; sending an explicit `false` clears a prior `true`. The value is persisted to BBolt so it survives a save/restart.
+> **REST API:** `auto_approve_tool_changes` remains accepted and persisted for
+> compatibility. `GET /api/v1/servers` omits it when unset; `POST` and `PATCH`
+> accept it as a tri-state field. Omitting it on `PATCH` leaves it unchanged.
+> Runtime behavior follows the effective `trust_mode`, with explicit
+> `trust_mode` taking precedence.
 
 ### Auto-Approve Behavior
 
 Tools are automatically approved (no manual review needed) when:
-- `quarantine_enabled` is `false` globally, or the server still carries the
-  deprecated `skip_quarantine: true` — recorded with `approved_by: "auto"`.
+- `quarantine_enabled` is `false` globally, or the effective `trust_mode` is
+  `auto`.
 - A **trusted server establishes its baseline** (first discovery with no prior
   baseline, or migrating already-stranded `pending` tools whose hash is
   unchanged) **and the offline TPA scan is clean for the tool** — recorded with
   `approved_by: "auto-baseline"`. A flagged first-seen tool is never
   auto-baselined, on that pass or any repeat (R2-1).
-- The server has `auto_approve_tool_changes: true` and a post-baseline change or
-  addition occurs — recorded with `approved_by: "auto-approve-changes"`.
+- Under `trust_mode: scan`, an offline scan of a new tool or changed contract
+  returns clean. Findings and incomplete scan coverage keep the tool pending.
+
+Under `trust_mode: manual`, new tools and changed contracts stay pending until
+approved. The default `scan` mode and the least-safe `auto` mode are described
+in [Trust modes](./security-quarantine.md#trust-modes-auto--scan--manual).
 
 #### Migrating existing installs
 
@@ -287,15 +300,11 @@ appear at once.
 
 The server list page shows a quarantine badge with the count of pending/changed tools for each server.
 
-The server detail view's **Configuration** tab carries an **Auto-approve tool
-changes** toggle (a **Tool-change approval** card) bound to the per-server
-`auto_approve_tool_changes` flag. It is **OFF by default (protected)**; a ⚠️ hint
-beneath it explains that enabling it disables rug-pull protection for that
-server — future tool description/schema changes and newly added tools are then
-trusted automatically instead of held for review. Toggling persists through the
-existing `PATCH /api/v1/servers/{id}` path. (As noted under
-[Per-Server Auto-Approve](#per-server-auto-approve), the runtime enforcement of
-this flag rolls out in an upcoming release.)
+The server detail view's **Configuration** tab has a **Trust mode** selector
+with **Auto**, **Scan**, and **Manual** options. It saves `trust_mode` through
+`PATCH /api/v1/servers/{id}`; choosing **Auto** requires confirming its warning
+about trusting changes without a security scan. The selector displays the
+default `Scan` mode when no value is configured.
 
 ### Doctor Command
 
