@@ -147,8 +147,8 @@ func TestReadFileWithPolicy_TraversalInPath(t *testing.T) {
 }
 
 func TestIsReservedMCPProxyEnv(t *testing.T) {
-	assert.True(t, isReservedMCPProxyEnv("MCPPROXY_API_KEY"))
-	assert.True(t, isReservedMCPProxyEnv("MCPPROXY_FOO"))
-	assert.False(t, isReservedMCPProxyEnv("OTHER"))
-	assert.False(t, isReservedMCPProxyEnv("MCPROXY_API_KEY"))
+	assert.True(t, ReservedMCPProxyEnvName("MCPPROXY_API_KEY", "linux"))
+	assert.True(t, ReservedMCPProxyEnvName("MCPPROXY_FOO", "linux"))
+	assert.False(t, ReservedMCPProxyEnvName("OTHER", "linux"))
+	assert.False(t, ReservedMCPProxyEnvName("MCPROXY_API_KEY", "linux"))
 }
