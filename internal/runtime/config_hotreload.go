@@ -189,6 +189,13 @@ func DetectConfigChanges(oldCfg, newCfg *config.Config) *ConfigApplyResult {
 
 	// Track hot-reloadable changes
 
+	// secret_file_dirs (issue #1721 — hot-reloadable). Rebuilds the upstream
+	// secret resolver when the allow-list changes; an explicit [] disables
+	// ${file:} without a restart.
+	if !config.SecretFileDirsEqual(oldCfg.SecretFileDirs, newCfg.SecretFileDirs) {
+		result.ChangedFields = append(result.ChangedFields, "secret_file_dirs")
+	}
+
 	// Server configuration changes (can be hot-reloaded).
 	//
 	// Compared via jsonEqual, not reflect.DeepEqual, for the same reason as

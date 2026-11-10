@@ -3791,22 +3791,12 @@ func (r *Runtime) applyComponentConfigLocked(oldCfg, newCfg *config.Config) {
 		r.activityService.SetUsagePersistInterval(newCfg.Observability.UsagePersistInterval.Duration())
 	}
 
-	if oldCfg.DataDir != newCfg.DataDir || !secretFileDirsEqual(oldCfg.SecretFileDirs, newCfg.SecretFileDirs) {
+	if oldCfg.DataDir != newCfg.DataDir || !config.SecretFileDirsEqual(oldCfg.SecretFileDirs, newCfg.SecretFileDirs) {
 		r.secretResolver = config.BuildSecretResolver(newCfg, r.cfgPath, secret.ScopeUpstream)
 		if r.upstreamManager != nil {
 			r.upstreamManager.SetSecretResolver(r.secretResolver)
 		}
 	}
-}
-
-func secretFileDirsEqual(a, b *config.SecretFileDirs) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return reflect.DeepEqual([]string(*a), []string(*b))
 }
 
 // GetVersionInfo returns the current version information from the update checker.

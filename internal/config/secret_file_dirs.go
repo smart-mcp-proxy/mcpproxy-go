@@ -56,6 +56,29 @@ func SecretFileDirsWildcard(dirs []string) bool {
 	return len(dirs) == 1 && dirs[0] == secretFileDirsWildcard
 }
 
+// SecretFileDirsEqual reports whether two secret_file_dirs settings are the same.
+func SecretFileDirsEqual(a, b *SecretFileDirs) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return stringSlicesEqual([]string(*a), []string(*b))
+}
+
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // EffectiveSecretFileDirRoots resolves the configured allow-list for policy
 // enforcement. When cfg.SecretFileDirs is nil the defaults apply; an empty
 // non-nil slice disables ${file:}; ["*"] is wildcard mode.
