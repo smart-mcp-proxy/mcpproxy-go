@@ -1033,7 +1033,6 @@ block** — off by default, best-effort, and unable to change the baseline verdi
     "scan_timeout_default": "60s",
     "integrity_check_interval": "1h",
     "integrity_check_on_restart": false,
-    "scanner_registry_url": "",
     "tpa_bundle_path": "",
     "require_signed_bundle": false,
     "tpa_active_root": "publisher",
