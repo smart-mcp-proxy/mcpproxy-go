@@ -75,11 +75,14 @@ The values are `ready`, `connecting`, `sign_in_required`, `needs_review`, `needs
 ```bash
 mcpproxy upstream add notion https://mcp.notion.com/sse
 mcpproxy upstream add fs -- npx -y @modelcontextprotocol/server-filesystem /tmp
-mcpproxy upstream add github https://api.githubcopilot.com/mcp/ --secret-header "Authorization: Bearer ghp_..."
-mcpproxy upstream add weather --secret-env WEATHER_API_KEY=abc123 -- npx -y weather-mcp
+mcpproxy secrets set github-token
+mcpproxy upstream add github https://api.githubcopilot.com/mcp/ --header 'Authorization: Bearer ${keyring:github-token}'
+
+mcpproxy secrets set weather-api-key
+mcpproxy upstream add weather --env 'WEATHER_API_KEY=${keyring:weather-api-key}' -- npx -y weather-mcp
 ```
 
-`--secret-env KEY=VALUE` and `--secret-header "Name: value"` (both repeatable) write the value to the OS keyring and store `${keyring:<server>-env-<name>}` in the config instead of the value. New servers are quarantined. To pick a server from a catalog instead of typing its command, see [Catalog Commands](/cli/catalog-commands).
+For manual setup, `mcpproxy secrets set <name>` prompts for the value and stores it in the OS keyring. Reference it with `${keyring:<name>}` in `--header` or `--env`; quote the reference so the shell passes it literally. The `--secret-env KEY=VALUE` and `--secret-header "Name: value"` flags (both repeatable) also store values in the keyring, but the supplied value is still a command-line argument and may be recorded in shell history or exposed in process listings. New servers are quarantined. To pick a server from a catalog instead of typing its command, see [Catalog Commands](/cli/catalog-commands).
 
 A successful add prints the next commands, so you can review and admit the server without leaving the terminal:
 
