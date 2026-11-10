@@ -101,6 +101,14 @@ The installer will:
 - Add MCPProxy to your system PATH
 - Create Start Menu shortcuts
 
+#### Troubleshooting: `uvx` servers fail with "untrusted mount point (os error 448)"
+
+**Symptom.** Right after installing with "Launch MCPProxy" checked, every `uvx`/`uv` stdio server shows `Error`, and `mcpproxy upstream logs <name>` contains `The path cannot be traversed because it contains an untrusted mount point. (os error 448)`. Starting MCPProxy from the Start menu works.
+
+**Cause.** The installers for v0.56.0 through v0.73.0 were built with Inno Setup 6.7.x before 6.7.4. Those versions leak the Windows RedirectionGuard process mitigation from Setup into the app launched by the final "Launch MCPProxy" checkbox. The tray, the core and all upstream servers then run with RedirectionGuard on, which blocks the junctions that uv creates for its managed Python versions. Installers built after this fix use Inno Setup 6.7.4, which stops the inheritance. One caveat from the Inno Setup 6.7.4 notes: if Setup did not have to request elevation (for example it was started from an already elevated shell), the mitigation can still be inherited.
+
+**Fix.** Quit MCPProxy (tray menu, Quit) and start it again from the Start menu. `mcpproxy doctor` and the core log (`main.log`) report a warning when the mitigation is active on the running process. Upgrading to a release built with Inno Setup 6.7.4 or newer avoids the problem.
+
 ### Manual Installation
 
 1. Download the Windows binary from the releases page

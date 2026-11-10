@@ -15,6 +15,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/redirectionguard"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/shellwrap"
 )
 
@@ -273,6 +274,12 @@ func (s *service) Doctor(ctx context.Context) (*contracts.Diagnostics, error) {
 	// macOS App-Data (TCC) denial probe (Spec 075 US3): surface a persisted denial
 	// to read MCP client configs as an actionable runtime warning. No-op off darwin.
 	if warning, ok := appDataDenialWarning(); ok {
+		diag.RuntimeWarnings = append(diag.RuntimeWarnings, warning)
+	}
+
+	// #1844: Windows RedirectionGuard inherited from the installer breaks uv
+	// servers (os error 448). No-op off Windows.
+	if warning, ok := redirectionguard.Check(); ok {
 		diag.RuntimeWarnings = append(diag.RuntimeWarnings, warning)
 	}
 

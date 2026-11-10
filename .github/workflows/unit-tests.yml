@@ -132,6 +132,85 @@ jobs:
       - name: Check the repository
         run: bash scripts/check-upstream-write-sites.sh
 
+  # Issue #1844: the Inno Setup install action and the Ver guard in
+  # scripts/installer.iss otherwise only run on tag builds. This job proves on
+  # every PR that the pinned 6.7.4 installs (SHA-256 verified), that the real
+  # installer script compiles with it (stub binaries; no Go build needed), and
+  # that the preprocessor guard can actually fail.
+  inno-setup-action-self-test:
+    name: Inno Setup Action
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install pinned Inno Setup
+        uses: ./.github/actions/install-inno-setup
+
+      - name: Compile scripts/installer.iss with stub binaries
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+
+          # installer.iss only needs the two exe files to exist; ignoreversion
+          # means their content is not inspected, so stubs are enough.
+          $bin = Join-Path $env:RUNNER_TEMP 'inno-selftest\bin'
+          $out = Join-Path $env:RUNNER_TEMP 'inno-selftest\out'
+          New-Item -ItemType Directory -Force -Path $bin, $out | Out-Null
+          Set-Content -Path (Join-Path $bin 'mcpproxy.exe') -Value 'stub' -Encoding ASCII
+          Set-Content -Path (Join-Path $bin 'mcpproxy-tray.exe') -Value 'stub' -Encoding ASCII
+
+          $log = (& $iscc "/O$out" "/DVersion=0.0.0-selftest" "/DArch=amd64" "/DBinPath=$bin" 'scripts\installer.iss' 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          Write-Host $log
+          if ($code -ne 0) {
+            Write-Host "::error::ISCC failed to compile scripts/installer.iss (exit code $code)"
+            exit 1
+          }
+          if ($log -notmatch '6\.7\.4') {
+            Write-Host '::error::ISCC output does not report Inno Setup 6.7.4'
+            exit 1
+          }
+          $setup = Join-Path $out 'mcpproxy-setup-0.0.0-selftest-amd64.exe'
+          if (-not (Test-Path -LiteralPath $setup)) {
+            Write-Host "::error::Expected installer was not produced: $setup"
+            exit 1
+          }
+          Write-Host "Compiled $setup"
+
+      - name: Prove the version guard can fail
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $iscc = 'C:\Program Files (x86)\Inno Setup 6\ISCC.exe'
+          $dir = Join-Path $env:RUNNER_TEMP 'inno-selftest\guard'
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $script = Join-Path $dir 'guard.iss'
+          # Same guard shape as installer.iss, but demanding a version that
+          # does not exist: ISCC must exit non-zero.
+          @(
+            '#if Ver < EncodeVer(99,0,0)'
+            '  #error "guard fired"'
+            '#endif'
+            '[Setup]'
+            'AppName=Guard'
+            'AppVersion=1.0'
+            'DefaultDirName={autopf}\Guard'
+            "OutputDir=$dir"
+            'OutputBaseFilename=guard'
+          ) | Set-Content -Path $script -Encoding ASCII
+          $log = (& $iscc $script 2>&1 | Out-String)
+          $code = $LASTEXITCODE
+          Write-Host $log
+          if ($code -eq 0) {
+            Write-Host '::error::The Ver guard did not fail the compile; it would not protect installer.iss'
+            exit 1
+          }
+          Write-Host "Guard failed the compile as expected (exit code $code)"
+          exit 0
+
   test:
     name: Unit Tests
     needs: [build-frontend, verify-oas]
