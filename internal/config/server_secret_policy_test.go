@@ -27,13 +27,6 @@ func TestServerSecretPolicyErrors_RefusesReservedEnv(t *testing.T) {
 	assert.NotContains(t, errs[0].Message, "/")
 }
 
-func TestDefaultSecretFileDirRootsForGOOS(t *testing.T) {
-	linux := DefaultSecretFileDirRootsForGOOS("linux")
-	assert.Contains(t, linux, "/run/secrets")
-	assert.NotContains(t, DefaultSecretFileDirRootsForGOOS("darwin"), "/run/secrets")
-	assert.Empty(t, DefaultSecretFileDirRootsForGOOS("windows"))
-}
-
 func TestLoad_APIKeyFileRefOutsideAllowListFailsLoad(t *testing.T) {
 	t.Cleanup(ResetProcessOverrides)
 	ResetProcessOverrides()

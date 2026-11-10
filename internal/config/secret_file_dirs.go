@@ -119,6 +119,12 @@ func stringSlicesEqual(a, b []string) bool {
 // enforcement. When cfg.SecretFileDirs is nil the defaults apply; an empty
 // non-nil slice disables ${file:}; ["*"] is wildcard mode.
 func EffectiveSecretFileDirRoots(cfg *Config, includeDataDirDerived bool) (wildcard bool, roots []string, disabled bool) {
+	return EffectiveSecretFileDirRootsForGOOS(cfg, includeDataDirDerived, runtime.GOOS)
+}
+
+// EffectiveSecretFileDirRootsForGOOS is EffectiveSecretFileDirRoots with an
+// explicit GOOS so platform default roots can be tested on Linux CI.
+func EffectiveSecretFileDirRootsForGOOS(cfg *Config, includeDataDirDerived bool, goos string) (wildcard bool, roots []string, disabled bool) {
 	if cfg != nil && cfg.SecretFileDirs != nil {
 		if len(*cfg.SecretFileDirs) == 0 {
 			return false, nil, true
@@ -128,7 +134,7 @@ func EffectiveSecretFileDirRoots(cfg *Config, includeDataDirDerived bool) (wildc
 		}
 		roots = append(roots, ([]string)(*cfg.SecretFileDirs)...)
 	} else {
-		roots = append(roots, DefaultSecretFileDirRoots()...)
+		roots = append(roots, DefaultSecretFileDirRootsForGOOS(goos)...)
 	}
 
 	if credDir := os.Getenv(envCredentialsDir); credDir != "" && filepath.IsAbs(credDir) {

@@ -10,6 +10,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestDefaultSecretFileDirRootsForGOOS(t *testing.T) {
+	linux := DefaultSecretFileDirRootsForGOOS("linux")
+	assert.Contains(t, linux, "/run/secrets")
+	assert.NotContains(t, DefaultSecretFileDirRootsForGOOS("darwin"), "/run/secrets")
+	assert.Empty(t, DefaultSecretFileDirRootsForGOOS("windows"))
+}
+
+func TestEffectiveSecretFileDirRootsForGOOS_DarwinAndWindowsDataDirOnly(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), "data")
+	cfg := &Config{DataDir: dataDir}
+	want := filepath.Join(dataDir, "secrets")
+	for _, goos := range []string{"darwin", "windows"} {
+		t.Run(goos, func(t *testing.T) {
+			_, roots, disabled := EffectiveSecretFileDirRootsForGOOS(cfg, true, goos)
+			assert.False(t, disabled)
+			require.Len(t, roots, 1)
+			assert.Equal(t, want, roots[0])
+			for _, stock := range []string{"/run/secrets", "/run/credentials"} {
+				assert.NotContains(t, roots, stock)
+			}
+		})
+	}
+}
+
 func TestEffectiveSecretFileDirRoots(t *testing.T) {
 	t.Run("absent uses defaults on linux", func(t *testing.T) {
 		if runtime.GOOS != "linux" {
