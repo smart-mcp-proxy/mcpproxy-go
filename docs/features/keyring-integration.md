@@ -88,7 +88,7 @@ References can be used in:
 - **Server arguments** (`args` field)
 - **Server headers** (`headers` field)
 
-> **Note:** The `url` field does not support secret references. If your server URL contains credentials, use environment variables or headers instead.
+> **Note:** Secret references are resolved in the `url` field along with `env`, `args`, and `headers`. For HTTP credentials, prefer `headers` so the URL stays free of credentials.
 
 ### Configuration Example
 
