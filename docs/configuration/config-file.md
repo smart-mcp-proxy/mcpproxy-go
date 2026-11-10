@@ -58,7 +58,7 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 |--------|------|---------|-------------|
 | `listen` | string | `127.0.0.1:8080` | Address and port to listen on |
 | `data_dir` | string | `~/.mcpproxy` | Directory for data storage |
-| `secret_file_dirs` | string[] | platform defaults | Absolute directories where `${file:}` references may be read. Omitted: `/run/secrets`, `/run/credentials` and `<data-dir>/secrets` on Linux; `<data-dir>/secrets` on macOS/Windows; plus `CREDENTIALS_DIRECTORY` when set. `[]` disables file references. `["*"]` allows any path (compatibility mode, startup warning). **Config file only** — REST/MCP/CLI management cannot change or widen it; a full config-file writer is trusted for v1. Reloads from disk apply. Upstream `${file:}` reads also refuse proxy state by open-handle identity: the live config file, admin-key paths, regular files directly under `<data-dir>` (except `<data-dir>/secrets`), and regular files one level under `<data-dir>/certs`, `index.bleve`, or `tpa-lkg` only — not deeper subtrees. |
+| `secret_file_dirs` | string[] | platform defaults | Where `${file:}` references may read on disk. See [Secret file directories](#secret-file-directories-secret_file_dirs). |
 | `api_key` | string | auto-generated | API key for REST API authentication |
 | `trusted_hosts` | string[] | `[]` | Non-loopback `Host` header values accepted on a loopback listener. Needed when running behind a reverse proxy — see [Reverse Proxy Deployment](/operations/reverse-proxy). This is DNS-rebinding protection only; it is **not** the control for forwarded headers (see `trusted_proxies`) |
 | `trusted_proxies` | string[] | `[]` (trust nobody) | CIDRs or IP addresses whose `X-Forwarded-For`, `X-Real-IP`, `X-Forwarded-Proto` and `X-Forwarded-Host` headers are believed. Headers from any other peer are ignored and the direct `RemoteAddr` is used. Env `MCPPROXY_TRUSTED_PROXIES` (comma list). Live (hot-reload, no restart). Validation: `trusted_proxies[N] "value" is not a valid CIDR or IP address` — refused identically at boot, `PATCH /api/v1/config` and `/config/apply`. See [Reverse Proxy Deployment](/operations/reverse-proxy#trusted_proxies-forwarded-headers) |
@@ -66,6 +66,35 @@ MCPProxy uses a JSON configuration file located at `~/.mcpproxy/mcp_config.json`
 | `mcp_reject_query_apikey` | boolean | `false` | Refuse a `?apikey=` query parameter on every MCP endpoint (`/mcp*` and the legacy `/v1/tool_code` aliases) with a 401, forcing clients onto `Authorization: Bearer <token>` or `X-API-Key` so tokens stop appearing in access logs, proxy logs and browser history (a URL already sent is still logged in transit; the option makes the client fail until it is migrated). MCP endpoints only: the REST API, the Web UI and `/events` keep accepting the query form. Entries written by an older Connect wizard with `?apikey=` in the URL (Codex, the generic fallback) must be reconnected first; current versions write an `X-API-Key` header. Live, no restart |
 | `enable_socket` | boolean | `true` | Enable the Unix socket/named pipe the tray uses. Socket connections are trusted **without the API key**, including stdio servers spawned under `none` or `sandbox` isolation, which can then mint agent tokens. Set `false` on headless installs and whenever untrusted stdio servers run outside `docker` isolation. |
 | `forward_client_headers` | boolean | `true` | Master switch for [client header forwarding](/configuration/upstream-servers#client-header-forwarding). Nothing is forwarded until a server lists names in `forward_headers`. Env `MCPPROXY_FORWARD_CLIENT_HEADERS=false` disables it for the process (never persisted). |
+
+### Secret file directories (`secret_file_dirs`) {#secret-file-directories-secret_file_dirs}
+
+`secret_file_dirs` is the allow-list of absolute directories from which `${file:/absolute/path}` references may read a secret. It applies to proxy-owned fields (`api_key`, a `${file:}` in `data_dir`, and similar) and to every field on an upstream server entry (see [Upstream servers — Secret references](/configuration/upstream-servers#secret-references)). Upstream `${file:}` reads still refuse proxy state files even when a path lies under an allowed root.
+
+**Defaults when the key is omitted:**
+
+| Platform | Roots |
+|----------|--------|
+| Linux | `/run/secrets`, `/run/credentials`, and `<data-dir>/secrets` once `data_dir` is resolved |
+| macOS | `<data-dir>/secrets` |
+| Windows | `<data-dir>\secrets` |
+
+If `CREDENTIALS_DIRECTORY` is set to an absolute path (systemd user credentials, some container layouts), that directory is added to the effective list on every platform.
+
+| Value | Meaning |
+|-------|---------|
+| *(omitted)* | Platform defaults in the table above |
+| `[]` | Every `${file:}` reference is refused |
+| `["*"]` | Compatibility mode: any absolute regular file may be read (upstream deny rules still apply). Emits a startup **warning** |
+| `["/var/lib/secrets", ...]` | Only files contained in the listed absolute directories |
+
+Validation rejects JSON `null`, relative paths, and a list that mixes `*` with other entries. A configured root that does not exist yet produces a startup warning; reads under that root fail until the directory appears.
+
+**Operator policy, not management API (v1):** `secret_file_dirs` cannot be changed or widened through `PATCH /api/v1/config`, `POST /api/v1/config/apply`, or any management merge that would persist a different value than the on-disk file — each save restores the file’s setting (`PersistableConfig`). Hot reload: editing the key in `mcp_config.json` rebuilds the upstream secret resolver without a process restart. For v1, anyone who can replace the entire config file is trusted to set policy directly in that file.
+
+**Admin API key and `MCPPROXY_API_KEY_FILE`:** The environment variable `MCPPROXY_API_KEY_FILE` is operator-controlled and is **not** gated by `secret_file_dirs` (it uses the same absolute-path read rules as other admin key files). It is refused when it resolves to the active config file or to anything under `data_dir` except `<data-dir>/secrets`. A `${file:}` in the `api_key` field **is** gated by `secret_file_dirs`. Setting both `MCPPROXY_API_KEY` and `MCPPROXY_API_KEY_FILE` to non-empty values still fails startup; an unusable key file still fails startup with no generated-key fallback.
+
+See [Environment variables — API key from a file](/configuration/environment-variables#api-key-from-a-file) for `MCPPROXY_API_KEY_FILE` examples.
 
 ### `audit_log` (edition-neutral JSONL audit record)
 

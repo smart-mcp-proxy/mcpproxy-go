@@ -302,25 +302,75 @@ full reference, including the
 [`/config-to-secret`](../api/rest-api.md#post-apiv1serversnameconfig-to-secret)
 endpoint that backs the "Convert to secret" affordance.
 
-### Secret references
+### Secret references {#secret-references}
 
-`headers` and `env` values support three reference shapes that get resolved
-at request time rather than stored in plaintext:
+`headers`, `env`, `args`, `url`, `command`, `oauth`, and nested isolation fields
+support secret references that are resolved when mcpproxy prepares that server’s
+connection, not stored in plaintext on the wire after substitution:
 
 | Reference | Source | Lifetime |
 |---|---|---|
 | `${keyring:NAME}` | OS keyring entry called `NAME` | Persists across restarts; managed via the Secrets page or `mcpproxy secrets` CLI |
 | `${env:VAR}` | The `VAR` environment variable on the mcpproxy process | Tied to the shell/launcher that started mcpproxy |
-| `${file:/absolute/path}` | The contents of a file (Docker/Kubernetes secret, systemd credential), one trailing newline removed | Read each time the server's connection is set up, so a rotated secret is picked up when the server is next restarted |
+| `${file:/absolute/path}` | File contents (Compose/Kubernetes secret, systemd credential), one trailing newline removed | Read each time the server connection is built so a rotated file is picked up on the next connect or restart |
 
-`${file:}` paths must lie under `secret_file_dirs` (see [Config file](config-file.md)).
-Upstream fields refuse `${env:MCPPROXY_*}` references so a server entry cannot
-read proxy credentials from the environment.
+#### `secret_file_dirs` and `${file:}`
 
-When mcpproxy connects to an upstream it substitutes the reference with
-the actual secret. The reference itself never reaches the upstream MCP
-server. See [Keyring Integration](../features/keyring-integration.md)
-for the full secret-storage story.
+Every `${file:}` path must be absolute. For upstream servers, the file must lie
+under one of the directories listed in [`secret_file_dirs`](/configuration/config-file#secret-file-directories-secret_file_dirs)
+(or under platform defaults when the key is omitted). Set `secret_file_dirs` to
+`[]` to disallow all file references; `["*"]` is compatibility mode (startup
+warning) but upstream reads still enforce the deny rules below.
+
+`CREDENTIALS_DIRECTORY`, when set, is treated like an extra allow-list root on
+load — useful for systemd user services that inject credentials beside the
+process.
+
+The proxy’s own `api_key` and `data_dir` use the same `secret_file_dirs` policy
+when they carry `${file:}` references. `MCPPROXY_API_KEY_FILE` is separate: it is
+not limited by `secret_file_dirs` (see the config-file section above).
+
+#### Reserved proxy namespace
+
+Upstream expansion refuses the whole `MCPPROXY_` environment namespace (including
+`MCPPROXY_CRED_KEY`), using Windows case rules for the prefix. Proxy-owned
+readers (`api_key`, `data_dir`, server-edition OAuth client fields) use a
+proxy-scoped resolver and may still read those variables.
+
+#### Files an upstream must never read
+
+Even when a path is under an allowed root or `secret_file_dirs` is `["*"]`, an
+upstream-scoped read refuses:
+
+- The active config file and the active admin API key source file(s)
+- Regular files directly under `<data-dir>` (except under `<data-dir>/secrets`)
+- Regular files one level below `<data-dir>/certs`, `<data-dir>/index.bleve`, or `<data-dir>/tpa-lkg` (not deeper subtrees)
+
+Checks use the opened file’s identity (device and inode), so hardlinks, aliases,
+and a config file replaced by rename are refused — not only a literal path match.
+
+#### Policy denials vs load failures
+
+A policy denial on one upstream server does **not** stop the daemon. That server
+fails to connect or spawn; status, per-server logs, and `mcpproxy doctor` show a
+fixed public message (no path or secret echoed), for example:
+
+- `secret file is missing, unreadable or outside secret_file_dirs`
+- `secret reference refused: this environment variable is reserved`
+
+Non-policy resolution failures may still use an internal placeholder until the
+reference is fixed. Failures in proxy-key or `data_dir` policy during **load**
+still abort startup.
+
+Management surfaces (`mcpproxy tools`, `mcpproxy call`, the CLI upstream client,
+and the daemon) all build the upstream resolver from the loaded config, so CLI
+and runtime enforce one policy. Changing `secret_file_dirs` in the config file
+hot-reloads the resolver; management APIs cannot widen the list.
+
+When mcpproxy connects successfully it substitutes references with the actual
+secret; the reference itself never reaches the upstream MCP server. See
+[Keyring Integration](../features/keyring-integration.md) for the full
+secret-storage story.
 
 ## Client Header Forwarding {#client-header-forwarding}
 
