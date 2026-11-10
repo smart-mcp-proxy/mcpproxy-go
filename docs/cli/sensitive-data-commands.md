@@ -50,7 +50,7 @@ mcpproxy activity list --detection-type aws_access_key
 
 ### Filter by Severity
 
-Filter activities by the severity level of detected sensitive data:
+Filter activities by the highest detected severity (exact match):
 
 ```bash
 # Filter by severity
@@ -309,7 +309,7 @@ Showing 4 of 4 records (page 1)
 |------|-------|---------|-------------|
 | `--sensitive-data` | | false | Filter to show only activities with sensitive data detected |
 | `--detection-type` | | | Filter by specific detection type (e.g., `aws_access_key`, `api_key`, `private_key`) |
-| `--severity` | | | Filter by minimum severity level: `critical`, `high`, `medium`, `low` |
+| `--severity` | | | Filter by exact highest detected severity: `critical`, `high`, `medium`, `low` |
 | `--type` | `-t` | | Filter by activity type (can combine with sensitive data filters) |
 | `--server` | `-s` | | Filter by server name |
 | `--tool` | | | Filter by tool name |
