@@ -405,15 +405,23 @@ Two consequences of the ownership rule are worth knowing:
 
 ### Manual Cleanup
 
-If containers remain after MCPProxy stops:
+If a container needs manual cleanup after MCPProxy stops, inspect candidates one at a time:
 
 ```bash
-# List MCPProxy-managed containers
-docker ps --filter "label=com.mcpproxy.managed=true"
+# List candidate container IDs
+docker ps -aq --filter "label=com.mcpproxy.managed=true"
 
-# Remove all MCPProxy containers
-docker rm -f $(docker ps -q --filter "label=com.mcpproxy.managed=true")
+# Check one candidate's exact labels before deciding whether it is safe to remove
+docker inspect --format '{{.Id}} {{json .Config.Labels}}' <candidate-container-id>
+
+# Only after confirming the exact orphan you intend to remove
+docker rm -f <confirmed-container-id>
 ```
+
+The `com.mcpproxy.managed=true` label is shared and copyable; the filter can also
+match user-created, other-instance, or orphaned containers. Do not pipe all
+matches to `docker rm -f` or treat that label alone as ownership proof. Remove
+only an exact container ID you have confirmed is safe to delete.
 
 See [Shutdown Behavior](/operations/shutdown-behavior) for detailed subprocess lifecycle documentation.
 
