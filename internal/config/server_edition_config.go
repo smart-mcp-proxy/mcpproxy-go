@@ -289,7 +289,11 @@ func resolveOAuthSecretRef(raw string) (string, error) {
 	if raw == "" {
 		return "", nil
 	}
-	return secret.NewResolver().ExpandSecretRefs(context.Background(), raw)
+	r := secret.NewResolverWithOptions(secret.ResolverOptions{
+		Scope:      secret.ScopeProxy,
+		FilePolicy: secret.NewWildcardFilePolicy(secret.ScopeProxy),
+	})
+	return r.ExpandSecretRefs(context.Background(), raw)
 }
 
 // PublicURLIsHTTPS reports whether the configured public_url uses https.

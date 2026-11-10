@@ -6,10 +6,38 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
+func TestResolver_UpstreamEnvGuard(t *testing.T) {
+	r := NewResolverWithOptions(ResolverOptions{
+		Scope:      ScopeUpstream,
+		FilePolicy: NewWildcardFilePolicy(ScopeUpstream),
+	})
+	for _, ref := range []string{
+		"${env:MCPROXY_API_KEY}",
+		"${env:MCPROXY_API_KEY_FILE}",
+		"${env:MCPROXY_CRED_KEY}",
+	} {
+		_, err := r.ExpandSecretRefs(context.Background(), ref)
+		require.ErrorIs(t, err, ErrReservedEnvVar, ref)
+	}
+}
+
+func TestEnvProvider_ReservedGuard(t *testing.T) {
+	p := NewEnvProvider(true)
+	_, err := p.Resolve(context.Background(), Ref{Type: "env", Name: "MCPROXY_API_KEY"})
+	require.ErrorIs(t, err, ErrReservedEnvVar)
+
+	t.Setenv("MCPROXY_API_KEY", "sekrit")
+	p2 := NewEnvProvider(false)
+	val, err := p2.Resolve(context.Background(), Ref{Type: "env", Name: "MCPROXY_API_KEY"})
+	require.NoError(t, err)
+	assert.Equal(t, "sekrit", val)
+}
+
 func TestEnvProvider_CanResolve(t *testing.T) {
-	provider := NewEnvProvider()
+	provider := NewEnvProvider(false)
 
 	assert.True(t, provider.CanResolve("env"))
 	assert.False(t, provider.CanResolve("keyring"))
@@ -17,12 +45,12 @@ func TestEnvProvider_CanResolve(t *testing.T) {
 }
 
 func TestEnvProvider_IsAvailable(t *testing.T) {
-	provider := NewEnvProvider()
+	provider := NewEnvProvider(false)
 	assert.True(t, provider.IsAvailable())
 }
 
 func TestEnvProvider_Resolve(t *testing.T) {
-	provider := NewEnvProvider()
+	provider := NewEnvProvider(false)
 	ctx := context.Background()
 
 	t.Run("existing environment variable", func(t *testing.T) {
@@ -85,7 +113,7 @@ func TestEnvProvider_Resolve(t *testing.T) {
 }
 
 func TestEnvProvider_Store(t *testing.T) {
-	provider := NewEnvProvider()
+	provider := NewEnvProvider(false)
 	ctx := context.Background()
 
 	ref := Ref{
@@ -100,7 +128,7 @@ func TestEnvProvider_Store(t *testing.T) {
 }
 
 func TestEnvProvider_Delete(t *testing.T) {
-	provider := NewEnvProvider()
+	provider := NewEnvProvider(false)
 	ctx := context.Background()
 
 	ref := Ref{
@@ -115,7 +143,7 @@ func TestEnvProvider_Delete(t *testing.T) {
 }
 
 func TestEnvProvider_List(t *testing.T) {
-	provider := NewEnvProvider()
+	provider := NewEnvProvider(false)
 	ctx := context.Background()
 
 	// Set some test environment variables

@@ -12,7 +12,7 @@ import (
 )
 
 func TestFileProvider_Resolve(t *testing.T) {
-	p := NewFileProvider()
+	p := NewFileProvider(NewWildcardFilePolicy(ScopeUpstream))
 	assert.True(t, p.CanResolve("file"))
 	assert.False(t, p.CanResolve("env"))
 	assert.True(t, p.IsAvailable())
@@ -36,7 +36,7 @@ func TestFileProvider_Resolve(t *testing.T) {
 }
 
 func TestFileProvider_ReadsTheFileEachTime(t *testing.T) {
-	p := NewFileProvider()
+	p := NewFileProvider(NewWildcardFilePolicy(ScopeUpstream))
 	path := writeSecretFile(t, "v1")
 	ref := Ref{Type: "file", Name: path}
 

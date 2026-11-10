@@ -7,18 +7,54 @@ import (
 	"strings"
 )
 
-// NewResolver creates a new secret resolver
+// NewResolver creates a resolver in wildcard file mode for tests and callers
+// that have not loaded a config policy yet.
 func NewResolver() *Resolver {
+	return NewResolverWithOptions(ResolverOptions{
+		Scope:      ScopeUpstream,
+		FilePolicy: NewWildcardFilePolicy(ScopeUpstream),
+	})
+}
+
+// NewResolverWithOptions builds a resolver for production use.
+func NewResolverWithOptions(opts ResolverOptions) *Resolver {
+	policy := opts.FilePolicy
+	if policy == nil {
+		policy = NewWildcardFilePolicy(opts.Scope)
+	}
+	policy.Scope = opts.Scope
+
 	r := &Resolver{
-		providers: make(map[string]Provider),
+		providers:  make(map[string]Provider),
+		scope:      opts.Scope,
+		filePolicy: policy,
 	}
 
-	// Register default providers
-	r.RegisterProvider("env", NewEnvProvider())
-	r.RegisterProvider(SecretTypeFile, NewFileProvider())
+	guard := opts.Scope == ScopeUpstream
+	r.RegisterProvider(SecretTypeEnv, NewEnvProvider(guard))
+	r.RegisterProvider(SecretTypeFile, NewFileProvider(policy))
 	r.RegisterProvider("keyring", NewKeyringProvider())
 
 	return r
+}
+
+// Scope returns the resolver's scope.
+func (r *Resolver) Scope() ResolveScope {
+	if r == nil {
+		return ScopeUpstream
+	}
+	return r.scope
+}
+
+// FilePolicy returns a copy of the file policy, if any.
+func (r *Resolver) FilePolicy() *FilePolicy {
+	if r == nil || r.filePolicy == nil {
+		return nil
+	}
+	cp := *r.filePolicy
+	cp.AllowedRoots = append([]string(nil), r.filePolicy.AllowedRoots...)
+	cp.Deny.AdminKeyFiles = append([]string(nil), r.filePolicy.Deny.AdminKeyFiles...)
+	return &cp
 }
 
 // RegisterProvider registers a new secret provider

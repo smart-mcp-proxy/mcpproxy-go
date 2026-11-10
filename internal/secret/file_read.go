@@ -1,12 +1,8 @@
 package secret
 
 import (
-	"bytes"
 	"errors"
-	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 )
 
 // MaxSecretFileBytes caps how much of a secret file is read. A token, a
@@ -35,58 +31,11 @@ const MaxSecretFileBytes = 64 * 1024
 // An empty result is returned as "" with no error, so a caller can decide
 // whether empty is acceptable for its field. Errors name the path and the
 // reason and never include any of the file's content.
+// ReadFile reads a secret without secret_file_dirs constraints. Callers that
+// enforce policy (the file provider, or MCPROXY_API_KEY_FILE after separate
+// admin-path checks) use ReadFileWithPolicy instead.
 func ReadFile(path string) (string, error) {
-	if path == "" {
-		return "", errors.New("secret file path is empty")
-	}
-	if !filepath.IsAbs(path) {
-		return "", fmt.Errorf("secret file path %q must be absolute", path)
-	}
-
-	// Check the type before opening: open(2) on a FIFO blocks until a writer
-	// appears, and on some devices it has side effects, so a mis-pointed path
-	// must be refused without ever reaching open. The check is repeated on the
-	// open descriptor so a path swapped in between is still refused.
-	if info, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("cannot read secret file %q: %w", path, unwrapPathError(err))
-	} else if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("secret file %q is not a regular file", path)
-	}
-
-	f, err := os.Open(path)
-	if err != nil {
-		return "", fmt.Errorf("cannot read secret file %q: %w", path, unwrapPathError(err))
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return "", fmt.Errorf("cannot read secret file %q: %w", path, unwrapPathError(err))
-	}
-	if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("secret file %q is not a regular file", path)
-	}
-
-	// Read one byte past the cap so an oversized file is detected from what
-	// was read, not from a size that may have changed since Stat.
-	data, err := io.ReadAll(io.LimitReader(f, MaxSecretFileBytes+1))
-	if err != nil {
-		return "", fmt.Errorf("cannot read secret file %q: %w", path, unwrapPathError(err))
-	}
-	if len(data) > MaxSecretFileBytes {
-		return "", fmt.Errorf("secret file %q is larger than %d bytes", path, MaxSecretFileBytes)
-	}
-	if bytes.IndexByte(data, 0) >= 0 {
-		return "", fmt.Errorf("secret file %q contains a NUL byte", path)
-	}
-
-	switch {
-	case bytes.HasSuffix(data, []byte("\r\n")):
-		data = data[:len(data)-2]
-	case bytes.HasSuffix(data, []byte("\n")):
-		data = data[:len(data)-1]
-	}
-	return string(data), nil
+	return ReadFileWithPolicy(path, NewWildcardFilePolicy(ScopeProxy))
 }
 
 // unwrapPathError drops the "open <path>:" prefix of an *os.PathError so the

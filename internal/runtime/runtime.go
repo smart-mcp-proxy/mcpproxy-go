@@ -476,8 +476,8 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("failed to initialize index manager: %w", err)
 	}
 
-	// Initialize secret resolver
-	secretResolver := secret.NewResolver()
+	// Initialize secret resolver (upstream scope: server entries + guards).
+	secretResolver := config.BuildSecretResolver(cfg, cfgPath, secret.ScopeUpstream)
 
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	// Spec 116 PR2b (review R6.1): no instance is built for a committed view
@@ -3790,6 +3790,23 @@ func (r *Runtime) applyComponentConfigLocked(oldCfg, newCfg *config.Config) {
 			zap.Duration("new_interval", newCfg.Observability.UsagePersistInterval.Duration()))
 		r.activityService.SetUsagePersistInterval(newCfg.Observability.UsagePersistInterval.Duration())
 	}
+
+	if oldCfg.DataDir != newCfg.DataDir || !secretFileDirsEqual(oldCfg.SecretFileDirs, newCfg.SecretFileDirs) {
+		r.secretResolver = config.BuildSecretResolver(newCfg, r.cfgPath, secret.ScopeUpstream)
+		if r.upstreamManager != nil {
+			r.upstreamManager.SetSecretResolver(r.secretResolver)
+		}
+	}
+}
+
+func secretFileDirsEqual(a, b *config.SecretFileDirs) bool {
+	if a == nil && b == nil {
+		return true
+	}
+	if a == nil || b == nil {
+		return false
+	}
+	return reflect.DeepEqual([]string(*a), []string(*b))
 }
 
 // GetVersionInfo returns the current version information from the update checker.

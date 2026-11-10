@@ -56,7 +56,7 @@ func NewApplicationContext(cfg *config.Config, logConfig *config.LogConfig, logg
 	}
 
 	// Initialize upstream manager
-	secretResolver := secret.NewResolver()
+	secretResolver := config.BuildSecretResolver(cfg, "", secret.ScopeUpstream)
 	baseUpstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	upstreamManager := &UpstreamManagerAdapter{Manager: baseUpstreamManager}
 

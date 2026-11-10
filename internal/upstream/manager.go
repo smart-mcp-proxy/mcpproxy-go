@@ -257,6 +257,15 @@ func cloneServerConfig(cfg *config.ServerConfig) *config.ServerConfig {
 }
 
 // NewManager creates a new upstream manager
+// SetSecretResolver replaces the resolver used when expanding upstream server
+// secrets (hot-reloaded secret_file_dirs).
+func (m *Manager) SetSecretResolver(secretResolver *secret.Resolver) {
+	if m == nil {
+		return
+	}
+	m.secretResolver = secretResolver
+}
+
 func NewManager(logger *zap.Logger, globalConfig *config.Config, boltStorage *storage.BoltDB, secretResolver *secret.Resolver, storageMgr *storage.Manager) *Manager {
 	// Scope this process's Docker container-ownership instance ID to its data
 	// dir instead of a host-wide shared file, so concurrent mcpproxy

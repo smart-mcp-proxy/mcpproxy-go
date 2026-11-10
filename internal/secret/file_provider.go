@@ -18,11 +18,13 @@ const (
 // of ReadFile.
 //
 // The file is read each time a reference is resolved; nothing is cached or logged.
-type FileProvider struct{}
+type FileProvider struct {
+	policy *FilePolicy
+}
 
 // NewFileProvider creates a new file provider.
-func NewFileProvider() *FileProvider {
-	return &FileProvider{}
+func NewFileProvider(policy *FilePolicy) *FileProvider {
+	return &FileProvider{policy: policy}
 }
 
 // CanResolve returns true if this provider can handle the given secret type.
@@ -37,8 +39,11 @@ func (p *FileProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 	if !p.CanResolve(ref.Type) {
 		return "", fmt.Errorf("file provider cannot resolve secret type: %s", ref.Type)
 	}
-	value, err := ReadFile(ref.Name)
+	value, err := ReadFileWithPolicy(ref.Name, p.policy)
 	if err != nil {
+		if errors.Is(err, ErrSecretFileDenied) {
+			return "", err
+		}
 		return "", err
 	}
 	if value == "" {

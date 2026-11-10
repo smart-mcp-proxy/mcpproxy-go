@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -12,11 +13,13 @@ const (
 )
 
 // EnvProvider resolves secrets from environment variables
-type EnvProvider struct{}
+type EnvProvider struct {
+	guardMCProxy bool
+}
 
 // NewEnvProvider creates a new environment variable provider
-func NewEnvProvider() *EnvProvider {
-	return &EnvProvider{}
+func NewEnvProvider(guardMCProxy bool) *EnvProvider {
+	return &EnvProvider{guardMCProxy: guardMCProxy}
 }
 
 // CanResolve returns true if this provider can handle the given secret type
@@ -30,12 +33,29 @@ func (p *EnvProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 		return "", fmt.Errorf("env provider cannot resolve secret type: %s", ref.Type)
 	}
 
+	if p.guardMCProxy {
+		if isReservedMCProxyEnv(ref.Name) {
+			return "", ErrReservedEnvVar
+		}
+	}
+
 	value := os.Getenv(ref.Name)
 	if value == "" {
 		return "", fmt.Errorf("environment variable %s not found or empty", ref.Name)
 	}
 
 	return value, nil
+}
+
+func isReservedMCProxyEnv(name string) bool {
+	const prefix = "MCPROXY_"
+	if len(name) < len(prefix) {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(name[:len(prefix)], prefix)
+	}
+	return strings.HasPrefix(name, prefix)
 }
 
 // Store is not supported for environment variables

@@ -34,7 +34,9 @@ type Provider interface {
 
 // Resolver manages secret resolution using multiple providers
 type Resolver struct {
-	providers map[string]Provider
+	providers  map[string]Provider
+	scope      ResolveScope
+	filePolicy *FilePolicy
 }
 
 // ResolveResult contains the result of secret resolution
