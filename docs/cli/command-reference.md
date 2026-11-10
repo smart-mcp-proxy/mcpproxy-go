@@ -540,8 +540,10 @@ mcpproxy auth logout [flags]
 Store a secret in the system keyring:
 
 ```bash
-mcpproxy secrets set <key> <value> [flags]
+mcpproxy secrets set <key> [value] [flags]
 ```
+
+Omit `value` to enter it at the prompt. The current CLI prompt echoes typed characters in the terminal. A literal value argument may be retained in shell history or exposed in process listings; use `--from-stdin` with a trusted secret source when that matters.
 
 | Flag | Description |
 |------|-------------|
@@ -551,9 +553,9 @@ mcpproxy secrets set <key> <value> [flags]
 
 **Examples:**
 ```bash
-mcpproxy secrets set github-token "ghp_abc123" --type=oauth-token
+mcpproxy secrets set github-token --type=oauth-token
 mcpproxy secrets set api-key --from-env=MY_API_KEY
-echo "secret-value" | mcpproxy secrets set db-password --from-stdin
+mcpproxy secrets set db-password --from-stdin < secret.txt
 ```
 
 ### secrets get

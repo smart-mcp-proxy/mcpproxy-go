@@ -129,15 +129,14 @@ MCPProxy provides a `secrets` command group for managing keyring entries.
 # Interactive (prompts for value)
 mcpproxy secrets set my-api-key
 
-# Inline value
-mcpproxy secrets set my-api-key "sk-abc123..."
-
 # From environment variable
 mcpproxy secrets set my-api-key --from-env=MY_API_KEY
 
 # From stdin
-echo "secret-value" | mcpproxy secrets set my-api-key --from-stdin
+mcpproxy secrets set my-api-key --from-stdin < secret.txt
 ```
+
+Avoid putting a literal secret in the command arguments: shells may keep it in history and processes may expose their arguments. The interactive prompt avoids a secret command argument, but the current CLI echoes typed characters in the terminal. Use `--from-stdin` with a trusted secret source when terminal echo is unsuitable.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -436,7 +435,7 @@ mcpproxy doctor
 
 ```bash
 mcpproxy secrets set my-api-key
-# Enter secret value: ****
+# Enter secret value: (typed characters are echoed in the terminal)
 ```
 
 Or use the Web UI: click **Add Value** next to the missing secret.
