@@ -224,11 +224,13 @@ jobs:
 
       # internal/server under -race takes ~10 minutes on the macOS runner and
       # grows with every spec's tests, so the default 10m package timeout
-      # ("panic: test timed out") is no longer enough there; match the
-      # Windows leg's 20m.
+      # ("panic: test timed out") is no longer enough there. internal/security/
+      # scanner also scores the full 1.2k-entry TPA eval corpus (Spec 101 US2,
+      # 1047 hard negatives) in several tests and timed out at 20m on
+      # ubuntu-latest; match the Windows leg's 40m.
       - name: Run unit tests (Unix)
         if: matrix.os != 'windows-latest'
-        run: go test -v -race -timeout 20m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 40m -coverprofile=coverage.out -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
@@ -335,7 +337,7 @@ jobs:
       # Keep the flags identical to the required ubuntu lane except for
       # -shuffle=on (and no coverage — Codecov already gets the ordered run).
       - name: Run unit tests (shuffled)
-        run: go test -v -race -timeout 20m -shuffle=on -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
+        run: go test -v -race -timeout 40m -shuffle=on -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 
@@ -440,8 +442,10 @@ jobs:
       # race-tested (Spec 107 FR-047). The -skip regex is the one the unit-test
       # job uses (see "Run unit tests" above): it drops the binary-spawning
       # internal/server tests that otherwise hang to the package timeout.
+      # internal/server alone took ~1130s of the old 20m here once the bundle
+      # activation self-check scored the full TPA corpus, hence 40m.
       - name: Test server edition packages
-        run: go test -race -tags server -timeout 20m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...
+        run: go test -race -tags server -timeout 40m -skip "E2E|Binary|MCPProtocol|TestInfoEndpoint|TestGracefulShutdownNoPanic|TestSocketInfoEndpoint" ./internal/serveredition/... ./internal/config/... ./internal/oauth/... ./internal/server/... ./internal/httpapi/... ./internal/storage/...
         env:
           TIKTOKEN_CACHE_DIR: ${{ runner.temp }}/tiktoken
 

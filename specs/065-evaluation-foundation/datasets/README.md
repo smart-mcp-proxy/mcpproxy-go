@@ -174,16 +174,63 @@ description,input_schema}`, and cross-server `peers` so the `shadowing` check ca
 fire deterministically. Validated by `detect_corpus_test.go` in this directory
 and scored by `cmd/scan-eval --gate`.
 
-**Composition (32 entries):**
+**Composition (1167 entries):**
 
 | Label | Category | Count | Mapped check | Gated today? |
 |-------|----------|-------|--------------|--------------|
 | malicious | `unicode_smuggling` | 6 | `unicode.hidden` | yes (US1) |
 | malicious | `decoded_payload` | 6 | `payload.decoded` | yes (US1) |
 | malicious | `shadowing` | 4 | `shadowing.cross_server` | yes (US1) |
+| malicious | `phrase_injection` | 13 | `phrase.injection` | yes (Spec 077 US1) |
 | malicious | `capability_mismatch` | 2 | `capability.mismatch` | **no** — US2 check; reported, not enforced |
-| benign | `hard_negative` (attack-resembling) | 9 | — | — |
+| malicious | `tpa_*` (16 signature classes, one gating signature or more each) | 89 | `tpa.bundle` | yes (Spec 101 US2) |
+| benign | `hard_negative` (attack-resembling) | 1042 (21 built-in categories, 1021 `tpa_*`) | — | — |
 | benign | `benign` (clean base rate) | 5 | — | — |
+
+The 89 `tpa_*` malicious entries are at least one self-authored sample per gating
+signature (42; `TPA-2026-0007` carries a second, `tpa_0007_m2`, and review rounds added
+further own-words samples for `0009`, `0013`, `0017`, `0022` (two), `0031`, `0033`, `0037` and `0044` (two); round 8 added wrapped-literal and replacement-claim variants for `0011`, `0019`, `0021`, `0022`, `0023`, `0024`, `0025`, `0031`, `0033`, `0035`, `0037`, `0038`, `0039`, `0042`, `0043` and `0044`; round 9 added own-words and variant samples for `0011`, `0012`, `0014`, `0018`, `0025`, `0026`, `0028`, `0033` and `0035`; the round-10 follow-up added a multiline replacement-claim sample for `0011` and two SGR-concealed imperatives for `0037`) of the embedded signature bundle (`internal/security/scanner/bundled/scanner-bundle.json`,
+built from `internal/security/tpacorpus/signatures/`); the classes are the
+vocabulary in `tpacorpus.Classes`:
+
+| Class | Malicious | Hard negatives |
+|-------|-----------|----------------|
+| `tpa_hidden_instruction_block` | 4 | 53 |
+| `tpa_comment_directive` | 2 | 36 |
+| `tpa_tool_shadowing` | 15 | 123 |
+| `tpa_cross_server_override` | 3 | 58 |
+| `tpa_exfil_redirect` | 7 | 98 |
+| `tpa_sensitive_file_coaxing` | 10 | 123 |
+| `tpa_credential_harvesting` | 2 | 38 |
+| `tpa_persistence_implant` | 7 | 81 |
+| `tpa_rug_pull_phrasing` | 3 | 35 |
+| `tpa_instruction_override` | 4 | 48 |
+| `tpa_conversation_exfil` | 5 | 64 |
+| `tpa_preference_manipulation` | 5 | 39 |
+| `tpa_concealment_directive` | 6 | 28 |
+| `tpa_invisible_text` | 8 | 58 |
+| `tpa_payload_execution` | 6 | 110 |
+| `tpa_schema_injection` | 2 | 29 |
+
+**Spec 101 US2 — in-place extension.** The `tpa_*` entries were appended to this
+file in place (the Spec 077 T016 precedent), with the 57 earlier entries left
+byte-identical; the "immutable once committed" rule above applies to a refresh of
+the *existing* samples, which still means a `_v2` file. The bundle classes use
+three optional keys that every other decoder ignores:
+
+- `tpa_id` — on a malicious `tpa_*` entry, the signature (`TPA-YYYY-NNNN`) the sample exercises.
+  Hard negatives never carry it.
+- `canonical` — exactly one malicious entry per class is `true`. The SC-004 test
+  scans these through the production path and requires a hard finding carrying a
+  `tpa.<signature id>.` signal.
+- hard-negative ids are `hn_<class>_…` (for example `hn_tpa_exfil_redirect_0018_a`)
+  with `resembles` set to the full class name.
+
+`tpacorpus.ValidatePolicy` (run by `go run ./cmd/tpa-corpus validate --bundle … --dataset …`
+and by `TestEmbeddedCorpus_PassesPolicyAgainstDetectCorpus`) enforces: a malicious sample
+per gating signature, a hard negative and exactly one canonical sample per gating class.
+All sample hosts are `*.example.invalid`; samples are reconstructed in our own wording, never
+copied from a source.
 
 A category is only **gated** (counted toward the recall floor) when its check is
 registered in the engine. `capability_mismatch` samples are present so the gate

@@ -234,6 +234,16 @@ go run ./cmd/tpa-db validate --bundle <path>   # schema + signatures[] integrity
 go run ./cmd/scan-eval --gate --bundle <path>  # recall ≥ 0.90 gated, hard-negative FP ≤ 0.05
 ```
 
+(amended by US2, 2026-10-20: corpus validation is `cmd/tpa-corpus`, an in-repo command separate from the signing command so the two stories do not share a `main.go`. `cmd/tpa-db` above is US1's signing tool and does not own the corpus checks.)
+
+```bash
+go run ./cmd/tpa-corpus validate --bundle <path> --dataset specs/065-evaluation-foundation/datasets/detect_corpus_v1.json
+                                               # signatures[] integrity (load layer) + licence allowlist,
+                                               # class vocabulary, eval pair, category registration (policy layer)
+go run ./cmd/tpa-corpus build                  # compile signatures/*.json + manifest.json into scanner-bundle.json, deterministically
+go run ./cmd/tpa-corpus verify                 # rebuild and byte-compare; a hand-edited scanner-bundle.json fails
+```
+
 `validate` enforces the [signatures[] contract](contracts/bundle-signatures-section.md) in both directions — every signature names a real rule, **and** every gating rule is named by exactly one signature. The second direction is the one that is easy to skip and the one that matters: without it a gating rule can ship with no provenance, no licence and no eval evidence.
 
 `--gate` is the same code path activation runs (plan D8), so a bundle that passes here is one that will activate — the CI layer and the activation layer cannot drift apart.

@@ -367,3 +367,27 @@ func TestSelfCheckEvaluateFlagsHardTierOnly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, m.GatedMalicious)
 }
+
+// TestSelfCheckParallelScoringMatchesSequential: the scoring fan-out is an
+// implementation detail; it must yield exactly the sequential metrics (same
+// counts, same per-entry flags, same id order in the rejection detail).
+func TestSelfCheckParallelScoringMatchesSequential(t *testing.T) {
+	check, _, err := loadBundleCheck(selfCheckEmbeddedPlusRule(t, `(?i)\bfile\b`, "parallel"))
+	require.NoError(t, err)
+	list := append(selfCheckBuiltins(), check)
+	// The pinned 57-entry corpus keeps the sequential leg cheap under -race.
+	corpus, err := os.ReadFile(selfCheckFixtureCorpusPath)
+	require.NoError(t, err)
+
+	prev := selfCheckWorkers
+	t.Cleanup(func() { selfCheckWorkers = prev })
+	selfCheckWorkers = 1
+	seq, err := selfCheckEvaluate(corpus, list)
+	require.NoError(t, err)
+	selfCheckWorkers = 8
+	par, err := selfCheckEvaluate(corpus, list)
+	require.NoError(t, err)
+
+	require.NotZero(t, seq.HardNegFP, "the fixture rule must flag some hard negatives so the id order is exercised")
+	assert.Equal(t, seq, par)
+}

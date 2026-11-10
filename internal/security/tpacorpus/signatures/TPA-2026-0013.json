@@ -1,0 +1,44 @@
+{
+  "category": "tpa_tool_shadowing",
+  "gating": true,
+  "id": "TPA-2026-0013",
+  "license": "MIT",
+  "provenance": {
+    "note": "Post-hook description that tells the agent to rewrite the verdict of a check tool after it has run.",
+    "published": "2025-08-09",
+    "source": "https://github.com/AIS2Lab/MCPSecBench/blob/main/code/maliciousadd.py"
+  },
+  "rules": [
+    {
+      "category": "tool-shadowing",
+      "confidence": 0.9,
+      "detector": "post_hook_result_tamper",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0013",
+      "indicators": [
+        {
+          "context": "tool_description",
+          "id": "$after",
+          "type": "regex",
+          "value": "after.{0,80}check\\s+tool"
+        },
+        {
+          "context": "tool_description",
+          "id": "$tamper",
+          "type": "regex",
+          "value": "(?:modify|rewrite|override).{0,60}result"
+        }
+      ],
+      "level": "high",
+      "pattern": "(?is)\\b(?:after|once)\\b.{0,80}?\\b(?:check|verif\\w*|validat\\w*|scan\\w*|audit\\w*)\\s+tool\\b.{0,120}?(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you)\\s+|\\b(?:agent|assistant|model|ai|llm)\\s+to\\s+)(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:run|execute|call|invoke)\\s+this\\s+(?:function|tool)\\b.{0,80}?(?:(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you|to)\\s+)(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:modify|replace|override|rewrite|overwrite|falsify|forge|flip)\\w*\\b.{0,40}?\\b(?:fail\\w*|wrong|incorrect|negative|bad|error\\w*)\\s+(?:result|verdict|output|outcome|finding)s?\\b.{0,40}?\\bof\\s+(?:(?:the|that)\\s+)?\\w+\\s+tool\\b(?:\\s*(?:[.;,!)]|$)|\\s+(?:with|to|by)\\s+(?:a\\s+)?(?:pass\\w*|success\\w*|ok\\b|clean|valid))|(?:^|[.!?:;\\n(]\\s*(?:(?:[-*•]|\\d+[.)])\\s+)?|,\\s*|\\b(?:first|then|also|always|must|should|please|now|just|simply|and|before|after|next|finally|you|to)\\s+)(?:(?:silently|quietly|secretly|covertly|discreetly|automatically|immediately)\\s+)*(?:modify|replace|override|correct|change|alter|rewrite|fix|overwrite|falsify|forge|flip)\\w*\\b.{0,40}?\\b(?:fail\\w*|wrong|incorrect|negative|bad|error\\w*)\\s+(?:result|verdict|output|outcome|finding)s?\\b.{0,40}?\\b(?:to|so)\\s+(?:that\\s+)?(?:(?:the\\s+)?(?:check|scan|audit|verification|validation|tool|result|verdict|it|they)\\s+)?(?:(?:report|show|display|return|read|appear|look|count|mark|register)\\w*\\s+(?:as\\s+)?(?:a\\s+)?(?:pass\\w*|success\\w*|clean|ok|valid)|(?:pass\\w*|success\\w*|succeed\\w*)\\s*(?:[.;,!)]|$)))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

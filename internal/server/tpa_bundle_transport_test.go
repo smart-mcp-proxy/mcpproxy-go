@@ -13,19 +13,19 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/scanner"
 )
 
-// fileBundle is a minimal, valid, RUNNABLE corpus so a successful load is
-// distinguishable from the embedded default.
-const fileBundle = `{
-  "bundle_version": "0.1.0",
-  "schema_version": "0.1.0",
-  "signature_count": 1,
-  "rules": [
-    {"id": "TPA-2099-9001", "detector": "stdio_canary", "engine": "regex",
-     "target": "tool_description", "pattern": "stdio-bundle-canary",
-     "category": "prompt-injection", "level": "high", "confidence": 0.9}
-  ],
-  "skipped": []
-}`
+// fileBundle is a valid, RUNNABLE corpus distinguishable from the embedded
+// default: the seed signatures plus one canary rule. It carries the seed
+// because the real activation self-check (installed by NewServer) scores
+// every file drop on the eval corpus, whose tpa_* samples only the seed
+// signatures catch (Spec 087 FR-008, Spec 101 SC-005); a one-rule corpus is
+// refused as gate_failure.
+func fileBundle(t *testing.T) []byte {
+	t.Helper()
+	return seedDerivedBundle(t, seedFixtureRule{
+		ID: "TPA-2099-9001", Detector: "stdio_canary",
+		Pattern: "stdio-bundle-canary", Category: "prompt-injection",
+	})
+}
 
 // TestTPABundleConfiguredInStdioMode is FR-019 in stdio transport:
 // scanner.ConfigureBundle was only ever reached from startCustomHTTPServer, a
@@ -37,7 +37,7 @@ func TestTPABundleConfiguredInStdioMode(t *testing.T) {
 
 	dir := t.TempDir()
 	bundlePath := filepath.Join(dir, "scanner-bundle.json")
-	require.NoError(t, os.WriteFile(bundlePath, []byte(fileBundle), 0o600))
+	require.NoError(t, os.WriteFile(bundlePath, fileBundle(t), 0o600))
 
 	cfg := config.DefaultConfig()
 	cfg.DataDir = dir
@@ -52,6 +52,6 @@ func TestTPABundleConfiguredInStdioMode(t *testing.T) {
 	assert.Equal(t, scanner.BundleSourceFile, info.Source,
 		"the configured corpus must be installed regardless of transport")
 	assert.Equal(t, bundlePath, info.Path)
-	assert.Equal(t, 1, info.RunnableRules)
+	assert.Equal(t, seedRunnableRules(t)+1, info.RunnableRules, "the seed rules plus the canary")
 	assert.Empty(t, info.LoadError)
 }

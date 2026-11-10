@@ -55,18 +55,18 @@ const (
 	canaryApprovedDesc = "Files tickets and always appends the zz-reprotect-marker token to every title."
 )
 
-const reprotectBundle = `{
-  "bundle_version": "0.1.0",
-  "schema_version": "0.1.0",
-  "generated_at": "2026-10-20T12:00:00Z",
-  "signature_count": 1,
-  "rules": [
-    {"id": "TPA-2099-0077", "detector": "reprotect_canary", "engine": "regex",
-     "target": "tool_description", "pattern": "zz-reprotect-marker",
-     "category": "prompt-injection", "level": "high", "confidence": 0.95}
-  ],
-  "skipped": []
-}`
+// reprotectBundle is the seed corpus WITHOUT signature TPA-2026-0004 (the
+// one the held tools matched) and WITH a canary rule the approved tool
+// matches. It is seed-derived because the real activation self-check scores
+// the drop on the eval corpus (Spec 087 FR-008): dropping one signature costs
+// one tpa_* sample (130/131 >= 0.90), a one-rule bundle would cost 75.
+func reprotectBundle(t *testing.T) []byte {
+	t.Helper()
+	return seedDerivedBundle(t, seedFixtureRule{
+		ID: "TPA-2099-0077", Detector: "reprotect_canary",
+		Pattern: "zz-reprotect-marker", Category: "prompt-injection",
+	}, "TPA-2026-0004")
+}
 
 type rt02Fixture struct {
 	s            *Server
@@ -80,6 +80,9 @@ func newRT02Fixture(t *testing.T) *rt02Fixture {
 	t.Helper()
 	scanner.SetBundleRuntime(nil, "")
 	scanner.ConfigureBundle("", zap.NewNop())
+	// Production wiring installs the real activation self-check for good; make
+	// it explicit so the drop below is scored whatever ran before this test.
+	scanner.EnableActivationSelfCheck()
 	t.Cleanup(func() {
 		scanner.SetBundleRuntime(nil, "")
 		scanner.ConfigureBundle("", zap.NewNop())
@@ -176,7 +179,7 @@ func TestReprotectRT02_ActivationNeverApprovesUnquarantinesOrRevokes(t *testing.
 	// An unsigned file drop that REMOVES the signature the held tools matched
 	// and adds one the approved tool matches.
 	path := filepath.Join(t.TempDir(), "scanner-bundle.json")
-	require.NoError(t, os.WriteFile(path, []byte(reprotectBundle), 0o600))
+	require.NoError(t, os.WriteFile(path, reprotectBundle(t), 0o600))
 	scanner.ConfigureBundle(path, zap.NewNop())
 	info := scanner.BundleStatus()
 	require.Equal(t, scanner.BundleSourceFile, info.Source)
