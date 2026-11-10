@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -67,9 +68,11 @@ func TestBinaryMetricsEndpoint(t *testing.T) {
 
 func writeMetricsEnabledConfig(t *testing.T, configPath string, port int, dataDir string) {
 	t.Helper()
+	encodedDataDir, err := json.Marshal(dataDir)
+	require.NoError(t, err)
 	content := `{
   "listen": ":` + strconv.Itoa(port) + `",
-  "data_dir": "` + dataDir + `",
+  "data_dir": ` + string(encodedDataDir) + `,
   "api_key": "` + testutil.TestAPIKey + `",
   "enable_tray": false,
   "mcpServers": [],

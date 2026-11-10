@@ -35,8 +35,7 @@ func TestRegistryAddCLIE2E(t *testing.T) {
 	}))
 	defer mockReg.Close()
 
-	tmpDir := filepath.Join("/tmp", "mcpproxy-test-"+t.Name())
-	require.NoError(t, os.MkdirAll(tmpDir, 0700))
+	tmpDir := cliE2ETempDir(t)
 	defer os.RemoveAll(tmpDir)
 
 	// Build mcpproxy binary.
@@ -50,7 +49,7 @@ func TestRegistryAddCLIE2E(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "mcp_config.json")
 	cfg := `{
 		"listen": "127.0.0.1:18085",
-		"data_dir": "` + tmpDir + `",
+		"data_dir": ` + jsonPath(t, tmpDir) + `,
 		"enable_socket": true,
 		"check_server_repo": false,
 		"allow_private_registry_fetch": true,
@@ -126,8 +125,7 @@ func TestRegistryAddCLIMissingInputE2E(t *testing.T) {
 	}))
 	defer mockReg.Close()
 
-	tmpDir := filepath.Join("/tmp", "mcpproxy-test-"+t.Name())
-	require.NoError(t, os.MkdirAll(tmpDir, 0700))
+	tmpDir := cliE2ETempDir(t)
 	defer os.RemoveAll(tmpDir)
 
 	mcpproxyBin := filepath.Join(tmpDir, binaryName("mcpproxy"))
@@ -139,7 +137,7 @@ func TestRegistryAddCLIMissingInputE2E(t *testing.T) {
 	configPath := filepath.Join(tmpDir, "mcp_config.json")
 	cfg := `{
 		"listen": "127.0.0.1:18086",
-		"data_dir": "` + tmpDir + `",
+		"data_dir": ` + jsonPath(t, tmpDir) + `,
 		"enable_socket": true,
 		"check_server_repo": false,
 		"allow_private_registry_fetch": true,

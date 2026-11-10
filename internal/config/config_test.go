@@ -467,16 +467,11 @@ func TestLoadEmptyConfigFile(t *testing.T) {
 			},
 		},
 		{
-			name: "/dev/null",
+			name: "null device",
 			setupFn: func(t *testing.T) string {
-				// Only test /dev/null on Unix-like systems
-				if _, err := os.Stat("/dev/null"); err != nil {
-					t.Skip("Skipping /dev/null test on non-Unix system")
-				}
-				return "/dev/null"
+				return os.DevNull
 			},
 			cleanupFn: func(path string) {
-				// No cleanup needed for /dev/null
 			},
 		},
 	}

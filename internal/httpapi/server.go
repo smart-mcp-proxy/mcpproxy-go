@@ -4504,6 +4504,15 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Subscribe before the first flush. The client treats the initial comment as
+	// proof that the stream is ready and may publish events immediately; if the
+	// subscription is created after that flush, events in the gap are lost.
+	statusCh := s.controller.StatusChannel()
+	eventsCh := s.controller.SubscribeEvents()
+	if eventsCh != nil {
+		defer s.controller.UnsubscribeEvents(eventsCh)
+	}
+
 	// Write headers explicitly to establish response
 	w.WriteHeader(http.StatusOK)
 
@@ -4523,16 +4532,6 @@ func (s *Server) handleSSEEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Add small delay to ensure browser processes the connection
 	time.Sleep(100 * time.Millisecond)
-
-	// Get status channel (shared)
-	statusCh := s.controller.StatusChannel()
-
-	// Create per-client event subscription to avoid competing for events
-	// Each SSE client gets its own channel so all clients receive all events
-	eventsCh := s.controller.SubscribeEvents()
-	if eventsCh != nil {
-		defer s.controller.UnsubscribeEvents(eventsCh)
-	}
 
 	s.logger.Debugw("SSE connection established",
 		"status_channel_nil", statusCh == nil,

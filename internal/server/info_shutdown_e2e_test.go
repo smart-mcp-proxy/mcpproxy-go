@@ -73,7 +73,7 @@ func TestInfoEndpoint(t *testing.T) {
 	require.NoError(t, cmd.Start(), "Failed to start server")
 	defer func() {
 		if cmd.Process != nil {
-			cmd.Process.Signal(syscall.SIGTERM)
+			cancel()
 			cmd.Wait()
 		}
 	}()
@@ -147,6 +147,9 @@ func TestInfoEndpoint(t *testing.T) {
 func TestGracefulShutdownNoPanic(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
+	}
+	if runtime.GOOS == "windows" {
+		t.Skip("SIGINT process signaling is not supported on Windows")
 	}
 
 	// Build the binary first
@@ -252,6 +255,9 @@ func TestSocketInfoEndpoint(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping E2E test in short mode")
 	}
+	if runtime.GOOS == "windows" {
+		t.Skip("Unix domain sockets are not supported on Windows")
+	}
 
 	// Build the binary first
 	binaryPath, cleanup := buildTestBinary(t)
@@ -291,7 +297,7 @@ func TestSocketInfoEndpoint(t *testing.T) {
 	require.NoError(t, cmd.Start(), "Failed to start server")
 	defer func() {
 		if cmd.Process != nil {
-			cmd.Process.Signal(syscall.SIGTERM)
+			cancel()
 			cmd.Wait()
 		}
 	}()

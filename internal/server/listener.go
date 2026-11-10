@@ -12,6 +12,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/socket"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
 )
 
@@ -129,12 +130,8 @@ func (m *ListenerManager) CreateTrayListener() (*Listener, error) {
 // getDefaultTrayEndpoint returns the default tray endpoint based on platform and data directory
 func (m *ListenerManager) getDefaultTrayEndpoint() string {
 	if runtime.GOOS == "windows" {
-		// Windows: Named pipe
-		username := os.Getenv("USERNAME")
-		if username == "" {
-			username = "default"
-		}
-		return fmt.Sprintf("npipe:////./pipe/mcpproxy-%s", username)
+		// Keep the server endpoint aligned with the CLI's data-dir-derived pipe.
+		return socket.GetDefaultSocketPath(m.config.DataDir)
 	}
 
 	// Unix: Socket in data directory

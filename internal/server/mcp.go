@@ -327,8 +327,9 @@ type MCPProxyServer struct {
 	// the agent then RELAXED a blamed filter. In-memory only, never persisted,
 	// and it holds no query text or tool identities — only the filter keys the
 	// block already named plus a timestamp. See preflight_telemetry.go.
-	filterDiagMu    sync.Mutex
-	filterDiagNotes map[string]filterDiagNote
+	filterDiagMu         sync.Mutex
+	filterDiagNotes      map[string]filterDiagNote
+	filterDiagRequestSeq uint64 // protected by filterDiagMu; assigned at handler entry
 
 	// configFilePath is the ACTIVE configuration FILE this server belongs to,
 	// handed in at construction (Spec 097). It is the authority for anything
@@ -2184,6 +2185,8 @@ func (p *MCPProxyServer) handleRetrieveTools(ctx context.Context, request mcp.Ca
 
 // handleRetrieveToolsWithMode implements the retrieve_tools functionality with mode-aware instructions.
 func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, request mcp.CallToolRequest, routingMode string) (*mcp.CallToolResult, error) {
+	filterDiagRequestSeq := p.beginFilterDiagRequest()
+
 	// Spec 042: telemetry counters.
 	p.recordMCPSurface()
 	p.recordBuiltinTool("retrieve_tools")
@@ -2262,7 +2265,7 @@ func (p *MCPProxyServer) handleRetrieveToolsWithMode(ctx context.Context, reques
 	// counter store, whose write shares the cost profile of the activation
 	// counters this handler already bumps unconditionally above.
 	if p.consumeFilterDiagFollowUp(sessionID,
-		activeFilterKeys(readOnlyOnly, excludeDestructive, excludeOpenWorld), startTime) {
+		activeFilterKeys(readOnlyOnly, excludeDestructive, excludeOpenWorld), startTime, filterDiagRequestSeq) {
 		p.recordFilterDiagnosticsFollowed()
 	}
 
