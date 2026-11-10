@@ -314,7 +314,7 @@ at request time rather than stored in plaintext:
 | `${file:/absolute/path}` | The contents of a file (Docker/Kubernetes secret, systemd credential), one trailing newline removed | Read each time the server's connection is set up, so a rotated secret is picked up when the server is next restarted |
 
 `${file:}` paths must lie under `secret_file_dirs` (see [Config file](config-file.md)).
-Upstream fields refuse `${env:MCPROXY_*}` references so a server entry cannot
+Upstream fields refuse `${env:MCPPROXY_*}` references so a server entry cannot
 read proxy credentials from the environment.
 
 When mcpproxy connects to an upstream it substitutes the reference with

@@ -14,12 +14,12 @@ const (
 
 // EnvProvider resolves secrets from environment variables
 type EnvProvider struct {
-	guardMCProxy bool
+	guardMCPProxy bool
 }
 
 // NewEnvProvider creates a new environment variable provider
-func NewEnvProvider(guardMCProxy bool) *EnvProvider {
-	return &EnvProvider{guardMCProxy: guardMCProxy}
+func NewEnvProvider(guardMCPProxy bool) *EnvProvider {
+	return &EnvProvider{guardMCPProxy: guardMCPProxy}
 }
 
 // CanResolve returns true if this provider can handle the given secret type
@@ -33,8 +33,8 @@ func (p *EnvProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 		return "", fmt.Errorf("env provider cannot resolve secret type: %s", ref.Type)
 	}
 
-	if p.guardMCProxy {
-		if isReservedMCProxyEnv(ref.Name) {
+	if p.guardMCPProxy {
+		if isReservedMCPProxyEnv(ref.Name) {
 			return "", ErrReservedEnvVar
 		}
 	}
@@ -47,8 +47,8 @@ func (p *EnvProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 	return value, nil
 }
 
-func isReservedMCProxyEnv(name string) bool {
-	const prefix = "MCPROXY_"
+func isReservedMCPProxyEnv(name string) bool {
+	const prefix = "MCPPROXY_"
 	if len(name) < len(prefix) {
 		return false
 	}
@@ -81,7 +81,6 @@ func (p *EnvProvider) List(_ context.Context) ([]Ref, error) {
 		name := pair[0]
 		value := pair[1]
 
-		// Only include variables that look like secrets
 		if isLikelySecretEnvVar(name, value) {
 			refs = append(refs, Ref{
 				Type:     "env",
@@ -104,10 +103,6 @@ func isLikelySecretEnvVar(name, value string) bool {
 	if value == "" {
 		return false
 	}
-
-	// Check if the variable name suggests it's a secret
 	isSecret, confidence := DetectPotentialSecret(value, name)
-
-	// Lower threshold for env vars since they're commonly used for secrets
 	return isSecret || confidence >= 0.3
 }

@@ -26,18 +26,48 @@ func BuildSecretResolver(cfg *Config, configPath string, scope secret.ResolveSco
 	}
 
 	if scope == secret.ScopeUpstream {
+		cfgPath := ResolveConfigPath(cfg, configPath)
 		policy.Deny = secret.DenyPaths{
-			ConfigFile:     resolveExistingPath(ResolveConfigPath(cfg, configPath)),
+			ConfigFile:     resolveExistingPath(cfgPath),
 			DataDir:        resolveExistingPath(cfg.DataDir),
 			DataSecretsDir: resolveExistingPath(filepath.Join(cfg.DataDir, "secrets")),
-			AdminKeyFiles:  adminKeySourcePaths(cfg, configPath),
 		}
+		policy.DenyIdentities = buildDenyIdentities(cfg, configPath)
 	}
 
 	return secret.NewResolverWithOptions(secret.ResolverOptions{
 		Scope:      scope,
 		FilePolicy: policy,
 	})
+}
+
+func buildDenyIdentities(cfg *Config, configPath string) []secret.DenyIdentity {
+	var ids []secret.DenyIdentity
+	add := func(path string) {
+		if id, ok := secret.StatDenyIdentity(path); ok {
+			ids = append(ids, id)
+		}
+	}
+
+	cfgPath := ResolveConfigPath(cfg, configPath)
+	add(cfgPath)
+
+	if path := os.Getenv(EnvAPIKeyFile); path != "" {
+		add(path)
+	}
+	if cfg != nil && secret.IsSecretRef(cfg.APIKey) {
+		if ref, err := secret.ParseSecretRef(cfg.APIKey); err == nil && ref.Type == secret.SecretTypeFile {
+			add(ref.Name)
+		}
+	}
+
+	if cfg != nil && cfg.DataDir != "" {
+		add(filepath.Join(cfg.DataDir, "config.db"))
+		add(filepath.Join(cfg.DataDir, ConfigFileName))
+		add(filepath.Join(cfg.DataDir, "mcpproxy.sock"))
+	}
+
+	return ids
 }
 
 // BuildSecretResolverForDataDirExpand builds a proxy-scoped resolver used only
@@ -68,18 +98,4 @@ func resolveExistingPath(path string) string {
 		return filepath.Clean(path)
 	}
 	return resolved
-}
-
-func adminKeySourcePaths(cfg *Config, configPath string) []string {
-	var paths []string
-	if path := os.Getenv(EnvAPIKeyFile); path != "" {
-		paths = append(paths, resolveExistingPath(path))
-	}
-	if cfg != nil && secret.IsSecretRef(cfg.APIKey) {
-		if ref, err := secret.ParseSecretRef(cfg.APIKey); err == nil && ref.Type == secret.SecretTypeFile {
-			paths = append(paths, resolveExistingPath(ref.Name))
-		}
-	}
-	_ = configPath
-	return paths
 }

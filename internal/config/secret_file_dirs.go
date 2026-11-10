@@ -34,8 +34,28 @@ const (
 	envCredentialsDir      = "CREDENTIALS_DIRECTORY"
 )
 
-// ErrAdminAPIKeyFilePath is returned when MCPROXY_API_KEY_FILE names a forbidden path.
+// ErrAdminAPIKeyFilePath is returned when MCPPROXY_API_KEY_FILE names a forbidden path.
 var ErrAdminAPIKeyFilePath = errors.New(EnvAPIKeyFile + ": path is not allowed")
+
+// ErrSecretFileDirsNotWritable is returned when a management surface tries to change secret_file_dirs.
+var ErrSecretFileDirsNotWritable = errors.New("secret_file_dirs can only be set in the configuration file")
+
+// SecretFileDirsChanged reports whether a management merge attempted to change
+// secret_file_dirs away from what is on disk.
+func SecretFileDirsChanged(base, edited *Config) bool {
+	if base == nil || edited == nil {
+		return false
+	}
+	return !SecretFileDirsEqual(base.SecretFileDirs, edited.SecretFileDirs)
+}
+
+// RestoreSecretFileDirsFromFile copies secret_file_dirs from the on-disk config into dst.
+func RestoreSecretFileDirsFromFile(dst, onDisk *Config) {
+	if dst == nil || onDisk == nil {
+		return
+	}
+	dst.SecretFileDirs = onDisk.SecretFileDirs
+}
 
 // DefaultSecretFileDirRoots returns the platform default allow-list roots before
 // the data directory is known. The derived <data-dir>/secrets entry is added
@@ -178,7 +198,7 @@ func ResolveConfigPath(cfg *Config, configPath string) string {
 	return filepath.Join(cfg.DataDir, ConfigFileName)
 }
 
-// validateAdminAPIKeyFilePath refuses MCPROXY_API_KEY_FILE paths that point at
+// validateAdminAPIKeyFilePath refuses MCPPROXY_API_KEY_FILE paths that point at
 // the active config file or at anything in the data directory except
 // <data-dir>/secrets.
 func validateAdminAPIKeyFilePath(cfg *Config, configPath, filePath string) error {

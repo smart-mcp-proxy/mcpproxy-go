@@ -497,9 +497,6 @@ func PersistableConfigWithEdits(effective, mergeBase *Config, path string) *Conf
 	processOverridesMu.RLock()
 	overrides := effectiveOverridesLocked()
 	processOverridesMu.RUnlock()
-	if len(overrides) == 0 {
-		return effective
-	}
 
 	var base *Config
 	if path != "" {
@@ -509,6 +506,15 @@ func PersistableConfigWithEdits(effective, mergeBase *Config, path string) *Conf
 	}
 
 	out := *effective
+	if base != nil {
+		RestoreSecretFileDirsFromFile(&out, base)
+	}
+	if len(overrides) == 0 {
+		if base != nil && !SecretFileDirsEqual(effective.SecretFileDirs, out.SecretFileDirs) {
+			return &out
+		}
+		return effective
+	}
 	for _, o := range overrides {
 		if mergeBase != nil && o.movedBetween(mergeBase, effective) {
 			continue // the caller's edit

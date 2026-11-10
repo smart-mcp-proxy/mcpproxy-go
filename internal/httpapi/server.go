@@ -6201,6 +6201,12 @@ func (s *Server) mergeConfigPatch(base *config.Config, patchMap map[string]inter
 	if err := json.Unmarshal(mergedBytes, &merged); err != nil {
 		return nil, &configMutationRefusal{status: http.StatusBadRequest, msg: fmt.Sprintf("Invalid configuration patch: %v", err)}
 	}
+	if config.SecretFileDirsChanged(base, &merged) {
+		return nil, &configMutationRefusal{
+			status: http.StatusBadRequest,
+			msg:    config.ErrSecretFileDirsNotWritable.Error(),
+		}
+	}
 	return &merged, nil
 }
 

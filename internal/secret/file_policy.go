@@ -50,8 +50,6 @@ func resolveSymlinks(path string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			// EvalSymlinks fails when the leaf is missing; use the path anyway so
-			// missing and outside errors share one message.
 			return filepath.Clean(path), nil
 		}
 		return "", err
@@ -69,8 +67,6 @@ func pathContainedInRoot(rootPath, filePath string) (bool, error) {
 	filePath = filepath.Clean(filePath)
 
 	if pathEqual(rootPath, filePath) {
-		// A directory is not a readable secret file; containment for a file under
-		// root still requires Rel below.
 		return false, nil
 	}
 
@@ -116,23 +112,15 @@ func (p *FilePolicy) matchingRoot(resolvedPath string) (string, error) {
 	return "", nil
 }
 
-func (p *FilePolicy) denied(resolvedPath string) bool {
-	if resolvedPath == "" {
+func (p *FilePolicy) deniedByPath(resolvedPath string) bool {
+	if resolvedPath == "" || p.Scope != ScopeUpstream {
 		return false
 	}
 	deny := p.Deny
 	if deny.ConfigFile != "" && pathEqual(resolvedPath, deny.ConfigFile) {
 		return true
 	}
-	for _, admin := range deny.AdminKeyFiles {
-		if admin != "" && pathEqual(resolvedPath, admin) {
-			return true
-		}
-	}
 	if deny.DataDir != "" {
-		if pathEqual(resolvedPath, deny.DataDir) {
-			return true
-		}
 		if deny.DataSecretsDir != "" {
 			if contained, _ := pathContainedInRoot(deny.DataSecretsDir, resolvedPath); contained {
 				return false
@@ -145,8 +133,22 @@ func (p *FilePolicy) denied(resolvedPath string) bool {
 	return false
 }
 
-// ReadFileWithPolicy reads a secret file according to policy. When policy is
-// nil or wildcard without upstream deny checks, behaviour matches ReadFile.
+func (p *FilePolicy) deniedByHandle(info os.FileInfo, resolvedPath string) bool {
+	if info == nil || p.Scope != ScopeUpstream {
+		return false
+	}
+	for _, id := range p.DenyIdentities {
+		if id.Matches(info) {
+			return true
+		}
+	}
+	if resolvedPath == "" {
+		return false
+	}
+	return p.deniedByPath(resolvedPath)
+}
+
+// ReadFileWithPolicy reads a secret file according to policy.
 func ReadFileWithPolicy(path string, policy *FilePolicy) (string, error) {
 	if path == "" {
 		return "", fmt.Errorf("secret file path is empty")
@@ -170,7 +172,7 @@ func ReadFileWithPolicy(path string, policy *FilePolicy) (string, error) {
 		if policy.Disabled {
 			return "", ErrSecretFileDenied
 		}
-		if policy.Scope == ScopeUpstream && policy.denied(resolved) {
+		if policy.deniedByPath(resolved) {
 			return "", ErrSecretFileDenied
 		}
 		if !policy.Wildcard {
@@ -181,19 +183,23 @@ func ReadFileWithPolicy(path string, policy *FilePolicy) (string, error) {
 			if root == "" {
 				return "", ErrSecretFileDenied
 			}
-			return readRegularFileFromRoot(root, resolved)
+			return readRegularFileFromRoot(policy, root, resolved)
 		}
 	}
-	return readRegularFilePath(resolved)
+	return readRegularFileAt(policy, resolved)
 }
 
-func readRegularFileFromRoot(rootPath, resolvedPath string) (string, error) {
+func readRegularFileFromRoot(policy *FilePolicy, rootPath, resolvedPath string) (string, error) {
 	rel, err := filepath.Rel(rootPath, resolvedPath)
 	if err != nil {
 		return "", ErrSecretFileDenied
 	}
-	rel = filepath.ToSlash(rel)
-	if rel == ".." || strings.HasPrefix(rel, "../") {
+	rel = filepath.ToSlash(strings.TrimPrefix(rel, string(filepath.Separator)))
+	if rel == ".." || strings.HasPrefix(rel, "../") || rel == "" {
+		return "", ErrSecretFileDenied
+	}
+	rel = strings.TrimSuffix(rel, "/")
+	if rel == "" {
 		return "", ErrSecretFileDenied
 	}
 
@@ -203,30 +209,45 @@ func readRegularFileFromRoot(rootPath, resolvedPath string) (string, error) {
 	}
 	defer root.Close()
 
-	f, err := root.Open(rel)
+	f, err := openSecretInRoot(root, rel)
 	if err != nil {
 		return "", ErrSecretFileDenied
 	}
 	defer f.Close()
 
-	return readSecretFromFile(f, resolvedPath)
+	return readOpenedSecret(policy, f, resolvedPath)
 }
 
-func readRegularFilePath(path string) (string, error) {
-	// Type check before open: FIFOs block in open(2).
-	if info, err := os.Stat(path); err != nil {
-		return "", fmt.Errorf("cannot read secret file %q: %w", path, unwrapPathError(err))
-	} else if !info.Mode().IsRegular() {
-		return "", fmt.Errorf("secret file %q is not a regular file", path)
-	}
-
-	f, err := os.Open(path)
+func readRegularFileAt(policy *FilePolicy, path string) (string, error) {
+	f, err := openSecretPath(path)
 	if err != nil {
+		if policy != nil && (policy.Scope == ScopeUpstream || !policy.Wildcard) {
+			return "", ErrSecretFileDenied
+		}
 		return "", fmt.Errorf("cannot read secret file %q: %w", path, unwrapPathError(err))
 	}
 	defer f.Close()
+	return readOpenedSecret(policy, f, path)
+}
 
-	return readSecretFromFile(f, path)
+func readOpenedSecret(policy *FilePolicy, f *os.File, labelPath string) (string, error) {
+	info, err := f.Stat()
+	if err != nil {
+		if policy != nil && policy.Scope == ScopeUpstream {
+			return "", ErrSecretFileDenied
+		}
+		return "", fmt.Errorf("cannot read secret file %q: %w", labelPath, unwrapPathError(err))
+	}
+	if !info.Mode().IsRegular() {
+		if policy != nil && policy.Scope == ScopeUpstream {
+			return "", ErrSecretFileDenied
+		}
+		return "", fmt.Errorf("secret file %q is not a regular file", labelPath)
+	}
+	if policy != nil && policy.deniedByHandle(info, labelPath) {
+		return "", ErrSecretFileDenied
+	}
+	return readSecretFromFile(f, labelPath)
 }
 
 func readSecretFromFile(f *os.File, labelPath string) (string, error) {

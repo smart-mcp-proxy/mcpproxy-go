@@ -3,7 +3,6 @@ package secret
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -56,9 +55,15 @@ func TestReadFileWithPolicy_DenyPathsEvenInWildcard(t *testing.T) {
 
 	policy := NewWildcardFilePolicy(ScopeUpstream)
 	policy.Deny = DenyPaths{
-		ConfigFile: cfg,
-		DataDir:    root,
+		ConfigFile:     cfg,
+		DataDir:        root,
 		DataSecretsDir: filepath.Join(root, "secrets"),
+	}
+	if id, ok := StatDenyIdentity(cfg); ok {
+		policy.DenyIdentities = append(policy.DenyIdentities, id)
+	}
+	if id, ok := StatDenyIdentity(filepath.Join(root, "config.db")); ok {
+		policy.DenyIdentities = append(policy.DenyIdentities, id)
 	}
 
 	_, err := ReadFileWithPolicy(cfg, policy)
@@ -108,9 +113,6 @@ func TestPathContainedInRoot_PrefixTrap(t *testing.T) {
 }
 
 func TestReadFileWithPolicy_SymlinkEscape(t *testing.T) {
-	if os.Getenv("GO_WANT_SYMLINK_TESTS") == "" && testing.Short() {
-		// Symlink tests still run by default; keep name for CI toggles.
-	}
 	root := t.TempDir()
 	allowed := filepath.Join(root, "secrets")
 	outside := filepath.Join(root, "outside")
@@ -149,9 +151,9 @@ func TestReadFileWithPolicy_TraversalInPath(t *testing.T) {
 	require.ErrorIs(t, err, ErrSecretFileDenied)
 }
 
-func TestIsReservedMCProxyEnv(t *testing.T) {
-	assert.True(t, isReservedMCProxyEnv("MCPROXY_API_KEY"))
-	assert.True(t, isReservedMCProxyEnv("MCPROXY_FOO"))
-	assert.False(t, isReservedMCProxyEnv("OTHER"))
-	assert.False(t, strings.HasPrefix("MCPROXY", "MCPROXY_")) // sanity
+func TestIsReservedMCPProxyEnv(t *testing.T) {
+	assert.True(t, isReservedMCPProxyEnv("MCPPROXY_API_KEY"))
+	assert.True(t, isReservedMCPProxyEnv("MCPPROXY_FOO"))
+	assert.False(t, isReservedMCPProxyEnv("OTHER"))
+	assert.False(t, isReservedMCPProxyEnv("MCPROXY_API_KEY"))
 }

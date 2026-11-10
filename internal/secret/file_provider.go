@@ -41,9 +41,6 @@ func (p *FileProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 	}
 	value, err := ReadFileWithPolicy(ref.Name, p.policy)
 	if err != nil {
-		if errors.Is(err, ErrSecretFileDenied) {
-			return "", err
-		}
 		return "", err
 	}
 	if value == "" {

@@ -9,17 +9,16 @@ const (
 	// environment guard does not.
 	ScopeProxy ResolveScope = iota
 	// ScopeUpstream resolves upstream server entry fields. secret_file_dirs,
-	// MCPROXY_ environment guard and proxy data deny paths all apply.
+	// MCPPROXY_ environment guard and proxy data deny paths all apply.
 	ScopeUpstream
 )
 
-// DenyPaths lists resolved filesystem paths upstream ${file:} reads must never
-// open, even in wildcard mode.
+// DenyPaths lists resolved filesystem paths used for a cheap pre-open check.
+// Handle identity checks use DenyIdentities and are authoritative.
 type DenyPaths struct {
-	ConfigFile       string
-	DataDir          string
-	DataSecretsDir   string
-	AdminKeyFiles    []string
+	ConfigFile     string
+	DataDir        string
+	DataSecretsDir string
 }
 
 // FilePolicy governs ${file:} resolution for one resolver.
@@ -30,9 +29,10 @@ type FilePolicy struct {
 	// Disabled refuses every ${file:} reference (explicit secret_file_dirs: []).
 	Disabled bool
 	// AllowedRoots are absolute, symlink-resolved directory roots.
-	AllowedRoots []string
-	Scope        ResolveScope
-	Deny         DenyPaths
+	AllowedRoots   []string
+	Scope          ResolveScope
+	Deny           DenyPaths
+	DenyIdentities []DenyIdentity
 }
 
 // ResolverOptions configures a production resolver.

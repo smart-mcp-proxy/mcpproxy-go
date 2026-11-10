@@ -32,7 +32,7 @@ const MaxSecretFileBytes = 64 * 1024
 // whether empty is acceptable for its field. Errors name the path and the
 // reason and never include any of the file's content.
 // ReadFile reads a secret without secret_file_dirs constraints. Callers that
-// enforce policy (the file provider, or MCPROXY_API_KEY_FILE after separate
+// enforce policy (the file provider, or MCPPROXY_API_KEY_FILE after separate
 // admin-path checks) use ReadFileWithPolicy instead.
 func ReadFile(path string) (string, error) {
 	return ReadFileWithPolicy(path, NewWildcardFilePolicy(ScopeProxy))

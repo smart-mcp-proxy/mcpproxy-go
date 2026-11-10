@@ -443,6 +443,13 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
+	config.SetLoadWarningRecorder(func(message, key, value string) {
+		logger.Warn(message, zap.String("key", key), zap.String("value", value))
+	})
+	for _, w := range config.DrainLoadWarnings() {
+		logger.Warn(w.Message, zap.String("key", w.Key), zap.String("value", w.Value))
+	}
+
 	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar())
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage manager: %w", err)

@@ -64,10 +64,10 @@ func LoadFromFile(configPath string) (*Config, error) {
 	// Expand secret/env refs in DataDir before creating it
 	expandDataDir(cfg, configPath)
 	for _, root := range WarnMissingSecretFileDirRoots(cfg) {
-		fmt.Fprintf(os.Stderr, "WARN: secret_file_dirs entry %q does not exist yet\n", root)
+		emitLoadWarning("secret_file_dirs root does not exist yet", "secret_file_dirs", root)
 	}
 	if cfg.SecretFileDirs != nil && SecretFileDirsWildcard([]string(*cfg.SecretFileDirs)) {
-		fmt.Fprintf(os.Stderr, "WARN: secret_file_dirs is [\"*\"]; every absolute file path may be read via ${file:}\n")
+		emitLoadWarning("secret_file_dirs is wildcard compatibility mode", "secret_file_dirs", "*")
 	}
 	// server_edition.oauth.client_id/client_secret are deliberately NOT
 	// expanded here (cross-review round 6, chunk 3 P2, superseding round 1's

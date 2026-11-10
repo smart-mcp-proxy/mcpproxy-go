@@ -53,7 +53,7 @@ func (r *Resolver) FilePolicy() *FilePolicy {
 	}
 	cp := *r.filePolicy
 	cp.AllowedRoots = append([]string(nil), r.filePolicy.AllowedRoots...)
-	cp.Deny.AdminKeyFiles = append([]string(nil), r.filePolicy.Deny.AdminKeyFiles...)
+	cp.DenyIdentities = append([]DenyIdentity(nil), r.filePolicy.DenyIdentities...)
 	return &cp
 }
 
