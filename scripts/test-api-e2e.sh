@@ -35,6 +35,19 @@ else
 fi
 API_BASE="${BASE_URL}/api/v1"
 TEST_DATA_DIR="${MCPPROXY_E2E_TEST_DATA_DIR:-./test-data}"
+TEST_DATA_DIR_OWNED=0
+if [ -z "${MCPPROXY_E2E_TEST_DATA_DIR:-}" ] && [ ! -e "$TEST_DATA_DIR" ]; then
+    TEST_DATA_DIR_OWNED=1
+fi
+AUDIT_DATA_DIR="${MCPPROXY_E2E_AUDIT_DATA_DIR:-./test-data-audit}"
+AUDIT_DATA_DIR_OWNED=0
+if [ -z "${MCPPROXY_E2E_AUDIT_DATA_DIR:-}" ] && [ ! -e "$AUDIT_DATA_DIR" ]; then
+    AUDIT_DATA_DIR_OWNED=1
+fi
+AUDIT_RUN_DATA_DIR=""
+AUDIT_RUN_DATA_DIR_OWNED=0
+AUDIT_JSONL_DIR=""
+AUDIT_JSONL_DIR_OWNED=0
 MCPPROXY_PID=""
 TEST_RESULTS_FILE="${MCPPROXY_E2E_RESULTS_FILE:-/tmp/mcpproxy_e2e_results.json}"
 SERVER_LOG_FILE="${MCPPROXY_E2E_LOG_FILE:-/tmp/mcpproxy_e2e.log}"
@@ -241,10 +254,13 @@ $(snapshot_orphans_with_comm "$MCPPROXY_PID")"
         sleep 1
         kill -9 "$AUDIT_PID" 2>/dev/null || true
     fi
-    if [ -n "${AUDIT_DATA_DIR:-}" ] && [ -d "$AUDIT_DATA_DIR" ]; then
+    if [ "${AUDIT_RUN_DATA_DIR_OWNED:-0}" = "1" ] && [ -n "${AUDIT_RUN_DATA_DIR:-}" ] && [ -d "$AUDIT_RUN_DATA_DIR" ]; then
+        rm -rf "$AUDIT_RUN_DATA_DIR"
+    fi
+    if [ "${AUDIT_DATA_DIR_OWNED:-0}" = "1" ] && [ -d "$AUDIT_DATA_DIR" ]; then
         rm -rf "$AUDIT_DATA_DIR"
     fi
-    if [ -n "${AUDIT_JSONL_DIR:-}" ] && [ -d "$AUDIT_JSONL_DIR" ]; then
+    if [ "${AUDIT_JSONL_DIR_OWNED:-0}" = "1" ] && [ -d "$AUDIT_JSONL_DIR" ]; then
         rm -rf "$AUDIT_JSONL_DIR"
     fi
     if [ -n "${AUDIT_SERVER_LOG:-}" ]; then
@@ -252,7 +268,7 @@ $(snapshot_orphans_with_comm "$MCPPROXY_PID")"
     fi
 
     # Clean up test data
-    if [ -d "$TEST_DATA_DIR" ]; then
+    if [ "${TEST_DATA_DIR_OWNED:-0}" = "1" ] && [ -d "$TEST_DATA_DIR" ]; then
         rm -rf "$TEST_DATA_DIR"
     fi
 
@@ -1377,8 +1393,10 @@ AUDIT_SCHEMA="./docs/schemas/audit-line-v1.schema.json"
 AUDIT_PORT="${AUDIT_LISTEN_PORT:-18181}"
 AUDIT_BASE_URL="http://localhost:${AUDIT_PORT}"
 AUDIT_MCP_URL="${AUDIT_BASE_URL}/mcp"
-AUDIT_DATA_DIR="${MCPPROXY_E2E_AUDIT_DATA_DIR:-./test-data-audit}"
-AUDIT_CONFIG_FILE="${AUDIT_DATA_DIR}/e2e-audit-config.json"
+mkdir -p "$AUDIT_DATA_DIR"
+AUDIT_RUN_DATA_DIR="$(mktemp -d "${AUDIT_DATA_DIR%/}/.mcpproxy-e2e-audit.XXXXXX")"
+AUDIT_RUN_DATA_DIR_OWNED=1
+AUDIT_CONFIG_FILE="${AUDIT_RUN_DATA_DIR}/e2e-audit-config.json"
 AUDIT_SERVER_LOG="${MCPPROXY_E2E_AUDIT_SERVER_LOG:-/tmp/mcpproxy_e2e_audit.log}"
 AUDIT_AJV_LOG="${MCPPROXY_E2E_AUDIT_AJV_LOG:-/tmp/mcpproxy_e2e_audit_ajv.log}"
 AUDIT_BUILD_LOG="${MCPPROXY_E2E_AUDIT_BUILD_LOG:-/tmp/mcpproxy_e2e_audit_build.log}"
@@ -1390,16 +1408,19 @@ AUDIT_BUILD_LOG="${MCPPROXY_E2E_AUDIT_BUILD_LOG:-/tmp/mcpproxy_e2e_audit_build.l
 # silently became empty and AUDIT_JSONL resolved to a root-level
 # "/audit.jsonl". The explicit XXXXXX template form is accepted by both.
 if [ -n "${MCPPROXY_E2E_AUDIT_JSONL_DIR:-}" ]; then
-    AUDIT_JSONL_DIR="$MCPPROXY_E2E_AUDIT_JSONL_DIR"
-    mkdir -p "$AUDIT_JSONL_DIR"
+    AUDIT_JSONL_PARENT_DIR="$MCPPROXY_E2E_AUDIT_JSONL_DIR"
+    mkdir -p "$AUDIT_JSONL_PARENT_DIR"
+    AUDIT_JSONL_DIR="$(mktemp -d "${AUDIT_JSONL_PARENT_DIR%/}/.mcpproxy-e2e-jsonl.XXXXXX")"
+    AUDIT_JSONL_DIR_OWNED=1
 else
     AUDIT_JSONL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mcpproxy_e2e_audit.XXXXXX")"
+    AUDIT_JSONL_DIR_OWNED=1
 fi
 AUDIT_JSONL="${AUDIT_JSONL_DIR}/audit.jsonl"
 # These paths are written into JSON and read by the native Go executable. On
 # Windows/MSYS, shell paths such as /d/... are not translated inside config
 # files, so normalize them before serializing the data_dir and audit_log.path.
-AUDIT_DATA_DIR_CONFIG_PATH="$AUDIT_DATA_DIR"
+AUDIT_DATA_DIR_CONFIG_PATH="$AUDIT_RUN_DATA_DIR"
 AUDIT_JSONL_CONFIG_PATH="$AUDIT_JSONL"
 if command -v cygpath >/dev/null 2>&1; then
     AUDIT_DATA_DIR_CONFIG_PATH="$(cygpath -w "$AUDIT_DATA_DIR")"
@@ -1475,8 +1496,7 @@ if [ ! -x "$AUDIT_BINARY" ]; then
 fi
 
 if [ -x "$AUDIT_BINARY" ]; then
-    rm -rf "$AUDIT_DATA_DIR"
-    mkdir -p "$AUDIT_DATA_DIR"
+    mkdir -p "$AUDIT_RUN_DATA_DIR"
 
     # Scratch config: template's listen/data_dir/audit_log overridden, and
     # the fixed-port launcher-test fixture dropped (it is owned by the
@@ -1616,7 +1636,14 @@ JSON
             kill -9 "$AUDIT_PID" 2>/dev/null || true
         fi
     fi
-    rm -rf "$AUDIT_DATA_DIR" "$AUDIT_JSONL_DIR"
+    if [ "${AUDIT_RUN_DATA_DIR_OWNED:-0}" = "1" ] && [ -d "$AUDIT_RUN_DATA_DIR" ]; then
+        rm -rf "$AUDIT_RUN_DATA_DIR"
+        AUDIT_RUN_DATA_DIR_OWNED=0
+    fi
+    if [ "${AUDIT_JSONL_DIR_OWNED:-0}" = "1" ] && [ -d "$AUDIT_JSONL_DIR" ]; then
+        rm -rf "$AUDIT_JSONL_DIR"
+        AUDIT_JSONL_DIR_OWNED=0
+    fi
     rm -f "$AUDIT_SERVER_LOG"
 fi
 

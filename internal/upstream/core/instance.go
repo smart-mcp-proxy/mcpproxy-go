@@ -19,8 +19,6 @@ var (
 	dataDirMu sync.Mutex
 	dataDir   string
 
-	legacyInstanceIDMu sync.Mutex
-
 	// legacyInstanceIDPath is a var (not a const) so tests can point it at a
 	// scratch path instead of the real host-wide file.
 	legacyInstanceIDPath = func() string {
@@ -104,9 +102,6 @@ func resolveInstanceID(dir string) string {
 // across a crashed-and-restarted process, and are identical across
 // goroutines within one process), so a random UUID is used instead.
 func adoptLegacyInstanceID(dataDir string) string {
-	legacyInstanceIDMu.Lock()
-	defer legacyInstanceIDMu.Unlock()
-
 	claimPath := fmt.Sprintf("%s.claimed-%s", legacyInstanceIDPath(), uuid.New().String())
 	if err := os.Rename(legacyInstanceIDPath(), claimPath); err != nil {
 		// No legacy file, or another process already claimed it.

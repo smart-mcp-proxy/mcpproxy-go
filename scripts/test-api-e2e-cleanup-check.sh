@@ -49,6 +49,13 @@ find_free_port() {
 
 DECOY_PORT="${DECOY_PORT:-$(find_free_port)}"
 DECOY_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mcpproxy-e2e-cleanup-check.XXXXXX")"
+CALLER_TEST_DATA_DIR="$DECOY_DIR/caller-test-data"
+CALLER_AUDIT_DATA_DIR="$DECOY_DIR/caller-audit-data"
+CALLER_AUDIT_JSONL_DIR="$DECOY_DIR/caller-audit-jsonl"
+mkdir -p "$CALLER_TEST_DATA_DIR" "$CALLER_AUDIT_DATA_DIR" "$CALLER_AUDIT_JSONL_DIR"
+printf 'preserve\n' > "$CALLER_TEST_DATA_DIR/.caller-owned"
+printf 'preserve\n' > "$CALLER_AUDIT_DATA_DIR/.caller-owned"
+printf 'preserve\n' > "$CALLER_AUDIT_JSONL_DIR/.caller-owned"
 DECOY_CONFIG="$DECOY_DIR/config.json"
 DECOY_LOG="$DECOY_DIR/decoy.log"
 DECOY_PID=""
@@ -69,6 +76,20 @@ cleanup_decoy() {
         kill -9 "$DECOY_PID" 2>/dev/null || true
     fi
     rm -rf "$DECOY_DIR"
+}
+
+assert_caller_directories_retained() {
+    local marker
+    for marker in \
+        "$CALLER_TEST_DATA_DIR/.caller-owned" \
+        "$CALLER_AUDIT_DATA_DIR/.caller-owned" \
+        "$CALLER_AUDIT_JSONL_DIR/.caller-owned"; do
+        if [ ! -f "$marker" ]; then
+            echo -e "${RED}FAIL: E2E cleanup removed caller-owned path $marker${NC}" >&2
+            return 1
+        fi
+    done
+    echo -e "${GREEN}PASS: E2E cleanup preserved caller-supplied data and JSONL directories.${NC}"
 }
 # See scripts/test-api-e2e.sh's cleanup trap for why INT/TERM are trapped
 # explicitly alongside EXIT (review round 4, finding F5).
@@ -150,7 +171,11 @@ run_abort_mode() {
     # set -m gives the background job its own process group, so the SIGTERM
     # below (sent to the suite PID only) cannot reach this script.
     set -m
-    E2E_ABORT_MARKER="$marker" LISTEN_PORT="$suite_port" ./scripts/test-api-e2e.sh > "$suite_log" 2>&1 &
+    E2E_ABORT_MARKER="$marker" LISTEN_PORT="$suite_port" \
+        MCPPROXY_E2E_TEST_DATA_DIR="$CALLER_TEST_DATA_DIR" \
+        MCPPROXY_E2E_AUDIT_DATA_DIR="$CALLER_AUDIT_DATA_DIR" \
+        MCPPROXY_E2E_AUDIT_JSONL_DIR="$CALLER_AUDIT_JSONL_DIR" \
+        ./scripts/test-api-e2e.sh > "$suite_log" 2>&1 &
     SUITE_PID=$!
     set +m
 
@@ -224,6 +249,7 @@ run_abort_mode() {
         echo -e "${RED}FAIL: decoy did not survive the aborted run.${NC}" >&2
         ok=0
     fi
+    assert_caller_directories_retained || ok=0
     if [ "$ok" -ne 1 ]; then
         echo "--- suite log tail ---" >&2
         tail -25 "$suite_log" >&2
@@ -238,11 +264,16 @@ if [ "$ABORT_MODE" -eq 1 ]; then
 fi
 
 echo -e "${YELLOW}Running scripts/test-api-e2e.sh (its own cleanup trap must not touch the decoy)...${NC}"
-./scripts/test-api-e2e.sh
+MCPPROXY_E2E_TEST_DATA_DIR="$CALLER_TEST_DATA_DIR" \
+    MCPPROXY_E2E_AUDIT_DATA_DIR="$CALLER_AUDIT_DATA_DIR" \
+    MCPPROXY_E2E_AUDIT_JSONL_DIR="$CALLER_AUDIT_JSONL_DIR" \
+    ./scripts/test-api-e2e.sh
 e2e_exit=$?
 echo "scripts/test-api-e2e.sh exited with status $e2e_exit (not itself checked here — only decoy survival is)."
 
 overall_pass=1
+
+assert_caller_directories_retained || overall_pass=0
 
 if kill -0 "$DECOY_PID" 2>/dev/null && curl -s --max-time 5 -o /dev/null "http://127.0.0.1:${DECOY_PORT}/api/v1/status"; then
     echo -e "${GREEN}PASS: decoy mcpproxy (pid=$DECOY_PID, port ${DECOY_PORT}) survived the E2E run's cleanup trap.${NC}"
