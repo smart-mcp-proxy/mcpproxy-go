@@ -74,10 +74,13 @@ func SecretFileDirsManagementEditRefused(configPath string, incoming *Config) bo
 // the data directory is known. The derived <data-dir>/secrets entry is added
 // separately once data_dir is resolved.
 func DefaultSecretFileDirRoots() []string {
-	switch runtime.GOOS {
-	case "windows":
-		return nil
-	case "darwin":
+	return DefaultSecretFileDirRootsForGOOS(runtime.GOOS)
+}
+
+// DefaultSecretFileDirRootsForGOOS returns platform default roots before data_dir is known.
+func DefaultSecretFileDirRootsForGOOS(goos string) []string {
+	switch goos {
+	case "windows", "darwin":
 		return nil
 	default:
 		return []string{"/run/secrets", "/run/credentials"}

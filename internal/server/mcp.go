@@ -6335,6 +6335,10 @@ func (p *MCPProxyServer) handleAddUpstream(ctx context.Context, request mcp.Call
 		if errors.As(createErr, &exists) {
 			return mcp.NewToolResultError(fmt.Sprintf("%v; use operation 'update' or 'patch' to modify it, or choose another name", exists)), nil
 		}
+		var verr *config.InvalidServerUpdateError
+		if errors.As(createErr, &verr) {
+			return mcp.NewToolResultError(joinMCPSecretPolicyMessages(verr.Errors)), nil
+		}
 		return mcp.NewToolResultError(fmt.Sprintf("Failed to add upstream: %v", createErr)), nil
 	}
 
@@ -6526,9 +6530,12 @@ func (p *MCPProxyServer) mergeUpstreamPatch(name string, request mcp.CallToolReq
 	})
 	if err != nil {
 		var userErr *mcpUserError
+		var verr *config.InvalidServerUpdateError
 		switch {
 		case errors.As(err, &userErr):
 			return nil, nil, 0, mcp.NewToolResultError(userErr.msg)
+		case errors.As(err, &verr):
+			return nil, nil, 0, mcp.NewToolResultError(joinMCPSecretPolicyMessages(verr.Errors))
 		case errors.Is(err, errUpstreamNotFound):
 			return nil, nil, 0, mcp.NewToolResultError(fmt.Sprintf("Server '%s' not found", name))
 		default:

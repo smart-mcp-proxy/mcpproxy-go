@@ -34,7 +34,7 @@ func (p *EnvProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 	}
 
 	if p.guardMCPProxy {
-		if isReservedMCPProxyEnv(ref.Name) {
+		if ReservedMCPProxyEnvName(ref.Name, runtime.GOOS) {
 			return "", ErrReservedEnvVar
 		}
 	}
@@ -47,12 +47,13 @@ func (p *EnvProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 	return value, nil
 }
 
-func isReservedMCPProxyEnv(name string) bool {
+// ReservedMCPProxyEnvName reports whether name is in the reserved MCPPROXY_ namespace.
+func ReservedMCPProxyEnvName(name, goos string) bool {
 	const prefix = "MCPPROXY_"
 	if len(name) < len(prefix) {
 		return false
 	}
-	if runtime.GOOS == "windows" {
+	if goos == "windows" {
 		return strings.EqualFold(name[:len(prefix)], prefix)
 	}
 	return strings.HasPrefix(name, prefix)

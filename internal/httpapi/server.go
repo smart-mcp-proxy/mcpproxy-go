@@ -2653,6 +2653,11 @@ func (s *Server) handleAddServer(w http.ResponseWriter, r *http.Request) {
 	// Add server via controller
 	logger := s.getRequestLogger(r) // T019: Use request-scoped logger
 	if err := s.controller.AddServer(r.Context(), serverConfig); err != nil {
+		var verr *config.InvalidServerUpdateError
+		if errors.As(err, &verr) {
+			s.writeError(w, r, http.StatusBadRequest, joinValidationMessages(verr.Errors))
+			return
+		}
 		// Check if it's a duplicate name error
 		if strings.Contains(err.Error(), "already exists") {
 			s.writeError(w, r, http.StatusConflict, err.Error())

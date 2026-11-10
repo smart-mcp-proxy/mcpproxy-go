@@ -29,13 +29,7 @@ func (e *UpstreamSecretPolicyError) Unwrap() error {
 }
 
 func policyExpansionError(serverName string, e secret.SecretExpansionError) *UpstreamSecretPolicyError {
-	pub := e.Err.Error()
-	if errors.Is(e.Err, secret.ErrSecretFileDenied) {
-		pub = secret.ErrSecretFileDenied.Error()
-	}
-	if errors.Is(e.Err, secret.ErrReservedEnvVar) {
-		pub = secret.ErrReservedEnvVar.Error()
-	}
+	pub := secret.PublicPolicyMessage(e.Err)
 	return &UpstreamSecretPolicyError{
 		ServerName: serverName,
 		Public:     pub,
