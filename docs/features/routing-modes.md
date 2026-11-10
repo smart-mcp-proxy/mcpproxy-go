@@ -156,7 +156,7 @@ Code execution mode is designed for multi-step orchestration workflows. Instead 
 - Requires the AI model to write correct JavaScript/TypeScript code
 - Debugging is harder: errors come from inside the sandbox, not from MCP tool calls
 - Higher latency per request (VM startup + multiple sequential tool calls)
-- Must be explicitly enabled (`"enable_code_execution": true`)
+- Can be disabled with `"enable_code_execution": false`; it is enabled by default since v0.66.0
 - Not all AI models are equally good at writing code for tool orchestration
 
 **When to use:**
@@ -283,5 +283,5 @@ When upstream servers connect, disconnect, or update their tools:
 
 - **Direct mode** exposes all tools upfront, which increases the initial token cost but simplifies the interaction. Use agent tokens with server restrictions to limit exposure.
 - **Retrieve tools mode** is the most secure by default because AI agents only see tools matching their search query.
-- **Code execution mode** requires explicit enablement (`enable_code_execution: true`) and runs code in a sandboxed JavaScript VM with no filesystem or network access.
+- **Code execution mode** is enabled by default since v0.66.0 and can be disabled with `enable_code_execution: false`. It runs code in a sandboxed JavaScript VM with no filesystem or network access.
 - All modes respect server quarantine, tool-level quarantine, and agent token permissions.
