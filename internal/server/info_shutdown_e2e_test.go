@@ -73,7 +73,8 @@ func TestInfoEndpoint(t *testing.T) {
 	require.NoError(t, cmd.Start(), "Failed to start server")
 	defer func() {
 		if cmd.Process != nil {
-			cmd.Process.Signal(syscall.SIGTERM)
+			// CommandContext kills the child on cancel; SIGTERM is unsupported on Windows.
+			cancel()
 			cmd.Wait()
 		}
 	}()
