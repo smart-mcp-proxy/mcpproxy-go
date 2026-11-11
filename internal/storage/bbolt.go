@@ -943,13 +943,21 @@ func removeFile(path string) error {
 // but reads it first and refuses a row it cannot decode (Spec 123 FR-013), so
 // a token save can never overwrite a row sealed under a key that is not
 // configured.
+//
+// With encryption off (no key), only a row shaped like an envelope (any
+// value starting "enc:") is refused: a corrupt plaintext row is overwritten
+// as it was before Spec 123 (FR-011 / SC-003), since no key could ever open
+// it and refusing it would report "cannot be decrypted" for a database that
+// never used encryption.
 func (b *BoltDB) SaveOAuthToken(record *OAuthTokenRecord) error {
 	record.Updated = time.Now()
 
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
 		if _, err := getOAuthRecordTx(bucket, b.oauthKey, record.ServerName); err != nil {
-			return err
+			if b.oauthKey != nil || oauthRowIsEnvelopeTx(bucket, record.ServerName) {
+				return err
+			}
 		}
 		return putOAuthRecord(bucket, b.oauthKey, record.ServerName, record)
 	})
@@ -1334,7 +1342,9 @@ func (b *BoltDB) SealPlaintextOAuthTokens(ctx context.Context) (int, error) {
 			if err != nil {
 				continue // plaintext that is not a record: undecryptable, untouched
 			}
-			if err := putOAuthRecord(bucket, b.oauthKey, row.key, record); err != nil {
+			// Keep the stored JSON's unknown fields (a row a newer binary
+			// wrote): sealing must not drop them (Spec 123 review).
+			if err := putOAuthRecordKeeping(bucket, b.oauthKey, row.key, record, row.value); err != nil {
 				return fmt.Errorf("seal oauth token %s: %w", row.key, err)
 			}
 			sealed++

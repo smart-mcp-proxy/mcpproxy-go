@@ -33,10 +33,11 @@ var codecFuncs = map[string]bool{
 // single-row read, the key-only clear and the listing helper. Everything
 // else goes through them.
 var oauthBucketAccessExempt = map[string]string{
-	"putOAuthRecord":    "write seam (encodes through encodeOAuthRecord)",
-	"getOAuthRecordTx":  "single-row read (decodes through decodeOAuthRecord)",
-	"clearOAuthStateTx": "key-only delete of a server's rows",
-	"collectOAuthRows":  "listing helper (copies key/value pairs for the codec)",
+	"putOAuthRecordKeeping": "write seam (encodes through encodeOAuthRecord; putOAuthRecord delegates to it)",
+	"getOAuthRecordTx":      "single-row read (decodes through decodeOAuthRecord)",
+	"oauthRowIsEnvelopeTx":  "single-row prefix check (decodes nothing)",
+	"clearOAuthStateTx":     "key-only delete of a server's rows",
+	"collectOAuthRows":      "listing helper (copies key/value pairs for the codec)",
 }
 
 type storagePkg struct {

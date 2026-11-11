@@ -1,8 +1,12 @@
 package storage
 
 import (
+	"bytes"
+	"encoding/json"
 	stderrors "errors"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -57,6 +61,16 @@ import (
 // in the same transaction (FR-016): the old plaintext page is now free but
 // not zeroed.
 func putOAuthRecord(bucket *bbolt.Bucket, k *tokenseal.Key, key string, rec *OAuthTokenRecord) error {
+	return putOAuthRecordKeeping(bucket, k, key, rec, nil)
+}
+
+// putOAuthRecordKeeping is putOAuthRecord for a record decoded from the
+// plaintext JSON object original: top-level fields of original that
+// OAuthTokenRecord does not know (a row written by a newer binary) are kept
+// in the written value. The boot sweep uses it (Spec 123 review), so sealing
+// a row never drops data the binary does not understand. A nil original is
+// putOAuthRecord.
+func putOAuthRecordKeeping(bucket *bbolt.Bucket, k *tokenseal.Key, key string, rec *OAuthTokenRecord, original []byte) error {
 	if hook := putOAuthRecordHook; hook != nil {
 		if err := hook(key); err != nil {
 			return err
@@ -74,7 +88,7 @@ func putOAuthRecord(bucket *bbolt.Bucket, k *tokenseal.Key, key string, rec *OAu
 		return err
 	}
 	rec.Revision = seq
-	data, err := encodeOAuthRecord(k, key, rec)
+	data, err := encodeOAuthRecord(k, key, rec, original)
 	if err != nil {
 		return err
 	}
@@ -143,12 +157,79 @@ func (e *ErrOAuthTokenUndecryptable) Is(target error) bool {
 
 // encodeOAuthRecord is the only encoder of oauth_tokens values (FR-010,
 // FR-011): plain JSON without a key, an enc:v1 envelope bound to key with one.
-func encodeOAuthRecord(k *tokenseal.Key, key string, rec *OAuthTokenRecord) ([]byte, error) {
+//
+// A non-nil original (the plaintext JSON object rec was decoded from) also
+// carries over the top-level fields OAuthTokenRecord does not know (see
+// putOAuthRecordKeeping).
+func encodeOAuthRecord(k *tokenseal.Key, key string, rec *OAuthTokenRecord, original []byte) ([]byte, error) {
 	data, err := rec.MarshalBinary()
-	if err != nil || k == nil {
-		return data, err
+	if err != nil {
+		return nil, err
+	}
+	if original != nil {
+		if data, err = keepUnknownOAuthFields(data, original); err != nil {
+			return nil, err
+		}
+	}
+	if k == nil {
+		return data, nil
 	}
 	return k.Seal(OAuthTokenBucket, key, data)
+}
+
+// oauthRecordJSONNames are the JSON object keys OAuthTokenRecord decodes.
+var oauthRecordJSONNames = func() []string {
+	t := reflect.TypeOf(OAuthTokenRecord{})
+	names := make([]string, 0, t.NumField())
+	for i := 0; i < t.NumField(); i++ {
+		f := t.Field(i)
+		if !f.IsExported() {
+			continue
+		}
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
+		if name == "-" {
+			continue
+		}
+		if name == "" {
+			name = f.Name
+		}
+		names = append(names, name)
+	}
+	return names
+}()
+
+// keepUnknownOAuthFields adds to encoded (the marshalled record) every
+// top-level key of original that no OAuthTokenRecord field decodes.
+// encoding/json matches keys case-insensitively, so a key that folds to a
+// known name is a known field and is not carried over (the record's value
+// wins).
+func keepUnknownOAuthFields(encoded, original []byte) ([]byte, error) {
+	var orig map[string]json.RawMessage
+	if err := json.Unmarshal(original, &orig); err != nil {
+		return nil, err
+	}
+	var out map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &out); err != nil {
+		return nil, err
+	}
+	added := false
+	for name, v := range orig {
+		known := false
+		for _, n := range oauthRecordJSONNames {
+			if strings.EqualFold(name, n) {
+				known = true
+				break
+			}
+		}
+		if !known {
+			out[name] = v
+			added = true
+		}
+	}
+	if !added {
+		return encoded, nil
+	}
+	return json.Marshal(out)
 }
 
 // decodeOAuthRecord is the only decoder of oauth_tokens values (FR-010): a
@@ -177,6 +258,13 @@ func decodeOAuthRecord(k *tokenseal.Key, key string, data []byte) (*OAuthTokenRe
 		return nil, &ErrOAuthTokenUndecryptable{Key: key, Reason: tokenseal.ReasonMalformed, RowKID: rowKID, KeyKID: k.ID()}
 	}
 	return rec, nil
+}
+
+// oauthRowIsEnvelopeTx reports whether the row stored under key has the
+// "enc:" prefix of an encrypted envelope, well-formed or not. It reads the
+// prefix only and decodes nothing.
+func oauthRowIsEnvelopeTx(bucket *bbolt.Bucket, key string) bool {
+	return bytes.HasPrefix(bucket.Get([]byte(key)), []byte("enc:"))
 }
 
 // oauthRawRow is one oauth_tokens key/value pair copied out of the bucket.

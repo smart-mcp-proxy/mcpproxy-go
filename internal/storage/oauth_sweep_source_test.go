@@ -88,7 +88,7 @@ func TestOAuthSweep_CollectsBeforeWriting(t *testing.T) {
 		switch name := sweepCallName(c); name {
 		case "ForEach", "Cursor", "First", "Next", "Seek", "Last", "Prev":
 			t.Errorf("SealPlaintextOAuthTokens walks the bucket itself (.%s); collect with collectOAuthRows and write after", name)
-		case "putOAuthRecord", "Put", "Delete":
+		case "putOAuthRecord", "putOAuthRecordKeeping", "Put", "Delete":
 			writes++
 			// Walk outwards: the nearest enclosing loop must be a range over
 			// the collected slice, with no closure (a walk callback) between
