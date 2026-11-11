@@ -250,7 +250,7 @@ func RefreshToken(client *mcp.Client) error {
 **Explanation**: This is expected behavior, not a bug:
 - **Connection persists after token expiration**: Once an MCP connection is established, it remains active. HTTP connections don't automatically drop when tokens expire.
 - **Refreshes are coordinated and persisted**: MCPProxy's persistent token store refreshes tokens (proactively and reactively) and writes the new access token, refresh token and expiry back to storage (BBolt). To stop mcp-go from starting its own refresh, the reactive path returns the token to mcp-go with a zeroed expiry.
-- **Status displays storage value**: `auth status` reads the expiration from persistent storage, so an `EXPIRED` line means no successful refresh has been stored yet (for example a refresh is pending, failing, or the server has not made a call since expiry).
+- **Status displays storage value**: `auth status` reads the expiration from persistent storage, so an `EXPIRED` line means the currently stored token has expired and no newer, unexpired token has been persisted (for example a refresh is pending, failing, or the server has not made a call since expiry).
 
 **When this occurs**:
 - Short-lived tokens (e.g., 30-second TTL) expire quickly after storage
@@ -284,7 +284,7 @@ func RefreshToken(client *mcp.Client) error {
 
 MCPProxy successfully handles Cloudflare's strict validation through:
 - **Global Callback Server Manager**: Coordinates OAuth callback servers across all upstream connections
-- **Dynamic Port Allocation**: Each upstream server gets one callback listener (OS-assigned port unless pinned) that is reused across its flows; callbacks are dispatched to the right flow by `state`
+- **Dynamic Port Allocation**: Each upstream server gets one callback listener that is reused across its flows. It binds a pinned or previously stored port when there is one, otherwise an OS-assigned ephemeral port; callbacks are dispatched to the right flow by `state`
 - **Perfect URI Consistency**: Exact match between Dynamic Client Registration and OAuth redirect_uri parameters
 - **Lifecycle Management**: Proper startup, shutdown, and cleanup of callback servers
 
