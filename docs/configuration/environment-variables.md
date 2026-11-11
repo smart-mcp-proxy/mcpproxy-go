@@ -31,6 +31,8 @@ Environment variables are useful for CI/CD environments or temporary overrides d
 | `MCPPROXY_LISTEN` | Override listen address | `127.0.0.1:8080` or `:8080` |
 | `MCPPROXY_API_KEY` | Set API key for authentication | `my-secret-key` |
 | `MCPPROXY_API_KEY_FILE` | Read the API key from a file (absolute path). Set it or `MCPPROXY_API_KEY`, not both; see [API key from a file](#api-key-from-a-file) | `/run/secrets/mcpproxy_api_key` |
+| `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY` | Key that encrypts the upstream OAuth tokens in `config.db` (base64, 32 bytes). Overrides `oauth_token_encryption_key`. Set it or the `_FILE` form, not both. See [OAuth Token Encryption](../features/oauth-token-encryption.md) | `bXkta2V5...` |
+| `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE` | Read that key from a file (absolute path; symlinks followed, as for `MCPPROXY_API_KEY_FILE`). A file that is named but missing, unreadable or empty stops startup with exit code 4; mcpproxy never falls back to storing tokens in the clear | `/run/secrets/oauth_key` |
 | `MCPPROXY_DATA_DIR` | Override data directory. Like `--data-dir` (which wins when both are set), it also makes `serve` read `<data-dir>/mcp_config.json` | `/var/lib/mcpproxy` |
 | `MCPPROXY_DATA` | Override data directory only (backward compatibility; `MCPPROXY_DATA_DIR` wins when both are set, and the config file is still looked up in the working directory and `~/.mcpproxy`) | `/var/lib/mcpproxy` |
 

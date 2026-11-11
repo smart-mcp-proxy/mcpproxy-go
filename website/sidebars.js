@@ -147,6 +147,7 @@ const sidebars = {
           label: 'Authentication',
           items: [
             'features/oauth-authentication',
+            'features/oauth-token-encryption',
             'features/auth-broker',
             'features/idp-token-storage',
           ],

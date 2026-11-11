@@ -80,7 +80,7 @@ For OAuth providers that require additional parameters (like RFC 8707 resource i
 3. User completes authentication
 4. MCPProxy receives callback with authorization code
 5. Exchanges code for access token
-6. Stores tokens securely in system keyring
+6. Stores the tokens in `config.db` in the data directory (encrypted when [`oauth_token_encryption_key`](oauth-token-encryption.md) is set)
 
 #### Reused client registrations
 
@@ -215,13 +215,10 @@ For providers like Runlayer, MCPProxy can auto-detect the resource parameter fro
 
 ## Token Storage
 
-Tokens are stored securely using the system keyring:
+MCPProxy stores the OAuth access token, the refresh token and the dynamic client registration secret of each upstream server in `config.db` in the data directory. They are not kept in the system keyring.
 
-| Platform | Storage |
-|----------|---------|
-| macOS | Keychain |
-| Windows | Credential Manager |
-| Linux | Secret Service (libsecret) |
+- **By default** the rows are readable JSON protected only by the `0600` file and `0700` directory permissions. A copy of `config.db` yields the tokens.
+- **With `oauth_token_encryption_key` set**, the rows are encrypted with AES-256-GCM, so a copy of `config.db` made without the key yields nothing. This does not protect against a process running as the same user as mcpproxy, which can read the key from the same place. See [OAuth Token Encryption](oauth-token-encryption.md) for key delivery, the threat model and recovery.
 
 ## Error Handling
 
@@ -399,5 +396,5 @@ curl -I https://auth.example.com/.well-known/oauth-authorization-server
 
 1. **Use PKCE**: MCPProxy uses PKCE by default for public clients
 2. **Minimal Scopes**: Request only necessary permissions
-3. **Token Storage**: Tokens are encrypted in system keyring
+3. **Token Storage**: Tokens live in `config.db` with file permissions only; set [`oauth_token_encryption_key`](oauth-token-encryption.md) to encrypt them (same-user processes can still read the key)
 4. **Callback Security**: Uses dynamic port allocation to prevent port conflicts

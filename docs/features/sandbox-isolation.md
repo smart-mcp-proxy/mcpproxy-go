@@ -17,7 +17,7 @@ Ubuntu 23.10+).
 
 :::caution The sandbox confines writes, not identity
 A stdio server under `sandbox` (or `none`) still runs as the proxy's user. It can
-read `mcp_config.json` and `config.db`, and while `enable_socket` is on it can
+read `mcp_config.json` and `config.db` (its OAuth tokens are encrypted only when `oauth_token_encryption_key` is set, and the same user can read that key too), and while `enable_socket` is on it can
 connect to the admin socket **without a key and mint itself an agent token**, in
 both modes. If you run stdio servers you do not fully trust outside `docker`
 isolation, **`enable_socket: false` is the setting that matters**. Details and
