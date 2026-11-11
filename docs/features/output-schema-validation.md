@@ -57,8 +57,9 @@ Config is hot-reloaded; changing `mode` does not require a restart.
 
 Key guarantees:
 
-- **Lossless on success**: a conforming `structuredContent` is forwarded
-  byte-for-byte unchanged (validation runs on a read-only view).
+- **Non-mutating on success**: a conforming `structuredContent` value is
+  forwarded unchanged; validation reads it without mutating it, and the MCP
+  server serializes the response through its normal transport encoder.
 - **Never blocks on a bad schema**: if a tool's declared schema is itself not
   compilable, validation degrades to a no-op (logged once) — it never blocks
   traffic on the proxy's inability to compile a schema.
