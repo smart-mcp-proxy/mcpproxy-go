@@ -172,6 +172,18 @@ func parseOAuthError(err error, responseBody []byte) error {
 
 // tryOAuthAuth attempts OAuth authentication
 func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
+	// Spec 123 FR-031: a stored row the configured key cannot decrypt stops
+	// the OAuth strategy here, before the flow coordinator, discovery, DCR or
+	// a callback server: a login could not overwrite the row, so the
+	// connection reports MCPX_OAUTH_TOKEN_UNDECRYPTABLE instead of parking
+	// as "login required".
+	if err := c.storedOAuthTokenUndecryptable(); err != nil {
+		c.logger.Warn("Stored OAuth token cannot be decrypted; not starting an OAuth flow",
+			zap.String("server", c.config.Name),
+			zap.Error(err))
+		return err
+	}
+
 	// Use the global OAuth flow coordinator to prevent race conditions
 	coordinator := oauth.GetGlobalCoordinator()
 
@@ -226,7 +238,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 	skipBrowserFlow := false
 
 	// First check for valid persisted token directly (handles cross-process OAuth)
-	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
+	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck, _ := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	if hasTokenPrecheck && !tokenExpiredPrecheck {
 		logger.Info("🔄 Valid OAuth token found in persistent storage - will skip browser flow if OAuth error occurs",
 			zap.String("server", c.config.Name),
@@ -248,7 +260,7 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 
 	// Check if tokens already exist for this server (both in-memory and persisted)
 	hasInMemoryTokens := tokenManager.HasTokenStore(c.config.Name)
-	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
+	hasPersistedToken, hasRefreshToken, isExpired, _ := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	logger.Info("🔍 HTTP OAuth strategy token status",
 		zap.Bool("has_in_memory_token_store", hasInMemoryTokens),
 		zap.Bool("has_persisted_token", hasPersistedToken),
@@ -625,6 +637,18 @@ func (c *Client) tryOAuthAuth(ctx context.Context) (oauthErr error) {
 
 // trySSEOAuthAuth attempts SSE OAuth authentication
 func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
+	// Spec 123 FR-031: a stored row the configured key cannot decrypt stops
+	// the OAuth strategy here, before the flow coordinator, discovery, DCR or
+	// a callback server: a login could not overwrite the row, so the
+	// connection reports MCPX_OAUTH_TOKEN_UNDECRYPTABLE instead of parking
+	// as "login required".
+	if err := c.storedOAuthTokenUndecryptable(); err != nil {
+		c.logger.Warn("Stored OAuth token cannot be decrypted; not starting an OAuth flow",
+			zap.String("server", c.config.Name),
+			zap.Error(err))
+		return err
+	}
+
 	// Use the global OAuth flow coordinator to prevent race conditions
 	coordinator := oauth.GetGlobalCoordinator()
 
@@ -672,7 +696,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 	skipBrowserFlow := false
 
 	// First check for valid persisted token directly (handles cross-process OAuth)
-	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
+	hasTokenPrecheck, hasRefreshPrecheck, tokenExpiredPrecheck, _ := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	if hasTokenPrecheck && !tokenExpiredPrecheck {
 		logger.Info("🔄 Valid OAuth token found in persistent storage - will skip browser flow if OAuth error occurs",
 			zap.String("server", c.config.Name),
@@ -694,7 +718,7 @@ func (c *Client) trySSEOAuthAuth(ctx context.Context) (oauthErr error) {
 
 	// Check if tokens already exist for this server (both in-memory and persisted)
 	hasInMemoryTokens := tokenManager.HasTokenStore(c.config.Name)
-	hasPersistedToken, hasRefreshToken, isExpired := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
+	hasPersistedToken, hasRefreshToken, isExpired, _ := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
 	logger.Info("🔍 SSE OAuth strategy token status",
 		zap.Bool("has_in_memory_token_store", hasInMemoryTokens),
 		zap.Bool("has_persisted_token", hasPersistedToken),
@@ -1861,6 +1885,19 @@ func resolveCallbackRedirectURIForPersistence(serverName, serverKey string, stor
 		return record.RedirectURI
 	}
 	return ""
+}
+
+// storedOAuthTokenUndecryptable returns oauth.TokenUndecryptableError when
+// the server's stored OAuth row exists but the configured key cannot decrypt
+// it (Spec 123 FR-031), and nil otherwise (a readable row or none). The later
+// HasPersistedTokenBound reads of the strategies run after this check, so
+// they ignore its error.
+func (c *Client) storedOAuthTokenUndecryptable() error {
+	if c.storage == nil {
+		return nil
+	}
+	_, _, _, err := oauth.HasPersistedTokenBound(c.config.Name, c.config.URL, c.storage, c.CredentialBinding())
+	return err
 }
 
 // wasOAuthRecentlyCompleted checks if OAuth was completed recently to prevent retry loops

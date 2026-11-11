@@ -36,6 +36,11 @@ const (
 	OAuthDiscoveryFailed  Code = "MCPX_OAUTH_DISCOVERY_FAILED"
 	OAuthCallbackTimeout  Code = "MCPX_OAUTH_CALLBACK_TIMEOUT"
 	OAuthCallbackMismatch Code = "MCPX_OAUTH_CALLBACK_MISMATCH"
+	// OAuthTokenUndecryptable: the stored OAuth row cannot be decrypted with
+	// the configured key (Spec 123 FR-031) — no key, another key, or an
+	// envelope that fails authentication. Not a login state: a login cannot
+	// overwrite the row, so the fix is to restore the key or discard the row.
+	OAuthTokenUndecryptable Code = "MCPX_OAUTH_TOKEN_UNDECRYPTABLE"
 )
 
 // HTTP domain — HTTP/SSE transport failures.

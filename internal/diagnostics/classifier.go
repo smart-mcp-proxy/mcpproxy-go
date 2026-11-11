@@ -66,6 +66,11 @@ func Classify(err error, hints ClassifierHints) Code {
 func classifyOAuth(err error, _ ClassifierHints) Code {
 	msg := strings.ToLower(err.Error())
 	switch {
+	// Spec 123: an undecryptable stored row is matched FIRST. Its message names
+	// the logout-then-login way out, which would otherwise read as
+	// login-required below, and a login is exactly what must not be offered.
+	case strings.Contains(msg, "stored oauth token") && strings.Contains(msg, "cannot be decrypted"):
+		return OAuthTokenUndecryptable
 	// Re-auth (a previously-working stored token broke) is matched BEFORE the
 	// login-required backstop because "re-login available" contains the
 	// "login available" substring; the order of these two cases is load-bearing.
