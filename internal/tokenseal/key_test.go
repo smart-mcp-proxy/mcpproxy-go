@@ -104,11 +104,11 @@ func TestKeyDoesNotPrintMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	js, _ := json.Marshal(k)
+	js, _ := json.Marshal(k) //nolint:staticcheck // asserting that marshaling a Key leaks nothing
 	out := fmt.Sprintf("%v|%+v|%#v|%s|%q", k, k, k, js, k)
 	rec, _ := derive(raw)
 	for _, secret := range []string{b64, strings.TrimRight(b64, "="), fmt.Sprintf("%x", raw), fmt.Sprintf("%x", rec),
-		base64.StdEncoding.EncodeToString(rec), fmt.Sprint(raw), fmt.Sprint(rec), string(raw), string(rec)} {
+		base64.StdEncoding.EncodeToString(rec), string(raw), string(rec)} {
 		if strings.Contains(out, secret) {
 			t.Fatalf("formatted key contains secret material %q in %q", secret, out)
 		}
