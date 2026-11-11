@@ -51,7 +51,7 @@ OAuth authentication is used when connecting to MCP servers that require authori
 | `pkce_enabled` | boolean | PKCE is always enabled for security; this flag is currently ignored |
 | `extra_params` | object | Additional authorization parameters (e.g., RFC 8707 resource) |
 
-**Note:** OAuth authorization and token endpoints are automatically discovered from the server's OAuth metadata (RFC 8414 `.well-known/oauth-authorization-server`), not configured manually.
+**Note:** OAuth authorization and token endpoints are discovered by default from the server's OAuth metadata (RFC 8414 `.well-known/oauth-authorization-server`). They can be overridden explicitly with `authorization_endpoint` and `token_endpoint` (and `registration_endpoint`); if metadata discovery fails and both authorization and token overrides are set, MCPProxy builds the metadata from them.
 
 ### Advanced Configuration
 
