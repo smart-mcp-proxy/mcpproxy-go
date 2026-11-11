@@ -108,3 +108,7 @@ mcpproxy doctor
 - Zero overhead for servers without `extra_params` configured
 - Thread-safe concurrent OAuth flows with parameter isolation
 - See `internal/oauth/transport_wrapper.go` for wrapper implementation
+
+## Token Response Normalization
+
+The same wrapper also post-processes successful token endpoint responses (code exchange and refresh) so that `mcp-go` can decode them. A `201 Created` is reported as `200 OK`, and an `expires_at` that is not an RFC 3339 string (a numeric Unix epoch, `null`, or any other string such as `""` or `"2026-11-11 10:00:00"`) is dropped from the JSON body, because `mcp-go` decodes `expires_at` into a `time.Time` and fails with `failed to decode token response` otherwise. When `expires_in` is missing or not positive and the dropped `expires_at` was a number or an all-digit string, `expires_in` is derived as the seconds remaining until that timestamp (never negative, capped at 10 years; values above `1e11` are read as milliseconds, and implausibly large values derive nothing). Valid RFC 3339 string `expires_at` values, non-2xx responses, non-JSON bodies and bodies over 1 MiB are passed through unchanged. This applies whether or not `extra_params` is configured.
