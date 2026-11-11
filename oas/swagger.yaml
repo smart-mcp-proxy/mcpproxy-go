@@ -2112,6 +2112,8 @@ components:
             $ref: '#/components/schemas/contracts.OAuthRequirement'
           type: array
           uniqueItems: false
+        oauth_token_storage:
+          $ref: '#/components/schemas/contracts.OAuthTokenStorageReport'
         runtime_warnings:
           items:
             type: string
@@ -2735,6 +2737,88 @@ components:
         success:
           description: Always true for successful start
           type: boolean
+      type: object
+    contracts.OAuthTokenStorageReport:
+      description: |-
+        OAuthTokenStorage (Spec 123 FR-030) reports the state of the stored
+        upstream OAuth rows: encryption on or off, the public key id, the row
+        counts by state, the undecryptable servers and the compaction advice.
+        It never carries key material or the key reference.
+      properties:
+        compaction_advised:
+          description: |-
+            CompactionAdvised mirrors the compaction marker: freed pages may still
+            hold old plaintext until `mcpproxy db compact --keep-backup=false`.
+          type: boolean
+        encryption_enabled:
+          description: EncryptionEnabled is true when an encryption key is configured.
+          type: boolean
+        key_id:
+          description: KeyID is the public, non-secret id of the configured key (administrator
+            only).
+          type: string
+        key_source_in_data_dir:
+          description: KeySourceInDataDir is true when the key file lies inside the
+            data directory.
+          type: boolean
+        key_source_kind:
+          description: |-
+            KeySourceKind is how the key was obtained: literal, env, env_file,
+            ref_file, ref_env or ref_keyring (administrator only).
+          type: string
+        plaintext:
+          description: |-
+            Plaintext counts valid JSON rows; Sealed counts envelopes the configured
+            key opens; Undecryptable counts everything else.
+          type: integer
+        sealed:
+          type: integer
+        servers:
+          description: Servers lists the undecryptable rows by server.
+          items:
+            $ref: '#/components/schemas/contracts.OAuthTokenStorageServer'
+          type: array
+          uniqueItems: false
+        undecryptable:
+          type: integer
+        undecryptable_by_reason:
+          $ref: '#/components/schemas/contracts.OAuthTokenUndecryptableByReason'
+        warnings:
+          description: |-
+            Warnings are stable codes: literal_key, key_file_in_data_dir,
+            plaintext_rows_with_key, compaction_advised, backup_file_present
+            (administrator only).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
+      type: object
+    contracts.OAuthTokenStorageServer:
+      properties:
+        bucket_key:
+          type: string
+        reason:
+          type: string
+        row_key_id:
+          description: RowKeyID is the key id in the row's envelope (administrator
+            only).
+          type: string
+        server:
+          type: string
+      type: object
+    contracts.OAuthTokenUndecryptableByReason:
+      description: UndecryptableByReason breaks Undecryptable down by reason.
+      properties:
+        auth_failed:
+          type: integer
+        key_mismatch:
+          type: integer
+        malformed:
+          type: integer
+        no_key:
+          type: integer
+        unsupported_version:
+          type: integer
       type: object
     contracts.PreflightPolicy:
       properties:

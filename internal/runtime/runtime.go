@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -787,6 +788,36 @@ func (r *Runtime) OAuthTokenKeyID() string {
 // once at startup. It holds no path or key material.
 func (r *Runtime) OAuthTokenKeySource() config.KeySource {
 	return r.oauthKeySource
+}
+
+// OAuthTokenStorageState reads what the doctor section about the stored OAuth
+// rows needs (Spec 123 FR-030): the public key id and key-source metadata
+// resolved at startup, the classification of every oauth_tokens row, the
+// compaction-advised marker and whether a config.db.bak sits in the data
+// directory. It returns no key material and no path.
+func (r *Runtime) OAuthTokenStorageState() (management.OAuthTokenStorageState, error) {
+	st := management.OAuthTokenStorageState{
+		KeyID:     r.oauthTokenKey.ID(),
+		KeySource: r.oauthKeySource,
+	}
+	sm := r.StorageManager()
+	if sm == nil {
+		return st, fmt.Errorf("storage not initialized")
+	}
+	rows, err := sm.ListOAuthTokenRows()
+	if err != nil {
+		return st, err
+	}
+	st.Rows = rows
+	if st.CompactAdvised, err = sm.OAuthCompactAdvised(); err != nil {
+		return st, err
+	}
+	if snap := r.ConfigSnapshot(); snap != nil && snap.Config != nil && snap.Config.DataDir != "" {
+		if _, statErr := os.Stat(filepath.Join(snap.Config.DataDir, "config.db.bak")); statErr == nil {
+			st.BackupPresent = true
+		}
+	}
+	return st, nil
 }
 
 // Config returns the underlying configuration pointer.
