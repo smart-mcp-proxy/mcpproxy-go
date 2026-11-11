@@ -1,0 +1,3 @@
+secrets/
+# the repo-wide .gitignore excludes mcp_config.json; this one is the example config
+!mcp_config.json
