@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpx"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
@@ -3820,6 +3821,13 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 			if encErr := json.NewEncoder(w).Encode(oauthValidationErr); encErr != nil {
 				s.logger.Errorw("Failed to encode OAuth validation error response", "error", encErr)
 			}
+			return
+		}
+
+		// Spec 123: the stored OAuth row cannot be decrypted; no login can
+		// help until the key is restored or the row is deleted.
+		if oauth.IsTokenUndecryptable(err) {
+			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("%s: %v", diagnostics.OAuthTokenUndecryptable, err))
 			return
 		}
 

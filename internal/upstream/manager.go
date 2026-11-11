@@ -2839,6 +2839,12 @@ func (m *Manager) StartManualOAuth(serverName string, force bool) error {
 		return fmt.Errorf("failed to create core client for OAuth: %w", err)
 	}
 
+	// Spec 123: an undecryptable stored row is reported to the caller here,
+	// not logged inside the goroutine.
+	if guardErr := coreClient.CheckManualLoginAllowed(); guardErr != nil {
+		return guardErr
+	}
+
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 		defer cancel()

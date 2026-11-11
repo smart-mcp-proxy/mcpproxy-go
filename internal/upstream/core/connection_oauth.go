@@ -1913,6 +1913,14 @@ func (c *Client) rejectManualLoginOnUndecryptableToken() error {
 	return err
 }
 
+// CheckManualLoginAllowed runs the manual-login guard for callers that start
+// the login asynchronously (upstream.Manager.StartManualOAuth): it returns the
+// coded MCPX_OAUTH_TOKEN_UNDECRYPTABLE error while the stored OAuth row cannot
+// be decrypted, before any goroutine, discovery or callback server exists.
+func (c *Client) CheckManualLoginAllowed() error {
+	return c.rejectManualLoginOnUndecryptableToken()
+}
+
 // wasOAuthRecentlyCompleted checks if OAuth was completed recently to prevent retry loops
 func (c *Client) wasOAuthRecentlyCompleted() bool {
 	c.oauthMu.RLock()
