@@ -1,10 +1,16 @@
 #!/bin/sh
-# Bring the example up, check it does what the walkthrough claims, tear it down.
+# Bring the example up under a separate project name, check it does what the
+# walkthrough claims, tear that test project down (including its own volume).
 # Needs docker compose v2 and curl. Used by .github/workflows/compose-example.yml.
 set -eu
 cd "$(dirname "$0")"
 
-PORT="${MCPPROXY_PORT:-18080}"
+# Run under its own Compose project (own containers, network and data volume) and
+# its own port, so `down -v` below removes only what this test created and never
+# the data volume of a deployment started with plain `docker compose up`.
+# COMPOSE_PROJECT_NAME takes precedence over the file's top-level `name:`.
+export COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-mcpproxy-sidecars-test}"
+PORT="${MCPPROXY_PORT:-18081}"
 export MCPPROXY_PORT="$PORT"
 fail() { echo "FAIL: $*" >&2; docker compose logs --tail=80 >&2 || true; exit 1; }
 cleanup() { docker compose down -v --remove-orphans >/dev/null 2>&1 || true; }
@@ -13,6 +19,8 @@ trap cleanup EXIT
 ./gen-secrets.sh
 KEY="$(cat secrets/mcpproxy_api_key)"
 
+# --wait returns once the sidecar is healthy and mcpproxy is running; the proxy
+# has no health check of its own, so step 1 polls it.
 docker compose up --build --wait --wait-timeout 300 || fail "stack did not become healthy"
 
 # 1. The proxy lists the sidecar's tools. The tool list arrives after the first

@@ -4,7 +4,13 @@
 set -eu
 cd "$(dirname "$0")"
 umask 077
+if [ -L secrets ]; then
+  echo "secrets is a symlink; refusing to use it" >&2
+  exit 1
+fi
 mkdir -p secrets
+# mkdir -p keeps the mode of an existing directory, so set it explicitly.
+chmod 0700 secrets
 for name in mcpproxy_api_key sidecar_api_key; do
   if [ ! -s "secrets/$name" ]; then
     # 256 random bits as hex.

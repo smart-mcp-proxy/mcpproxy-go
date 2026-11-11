@@ -50,6 +50,9 @@ services:
     # The default stop_grace_period (10 s) is shorter than mcpproxy's 60 s
     # graceful-shutdown bound.
     stop_grace_period: 60s
+    # No healthcheck here: the image is distroless (no shell, curl or wget) and
+    # `mcpproxy status` exits 0 even when the core is down, so no in-image probe
+    # is reliable. `up --wait` returns once the container is running.
     depends_on:
       everything: {condition: service_healthy}
 

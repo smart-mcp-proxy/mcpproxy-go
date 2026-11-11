@@ -61,9 +61,13 @@ curl -H "X-API-Key: $(cat secrets/mcpproxy_api_key)" \
   http://127.0.0.1:18080/api/v1/servers/everything/tools
 ```
 
+`gen-secrets.sh` sets `secrets/` to `0700` (and refuses a symlink). The key files inside are
+`0644` because the sidecar (uid 1000) and mcpproxy (root) both read them through the bind
+mount; the directory is what keeps other host users out.
+
 The demo server is `@modelcontextprotocol/server-everything`, so the example needs no
-credentials. To wrap a different server, change `SERVER_PKG` in the `sidecar/Dockerfile`
-build argument and the `--stdio=` command in `docker-compose.yml`, add one sidecar service
+credentials. To wrap a different server, change `build.args.SERVER_PKG` in `docker-compose.yml`
+(it overrides the default in `sidecar/Dockerfile`) and the `--stdio=` command beside it, add one sidecar service
 per server, and add a matching entry to `mcpproxy/mcp_config.json`.
 
 The mcpproxy image needs **v0.72.0 or newer**: `${file:}` references and
@@ -124,8 +128,13 @@ with state needs the flag, and the example sets it on every sidecar.
 
 ## Checks the CI job runs
 
-`examples/compose-stdio-sidecars/test.sh` builds the sidecar, starts the stack, waits for
-both health checks and then checks that the proxy lists `everything:echo` with the API
+`examples/compose-stdio-sidecars/test.sh` builds the sidecar, starts the stack, starts the stack
+under its own Compose project name (`mcpproxy-sidecars-test`, port 18081), so the
+deployment's data volume is never touched and only the test project's containers, network
+and volume are removed at the end. Only the sidecar has a Compose health check, so
+`up --wait` returns once the sidecar is healthy and the proxy container is running (the
+image has no shell or HTTP client for a probe, and `mcpproxy status` exits 0 when the core
+is down); the script then polls the proxy until it lists the tools. It checks that the proxy lists `everything:echo` with the API
 key; that `/mcp` without a credential and the sidecar without its key both return `401`;
 that the sidecar cannot reach `1.1.1.1` or `example.com`; that `/data` does not exist in
 the sidecar; and that no container mounts the Docker socket.
