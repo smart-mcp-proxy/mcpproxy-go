@@ -929,7 +929,7 @@ func runAuthLogoutStandalone(_ context.Context, serverName string, cfg *config.C
 	fmt.Println("   Note: Running in standalone mode (no daemon detected)")
 	fmt.Println()
 
-	// Spec 123: no CLI client here. cli.NewClient resolves the OAuth token
+	// Spec 123: not cli.NewClient. It resolves the OAuth token
 	// key first, and an unresolvable key reference (the usual lost-key case)
 	// would refuse the very logout the docs prescribe for it. The clear is a
 	// key-only delete, so it needs no key.
@@ -938,7 +938,7 @@ func runAuthLogoutStandalone(_ context.Context, serverName string, cfg *config.C
 		return fmt.Errorf("failed to create logger: %w", err)
 	}
 	defer func() { _ = logger.Sync() }()
-	if err := clearOAuthTokenStandalone(cfg, serverName, logger.Sugar()); err != nil {
+	if err := cli.ClearOAuthTokenStandalone(cfg, serverName, logger.Sugar()); err != nil {
 		return fmt.Errorf("failed to clear OAuth token: %w", err)
 	}
 
