@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,8 +15,11 @@ import (
 // published as written, and anything else (a reference mixed with literal
 // text) stays masked.
 func TestOAuthTokenKeyMaskingMatchesValidationRecogniser(t *testing.T) {
+	// Absolute on every OS: validation requires an absolute ${file:} path,
+	// and a POSIX-rooted literal is relative on Windows.
+	keyPath := filepath.Join(t.TempDir(), "oauth-key")
 	refs := []string{
-		"${ file:/run/credentials/mcpproxy.service/oauth-key}",
+		"${ file:" + keyPath + "}",
 		"${ env:MCPPROXY_OAUTH_KEY_SOURCE }",
 		"${ keyring:mcpproxy-oauth-key }",
 	}

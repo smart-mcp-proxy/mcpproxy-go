@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,13 +15,15 @@ import (
 // ${env:}, ${keyring:}) is shown exactly as written, because it is
 // operator-authored and not secret. reveal_secret_headers changes neither.
 func TestOAuthTokenKeyMaskingPolicy(t *testing.T) {
+	// Absolute on every OS (a POSIX-rooted literal is relative on Windows).
+	fileRef := "${file:" + filepath.Join(t.TempDir(), "oauth-key") + "}"
 	cases := []struct {
 		name      string
 		value     string
 		reference bool
 	}{
 		{"literal", spec123LiteralKey, false},
-		{"file reference", "${file:/run/credentials/mcpproxy.service/oauth-key}", true},
+		{"file reference", fileRef, true},
 		{"env reference", "${env:MCPPROXY_OAUTH_KEY_SOURCE}", true},
 		{"keyring reference", "${keyring:mcpproxy-oauth-key}", true},
 	}
