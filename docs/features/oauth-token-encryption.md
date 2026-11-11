@@ -274,9 +274,10 @@ the clear: delete those too. Single-step rekeying is not offered.
 
 **Packaged Linux service**
 
-The service's key often exists only inside the unit (`LoadCredential=`), so supply
-it explicitly and run as the service user with the service's paths, with the
-service stopped:
+Run the offline commands as the service user with the service's paths, with the
+service stopped, and supply the key explicitly. The examples below read the key
+file directly, so they need the delivery where the service user can read it
+(`chown mcpproxy /etc/mcpproxy/oauth-key`, mode `0600`):
 
 ```bash
 sudo systemctl stop mcpproxy
@@ -306,11 +307,24 @@ plaintext that `decrypt` wrote stays in freed pages until the next
 [Rotate the key](#turning-it-off-downgrading-and-rotating-the-key) with the same
 prefix: `encrypt` with the new key comes before the compaction.
 
-For a key that only the unit can see, `systemd-run --pipe -p LoadCredential=oauth-key:/etc/credstore/oauth-key ...`
-and `docker compose run --rm --entrypoint mcpproxy mcpproxy auth tokens ...` (with the
-same secret, configuration and data volume mounted, and the service stopped) give the
-command the same view the service has. The image's entrypoint is `mcpproxy serve`, so
-without `--entrypoint` the arguments would go to `serve`.
+With `LoadCredential=` the key file is root-only and the service user cannot read
+it, so the commands above exit 4. Let systemd hand the credential to a one-off
+unit that runs as the service user instead (replace `status` with the command you
+need; for `LoadCredentialEncrypted=` use that property and the encrypted file):
+
+```bash
+sudo systemd-run --pipe --wait --collect \
+  -p User=mcpproxy -p Group=mcpproxy \
+  -p LoadCredential=oauth-key:/etc/mcpproxy/oauth-key \
+  /bin/sh -c 'MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE="$CREDENTIALS_DIRECTORY/oauth-key" \
+    exec /usr/bin/mcpproxy --config=/etc/mcpproxy/mcp_config.json \
+    --data-dir=/var/lib/mcpproxy auth tokens status'
+```
+
+In a container, `docker compose run --rm --entrypoint mcpproxy mcpproxy auth tokens ...`
+(with the same secret, configuration and data volume mounted, and the service
+stopped) gives the command the same view the service has. The image's entrypoint is
+`mcpproxy serve`, so without `--entrypoint` the arguments would go to `serve`.
 
 ## When a login is refused
 

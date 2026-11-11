@@ -1781,7 +1781,8 @@ Validate configuration without applying.
 Get system diagnostics.
 
 When an OAuth token encryption key is configured, or any stored OAuth row is encrypted, the
-response carries an `oauth_token_storage` object (Spec 123):
+response's `data` object carries an `oauth_token_storage` object (Spec 123). The
+example shows that part of `data` only:
 
 ```json
 {
