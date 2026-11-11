@@ -84,8 +84,31 @@ func TestOpenErrorReasons(t *testing.T) {
 			t.Fatalf("got %v", err)
 		}
 	})
+	// spec.md "Undecryptable row": truncation is auth_failed, whatever the
+	// cut length (review: only cuts keeping a multiple of 4 base64 characters
+	// used to reach GCM; the rest reported malformed).
 	t.Run("truncated payload", func(t *testing.T) {
 		_, err := k.Open(bucket, bkey, env[:len("enc:v1:")+17+8])
+		if reasonOf(t, err).Reason != ReasonAuthFailed {
+			t.Fatalf("got %v", err)
+		}
+	})
+	t.Run("truncated by 1..24 bytes", func(t *testing.T) {
+		for _, plain := range []string{`{"x":1}`, `{"x":12}`, `{"x":123}`} {
+			e, err := k.Seal(bucket, bkey, []byte(plain))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for n := 1; n <= 24; n++ {
+				_, err := k.Open(bucket, bkey, e[:len(e)-n])
+				if got := reasonOf(t, err).Reason; got != ReasonAuthFailed {
+					t.Errorf("plaintext %q truncated by %d: got %s, want auth_failed", plain, n, got)
+				}
+			}
+		}
+	})
+	t.Run("misplaced padding", func(t *testing.T) {
+		_, err := k.Open(bucket, bkey, []byte("enc:v1:"+k.ID()+":AA=A"))
 		if reasonOf(t, err).Reason != ReasonMalformed {
 			t.Fatalf("got %v", err)
 		}

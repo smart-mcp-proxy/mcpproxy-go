@@ -149,15 +149,42 @@ func (k *Key) Open(bucket, bucketKey string, value []byte) ([]byte, error) {
 	if rowKID != k.kid {
 		return nil, &OpenError{Reason: ReasonKeyMismatch, RowKID: rowKID, KeyKID: k.kid}
 	}
-	raw, err := base64.StdEncoding.DecodeString(string(value[len(prefixV1)+kidHexLen+1:]))
-	if err != nil || len(raw) < nonceLen+k.aead.Overhead() {
+	payload := string(value[len(prefixV1)+kidHexLen+1:])
+	if !isBase64Text(payload) {
 		return nil, &OpenError{Reason: ReasonMalformed, RowKID: rowKID, KeyKID: k.kid}
+	}
+	// A payload of base64 text that does not decode, or decodes too short to
+	// hold a nonce and a tag, is a truncated envelope: spec.md classes
+	// truncation as auth_failed, whatever the cut length (an incomplete final
+	// quantum would otherwise read as malformed for 3 of every 4 lengths).
+	raw, err := base64.StdEncoding.DecodeString(payload)
+	if err != nil || len(raw) < nonceLen+k.aead.Overhead() {
+		return nil, &OpenError{Reason: ReasonAuthFailed, RowKID: rowKID, KeyKID: k.kid}
 	}
 	pt, err := k.aead.Open(nil, raw[:nonceLen], raw[nonceLen:], aadFor(k.kid, bucket, bucketKey))
 	if err != nil {
 		return nil, &OpenError{Reason: ReasonAuthFailed, RowKID: rowKID, KeyKID: k.kid}
 	}
 	return pt, nil
+}
+
+// isBase64Text reports whether s is made only of standard base64 alphabet
+// characters followed by at most two '=' padding characters. It says
+// nothing about length: a cut-short payload still passes.
+func isBase64Text(s string) bool {
+	body := strings.TrimRight(s, "=")
+	if len(s)-len(body) > 2 {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9', c == '+', c == '/':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // Shape is the outer form of a stored value.
