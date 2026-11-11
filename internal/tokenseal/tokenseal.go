@@ -112,11 +112,21 @@ func aadFor(kid, bucket, bucketKey string) []byte {
 	return []byte(aadDomain + "\x00" + aadVersion + "\x00" + kid + "\x00" + bucket + "\x00" + bucketKey)
 }
 
+// MaxPlaintextLen is the largest plaintext Seal accepts. An OAuth record is a
+// few kilobytes of JSON; the bound keeps Seal's buffer sizes from overflowing.
+const MaxPlaintextLen = 1 << 20
+
+// ErrPlaintextTooLarge is returned by Seal for a plaintext over MaxPlaintextLen.
+var ErrPlaintextTooLarge = errors.New("tokenseal: plaintext is larger than 1 MiB")
+
 // Seal returns the enc:v1 envelope for plaintext. A nil key is an error: a
 // caller that wants plaintext must not call Seal.
 func (k *Key) Seal(bucket, bucketKey string, plaintext []byte) ([]byte, error) {
 	if k == nil || k.aead == nil {
 		return nil, errors.New("tokenseal: no key configured")
+	}
+	if len(plaintext) > MaxPlaintextLen {
+		return nil, ErrPlaintextTooLarge
 	}
 	nonce := make([]byte, nonceLen, nonceLen+len(plaintext)+k.aead.Overhead())
 	if _, err := rand.Read(nonce); err != nil {
