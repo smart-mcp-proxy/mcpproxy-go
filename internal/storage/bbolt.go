@@ -1315,7 +1315,8 @@ func classifyOAuthRow(k *tokenseal.Key, row oauthRawRow) OAuthTokenRow {
 // sealed. It collects every row first and writes only after the walk ends
 // (bbolt cursors skip keys when the bucket is mutated during iteration).
 // Sealed rows and undecryptable rows (including plaintext that is not a
-// record) are left exactly as they are. Each rewrite goes through
+// record) are left exactly as they are, as is a plaintext row too large to
+// seal (logged). Each rewrite goes through
 // putOAuthRecord, so it takes a new revision and sets the compaction-advised
 // marker in the same transaction. Without a key it does nothing. Any write
 // error rolls the whole sweep back.
@@ -1345,6 +1346,16 @@ func (b *BoltDB) SealPlaintextOAuthTokens(ctx context.Context) (int, error) {
 			// Keep the stored JSON's unknown fields (a row a newer binary
 			// wrote): sealing must not drop them (Spec 123 review).
 			if err := putOAuthRecordKeeping(bucket, b.oauthKey, row.key, record, row.value); err != nil {
+				if stderrors.Is(err, tokenseal.ErrPlaintextTooLarge) {
+					// A per-row reason: leave this row as it is and keep
+					// sealing the others. Only transaction-level failures
+					// fail the sweep (and with it startup).
+					if b.logger != nil {
+						b.logger.Warnw("OAuth token row is too large to seal; left as plaintext",
+							"server_key", row.key, "limit_bytes", tokenseal.MaxPlaintextLen)
+					}
+					continue
+				}
 				return fmt.Errorf("seal oauth token %s: %w", row.key, err)
 			}
 			sealed++
