@@ -249,15 +249,15 @@ func RefreshToken(client *mcp.Client) error {
 
 **Explanation**: This is expected behavior, not a bug:
 - **Connection persists after token expiration**: Once an MCP connection is established, it remains active. HTTP connections don't automatically drop when tokens expire.
-- **Token refresh happens in-memory**: mcp-go's OAuth handler automatically refreshes tokens during API calls. The refreshed token lives in mcp-go's memory.
-- **Status displays storage value**: `auth status` reads the **original** expiration from persistent storage (BBolt), which may lag behind in-memory state.
+- **Refreshes are coordinated and persisted**: MCPProxy's persistent token store refreshes tokens (proactively and reactively) and writes the new access token, refresh token and expiry back to storage (BBolt). To stop mcp-go from starting its own refresh, the reactive path returns the token to mcp-go with a zeroed expiry.
+- **Status displays storage value**: `auth status` reads the expiration from persistent storage, so an `EXPIRED` line means the currently stored token has expired and no newer, unexpired token has been persisted (for example a refresh is pending, failing, or the server has not made a call since expiry).
 
 **When this occurs**:
 - Short-lived tokens (e.g., 30-second TTL) expire quickly after storage
 - Server connected successfully, then stored token expired
-- mcp-go refreshed the token automatically OR the connection is still active from before expiration
+- A refresh has not yet been persisted, OR the connection is still active from before expiration
 
-**How to verify**: Call a tool on the server. If it works, mcp-go is refreshing tokens automatically.
+**How to verify**: A successful tool call alone does not prove a refresh happened (the existing connection may simply still be valid). Check the logs for refresh results, or run `mcpproxy auth login` if refreshes are failing.
 
 **Contrast with "Disconnected + Expired"**: If status shows "Disconnected" with "EXPIRED" token, the refresh token also failed (expired or missing), requiring re-authentication via `mcpproxy auth login`.
 
@@ -284,7 +284,7 @@ func RefreshToken(client *mcp.Client) error {
 
 MCPProxy successfully handles Cloudflare's strict validation through:
 - **Global Callback Server Manager**: Coordinates OAuth callback servers across all upstream connections
-- **Dynamic Port Allocation**: Each OAuth flow gets a unique, OS-assigned port
+- **Dynamic Port Allocation**: Each upstream server gets one callback listener that is reused across its flows. It tries a pinned or previously stored port first and otherwise takes an OS-assigned ephemeral port. A stored port that is unavailable falls back to an ephemeral one; a pinned port that is unavailable is an error. Callbacks are dispatched to the right flow by `state`
 - **Perfect URI Consistency**: Exact match between Dynamic Client Registration and OAuth redirect_uri parameters
 - **Lifecycle Management**: Proper startup, shutdown, and cleanup of callback servers
 
@@ -442,7 +442,7 @@ The integration of OAuth 2.1 with MCP servers in Go requires strict adherence to
 
 **For Cloudflare MCP OAuth** (and other strict providers):
 - ✅ **Perfect URI matching** with callback server coordination
-- ✅ **Zero port conflicts** through dedicated servers per OAuth flow
+- ✅ **Port conflicts handled** with per-server shared listeners, ephemeral allocation, and an explicit error when a pinned port is unavailable
 - ✅ **Automatic retry** post-OAuth for seamless MCP connection
 - ✅ **Production-tested** with Cloudflare AutoRAG OAuth flows
 - ✅ **RFC 8252 compliant** with enhanced security

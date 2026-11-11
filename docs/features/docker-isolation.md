@@ -268,7 +268,7 @@ Environment variables from server configuration are automatically passed to cont
 }
 ```
 
-These become Docker arguments: `-e API_KEY=your-secret-key -e DEBUG=true`
+These become key-only Docker arguments: `-e API_KEY -e DEBUG`. The values are passed through the Docker CLI process environment, not argv, so they do not appear in the process list. (`PATH` is the one exception and is inlined as `-e PATH=<value>`.)
 
 ## Docker-in-Docker Prevention
 
