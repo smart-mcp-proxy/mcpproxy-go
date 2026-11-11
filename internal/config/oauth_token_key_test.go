@@ -116,11 +116,15 @@ func TestResolveOAuthTokenKey_Failures(t *testing.T) {
 	short := writeOAuthKeyFile(t, secretDir, "short-key", base64.StdEncoding.EncodeToString(make([]byte, 31)))
 	urlAlphabet := writeOAuthKeyFile(t, secretDir, "url-key", strings.NewReplacer("+", "-", "/", "_").Replace(key)+"--__")
 
+	oversized := writeOAuthKeyFile(t, secretDir, "big-key", strings.Repeat("A", 70*1024))
+	withNUL := writeOAuthKeyFile(t, secretDir, "nul-key", "abc\x00def")
+
 	cases := []struct {
 		name     string
 		field    string
 		env      string
 		envFile  string
+		envSet   map[string]string
 		sentence string
 	}{
 		{name: "missing file reference", field: "${file:" + missing + "}", sentence: MsgOAuthTokenKeyUnresolvable},
@@ -132,7 +136,13 @@ func TestResolveOAuthTokenKey_Failures(t *testing.T) {
 		{name: "31-byte file reference", field: "${file:" + short + "}", sentence: MsgOAuthTokenKeyMalformed},
 		{name: "url alphabet file reference", field: "${file:" + urlAlphabet + "}", sentence: MsgOAuthTokenKeyMalformed},
 		{name: "missing env file", envFile: missing, sentence: MsgOAuthTokenKeyUnresolvable},
-		{name: "relative env file", envFile: "relative/key", sentence: MsgOAuthTokenKeyUnresolvable},
+		{name: "relative env file", envFile: "relative/key", sentence: MsgOAuthTokenKeyUnusable},
+		// Present but invalid sources are mistakes, never a lost key.
+		{name: "empty env reference", field: "${env:SPEC123_EMPTY_ENV}", envSet: map[string]string{"SPEC123_EMPTY_ENV": ""}, sentence: MsgOAuthTokenKeyEmpty},
+		{name: "oversized file reference", field: "${file:" + oversized + "}", sentence: MsgOAuthTokenKeyUnusable},
+		{name: "NUL file reference", field: "${file:" + withNUL + "}", sentence: MsgOAuthTokenKeyUnusable},
+		{name: "directory file reference", field: "${file:" + secretDir + "}", sentence: MsgOAuthTokenKeyUnusable},
+		{name: "oversized env file", envFile: oversized, sentence: MsgOAuthTokenKeyUnusable},
 		// Review point: a selected source that resolves empty is an error,
 		// never "encryption off", even with an empty field.
 		{name: "empty env file with empty field", envFile: empty, sentence: MsgOAuthTokenKeyEmpty},
@@ -148,6 +158,9 @@ func TestResolveOAuthTokenKey_Failures(t *testing.T) {
 			if tc.envFile != "" {
 				t.Setenv(EnvOAuthTokenKeyFile, tc.envFile)
 			}
+			for n, v := range tc.envSet {
+				t.Setenv(n, v)
+			}
 			k, _, err := ResolveOAuthTokenKey(&Config{DataDir: t.TempDir(), OAuthTokenEncryptionKey: tc.field})
 			require.Error(t, err)
 			assert.Nil(t, k)
@@ -156,6 +169,8 @@ func TestResolveOAuthTokenKey_Failures(t *testing.T) {
 			require.True(t, errors.As(err, &se), "error must be a *StartupError, got %T", err)
 			assert.Equal(t, ExitCodeOAuthTokenKeyError, se.ExitCode)
 			assert.Equal(t, 4, se.ExitCode)
+			assert.Equal(t, tc.sentence == MsgOAuthTokenKeyUnresolvable, IsOAuthTokenKeyUnresolvable(err),
+				"only a missing or unreadable source is a lost key")
 			assert.True(t, strings.HasSuffix(err.Error(), tc.sentence), "message %q must end with the fixed sentence %q", err.Error(), tc.sentence)
 
 			// SC-004: the error never carries the path, the reference or the key.

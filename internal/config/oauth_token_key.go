@@ -3,9 +3,11 @@ package config
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tokenseal"
@@ -35,6 +37,10 @@ const (
 const (
 	MsgOAuthTokenKeyUnresolvable = "could not resolve the secret reference; check that the referenced file, environment variable or keyring entry exists and is readable"
 	MsgOAuthTokenKeyEmpty        = "resolved to an empty value"
+	// MsgOAuthTokenKeyUnusable is for a file source that exists but cannot be
+	// used as one (too large, not a regular file, invalid bytes, relative
+	// path). It is a mistake in a present source, never a lost key.
+	MsgOAuthTokenKeyUnusable = "is present but is not a usable key source; check that it is an absolute path to a small regular text file"
 	// MsgOAuthTokenKeyMalformed is tokenseal.ErrInvalidKey's text.
 	MsgOAuthTokenKeyMalformed = "is not a base64-encoded 32-byte key"
 
@@ -106,7 +112,7 @@ func ResolveOAuthTokenKey(c *Config) (*tokenseal.Key, KeySource, error) {
 		src.Kind = KeySourceEnvFile
 		v, err := secret.ReadFile(envFile)
 		if err != nil {
-			return nil, KeySource{}, oauthTokenKeyError(label, MsgOAuthTokenKeyUnresolvable)
+			return nil, KeySource{}, oauthTokenKeyError(label, fileSourceSentence(err))
 		}
 		raw = v
 		src.InDataDir = pathWithinDir(envFile, dataDir)
@@ -133,9 +139,16 @@ func ResolveOAuthTokenKey(c *Config) (*tokenseal.Key, KeySource, error) {
 			v, err = secret.ReadFile(ref.Name)
 			if err == nil {
 				src.InDataDir = pathWithinDir(ref.Name, dataDir)
+			} else {
+				return nil, KeySource{}, oauthTokenKeyError(label, fileSourceSentence(err))
 			}
 		case "env":
 			src.Kind = KeySourceRefEnv
+			// The env provider reports unset and empty alike; only an unset
+			// variable is a lost key.
+			if ev, set := os.LookupEnv(ref.Name); set && ev == "" {
+				return nil, KeySource{}, oauthTokenKeyError(label, MsgOAuthTokenKeyEmpty)
+			}
 			v, err = secret.NewResolver().Resolve(context.Background(), *ref)
 		default: // keyring
 			src.Kind = KeySourceRefKeyring
@@ -161,14 +174,25 @@ func ResolveOAuthTokenKey(c *Config) (*tokenseal.Key, KeySource, error) {
 }
 
 // IsOAuthTokenKeyUnresolvable reports whether err is ResolveOAuthTokenKey's
-// "the reference no longer resolves" error (a missing secret mount, key file,
-// environment variable or keyring entry): the lost-key case. Every other key
-// error (both variables set, a bad reference, an empty or malformed value)
-// is a mistake in a key that is present, and returns false.
+// "the reference no longer resolves" error: a source that is missing or
+// unreadable (key file absent or permission denied, environment variable not
+// set, keyring entry absent): the lost-key case. Every other key error (both
+// variables set, a bad reference, an empty, oversized or malformed value) is a
+// mistake in a source that is present, and returns false.
 func IsOAuthTokenKeyUnresolvable(err error) bool {
 	var se *StartupError
 	return errors.As(err, &se) && se.ExitCode == ExitCodeOAuthTokenKeyError &&
 		strings.HasSuffix(se.Message, ": "+MsgOAuthTokenKeyUnresolvable)
+}
+
+// fileSourceSentence classifies a secret.ReadFile failure: a file that does
+// not exist or cannot be opened is a lost key; anything else (too large, not a
+// regular file, a NUL byte, a relative path) is a present but unusable source.
+func fileSourceSentence(err error) string {
+	if errors.Is(err, fs.ErrNotExist) || errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.ENOTDIR) {
+		return MsgOAuthTokenKeyUnresolvable
+	}
+	return MsgOAuthTokenKeyUnusable
 }
 
 func oauthTokenKeyError(label, sentence string) *StartupError {
