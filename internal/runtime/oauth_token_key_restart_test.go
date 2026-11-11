@@ -3,6 +3,7 @@ package runtime
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -101,7 +102,13 @@ func TestOAuthTokenKey_EditIsRestartGatedAndSaveKeepsReference(t *testing.T) {
 	require.NoError(t, rt.SaveConfiguration())
 	raw, err := os.ReadFile(cfgPath)
 	require.NoError(t, err)
-	assert.Contains(t, string(raw), `"oauth_token_encryption_key": "`+otherRef+`"`)
+	// Decode instead of matching text: JSON escapes the backslashes of a
+	// Windows path.
+	var saved struct {
+		Key string `json:"oauth_token_encryption_key"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &saved))
+	assert.Equal(t, otherRef, saved.Key)
 	key, err := os.ReadFile(keyFile)
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), string(key[:len(key)-1]))

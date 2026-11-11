@@ -3,6 +3,7 @@ package config
 import (
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -299,5 +300,11 @@ func TestOAuthTokenKey_SaveKeepsReference(t *testing.T) {
 	require.NoError(t, SaveConfig(loaded, path))
 	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.Contains(t, string(raw), `"oauth_token_encryption_key": "${file:`+keyFile+`}"`)
+	// Decode instead of matching text: JSON escapes the backslashes of a
+	// Windows path.
+	var saved struct {
+		Key string `json:"oauth_token_encryption_key"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &saved))
+	assert.Equal(t, ref, saved.Key)
 }
