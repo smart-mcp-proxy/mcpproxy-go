@@ -52,6 +52,10 @@ func TestPinRestartGatedCoversEveryRestartGatedField(t *testing.T) {
 		// re-read: a PATCH must report requires_restart, not applied.
 		"enable_prompts": func(c *config.Config) { c.EnablePrompts = !c.EnablePrompts },
 		"instructions":   func(c *config.Config) { c.Instructions = "changed instructions" },
+		// Spec 123 FR-023: the OAuth token key is bound when config.db is
+		// opened; a key change mid-process would split the bucket between
+		// two keys.
+		"oauth_token_encryption_key": func(c *config.Config) { c.OAuthTokenEncryptionKey = "${file:/run/secrets/other-key}" },
 	}
 
 	for name, mutate := range mutations {

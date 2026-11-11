@@ -249,7 +249,7 @@ func TestStorageOpenSitesPassOAuthKey(t *testing.T) {
 		t.Fatalf("module root not found at %s: %v", root, err)
 	}
 	skipDirs := map[string]bool{"node_modules": true, "vendor": true, "testdata": true, "frontend": true, "website": true, "native": true}
-	var sites, violations []string
+	var sites, violations, nilKeys []string
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -306,6 +306,14 @@ func TestStorageOpenSitesPassOAuthKey(t *testing.T) {
 			sites = append(sites, where)
 			for _, a := range call.Args {
 				if c, ok := a.(*ast.CallExpr); ok && isPkgSel(c.Fun, "WithOAuthTokenKey") {
+					// Spec 123 T036: the key is the resolved one. A literal nil
+					// would open config.db with encryption off whatever the
+					// operator configured, and write plaintext rows back.
+					if len(c.Args) == 1 {
+						if id, ok := c.Args[0].(*ast.Ident); ok && id.Name == "nil" {
+							nilKeys = append(nilKeys, where)
+						}
+					}
 					return true
 				}
 			}
@@ -323,5 +331,9 @@ func TestStorageOpenSitesPassOAuthKey(t *testing.T) {
 	sort.Strings(violations)
 	for _, v := range violations {
 		t.Errorf("storage open site without storage.WithOAuthTokenKey: %s", v)
+	}
+	sort.Strings(nilKeys)
+	for _, v := range nilKeys {
+		t.Errorf("storage open site passes a literal nil key instead of the resolved one (config.ResolveOAuthTokenKey): %s", v)
 	}
 }
