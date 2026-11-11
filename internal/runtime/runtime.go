@@ -3158,7 +3158,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// report while the server is not connected, whatever the last dial
 		// error says (a parked "login required" is exactly what must not be
 		// shown for it).
-		if oauthUndecryptable != nil && !connected {
+		setUndecryptableDiagnostic := func() {
 			code := diagnostics.OAuthTokenUndecryptable
 			cause := oauthUndecryptable.Error()
 			if len(cause) > 256 {
@@ -3177,6 +3177,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			}
 			serverMap["diagnostic"] = diagMap
 			serverMap["error_code"] = string(code)
+		}
+		if oauthUndecryptable != nil && !connected {
+			setUndecryptableDiagnostic()
 		}
 
 		// Add OAuth status fields if available
@@ -3255,6 +3258,12 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 		healthStatus := health.CalculateHealth(healthInput, healthConfig)
 		serverMap["health"] = healthStatus
+		// Spec 123 FR-031: a connected server whose sign-in need met the
+		// undecryptable row reports the same diagnostic a disconnected one does
+		// (health says configure; the diagnostic must not disagree).
+		if oauthUndecryptable != nil && connected && health.IsOAuthTokenUndecryptable(healthStatus) {
+			setUndecryptableDiagnostic()
+		}
 
 		// GH #1145: agents and the CLI read these directly rather than parsing
 		// the health summary. Emitted only when set, so the payload shape is

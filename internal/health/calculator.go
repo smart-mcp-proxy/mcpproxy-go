@@ -139,7 +139,31 @@ func DefaultHealthConfig() *HealthCalculatorConfig {
 // outcome (disabled, quarantined, connecting, unhealthy, OAuth, refresh) takes
 // precedence and is returned untouched.
 func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *contracts.HealthStatus {
-	return applyCallFailureRate(calculateHealthBase(input, cfg), input)
+	return applyCallFailureRate(applyConnectedUndecryptable(calculateHealthBase(input, cfg), input), input)
+}
+
+// applyConnectedUndecryptable is Spec 123 FR-031 for a connected server: one
+// that connected anonymously (or on a still-valid session) and then needs a
+// sign-in meets the undecryptable stored OAuth row, so `login` (which could
+// not overwrite the row) is replaced by the unhealthy/configure outcome the
+// disconnected branches already return. Only the explicit input field counts
+// here (never LastError text), and only an outcome that was about to offer
+// `login` changes: a connected server that needs no sign-in stays as it was.
+func applyConnectedUndecryptable(status *contracts.HealthStatus, input HealthCalculatorInput) *contracts.HealthStatus {
+	if status == nil || !input.Connected || input.OAuthTokenUndecryptable == "" || status.Action != ActionLogin {
+		return status
+	}
+	status.Level = LevelUnhealthy
+	status.Summary = oauthTokenUndecryptableSummary
+	status.Detail = input.OAuthTokenUndecryptable
+	status.Action = ActionConfigure
+	status.Status = StatusNeedsConfig
+	status.Usable = false
+	status.Actions = []string{ActionConfigure}
+	if status.AdminState == StateQuarantined {
+		status.Actions = []string{ActionConfigure, ActionApprove}
+	}
+	return status
 }
 
 // applyCallFailureRate downgrades a ready, enabled, healthy result to degraded
@@ -1070,6 +1094,11 @@ func ExtractMissingSecret(lastError string) string {
 // oauthTokenUndecryptableSummary is the health summary of a server whose
 // stored OAuth row cannot be decrypted (Spec 123).
 const oauthTokenUndecryptableSummary = "Stored sign-in cannot be decrypted"
+
+// IsOAuthTokenUndecryptable reports whether hs is the undecryptable-row outcome.
+func IsOAuthTokenUndecryptable(hs *contracts.HealthStatus) bool {
+	return hs != nil && hs.Summary == oauthTokenUndecryptableSummary
+}
 
 // oauthTokenUndecryptableMarker starts the detail sentence the OAuth layer
 // writes for an undecryptable row (oauth.TokenUndecryptableError).
