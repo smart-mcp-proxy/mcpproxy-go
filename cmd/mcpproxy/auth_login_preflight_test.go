@@ -155,7 +155,10 @@ func TestPreflightStandalone_UnresolvableKeyKeepsExit4(t *testing.T) {
 	assert.Equal(t, ExitCodeConfigError, classifyError(err))
 }
 
-// fakeDaemon answers the two endpoints the daemon-mode pre-flight touches.
+// fakeDaemonAlphaURL is the URL the fake daemon reports for server "alpha".
+const fakeDaemonAlphaURL = "https://alpha.example.invalid/mcp"
+
+// fakeDaemon answers the endpoints the daemon-mode pre-flight touches.
 type fakeDaemon struct {
 	srv       *httptest.Server
 	loginHits int32
@@ -169,6 +172,10 @@ func newFakeDaemon(t *testing.T, diag map[string]interface{}, loginStatus int, l
 		switch {
 		case r.URL.Path == "/api/v1/status":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": map[string]interface{}{}})
+		case r.URL.Path == "/api/v1/servers":
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": map[string]interface{}{
+				"servers": []interface{}{map[string]interface{}{"name": "alpha", "url": fakeDaemonAlphaURL}},
+			}})
 		case r.URL.Path == "/api/v1/diagnostics":
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "data": diag})
 		case strings.HasSuffix(r.URL.Path, "/login"):
@@ -188,7 +195,7 @@ func TestAuthLoginDaemon_PreflightFromDiagnosticsOpensNothing(t *testing.T) {
 		"oauth_token_storage": map[string]interface{}{
 			"encryption_enabled": true, "key_id": "0123456789abcdef", "undecryptable": 1,
 			"servers": []interface{}{map[string]interface{}{
-				"bucket_key": "alpha_0123456789abcdef", "server": "alpha", "reason": "key_mismatch", "row_key_id": "fedcba9876543210",
+				"bucket_key": oauth.GenerateServerKey("alpha", fakeDaemonAlphaURL), "server": "alpha", "reason": "key_mismatch", "row_key_id": "fedcba9876543210",
 			}},
 		},
 	}, http.StatusOK, `{"success":true,"data":{}}`)
@@ -276,4 +283,22 @@ func TestPreflightStandalone_LockedDatabaseStopsTheLogin(t *testing.T) {
 	require.Error(t, err)
 	assert.Equal(t, ExitCodeDBLocked, classifyError(err))
 	assert.Zero(t, atomic.LoadInt32(f.hits))
+}
+
+// A row is keyed by name and URL: an undecryptable row left by an earlier URL
+// of the same server does not block a login for the current one.
+func TestAuthLoginDaemon_UndecryptableRowOfAnEarlierURLDoesNotBlock(t *testing.T) {
+	d := newFakeDaemon(t, map[string]interface{}{
+		"oauth_token_storage": map[string]interface{}{
+			"encryption_enabled": true, "undecryptable": 1,
+			"servers": []interface{}{map[string]interface{}{
+				"bucket_key": oauth.GenerateServerKey("alpha", "https://old.example.invalid/mcp"), "server": "alpha", "reason": "key_mismatch",
+			}},
+		},
+	}, http.StatusOK, `{"success":true,"data":{"success":true}}`)
+	client := cliclient.NewClient(d.srv.URL, zap.NewNop().Sugar())
+	_ = captureStderrText(func() {
+		_ = runAuthLoginClientMode(context.Background(), client, "alpha")
+	})
+	assert.EqualValues(t, 1, atomic.LoadInt32(&d.loginHits))
 }

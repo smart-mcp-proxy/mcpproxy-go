@@ -237,6 +237,16 @@ dbcli() {
 	CLI_CODE=$?
 	ALL_CLI_OUT="$ALL_CLI_OUT"$'\n'"$CLI_OUT"
 }
+# absent PATTERN FILE WHAT: passes only when the scan ran and found nothing
+# (grep exit 1); a match (0) and a scan that could not run (2+) both fail.
+absent() {
+	grep -a -q -e "$1" "$2"
+	case $? in
+	1) ok "no $3" ;;
+	0) bad "found $3" ;;
+	*) bad "could not scan $2 for $3" ;;
+	esac
+}
 status_field() { cli auth tokens status -o json >/dev/null; echo "$CLI_OUT" | jq -r "$1"; }
 
 step "5. offline auth tokens + db compact round trip"
@@ -283,8 +293,9 @@ if grep -a -q "$TOKEN_TAIL" "$DB.bak"; then ok "the retained backup still holds 
 dbcli db compact --keep-backup=false
 if [ "$CLI_CODE" = "0" ]; then ok "db compact --keep-backup=false succeeded"; else bad "compact --keep-backup=false ($CLI_CODE): $CLI_OUT"; fi
 if [ "$(status_field '.oauth_token_storage.compaction_advised')" = "false" ]; then ok "the marker is cleared"; else bad "marker still set after --keep-backup=false"; fi
-if grep -a -q "$TOKEN_TAIL" "$DB"; then bad "token text found in config.db after compaction"; else ok "no token text in config.db after compaction"; fi
-if grep -a -q '"access_token"' "$DB" || grep -a -q '"refresh_token"' "$DB"; then bad "plaintext token fields in config.db after compaction"; else ok "no plaintext token fields in config.db after compaction"; fi
+absent "$TOKEN_TAIL" "$DB" "token text in config.db after compaction"
+absent '"access_token"' "$DB" "plaintext access_token field in config.db after compaction"
+absent '"refresh_token"' "$DB" "plaintext refresh_token field in config.db after compaction"
 if [ "$(status_field '.oauth_token_storage.warnings | index("backup_file_present") != null')" = "true" ]; then ok "the leftover config.db.bak is still reported"; else bad "status does not report the leftover config.db.bak"; fi
 rm -f "$DB.bak"
 cli auth tokens status -o json >/dev/null

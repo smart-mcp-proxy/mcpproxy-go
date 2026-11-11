@@ -123,8 +123,8 @@ func preflightStandaloneOAuthRow(cfg *config.Config, server *config.ServerConfig
 
 // preflightDaemonOAuthRow asks the running daemon (GET /api/v1/diagnostics,
 // the doctor payload) whether server's row is undecryptable, before it is
-// asked to log in. Any problem reading the diagnostics is ignored: the
-// daemon's own refusal (REST 409) is rendered by oauthRefusalFromAPIError.
+// asked to log in. Any problem reading the diagnostics or the server list is
+// ignored: the daemon's own refusal (REST 409) is rendered by oauthRefusalFromAPIError.
 func preflightDaemonOAuthRow(ctx context.Context, client *cliclient.Client, serverName string) error {
 	pingCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -144,14 +144,40 @@ func preflightDaemonOAuthRow(ctx context.Context, client *cliclient.Client, serv
 	if json.Unmarshal(b, &rep) != nil {
 		return nil
 	}
+	if len(rep.Servers) == 0 {
+		return nil
+	}
+	// A row is keyed by server name AND URL, so an undecryptable row left
+	// behind by an earlier URL of this server must not block a login for the
+	// current one: match the current row's bucket key.
+	current := daemonServerOAuthKey(pingCtx, client, serverName)
+	if current == "" {
+		return nil
+	}
 	for _, s := range rep.Servers {
-		if s.Server == serverName {
+		if s.BucketKey == current {
 			return undecryptableRefusal(oauthUndecryptableInfo{
 				Server: serverName, Reason: s.Reason, RowKeyID: s.RowKeyID, KeyID: rep.KeyID,
 			})
 		}
 	}
 	return nil
+}
+
+// daemonServerOAuthKey is the oauth_tokens bucket key of serverName as the
+// daemon has it configured (name and URL), or "" when it cannot be told.
+func daemonServerOAuthKey(ctx context.Context, client *cliclient.Client, serverName string) string {
+	servers, err := client.GetServers(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, s := range servers {
+		if name, _ := s["name"].(string); name == serverName {
+			serverURL, _ := s["url"].(string)
+			return oauth.GenerateServerKey(serverName, serverURL)
+		}
+	}
+	return ""
 }
 
 // oauthRefusalFromAPIError renders the explanation for the daemon's own

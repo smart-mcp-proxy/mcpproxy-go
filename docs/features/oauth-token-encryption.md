@@ -242,8 +242,8 @@ data directory made until you encrypt again hold them in plaintext.
 
 ## Turning it off, downgrading and rotating the key
 
-An older release cannot read encrypted rows: its servers show "login required" and
-a new login cannot overwrite the row. Decrypt first.
+An older release cannot read encrypted rows: its servers show "login required", and
+a new login there overwrites the encrypted row with a plaintext one. Decrypt first.
 
 **Disable, or downgrade to a release without this feature**
 
