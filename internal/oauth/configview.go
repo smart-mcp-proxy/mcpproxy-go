@@ -47,6 +47,28 @@ func RedactedConfig(cfg *config.Config) *config.Config {
 	return &masked
 }
 
+// WithMaskedOAuthTokenKey returns a shallow copy of cfg whose
+// oauth_token_encryption_key is masked exactly as RedactedConfig masks it, and
+// everything else is untouched. It is for the reveal_secret_headers read path:
+// that opt-out unmasks upstream credentials, but the at-rest encryption key
+// protects every stored OAuth token and is never published (Spec 123). Returns
+// nil when the walk cannot round-trip (the caller fails closed).
+func WithMaskedOAuthTokenKey(cfg *config.Config) *config.Config {
+	if cfg == nil {
+		return nil
+	}
+	cp := *cfg
+	if cfg.OAuthTokenEncryptionKey == "" {
+		return &cp
+	}
+	masked := RedactedConfig(cfg)
+	if masked == nil {
+		return nil
+	}
+	cp.OAuthTokenEncryptionKey = masked.OAuthTokenEncryptionKey
+	return &cp
+}
+
 // restorePublicSigners puts security.tpa_operator_signers back verbatim after
 // the generic walk masked them. They are Ed25519 PUBLIC keys (spec 101): the
 // value-shaped detector reads a 44-character base64 string as a high-entropy

@@ -5874,6 +5874,11 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
 			return
 		}
+	} else if published = oauth.WithMaskedOAuthTokenKey(cfg); published == nil {
+		// reveal_secret_headers never reveals the OAuth token encryption key.
+		s.logger.Errorw("Failed to redact configuration for publication")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
+		return
 	}
 
 	// Convert config to contracts type for consistent API response
