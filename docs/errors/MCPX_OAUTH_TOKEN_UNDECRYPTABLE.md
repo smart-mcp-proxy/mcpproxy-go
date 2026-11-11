@@ -57,6 +57,12 @@ mcpproxy auth logout --server=<server-name>
 mcpproxy auth login --server=<server-name>
 ```
 
+With mcpproxy stopped, `auth logout` works even when the key reference cannot
+be read: it deletes the stored entry and needs no key. `auth login` and
+starting mcpproxy still need a readable key, so if the original key is gone,
+configure a new one first (see
+[OAuth Token Encryption](../features/oauth-token-encryption.md)).
+
 Removing the server, or changing its OAuth settings, also discards the stored
 token.
 

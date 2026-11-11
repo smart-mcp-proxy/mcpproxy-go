@@ -150,7 +150,12 @@ are encrypted from the first write.
 
 Restoring the original key and restarting makes every server authenticated again,
 with no browser. If the key is lost for good, run `mcpproxy auth logout --server=<server>`
-for each affected server and sign in again.
+for each affected server and sign in again. With mcpproxy stopped, `auth logout`
+works even when the key reference cannot be read (it deletes the stored entry and
+needs no key). `auth login` and starting mcpproxy still need a readable key, so
+before signing in, configure a new key (see "Generating a key" above, in the config
+field or through `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE]`). Any entry still
+encrypted under the lost key then shows as undecryptable until you log it out.
 
 Rows that cannot be read are never overwritten by a login and are never removed by
 the orphan cleanup, so a wrong key cannot destroy the tokens.
