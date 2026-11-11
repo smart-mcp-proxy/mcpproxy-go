@@ -5872,7 +5872,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// one, so a client cannot widen its own read by staging the flag and
 	// re-reading before the restart, and (#1167) it is ANDed with the caller's
 	// identity so only an authenticated admin can exercise the opt-out.
-	published := cfg
+	var published *config.Config
 	if !s.revealSecrets(r.Context()) {
 		published = oauth.RedactedConfig(cfg)
 		if published == nil {
