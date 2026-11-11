@@ -348,7 +348,7 @@ func CreateHTTPClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		logger.Debug("OAuth config details",
 			zap.String("client_id", cfg.OAuthConfig.ClientID),
 			zap.Bool("has_client_secret", cfg.OAuthConfig.ClientSecret != ""),
-			zap.String("token_store_type", fmt.Sprintf("%T", cfg.OAuthConfig.TokenStore)))
+			zap.Bool("has_token_store", cfg.OAuthConfig.TokenStore != nil))
 
 		logger.Debug("🔧 About to create OAuth client with mcp-go library",
 			zap.String("url", cfg.logSafeURL()),
@@ -458,7 +458,7 @@ func CreateSSEClient(cfg *HTTPTransportConfig) (*client.Client, error) {
 		logger.Debug("OAuth SSE config details",
 			zap.String("client_id", cfg.OAuthConfig.ClientID),
 			zap.Bool("has_client_secret", cfg.OAuthConfig.ClientSecret != ""),
-			zap.String("token_store_type", fmt.Sprintf("%T", cfg.OAuthConfig.TokenStore)))
+			zap.Bool("has_token_store", cfg.OAuthConfig.TokenStore != nil))
 
 		logger.Info("Creating OAuth SSE client with context-based timeout",
 			zap.String("url", cfg.logSafeURL()),
