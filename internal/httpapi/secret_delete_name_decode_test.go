@@ -34,7 +34,7 @@ func (p *recordingKeyring) IsAvailable() bool                          { return 
 // keyring delete, otherwise the wrong (nonexistent) entry is targeted.
 func TestDeleteSecret_DecodesNameParam(t *testing.T) {
 	kr := &recordingKeyring{}
-	res := secret.NewResolver()
+	res := secret.NewTestWildcardResolver()
 	res.RegisterProvider(secretTypeKeyring, kr)
 	ctrl := &secretResolverController{MockServerController: &MockServerController{}, resolver: res}
 	srv := NewServer(ctrl, zaptest.NewLogger(t).Sugar(), nil)
@@ -64,7 +64,7 @@ func TestDeleteSecret_LiteralPercentNameNotDoubleDecoded(t *testing.T) {
 	for path, want := range cases {
 		t.Run(want, func(t *testing.T) {
 			kr := &recordingKeyring{}
-			res := secret.NewResolver()
+			res := secret.NewTestWildcardResolver()
 			res.RegisterProvider(secretTypeKeyring, kr)
 			ctrl := &secretResolverController{MockServerController: &MockServerController{}, resolver: res}
 			srv := NewServer(ctrl, zaptest.NewLogger(t).Sugar(), nil)

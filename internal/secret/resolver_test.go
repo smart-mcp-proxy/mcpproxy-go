@@ -229,7 +229,7 @@ func TestResolver_AnalyzeForMigration(t *testing.T) {
 }
 
 func TestNewResolver(t *testing.T) {
-	resolver := NewResolver()
+	resolver := NewTestWildcardResolver()
 
 	assert.NotNil(t, resolver)
 	assert.NotNil(t, resolver.providers)

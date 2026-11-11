@@ -74,8 +74,7 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 		}
 	}
 
-	// Create secret resolver for CLI operations
-	secretResolver := secret.NewResolver()
+	secretResolver := config.BuildSecretResolver(globalConfig, globalConfig.ConfigFilePathForPolicy(), secret.ScopeUpstream)
 
 	// Create core client directly for CLI operations (with persistent storage for OAuth tokens)
 	coreClient, err := core.NewClientWithOptions(serverName, serverConfig, logger, logConfig, globalConfig, db, true, secretResolver)

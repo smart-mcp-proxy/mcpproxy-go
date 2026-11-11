@@ -15,6 +15,19 @@ import (
 // the observability usage cadence must be detected as a hot-reloadable change so
 // ApplyConfig can push the new persist interval to the running ActivityService.
 // SetUsagePersistInterval advertises hot-reload; the detector must back it.
+func TestDetectConfigChanges_SecretFileDirsHotReloadable(t *testing.T) {
+	a := config.SecretFileDirs{"/run/secrets"}
+	b := config.SecretFileDirs{"/etc/mcpproxy/secrets"}
+	old := &config.Config{DataDir: "/d", Listen: ":8080"}
+	old.SecretFileDirs = &a
+	changed := &config.Config{DataDir: "/d", Listen: ":8080"}
+	changed.SecretFileDirs = &b
+	result := DetectConfigChanges(old, changed)
+	require.True(t, result.Success)
+	assert.Contains(t, result.ChangedFields, "secret_file_dirs")
+	assert.False(t, result.RequiresRestart)
+}
+
 func TestDetectConfigChanges_Observability(t *testing.T) {
 	base := &config.Config{
 		Listen: "127.0.0.1:8080", DataDir: "/d", TLS: &config.TLSConfig{},

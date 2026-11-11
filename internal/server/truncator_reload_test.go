@@ -50,7 +50,7 @@ func TestTruncatorHotReloadOnServingPath(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { idx.Close() })
 
-	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewResolver(), sm)
+	um := upstream.NewManager(logger, cfg, sm.GetBoltDB(), secret.NewTestWildcardResolver(), sm)
 
 	cm, err := cache.NewManager(sm.GetDB(), logger)
 	require.NoError(t, err)

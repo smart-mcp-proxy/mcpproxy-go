@@ -73,7 +73,7 @@ func getSecretsSetCommand() *cobra.Command {
 			}
 
 			// Create resolver and store secret
-			resolver := secret.NewResolver()
+			resolver := config.BuildSecretResolverForKeyringCLI()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
@@ -116,7 +116,7 @@ func getSecretsGetCommand() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
 
-			resolver := secret.NewResolver()
+			resolver := config.BuildSecretResolverForKeyringCLI()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
@@ -158,7 +158,7 @@ func getSecretsDeleteCommand() *cobra.Command {
 		RunE: func(_ *cobra.Command, args []string) error {
 			name := args[0]
 
-			resolver := secret.NewResolver()
+			resolver := config.BuildSecretResolverForKeyringCLI()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
@@ -192,7 +192,7 @@ func getSecretsListCommand() *cobra.Command {
 		Short: "List all stored secrets",
 		Long:  "List all secrets stored in available providers. Secret values are never displayed.",
 		RunE: func(_ *cobra.Command, _ []string) error {
-			resolver := secret.NewResolver()
+			resolver := config.BuildSecretResolverForKeyringCLI()
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
@@ -297,8 +297,8 @@ func getSecretsMigrateCommand() *cobra.Command {
 				return fmt.Errorf("failed to load config: %w", err)
 			}
 
-			// Analyze configuration for potential secrets
-			resolver := secret.NewResolver()
+			// Analyze configuration for plaintext migration hints (no upstream file reads).
+			resolver := config.BuildSecretResolverForKeyringCLI()
 			analysis := resolver.AnalyzeForMigration(cfg)
 
 			if len(analysis.Candidates) == 0 {

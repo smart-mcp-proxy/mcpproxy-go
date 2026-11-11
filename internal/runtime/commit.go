@@ -194,6 +194,26 @@ func (tx *CommitTx) Base() *config.Config { return tx.base.Config }
 // it only through the CommitTx operations (or MutateGlobal for global fields).
 func (tx *CommitTx) Config() *config.Config { return tx.next }
 
+func (tx *CommitTx) commitConfigPath() string {
+	if tx.path != "" {
+		return tx.path
+	}
+	if tx.r != nil {
+		return tx.r.cfgPath
+	}
+	return ""
+}
+
+func (tx *CommitTx) validateServerSecretPolicy(sc *config.ServerConfig) error {
+	if sc == nil {
+		return nil
+	}
+	if errs := config.ServerSecretPolicyErrors(tx.next, tx.commitConfigPath(), sc); len(errs) > 0 {
+		return &config.InvalidServerUpdateError{Server: sc.Name, Errors: errs}
+	}
+	return nil
+}
+
 func (tx *CommitTx) entry(name string) *config.ServerConfig {
 	for _, sc := range tx.next.Servers {
 		if sc != nil && sc.Name == name {
@@ -247,6 +267,9 @@ func (tx *CommitTx) CreateServer(sc *config.ServerConfig) error {
 			return &ServerExistsError{Name: sc.Name}
 		}
 	}
+	if err := tx.validateServerSecretPolicy(sc); err != nil {
+		return err
+	}
 	tx.next.Servers = append(tx.next.Servers, config.CopyServerConfig(sc))
 	if tx.removed[sc.Name] {
 		delete(tx.removed, sc.Name)
@@ -270,6 +293,9 @@ func (tx *CommitTx) UpdateServer(name string, fn func(cur *config.ServerConfig) 
 	}
 	if cp.Name != name {
 		return fmt.Errorf("%w: UpdateServer cannot rename %q to %q", ErrCommitInvariant, name, cp.Name)
+	}
+	if err := tx.validateServerSecretPolicy(cp); err != nil {
+		return err
 	}
 	if cp.Quarantined && cp.QuarantineExplicitlySet() {
 		if tx.quarantineDecided == nil {

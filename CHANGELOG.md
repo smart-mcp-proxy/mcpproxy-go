@@ -5,6 +5,10 @@ Releases follow [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- **config: `secret_file_dirs` allow-list for `${file:}` and upstream guards (#1721).** Upstream server fields resolve `${file:}` only under `secret_file_dirs` (platform defaults, `CREDENTIALS_DIRECTORY`, `<data-dir>/secrets`; `[]` disables; `["*"]` warns). Upstream fields refuse `${env:MCPPROXY_*}`, block proxy config/data/admin-key files by open-handle identity, and use traversal-resistant opens (`os.Root`, `go 1.26.5+`). `MCPPROXY_API_KEY_FILE` and `api_key` `${file:}` keep separate rules. `secret_file_dirs` is config-file-only (management APIs cannot change it). Policy denials stop one upstream without stopping the daemon.
+
 ### Breaking Changes
 
 - **trust mode / tool approvals (Spec 119):** `scan` is now the default per-server trust mode, and under

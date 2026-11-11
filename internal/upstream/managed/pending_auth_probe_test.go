@@ -26,7 +26,7 @@ import (
 func newLadderClient(t *testing.T, url string) *Client {
 	t.Helper()
 	cfg := &config.ServerConfig{Name: "gh1537", URL: url, Protocol: "streamable-http", Enabled: true, Created: time.Now()}
-	mc, err := NewClient(cfg.Name, cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewResolver())
+	mc, err := NewClient(cfg.Name, cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	return mc
 }

@@ -46,7 +46,7 @@ func newConcurrencyManager(t *testing.T, cfg *config.Config, serverCfg *config.S
 	t.Helper()
 	t.Setenv("CI", "")
 
-	m := NewManager(zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 
 	require.NoError(t, m.AddServerConfig(serverCfg.Name, serverCfg))
@@ -219,7 +219,7 @@ func TestApplyConcurrencyLimits_GlobalAndDisabledServers(t *testing.T) {
 		Servers:               []*config.ServerConfig{enabled, disabled, quarantined},
 	}
 
-	m := NewManager(zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 
 	global := m.Limiters().Global()
@@ -242,7 +242,7 @@ func TestZeroConfig_AdmissionIsPassthroughButCounted(t *testing.T) {
 
 	sc := &config.ServerConfig{Name: "plain", URL: "http://127.0.0.1:1", Protocol: "http", Enabled: true}
 	cfg := &config.Config{Servers: []*config.ServerConfig{sc}}
-	m := NewManager(zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 
 	assert.Equal(t, 0, m.Limiters().Global().Limits().Max, "no global cap must be published")
@@ -268,7 +268,7 @@ func TestHotEnableSeesGrandfatheredCalls(t *testing.T) {
 
 	sc := &config.ServerConfig{Name: "late", URL: "http://127.0.0.1:1", Protocol: "http", Enabled: true}
 	cfg := &config.Config{Servers: []*config.ServerConfig{sc}}
-	m := NewManager(zap.NewNop(), cfg, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), cfg, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel() })
 
 	// Three unlimited calls in flight.

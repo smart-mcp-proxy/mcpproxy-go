@@ -69,7 +69,7 @@ func buildMCPProxyWithActivation(t *testing.T) (*MCPProxyServer, *runtime.Runtim
 	idx := rt.IndexManager()
 	require.NotNil(t, idx)
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	um := upstream.NewManager(logger, cfg, nil, secretResolver, nil)
 
 	cm, err := cache.NewManager(rt.StorageManager().GetDB(), logger)

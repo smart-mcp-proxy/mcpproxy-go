@@ -54,7 +54,7 @@ func TestClient_HeaderSecretResolution(t *testing.T) {
 
 	// Setup mock secret provider
 	mockProvider := &MockSecretProvider{}
-	resolver := secret.NewResolver()
+	resolver := secret.NewTestWildcardResolver()
 	resolver.RegisterProvider("env", mockProvider)
 
 	// Create a temporary database for testing
@@ -110,7 +110,7 @@ func TestClient_HeaderSecretResolution(t *testing.T) {
 	t.Run("resolve multiple secrets in headers", func(t *testing.T) {
 		// Create a fresh mock provider for this test
 		freshMockProvider := &MockSecretProvider{}
-		freshResolver := secret.NewResolver()
+		freshResolver := secret.NewTestWildcardResolver()
 		freshResolver.RegisterProvider("env", freshMockProvider)
 
 		serverConfig := &config.ServerConfig{
@@ -220,7 +220,7 @@ func TestClient_HeaderSecretResolution(t *testing.T) {
 
 // makeResolverWithMock creates a Resolver with a "mock" provider for testing.
 func makeResolverWithMock(mockP *MockSecretProvider) *secret.Resolver {
-	r := secret.NewResolver()
+	r := secret.NewTestWildcardResolver()
 	r.RegisterProvider("mock", mockP)
 	return r
 }

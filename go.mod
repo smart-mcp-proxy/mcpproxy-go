@@ -1,6 +1,6 @@
 module github.com/smart-mcp-proxy/mcpproxy-go
 
-go 1.26.0
+go 1.26.5
 
 require (
 	fyne.io/systray v1.12.2

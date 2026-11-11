@@ -26,7 +26,7 @@ import (
 func TestConnectBudget_ServerRunningDockerItself(t *testing.T) {
 	logger := zap.NewNop()
 	gc := &config.Config{DockerIsolation: &config.DockerIsolationConfig{Enabled: true}}
-	m := NewManager(logger, gc, nil, secret.NewResolver(), nil)
+	m := NewManager(logger, gc, nil, secret.NewTestWildcardResolver(), nil)
 
 	sc := &config.ServerConfig{
 		Name:     "already-dockerised",
@@ -35,7 +35,7 @@ func TestConnectBudget_ServerRunningDockerItself(t *testing.T) {
 		Protocol: "stdio",
 		Enabled:  true,
 	}
-	client, err := managed.NewClient("already-dockerised", sc, logger, nil, gc, nil, secret.NewResolver())
+	client, err := managed.NewClient("already-dockerised", sc, logger, nil, gc, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	assert.Equal(t, 3*time.Minute, m.resolveConnectTimeout(sc, client.DependsOnDocker()),

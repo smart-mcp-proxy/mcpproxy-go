@@ -27,7 +27,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/oauth"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/reqcontext"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 )
 
 var (
@@ -1554,7 +1553,7 @@ func runUpstreamAdd(cmd *cobra.Command, args []string) error {
 	// FR-065: --secret-env/--secret-header write to the OS keyring instead
 	// of the config, under the shared per-kind ref name, and merge
 	// ${keyring:<ref>} into the same env/headers maps above.
-	resolver := secret.NewResolver()
+	resolver := config.BuildSecretResolverForKeyringCLI()
 	var writtenSecretRefs []string
 	if len(upstreamAddSecretEnvs) > 0 || len(upstreamAddSecretHeaders) > 0 {
 		var err error

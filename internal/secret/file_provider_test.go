@@ -12,7 +12,7 @@ import (
 )
 
 func TestFileProvider_Resolve(t *testing.T) {
-	p := NewFileProvider()
+	p := NewFileProvider(NewWildcardFilePolicy(ScopeUpstream))
 	assert.True(t, p.CanResolve("file"))
 	assert.False(t, p.CanResolve("env"))
 	assert.True(t, p.IsAvailable())
@@ -36,7 +36,7 @@ func TestFileProvider_Resolve(t *testing.T) {
 }
 
 func TestFileProvider_ReadsTheFileEachTime(t *testing.T) {
-	p := NewFileProvider()
+	p := NewFileProvider(NewWildcardFilePolicy(ScopeUpstream))
 	path := writeSecretFile(t, "v1")
 	ref := Ref{Type: "file", Name: path}
 
@@ -51,7 +51,7 @@ func TestFileProvider_ReadsTheFileEachTime(t *testing.T) {
 }
 
 func TestResolver_ExpandsFileReferences(t *testing.T) {
-	r := NewResolver()
+	r := NewTestWildcardResolver()
 	lf := writeSecretFile(t, "same-value\n")
 	crlf := writeSecretFile(t, "same-value\r\n")
 
@@ -68,7 +68,7 @@ func TestResolver_ExpandsFileReferences(t *testing.T) {
 }
 
 func TestResolver_FileReferenceErrorsNameTheReferenceNotTheValue(t *testing.T) {
-	r := NewResolver()
+	r := NewTestWildcardResolver()
 	const sentinel = "SENTINEL-p3Wv9Qd"
 
 	missing := filepath.Join(t.TempDir(), "missing")

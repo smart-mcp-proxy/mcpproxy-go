@@ -242,7 +242,7 @@ func TestConnectStdioDirectDockerRun_ContainerEvidence(t *testing.T) {
 				Enabled: true,
 			}
 			mainCore, mainLogs := observer.New(zap.DebugLevel)
-			c, err := NewClient("a", cfg, zap.New(mainCore), nil, nil, nil, secret.NewResolver())
+			c, err := NewClient("a", cfg, zap.New(mainCore), nil, nil, nil, secret.NewTestWildcardResolver())
 			require.NoError(t, err)
 			arm.preset(c)
 

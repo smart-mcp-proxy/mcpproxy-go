@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/spf13/viper"
 )
 
@@ -51,6 +50,7 @@ func LoadFromFile(configPath string) (*Config, error) {
 			return nil, fmt.Errorf("failed to load config file %s: %w", configPath, err)
 		}
 	}
+	cfg.loadConfigPath = configPath
 
 	// Set data directory if not specified
 	if cfg.DataDir == "" {
@@ -62,7 +62,13 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 
 	// Expand secret/env refs in DataDir before creating it
-	expandDataDir(cfg)
+	expandDataDir(cfg, configPath)
+	for _, root := range WarnMissingSecretFileDirRoots(cfg) {
+		emitLoadWarning("secret_file_dirs root does not exist yet", "secret_file_dirs", root)
+	}
+	if cfg.SecretFileDirs != nil && SecretFileDirsWildcard([]string(*cfg.SecretFileDirs)) {
+		emitLoadWarning("secret_file_dirs is wildcard compatibility mode", "secret_file_dirs", "*")
+	}
 	// server_edition.oauth.client_id/client_secret are deliberately NOT
 	// expanded here (cross-review round 6, chunk 3 P2, superseding round 1's
 	// in-place expansion): this cfg is what becomes r.cfg/r.desiredCfg and is
@@ -202,6 +208,7 @@ func LoadWithPath() (*Config, string, error) {
 			fmt.Fprintf(os.Stderr, "INFO: Created default configuration file at %s\n", defaultConfigPath)
 		}
 	}
+	cfg.loadConfigPath = configPath
 
 	// Only use viper.Unmarshal if no config file was auto-loaded
 	// When config file is auto-loaded, CLI flags are handled in main.go
@@ -222,7 +229,7 @@ func LoadWithPath() (*Config, string, error) {
 	}
 
 	// Expand secret/env refs in DataDir before creating it
-	expandDataDir(cfg)
+	expandDataDir(cfg, configPath)
 	// server_edition.oauth.client_id/client_secret are deliberately NOT
 	// expanded here — see the matching comment in LoadFromFile (cross-review
 	// round 6, chunk 3 P2).
@@ -844,11 +851,12 @@ func SetRegistriesInitCallback(callback func(*Config)) {
 
 // expandDataDir expands secret/env refs in cfg.DataDir in place.
 // Failures are logged to stderr and the original value is kept.
-func expandDataDir(cfg *Config) {
+func expandDataDir(cfg *Config, configPath string) {
 	if cfg.DataDir == "" {
 		return
 	}
-	resolver := secret.NewResolver()
+	_ = configPath
+	resolver := BuildSecretResolverForDataDirExpand(cfg)
 	resolved, err := resolver.ExpandSecretRefs(context.Background(), cfg.DataDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "WARN: Failed to resolve secret ref in data_dir, using original value: reference=%s err=%v\n", cfg.DataDir, err)

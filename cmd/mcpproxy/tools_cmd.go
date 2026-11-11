@@ -17,7 +17,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/preflight"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/security/detect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/transport"
@@ -1104,8 +1103,7 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 		}
 	}
 
-	// Create secret resolver
-	secretResolver := secret.NewResolver()
+	secretResolver := cliUpstreamSecretResolver(globalConfig)
 
 	// Create log config for managed client
 	logConfig := &config.LogConfig{

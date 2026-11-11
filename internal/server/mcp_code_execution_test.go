@@ -44,7 +44,7 @@ func TestCodeExecution_WithNilMainServer(t *testing.T) {
 	require.NoError(t, err)
 	defer indexManager.Close()
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
@@ -110,7 +110,7 @@ func newCodeExecProxy(t *testing.T) *server.MCPProxyServer {
 	require.NoError(t, err)
 	t.Cleanup(func() { indexManager.Close() })
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
@@ -243,7 +243,7 @@ func TestCodeExecution_TypeScript(t *testing.T) {
 	require.NoError(t, err)
 	defer indexManager.Close()
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
@@ -305,7 +305,7 @@ func TestCodeExecution_JavaScriptBackwardCompat(t *testing.T) {
 	require.NoError(t, err)
 	defer indexManager.Close()
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)
@@ -367,7 +367,7 @@ func TestCodeExecution_InvalidLanguage(t *testing.T) {
 	require.NoError(t, err)
 	defer indexManager.Close()
 
-	secretResolver := secret.NewResolver()
+	secretResolver := secret.NewTestWildcardResolver()
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 
 	cacheManager, err := cache.NewManager(storageManager.GetDB(), logger)

@@ -20,7 +20,7 @@ import (
 // RegisterServerIdentity for that server. An in-flight connect owned by
 // someone else is not a failure of AddServer.
 func TestAddServer_UnchangedServerAlreadyConnectingIsNotAnError(t *testing.T) {
-	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewTestWildcardResolver(), nil)
 	sc := &config.ServerConfig{
 		Name: "fx", Command: "/nonexistent/never-run", Protocol: "stdio", Enabled: true,
 	}

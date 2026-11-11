@@ -72,7 +72,7 @@ func (u *mgdUpstream) handler() http.Handler {
 func TestManagedForwardPolicy_LiveFromAtomicConfigs(t *testing.T) {
 	cfg := &config.ServerConfig{Name: "s", Protocol: "streamable-http", URL: "http://127.0.0.1:1/mcp",
 		ForwardHeaders: []string{"X-Tenant-Id"}, Headers: map[string]string{"X-Static": "v"}}
-	mc, err := NewClient("s", cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewResolver())
+	mc, err := NewClient("s", cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	p := mc.forwardPolicy()
@@ -102,7 +102,7 @@ func TestManagedCallTool_HotReloadNoReconnect(t *testing.T) {
 
 	cfg := &config.ServerConfig{Name: "s", Protocol: "streamable-http", URL: srv.URL, Enabled: true,
 		ForwardHeaders: []string{"X-Tenant-Id"}}
-	mc, err := NewClient("s", cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewResolver())
+	mc, err := NewClient("s", cfg, zap.NewNop(), nil, &config.Config{}, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -147,7 +147,7 @@ func TestManagedCallTool_HotReloadNoReconnect(t *testing.T) {
 func TestManagedWarnForwardHeaders_OnceNamesOnly(t *testing.T) {
 	obsCore, logs := observer.New(zapcore.WarnLevel)
 	mk := func(cfg *config.ServerConfig) *Client {
-		mc, err := NewClient(cfg.Name, cfg, zap.New(obsCore), nil, &config.Config{}, nil, secret.NewResolver())
+		mc, err := NewClient(cfg.Name, cfg, zap.New(obsCore), nil, &config.Config{}, nil, secret.NewTestWildcardResolver())
 		require.NoError(t, err)
 		return mc
 	}

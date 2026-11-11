@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,6 +17,8 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/health"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/management"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 )
 
 // internal/server/upstream_servers_health_status_test.go already proves the
@@ -160,4 +164,56 @@ func TestHandleGetServers_HealthCarriesMultiActionSlice(t *testing.T) {
 	assert.Equal(t, []string{health.ActionLogin, health.ActionApprove}, got.Actions,
 		"the full ordered actions slice must survive the REST handler's JSON round-trip")
 	assert.Equal(t, health.ActionLogin, got.Action)
+}
+
+func TestHandleGetServers_HealthSecretPolicyDenialPublicOnly(t *testing.T) {
+	dir := t.TempDir()
+	allowed := filepath.Join(dir, "allowed")
+	outside := filepath.Join(dir, "outside", "deep", "token.pem")
+	require.NoError(t, os.MkdirAll(allowed, 0o700))
+	require.NoError(t, os.MkdirAll(filepath.Dir(outside), 0o700))
+	require.NoError(t, os.WriteFile(outside, []byte("x\n"), 0o600))
+	secretDirs := config.SecretFileDirs{allowed}
+	cfg := &config.Config{DataDir: dir, SecretFileDirs: &secretDirs}
+	r := config.BuildSecretResolver(cfg, "", secret.ScopeUpstream)
+	srvCfg := &config.ServerConfig{
+		Name: "denied", Command: "true",
+		Env: map[string]string{"TOKEN": "${file:" + outside + "}"},
+	}
+	_, err := core.NewClientWithOptions("denied", srvCfg, zap.NewNop(), nil, cfg, nil, false, r)
+	require.Error(t, err)
+	var pe *core.UpstreamSecretPolicyError
+	require.ErrorAs(t, err, &pe)
+
+	computed := health.CalculateHealth(health.HealthCalculatorInput{
+		Name: "denied", Enabled: true, State: "error", Connected: false, LastError: err.Error(),
+	}, nil)
+	svc := &restHealthVocabService{server: &contracts.Server{
+		ID: "denied", Name: "denied", Protocol: "stdio", Enabled: true, Health: computed,
+		LastError: err.Error(),
+	}}
+	srv := NewServer(&restHealthVocabController{svc: svc}, zap.NewNop().Sugar(), nil)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/servers", http.NoBody)
+	req.Header.Set("X-API-Key", restHealthVocabAPIKey)
+	w := httptest.NewRecorder()
+	srv.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	var resp struct {
+		Data struct {
+			Servers []struct {
+				LastError string                 `json:"last_error"`
+				Health    contracts.HealthStatus `json:"health"`
+			} `json:"servers"`
+		} `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Len(t, resp.Data.Servers, 1)
+	leaks := []string{outside, "${file:", "TOKEN"}
+	for _, s := range []string{resp.Data.Servers[0].LastError, resp.Data.Servers[0].Health.Detail} {
+		assert.Contains(t, s, pe.Public)
+		for _, leak := range leaks {
+			assert.NotContains(t, s, leak)
+		}
+	}
 }

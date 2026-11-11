@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime"
 	"strings"
 )
 
@@ -12,11 +13,13 @@ const (
 )
 
 // EnvProvider resolves secrets from environment variables
-type EnvProvider struct{}
+type EnvProvider struct {
+	guardMCPProxy bool
+}
 
 // NewEnvProvider creates a new environment variable provider
-func NewEnvProvider() *EnvProvider {
-	return &EnvProvider{}
+func NewEnvProvider(guardMCPProxy bool) *EnvProvider {
+	return &EnvProvider{guardMCPProxy: guardMCPProxy}
 }
 
 // CanResolve returns true if this provider can handle the given secret type
@@ -30,12 +33,30 @@ func (p *EnvProvider) Resolve(_ context.Context, ref Ref) (string, error) {
 		return "", fmt.Errorf("env provider cannot resolve secret type: %s", ref.Type)
 	}
 
+	if p.guardMCPProxy {
+		if ReservedMCPProxyEnvName(ref.Name, runtime.GOOS) {
+			return "", ErrReservedEnvVar
+		}
+	}
+
 	value := os.Getenv(ref.Name)
 	if value == "" {
 		return "", fmt.Errorf("environment variable %s not found or empty", ref.Name)
 	}
 
 	return value, nil
+}
+
+// ReservedMCPProxyEnvName reports whether name is in the reserved MCPPROXY_ namespace.
+func ReservedMCPProxyEnvName(name, goos string) bool {
+	const prefix = "MCPPROXY_"
+	if len(name) < len(prefix) {
+		return false
+	}
+	if goos == "windows" {
+		return strings.EqualFold(name[:len(prefix)], prefix)
+	}
+	return strings.HasPrefix(name, prefix)
 }
 
 // Store is not supported for environment variables
@@ -61,7 +82,6 @@ func (p *EnvProvider) List(_ context.Context) ([]Ref, error) {
 		name := pair[0]
 		value := pair[1]
 
-		// Only include variables that look like secrets
 		if isLikelySecretEnvVar(name, value) {
 			refs = append(refs, Ref{
 				Type:     "env",
@@ -84,10 +104,6 @@ func isLikelySecretEnvVar(name, value string) bool {
 	if value == "" {
 		return false
 	}
-
-	// Check if the variable name suggests it's a secret
 	isSecret, confidence := DetectPotentialSecret(value, name)
-
-	// Lower threshold for env vars since they're commonly used for secrets
 	return isSecret || confidence >= 0.3
 }

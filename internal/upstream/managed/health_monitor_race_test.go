@@ -174,7 +174,7 @@ func newStoppedLoopClient(t *testing.T, name string) (*Client, <-chan struct{}) 
 	t.Cleanup(ts.Close)
 
 	cfg := &config.ServerConfig{Name: name, Protocol: "streamable-http", URL: ts.URL, Enabled: true}
-	mc, err := NewClient(name, cfg, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	mc, err := NewClient(name, cfg, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = mc.Disconnect() })
 

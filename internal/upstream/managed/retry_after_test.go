@@ -38,7 +38,7 @@ func coreClientThatWasRateLimited(t *testing.T, retryAfter string) *core.Client 
 		Protocol: "http",
 		Enabled:  true,
 		Created:  time.Now(),
-	}, zap.NewNop(), nil, nil, nil, secret.NewResolver())
+	}, zap.NewNop(), nil, nil, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)

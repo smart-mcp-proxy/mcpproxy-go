@@ -280,7 +280,7 @@ func connectPromptUpstream(t *testing.T, proxy *MCPProxyServer, servers map[stri
 	qOff := false
 	proxy.config.QuarantineEnabled = &qOff
 
-	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewResolver(), nil)
+	um := upstream.NewManager(zap.NewNop(), proxy.config, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { um.DisconnectAll() })
 	for name, prompts := range servers {
 		mcpSrv := mcpserver.NewMCPServer(name, "1.0.0-test", mcpserver.WithPromptCapabilities(true))

@@ -52,7 +52,7 @@ func (n *notifyRecorder) count() int {
 
 func newNotifyManager(t *testing.T) (*Manager, *notifyRecorder, *fakeClock) {
 	t.Helper()
-	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewResolver(), nil)
+	m := NewManager(zap.NewNop(), &config.Config{}, nil, secret.NewTestWildcardResolver(), nil)
 	t.Cleanup(func() { m.shutdownCancel(); m.stopCallHealthTimers() })
 	now := &fakeClock{t: time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)}
 	m.callStats.SetClock(now.Now)

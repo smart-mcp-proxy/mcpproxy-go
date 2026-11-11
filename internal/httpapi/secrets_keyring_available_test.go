@@ -30,7 +30,7 @@ func newSecretResolverTestServer(t *testing.T) *Server {
 	logger := zaptest.NewLogger(t).Sugar()
 	controller := &secretResolverController{
 		MockServerController: &MockServerController{},
-		resolver:             secret.NewResolver(),
+		resolver:             secret.NewTestWildcardResolver(),
 	}
 	return NewServer(controller, logger, nil)
 }

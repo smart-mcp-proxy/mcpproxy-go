@@ -15,7 +15,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/codescripts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
@@ -317,8 +316,7 @@ func runCodeExecStandalone(globalConfig *config.Config, code string, input map[s
 	}
 	defer indexManager.Close()
 
-	// Create secret resolver
-	secretResolver := secret.NewResolver()
+	secretResolver := cliUpstreamSecretResolver(globalConfig)
 
 	// Create upstream manager
 	upstreamManager := upstream.NewManager(logger, globalConfig, storageManager.GetBoltDB(), secretResolver, storageManager)

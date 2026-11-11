@@ -61,7 +61,7 @@ func blockingCallClient(t *testing.T, callTimeout time.Duration) (*Client, *obse
 	cfg := &config.ServerConfig{Name: "blk", Protocol: "streamable-http", URL: srv.URL, Enabled: true}
 	gc := &config.Config{CallToolTimeout: config.Duration(callTimeout)}
 	obsCore, logs := observer.New(zapcore.DebugLevel)
-	c, err := NewClient("blk", cfg, zap.New(obsCore), nil, gc, nil, secret.NewResolver())
+	c, err := NewClient("blk", cfg, zap.New(obsCore), nil, gc, nil, secret.NewTestWildcardResolver())
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

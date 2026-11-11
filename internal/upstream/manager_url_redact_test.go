@@ -74,7 +74,7 @@ func TestConnectAll_DoesNotLogTheConfiguredURLCredential(t *testing.T) {
 		"precondition: the site under test must have run")
 }
 
-func secret2Resolver() *secret.Resolver { return secret.NewResolver() }
+func secret2Resolver() *secret.Resolver { return secret.NewTestWildcardResolver() }
 
 func hasEntryContaining(entries []observer.LoggedEntry, msg string) bool {
 	for _, e := range entries {

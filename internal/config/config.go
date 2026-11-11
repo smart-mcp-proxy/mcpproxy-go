@@ -249,6 +249,13 @@ type Config struct {
 	TrayEndpoint string `json:"tray_endpoint,omitempty" mapstructure:"tray-endpoint"` // Tray endpoint override (unix:// or npipe://)
 	EnableSocket bool   `json:"enable_socket" mapstructure:"enable-socket"`           // Enable Unix socket/named pipe for local IPC (default: true)
 	DataDir      string `json:"data_dir" mapstructure:"data-dir"`
+	// SecretFileDirs lists absolute directories where ${file:} references may
+	// be resolved. Absent (nil) uses platform defaults; an explicit empty array
+	// disables file references; exactly ["*"] allows any path (compatibility mode).
+	SecretFileDirs *SecretFileDirs `json:"secret_file_dirs,omitempty" mapstructure:"secret-file-dirs"`
+	// loadConfigPath is the path LoadFromFile read; used for policy checks during
+	// validation (not serialized).
+	loadConfigPath string `json:"-"`
 	// Deprecated: EnableTray is unused and has no runtime effect. Kept for backward compatibility.
 	EnableTray  bool            `json:"enable_tray,omitempty" mapstructure:"tray"`
 	DebugSearch bool            `json:"debug_search" mapstructure:"debug-search"`
@@ -3111,6 +3118,7 @@ func (c *Config) validateDetailedCore() []ValidationError {
 	// Spec 107 FR-027/FR-039: every trusted_proxies entry must parse as a
 	// CIDR or IP on every door (boot, PATCH, /config/apply).
 	errors = append(errors, validateTrustedProxies(c)...)
+	errors = append(errors, validateSecretFileDirs(c)...)
 
 	// Spec 107 FR-039: the server_edition block is validated (never mutated)
 	// on every door — boot, PATCH and /config/apply. No-op in the personal
@@ -3220,6 +3228,12 @@ func (c *Config) Validate() error {
 	// carries an api_key: one rule, checked on every load.
 	if err := checkEnvAPIKeyConflict(); err != nil {
 		return err
+	}
+
+	if path := os.Getenv(EnvAPIKeyFile); path != "" {
+		if err := validateAdminAPIKeyFilePath(c, c.loadConfigPath, path); err != nil {
+			return err
+		}
 	}
 
 	// api_key may itself be a secret reference (api_key: "${file:/run/secrets/k}"),
