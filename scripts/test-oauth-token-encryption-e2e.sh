@@ -39,6 +39,16 @@ trap cleanup EXIT
 
 ok()   { echo "  PASS: $*"; }
 bad()  { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
+# absent TEXT FILE WHAT (TEXT is a fixed string): passes only when the scan ran and found nothing
+# (grep exit 1); a match (0) and a scan that could not run (2+) both fail.
+absent() {
+	grep -a -q -F -e "$1" "$2"
+	case $? in
+	1) ok "no $3" ;;
+	0) bad "found $3" ;;
+	*) bad "could not scan $2 for $3" ;;
+	esac
+}
 step() { echo; echo "== $*"; }
 need() { command -v "$1" >/dev/null || { echo "missing tool: $1"; exit 2; }; }
 for t in go curl jq openssl shasum; do need "$t"; done
@@ -186,8 +196,8 @@ if [ "${LOGINS_AFTER_FIRST:-0}" -ge 1 ]; then ok "the headless login ran ($LOGIN
 stop_proxy
 
 if [ -n "$(sealed_values)" ]; then ok "config.db holds an enc:v1 envelope"; else bad "no sealed OAuth row in config.db"; fi
-if grep -a -q '"access_token"' "$DB"; then bad "plaintext \"access_token\" field found in config.db"; else ok "no plaintext token field in config.db"; fi
-if grep -a -q '"refresh_token"' "$DB"; then bad "plaintext \"refresh_token\" field found in config.db"; else ok "no plaintext refresh_token field in config.db"; fi
+absent '"access_token"' "$DB" "plaintext access_token field in config.db"
+absent '"refresh_token"' "$DB" "plaintext refresh_token field in config.db"
 SEALED_BEFORE="$(sealed_values)"
 
 step "2. restart with no key configured"
@@ -212,7 +222,7 @@ env -u MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY -u MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KE
 CODE=$?
 if [ "$CODE" = "4" ]; then ok "exit code 4"; else bad "exit code $CODE, want 4"; fi
 if [ "$(shasum -a 256 "$DB" | cut -d' ' -f1)" = "$HASH_BEFORE" ]; then ok "config.db bytes unchanged"; else bad "config.db changed"; fi
-if grep -q "$WORK/keys" "$WORK/missing.log"; then bad "error output contains the key path"; else ok "error output does not contain the key path"; fi
+absent "$WORK/keys" "$WORK/missing.log" "key path in the error output"
 
 step "4. restart with the key"
 start_proxy "MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=$KEYFILE" || bad "proxy did not start with the key"
@@ -236,16 +246,6 @@ dbcli() {
 	CLI_OUT="$(env MCPPROXY_TELEMETRY=false "$BIN" "$@" --data-dir "$DATA" 2>&1)"
 	CLI_CODE=$?
 	ALL_CLI_OUT="$ALL_CLI_OUT"$'\n'"$CLI_OUT"
-}
-# absent PATTERN FILE WHAT: passes only when the scan ran and found nothing
-# (grep exit 1); a match (0) and a scan that could not run (2+) both fail.
-absent() {
-	grep -a -q -e "$1" "$2"
-	case $? in
-	1) ok "no $3" ;;
-	0) bad "found $3" ;;
-	*) bad "could not scan $2 for $3" ;;
-	esac
 }
 # status_field FILTER sets STATUS_VAL. Call it in this shell, never inside
 # $(...): a subshell would drop the output from ALL_CLI_OUT (the leak scan).
@@ -275,7 +275,7 @@ if [ "$CLI_CODE" = "0" ] && [ "$(echo "$CLI_OUT" | jq -r '.decrypted')" = "1" ];
 ACCESS="$(plain_access_tokens | head -1)"
 if [ -n "$ACCESS" ]; then ok "the row is readable plaintext after decrypt"; else bad "no plaintext access token after decrypt"; fi
 TOKEN_TAIL="${ACCESS: -32}"
-if grep -a -q "$TOKEN_TAIL" "$DB"; then ok "control: the raw scan sees the token text while the row is plaintext"; else bad "control failed: the raw scan cannot see a plaintext token"; fi
+if grep -a -q -F -e "$TOKEN_TAIL" "$DB"; then ok "control: the raw scan sees the token text while the row is plaintext"; else bad "control failed: the raw scan cannot see a plaintext token"; fi
 
 # d. encrypt seals again and sets the compaction marker
 cli auth tokens encrypt -o json
@@ -291,7 +291,12 @@ if [ "$CLI_CODE" = "0" ] && echo "$CLI_OUT" | grep -q "config.db.bak"; then ok "
 status_field '.oauth_token_storage.compaction_advised'
 if [ "$STATUS_VAL" = "true" ]; then ok "the marker survives a compaction that keeps a backup"; else bad "marker cleared by a compaction that kept a backup"; fi
 if [ -f "$DB.bak" ]; then ok "config.db.bak exists"; else bad "no config.db.bak after the default compaction"; fi
-if grep -a -q "$TOKEN_TAIL" "$DB.bak"; then ok "the retained backup still holds the old plaintext (why the marker stays)"; else echo "  NOTE: the backup no longer shows the plaintext (page reuse); not a failure"; fi
+grep -a -q -F -e "$TOKEN_TAIL" "$DB.bak"
+case $? in
+0) ok "the retained backup still holds the old plaintext (why the marker stays)" ;;
+1) echo "  NOTE: the backup no longer shows the plaintext (page reuse); not a failure" ;;
+*) bad "could not scan $DB.bak for the token text" ;;
+esac
 
 # f. --keep-backup=false clears the marker; the raw file holds no token text
 dbcli db compact --keep-backup=false
