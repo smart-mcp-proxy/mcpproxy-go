@@ -386,6 +386,15 @@ components:
             Routing mode (Spec 031): how MCP tools are exposed to clients
             Valid values: "retrieve_tools" (default), "direct", "code_execution"
           type: string
+        secret_file_dirs:
+          description: |-
+            SecretFileDirs lists absolute directories where ${file:} references may
+            be resolved. Absent (nil) uses platform defaults; an explicit empty array
+            disables file references; exactly ["*"] allows any path (compatibility mode).
+          items:
+            type: string
+          type: array
+          uniqueItems: false
         security:
           $ref: '#/components/schemas/config.SecurityConfig'
         sensitive_data_detection:
