@@ -85,7 +85,10 @@ PROXY_PID=""
 
 # start_proxy [env assignments...] -> starts the daemon and waits for the API.
 start_proxy() {
-	env PATH="$WORK/fakebin:$PATH" MCPPROXY_TELEMETRY=false "$@" \
+	# Drop any inherited key variables first: the step's own assignments are the
+	# only source of a key.
+	env -u MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY -u MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE \
+		PATH="$WORK/fakebin:$PATH" MCPPROXY_TELEMETRY=false "$@" \
 		"$BIN" serve --config "$WORK/config.json" >>"$WORK/proxy.log" 2>&1 &
 	PROXY_PID=$!
 	for _ in $(seq 1 100); do
@@ -112,7 +115,45 @@ wait_authenticated() {
 	return 1
 }
 
-sealed_values() { grep -a -o 'enc:v1:[A-Za-z0-9_=+/-]*' "$DB" | sort -u; }
+# sealed_values prints every live oauth_tokens key/value pair (the whole value,
+# nonce and ciphertext included), read-only, from config.db. Call it only while
+# the daemon is stopped: bbolt holds a file lock. Only enc:v1 values are kept,
+# so an unsealed (plaintext) row yields nothing.
+cat > "$WORK/dumpoauth.go" <<'EOF'
+package main
+
+import (
+	"fmt"
+	"os"
+	"strings"
+	"time"
+
+	"go.etcd.io/bbolt"
+)
+
+func main() {
+	db, err := bbolt.Open(os.Args[1], 0o600, &bbolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	_ = db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("oauth_tokens"))
+		if b == nil {
+			return nil
+		}
+		return b.ForEach(func(k, v []byte) error {
+			if strings.HasPrefix(string(v), "enc:v1:") {
+				fmt.Printf("%s=%s\n", k, v)
+			}
+			return nil
+		})
+	})
+}
+EOF
+(cd "$ROOT" && go build -o "$WORK/dumpoauth" "$WORK/dumpoauth.go") || { echo "could not build the bucket reader"; exit 2; }
+sealed_values() { "$WORK/dumpoauth" "$DB" | sort; }
 
 step "1. login with the key set"
 # E2E_CONTROL_NO_KEY=1 runs step 1 without a key: the scan below must then fail,
@@ -147,7 +188,8 @@ if [ "$(wc -l < "$OPEN_LOG" | tr -d ' ')" = "$LOGINS_AFTER_FIRST" ]; then ok "no
 
 step "3. restart with a missing key file"
 HASH_BEFORE="$(shasum -a 256 "$DB" | cut -d' ' -f1)"
-env PATH="$WORK/fakebin:$PATH" MCPPROXY_TELEMETRY=false MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE="$WORK/keys/does-not-exist" \
+env -u MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY -u MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE \
+	PATH="$WORK/fakebin:$PATH" MCPPROXY_TELEMETRY=false MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE="$WORK/keys/does-not-exist" \
 	"$BIN" serve --config "$WORK/config.json" >"$WORK/missing.log" 2>&1
 CODE=$?
 if [ "$CODE" = "4" ]; then ok "exit code 4"; else bad "exit code $CODE, want 4"; fi

@@ -39,7 +39,7 @@ Where the key lives decides what the encryption buys you.
 | `LoadCredentialEncrypted=` wrapped with the **host key only** (`/var/lib/systemd/credential.secret`) | yes | **no**: the wrapping secret is on the same disk, so a whole-disk copy yields both |
 | tmpfs-backed Kubernetes or Swarm secret, cloud secret store, a key supplied by an external supervisor | yes | yes, as long as the key is not written to the captured storage |
 | `LoadCredential=` from a plain file, a Docker Compose `file:` secret on the same volume, a key file next to the data directory | yes | **no**: the key file is in the snapshot |
-| `${keyring:NAME}` on a desktop | yes | yes for a copy of the data directory; the login keychain is a separate store |
+| `${keyring:NAME}` on a desktop | yes | depends: only if the captured disk does not also hold the keyring and the material that unlocks it (for example the login keychain and the user's login password) |
 | Key as a literal in `mcp_config.json` | **no**, when the config file is copied together with the database | no |
 
 A snapshot taken with memory also contains the running key, whatever the delivery.
@@ -49,10 +49,20 @@ A snapshot taken with memory also contains the running key, whatever the deliver
 The key is 32 random bytes, base64-encoded (standard alphabet).
 
 ```bash
-umask 077
-openssl rand -base64 32 > /etc/mcpproxy/oauth-key
-chmod 600 /etc/mcpproxy/oauth-key
+# as root: /etc/mcpproxy may not exist yet, and an ordinary user cannot write there
+sudo install -d -m 0750 /etc/mcpproxy
+( umask 077; openssl rand -base64 32 | sudo tee /etc/mcpproxy/oauth-key >/dev/null )
+sudo chmod 600 /etc/mcpproxy/oauth-key
 ```
+
+Who must be able to read the file depends on the delivery. With systemd
+`LoadCredential=` or `LoadCredentialEncrypted=` systemd (root) reads it and hands
+the daemon a private copy, so a root-owned `0600` file is right. When you point
+`${file:...}` or `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE` at the file directly,
+the service user that runs mcpproxy must be able to read it: `chown root:<group>`
+with mode `0640` for a group that contains only that user, or `chown <user>` with
+mode `0600`. (The Linux package creates `/etc/mcpproxy` as `root:mcpproxy`; adjust
+accordingly.)
 
 Keep the file **outside** `data_dir`. A key stored next to `config.db` protects
 nothing if the directory is copied.
@@ -90,8 +100,12 @@ Environment=MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=%d/oauth-key
 
 For a snapshot-resistant setup bind the credential to the TPM
 (`systemd-creds encrypt --with-key=tpm2 ...`) and use
-`LoadCredentialEncrypted=oauth-key:/etc/mcpproxy/oauth-key.cred`. A credential
-encrypted with the host key only does not help against a whole-disk copy. The
+`LoadCredentialEncrypted=oauth-key:/etc/mcpproxy/oauth-key.cred`. Once the
+encrypted credential works (start the service and check the log shows the key id),
+**delete the plaintext key file** (`shred -u /etc/mcpproxy/oauth-key`, or `rm` on a
+filesystem where shredding does not apply) and remove it from any backup or copy
+you made: a plaintext key left on the disk makes a snapshot as readable as before.
+A credential encrypted with the host key only does not help against a whole-disk copy. The
 config form `"oauth_token_encryption_key": "${file:/run/credentials/mcpproxy.service/oauth-key}"`
 works as well.
 
@@ -128,16 +142,21 @@ key in the OS keyring and use `"${keyring:oauth_token_key}"` (see
 ## Switching it on
 
 1. Generate the key and configure it as above.
-2. Restart mcpproxy. At start it encrypts every plaintext OAuth row in one
-   transaction and logs the key id and the number of rows. Nothing needs signing
-   in again.
+2. Restart mcpproxy. At start it either encrypts every valid plaintext OAuth row
+   in one transaction and logs the key id and the number of rows, or it refuses to
+   start (the transaction is rolled back and every row stays as it was). Nothing
+   needs signing in again. A row that cannot be sealed for a reason of its own
+   (not a valid token record, or larger than 1 MiB) is logged and left unchanged;
+   it does not stop startup, and it stays plaintext until it is removed with
+   `mcpproxy auth logout --server=<server>`.
 3. The old plaintext pages stay inside the database file until it is rewritten.
    Stop mcpproxy, run `mcpproxy db compact --keep-backup=false`, start it again.
 4. Delete any `config.db.bak` and any older copy of `config.db`. They still hold
    the tokens in the clear.
 
-After step 3 the raw file contains no token text. Rows written while a key is set
-are encrypted from the first write.
+After step 3 the raw file contains no token text from the rows that were
+encrypted. Check the startup log for rows reported as left unchanged. Rows written
+while a key is set are encrypted from the first write.
 
 ## What happens when the key is wrong or missing
 
