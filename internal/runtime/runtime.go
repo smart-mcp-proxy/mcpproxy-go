@@ -2898,7 +2898,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			// IMPORTANT: This runs for ALL servers with a URL, including autodiscovery servers
 			// PersistentTokenStore uses serverKey (name + URL hash), not just server name
 			// We need to generate the same key format: "servername_hash16"
-			if url != "" && r.storageManager != nil && tokenInPlay {
+			if shouldProbeStoredOAuthRow(url, r.storageManager != nil, tokenInPlay, r.callTimeOAuthRequired(serverStatus.Name)) {
 				r.logger.Debug("Checking OAuth token in storage",
 					zap.String("server", serverStatus.Name),
 					// #1158: the configured upstream URL routinely carries a
@@ -2933,6 +2933,10 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 						oauthConfig = map[string]interface{}{"autodiscovery": true}
 					}
 					oauthStatus = string(oauth.OAuthStatusError)
+				} else if !tokenInPlay {
+					// Probed only for the undecryptable outcome (a call-time
+					// sign-in need on a static-header server): a readable
+					// leftover row is still not evidence about this server.
 				} else if err == nil && token != nil && token.AccessToken != "" {
 					authenticated = true
 					tokenExpiresAt = token.ExpiresAt
@@ -3196,11 +3200,10 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// MCP-2084: call-time OAuth requirement — set when an anonymously-connected
 		// server rejected a tools/call with "authorization required". Drives a
 		// proactive Sign-in CTA even though the server looks connected.
-		var callTimeOAuthRequired bool
+		callTimeOAuthRequired := r.callTimeOAuthRequired(serverStatus.Name)
 		if r.upstreamManager != nil {
 			if client, exists := r.upstreamManager.GetClient(serverStatus.Name); exists && client != nil {
 				userLoggedOut = client.IsUserLoggedOut()
-				callTimeOAuthRequired = client.IsOAuthCallRequired()
 			}
 		}
 		serverMap["user_logged_out"] = userLoggedOut
@@ -4761,4 +4764,24 @@ func knownClientAliases() map[string]bool {
 
 func isKnownClientAlias(rawNormalized string) bool {
 	return knownClientAliases()[rawNormalized]
+}
+
+// callTimeOAuthRequired reports whether the named server's client recorded a
+// call-time sign-in requirement (MCP-2084).
+func (r *Runtime) callTimeOAuthRequired(name string) bool {
+	if r.upstreamManager == nil {
+		return false
+	}
+	client, exists := r.upstreamManager.GetClient(name)
+	return exists && client != nil && client.IsOAuthCallRequired()
+}
+
+// shouldProbeStoredOAuthRow decides whether the server-list projection reads
+// the stored OAuth row. A token in play always does. A header-authenticated
+// server whose leftover row is not in play (GH #1172) is exempt, unless its
+// client recorded a call-time sign-in requirement: health will then offer
+// `login`, which must never be offered over an undecryptable row (Spec 123
+// FR-031), so the row is probed (for that outcome only).
+func shouldProbeStoredOAuthRow(url string, haveStorage, tokenInPlay, callTimeOAuthRequired bool) bool {
+	return url != "" && haveStorage && (tokenInPlay || callTimeOAuthRequired)
 }
