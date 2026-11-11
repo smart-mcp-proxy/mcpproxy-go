@@ -547,6 +547,35 @@ func renderOAuthTokenStorage(w io.Writer, rep *contracts.OAuthTokenStorageReport
 	}
 }
 
+// displayOAuthTokenStorage prints the OAuth token storage section of the
+// doctor diagnostics payload (Spec 123 FR-030). It stays silent when the
+// daemon did not report the section (an older daemon) or when nothing is
+// configured and nothing is sealed: with no key, doctor's output is unchanged.
+func displayOAuthTokenStorage(diag map[string]interface{}) {
+	raw, ok := diag["oauth_token_storage"]
+	if !ok || raw == nil {
+		return
+	}
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return
+	}
+	var rep contracts.OAuthTokenStorageReport
+	if json.Unmarshal(b, &rep) != nil {
+		return
+	}
+	if !rep.EncryptionEnabled && rep.Sealed == 0 && rep.Undecryptable == 0 && !rep.CompactionAdvised {
+		return
+	}
+	fmt.Println("🔑 OAuth Token Storage")
+	fmt.Println("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
+	renderOAuthTokenStorage(os.Stdout, &rep, "  ")
+	for _, step := range statusNextSteps(&rep) {
+		fmt.Println("  Next:      " + step)
+	}
+	fmt.Println()
+}
+
 func renderTokensStatusText(w io.Writer, out tokensStatusOutput) {
 	fmt.Fprintln(w, "OAuth token storage")
 	renderOAuthTokenStorage(w, out.OAuthTokenStorage, "  ")
