@@ -35,6 +35,13 @@ func TokenUndecryptableDetail(err error) string {
 	return "stored OAuth token cannot be decrypted: " + undecryptableReasonText(reason)
 }
 
+// UndecryptableReasonText is the words for a tokenseal reason code
+// ("key_mismatch" -> "sealed with a different key"), as the health detail and
+// the login explanation phrase it.
+func UndecryptableReasonText(reason string) string {
+	return undecryptableReasonText(tokenseal.Reason(reason))
+}
+
 func undecryptableReasonText(r tokenseal.Reason) string {
 	switch r {
 	case tokenseal.ReasonNoKey:
