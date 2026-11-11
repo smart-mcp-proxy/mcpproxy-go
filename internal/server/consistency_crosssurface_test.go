@@ -12,10 +12,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpapi"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // Spec 070 keystone regression (T021 / CN-004 / FR-010 / SC-004).
@@ -126,13 +129,40 @@ const consistencyAPIKey = "t021-consistency-key"
 // closed on cleanup so the temp-dir removal succeeds on Windows.
 func newConsistencyServer(t *testing.T) *Server {
 	t.Helper()
+	return newConsistencyServerWithLogger(t, zap.NewNop())
+}
+
+func newConsistencyServerWithLogger(t *testing.T, logger *zap.Logger) *Server {
+	t.Helper()
 	cfg := config.DefaultConfig()
 	cfg.DataDir = t.TempDir()
 	cfg.Listen = "127.0.0.1:0"
 	cfg.APIKey = consistencyAPIKey
-	srv, err := NewServer(cfg, zap.NewNop())
+	srv, err := NewServer(cfg, logger)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = srv.Shutdown() })
+	return srv
+}
+
+// newSettledConsistencyServer is newConsistencyServer for a test that seeds
+// the index and storage by hand: it returns only once the runtime's startup
+// work that would otherwise race the seeding has finished.
+//
+// PhaseReady alone is not enough. StartBackgroundInitialization sets it and then
+// spawns backgroundToolIndexing, whose first act is cleanupOrphanedIndexEntries:
+// it lists the indexed servers and deletes every one the upstream manager does
+// not know. A fixture that indexes a hand-made server between that list and
+// the delete (or between two deletes) loses documents at random, which a
+// loaded runner makes likely. Waiting for the pass's completion line pins it
+// before the seeding starts; the discovery sweep that follows it waits 2s.
+func newSettledConsistencyServer(t *testing.T) *Server {
+	t.Helper()
+	core, logs := observer.New(zapcore.DebugLevel)
+	srv := newConsistencyServerWithLogger(t, zap.New(core))
+	require.Eventually(t, func() bool {
+		return srv.runtime.CurrentPhase() == runtime.PhaseReady &&
+			logs.FilterMessage("Orphaned index cleanup completed").Len() > 0
+	}, 10*time.Second, 10*time.Millisecond, "fixture: runtime never finished its startup orphan-index cleanup")
 	return srv
 }
 

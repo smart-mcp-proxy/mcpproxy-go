@@ -2,12 +2,10 @@ package server
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -18,13 +16,9 @@ import (
 // must not be returned — by its canonical "server:tool" id, which the index
 // resolves to that one document, or by any word that matches it.
 func TestSearchTools_WithholdsApprovalLockedHits(t *testing.T) {
-	srv := newConsistencyServer(t)
-
-	// See TestSearchTools_AnnotationsSurviveToTier: seeding before the
-	// background config sync finishes races it.
-	require.Eventually(t, func() bool {
-		return srv.runtime.CurrentPhase() == runtime.PhaseReady
-	}, 10*time.Second, 10*time.Millisecond, "fixture: runtime never reached PhaseReady")
+	// Seeding before the runtime's startup sync and orphan-index cleanup finish
+	// races them (see newSettledConsistencyServer).
+	srv := newSettledConsistencyServer(t)
 
 	store := srv.runtime.StorageManager()
 	require.NoError(t, store.SaveUpstreamServer(&config.ServerConfig{Name: "orchid", Enabled: true}))
