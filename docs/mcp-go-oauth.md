@@ -436,7 +436,7 @@ The integration of OAuth 2.1 with MCP servers in Go requires strict adherence to
 2. **RFC 8252 Compliance**: **ACHIEVED** with `127.0.0.1` loopback interface and OS-assigned ephemeral ports
 3. **PKCE Security**: **IMPLEMENTED** with mandatory PKCE-S256 for all OAuth flows
 4. **Dynamic Client Registration**: **WORKING** seamlessly with Cloudflare and other OAuth providers
-5. **Token Management**: **AUTOMATED** with refresh token handling and secure storage
+5. **Token Management**: **AUTOMATED** with refresh token handling and persistence in `config.db`
 
 ### 🚀 **MCPProxy Implementation Highlights**
 

@@ -80,7 +80,7 @@ For OAuth providers that require additional parameters (like RFC 8707 resource i
 3. User completes authentication
 4. MCPProxy receives callback with authorization code
 5. Exchanges code for access token
-6. Stores tokens securely in system keyring
+6. Stores tokens in `config.db` in the data directory
 
 #### Reused client registrations
 
@@ -215,13 +215,11 @@ For providers like Runlayer, MCPProxy can auto-detect the resource parameter fro
 
 ## Token Storage
 
-Tokens are stored securely using the system keyring:
+MCPProxy stores upstream OAuth credentials in the `oauth_tokens` bucket of `config.db` in the data directory (default `~/.mcpproxy/`). For each server that is stored: the access token, the refresh token, and the client secret from dynamic client registration (DCR), if there is one.
 
-| Platform | Storage |
-|----------|---------|
-| macOS | Keychain |
-| Windows | Credential Manager |
-| Linux | Secret Service (libsecret) |
+These values are **not encrypted and are not kept in the operating system keyring**. They are stored as readable JSON. What protects them is file permissions: the data directory is created `0700` and `config.db` `0600`, so only the user running MCPProxy can read them. Anyone or anything that can read `config.db` as that user, or that obtains a copy of the file (a backup, a disk or VM snapshot), can read the tokens. This includes a stdio upstream server that runs outside Docker isolation, because it runs as the same user.
+
+The system keyring is used only for secrets you reference from configuration with `${keyring:NAME}` (see [Keyring Integration](/features/keyring-integration)); it is not used for upstream OAuth tokens.
 
 ## Error Handling
 
@@ -399,5 +397,5 @@ curl -I https://auth.example.com/.well-known/oauth-authorization-server
 
 1. **Use PKCE**: MCPProxy uses PKCE by default for public clients
 2. **Minimal Scopes**: Request only necessary permissions
-3. **Token Storage**: Tokens are encrypted in system keyring
+3. **Token Storage**: Tokens are stored as readable JSON in `config.db`, protected only by `0600`/`0700` file permissions; keep the data directory and any backups of `config.db` private
 4. **Callback Security**: Uses dynamic port allocation to prevent port conflicts

@@ -92,7 +92,7 @@ it does not hide files or sockets the proxy's user can reach. Two things in
 the data directory matter here:
 
 - `mcp_config.json` holds `api_key`; `config.db` holds the upstream OAuth
-  tokens. The directory is `0700` and the files `0600`, but the child runs as
+  tokens in readable form (not encrypted). The directory is `0700` and the files `0600`, but the child runs as
   the same user, so that does not help.
 - `mcpproxy.sock` (on by default, `enable_socket: true`) is the local admin
   endpoint. Connections to it are trusted **without an API key**, because the
@@ -106,7 +106,7 @@ child ran a probe script:
 | | `none` | `sandbox` (Landlock) | `docker` (rootless Podman) |
 |---|---|---|---|
 | Read `mcp_config.json` (has `api_key`) | read | read | not visible (data dir not mounted) |
-| Read `config.db` (OAuth tokens) | read | read | not visible |
+| Read `config.db` (OAuth tokens, readable JSON) | read | read | not visible |
 | `api_key` in the child's environment | no | no | no |
 | Connect to `<data-dir>/mcpproxy.sock` with no key | **yes**, `GET /api/v1/status` returns data | **yes**, same | the socket is not visible |
 | Mint a token over the socket (`POST /api/v1/tokens`, read+write+destructive, all servers) | same socket | **201, `mcp_agt_…` returned** | n/a |
