@@ -33,14 +33,19 @@ call mcpproxy's API or its admin socket.
 
 Where the key lives decides what the encryption buys you.
 
-| Delivery | Copy of `config.db` / data dir | Disk or VM disk snapshot |
+Protection against a copy of `config.db` or of the data directory holds only when
+the key source is **not part of that copy**. A key file stored inside the data
+directory, or any copy that includes the key, gives no protection at all.
+
+| Delivery | Copy of `config.db` / data dir (key source not in the copy) | Disk or VM disk snapshot |
 |----------|:------------------------------:|:------------------------:|
 | `LoadCredentialEncrypted=` bound to a **TPM2** | yes | yes |
 | `LoadCredentialEncrypted=` wrapped with the **host key only** (`/var/lib/systemd/credential.secret`) | yes | **no**: the wrapping secret is on the same disk, so a whole-disk copy yields both |
 | tmpfs-backed Kubernetes or Swarm secret, cloud secret store, a key supplied by an external supervisor | yes | yes, as long as the key is not written to the captured storage |
-| `LoadCredential=` from a plain file, a Docker Compose `file:` secret on the same volume, a key file next to the data directory | yes | **no**: the key file is in the snapshot |
+| `LoadCredential=` from a plain file outside the data directory, a Docker Compose `file:` secret bind-mounted from the host | yes | **no**: the key file is in the snapshot |
+| A key file stored inside the data directory, or next to it in a copy that includes it | **no**: the copy holds the database and the key | **no** |
 | `${keyring:NAME}` on a desktop | yes | depends: only if the captured disk does not also hold the keyring and the material that unlocks it (for example the login keychain and the user's login password) |
-| Key as a literal in `mcp_config.json` | **no**, when the config file is copied together with the database | no |
+| Key as a literal in `mcp_config.json` | **no** when the config file is copied together with the database; yes when only `config.db` is copied | no |
 
 A snapshot taken with memory also contains the running key, whatever the delivery.
 
@@ -49,8 +54,10 @@ A snapshot taken with memory also contains the running key, whatever the deliver
 The key is 32 random bytes, base64-encoded (standard alphabet).
 
 ```bash
-# as root: /etc/mcpproxy may not exist yet, and an ordinary user cannot write there
-sudo install -d -m 0750 /etc/mcpproxy
+# Create /etc/mcpproxy only if it is missing; an existing one is left alone
+# (the Linux package sets it root:mcpproxy 2770 and the daemon writes there).
+[ -d /etc/mcpproxy ] || sudo install -d -m 0755 /etc/mcpproxy
+# Only the key file gets its own ownership and mode.
 ( umask 077; openssl rand -base64 32 | sudo tee /etc/mcpproxy/oauth-key >/dev/null )
 sudo chmod 600 /etc/mcpproxy/oauth-key
 ```
@@ -59,10 +66,11 @@ Who must be able to read the file depends on the delivery. With systemd
 `LoadCredential=` or `LoadCredentialEncrypted=` systemd (root) reads it and hands
 the daemon a private copy, so a root-owned `0600` file is right. When you point
 `${file:...}` or `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE` at the file directly,
-the service user that runs mcpproxy must be able to read it: `chown root:<group>`
-with mode `0640` for a group that contains only that user, or `chown <user>` with
-mode `0600`. (The Linux package creates `/etc/mcpproxy` as `root:mcpproxy`; adjust
-accordingly.)
+the service user that runs mcpproxy must be able to read it, and nobody else:
+`sudo chown <service user> /etc/mcpproxy/oauth-key` with mode `0600`, or
+`sudo chown root:<group> ...` with mode `0640` for a group that contains only that
+user. For the Linux package that is `sudo chown mcpproxy /etc/mcpproxy/oauth-key`.
+Change the key file only, never the mode or owner of `/etc/mcpproxy` itself.
 
 Keep the file **outside** `data_dir`. A key stored next to `config.db` protects
 nothing if the directory is copied.
@@ -86,8 +94,11 @@ The key can come from three places. The environment wins over the config field.
 }
 ```
 
-The REST API and the Web UI mask a literal key; a reference is not secret and is
-shown as written.
+`GET /api/v1/config`, the Web UI and every other config output always mask a
+literal key, whatever `reveal_secret_headers` says. A reference
+(`${file:...}`, `${env:...}`, `${keyring:...}`) is shown exactly as written,
+because it is operator-authored and not secret. When the masked document is sent
+back (raw-JSON editor, `PATCH`), the stored value is restored, never the mask.
 
 ### systemd
 
@@ -162,7 +173,7 @@ while a key is set are encrypted from the first write.
 
 | Situation | Result |
 |-----------|--------|
-| The key reference cannot be read (missing mount, unreadable file, empty value, not 32 bytes) | mcpproxy does not start, and CLI commands stop, with exit code 4 and a message naming the field or variable. `config.db` is not opened and not changed |
+| The key reference cannot be read (missing mount, unreadable file, empty value, not 32 bytes) | mcpproxy does not start, and every command that opens `config.db` through the key-aware storage helpers stops, with exit code 4 and a message naming the field or variable. `config.db` is not opened and not changed. Commands that only talk to a running daemon over the socket or HTTP are unaffected. Standalone `auth logout` proceeds without the key (see below). `mcpproxy db compact` and `mcpproxy db stats` open the file directly with bbolt and do not resolve the key: they copy or count bytes and never decode token rows |
 | The key is removed from the configuration of a database that has encrypted rows | mcpproxy starts. The affected servers show `unhealthy` with [`MCPX_OAUTH_TOKEN_UNDECRYPTABLE`](../errors/MCPX_OAUTH_TOKEN_UNDECRYPTABLE.md). The rows are kept byte for byte and no sign-in is offered |
 | A different key is configured | Same as above; the message gives the key ids (a short fingerprint, never key material) |
 | An encrypted entry was changed or copied from another server | It fails authentication and is refused. Restoring the key does not repair it: use `mcpproxy auth logout --server=<server>` and sign in again, or restore from a backup |

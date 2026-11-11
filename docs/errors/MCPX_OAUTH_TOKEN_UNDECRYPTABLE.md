@@ -21,7 +21,11 @@ the key mcpproxy started with cannot open it.
 mcpproxy keeps the stored token exactly as it is and does **not** offer a new
 sign-in for this server: a new sign-in cannot replace a token it cannot read,
 and the token comes back as soon as the right key is available again. Other
-servers keep working.
+servers keep working. This holds for a server that is currently connected too
+(for example one that connected anonymously and later needs a sign-in): its
+health reports `configure`, never `login`. A login started from the Web UI, the
+tray or `POST /api/v1/servers/{id}/login` is refused with this code (HTTP 409)
+instead of starting.
 
 The server's health detail names the reason:
 
