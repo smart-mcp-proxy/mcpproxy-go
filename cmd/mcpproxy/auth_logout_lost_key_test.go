@@ -57,3 +57,39 @@ func TestAuthLogoutStandalone_UnresolvableKeyStillDiscardsRow(t *testing.T) {
 		return nil
 	}))
 }
+
+// Only a reference that no longer resolves is a lost key. A key that is
+// present but wrong (malformed, or both environment variables set) is an
+// operator mistake that the keyless logout would hide, so it still stops
+// with the exit-4 startup error and the row is kept (Spec 123 FR-022).
+func TestAuthLogoutStandalone_MalformedKeyStillRefuses(t *testing.T) {
+	t.Setenv(config.EnvOAuthTokenKey, "")
+	t.Setenv(config.EnvOAuthTokenKeyFile, "")
+	dataDir := t.TempDir()
+	srv := &config.ServerConfig{Name: "x", URL: "https://example.invalid/mcp", Protocol: "http", Enabled: true}
+	serverKey := oauth.GenerateServerKey(srv.Name, srv.URL)
+
+	db, err := storage.NewBoltDB(dataDir, zap.NewNop().Sugar())
+	require.NoError(t, err)
+	require.NoError(t, db.SaveOAuthToken(&storage.OAuthTokenRecord{ServerName: serverKey, AccessToken: "a"}))
+	require.NoError(t, db.Close())
+
+	cfg := &config.Config{
+		DataDir:                 dataDir,
+		OAuthTokenEncryptionKey: "not-a-32-byte-key",
+		Servers:                 []*config.ServerConfig{srv},
+	}
+
+	err = runAuthLogoutStandalone(context.Background(), "x", cfg)
+	var startupErr *config.StartupError
+	require.ErrorAs(t, err, &startupErr)
+	require.Equal(t, config.ExitCodeOAuthTokenKeyError, startupErr.ExitCode)
+
+	raw, err := bbolt.Open(filepath.Join(dataDir, "config.db"), 0600, nil)
+	require.NoError(t, err)
+	defer raw.Close()
+	require.NoError(t, raw.View(func(tx *bbolt.Tx) error {
+		require.NotNil(t, tx.Bucket([]byte(storage.OAuthTokenBucket)).Get([]byte(serverKey)), "row must be kept")
+		return nil
+	}))
+}

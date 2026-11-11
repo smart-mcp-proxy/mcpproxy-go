@@ -103,8 +103,9 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 
 // ClearOAuthTokenStandalone discards serverName's stored OAuth token for the
 // standalone `auth logout` (no daemon) without building a client. The clear
-// is a delete on the bucket key alone, so an OAuth token key that cannot be
-// resolved does not stop it (Spec 123 review): the documented recovery for a
+// is a delete on the bucket key alone, so an OAuth token key reference that
+// no longer resolves does not stop it (Spec 123 review; any other key error
+// still does): the documented recovery for a
 // lost key is this logout, and the usual way a key is lost is a key reference
 // that no longer resolves (a missing secret mount or key file), which
 // NewClient refuses with exit 4. Opening without a key is then safe because
@@ -125,10 +126,16 @@ func ClearOAuthTokenStandalone(globalConfig *config.Config, serverName string, l
 	if globalConfig.DataDir == "" {
 		return fmt.Errorf("storage not available - cannot clear OAuth token")
 	}
-	// Pass the resolved key when there is one (FR-017); an unresolvable
-	// reference opens with none, which is safe for this delete-only use.
+	// Pass the resolved key when there is one (FR-017). Only a reference
+	// that no longer resolves opens with none, which is safe for this
+	// delete-only use. A key that is present but wrong (both variables set,
+	// a bad reference, an empty or malformed value) is an operator mistake
+	// and still stops with the exit-4 startup error (FR-022).
 	oauthKey, _, keyErr := config.ResolveOAuthTokenKey(globalConfig)
 	if keyErr != nil {
+		if !config.IsOAuthTokenKeyUnresolvable(keyErr) {
+			return keyErr
+		}
 		logger.Warnw("OAuth token key cannot be resolved; discarding the stored token without it", "error", keyErr)
 		oauthKey = nil
 	}

@@ -68,7 +68,9 @@ func putOAuthRecord(bucket *bbolt.Bucket, k *tokenseal.Key, key string, rec *OAu
 // plaintext JSON object original: top-level fields of original that
 // OAuthTokenRecord does not know (a row written by a newer binary) are kept
 // in the written value. The boot sweep uses it (Spec 123 review), so sealing
-// a row never drops data the binary does not understand. A nil original is
+// a row never drops data the binary does not understand. Every later writer
+// passes nil and writes the typed record only, as before this feature, so
+// such fields last until the row's next save or refresh. A nil original is
 // putOAuthRecord.
 func putOAuthRecordKeeping(bucket *bbolt.Bucket, k *tokenseal.Key, key string, rec *OAuthTokenRecord, original []byte) error {
 	if hook := putOAuthRecordHook; hook != nil {

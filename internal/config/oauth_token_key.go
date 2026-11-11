@@ -2,6 +2,7 @@ package config
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -157,6 +158,17 @@ func ResolveOAuthTokenKey(c *Config) (*tokenseal.Key, KeySource, error) {
 		return nil, KeySource{}, oauthTokenKeyError(label, MsgOAuthTokenKeyMalformed)
 	}
 	return key, src, nil
+}
+
+// IsOAuthTokenKeyUnresolvable reports whether err is ResolveOAuthTokenKey's
+// "the reference no longer resolves" error (a missing secret mount, key file,
+// environment variable or keyring entry): the lost-key case. Every other key
+// error (both variables set, a bad reference, an empty or malformed value)
+// is a mistake in a key that is present, and returns false.
+func IsOAuthTokenKeyUnresolvable(err error) bool {
+	var se *StartupError
+	return errors.As(err, &se) && se.ExitCode == ExitCodeOAuthTokenKeyError &&
+		strings.HasSuffix(se.Message, ": "+MsgOAuthTokenKeyUnresolvable)
 }
 
 func oauthTokenKeyError(label, sentence string) *StartupError {
