@@ -28,7 +28,7 @@ Fix OAuth token refresh so servers survive restarts and proactively refresh befo
 | I. Performance at Scale | ✅ PASS | Token refresh is per-server, async background operation; does not block API requests; uses existing scheduler pattern |
 | II. Actor-Based Concurrency | ✅ PASS | Existing RefreshManager uses goroutine + timer pattern; will extend with exponential backoff; no new locks required |
 | III. Configuration-Driven Architecture | ✅ PASS | Refresh threshold (80%) already configurable; no new config fields required; existing patterns sufficient |
-| IV. Security by Default | ✅ PASS | No new security surface; tokens stored in existing encrypted BBolt bucket; rate limiting prevents abuse |
+| IV. Security by Default | ✅ PASS | No new security surface; ~~tokens stored in existing encrypted BBolt bucket~~ (not true: the `oauth_tokens` bucket holds plain JSON protected by file permissions; see Spec 123); rate limiting prevents abuse |
 | V. Test-Driven Development (TDD) | ✅ PASS | Will add unit tests for RefreshManager changes, integration tests for health status, E2E tests for restart recovery |
 | VI. Documentation Hygiene | ✅ PASS | Will update CLAUDE.md if architecture changes; logging documentation already exists |
 

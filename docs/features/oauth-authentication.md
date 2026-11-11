@@ -51,7 +51,7 @@ OAuth authentication is used when connecting to MCP servers that require authori
 | `pkce_enabled` | boolean | PKCE is always enabled for security; this flag is currently ignored |
 | `extra_params` | object | Additional authorization parameters (e.g., RFC 8707 resource) |
 
-**Note:** OAuth authorization and token endpoints are automatically discovered from the server's OAuth metadata (RFC 8414 `.well-known/oauth-authorization-server`), not configured manually.
+**Note:** OAuth authorization and token endpoints are discovered by default from the server's OAuth metadata (RFC 8414 `.well-known/oauth-authorization-server`). They can be overridden explicitly with `authorization_endpoint` and `token_endpoint` (and `registration_endpoint`); if metadata discovery fails and both authorization and token overrides are set, MCPProxy builds the metadata from them.
 
 ### Advanced Configuration
 
@@ -215,10 +215,13 @@ For providers like Runlayer, MCPProxy can auto-detect the resource parameter fro
 
 ## Token Storage
 
-MCPProxy stores the OAuth access token, the refresh token and the dynamic client registration secret of each upstream server in `config.db` in the data directory. They are not kept in the system keyring.
+MCPProxy stores upstream OAuth credentials in the `oauth_tokens` bucket of `config.db` in the data directory (default `~/.mcpproxy/`). For each server that is stored: the access token, the refresh token, and the client secret from dynamic client registration (DCR), if there is one.
 
-- **By default** the rows are readable JSON protected only by the `0600` file and `0700` directory permissions. A copy of `config.db` yields the tokens.
-- **With `oauth_token_encryption_key` set**, the rows are encrypted with AES-256-GCM. A copy of `config.db` made without the key yields no tokens only after the startup migration has encrypted the existing rows **and** the database file has been compacted (otherwise old plaintext pages remain in the file), and not for any row the migration skipped (a row that is not a valid token record, or is larger than 1 MiB, is logged and left as it was). This does not protect against a process running as the same user as mcpproxy, which can read the key from the same place. See [OAuth Token Encryption](oauth-token-encryption.md) for key delivery, the threat model and recovery.
+By default these values are **not encrypted**, and they are never kept in the operating system keyring. They are stored as readable JSON. What protects them is file permissions: on macOS and Linux the data directory is created `0700` and `config.db` `0600` (POSIX creation modes; tightening an already-existing file is best-effort and a failure is only logged), so other users cannot read them. On Windows these mode bits have no meaning, and protection is the ACL of the data directory, which it inherits from its parent: the user profile for the default location. A custom data directory (`--data-dir`, `data_dir`) gets whatever ACL its location has, so secure it yourself. Anyone or anything that can read `config.db` as that user, or that obtains a copy of the file (a backup, a disk or VM snapshot), can read the tokens. This includes a stdio upstream server that runs outside Docker isolation, because it runs as the same user.
+
+With [`oauth_token_encryption_key`](oauth-token-encryption.md) set, the rows are encrypted with AES-256-GCM. A copy of `config.db` made without the key yields no tokens only after the startup migration has encrypted the existing rows **and** the database file has been compacted (otherwise old plaintext pages remain in the file), and not for any row the migration skipped (a row that is not a valid token record, or is larger than 1 MiB, is logged and left as it was). This does not protect against a process running as the same user as mcpproxy, which can read the key from the same place. See [OAuth Token Encryption](oauth-token-encryption.md) for key delivery, the threat model and recovery.
+
+The system keyring is used only for secrets you reference from configuration with `${keyring:NAME}` (see [Keyring Integration](/features/keyring-integration)); it is not used for upstream OAuth tokens.
 
 ## Error Handling
 
@@ -396,5 +399,5 @@ curl -I https://auth.example.com/.well-known/oauth-authorization-server
 
 1. **Use PKCE**: MCPProxy uses PKCE by default for public clients
 2. **Minimal Scopes**: Request only necessary permissions
-3. **Token Storage**: Tokens live in `config.db` with file permissions only; set [`oauth_token_encryption_key`](oauth-token-encryption.md) to encrypt them (same-user processes can still read the key; a copy of `config.db` is protected only after migration and compaction, see that page)
+3. **Token Storage**: Tokens are stored as readable JSON in `config.db`, protected only by file permissions (`0600`/`0700` creation modes on macOS and Linux, best-effort on existing files; the data directory's inherited ACL on Windows); keep the data directory and any backups of `config.db` private; set [`oauth_token_encryption_key`](oauth-token-encryption.md) to encrypt them (same-user processes can still read the key; a copy of `config.db` is protected only after migration and compaction, see that page)
 4. **Callback Security**: Uses dynamic port allocation to prevent port conflicts

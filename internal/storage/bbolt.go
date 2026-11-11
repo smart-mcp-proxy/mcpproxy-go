@@ -63,8 +63,9 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger, opts ...Option) (*Bolt
 	dbPath := filepath.Join(dataDir, "config.db")
 
 	// Try to open with timeout, if it fails, immediately return database locked error.
-	// The database holds OAuth tokens and DCR client secrets, so it is created
-	// owner-only (0600).
+	// The database holds OAuth tokens and DCR client secrets as plain JSON
+	// (not encrypted), so it is created owner-only (0600): file permissions
+	// are the only protection.
 	db, err := bbolt.Open(dbPath, 0600, &bbolt.Options{
 		Timeout: 10 * time.Second,
 		NoSync:  noSync.Load(),
