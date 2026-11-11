@@ -1341,7 +1341,13 @@ func (b *BoltDB) SealPlaintextOAuthTokens(ctx context.Context) (int, error) {
 			}
 			record, err := decodeOAuthRecord(b.oauthKey, row.key, row.value)
 			if err != nil {
-				continue // plaintext that is not a record: undecryptable, untouched
+				// Plaintext that is not a record: undecryptable, untouched.
+				// Name the key and the reason, never the value.
+				if b.logger != nil {
+					b.logger.Warnw("OAuth token row is not a valid record; left as plaintext",
+						"server_key", row.key, "reason", "malformed")
+				}
+				continue
 			}
 			// Keep the stored JSON's unknown fields (a row a newer binary
 			// wrote): sealing must not drop them (Spec 123 review).
@@ -1352,7 +1358,7 @@ func (b *BoltDB) SealPlaintextOAuthTokens(ctx context.Context) (int, error) {
 					// fail the sweep (and with it startup).
 					if b.logger != nil {
 						b.logger.Warnw("OAuth token row is too large to seal; left as plaintext",
-							"server_key", row.key, "limit_bytes", tokenseal.MaxPlaintextLen)
+							"server_key", row.key, "reason", "too_large", "limit_bytes", tokenseal.MaxPlaintextLen)
 					}
 					continue
 				}
