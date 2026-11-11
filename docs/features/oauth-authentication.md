@@ -218,7 +218,7 @@ For providers like Runlayer, MCPProxy can auto-detect the resource parameter fro
 MCPProxy stores the OAuth access token, the refresh token and the dynamic client registration secret of each upstream server in `config.db` in the data directory. They are not kept in the system keyring.
 
 - **By default** the rows are readable JSON protected only by the `0600` file and `0700` directory permissions. A copy of `config.db` yields the tokens.
-- **With `oauth_token_encryption_key` set**, the rows are encrypted with AES-256-GCM, so a copy of `config.db` made without the key yields nothing. This does not protect against a process running as the same user as mcpproxy, which can read the key from the same place. See [OAuth Token Encryption](oauth-token-encryption.md) for key delivery, the threat model and recovery.
+- **With `oauth_token_encryption_key` set**, the rows are encrypted with AES-256-GCM. A copy of `config.db` made without the key yields no tokens only after the startup migration has encrypted the existing rows **and** the database file has been compacted (otherwise old plaintext pages remain in the file), and not for any row the migration skipped (a row that is not a valid token record, or is larger than 1 MiB, is logged and left as it was). This does not protect against a process running as the same user as mcpproxy, which can read the key from the same place. See [OAuth Token Encryption](oauth-token-encryption.md) for key delivery, the threat model and recovery.
 
 ## Error Handling
 
@@ -396,5 +396,5 @@ curl -I https://auth.example.com/.well-known/oauth-authorization-server
 
 1. **Use PKCE**: MCPProxy uses PKCE by default for public clients
 2. **Minimal Scopes**: Request only necessary permissions
-3. **Token Storage**: Tokens live in `config.db` with file permissions only; set [`oauth_token_encryption_key`](oauth-token-encryption.md) to encrypt them (same-user processes can still read the key)
+3. **Token Storage**: Tokens live in `config.db` with file permissions only; set [`oauth_token_encryption_key`](oauth-token-encryption.md) to encrypt them (same-user processes can still read the key; a copy of `config.db` is protected only after migration and compaction, see that page)
 4. **Callback Security**: Uses dynamic port allocation to prevent port conflicts

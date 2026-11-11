@@ -23,9 +23,10 @@ sign-in for this server: a new sign-in cannot replace a token it cannot read,
 and the token comes back as soon as the right key is available again. Other
 servers keep working. This holds for a server that is currently connected too
 (for example one that connected anonymously and later needs a sign-in): its
-health reports `configure`, never `login`. A login started from the Web UI, the
-tray or `POST /api/v1/servers/{id}/login` is refused with this code (HTTP 409)
-instead of starting.
+health reports `configure`, never `login`. A login started from the REST API
+(`POST /api/v1/servers/{id}/login`), the Web UI or the tray is refused with this
+code instead of starting. The HTTP 409 applies to the REST and Web UI requests
+only; the tray receives the same error in-process, with no HTTP status.
 
 The server's health detail names the reason:
 
@@ -46,10 +47,13 @@ an unset environment variable, a changed config reference), make the original
 key available again and restart mcpproxy. The key is read only at startup.
 
 ```bash
-mcpproxy upstream list
+mcpproxy upstream list -o json
 ```
 
-shows which servers are affected and why.
+shows which servers are affected and why. The table form (`mcpproxy upstream list`)
+shows only the action column; the reason is in the JSON: `health.action` is
+`configure`, `health.detail` holds the reason, and `error_code` is
+`MCPX_OAUTH_TOKEN_UNDECRYPTABLE` (with the cause in `diagnostic.cause`).
 
 ### Discard the stored token, then sign in again
 
@@ -61,8 +65,20 @@ mcpproxy auth logout --server=<server-name>
 mcpproxy auth login --server=<server-name>
 ```
 
-With mcpproxy stopped, `auth logout` works even when the key reference cannot
-be read: it deletes the stored entry and needs no key. `auth login` and
+With mcpproxy stopped, `auth logout` works when the key source is missing or
+unreadable: it deletes the stored entry and needs no key. A source that is present
+but unusable (empty, oversized, malformed, both variables set, or a bad
+reference) still stops it with exit 4. For the Linux package, run it as the service
+user with the service's paths:
+
+```bash
+sudo systemctl stop mcpproxy
+sudo -u mcpproxy mcpproxy --config=/etc/mcpproxy/mcp_config.json \
+  --data-dir=/var/lib/mcpproxy auth logout --server=<server-name>
+sudo systemctl start mcpproxy
+```
+
+`auth login` and
 starting mcpproxy still need a readable key, so if the original key is gone,
 configure a new one first (see
 [OAuth Token Encryption](../features/oauth-token-encryption.md)).

@@ -162,6 +162,14 @@ key in the OS keyring and use `"${keyring:oauth_token_key}"` (see
    `mcpproxy auth logout --server=<server>`.
 3. The old plaintext pages stay inside the database file until it is rewritten.
    Stop mcpproxy, run `mcpproxy db compact --keep-backup=false`, start it again.
+   For the Linux package, run it as the service user with the service's paths:
+
+   ```bash
+   sudo systemctl stop mcpproxy
+   sudo -u mcpproxy mcpproxy --config=/etc/mcpproxy/mcp_config.json \
+     --data-dir=/var/lib/mcpproxy db compact --keep-backup=false
+   sudo systemctl start mcpproxy
+   ```
 4. Delete any `config.db.bak` and any older copy of `config.db`. They still hold
    the tokens in the clear.
 
@@ -173,16 +181,29 @@ while a key is set are encrypted from the first write.
 
 | Situation | Result |
 |-----------|--------|
-| The key reference cannot be read (missing mount, unreadable file, empty value, not 32 bytes) | mcpproxy does not start, and every command that opens `config.db` through the key-aware storage helpers stops, with exit code 4 and a message naming the field or variable. `config.db` is not opened and not changed. Commands that only talk to a running daemon over the socket or HTTP are unaffected. Standalone `auth logout` proceeds without the key (see below). `mcpproxy db compact` and `mcpproxy db stats` open the file directly with bbolt and do not resolve the key: they copy or count bytes and never decode token rows |
+| The key reference cannot be read (missing mount, unreadable file, empty value, not 32 bytes) | mcpproxy does not start, and every command that opens `config.db` through the key-aware storage helpers stops, with exit code 4 and a message naming the field or variable. `config.db` is not opened and not changed. Commands that only talk to a running daemon over the socket or HTTP are unaffected. Standalone `auth logout` proceeds without the key only when the key source is missing or unreadable; a source that is present but unusable (empty, oversized, malformed, both variables set, or a bad reference) still exits 4 (see below). `mcpproxy db compact` and `mcpproxy db stats` open the file directly with bbolt and do not resolve the key: they copy or count bytes and never decode token rows |
 | The key is removed from the configuration of a database that has encrypted rows | mcpproxy starts. The affected servers show `unhealthy` with [`MCPX_OAUTH_TOKEN_UNDECRYPTABLE`](../errors/MCPX_OAUTH_TOKEN_UNDECRYPTABLE.md). The rows are kept byte for byte and no sign-in is offered |
 | A different key is configured | Same as above; the message gives the key ids (a short fingerprint, never key material) |
-| An encrypted entry was changed or copied from another server | It fails authentication and is refused. Restoring the key does not repair it: use `mcpproxy auth logout --server=<server>` and sign in again, or restore from a backup |
+| An encrypted entry was changed or copied from another server | It fails authentication and is refused. Restoring the key does not repair it: restore the original value from a backup, or run `mcpproxy auth logout --server=<server>` and sign in again |
 
-Restoring the original key and restarting makes every server authenticated again,
-with no browser. If the key is lost for good, run `mcpproxy auth logout --server=<server>`
+Restoring the original key and restarting recovers the missing-key and wrong-key
+cases only: those servers are authenticated again, with no browser. A changed or
+swapped entry stays refused whatever the key; restore its original value or log it
+out and sign in again. If the key is lost for good, run `mcpproxy auth logout --server=<server>`
 for each affected server and sign in again. With mcpproxy stopped, `auth logout`
-works even when the key reference cannot be read (it deletes the stored entry and
-needs no key). `auth login` and starting mcpproxy still need a readable key, so
+works when the key source is missing or unreadable (it deletes the stored entry and
+needs no key); a source that is present but unusable (empty, oversized, malformed,
+both variables set, or a bad reference) still stops it with exit 4. For the Linux
+package run it as the service user with the service's paths:
+
+```bash
+sudo systemctl stop mcpproxy
+sudo -u mcpproxy mcpproxy --config=/etc/mcpproxy/mcp_config.json \
+  --data-dir=/var/lib/mcpproxy auth logout --server=<server>
+sudo systemctl start mcpproxy
+```
+
+`auth login` and starting mcpproxy still need a readable key, so
 before signing in, configure a new key (see "Generating a key" above, in the config
 field or through `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE]`). Any entry still
 encrypted under the lost key then shows as undecryptable until you log it out.
