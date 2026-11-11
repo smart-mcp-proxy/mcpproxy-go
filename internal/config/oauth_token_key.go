@@ -251,3 +251,12 @@ func pathWithinDir(p, dir string) bool {
 	}
 	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
+
+// IsOAuthTokenKeyReference reports whether v (surrounding whitespace ignored)
+// is exactly one well-formed ${file:/abs}, ${env:NAME} or ${keyring:NAME}
+// reference, by the same rule config validation applies. Config outputs use it
+// to decide whether oauth_token_encryption_key is published as written.
+func IsOAuthTokenKeyReference(v string) bool {
+	_, ok := parseOAuthTokenKeyRef(strings.TrimSpace(v))
+	return ok
+}
