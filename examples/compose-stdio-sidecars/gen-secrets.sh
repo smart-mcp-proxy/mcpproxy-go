@@ -12,6 +12,12 @@ mkdir -p secrets
 # mkdir -p keeps the mode of an existing directory, so set it explicitly.
 chmod 0700 secrets
 for name in mcpproxy_api_key sidecar_api_key; do
+  # -s and chmod follow symlinks, so a link here would expose (or overwrite)
+  # a file outside secrets/. Accept only a regular file or nothing.
+  if [ -L "secrets/$name" ] || { [ -e "secrets/$name" ] && [ ! -f "secrets/$name" ]; }; then
+    echo "secrets/$name is not a regular file; refusing to use it" >&2
+    exit 1
+  fi
   if [ ! -s "secrets/$name" ]; then
     # 256 random bits as hex.
     printf '%s' "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" > "secrets/$name"

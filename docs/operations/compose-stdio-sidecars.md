@@ -128,7 +128,7 @@ with state needs the flag, and the example sets it on every sidecar.
 
 ## Checks the CI job runs
 
-`examples/compose-stdio-sidecars/test.sh` builds the sidecar, starts the stack, starts the stack
+`examples/compose-stdio-sidecars/test.sh` builds the sidecar, starts the stack
 under its own Compose project name (`mcpproxy-sidecars-test`, port 18081), so the
 deployment's data volume is never touched and only the test project's containers, network
 and volume are removed at the end. Only the sidecar has a Compose health check, so
