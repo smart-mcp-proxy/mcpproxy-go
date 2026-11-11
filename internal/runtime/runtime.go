@@ -47,6 +47,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tokenseal"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolsig"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
@@ -428,6 +429,13 @@ type Runtime struct {
 	profileEvaluator   ProfileEvaluator
 	profileSessionHook ProfileSessionHook
 
+	// oauthTokenKey is the key config.db's oauth_tokens values are sealed
+	// with (Spec 123), resolved once in New before storage is opened and kept
+	// for the life of the process (the field is restart-gated). nil = off.
+	// oauthKeySource is what doctor reports about it; it holds no path.
+	oauthTokenKey  *tokenseal.Key
+	oauthKeySource config.KeySource
+
 	appCtx    context.Context
 	appCancel context.CancelFunc
 	// lifetimeCtx is the runtime's original application context. Close
@@ -443,7 +451,15 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
-	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(nil))
+	// Spec 123 FR-020/FR-022: resolve the OAuth token key once, before
+	// config.db is opened. An unresolvable or malformed key stops here with a
+	// *config.StartupError (exit 4) and no byte of the database written.
+	oauthTokenKey, oauthKeySource, err := config.ResolveOAuthTokenKey(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(oauthTokenKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage manager: %w", err)
 	}
@@ -605,7 +621,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	}
 
 	rt := &Runtime{
-		cfg: cfg,
+		oauthTokenKey:  oauthTokenKey,
+		oauthKeySource: oauthKeySource,
+		cfg:            cfg,
 		// Boot: memory and disk agree by definition.
 		desiredCfg:         cfg,
 		cfgPath:            cfgPath,
@@ -710,6 +728,18 @@ func (r *Runtime) Attention() []contracts.AttentionItem {
 		return nil
 	}
 	return r.attention.Items()
+}
+
+// OAuthTokenKeyID returns the id of the key oauth_tokens values are sealed
+// with, or "" when encryption is off (Spec 123). It never exposes the key.
+func (r *Runtime) OAuthTokenKeyID() string {
+	return r.oauthTokenKey.ID()
+}
+
+// OAuthTokenKeySource reports where the running key came from, as resolved
+// once at startup. It holds no path or key material.
+func (r *Runtime) OAuthTokenKeySource() config.KeySource {
+	return r.oauthKeySource
 }
 
 // Config returns the underlying configuration pointer.

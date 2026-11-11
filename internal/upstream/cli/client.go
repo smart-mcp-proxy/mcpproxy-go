@@ -64,7 +64,16 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 	// Create storage for persistent OAuth tokens (CLI should also persist tokens)
 	var db *storage.BoltDB
 	if globalConfig.DataDir != "" {
-		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(nil))
+		// Spec 123: resolve the OAuth token key first. A resolution error is
+		// returned (exit 4) rather than downgraded to the in-memory fallback,
+		// which would let `auth login` succeed without persisting anything.
+		// A NewBoltDB error after a successful resolution (e.g. a running core
+		// holds the lock) keeps the existing fallback below.
+		oauthKey, _, keyErr := config.ResolveOAuthTokenKey(globalConfig)
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(oauthKey))
 		if err != nil {
 			logger.Warn("Failed to create storage for CLI OAuth tokens, falling back to in-memory",
 				zap.String("data_dir", globalConfig.DataDir),

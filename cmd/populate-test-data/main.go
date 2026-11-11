@@ -25,7 +25,13 @@ func main() {
 
 	// Create storage manager
 	dataDir := filepath.Join(homeDir, ".mcpproxy")
-	mgr, err := storage.NewManager(dataDir, sugar, storage.WithOAuthTokenKey(nil))
+	// Spec 123: honour MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE] like every
+	// other process that opens config.db.
+	oauthKey, _, err := config.ResolveOAuthTokenKey(&config.Config{DataDir: dataDir})
+	if err != nil {
+		logger.Fatal("Failed to resolve the OAuth token key", zap.Error(err))
+	}
+	mgr, err := storage.NewManager(dataDir, sugar, storage.WithOAuthTokenKey(oauthKey))
 	if err != nil {
 		logger.Fatal("Failed to create storage manager", zap.Error(err))
 	}

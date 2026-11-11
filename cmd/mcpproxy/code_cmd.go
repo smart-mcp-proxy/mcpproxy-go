@@ -302,7 +302,13 @@ func runCodeExecStandalone(globalConfig *config.Config, code string, input map[s
 	defer cancel()
 
 	// Create storage manager
-	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(nil))
+	// Spec 123: a key that cannot be resolved is exit 4, not the generic
+	// exit 2 below.
+	oauthKey, err := resolveCLIOAuthTokenKey(globalConfig)
+	if err != nil {
+		return err
+	}
+	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(oauthKey))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating storage manager: %v\n", err)
 		return exitError(2)
