@@ -422,7 +422,7 @@ func writeTokensOutput(w io.Writer, format string, data interface{}, text func()
 		if err != nil {
 			return err
 		}
-		var generic interface{} = data
+		generic := data
 		if strings.EqualFold(format, "yaml") {
 			b, err := json.Marshal(data)
 			if err != nil {
@@ -462,7 +462,7 @@ func oauthStorageWarningText(code string) string {
 }
 
 func statusNextSteps(rep *contracts.OAuthTokenStorageReport) []string {
-	var steps []string
+	steps := []string{}
 	if rep.Undecryptable > 0 {
 		steps = append(steps, "Undecryptable rows: restore the key they were sealed with, or discard a row with 'mcpproxy auth logout --server=<name>' and sign in again.")
 	}
@@ -476,7 +476,7 @@ func statusNextSteps(rep *contracts.OAuthTokenStorageReport) []string {
 }
 
 func encryptNextSteps(out tokensEncryptOutput) []string {
-	var steps []string
+	steps := []string{}
 	if out.DryRun {
 		steps = append(steps, "Dry run: nothing was written. Run without --dry-run to seal these rows.")
 		return steps
