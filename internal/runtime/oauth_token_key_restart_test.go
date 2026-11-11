@@ -79,7 +79,9 @@ func TestOAuthTokenKey_RuntimeResolvesOnceAndKeepsSource(t *testing.T) {
 func TestOAuthTokenKey_EditIsRestartGatedAndSaveKeepsReference(t *testing.T) {
 	rt, cfgPath, keyFile, kid := newOAuthKeyRuntime(t)
 	originalRef := "${file:" + keyFile + "}"
-	otherRef := "${file:/run/credentials/mcpproxy.service/other-key}"
+	// Absolute on every OS (LoadFromFile validates it with filepath.IsAbs,
+	// and a POSIX-rooted literal is relative on Windows); never created.
+	otherRef := "${file:" + filepath.Join(t.TempDir(), "other-key") + "}"
 
 	onDisk, err := config.LoadFromFile(cfgPath)
 	require.NoError(t, err)

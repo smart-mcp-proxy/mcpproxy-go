@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -53,6 +54,9 @@ func TestResolveOAuthTokenKey_Table(t *testing.T) {
 	dataDir := t.TempDir()
 	fileA := writeOAuthKeyFile(t, secretDir, "oauth-key", keyA+"\n")
 	fileB := writeOAuthKeyFile(t, secretDir, "oauth-key-b", keyB)
+	// Absolute on every OS (a POSIX-rooted literal has no drive letter, so
+	// filepath.IsAbs rejects it on Windows), and never created.
+	missingFile := filepath.Join(t.TempDir(), "nonexistent", "key")
 
 	cases := []struct {
 		name    string
@@ -72,7 +76,7 @@ func TestResolveOAuthTokenKey_Table(t *testing.T) {
 		{name: "env file", envFile: fileB, wantKID: kidOf(t, keyB), want: KeySourceEnvFile},
 		{name: "env value beats the field", field: "${file:" + fileA + "}", env: keyB, wantKID: kidOf(t, keyB), want: KeySourceEnv},
 		{name: "env file beats the field", field: keyA, envFile: fileB, wantKID: kidOf(t, keyB), want: KeySourceEnvFile},
-		{name: "env file beats an unreadable field reference", field: "${file:/nonexistent/spec123/key}", envFile: fileB, wantKID: kidOf(t, keyB), want: KeySourceEnvFile},
+		{name: "env file beats an unreadable field reference", field: "${file:" + missingFile + "}", envFile: fileB, wantKID: kidOf(t, keyB), want: KeySourceEnvFile},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -189,7 +193,12 @@ func TestResolveOAuthTokenKey_InDataDir(t *testing.T) {
 	outside := writeOAuthKeyFile(t, outsideDir, "oauth-key", key)
 	// A Kubernetes-style symlink outside the data dir whose target is inside.
 	link := filepath.Join(outsideDir, "linked-key")
-	require.NoError(t, os.Symlink(inside, link))
+	if err := os.Symlink(inside, link); err != nil {
+		if runtime.GOOS == "windows" {
+			t.Skipf("symlinks need a privilege this Windows runner lacks: %v", err)
+		}
+		require.NoError(t, err)
+	}
 
 	for _, tc := range []struct {
 		name   string
@@ -221,9 +230,11 @@ func TestResolveOAuthTokenKey_InDataDir(t *testing.T) {
 // *StartupError with exit 4, and the error never quotes the value.
 func TestConfigValidate_OAuthTokenKeySyntaxOnly(t *testing.T) {
 	clearOAuthKeyEnv(t)
+	// Absolute on every OS: a POSIX-rooted literal is relative on Windows.
+	missingFile := filepath.Join(t.TempDir(), "nonexistent", "oauth-key")
 	for _, ok := range []string{
 		"",
-		"${file:/nonexistent/spec123/oauth-key}",
+		"${file:" + missingFile + "}",
 		"${env:SPEC123_DEFINITELY_UNSET}",
 		"${keyring:mcpproxy-oauth-key}",
 		"some-literal-that-is-checked-at-open",
