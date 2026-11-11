@@ -274,7 +274,7 @@ try {
 - No access to file system
 - No access to network (except via call_tool)
 - No access to process environment
-- Memory limits enforced
+- Execution timeout and tool-call limits are enforced, but there is no per-execution heap or memory limit; the Goja VM runs inside the mcpproxy process
 
 ### Tool Call Security
 
