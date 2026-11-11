@@ -139,7 +139,7 @@ mcpproxy upstream enable server-name
 mcpproxy upstream disable server-name
 ```
 
-### Patch Headers / Env
+### Patch Headers, Env, and Initialization Timeout
 
 `mcpproxy upstream patch` updates HTTP `headers` and stdio `env` on an
 existing server using JSON Merge Patch semantics — keys you specify are
@@ -148,6 +148,11 @@ and every other key on the stored config is preserved.
 
 This means you can rotate a single Bearer token without seeing or
 touching any other header. The same applies to env vars on stdio servers.
+For an upstream that needs more time to start responding to MCP `initialize`,
+you can also raise its handshake deadline with `--init-timeout`. For example,
+`mcpproxy upstream patch slow-start --init-timeout 3m`; durations such as
+`120s` and `3m` are accepted, and the flag can be combined with header or env
+updates.
 
 ```bash
 # Rotate the Authorization header on a connected server
@@ -175,6 +180,7 @@ mcpproxy upstream patch obsidian-pilot \
 | `--header-remove NAME` | Delete a header by name |
 | `--env KEY=value` | Upsert one env var |
 | `--env-remove KEY` | Delete an env var by name |
+| `--init-timeout duration` | Set the MCP initialize handshake deadline (e.g. `120s` or `3m`) |
 
 **Notes:**
 
