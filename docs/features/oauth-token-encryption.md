@@ -307,8 +307,10 @@ plaintext that `decrypt` wrote stays in freed pages until the next
 prefix: `encrypt` with the new key comes before the compaction.
 
 For a key that only the unit can see, `systemd-run --pipe -p LoadCredential=oauth-key:/etc/credstore/oauth-key ...`
-and `docker compose run --rm mcpproxy auth tokens ...` (with the same secret mounted)
-give the command the same view the service has.
+and `docker compose run --rm --entrypoint mcpproxy mcpproxy auth tokens ...` (with the
+same secret, configuration and data volume mounted, and the service stopped) give the
+command the same view the service has. The image's entrypoint is `mcpproxy serve`, so
+without `--entrypoint` the arguments would go to `serve`.
 
 ## When a login is refused
 

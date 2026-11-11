@@ -307,11 +307,25 @@ if wait_authenticated; then ok "authenticated, same login"; else bad "not authen
 if [ "$(wc -l < "$OPEN_LOG" | tr -d ' ')" = "$LOGINS_AFTER_FIRST" ]; then ok "no browser launched"; else bad "the round trip forced a new login"; fi
 DOCTOR="$(curl -sf -H "X-API-Key: $API_KEY" "$API/diagnostics" | jq -c '.data.oauth_token_storage')"
 if echo "$DOCTOR" | jq -e '.encryption_enabled == true and .sealed == 1 and .compaction_advised == false' >/dev/null; then ok "doctor section: encryption on, 1 sealed, no compaction pending"; else bad "doctor section: $DOCTOR"; fi
-if echo "$DOCTOR" | grep -q "$(tr -d '\n' < "$KEYFILE")"; then bad "doctor output contains key bytes"; else ok "doctor output holds no key bytes"; fi
+grep -q -F -e "$(tr -d '\n' < "$KEYFILE")" <<< "$DOCTOR"
+case $? in
+1) ok "doctor output holds no key bytes" ;;
+0) bad "doctor output contains key bytes" ;;
+*) bad "could not scan the doctor output for key bytes" ;;
+esac
 stop_proxy
 
 
-if grep -a -q "$(tr -d '\n' < "$KEYFILE")" "$WORK/proxy.log" "$WORK/missing.log" 2>/dev/null || echo "$ALL_CLI_OUT" | grep -q "$(tr -d '\n' < "$KEYFILE")"; then bad "key bytes found in logs"; else ok "key bytes absent from logs"; fi
+KEY_TEXT="$(tr -d '\n' < "$KEYFILE")"
+if grep -a -q -F -e "$KEY_TEXT" "$WORK/proxy.log" "$WORK/missing.log" 2>/dev/null; then bad "key bytes found in logs"; else ok "key bytes absent from logs"; fi
+# A here-string, not a pipe: under pipefail an early match would kill the
+# producer (SIGPIPE) and read as "absent".
+grep -q -F -e "$KEY_TEXT" <<< "$ALL_CLI_OUT"
+case $? in
+1) ok "key bytes absent from all CLI output" ;;
+0) bad "key bytes found in CLI output" ;;
+*) bad "could not scan the CLI output for key bytes" ;;
+esac
 
 echo
 if [ "$FAIL" = "0" ]; then echo "OAuth token encryption e2e: all checks passed"; exit 0; fi
