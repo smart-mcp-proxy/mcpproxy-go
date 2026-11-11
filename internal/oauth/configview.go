@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"reflect"
+	"regexp"
+	"strings"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 )
@@ -44,7 +46,30 @@ func RedactedConfig(cfg *config.Config) *config.Config {
 		return nil
 	}
 	restorePublicSigners(cfg, &masked)
+	masked.OAuthTokenEncryptionKey = publishOAuthTokenKey(cfg.OAuthTokenEncryptionKey, masked.OAuthTokenEncryptionKey)
 	return &masked
+}
+
+// oauthTokenKeyReferencePattern matches a value that is ENTIRELY one
+// ${file:...}, ${env:...} or ${keyring:...} reference.
+var oauthTokenKeyReferencePattern = regexp.MustCompile(`^\$\{(?:file|env|keyring):[^}]+\}$`)
+
+// publishOAuthTokenKey is the Spec 123 masking policy for
+// oauth_token_encryption_key in every config output: a LITERAL key is always
+// masked; a REFERENCE (${file:}, ${env:}, ${keyring:}) is shown exactly as
+// written, because it is operator-authored and not secret. walked is what the
+// generic walk rendered; a literal it left readable is still masked here.
+func publishOAuthTokenKey(src, walked string) string {
+	if src == "" {
+		return ""
+	}
+	if oauthTokenKeyReferencePattern.MatchString(strings.TrimSpace(src)) {
+		return src
+	}
+	if walked == src {
+		return bulletMarker
+	}
+	return walked
 }
 
 // WithMaskedOAuthTokenKey returns a shallow copy of cfg whose
