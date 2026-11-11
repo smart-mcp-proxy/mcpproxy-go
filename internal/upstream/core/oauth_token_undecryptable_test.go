@@ -30,6 +30,7 @@ type undecryptableCoreFixture struct {
 	srv  *oauthserver.ServerResult
 	m    *storage.Manager
 	db   *storage.BoltDB
+	dir  string
 	name string
 	url  string
 	key  string
@@ -66,7 +67,7 @@ func newUndecryptableCoreFixture(t *testing.T, name string, sse bool) *undecrypt
 	m, err := storage.NewManager(dir, zap.NewNop().Sugar(), storage.WithOAuthTokenKey(nil))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = m.Close() })
-	return &undecryptableCoreFixture{srv: srv, m: m, db: m.GetBoltDB(), name: name, url: url, key: key}
+	return &undecryptableCoreFixture{srv: srv, m: m, db: m.GetBoltDB(), name: name, url: url, key: key, dir: dir}
 }
 
 func (f *undecryptableCoreFixture) client(t *testing.T, protocol string) *Client {

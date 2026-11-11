@@ -1900,6 +1900,19 @@ func (c *Client) storedOAuthTokenUndecryptable() error {
 	return err
 }
 
+// rejectManualLoginOnUndecryptableToken is the one guard in front of every
+// manual-login entry point (quick and forced HTTP/SSE). It is
+// storedOAuthTokenUndecryptable plus the warning the automatic strategies log.
+func (c *Client) rejectManualLoginOnUndecryptableToken() error {
+	err := c.storedOAuthTokenUndecryptable()
+	if err != nil {
+		c.logger.Warn("Stored OAuth token cannot be decrypted; not starting a manual OAuth login",
+			zap.String("server", c.config.Name),
+			zap.Error(err))
+	}
+	return err
+}
+
 // wasOAuthRecentlyCompleted checks if OAuth was completed recently to prevent retry loops
 func (c *Client) wasOAuthRecentlyCompleted() bool {
 	c.oauthMu.RLock()
@@ -1946,6 +1959,12 @@ func (c *Client) StartOAuthFlowQuick(ctx context.Context) (*OAuthStartResult, er
 			zap.String("server", c.config.Name),
 			zap.String("correlation_id", result.CorrelationID))
 		return result, fmt.Errorf("OAuth is not supported or not applicable for server '%s'", c.config.Name)
+	}
+
+	// Spec 123 FR-031: a manual login must not start discovery, DCR or a
+	// callback listener over a stored row the configured key cannot decrypt.
+	if err := c.rejectManualLoginOnUndecryptableToken(); err != nil {
+		return result, err
 	}
 
 	// Check if OAuth is already in progress
@@ -2473,6 +2492,11 @@ func (c *Client) ForceOAuthFlowWithResult(ctx context.Context) (*OAuthStartResul
 	// Fast‑fail if OAuth is clearly not applicable for this server
 	if !oauth.ShouldUseOAuth(c.config) {
 		return nil, fmt.Errorf("OAuth is not supported or not applicable for server '%s'", c.config.Name)
+	}
+
+	// Spec 123 FR-031: see StartOAuthFlowQuick.
+	if err := c.rejectManualLoginOnUndecryptableToken(); err != nil {
+		return nil, err
 	}
 
 	// Clear any existing OAuth state
