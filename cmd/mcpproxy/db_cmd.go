@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"errors"
 	"fmt"
@@ -68,6 +69,17 @@ type compactResult struct {
 	// actually got the space back — which matters most to the user who ran out
 	// of disk in the first place.
 	BackupBytes int64 `json:"backup_bytes,omitempty" yaml:"backup_bytes,omitempty"`
+	// OAuthCompactionAdvised (Spec 123) is true when the database carried the
+	// compaction-advised marker: a plaintext OAuth token row was sealed and
+	// the old plaintext may sit in freed pages. OAuthCompactionCleared is true
+	// when this run, which kept no backup, removed the marker. With a retained
+	// backup the marker stays, because that backup is the old file.
+	OAuthCompactionAdvised bool `json:"oauth_compaction_advised,omitempty" yaml:"oauth_compaction_advised,omitempty"`
+	OAuthCompactionCleared bool `json:"oauth_compaction_cleared,omitempty" yaml:"oauth_compaction_cleared,omitempty"`
+	// StaleBackupPath is a config.db.bak this run did not create and did not
+	// remove (an earlier default compaction's) while the database holds
+	// sealed OAuth rows or advice: it may still hold plaintext tokens.
+	StaleBackupPath string `json:"stale_backup_path,omitempty" yaml:"stale_backup_path,omitempty"`
 }
 
 type bucketStat struct {
@@ -191,6 +203,10 @@ func runDBCompact(cmd *cobra.Command, _ []string) error {
 			fmt.Fprintln(os.Stderr, lockedRemediation)
 		}
 		return err
+	}
+
+	for _, note := range compactNotes(res) {
+		fmt.Fprintln(os.Stderr, note)
 	}
 
 	formatter, err := GetOutputFormatter()
@@ -401,6 +417,13 @@ func compactDatabase(srcPath string, opts compactOptions) (result *compactResult
 
 	dir := filepath.Dir(srcPath)
 
+	// Spec 123: read the marker and whether any OAuth row is sealed from the
+	// source (no key is needed: an envelope is recognised by its prefix).
+	oauthMarker, oauthSealedRows, err := inspectOAuthSealState(src)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect OAuth token state: %w", err)
+	}
+
 	// The temp file must live in the same directory: os.Rename is only atomic
 	// within a filesystem.
 	tmpFile, err := os.CreateTemp(dir, dbFileName+".compact-*")
@@ -434,6 +457,18 @@ func compactDatabase(srcPath string, opts compactOptions) (result *compactResult
 		return nil, fmt.Errorf("compaction failed: %w", err)
 	}
 
+	// Spec 123: a compaction that keeps no backup is the one that gets rid of
+	// the freed pages holding old plaintext, so it clears the marker in the
+	// new file before it replaces the old one. With a backup kept the marker
+	// stays: the backup is the old file.
+	oauthMarkerCleared := false
+	if oauthMarker && !opts.KeepBackup {
+		if err := clearOAuthCompactAdvised(dst); err != nil {
+			return nil, fmt.Errorf("failed to clear the OAuth compaction marker: %w", err)
+		}
+		oauthMarkerCleared = true
+	}
+
 	// Close both handles before touching the files: on Windows a rename over an
 	// open file fails outright.
 	if err := dst.Close(); err != nil {
@@ -465,10 +500,17 @@ func compactDatabase(srcPath string, opts compactOptions) (result *compactResult
 	}
 
 	res := &compactResult{
-		Path:           srcPath,
-		BeforeBytes:    beforeBytes,
-		AfterBytes:     afterInfo.Size(),
-		ReclaimedBytes: beforeBytes - afterInfo.Size(),
+		Path:                   srcPath,
+		BeforeBytes:            beforeBytes,
+		AfterBytes:             afterInfo.Size(),
+		ReclaimedBytes:         beforeBytes - afterInfo.Size(),
+		OAuthCompactionAdvised: oauthMarker,
+		OAuthCompactionCleared: oauthMarkerCleared,
+	}
+	if !opts.KeepBackup && (oauthMarker || oauthSealedRows > 0) {
+		if _, statErr := os.Stat(srcPath + ".bak"); statErr == nil {
+			res.StaleBackupPath = srcPath + ".bak"
+		}
 	}
 
 	// The backup is a hard link, not a move: config.db therefore never stops
@@ -534,6 +576,58 @@ func compactDatabase(srcPath string, opts compactOptions) (result *compactResult
 	}
 
 	return res, nil
+}
+
+// inspectOAuthSealState reports whether the compaction-advised marker is set
+// and how many oauth_tokens values are encrypted envelopes. It reads raw
+// bytes: no key is needed, and nothing but a count leaves this function.
+func inspectOAuthSealState(db *bbolt.DB) (marker bool, sealedRows int, err error) {
+	err = db.View(func(tx *bbolt.Tx) error {
+		if meta := tx.Bucket([]byte(storage.MetaBucket)); meta != nil {
+			marker = meta.Get([]byte(storage.OAuthSealCompactAdvisedKey)) != nil
+		}
+		if b := tx.Bucket([]byte(storage.OAuthTokenBucket)); b != nil {
+			return b.ForEach(func(_, v []byte) error {
+				if bytes.HasPrefix(v, []byte("enc:")) {
+					sealedRows++
+				}
+				return nil
+			})
+		}
+		return nil
+	})
+	return marker, sealedRows, err
+}
+
+// clearOAuthCompactAdvised deletes the compaction-advised marker from db.
+func clearOAuthCompactAdvised(db *bbolt.DB) error {
+	return db.Update(func(tx *bbolt.Tx) error {
+		meta := tx.Bucket([]byte(storage.MetaBucket))
+		if meta == nil {
+			return nil
+		}
+		return meta.Delete([]byte(storage.OAuthSealCompactAdvisedKey))
+	})
+}
+
+// compactNotes returns the human notes about OAuth token plaintext that
+// follow a compaction (Spec 123 FR-016). They go to stderr so machine
+// formats on stdout stay parseable; the same facts are fields of the result.
+func compactNotes(res *compactResult) []string {
+	var notes []string
+	if res.BackupPath != "" && res.OAuthCompactionAdvised {
+		notes = append(notes,
+			"Note: "+res.BackupPath+" is the pre-compaction file and still holds the old pages, which may include OAuth tokens that were stored as plaintext before they were sealed.",
+			"      Delete it once mcpproxy starts cleanly. The OAuth compaction advice stays until you run 'mcpproxy db compact --keep-backup=false'.")
+	}
+	if res.OAuthCompactionCleared {
+		notes = append(notes, "OAuth token compaction advice cleared: the compacted file holds no freed plaintext pages.")
+	}
+	if res.StaleBackupPath != "" {
+		notes = append(notes,
+			"Warning: "+res.StaleBackupPath+" is left over from an earlier compaction and may still hold OAuth tokens as plaintext. Delete it.")
+	}
+	return notes
 }
 
 // assertSourceUnchangedAndFree verifies, immediately before the destructive
