@@ -14,11 +14,12 @@ func rejectPlatformAbsolutePath(path string) error {
 	}
 	vol := filepath.VolumeName(path)
 	if vol != "" && len(vol) == 2 && vol[1] == ':' {
-		rest := strings.TrimPrefix(path, vol)
-		rest = strings.TrimPrefix(rest, `\`)
-		rest = strings.TrimPrefix(rest, `/`)
-		if rest != "" && !strings.HasPrefix(rest, `\`) && !strings.HasPrefix(rest, `/`) {
-			// Drive-relative path such as C:foo
+		afterVol := strings.TrimPrefix(path, vol)
+		if afterVol == "" {
+			return fmt.Errorf("secret file path %q must be absolute", path)
+		}
+		if afterVol[0] != '\\' && afterVol[0] != '/' {
+			// Drive-relative path such as C:foo (no root after the colon).
 			return fmt.Errorf("secret file path %q must be absolute", path)
 		}
 	}
