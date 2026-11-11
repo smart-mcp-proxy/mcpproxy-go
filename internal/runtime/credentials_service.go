@@ -63,6 +63,20 @@ type tokenRevokeReporter interface {
 	RevokeAgentTokenReport(userID, name string) (before, after *auth.AgentToken, err error)
 }
 
+// tokenRegenerator is the optional store method behind Regenerate
+// (*storage.Manager and the REST door's token store). A store without it
+// cannot rotate a token.
+type tokenRegenerator interface {
+	RegenerateAgentToken(name string, newRawToken string, hmacKey []byte) (*auth.AgentToken, error)
+}
+
+// RegenerateResult is a Regenerate outcome: the rotated record's view and the
+// new secret, shown once.
+type RegenerateResult struct {
+	View   CredentialView
+	Secret string
+}
+
 // CredentialsServiceDeps wires a CredentialsService. Zero values are safe in
 // tests: Now defaults to time.Now, Mu to the clients service's mutex (or a
 // private one), Guard to the conservative evaluator, Generate to
@@ -1002,6 +1016,56 @@ func (s *CredentialsService) Revoke(ctx context.Context, a Actor, ref Credential
 		s.clients.notifier.NotifyBindingChanged(after.Name)
 	}
 	return &RevokeResult{View: view, Changed: true}, nil
+}
+
+// Regenerate rotates the secret of the agent token called name and records the
+// rotation (issue #1698): one `profile_change` row with change "rotate", the
+// actor, and the old and new token prefixes — never a secret — the same shape
+// client-credential rotation writes. The store's refusals (unknown name,
+// revoked token, client credential) pass through with their sentinels so the
+// REST door keeps its status mapping, and a refused rotation writes nothing.
+func (s *CredentialsService) Regenerate(ctx context.Context, a Actor, name string) (*RegenerateResult, error) {
+	if s == nil || s.tokens == nil {
+		return nil, ErrCredentialsUnavailable
+	}
+	regen, ok := s.tokens.(tokenRegenerator)
+	if !ok {
+		return nil, ErrCredentialsUnavailable
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// The read is for the old prefix only; existence is the store's call, so
+	// its refusal (not found, revoked, client credential) decides the answer.
+	before, err := s.tokens.GetAgentTokenByName(name)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read credentials: %w", err)
+	}
+	oldPrefix := ""
+	if before != nil {
+		oldPrefix = before.TokenPrefix
+	}
+	secret, err := s.generate()
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate token: %w", err)
+	}
+	key, err := s.hmacKey()
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize token security: %w", err)
+	}
+	after, err := regen.RegenerateAgentToken(name, secret, key)
+	if err != nil {
+		if errors.Is(err, storage.ErrAgentTokenNotFound) {
+			return nil, s.notFound("token", name)
+		}
+		return nil, err
+	}
+	view := ViewOf(after, s.cfg(), s.now())
+	s.writeLifecycle(ctx, a, profile.ChangeRotate, view, map[string]interface{}{
+		"old_token_prefix": oldPrefix,
+		"new_token_prefix": after.TokenPrefix,
+	})
+	s.announce(view, profile.ChangeRotate)
+	return &RegenerateResult{View: view, Secret: secret}, nil
 }
 
 func (s *CredentialsService) revokeTokenStore(name string) (*auth.AgentToken, error) {

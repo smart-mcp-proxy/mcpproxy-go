@@ -263,6 +263,35 @@ func (p *MCPProxyServer) describeGateReason(serverName, toolName string) string 
 	return ""
 }
 
+// approvalLocked is describeGateReason's tool-level step (4) on its own, for a
+// read path that has already answered the server-level quarantine gate: the
+// tool's stored description and schema are held back while its approval is
+// pending or changed. A failed read of the server or approval record counts as
+// locked — the definition is not returned on a verdict that could not be read.
+func (p *MCPProxyServer) approvalLocked(serverName, toolName string) bool {
+	gate := p.evaluateExactToolGate(serverName, toolName)
+	return gate.lockStatus != "" || gate.storageErr != nil
+}
+
+// exactCandidateWithheld reports whether query is a whole canonical
+// "server:tool" id — the shape the index resolves to one document
+// (index.exactQualifiedTool) — whose server the caller may see and whose tool
+// `withheld` says the retrieve_tools loops will not return. The split is the
+// one handleCallToolVariant applies: the first colon ends the server name, the
+// rest is the raw tool name. A caller out of scope gets false: the scoped
+// searches already reject that candidate before the cut, and nothing about it
+// may be learned here.
+func exactCandidateWithheld(query string, inScope func(serverName string) bool, withheld func(serverName, toolName string) bool) bool {
+	if strings.ContainsAny(query, " \t\r\n") {
+		return false
+	}
+	serverName, toolName, ok := strings.Cut(query, ":")
+	if !ok || serverName == "" || toolName == "" || !inScope(serverName) {
+		return false
+	}
+	return withheld(serverName, toolName)
+}
+
 // normalizeServerTool strips the indexed "server:tool" prefix from toolName
 // (result.Tool.Name keeps the prefix when ServerName is set) — exactly like
 // isToolCallable, so approval/config lookups key consistently.

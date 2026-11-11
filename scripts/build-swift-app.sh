@@ -9,9 +9,14 @@ VERSION="${1:-v0.0.0}"
 ARCH="${2:-arm64}"
 OUTPUT_DIR="${3:-.}"
 
-SWIFT_DIR="native/macos/MCPProxy"
+# BUILD_SWIFT_APP_SWIFT_DIR / BUILD_SWIFT_APP_STOP_AFTER_BUILD exist for
+# scripts/build-swift-app.test.sh (a throwaway package dir; stop once the
+# binary is built). Leave them unset for a real build.
+SWIFT_DIR="${BUILD_SWIFT_APP_SWIFT_DIR:-native/macos/MCPProxy}"
 BUNDLE_ID="com.smartmcpproxy.mcpproxy"
 APP_NAME="MCPProxy"
+# Where SwiftPM caches downloaded binary artifacts (Sparkle's xcframework).
+SPM_ARTIFACT_CACHE="${SWIFTPM_ARTIFACT_CACHE:-$HOME/Library/Caches/org.swift.swiftpm/artifacts}"
 
 # Map Go arch names to Swift/Apple arch names
 case "$ARCH" in
@@ -27,9 +32,44 @@ OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 
 cd "$SWIFT_DIR"
 
+# A binary-artifact download that fails mid-way (the GitHub release CDN
+# answering with a short error body, as seen in CI) leaves its destination
+# behind in SwiftPM's artifact cache; the next `swift build` then refuses with
+# "... already exists in file system" instead of re-downloading, and the swiftc
+# fallback below cannot bundle Sparkle at all. Drop the stale Sparkle entries
+# so one retry downloads afresh. Only that signature is retried: a compile
+# error is reported once, as before.
+spm_build() {
+  swift build -c release --arch "$SWIFT_ARCH" 2>&1 | tee "$SPM_LOG"
+  return "${PIPESTATUS[0]}"
+}
+spm_download_failed() {
+  grep -qE "failed downloading|already exists in file system" "$SPM_LOG"
+}
+purge_stale_spm_artifacts() {
+  local entry
+  for entry in "$SPM_ARTIFACT_CACHE"/*[Ss]parkle* .build/artifacts/sparkle; do
+    [ -e "$entry" ] || continue
+    echo "Removing stale SwiftPM artifact: $entry"
+    rm -rf "$entry"
+  done
+}
+
 # Try swift build first (needs Xcode), fall back to swiftc (works with Command Line Tools)
 BINARY_PATH=""
-if swift build -c release --arch "$SWIFT_ARCH" 2>&1; then
+SPM_LOG="$(mktemp)"
+SPM_OK=0
+if spm_build; then
+  SPM_OK=1
+elif spm_download_failed; then
+  echo "swift build failed on a stale SwiftPM artifact download — purging and retrying once..."
+  purge_stale_spm_artifacts
+  if spm_build; then
+    SPM_OK=1
+  fi
+fi
+rm -f "$SPM_LOG"
+if [ "$SPM_OK" = 1 ]; then
   # Find the built binary from SPM
   BINARY_PATH=".build/release/${APP_NAME}"
   if [ ! -f "$BINARY_PATH" ]; then
@@ -55,6 +95,10 @@ if [ ! -f "$BINARY_PATH" ]; then
   exit 1
 fi
 echo "✅ Swift binary built: $BINARY_PATH ($(du -sh "$BINARY_PATH" | cut -f1))"
+if [ -n "${BUILD_SWIFT_APP_STOP_AFTER_BUILD:-}" ]; then
+  echo "BUILD_SWIFT_APP_STOP_AFTER_BUILD set — skipping bundle assembly"
+  exit 0
+fi
 
 # Assemble .app bundle
 APP_BUNDLE="${OUTPUT_DIR}/${APP_NAME}.app"

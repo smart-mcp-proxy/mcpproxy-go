@@ -12,7 +12,7 @@ description: An upstream config refers to a secret that does not exist in the se
 
 ## What happened
 
-The upstream config references a secret (typically via `${SECRET:NAME}` in
+The upstream config references a secret (typically via `${keyring:NAME}` in
 `env` or `headers`), but the secret was not found in the active secret store
 when mcpproxy tried to start that server.
 
@@ -21,7 +21,7 @@ when mcpproxy tried to start that server.
 ### List what's defined
 
 ```bash
-mcpproxy secret list
+mcpproxy secrets list
 ```
 
 If the name you referenced isn't there, add it.
@@ -29,7 +29,7 @@ If the name you referenced isn't there, add it.
 ### Add the missing secret
 
 ```bash
-mcpproxy secret set <NAME>           # prompts for the value, never echoed
+mcpproxy secrets set <NAME>          # prompts; typed characters are echoed in the terminal
 ```
 
 Secrets are stored in the OS keychain on macOS / Windows and in an encrypted
@@ -39,11 +39,11 @@ file on Linux.
 
 ```jsonc
 {
-  // env values support ${SECRET:NAME} expansion:
-  "env": { "GITHUB_TOKEN": "${SECRET:github_personal_token}" },
+  // env values support ${keyring:NAME} expansion:
+  "env": { "GITHUB_TOKEN": "${keyring:github_personal_token}" },
 
   // headers do too:
-  "headers": { "Authorization": "Bearer ${SECRET:my_api_key}" }
+  "headers": { "Authorization": "Bearer ${keyring:my_api_key}" }
 }
 ```
 
@@ -55,8 +55,9 @@ If you previously stored secrets inline and want to move them into the secret
 store:
 
 ```bash
-mcpproxy secret set github_personal_token < /dev/stdin <<<"ghp_xxx"
-# Then update the config to use ${SECRET:github_personal_token}
+mcpproxy secrets set github_personal_token
+# Enter the value at the prompt (terminal input is echoed).
+# Then update the config to use ${keyring:github_personal_token}
 ```
 
 ## Related

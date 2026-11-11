@@ -48,6 +48,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	gate := fs.Bool("gate", false, "run the Spec-076 detect.Engine over the corpus, print per-category recall/FP metrics, and exit non-zero on a recall/FP breach (CI regression gate)")
 	minRecall := fs.Float64("min-recall", 0.90, "gate: minimum malicious recall over gated categories (FR-013)")
 	maxFP := fs.Float64("max-fp", 0.05, "gate: maximum false-positive rate over benign + hard-negative samples (FR-013)")
+	bundlePath := fs.String("bundle", "", "gate: path to a candidate scanner bundle; empty = the embedded default")
 	reviewGate := fs.Bool("review-gate", false, "run the full baseline check set over a REVIEW-tier corpus (Spec 122): per-category recall by check id (any tier), hard-negative FP by check id, and no soft sample may become dangerous")
 	minReviewRecall := fs.Float64("min-review-recall", 0.90, "review-gate: minimum recall over the review categories")
 	maxReviewFP := fs.Float64("max-review-fp", 0.10, "review-gate: maximum false-positive rate over the review hard negatives")
@@ -78,7 +79,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "error: %v\n", err)
 			return exitConfigError
 		}
-		return runGate(gc, *minRecall, *maxFP, stdout, stderr)
+		gb, err := loadGateBundle(*bundlePath)
+		if err != nil {
+			fmt.Fprintf(stderr, "error: %v\n", err)
+			return exitConfigError
+		}
+		return runGate(gc, gb, *minRecall, *maxFP, stdout, stderr)
 	}
 
 	if err := validateDetectors(*detectors); err != nil {

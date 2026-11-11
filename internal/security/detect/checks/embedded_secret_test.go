@@ -207,3 +207,50 @@ func TestEmbeddedSecret_EvidenceMasked(t *testing.T) {
 		t.Errorf("evidence must be masked, got %q", got)
 	}
 }
+
+// TestEmbeddedSecret_ReadablePath locks #1845: an example URL path scored 4.50
+// bits and was reported as high_entropy. Only a readable multi-segment path is
+// exempt; no host is trusted.
+func TestEmbeddedSecret_ReadablePath(t *testing.T) {
+	c := &EmbeddedSecret{}
+	issue := detect.ToolView{
+		Name:        "confluence_get_page",
+		Description: "Get content of a specific Confluence page by its ID.",
+		InputSchema: []byte(`{"properties":{"page_id":{"type":"string",
+        "description":"Confluence page ID, e.g. from 'https://example.atlassian.net/wiki/spaces/TEAM/pages/123456789/Page+Title'"}}}`),
+	}
+	if sigs := c.Inspect(issue, detect.RegistryView{}); len(sigs) != 0 {
+		t.Fatalf("issue fixture should not flag, got %+v", sigs)
+	}
+	skip := []struct{ name, desc string }{
+		{"readable-path-no-url", "see net/wiki/spaces/TEAM/pages/123456789/Page+Title for details"},
+		{"readable-path-real-host", "e.g. https://acme.atlassian.net/wiki/spaces/TEAM/pages/123456789/Page+Title"},
+	}
+	for _, tc := range skip {
+		t.Run("skip-"+tc.name, func(t *testing.T) {
+			if sigs := c.Inspect(view("t", tc.desc), detect.RegistryView{}); len(sigs) != 0 {
+				t.Fatalf("expected no signal for %q, got %+v", tc.desc, sigs)
+			}
+		})
+	}
+	flag := []struct{ name, desc string }{
+		{"query-token", "Lists items. Example: https://api.example.com/v1/items?token=Zk9qL2mXvB7nR4tY8wPc3sHf6dJa1Ue5"},
+		{"base64-blob", "token Zk9qL2mXvB7nR4tY8wPc3sHf6dJa1Ue5"},
+		{"jwt", "token eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"},
+		{"base64-one-slash", "token Zx9Qw3Lk8Vb2Nm5Rt7Yp1Hs4Dc6Fg/Jn0Bv3Xa8Kq2Wz5Ey"},
+		{"base64-many-slashes", "aGVsbG8gd29ybGQ/dGhpcyBpcw/YSBzZWNyZXQ+Zm9vYmFy0123"},
+		{"opaque-segment-in-path", "a/b/Zx9Qw3Lk8Vb2Nm5Rt7Yp1Hs4Dc6FgJn0Bv3Xa8Kq2WzEy"},
+		// No host is trusted: a placeholder-looking host does not hide an opaque run.
+		{"example-com-opaque", "e.g. https://example.com/Zx9Qw3Lk8Vb2Nm5Rt7Yp1Hs4Dc6/Abcd"},
+		{"localhost-opaque", "http://localhost:8080/Zx9Qw3Lk8Vb2Nm5Rt7Yp1Hs4Dc6Fg"},
+		{"fragment", "See https://example.com/page#Zk9qL2mXvB7nR4tY8wPc3sHf6dJa1Ue5"},
+		{"real-host-opaque", "https://api.realcorp.com/Zx9Qw3Lk8Vb2Nm5Rt7Yp1Hs4Dc6Fg"},
+	}
+	for _, tc := range flag {
+		t.Run("flag-"+tc.name, func(t *testing.T) {
+			if sigs := c.Inspect(view("t", tc.desc), detect.RegistryView{}); len(sigs) == 0 {
+				t.Fatalf("expected a high_entropy signal for %q", tc.desc)
+			}
+		})
+	}
+}

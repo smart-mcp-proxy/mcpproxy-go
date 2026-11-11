@@ -24,10 +24,11 @@ Preflight replaces the silent miss with a deterministic gate: the wrapper fails 
 
 ## Concept: a stat, not a ping
 
-A preflight is **observational only**. It reads local proxy state — the tool index, tool-approval records and hashes, the connection-state snapshot, and configuration policy — and performs:
+A preflight is **operationally read-only**. It reads local proxy state — the tool index, tool-approval records and hashes, the connection-state snapshot, and configuration policy — and performs:
 
 - **Zero upstream calls.** No server is contacted, ever — even a dead one.
-- **Zero mutation.** No connects, reconnects, re-indexing, or config/approval changes are triggered.
+- **No operational changes.** It does not connect or reconnect upstreams, re-index tools, or change configuration or approval state.
+- **One local audit write.** Each executed preflight persists an activity-log record before returning its result; if that write fails, the preflight fails. Nothing is sent upstream.
 
 That makes it deterministic and cheap enough to run before every scheduled job. It also defines the honest limit: preflight is a *point-in-time eligibility check*, not a call-success guarantee. A network race or an upstream crash a second later can still fail the real call — preflight tells you the proxy would not have refused it.
 

@@ -1,0 +1,48 @@
+{
+  "category": "tpa_instruction_override",
+  "gating": true,
+  "id": "TPA-2026-0027",
+  "license": "MIT",
+  "provenance": {
+    "note": "Classic 'ignore all previous instructions' opener inside a tool description followed by a data-dump order.",
+    "published": "2025-08-19",
+    "source": "https://arxiv.org/abs/2508.14925"
+  },
+  "rules": [
+    {
+      "category": "prompt-injection",
+      "confidence": 0.9,
+      "detector": "ignore_previous",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0027",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?>\\n]\\s*)(?:(?:first|then|also|now|please|always|and|but|next|you\\s+(?:must|should|shall|need\\s+to))[,:]?\\s+)*(ignore|disregard|forget|override)\\W+(?:(?:all|any|every|the|of|your|my|these|those|other)\\W+){0,4}?(previous|prior|above|earlier|preceding)\\W+(?:\\w+\\W+){0,1}(?:(?:instructions|directions|guidelines|prompts?)\\b(?:\\s+(?:you|that|which)\\s+(?:were|have|had|may\\s+have|received|got)\\b|\\s+(?:given|provided|issued|received)\\b|\\W{0,3}(?:and\\s+)?(?:instead|now|then|just)\\b|\\s+and\\s+(?:\\w+\\s+){0,1}?(?:do|output|print|send|reveal|say|write|follow|act|respond|reply|execute|run|tell|return|answer|obey|only|from)\\b|[.!]\\s+(?:you|from\\s+now|now|instead)\\b)|(?:rules|commands)\\b(?:\\s+(?:you|that|which)\\s+(?:were|have|had|received|got)\\b|\\s+(?:given|provided|issued)\\b|\\W{0,3}(?:and\\s+)?instead\\b|[.!]\\s+(?:you|from\\s+now)\\b))",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    },
+    {
+      "category": "prompt-injection",
+      "confidence": 0.85,
+      "detector": "ignore_instructions_then_act",
+      "engine": "regex",
+      "flags": [
+        "i",
+        "s"
+      ],
+      "id": "TPA-2026-0027",
+      "indicators": [],
+      "level": "high",
+      "pattern": "(?is)(?:^|[.!?>\\n]\\s*)(?:(?:first|then|also|now|please|always|and|but|next|you\\s+(?:must|should|shall|need\\s+to))[,:]?\\s+)*(ignore|disregard|forget)\\W+(?:(?:the|these|those|other|my)\\W+){0,2}(?:(?:(?:all|any|every|your|previous|prior|above|earlier|preceding|original|initial|existing|system|safety)\\W+){1,4}?(?:instructions|directions|guidelines|system\\s+prompt)|system\\s+prompt)\\W+(?:(?:you|that|which)\\s+(?:were|have|had)\\s+(?:been\\s+)?(?:given|provided|told|sent)\\W+)?((?:and\\s+)?instead|and\\s+(?:then\\s+)?(?:output|print|send|post|reveal|dump|upload|execute|run))\\b",
+      "severity": "high",
+      "target": "tool_description",
+      "type": "lexical"
+    }
+  ],
+  "skipped": []
+}

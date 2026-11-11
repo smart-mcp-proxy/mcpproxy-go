@@ -34,8 +34,12 @@ func resetBundleRuntimeForTest(t *testing.T) {
 func configureUnsignedDropBundle(t *testing.T) {
 	t.Helper()
 	resetBundleRuntimeForTest(t)
+	// Production wiring (NewServer) installs the real activation self-check and
+	// never removes it, so whether it ran here used to depend on test order.
+	// Install it explicitly: the drop must clear it like any operator file.
+	scanner.EnableActivationSelfCheck()
 	path := filepath.Join(t.TempDir(), "scanner-bundle.json")
-	require.NoError(t, os.WriteFile(path, []byte(fileBundle), 0o600))
+	require.NoError(t, os.WriteFile(path, fileBundle(t), 0o600))
 	scanner.ConfigureBundle(path, zap.NewNop())
 	degraded, reason := scanner.BundleCoverageDegraded()
 	require.True(t, degraded, "an unsigned external bundle must run degraded")

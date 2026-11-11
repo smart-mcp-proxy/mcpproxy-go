@@ -162,7 +162,13 @@ type SecurityScanEnricher interface {
 // This allows the service to delegate to runtime without a direct dependency.
 type RuntimeOperations interface {
 	EnableServer(serverName string, enabled bool) error
+	// EnableServerCtx is EnableServer carrying the request context, so the
+	// config_change row names the caller (issue #1698).
+	EnableServerCtx(ctx context.Context, serverName string, enabled bool) error
 	RestartServer(serverName string) error
+	// RestartServerCtx is RestartServer carrying the request context (issue
+	// #1698): a restart of a disabled server enables it and records who asked.
+	RestartServerCtx(ctx context.Context, serverName string) error
 	GetAllServers() ([]map[string]interface{}, error)
 	BulkEnableServers(serverNames []string, enabled bool) (map[string]error, error)
 	GetServerTools(serverName string) ([]map[string]interface{}, error)
@@ -509,6 +515,9 @@ func (s *service) ListServers(ctx context.Context) ([]*contracts.Server, *contra
 			if redirectPort, ok := oauthRaw["redirect_port"].(int); ok {
 				oauthCfg.RedirectPort = redirectPort
 			}
+			if enabled, ok := oauthRaw["refresh_replay_enabled"].(bool); ok {
+				oauthCfg.RefreshReplayEnabled = &enabled
+			}
 			if pkceEnabled, ok := oauthRaw["pkce_enabled"].(bool); ok {
 				oauthCfg.PKCEEnabled = pkceEnabled
 			}
@@ -719,7 +728,7 @@ func (s *service) EnableServer(ctx context.Context, name string, enabled bool) e
 	}
 
 	// Delegate to runtime
-	if err := s.runtime.EnableServer(name, enabled); err != nil {
+	if err := s.runtime.EnableServerCtx(ctx, name, enabled); err != nil {
 		s.logger.Errorw("Failed to enable/disable server",
 			"server", name,
 			"enabled", enabled,
@@ -746,7 +755,7 @@ func (s *service) RestartServer(ctx context.Context, name string) error {
 	}
 
 	// Delegate to runtime
-	if err := s.runtime.RestartServer(name); err != nil {
+	if err := s.runtime.RestartServerCtx(ctx, name); err != nil {
 		s.logger.Errorw("Failed to restart server",
 			"server", name,
 			"error", err)
@@ -836,7 +845,7 @@ func (s *service) RestartAll(ctx context.Context) (*BulkOperationResult, error) 
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			if err := s.runtime.RestartServer(serverName); err != nil {
+			if err := s.runtime.RestartServerCtx(ctx, serverName); err != nil {
 				s.logger.Errorw("Failed to restart server in bulk operation",
 					"correlation_id", correlationID,
 					"server", serverName,

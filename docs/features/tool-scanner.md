@@ -97,7 +97,7 @@ key on, e.g. `AKIA…` prefixes).
 
 ## The checks
 
-Four **hard** checks, three **soft** heuristic checks, and — since Spec 122 — four more review-tier
+Four built-in **hard** checks, three **soft** heuristic checks, the **signature-bundle** hard check (`tpa.bundle`), which is built from the embedded TPA signature corpus rather than hand-written in Go, and — since Spec 122 — four more review-tier
 checks plus a reconstruction step, described in
 [SkillSpector-informed checks](#skillspector-informed-checks-spec-122) below.
 
@@ -128,7 +128,12 @@ all servers' tools:
    …) legitimately collide across servers — `retrieve_tools`' BM25 ranking
    disambiguates them. The near-duplicate description (cosmetic edits — case,
    punctuation, whitespace — do not launder a copy) is the impersonation
-   evidence.
+   evidence. A **byte-identical definition** — same description *and* same
+   input/output schemas — on another server is not a clone either: that is one
+   MCP server installed twice (two filesystem roots, two GitHub orgs) and
+   carries no rewritten text, so neither this shape nor the name squat fires on
+   it, and a trusted server's first-seen toolset is not held for it. Any edit at
+   all — one word, one schema property — is judged as a clone as before.
    - **Name squat (soft, review only; round-2 red team R2-5)** — a
      *distinctive* name another server also exposes, with a genuinely
      *different* description. This is the shape a clone check cannot see
@@ -177,6 +182,21 @@ phrase is not discarded, though — it is downgraded to a **soft** review signal
 behind a framing cue. Broader, lower-confidence phrasing lives in the soft
 `directive.imperative` check instead. Runs over **normalized** text.
 
+#### `tpa.bundle` — TPA signature corpus (`BundleCheck`)
+
+Runs the offline TPA signature corpus (the embedded `scanner-bundle.json`, or the
+file named by `security.tpa_bundle_path`) over each tool's description. Each
+runnable rule is a regex over the `tool_description` target and every match is
+**hard** tier. A match reports the signal `tpa.<TPA-id>.<detector>`, for example
+`tpa.TPA-2026-0004.shadow_directive`, and the id of the known attack is listed
+first in the hold evidence. The embedded corpus currently holds 44 signatures in
+16 classes (42 gating); how signatures are written, sourced, licensed and gated
+is in [TPA Signature Database](/features/tpa-signatures).
+
+Unlike the four built-in hard checks, this check's coverage is data: a bundle
+that cannot be loaded is refused and the last good corpus stays live (see
+[Signature bundle](/features/security-quarantine#signature-bundle-offline-tpa-corpus)).
+
 ### Soft tier
 
 #### `directive.imperative` — prompt-injection directives
@@ -207,6 +227,29 @@ touches:
 - **Unexplained data-sink param** — a free-form input named like an
   exfiltration channel (`sidenote`, `scratchpad`) that the description never
   explains — the model is steered to stuff stolen data into it.
+  A parameter is also a sink by shape when its own description asks for the
+  user's conversation, prompt or environment. The one exemption is narrow
+  config-precedence wording: the whole sentence holding the "environment
+  variable" phrase must be a precedence statement, i.e. an optional lead
+  ("(Optional)", "If omitted,", "Use this"), a strong precedence cue
+  ("overrides", "defaults to", "falls back to", "takes precedence over",
+  "instead of"), the phrase and an UPPER_SNAKE identifier in either order (the
+  identifier may be quoted, in backticks or `$`-prefixed), and at most a
+  condition such as "if provided" or "when omitted" and an example
+  parenthetical such as "(e.g. PROJ,OPS)". Examples: "Overrides the environment
+  variable JIRA_PROJECTS_FILTER if provided", "If omitted, falls back to the
+  `JIRA_URL` environment variable". Lines longer than 4 KiB get no exemption
+  at all. Anything else in that sentence, such as a request to send or
+  include a value or an instruction after a colon or semicolon, leaves the
+  phrase flagged, and so does a sentence with two such phrases. This is an
+  allow-list of sentence shapes, not a list of denied words. Each sentence is
+  judged on the raw text; if the raw and normalized text disagree about the
+  phrase (homoglyphs, extra spaces, invisible characters) nothing in that line
+  is exempt. Weak wording ("see", "read from", "same as") and plain words
+  (`TEAM`) do not qualify. An exempt sentence produces no finding, even when
+  the variable is token-named (`GITHUB_TOKEN`), because it only documents
+  configuration; a request in a separate sentence is not tied to the phrase and
+  is not caught by this check.
 
 The declared category is taken from the tool **name and its leading sentence**,
 not the full description, so an attacker's benign cover sentence still anchors
@@ -224,7 +267,12 @@ match's **per-match confidence**: a validated card / live cloud key is high; a
 documented placeholder (`AKIA…EXAMPLE`) collapses to near-zero and is dropped.
 Scans **raw** text (secrets are case-sensitive). Being soft, a hit raises a
 review item rather than auto-quarantining — an embedded secret may be a careless
-example as easily as a planted one.
+example as easily as a planted one. A high-entropy candidate that is a readable
+multi-segment path (`wiki/spaces/TEAM/pages/123456789/Page+Title`: at least
+three segments, each all digits or plain words joined by `+`, `-` or `_`, none
+an opaque run) is not reported. No host is trusted, so an opaque base64-style
+run is still reported wherever it appears, including in a URL on an example
+domain.
 
 ### At a glance
 
@@ -234,6 +282,7 @@ example as easily as a planted one.
 | `shadowing.cross_server` | hard / soft | Hard: impersonation clone (same name + near-duplicate description) or exclusive cross-server reference. Soft: name squat (distinctive shared name, different description, no own-server provenance) |
 | `payload.decoded` | hard | base64/hex blob that decodes to a shell/exfil command |
 | `phrase.injection` | hard | Curated instruction-override / exfiltration directives (position-discounted; blocks approval) |
+| `tpa.bundle` | hard | Known-attack regex signatures from the TPA corpus (`tpa.<TPA-id>.<detector>` signals) |
 | `directive.imperative` | soft | Injection directives, secrecy imperatives, instruction overrides (normalized, position-discounted) |
 | `capability.mismatch` | soft | Compute/string tool touching `~/.ssh` etc.; unexplained data-sink param |
 | `secret.embedded` | soft | Hardcoded live credential (confidence-scored, placeholders dropped) |
@@ -377,6 +426,18 @@ go run ./cmd/scan-eval \
   --gate --min-recall 0.90 --max-fp 0.05
 ```
 
+By default the gate scores the signature corpus embedded in the build, so
+`tpa.bundle` appears in the `checks` list of the metrics. To score a candidate
+corpus instead, add `--bundle <path>`; the file goes through the production
+loader, and a load failure is an error rather than a silent fallback to the
+embedded corpus:
+
+```bash
+go run ./cmd/scan-eval \
+  --corpus specs/065-evaluation-foundation/datasets/detect_corpus_v1.json \
+  --gate --min-recall 0.90 --max-fp 0.05 --bundle path/to/candidate-bundle.json
+```
+
 - **Recall ≥ 0.90** on malicious entries and **false-positive rate ≤ 0.05** on
   the **hard-negative** set (benign tools that deliberately resemble attacks).
   Clean-benign entries are reported for transparency but do **not** dilute the
@@ -403,12 +464,20 @@ context the detect engine needs). Each entry is labeled `malicious` or
 `shadowing`, `capability_mismatch`), and hard-negatives record which attack
 class they `resemble` so a false positive is attributed to that category.
 
-A category is only **enforced** by the gate when its corresponding check is
-registered in the gate's check list (`gateChecks()` in `cmd/scan-eval/gate.go`).
-This is a forward-compatibility mechanism: a category whose check is not yet in
-the gate list is **measured and reported but never fails the build
-prematurely**. When a new check is wired into the gate list, the gate begins
-enforcing its category.
+A category is only **enforced** by the gate when it has a `categoryCheck` entry
+(`cmd/scan-eval/gate.go`) naming a check that is registered in the gate's check
+list (`gateChecks()`). A category with no entry, or whose check is not
+registered, is **measured and reported but never fails the build**. That is a
+hazard, not a feature: a new category that nobody maps would score as healthy
+while being unenforced. The signature classes are therefore mapped explicitly
+(each to `tpa.bundle`), and `TestCategoryCheck_CoversCorpusClasses` fails when a
+class of the TPA vocabulary, or the category of any gating signature in the
+embedded bundle, is missing from `categoryCheck`. Only a category deliberately
+awaiting its check (for example `capability_mismatch`, whose check is soft and
+not scored by the gate) stays unenforced.
+
+A separate deterministic control signature keeps the bundle half of the gate
+from being vacuous; see [TPA Signature Database](/features/tpa-signatures#how-the-gate-blocks-a-bad-corpus).
 
 ## How it plugs in (unchanged entry points)
 
@@ -427,11 +496,15 @@ It reuses — rather than rebuilds — the Spec-032 quarantine hashing, the
 quarantine state machine, the aggregated-report types, and the
 `internal/security/patterns/` secret matchers (FR-012).
 
-Since Spec 077, `inprocess.go` delegates to the detect engine **exclusively** —
-the duplicated legacy TPA keyword rules and the duplicated legacy embedded-secret
-path have been removed. The engine's two-tier semantics therefore describe the
+Since Spec 077, `inprocess.go` delegates all in-process detection to the detect
+engine — the duplicated legacy TPA keyword rules and the duplicated legacy
+embedded-secret path have been removed. The engine it builds runs the built-in
+checks and, when a signature bundle is available, the `tpa.bundle` check as well
+(a scan with no bundle is reported as degraded coverage and cannot yield an
+auto-approvable verdict). The engine's two-tier semantics therefore describe the
 entire in-process detection behavior, with `phrase.injection` (hard) carrying the
-approval-blocking posture the removed rules used to provide.
+approval-blocking posture the removed rules used to provide and `tpa.bundle`
+adding the known-attack signatures.
 
 ## Signature corpus and coverage
 
@@ -498,6 +571,7 @@ the refresh cycle and the full list of reasons.
 ## Related reading
 
 - [Security Scanner Plugins](/features/security-scanner-plugins) — the plugin framework hosting the `tpa-descriptions` scanner
+- [TPA Signature Database](/features/tpa-signatures) — how the `tpa.bundle` corpus is authored, built and gated
 - [Security Quarantine](/features/security-quarantine) — the quarantine mechanism hard-tier findings drive
 - [Tool Quarantine (Spec 032)](/features/tool-quarantine) — per-tool hash-based approval
 - [Signed TPA Bundles](/features/tpa-bundle-signing) — signing, dropping, rolling back and monitoring the signature corpus

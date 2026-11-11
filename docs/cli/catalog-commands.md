@@ -58,7 +58,8 @@ The reference is `<source>/<id>`. It splits on the **first** slash only, because
 
 ```bash
 mcpproxy catalog add official/io.github.github/github-mcp-server
-mcpproxy catalog add official/io.github.github/github-mcp-server --name gh --env GITHUB_TOKEN=...
+mcpproxy secrets set github-token
+mcpproxy catalog add official/io.github.github/github-mcp-server --name gh --env 'GITHUB_TOKEN=${keyring:github-token}'
 ```
 
 | Flag | Description |
@@ -79,11 +80,14 @@ mcpproxy review approve <name>
 `catalog add --env` stores the value in the config file. To keep a value in the OS keyring instead, add the server by hand with `upstream add`:
 
 ```bash
-mcpproxy upstream add github https://api.githubcopilot.com/mcp/ --secret-header "Authorization: Bearer ghp_..."
-mcpproxy upstream add weather --secret-env WEATHER_API_KEY=abc123 -- npx -y weather-mcp
+mcpproxy secrets set github-token
+mcpproxy upstream add github https://api.githubcopilot.com/mcp/ --header 'Authorization: Bearer ${keyring:github-token}'
+
+mcpproxy secrets set weather-api-key
+mcpproxy upstream add weather --env 'WEATHER_API_KEY=${keyring:weather-api-key}' -- npx -y weather-mcp
 ```
 
-`--secret-env` and `--secret-header` write the value to the keyring and store `${keyring:<server>-env-<name>}` in the config. The Web UI and macOS Add Server forms offer the same choice as a **Value · Secret** toggle that defaults to Secret for names like `*_TOKEN`, `*_KEY`, `*SECRET*` and `*PASSWORD*`. The value is masked while you type it (Show reveals it). See [Keyring Integration](/features/keyring-integration).
+For manual setup, `mcpproxy secrets set <name>` prompts for the value; the current CLI prompt echoes typed characters in the terminal. You can also use `--from-stdin` with a trusted secret source when terminal echo is unsuitable. Reference a stored value with `${keyring:<name>}` in `--header` or `--env`; quote the reference so the shell passes it literally. The `--secret-env` and `--secret-header` flags also write values to the keyring, but take the secret as a command-line argument, which may be retained in shell history or exposed in process listings. The Web UI and macOS Add Server forms offer the same choice as a **Value · Secret** toggle that defaults to Secret for names like `*_TOKEN`, `*_KEY`, `*SECRET*` and `*PASSWORD*`. The value is masked while you type it (Show reveals it). See [Keyring Integration](/features/keyring-integration).
 
 ## Catalog sources and the older commands
 

@@ -215,8 +215,13 @@ type Runtime struct {
 	// installed after New (SetManagementService) because the service is built
 	// on top of the Runtime, not because the type has to be erased: the
 	// management package does not import runtime, so the field carries the
-	// real interface and every consumer gets a compile-time contract.
-	managementService management.Service
+	// real interface and every consumer gets a compile-time contract. It is an
+	// atomic.Pointer because the servers.changed coalescer and the attention
+	// subscriber start in New and read it from their own goroutines, while the
+	// server installs it later on the startup goroutine (a plain field raced
+	// under -race once a publish landed before SetManagementService). Read it
+	// through GetManagementService.
+	managementService atomic.Pointer[management.Service]
 	activityService   *ActivityService // Activity logging service
 
 	// rejectionMetric counts a concurrency shed SYNCHRONOUSLY at the rejection
@@ -1396,14 +1401,18 @@ func (r *Runtime) NotifySecretsChanged(ctx context.Context, operation, secretNam
 		zap.String("secret_name", secretName),
 		zap.Strings("servers", affectedServers))
 
-	// Restart affected servers in the background
+	// Restart affected servers in the background. The caller's identity rides
+	// along (issue #1698: a restart that enables a disabled server records who
+	// changed the secret); the request's cancellation does not, since the
+	// restarts outlive the request.
+	restartCtx := context.WithoutCancel(ctx)
 	go func() {
 		for _, serverName := range affectedServers {
 			r.logger.Info("Restarting server due to secret change",
 				zap.String("server", serverName),
 				zap.String("secret_name", secretName))
 
-			if err := r.RestartServer(serverName); err != nil {
+			if err := r.RestartServerCtx(restartCtx, serverName); err != nil {
 				r.logger.Error("Failed to restart server after secret change",
 					zap.String("server", serverName),
 					zap.String("secret_name", secretName),
@@ -2652,13 +2661,22 @@ func (r *Runtime) GetDockerRecoveryStatus() *storage.DockerRecoveryState {
 // the Runtime (it takes one as its RuntimeOperations), not because of an
 // import cycle — internal/management does not import internal/runtime.
 func (r *Runtime) SetManagementService(svc management.Service) {
-	r.managementService = svc
+	if svc == nil {
+		r.managementService.Store(nil)
+		return
+	}
+	r.managementService.Store(&svc)
 }
 
-// GetManagementService returns the management service instance.
-// Returns nil if service hasn't been set yet.
+// GetManagementService returns the management service instance, or nil while
+// none is installed. Safe to call from any goroutine: the field is swapped
+// atomically, so a background reader (the servers.changed coalescer, the
+// attention subscriber) never tears against SetManagementService.
 func (r *Runtime) GetManagementService() management.Service {
-	return r.managementService
+	if svc := r.managementService.Load(); svc != nil {
+		return *svc
+	}
+	return nil
 }
 
 // SetRefreshMetricsRecorder sets the metrics recorder for OAuth token refresh operations.
@@ -2785,6 +2803,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					// auth_url, token_url will be populated from OAuth runtime state if available
 					"auth_url":  "",
 					"token_url": "",
+				}
+				if enabled := serverStatus.Config.OAuth.RefreshReplayEnabled; enabled != nil {
+					oauthConfig["refresh_replay_enabled"] = *enabled
 				}
 			}
 

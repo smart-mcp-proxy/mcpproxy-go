@@ -3,6 +3,8 @@ package server
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -354,4 +356,73 @@ func redactActivityConfigValues(values map[string]interface{}) map[string]interf
 // recognises, leaving text it does not recognise untouched.
 func maskDetectedSecrets(s string) string {
 	return oauth.MaskDetectedSecrets(s)
+}
+
+// serverAddedValues is the config_change `new_values` of a server add: the
+// same keys the MCP door records (protocol, enabled, quarantined, and url or
+// command when set). The two credential-bearing leaves are redacted as they
+// are read, through the shared rule (the round-8 door scan in internal/oauth
+// requires every published server leaf to pass through it).
+func serverAddedValues(sc *config.ServerConfig) map[string]interface{} {
+	values := map[string]interface{}{
+		"protocol":    sc.Protocol,
+		"enabled":     sc.Enabled,
+		"quarantined": sc.Quarantined,
+	}
+	if sc.URL != "" {
+		values["url"] = redactActivityValue("url", normalizeForRedaction(sc.URL))
+	}
+	if sc.Command != "" {
+		values["command"] = redactActivityValue("command", normalizeForRedaction(sc.Command))
+	}
+	return values
+}
+
+// serverConfigDelta compares two server entries field by field, by their JSON
+// keys, and returns the keys whose values differ with the before and after
+// value of each (issue #1698: a `server_updated` row records what changed and
+// nothing else). Unexported state and keys absent from the JSON form are not
+// compared. The returned maps are nil when nothing changed.
+func serverConfigDelta(before, after *config.ServerConfig) ([]string, map[string]interface{}, map[string]interface{}) {
+	prev := serverConfigJSONMap(before)
+	next := serverConfigJSONMap(after)
+	var changed []string
+	for key := range prev {
+		if _, ok := next[key]; !ok {
+			changed = append(changed, key)
+		}
+	}
+	for key, nv := range next {
+		pv, ok := prev[key]
+		if !ok || !reflect.DeepEqual(pv, nv) {
+			changed = append(changed, key)
+		}
+	}
+	if len(changed) == 0 {
+		return nil, nil, nil
+	}
+	sort.Strings(changed)
+	previous := make(map[string]interface{}, len(changed))
+	current := make(map[string]interface{}, len(changed))
+	for _, key := range changed {
+		if v, ok := prev[key]; ok {
+			previous[key] = v
+		}
+		if v, ok := next[key]; ok {
+			current[key] = v
+		}
+	}
+	return changed, previous, current
+}
+
+func serverConfigJSONMap(sc *config.ServerConfig) map[string]interface{} {
+	raw, err := json.Marshal(sc)
+	if err != nil {
+		return nil
+	}
+	var out map[string]interface{}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil
+	}
+	return out
 }

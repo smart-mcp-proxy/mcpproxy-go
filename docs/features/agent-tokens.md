@@ -191,6 +191,11 @@ Server scoping is enforced at three levels:
    `GET /api/v1/diagnostics` / `doctor`, `GET /api/v1/profiles`,
    `GET /api/v1/annotations/coverage` and `GET /api/v1/security/scans`.
 
+   For a token minted with `--profile`, the set that scopes all of the above is
+   `allowed_servers` **intersected with the pinned profile's servers** (Spec
+   118, issue #1686): the pin is part of the visibility boundary, not only of
+   dispatch. See [Profile Pinning](#profile-pinning) for the fail-closed cases.
+
    **The whole `/api/v1/servers/{id}` subtree** answers `404 Server not found`
    for a server outside the scope — `tools`, `logs`, `tool-calls`,
    `diagnostics`, `scan/status`, `scan/report`, `scan/files`, `integrity`,
@@ -568,6 +573,10 @@ See [Which profile applies](./profiles.md#which-profile-applies) for how a clien
 
 **Validation & config changes**: the pinned slug must name a configured profile at creation time (creation is rejected otherwise). If the profile is **later removed** from the configuration, the pin resolves to a **deny-all scope**: the token sees no upstream servers and no tools, on the MCP session path and in [preflight](./tools-preflight.md#disclosure-tiers) alike. A pin with **zero reach** — the profile still exists but is empty, names only unconfigured servers, or no longer overlaps the token's `allowed_servers` — is treated exactly like a deleted one on `set_profile` and `/mcp/p/<pin>`, so the token cannot tell whether its own pin still exists. A request under a **deleted** pin is logged with a warning naming the removed profile, not hard-failed at the transport; a refused `/mcp/p/<pin>` initialization (deleted or zero-reach alike) is logged as `profile URL refused for scoped caller`. The pin is a restriction the operator applied, so losing the profile it names must never hand the token a wider view than it had the day before — re-create the profile, or re-mint the token against a live one, to restore it. Pinning composes with server scoping and permission tiers: a request must satisfy **all** of them.
 
+**The pin bounds every REST and SSE read, not only dispatch** (Spec 118, issue #1686). A pinned token's visible set on the REST API is `allowed_servers` ∩ the pinned profile's effective servers, resolved from the live configuration on every request and before every `/events` frame. Every read door answers from that one set — `GET /api/v1/status` (`upstream_stats` and its counters), `GET /api/v1/servers` and `/tools` (bare or with `?profile=`), the `/events` stream (status frames, the `servers.changed` and `attention.changed` embeds, every server-named event), `GET /api/v1/review`, `/attention`, `/annotations/coverage`, `/diagnostics`, `/catalog/search`, the activity and tool-call doors, and the whole `/servers/{id}` subtree — so no door and no count can disclose a server outside the pin. On the profile doors a pinned token may learn **only its own pin**: `GET /api/v1/profiles` lists that one profile (narrowed to the visible servers, `switchable_to` cleared), `GET /api/v1/profiles/{name}`, `/profiles/{name}/effective-tools` and `?profile=<name>` for any other name answer the same non-disclosing `404` an unknown profile gets, and `GET /api/v1/profiles/active` reads `""` unless the server-level active profile is the pin itself. (For an unpinned scoped token, `/profiles/active` likewise reads `""` when the active profile has no server in its `allowed_servers`.)
+
+Fail-closed cases: a pin naming a **deleted** profile, an **empty** one, one whose servers are all unconfigured, or one with **no overlap** with `allowed_servers` yields an empty visible set on every door — the same empty lists, zero counts and `404`s a token granted `[]` receives — so the token cannot tell which of these happened. On `/events`, the `active_profile.changed` slug is rendered as `GET /profiles/active` would answer it, and a `servers.changed` extra naming a hidden server is withheld together with the counts that describe that server's change. Accepted residual on `/events`: `servers.changed` is a coalesced state snapshot, so while the token still has at least one visible server a frame caused by a change to a hidden server alone is still delivered (its narrowed embed holds the token's own, unchanged rows); it never carries a hidden name, row or count. A frame that would carry nothing visible is dropped.
+
 The pin is shown by `token list` (PROFILE PIN column) and `token show` (Profile Pin field), and is preserved across `token regenerate`.
 
 ### Token kinds and legacy scope
@@ -723,6 +732,11 @@ mcpproxy token regenerate deploy-bot
 ```
 
 The new token is displayed once — save it immediately.
+
+A regeneration writes one `profile_change` activity record with `change: rotate`,
+the `token_name`, the actor (`actor_kind`, `actor_name`, `surface`) and a diff
+holding the old and new `token_prefix` — never the secret — so the record of who
+minted, rotated or revoked a token is complete (`issue`, `rotate`, `revoke`).
 
 ### JSON Output
 

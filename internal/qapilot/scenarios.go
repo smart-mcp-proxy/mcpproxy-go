@@ -237,6 +237,12 @@ var Scenarios = []Scenario{
 	{ID: "S29", Title: "manual: a clean change that widens the input schema is held like every change",
 		Requirements: []string{"QP-20", "QP-10"}, Setup: manualTrusted,
 		Steps: []Action{discover("t1", Benign), discover("t1", BenignWide), discover("t1", BenignWide)}},
+	{ID: "S30", Title: "trusted first discovery: a tool that scans dangerous is held pending while its clean sibling is baselined (R2-1); it stays pending across reconnects",
+		Requirements: []string{"QP-08"}, Setup: manualTrusted,
+		Steps: []Action{discover("t1", Benign, "t2", Malicious), discover("t1", Benign, "t2", Malicious), discover("t1", Benign, "t2", Malicious)}},
+	{ID: "S31", Title: "trusted first discovery of only dangerous tools records no baseline; an identical reconnect does not promote the held record; the first clean tool then starts the baseline (R2-1)",
+		Requirements: []string{"QP-08"}, Setup: scanTrusted,
+		Steps: []Action{discover("t1", Malicious), discover("t1", Malicious), discover("t1", Malicious, "t2", Benign), discover("t1", Malicious, "t2", Benign)}},
 }
 
 // KnownDeviations are sequences where the implementation is known to differ

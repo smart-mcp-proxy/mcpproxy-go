@@ -138,9 +138,10 @@ func (c *serversChangedCoalescer) start(ctx context.Context) {
 }
 
 // serversLister is the minimal slice of the management service needed by
-// emitServersChanged to fetch the current server list. The runtime stores the
-// management service as interface{} (avoiding an import cycle), so this local
-// interface is the type assertion target. Implemented by
+// emitServersChanged to fetch the current server list. The runtime holds the
+// full management.Service behind an atomic swap (GetManagementService); this
+// local interface is the type-assertion target so the event path depends on
+// one method, not the whole service. Implemented by
 // internal/management.(*service).
 type serversLister interface {
 	ListServers(ctx context.Context) ([]*contracts.Server, *contracts.ServerStats, error)
@@ -289,7 +290,7 @@ func (r *Runtime) buildServersChangedPayload(parentCtx context.Context, reason s
 	}
 	payload["reason"] = reason
 
-	if lister, ok := r.managementService.(serversLister); ok && lister != nil {
+	if lister, ok := r.GetManagementService().(serversLister); ok && lister != nil {
 		ctx, cancel := context.WithTimeout(parentCtx, 2*time.Second)
 		servers, stats, err := lister.ListServers(ctx)
 		cancel()
@@ -717,13 +718,24 @@ func (r *Runtime) emitActivityPolicyDecision(serverName, toolName, sessionID, re
 	r.publishEvent(newEvent(EventTypeActivityPolicyDecision, payload))
 }
 
-// EmitActivityQuarantineChange emits an event when a server's quarantine state changes.
+// EmitActivityQuarantineChange emits an event when a server's quarantine state
+// changes with no caller behind it (the config-load admission gate, a scanner
+// verdict). A change an operator or agent requested goes through
+// EmitActivityQuarantineChangeCtx so the record names them (issue #1698).
 func (r *Runtime) EmitActivityQuarantineChange(serverName string, quarantined bool, reason string) {
+	r.EmitActivityQuarantineChangeCtx(context.Background(), serverName, quarantined, reason)
+}
+
+// EmitActivityQuarantineChangeCtx is EmitActivityQuarantineChange carrying the
+// caller of ctx (RequestActor) and its request id on the event, so the stored
+// quarantine_change row says who approved or quarantined the server.
+func (r *Runtime) EmitActivityQuarantineChangeCtx(ctx context.Context, serverName string, quarantined bool, reason string) {
 	payload := map[string]any{
 		"server_name": serverName,
 		"quarantined": quarantined,
 		"reason":      reason,
 	}
+	stampActor(ctx, payload)
 	r.publishEvent(newEvent(EventTypeActivityQuarantineChange, payload))
 }
 
@@ -875,13 +887,49 @@ func (r *Runtime) emitUpstreamPromptsChanged() {
 
 // EmitActivityConfigChange emits an event when configuration changes (Spec 024).
 // action is one of: server_added, server_removed, server_updated, settings_changed
-// source indicates how the change was triggered: "mcp", "cli", or "api"
+// source indicates how the change was triggered: "mcp", "cli", or "api".
+// A change made by an authenticated caller goes through
+// EmitActivityConfigChangeCtx so the record names them (issue #1698).
 func (r *Runtime) EmitActivityConfigChange(action, affectedEntity, source string, changedFields []string, previousValues, newValues map[string]interface{}) {
+	r.emitConfigChange(context.Background(), action, affectedEntity, source, changedFields, previousValues, newValues, nil)
+}
+
+// EmitActivityConfigChangeCtx is EmitActivityConfigChange for a change the
+// caller of ctx made: the event carries the actor (RequestActor) and request
+// id, and its source follows the actor's surface (cli, mcp, else api).
+func (r *Runtime) EmitActivityConfigChangeCtx(ctx context.Context, action, affectedEntity string, changedFields []string, previousValues, newValues map[string]interface{}) {
+	r.emitConfigChange(ctx, action, affectedEntity, "", changedFields, previousValues, newValues, nil)
+}
+
+// EmitActivityServerRemoved records a server removal as a config change. purged
+// is the removal's purge summary ({bucket: count}, Spec 116 PR2); the activity
+// record carries it in metadata["purged"] (additive).
+func (r *Runtime) EmitActivityServerRemoved(name, source string, purged map[string]int) {
+	r.emitConfigChange(context.Background(), "server_removed", name, source, nil, nil, nil, purged)
+}
+
+// EmitActivityServerRemovedCtx is EmitActivityServerRemoved naming the caller
+// of ctx (issue #1698).
+func (r *Runtime) EmitActivityServerRemovedCtx(ctx context.Context, name string, purged map[string]int) {
+	r.emitConfigChange(ctx, "server_removed", name, "", nil, nil, nil, purged)
+}
+
+// emitConfigChange is the one builder behind the config_change emitters. An
+// empty source is derived from the actor's surface when ctx names one and is
+// "api" otherwise (the pre-#1698 default of the REST door).
+func (r *Runtime) emitConfigChange(ctx context.Context, action, affectedEntity, source string, changedFields []string, previousValues, newValues map[string]interface{}, purged map[string]int) {
 	payload := map[string]any{
 		"action":          action,
 		"affected_entity": affectedEntity,
-		"source":          source,
 	}
+	actor, hasActor := stampActor(ctx, payload)
+	if source == "" {
+		source = string(storage.ActivitySourceAPI)
+		if hasActor {
+			source = string(surfaceSource(actor.Surface))
+		}
+	}
+	payload["source"] = source
 	if len(changedFields) > 0 {
 		payload["changed_fields"] = changedFields
 	}
@@ -890,18 +938,6 @@ func (r *Runtime) EmitActivityConfigChange(action, affectedEntity, source string
 	}
 	if newValues != nil {
 		payload["new_values"] = newValues
-	}
-	r.publishEvent(newEvent(EventTypeActivityConfigChange, payload))
-}
-
-// EmitActivityServerRemoved records a server removal as a config change. purged
-// is the removal's purge summary ({bucket: count}, Spec 116 PR2); the activity
-// record carries it in metadata["purged"] (additive).
-func (r *Runtime) EmitActivityServerRemoved(name, source string, purged map[string]int) {
-	payload := map[string]any{
-		"action":          "server_removed",
-		"affected_entity": name,
-		"source":          source,
 	}
 	if len(purged) > 0 {
 		summary := make(map[string]any, len(purged))

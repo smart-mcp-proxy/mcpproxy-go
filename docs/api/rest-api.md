@@ -34,7 +34,7 @@ curl "http://127.0.0.1:8080/api/v1/servers?apikey=your-api-key"
 Two kinds of credential authenticate against the REST API:
 
 - **Admin API key** — full access to every endpoint.
-- **Agent tokens** (`mcp_agt_` prefix, see [Agent Tokens](../features/agent-tokens.md)) — scoped, read-oriented access. Agent tokens may **read** (`GET /api/v1/servers`, diagnostics, config/registry reads, `GET /api/v1/index/search`) but may **not** perform mutating operations that touch server/security/config state. These return **`403 Forbidden`** with `operation requires admin access` for an agent token, mirroring the MCP `upstream_servers`/`quarantine_security` denylist so the two surfaces cannot drift. Socket (tray) connections authenticate as admin and are unaffected. Gated routes:
+- **Agent tokens** (`mcp_agt_` prefix, see [Agent Tokens](../features/agent-tokens.md)) — scoped, read-oriented access. They may **read** (`GET /api/v1/servers`, diagnostics, registry browsing, read-only `POST /api/v1/config/validate`, and `GET /api/v1/index/search`). The full configuration document (`GET /api/v1/config`) is admin-only. They may **not** perform mutating operations that touch server/security/config state. These return **`403 Forbidden`** with `operation requires admin access` for an agent token, mirroring the MCP `upstream_servers`/`quarantine_security` denylist so the two surfaces cannot drift. Socket (tray) connections authenticate as admin and are unaffected. Gated routes:
   - **Servers** — add, remove, patch, enable, disable, restart, reconnect, quarantine, unquarantine, login, logout, config-to-secret, discover-tools, refresh, tool approve/block, the bulk `enable_all`/`disable_all`/`restart_all`, and the security scanner (`scan`, `scan/cancel`, `security/approve`, `security/reject`).
   - **Config** — `POST /config/apply`, `PATCH /config`, `PATCH /config/docker-isolation` (config can add/remove/enable/disable servers). `POST /config/validate` is read-only and stays open.
   - **Registries** — `POST/PUT/DELETE /registries[/{id}]` (source management) and `POST /registries/{id}/servers/{serverId}/add`. Registry browsing (`GET`) stays open.
@@ -776,7 +776,13 @@ search/filter/sort over the full set. For relevance-ranked discovery use
 > **Quarantine visibility:** `GET /api/v1/index/search` withholds the tools of
 > **quarantined** servers — their descriptions/schemas are the Tool Poisoning
 > Attack payload quarantine exists to contain, so the REST search path applies
-> the same server-level visibility gate as MCP `retrieve_tools`. Response shape
+> the same server-level visibility gate as MCP `retrieve_tools`. It also
+> withholds a tool whose approval is **pending** or **changed** (tool-level
+> quarantine) while that tool's entry is still in the search index, for a
+> matching word and for its `server:tool` id alike. This follows the same
+> switches as the call path: it does not apply when `quarantine_enabled` is
+> `false` or the server's trust mode is `auto`. Such a hit is dropped after
+> ranking, so a page can hold fewer than `limit` results. Response shape
 > is unchanged (bare tool `name` + separate `server_name`); only which tools
 > appear is filtered. `GET /api/v1/tools` (above) is the unfiltered operator
 > overview and still lists quarantined servers' tools with their state.
@@ -1725,15 +1731,19 @@ Events include:
 
 The stream is rendered **per connection**. An admin subscriber (API key, Web UI,
 tray over the unix socket) receives every event exactly as the event bus
-published it. For an agent token limited by `allowed_servers` (issue #1166):
+published it. For an agent token limited by `allowed_servers` (issue #1166) —
+and, for a token minted with `--profile`, by `allowed_servers` intersected with
+the pinned profile's servers (Spec 118, issue #1686; the same set every REST
+read door uses):
 
 | Event | Delivered to a scoped subscriber |
 |-------|----------------------------------|
 | Names a server outside the scope, through `server_name`, `server`, `target_server` or `affected_entity` — every `activity.*`, `oauth.*` and `security.*` event | **No.** The whole frame is dropped: blanking the name still discloses the mutation, its timing, and how many servers are hidden. |
-| `servers.changed` | **Yes, always** — it is coalesced last-write-wins and carries renderable state. The embedded server list is narrowed, `stats` recomputed, and a coalescer extra naming an out-of-scope server is removed. |
+| `servers.changed` | **Yes** — it is coalesced last-write-wins and carries renderable state. The embedded server list is narrowed, `stats` recomputed, and a coalescer extra naming an out-of-scope server is removed together with the extras that describe that server's change (`added`, `modified`, `removed`, `approved_count`, `changed`, `blocked_count`, …), leaving `servers`, `stats` and `reason`. For a **profile-pinned** token a frame whose narrowed list is empty (or absent) and whose every identity extra names a hidden server is dropped. |
+| `active_profile.changed` | **Yes**, but the slug is rendered per subscriber exactly as `GET /api/v1/profiles/active` answers it: `""` unless the profile is one the caller may select (a pinned token: its own pin; an unpinned scoped token: a profile its `allowed_servers` reaches). |
 | `config.reloaded`, `config.saved`, `secrets.changed` | **No.** They announce mutations of the admin config document, which `GET /api/v1/config` already answers `403` for this caller. |
 | `profiles.changed`, `client.binding_changed`, `credentials.changed` | **No.** They name profiles, clients and bindings a scoped caller may not reach. `profiles.changed {name, change: create|update|delete|anonymous, previous_name?}` is an invalidation, not a log: refetch `GET /api/v1/profiles`. One event per changed profile, published after the new configuration is live, for service writes and hand edits alike. |
-| Everything else (`active_profile.changed`, `activity.system.*`, `sensitive_data.detected`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
+| Everything else (`activity.system.*`, `sensitive_data.detected`, `security.scanner_changed`, …) | **Yes**, unchanged: no server identity to scope. |
 
 ## Error Responses
 

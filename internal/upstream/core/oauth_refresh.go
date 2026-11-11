@@ -64,6 +64,16 @@ var afterStoredDCRPersistHook func(server string)
 // otherwise the stored DCR credentials. A refresh is never sent with an empty
 // client_id.
 func (c *Client) oauthRefreshFunc(handler *transport.OAuthHandler) oauth.RefreshFunc {
+	return c.withRefreshReplay(c.oauthRefreshOnce(handler), func(ctx context.Context) (string, error) {
+		metadata, err := handler.GetServerMetadata(ctx)
+		if err != nil {
+			return "", err
+		}
+		return metadata.TokenEndpoint, nil
+	})
+}
+
+func (c *Client) oauthRefreshOnce(handler *transport.OAuthHandler) oauth.RefreshFunc {
 	return func(ctx context.Context, rec *storage.OAuthTokenRecord) (*client.Token, error) {
 		// Spec 116 PR4: live-QA park point (quickstart L4, -tags qa_hooks
 		// only), then the early exit of a retired instance. The token

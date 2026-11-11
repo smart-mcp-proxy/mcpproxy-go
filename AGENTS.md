@@ -34,7 +34,7 @@
 - When editing configs, prefer `runtime.SaveConfiguration()` flows so disk state and in-memory state stay aligned; regenerated files land in `~/.mcpproxy/`.
 
 ## Active Technologies
-- Go 1.24 (toolchain go1.24.10) + BBolt (storage), Chi router (HTTP), Zap (logging), regexp (stdlib), existing ActivityService (026-pii-detection)
+- Go 1.26.0 (go.mod) + BBolt (storage), Chi router (HTTP), Zap (logging), regexp (stdlib), existing ActivityService (026-pii-detection)
 - BBolt database (`~/.mcpproxy/config.db`) - ActivityRecord.Metadata extension (026-pii-detection)
 
 ## Recent Changes

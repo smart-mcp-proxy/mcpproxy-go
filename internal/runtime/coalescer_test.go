@@ -21,10 +21,10 @@ func newCoalescerTestRuntime(t *testing.T) *Runtime {
 	logger, err := zap.NewDevelopment()
 	require.NoError(t, err)
 	rt := &Runtime{
-		logger:            logger,
-		eventSubs:         make(map[chan Event]struct{}),
-		managementService: &fakeServersLister{servers: []*contracts.Server{{Name: "s1"}}, stats: &contracts.ServerStats{}},
+		logger:    logger,
+		eventSubs: make(map[chan Event]struct{}),
 	}
+	rt.SetManagementService(&fakeServersLister{servers: []*contracts.Server{{Name: "s1"}}, stats: &contracts.ServerStats{}})
 	rt.coalescer = newServersChangedCoalescer(rt, 50*time.Millisecond)
 	return rt
 }
@@ -154,10 +154,10 @@ func TestCoalescer_AmortisesBuildAcrossBurst(t *testing.T) {
 		stats:   &contracts.ServerStats{},
 	}
 	rt := &Runtime{
-		logger:            logger,
-		eventSubs:         make(map[chan Event]struct{}),
-		managementService: lister,
+		logger:    logger,
+		eventSubs: make(map[chan Event]struct{}),
 	}
+	rt.SetManagementService(lister)
 	rt.coalescer = newServersChangedCoalescer(rt, 50*time.Millisecond)
 
 	ctx, cancel := context.WithCancel(context.Background())

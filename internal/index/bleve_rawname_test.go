@@ -132,10 +132,9 @@ func TestBleveIndex_RawShapedExactNameScoresUnchanged(t *testing.T) {
 		"wipe_disk": {{"a:wipe_disk", 3.827535}},
 		"list":      {{"a:list", 3.491087}},
 		"get_repo":  {{"b:get_repo", 3.864724}},
-		// The canonical id is not a query the pre-FR-009 index answered for a
-		// production-shaped document (full_tool_name held the raw name), and
-		// it must not start answering it now.
-		"a:erase": nil,
+		// The exact document ID is now resolved without changing scored fields.
+		// It had no lexical score, so the exact-only hit receives a ranking score of one.
+		"a:erase": {{"a:erase", 1}},
 	}
 
 	for _, stamp := range []bool{false, true} {

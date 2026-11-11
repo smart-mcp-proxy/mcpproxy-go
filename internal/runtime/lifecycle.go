@@ -2393,6 +2393,12 @@ func (r *Runtime) postConfigReload() {
 // together, the commit purges a disabled server's tools from the index, and
 // the connect/disconnect runs after the commit lock is released.
 func (r *Runtime) EnableServer(serverName string, enabled bool) error {
+	return r.EnableServerCtx(context.Background(), serverName, enabled)
+}
+
+// EnableServerCtx is EnableServer for a change the caller of ctx made: the
+// config_change row names them (issue #1698, RequestActor).
+func (r *Runtime) EnableServerCtx(ctx context.Context, serverName string, enabled bool) error {
 	r.logger.Info("Request to change server enabled state",
 		zap.String("server", serverName),
 		zap.Bool("enabled", enabled))
@@ -2411,7 +2417,7 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 	if enabled {
 		action = "server_enabled"
 	}
-	r.EmitActivityConfigChange(action, serverName, "api", []string{"enabled"}, map[string]interface{}{"enabled": !enabled}, map[string]interface{}{"enabled": enabled})
+	r.EmitActivityConfigChangeCtx(ctx, action, serverName, []string{"enabled"}, map[string]interface{}{"enabled": !enabled}, map[string]interface{}{"enabled": enabled})
 
 	// Reindexing and reconnect checks are slow; run them off the caller's
 	// goroutine so the HTTP handler returns right after the commit.
@@ -2428,7 +2434,13 @@ func (r *Runtime) EnableServer(serverName string, enabled bool) error {
 // written to storage under the server's approval lock in the same step that
 // purges the index (FR-008), and published before this returns.
 func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
-	return r.QuarantineServerAt(serverName, quarantined, 0)
+	return r.QuarantineServerAtCtx(context.Background(), serverName, quarantined, 0)
+}
+
+// QuarantineServerCtx is QuarantineServer for a change the caller of ctx made:
+// the quarantine_change row names them (issue #1698, RequestActor).
+func (r *Runtime) QuarantineServerCtx(ctx context.Context, serverName string, quarantined bool) error {
+	return r.QuarantineServerAtCtx(ctx, serverName, quarantined, 0)
 }
 
 // QuarantineServerAt is QuarantineServer bound to expectedIncarnation (Spec
@@ -2437,6 +2449,12 @@ func (r *Runtime) QuarantineServer(serverName string, quarantined bool) error {
 // scanner approval and an unquarantine the operator reviewed in the Web UI use
 // it, so a remove and re-add in between can never release the replacement.
 func (r *Runtime) QuarantineServerAt(serverName string, quarantined bool, expectedIncarnation int64) error {
+	return r.QuarantineServerAtCtx(context.Background(), serverName, quarantined, expectedIncarnation)
+}
+
+// QuarantineServerAtCtx is QuarantineServerAt naming the caller of ctx on the
+// quarantine_change row (issue #1698).
+func (r *Runtime) QuarantineServerAtCtx(ctx context.Context, serverName string, quarantined bool, expectedIncarnation int64) error {
 	r.logger.Info("Request to change server quarantine state",
 		zap.String("server", serverName),
 		zap.Bool("quarantined", quarantined))
@@ -2515,7 +2533,7 @@ func (r *Runtime) QuarantineServerAt(serverName string, quarantined bool, expect
 	if quarantined {
 		reason = "Server quarantined for security review"
 	}
-	r.EmitActivityQuarantineChange(serverName, quarantined, reason)
+	r.EmitActivityQuarantineChangeCtx(ctx, serverName, quarantined, reason)
 
 	r.HandleUpstreamServerChange(r.AppContext())
 
@@ -2644,6 +2662,13 @@ func (r *Runtime) refreshServerFromDiskForRestart(serverName string) (*config.Se
 // Validation and disconnect are synchronous; reconnection and reindexing happen
 // asynchronously so the caller (HTTP handler) returns immediately.
 func (r *Runtime) RestartServer(serverName string) error {
+	return r.RestartServerCtx(context.Background(), serverName)
+}
+
+// RestartServerCtx is RestartServer carrying the request context: a restart
+// of a disabled server enables it, and that config_change row names the
+// caller (issue #1698).
+func (r *Runtime) RestartServerCtx(ctx context.Context, serverName string) error {
 	r.logger.Info("Request to restart server", zap.String("server", serverName))
 
 	// Issue #467: pull the latest server config from disk before falling
@@ -2666,7 +2691,7 @@ func (r *Runtime) RestartServer(serverName string) error {
 	if !serverConfig.Enabled {
 		r.logger.Info("Server is disabled, enabling it",
 			zap.String("server", serverName))
-		return r.EnableServer(serverName, true)
+		return r.EnableServerCtx(ctx, serverName, true)
 	}
 
 	// Spec 116 PR3 (#1563, review R5.4): the restart is bound to the
@@ -2684,7 +2709,7 @@ func (r *Runtime) RestartServer(serverName string) error {
 			return fmt.Errorf("server '%s' not found in configuration", serverName)
 		}
 		if !cfg.Enabled {
-			return r.EnableServer(serverName, true)
+			return r.EnableServerCtx(ctx, serverName, true)
 		}
 		client, exists := r.upstreamManager.GetClient(serverName)
 		if !exists {
