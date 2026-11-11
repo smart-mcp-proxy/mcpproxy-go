@@ -19,7 +19,7 @@ A developer using MCPProxy wants to add security scanning to their quarantine wo
 
 1. **Given** MCPProxy is running and Docker is available, **When** a user lists available scanners, **Then** the bundled registry shows all known scanners with their install status, required configuration, and descriptions.
 2. **Given** a scanner is listed as "available", **When** the user installs it, **Then** the Docker image is pulled, the scanner status changes to "installed", and an activity log entry is recorded.
-3. **Given** a scanner requires API keys (e.g., `MCP_SCANNER_API_KEY`), **When** the user configures it, **Then** the keys are stored securely (encrypted in the database) and the scanner status changes to "configured".
+3. **Given** a scanner requires API keys (e.g., `MCP_SCANNER_API_KEY`), **When** the user configures it, **Then** the keys are stored securely (~~encrypted in the database~~ not encrypted; use `${keyring:}` references, see Spec 123) and the scanner status changes to "configured".
 4. **Given** a scanner is installed, **When** the user removes it, **Then** the Docker image is removed, all configuration is deleted, and the scanner returns to "available" status.
 5. **Given** Docker is not available on the host, **When** the user attempts to install a scanner, **Then** a clear error message explains that Docker is required for scanner execution.
 
@@ -129,7 +129,7 @@ Power users can register custom scanners not in the bundled registry. They provi
 
 - **FR-001**: System MUST provide a scanner registry listing all known security scanners with their metadata (name, vendor, description, input types, license, configuration requirements).
 - **FR-002**: System MUST support installing scanners by pulling their Docker images, with progress feedback.
-- **FR-003**: System MUST securely store scanner configuration (API keys, secrets) in the existing encrypted database.
+- **FR-003**: System MUST securely store scanner configuration (API keys, secrets) in the existing database (~~encrypted~~ not encrypted: plain BBolt protected by file permissions; secrets should use `${keyring:}` references, see Spec 123).
 - **FR-004**: System MUST execute scanners in isolated Docker containers with configurable network access and resource limits.
 - **FR-005**: System MUST support three scanner input types: source filesystem (read-only mount), MCP connection (isolated network), and container image reference.
 - **FR-006**: System MUST read scanner results in SARIF format and normalize findings into an internal model with severity, category, title, description, location, and scanner source.
@@ -176,7 +176,7 @@ Power users can register custom scanners not in the bundled registry. They provi
 - Docker is available on the host (required for scanner execution; graceful degradation with clear error when absent).
 - Scanners are distributed as Docker images (no host-level installation needed).
 - SARIF is the universal output format; non-SARIF scanners use adapter shims (thin Docker wrappers) provided by the registry.
-- Scanner API keys are stored encrypted in the existing BBolt database (same mechanism as existing secrets).
+- Scanner API keys are stored in the existing BBolt database, ~~encrypted~~ not encrypted (plain JSON protected by file permissions; see Spec 123). Secrets should use `${keyring:}` references.
 - The scanner registry ships as a bundled JSON file; remote updates are opt-in and user-controlled (default: static file).
 - v1 targets stdio servers in Docker; HTTP/SSE servers are scanned via URL (no container snapshotting needed).
 - Pre-configured servers in the JSON config file are not auto-scanned; users can trigger manual scans on them.
