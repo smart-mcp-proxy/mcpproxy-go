@@ -434,3 +434,20 @@ func TestAuthTokensCommandsAreRegistered(t *testing.T) {
 	assert.NotNil(t, c.Flags().Lookup("yes"))
 	assert.NotNil(t, c.Flags().Lookup("leave-undecryptable"))
 }
+
+// Without a key the write commands are exit 4 whether or not a database
+// exists yet: the missing key is reported before the file is looked at.
+func TestAuthTokensEncryptDecrypt_NoKeyIsExit4WithoutADatabase(t *testing.T) {
+	f := newTokensFixture(t, "")
+	_ = os.Remove(filepath.Join(f.dataDir, dbFileName))
+	var buf bytes.Buffer
+
+	err := authTokensEncrypt(context.Background(), f.cfg, &buf, "table", false)
+	require.Error(t, err)
+	assert.Equal(t, ExitCodeConfigError, classifyError(err))
+	err = authTokensDecrypt(context.Background(), f.cfg, &buf, "table", true, false)
+	require.Error(t, err)
+	assert.Equal(t, ExitCodeConfigError, classifyError(err))
+	_, statErr := os.Stat(filepath.Join(f.dataDir, dbFileName))
+	assert.True(t, os.IsNotExist(statErr), "no database may be created")
+}

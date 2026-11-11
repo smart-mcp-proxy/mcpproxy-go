@@ -262,3 +262,18 @@ func TestAuthStatusPretty_ShowsTheUndecryptableStateDistinctly(t *testing.T) {
 	assert.NotContains(t, alphaBlock, "Action: mcpproxy auth login --server=alpha", "an undecryptable row is never offered as 'log in'")
 	assert.Contains(t, out, "Action: mcpproxy auth login --server=beta")
 }
+
+// A database the pre-flight cannot open (a running core holds it) stops the
+// login with exit 3: continuing would fall back to in-memory storage, where
+// nothing can see an undecryptable row.
+func TestPreflightStandalone_LockedDatabaseStopsTheLogin(t *testing.T) {
+	f := newLoginPreflightFixture(t, tokensKeyB64(2)) // the row is undecryptable
+	holder, err := storage.NewManager(f.cfg.DataDir, zap.NewNop().Sugar(), storage.WithOAuthTokenKey(tokensKey(t, 1)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = holder.Close() })
+
+	err = preflightStandaloneOAuthRow(f.cfg, f.cfg.Servers[0])
+	require.Error(t, err)
+	assert.Equal(t, ExitCodeDBLocked, classifyError(err))
+	assert.Zero(t, atomic.LoadInt32(f.hits))
+}

@@ -226,10 +226,15 @@ key exactly as the daemon does, so `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=<so
 supplies a key that only exists inside the service (a systemd credential, a
 container secret). Add `-o json` or `-o yaml` for machine-readable output.
 
+All three open `config.db` the way every offline command does, which applies the
+usual open-time maintenance (file permissions, session-record migration and
+retention). `status` and `encrypt --dry-run` change nothing else: no OAuth row and
+not the compaction marker.
+
 | Command | What it does |
 |---------|--------------|
-| `mcpproxy auth tokens status` | Prints the section above plus one line per server. Read-only. |
-| `mcpproxy auth tokens encrypt [--dry-run]` | Encrypts every plaintext row under the configured key in one transaction, as the startup sweep does. Idempotent. Lists rows it had to leave (not a valid record, or over 1 MiB) and undecryptable rows; exits 1 when any remain. `--dry-run` reports the count and writes nothing, not even the compaction marker. Needs a key (exit 4 without one). |
+| `mcpproxy auth tokens status` | Prints the section above plus one line per server. Changes no OAuth row. |
+| `mcpproxy auth tokens encrypt [--dry-run]` | Encrypts every plaintext row under the configured key in one transaction, as the startup sweep does. Idempotent. Lists rows it had to leave (not a valid record, or over 1 MiB) and undecryptable rows; exits 1 when any remain. `--dry-run` reports the count and changes no OAuth row, nor the compaction marker. Needs a key (exit 4 without one). |
 | `mcpproxy auth tokens decrypt --yes [--leave-undecryptable]` | Rewrites every row the configured key opens as plaintext JSON, in one transaction. Needs `--yes`. If a row cannot be opened it refuses and changes nothing, unless `--leave-undecryptable` says to rewrite the others and leave those as they are (it still exits 1). Needs the key. |
 
 `decrypt` stores the tokens readable in `config.db`. Copies of the file or of the
@@ -246,7 +251,8 @@ a new login cannot overwrite the row. Decrypt first.
 sudo systemctl stop mcpproxy
 MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=/etc/mcpproxy/oauth-key \
   mcpproxy auth tokens decrypt --yes
-# then remove oauth_token_encryption_key from the configuration,
+# then remove every key source: oauth_token_encryption_key in the configuration
+# and MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE] in the service environment,
 # and only then install the older binary or start mcpproxy again
 ```
 
@@ -277,13 +283,28 @@ sudo systemctl stop mcpproxy
 sudo -u mcpproxy env MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=/etc/mcpproxy/oauth-key \
   mcpproxy --config=/etc/mcpproxy/mcp_config.json --data-dir=/var/lib/mcpproxy \
   auth tokens status
+sudo systemctl start mcpproxy
+```
+
+The write commands take the same prefix. To turn encryption off on the packaged
+service:
+
+```bash
+sudo systemctl stop mcpproxy
 sudo -u mcpproxy env MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=/etc/mcpproxy/oauth-key \
   mcpproxy --config=/etc/mcpproxy/mcp_config.json --data-dir=/var/lib/mcpproxy \
   auth tokens decrypt --yes
-sudo -u mcpproxy mcpproxy --config=/etc/mcpproxy/mcp_config.json \
-  --data-dir=/var/lib/mcpproxy db compact --keep-backup=false
+# remove every key source before starting again: oauth_token_encryption_key in
+# /etc/mcpproxy/mcp_config.json AND any MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE]
+# / LoadCredential= line in the unit or its drop-ins (then: systemctl daemon-reload)
 sudo systemctl start mcpproxy
 ```
+
+If a key source is left in place, the next start encrypts the rows again and the
+plaintext that `decrypt` wrote stays in freed pages until the next
+`db compact --keep-backup=false`. To rotate the key instead, follow
+[Rotate the key](#turning-it-off-downgrading-and-rotating-the-key) with the same
+prefix: `encrypt` with the new key comes before the compaction.
 
 For a key that only the unit can see, `systemd-run --pipe -p LoadCredential=oauth-key:/etc/credstore/oauth-key ...`
 and `docker compose run --rm mcpproxy auth tokens ...` (with the same secret mounted)

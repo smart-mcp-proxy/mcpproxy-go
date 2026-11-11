@@ -557,7 +557,7 @@ mcpproxy auth tokens decrypt --yes [--leave-undecryptable]
 
 | Flag | Command | Description |
 |------|---------|-------------|
-| `--dry-run` | `encrypt` | Report what would be sealed; write nothing, not even the compaction marker |
+| `--dry-run` | `encrypt` | Report what would be sealed; change no OAuth row, nor the compaction marker |
 | `--yes` | `decrypt` | Confirm that the tokens are stored as plaintext |
 | `--leave-undecryptable` | `decrypt` | Rewrite the rows the key opens and leave the others as they are |
 | `--config`, `--log-level` | all | As for the other `auth` commands |

@@ -91,19 +91,21 @@ func undecryptableRefusal(info oauthUndecryptableInfo) error {
 // preflightStandaloneOAuthRow reads server's stored row through the
 // key-aware storage helper before any client, discovery or browser step. It
 // returns nil when the row is absent, plaintext or opens with the configured
-// key, and also when the database cannot be opened (the login path reports
-// that itself); a key that fails to resolve keeps its exit-4 error.
+// key. A database that cannot be opened stops the login (a running core
+// holding it is exit 3): the login client would fall back to in-memory
+// storage, where an undecryptable row is invisible. A key that fails to
+// resolve keeps its exit-4 error.
 func preflightStandaloneOAuthRow(cfg *config.Config, server *config.ServerConfig) error {
 	if cfg.DataDir == "" {
 		return nil
 	}
 	mgr, key, _, err := openStorageForCLIWithKey(cfg, zap.NewNop().Sugar(), false)
 	if err != nil {
-		var startupErr *config.StartupError
-		if errors.As(err, &startupErr) {
-			return err
+		var lockErr *storage.DatabaseLockedError
+		if errors.As(err, &lockErr) {
+			fmt.Fprintln(os.Stderr, lockedRemediation)
 		}
-		return nil
+		return err
 	}
 	defer func() { _ = mgr.Close() }()
 

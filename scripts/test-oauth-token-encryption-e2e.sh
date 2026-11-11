@@ -287,7 +287,8 @@ if grep -a -q "$TOKEN_TAIL" "$DB"; then bad "token text found in config.db after
 if grep -a -q '"access_token"' "$DB" || grep -a -q '"refresh_token"' "$DB"; then bad "plaintext token fields in config.db after compaction"; else ok "no plaintext token fields in config.db after compaction"; fi
 if [ "$(status_field '.oauth_token_storage.warnings | index("backup_file_present") != null')" = "true" ]; then ok "the leftover config.db.bak is still reported"; else bad "status does not report the leftover config.db.bak"; fi
 rm -f "$DB.bak"
-if [ "$(status_field '.oauth_token_storage.warnings | length')" = "0" ]; then ok "no warning remains once the backup is deleted"; else bad "warnings remain: $CLI_OUT"; fi
+cli auth tokens status -o json >/dev/null
+if [ "$CLI_CODE" = "0" ] && echo "$CLI_OUT" | jq -e '.oauth_token_storage.warnings | type == "array" and length == 0' >/dev/null; then ok "no warning remains once the backup is deleted"; else bad "warnings remain: $CLI_OUT"; fi
 
 step "6. restart after the round trip"
 start_proxy "MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=$KEYFILE" || bad "proxy did not start after the round trip"

@@ -108,7 +108,7 @@ func init() {
 		c.Flags().StringVarP(&authLogLevel, "log-level", "l", "warn", "Log level (trace, debug, info, warn, error)")
 		addConfigFlag(c.Flags(), &authConfigPath, "Path to MCP configuration file (default: ~/.mcpproxy/mcp_config.json)")
 	}
-	authTokensEncryptCmd.Flags().BoolVar(&authTokensDryRun, "dry-run", false, "Report what would be sealed and write nothing")
+	authTokensEncryptCmd.Flags().BoolVar(&authTokensDryRun, "dry-run", false, "Report what would be sealed; change no OAuth row")
 	authTokensDecryptCmd.Flags().BoolVar(&authTokensYes, "yes", false, "Confirm that the tokens are to be stored as plaintext")
 	authTokensDecryptCmd.Flags().BoolVar(&authTokensLeaveUndecryptable, "leave-undecryptable", false,
 		"Rewrite the rows the key opens and leave rows it cannot open as they are")
@@ -204,9 +204,13 @@ func openTokensStorage(cfg *config.Config, requireKey bool) (*storage.Manager, f
 	if err != nil {
 		return nil, nil, "", config.KeySource{}, err
 	}
-	// Resolve (and fail on) the key before looking at the file, so a bad key
-	// is exit 4 whether or not a database exists yet.
-	if _, _, kerr := config.ResolveOAuthTokenKey(cfg); kerr != nil {
+	// Resolve (and fail on) the key before looking at the file, so a bad or
+	// missing key is exit 4 whether or not a database exists yet.
+	resolved, _, kerr := config.ResolveOAuthTokenKey(cfg)
+	if kerr == nil && resolved == nil && requireKey {
+		kerr = errNoOAuthTokenKey()
+	}
+	if kerr != nil {
 		syncLog()
 		return nil, nil, "", config.KeySource{}, kerr
 	}
@@ -478,7 +482,7 @@ func statusNextSteps(rep *contracts.OAuthTokenStorageReport) []string {
 func encryptNextSteps(out tokensEncryptOutput) []string {
 	steps := []string{}
 	if out.DryRun {
-		steps = append(steps, "Dry run: nothing was written. Run without --dry-run to seal these rows.")
+		steps = append(steps, "Dry run: no row was changed. Run without --dry-run to seal these rows.")
 		return steps
 	}
 	if out.Sealed > 0 || out.CompactionAdvised {

@@ -28,6 +28,14 @@ func openStorageForCLI(cfg *config.Config, logger *zap.SugaredLogger) (*storage.
 	return mgr, err
 }
 
+// errNoOAuthTokenKey is the exit-4 error of a command that can only work
+// with a key when none is configured.
+func errNoOAuthTokenKey() error {
+	return config.NewStartupError(config.ExitCodeOAuthTokenKeyError,
+		"no OAuth token encryption key is configured: set "+config.OAuthTokenKeyField+" in the configuration, or "+
+			config.EnvOAuthTokenKey+" / "+config.EnvOAuthTokenKeyFile+" in the environment")
+}
+
 // openStorageForCLIWithKey is openStorageForCLI that also returns the
 // resolved key and its source metadata, for commands that report on the key
 // (`auth tokens`). With requireKey, no configured key is exit 4 before
@@ -39,9 +47,7 @@ func openStorageForCLIWithKey(cfg *config.Config, logger *zap.SugaredLogger, req
 		return nil, nil, config.KeySource{}, err
 	}
 	if key == nil && requireKey {
-		return nil, nil, config.KeySource{}, config.NewStartupError(config.ExitCodeOAuthTokenKeyError,
-			"no OAuth token encryption key is configured: set "+config.OAuthTokenKeyField+" in the configuration, or "+
-				config.EnvOAuthTokenKey+" / "+config.EnvOAuthTokenKeyFile+" in the environment")
+		return nil, nil, config.KeySource{}, errNoOAuthTokenKey()
 	}
 	mgr, err := storage.NewManager(cfg.DataDir, logger, storage.WithOAuthTokenKey(key))
 	if err != nil {
