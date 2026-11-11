@@ -26,8 +26,11 @@ different key, the token works again once the original key is configured and
 mcpproxy is restarted. A stored entry that was changed, damaged or copied from
 another server is not repaired by any key: restore `config.db` from a backup,
 or discard the entry with `auth logout` and sign in again. Other servers keep
-working. The Web UI may still show a sign-in button for the server; pressing
-it returns this error. This holds for a server that is currently connected too
+working. The Web UI offers the configure guidance for the server instead of a
+sign-in button, and `mcpproxy auth login --server=<name>` reads the stored row first:
+it explains this error with the reason, the key ids and the next commands, opens no
+browser and exits non-zero. `mcpproxy auth status` shows the server as "cannot be
+decrypted", never as "log in". This holds for a server that is currently connected too
 (for example one that connected anonymously and later needs a sign-in): its
 health reports `configure`, never `login`. A login started from the REST API
 (`POST /api/v1/servers/{id}/login`), the Web UI or the tray is refused with this
@@ -56,7 +59,11 @@ key available again and restart mcpproxy. The key is read only at startup.
 mcpproxy upstream list -o json
 ```
 
-shows which servers are affected and why. The table form (`mcpproxy upstream list`)
+shows which servers are affected and why, and `mcpproxy doctor` has an OAuth Token
+Storage section with the row counts, the reason for each affected server and both
+key ids (the row's and the configured one; public fingerprints, never key material).
+With mcpproxy stopped, `mcpproxy auth tokens status` prints the same from the
+database. The table form (`mcpproxy upstream list`)
 shows only the action column; the reason is in the JSON: `health.action` is
 `configure`, `health.detail` holds the reason, and `error_code` is
 `MCPX_OAUTH_TOKEN_UNDECRYPTABLE` (with the cause in `diagnostic.cause`).

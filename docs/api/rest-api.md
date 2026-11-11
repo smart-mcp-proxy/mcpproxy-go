@@ -1780,6 +1780,46 @@ Validate configuration without applying.
 
 Get system diagnostics.
 
+When an OAuth token encryption key is configured, or any stored OAuth row is encrypted, the
+response carries an `oauth_token_storage` object (Spec 123):
+
+```json
+{
+  "oauth_token_storage": {
+    "encryption_enabled": true,
+    "key_id": "0329a64b3f620111",
+    "key_source_kind": "ref_file",
+    "plaintext": 0,
+    "sealed": 2,
+    "undecryptable": 1,
+    "undecryptable_by_reason": {
+      "no_key": 0, "key_mismatch": 1, "auth_failed": 0, "unsupported_version": 0, "malformed": 0
+    },
+    "servers": [
+      { "bucket_key": "notion_0123456789abcdef", "server": "notion",
+        "reason": "key_mismatch", "row_key_id": "132087b39d6d2462" }
+    ],
+    "compaction_advised": true,
+    "warnings": ["compaction_advised"]
+  }
+}
+```
+
+| Field | Description |
+|-------|-------------|
+| `encryption_enabled` | A key is configured |
+| `key_id` | Public fingerprint of the configured key (administrators only) |
+| `key_source_kind` | `literal`, `env`, `env_file`, `ref_file`, `ref_env` or `ref_keyring`; `key_source_in_data_dir` is true when the key file lies inside the data directory (administrators only) |
+| `plaintext`, `sealed`, `undecryptable` | A partition of the stored rows: they sum to the row total, and a `key_mismatch` row is counted once, under `undecryptable` |
+| `undecryptable_by_reason` | The `undecryptable` count by reason |
+| `servers` | One entry per undecryptable row (`row_key_id` for administrators only) |
+| `compaction_advised` | A plaintext row was replaced by an encrypted one and freed pages may still hold the old plaintext; cleared by `mcpproxy db compact --keep-backup=false` |
+| `warnings` | `literal_key`, `key_file_in_data_dir`, `plaintext_rows_with_key`, `compaction_advised`, `backup_file_present` (administrators only) |
+
+The object never carries the key, key bytes, key source contents or the key reference. A caller
+scoped to some servers sees counts and entries for those servers only, and no key id or warnings.
+Each undecryptable server also adds one entry to `runtime_warnings`.
+
 #### GET /api/v1/doctor
 
 Run health checks (same as `mcpproxy doctor` CLI).
