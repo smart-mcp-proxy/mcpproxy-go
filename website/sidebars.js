@@ -172,6 +172,7 @@ const sidebars = {
       items: [
         'operations/reverse-proxy',
         'operations/deploying-for-a-team',
+        'operations/compose-stdio-sidecars',
         'operations/shutdown-behavior',
         'features/observability',
         'logging',
