@@ -227,18 +227,10 @@ func validateAdminAPIKeyFilePath(cfg *Config, configPath, filePath string) error
 	if filePath == "" {
 		return nil
 	}
-	resolved, err := filepath.EvalSymlinks(filePath)
-	if err != nil {
-		// Unusable files are handled by ResolveEnvAPIKey's read error.
-		resolved = filepath.Clean(filePath)
-	}
+	resolved := resolvePathForPolicy(filePath)
 	cfgPath := ResolveConfigPath(cfg, configPath)
 	if cfgPath != "" {
-		cfgResolved, err := filepath.EvalSymlinks(cfgPath)
-		if err != nil {
-			cfgResolved = filepath.Clean(cfgPath)
-		}
-		if pathsEqual(resolved, cfgResolved) {
+		if pathsEqual(resolved, resolvePathForPolicy(cfgPath)) {
 			return ErrAdminAPIKeyFilePath
 		}
 	}
@@ -254,6 +246,19 @@ func validateAdminAPIKeyFilePath(cfg *Config, configPath, filePath string) error
 	return nil
 }
 
+// resolvePathForPolicy canonicalizes a path for policy comparisons. On Windows
+// EvalSymlinks aligns long and 8.3 spellings so containment checks match.
+func resolvePathForPolicy(path string) string {
+	if path == "" {
+		return ""
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(resolved)
+}
+
 func pathsEqual(a, b string) bool {
 	if runtime.GOOS == "windows" {
 		return strings.EqualFold(filepath.Clean(a), filepath.Clean(b))
@@ -262,8 +267,8 @@ func pathsEqual(a, b string) bool {
 }
 
 func pathContainedInDir(dir, file string) (bool, error) {
-	dir = filepath.Clean(dir)
-	file = filepath.Clean(file)
+	dir = resolvePathForPolicy(dir)
+	file = resolvePathForPolicy(file)
 	rel, err := filepath.Rel(dir, file)
 	if err != nil {
 		return false, err

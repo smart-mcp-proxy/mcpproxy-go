@@ -141,8 +141,16 @@ func TestReadFileWithPolicy_KubernetesLayout(t *testing.T) {
 }
 
 func TestReadFileWithPolicy_TraversalInPath(t *testing.T) {
-	policy := NewWildcardFilePolicy(ScopeUpstream)
-	_, err := ReadFileWithPolicy("/run/secrets/../etc/passwd", policy)
+	root := t.TempDir()
+	allowed := filepath.Join(root, "secrets")
+	outside := filepath.Join(root, "outside")
+	require.NoError(t, os.MkdirAll(allowed, 0o700))
+	require.NoError(t, os.MkdirAll(outside, 0o700))
+	outFile := filepath.Join(outside, "passwd")
+	require.NoError(t, os.WriteFile(outFile, []byte("x\n"), 0o600))
+	traversal := filepath.Join(allowed, "..", "outside", "passwd")
+	policy := &FilePolicy{AllowedRoots: []string{allowed}, Scope: ScopeUpstream}
+	_, err := ReadFileWithPolicy(traversal, policy)
 	require.ErrorIs(t, err, ErrSecretFileDenied)
 }
 
