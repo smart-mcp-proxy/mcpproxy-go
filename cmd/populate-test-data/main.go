@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,17 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"go.uber.org/zap"
 )
+
+// loadErrorExitCode maps a config load error to the process exit status: a
+// (possibly wrapped) *config.StartupError carries its own code (for example 4
+// for an invalid OAuth token key reference), anything else is 1.
+func loadErrorExitCode(err error) int {
+	var se *config.StartupError
+	if errors.As(err, &se) {
+		return se.ExitCode
+	}
+	return 1
+}
 
 func main() {
 	// Setup logger
@@ -33,6 +45,11 @@ func main() {
 	if _, statErr := os.Stat(configFile); statErr == nil {
 		loaded, loadErr := config.LoadFromFile(configFile)
 		if loadErr != nil {
+			if code := loadErrorExitCode(loadErr); code != 1 {
+				logger.Error("Failed to load the config of the data dir", zap.Error(loadErr))
+				_ = logger.Sync()
+				os.Exit(code)
+			}
 			logger.Fatal("Failed to load the config of the data dir", zap.Error(loadErr))
 		}
 		loaded.DataDir = dataDir
