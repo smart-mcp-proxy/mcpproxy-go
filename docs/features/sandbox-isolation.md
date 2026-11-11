@@ -93,7 +93,7 @@ the data directory matter here:
 
 - `mcp_config.json` holds `api_key`; `config.db` holds the upstream OAuth
   tokens in readable form (not encrypted). On macOS and Linux the directory is created `0700` and the files `0600`
-  (creation modes; tightening existing files is best-effort; on Windows protection is the ACL inherited from the user profile directory), but the child runs as
+  (creation modes; tightening existing files is best-effort; on Windows protection is the ACL the data directory inherits from its parent), but the child runs as
   the same user, so that does not help.
 - `mcpproxy.sock` (on by default, `enable_socket: true`) is the local admin
   endpoint. Connections to it are trusted **without an API key**, because the
