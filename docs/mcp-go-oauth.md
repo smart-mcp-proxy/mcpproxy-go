@@ -284,7 +284,7 @@ func RefreshToken(client *mcp.Client) error {
 
 MCPProxy successfully handles Cloudflare's strict validation through:
 - **Global Callback Server Manager**: Coordinates OAuth callback servers across all upstream connections
-- **Dynamic Port Allocation**: Each upstream server gets one callback listener that is reused across its flows. It binds a pinned or previously stored port when there is one, otherwise an OS-assigned ephemeral port; callbacks are dispatched to the right flow by `state`
+- **Dynamic Port Allocation**: Each upstream server gets one callback listener that is reused across its flows. It tries a pinned or previously stored port first and otherwise takes an OS-assigned ephemeral port. A stored port that is unavailable falls back to an ephemeral one; a pinned port that is unavailable is an error. Callbacks are dispatched to the right flow by `state`
 - **Perfect URI Consistency**: Exact match between Dynamic Client Registration and OAuth redirect_uri parameters
 - **Lifecycle Management**: Proper startup, shutdown, and cleanup of callback servers
 
