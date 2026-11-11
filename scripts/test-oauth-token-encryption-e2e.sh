@@ -247,7 +247,9 @@ absent() {
 	*) bad "could not scan $2 for $3" ;;
 	esac
 }
-status_field() { cli auth tokens status -o json >/dev/null; echo "$CLI_OUT" | jq -r "$1"; }
+# status_field FILTER sets STATUS_VAL. Call it in this shell, never inside
+# $(...): a subshell would drop the output from ALL_CLI_OUT (the leak scan).
+status_field() { cli auth tokens status -o json; STATUS_VAL="$(jq -r "$1" <<< "$CLI_OUT")"; }
 
 step "5. offline auth tokens + db compact round trip"
 
@@ -280,23 +282,27 @@ cli auth tokens encrypt -o json
 if [ "$CLI_CODE" = "0" ] && [ "$(echo "$CLI_OUT" | jq -r '.sealed')" = "1" ]; then ok "encrypt sealed the row"; else bad "encrypt failed ($CLI_CODE): $CLI_OUT"; fi
 cli auth tokens encrypt -o json
 if [ "$CLI_CODE" = "0" ] && [ "$(echo "$CLI_OUT" | jq -r '.sealed')" = "0" ]; then ok "encrypt is idempotent"; else bad "second encrypt: ($CLI_CODE) $CLI_OUT"; fi
-if [ "$(status_field '.oauth_token_storage.compaction_advised')" = "true" ]; then ok "status says compaction is pending"; else bad "compaction not reported as pending"; fi
+status_field '.oauth_token_storage.compaction_advised'
+if [ "$STATUS_VAL" = "true" ]; then ok "status says compaction is pending"; else bad "compaction not reported as pending"; fi
 
 # e. a default compaction keeps the marker and leaves config.db.bak
 dbcli db compact
 if [ "$CLI_CODE" = "0" ] && echo "$CLI_OUT" | grep -q "config.db.bak"; then ok "default db compact warns about config.db.bak"; else bad "default compact ($CLI_CODE): $CLI_OUT"; fi
-if [ "$(status_field '.oauth_token_storage.compaction_advised')" = "true" ]; then ok "the marker survives a compaction that keeps a backup"; else bad "marker cleared by a compaction that kept a backup"; fi
+status_field '.oauth_token_storage.compaction_advised'
+if [ "$STATUS_VAL" = "true" ]; then ok "the marker survives a compaction that keeps a backup"; else bad "marker cleared by a compaction that kept a backup"; fi
 if [ -f "$DB.bak" ]; then ok "config.db.bak exists"; else bad "no config.db.bak after the default compaction"; fi
 if grep -a -q "$TOKEN_TAIL" "$DB.bak"; then ok "the retained backup still holds the old plaintext (why the marker stays)"; else echo "  NOTE: the backup no longer shows the plaintext (page reuse); not a failure"; fi
 
 # f. --keep-backup=false clears the marker; the raw file holds no token text
 dbcli db compact --keep-backup=false
 if [ "$CLI_CODE" = "0" ]; then ok "db compact --keep-backup=false succeeded"; else bad "compact --keep-backup=false ($CLI_CODE): $CLI_OUT"; fi
-if [ "$(status_field '.oauth_token_storage.compaction_advised')" = "false" ]; then ok "the marker is cleared"; else bad "marker still set after --keep-backup=false"; fi
+status_field '.oauth_token_storage.compaction_advised'
+if [ "$STATUS_VAL" = "false" ]; then ok "the marker is cleared"; else bad "marker still set after --keep-backup=false"; fi
 absent "$TOKEN_TAIL" "$DB" "token text in config.db after compaction"
 absent '"access_token"' "$DB" "plaintext access_token field in config.db after compaction"
 absent '"refresh_token"' "$DB" "plaintext refresh_token field in config.db after compaction"
-if [ "$(status_field '.oauth_token_storage.warnings | index("backup_file_present") != null')" = "true" ]; then ok "the leftover config.db.bak is still reported"; else bad "status does not report the leftover config.db.bak"; fi
+status_field '.oauth_token_storage.warnings | index("backup_file_present") != null'
+if [ "$STATUS_VAL" = "true" ]; then ok "the leftover config.db.bak is still reported"; else bad "status does not report the leftover config.db.bak"; fi
 rm -f "$DB.bak"
 cli auth tokens status -o json >/dev/null
 if [ "$CLI_CODE" = "0" ] && echo "$CLI_OUT" | jq -e '.oauth_token_storage.warnings | type == "array" and length == 0' >/dev/null; then ok "no warning remains once the backup is deleted"; else bad "warnings remain: $CLI_OUT"; fi
@@ -317,7 +323,14 @@ stop_proxy
 
 
 KEY_TEXT="$(tr -d '\n' < "$KEYFILE")"
-if grep -a -q -F -e "$KEY_TEXT" "$WORK/proxy.log" "$WORK/missing.log" 2>/dev/null; then bad "key bytes found in logs"; else ok "key bytes absent from logs"; fi
+for LOG in "$WORK/proxy.log" "$WORK/missing.log"; do
+	grep -a -q -F -e "$KEY_TEXT" "$LOG"
+	case $? in
+	1) ok "key bytes absent from $(basename "$LOG")" ;;
+	0) bad "key bytes found in $(basename "$LOG")" ;;
+	*) bad "could not scan $LOG for key bytes" ;;
+	esac
+done
 # A here-string, not a pipe: under pipefail an early match would kill the
 # producer (SIGPIPE) and read as "absent".
 grep -q -F -e "$KEY_TEXT" <<< "$ALL_CLI_OUT"
