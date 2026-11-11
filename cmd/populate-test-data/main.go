@@ -25,11 +25,25 @@ func main() {
 
 	// Create storage manager
 	dataDir := filepath.Join(homeDir, ".mcpproxy")
-	// Spec 123: honour MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE] like every
-	// other process that opens config.db.
-	oauthKey, _, err := config.ResolveOAuthTokenKey(&config.Config{DataDir: dataDir})
+	// Spec 123: honour MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE] and the
+	// oauth_token_encryption_key of the config that belongs to this data dir,
+	// like every other process that opens config.db.
+	keyCfg := &config.Config{DataDir: dataDir}
+	configFile := filepath.Join(dataDir, "mcp_config.json")
+	if _, statErr := os.Stat(configFile); statErr == nil {
+		loaded, loadErr := config.LoadFromFile(configFile)
+		if loadErr != nil {
+			logger.Fatal("Failed to load the config of the data dir", zap.Error(loadErr))
+		}
+		loaded.DataDir = dataDir
+		keyCfg = loaded
+	}
+	oauthKey, _, err := config.ResolveOAuthTokenKey(keyCfg)
 	if err != nil {
-		logger.Fatal("Failed to resolve the OAuth token key", zap.Error(err))
+		// Exit with the dedicated key-error code (4), not zap's Fatal status 1.
+		logger.Error("Failed to resolve the OAuth token key", zap.Error(err))
+		_ = logger.Sync()
+		os.Exit(config.ExitCodeOAuthTokenKeyError)
 	}
 	mgr, err := storage.NewManager(dataDir, sugar, storage.WithOAuthTokenKey(oauthKey))
 	if err != nil {
