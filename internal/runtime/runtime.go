@@ -453,6 +453,9 @@ var runtimeNewStageHook func(stage string, sm *storage.Manager)
 const (
 	runtimeStageUpstreamManager = "upstream_manager"
 	runtimeStageRefreshManager  = "refresh_manager"
+	// runtimeStageOAuthBootSweep fires just before the Spec 123 boot sweep
+	// seals plaintext oauth_tokens rows.
+	runtimeStageOAuthBootSweep = "oauth_boot_sweep"
 )
 
 // New creates a runtime helper for the given config and prepares core managers.
@@ -474,24 +477,6 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("failed to initialize storage manager: %w", err)
 	}
 
-	// Spec 123 FR-016: the boot sweep. With a key configured, every plaintext
-	// oauth_tokens row is sealed in one transaction here, directly after the
-	// database opens and before any component that reads or writes OAuth rows
-	// (the upstream manager, the refresh manager, background initialization)
-	// exists, so nothing is in flight. Sealed and undecryptable rows are left
-	// as they are. A failure leaves every row as it was (one transaction);
-	// the rows are still read, and the next write or boot seals them.
-	if oauthTokenKey != nil {
-		sealed, sweepErr := storageManager.SealPlaintextOAuthTokens(context.Background())
-		if sweepErr != nil {
-			logger.Warn("OAuth token boot sweep failed; plaintext rows are sealed at their next write or the next start",
-				zap.String("key_id", oauthTokenKey.ID()), zap.Error(sweepErr))
-		} else {
-			logger.Info("OAuth token encryption enabled",
-				zap.String("key_id", oauthTokenKey.ID()), zap.Int("sealed_plaintext_rows", sealed))
-		}
-	}
-
 	// Spec 080 (US3, FR-010): derive the previous instance's shutdown outcome
 	// and immediately re-arm the marker. This is the FIRST DB operation after
 	// storage.NewManager succeeds — before stale-session cleanup or any other
@@ -506,6 +491,28 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 			logger.Warn("Failed to arm shutdown marker; previous_shutdown will be omitted", zap.Error(err))
 		} else {
 			previousShutdown = prev
+		}
+	}
+
+	// Spec 123 FR-016: the boot sweep. With a key configured, every plaintext
+	// oauth_tokens row is sealed in one transaction here, directly after the
+	// shutdown marker is armed (so a crash or hang in the sweep still reads
+	// as a crash next time) and before any component that reads or writes
+	// OAuth rows (the upstream manager, the refresh manager, background
+	// initialization) exists, so nothing is in flight. Sealed and undecryptable rows are left
+	// as they are. A failure leaves every row as it was (one transaction);
+	// the rows are still read, and the next write or boot seals them.
+	if oauthTokenKey != nil {
+		if hook := runtimeNewStageHook; hook != nil {
+			hook(runtimeStageOAuthBootSweep, storageManager)
+		}
+		sealed, sweepErr := storageManager.SealPlaintextOAuthTokens(context.Background())
+		if sweepErr != nil {
+			logger.Warn("OAuth token boot sweep failed; plaintext rows are sealed at their next write or the next start",
+				zap.String("key_id", oauthTokenKey.ID()), zap.Error(sweepErr))
+		} else {
+			logger.Info("OAuth token encryption enabled",
+				zap.String("key_id", oauthTokenKey.ID()), zap.Int("sealed_plaintext_rows", sealed))
 		}
 	}
 
