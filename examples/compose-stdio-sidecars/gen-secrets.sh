@@ -19,8 +19,16 @@ for name in mcpproxy_api_key sidecar_api_key; do
     exit 1
   fi
   if [ ! -s "secrets/$name" ]; then
-    # 256 random bits as hex.
-    printf '%s' "$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')" > "secrets/$name"
+    # 256 random bits as hex. od's status is checked on its own (a pipeline
+    # reports only its last command) and the result must be exactly 64 hex
+    # characters, so a failed or short read never becomes a weak key.
+    raw="$(od -An -N32 -tx1 /dev/urandom)" || { echo "could not read /dev/urandom" >&2; exit 1; }
+    key="$(printf '%s' "$raw" | tr -d ' \n')"
+    case "$key" in
+      *[!0-9a-f]*) echo "unexpected output from od" >&2; exit 1 ;;
+    esac
+    [ "${#key}" -eq 64 ] || { echo "short read from /dev/urandom" >&2; exit 1; }
+    printf '%s' "$key" > "secrets/$name"
   fi
   # The sidecar runs as uid 1000 and mcpproxy as root, and both must read the
   # file through the bind mount. The directory (0700) is what keeps other host
