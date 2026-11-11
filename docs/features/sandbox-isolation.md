@@ -125,7 +125,8 @@ What to do:
   setting that closes the token-minting path in both `none` and `sandbox`; the
   tray uses the socket, and the CLI also prefers it but falls back to
   authenticated TCP when an API key is available, so a headless service
-  keeps working.
+  keeps working. The fallback speaks plain HTTP: with `tls.enabled` it does
+  not connect, and CLI commands that need the daemon fail without the socket.
 - **Servers you do not trust**: use `docker` isolation
   (`docker_isolation.mode: "docker"`, or per-server `isolation.mode`). The
   container does not mount the data directory, so neither the files nor the
