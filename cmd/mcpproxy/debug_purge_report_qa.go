@@ -38,7 +38,7 @@ func registerQADebugCommands(root *cobra.Command) {
 			if dataDir == "" {
 				return fmt.Errorf("--data-dir is required")
 			}
-			mgr, err := storage.NewManager(dataDir, zap.NewNop().Sugar())
+			mgr, err := storage.NewManager(dataDir, zap.NewNop().Sugar(), storage.WithOAuthTokenKey(nil))
 			if err != nil {
 				return fmt.Errorf("open %s/config.db (is the daemon still running?): %w", dataDir, err)
 			}
@@ -78,7 +78,7 @@ func registerQADebugCommands(root *cobra.Command) {
 			if seedDir == "" {
 				return fmt.Errorf("--data-dir is required")
 			}
-			mgr, err := storage.NewManager(seedDir, zap.NewNop().Sugar())
+			mgr, err := storage.NewManager(seedDir, zap.NewNop().Sugar(), storage.WithOAuthTokenKey(nil))
 			if err != nil {
 				return fmt.Errorf("open %s/config.db (is the daemon still running?): %w", seedDir, err)
 			}

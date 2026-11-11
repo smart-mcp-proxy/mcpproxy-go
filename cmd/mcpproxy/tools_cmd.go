@@ -1095,7 +1095,7 @@ func runToolsListStandalone(ctx context.Context, serverName string, globalConfig
 	// Create storage (optional, for OAuth persistence)
 	var db *storage.BoltDB
 	if globalConfig.DataDir != "" {
-		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar())
+		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(nil))
 		if err != nil {
 			logger.Warn("Failed to create storage, OAuth will use in-memory")
 		} else {

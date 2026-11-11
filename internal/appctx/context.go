@@ -44,7 +44,7 @@ func NewApplicationContext(cfg *config.Config, logConfig *config.LogConfig, logg
 	}
 
 	// Initialize storage manager
-	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar())
+	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(nil))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create storage manager: %w", err)
 	}

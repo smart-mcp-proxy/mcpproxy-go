@@ -64,7 +64,7 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 	// Create storage for persistent OAuth tokens (CLI should also persist tokens)
 	var db *storage.BoltDB
 	if globalConfig.DataDir != "" {
-		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar())
+		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(nil))
 		if err != nil {
 			logger.Warn("Failed to create storage for CLI OAuth tokens, falling back to in-memory",
 				zap.String("data_dir", globalConfig.DataDir),

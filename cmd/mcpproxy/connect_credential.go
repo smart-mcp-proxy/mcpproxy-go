@@ -222,7 +222,7 @@ func (o *offlineConnectBackend) close()          { _ = o.sm.Close() }
 func (o *offlineConnectBackend) viaDaemon() bool { return false }
 
 func newOfflineConnectBackend(cfg *config.Config) (*offlineConnectBackend, error) {
-	sm, err := storage.NewManager(cfg.DataDir, zap.NewNop().Sugar())
+	sm, err := storage.NewManager(cfg.DataDir, zap.NewNop().Sugar(), storage.WithOAuthTokenKey(nil))
 	if err != nil {
 		var locked *storage.DatabaseLockedError
 		if errors.As(err, &locked) {

@@ -494,7 +494,7 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 	}
 
 	// Create storage manager
-	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar())
+	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(nil))
 	if err != nil {
 		return fmt.Errorf("failed to create storage manager: %w", err)
 	}

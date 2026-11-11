@@ -25,7 +25,7 @@ func main() {
 
 	// Create storage manager
 	dataDir := filepath.Join(homeDir, ".mcpproxy")
-	mgr, err := storage.NewManager(dataDir, sugar)
+	mgr, err := storage.NewManager(dataDir, sugar, storage.WithOAuthTokenKey(nil))
 	if err != nil {
 		logger.Fatal("Failed to create storage manager", zap.Error(err))
 	}
@@ -69,12 +69,12 @@ func main() {
 	// Create parent code_execution call
 	parentCallID := fmt.Sprintf("%d-code_execution", time.Now().UnixNano())
 	parentCall := &storage.ToolCallRecord{
-		ID:               parentCallID,
-		ServerID:         mcpproxyServerID,
-		ServerName:       "mcpproxy",
-		ToolName:         "code_execution",
+		ID:         parentCallID,
+		ServerID:   mcpproxyServerID,
+		ServerName: "mcpproxy",
+		ToolName:   "code_execution",
 		Arguments: map[string]interface{}{
-			"code": "(function() {\n  var echo1 = call_tool('everything-server', 'echo', {message: 'Testing session tracking!'});\n  var echo2 = call_tool('everything-server', 'echo', {message: 'Nested call #2'});\n  var add = call_tool('everything-server', 'add', {a: 100, b: 200});\n  return {echo1: echo1, echo2: echo2, add: add};\n})()",
+			"code":  "(function() {\n  var echo1 = call_tool('everything-server', 'echo', {message: 'Testing session tracking!'});\n  var echo2 = call_tool('everything-server', 'echo', {message: 'Nested call #2'});\n  var add = call_tool('everything-server', 'add', {a: 100, b: 200});\n  return {echo1: echo1, echo2: echo2, add: add};\n})()",
 			"input": map[string]interface{}{},
 		},
 		Response: map[string]interface{}{
@@ -102,10 +102,10 @@ func main() {
 
 	// Create nested echo call #1
 	nestedCall1 := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-echo", time.Now().UnixNano()),
-		ServerID:         everythingServerID,
-		ServerName:       "everything-server",
-		ToolName:         "echo",
+		ID:         fmt.Sprintf("%d-echo", time.Now().UnixNano()),
+		ServerID:   everythingServerID,
+		ServerName: "everything-server",
+		ToolName:   "echo",
 		Arguments: map[string]interface{}{
 			"message": "Testing session tracking!",
 		},
@@ -129,10 +129,10 @@ func main() {
 	// Create nested echo call #2
 	time.Sleep(10 * time.Millisecond)
 	nestedCall2 := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-echo", time.Now().UnixNano()),
-		ServerID:         everythingServerID,
-		ServerName:       "everything-server",
-		ToolName:         "echo",
+		ID:         fmt.Sprintf("%d-echo", time.Now().UnixNano()),
+		ServerID:   everythingServerID,
+		ServerName: "everything-server",
+		ToolName:   "echo",
 		Arguments: map[string]interface{}{
 			"message": "Nested call #2",
 		},
@@ -156,10 +156,10 @@ func main() {
 	// Create nested add call
 	time.Sleep(10 * time.Millisecond)
 	nestedCall3 := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-add", time.Now().UnixNano()),
-		ServerID:         everythingServerID,
-		ServerName:       "everything-server",
-		ToolName:         "add",
+		ID:         fmt.Sprintf("%d-add", time.Now().UnixNano()),
+		ServerID:   everythingServerID,
+		ServerName: "everything-server",
+		ToolName:   "add",
 		Arguments: map[string]interface{}{
 			"a": 100,
 			"b": 200,
@@ -184,10 +184,10 @@ func main() {
 	// Create a direct tool call (not from code_execution)
 	time.Sleep(10 * time.Millisecond)
 	directCall := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-longRunningOperation", time.Now().UnixNano()),
-		ServerID:         everythingServerID,
-		ServerName:       "everything-server",
-		ToolName:         "longRunningOperation",
+		ID:         fmt.Sprintf("%d-longRunningOperation", time.Now().UnixNano()),
+		ServerID:   everythingServerID,
+		ServerName: "everything-server",
+		ToolName:   "longRunningOperation",
 		Arguments: map[string]interface{}{
 			"duration": 2000,
 			"steps":    5,

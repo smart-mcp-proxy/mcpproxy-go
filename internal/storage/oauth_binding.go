@@ -8,6 +8,7 @@ import (
 	"go.etcd.io/bbolt"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/commitview"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tokenseal"
 )
 
 // Spec 116 PR2b (#1607): OAuth state bound to the server incarnation.
@@ -48,17 +49,154 @@ import (
 // sequence (review R7.3). EVERY write to the oauth_tokens bucket goes through
 // it; the sequence is persisted and never reused, so a deleted and re-created
 // record never repeats an older revision.
-func putOAuthRecord(bucket *bbolt.Bucket, key string, rec *OAuthTokenRecord) error {
+//
+// Spec 123: the value is encoded by encodeOAuthRecord under k (callers pass
+// BoltDB.oauthKey; nil writes plain JSON). Sealing runs inside the caller's
+// transaction, so the transaction shape of every writer is unchanged. When a
+// sealed value replaces a plaintext one, the compaction-advised marker is set
+// in the same transaction (FR-016): the old plaintext page is now free but
+// not zeroed.
+func putOAuthRecord(bucket *bbolt.Bucket, k *tokenseal.Key, key string, rec *OAuthTokenRecord) error {
+	if hook := putOAuthRecordHook; hook != nil {
+		if err := hook(key); err != nil {
+			return err
+		}
+	}
+	replacesPlaintext := false
+	if k != nil {
+		if prev := bucket.Get([]byte(key)); prev != nil {
+			shape, _ := tokenseal.Classify(prev)
+			replacesPlaintext = shape == tokenseal.ShapePlaintext
+		}
+	}
 	seq, err := bucket.NextSequence()
 	if err != nil {
 		return err
 	}
 	rec.Revision = seq
-	data, err := rec.MarshalBinary()
+	data, err := encodeOAuthRecord(k, key, rec)
 	if err != nil {
 		return err
 	}
+	if replacesPlaintext {
+		if err := markOAuthCompactAdvisedTx(bucket.Tx()); err != nil {
+			return err
+		}
+	}
 	return bucket.Put([]byte(key), data)
+}
+
+// putOAuthRecordHook, when set (tests only), runs at the start of every
+// putOAuthRecord; an error aborts that write and so its transaction. It is
+// the fault-injection seam for the sweep's atomicity test.
+var putOAuthRecordHook func(key string) error
+
+// markOAuthCompactAdvisedTx sets meta/OAuthSealCompactAdvisedKey unless it is
+// already set (the first sealing write's time is kept).
+func markOAuthCompactAdvisedTx(tx *bbolt.Tx) error {
+	meta, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
+	if err != nil {
+		return err
+	}
+	if meta.Get([]byte(OAuthSealCompactAdvisedKey)) != nil {
+		return nil
+	}
+	return meta.Put([]byte(OAuthSealCompactAdvisedKey), []byte(time.Now().UTC().Format(time.RFC3339)))
+}
+
+// ErrOAuthTokenUndecryptableSentinel matches every *ErrOAuthTokenUndecryptable
+// with errors.Is.
+var ErrOAuthTokenUndecryptableSentinel = stderrors.New("stored OAuth token cannot be decrypted")
+
+// ErrOAuthTokenUndecryptable is returned for an oauth_tokens row the
+// configured key cannot turn into a record (Spec 123 FR-012): sealed under no
+// key or another key, an envelope that fails authentication (edited, or moved
+// under another bucket key), an unsupported envelope version, or a value
+// that is neither an envelope nor a JSON record. It is distinct from "not
+// found", and every writer that starts from the stored record refuses such a
+// row (FR-013). It carries key ids only, never key material or row bytes.
+type ErrOAuthTokenUndecryptable struct {
+	Key    string           // bucket key of the row
+	Reason tokenseal.Reason // no_key, key_mismatch, auth_failed, unsupported_version, malformed
+	RowKID string           // key id in the row's envelope prefix ("" if none)
+	KeyKID string           // key id of the configured key ("" if none)
+}
+
+func (e *ErrOAuthTokenUndecryptable) Error() string {
+	msg := "stored OAuth token " + e.Key + " cannot be decrypted: " + string(e.Reason)
+	if e.RowKID != "" {
+		msg += " (row key id " + e.RowKID
+		if e.KeyKID != "" {
+			msg += ", configured key id " + e.KeyKID
+		}
+		msg += ")"
+	} else if e.KeyKID != "" {
+		msg += " (configured key id " + e.KeyKID + ")"
+	}
+	return msg
+}
+
+// Is makes errors.Is(err, ErrOAuthTokenUndecryptableSentinel) hold.
+func (e *ErrOAuthTokenUndecryptable) Is(target error) bool {
+	return target == ErrOAuthTokenUndecryptableSentinel
+}
+
+// encodeOAuthRecord is the only encoder of oauth_tokens values (FR-010,
+// FR-011): plain JSON without a key, an enc:v1 envelope bound to key with one.
+func encodeOAuthRecord(k *tokenseal.Key, key string, rec *OAuthTokenRecord) ([]byte, error) {
+	data, err := rec.MarshalBinary()
+	if err != nil || k == nil {
+		return data, err
+	}
+	return k.Seal(OAuthTokenBucket, key, data)
+}
+
+// decodeOAuthRecord is the only decoder of oauth_tokens values (FR-010): a
+// plaintext row is read as today, a sealed row is opened with k. Any failure
+// is an *ErrOAuthTokenUndecryptable.
+func decodeOAuthRecord(k *tokenseal.Key, key string, data []byte) (*OAuthTokenRecord, error) {
+	shape, rowKID := tokenseal.Classify(data)
+	plain := data
+	switch shape {
+	case tokenseal.ShapePlaintext:
+	case tokenseal.ShapeSealedV1, tokenseal.ShapeUnsupported:
+		opened, err := k.Open(OAuthTokenBucket, key, data)
+		if err != nil {
+			var oe *tokenseal.OpenError
+			if stderrors.As(err, &oe) {
+				return nil, &ErrOAuthTokenUndecryptable{Key: key, Reason: oe.Reason, RowKID: oe.RowKID, KeyKID: oe.KeyKID}
+			}
+			return nil, &ErrOAuthTokenUndecryptable{Key: key, Reason: tokenseal.ReasonMalformed, RowKID: rowKID, KeyKID: k.ID()}
+		}
+		plain = opened
+	default:
+		return nil, &ErrOAuthTokenUndecryptable{Key: key, Reason: tokenseal.ReasonMalformed, KeyKID: k.ID()}
+	}
+	rec := &OAuthTokenRecord{}
+	if err := rec.UnmarshalBinary(plain); err != nil {
+		return nil, &ErrOAuthTokenUndecryptable{Key: key, Reason: tokenseal.ReasonMalformed, RowKID: rowKID, KeyKID: k.ID()}
+	}
+	return rec, nil
+}
+
+// oauthRawRow is one oauth_tokens key/value pair copied out of the bucket.
+type oauthRawRow struct {
+	key   string
+	value []byte
+}
+
+// collectOAuthRows copies every key/value pair of the oauth_tokens bucket.
+// It is the one listing walk: callers decode or rewrite rows only after it
+// returns, so no caller mutates the bucket while a cursor is on it (bbolt
+// cursors skip keys when the bucket changes during iteration; see
+// clearOAuthStateTx).
+func collectOAuthRows(bucket *bbolt.Bucket) ([]oauthRawRow, error) {
+	var rows []oauthRawRow
+	err := bucket.ForEach(func(k, v []byte) error {
+		rows = append(rows, oauthRawRow{key: string(k), value: append([]byte(nil), v...)})
+		return nil
+	})
+	return rows, err
 }
 
 // oauthRowBindingTx returns the binding stored on server's upstreams row.
@@ -128,17 +266,14 @@ func OAuthRecordVisible(rec *OAuthTokenRecord, b commitview.CredentialBinding) b
 	return b.IsZero() || rec.OAuthEpoch == b.OAuthEpoch
 }
 
-// getOAuthRecordTx reads the record at key; nil when absent.
-func getOAuthRecordTx(bucket *bbolt.Bucket, key string) (*OAuthTokenRecord, error) {
+// getOAuthRecordTx reads the record at key; nil when absent. A row k cannot
+// decode is an *ErrOAuthTokenUndecryptable, never "absent".
+func getOAuthRecordTx(bucket *bbolt.Bucket, k *tokenseal.Key, key string) (*OAuthTokenRecord, error) {
 	data := bucket.Get([]byte(key))
 	if data == nil {
 		return nil, nil
 	}
-	rec := &OAuthTokenRecord{}
-	if err := rec.UnmarshalBinary(data); err != nil {
-		return nil, err
-	}
-	return rec, nil
+	return decodeOAuthRecord(k, key, data)
 }
 
 // GetOAuthTokenBound is GetOAuthToken for a reader bound to binding: a
@@ -147,7 +282,7 @@ func getOAuthRecordTx(bucket *bbolt.Bucket, key string) (*OAuthTokenRecord, erro
 func (b *BoltDB) GetOAuthTokenBound(serverKey string, binding commitview.CredentialBinding) (*OAuthTokenRecord, error) {
 	var record *OAuthTokenRecord
 	err := b.db.View(func(tx *bbolt.Tx) error {
-		rec, err := getOAuthRecordTx(tx.Bucket([]byte(OAuthTokenBucket)), serverKey)
+		rec, err := getOAuthRecordTx(tx.Bucket([]byte(OAuthTokenBucket)), b.oauthKey, serverKey)
 		if err != nil {
 			return err
 		}
@@ -165,7 +300,7 @@ func (b *BoltDB) GetOAuthTokenBound(serverKey string, binding commitview.Credent
 // when none), which a later ClearOAuthClientIfBound passes back.
 func (b *BoltDB) GetOAuthClientCredentialsBound(serverKey string, binding commitview.CredentialBinding) (clientID, clientSecret string, callbackPort int, redirectURI string, revision uint64, err error) {
 	err = b.db.View(func(tx *bbolt.Tx) error {
-		rec, err := getOAuthRecordTx(tx.Bucket([]byte(OAuthTokenBucket)), serverKey)
+		rec, err := getOAuthRecordTx(tx.Bucket([]byte(OAuthTokenBucket)), b.oauthKey, serverKey)
 		if err != nil || !OAuthRecordVisible(rec, binding) {
 			return err
 		}
@@ -193,7 +328,7 @@ func (b *BoltDB) UpdateOAuthTokenIfBound(serverKey, server string, binding commi
 		}
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
 		now := time.Now()
-		record, err := getOAuthRecordTx(bucket, serverKey)
+		record, err := getOAuthRecordTx(bucket, b.oauthKey, serverKey)
 		if err != nil {
 			return err
 		}
@@ -210,7 +345,7 @@ func (b *BoltDB) UpdateOAuthTokenIfBound(serverKey, server string, binding commi
 		record.Updated = now
 		record.OAuthEpoch = epoch
 		written = true
-		return putOAuthRecord(bucket, serverKey, record)
+		return putOAuthRecord(bucket, b.oauthKey, serverKey, record)
 	})
 	if stderrors.Is(err, ErrSkipOAuthTokenUpdate) {
 		return false, nil
@@ -248,7 +383,7 @@ func (b *BoltDB) SaveOAuthClientIfBound(serverKey, server string, binding commit
 		}
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
 		now := time.Now()
-		record, err := getOAuthRecordTx(bucket, serverKey)
+		record, err := getOAuthRecordTx(bucket, b.oauthKey, serverKey)
 		if err != nil {
 			return err
 		}
@@ -273,7 +408,7 @@ func (b *BoltDB) SaveOAuthClientIfBound(serverKey, server string, binding commit
 		record.Updated = now
 		record.OAuthEpoch = epoch
 		saved = true
-		return putOAuthRecord(bucket, serverKey, record)
+		return putOAuthRecord(bucket, b.oauthKey, serverKey, record)
 	})
 	return saved && err == nil, err
 }
@@ -283,12 +418,12 @@ func (b *BoltDB) SaveOAuthClientIfBound(serverKey, server string, binding commit
 // record exists, was written under the binding's epoch, and still has the
 // revision observedRev the caller based its decision on. It returns the
 // record when all hold, nil otherwise.
-func boundClearTx(tx *bbolt.Tx, serverKey, server string, binding commitview.CredentialBinding, observedRev uint64) (*OAuthTokenRecord, error) {
+func boundClearTx(tx *bbolt.Tx, k *tokenseal.Key, serverKey, server string, binding commitview.CredentialBinding, observedRev uint64) (*OAuthTokenRecord, error) {
 	allowed, _, err := oauthWriteAllowedTx(tx, server, binding)
 	if err != nil || !allowed {
 		return nil, err
 	}
-	rec, err := getOAuthRecordTx(tx.Bucket([]byte(OAuthTokenBucket)), serverKey)
+	rec, err := getOAuthRecordTx(tx.Bucket([]byte(OAuthTokenBucket)), k, serverKey)
 	if err != nil || rec == nil {
 		return nil, err
 	}
@@ -305,7 +440,7 @@ func boundClearTx(tx *bbolt.Tx, serverKey, server string, binding commitview.Cre
 func (b *BoltDB) DeleteOAuthTokenIfBound(serverKey, server string, binding commitview.CredentialBinding, observedRev uint64) (bool, error) {
 	deleted := false
 	err := b.db.Update(func(tx *bbolt.Tx) error {
-		rec, err := boundClearTx(tx, serverKey, server, binding, observedRev)
+		rec, err := boundClearTx(tx, b.oauthKey, serverKey, server, binding, observedRev)
 		if err != nil || rec == nil {
 			return err
 		}
@@ -325,7 +460,7 @@ func (b *BoltDB) DeleteOAuthTokenIfBound(serverKey, server string, binding commi
 func (b *BoltDB) ClearOAuthClientIfBound(serverKey, server string, binding commitview.CredentialBinding, observedRev uint64) (bool, error) {
 	cleared := false
 	err := b.db.Update(func(tx *bbolt.Tx) error {
-		rec, err := boundClearTx(tx, serverKey, server, binding, observedRev)
+		rec, err := boundClearTx(tx, b.oauthKey, serverKey, server, binding, observedRev)
 		if err != nil || rec == nil {
 			return err
 		}
@@ -335,7 +470,7 @@ func (b *BoltDB) ClearOAuthClientIfBound(serverKey, server string, binding commi
 		rec.RedirectURI = ""
 		rec.Updated = time.Now()
 		cleared = true
-		return putOAuthRecord(tx.Bucket([]byte(OAuthTokenBucket)), serverKey, rec)
+		return putOAuthRecord(tx.Bucket([]byte(OAuthTokenBucket)), b.oauthKey, serverKey, rec)
 	})
 	return cleared && err == nil, err
 }
@@ -360,7 +495,7 @@ func (b *BoltDB) ClearOAuthClientIfBoundAndClientID(serverKey, server string, bi
 			return err
 		}
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		rec, err := getOAuthRecordTx(bucket, serverKey)
+		rec, err := getOAuthRecordTx(bucket, b.oauthKey, serverKey)
 		if err != nil || rec == nil || !OAuthRecordVisible(rec, binding) || rec.ClientID != expectedClientID {
 			return err
 		}
@@ -370,7 +505,7 @@ func (b *BoltDB) ClearOAuthClientIfBoundAndClientID(serverKey, server string, bi
 		rec.RedirectURI = ""
 		rec.Updated = time.Now()
 		cleared = true
-		return putOAuthRecord(bucket, serverKey, rec)
+		return putOAuthRecord(bucket, b.oauthKey, serverKey, rec)
 	})
 	return cleared && err == nil, err
 }

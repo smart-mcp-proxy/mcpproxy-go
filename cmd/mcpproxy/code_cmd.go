@@ -302,7 +302,7 @@ func runCodeExecStandalone(globalConfig *config.Config, code string, input map[s
 	defer cancel()
 
 	// Create storage manager
-	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar())
+	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(nil))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error creating storage manager: %v\n", err)
 		return exitError(2)

@@ -443,7 +443,7 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
-	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar())
+	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(nil))
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage manager: %w", err)
 	}
