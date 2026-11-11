@@ -107,6 +107,10 @@ func TestStoredAccessToken_UndecryptableRow(t *testing.T) {
 // Each one was reviewed to distinguish the undecryptable error from "no
 // token"; a new caller must be reviewed and added here.
 var oauthReadPathInventory = []string{
+	// PR-3 login pre-flight: reads the row before any client or browser step
+	// and turns the typed error into the MCPX_OAUTH_TOKEN_UNDECRYPTABLE
+	// explanation and a non-zero exit (never "no token").
+	"cmd/mcpproxy/auth_login_preflight.go:preflightStandaloneOAuthRow",
 	"internal/oauth/config.go:GetPersistedRefreshToken",
 	"internal/oauth/config.go:HasPersistedToken",
 	"internal/oauth/config.go:HasPersistedTokenBound",

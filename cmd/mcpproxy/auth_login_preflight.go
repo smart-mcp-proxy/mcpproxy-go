@@ -32,6 +32,13 @@ import (
 // handler; this is the message on top. It never prints key material: key ids
 // are public fingerprints.
 
+// reasonText is the words for a tokenseal reason code ("key_mismatch" ->
+// "sealed with a different key"), phrased as the health detail phrases it.
+func reasonText(reason string) string {
+	detail := oauth.TokenUndecryptableDetail(&storage.ErrOAuthTokenUndecryptable{Reason: tokenseal.Reason(reason)})
+	return strings.TrimPrefix(detail, "stored OAuth token cannot be decrypted: ")
+}
+
 // oauthUndecryptableInfo is what the explanation shows.
 type oauthUndecryptableInfo struct {
 	Server   string
@@ -50,7 +57,7 @@ func printOAuthTokenUndecryptable(w io.Writer, info oauthUndecryptableInfo) {
 	if reason == "" {
 		fmt.Fprintln(w, "  Reason:             unknown")
 	} else {
-		fmt.Fprintf(w, "  Reason:             %s (%s)\n", reason, oauth.UndecryptableReasonText(reason))
+		fmt.Fprintf(w, "  Reason:             %s (%s)\n", reason, reasonText(reason))
 	}
 	if info.RowKeyID != "" {
 		fmt.Fprintf(w, "  Row key id:         %s\n", info.RowKeyID)
@@ -157,7 +164,7 @@ func oauthRefusalFromAPIError(err error, serverName string) error {
 		tokenseal.ReasonNoKey, tokenseal.ReasonKeyMismatch, tokenseal.ReasonAuthFailed,
 		tokenseal.ReasonUnsupportedVersion, tokenseal.ReasonMalformed,
 	} {
-		if strings.Contains(err.Error(), oauth.UndecryptableReasonText(string(r))) {
+		if strings.Contains(err.Error(), reasonText(string(r))) {
 			info.Reason = string(r)
 			break
 		}
