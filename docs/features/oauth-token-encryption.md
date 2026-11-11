@@ -146,10 +146,10 @@ are encrypted from the first write.
 | The key reference cannot be read (missing mount, unreadable file, empty value, not 32 bytes) | mcpproxy does not start, and CLI commands stop, with exit code 4 and a message naming the field or variable. `config.db` is not opened and not changed |
 | The key is removed from the configuration of a database that has encrypted rows | mcpproxy starts. The affected servers show `unhealthy` with [`MCPX_OAUTH_TOKEN_UNDECRYPTABLE`](../errors/MCPX_OAUTH_TOKEN_UNDECRYPTABLE.md). The rows are kept byte for byte and no sign-in is offered |
 | A different key is configured | Same as above; the message gives the key ids (a short fingerprint, never key material) |
-| An encrypted entry was changed or copied from another server | It fails authentication and is refused. Restoring the key does not repair it: use `mcpproxy auth logout <server>` and sign in again, or restore from a backup |
+| An encrypted entry was changed or copied from another server | It fails authentication and is refused. Restoring the key does not repair it: use `mcpproxy auth logout --server=<server>` and sign in again, or restore from a backup |
 
 Restoring the original key and restarting makes every server authenticated again,
-with no browser. If the key is lost for good, run `mcpproxy auth logout <server>`
+with no browser. If the key is lost for good, run `mcpproxy auth logout --server=<server>`
 for each affected server and sign in again.
 
 Rows that cannot be read are never overwritten by a login and are never removed by
