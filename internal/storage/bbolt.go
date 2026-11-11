@@ -1322,57 +1322,8 @@ func classifyOAuthRow(k *tokenseal.Key, row oauthRawRow) OAuthTokenRow {
 // marker in the same transaction. Without a key it does nothing. Any write
 // error rolls the whole sweep back.
 func (b *BoltDB) SealPlaintextOAuthTokens(ctx context.Context) (int, error) {
-	if b.oauthKey == nil {
-		return 0, nil
-	}
-	sealed := 0
-	err := b.db.Update(func(tx *bbolt.Tx) error {
-		sealed = 0
-		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		rows, err := collectOAuthRows(bucket)
-		if err != nil {
-			return err
-		}
-		for _, row := range rows {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if shape, _ := tokenseal.Classify(row.value); shape != tokenseal.ShapePlaintext {
-				continue
-			}
-			record, err := decodeOAuthRecord(b.oauthKey, row.key, row.value)
-			if err != nil {
-				// Plaintext that is not a record: undecryptable, untouched.
-				// Name the key and the reason, never the value.
-				if b.logger != nil {
-					b.logger.Warnw("OAuth token row is not a valid record; left as plaintext",
-						"server_key", row.key, "reason", "malformed")
-				}
-				continue
-			}
-			// Keep the stored JSON's unknown fields (a row a newer binary
-			// wrote): sealing must not drop them (Spec 123 review).
-			if err := putOAuthRecordKeeping(bucket, b.oauthKey, row.key, record, row.value); err != nil {
-				if stderrors.Is(err, tokenseal.ErrPlaintextTooLarge) {
-					// A per-row reason: leave this row as it is and keep
-					// sealing the others. Only transaction-level failures
-					// fail the sweep (and with it startup).
-					if b.logger != nil {
-						b.logger.Warnw("OAuth token row is too large to seal; left as plaintext",
-							"server_key", row.key, "reason", "too_large", "limit_bytes", tokenseal.MaxPlaintextLen)
-					}
-					continue
-				}
-				return fmt.Errorf("seal oauth token %s: %w", row.key, err)
-			}
-			sealed++
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-	return sealed, nil
+	rep, err := b.SealOAuthTokens(ctx, false)
+	return rep.Sealed, err
 }
 
 // Onboarding wizard operations (Spec 046)

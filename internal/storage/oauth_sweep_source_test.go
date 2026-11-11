@@ -44,11 +44,20 @@ func sweepCallName(c *ast.CallExpr) string {
 	return ""
 }
 
+// The sweep body lives in SealOAuthTokens (oauth_tools.go, which
+// SealPlaintextOAuthTokens calls); the PR-3 decrypt rewrite follows the same
+// rule, so both are pinned.
 func TestOAuthSweep_CollectsBeforeWriting(t *testing.T) {
-	funcs := parseStorageFuncs(t, "bbolt.go", "oauth_binding.go")
-	sweep := funcs["SealPlaintextOAuthTokens"]
+	funcs := parseStorageFuncs(t, "bbolt.go", "oauth_binding.go", "oauth_tools.go")
+	for _, name := range []string{"SealOAuthTokens", "DecryptOAuthTokens"} {
+		t.Run(name, func(t *testing.T) { checkCollectBeforeWriting(t, funcs, name) })
+	}
+}
+
+func checkCollectBeforeWriting(t *testing.T, funcs map[string]*ast.FuncDecl, fname string) {
+	sweep := funcs[fname]
 	if sweep == nil {
-		t.Fatal("SealPlaintextOAuthTokens not found in bbolt.go")
+		t.Fatalf("%s not found", fname)
 	}
 	collect := funcs["collectOAuthRows"]
 	if collect == nil {
@@ -70,7 +79,7 @@ func TestOAuthSweep_CollectsBeforeWriting(t *testing.T) {
 		return true
 	})
 	if len(collected) == 0 {
-		t.Fatal("SealPlaintextOAuthTokens must collect the rows with collectOAuthRows before writing")
+		t.Fatalf("%s must collect the rows with collectOAuthRows before writing", fname)
 	}
 
 	writes := 0
@@ -87,7 +96,7 @@ func TestOAuthSweep_CollectsBeforeWriting(t *testing.T) {
 		}
 		switch name := sweepCallName(c); name {
 		case "ForEach", "Cursor", "First", "Next", "Seek", "Last", "Prev":
-			t.Errorf("SealPlaintextOAuthTokens walks the bucket itself (.%s); collect with collectOAuthRows and write after", name)
+			t.Errorf("%s walks the bucket itself (.%s); collect with collectOAuthRows and write after", fname, name)
 		case "putOAuthRecord", "putOAuthRecordKeeping", "Put", "Delete":
 			writes++
 			// Walk outwards: the nearest enclosing loop must be a range over
@@ -109,13 +118,13 @@ func TestOAuthSweep_CollectsBeforeWriting(t *testing.T) {
 				}
 			}
 			if !inCollectedRange {
-				t.Errorf("SealPlaintextOAuthTokens writes (%s) outside a range over the collected rows", name)
+				t.Errorf("%s writes (%s) outside a range over the collected rows", fname, name)
 			}
 		}
 		return true
 	})
 	if writes == 0 {
-		t.Fatal("SealPlaintextOAuthTokens has no write; the test premise is stale")
+		t.Fatalf("%s has no write; the test premise is stale", fname)
 	}
 
 	ast.Inspect(collect.Body, func(n ast.Node) bool {
