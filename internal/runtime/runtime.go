@@ -2825,9 +2825,6 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
 	snapGens := committed.gens()
 	for _, serverStatus := range snapshot.Servers {
-		// Read once per server: concurrent tool calls set this flag, and the
-		// stored-row probe and the health input below must see the same value.
-		callTimeOAuthRequired := r.callTimeOAuthRequired(serverStatus.Name)
 		// Spec 116 PR2 review round 7: a server the committed snapshot no
 		// longer configures is a removed server the view has not caught up
 		// with; listing it would offer unbound rows (no incarnation).
@@ -2835,6 +2832,10 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			continue
 		}
 		serverStatus = committed.pairStatus(serverStatus)
+		// Read once per server (after the nil guard above): concurrent tool
+		// calls set this flag, and the stored-row probe and the health input
+		// below must see the same value.
+		callTimeOAuthRequired := r.callTimeOAuthRequired(serverStatus.Name)
 		// Convert StateView ServerStatus to API response format
 		connected := serverStatus.Connected
 		connecting := strings.EqualFold(serverStatus.State, "connecting")
