@@ -298,6 +298,13 @@ case $? in
 *) bad "could not scan $DB.bak for the token text" ;;
 esac
 
+# The default compaction above already rewrote config.db, so seal the row once
+# more: the control proves the freed page holds the token text right before
+# the compaction under test, which must be what removes it.
+cli auth tokens decrypt --yes -o json
+cli auth tokens encrypt -o json
+if [ "$CLI_CODE" = "0" ] && grep -a -q -F -e "$TOKEN_TAIL" "$DB"; then ok "control: a freed page still holds the token text after sealing"; else bad "control failed: no token text in config.db after decrypt + encrypt ($CLI_CODE)"; fi
+
 # f. --keep-backup=false clears the marker; the raw file holds no token text
 dbcli db compact --keep-backup=false
 if [ "$CLI_CODE" = "0" ]; then ok "db compact --keep-backup=false succeeded"; else bad "compact --keep-backup=false ($CLI_CODE): $CLI_OUT"; fi
