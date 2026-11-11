@@ -500,20 +500,26 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// as a crash next time) and before any component that reads or writes
 	// OAuth rows (the upstream manager, the refresh manager, background
 	// initialization) exists, so nothing is in flight. Sealed and undecryptable rows are left
-	// as they are. A failure leaves every row as it was (one transaction);
-	// the rows are still read, and the next write or boot seals them.
+	// as they are, and so is a plaintext row that cannot be sealed for a
+	// per-row reason (logged). A transaction-level failure leaves every row as
+	// it was and refuses startup.
 	if oauthTokenKey != nil {
 		if hook := runtimeNewStageHook; hook != nil {
 			hook(runtimeStageOAuthBootSweep, storageManager)
 		}
 		sealed, sweepErr := storageManager.SealPlaintextOAuthTokens(context.Background())
 		if sweepErr != nil {
-			logger.Warn("OAuth token boot sweep failed; plaintext rows are sealed at their next write or the next start",
+			// Refuse to start: encryption is configured, so no OAuth consumer
+			// may run over rows that are still plaintext. The transaction
+			// rolled back, leaving every row as it was; fix the cause (disk
+			// space, permissions, a corrupt file) and start again.
+			logger.Error("OAuth token boot sweep failed; refusing to start",
 				zap.String("key_id", oauthTokenKey.ID()), zap.Error(sweepErr))
-		} else {
-			logger.Info("OAuth token encryption enabled",
-				zap.String("key_id", oauthTokenKey.ID()), zap.Int("sealed_plaintext_rows", sealed))
+			_ = storageManager.Close()
+			return nil, fmt.Errorf("failed to encrypt stored OAuth tokens at startup: %w", sweepErr)
 		}
+		logger.Info("OAuth token encryption enabled",
+			zap.String("key_id", oauthTokenKey.ID()), zap.Int("sealed_plaintext_rows", sealed))
 	}
 
 	// Close any stale sessions from previous runs
