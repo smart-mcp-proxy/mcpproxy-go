@@ -119,11 +119,28 @@ const MaxPlaintextLen = 1 << 20
 // ErrPlaintextTooLarge is returned by Seal for a plaintext over MaxPlaintextLen.
 var ErrPlaintextTooLarge = errors.New("tokenseal: plaintext is larger than 1 MiB")
 
+// ErrContextNUL is returned by Seal for a bucket or bucket key containing a
+// NUL byte: the AAD is NUL-separated, so such a pair could collide with a
+// different (bucket, key) pair.
+var ErrContextNUL = errors.New("tokenseal: bucket and bucket key must not contain NUL")
+
+func hasNUL(parts ...string) bool {
+	for _, p := range parts {
+		if strings.IndexByte(p, 0) >= 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // Seal returns the enc:v1 envelope for plaintext. A nil key is an error: a
 // caller that wants plaintext must not call Seal.
 func (k *Key) Seal(bucket, bucketKey string, plaintext []byte) ([]byte, error) {
 	if k == nil || k.aead == nil {
 		return nil, errors.New("tokenseal: no key configured")
+	}
+	if hasNUL(bucket, bucketKey) {
+		return nil, ErrContextNUL
 	}
 	if len(plaintext) > MaxPlaintextLen {
 		return nil, ErrPlaintextTooLarge
@@ -145,6 +162,9 @@ func (k *Key) Seal(bucket, bucketKey string, plaintext []byte) ([]byte, error) {
 // and yields ReasonNoKey for a well-formed envelope. Every failure is an
 // *OpenError. Open does not accept plaintext values: callers Classify first.
 func (k *Key) Open(bucket, bucketKey string, value []byte) ([]byte, error) {
+	if hasNUL(bucket, bucketKey) {
+		return nil, &OpenError{Reason: ReasonMalformed, KeyKID: k.ID()}
+	}
 	shape, rowKID := Classify(value)
 	switch shape {
 	case ShapeUnsupported:
