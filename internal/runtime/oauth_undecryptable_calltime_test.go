@@ -1,6 +1,8 @@
 package runtime
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,4 +51,18 @@ func TestGetAllServers_HeaderServerUndecryptableRowNoSignInNeedStaysHealthy(t *t
 	require.True(t, ok)
 	assert.Equal(t, health.LevelHealthy, hs.Level)
 	assert.NotContains(t, server, "error_code")
+}
+
+// The call-time sign-in flag is set by concurrent tool calls. The projection
+// must read it once per server and use that one value both to decide whether
+// to probe the stored row and as the health input: two reads can disagree, and
+// then health offers login over a row that was never probed.
+func TestGetAllServers_ReadsCallTimeOAuthFlagOnce(t *testing.T) {
+	src, err := os.ReadFile("runtime.go")
+	require.NoError(t, err)
+	start := strings.Index(string(src), "func (r *Runtime) GetAllServers()")
+	end := strings.Index(string(src), "func (r *Runtime) getAllServersLegacy()")
+	require.True(t, start >= 0 && end > start)
+	assert.Equal(t, 1, strings.Count(string(src)[start:end], "r.callTimeOAuthRequired("),
+		"GetAllServers must snapshot the call-time OAuth flag once per server")
 }

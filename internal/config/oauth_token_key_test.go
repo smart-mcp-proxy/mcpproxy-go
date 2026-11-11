@@ -267,6 +267,7 @@ func TestConfigValidate_OAuthTokenKeySyntaxOnly(t *testing.T) {
 		"${file:/a}${file:/b}",
 		"prefix-${file:/abs/key}",
 		"${file:/abs/key",
+		"${env:${env:KEY}",
 	} {
 		t.Run("rejects "+bad, func(t *testing.T) {
 			cfg := DefaultConfig()

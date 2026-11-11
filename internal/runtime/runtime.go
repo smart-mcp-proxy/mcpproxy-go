@@ -2825,6 +2825,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 	result := make([]map[string]interface{}, 0, len(snapshot.Servers))
 	snapGens := committed.gens()
 	for _, serverStatus := range snapshot.Servers {
+		// Read once per server: concurrent tool calls set this flag, and the
+		// stored-row probe and the health input below must see the same value.
+		callTimeOAuthRequired := r.callTimeOAuthRequired(serverStatus.Name)
 		// Spec 116 PR2 review round 7: a server the committed snapshot no
 		// longer configures is a removed server the view has not caught up
 		// with; listing it would offer unbound rows (no incarnation).
@@ -2898,7 +2901,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			// IMPORTANT: This runs for ALL servers with a URL, including autodiscovery servers
 			// PersistentTokenStore uses serverKey (name + URL hash), not just server name
 			// We need to generate the same key format: "servername_hash16"
-			if shouldProbeStoredOAuthRow(url, r.storageManager != nil, tokenInPlay, r.callTimeOAuthRequired(serverStatus.Name)) {
+			if shouldProbeStoredOAuthRow(url, r.storageManager != nil, tokenInPlay, callTimeOAuthRequired) {
 				r.logger.Debug("Checking OAuth token in storage",
 					zap.String("server", serverStatus.Name),
 					// #1158: the configured upstream URL routinely carries a
@@ -3200,7 +3203,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// MCP-2084: call-time OAuth requirement — set when an anonymously-connected
 		// server rejected a tools/call with "authorization required". Drives a
 		// proactive Sign-in CTA even though the server looks connected.
-		callTimeOAuthRequired := r.callTimeOAuthRequired(serverStatus.Name)
+		// (callTimeOAuthRequired was read once at the top of this iteration.)
 		if r.upstreamManager != nil {
 			if client, exists := r.upstreamManager.GetClient(serverStatus.Name); exists && client != nil {
 				userLoggedOut = client.IsUserLoggedOut()

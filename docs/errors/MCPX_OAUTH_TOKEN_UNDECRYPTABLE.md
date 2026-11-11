@@ -18,10 +18,16 @@ key you configure (`oauth_token_encryption_key`, or the
 environment variables). The stored token for this server is encrypted, and
 the key mcpproxy started with cannot open it.
 
-mcpproxy keeps the stored token exactly as it is and does **not** offer a new
-sign-in for this server: a new sign-in cannot replace a token it cannot read,
-and the token comes back as soon as the right key is available again. Other
-servers keep working. This holds for a server that is currently connected too
+mcpproxy keeps the stored token exactly as it is and does **not** start a new
+sign-in for this server: its health recommends `configure`, not `login`, and a
+sign-in request is refused before any flow starts, because a new sign-in
+cannot replace a token mcpproxy cannot read. When the cause is a missing or a
+different key, the token works again once the original key is configured and
+mcpproxy is restarted. A stored entry that was changed, damaged or copied from
+another server is not repaired by any key: restore `config.db` from a backup,
+or discard the entry with `auth logout` and sign in again. Other servers keep
+working. The Web UI may still show a sign-in button for the server; pressing
+it returns this error. This holds for a server that is currently connected too
 (for example one that connected anonymously and later needs a sign-in): its
 health reports `configure`, never `login`. A login started from the REST API
 (`POST /api/v1/servers/{id}/login`), the Web UI or the tray is refused with this

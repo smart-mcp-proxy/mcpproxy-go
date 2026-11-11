@@ -206,6 +206,11 @@ func parseOAuthTokenKeyRef(s string) (*secret.Ref, bool) {
 	if len(refs) != 1 || refs[0].Original != s || refs[0].Name == "" {
 		return nil, false
 	}
+	// The reference pattern is permissive: an unclosed nested form such as
+	// ${env:${env:KEY} is one match whose name is "${env:KEY". Not a reference.
+	if strings.Contains(refs[0].Name, "${") {
+		return nil, false
+	}
 	ref := refs[0]
 	switch ref.Type {
 	case secret.SecretTypeFile:

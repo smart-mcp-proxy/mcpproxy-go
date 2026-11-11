@@ -33,6 +33,9 @@ func TestOAuthTokenKeyMaskingMatchesValidationRecogniser(t *testing.T) {
 		"${env:KEY}" + spec123LiteralKey,
 		spec123LiteralKey + "${ file:/run/key }",
 		"prefix-${keyring:name}",
+		// An unclosed nested reference is one regexp match, not a reference.
+		"${env:${env:KEY}",
+		"${keyring:${file:/abs/key}",
 	}
 	for _, v := range mixed {
 		t.Run("mixed "+v, func(t *testing.T) {
