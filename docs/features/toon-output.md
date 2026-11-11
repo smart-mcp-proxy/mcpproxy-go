@@ -38,7 +38,7 @@ A blanket "TOON everything" switch would burn tokens on most responses to win on
 
 - **`off`** (default): all responses byte-identical to pre-feature behavior.
 - **`adaptive`** (recommended): encode a result text block only when it (a) parses as JSON, (b) classifies as tabular-uniform, and (c) the complete TOON emission (marker + decode hint + body) is at least `toon_min_savings_pct` percent smaller than the exact passthrough block. Near-ties pass through — they are not worth the agent-side decode risk.
-- **`always`**: encode **every** JSON-parseable block — any JSON value, not just tabular — regardless of the size comparison. **Benchmarking/debugging only; can increase token cost.** Non-JSON text still passes through.
+- **`always`**: attempt encoding each JSON-parseable block — any JSON value, not just tabular — regardless of the size comparison. **Benchmarking/debugging only; can increase token cost.** Non-JSON text still passes through. If a JSON block contains a number TOON cannot round-trip exactly, the block passes through unchanged in every mode to preserve its value.
 
 Changes **hot-reload**: save the config file and the next tool call uses the new mode. No restart, no client reconfiguration.
 
@@ -88,7 +88,8 @@ The encoder sits at exactly one seam — the text-block rendering of `call_tool_
 2. **Sensitive-data detection scans pre-encoding text**: the activity pipeline's scanner receives the pre-encoding rendering, so enabling TOON produces identical detection findings.
 3. **Truncation last**: the response-size limit applies to the final rendered payload; the marker + hint sit at the head of the block and survive truncation. When the configured limit is too small to hold marker + hint + one data row, the block passes through (in every mode).
 4. **Errors never lose data**: any encoder failure falls back to passthrough, is logged, and counted — it never surfaces as a tool-call error.
-5. **Structured content untouched**: output-schema validation still evaluates the original `structuredContent`; only the text rendering is re-encoded.
+5. **Exact numeric fidelity**: a block containing a JSON number that TOON cannot round-trip exactly passes through unchanged in every mode, including `always`, so encoding does not change the numeric value.
+6. **Structured content untouched**: output-schema validation still evaluates the original `structuredContent`; only the text rendering is re-encoded.
 
 **Never encoded**: `retrieve_tools` and all listings (measured net-negative), code-execution paths (agent-written programs expect JSON), and direct-mode server tools (unmodified upstream passthrough).
 
