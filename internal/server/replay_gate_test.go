@@ -21,6 +21,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/profile"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 )
 
 // replayGateFixture is one connected counting upstream "github" exposing spec,
@@ -175,6 +176,62 @@ func TestReplayToolCall_GenerationChangesWhileQueued_RefusedWithZeroUpstreamCall
 				t.Fatal("the queued replay never returned")
 			}
 			require.Empty(t, up.dispatched(), "the replay must never reach the reconnected upstream")
+		})
+	}
+}
+
+// Replay needs a CERTIFIED live identity to dispatch. A client that dropped
+// between the gate and the live check must be refused (it used to "stand
+// aside" and dispatch unpinned), with zero upstream calls.
+func TestReplayToolCall_ClientDisconnectedAtLiveCheck_Refused(t *testing.T) {
+	for label, ctx := range map[string]context.Context{
+		"read-only token": replayTokenCtx(auth.PermRead),
+		"admin":           auth.WithAuthContext(context.Background(), auth.AdminContext()),
+	} {
+		t.Run(label, func(t *testing.T) {
+			mainSrv, proxy, _, up, callID := replayGateFixture(t, readSpec("create_issue"))
+			proxy.replayAfterGate = func() {
+				client, ok := proxy.upstreamManager.GetClient("github")
+				require.True(t, ok)
+				require.NoError(t, client.Disconnect())
+			}
+			t.Cleanup(func() { proxy.replayAfterGate = nil })
+
+			_, err := mainSrv.ReplayToolCall(ctx, callID, nil)
+			var refusal *profile.ToolBlockedError
+			require.ErrorAs(t, err, &refusal)
+			assert.Equal(t, replayBlockReasonToolNotCallable, refusal.Reason)
+			assert.Contains(t, refusal.Message, "is not connected")
+			require.Empty(t, up.dispatched(), "a disconnected client must never be dispatched to")
+		})
+	}
+}
+
+// The gate evaluated generation A; generation B connected and completed
+// discovery before the live check, with the tool now destructive. The verdicts
+// (quarantine, profile policy, token tier, audit operation) all describe A, so
+// the replay is refused with the discovery-window body and the next replay
+// evaluates B from scratch. Admin and full-tier token included.
+func TestReplayToolCall_GenerationChangesBetweenGateAndLiveCheck_Refused(t *testing.T) {
+	for label, ctx := range map[string]context.Context{
+		"read-only token": replayTokenCtx(auth.PermRead),
+		"admin":           auth.WithAuthContext(context.Background(), auth.AdminContext()),
+		"full token":      replayTokenCtx(auth.PermRead, auth.PermWrite, auth.PermDestructive),
+	} {
+		t.Run(label, func(t *testing.T) {
+			mainSrv, proxy, rt, up, callID := replayGateFixture(t, readSpec("create_issue"))
+			proxy.replayAfterGate = func() {
+				bounceConnection(t, proxy, "github")
+				stampDiscoveredOnLiveConnection(t, proxy, rt, "github", []stateview.ToolInfo{destructiveSpec("create_issue").info()})
+			}
+			t.Cleanup(func() { proxy.replayAfterGate = nil })
+
+			_, err := mainSrv.ReplayToolCall(ctx, callID, nil)
+			var refusal *profile.ToolBlockedError
+			require.ErrorAs(t, err, &refusal)
+			assert.Equal(t, replayBlockReasonToolNotCallable, refusal.Reason)
+			assert.Contains(t, refusal.Message, unresolvedToolIdentityMessage("github", "create_issue", false))
+			require.Empty(t, up.dispatched(), "a verdict about generation A must not dispatch onto generation B")
 		})
 	}
 }

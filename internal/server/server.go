@@ -4508,23 +4508,20 @@ const replayBlockReasonToolNotCallable profile.BlockReason = "tool_not_callable"
 // and no `(server, tool)` pair was ever resolved to audit.
 func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
 	original, lookupErr := s.runtime.GetToolCallByID(id)
-	if lookupErr != nil || original == nil || s.mcpProxy == nil {
-		// A scoped (non-admin) credential must never reach the unaudited,
-		// ungated delegate: the permission-tier check below needs both the
-		// record and the proxy, so without them fail closed.
-		if auth.IsNonAdmin(auth.AuthContextFromContext(ctx)) {
-			if lookupErr != nil {
-				return nil, lookupErr
-			}
-			if original == nil {
-				return nil, fmt.Errorf("tool call not found: %s", id)
-			}
-			return nil, &profile.ToolBlockedError{
-				Reason:  replayBlockReasonTokenPermission,
-				Message: "Permission denied: tool call replay is unavailable for this credential",
-			}
+	// Fail closed for every caller: without the record or the proxy there is no
+	// gate to answer to, and the ungated runtime delegate is never reachable
+	// from here (an administrator included).
+	if lookupErr != nil {
+		return nil, lookupErr
+	}
+	if original == nil {
+		return nil, fmt.Errorf("tool call not found: %s", id)
+	}
+	if s.mcpProxy == nil {
+		return nil, &profile.ToolBlockedError{
+			Reason:  replayBlockReasonToolNotCallable,
+			Message: "Tool call replay is unavailable: the MCP proxy is not initialized",
 		}
-		return s.runtime.ReplayToolCall(ctx, id, arguments)
 	}
 
 	callArgs := arguments
@@ -4613,28 +4610,38 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	if refusal := s.mcpProxy.replayGateRefusal(ctx, gate, requestID); refusal != nil {
 		return nil, refusal
 	}
+	if s.mcpProxy.replayAfterGate != nil {
+		s.mcpProxy.replayAfterGate()
+	}
 
-	// Live identity (liveIdentityRefusal): once the live client is connected,
-	// the only admitting outcome is a name certified on ITS connection
-	// generation. The dispatch below is pinned to that generation, so a
-	// reconnect between this check and the transport is refused by the
-	// managed client with zero upstream calls.
-	var certified toolIdentity
-	if client, exists := s.mcpProxy.upstreamManager.GetClient(original.ServerName); exists {
-		live, message, refuse := s.mcpProxy.liveIdentityRefusal(gate.serverConfig, original.ServerName, original.ToolName, identity, client)
-		if refuse {
-			return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	// Live identity. Replay is an operator convenience, not a hot path, so it
+	// is stricter than handleCallToolVariant: it dispatches only onto a
+	// CERTIFIED connection generation, and only the SAME generation every
+	// verdict above (quarantine, profile policy, token tier, audit operation)
+	// was computed from. A missing or disconnected client, a gate identity
+	// that was not certified, or a live generation that differs from the
+	// gate's is refused with zero upstream calls; the caller retries and the
+	// next replay evaluates everything against the new generation. The
+	// dispatch is pinned to that generation, so a reconnect between this
+	// check and the transport is refused by the managed client.
+	client, exists := s.mcpProxy.upstreamManager.GetClient(original.ServerName)
+	if !exists || !client.IsConnected() {
+		message := fmt.Sprintf("Server '%s' is not connected - use 'upstream_servers' tool to check server configuration", original.ServerName)
+		if exists {
+			message = fmt.Sprintf("Server '%s' is not connected (state: %s) - use 'upstream_servers' tool to check server configuration", original.ServerName, client.GetState().String())
 		}
-		certified = live
-		// The tier above was read from the gate's identity; a certified live
-		// identity is the connection the call will reach, so authorize its
-		// annotations too (a tool that turned destructive on a reconnect).
-		if scopedCaller && certified.certified() {
-			if perm := tierForAnnotations(certified.Annotations, certified.Found); perm != "" && !authCtx.HasPermission(perm) {
-				message := tokenTierRefusalText(perm, original.ServerName, original.ToolName)
-				return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonTokenPermission, message, telemetry.BlockReasonTokenPermission)
-			}
-		}
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+	discoveryWindow := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, false)
+	if !identity.certified() {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, discoveryWindow, telemetry.BlockReasonToolNotCallable)
+	}
+	certified, message, refuse := s.mcpProxy.liveIdentityRefusal(gate.serverConfig, original.ServerName, original.ToolName, identity, client)
+	if refuse {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+	if !certified.certified() || certified.DiscoveryEpoch != identity.DiscoveryEpoch {
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, discoveryWindow, telemetry.BlockReasonToolNotCallable)
 	}
 
 	// Spec 107 (round-3 cross-review finding, PR-D): the persisted record's
@@ -4652,7 +4659,7 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	startTime := time.Now()
 	ctx = s.mcpProxy.withReviewDirtyRecheck(ctx, original.ServerName)
 	result, err := s.runtime.ReplayToolCallWithOptions(ctx, id, arguments, runtime.ReplayOptions{
-		PinEpoch: certified.certified(),
+		PinEpoch: true,
 		Epoch:    certified.DiscoveryEpoch,
 	})
 	durationMs := time.Since(startTime).Milliseconds()
