@@ -35,7 +35,7 @@ func TestExecuteTimeoutStopsCatastrophicRegex(t *testing.T) {
 func TestExecuteMemoryBudgetInterrupts(t *testing.T) {
 	start := time.Now()
 	result, ec := execute(context.Background(), newMockToolCaller(),
-		`var a = []; for (;;) { a.push("x".repeat(1 << 20)) }`,
+		`var a = []; for (;;) { a.push("x".repeat(1024).repeat(1024)) }`,
 		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 64 << 20})
 	if result.Ok {
 		t.Fatal("expected the allocation loop to hit the memory budget")
@@ -58,7 +58,7 @@ func TestExecuteMemoryBudgetInterrupts(t *testing.T) {
 // little at any one time, must not trip it.
 func TestExecuteMemoryBudgetIgnoresGarbage(t *testing.T) {
 	result, _ := execute(context.Background(), newMockToolCaller(),
-		`var n = 0; for (var i = 0; i < 256; i++) { var s = "x".repeat(1 << 20); n += s.length; s = null } n`,
+		`var n = 0; for (var i = 0; i < 256; i++) { var s = "x".repeat(1024).repeat(1024); n += s.length; s = null } n`,
 		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 64 << 20})
 	if !result.Ok {
 		t.Fatalf("garbage-only allocation tripped the memory budget: %+v", result.Error)
@@ -68,37 +68,17 @@ func TestExecuteMemoryBudgetIgnoresGarbage(t *testing.T) {
 // TestExecuteMemoryBudgetDisabled: a negative budget turns the watchdog off.
 func TestExecuteMemoryBudgetDisabled(t *testing.T) {
 	result, _ := execute(context.Background(), newMockToolCaller(),
-		`var a = []; for (var i = 0; i < 96; i++) { a.push("x".repeat(1 << 20)) } a.length`,
+		`var a = []; for (var i = 0; i < 96; i++) { a.push("x".repeat(1024).repeat(1024)) } a.length`,
 		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: -1})
 	if !result.Ok {
 		t.Fatalf("disabled budget still interrupted the script: %+v", result.Error)
 	}
 }
 
-// TestExecuteTimeoutStopsGlobalRegexLoop: a global regex runs every match from
-// one native loop, and regexp2 restarts its per-match deadline on each one. A
-// pattern whose every match stays under regexMatchTimeout but whose matches
-// add up to minutes (a failing backtracking lookahead per position) outlived
-// the timeout unless each match goes back through the interpreter.
-func TestExecuteTimeoutStopsGlobalRegexLoop(t *testing.T) {
-	result, ec := execute(context.Background(), newMockToolCaller(),
-		`("a".repeat(22) + "c").repeat(400).replace(/(?=(a+)+b)|./g, "")`, ExecutionOptions{TimeoutMs: 100})
-	if result.Ok {
-		t.Fatal("expected the global regex loop to time out")
-	}
-	if result.Error == nil || result.Error.Code != ErrorCodeTimeout {
-		t.Fatalf("expected %s, got %+v", ErrorCodeTimeout, result.Error)
-	}
-
-	select {
-	case <-ec.scriptDone:
-	case <-time.After(regexMatchTimeout + 3*time.Second):
-		t.Fatal("script goroutine still running the global regex loop long after the timeout")
-	}
-}
-
-// TestRegexBuiltinsStillWork: routing matches through the interpreter must not
-// change what the regex built-ins return.
+// TestRegexBuiltinsStillWork pins what the regex built-ins return, so the
+// sandbox limits never move them off goja's native regex paths: the generic
+// spec path mis-reports a capture that sits inside a lookahead before a
+// consuming capture, and its split limit coercion differs.
 func TestRegexBuiltinsStillWork(t *testing.T) {
 	result, _ := execute(context.Background(), newMockToolCaller(), `[
 		"a1b22c333".replace(/\d+/g, "#"),
@@ -122,14 +102,31 @@ func TestRegexBuiltinsStillWork(t *testing.T) {
 			log.length = 0;
 			"a,b".split(rx, { valueOf() { log.push("limit"); return 5 } });
 			return log.join(">");
-		})()
+		})(),
+		"abc".replace(/(?=..(c))(a)(b)/, "$2")
 	]`, ExecutionOptions{TimeoutMs: 5000})
 	if !result.Ok {
 		t.Fatalf("regex built-ins failed: %+v", result.Error)
 	}
 	got := fmt.Sprint(result.Value)
-	want := "[a#b#c# x,y,z k=v|k2=v2 12 2 true 1 a,b 0 a,b [Symbol.split] a,b TypeError TypeError species>limit]"
+	want := "[a#b#c# x,y,z k=v|k2=v2 12 2 true 1 a,b 0 a,b [Symbol.split] a,b TypeError TypeError species>limit ac]"
 	if got != want {
 		t.Fatalf("regex built-ins changed behaviour:\n got %s\nwant %s", got, want)
+	}
+}
+
+// TestRegexSplitStaysLinear: splitting a long input on an absent delimiter is
+// a linear scan on goja's native path. The generic spec path tries a sticky
+// match at every position and re-decodes the input each time, which turned
+// this into seconds and tens of GiB of allocation.
+func TestRegexSplitStaysLinear(t *testing.T) {
+	start := time.Now()
+	result, _ := execute(context.Background(), newMockToolCaller(),
+		`"a".repeat(100000).split(/,/).length`, ExecutionOptions{TimeoutMs: 30000})
+	if !result.Ok {
+		t.Fatalf("split failed: %+v", result.Error)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("split of 100k chars took %v; the native linear path is ~1ms", elapsed)
 	}
 }

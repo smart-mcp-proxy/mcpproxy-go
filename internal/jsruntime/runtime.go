@@ -316,9 +316,7 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 	vm := goja.New()
 
 	// Set up sandbox restrictions
-	if err := setupSandbox(vm); err != nil {
-		return NewErrorResult(NewJsError(ErrorCodeRuntimeError, fmt.Sprintf("failed to set up sandbox: %v", err))), execCtx
-	}
+	setupSandbox(vm)
 
 	// Bind input global variable
 	if opts.Input == nil {
@@ -476,8 +474,18 @@ func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (re
 // it a catastrophically backtracking regex (goja hands any pattern RE2 cannot
 // run, e.g. one with a backreference, to regexp2) ignores the execution
 // timeout and keeps a core busy for practically ever after Execute has
-// answered. A timed-out match reads as "no match" to the script; the
-// interrupt then lands at the next instruction.
+// answered. A timed-out match reads as "no match" to the script (goja drops
+// regexp2's timeout error), so a legitimate pattern that needs more than a
+// second on its input also answers false; the interrupt then lands at the
+// next instruction.
+//
+// The deadline is per match. A global regex (replace, match, matchAll, split)
+// runs all its matches from one native loop that never checks the interrupt,
+// so a pattern whose every match stays under the deadline can still outlive
+// the execution timeout. Routing those loops through the interpreter (by
+// redefining RegExp.prototype.exec) closes that, but goja's generic regex
+// path is quadratic for split and mis-reports some captures, so it is not
+// used; closing it needs interrupt checks inside goja.
 //
 // regexp2 reads DefaultMatchTimeout when a pattern is compiled and the knob is
 // process-wide, so it also bounds the tokenizer's patterns (tiktoken), whose
@@ -537,6 +545,7 @@ func watchMemory(vm *goja.Runtime, budget int64, baseline uint64, done <-chan st
 	ticker := time.NewTicker(memoryCheckInterval)
 	defer ticker.Stop()
 	var lastGC time.Time
+	overAfterGC := 0
 	for {
 		select {
 		case <-done:
@@ -544,6 +553,7 @@ func watchMemory(vm *goja.Runtime, budget int64, baseline uint64, done <-chan st
 		case <-ticker.C:
 		}
 		if heapObjectBytes() <= limit {
+			overAfterGC = 0
 			continue
 		}
 		// The sample counts garbage not yet swept; only a collection says
@@ -557,6 +567,14 @@ func watchMemory(vm *goja.Runtime, budget int64, baseline uint64, done <-chan st
 		runtime.GC()
 		lastGC = time.Now()
 		if heapObjectBytes() <= limit {
+			overAfterGC = 0
+			continue
+		}
+		// Values allocated while a collection is marking survive it even if
+		// already dropped, so one post-GC sample over the limit can still be
+		// churn. Two consecutive collections over it are memory being kept.
+		overAfterGC++
+		if overAfterGC < 2 {
 			continue
 		}
 		vm.Interrupt(errMemoryLimit)
@@ -575,47 +593,8 @@ func interruptedResult(ie *goja.InterruptedError) *Result {
 	return NewErrorResult(NewJsError(ErrorCodeTimeout, "JavaScript execution timed out"))
 }
 
-// regexExecTrampoline replaces RegExp.prototype.exec with a script-level
-// wrapper around the native one. goja runs every match of a global regex
-// (replace, match, matchAll, split) from one native loop while the prototype
-// is untouched, and regexp2 restarts its per-match deadline on each match, so
-// a pattern whose matches each stay under regexMatchTimeout could still keep
-// the loop going for minutes past the execution timeout. Any change to exec
-// moves goja onto its spec path, which calls exec once per match; the wrapper
-// is interpreted code, so vm.Interrupt lands between matches. apply is
-// captured here so a script that later replaces Reflect.apply cannot undo it.
-//
-// goja's spec-path split converts its limit with ToLength where the fast path
-// (and ECMAScript) use ToUint32, so "a,b".split(/,/, -1) would return []
-// instead of ["a", "b"]. The split wrapper hands the native splitter a
-// prototype-less adapter whose valueOf applies ToUint32, so the script's own
-// limit is still coerced at the point the spec says (after the species
-// splitter is built). Strict mode keeps a null or undefined receiver from
-// turning into the global object.
-//
-// Native loops that call a native callable (an exec replaced by a bound
-// built-in, a RegExp subclass whose exec is null under matchAll) still never
-// reach the interpreter; closing those needs interrupt checks inside goja.
-const regexExecTrampoline = `(function () {
-	"use strict";
-	var proto = RegExp.prototype;
-	var nativeExec = proto.exec;
-	var nativeSplit = proto[Symbol.split];
-	var apply = Reflect.apply;
-	function define(key, fn) {
-		Object.defineProperty(proto, key, { value: fn, writable: true, enumerable: false, configurable: true });
-	}
-	define("exec", function exec(s) { return apply(nativeExec, this, [s]); });
-	define(Symbol.split, {
-		[Symbol.split](s, limit) {
-			var lim = limit === undefined ? undefined : { __proto__: null, valueOf: function () { return limit >>> 0; } };
-			return apply(nativeSplit, this, [s, lim]);
-		}
-	}[Symbol.split]);
-})()`
-
 // setupSandbox configures the VM to prevent access to restricted APIs
-func setupSandbox(vm *goja.Runtime) error {
+func setupSandbox(vm *goja.Runtime) {
 	// Disable require() - prevent module loading
 	vm.Set("require", goja.Undefined())
 
@@ -629,9 +608,6 @@ func setupSandbox(vm *goja.Runtime) error {
 
 	// Note: Goja does not provide filesystem, network, or process access by default
 	// so we don't need to explicitly block those
-
-	_, err := vm.RunString(regexExecTrampoline)
-	return err
 }
 
 // errorEnvelope builds the {ok:false, error:{code, message}} value both
