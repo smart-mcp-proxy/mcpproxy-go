@@ -349,7 +349,13 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 
 	// Batch workers dispatch under the execution's timeout context. Assigned
 	// before the script goroutine starts, so nothing reads it concurrently.
-	execCtx.ctx = timeoutCtx
+	//
+	// The memory watchdog cancels it too, so an upstream call that an
+	// over-budget script is waiting on returns instead of holding the
+	// script's heap until the call or the timeout ends.
+	runCtx, cancelRun := context.WithCancelCause(timeoutCtx)
+	defer cancelRun(nil)
+	execCtx.ctx = runCtx
 
 	// Run JavaScript with timeout enforcement
 	resultChan := make(chan *Result, 1)
@@ -359,7 +365,7 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 	// goroutine does, so a runaway script that keeps allocating after
 	// Execute has answered is still stopped.
 	if budget := resolveMemoryBudget(opts.MaxMemoryBytes); budget > 0 {
-		go watchMemory(vm, budget, heapObjectBytes(), execCtx.scriptDone)
+		go watchMemory(vm, budget, memoryBaseline(), execCtx.scriptDone, cancelRun)
 	}
 
 	go func() {
@@ -528,19 +534,29 @@ func heapObjectBytes() uint64 {
 	return sample[0].Value.Uint64()
 }
 
+// memoryBaseline is the heap an execution's budget is measured from, taken
+// right after a collection. Neither the current object bytes (which hold
+// garbage from earlier work until it is swept) nor the live figure of the last
+// collection (which may still count an execution that has since finished) is
+// a fair start: either hands the script extra headroom once that memory is
+// collected. The collection costs a few milliseconds per execution.
+func memoryBaseline() uint64 {
+	runtime.GC()
+	return heapObjectBytes()
+}
+
 // watchMemory interrupts vm once the heap has grown more than budget past
 // baseline, and returns when done closes.
 //
 // This is a best-effort guard, not an exact per-script cap. goja keeps no
 // per-VM accounting, so the measure is the process heap: an execution running
 // beside another that allocates heavily can be stopped for memory it did not
-// take, and garbage counted in the baseline that is collected later widens the
-// headroom. vm.Interrupt cannot abort a native call either, so one built-in
+// take. vm.Interrupt cannot abort a native call either, so one built-in
 // that allocates a lot in a single step (a huge String.prototype.repeat or
 // ArrayBuffer) completes before the script is stopped at its next
 // instruction. What it does guarantee is that a script cannot keep growing
 // the heap, step after step, until the timeout.
-func watchMemory(vm *goja.Runtime, budget int64, baseline uint64, done <-chan struct{}) {
+func watchMemory(vm *goja.Runtime, budget int64, baseline uint64, done <-chan struct{}, cancelRun context.CancelCauseFunc) {
 	limit := baseline + uint64(budget)
 	ticker := time.NewTicker(memoryCheckInterval)
 	defer ticker.Stop()
@@ -572,11 +588,15 @@ func watchMemory(vm *goja.Runtime, budget int64, baseline uint64, done <-chan st
 		}
 		// Values allocated while a collection is marking survive it even if
 		// already dropped, so one post-GC sample over the limit can still be
-		// churn. Two consecutive collections over it are memory being kept.
+		// churn. Two consecutive collections over it, at least
+		// forcedGCInterval apart, are taken as memory being kept: a heuristic,
+		// since floating garbage per collection is bounded only by what the
+		// script allocates during one mark phase.
 		overAfterGC++
 		if overAfterGC < 2 {
 			continue
 		}
+		cancelRun(errMemoryLimit)
 		vm.Interrupt(errMemoryLimit)
 		return
 	}

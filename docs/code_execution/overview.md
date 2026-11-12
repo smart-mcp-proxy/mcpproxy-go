@@ -184,7 +184,7 @@ The JavaScript execution environment is **heavily sandboxed** to prevent securit
 
 Two built-in limits are not configurable:
 
-- **Memory:** a script that keeps more than 256 MiB of new heap alive is stopped with `MEMORY_LIMIT`.
+- **Memory:** a script that keeps more than about 256 MiB of new heap alive is stopped with `MEMORY_LIMIT`, and any upstream call it is waiting on is cancelled. The check is approximate: it measures the whole process heap, so heavy concurrent executions share the headroom.
 - **Regex matches:** a single regular-expression match is capped at 1 second, and a match that hits the cap counts as no match. This stops catastrophically backtracking patterns from outliving the execution timeout.
 
 `code_execution_max_parallel` is hot-reloaded and applies to executions that start after the change. It is not a request-level option: a script overrides it per batch with `call_tools(requests, {max_parallel})`, so precedence is per-batch override > `code_execution_max_parallel` > built-in 8.

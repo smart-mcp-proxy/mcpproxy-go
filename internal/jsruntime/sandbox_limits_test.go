@@ -130,3 +130,47 @@ func TestRegexSplitStaysLinear(t *testing.T) {
 		t.Fatalf("split of 100k chars took %v; the native linear path is ~1ms", elapsed)
 	}
 }
+
+// blockingCaller blocks every call until its context is cancelled.
+type blockingCaller struct{ cancelled chan struct{} }
+
+func (b *blockingCaller) CallTool(ctx context.Context, _, _ string, _ map[string]interface{}) (interface{}, error) {
+	<-ctx.Done()
+	close(b.cancelled)
+	return nil, ctx.Err()
+}
+
+// TestExecuteMemoryBudgetCancelsInFlightCall: a script that is over its budget
+// while it waits on an upstream call must not keep its heap until the call or
+// the timeout ends. The memory trip cancels the execution context, so the call
+// returns and the script stops with MEMORY_LIMIT.
+func TestExecuteMemoryBudgetCancelsInFlightCall(t *testing.T) {
+	caller := &blockingCaller{cancelled: make(chan struct{})}
+	start := time.Now()
+	result, _ := execute(context.Background(), caller,
+		`var keep = []; for (var i = 0; i < 96; i++) { keep.push("x".repeat(1024).repeat(1024)) } call_tool("s", "t", {}); keep.length`,
+		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 32 << 20})
+	if result.Error == nil || result.Error.Code != ErrorCodeMemoryLimit {
+		t.Fatalf("expected %s, got ok=%v %+v", ErrorCodeMemoryLimit, result.Ok, result.Error)
+	}
+	if elapsed := time.Since(start); elapsed > 10*time.Second {
+		t.Fatalf("memory trip took %v; it waited for the timeout instead of cancelling the call", elapsed)
+	}
+	select {
+	case <-caller.cancelled:
+	default:
+		t.Fatal("the in-flight upstream call was never cancelled")
+	}
+}
+
+// TestExecuteMemoryBudgetSustainedChurn: a script that allocates and drops
+// values for several seconds, across many collections, keeps little alive and
+// must not be stopped for the garbage that floats through each collection.
+func TestExecuteMemoryBudgetSustainedChurn(t *testing.T) {
+	result, _ := execute(context.Background(), newMockToolCaller(),
+		`var end = Date.now() + 3000, n = 0; while (Date.now() < end) { var s = "x".repeat(1024).repeat(1024); n += s.length; s = null } n > 0`,
+		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 64 << 20})
+	if !result.Ok {
+		t.Fatalf("sustained churn tripped the memory budget: %+v", result.Error)
+	}
+}
