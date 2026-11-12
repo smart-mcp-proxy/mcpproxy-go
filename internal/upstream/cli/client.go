@@ -67,20 +67,18 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 		// Spec 123: resolve the OAuth token key first. A resolution error is
 		// returned (exit 4) rather than downgraded to the in-memory fallback,
 		// which would let `auth login` succeed without persisting anything.
-		// A NewBoltDB error after a successful resolution (e.g. a running core
-		// holds the lock) keeps the existing fallback below.
+		// A NewBoltDB error (e.g. a running core holds the lock) is returned
+		// too, with its type (exit 3): in-memory storage cannot see a stored
+		// row that must not be replaced, and would not keep the new token.
 		oauthKey, _, keyErr := config.ResolveOAuthTokenKey(globalConfig)
 		if keyErr != nil {
 			return nil, keyErr
 		}
 		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(oauthKey))
 		if err != nil {
-			logger.Warn("Failed to create storage for CLI OAuth tokens, falling back to in-memory",
-				zap.String("data_dir", globalConfig.DataDir),
-				zap.Error(err))
-		} else {
-			db = boltDB
+			return nil, fmt.Errorf("failed to open storage for OAuth tokens in %s: %w", globalConfig.DataDir, err)
 		}
+		db = boltDB
 	}
 
 	// Create secret resolver for CLI operations

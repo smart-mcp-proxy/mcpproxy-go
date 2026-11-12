@@ -177,6 +177,166 @@ After step 3 the raw file contains no token text from the rows that were
 encrypted. Check the startup log for rows reported as left unchanged. Rows written
 while a key is set are encrypted from the first write.
 
+Until step 3 is done mcpproxy remembers that compaction is pending (a marker in
+`config.db`, set by any write that replaced a plaintext row with an encrypted one)
+and says so in `mcpproxy doctor` and `mcpproxy auth tokens status`. A plain
+`mcpproxy db compact` keeps the pre-compaction file as `config.db.bak`, which still
+holds the old pages, so it does **not** clear the advice and prints a note naming
+the backup. Only `db compact --keep-backup=false` clears it. A `config.db.bak` left
+by an earlier compaction is not removed by that command: delete it yourself.
+`doctor` reports it until you do.
+
+## Checking the state
+
+`mcpproxy doctor` (and `GET /api/v1/diagnostics`) include an **OAuth Token Storage**
+section once a key is configured or any row is encrypted:
+
+```text
+🔑 OAuth Token Storage
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Encryption: on (key id 0329a64b3f620111, source: ref_file)
+  Rows:       sealed 2, plaintext 0, undecryptable 1
+              undecryptable by reason: key_mismatch 1
+    - notion: key_mismatch (row key id 132087b39d6d2462)
+  Warning:    freed pages may still hold the old plaintext; with mcpproxy stopped, run: mcpproxy db compact --keep-backup=false
+  Next:      Undecryptable rows: restore the key they were sealed with, or discard a row with 'mcpproxy auth logout --server=<name>' and sign in again.
+```
+
+| Field | Meaning |
+|-------|---------|
+| Encryption, key id, source | Whether a key is configured, its public key id (a short fingerprint) and how it was obtained: `literal`, `env`, `env_file`, `ref_file`, `ref_env`, `ref_keyring` |
+| Rows | A strict partition of the stored rows: `sealed` (opens with the configured key), `plaintext`, `undecryptable` (broken down by reason: `no_key`, `key_mismatch`, `auth_failed`, `unsupported_version`, `malformed`) |
+| Per-server list | Every undecryptable row with its server, reason and the key id in the row, so a `key_mismatch` names both ids |
+| Warnings | `literal_key` (the key is in the config file), `key_file_in_data_dir`, `plaintext_rows_with_key` (a restored backup or a write by an older binary; sealed at the next start), `compaction_advised`, `backup_file_present` (`config.db.bak` in the data directory while encryption is on) |
+
+Each undecryptable server also appears once in the doctor's runtime warnings, so the
+issue count and the tray badge reflect it. The section never contains the key, its
+bytes, the contents of the key source or the key reference; a token scoped to some
+servers sees counts for those servers only and no key id.
+
+With mcpproxy stopped, `mcpproxy auth tokens status` prints the same section from
+the database, plus one line per server (`sealed`, `plaintext` or `undecryptable`
+with its reason). It prints no token value.
+
+## The `auth tokens` commands
+
+Three offline commands work on the database directly, so mcpproxy must be stopped:
+with a running core they fail with exit code 3 and change nothing. They resolve the
+key exactly as the daemon does, so `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=<source>`
+supplies a key that only exists inside the service (a systemd credential, a
+container secret). Add `-o json` or `-o yaml` for machine-readable output.
+
+All three open `config.db` the way every offline command does, which applies the
+usual open-time maintenance (file permissions, session-record migration and
+retention). `status` and `encrypt --dry-run` change nothing else: no OAuth row and
+not the compaction marker.
+
+| Command | What it does |
+|---------|--------------|
+| `mcpproxy auth tokens status` | Prints the section above plus one line per server. Changes no OAuth row. |
+| `mcpproxy auth tokens encrypt [--dry-run]` | Encrypts every plaintext row under the configured key in one transaction, as the startup sweep does. Idempotent. Lists rows it had to leave (not a valid record, or over 1 MiB) and undecryptable rows; exits 1 when any remain. `--dry-run` reports the count and changes no OAuth row, nor the compaction marker. Needs a key (exit 4 without one). |
+| `mcpproxy auth tokens decrypt --yes [--leave-undecryptable]` | Rewrites every row the configured key opens as plaintext JSON, in one transaction. Needs `--yes`. If a row cannot be opened it refuses and changes nothing, unless `--leave-undecryptable` says to rewrite the others and leave those as they are (it still exits 1). Needs the key. |
+
+`decrypt` stores the tokens readable in `config.db`. Copies of the file or of the
+data directory made until you encrypt again hold them in plaintext.
+
+## Turning it off, downgrading and rotating the key
+
+An older release cannot read encrypted rows: its servers show "login required", and
+a new login there overwrites the encrypted row with a plaintext one. Decrypt first.
+
+**Disable, or downgrade to a release without this feature**
+
+```bash
+sudo systemctl stop mcpproxy
+MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=/etc/mcpproxy/oauth-key \
+  mcpproxy auth tokens decrypt --yes
+# then remove every key source: oauth_token_encryption_key in the configuration
+# and MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE] in the service environment,
+# and only then install the older binary or start mcpproxy again
+```
+
+With a key still configured, the next start would encrypt the rows again.
+
+**Rotate the key**
+
+1. Stop mcpproxy.
+2. `mcpproxy auth tokens decrypt --yes` with the **old** key.
+3. Change the key (configuration, credential or environment).
+4. `mcpproxy auth tokens encrypt` with the **new** key.
+5. `mcpproxy db compact --keep-backup=false`, then delete any `config.db.bak`.
+6. Start mcpproxy.
+
+Step 2 leaves the tokens in plaintext and step 4 leaves the plaintext in freed pages
+that bbolt does not zero, which is what step 5 removes. Any copy or backup of
+`config.db` or of the data directory made between steps 2 and 5 holds the tokens in
+the clear: delete those too. Single-step rekeying is not offered.
+
+**Packaged Linux service**
+
+Run the offline commands as the service user with the service's paths, with the
+service stopped, and supply the key explicitly. The examples below read the key
+file directly, so they need the delivery where the service user can read it
+(`chown mcpproxy /etc/mcpproxy/oauth-key`, mode `0600`):
+
+```bash
+sudo systemctl stop mcpproxy
+sudo -u mcpproxy env MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=/etc/mcpproxy/oauth-key \
+  mcpproxy --config=/etc/mcpproxy/mcp_config.json --data-dir=/var/lib/mcpproxy \
+  auth tokens status
+sudo systemctl start mcpproxy
+```
+
+The write commands take the same prefix. To turn encryption off on the packaged
+service:
+
+```bash
+sudo systemctl stop mcpproxy
+sudo -u mcpproxy env MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE=/etc/mcpproxy/oauth-key \
+  mcpproxy --config=/etc/mcpproxy/mcp_config.json --data-dir=/var/lib/mcpproxy \
+  auth tokens decrypt --yes
+# remove every key source before starting again: oauth_token_encryption_key in
+# /etc/mcpproxy/mcp_config.json AND any MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE]
+# / LoadCredential= line in the unit or its drop-ins (then: systemctl daemon-reload)
+sudo systemctl start mcpproxy
+```
+
+If a key source is left in place, the next start encrypts the rows again and the
+plaintext that `decrypt` wrote stays in freed pages until the next
+`db compact --keep-backup=false`. To rotate the key instead, follow
+[Rotate the key](#turning-it-off-downgrading-and-rotating-the-key) with the same
+prefix: `encrypt` with the new key comes before the compaction.
+
+With `LoadCredential=` the key file is root-only and the service user cannot read
+it, so the commands above exit 4. Let systemd hand the credential to a one-off
+unit that runs as the service user instead (replace `status` with the command you
+need; for `LoadCredentialEncrypted=` use that property and the encrypted file):
+
+```bash
+sudo systemd-run --pipe --wait --collect \
+  -p User=mcpproxy -p Group=mcpproxy \
+  -p LoadCredential=oauth-key:/etc/mcpproxy/oauth-key \
+  /bin/sh -c 'MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE="$CREDENTIALS_DIRECTORY/oauth-key" \
+    exec /usr/bin/mcpproxy --config=/etc/mcpproxy/mcp_config.json \
+    --data-dir=/var/lib/mcpproxy auth tokens status'
+```
+
+In a container, `docker compose run --rm --entrypoint mcpproxy mcpproxy auth tokens ...`
+(with the same secret, configuration and data volume mounted, and the service
+stopped) gives the command the same view the service has. The image's entrypoint is
+`mcpproxy serve`, so without `--entrypoint` the arguments would go to `serve`.
+
+## When a login is refused
+
+`mcpproxy auth login --server=<name>` reads the stored row first. When it cannot be
+decrypted it opens no browser and contacts neither the authorization server nor
+the discovery endpoint. It prints the
+[`MCPX_OAUTH_TOKEN_UNDECRYPTABLE`](../errors/MCPX_OAUTH_TOKEN_UNDECRYPTABLE.md)
+explanation with the reason, the key ids (never key material) and the two ways out,
+and exits non-zero. It works the same through a running daemon and standalone.
+`mcpproxy auth status` shows such a server as "cannot be decrypted", never as "log
+in", and the Web UI offers the configure guidance instead of a sign-in button.
+
 ## What happens when the key is wrong or missing
 
 | Situation | Result |
@@ -214,6 +374,6 @@ the orphan cleanup, so a wrong key cannot destroy the tokens.
 ## Notes
 
 - Changing the key takes effect at the next start. It is a restart-gated field.
-- Disabling encryption and rotating the key are not covered here yet; both need
-  an offline, key-aware database command. Until then do not remove the key from a
-  database that holds encrypted rows unless you accept the sign-in cost above.
+- Do not remove the key from a database that holds encrypted rows without running
+  `mcpproxy auth tokens decrypt --yes` first, unless you accept the sign-in cost
+  above (see "Turning it off, downgrading and rotating the key").

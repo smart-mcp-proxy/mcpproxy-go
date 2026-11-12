@@ -122,6 +122,25 @@ suffix:
 }
 ```
 
+### OAuth token encryption and the backup
+
+When OAuth token encryption is on (see [OAuth Token Encryption](/features/oauth-token-encryption)),
+sealing a row that used to be plaintext frees the page that held the plaintext, and bbolt does not
+zero freed pages. `mcpproxy` records this in a compaction marker, which `mcpproxy doctor` and
+`mcpproxy auth tokens status` report as "compaction pending".
+
+- `db compact --keep-backup=false` rewrites only live data, so the compacted file holds no freed
+  plaintext page, and it **clears the marker**. Run it offline after enabling encryption and after
+  every key rotation.
+- The default `db compact` keeps `config.db.bak`, the pre-compaction file, which still holds those
+  old pages. It **keeps the marker** and prints a note naming the backup. Delete the backup once
+  mcpproxy starts cleanly, then run the `--keep-backup=false` form.
+- `--keep-backup=false` does not delete a `config.db.bak` from an earlier run; it warns when one
+  is left over, and `mcpproxy doctor` reports `backup_file_present` until you delete it.
+
+JSON output adds `oauth_compaction_advised` (the marker was set), `oauth_compaction_cleared` (this
+run cleared it) and `stale_backup_path` (a leftover backup) when they apply.
+
 ### Safety properties
 
 - The rewrite goes to a **temporary file in the same directory** and is moved

@@ -24,13 +24,34 @@ func resolveCLIOAuthTokenKey(cfg *config.Config) (*tokenseal.Key, error) {
 // resolved OAuth token key. A key error is returned unwrapped (exit 4); a
 // storage error keeps its type (a running core holding the lock is exit 3).
 func openStorageForCLI(cfg *config.Config, logger *zap.SugaredLogger) (*storage.Manager, error) {
-	key, err := resolveCLIOAuthTokenKey(cfg)
+	mgr, _, _, err := openStorageForCLIWithKey(cfg, logger, false)
+	return mgr, err
+}
+
+// errNoOAuthTokenKey is the exit-4 error of a command that can only work
+// with a key when none is configured.
+func errNoOAuthTokenKey() error {
+	return config.NewStartupError(config.ExitCodeOAuthTokenKeyError,
+		"no OAuth token encryption key is configured: set "+config.OAuthTokenKeyField+" in the configuration, or "+
+			config.EnvOAuthTokenKey+" / "+config.EnvOAuthTokenKeyFile+" in the environment")
+}
+
+// openStorageForCLIWithKey is openStorageForCLI that also returns the
+// resolved key and its source metadata, for commands that report on the key
+// (`auth tokens`). With requireKey, no configured key is exit 4 before
+// anything is opened, so a command that can only work with a key never
+// creates or touches config.db without one.
+func openStorageForCLIWithKey(cfg *config.Config, logger *zap.SugaredLogger, requireKey bool) (*storage.Manager, *tokenseal.Key, config.KeySource, error) {
+	key, src, err := config.ResolveOAuthTokenKey(cfg)
 	if err != nil {
-		return nil, err
+		return nil, nil, config.KeySource{}, err
+	}
+	if key == nil && requireKey {
+		return nil, nil, config.KeySource{}, errNoOAuthTokenKey()
 	}
 	mgr, err := storage.NewManager(cfg.DataDir, logger, storage.WithOAuthTokenKey(key))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create storage manager: %w", err)
+		return nil, nil, config.KeySource{}, fmt.Errorf("failed to create storage manager: %w", err)
 	}
-	return mgr, nil
+	return mgr, key, src, nil
 }
