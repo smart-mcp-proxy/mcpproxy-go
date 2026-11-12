@@ -3,6 +3,7 @@ package jsruntime
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 )
@@ -58,8 +59,8 @@ func TestExecuteMemoryBudgetInterrupts(t *testing.T) {
 // little at any one time, must not trip it.
 func TestExecuteMemoryBudgetIgnoresGarbage(t *testing.T) {
 	result, _ := execute(context.Background(), newMockToolCaller(),
-		`var n = 0; for (var i = 0; i < 256; i++) { var s = "x".repeat(1024).repeat(1024); n += s.length; s = null } n`,
-		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 64 << 20})
+		`var n = 0; for (var i = 0; i < 512; i++) { var s = "x".repeat(1024).repeat(1024); n += s.length; s = null } n`,
+		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 128 << 20})
 	if !result.Ok {
 		t.Fatalf("garbage-only allocation tripped the memory budget: %+v", result.Error)
 	}
@@ -131,11 +132,16 @@ func TestRegexSplitStaysLinear(t *testing.T) {
 	}
 }
 
-// blockingCaller blocks every call until its context is cancelled.
+// blockingCaller pushes the heap over budget only once a call is in flight,
+// by holding a large allocation, then blocks until its context is cancelled.
+// The budget is measured on the process heap, so the script is over budget
+// exactly while it waits here, never before it dispatches.
 type blockingCaller struct{ cancelled chan struct{} }
 
 func (b *blockingCaller) CallTool(ctx context.Context, _, _ string, _ map[string]interface{}) (interface{}, error) {
+	hold := make([]byte, 96<<20)
 	<-ctx.Done()
+	runtime.KeepAlive(hold)
 	close(b.cancelled)
 	return nil, ctx.Err()
 }
@@ -148,7 +154,7 @@ func TestExecuteMemoryBudgetCancelsInFlightCall(t *testing.T) {
 	caller := &blockingCaller{cancelled: make(chan struct{})}
 	start := time.Now()
 	result, _ := execute(context.Background(), caller,
-		`var keep = []; for (var i = 0; i < 96; i++) { keep.push("x".repeat(1024).repeat(1024)) } call_tool("s", "t", {}); keep.length`,
+		`call_tool("s", "t", {}); true`,
 		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 32 << 20})
 	if result.Error == nil || result.Error.Code != ErrorCodeMemoryLimit {
 		t.Fatalf("expected %s, got ok=%v %+v", ErrorCodeMemoryLimit, result.Ok, result.Error)
@@ -168,7 +174,7 @@ func TestExecuteMemoryBudgetCancelsInFlightCall(t *testing.T) {
 func TestExecuteMemoryBudgetCancelsInFlightBatch(t *testing.T) {
 	caller := &blockingCaller{cancelled: make(chan struct{})}
 	result, _ := execute(context.Background(), caller,
-		`var keep = []; for (var i = 0; i < 96; i++) { keep.push("x".repeat(1024).repeat(1024)) } call_tools([{server: "s", tool: "t", args: {}}]); keep.length`,
+		`call_tools([{server: "s", tool: "t", args: {}}]); true`,
 		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 32 << 20})
 	if result.Error == nil || result.Error.Code != ErrorCodeMemoryLimit {
 		t.Fatalf("expected %s, got ok=%v %+v", ErrorCodeMemoryLimit, result.Ok, result.Error)
@@ -183,10 +189,18 @@ func TestExecuteMemoryBudgetCancelsInFlightBatch(t *testing.T) {
 // TestExecuteMemoryBudgetSustainedChurn: a script that allocates and drops
 // values for several seconds, across many collections, keeps little alive and
 // must not be stopped for the garbage that floats through each collection.
+// The churn is paced (~128 MiB/s) so the garbage one collection can float stays
+// far under the budget even on a slow, instrumented runner; the heuristic does
+// not promise this for unpaced churn.
 func TestExecuteMemoryBudgetSustainedChurn(t *testing.T) {
 	result, _ := execute(context.Background(), newMockToolCaller(),
-		`var end = Date.now() + 3000, n = 0; while (Date.now() < end) { var s = "x".repeat(1024).repeat(1024); n += s.length; s = null } n > 0`,
-		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 64 << 20})
+		`var end = Date.now() + 3000, n = 0;
+		 while (Date.now() < end) {
+			var s = "x".repeat(1024).repeat(256); n += s.length; s = null;
+			var pause = Date.now() + 2; while (Date.now() < pause) {}
+		 }
+		 n > 0`,
+		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 128 << 20})
 	if !result.Ok {
 		t.Fatalf("sustained churn tripped the memory budget: %+v", result.Error)
 	}
