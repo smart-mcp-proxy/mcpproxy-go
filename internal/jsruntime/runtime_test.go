@@ -233,8 +233,11 @@ func TestExecuteTimeout(t *testing.T) {
 		t.Errorf("expected error code TIMEOUT, got %s", result.Error.Code)
 	}
 
-	// Verify timeout occurred around 100ms (allow some margin)
-	if duration < 90*time.Millisecond || duration > 200*time.Millisecond {
+	// Verify the timeout fired at 100ms and not much later. The upper bound
+	// leaves room for VM setup (the stack guard instruments every builtin,
+	// ~2ms normally and ~100ms under -race on a shared CI runner), which runs
+	// before the timeout clock starts.
+	if duration < 90*time.Millisecond || duration > time.Second {
 		t.Errorf("expected timeout around 100ms, got %v", duration)
 	}
 }

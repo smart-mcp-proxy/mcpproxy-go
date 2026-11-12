@@ -47,6 +47,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/core"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/limiter"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/managed"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream/types"
 )
 
@@ -4487,6 +4488,10 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 // token's permission tier; httpapi maps *profile.ToolBlockedError to 403.
 const replayBlockReasonTokenPermission profile.BlockReason = "token_permission"
 
+// replayBlockReasonToolNotCallable labels a replay refused by the shared
+// per-tool gate or the live identity check (tool disabled / not certified).
+const replayBlockReasonToolNotCallable profile.BlockReason = "tool_not_callable"
+
 // ReplayToolCall replays a tool call with modified arguments. ctx is the
 // caller's request context: it governs the concurrency-limiter queue wait as
 // well as the upstream call (spec 093 FR-005).
@@ -4553,9 +4558,37 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonProfileScope)
 		return nil, profile.ErrToolOutsideProfile
 	}
+	// Agent token server access first, so a scoped caller learns nothing about
+	// a server outside its scope from the shape of any later refusal (the
+	// order handleCallToolVariant keeps: effective server scope, then the
+	// identity gate).
+	replayAuth := auth.AuthContextFromContext(ctx)
+	authCtx := auth.ScopedView(replayAuth, (replayAuth == nil || replayAuth.Anonymous) && profileResolution.anonymousConfinementActive())
+	scopedCaller := auth.IsNonAdmin(authCtx)
+	if scopedCaller && !authCtx.CanAccessServer(original.ServerName) {
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonTokenPermission)
+		return nil, profile.ErrToolOutsideProfile
+	}
+
+	// Replay is a dispatch path, so it answers to the SAME shared per-tool gate
+	// as every other one (evaluateExactToolGate: server quarantine / disabled,
+	// tool-level quarantine, enabled_tools / disabled_tools, review-dirty) and
+	// takes the tool's identity, annotations and tier from it, never from a
+	// separate read. The stored record only names WHICH tool to replay.
+	gate := s.mcpProxy.evaluateExactToolGate(original.ServerName, original.ToolName)
+	identity := gate.identity
+	annotations, annotationsFound := identity.Annotations, identity.Found
+	if annotationsFound {
+		auditSetOperation(ctx, tierForAnnotations(annotations, annotationsFound))
+	}
+	if identity.Unresolved() {
+		message := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, identity.DiscoveryDone)
+		return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+	}
+
 	if policy := profileResolution.Policy; policy != nil {
-		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
-		intrinsic := profile.IntrinsicTier(annotations, found)
+		intrinsic := profile.IntrinsicTier(annotations, annotationsFound)
 		if admitted, reason, tier := policy.Decide(original.ServerName, original.ToolName, intrinsic); !admitted && reason != profile.ReasonServerNotInProfile {
 			message, blockReason := profileToolPolicyRefusal(reason, tier, policy.Cap, original.ServerName, original.ToolName, profileRefusalSubject(profileResolution, profileIndex))
 			refusal := &profile.ToolBlockedError{Reason: blockReason, Message: message}
@@ -4566,22 +4599,41 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	}
 
 	// Agent token authorization: replay dispatches a real call, so a scoped
-	// credential needs the TARGET tool's permission tier (live annotations,
-	// fail closed to destructive when unknown) and access to its server,
-	// exactly as handleCallToolVariant enforces. Exact-match, not hierarchical.
-	replayAuth := auth.AuthContextFromContext(ctx)
-	if authCtx := auth.ScopedView(replayAuth, (replayAuth == nil || replayAuth.Anonymous) && profileResolution.anonymousConfinementActive()); auth.IsNonAdmin(authCtx) {
-		if !authCtx.CanAccessServer(original.ServerName) {
-			s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
-				sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonTokenPermission)
-			return nil, profile.ErrToolOutsideProfile
-		}
-		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
-		if perm := tierForAnnotations(annotations, found); perm != "" && !authCtx.HasPermission(perm) {
+	// credential needs the TARGET tool's permission tier (fail closed to
+	// destructive when unknown), exactly as handleCallToolVariant enforces.
+	// Exact-match, not hierarchical.
+	if scopedCaller {
+		if perm := tierForAnnotations(annotations, annotationsFound); perm != "" && !authCtx.HasPermission(perm) {
 			message := tokenTierRefusalText(perm, original.ServerName, original.ToolName)
-			s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
-				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonTokenPermission)
-			return nil, &profile.ToolBlockedError{Reason: replayBlockReasonTokenPermission, Message: message}
+			return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonTokenPermission, message, telemetry.BlockReasonTokenPermission)
+		}
+	}
+
+	// The shared policy gates, in handleCallToolVariant's order of answer.
+	if refusal := s.mcpProxy.replayGateRefusal(ctx, gate, requestID); refusal != nil {
+		return nil, refusal
+	}
+
+	// Live identity (liveIdentityRefusal): once the live client is connected,
+	// the only admitting outcome is a name certified on ITS connection
+	// generation. The dispatch below is pinned to that generation, so a
+	// reconnect between this check and the transport is refused by the
+	// managed client with zero upstream calls.
+	var certified toolIdentity
+	if client, exists := s.mcpProxy.upstreamManager.GetClient(original.ServerName); exists {
+		live, message, refuse := s.mcpProxy.liveIdentityRefusal(gate.serverConfig, original.ServerName, original.ToolName, identity, client)
+		if refuse {
+			return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonToolNotCallable, message, telemetry.BlockReasonToolNotCallable)
+		}
+		certified = live
+		// The tier above was read from the gate's identity; a certified live
+		// identity is the connection the call will reach, so authorize its
+		// annotations too (a tool that turned destructive on a reconnect).
+		if scopedCaller && certified.certified() {
+			if perm := tierForAnnotations(certified.Annotations, certified.Found); perm != "" && !authCtx.HasPermission(perm) {
+				message := tokenTierRefusalText(perm, original.ServerName, original.ToolName)
+				return nil, s.mcpProxy.refuseReplay(ctx, original, requestID, replayBlockReasonTokenPermission, message, telemetry.BlockReasonTokenPermission)
+			}
 		}
 	}
 
@@ -4598,11 +4650,30 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 	s.mcpProxy.auditAuthz(ctx, "allow", "")
 
 	startTime := time.Now()
-	result, err := s.runtime.ReplayToolCall(ctx, id, arguments)
+	ctx = s.mcpProxy.withReviewDirtyRecheck(ctx, original.ServerName)
+	result, err := s.runtime.ReplayToolCallWithOptions(ctx, id, arguments, runtime.ReplayOptions{
+		PinEpoch: certified.certified(),
+		Epoch:    certified.DiscoveryEpoch,
+	})
 	durationMs := time.Since(startTime).Milliseconds()
 
 	var limitErr *limiter.LimitError
+	dirty := isReviewNotRecordedRefusal(err)
 	switch {
+	case dirty || errors.Is(err, managed.ErrConnectionGenerationChanged):
+		// The generation moved (or the review state changed) while the call
+		// waited: the managed client refused before the transport, so nothing
+		// reached the upstream. Same refusal bodies as the other dispatch
+		// paths; the allow line is closed by an error tool_call, never a
+		// second authz.
+		message := unresolvedToolIdentityMessage(original.ServerName, original.ToolName, false)
+		if dirty {
+			message = reviewNotRecordedMessage(original.ServerName)
+		}
+		s.mcpProxy.auditToolCall(ctx, "error", "", audit.ErrorClassUpstreamUnavailable, durationMs, nil, nil)
+		s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+			sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonToolNotCallable)
+		return nil, &profile.ToolBlockedError{Reason: replayBlockReasonToolNotCallable, Message: message}
 	case errors.As(err, &limitErr) && limitErr.Shed():
 		// Spec 093 FR-011: a shed never reached the upstream, so it is the
 		// tool_call half of the authz-allow pair, never a second authz —

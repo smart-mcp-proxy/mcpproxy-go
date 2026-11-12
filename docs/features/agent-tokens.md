@@ -210,8 +210,16 @@ Server scoping is enforced at three levels:
    attributable to an allowed server: `GET /api/v1/activity`,
    `/activity/summary`, `/activity/usage`, `/activity/export`, `/activity/{id}`,
    `GET /api/v1/tool-calls` and `/tool-calls/{id}` (plus its `/replay`; a replay
-   re-dispatches the call, so it also requires the permission tier of the target
-   tool, from its live annotations, exactly like `call_tool_*`, else `403`;
+   re-dispatches the call, so it answers to the same per-tool gate as
+   `call_tool_*` for every caller, administrators included: a tool that is
+   pending or changed under tool-level quarantine, denied by `enabled_tools` /
+   `disabled_tools`, on a quarantined or disabled server, or not certified on
+   the server's live connection (the discovery window after a reconnect) is
+   refused with `403` and never reaches the upstream. A scoped token also
+   requires the permission tier of the target tool, taken from that same
+   certified identity, else `403`; the dispatch is pinned to the certified
+   connection generation, so a reconnect between the check and the call is
+   refused too;
    `POST /api/v1/feedback` is admin-only). The
    entitlement is applied inside the query, so `total` and the page always
    describe the same record set, and a `?server=` filter narrows *within* the

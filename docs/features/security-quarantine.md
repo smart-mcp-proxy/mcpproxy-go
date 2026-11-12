@@ -907,6 +907,15 @@ server (persisted marker in `config.db`; a fresh install with no servers logs
 nothing), and `mcpproxy doctor` names them on every run. Set `trust_mode:
 "manual"` on a server whose tool changes a person should review.
 
+### Replay honours the same gate
+
+`POST /api/v1/tool-calls/{id}/replay` re-dispatches a recorded call, so it is
+a dispatch path like `call_tool_*`: it evaluates the same per-tool gate and
+refuses (`403`, zero upstream calls) a tool that is pending or changed, denied
+by `enabled_tools` / `disabled_tools`, on a quarantined or disabled server, or
+not certified on the live connection. This applies to administrators too; a
+normally approved tool on a connected server replays as before.
+
 ### Block (approve + disable)
 
 When reviewing a pending or changed tool you may want to **acknowledge it but
