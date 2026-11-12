@@ -596,8 +596,11 @@ func watchMemory(vm *goja.Runtime, budget int64, baseline uint64, done <-chan st
 		if overAfterGC < 2 {
 			continue
 		}
-		cancelRun(errMemoryLimit)
+		// Interrupt first: the cancelled call then returns into a script
+		// whose next instruction already stops it, so the script cannot see
+		// the call fail and finish before the interrupt is installed.
 		vm.Interrupt(errMemoryLimit)
+		cancelRun(errMemoryLimit)
 		return
 	}
 }

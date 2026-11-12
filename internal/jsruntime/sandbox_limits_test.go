@@ -163,6 +163,23 @@ func TestExecuteMemoryBudgetCancelsInFlightCall(t *testing.T) {
 	}
 }
 
+// TestExecuteMemoryBudgetCancelsInFlightBatch: the same for a call_tools()
+// batch, whose workers dispatch under the execution context.
+func TestExecuteMemoryBudgetCancelsInFlightBatch(t *testing.T) {
+	caller := &blockingCaller{cancelled: make(chan struct{})}
+	result, _ := execute(context.Background(), caller,
+		`var keep = []; for (var i = 0; i < 96; i++) { keep.push("x".repeat(1024).repeat(1024)) } call_tools([{server: "s", tool: "t", args: {}}]); keep.length`,
+		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 32 << 20})
+	if result.Error == nil || result.Error.Code != ErrorCodeMemoryLimit {
+		t.Fatalf("expected %s, got ok=%v %+v", ErrorCodeMemoryLimit, result.Ok, result.Error)
+	}
+	select {
+	case <-caller.cancelled:
+	default:
+		t.Fatal("the in-flight batch call was never cancelled")
+	}
+}
+
 // TestExecuteMemoryBudgetSustainedChurn: a script that allocates and drops
 // values for several seconds, across many collections, keeps little alive and
 // must not be stopped for the garbage that floats through each collection.
