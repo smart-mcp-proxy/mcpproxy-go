@@ -4483,6 +4483,10 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 	return s.runtime.GetServerToolCalls(serverName, limit)
 }
 
+// replayBlockReasonTokenPermission labels a replay refused for the agent
+// token's permission tier; httpapi maps *profile.ToolBlockedError to 403.
+const replayBlockReasonTokenPermission profile.BlockReason = "token_permission"
+
 // ReplayToolCall replays a tool call with modified arguments. ctx is the
 // caller's request context: it governs the concurrency-limiter queue wait as
 // well as the upstream call (spec 093 FR-005).
@@ -4500,6 +4504,21 @@ func (s *Server) GetServerToolCalls(serverName string, limit int) ([]*contracts.
 func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
 	original, lookupErr := s.runtime.GetToolCallByID(id)
 	if lookupErr != nil || original == nil || s.mcpProxy == nil {
+		// A scoped (non-admin) credential must never reach the unaudited,
+		// ungated delegate: the permission-tier check below needs both the
+		// record and the proxy, so without them fail closed.
+		if auth.IsNonAdmin(auth.AuthContextFromContext(ctx)) {
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			if original == nil {
+				return nil, fmt.Errorf("tool call not found: %s", id)
+			}
+			return nil, &profile.ToolBlockedError{
+				Reason:  replayBlockReasonTokenPermission,
+				Message: "Permission denied: tool call replay is unavailable for this credential",
+			}
+		}
 		return s.runtime.ReplayToolCall(ctx, id, arguments)
 	}
 
@@ -4543,6 +4562,26 @@ func (s *Server) ReplayToolCall(ctx context.Context, id string, arguments map[st
 			s.mcpProxy.emitActivityPolicyDecisionWithBlockReason(ctx, original.ServerName, original.ToolName,
 				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonOther, string(blockReason))
 			return nil, refusal
+		}
+	}
+
+	// Agent token authorization: replay dispatches a real call, so a scoped
+	// credential needs the TARGET tool's permission tier (live annotations,
+	// fail closed to destructive when unknown) and access to its server,
+	// exactly as handleCallToolVariant enforces. Exact-match, not hierarchical.
+	replayAuth := auth.AuthContextFromContext(ctx)
+	if authCtx := auth.ScopedView(replayAuth, (replayAuth == nil || replayAuth.Anonymous) && profileResolution.anonymousConfinementActive()); auth.IsNonAdmin(authCtx) {
+		if !authCtx.CanAccessServer(original.ServerName) {
+			s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+				sessionIDFromContext(ctx), requestID, "blocked", profile.ErrToolOutsideProfile.Error(), telemetry.BlockReasonTokenPermission)
+			return nil, profile.ErrToolOutsideProfile
+		}
+		annotations, found := s.mcpProxy.EffectiveAnnotations(original.ServerName, original.ToolName)
+		if perm := tierForAnnotations(annotations, found); perm != "" && !authCtx.HasPermission(perm) {
+			message := tokenTierRefusalText(perm, original.ServerName, original.ToolName)
+			s.mcpProxy.emitActivityPolicyDecision(ctx, original.ServerName, original.ToolName,
+				sessionIDFromContext(ctx), requestID, "blocked", message, telemetry.BlockReasonTokenPermission)
+			return nil, &profile.ToolBlockedError{Reason: replayBlockReasonTokenPermission, Message: message}
 		}
 	}
 

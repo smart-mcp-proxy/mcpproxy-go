@@ -209,7 +209,10 @@ Server scoping is enforced at three levels:
    **The activity, tool-call and usage doors** are scoped to records
    attributable to an allowed server: `GET /api/v1/activity`,
    `/activity/summary`, `/activity/usage`, `/activity/export`, `/activity/{id}`,
-   `GET /api/v1/tool-calls` and `/tool-calls/{id}` (plus its `/replay`). The
+   `GET /api/v1/tool-calls` and `/tool-calls/{id}` (plus its `/replay`; a replay
+   re-dispatches the call, so it also requires the permission tier of the target
+   tool, from its live annotations, exactly like `call_tool_*`, else `403`;
+   `POST /api/v1/feedback` is admin-only). The
    entitlement is applied inside the query, so `total` and the page always
    describe the same record set, and a `?server=` filter narrows *within* the
    scope rather than escaping it. Records with no server attribution

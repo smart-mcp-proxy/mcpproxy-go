@@ -1295,7 +1295,7 @@ func (s *Server) setupRoutes() {
 		})
 
 		// Feedback submission (Spec 036)
-		r.Post("/feedback", s.handleFeedback)
+		r.With(s.requireAdminReadMiddleware("Admin credentials required to submit feedback")).Post("/feedback", s.handleFeedback)
 
 		// Client connect/disconnect. Config reads disclose local paths and
 		// connection state; writes can modify user-owned client files or embed

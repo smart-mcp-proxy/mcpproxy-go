@@ -214,7 +214,7 @@ func (s *Service) undo(client *ClientDef, cfgPath, serverName, backupPath string
 		return res, s.revokeUnheld(client.ID, "", intent, res)
 	}
 
-	perm := os.FileMode(0o644)
+	perm := newFilePerm
 	if info, statErr := os.Stat(cfgPath); statErr == nil {
 		perm = info.Mode()
 	}
