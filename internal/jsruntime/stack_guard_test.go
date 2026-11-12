@@ -45,7 +45,7 @@ func TestStackGuardChild(t *testing.T) {
 		}
 		code = v.String()
 	}
-	result := Execute(context.Background(), newMockToolCaller(), code, ExecutionOptions{
+	result := Execute(context.Background(), marshalingToolCaller{newMockToolCaller()}, code, ExecutionOptions{
 		TimeoutMs: 60000, MaxMemoryBytes: budget, Language: os.Getenv(stackChildLangEnv),
 	})
 	out, err := json.Marshal(result)
@@ -53,6 +53,18 @@ func TestStackGuardChild(t *testing.T) {
 		out, _ = json.Marshal(NewErrorResult(NewJsError(ErrorCodeSerializationError, err.Error())))
 	}
 	fmt.Println(stackChildMarker + string(out))
+}
+
+// marshalingToolCaller JSON-encodes the arguments of every call, as the
+// proxy does downstream of call_tool, so a vector that hands a tool call a
+// value too deep for Go's recursive encoders crashes the child.
+type marshalingToolCaller struct{ *mockToolCaller }
+
+func (m marshalingToolCaller) CallTool(ctx context.Context, server, tool string, args map[string]interface{}) (interface{}, error) {
+	if _, err := json.Marshal(args); err != nil {
+		return nil, err
+	}
+	return m.mockToolCaller.CallTool(ctx, server, tool, args)
 }
 
 type stackVector struct {
@@ -136,6 +148,14 @@ var stackVectors = []stackVector{
 	{name: "deep arrays as result", code: `var a=[]; for(var i=0;i<1500000;i++) a=[a]; a`},
 	{name: "deep Map chain as result", code: `var m=new Map(); for(var i=0;i<1000000;i++) m=new Map([[1,m]]); m`},
 	{name: "deep arrays as call_tool args", code: `var a=[]; for(var i=0;i<1500000;i++) a=[a]; call_tool("s","t",{a:a})`},
+	// An acyclic graph that reuses exported objects: each one is exported
+	// once, but the longest path through the Go graph is the chain's length.
+	// "b" is exported first (JS order) and builds the chain one level at a
+	// time; json.Marshal then walks "a" (sorted first), the whole chain.
+	{name: "shared chain as result", code: `var a=[{}]; for(var i=1;i<2000000;i++) a.push({n:a[i-1]}); ({b:a, a:a[a.length-1]})`},
+	{name: "shared chain as call_tool args", code: `var a=[{}]; for(var i=1;i<2000000;i++) a.push({n:a[i-1]}); call_tool("s","t",{b:a, a:a[a.length-1]})`},
+	{name: "shared chain in call_tools args", code: `var a=[{}]; for(var i=1;i<2000000;i++) a.push({n:a[i-1]}); call_tools([{server:"s",tool:"t",args:{b:a, a:a[a.length-1]}}])`},
+	{name: "shared Map chain as result", code: `var a=[new Map()]; for(var i=1;i<1000000;i++) a.push(new Map([[1,a[i-1]]])); ({b:a, a:a[a.length-1]})`},
 	{name: "lazy getters as result, re-entering export", code: `function mk(){return {get n(){ return call_tool("s","t",mk()) }}}; mk()`},
 	{name: "cyclic Map written into input", code: `var m=new Map(); m.set(1,m); input.x=m; "done"`, want: "ok"},
 	{name: "cyclic Map written into a call_tool result", code: `var m=new Map(); m.set(1,m); var r=call_tool("s","t",{}); r.x=m; r.result=m; "done"`, want: "ok"},
@@ -170,12 +190,21 @@ var stackVectors = []stackVector{
 	{name: "script text nested regex groups", code: `"/"+"(".repeat(1000000)+")".repeat(1000000)+"/"`, generate: true, want: sourceTooDeepMessage},
 	{name: "TypeScript nested brackets", code: `"[".repeat(1000000)+"]".repeat(1000000)`, generate: true, language: "typescript", want: sourceTooDeepMessage},
 	{name: "TypeScript nested parens", code: `"let x: number = "+"(".repeat(1000000)+"1"+")".repeat(1000000)`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	// TypeScript nesting that consumes no punctuation: esbuild recurses once
+	// per keyword operator ("keyof keyof T", "readonly readonly T[]", a type
+	// predicate "a is a is ...", "infer U extends infer U extends ...").
+	{name: "TypeScript keyof chain", code: `"type T = " + "keyof ".repeat(5000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript readonly chain", code: `"type T = " + "readonly ".repeat(5000000) + "any[]; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript type predicate chain", code: `"type T = " + "a is ".repeat(5000000) + "a; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript asserts predicate chain", code: `"function f(x): asserts x is " + "x is ".repeat(5000000) + "x {}; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript infer extends chain", code: `"type T<X> = X extends " + "infer U extends ".repeat(5000000) + "any ? 1 : 0; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
 	{name: "RegExp constructor nested groups", code: `new RegExp("(".repeat(1000000)+")".repeat(1000000)).source.length`, want: "Invalid regular expression"},
 	// Nesting just under the limit compiles, without a crash.
 	{name: "script text nested parens under the limit", code: `"0&&"+"(".repeat(49000)+"1"+")".repeat(49000)`, generate: true, want: "ok"},
 	{name: "script text arrow chain under the limit", code: `"0&&("+"a=>".repeat(20000)+"1)"`, generate: true, want: "ok"},
 	{name: "eval nested brackets under the limit", code: `eval("0&&"+"[".repeat(49000)+"]".repeat(49000))`, want: "ok"},
 	{name: "Function spread nesting under the limit", code: `Function("a", "return "+"[...".repeat(19000)+"a"+"]".repeat(19000)); 1`, want: "ok"},
+	{name: "TypeScript keyof chain under the limit", code: `"type T = " + "keyof ".repeat(90000) + "any; 7"`, generate: true, language: "typescript", want: "ok"},
 	{name: "TypeScript nested parens under the limit", code: `"let x: number = 0&&"+"(".repeat(49000)+"1"+")".repeat(49000)+"; x"`, generate: true, language: "typescript", want: "ok"},
 }
 
@@ -386,6 +415,49 @@ func TestSourceOperatorTokens(t *testing.T) {
 	if got := sourceOperatorTokens(strings.Repeat("(", 1000), 10); got != 11 {
 		t.Errorf("limited count = %d, want 11", got)
 	}
+
+	// TypeScript: every word counts as well.
+	tsCases := []struct {
+		src  string
+		want int
+	}{
+		{"", 0},
+		{"abc def 123 $_x", 4},
+		{"keyof keyof T", 3},
+		{"a is a is a", 5},
+		{"a+b", 3},
+		{"caf\u00e9 \u00e9t\u00e9", 2},
+		{"\t\n\r ", 0},
+	}
+	for _, tc := range tsCases {
+		if got := typeScriptSourceTokens(tc.src, maxSourceTokens); got != tc.want {
+			t.Errorf("typeScriptSourceTokens(%q) = %d, want %d", tc.src, got, tc.want)
+		}
+	}
+}
+
+// TestTranspileTypeScriptBoundsOutput: esbuild indents every nested line, so
+// deeply nested source gets whitespace-free output instead of output that
+// grows with the square of the depth; ordinary source keeps the readable form.
+func TestTranspileTypeScriptBoundsOutput(t *testing.T) {
+	deep := strings.Repeat("{", 49000) + strings.Repeat("}", 49000)
+	out, jsErr := TranspileTypeScript(deep)
+	if jsErr != nil {
+		t.Fatalf("transpile: %v", jsErr)
+	}
+	if len(out) > 1<<20 {
+		t.Fatalf("output of %d bytes for %d bytes of source", len(out), len(deep))
+	}
+	out, jsErr = TranspileTypeScript("function f(x: number): number {\n  if (x) {\n    return x;\n  }\n  return 0;\n}\n")
+	if jsErr != nil {
+		t.Fatalf("transpile: %v", jsErr)
+	}
+	if !strings.Contains(out, "\n    return x;\n") {
+		t.Fatalf("ordinary source lost its readable output:\n%s", out)
+	}
+	if _, jsErr := TranspileTypeScript("type T = " + strings.Repeat("keyof ", maxSourceTokens) + "any"); jsErr == nil || jsErr.Code != ErrorCodeSyntaxError || !strings.Contains(jsErr.Message, sourceTooDeepMessage) {
+		t.Fatalf("expected a SYNTAX_ERROR naming the limit, got %+v", jsErr)
+	}
 }
 
 // TestStackGuardCallDepthLimitMessage: goja's own stack overflow error has an
@@ -458,6 +530,69 @@ func TestStackGuardInstrumentsEveryBuiltin(t *testing.T) {
 	}
 }
 
+// TestBuiltinTemplateMatchesWalk: following the recorded template finds
+// exactly the functions a full walk of a fresh VM finds, and a VM whose graph
+// differs from the template is walked instead.
+func TestBuiltinTemplateMatchesWalk(t *testing.T) {
+	tmpl := builtinTemplate()
+	if tmpl == nil {
+		t.Fatal("no template: every execution walks the builtins in full")
+	}
+	vm := goja.New()
+	setupSandbox(vm)
+	followed, ok := tmpl.follow(vm)
+	if !ok {
+		t.Fatal("a fresh sandboxed VM does not follow the template")
+	}
+	walked, err := collectBuiltins(vm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The builtins: the roots' own JS functions ((function*(){}), ...) are
+	// created anew each time the roots are evaluated, and are not patched.
+	set := func(fs []*goja.Object) map[*goja.Object]struct{} {
+		m := make(map[*goja.Object]struct{}, len(fs))
+		for _, f := range fs {
+			if _, _, native := nativeFuncFields(f); native {
+				m[f] = struct{}{}
+			}
+		}
+		return m
+	}
+	fset, wset := set(followed), set(walked)
+	if len(fset) != len(wset) || len(fset) < 200 {
+		t.Fatalf("template found %d builtins, the walk %d", len(fset), len(wset))
+	}
+	for f := range wset {
+		if _, ok := fset[f]; !ok {
+			t.Fatalf("the template misses %v", f.Get("name"))
+		}
+	}
+
+	// A global added before the guard is installed: the template no longer
+	// describes the VM.
+	other := goja.New()
+	setupSandbox(other)
+	if err := other.Set("extra", func(goja.FunctionCall) goja.Value { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tmpl.follow(other); ok {
+		t.Fatal("followed the template on a VM with another global")
+	}
+	if funcs, err := builtinFunctions(other); err != nil || len(funcs) <= len(walked) {
+		t.Fatalf("fallback walk: %d functions, %v", len(funcs), err)
+	}
+	// A builtin replaced before the guard is installed is found by the walk.
+	changed := goja.New()
+	setupSandbox(changed)
+	if _, err := changed.RunString(`Array.prototype.join = function(){}; Object.defineProperty(Map.prototype, "size", {get: String.prototype.trim.bind("")})`); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := tmpl.follow(changed); ok {
+		t.Fatal("followed the template on a VM whose builtins were replaced")
+	}
+}
+
 // TestNativeFuncFieldsLayout pins the goja internals installStackGuard
 // relies on: if a goja upgrade moves them, this fails before code_execution
 // starts refusing every script.
@@ -487,6 +622,10 @@ func TestNativeFuncFieldsLayout(t *testing.T) {
 		t.Fatal("a JS function must not be treated as a builtin")
 	}
 }
+
+// deep1500 builds a chain of 1500 objects in o: deep, but well within the
+// native depth budget when serialized alone.
+const deep1500 = `var o={}; for(var i=0;i<1500;i++) o={x:o}; `
 
 // TestStackGuardStringifyMatchesGoja: the depth-tracking JSON.stringify
 // produces goja's output, byte for byte, and goja's errors.
@@ -526,12 +665,34 @@ func TestStackGuardStringifyMatchesGoja(t *testing.T) {
 		`JSON.stringify({get a(){ throw new TypeError("getter") }})`,
 		`JSON.stringify({a:[1]}, {not:"a replacer"})`,
 		`JSON.stringify(input)`, `JSON.stringify(input, ["k", "nested", "v"])`,
+		// Boxed primitives are unwrapped by goja, also through a property list.
+		`var o=Object(Symbol("s")); o.a=1; JSON.stringify([o], ["a"])`, `var o=Object(Symbol("s")); o.a=o; JSON.stringify(o, ["a"])`,
+		`var o=Object(Symbol("s")); o.a=1; JSON.stringify([o])`, `var o=new Number(1); o.a=o; JSON.stringify([o], ["a"])`,
+		// A sibling serialized after a deep subtree runs at its own depth.
+		deep1500 + `JSON.stringify({a:o, get b(){ return JSON.stringify(o).length }}).length`,
+		deep1500 + `JSON.stringify({a:o, b:{toJSON:function(){ return JSON.stringify(o).length }}}).length`,
+		deep1500 + `JSON.stringify([o, {toJSON:function(){ return JSON.stringify(o).length }}]).length`,
+		deep1500 + `var arr=[o]; Object.defineProperty(arr, 1, {get:function(){ return JSON.stringify(o).length }, enumerable:true}); JSON.stringify(arr).length`,
+		deep1500 + `JSON.stringify({a:o, get b(){ return JSON.stringify(o).length }}, ["a","b","x"]).length`,
+		deep1500 + `JSON.stringify([o, {get b(){ return JSON.stringify(o).length }}], ["x","b"]).length`,
+		deep1500 + `JSON.stringify({a:o, get b(){ return JSON.stringify(o).length }}, function(k,v){ return v }).length`,
+		// What the script sees while goja serializes is unchanged.
+		`var inner={b:1}; JSON.stringify({a:inner}, function(k,v){ return k === "b" ? (this === inner) : v })`,
+		`var arr=[1]; JSON.stringify({a:arr}, function(k,v){ return k === "0" ? (this === arr) : v })`,
+		`var o={get g(){ return this === o }}; JSON.stringify(o)`, `var o={toJSON:function(){ return this === o }}; JSON.stringify({k:o})`,
+		`var o={a:1, get b(){ o.c=3; delete o.a; return 2 }}; JSON.stringify(o) + JSON.stringify(o)`,
+		`JSON.stringify(Object.freeze({a:Object.freeze([1,{b:2}])}))`, `JSON.stringify({t:new Uint8Array([1,2]), d:new Date(0), r:/x/, e:new Error("m")})`,
+		`(function(){ return JSON.stringify(arguments) })(1, {a:2})`, `class C { constructor(){ this.p = 1 } get g(){ return 1 } }; JSON.stringify(new C())`,
+		`var s={x:1}; JSON.stringify({a:s, b:[s, s]})`, `var o={}; var a=[o]; o.a=a; JSON.stringify(a)`,
+		`var o={a:{}}; JSON.stringify(o, function(k,v){ return k === "a" ? o : v })`,
+		`var log=[]; var p=new Proxy({x:{y:1}},{get:function(t,k){ log.push(String(k)); return t[k] }, ownKeys:function(t){ log.push("keys"); return Reflect.ownKeys(t) }}); JSON.stringify({p:p}) + log.join()`,
+		`JSON.stringify([new Proxy([1,[2]], {})])`,
 	}
 	// One key per level: goja serializes a Go map in Go's random order.
 	input := map[string]interface{}{"nested": map[string]interface{}{"v": []interface{}{1, "two"}}}
 	run := func(vm *goja.Runtime, expr string) string {
 		_ = vm.Set("input", input)
-		v, err := vm.RunString(`(function(){ try { var r = ` + expr + `; return typeof r + ":" + String(r) } catch (e) { return "throw:" + e.name + ":" + e.message } })()`)
+		v, err := vm.RunString(`(function(){ try { var r = (function(){ return eval(` + strconv.Quote(expr) + `) })(); return typeof r + ":" + String(r) } catch (e) { return "throw:" + e.name + ":" + e.message } })()`)
 		if err != nil {
 			return "go error: " + err.Error()
 		}
@@ -561,7 +722,7 @@ func TestStackGuardParseMatchesGoja(t *testing.T) {
 		`JSON.stringify(JSON.parse("[".repeat(1000) + "]".repeat(1000))).length`,
 	}
 	run := func(vm *goja.Runtime, expr string) string {
-		v, err := vm.RunString(`(function(){ try { var r = ` + expr + `; return typeof r + ":" + String(r) } catch (e) { return "throw:" + e.name + ":" + e.message } })()`)
+		v, err := vm.RunString(`(function(){ try { var r = (function(){ return eval(` + strconv.Quote(expr) + `) })(); return typeof r + ":" + String(r) } catch (e) { return "throw:" + e.name + ":" + e.message } })()`)
 		if err != nil {
 			return "go error: " + err.Error()
 		}
@@ -607,6 +768,19 @@ func TestStackGuardBuiltinsMatchGoja(t *testing.T) {
 		`JSON.stringify(new Proxy([1,[2,[3]]], {}).flat(Infinity))`,
 		`var a=[1]; for(var i=0;i<900;i++) a=[a]; a.flat(Infinity).length`,
 		`JSON.stringify([[1],[2,[3]]].flatMap(function(x){ return x }))`,
+		// goja reads the receiver's length before it coerces the depth.
+		`var o={0:7,length:1}; var d={valueOf:function(){ o.length=0; return 1 }}; JSON.stringify(Array.prototype.flat.call(o,d))`,
+		`var log=[]; var o={get length(){ log.push("length"); return 1 }, 0:[1]}; Array.prototype.flat.call(o, {valueOf:function(){ log.push("depth"); return Infinity }}); log.join()`,
+		`[1].flat(Symbol())`, `[1,[2]].flat({valueOf:function(){ throw new Error("boom") }})`, `JSON.stringify([1,[2]].flat(1n))`,
+		`var calls=0; JSON.stringify([1,[2,[3]]].flat({valueOf:function(){ calls++; return 2 }})) + calls`,
+		// A species result that is not an array, with depth Infinity.
+		`var a=[1,2]; a.constructor={}; a.constructor[Symbol.species]=function(){ return {} }; JSON.stringify(a.flat(Infinity))`,
+		`var a=[1,[2,[3]]]; a.constructor={}; a.constructor[Symbol.species]=function(){ return {} }; JSON.stringify(a.flat(Infinity))`,
+		`var a=[1,[2]]; a.constructor={}; a.constructor[Symbol.species]=function(){ return {pre:[0]} }; JSON.stringify(a.flat(Infinity))`,
+		`var a=[1,[2]]; a.constructor={}; a.constructor[Symbol.species]=function(){ return new Array(1e6) }; var r=a.flat(Infinity); r.length + ":" + r[0] + r[1]`,
+		`var a=[1,[2]]; a.constructor={}; a.constructor[Symbol.species]=function(){ var r=[]; r.length=4294967295; return r }; var r=a.flat(Infinity); r.length + ":" + r[0] + r[1]`,
+		`var a=[1,[2]]; a.constructor={}; a.constructor[Symbol.species]=function(){ return new Uint8Array(4) }; var r=a.flat(Infinity); Array.prototype.join.call(r)`,
+		`var a=[1,[2]]; a.constructor={}; a.constructor[Symbol.species]=function(){ return new Uint8Array(1e7) }; var r=a.flat(Infinity); r.length + ":" + r[0] + r[1]`,
 		// prototype setters
 		`var o={}; var p={x:1}; Object.setPrototypeOf(o,p) === o && o.x`, `var o={}; o.__proto__={y:2}; o.y`,
 		`var o={}; Reflect.setPrototypeOf(o,{z:3}) + ":" + o.z`, `var o={}; Object.setPrototypeOf(o,null); Object.getPrototypeOf(o)`,
@@ -673,6 +847,9 @@ func TestStackGuardExportMatchesGoja(t *testing.T) {
 		`class K { constructor(){ this.p = {q:1} } }; new K()`,
 		`[[1,[2,[3,[4]]]], {deep:{deeper:{deepest:[{}]}}}]`,
 		`var o={v:1}; for(var i=0;i<1000;i++) o={n:o}; o`, `var a=[1]; for(var i=0;i<1000;i++) a=[a]; a`,
+		// Keys are looked up as the JS strings they are, lone surrogates included.
+		`({["\ud800"]:7})`, `({"\ud800":1, "\ufffd":2})`, `({a:{["x\udc00"]:[1]}})`,
+		`var a=[{}]; for(var i=1;i<1000;i++) a.push({n:a[i-1]}); a`,
 	}
 	for _, expr := range exprs {
 		plain := goja.New()
@@ -704,6 +881,27 @@ func TestStackGuardExportMatchesGoja(t *testing.T) {
 	m := g.export(v).(map[string]interface{})
 	if reflect.ValueOf(m["a"]).Pointer() != reflect.ValueOf(m["b"]).Pointer() {
 		t.Error("a shared object exported to two Go values")
+	}
+
+	// Reusing an exported object counts its whole height: the longest path
+	// through the exported Go graph stays within the budget.
+	for _, expr := range []string{
+		`var a=[{}]; for(var i=1;i<3000;i++) a.push({n:a[i-1]}); a`,
+		`var a=[{}]; for(var i=1;i<3000;i++) a.push({n:a[i-1]}); ({b:a, a:a[a.length-1]})`,
+		`var a=[new Map()]; for(var i=1;i<3000;i++) a.push(new Map([[1,a[i-1]]])); a`,
+		`var a=[new Set()]; for(var i=1;i<3000;i++) a.push(new Set([a[i-1]])); a`,
+		`var a=[[]]; for(var i=1;i<3000;i++) a.push([a[i-1], a[i-1]]); a`,
+	} {
+		v, err := vm.RunString(expr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := g.tryExport(v, false); ok {
+			t.Errorf("%s: exported a graph deeper than the budget", expr)
+		}
+		if _, ok := g.tryExport(v, true); ok {
+			t.Errorf("%s: exported tool arguments deeper than the budget", expr)
+		}
 	}
 }
 

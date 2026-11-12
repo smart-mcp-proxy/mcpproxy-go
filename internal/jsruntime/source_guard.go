@@ -43,16 +43,33 @@ var sourceKeywordOperators = map[string]struct{}{
 // sourceOperatorTokens counts the operator tokens in src, stopping once the
 // count exceeds limit.
 func sourceOperatorTokens(src string, limit int) int {
+	return countSourceTokens(src, limit, false)
+}
+
+// typeScriptSourceTokens counts the tokens of TypeScript source: every ASCII
+// punctuation character and every word. TypeScript adds operators that nest
+// with no punctuation at all and that esbuild parses recursively ("keyof
+// keyof T", "readonly readonly T[]", a type predicate "a is a is ...",
+// "infer U extends infer U extends ..."); rather than keep a list of them,
+// every word counts, so the count bounds the nesting whatever words the
+// grammar grows. Runs of non-ASCII bytes count as words too.
+func typeScriptSourceTokens(src string, limit int) int {
+	return countSourceTokens(src, limit, true)
+}
+
+func countSourceTokens(src string, limit int, everyWord bool) int {
 	n := 0
 	for i := 0; i < len(src) && n <= limit; {
 		c := src[i]
 		switch {
-		case isSourceWordByte(c):
+		case isSourceWordByte(c) || everyWord && c >= 0x80:
 			j := i + 1
-			for j < len(src) && isSourceWordByte(src[j]) {
+			for j < len(src) && (isSourceWordByte(src[j]) || everyWord && src[j] >= 0x80) {
 				j++
 			}
-			if _, op := sourceKeywordOperators[src[i:j]]; op {
+			if everyWord {
+				n++
+			} else if _, op := sourceKeywordOperators[src[i:j]]; op {
 				n++
 			}
 			i = j
@@ -70,10 +87,14 @@ func isSourceWordByte(c byte) bool {
 	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '$'
 }
 
+func sourceTooDeepError() error {
+	return fmt.Errorf("%s (more than %d operators and brackets)", sourceTooDeepMessage, maxSourceTokens)
+}
+
 // checkSourceSize reports a source too large to hand to the parser safely.
 func checkSourceSize(src string) error {
 	if sourceOperatorTokens(src, maxSourceTokens) > maxSourceTokens {
-		return fmt.Errorf("%s (more than %d operators and brackets)", sourceTooDeepMessage, maxSourceTokens)
+		return sourceTooDeepError()
 	}
 	return nil
 }
@@ -192,7 +213,7 @@ func (g *nativeGuard) checkFunctionArgs(args []goja.Value, toString nativeCallFu
 		out[i] = s
 		total += sourceOperatorTokens(s.String(), maxSourceTokens) + 1 // + the "," joining parameters
 		if total > maxSourceTokens {
-			panic(g.newRangeError(fmt.Sprintf("%s (more than %d operators and brackets)", sourceTooDeepMessage, maxSourceTokens)))
+			panic(g.newRangeError(sourceTooDeepError().Error()))
 		}
 	}
 	return out

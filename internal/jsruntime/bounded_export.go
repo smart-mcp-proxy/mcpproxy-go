@@ -1,9 +1,12 @@
 package jsruntime
 
 import (
+	"errors"
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/dop251/goja"
 )
@@ -25,15 +28,36 @@ import (
 
 var exportMapType = reflect.TypeOf(map[string]interface{}{})
 
-// exportError is how exportValue unwinds when the value is nested too deeply.
-type exportError struct{}
+var (
+	// errExportTooDeep: the value is nested deeper than the native depth
+	// budget allows.
+	errExportTooDeep = errors.New("nested too deeply to export")
+	// errExportCycle: a script result refers to itself.
+	errExportCycle = errors.New("contains a circular reference")
+)
+
+// exportError is how the exporter unwinds with one of the errors above.
+type exportError struct{ err error }
+
+// cycleMode selects what the exporter does with a value that refers to
+// itself.
+type cycleMode int
+
+const (
+	// cyclesKept: goja's semantics, the Go value refers to itself too.
+	cyclesKept cycleMode = iota
+	// cyclesThrow: a TypeError, as JSON.stringify throws (tool arguments).
+	cyclesThrow
+	// cyclesFail: errExportCycle (a script result, which must be JSON).
+	cyclesFail
+)
 
 // export converts v to Go the way v.Export() does. It panics with a
 // RangeError when v is nested deeper than the native depth budget allows;
 // script exceptions thrown by getters propagate as from Export.
 func (g *nativeGuard) export(v goja.Value) interface{} {
-	out, ok := g.tryExport(v, false)
-	if !ok {
+	out, err := g.exportMode(v, cyclesKept)
+	if err != nil {
 		panic(g.newRangeError(stackOverflowMessage))
 	}
 	return out
@@ -43,66 +67,120 @@ func (g *nativeGuard) export(v goja.Value) interface{} {
 // cycle throws a TypeError instead of becoming a cyclic Go map that Go code
 // downstream (activity redaction, logging) would walk without end.
 func (g *nativeGuard) exportArgs(v goja.Value) interface{} {
-	out, ok := g.tryExport(v, true)
-	if !ok {
+	out, err := g.exportMode(v, cyclesThrow)
+	if err != nil {
 		panic(g.newRangeError(stackOverflowMessage))
 	}
 	return out
 }
 
-// tryExport is export reporting a too-deep value as ok=false.
+// exportResult is export for the script's result, which is JSON-encoded
+// next: a cycle is reported (errExportCycle) instead of handed on, so that
+// every path through the Go value is bounded by the depth budget.
+func (g *nativeGuard) exportResult(v goja.Value) (interface{}, error) {
+	return g.exportMode(v, cyclesFail)
+}
+
+// tryExport is export (or, with rejectCycles, exportArgs) reporting a
+// too-deep value as ok=false.
 func (g *nativeGuard) tryExport(v goja.Value, rejectCycles bool) (out interface{}, ok bool) {
+	mode := cyclesKept
+	if rejectCycles {
+		mode = cyclesThrow
+	}
+	out, err := g.exportMode(v, mode)
+	return out, err == nil
+}
+
+func (g *nativeGuard) exportMode(v goja.Value, mode cycleMode) (out interface{}, err error) {
 	saved := g.enter()
 	defer g.restore(saved)
 	defer func() {
 		if r := recover(); r != nil {
-			if _, deep := r.(exportError); !deep {
+			ee, ours := r.(exportError)
+			if !ours {
 				panic(r)
 			}
-			out, ok = nil, false
+			out, err = nil, ee.err
 		}
 	}()
-	e := &exporter{g: g, base: saved + 1, seen: make(map[*goja.Object]interface{})}
-	if rejectCycles {
+	e := &exporter{g: g, base: saved + 1, mode: mode, seen: make(map[*goja.Object]interface{}), height: make(map[*goja.Object]int)}
+	if mode != cyclesKept {
 		e.onPath = make(map[*goja.Object]bool)
 	}
-	return e.value(v, 0), true
+	out, _ = e.value(v, 0)
+	return out, nil
 }
 
 type exporter struct {
 	g    *nativeGuard
 	base int
+	mode cycleMode
 	// seen is goja's export context: an object exported once is the same Go
 	// value wherever it appears again (which also ends cycles).
 	seen map[*goja.Object]interface{}
-	// onPath, when set, holds the objects being exported above the current
-	// one, so that a cycle is refused.
+	// height is, for every object whose export is complete, the number of
+	// object levels of its Go value (1 for an object holding no objects).
+	// An object reused at a level counts with its height, so the longest
+	// path through the Go graph, and not only the path the export walked,
+	// stays within the budget (an acyclic graph that reuses exported
+	// objects can otherwise be arbitrarily deep).
+	height map[*goja.Object]int
+	// onPath, when cycles are refused, holds the objects being exported
+	// above the current one.
 	onPath map[*goja.Object]bool
 }
 
-func (e *exporter) value(v goja.Value, level int) interface{} {
+// value exports v at the given level and returns it with its height.
+func (e *exporter) value(v goja.Value, level int) (interface{}, int) {
 	obj, ok := v.(*goja.Object)
 	if !ok {
 		if v == nil {
-			return nil
+			return nil, 0
 		}
-		return v.Export()
+		return v.Export(), 0
 	}
 	if out, done := e.seen[obj]; done {
 		if e.onPath[obj] {
+			if e.mode == cyclesFail {
+				panic(exportError{errExportCycle})
+			}
 			panic(e.g.vm.NewTypeError("Converting circular structure to JSON"))
 		}
-		return out
+		// An object still being exported (a cycle, kept) has no height yet:
+		// cycles are only kept by export, whose Go value nothing walks.
+		h := e.height[obj]
+		if h > 0 && e.base+level+h-1 >= e.g.max {
+			panic(exportError{errExportTooDeep})
+		}
+		return out, h
 	}
 	if e.base+level >= e.g.max {
-		panic(exportError{})
+		panic(exportError{errExportTooDeep})
 	}
 	if e.onPath != nil {
 		e.onPath[obj] = true
 		defer delete(e.onPath, obj)
 	}
+	out, below := e.object(obj, level)
+	e.height[obj] = below + 1
+	return out, below + 1
+}
+
+// object exports one object and returns it with the height of its tallest
+// element.
+func (e *exporter) object(obj *goja.Object, level int) (interface{}, int) {
 	// Script code a getter runs at this level sees the depth it runs at.
 	e.g.depth = e.base + level
+
+	below := 0
+	elem := func(v goja.Value) interface{} {
+		out, h := e.value(v, level+1)
+		if h > below {
+			below = h
+		}
+		return out
+	}
 
 	kind := ""
 	if s := objectImpl(obj); s.IsValid() {
@@ -115,59 +193,92 @@ func (e *exporter) value(v goja.Value, level int) interface{} {
 		for i := range arr {
 			e.g.depth = e.base + level
 			if el := obj.Get(strconv.Itoa(i)); el != nil {
-				arr[i] = e.value(el, level+1)
+				arr[i] = elem(el)
 			}
 		}
-		return arr
+		return arr, below
 	case "mapObject":
 		entries := e.g.collect(e.g.mapForEach, obj)
 		m := make([][2]interface{}, len(entries)/2)
 		e.seen[obj] = m
 		for i := range m {
-			m[i][0] = e.value(entries[2*i+1], level+1) // forEach passes (value, key)
-			m[i][1] = e.value(entries[2*i], level+1)
+			m[i][0] = elem(entries[2*i+1]) // forEach passes (value, key)
+			m[i][1] = elem(entries[2*i])
 		}
-		return m
+		return m, below
 	case "setObject":
 		entries := e.g.collect(e.g.setForEach, obj)
 		a := make([]interface{}, len(entries)/2)
 		e.seen[obj] = a
 		for i := range a {
-			a[i] = e.value(entries[2*i], level+1)
+			a[i] = elem(entries[2*i])
 		}
-		return a
+		return a, below
 	case "proxyObject":
-		return obj.Export() // a goja.Proxy; goja does not descend into it
+		return obj.Export(), 0 // a goja.Proxy; goja does not descend into it
 	}
 	if len(kind) >= len("objectGo") && kind[:len("objectGo")] == "objectGo" {
-		return obj.Export() // Go-backed: Export hands back the Go value itself
+		return obj.Export(), 0 // Go-backed: Export hands back the Go value itself
 	}
 	if obj.ExportType() != exportMapType {
-		return obj.Export() // functions, dates, wrapped primitives, typed arrays, ...
+		return obj.Export(), 0 // functions, dates, wrapped primitives, typed arrays, ...
 	}
 	// An ordinary object: goja exports its own enumerable string-keyed
-	// properties (a String object's character indices are not among them).
-	keys := obj.Keys()
-	m := make(map[string]interface{}, len(keys))
+	// properties (a String object's character indices are not among them),
+	// each looked up by its JS key.
+	names, exact := e.g.ownKeys(obj)
+	m := make(map[string]interface{}, len(names))
 	e.seen[obj] = m
 	strLen := -1
 	if kind == "stringObject" {
 		strLen = int(jsonToLength(obj.Get("length")))
 	}
-	for _, k := range keys {
+	for i, k := range names {
 		if strLen >= 0 {
-			if i, err := strconv.Atoi(k); err == nil && i >= 0 && i < strLen && strconv.Itoa(i) == k {
+			if n, err := strconv.Atoi(k); err == nil && n >= 0 && n < strLen && strconv.Itoa(n) == k {
 				continue
 			}
 		}
 		e.g.depth = e.base + level
-		if el := obj.Get(k); el != nil {
-			m[k] = e.value(el, level+1)
+		var el goja.Value
+		if exact != nil {
+			el = e.g.reflectGet(goja.FunctionCall{Arguments: []goja.Value{obj, exact[i]}})
+		} else {
+			el = obj.Get(k)
+		}
+		if el != nil {
+			m[k] = elem(el)
 		} else {
 			m[k] = nil
 		}
 	}
-	return m
+	return m, below
+}
+
+// ownKeys returns obj's own enumerable string keys as Go strings, the way
+// goja's export names them. A lone surrogate in a key has become U+FFFD
+// there, so a lookup by that string would miss the property: when a key
+// holds U+FFFD, the keys are also returned as the JS strings they are, read
+// through the original Object.keys, to look the properties up by.
+func (g *nativeGuard) ownKeys(obj *goja.Object) (names []string, exact []goja.Value) {
+	names = obj.Keys()
+	for _, n := range names {
+		if !strings.ContainsRune(n, utf8.RuneError) {
+			continue
+		}
+		arr, ok := g.objectKeys(goja.FunctionCall{Arguments: []goja.Value{obj}}).(*goja.Object)
+		if !ok {
+			break
+		}
+		exact = make([]goja.Value, internalLength(arr))
+		names = make([]string, len(exact))
+		for i := range exact {
+			exact[i] = arr.Get(strconv.Itoa(i))
+			names[i] = exact[i].String()
+		}
+		break
+	}
+	return names, exact
 }
 
 // internalLength is the length goja's export uses for an array or an

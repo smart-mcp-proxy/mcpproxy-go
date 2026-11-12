@@ -307,10 +307,13 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 		return NewErrorResult(langErr), execCtx
 	}
 
-	// Refuse source the parser (esbuild's, then goja's) could not take without
-	// overflowing the Go stack (source_guard.go).
-	if err := checkSourceSize(code); err != nil {
-		return sourceTooLargeResult(err), execCtx
+	// Refuse source the parser could not take without overflowing the Go
+	// stack (source_guard.go). TypeScript is checked, by a stricter count, in
+	// TranspileTypeScript before esbuild parses it.
+	if opts.Language != "typescript" {
+		if err := checkSourceSize(code); err != nil {
+			return sourceTooLargeResult(err), execCtx
+		}
 	}
 
 	// Transpile TypeScript to JavaScript if needed
@@ -506,8 +509,12 @@ func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (re
 	}
 
 	// Export the result to Go value, within the native depth budget.
-	exported, ok := execCtx.guard.tryExport(value, false)
-	if !ok {
+	exported, err := execCtx.guard.exportResult(value)
+	switch {
+	case errors.Is(err, errExportCycle):
+		return NewErrorResult(NewJsError(ErrorCodeSerializationError,
+			"result must be JSON-serializable: it "+errExportCycle.Error()))
+	case err != nil:
 		return NewErrorResult(NewJsError(ErrorCodeSerializationError,
 			fmt.Sprintf("result is nested too deeply to export: RangeError: %s", stackOverflowMessage)))
 	}
