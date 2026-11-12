@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/dlclark/regexp2"
 )
 
 // TestExecuteTimeoutStopsCatastrophicRegex: vm.Interrupt is only checked by
@@ -203,5 +206,42 @@ func TestExecuteMemoryBudgetSustainedChurn(t *testing.T) {
 		ExecutionOptions{TimeoutMs: 30000, MaxMemoryBytes: 128 << 20})
 	if !result.Ok {
 		t.Fatalf("sustained churn tripped the memory budget: %+v", result.Error)
+	}
+}
+
+// TestRegexMatchTimeoutAfterIdleClock: regexMatchTimeout is process-wide, so
+// it also bounds the tokenizer's patterns. regexp2 ≤ v1.11.4 computed a new
+// deadline from a clock that had stopped ticking after ~1s idle, so the first
+// slow-ish match after a pause timed out almost at once, reading as "no match"
+// to goja and truncating tiktoken's token counts (bench/arms flaked on CI).
+func TestRegexMatchTimeoutAfterIdleClock(t *testing.T) {
+	if testing.Short() {
+		t.Skip("waits for regexp2's timeout clock to go idle")
+	}
+	// The first alternative backtracks before the second one matches. The
+	// input is grown until a match takes a few hundred milliseconds here
+	// (much slower under -race): well under the timeout, well over the
+	// clock's 100ms tick.
+	re := regexp2.MustCompile(`^(?:(a+)+x|a+y)$`, regexp2.ECMAScript)
+	var input string
+	for n := 10; ; n++ {
+		if n > 40 {
+			t.Skip("could not calibrate a match between the clock tick and the timeout")
+		}
+		input = strings.Repeat("a", n) + "y"
+		start := time.Now()
+		ok, err := re.MatchString(input)
+		if err != nil || !ok {
+			t.Fatalf("calibration match (n=%d): ok=%v err=%v", n, ok, err)
+		}
+		if time.Since(start) >= 150*time.Millisecond {
+			break
+		}
+	}
+	time.Sleep(regexMatchTimeout + 2*time.Second) // let the clock stop
+	start := time.Now()
+	ok, err := re.MatchString(input)
+	if err != nil || !ok {
+		t.Fatalf("match after an idle clock spuriously failed after %v: ok=%v err=%v", time.Since(start), ok, err)
 	}
 }
