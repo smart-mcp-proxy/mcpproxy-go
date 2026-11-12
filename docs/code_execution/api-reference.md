@@ -428,6 +428,7 @@ var isObject = typeof value === 'object' && value !== null;
 | `SYNTAX_ERROR` | JavaScript syntax error | Invalid JavaScript syntax | Fix syntax errors in code |
 | `RUNTIME_ERROR` | JavaScript runtime error | Uncaught exception during execution | Add error handling, check variable access |
 | `TIMEOUT` | Execution timeout | Code exceeded `timeout_ms` limit | Optimize code, increase timeout, avoid infinite loops |
+| `MEMORY_LIMIT` | Memory budget exceeded | Code kept more than 256 MiB of new heap alive (e.g. accumulating large strings or arrays) | Process data in chunks and drop references you no longer need |
 | `MAX_TOOL_CALLS_EXCEEDED` | Tool call limit exceeded | Code called `call_tool()` more than `max_tool_calls` times | Reduce tool calls, increase limit, or use pagination |
 | `SERVER_NOT_ALLOWED` | Server not in allowed list | Attempted to call server not in `allowed_servers` | Add server to allowed list or remove restriction |
 | `SERIALIZATION_ERROR` | Result not JSON-serializable | Return value contains functions, circular refs, etc. | Return only plain objects, arrays, primitives |

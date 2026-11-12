@@ -3,12 +3,16 @@ package jsruntime
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"runtime"
+	"runtime/metrics"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/dlclark/regexp2"
 	"github.com/dop251/goja"
 	"github.com/google/uuid"
 
@@ -24,6 +28,7 @@ type ExecutionOptions struct {
 	ExecutionID    string                 // Unique execution ID for logging (auto-generated if empty)
 	Language       string                 // Source language: "javascript" (default) or "typescript"
 	MaxParallel    int                    // Default concurrency for call_tools() batches (0 = built-in default; per-batch options override this)
+	MaxMemoryBytes int64                  // Heap growth budget for the execution (0 = DefaultMaxMemoryBytes, <0 = no budget)
 
 	// RestrictToAllowed enforces AllowedServers even when it is empty. Set by the
 	// Spec 057 profile path: an active profile with an empty effective server set
@@ -311,7 +316,9 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 	vm := goja.New()
 
 	// Set up sandbox restrictions
-	setupSandbox(vm)
+	if err := setupSandbox(vm); err != nil {
+		return NewErrorResult(NewJsError(ErrorCodeRuntimeError, fmt.Sprintf("failed to set up sandbox: %v", err))), execCtx
+	}
 
 	// Bind input global variable
 	if opts.Input == nil {
@@ -349,6 +356,14 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 	// Run JavaScript with timeout enforcement
 	resultChan := make(chan *Result, 1)
 	execCtx.scriptDone = make(chan struct{})
+
+	// The watchdog outlives a timeout: it stops only when the script
+	// goroutine does, so a runaway script that keeps allocating after
+	// Execute has answered is still stopped.
+	if budget := resolveMemoryBudget(opts.MaxMemoryBytes); budget > 0 {
+		go watchMemory(vm, budget, heapObjectBytes(), execCtx.scriptDone)
+	}
+
 	go func() {
 		defer close(execCtx.scriptDone)
 		resultChan <- executeWithVM(vm, code, execCtx)
@@ -405,8 +420,8 @@ func (ec *ExecutionContext) executionCtx() context.Context {
 func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (result *Result) {
 	defer func() {
 		if r := recover(); r != nil {
-			if _, ok := r.(*goja.InterruptedError); ok {
-				result = NewErrorResult(NewJsError(ErrorCodeTimeout, "JavaScript execution timed out"))
+			if ie, ok := r.(*goja.InterruptedError); ok {
+				result = interruptedResult(ie)
 				return
 			}
 			result = NewErrorResult(NewJsError(ErrorCodeRuntimeError, fmt.Sprintf("script panicked: %v", r)))
@@ -429,6 +444,10 @@ func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (re
 	// Execute the code
 	value, err := vm.RunString(code)
 	if err != nil {
+		var ie *goja.InterruptedError
+		if errors.As(err, &ie) {
+			return interruptedResult(ie)
+		}
 		// Extract runtime error details
 		if exception, ok := err.(*goja.Exception); ok {
 			stack := exception.String() // Stack trace is included in the exception string
@@ -452,8 +471,151 @@ func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (re
 	return NewSuccessResult(exported)
 }
 
+// regexMatchTimeout bounds a single regexp2 match. vm.Interrupt is only
+// checked by goja's interpreter loop, never inside a native call, so without
+// it a catastrophically backtracking regex (goja hands any pattern RE2 cannot
+// run, e.g. one with a backreference, to regexp2) ignores the execution
+// timeout and keeps a core busy for practically ever after Execute has
+// answered. A timed-out match reads as "no match" to the script; the
+// interrupt then lands at the next instruction.
+//
+// regexp2 reads DefaultMatchTimeout when a pattern is compiled and the knob is
+// process-wide, so it also bounds the tokenizer's patterns (tiktoken), whose
+// per-match work is tiny next to a second.
+const regexMatchTimeout = time.Second
+
+func init() {
+	regexp2.DefaultMatchTimeout = regexMatchTimeout
+}
+
+// DefaultMaxMemoryBytes is the heap growth an execution may cause when
+// ExecutionOptions.MaxMemoryBytes is 0. goja has no heap limit of its own.
+const DefaultMaxMemoryBytes int64 = 256 << 20
+
+// memoryCheckInterval is how often the watchdog samples the heap.
+const memoryCheckInterval = 10 * time.Millisecond
+
+// forcedGCInterval is the shortest gap between two collections one watchdog
+// forces to tell live memory from garbage.
+const forcedGCInterval = 100 * time.Millisecond
+
+const heapObjectsMetric = "/memory/classes/heap/objects:bytes"
+
+var errMemoryLimit = errors.New("memory budget exceeded")
+
+func resolveMemoryBudget(opt int64) int64 {
+	if opt == 0 {
+		return DefaultMaxMemoryBytes
+	}
+	return opt
+}
+
+// heapObjectBytes is the process heap held by objects, live or not yet swept.
+func heapObjectBytes() uint64 {
+	sample := []metrics.Sample{{Name: heapObjectsMetric}}
+	metrics.Read(sample)
+	if sample[0].Value.Kind() != metrics.KindUint64 {
+		return 0
+	}
+	return sample[0].Value.Uint64()
+}
+
+// watchMemory interrupts vm once the heap has grown more than budget past
+// baseline, and returns when done closes.
+//
+// This is a best-effort guard, not an exact per-script cap. goja keeps no
+// per-VM accounting, so the measure is the process heap: an execution running
+// beside another that allocates heavily can be stopped for memory it did not
+// take, and garbage counted in the baseline that is collected later widens the
+// headroom. vm.Interrupt cannot abort a native call either, so one built-in
+// that allocates a lot in a single step (a huge String.prototype.repeat or
+// ArrayBuffer) completes before the script is stopped at its next
+// instruction. What it does guarantee is that a script cannot keep growing
+// the heap, step after step, until the timeout.
+func watchMemory(vm *goja.Runtime, budget int64, baseline uint64, done <-chan struct{}) {
+	limit := baseline + uint64(budget)
+	ticker := time.NewTicker(memoryCheckInterval)
+	defer ticker.Stop()
+	var lastGC time.Time
+	for {
+		select {
+		case <-done:
+			return
+		case <-ticker.C:
+		}
+		if heapObjectBytes() <= limit {
+			continue
+		}
+		// The sample counts garbage not yet swept; only a collection says
+		// what is live. It runs only on this suspicion path, and at most once
+		// per forcedGCInterval, so a script that churns through short-lived
+		// values is neither mistaken for one that keeps them nor able to make
+		// the whole process collect every tick.
+		if time.Since(lastGC) < forcedGCInterval {
+			continue
+		}
+		runtime.GC()
+		lastGC = time.Now()
+		if heapObjectBytes() <= limit {
+			continue
+		}
+		vm.Interrupt(errMemoryLimit)
+		return
+	}
+}
+
+// interruptedResult reports why the VM was interrupted: the memory watchdog
+// names itself through the interrupt value; anything else is Execute's
+// timeout. Keying on the value, not on a flag the watchdog sets, means a
+// script that finished before the interrupt reached it keeps its result.
+func interruptedResult(ie *goja.InterruptedError) *Result {
+	if ie.Value() == errMemoryLimit {
+		return NewErrorResult(NewJsError(ErrorCodeMemoryLimit, "JavaScript execution exceeded its memory budget"))
+	}
+	return NewErrorResult(NewJsError(ErrorCodeTimeout, "JavaScript execution timed out"))
+}
+
+// regexExecTrampoline replaces RegExp.prototype.exec with a script-level
+// wrapper around the native one. goja runs every match of a global regex
+// (replace, match, matchAll, split) from one native loop while the prototype
+// is untouched, and regexp2 restarts its per-match deadline on each match, so
+// a pattern whose matches each stay under regexMatchTimeout could still keep
+// the loop going for minutes past the execution timeout. Any change to exec
+// moves goja onto its spec path, which calls exec once per match; the wrapper
+// is interpreted code, so vm.Interrupt lands between matches. apply is
+// captured here so a script that later replaces Reflect.apply cannot undo it.
+//
+// goja's spec-path split converts its limit with ToLength where the fast path
+// (and ECMAScript) use ToUint32, so "a,b".split(/,/, -1) would return []
+// instead of ["a", "b"]. The split wrapper hands the native splitter a
+// prototype-less adapter whose valueOf applies ToUint32, so the script's own
+// limit is still coerced at the point the spec says (after the species
+// splitter is built). Strict mode keeps a null or undefined receiver from
+// turning into the global object.
+//
+// Native loops that call a native callable (an exec replaced by a bound
+// built-in, a RegExp subclass whose exec is null under matchAll) still never
+// reach the interpreter; closing those needs interrupt checks inside goja.
+const regexExecTrampoline = `(function () {
+	"use strict";
+	var proto = RegExp.prototype;
+	var nativeExec = proto.exec;
+	var nativeSplit = proto[Symbol.split];
+	var apply = Reflect.apply;
+	function define(key, fn) {
+		Object.defineProperty(proto, key, { value: fn, writable: true, enumerable: false, configurable: true });
+	}
+	define("exec", function exec(s) { return apply(nativeExec, this, [s]); });
+	define(Symbol.split, {
+		[Symbol.split](s, limit) {
+			var lim = limit === undefined ? undefined : { __proto__: null, valueOf: function () { return limit >>> 0; } };
+			return apply(nativeSplit, this, [s, lim]);
+		}
+	}[Symbol.split]);
+})()`
+
 // setupSandbox configures the VM to prevent access to restricted APIs
-func setupSandbox(vm *goja.Runtime) {
+func setupSandbox(vm *goja.Runtime) error {
 	// Disable require() - prevent module loading
 	vm.Set("require", goja.Undefined())
 
@@ -467,6 +629,9 @@ func setupSandbox(vm *goja.Runtime) {
 
 	// Note: Goja does not provide filesystem, network, or process access by default
 	// so we don't need to explicitly block those
+
+	_, err := vm.RunString(regexExecTrampoline)
+	return err
 }
 
 // errorEnvelope builds the {ok:false, error:{code, message}} value both
