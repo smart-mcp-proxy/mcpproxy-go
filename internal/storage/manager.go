@@ -3,8 +3,10 @@ package storage
 import (
 	"bytes"
 	"container/heap"
+	"context"
 	"encoding/hex"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -42,8 +44,10 @@ type Manager struct {
 }
 
 // NewManager creates a new storage manager
-func NewManager(dataDir string, logger *zap.SugaredLogger) (*Manager, error) {
-	db, err := NewBoltDB(dataDir, logger)
+//
+// opts are passed to NewBoltDB; production callers pass WithOAuthTokenKey.
+func NewManager(dataDir string, logger *zap.SugaredLogger, opts ...Option) (*Manager, error) {
+	db, err := NewBoltDB(dataDir, logger, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bolt database: %w", err)
 	}
@@ -2626,15 +2630,67 @@ func oauthKeyBelongsTo(key, name string) bool {
 	return true
 }
 
-// CleanupOrphanedOAuthTokens removes OAuth tokens for servers that no longer exist in the configuration.
-// This should be called during startup to clean up tokens left behind when servers were removed
-// while mcpproxy was not running, or from older versions that didn't clean up properly.
-func (m *Manager) CleanupOrphanedOAuthTokens(validServerNames []string) (int, error) {
+// ListOAuthTokenRows classifies every oauth_tokens row (plaintext, sealed or
+// undecryptable with a reason) for status, doctor and the CLI (Spec 123
+// FR-014).
+func (m *Manager) ListOAuthTokenRows() ([]OAuthTokenRow, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.db == nil {
+		return nil, fmt.Errorf("storage not initialized")
+	}
+	return m.db.ListOAuthTokenRows()
+}
+
+// SealPlaintextOAuthTokens is the boot sweep (Spec 123 FR-016): it seals
+// every plaintext row under the configured key in one transaction and
+// returns the count. A no-op without a key. See BoltDB.SealPlaintextOAuthTokens.
+func (m *Manager) SealPlaintextOAuthTokens(ctx context.Context) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	if m.db == nil {
 		return 0, fmt.Errorf("storage not initialized")
+	}
+	return m.db.SealPlaintextOAuthTokens(ctx)
+}
+
+// OAuthOrphanCleanupReport is the outcome of CleanupOrphanedOAuthTokensReport.
+type OAuthOrphanCleanupReport struct {
+	// Deleted is the number of decodable orphan rows deleted.
+	Deleted int
+	// UndecryptableKept lists, sorted, every row the cleanup could not decode
+	// and therefore kept (Spec 123 FR-015).
+	UndecryptableKept []string
+	// UndecryptableOrphans is the subset of UndecryptableKept whose key
+	// prefix names no configured server ("undecryptable orphan"): reported,
+	// never deleted.
+	UndecryptableOrphans []string
+}
+
+// CleanupOrphanedOAuthTokens removes OAuth tokens for servers that no longer exist in the configuration.
+// This should be called during startup to clean up tokens left behind when servers were removed
+// while mcpproxy was not running, or from older versions that didn't clean up properly.
+// It never deletes a row it could not decode (see CleanupOrphanedOAuthTokensReport).
+func (m *Manager) CleanupOrphanedOAuthTokens(validServerNames []string) (int, error) {
+	rep, err := m.CleanupOrphanedOAuthTokensReport(validServerNames)
+	return rep.Deleted, err
+}
+
+// CleanupOrphanedOAuthTokensReport is CleanupOrphanedOAuthTokens with the full
+// report. It runs in one transaction: every row is collected and decoded
+// first, then the decodable orphans are deleted by key. A row that cannot be
+// decoded (sealed under no key or another key, or not a record) cannot be
+// attributed to a server from its contents, so it is kept unconditionally
+// and reported (Spec 123 FR-015).
+func (m *Manager) CleanupOrphanedOAuthTokensReport(validServerNames []string) (OAuthOrphanCleanupReport, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var rep OAuthOrphanCleanupReport
+	if m.db == nil {
+		return rep, fmt.Errorf("storage not initialized")
 	}
 
 	// Create a set of valid server names for fast lookup
@@ -2643,68 +2699,96 @@ func (m *Manager) CleanupOrphanedOAuthTokens(validServerNames []string) (int, er
 		validServers[name] = true
 	}
 
-	// Get all OAuth tokens
-	tokens, err := m.db.ListOAuthTokens()
-	if err != nil {
-		return 0, fmt.Errorf("failed to list OAuth tokens: %w", err)
-	}
-
-	// Find orphaned tokens (tokens whose server no longer exists)
+	total := 0
 	var orphanedKeys []string
-	for _, token := range tokens {
-		serverName := token.GetServerName()
-		if serverName == "" {
-			// Token has no server name, consider it orphaned
-			orphanedKeys = append(orphanedKeys, token.ServerName)
-			continue
+	err := m.db.db.Update(func(tx *bbolt.Tx) error {
+		rep = OAuthOrphanCleanupReport{}
+		orphanedKeys = orphanedKeys[:0]
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		rows, err := collectOAuthRows(bucket)
+		if err != nil {
+			return fmt.Errorf("failed to list OAuth tokens: %w", err)
 		}
+		total = len(rows)
 
-		// Check if the server name matches a valid server
-		if validServers[serverName] {
-			continue
-		}
-
-		// For legacy tokens without DisplayName, GetServerName() returns the storage key
-		// (e.g., "cloudflare-observability_8753c4ae5a2f60a6") instead of the server name.
-		// Try extracting the server name prefix from the storage key before classifying as orphaned.
-		if token.DisplayName == "" {
-			if prefix := extractServerNameFromKey(token.ServerName); prefix != "" && validServers[prefix] {
-				m.logger.Infow("Legacy OAuth token matched by key prefix (missing DisplayName)",
-					"storage_key", token.ServerName,
-					"extracted_name", prefix)
+		for _, row := range rows {
+			token, err := decodeOAuthRecord(m.db.oauthKey, row.key, row.value)
+			if err != nil {
+				var ue *ErrOAuthTokenUndecryptable
+				if !stderrors.As(err, &ue) {
+					return err
+				}
+				rep.UndecryptableKept = append(rep.UndecryptableKept, row.key)
+				prefix := extractServerNameFromKey(row.key)
+				if !validServers[row.key] && (prefix == "" || !validServers[prefix]) {
+					rep.UndecryptableOrphans = append(rep.UndecryptableOrphans, row.key)
+					m.logger.Warnw("Keeping undecryptable OAuth token row of an unknown server",
+						"storage_key", row.key, "reason", string(ue.Reason))
+				}
 				continue
 			}
+
+			// Find orphaned tokens (tokens whose server no longer exists)
+			serverName := token.GetServerName()
+			if serverName == "" {
+				// Token has no server name, consider it orphaned
+				orphanedKeys = append(orphanedKeys, row.key)
+				continue
+			}
+
+			// Check if the server name matches a valid server
+			if validServers[serverName] {
+				continue
+			}
+
+			// For legacy tokens without DisplayName, GetServerName() returns the storage key
+			// (e.g., "cloudflare-observability_8753c4ae5a2f60a6") instead of the server name.
+			// Try extracting the server name prefix from the storage key before classifying as orphaned.
+			if token.DisplayName == "" {
+				if prefix := extractServerNameFromKey(token.ServerName); prefix != "" && validServers[prefix] {
+					m.logger.Infow("Legacy OAuth token matched by key prefix (missing DisplayName)",
+						"storage_key", token.ServerName,
+						"extracted_name", prefix)
+					continue
+				}
+			}
+
+			orphanedKeys = append(orphanedKeys, row.key)
+			m.logger.Infow("Found orphaned OAuth token",
+				"storage_key", row.key,
+				"display_name", serverName)
 		}
 
-		orphanedKeys = append(orphanedKeys, token.ServerName)
-		m.logger.Infow("Found orphaned OAuth token",
-			"storage_key", token.ServerName,
-			"display_name", serverName)
+		// Delete orphaned tokens, after the walk (key-only deletes).
+		for _, key := range orphanedKeys {
+			if err := bucket.Delete([]byte(key)); err != nil {
+				return fmt.Errorf("delete orphaned OAuth token %s: %w", key, err)
+			}
+			rep.Deleted++
+		}
+		return nil
+	})
+	if err != nil {
+		return OAuthOrphanCleanupReport{}, err
 	}
+	sort.Strings(rep.UndecryptableKept)
+	sort.Strings(rep.UndecryptableOrphans)
 
 	if len(orphanedKeys) == 0 {
 		m.logger.Debug("No orphaned OAuth tokens found")
-		return 0, nil
+	} else {
+		m.logger.Infow("Cleaned up orphaned OAuth tokens",
+			"total_tokens", total,
+			"orphaned_found", len(orphanedKeys),
+			"deleted", rep.Deleted)
+	}
+	if len(rep.UndecryptableKept) > 0 {
+		m.logger.Warnw("Kept OAuth token rows that cannot be decrypted",
+			"count", len(rep.UndecryptableKept),
+			"unknown_server", len(rep.UndecryptableOrphans))
 	}
 
-	// Delete orphaned tokens
-	deleted := 0
-	for _, key := range orphanedKeys {
-		if err := m.db.DeleteOAuthToken(key); err != nil {
-			m.logger.Warnw("Failed to delete orphaned OAuth token",
-				"key", key,
-				"error", err)
-			continue
-		}
-		deleted++
-	}
-
-	m.logger.Infow("Cleaned up orphaned OAuth tokens",
-		"total_tokens", len(tokens),
-		"orphaned_found", len(orphanedKeys),
-		"deleted", deleted)
-
-	return deleted, nil
+	return rep, nil
 }
 
 // extractServerNameFromKey extracts the server name prefix from a storage key.

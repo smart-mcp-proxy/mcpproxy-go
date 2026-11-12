@@ -292,7 +292,8 @@ func TestHasPersistedToken_ZeroExpiresAt(t *testing.T) {
 	}
 	require.NoError(t, db.SaveOAuthToken(record))
 
-	hasToken, hasRefresh, isExpired := HasPersistedToken(serverName, serverURL, db)
+	hasToken, hasRefresh, isExpired, err := HasPersistedToken(serverName, serverURL, db)
+	require.NoError(t, err)
 
 	assert.True(t, hasToken, "Expected hasToken=true for a record with a non-empty access token")
 	assert.False(t, hasRefresh, "Expected hasRefresh=false for a record without a refresh token")
@@ -316,7 +317,8 @@ func TestHasPersistedToken_FutureExpiresAt(t *testing.T) {
 		ExpiresAt:    time.Now().Add(1 * time.Hour),
 	}))
 
-	hasToken, hasRefresh, isExpired := HasPersistedToken(serverName, serverURL, db)
+	hasToken, hasRefresh, isExpired, err := HasPersistedToken(serverName, serverURL, db)
+	require.NoError(t, err)
 	assert.True(t, hasToken)
 	assert.True(t, hasRefresh)
 	assert.False(t, isExpired)
@@ -338,7 +340,8 @@ func TestHasPersistedToken_PastExpiresAt(t *testing.T) {
 		ExpiresAt:   time.Now().Add(-1 * time.Hour),
 	}))
 
-	hasToken, _, isExpired := HasPersistedToken(serverName, serverURL, db)
+	hasToken, _, isExpired, err := HasPersistedToken(serverName, serverURL, db)
+	require.NoError(t, err)
 	assert.True(t, hasToken)
 	assert.True(t, isExpired, "Expected isExpired=true for a record with a past ExpiresAt")
 }

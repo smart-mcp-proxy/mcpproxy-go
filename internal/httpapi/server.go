@@ -25,6 +25,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/connect"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/diagnostics"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/httpx"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/launch"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
@@ -3823,6 +3824,13 @@ func (s *Server) handleServerLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// Spec 123: the stored OAuth row cannot be decrypted; no login can
+		// help until the key is restored or the row is deleted.
+		if oauth.IsTokenUndecryptable(err) {
+			s.writeError(w, r, http.StatusConflict, fmt.Sprintf("%s: %v", diagnostics.OAuthTokenUndecryptable, err))
+			return
+		}
+
 		// Map errors to HTTP status codes (T019)
 		if strings.Contains(err.Error(), "management disabled") || strings.Contains(err.Error(), "read-only") {
 			s.writeError(w, r, http.StatusForbidden, err.Error())
@@ -5864,7 +5872,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 	// one, so a client cannot widen its own read by staging the flag and
 	// re-reading before the restart, and (#1167) it is ANDed with the caller's
 	// identity so only an authenticated admin can exercise the opt-out.
-	published := cfg
+	var published *config.Config
 	if !s.revealSecrets(r.Context()) {
 		published = oauth.RedactedConfig(cfg)
 		if published == nil {
@@ -5874,6 +5882,11 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
 			return
 		}
+	} else if published = oauth.WithMaskedOAuthTokenKey(cfg); published == nil {
+		// reveal_secret_headers never reveals the OAuth token encryption key.
+		s.logger.Errorw("Failed to redact configuration for publication")
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to get configuration")
+		return
 	}
 
 	// Convert config to contracts type for consistent API response

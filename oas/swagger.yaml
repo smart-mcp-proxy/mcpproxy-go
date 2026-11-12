@@ -306,6 +306,17 @@ components:
         oauth_expiry_warning_hours:
           description: Health status settings
           type: number
+        oauth_token_encryption_key:
+          description: |-
+            OAuthTokenEncryptionKey seals the upstream OAuth tokens stored in
+            config.db (Spec 123). Empty (the default) leaves them as plain JSON. It
+            takes a secret reference (${file:/abs/path}, ${env:NAME},
+            ${keyring:NAME}) or a literal standard-base64 32-byte key; the
+            MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE] variables override it. The key
+            is resolved only where config.db is opened (ResolveOAuthTokenKey), never
+            stored on Config, and is restart-gated, so every save writes the field
+            as configured.
+          type: string
         observability:
           $ref: '#/components/schemas/config.ObservabilityConfig'
         output_sanitisation:

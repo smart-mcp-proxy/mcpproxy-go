@@ -128,7 +128,7 @@ func TestCoreLoginCompletion_ParkedAcrossRemoval_T2_9(t *testing.T) {
 			assert.Nil(t, f.record(t), "the completion's DCR save is refused too")
 
 			if readd {
-				has, _, _ := oauth.HasPersistedTokenBound(f.name, f.srv.MCPURL, f.db, cur)
+				has, _, _, _ := oauth.HasPersistedTokenBound(f.name, f.srv.MCPURL, f.db, cur)
 				assert.False(t, has, "the re-added server starts unauthenticated")
 			}
 		})

@@ -16,7 +16,6 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/index"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/server"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/upstream"
 
@@ -494,9 +493,9 @@ func runCallToolVariantStandalone(ctx context.Context, toolVariant string, args 
 	}
 
 	// Create storage manager
-	storageManager, err := storage.NewManager(globalConfig.DataDir, logger.Sugar())
+	storageManager, err := openStorageForCLI(globalConfig, logger.Sugar())
 	if err != nil {
-		return fmt.Errorf("failed to create storage manager: %w", err)
+		return err
 	}
 	defer storageManager.Close()
 

@@ -66,6 +66,12 @@ type HealthCalculatorInput struct {
 	// Secret/config detection
 	MissingSecret  string // Secret name if unresolved (e.g., "GITHUB_TOKEN")
 	OAuthConfigErr string // OAuth config error (e.g., "requires 'resource' parameter")
+	// OAuthTokenUndecryptable is set when the server's stored OAuth row cannot
+	// be decrypted with the configured key (Spec 123 FR-031): the detail
+	// sentence ("stored OAuth token cannot be decrypted: <reason>"). The
+	// connection error carries the same sentence, so it is also derived from
+	// LastError (ExtractOAuthTokenUndecryptable). Never a login state.
+	OAuthTokenUndecryptable string
 
 	// Tool info
 	ToolCount int
@@ -133,7 +139,31 @@ func DefaultHealthConfig() *HealthCalculatorConfig {
 // outcome (disabled, quarantined, connecting, unhealthy, OAuth, refresh) takes
 // precedence and is returned untouched.
 func CalculateHealth(input HealthCalculatorInput, cfg *HealthCalculatorConfig) *contracts.HealthStatus {
-	return applyCallFailureRate(calculateHealthBase(input, cfg), input)
+	return applyCallFailureRate(applyConnectedUndecryptable(calculateHealthBase(input, cfg), input), input)
+}
+
+// applyConnectedUndecryptable is Spec 123 FR-031 for a connected server: one
+// that connected anonymously (or on a still-valid session) and then needs a
+// sign-in meets the undecryptable stored OAuth row, so `login` (which could
+// not overwrite the row) is replaced by the unhealthy/configure outcome the
+// disconnected branches already return. Only the explicit input field counts
+// here (never LastError text), and only an outcome that was about to offer
+// `login` changes: a connected server that needs no sign-in stays as it was.
+func applyConnectedUndecryptable(status *contracts.HealthStatus, input HealthCalculatorInput) *contracts.HealthStatus {
+	if status == nil || !input.Connected || input.OAuthTokenUndecryptable == "" || status.Action != ActionLogin {
+		return status
+	}
+	status.Level = LevelUnhealthy
+	status.Summary = oauthTokenUndecryptableSummary
+	status.Detail = input.OAuthTokenUndecryptable
+	status.Action = ActionConfigure
+	status.Status = StatusNeedsConfig
+	status.Usable = false
+	status.Actions = []string{ActionConfigure}
+	if status.AdminState == StateQuarantined {
+		status.Actions = []string{ActionConfigure, ActionApprove}
+	}
+	return status
 }
 
 // applyCallFailureRate downgrades a ready, enabled, healthy result to degraded
@@ -180,8 +210,32 @@ func calculateHealthBase(input HealthCalculatorInput, cfg *HealthCalculatorConfi
 		}
 	}
 
+	// Spec 123 FR-031: an undecryptable stored OAuth row. Checked ahead of
+	// every OAuth/login branch: a login cannot overwrite the row, so "log in"
+	// is never the fix; the operator restores the key or discards the row.
+	undecryptable := ""
+	if !input.Connected {
+		undecryptable = input.OAuthTokenUndecryptable
+		if undecryptable == "" {
+			undecryptable = ExtractOAuthTokenUndecryptable(input.LastError)
+		}
+	}
+
 	if input.Quarantined {
 		state := strings.ToLower(input.State)
+
+		if undecryptable != "" {
+			return &contracts.HealthStatus{
+				Level:      LevelUnhealthy,
+				AdminState: StateQuarantined,
+				Summary:    oauthTokenUndecryptableSummary,
+				Detail:     undecryptable,
+				Action:     ActionConfigure,
+				Status:     StatusNeedsConfig,
+				Usable:     false,
+				Actions:    []string{ActionConfigure, ActionApprove},
+			}
+		}
 
 		// FR-010: a quarantined server that ALSO needs OAuth sign-in reports
 		// `login` (was `approve`) — the quarantined branch now checks the same
@@ -280,6 +334,21 @@ func calculateHealthBase(input HealthCalculatorInput, cfg *HealthCalculatorConfi
 			AdminState: StateEnabled,
 			Summary:    "OAuth configuration error",
 			Detail:     input.OAuthConfigErr,
+			Action:     ActionConfigure,
+			Status:     StatusNeedsConfig,
+			Usable:     false,
+			Actions:    []string{ActionConfigure},
+		}
+	}
+
+	// 3a. Undecryptable stored OAuth row (Spec 123 FR-031), ahead of the park
+	// and connection-state branches, which would offer restart or login.
+	if undecryptable != "" {
+		return &contracts.HealthStatus{
+			Level:      LevelUnhealthy,
+			AdminState: StateEnabled,
+			Summary:    oauthTokenUndecryptableSummary,
+			Detail:     undecryptable,
 			Action:     ActionConfigure,
 			Status:     StatusNeedsConfig,
 			Usable:     false,
@@ -1020,6 +1089,35 @@ func ExtractMissingSecret(lastError string) string {
 	}
 
 	return ""
+}
+
+// oauthTokenUndecryptableSummary is the health summary of a server whose
+// stored OAuth row cannot be decrypted (Spec 123).
+const oauthTokenUndecryptableSummary = "Stored sign-in cannot be decrypted"
+
+// IsOAuthTokenUndecryptable reports whether hs is the undecryptable-row outcome.
+func IsOAuthTokenUndecryptable(hs *contracts.HealthStatus) bool {
+	return hs != nil && hs.Summary == oauthTokenUndecryptableSummary
+}
+
+// oauthTokenUndecryptableMarker starts the detail sentence the OAuth layer
+// writes for an undecryptable row (oauth.TokenUndecryptableError).
+const oauthTokenUndecryptableMarker = "stored OAuth token cannot be decrypted:"
+
+// ExtractOAuthTokenUndecryptable returns the "stored OAuth token cannot be
+// decrypted: <reason>" sentence from a connection error, or "" when the error
+// is about something else. The sentence ends at the first ';' or newline (the
+// producer appends the ways out after it).
+func ExtractOAuthTokenUndecryptable(lastError string) string {
+	i := strings.Index(lastError, oauthTokenUndecryptableMarker)
+	if i < 0 {
+		return ""
+	}
+	detail := lastError[i:]
+	if j := strings.IndexAny(detail, ";\n"); j >= 0 {
+		detail = detail[:j]
+	}
+	return strings.TrimSpace(detail)
 }
 
 // ExtractOAuthConfigError extracts an OAuth configuration error from the error message.

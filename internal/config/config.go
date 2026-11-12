@@ -388,6 +388,15 @@ type Config struct {
 	// Security settings
 	APIKey         string `json:"api_key,omitempty" mapstructure:"api-key"`         // API key for REST API authentication
 	RequireMCPAuth bool   `json:"require_mcp_auth" mapstructure:"require-mcp-auth"` // Require authentication on /mcp endpoint (default: false)
+	// OAuthTokenEncryptionKey seals the upstream OAuth tokens stored in
+	// config.db (Spec 123). Empty (the default) leaves them as plain JSON. It
+	// takes a secret reference (${file:/abs/path}, ${env:NAME},
+	// ${keyring:NAME}) or a literal standard-base64 32-byte key; the
+	// MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE] variables override it. The key
+	// is resolved only where config.db is opened (ResolveOAuthTokenKey), never
+	// stored on Config, and is restart-gated, so every save writes the field
+	// as configured.
+	OAuthTokenEncryptionKey string `json:"oauth_token_encryption_key,omitempty" mapstructure:"oauth_token_encryption_key"`
 	// MCPRejectQueryAPIKey makes every MCP endpoint (/mcp*) refuse a request that
 	// carries a ?apikey= query parameter, with a 401, instead of honouring it. A credential in a URL ends up in access logs,
 	// proxy logs and browser history; MCP clients can send Authorization:
@@ -2452,6 +2461,9 @@ func (c *Config) ValidateDetailed() []ValidationError {
 	errors = append(errors, c.oauthRefreshReplayErrors()...)
 	errors = append(errors, c.tpaTrustRootErrors()...)
 	errors = append(errors, c.tpaRefreshErrors()...)
+	if err := checkOAuthTokenKeySyntax(c.OAuthTokenEncryptionKey); err != nil {
+		errors = append(errors, ValidationError{Field: OAuthTokenKeyField, Message: msgOAuthTokenKeyBadReference})
+	}
 	if _, err := ValidateProfiles(c); err != nil {
 		errors = append(errors, ValidationError{Field: "profiles", Message: err.Error()})
 	}
@@ -3215,6 +3227,14 @@ func (c *Config) Validate() error {
 		return profileErr
 	}
 	c.profileWarnings = profileWarnings
+
+	// Spec 123 FR-020/FR-022: oauth_token_encryption_key is checked for its
+	// syntax only. Nothing is read here: the key is resolved where config.db
+	// is opened, so commands that never open it and every hot reload keep
+	// working while the referenced file is not readable from this process.
+	if err := checkOAuthTokenKeySyntax(c.OAuthTokenEncryptionKey); err != nil {
+		return err
+	}
 
 	// Both key variables set is an error whether or not the config file
 	// carries an api_key: one rule, checked on every load.

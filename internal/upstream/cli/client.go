@@ -64,7 +64,16 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 	// Create storage for persistent OAuth tokens (CLI should also persist tokens)
 	var db *storage.BoltDB
 	if globalConfig.DataDir != "" {
-		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar())
+		// Spec 123: resolve the OAuth token key first. A resolution error is
+		// returned (exit 4) rather than downgraded to the in-memory fallback,
+		// which would let `auth login` succeed without persisting anything.
+		// A NewBoltDB error after a successful resolution (e.g. a running core
+		// holds the lock) keeps the existing fallback below.
+		oauthKey, _, keyErr := config.ResolveOAuthTokenKey(globalConfig)
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		boltDB, err := storage.NewBoltDB(globalConfig.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(oauthKey))
 		if err != nil {
 			logger.Warn("Failed to create storage for CLI OAuth tokens, falling back to in-memory",
 				zap.String("data_dir", globalConfig.DataDir),
@@ -90,6 +99,55 @@ func NewClient(serverName string, globalConfig *config.Config, logLevel string) 
 		storage:    db,
 		debugMode:  logLevel == "trace" || logLevel == "debug",
 	}, nil
+}
+
+// ClearOAuthTokenStandalone discards serverName's stored OAuth token for the
+// standalone `auth logout` (no daemon) without building a client. The clear
+// is a delete on the bucket key alone, so an OAuth token key reference that
+// no longer resolves does not stop it (Spec 123 review; any other key error
+// still does): the documented recovery for a
+// lost key is this logout, and the usual way a key is lost is a key reference
+// that no longer resolves (a missing secret mount or key file), which
+// NewClient refuses with exit 4. Opening without a key is then safe because
+// nothing is written to oauth_tokens: the row is deleted whatever its shape
+// (plaintext, sealed under any key, or damaged). A running core holding the
+// lock is still a *storage.DatabaseLockedError.
+func ClearOAuthTokenStandalone(globalConfig *config.Config, serverName string, logger *zap.SugaredLogger) error {
+	var serverConfig *config.ServerConfig
+	for _, server := range globalConfig.Servers {
+		if server != nil && server.Name == serverName {
+			serverConfig = server
+			break
+		}
+	}
+	if serverConfig == nil {
+		return fmt.Errorf("server '%s' not found in configuration", serverName)
+	}
+	if globalConfig.DataDir == "" {
+		return fmt.Errorf("storage not available - cannot clear OAuth token")
+	}
+	// Pass the resolved key when there is one (FR-017). Only a reference
+	// that no longer resolves opens with none, which is safe for this
+	// delete-only use. A key that is present but wrong (both variables set,
+	// a bad reference, an empty or malformed value) is an operator mistake
+	// and still stops with the exit-4 startup error (FR-022).
+	oauthKey, _, keyErr := config.ResolveOAuthTokenKey(globalConfig)
+	if keyErr != nil {
+		if !config.IsOAuthTokenKeyUnresolvable(keyErr) {
+			return keyErr
+		}
+		logger.Warnw("OAuth token key cannot be resolved; discarding the stored token without it", "error", keyErr)
+		oauthKey = nil
+	}
+	db, err := storage.NewBoltDB(globalConfig.DataDir, logger, storage.WithOAuthTokenKey(oauthKey))
+	if err != nil {
+		return fmt.Errorf("failed to open storage: %w", err)
+	}
+	defer db.Close()
+	// Same key as PersistentTokenStore. Standalone mode only: this process
+	// opened config.db itself, so no daemon instance shares it (Spec 116
+	// PR2b, review R8.3).
+	return db.ClearOAuthTokenForStandaloneLogout(oauth.GenerateServerKey(serverConfig.Name, serverConfig.URL))
 }
 
 // Close cleans up the client and closes storage if it was created

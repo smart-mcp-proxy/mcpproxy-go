@@ -88,6 +88,7 @@ A running MCPProxy core watches `mcp_config.json` and hot-reloads external edits
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
+| `oauth_token_encryption_key` | string | `""` (off) | Key that encrypts the upstream OAuth tokens in `config.db` (AES-256-GCM): 32 random bytes, base64. A literal key or one reference: `${file:/abs/path}`, `${env:NAME}`, `${keyring:NAME}`. Env `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY` / `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE` override it. A key that cannot be resolved stops startup with exit code 4 before `config.db` is opened. Needs a restart. Masked in the REST API and the Web UI. See [OAuth Token Encryption](features/oauth-token-encryption.md) |
 | `enable_socket` | boolean | `true` | Enable the Unix socket (macOS/Linux) or named pipe (Windows) the tray uses to talk to the core. **Connections over it are trusted without the API key**, and that includes every stdio server the proxy itself spawns under `none` or `sandbox` isolation: such a server can call the admin API and mint agent tokens with no credential. The tray is the only socket client, so **set `false` on headless installs, and whenever a stdio server you do not fully trust runs outside `docker` isolation**. `mcpproxy doctor` warns about the combination. See [What the sandbox does not hide](features/sandbox-isolation.md#what-the-sandbox-does-not-hide). |
 | `tray_endpoint` | string | `""` | Override socket/pipe path (advanced, usually not needed) |
 
@@ -1998,6 +1999,8 @@ Many configuration options can be overridden via environment variables:
 | `MCPPROXY_LISTEN` / `MCPP_LISTEN` | `listen` | Network binding address |
 | `MCPPROXY_API_KEY` | `api_key` | API key for authentication (empty values trigger auto-generation; auth remains enabled) |
 | `MCPPROXY_API_KEY_FILE` | `api_key` | Absolute path of a file that holds the API key; set it or `MCPPROXY_API_KEY`, not both (both set stops startup with an error naming both); an unusable file stops startup (no fallback, nothing generated) |
+| `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY` | `oauth_token_encryption_key` | The key itself (base64, 32 bytes); overrides the field. Set it or the `_FILE` form, not both (exit 4) |
+| `MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY_FILE` | `oauth_token_encryption_key` | Absolute path of a file that holds the key; overrides the field. A key source that is named but unusable or empty stops startup with exit 4 (no fallback to plaintext) |
 | `MCPPROXY_TRUSTED_HOSTS` | `trusted_hosts` | Comma-separated `Host` allowlist for loopback listeners behind a reverse proxy |
 | `MCPPROXY_TRUSTED_PROXIES` | `trusted_proxies` | Comma-separated CIDRs/IPs whose `X-Forwarded-*` headers are honoured |
 | `MCPPROXY_AUDIT_LOG_ENABLED` | `audit_log.enabled` | Turn audit logging on/off |

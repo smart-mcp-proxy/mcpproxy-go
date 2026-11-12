@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,17 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"go.uber.org/zap"
 )
+
+// loadErrorExitCode maps a config load error to the process exit status: a
+// (possibly wrapped) *config.StartupError carries its own code (for example 4
+// for an invalid OAuth token key reference), anything else is 1.
+func loadErrorExitCode(err error) int {
+	var se *config.StartupError
+	if errors.As(err, &se) {
+		return se.ExitCode
+	}
+	return 1
+}
 
 func main() {
 	// Setup logger
@@ -25,7 +37,32 @@ func main() {
 
 	// Create storage manager
 	dataDir := filepath.Join(homeDir, ".mcpproxy")
-	mgr, err := storage.NewManager(dataDir, sugar)
+	// Spec 123: honour MCPPROXY_OAUTH_TOKEN_ENCRYPTION_KEY[_FILE] and the
+	// oauth_token_encryption_key of the config that belongs to this data dir,
+	// like every other process that opens config.db.
+	keyCfg := &config.Config{DataDir: dataDir}
+	configFile := filepath.Join(dataDir, "mcp_config.json")
+	if _, statErr := os.Stat(configFile); statErr == nil {
+		loaded, loadErr := config.LoadFromFile(configFile)
+		if loadErr != nil {
+			if code := loadErrorExitCode(loadErr); code != 1 {
+				logger.Error("Failed to load the config of the data dir", zap.Error(loadErr))
+				_ = logger.Sync()
+				os.Exit(code)
+			}
+			logger.Fatal("Failed to load the config of the data dir", zap.Error(loadErr))
+		}
+		loaded.DataDir = dataDir
+		keyCfg = loaded
+	}
+	oauthKey, _, err := config.ResolveOAuthTokenKey(keyCfg)
+	if err != nil {
+		// Exit with the dedicated key-error code (4), not zap's Fatal status 1.
+		logger.Error("Failed to resolve the OAuth token key", zap.Error(err))
+		_ = logger.Sync()
+		os.Exit(config.ExitCodeOAuthTokenKeyError)
+	}
+	mgr, err := storage.NewManager(dataDir, sugar, storage.WithOAuthTokenKey(oauthKey))
 	if err != nil {
 		logger.Fatal("Failed to create storage manager", zap.Error(err))
 	}
@@ -69,12 +106,12 @@ func main() {
 	// Create parent code_execution call
 	parentCallID := fmt.Sprintf("%d-code_execution", time.Now().UnixNano())
 	parentCall := &storage.ToolCallRecord{
-		ID:               parentCallID,
-		ServerID:         mcpproxyServerID,
-		ServerName:       "mcpproxy",
-		ToolName:         "code_execution",
+		ID:         parentCallID,
+		ServerID:   mcpproxyServerID,
+		ServerName: "mcpproxy",
+		ToolName:   "code_execution",
 		Arguments: map[string]interface{}{
-			"code": "(function() {\n  var echo1 = call_tool('everything-server', 'echo', {message: 'Testing session tracking!'});\n  var echo2 = call_tool('everything-server', 'echo', {message: 'Nested call #2'});\n  var add = call_tool('everything-server', 'add', {a: 100, b: 200});\n  return {echo1: echo1, echo2: echo2, add: add};\n})()",
+			"code":  "(function() {\n  var echo1 = call_tool('everything-server', 'echo', {message: 'Testing session tracking!'});\n  var echo2 = call_tool('everything-server', 'echo', {message: 'Nested call #2'});\n  var add = call_tool('everything-server', 'add', {a: 100, b: 200});\n  return {echo1: echo1, echo2: echo2, add: add};\n})()",
 			"input": map[string]interface{}{},
 		},
 		Response: map[string]interface{}{
@@ -102,10 +139,10 @@ func main() {
 
 	// Create nested echo call #1
 	nestedCall1 := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-echo", time.Now().UnixNano()),
-		ServerID:         everythingServerID,
-		ServerName:       "everything-server",
-		ToolName:         "echo",
+		ID:         fmt.Sprintf("%d-echo", time.Now().UnixNano()),
+		ServerID:   everythingServerID,
+		ServerName: "everything-server",
+		ToolName:   "echo",
 		Arguments: map[string]interface{}{
 			"message": "Testing session tracking!",
 		},
@@ -129,10 +166,10 @@ func main() {
 	// Create nested echo call #2
 	time.Sleep(10 * time.Millisecond)
 	nestedCall2 := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-echo", time.Now().UnixNano()),
-		ServerID:         everythingServerID,
-		ServerName:       "everything-server",
-		ToolName:         "echo",
+		ID:         fmt.Sprintf("%d-echo", time.Now().UnixNano()),
+		ServerID:   everythingServerID,
+		ServerName: "everything-server",
+		ToolName:   "echo",
 		Arguments: map[string]interface{}{
 			"message": "Nested call #2",
 		},
@@ -156,10 +193,10 @@ func main() {
 	// Create nested add call
 	time.Sleep(10 * time.Millisecond)
 	nestedCall3 := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-add", time.Now().UnixNano()),
-		ServerID:         everythingServerID,
-		ServerName:       "everything-server",
-		ToolName:         "add",
+		ID:         fmt.Sprintf("%d-add", time.Now().UnixNano()),
+		ServerID:   everythingServerID,
+		ServerName: "everything-server",
+		ToolName:   "add",
 		Arguments: map[string]interface{}{
 			"a": 100,
 			"b": 200,
@@ -184,10 +221,10 @@ func main() {
 	// Create a direct tool call (not from code_execution)
 	time.Sleep(10 * time.Millisecond)
 	directCall := &storage.ToolCallRecord{
-		ID:               fmt.Sprintf("%d-longRunningOperation", time.Now().UnixNano()),
-		ServerID:         everythingServerID,
-		ServerName:       "everything-server",
-		ToolName:         "longRunningOperation",
+		ID:         fmt.Sprintf("%d-longRunningOperation", time.Now().UnixNano()),
+		ServerID:   everythingServerID,
+		ServerName: "everything-server",
+		ToolName:   "longRunningOperation",
 		Arguments: map[string]interface{}{
 			"duration": 2000,
 			"steps":    5,

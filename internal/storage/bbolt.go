@@ -2,6 +2,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	stderrors "errors"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tokenseal"
 
 	"go.etcd.io/bbolt"
 	"go.etcd.io/bbolt/errors"
@@ -37,6 +39,9 @@ func (e *DatabaseLockedError) Unwrap() error {
 type BoltDB struct {
 	db     *bbolt.DB
 	logger *zap.SugaredLogger
+	// oauthKey seals and opens oauth_tokens values (Spec 123); nil when
+	// encryption is off. Set once at open, never changed.
+	oauthKey *tokenseal.Key
 }
 
 // noSync opens databases with bbolt's NoSync. Only tests set it, through
@@ -53,7 +58,8 @@ var noSync atomic.Bool
 func DisableSyncForTesting() { noSync.Store(true) }
 
 // NewBoltDB creates a new BoltDB instance
-func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
+func NewBoltDB(dataDir string, logger *zap.SugaredLogger, opts ...Option) (*BoltDB, error) {
+	o := resolveOpenOptions(opts)
 	dbPath := filepath.Join(dataDir, "config.db")
 
 	// Try to open with timeout, if it fails, immediately return database locked error.
@@ -85,8 +91,9 @@ func NewBoltDB(dataDir string, logger *zap.SugaredLogger) (*BoltDB, error) {
 	tightenFilePermissions(dbPath, logger)
 
 	boltDB := &BoltDB{
-		db:     db,
-		logger: logger,
+		db:       db,
+		logger:   logger,
+		oauthKey: o.oauthKey,
 	}
 
 	// Initialize buckets and schema
@@ -925,36 +932,60 @@ func removeFile(path string) error {
 }
 
 // OAuth token operations
+//
+// Spec 123: every value of the oauth_tokens bucket is decoded through
+// getOAuthRecordTx/decodeOAuthRecord and written through putOAuthRecord, so a
+// configured key seals every write and a row the key cannot open is a typed
+// *ErrOAuthTokenUndecryptable that every writer below refuses (FR-013): they
+// all read the stored record first, inside their one transaction, and write
+// nothing when it cannot be decoded.
 
-// SaveOAuthToken saves an OAuth token record
+// SaveOAuthToken saves an OAuth token record. It replaces the stored record,
+// but reads it first and refuses a row it cannot decode (Spec 123 FR-013), so
+// a token save can never overwrite a row sealed under a key that is not
+// configured.
+//
+// With encryption off (no key), only a row shaped like an envelope (any
+// value starting "enc:") is refused: a corrupt plaintext row is overwritten
+// as it was before Spec 123 (FR-011 / SC-003), since no key could ever open
+// it and refusing it would report "cannot be decrypted" for a database that
+// never used encryption.
 func (b *BoltDB) SaveOAuthToken(record *OAuthTokenRecord) error {
 	record.Updated = time.Now()
 
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		return putOAuthRecord(bucket, record.ServerName, record)
+		if _, err := getOAuthRecordTx(bucket, b.oauthKey, record.ServerName); err != nil {
+			if b.oauthKey != nil || oauthRowIsEnvelopeTx(bucket, record.ServerName) {
+				return err
+			}
+		}
+		return putOAuthRecord(bucket, b.oauthKey, record.ServerName, record)
 	})
 }
 
-// GetOAuthToken retrieves an OAuth token record by server name
+// GetOAuthToken retrieves an OAuth token record by server name. A row that
+// cannot be decoded returns *ErrOAuthTokenUndecryptable, not "not found".
 func (b *BoltDB) GetOAuthToken(serverName string) (*OAuthTokenRecord, error) {
 	var record *OAuthTokenRecord
 
 	err := b.db.View(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		data := bucket.Get([]byte(serverName))
-		if data == nil {
+		rec, err := getOAuthRecordTx(tx.Bucket([]byte(OAuthTokenBucket)), b.oauthKey, serverName)
+		if err != nil {
+			return err
+		}
+		if rec == nil {
 			return fmt.Errorf("oauth token not found")
 		}
-
-		record = &OAuthTokenRecord{}
-		return record.UnmarshalBinary(data)
+		record = rec
+		return nil
 	})
 
 	return record, err
 }
 
-// DeleteOAuthToken deletes an OAuth token record
+// DeleteOAuthToken deletes an OAuth token record. It acts on the bucket key
+// alone, so it also deletes a row that cannot be decoded (FR-013).
 func (b *BoltDB) DeleteOAuthToken(serverName string) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
@@ -971,15 +1002,13 @@ func (b *BoltDB) DeleteOAuthToken(serverName string) error {
 func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret string, callbackPort int, redirectURI string) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		data := bucket.Get([]byte(serverKey))
+		record, err := getOAuthRecordTx(bucket, b.oauthKey, serverKey)
+		if err != nil {
+			return err
+		}
 
-		var record *OAuthTokenRecord
-		if data != nil {
+		if record != nil {
 			// Update existing record
-			record = &OAuthTokenRecord{}
-			if err := record.UnmarshalBinary(data); err != nil {
-				return err
-			}
 			record.ClientID = clientID
 			record.ClientSecret = clientSecret
 			record.CallbackPort = callbackPort
@@ -999,7 +1028,7 @@ func (b *BoltDB) UpdateOAuthClientCredentials(serverKey, clientID, clientSecret 
 			}
 		}
 
-		return putOAuthRecord(bucket, serverKey, record)
+		return putOAuthRecord(bucket, b.oauthKey, serverKey, record)
 	})
 }
 
@@ -1034,14 +1063,14 @@ func (b *BoltDB) saveOAuthClientCredentialsIf(serverKey, clientID, clientSecret 
 	saved := false
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		record := &OAuthTokenRecord{ServerName: serverKey, Created: time.Now()}
-		if data := bucket.Get([]byte(serverKey)); data != nil {
-			if err := record.UnmarshalBinary(data); err != nil {
-				return err
-			}
-			if !allow(record) {
-				return nil
-			}
+		record, err := getOAuthRecordTx(bucket, b.oauthKey, serverKey)
+		if err != nil {
+			return err
+		}
+		if record == nil {
+			record = &OAuthTokenRecord{ServerName: serverKey, Created: time.Now()}
+		} else if !allow(record) {
+			return nil
 		}
 		record.ClientID = clientID
 		record.ClientSecret = clientSecret
@@ -1049,7 +1078,7 @@ func (b *BoltDB) saveOAuthClientCredentialsIf(serverKey, clientID, clientSecret 
 		record.RedirectURI = redirectURI
 		record.Updated = time.Now()
 		saved = true
-		return putOAuthRecord(bucket, serverKey, record)
+		return putOAuthRecord(bucket, b.oauthKey, serverKey, record)
 	})
 	return saved && err == nil, err
 }
@@ -1059,15 +1088,9 @@ func (b *BoltDB) saveOAuthClientCredentialsIf(serverKey, clientID, clientSecret 
 // or fresh records without DCR).
 func (b *BoltDB) GetOAuthClientCredentials(serverKey string) (clientID, clientSecret string, callbackPort int, redirectURI string, err error) {
 	err = b.db.View(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		data := bucket.Get([]byte(serverKey))
-		if data == nil {
-			return nil // No credentials stored
-		}
-
-		record := &OAuthTokenRecord{}
-		if err := record.UnmarshalBinary(data); err != nil {
-			return err
+		record, err := getOAuthRecordTx(tx.Bucket([]byte(OAuthTokenBucket)), b.oauthKey, serverKey)
+		if err != nil || record == nil {
+			return err // nil record: no credentials stored
 		}
 		clientID = record.ClientID
 		clientSecret = record.ClientSecret
@@ -1084,14 +1107,9 @@ func (b *BoltDB) GetOAuthClientCredentials(serverKey string) (clientID, clientSe
 func (b *BoltDB) ClearOAuthClientCredentials(serverKey string) error {
 	return b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		data := bucket.Get([]byte(serverKey))
-		if data == nil {
-			return nil // Nothing to clear
-		}
-
-		record := &OAuthTokenRecord{}
-		if err := record.UnmarshalBinary(data); err != nil {
-			return err
+		record, err := getOAuthRecordTx(bucket, b.oauthKey, serverKey)
+		if err != nil || record == nil {
+			return err // nil record: nothing to clear
 		}
 
 		// Clear DCR-related fields
@@ -1101,7 +1119,7 @@ func (b *BoltDB) ClearOAuthClientCredentials(serverKey string) error {
 		record.RedirectURI = ""
 		record.Updated = time.Now()
 
-		return putOAuthRecord(bucket, serverKey, record)
+		return putOAuthRecord(bucket, b.oauthKey, serverKey, record)
 	})
 }
 
@@ -1122,14 +1140,12 @@ func (b *BoltDB) UpdateOAuthToken(serverKey string, mutate func(rec *OAuthTokenR
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
 		now := time.Now()
-		record := &OAuthTokenRecord{}
-		if data := bucket.Get([]byte(serverKey)); data != nil {
-			if err := record.UnmarshalBinary(data); err != nil {
-				return err
-			}
-		} else {
-			record.ServerName = serverKey
-			record.Created = now
+		record, err := getOAuthRecordTx(bucket, b.oauthKey, serverKey)
+		if err != nil {
+			return err
+		}
+		if record == nil {
+			record = &OAuthTokenRecord{ServerName: serverKey, Created: now}
 		}
 		if err := mutate(record); err != nil {
 			return err
@@ -1139,7 +1155,7 @@ func (b *BoltDB) UpdateOAuthToken(serverKey string, mutate func(rec *OAuthTokenR
 			record.Created = now
 		}
 		record.Updated = now
-		return putOAuthRecord(bucket, serverKey, record)
+		return putOAuthRecord(bucket, b.oauthKey, serverKey, record)
 	})
 	if stderrors.Is(err, ErrSkipOAuthTokenUpdate) {
 		return nil
@@ -1181,12 +1197,8 @@ func (b *BoltDB) clearOAuthClientCredentialsWhere(serverKey string, match func(r
 	cleared := false
 	err := b.db.Update(func(tx *bbolt.Tx) error {
 		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		data := bucket.Get([]byte(serverKey))
-		if data == nil {
-			return nil
-		}
-		record := &OAuthTokenRecord{}
-		if err := record.UnmarshalBinary(data); err != nil {
+		record, err := getOAuthRecordTx(bucket, b.oauthKey, serverKey)
+		if err != nil || record == nil {
 			return err
 		}
 		if !match(record) {
@@ -1198,28 +1210,169 @@ func (b *BoltDB) clearOAuthClientCredentialsWhere(serverKey string, match func(r
 		record.RedirectURI = ""
 		record.Updated = time.Now()
 		cleared = true
-		return putOAuthRecord(bucket, serverKey, record)
+		return putOAuthRecord(bucket, b.oauthKey, serverKey, record)
 	})
 	return cleared, err
 }
 
-// ListOAuthTokens returns all OAuth token records
+// ListOAuthTokens returns every OAuth token record that can be decoded. It is
+// per-row tolerant (Spec 123 FR-014): a row the configured key cannot open,
+// or a plaintext row that is not a record, is skipped and logged once per
+// listing (bucket key and reason only), so one bad row does not hide every
+// other server's tokens from the refresh manager and orphan cleanup.
+// ListOAuthTokenRows reports those rows.
 func (b *BoltDB) ListOAuthTokens() ([]*OAuthTokenRecord, error) {
 	var records []*OAuthTokenRecord
+	var skipped []*ErrOAuthTokenUndecryptable
 
 	err := b.db.View(func(tx *bbolt.Tx) error {
-		bucket := tx.Bucket([]byte(OAuthTokenBucket))
-		return bucket.ForEach(func(_, v []byte) error {
-			record := &OAuthTokenRecord{}
-			if err := record.UnmarshalBinary(v); err != nil {
-				return err
+		rows, err := collectOAuthRows(tx.Bucket([]byte(OAuthTokenBucket)))
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			record, err := decodeOAuthRecord(b.oauthKey, row.key, row.value)
+			if err != nil {
+				var ue *ErrOAuthTokenUndecryptable
+				if !stderrors.As(err, &ue) {
+					return err
+				}
+				skipped = append(skipped, ue)
+				continue
 			}
 			records = append(records, record)
-			return nil
-		})
+		}
+		return nil
 	})
+	if err == nil && b.logger != nil {
+		for _, ue := range skipped {
+			b.logger.Warnw("Skipping OAuth token row that cannot be decrypted",
+				"key", ue.Key, "reason", string(ue.Reason), "row_key_id", ue.RowKID, "key_id", ue.KeyKID)
+		}
+	}
 
 	return records, err
+}
+
+// OAuthRowClass is the strict partition of oauth_tokens rows reported by
+// ListOAuthTokenRows: every row is exactly one of these.
+type OAuthRowClass string
+
+// OAuth row classes. key_mismatch is a Reason of OAuthRowUndecryptable, not a
+// class of its own.
+const (
+	OAuthRowPlaintext     OAuthRowClass = "plaintext"     // a JSON record
+	OAuthRowSealed        OAuthRowClass = "sealed"        // an envelope the configured key opens
+	OAuthRowUndecryptable OAuthRowClass = "undecryptable" // anything else; Reason says why
+)
+
+// OAuthTokenRow classifies one oauth_tokens row for status, doctor and the
+// CLI (Spec 123 FR-014). It carries no record field and no row bytes.
+type OAuthTokenRow struct {
+	BucketKey string
+	Class     OAuthRowClass
+	RowKID    string           // key id in the envelope prefix ("" for plaintext and unprefixed rows)
+	Reason    tokenseal.Reason // set only for OAuthRowUndecryptable
+}
+
+// ListOAuthTokenRows classifies every oauth_tokens row, in key order.
+func (b *BoltDB) ListOAuthTokenRows() ([]OAuthTokenRow, error) {
+	var out []OAuthTokenRow
+	err := b.db.View(func(tx *bbolt.Tx) error {
+		rows, err := collectOAuthRows(tx.Bucket([]byte(OAuthTokenBucket)))
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			out = append(out, classifyOAuthRow(b.oauthKey, row))
+		}
+		return nil
+	})
+	return out, err
+}
+
+func classifyOAuthRow(k *tokenseal.Key, row oauthRawRow) OAuthTokenRow {
+	shape, rowKID := tokenseal.Classify(row.value)
+	r := OAuthTokenRow{BucketKey: row.key, RowKID: rowKID}
+	if _, err := decodeOAuthRecord(k, row.key, row.value); err != nil {
+		r.Class = OAuthRowUndecryptable
+		r.Reason = tokenseal.ReasonMalformed
+		var ue *ErrOAuthTokenUndecryptable
+		if stderrors.As(err, &ue) {
+			r.Reason = ue.Reason
+		}
+		return r
+	}
+	if shape == tokenseal.ShapePlaintext {
+		r.Class = OAuthRowPlaintext
+	} else {
+		r.Class = OAuthRowSealed
+	}
+	return r
+}
+
+// SealPlaintextOAuthTokens seals every plaintext oauth_tokens row under the
+// configured key in ONE transaction (Spec 123 FR-016) and returns how many it
+// sealed. It collects every row first and writes only after the walk ends
+// (bbolt cursors skip keys when the bucket is mutated during iteration).
+// Sealed rows and undecryptable rows (including plaintext that is not a
+// record) are left exactly as they are, as is a plaintext row too large to
+// seal (logged). Each rewrite goes through
+// putOAuthRecord, so it takes a new revision and sets the compaction-advised
+// marker in the same transaction. Without a key it does nothing. Any write
+// error rolls the whole sweep back.
+func (b *BoltDB) SealPlaintextOAuthTokens(ctx context.Context) (int, error) {
+	if b.oauthKey == nil {
+		return 0, nil
+	}
+	sealed := 0
+	err := b.db.Update(func(tx *bbolt.Tx) error {
+		sealed = 0
+		bucket := tx.Bucket([]byte(OAuthTokenBucket))
+		rows, err := collectOAuthRows(bucket)
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if shape, _ := tokenseal.Classify(row.value); shape != tokenseal.ShapePlaintext {
+				continue
+			}
+			record, err := decodeOAuthRecord(b.oauthKey, row.key, row.value)
+			if err != nil {
+				// Plaintext that is not a record: undecryptable, untouched.
+				// Name the key and the reason, never the value.
+				if b.logger != nil {
+					b.logger.Warnw("OAuth token row is not a valid record; left as plaintext",
+						"server_key", row.key, "reason", "malformed")
+				}
+				continue
+			}
+			// Keep the stored JSON's unknown fields (a row a newer binary
+			// wrote): sealing must not drop them (Spec 123 review).
+			if err := putOAuthRecordKeeping(bucket, b.oauthKey, row.key, record, row.value); err != nil {
+				if stderrors.Is(err, tokenseal.ErrPlaintextTooLarge) {
+					// A per-row reason: leave this row as it is and keep
+					// sealing the others. Only transaction-level failures
+					// fail the sweep (and with it startup).
+					if b.logger != nil {
+						b.logger.Warnw("OAuth token row is too large to seal; left as plaintext",
+							"server_key", row.key, "reason", "too_large", "limit_bytes", tokenseal.MaxPlaintextLen)
+					}
+					continue
+				}
+				return fmt.Errorf("seal oauth token %s: %w", row.key, err)
+			}
+			sealed++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return sealed, nil
 }
 
 // Onboarding wizard operations (Spec 046)

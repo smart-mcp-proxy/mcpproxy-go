@@ -914,7 +914,7 @@ func runAuthLogoutClientMode(ctx context.Context, client *cliclient.Client, serv
 }
 
 // runAuthLogoutStandalone clears OAuth token in standalone mode.
-func runAuthLogoutStandalone(ctx context.Context, serverName string, cfg *config.Config) error {
+func runAuthLogoutStandalone(_ context.Context, serverName string, cfg *config.Config) error {
 	fmt.Printf("🔐 OAuth Logout - Server: %s\n", serverName)
 	fmt.Printf("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n")
 
@@ -929,14 +929,16 @@ func runAuthLogoutStandalone(ctx context.Context, serverName string, cfg *config
 	fmt.Println("   Note: Running in standalone mode (no daemon detected)")
 	fmt.Println()
 
-	cliClient, err := cli.NewClient(serverName, cfg, authLogLevel)
+	// Spec 123: not cli.NewClient. It resolves the OAuth token
+	// key first, and an unresolvable key reference (the usual lost-key case)
+	// would refuse the very logout the docs prescribe for it. The clear is a
+	// key-only delete, so it needs no key.
+	logger, err := logs.SetupCommandLogger(false, authLogLevel, false, "")
 	if err != nil {
-		return fmt.Errorf("failed to create CLI client: %w", err)
+		return fmt.Errorf("failed to create logger: %w", err)
 	}
-	defer cliClient.Close()
-
-	// Clear OAuth token
-	if err := cliClient.ClearOAuthToken(ctx); err != nil {
+	defer func() { _ = logger.Sync() }()
+	if err := cli.ClearOAuthTokenStandalone(cfg, serverName, logger.Sugar()); err != nil {
 		return fmt.Errorf("failed to clear OAuth token: %w", err)
 	}
 

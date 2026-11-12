@@ -73,11 +73,21 @@ func (r *Runtime) StartBackgroundInitialization() {
 		}
 		r.mu.RUnlock()
 
-		if deleted, err := r.storageManager.CleanupOrphanedOAuthTokens(validServerNames); err != nil {
+		// Spec 123 FR-015: a row the cleanup cannot decode is never deleted;
+		// it is kept and reported, and one that names no configured server
+		// is listed as an undecryptable orphan for the operator to discard.
+		if rep, err := r.storageManager.CleanupOrphanedOAuthTokensReport(validServerNames); err != nil {
 			r.logger.Warn("Failed to cleanup orphaned OAuth tokens", zap.Error(err))
-		} else if deleted > 0 {
-			r.logger.Info("Cleaned up orphaned OAuth tokens during startup",
-				zap.Int("deleted", deleted))
+		} else {
+			if rep.Deleted > 0 {
+				r.logger.Info("Cleaned up orphaned OAuth tokens during startup",
+					zap.Int("deleted", rep.Deleted))
+			}
+			if len(rep.UndecryptableKept) > 0 {
+				r.logger.Warn("Kept OAuth token rows that cannot be decrypted with the configured key",
+					zap.Strings("rows", rep.UndecryptableKept),
+					zap.Strings("orphans", rep.UndecryptableOrphans))
+			}
 		}
 	}
 

@@ -47,6 +47,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/stringutil"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/telemetry"
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/tokenseal"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/toolsig"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/truncate"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/updatecheck"
@@ -428,6 +429,13 @@ type Runtime struct {
 	profileEvaluator   ProfileEvaluator
 	profileSessionHook ProfileSessionHook
 
+	// oauthTokenKey is the key config.db's oauth_tokens values are sealed
+	// with (Spec 123), resolved once in New before storage is opened and kept
+	// for the life of the process (the field is restart-gated). nil = off.
+	// oauthKeySource is what doctor reports about it; it holds no path.
+	oauthTokenKey  *tokenseal.Key
+	oauthKeySource config.KeySource
+
 	appCtx    context.Context
 	appCancel context.CancelFunc
 	// lifetimeCtx is the runtime's original application context. Close
@@ -437,13 +445,34 @@ type Runtime struct {
 	lifetimeCtx context.Context
 }
 
+// runtimeNewStageHook is a test seam (nil in production) that runtime.New
+// calls with the open storage just before it constructs the component a
+// stage names (Spec 123 T040: the boot sweep runs before either).
+var runtimeNewStageHook func(stage string, sm *storage.Manager)
+
+const (
+	runtimeStageUpstreamManager = "upstream_manager"
+	runtimeStageRefreshManager  = "refresh_manager"
+	// runtimeStageOAuthBootSweep fires just before the Spec 123 boot sweep
+	// seals plaintext oauth_tokens rows.
+	runtimeStageOAuthBootSweep = "oauth_boot_sweep"
+)
+
 // New creates a runtime helper for the given config and prepares core managers.
 func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("config cannot be nil")
 	}
 
-	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar())
+	// Spec 123 FR-020/FR-022: resolve the OAuth token key once, before
+	// config.db is opened. An unresolvable or malformed key stops here with a
+	// *config.StartupError (exit 4) and no byte of the database written.
+	oauthTokenKey, oauthKeySource, err := config.ResolveOAuthTokenKey(cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	storageManager, err := storage.NewManager(cfg.DataDir, logger.Sugar(), storage.WithOAuthTokenKey(oauthTokenKey))
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage manager: %w", err)
 	}
@@ -465,6 +494,34 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 		}
 	}
 
+	// Spec 123 FR-016: the boot sweep. With a key configured, every plaintext
+	// oauth_tokens row is sealed in one transaction here, directly after the
+	// shutdown marker is armed (so a crash or hang in the sweep still reads
+	// as a crash next time) and before any component that reads or writes
+	// OAuth rows (the upstream manager, the refresh manager, background
+	// initialization) exists, so nothing is in flight. Sealed and undecryptable rows are left
+	// as they are, and so is a plaintext row that cannot be sealed for a
+	// per-row reason (logged). A transaction-level failure leaves every row as
+	// it was and refuses startup.
+	if oauthTokenKey != nil {
+		if hook := runtimeNewStageHook; hook != nil {
+			hook(runtimeStageOAuthBootSweep, storageManager)
+		}
+		sealed, sweepErr := storageManager.SealPlaintextOAuthTokens(context.Background())
+		if sweepErr != nil {
+			// Refuse to start: encryption is configured, so no OAuth consumer
+			// may run over rows that are still plaintext. The transaction
+			// rolled back, leaving every row as it was; fix the cause (disk
+			// space, permissions, a corrupt file) and start again.
+			logger.Error("OAuth token boot sweep failed; refusing to start",
+				zap.String("key_id", oauthTokenKey.ID()), zap.Error(sweepErr))
+			_ = storageManager.Close()
+			return nil, fmt.Errorf("failed to encrypt stored OAuth tokens at startup: %w", sweepErr)
+		}
+		logger.Info("OAuth token encryption enabled",
+			zap.String("key_id", oauthTokenKey.ID()), zap.Int("sealed_plaintext_rows", sealed))
+	}
+
 	// Close any stale sessions from previous runs
 	if err := storageManager.CloseAllActiveSessions(); err != nil {
 		logger.Warn("Failed to close stale sessions on startup", zap.Error(err))
@@ -479,6 +536,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	// Initialize secret resolver
 	secretResolver := secret.NewResolver()
 
+	if hook := runtimeNewStageHook; hook != nil {
+		hook(runtimeStageUpstreamManager, storageManager)
+	}
 	upstreamManager := upstream.NewManager(logger, cfg, storageManager.GetBoltDB(), secretResolver, storageManager)
 	// Spec 116 PR2b (review R6.1): no instance is built for a committed view
 	// the stored row has already moved past.
@@ -540,6 +600,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 
 	// Initialize OAuth refresh manager for proactive token refresh
 	// Uses storageManager as the token store and global coordinator for flow coordination
+	if hook := runtimeNewStageHook; hook != nil {
+		hook(runtimeStageRefreshManager, storageManager)
+	}
 	refreshManager := oauth.NewRefreshManager(
 		storageManager,
 		oauth.GetGlobalCoordinator(),
@@ -605,7 +668,9 @@ func New(cfg *config.Config, cfgPath string, logger *zap.Logger) (*Runtime, erro
 	}
 
 	rt := &Runtime{
-		cfg: cfg,
+		oauthTokenKey:  oauthTokenKey,
+		oauthKeySource: oauthKeySource,
+		cfg:            cfg,
 		// Boot: memory and disk agree by definition.
 		desiredCfg:         cfg,
 		cfgPath:            cfgPath,
@@ -710,6 +775,18 @@ func (r *Runtime) Attention() []contracts.AttentionItem {
 		return nil
 	}
 	return r.attention.Items()
+}
+
+// OAuthTokenKeyID returns the id of the key oauth_tokens values are sealed
+// with, or "" when encryption is off (Spec 123). It never exposes the key.
+func (r *Runtime) OAuthTokenKeyID() string {
+	return r.oauthTokenKey.ID()
+}
+
+// OAuthTokenKeySource reports where the running key came from, as resolved
+// once at startup. It holds no path or key material.
+func (r *Runtime) OAuthTokenKeySource() config.KeySource {
+	return r.oauthKeySource
 }
 
 // Config returns the underlying configuration pointer.
@@ -2755,6 +2832,10 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			continue
 		}
 		serverStatus = committed.pairStatus(serverStatus)
+		// Read once per server (after the nil guard above): concurrent tool
+		// calls set this flag, and the stored-row probe and the health input
+		// below must see the same value.
+		callTimeOAuthRequired := r.callTimeOAuthRequired(serverStatus.Name)
 		// Convert StateView ServerStatus to API response format
 		connected := serverStatus.Connected
 		connecting := strings.EqualFold(serverStatus.State, "connecting")
@@ -2782,6 +2863,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		var oauthStatus string // OAuth status: "authenticated", "expired", "error", "none"
 		var tokenExpiresAt time.Time
 		var hasRefreshToken bool
+		// oauthUndecryptable is the coded error for a stored OAuth row the
+		// configured key cannot decrypt (Spec 123 FR-031), nil otherwise.
+		var oauthUndecryptable error
 		if serverStatus.Config != nil {
 			created = serverStatus.Config.Created
 			url = serverStatus.Config.URL
@@ -2818,7 +2902,7 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			// IMPORTANT: This runs for ALL servers with a URL, including autodiscovery servers
 			// PersistentTokenStore uses serverKey (name + URL hash), not just server name
 			// We need to generate the same key format: "servername_hash16"
-			if url != "" && r.storageManager != nil && tokenInPlay {
+			if shouldProbeStoredOAuthRow(url, r.storageManager != nil, tokenInPlay, callTimeOAuthRequired) {
 				r.logger.Debug("Checking OAuth token in storage",
 					zap.String("server", serverStatus.Name),
 					// #1158: the configured upstream URL routinely carries a
@@ -2843,9 +2927,21 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 					zap.Bool("token_nil", token == nil),
 					zap.Error(err))
 
-				// DCR persists client credentials before the code exchange. Like
-				// PersistentTokenStore.GetToken, require an actual access token.
-				if err == nil && token != nil && token.AccessToken != "" {
+				// Spec 123 FR-031: a row the configured key cannot decrypt is
+				// present but unusable. It identifies an OAuth server, it is
+				// not authenticated, and its reason goes to the health detail
+				// and the diagnostics code instead of a "log in" status.
+				if oauth.IsTokenUndecryptable(err) {
+					oauthUndecryptable = oauth.TokenUndecryptableError(serverStatus.Name, err)
+					if oauthConfig == nil {
+						oauthConfig = map[string]interface{}{"autodiscovery": true}
+					}
+					oauthStatus = string(oauth.OAuthStatusError)
+				} else if !tokenInPlay {
+					// Probed only for the undecryptable outcome (a call-time
+					// sign-in need on a static-header server): a readable
+					// leftover row is still not evidence about this server.
+				} else if err == nil && token != nil && token.AccessToken != "" {
 					authenticated = true
 					tokenExpiresAt = token.ExpiresAt
 					hasRefreshToken = token.RefreshToken != ""
@@ -3066,6 +3162,34 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			serverMap["error_code"] = string(d.Code)
 		}
 
+		// Spec 123 FR-031: an undecryptable stored OAuth row is the cause to
+		// report while the server is not connected, whatever the last dial
+		// error says (a parked "login required" is exactly what must not be
+		// shown for it).
+		setUndecryptableDiagnostic := func() {
+			code := diagnostics.OAuthTokenUndecryptable
+			cause := oauthUndecryptable.Error()
+			if len(cause) > 256 {
+				cause = stringutil.UTF8Prefix(cause, 256) + "..."
+			}
+			diagMap := map[string]interface{}{
+				"code":        code,
+				"cause":       cause,
+				"detected_at": time.Now(),
+			}
+			if entry, ok := diagnostics.Get(code); ok {
+				diagMap["severity"] = entry.Severity
+				diagMap["user_message"] = entry.UserMessage
+				diagMap["fix_steps"] = entry.FixSteps
+				diagMap["docs_url"] = entry.DocsURL
+			}
+			serverMap["diagnostic"] = diagMap
+			serverMap["error_code"] = string(code)
+		}
+		if oauthUndecryptable != nil && !connected {
+			setUndecryptableDiagnostic()
+		}
+
 		// Add OAuth status fields if available
 		if oauthStatus != "" {
 			serverMap["oauth_status"] = oauthStatus
@@ -3080,11 +3204,10 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 		// MCP-2084: call-time OAuth requirement — set when an anonymously-connected
 		// server rejected a tools/call with "authorization required". Drives a
 		// proactive Sign-in CTA even though the server looks connected.
-		var callTimeOAuthRequired bool
+		// (callTimeOAuthRequired was read once at the top of this iteration.)
 		if r.upstreamManager != nil {
 			if client, exists := r.upstreamManager.GetClient(serverStatus.Name); exists && client != nil {
 				userLoggedOut = client.IsUserLoggedOut()
-				callTimeOAuthRequired = client.IsOAuthCallRequired()
 			}
 		}
 		serverMap["user_logged_out"] = userLoggedOut
@@ -3120,6 +3243,9 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 			RetryStoppedReason: serverStatus.RetryStoppedReason,
 			RetryCount:         serverStatus.RetryCount,
 		}
+		if oauthUndecryptable != nil {
+			healthInput.OAuthTokenUndecryptable = oauth.TokenUndecryptableDetail(oauthUndecryptable)
+		}
 		// Spec 113-d: rolling tool-call failure rate (same source at all sites).
 		if r.upstreamManager != nil {
 			healthInput.CallsInWindow, healthInput.CallFailuresInWindow, healthInput.DominantCallFailureKind =
@@ -3139,6 +3265,12 @@ func (r *Runtime) GetAllServers() ([]map[string]interface{}, error) {
 
 		healthStatus := health.CalculateHealth(healthInput, healthConfig)
 		serverMap["health"] = healthStatus
+		// Spec 123 FR-031: a connected server whose sign-in need met the
+		// undecryptable row reports the same diagnostic a disconnected one does
+		// (health says configure; the diagnostic must not disagree).
+		if oauthUndecryptable != nil && connected && health.IsOAuthTokenUndecryptable(healthStatus) {
+			setUndecryptableDiagnostic()
+		}
 
 		// GH #1145: agents and the CLI read these directly rather than parsing
 		// the health summary. Emitted only when set, so the payload shape is
@@ -4636,4 +4768,24 @@ func knownClientAliases() map[string]bool {
 
 func isKnownClientAlias(rawNormalized string) bool {
 	return knownClientAliases()[rawNormalized]
+}
+
+// callTimeOAuthRequired reports whether the named server's client recorded a
+// call-time sign-in requirement (MCP-2084).
+func (r *Runtime) callTimeOAuthRequired(name string) bool {
+	if r.upstreamManager == nil {
+		return false
+	}
+	client, exists := r.upstreamManager.GetClient(name)
+	return exists && client != nil && client.IsOAuthCallRequired()
+}
+
+// shouldProbeStoredOAuthRow decides whether the server-list projection reads
+// the stored OAuth row. A token in play always does. A header-authenticated
+// server whose leftover row is not in play (GH #1172) is exempt, unless its
+// client recorded a call-time sign-in requirement: health will then offer
+// `login`, which must never be offered over an undecryptable row (Spec 123
+// FR-031), so the row is probed (for that outcome only).
+func shouldProbeStoredOAuthRow(url string, haveStorage, tokenInPlay, callTimeOAuthRequired bool) bool {
+	return url != "" && haveStorage && (tokenInPlay || callTimeOAuthRequired)
 }
