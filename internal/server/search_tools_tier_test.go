@@ -2,14 +2,12 @@ package server
 
 import (
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/contracts"
-	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime"
 )
 
 // TestSearchTools_AnnotationsSurviveToTier is a regression test for a Spec
@@ -24,8 +22,6 @@ import (
 // when found via search — the exact "silently not destructive" outcome the
 // tier feature exists to prevent.
 func TestSearchTools_AnnotationsSurviveToTier(t *testing.T) {
-	srv := newConsistencyServer(t)
-
 	// newConsistencyServer's cfg.Servers is empty, so NewServer's async
 	// LoadConfiguredServers (StartBackgroundInitialization) is about to
 	// re-sync storage to match it. Seeding the upstream server config before
@@ -34,9 +30,9 @@ func TestSearchTools_AnnotationsSurviveToTier(t *testing.T) {
 	// then finds no server and withholds the tool, making the search return
 	// zero hits (flake reproduced under -race full-package runs). Same
 	// pattern as mcp_group_scope_test.go / server_logs_missing_file_test.go.
-	require.Eventually(t, func() bool {
-		return srv.runtime.CurrentPhase() == runtime.PhaseReady
-	}, 10*time.Second, 10*time.Millisecond, "fixture: runtime never reached PhaseReady")
+	// The startup orphan-index cleanup races the hand-seeded index documents
+	// the same way (see newSettledConsistencyServer), so wait for both.
+	srv := newSettledConsistencyServer(t)
 
 	require.NoError(t, srv.runtime.StorageManager().SaveUpstreamServer(&config.ServerConfig{
 		Name:    "danger",
