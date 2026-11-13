@@ -309,6 +309,12 @@ type MCPProxyServer struct {
 	// bound to the removed incarnation).
 	toolGateAfterRecordRead func(serverName string)
 
+	// replayAfterGate, when non-nil, runs in Server.ReplayToolCall after the
+	// shared gate answered and before the live identity check. Nil in
+	// production; the only writer is a test (a connection that drops or
+	// changes generation in exactly that window).
+	replayAfterGate func()
+
 	// Spec 049: in-memory only counter of retrieve_tools calls that opted into
 	// include_disabled. Never persisted (privacy, consistent with Spec 042).
 	includeDisabledCalls atomic.Int64

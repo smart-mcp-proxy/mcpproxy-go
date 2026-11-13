@@ -1197,7 +1197,7 @@ func (s *Service) disconnectJSON(client *ClientDef, cfgPath, serverName string) 
 	setServersMap(client, data, serversMap)
 
 	info, _ := os.Stat(cfgPath)
-	perm := os.FileMode(0o644)
+	perm := newFilePerm
 	if info != nil {
 		perm = info.Mode()
 	}
@@ -1378,7 +1378,7 @@ func (s *Service) disconnectTOML(client *ClientDef, cfgPath, serverName string) 
 	data["mcp_servers"] = serversMap
 
 	info, _ := os.Stat(cfgPath)
-	perm := os.FileMode(0o644)
+	perm := newFilePerm
 	if info != nil {
 		perm = info.Mode()
 	}

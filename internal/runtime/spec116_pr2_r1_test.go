@@ -106,7 +106,7 @@ func TestReplayToolCall_R1_IncarnationCapturedBeforeClient(t *testing.T) {
 	var body *ast.BlockStmt
 	ast.Inspect(file, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "ReplayToolCall" || fn.Body == nil {
+		if !ok || fn.Name.Name != "ReplayToolCallWithOptions" || fn.Body == nil {
 			return true
 		}
 		body = fn.Body

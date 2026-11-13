@@ -229,7 +229,7 @@ func TestReplayToolCall_CreatesNoExecutionTimeoutBeforeDispatch(t *testing.T) {
 	var body *ast.BlockStmt
 	ast.Inspect(file, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "ReplayToolCall" || fn.Body == nil {
+		if !ok || fn.Name.Name != "ReplayToolCallWithOptions" || fn.Body == nil {
 			return true
 		}
 		body = fn.Body
@@ -254,7 +254,7 @@ func TestReplayToolCall_CreatesNoExecutionTimeoutBeforeDispatch(t *testing.T) {
 		if pkg.Name == "context" && (sel.Sel.Name == "WithTimeout" || sel.Sel.Name == "WithDeadline") {
 			foundTimeout = true
 		}
-		if pkg.Name == "client" && sel.Sel.Name == "CallTool" {
+		if pkg.Name == "client" && (sel.Sel.Name == "CallTool" || sel.Sel.Name == "CallToolOnEpoch") {
 			foundCall = true
 		}
 		return true
@@ -278,7 +278,7 @@ func TestReplayToolCall_ReleasesRuntimeLockBeforeDispatch(t *testing.T) {
 	var body *ast.BlockStmt
 	ast.Inspect(file, func(n ast.Node) bool {
 		fn, ok := n.(*ast.FuncDecl)
-		if !ok || fn.Name.Name != "ReplayToolCall" || fn.Body == nil {
+		if !ok || fn.Name.Name != "ReplayToolCallWithOptions" || fn.Body == nil {
 			return true
 		}
 		body = fn.Body

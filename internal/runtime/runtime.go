@@ -1776,6 +1776,25 @@ func (r *Runtime) GetServerToolCalls(serverName string, limit int) ([]*contracts
 // mid-queue releases the slot immediately instead of leaving a call queued for
 // a caller that is gone (FR-005).
 func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[string]interface{}) (*contracts.ToolCallRecord, error) {
+	return r.ReplayToolCallWithOptions(ctx, id, arguments, ReplayOptions{})
+}
+
+// ReplayOptions tunes how ReplayToolCallWithOptions dispatches.
+type ReplayOptions struct {
+	// PinEpoch pins the dispatch to the connection generation Epoch, the one a
+	// caller's gate certified the tool identity against (Spec 105 FR-009): the
+	// managed client refuses, with zero transport calls, if the generation moved
+	// before the call reaches the transport. False dispatches unpinned.
+	PinEpoch bool
+	Epoch    int64
+}
+
+// ReplayToolCallWithOptions is ReplayToolCall with dispatch options. A
+// dispatch the managed client refused BEFORE the transport (a generation
+// change on a pinned call, a failed dispatch re-check) is returned as an error
+// and not recorded: nothing reached the upstream, so there is no call to
+// record.
+func (r *Runtime) ReplayToolCallWithOptions(ctx context.Context, id string, arguments map[string]interface{}, opts ReplayOptions) (*contracts.ToolCallRecord, error) {
 	// Spec 093 FR-008: snapshot the collaborators under the lock and release it
 	// before anything that can block. Replay dispatches through the same
 	// admission seam as every other origin, so holding r.mu across the call
@@ -1899,8 +1918,19 @@ func (r *Runtime) ReplayToolCall(ctx context.Context, id string, arguments map[s
 	ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceInternal)
 
 	startTime := time.Now()
-	result, callErr := client.CallTool(ctx, originalCall.ToolName, callArgs)
+	var (
+		result  interface{}
+		callErr error
+	)
+	if opts.PinEpoch {
+		result, callErr = client.CallToolOnEpoch(ctx, originalCall.ToolName, callArgs, opts.Epoch)
+	} else {
+		result, callErr = client.CallTool(ctx, originalCall.ToolName, callArgs)
+	}
 	duration := time.Since(startTime)
+	if callErr != nil && (errors.Is(callErr, managed.ErrConnectionGenerationChanged) || errors.Is(callErr, managed.ErrDispatchRecheckRefused)) {
+		return nil, callErr
+	}
 
 	// Create new tool call record
 	newCall := &storage.ToolCallRecord{

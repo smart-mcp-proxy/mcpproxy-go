@@ -11627,6 +11627,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/contracts.ErrorResponse'
           description: Unauthorized - missing or invalid API key
+        "403":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: 'Replay refused: tool quarantined or not callable, server quarantined,
+            outside the profile policy, or the token lacks the tool''s permission
+            tier'
         "405":
           content:
             application/json:

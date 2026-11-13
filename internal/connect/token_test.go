@@ -1297,8 +1297,8 @@ func TestConnectWithPrecondition_FileVanishedBetweenStatAndReadDefaultsPerm(t *t
 		}
 		return
 	}
-	if got := info.Mode().Perm(); got != 0o644 {
-		t.Fatalf("perm = %o, want the 0644 create default — the stale 0400 mode from the vanished file must not survive the self-heal", got)
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("perm = %o, want the 0600 create default — the stale 0400 mode from the vanished file must not survive the self-heal", got)
 	}
 }
 

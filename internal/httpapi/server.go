@@ -1295,7 +1295,7 @@ func (s *Server) setupRoutes() {
 		})
 
 		// Feedback submission (Spec 036)
-		r.Post("/feedback", s.handleFeedback)
+		r.With(s.requireAdminReadMiddleware("Admin credentials required to submit feedback")).Post("/feedback", s.handleFeedback)
 
 		// Client connect/disconnect. Config reads disclose local paths and
 		// connection state; writes can modify user-owned client files or embed
@@ -5707,6 +5707,7 @@ func (s *Server) maskToolCallRecord(record *contracts.ToolCallRecord) {
 // @Success      200      {object}  contracts.ReplayToolCallResponse    "Tool call replayed successfully"
 // @Failure      400      {object}  contracts.ErrorResponse             "Tool call ID required or invalid JSON payload"
 // @Failure      401      {object}  contracts.ErrorResponse             "Unauthorized - missing or invalid API key"
+// @Failure      403      {object}  contracts.ErrorResponse             "Replay refused: tool quarantined or not callable, server quarantined, outside the profile policy, or the token lacks the tool's permission tier"
 // @Failure      405      {object}  contracts.ErrorResponse             "Method not allowed"
 // @Failure      429      {object}  contracts.ErrorResponse             "Shed by a concurrency limit or an agent token call rate limit (Retry-After header carries the wait hint)"
 // @Failure      500      {object}  contracts.ErrorResponse             "Failed to replay tool call"
