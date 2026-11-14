@@ -543,7 +543,7 @@ Store a secret in the system keyring:
 mcpproxy secrets set <key> [value] [flags]
 ```
 
-Omit `value` to enter it at the prompt. The current CLI prompt echoes typed characters in the terminal. A literal value argument may be retained in shell history or exposed in process listings; use `--from-stdin` with a trusted secret source when that matters.
+Omit `value` to enter it at the prompt. When stdin is a terminal, typed characters are not echoed. When stdin is not a terminal, the CLI reads the secret from stdin; use `--from-stdin` to make that input mode explicit. A literal value argument may be retained in shell history or exposed in process listings.
 
 | Flag | Description |
 |------|-------------|

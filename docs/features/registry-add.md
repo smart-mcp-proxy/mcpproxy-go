@@ -93,7 +93,7 @@ mcpproxy registry add official io.github.example/github-mcp --env 'GITHUB_TOKEN=
 # ✅ Added 'github-mcp' (quarantined — approve with: mcpproxy upstream approve github-mcp)
 ```
 
-For credentials, avoid putting a literal value in `--env`: it is a command-line argument and may be retained in shell history or exposed in process listings. Store the value with `mcpproxy secrets set github-token`, then use a quoted keyring reference such as `--env 'GITHUB_TOKEN=${keyring:github-token}'`. The current interactive prompt echoes typed characters in the terminal; use `--from-stdin` with a trusted secret source when that is unsuitable.
+For credentials, avoid putting a literal value in `--env`: it is a command-line argument and may be retained in shell history or exposed in process listings. Store the value with `mcpproxy secrets set github-token`, then use a quoted keyring reference such as `--env 'GITHUB_TOKEN=${keyring:github-token}'`. When stdin is a terminal, typed characters are not echoed. When stdin is not a terminal, the CLI reads the secret from stdin; use `--from-stdin` to make that mode explicit with a trusted secret source.
 
 Notes:
 
