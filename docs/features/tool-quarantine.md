@@ -100,10 +100,15 @@ Tool-level quarantine is enabled by default. To disable:
 ### Per-Server Trust Modes
 
 The effective `trust_mode` controls how new and changed tool contracts are
-approved. The default is `scan`: tools are auto-approved only when the offline
-scan is clean; findings or scan-coverage gaps keep them pending for review.
-`manual` holds every new or changed tool for review. `auto` approves all such
-changes without scanning and disables rug-pull protection. See [Trust modes](./security-quarantine.md#trust-modes-auto--scan--manual)
+approved. The default is `scan`: a new tool is auto-approved only when the
+offline scan is clean with full coverage. A changed contract also needs the
+Spec 120 structural gate to find no hold signal; safety-hint changes, input
+schema widening, output-schema changes, and dispatch-tier changes stay pending
+even when the scan is clean. Findings or scan-coverage gaps also keep tools
+pending for review. `manual` holds new and changed tools for review, except
+that a trusted server's clean first-discovery baseline is auto-approved.
+`auto` approves all such changes without scanning and disables rug-pull
+protection. See [Trust modes](./security-quarantine.md#trust-modes-auto--scan--manual)
 for the full behavior, including new-server admission.
 
 Older configs and API clients can still use `auto_approve_tool_changes` as a
@@ -146,12 +151,16 @@ Tools are automatically approved (no manual review needed) when:
   unchanged) **and the offline TPA scan is clean for the tool** — recorded with
   `approved_by: "auto-baseline"`. A flagged first-seen tool is never
   auto-baselined, on that pass or any repeat (R2-1).
-- Under `trust_mode: scan`, an offline scan of a new tool or changed contract
-  returns clean. Findings and incomplete scan coverage keep the tool pending.
+- Under `trust_mode: scan`, a new tool is approved only after a clean scan with
+  full coverage. A changed contract also requires no Spec 120 structural hold
+  signal; safety-hint changes, input-schema widening, output-schema changes,
+  and dispatch-tier changes stay pending regardless of the scan verdict.
+  Findings and incomplete scan coverage keep a new tool pending.
 
 Under `trust_mode: manual`, new tools and changed contracts stay pending until
-approved. The default `scan` mode and the least-safe `auto` mode are described
-in [Trust modes](./security-quarantine.md#trust-modes-auto--scan--manual).
+approved, except for a trusted server's clean first-discovery baseline, which
+is auto-approved. The default `scan` mode and the least-safe `auto` mode are
+described in [Trust modes](./security-quarantine.md#trust-modes-auto--scan--manual).
 
 #### Migrating existing installs
 
