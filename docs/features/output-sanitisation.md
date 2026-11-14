@@ -23,8 +23,8 @@ response chokepoint instead of only logging.
 The feature is **fully opt-in**: with no `output_sanitisation` block (or all
 options at their defaults) mcpproxy forwards every tool response byte-for-byte —
 identical to pre-feature behaviour. Each behaviour above is enabled
-independently. Non-text blocks (image / audio / embedded resource) are never
-modified.
+independently. Image, audio and binary resource content are never modified;
+embedded text resources in prompt results are sanitised like other text.
 
 Spotlighting wraps untrusted text as:
 
@@ -39,7 +39,7 @@ Spotlighting wraps untrusted text as:
 - **Default behavior:** nothing is redacted or blocked. Sensitive-data detection still runs and flags records in the activity log, but it does so after the call is recorded and does not change what the agent receives.
 - **Covered paths.** Sanitisation applies to the `call_tool_*` wrapper path, to direct routing mode (`/mcp/all`, or `routing_mode: direct`, with tools exposed as `server__tool`), to `code_execution` tool calls, and to successful upstream `get_prompt` results. Prompt content is always treated as untrusted because prompts have no `openWorldHint` distinction.
 - **Upstream error responses are not covered.** Upstream error responses (`isError: true`) bypass `redact` and `block`, so a secret echoed in an upstream error result is forwarded as-is, even with `response_action: block`.
-- **Text content only.** `redact`, `block` and `strip` act on text in successful tool responses and successful `get_prompt` results. For prompts, this includes text inside embedded text resources; image, audio and binary resource content is never modified. Tool **arguments** sent to an upstream server are not covered.
+- **Text content only.** `redact` and `block` act on text content in successful tool responses and successful `get_prompt` results on the covered paths; `strip` acts on the untrusted subset of that text. For prompts, this includes text inside embedded text resources; image, audio and binary resource content is never modified. Tool **arguments** sent to an upstream server are not covered.
 - **Pattern-based.** Only values matching the detector's patterns are redacted, and `block` triggers only on a **critical** detection. Redaction replaces the matched span; a multi-line secret such as a PEM private key may leave surrounding lines (in a local check with a synthetic key, only the `BEGIN` line was replaced). Well-known documentation example values (for instance the AWS documentation example access key) are classed as likely examples by the detector and were forwarded unredacted in a local check, while the accompanying secret key was masked. Treat redaction as risk reduction, not a guarantee that no secret reaches the agent.
 - **A canary check you can run locally:** point a scratch instance at a fixture server that returns a fake AWS key or private key and compare the response under the default config, `response_action: redact` and `response_action: block`. Use fake values only.
 
