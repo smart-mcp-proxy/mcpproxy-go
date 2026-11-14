@@ -412,52 +412,24 @@ func findAvailablePort(t *testing.T) int {
 
 // createTestConfig creates a test configuration file
 func createTestConfig(t *testing.T, configPath string, port int, dataDir string) {
-	encodedDataDir, err := json.Marshal(dataDir)
+	config := map[string]any{
+		"listen": fmt.Sprintf(":%d", port), "data_dir": dataDir, "api_key": TestAPIKey,
+		"enable_tray": false, "debug_search": true, "top_k": 10, "tools_limit": 50,
+		"tool_response_limit": 20000, "call_tool_timeout": "30s",
+		"mcpServers": []any{map[string]any{
+			"name": "memory", "protocol": "stdio", "command": "npx",
+			"args":    []string{"-y", "@modelcontextprotocol/server-memory"},
+			"enabled": true, "quarantined": false, "created": "2025-01-01T00:00:00Z",
+		}},
+		"environment": map[string]any{
+			"inherit_system_safe": true,
+			"allowed_system_vars": []string{"PATH", "HOME", "TMPDIR", "TEMP", "TMP", "NODE_PATH", "NPM_CONFIG_PREFIX"},
+		},
+		"quarantine_enabled": false, "docker_isolation": map[string]any{"enabled": false},
+	}
+	encoded, err := json.MarshalIndent(config, "", "  ")
 	require.NoError(t, err)
-
-	config := fmt.Sprintf(`{
-  "listen": ":%d",
-  "data_dir": %s,
-  "api_key": "%s",
-  "enable_tray": false,
-  "debug_search": true,
-  "top_k": 10,
-  "tools_limit": 50,
-  "tool_response_limit": 20000,
-  "call_tool_timeout": "30s",
-  "mcpServers": [
-    {
-      "name": "memory",
-      "protocol": "stdio",
-      "command": "npx",
-      "args": [
-        "-y",
-        "@modelcontextprotocol/server-memory"
-      ],
-      "enabled": true,
-      "quarantined": false,
-      "created": "2025-01-01T00:00:00Z"
-    }
-  ],
-  "environment": {
-    "inherit_system_safe": true,
-    "allowed_system_vars": [
-      "PATH",
-      "HOME",
-      "TMPDIR",
-      "TEMP",
-      "TMP",
-      "NODE_PATH",
-      "NPM_CONFIG_PREFIX"
-    ]
-  },
-  "quarantine_enabled": false,
-  "docker_isolation": {
-    "enabled": false
-  }
-}`, port, encodedDataDir, TestAPIKey)
-
-	err = os.WriteFile(configPath, []byte(config), 0600)
+	err = os.WriteFile(configPath, encoded, 0600)
 	require.NoError(t, err)
 }
 

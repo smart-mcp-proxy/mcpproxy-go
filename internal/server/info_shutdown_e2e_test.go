@@ -73,7 +73,11 @@ func TestInfoEndpoint(t *testing.T) {
 	require.NoError(t, cmd.Start(), "Failed to start server")
 	defer func() {
 		if cmd.Process != nil {
-			cancel()
+			if runtime.GOOS == "windows" {
+				cancel()
+			} else {
+				_ = cmd.Process.Signal(syscall.SIGTERM)
+			}
 			cmd.Wait()
 		}
 	}()
@@ -297,7 +301,11 @@ func TestSocketInfoEndpoint(t *testing.T) {
 	require.NoError(t, cmd.Start(), "Failed to start server")
 	defer func() {
 		if cmd.Process != nil {
-			cancel()
+			if runtime.GOOS == "windows" {
+				cancel()
+			} else {
+				_ = cmd.Process.Signal(syscall.SIGTERM)
+			}
 			cmd.Wait()
 		}
 	}()

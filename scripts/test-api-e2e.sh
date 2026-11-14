@@ -36,12 +36,12 @@ fi
 API_BASE="${BASE_URL}/api/v1"
 TEST_DATA_DIR="${MCPPROXY_E2E_TEST_DATA_DIR:-./test-data}"
 TEST_DATA_DIR_OWNED=0
-if [ -z "${MCPPROXY_E2E_TEST_DATA_DIR:-}" ] && [ ! -e "$TEST_DATA_DIR" ]; then
+if [ -z "${MCPPROXY_E2E_TEST_DATA_DIR:-}" ]; then
     TEST_DATA_DIR_OWNED=1
 fi
 AUDIT_DATA_DIR="${MCPPROXY_E2E_AUDIT_DATA_DIR:-./test-data-audit}"
 AUDIT_DATA_DIR_OWNED=0
-if [ -z "${MCPPROXY_E2E_AUDIT_DATA_DIR:-}" ] && [ ! -e "$AUDIT_DATA_DIR" ]; then
+if [ -z "${MCPPROXY_E2E_AUDIT_DATA_DIR:-}" ]; then
     AUDIT_DATA_DIR_OWNED=1
 fi
 AUDIT_RUN_DATA_DIR=""
@@ -69,11 +69,10 @@ TESTS_PASSED=0
 TESTS_FAILED=0
 TESTS_SKIPPED=0
 
-# The launcher PID is recorded by mcpproxy when it starts the configured child.
-# Read that run-owned PID instead of searching the process table by command
-# text; MSYS pgrep cannot reliably see native Windows child processes.
+# On Windows, identify the fixture by process name and command line; MSYS
+# cannot reliably see native children. Other platforms read the daemon log.
 launcher_child_pid() {
-    if command -v powershell.exe >/dev/null 2>&1; then
+    if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* ]]; then
         MCPPROXY_E2E_LAUNCHER_FIXTURE="$LAUNCHER_FIXTURE" powershell.exe -NoProfile -NonInteractive -Command '
             $fixture = $env:MCPPROXY_E2E_LAUNCHER_FIXTURE
             $fixtureName = Split-Path -Path $fixture -Leaf
@@ -94,7 +93,7 @@ launcher_child_pid() {
 launcher_child_is_running() {
     local pid="$1"
     [ -n "$pid" ] || return 1
-    if command -v powershell.exe >/dev/null 2>&1; then
+    if [[ "$(uname -s)" == MINGW* || "$(uname -s)" == MSYS* || "$(uname -s)" == CYGWIN* ]]; then
         MCPPROXY_E2E_LAUNCHER_PID="$pid" \
             MCPPROXY_E2E_LAUNCHER_FIXTURE="$LAUNCHER_FIXTURE" \
             powershell.exe -NoProfile -NonInteractive -Command '
@@ -788,8 +787,13 @@ mkdir -p "$TEST_DATA_DIR" "$(dirname "$CONFIG_FILE")"
 echo "Copying fresh config from template..."
 cp "$CONFIG_TEMPLATE" "$CONFIG_FILE"
 
+# Config files are read by the native daemon, which needs a Windows path.
+TEST_DATA_DIR_CONFIG_PATH="$TEST_DATA_DIR"
+if command -v cygpath >/dev/null 2>&1; then
+    TEST_DATA_DIR_CONFIG_PATH="$(cygpath -w "$TEST_DATA_DIR")"
+fi
 # Keep the daemon's data and launcher fixture inside the selected test scope.
-if ! jq --arg data_dir "$TEST_DATA_DIR" --arg launcher "$LAUNCHER_FIXTURE" \
+if ! jq --arg data_dir "$TEST_DATA_DIR_CONFIG_PATH" --arg launcher "$LAUNCHER_FIXTURE" \
     '.data_dir = $data_dir | .mcpServers |= map(if .command == "./test/launcher-server/launcher-server" then .command = $launcher else . end)' \
     "$CONFIG_FILE" > "${CONFIG_FILE}.tmp"; then
     echo -e "${RED}Error: failed to configure isolated E2E paths${NC}"
@@ -1423,7 +1427,7 @@ AUDIT_JSONL="${AUDIT_JSONL_DIR}/audit.jsonl"
 AUDIT_DATA_DIR_CONFIG_PATH="$AUDIT_RUN_DATA_DIR"
 AUDIT_JSONL_CONFIG_PATH="$AUDIT_JSONL"
 if command -v cygpath >/dev/null 2>&1; then
-    AUDIT_DATA_DIR_CONFIG_PATH="$(cygpath -w "$AUDIT_DATA_DIR")"
+    AUDIT_DATA_DIR_CONFIG_PATH="$(cygpath -w "$AUDIT_RUN_DATA_DIR")"
     AUDIT_JSONL_CONFIG_PATH="$(cygpath -w "$AUDIT_JSONL")"
 fi
 AUDIT_API_KEY=""

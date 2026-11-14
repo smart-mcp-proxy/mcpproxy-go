@@ -97,7 +97,7 @@ func TestResolveInstanceIDAdoptsLegacySharedFileOnce(t *testing.T) {
 	}
 }
 
-func TestAdoptLegacyInstanceIDSequentialClaimIsExclusive(t *testing.T) {
+func TestAdoptLegacyInstanceIDConcurrentClaimIsExclusive(t *testing.T) {
 	legacyPath := filepath.Join(t.TempDir(), "mcpproxy-instance-id")
 	withLegacyInstanceIDPath(t, legacyPath)
 
@@ -106,16 +106,37 @@ func TestAdoptLegacyInstanceIDSequentialClaimIsExclusive(t *testing.T) {
 		t.Fatalf("failed to seed legacy instance id file: %v", err)
 	}
 
-	dataDir1 := t.TempDir()
-	dataDir2 := t.TempDir()
-	if got := adoptLegacyInstanceID(dataDir1); got != legacyID {
-		t.Fatalf("first data dir should adopt the legacy id %q, got %q", legacyID, got)
+	const racers = 8
+	dataDirs := make([]string, racers)
+	for i := range dataDirs {
+		dataDirs[i] = t.TempDir()
 	}
-	if got := adoptLegacyInstanceID(dataDir2); got != "" {
-		t.Fatalf("second data dir should not adopt an already-claimed legacy id, got %q", got)
+	start := make(chan struct{})
+	results := make([]string, racers)
+	var wg sync.WaitGroup
+	for i := 0; i < racers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i] = adoptLegacyInstanceID(dataDirs[i])
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	adopters := 0
+	for _, id := range results {
+		if id == legacyID {
+			adopters++
+		} else if id != "" {
+			t.Errorf("adoptLegacyInstanceID returned an unexpected non-empty, non-legacy id %q", id)
+		}
+	}
+	if adopters != 1 {
+		t.Fatalf("expected exactly one of %d concurrent racers to adopt the legacy id, got %d", racers, adopters)
 	}
 	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
-		t.Fatalf("expected the legacy shared file to be gone after the first claim, stat err = %v", err)
+		t.Fatalf("expected the legacy shared file to be gone after the race, stat err = %v", err)
 	}
 }
 
