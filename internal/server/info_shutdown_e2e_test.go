@@ -71,13 +71,7 @@ func TestInfoEndpoint(t *testing.T) {
 	cmd.Stderr = os.Stderr
 
 	require.NoError(t, cmd.Start(), "Failed to start server")
-	defer func() {
-		if cmd.Process != nil {
-			// CommandContext kills the child on cancel; SIGTERM is unsupported on Windows.
-			cancel()
-			cmd.Wait()
-		}
-	}()
+	defer stopTestProcess(cmd, cancel)
 
 	// Wait for server to be ready
 	serverURL := fmt.Sprintf("http://%s", listenAddr)
@@ -290,12 +284,7 @@ func TestSocketInfoEndpoint(t *testing.T) {
 	cmd.Env = append(os.Environ(), "MCPPROXY_API_KEY=e2e-test-api-key-12345")
 
 	require.NoError(t, cmd.Start(), "Failed to start server")
-	defer func() {
-		if cmd.Process != nil {
-			cmd.Process.Signal(syscall.SIGTERM)
-			cmd.Wait()
-		}
-	}()
+	defer stopTestProcess(cmd, cancel)
 
 	// Wait for socket to be created
 	require.True(t, waitForSocket(socketPath, 10*time.Second), "Socket was not created")
@@ -327,6 +316,23 @@ func TestSocketInfoEndpoint(t *testing.T) {
 }
 
 // Helper functions
+
+func stopTestProcess(cmd *exec.Cmd, cancel context.CancelFunc) {
+	if cmd.Process == nil {
+		cancel()
+		return
+	}
+
+	if runtime.GOOS == "windows" {
+		// CommandContext uses process termination on cancel; Windows does not support SIGTERM.
+		cancel()
+	} else if err := cmd.Process.Signal(syscall.SIGTERM); err != nil {
+		// Fall back to CommandContext termination if graceful shutdown cannot be requested.
+		cancel()
+	}
+
+	_ = cmd.Wait()
+}
 
 func buildTestBinary(t *testing.T) (string, func()) {
 	t.Helper()
