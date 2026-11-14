@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/logs"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/secret"
+	"golang.org/x/term"
 )
 
 // GetSecretsCommand returns the secrets management command
@@ -58,8 +60,13 @@ func getSecretsSetCommand() *cobra.Command {
 				if value == "" {
 					return fmt.Errorf("environment variable %s is not set or empty", fromEnv)
 				}
+			} else if fromStdin {
+				var err error
+				value, err = readSecretStdin(os.Stdin)
+				if err != nil {
+					return fmt.Errorf("failed to read secret from stdin: %w", err)
+				}
 			} else {
-				// Both fromStdin and default case read from stdin
 				fmt.Print("Enter secret value: ")
 				var err error
 				value, err = readPassword()
@@ -344,11 +351,22 @@ func getSecretsMigrateCommand() *cobra.Command {
 	return cmd
 }
 
-// readPassword reads a password from stdin without echoing
+// readPassword reads a password without echoing when stdin is a terminal.
 func readPassword() (string, error) {
-	// For now, use a simple implementation
-	// In production, you'd want to use something like golang.org/x/term
-	var password string
-	_, err := fmt.Scanln(&password)
-	return password, err
+	if !term.IsTerminal(int(os.Stdin.Fd())) {
+		return readSecretStdin(os.Stdin)
+	}
+
+	password, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Println()
+	return string(password), err
+}
+
+// readSecretStdin reads all piped input and removes only line-ending bytes.
+func readSecretStdin(input io.Reader) (string, error) {
+	value, err := io.ReadAll(input)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(value), "\r\n"), nil
 }

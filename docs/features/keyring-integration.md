@@ -136,7 +136,7 @@ mcpproxy secrets set my-api-key --from-env=MY_API_KEY
 mcpproxy secrets set my-api-key --from-stdin < secret.txt
 ```
 
-Avoid putting a literal secret in the command arguments: shells may keep it in history and processes may expose their arguments. The interactive prompt avoids a secret command argument, but the current CLI echoes typed characters in the terminal. Use `--from-stdin` with a trusted secret source when terminal echo is unsuitable.
+Avoid putting a literal secret in the command arguments: shells may keep it in history and processes may expose their arguments. When stdin is a terminal, the prompt reads the secret without echoing typed characters. Otherwise, the CLI reads the secret from stdin; `--from-stdin` explicitly selects that input mode for a trusted secret source.
 
 | Flag | Default | Description |
 |------|---------|-------------|
@@ -435,7 +435,7 @@ mcpproxy doctor
 
 ```bash
 mcpproxy secrets set my-api-key
-# Enter secret value: (typed characters are echoed in the terminal)
+# Enter secret value: (typed characters are not echoed when stdin is a terminal)
 ```
 
 Or use the Web UI: click **Add Value** next to the missing secret.
