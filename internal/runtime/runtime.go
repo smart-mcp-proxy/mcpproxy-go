@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2491,8 +2493,8 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 	// live calls cost one upstream round trip per server per poll (about a
 	// thousand an hour for a dozen servers), and on a busy machine the poll
 	// took seconds to minutes. Tokenizing every tool definition is the other
-	// expensive part, so its result is kept until a server's tool set (its
-	// discovery epoch and tool count) or the model or topK changes.
+	// expensive part, so its result is kept until a server's tool definitions,
+	// the model or topK change.
 	serverInfos, fingerprint := r.tokenSavingsInputs()
 	cacheKey := fmt.Sprintf("%s|%d|%s", model, topK, fingerprint)
 
@@ -2549,6 +2551,13 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 // estimate from the StateView (connected servers whose discovery has
 // completed), plus a fingerprint that changes whenever one of those tool sets
 // does.
+//
+// The fingerprint is a digest of exactly what the estimate tokenizes (server
+// name, tool name, description, input schema). A discovery epoch plus a tool
+// count would not do: the epoch is the connection token, so a
+// tools/list_changed re-discovery on the same connection keeps it, and an
+// edited description or schema keeps the count too. Hashing the definitions
+// costs far less than tokenizing them.
 func (r *Runtime) tokenSavingsInputs() ([]tokens.ServerToolInfo, string) {
 	sup := r.Supervisor()
 	if sup == nil || sup.StateView() == nil {
@@ -2563,17 +2572,35 @@ func (r *Runtime) tokenSavingsInputs() ([]tokens.ServerToolInfo, string) {
 	}
 	sort.Strings(names)
 
-	var fp strings.Builder
+	digest := sha256.New()
+	// Every field is length-prefixed so adjacent fields cannot run together.
+	writeField := func(b []byte) {
+		var size [8]byte
+		binary.BigEndian.PutUint64(size[:], uint64(len(b)))
+		digest.Write(size[:])
+		digest.Write(b)
+	}
 	infos := make([]tokens.ServerToolInfo, 0, len(names))
 	for _, name := range names {
 		status := snapshot.Servers[name]
-		fmt.Fprintf(&fp, "%d:%s:%d:%d;", len(name), name, status.DiscoveryEpoch, len(status.Tools))
+		writeField([]byte(name))
+		writeField([]byte(strconv.Itoa(len(status.Tools))))
 		toolInfos := make([]tokens.ToolInfo, 0, len(status.Tools))
 		for _, tool := range status.Tools {
 			inputSchema := tool.InputSchema
 			if inputSchema == nil {
 				inputSchema = map[string]interface{}{}
 			}
+			writeField([]byte(tool.Name))
+			writeField([]byte(tool.Description))
+			// encoding/json sorts map keys, so the same schema always yields
+			// the same bytes. A schema that cannot be encoded falls back to a
+			// marker; it cannot be tokenized as JSON either.
+			schemaJSON, err := json.Marshal(inputSchema)
+			if err != nil {
+				schemaJSON = []byte("unencodable")
+			}
+			writeField(schemaJSON)
 			toolInfos = append(toolInfos, tokens.ToolInfo{
 				Name:        tool.Name,
 				Description: tool.Description,
@@ -2586,7 +2613,7 @@ func (r *Runtime) tokenSavingsInputs() ([]tokens.ServerToolInfo, string) {
 			Tools:      toolInfos,
 		})
 	}
-	return infos, fp.String()
+	return infos, hex.EncodeToString(digest.Sum(nil))
 }
 
 func copyIntMap(m map[string]int) map[string]int {

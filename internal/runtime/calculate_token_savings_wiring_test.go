@@ -133,3 +133,39 @@ func TestRuntime_CalculateTokenSavings_UsesStateViewAndCaches(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 0, gone.TotalServerToolListSize)
 }
+
+// A tools/list_changed re-discovery on the SAME connection keeps the discovery
+// epoch (it is the connection token), and an edited definition keeps the tool
+// count too. The estimate must still be recounted (#1911).
+func TestRuntime_CalculateTokenSavings_RecountsOnSameEpochDefinitionChange(t *testing.T) {
+	rt := newTestRuntime(t)
+	view := rt.Supervisor().StateView()
+
+	setTool := func(description string, schema map[string]interface{}) {
+		view.UpdateServer("alpha", func(s *stateview.ServerStatus) {
+			s.Connected = true
+			s.ToolsDiscovered = true
+			s.DiscoveryEpoch = 7
+			s.Tools = []stateview.ToolInfo{{Name: "one", Description: description, InputSchema: schema}}
+		})
+	}
+
+	setTool("short", map[string]interface{}{"type": "object"})
+	before, err := rt.CalculateTokenSavings()
+	require.NoError(t, err)
+
+	setTool("a much longer description that costs clearly more tokens than the short one did before the upstream edited it", map[string]interface{}{"type": "object"})
+	longer, err := rt.CalculateTokenSavings()
+	require.NoError(t, err)
+	assert.Greater(t, longer.TotalServerToolListSize, before.TotalServerToolListSize,
+		"an edited description on the same connection must be recounted")
+
+	setTool("short", map[string]interface{}{
+		"type":       "object",
+		"properties": map[string]interface{}{"path": map[string]interface{}{"type": "string", "description": "file to read"}},
+	})
+	schema, err := rt.CalculateTokenSavings()
+	require.NoError(t, err)
+	assert.Greater(t, schema.TotalServerToolListSize, before.TotalServerToolListSize,
+		"an edited input schema on the same connection must be recounted")
+}
