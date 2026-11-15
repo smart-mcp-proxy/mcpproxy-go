@@ -2,6 +2,8 @@ package jsruntime
 
 import (
 	"fmt"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dop251/goja"
 )
@@ -52,7 +54,15 @@ func sourceOperatorTokens(src string, limit int) int {
 // keyof T", "readonly readonly T[]", a type predicate "a is a is ...",
 // "infer U extends infer U extends ..."); rather than keep a list of them,
 // every word counts, so the count bounds the nesting whatever words the
-// grammar grows. Runs of non-ASCII bytes count as words too.
+// grammar grows.
+//
+// A word is a run of ASCII word bytes and non-ASCII letters, digits and
+// marks; every other non-ASCII rune (a space or line separator such as
+// U+00A0, U+2028 or U+3000, U+FEFF, punctuation, symbols, format characters,
+// invalid UTF-8) is a token of its own and ends a word. Everything esbuild
+// reads as whitespace between two keywords is such a rune, so separating
+// "keyof keyof ..." with one cannot make the words merge; a run of letters
+// is at most one identifier to esbuild (or a syntax error).
 func typeScriptSourceTokens(src string, limit int) int {
 	return countSourceTokens(src, limit, true)
 }
@@ -62,10 +72,23 @@ func countSourceTokens(src string, limit int, everyWord bool) int {
 	for i := 0; i < len(src) && n <= limit; {
 		c := src[i]
 		switch {
-		case isSourceWordByte(c) || everyWord && c >= 0x80:
+		case isSourceWordByte(c) || everyWord && c >= utf8.RuneSelf && isWordRune(src[i:]):
 			j := i + 1
-			for j < len(src) && (isSourceWordByte(src[j]) || everyWord && src[j] >= 0x80) {
-				j++
+			if c >= utf8.RuneSelf {
+				_, size := utf8.DecodeRuneInString(src[i:])
+				j = i + size
+			}
+			for j < len(src) {
+				if isSourceWordByte(src[j]) {
+					j++
+					continue
+				}
+				if everyWord && src[j] >= utf8.RuneSelf && isWordRune(src[j:]) {
+					_, size := utf8.DecodeRuneInString(src[j:])
+					j += size
+					continue
+				}
+				break
 			}
 			if everyWord {
 				n++
@@ -73,14 +96,28 @@ func countSourceTokens(src string, limit int, everyWord bool) int {
 				n++
 			}
 			i = j
+		case everyWord && c >= utf8.RuneSelf: // any other non-ASCII rune
+			_, size := utf8.DecodeRuneInString(src[i:])
+			n++
+			i += size
 		case c > ' ' && c < 0x7f: // ASCII punctuation (word bytes handled above)
 			n++
 			i++
-		default: // whitespace, control and non-ASCII bytes (identifiers, text)
+		default: // whitespace, control and (JavaScript) non-ASCII bytes
 			i++
 		}
 	}
 	return n
+}
+
+// isWordRune reports whether the rune s starts with is a non-ASCII letter,
+// digit or mark.
+func isWordRune(s string) bool {
+	r, size := utf8.DecodeRuneInString(s)
+	if r == utf8.RuneError && size <= 1 {
+		return false
+	}
+	return unicode.In(r, unicode.L, unicode.Nd, unicode.Nl, unicode.Mn, unicode.Mc)
 }
 
 func isSourceWordByte(c byte) bool {

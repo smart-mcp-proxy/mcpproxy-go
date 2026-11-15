@@ -23,8 +23,16 @@ import (
 // own roots with plain Go lookups. If anything does not match on the way (a
 // step that leads nowhere or to an object already reached, a function that
 // is not one, an object of another implementation kind, a global object with
-// other keys), the VM is walked in full instead. installStackGuard runs on a
-// fresh VM, which always matches; the checks catch a VM changed before it.
+// other keys), the VM is walked in full instead.
+//
+// Following the template is only sound on a pristine VM: it checks the edges
+// of the spanning tree, not the others, so a VM changed by script code
+// before the guard is installed could keep an original builtin behind an edge
+// the template does not check (String.prototype.saved = String.prototype.trim,
+// then trim replaced by another builtin of the same kind). Those checks are
+// consistency checks against a goja upgrade, not tamper detection. The guard
+// is therefore only ever installed by newGuardedVM, on a VM it creates
+// itself, before any script code exists that could run.
 
 // collectGraphScript walks the object graph from the roots breadth first and
 // returns, for every object, the object it was first reached from, the step
@@ -213,8 +221,8 @@ func collectBuiltins(vm *goja.Runtime, extraRoots ...goja.Value) ([]*goja.Object
 }
 
 // builtinFunctions returns every function object reachable from builtinRoots
-// in vm, which must be fresh: through the template when vm's graph follows
-// it, by walking vm's graph otherwise.
+// in vm, which must be pristine (see above): through the template when vm's
+// graph follows it, by walking vm's graph otherwise.
 func builtinFunctions(vm *goja.Runtime) ([]*goja.Object, error) {
 	if t := builtinTemplate(); t != nil {
 		if funcs, ok := t.follow(vm); ok {

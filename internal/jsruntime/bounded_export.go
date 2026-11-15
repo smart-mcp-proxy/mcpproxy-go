@@ -2,6 +2,7 @@ package jsruntime
 
 import (
 	"errors"
+	"fmt"
 	"reflect"
 	"sort"
 	"strconv"
@@ -25,6 +26,22 @@ import (
 //   - Go data the script may write into (input, tool results, call_tools
 //     slots) is handed to it as plain JS objects and arrays (toJS) instead of
 //     goja's Go-backed wrappers, whose property writes call Export natively.
+//
+// The Go value keeps goja's sharing: an object that appears twice is exported
+// once and referenced twice. Go code downstream (json.Marshal of the result,
+// of tool arguments, activity logging) walks every reference, so a small
+// acyclic graph that shares objects at every level
+// (x = {a: x, b: x}, sixty times) is 2^60 work there, in Go code no timeout
+// interrupts. The JSON data exports (a result, tool arguments) are therefore
+// bounded by their expanded size too: every value counts each time it
+// appears, at a lower bound of the bytes its JSON encoding takes, against
+// maxExportSize.
+
+// maxExportSize bounds the expanded size of a script result or of tool-call
+// arguments, in (a lower bound of) JSON-encoded bytes. Distinct data that
+// large would already exceed the default memory budget; the bound is reached
+// in practice only through shared references.
+const maxExportSize int64 = 64 << 20
 
 var exportMapType = reflect.TypeOf(map[string]interface{}{})
 
@@ -34,6 +51,8 @@ var (
 	errExportTooDeep = errors.New("nested too deeply to export")
 	// errExportCycle: a script result refers to itself.
 	errExportCycle = errors.New("contains a circular reference")
+	// errExportTooLarge: the value's expanded size exceeds maxExportSize.
+	errExportTooLarge = fmt.Errorf("too large to serialize (more than %d MiB as JSON, counting every reference to a shared value)", maxExportSize>>20)
 )
 
 // exportError is how the exporter unwinds with one of the errors above.
@@ -68,7 +87,10 @@ func (g *nativeGuard) export(v goja.Value) interface{} {
 // downstream (activity redaction, logging) would walk without end.
 func (g *nativeGuard) exportArgs(v goja.Value) interface{} {
 	out, err := g.exportMode(v, cyclesThrow)
-	if err != nil {
+	switch {
+	case errors.Is(err, errExportTooLarge):
+		panic(g.newRangeError("tool arguments are " + errExportTooLarge.Error()))
+	case err != nil:
 		panic(g.newRangeError(stackOverflowMessage))
 	}
 	return out
@@ -107,6 +129,7 @@ func (g *nativeGuard) exportMode(v goja.Value, mode cycleMode) (out interface{},
 	e := &exporter{g: g, base: saved + 1, mode: mode, seen: make(map[*goja.Object]interface{}), height: make(map[*goja.Object]int)}
 	if mode != cyclesKept {
 		e.onPath = make(map[*goja.Object]bool)
+		e.size = make(map[*goja.Object]int64)
 	}
 	out, _ = e.value(v, 0)
 	return out, nil
@@ -129,6 +152,38 @@ type exporter struct {
 	// onPath, when cycles are refused, holds the objects being exported
 	// above the current one.
 	onPath map[*goja.Object]bool
+	// size, when cycles are refused (JSON data), is the expanded size of
+	// every object whose export is complete, and used the expanded size of
+	// everything exported so far; see maxExportSize.
+	size map[*goja.Object]int64
+	used int64
+}
+
+// charge counts n more bytes of expanded size, when sizes are counted.
+func (e *exporter) charge(n int64) {
+	if e.size == nil {
+		return
+	}
+	e.used += n
+	if e.used > maxExportSize || n < 0 {
+		panic(exportError{errExportTooLarge})
+	}
+}
+
+// leafSize is a lower bound of the JSON size of a value exported as is.
+func leafSize(out interface{}) int64 {
+	switch t := out.(type) {
+	case nil:
+		return 4
+	case string:
+		return int64(len(t)) + 2
+	}
+	rv := reflect.ValueOf(out)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map, reflect.String:
+		return int64(rv.Len()) + 2 // a typed array's elements, ...
+	}
+	return 1
 }
 
 // value exports v at the given level and returns it with its height.
@@ -136,9 +191,12 @@ func (e *exporter) value(v goja.Value, level int) (interface{}, int) {
 	obj, ok := v.(*goja.Object)
 	if !ok {
 		if v == nil {
+			e.charge(4)
 			return nil, 0
 		}
-		return v.Export(), 0
+		out := v.Export()
+		e.charge(leafSize(out))
+		return out, 0
 	}
 	if out, done := e.seen[obj]; done {
 		if e.onPath[obj] {
@@ -153,6 +211,7 @@ func (e *exporter) value(v goja.Value, level int) (interface{}, int) {
 		if h > 0 && e.base+level+h-1 >= e.g.max {
 			panic(exportError{errExportTooDeep})
 		}
+		e.charge(e.size[obj]) // each reference is encoded in full
 		return out, h
 	}
 	if e.base+level >= e.g.max {
@@ -162,8 +221,12 @@ func (e *exporter) value(v goja.Value, level int) (interface{}, int) {
 		e.onPath[obj] = true
 		defer delete(e.onPath, obj)
 	}
+	before := e.used
 	out, below := e.object(obj, level)
 	e.height[obj] = below + 1
+	if e.size != nil {
+		e.size[obj] = e.used - before
+	}
 	return out, below + 1
 }
 
@@ -188,7 +251,9 @@ func (e *exporter) object(obj *goja.Object, level int) (interface{}, int) {
 	}
 	switch kind {
 	case "arrayObject", "sparseArrayObject", "argumentsObject":
-		arr := make([]interface{}, internalLength(obj))
+		n := internalLength(obj)
+		e.charge(int64(n) + 2) // "[]" and a byte per element, before allocating
+		arr := make([]interface{}, n)
 		e.seen[obj] = arr
 		for i := range arr {
 			e.g.depth = e.base + level
@@ -199,6 +264,7 @@ func (e *exporter) object(obj *goja.Object, level int) (interface{}, int) {
 		return arr, below
 	case "mapObject":
 		entries := e.g.collect(e.g.mapForEach, obj)
+		e.charge(int64(len(entries)) + 2)
 		m := make([][2]interface{}, len(entries)/2)
 		e.seen[obj] = m
 		for i := range m {
@@ -208,6 +274,7 @@ func (e *exporter) object(obj *goja.Object, level int) (interface{}, int) {
 		return m, below
 	case "setObject":
 		entries := e.g.collect(e.g.setForEach, obj)
+		e.charge(int64(len(entries)/2) + 2)
 		a := make([]interface{}, len(entries)/2)
 		e.seen[obj] = a
 		for i := range a {
@@ -215,18 +282,24 @@ func (e *exporter) object(obj *goja.Object, level int) (interface{}, int) {
 		}
 		return a, below
 	case "proxyObject":
+		e.charge(2)
 		return obj.Export(), 0 // a goja.Proxy; goja does not descend into it
 	}
 	if len(kind) >= len("objectGo") && kind[:len("objectGo")] == "objectGo" {
-		return obj.Export(), 0 // Go-backed: Export hands back the Go value itself
+		out := obj.Export() // Go-backed: Export hands back the Go value itself
+		e.charge(leafSize(out))
+		return out, 0
 	}
 	if obj.ExportType() != exportMapType {
-		return obj.Export(), 0 // functions, dates, wrapped primitives, typed arrays, ...
+		out := obj.Export() // functions, dates, wrapped primitives, typed arrays, ...
+		e.charge(leafSize(out))
+		return out, 0
 	}
 	// An ordinary object: goja exports its own enumerable string-keyed
 	// properties (a String object's character indices are not among them),
 	// each looked up by its JS key.
 	names, exact := e.g.ownKeys(obj)
+	e.charge(2)
 	m := make(map[string]interface{}, len(names))
 	e.seen[obj] = m
 	strLen := -1
@@ -240,6 +313,7 @@ func (e *exporter) object(obj *goja.Object, level int) (interface{}, int) {
 			}
 		}
 		e.g.depth = e.base + level
+		e.charge(int64(len(k)) + 3) // "k":
 		var el goja.Value
 		if exact != nil {
 			el = e.g.reflectGet(goja.FunctionCall{Arguments: []goja.Value{obj, exact[i]}})

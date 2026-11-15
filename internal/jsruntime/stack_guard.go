@@ -40,8 +40,11 @@ import (
 //     wired, counts against it and fails with a catchable RangeError.
 //
 // JSON.stringify, JSON.parse and Array.prototype.flat recurse inside a single
-// builtin call, so they get their own depth checks against the same budget,
-// as does exporting a value to Go (bounded_export.go). Two recursions involve
+// builtin call, so their recursions are counted level by level against the
+// same budget: JSON.parse's reviver walk and flat's flattening run here, in
+// Go, as goja runs them, with one count per level; JSON.stringify drives
+// goja's own serializer and tracks the depth it is at. Exporting a value to
+// Go (bounded_export.go) is counted the same way. Two recursions involve
 // no builtin call at all and are closed structurally: a property lookup on a
 // prototype cycle through a proxy (wrapSetPrototypeOf refuses the cycle) and
 // a callable proxy used as a trap (guardedHandler counts every trap call).
@@ -96,6 +99,9 @@ type nativeGuard struct {
 	setForEach    nativeCallFunc // the original Set.prototype.forEach
 	objectKeys    nativeCallFunc // the original Object.keys
 	reflectGet    nativeCallFunc // the original Reflect.get
+	reflectHas    nativeCallFunc // the original Reflect.has
+	reflectDefine nativeCallFunc // the original Reflect.defineProperty
+	reflectDelete nativeCallFunc // the original Reflect.deleteProperty
 
 	// patched is every function object instrumented so far.
 	patched map[*goja.Object]struct{}
@@ -149,9 +155,25 @@ var builtinRoots = []string{
 	`(function(){ return arguments })()`,
 }
 
+// newGuardedVM creates the VM an execution runs in: sandboxed, with the stack
+// guard installed before any script code exists. It is the only production
+// path to installStackGuard, which relies on a pristine VM (builtin_graph.go).
+func newGuardedVM() (*goja.Runtime, *nativeGuard, error) {
+	vm := goja.New()
+	setupSandbox(vm)
+	g, err := installStackGuard(vm)
+	if err != nil {
+		return nil, nil, err
+	}
+	return vm, g, nil
+}
+
 // installStackGuard sets the JS call-depth limit and instruments every
-// builtin of vm against nested native recursion. It must run before any
-// script code.
+// builtin of vm against nested native recursion. vm must be pristine: fresh
+// from goja.New (and setupSandbox), with no script code run in it, since a
+// script that ran first could have hidden an original builtin where finding
+// the builtins does not look (builtin_graph.go). Production code goes through
+// newGuardedVM; tests call it on fresh VMs.
 //
 // The instrumentation replaces, in place, the Go functions a builtin
 // function object dispatches to. Replacing the properties that hold the
@@ -209,6 +231,9 @@ func installStackGuard(vm *goja.Runtime) (*nativeGuard, error) {
 		{vm.Get("Set").ToObject(vm).Get("prototype").ToObject(vm), "forEach", &g.setForEach},
 		{vm.Get("Object").ToObject(vm), "keys", &g.objectKeys},
 		{vm.Get("Reflect").ToObject(vm), "get", &g.reflectGet},
+		{vm.Get("Reflect").ToObject(vm), "has", &g.reflectHas},
+		{vm.Get("Reflect").ToObject(vm), "defineProperty", &g.reflectDefine},
+		{vm.Get("Reflect").ToObject(vm), "deleteProperty", &g.reflectDelete},
 	} {
 		fn, _, ok := nativeFuncFields(c.holder.Get(c.name).ToObject(vm))
 		if !ok || *fn == nil {
@@ -403,94 +428,104 @@ func (g *nativeGuard) wrapBind(orig nativeCallFunc) nativeCallFunc {
 // counter would not see it and a cyclic array (a[0] = a) needs no heap to go
 // arbitrarily deep.
 //
-// The call is charged the depth it may recurse to, so a getter or proxy trap
-// that runs during it and calls flat again works from what is left. A
-// request deeper than half of what is left is cut there (half, so that the
-// charges of flat calls nested that way add up to at most the budget): goja
-// flattens to the cut, and if the result still holds an array, flattening
-// it as asked would have gone deeper, which throws the RangeError.
-//
-// goja coerces the depth argument after it has read the receiver's length,
-// so it is handed an object whose valueOf coerces the script's argument at
-// that point and answers with the cut depth.
-func (g *nativeGuard) wrapFlat(orig nativeCallFunc) nativeCallFunc {
+// It replaces goja's flat with the same algorithm (goja's own order of
+// observable steps: the receiver's length, then the depth argument, then the
+// species constructor, then each element's has and get) in which every level
+// of flattening is one count of the nesting budget. The recursion itself is
+// what is bounded, so nothing has to be inferred from the depth argument or
+// the result, and a getter or proxy trap that runs during it, at whatever
+// level, works from what is left.
+func (g *nativeGuard) wrapFlat(nativeCallFunc) nativeCallFunc {
+	vm := g.vm
 	return func(call goja.FunctionCall) goja.Value {
-		saved := g.enter()
-		defer g.restore(saved)
-		limit := int64(g.max-saved-1) / 2
-		requested, depth := int64(1), int64(1)
-		decide := func() {
-			depth = requested
-			if depth > limit {
-				depth = limit
-			}
-			if depth > 0 {
-				g.depth = saved + 1 + int(depth)
-			}
+		defer g.restore(g.enter())
+		o := call.This.ToObject(vm)
+		length := toLength(o.Get("length"))
+		depth := int64(1)
+		if len(call.Arguments) > 0 { // goja reads an explicit undefined as 0
+			depth = call.Arguments[0].ToInteger()
 		}
-		var arg goja.Value
-		if len(call.Arguments) == 0 {
-			decide()
-			arg = g.vm.ToValue(depth)
-		} else { // goja reads an explicit undefined as 0
-			script := call.Arguments[0]
-			box := g.vm.NewObject()
-			if err := box.SetPrototype(nil); err != nil {
-				panic(err)
-			}
-			if err := box.Set("valueOf", func(goja.FunctionCall) goja.Value {
-				requested = script.ToInteger()
-				decide()
-				return g.vm.ToValue(depth)
-			}); err != nil {
-				panic(err)
-			}
-			requested, depth = 0, 0 // until goja coerces it (it may throw first)
-			arg = box
-		}
-		res := orig(goja.FunctionCall{This: call.This, Arguments: []goja.Value{arg}})
-		if requested > depth && g.holdsArray(res) {
-			panic(g.newRangeError(stackOverflowMessage))
-		}
-		return res
+		a := g.arraySpeciesCreate(o)
+		g.flattenIntoArray(a, o, length, 0, depth)
+		return a
 	}
 }
 
-// holdsArray reports whether the object flat returned has an element that is
-// an array. A proxy result is assumed to have one (its elements cannot be
-// read without running script code), and so is a String object, whose
-// character indices are listed as keys without being stored: enumerating a
-// long one would cost memory and time no interrupt can stop. A typed array
-// holds numbers only.
-func (g *nativeGuard) holdsArray(res goja.Value) bool {
-	obj, ok := res.(*goja.Object)
-	if !ok {
-		return false
+// maxSafeInteger is 2^53, goja's bound on array-like lengths.
+const maxSafeInteger = int64(1) << 53
+
+// toLength is goja's ToLength.
+func toLength(v goja.Value) int64 {
+	if v == nil {
+		return 0
 	}
-	switch objectKind(obj) {
-	case "proxyObject", "stringObject":
-		return true
-	case "typedArrayObject":
-		return false
+	i := v.ToInteger()
+	switch {
+	case i < 0:
+		return 0
+	case i >= maxSafeInteger:
+		return maxSafeInteger - 1
 	}
-	// The elements flat wrote are the result's index properties; Keys lists
-	// only the properties an object holds (an array's holes are skipped).
-	for _, k := range obj.Keys() {
-		if !isArrayIndex(k) {
+	return i
+}
+
+// arraySpeciesCreate is goja's ArraySpeciesCreate(obj, 0).
+func (g *nativeGuard) arraySpeciesCreate(obj *goja.Object) *goja.Object {
+	vm := g.vm
+	if g.isArray(goja.FunctionCall{Arguments: []goja.Value{obj}}).ToBoolean() {
+		v := obj.Get("constructor")
+		if c, ok := v.(*goja.Object); ok {
+			v = c.GetSymbol(goja.SymSpecies)
+			if goja.IsNull(v) {
+				v = nil
+			}
+		}
+		if v != nil && !goja.IsUndefined(v) {
+			if c, ok := v.(*goja.Object); ok {
+				if ctor, ok := goja.AssertConstructor(c); ok {
+					res, err := ctor(c, vm.ToValue(0))
+					if err != nil {
+						panic(err)
+					}
+					return res
+				}
+			}
+			panic(vm.NewTypeError("Species is not a constructor"))
+		}
+	}
+	return vm.NewArray()
+}
+
+// flattenIntoArray is goja's FlattenIntoArray (without a mapper), counting
+// one level of the nesting budget per call.
+func (g *nativeGuard) flattenIntoArray(target, source *goja.Object, sourceLen, start, depth int64) int64 {
+	defer g.restore(g.enter())
+	vm := g.vm
+	targetIndex := start
+	for sourceIndex := int64(0); sourceIndex < sourceLen; sourceIndex++ {
+		key := strconv.FormatInt(sourceIndex, 10)
+		if !g.reflectHas(goja.FunctionCall{Arguments: []goja.Value{source, vm.ToValue(key)}}).ToBoolean() {
 			continue
 		}
-		el, ok := obj.Get(k).(*goja.Object)
-		if ok && g.isArray(goja.FunctionCall{Arguments: []goja.Value{el}}).ToBoolean() {
-			return true
+		element := source.Get(key)
+		if element == nil {
+			element = goja.Undefined()
 		}
+		if depth > 0 {
+			if el, ok := element.(*goja.Object); ok && g.isArray(goja.FunctionCall{Arguments: []goja.Value{el}}).ToBoolean() {
+				targetIndex = g.flattenIntoArray(target, el, toLength(el.Get("length")), targetIndex, depth-1)
+				continue
+			}
+		}
+		if targetIndex >= maxSafeInteger-1 {
+			panic(vm.NewTypeError("Invalid array length"))
+		}
+		if err := target.DefineDataProperty(strconv.FormatInt(targetIndex, 10), element, goja.FLAG_TRUE, goja.FLAG_TRUE, goja.FLAG_TRUE); err != nil {
+			panic(err)
+		}
+		targetIndex++
 	}
-	return false
-}
-
-// isArrayIndex reports whether k is the canonical form of an array index.
-func isArrayIndex(k string) bool {
-	i, err := strconv.ParseUint(k, 10, 32)
-	return err == nil && i < 1<<32-1 && strconv.FormatUint(i, 10) == k
+	return targetIndex
 }
 
 // maxProtoWalk bounds the object graph protoCycle walks. A prototype graph
@@ -767,10 +802,20 @@ func (g *nativeGuard) guardedHandler(h *goja.Object) goja.Value {
 	}))
 }
 
-// wrapParse bounds the nesting of the text JSON.parse decodes recursively.
-// The text is coerced once, here, and handed on as a string, so a toString
-// with side effects still runs exactly once.
+// wrapParse bounds JSON.parse's two recursions. Decoding recurses on the
+// nesting of the text, which is measured before goja decodes it. The text is
+// coerced once, here, and handed on as a string, so a toString with side
+// effects still runs exactly once.
+//
+// The reviver walk recurses on the decoded value as the reviver leaves it,
+// and a reviver can make that anything (a cycle, a getter that hands back a
+// fresh object at every level), with no builtin call or JS frame in between.
+// So goja only decodes, and the walk runs here: goja's InternalizeJSONProperty
+// step for step (the same reads, deletions and definitions, in the same
+// order, through the original Reflect and Object builtins), one count of the
+// nesting budget per level.
 func (g *nativeGuard) wrapParse(orig nativeCallFunc) nativeCallFunc {
+	vm := g.vm
 	return func(call goja.FunctionCall) goja.Value {
 		saved := g.enter()
 		defer g.restore(saved)
@@ -778,15 +823,89 @@ func (g *nativeGuard) wrapParse(orig nativeCallFunc) nativeCallFunc {
 		if saved+1+jsonNestingDepth(text.String()) > g.max {
 			panic(g.newRangeError(stackOverflowMessage))
 		}
-		args := make([]goja.Value, len(call.Arguments))
-		copy(args, call.Arguments)
-		if len(args) == 0 {
-			args = append(args, text)
-		} else {
-			args[0] = text
+		reviver, callable := goja.AssertFunction(call.Argument(1))
+		if !callable {
+			// No walk: goja's own handling of a missing or non-callable reviver.
+			args := make([]goja.Value, len(call.Arguments))
+			copy(args, call.Arguments)
+			if len(args) == 0 {
+				args = append(args, text)
+			} else {
+				args[0] = text
+			}
+			return orig(goja.FunctionCall{This: call.This, Arguments: args})
 		}
-		return orig(goja.FunctionCall{This: call.This, Arguments: args})
+		value := orig(goja.FunctionCall{This: call.This, Arguments: []goja.Value{text}})
+		root := vm.NewObject()
+		if err := root.DefineDataProperty("", value, goja.FLAG_TRUE, goja.FLAG_TRUE, goja.FLAG_TRUE); err != nil {
+			panic(err)
+		}
+		w := &reviveWalker{g: g, reviver: reviver, desc: vm.NewObject()}
+		if err := w.desc.SetPrototype(nil); err != nil {
+			panic(err)
+		}
+		for _, f := range []string{"writable", "enumerable", "configurable"} {
+			if err := w.desc.Set(f, true); err != nil {
+				panic(err)
+			}
+		}
+		return w.walk(root, vm.ToValue(""))
 	}
+}
+
+// reviveWalker runs one JSON.parse reviver walk.
+type reviveWalker struct {
+	g       *nativeGuard
+	reviver goja.Callable
+	// desc is the data descriptor CreateDataProperty defines with; only its
+	// value changes. Reflect.defineProperty reads it when called, and a
+	// proxy's defineProperty trap is handed a copy, so the script never sees
+	// it.
+	desc *goja.Object
+}
+
+// walk is InternalizeJSONProperty(holder, name).
+func (w *reviveWalker) walk(holder *goja.Object, name goja.Value) goja.Value {
+	g := w.g
+	defer g.restore(g.enter())
+	value := g.reflectGet(goja.FunctionCall{Arguments: []goja.Value{holder, name}})
+	if obj, ok := value.(*goja.Object); ok {
+		if g.isArray(goja.FunctionCall{Arguments: []goja.Value{obj}}).ToBoolean() {
+			length := toLength(obj.Get("length"))
+			for i := int64(0); i < length; i++ {
+				w.property(obj, g.vm.ToValue(strconv.FormatInt(i, 10)))
+			}
+		} else {
+			// Object.keys is goja's EnumerableOwnProperties step, keys as the
+			// JS strings they are.
+			keys, _ := g.objectKeys(goja.FunctionCall{Arguments: []goja.Value{obj}}).(*goja.Object)
+			n := internalLength(keys)
+			for i := 0; i < n; i++ {
+				w.property(obj, keys.Get(strconv.Itoa(i)))
+			}
+		}
+	}
+	res, err := w.reviver(holder, name, value)
+	if err != nil {
+		panic(err)
+	}
+	return res
+}
+
+// property revives obj[name] and stores the answer: deleted when it is
+// undefined, defined as a data property otherwise (neither throws on
+// failure, as in goja).
+func (w *reviveWalker) property(obj *goja.Object, name goja.Value) {
+	g := w.g
+	v := w.walk(obj, name)
+	if goja.IsUndefined(v) {
+		g.reflectDelete(goja.FunctionCall{Arguments: []goja.Value{obj, name}})
+		return
+	}
+	if err := w.desc.Set("value", v); err != nil {
+		panic(err)
+	}
+	g.reflectDefine(goja.FunctionCall{Arguments: []goja.Value{obj, name, w.desc}})
 }
 
 // jsonNestingDepth is the deepest bracket nesting in s outside string
@@ -836,21 +955,28 @@ func jsonNestingDepth(s string) int {
 //     (the receiver a getter sees is the object, as in goja). Through it the
 //     guard learns when goja moves on to a property of that object, so a
 //     getter or toJSON there runs at the object's depth and not at the
-//     depth of the last subtree serialized before it. The same object gets
-//     the same proxy, so goja's own cycle check still sees cycles;
+//     depth of the last subtree serialized before it. The proxy's target is
+//     a shell, never the object: goja checks a get trap against its target's
+//     own properties, and a getter that makes its own property read-only and
+//     non-configurable would otherwise turn into a TypeError. An array's
+//     shell is an empty array (goja reads an array by length and index); an
+//     object's is an object holding the object's keys, in its order, as
+//     configurable undefined properties, which goja lists as the object's
+//     keys. Shells are shared by every holder with the same keys (the trap
+//     finds its object from the receiver, the holder proxy itself), and
+//     proxies are made anew for every visit, so cycles are detected here,
+//     on the objects, with goja's error and at the point goja's own check
+//     would;
 //   - a script replacer array (property list) is emulated: every plain
 //     object goja would serialize through the list is handed back as a proxy
 //     exposing exactly the listed keys, in list order, each read from the
 //     object when goja asks for it, which is what goja does with the list.
-//     Cycles through such objects are detected here with goja's error,
-//     since the proxies hide them from goja's own check.
 //
 // Objects goja serializes without reading their properties through the
 // holder (boxed primitives, String objects, Go-backed objects) are handed
-// back unchanged, and so is a script proxy outside property-list mode (its
-// traps would see the holder proxy's extra invariant checks); a getter on a
-// later property of such an object then runs at a depth that is too high,
-// never too low.
+// back unchanged. A script proxy gets a holder proxy like any object: its
+// traps run in the order goja's would (ownKeys and getOwnPropertyDescriptor
+// through Object.keys, then get for each key), against its own target.
 func (g *nativeGuard) wrapStringify(orig nativeCallFunc) nativeCallFunc {
 	vm := g.vm
 	return func(call goja.FunctionCall) goja.Value {
@@ -874,54 +1000,75 @@ func (g *nativeGuard) wrapStringify(orig nativeCallFunc) nativeCallFunc {
 		// object whose properties are read (a holder proxy's object, a list
 		// proxy itself).
 		depths := make(map[*goja.Object]int)
-		proxies := make(map[*goja.Object]*goja.Object) // an object to its holder proxy
 		objects := make(map[*goja.Object]*goja.Object) // a holder proxy to its object
-		var traps *goja.ProxyTrapConfig                // shared by the holder proxies: the target is the object
-		var exactHandler *goja.Object                  // see holderProxy
+		var arrayShell *goja.Object                    // the target of every array's holder proxy
+		objectShells := make(map[string]*goja.Object)  // an object shell by its keys
+		exactShells := make(map[*goja.Object]*goja.Object)
+		var traps *goja.ProxyTrapConfig // shared by the holder proxies
+		var exactHandler *goja.Object   // see holderProxy
+		holderGet := func(receiver goja.Value) *goja.Object {
+			p, _ := receiver.(*goja.Object)
+			o := objects[p]
+			g.depth = base + depths[o]
+			return o
+		}
 		holderProxy := func(obj *goja.Object, array bool) *goja.Object {
-			if p, ok := proxies[obj]; ok {
-				return p
+			if traps == nil {
+				traps = &goja.ProxyTrapConfig{
+					Get: func(_ *goja.Object, property string, receiver goja.Value) goja.Value {
+						if v := holderGet(receiver).Get(property); v != nil {
+							return v
+						}
+						return goja.Undefined()
+					},
+				}
 			}
 			var p *goja.Object
-			if array || !hasLossyKey(obj) {
-				if traps == nil {
-					traps = &goja.ProxyTrapConfig{
-						Get: func(target *goja.Object, property string, _ goja.Value) goja.Value {
-							g.depth = base + depths[target]
-							if v := target.Get(property); v != nil {
-								return v
-							}
-							return goja.Undefined()
-						},
-					}
-				}
-				p = vm.ToValue(vm.NewProxy(obj, traps)).(*goja.Object)
-			} else {
-				// A trap configured from Go is handed the key as a Go string,
-				// in which a lone surrogate has become U+FFFD. An object with
-				// such a key gets a handler object instead, whose get receives
-				// the key as the JS string it is.
-				if exactHandler == nil {
-					exactHandler = vm.NewObject()
-					if err := exactHandler.SetPrototype(nil); err != nil {
-						panic(err)
-					}
-					if err := exactHandler.Set("get", func(c goja.FunctionCall) goja.Value {
-						target, _ := c.Argument(0).(*goja.Object)
-						g.depth = base + depths[target]
-						return g.reflectGet(goja.FunctionCall{Arguments: []goja.Value{target, c.Argument(1)}})
-					}); err != nil {
-						panic(err)
-					}
-				}
-				p = g.newProxy(obj, exactHandler)
+			var keys []string
+			if !array && !isProxy(obj) {
+				keys = obj.Keys()
 			}
-			proxies[obj] = p
+			switch {
+			case array: // read by length and ASCII indices only
+				if arrayShell == nil {
+					arrayShell = vm.NewArray()
+				}
+				p = vm.ToValue(vm.NewProxy(arrayShell, traps)).(*goja.Object)
+			case !isProxy(obj) && !hasLossyKeyIn(keys):
+				sig := strings.Join(keys, "\x00")
+				shell, ok := objectShells[sig]
+				if !ok {
+					shell = vm.NewObject()
+					for _, k := range keys {
+						if err := shell.DefineDataProperty(k, goja.Undefined(), goja.FLAG_TRUE, goja.FLAG_TRUE, goja.FLAG_TRUE); err != nil {
+							panic(err)
+						}
+					}
+					objectShells[sig] = shell
+				}
+				p = vm.ToValue(vm.NewProxy(shell, traps)).(*goja.Object)
+			default:
+				// A script proxy (whose keys only its traps can list), or an
+				// object with a key that a Go string cannot name (a trap
+				// configured from Go is handed the key as a Go string, in
+				// which a lone surrogate has become U+FFFD): a handler object
+				// whose traps receive the keys as the JS strings they are,
+				// over an empty shell of its own.
+				if exactHandler == nil {
+					exactHandler = g.exactHolderHandler(holderGet, func(shell *goja.Object) *goja.Object {
+						keys, _ := g.objectKeys(goja.FunctionCall{Arguments: []goja.Value{exactShells[shell]}}).(*goja.Object)
+						return keys
+					})
+				}
+				shell := vm.NewObject()
+				exactShells[shell] = obj
+				p = g.newProxy(shell, exactHandler)
+			}
 			objects[p] = obj
 			return p
 		}
 
-		var path []*goja.Object // list mode: the objects on the current path, by depth
+		var path []*goja.Object // the objects on the current path, by depth
 		replacer := func(rc goja.FunctionCall) goja.Value {
 			this := rc.This
 			holder, _ := this.(*goja.Object)
@@ -949,36 +1096,31 @@ func (g *nativeGuard) wrapStringify(orig nativeCallFunc) nativeCallFunc {
 			if base+d > g.max {
 				panic(g.newRangeError(stackOverflowMessage))
 			}
-			if listMode {
-				if len(path) >= d {
-					path = path[:d-1]
-				}
-				for _, ancestor := range path {
-					if ancestor.SameAs(obj) {
-						panic(vm.NewTypeError("Converting circular structure to JSON"))
-					}
-				}
-				path = append(path, obj)
+			// goja's own cycle check compares the holder proxies, which are
+			// made anew for every visit; the check is made here instead, on
+			// the objects, at the point goja would make it.
+			if len(path) >= d {
+				path = path[:d-1]
 			}
+			for _, ancestor := range path {
+				if ancestor.SameAs(obj) {
+					panic(vm.NewTypeError("Converting circular structure to JSON"))
+				}
+			}
+			path = append(path, obj)
 			var out *goja.Object
 			switch {
 			case jsonSerializedDirectly(obj):
 				out = obj
 			case g.isArray(goja.FunctionCall{Arguments: []goja.Value{obj}}).ToBoolean():
 				// goja serializes every element, whatever the list says.
-				if isProxy(obj) {
-					out = obj
-				} else {
-					out = holderProxy(obj, true)
-				}
+				out = holderProxy(obj, true)
 			case listMode:
 				var sub *goja.Object
 				sub = vm.ToValue(vm.NewProxy(vm.NewObject(), propertyListTraps(vm, obj, propertyList, func() {
 					g.depth = base + depths[sub]
 				}))).(*goja.Object)
 				out = sub
-			case isProxy(obj):
-				out = obj
 			default:
 				out = holderProxy(obj, false)
 			}
@@ -998,15 +1140,52 @@ func (g *nativeGuard) wrapStringify(orig nativeCallFunc) nativeCallFunc {
 	}
 }
 
-// hasLossyKey reports whether one of obj's own enumerable string keys does
-// not survive the conversion to a Go string (it holds U+FFFD there).
-func hasLossyKey(obj *goja.Object) bool {
-	for _, k := range obj.Keys() {
+// hasLossyKeyIn reports whether one of keys does not survive the conversion
+// to a Go string (it holds U+FFFD there).
+func hasLossyKeyIn(keys []string) bool {
+	for _, k := range keys {
 		if strings.ContainsRune(k, utf8.RuneError) {
 			return true
 		}
 	}
 	return false
+}
+
+// exactHolderHandler is the handler of JSON.stringify's holder proxies over a
+// script proxy or an object with a lossy key: get reads the property from the
+// holder's object (holderGet, from the receiver) by its JS key; ownKeys lists
+// the object's keys through the original Object.keys (keysOf, from the
+// shell); every listed key is reported enumerable (and configurable: the
+// shell has no own properties to contradict that).
+func (g *nativeGuard) exactHolderHandler(holderGet func(goja.Value) *goja.Object, keysOf func(*goja.Object) *goja.Object) *goja.Object {
+	vm := g.vm
+	h := vm.NewObject()
+	desc := vm.NewObject()
+	for _, o := range []*goja.Object{h, desc} {
+		if err := o.SetPrototype(nil); err != nil {
+			panic(err)
+		}
+	}
+	for _, f := range []string{"writable", "enumerable", "configurable"} {
+		if err := desc.Set(f, true); err != nil {
+			panic(err)
+		}
+	}
+	for name, fn := range map[string]func(goja.FunctionCall) goja.Value{
+		"get": func(c goja.FunctionCall) goja.Value {
+			return g.reflectGet(goja.FunctionCall{Arguments: []goja.Value{holderGet(c.Argument(2)), c.Argument(1)}})
+		},
+		"ownKeys": func(c goja.FunctionCall) goja.Value {
+			shell, _ := c.Argument(0).(*goja.Object)
+			return keysOf(shell)
+		},
+		"getOwnPropertyDescriptor": func(goja.FunctionCall) goja.Value { return desc },
+	} {
+		if err := h.Set(name, fn); err != nil {
+			panic(err)
+		}
+	}
+	return h
 }
 
 // jsonPropertyList builds JSON.stringify's property list from a replacer

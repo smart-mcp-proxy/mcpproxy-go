@@ -325,15 +325,10 @@ func execute(ctx context.Context, caller ToolCaller, code string, opts Execution
 		code = transpiled
 	}
 
-	// Initialize Goja VM
-	vm := goja.New()
-
-	// Set up sandbox restrictions
-	setupSandbox(vm)
-
-	// Bound JS and native recursion so a script cannot overflow the Go stack
-	// (a fatal, unrecoverable error that would take the whole process down).
-	guard, err := installStackGuard(vm)
+	// A sandboxed VM whose JS and native recursion are bounded, so a script
+	// cannot overflow the Go stack (a fatal, unrecoverable error that would
+	// take the whole process down).
+	vm, guard, err := newGuardedVM()
 	if err != nil {
 		return NewErrorResult(NewJsError(ErrorCodeRuntimeError, err.Error())), execCtx
 	}
@@ -514,6 +509,8 @@ func executeWithVM(vm *goja.Runtime, code string, execCtx *ExecutionContext) (re
 	case errors.Is(err, errExportCycle):
 		return NewErrorResult(NewJsError(ErrorCodeSerializationError,
 			"result must be JSON-serializable: it "+errExportCycle.Error()))
+	case errors.Is(err, errExportTooLarge):
+		return NewErrorResult(NewJsError(ErrorCodeSerializationError, "result is "+errExportTooLarge.Error()))
 	case err != nil:
 		return NewErrorResult(NewJsError(ErrorCodeSerializationError,
 			fmt.Sprintf("result is nested too deeply to export: RangeError: %s", stackOverflowMessage)))

@@ -46,7 +46,9 @@ func TestStackGuardChild(t *testing.T) {
 		code = v.String()
 	}
 	result := Execute(context.Background(), marshalingToolCaller{newMockToolCaller()}, code, ExecutionOptions{
-		TimeoutMs: 60000, MaxMemoryBytes: budget, Language: os.Getenv(stackChildLangEnv),
+		// Generous: the heaviest builders take tens of seconds on a slow
+		// -race runner, and a timeout would hide what the vector proves.
+		TimeoutMs: 120000, MaxMemoryBytes: budget, Language: os.Getenv(stackChildLangEnv),
 	})
 	out, err := json.Marshal(result)
 	if err != nil {
@@ -128,6 +130,12 @@ var stackVectors = []stackVector{
 	{name: "cyclic array flat(Infinity)", code: `var a=[]; a[0]=a; a.flat(Infinity).length`},
 	{name: "cyclic array flat(1e9)", code: `var a=[]; a[0]=a; a.flat(1e9).length`},
 	{name: "flat re-entered from a getter", code: `var g=[]; Object.defineProperty(g,0,{get:function(){ return d.flat(Infinity) }}); g.length=1; var d=g; for(var i=0;i<1000;i++) d=[d]; d.flat(Infinity)`},
+	// The reviver walk recurses natively over what the reviver builds: a
+	// cycle, or a getter that hands back a fresh object at every level.
+	{name: "JSON.parse reviver builds a cycle", code: `JSON.parse('{"a":0,"b":0}', function(k,v){ if(k==="a"){ var c={}; c.x=c; this.b=c } return v })`},
+	{name: "JSON.parse reviver builds a cyclic array", code: `JSON.parse('[0,0]', function(k,v){ if(k==="0"){ var c=[]; c[0]=c; this[1]=c } return v })`},
+	{name: "JSON.parse reviver lazy getters", code: `function mk(){ var o={}; Object.defineProperty(o,"x",{get:mk, enumerable:true}); return o } JSON.parse('{"a":0,"b":0}', function(k,v){ if(k==="a"){ this.b=mk() } return v })`},
+	{name: "JSON.parse reviver through a proxy", code: `var p; p=new Proxy({}, {ownKeys:function(){ return ["x"] }, getOwnPropertyDescriptor:function(){ return {value:p, enumerable:true, configurable:true} }, get:function(){ return p }}); JSON.parse('{"a":0,"b":0}', function(k,v){ if(k==="a"){ this.b=p } return v })`},
 	{name: "JSON.parse re-entered from the reviver", code: `var t="[".repeat(1500)+"]".repeat(1500); function r(k,v){ return JSON.parse(t, r) } JSON.parse(t, r)`},
 	{name: "proxy cycle setPrototypeOf(p, proxy of p)", code: `var p=new Proxy({},{}); var q=new Proxy(p,{}); Object.setPrototypeOf(p,q); p.x`, want: cyclicProtoMessage},
 	{name: "proxy cycle handler prototype", code: `var h={}; var p=new Proxy({},h); Object.setPrototypeOf(h,p); p.x`, want: cyclicProtoMessage},
@@ -146,16 +154,28 @@ var stackVectors = []stackVector{
 	{name: "cyclic Map as call_tool args", code: `var m=new Map(); m.set(1,m); call_tool("s","t",{m:m})`, want: "circular"},
 	{name: "cyclic Map in call_tools args", code: `var m=new Map(); m.set(1,m); call_tools([{server:"s",tool:"t",args:{m:m}}])`, want: "circular"},
 	{name: "deep arrays as result", code: `var a=[]; for(var i=0;i<1500000;i++) a=[a]; a`},
-	{name: "deep Map chain as result", code: `var m=new Map(); for(var i=0;i<1000000;i++) m=new Map([[1,m]]); m`},
+	{name: "deep Map chain as result", code: `var m=new Map(); for(var i=0;i<20000;i++) m=new Map([[1,m]]); m`},
 	{name: "deep arrays as call_tool args", code: `var a=[]; for(var i=0;i<1500000;i++) a=[a]; call_tool("s","t",{a:a})`},
 	// An acyclic graph that reuses exported objects: each one is exported
 	// once, but the longest path through the Go graph is the chain's length.
+	// 20000 links: ten times the native depth limit, so the guard's error is
+	// what is asserted, small enough to build quickly under -race.
 	// "b" is exported first (JS order) and builds the chain one level at a
 	// time; json.Marshal then walks "a" (sorted first), the whole chain.
-	{name: "shared chain as result", code: `var a=[{}]; for(var i=1;i<2000000;i++) a.push({n:a[i-1]}); ({b:a, a:a[a.length-1]})`},
-	{name: "shared chain as call_tool args", code: `var a=[{}]; for(var i=1;i<2000000;i++) a.push({n:a[i-1]}); call_tool("s","t",{b:a, a:a[a.length-1]})`},
-	{name: "shared chain in call_tools args", code: `var a=[{}]; for(var i=1;i<2000000;i++) a.push({n:a[i-1]}); call_tools([{server:"s",tool:"t",args:{b:a, a:a[a.length-1]}}])`},
-	{name: "shared Map chain as result", code: `var a=[new Map()]; for(var i=1;i<1000000;i++) a.push(new Map([[1,a[i-1]]])); ({b:a, a:a[a.length-1]})`},
+	{name: "shared chain as result", code: `var a=[{}]; for(var i=1;i<20000;i++) a.push({n:a[i-1]}); ({b:a, a:a[a.length-1]})`},
+	{name: "shared chain as call_tool args", code: `var a=[{}]; for(var i=1;i<20000;i++) a.push({n:a[i-1]}); call_tool("s","t",{b:a, a:a[a.length-1]})`},
+	{name: "shared chain in call_tools args", code: `var a=[{}]; for(var i=1;i<20000;i++) a.push({n:a[i-1]}); call_tools([{server:"s",tool:"t",args:{b:a, a:a[a.length-1]}}])`},
+	{name: "shared Map chain as result", code: `var a=[new Map()]; for(var i=1;i<20000;i++) a.push(new Map([[1,a[i-1]]])); ({b:a, a:a[a.length-1]})`},
+	// An acyclic graph that shares objects expands exponentially when the Go
+	// value is encoded: bounded by the expanded size, not by its height.
+	{name: "shared DAG as result", code: `var x={}; for(var i=0;i<60;i++) x={a:x,b:x}; x`, want: "too large"},
+	{name: "shared array DAG as result", code: `var x=[]; for(var i=0;i<60;i++) x=[x,x]; x`, want: "too large"},
+	{name: "shared Map DAG as result", code: `var x=new Map(); for(var i=0;i<60;i++) x=new Map([[1,x],[2,x]]); x`, want: "too large"},
+	{name: "shared string as result", code: `var s="x".repeat(1<<20); var a=[]; for(var i=0;i<100000;i++) a.push(s); a`, want: "too large"},
+	{name: "shared typed array as result", code: `var t=new Float64Array(1<<20); var a=[]; for(var i=0;i<100000;i++) a.push(t); a`, want: "too large"},
+	{name: "huge sparse array as result", code: `var a=[]; a.length=4294967295; a`, want: "too large"},
+	{name: "shared DAG as call_tool args", code: `var x={}; for(var i=0;i<60;i++) x={a:x,b:x}; call_tool("s","t",{x:x})`, want: "too large"},
+	{name: "shared DAG in call_tools args", code: `var x={}; for(var i=0;i<60;i++) x={a:x,b:x}; call_tools([{server:"s",tool:"t",args:{x:x}}])`, want: "too large"},
 	{name: "lazy getters as result, re-entering export", code: `function mk(){return {get n(){ return call_tool("s","t",mk()) }}}; mk()`},
 	{name: "cyclic Map written into input", code: `var m=new Map(); m.set(1,m); input.x=m; "done"`, want: "ok"},
 	{name: "cyclic Map written into a call_tool result", code: `var m=new Map(); m.set(1,m); var r=call_tool("s","t",{}); r.x=m; r.result=m; "done"`, want: "ok"},
@@ -194,6 +214,16 @@ var stackVectors = []stackVector{
 	// per keyword operator ("keyof keyof T", "readonly readonly T[]", a type
 	// predicate "a is a is ...", "infer U extends infer U extends ...").
 	{name: "TypeScript keyof chain", code: `"type T = " + "keyof ".repeat(5000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript keyof chain separated by U+00A0", code: `"type T = " + "keyof\u00a0".repeat(3000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript keyof chain separated by U+1680", code: `"type T = " + "keyof\u1680".repeat(3000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript keyof chain separated by U+2000", code: `"type T = " + "keyof\u2000".repeat(3000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript keyof chain separated by U+2028", code: `"type T = " + "keyof\u2028".repeat(3000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript keyof chain separated by U+2029", code: `"type T = " + "keyof\u2029".repeat(3000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript keyof chain separated by U+202F", code: `"type T = " + "keyof\u202f".repeat(3000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript keyof chain separated by U+205F", code: `"type T = " + "keyof\u205f".repeat(3000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript keyof chain separated by U+3000", code: `"type T = " + "keyof\u3000".repeat(3000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript keyof chain separated by U+FEFF", code: `"type T = " + "keyof\ufeff".repeat(3000000) + "any; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
+	{name: "TypeScript readonly chain separated by NBSP", code: `"type T = " + "readonly\u00a0".repeat(3000000) + "any[]; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
 	{name: "TypeScript readonly chain", code: `"type T = " + "readonly ".repeat(5000000) + "any[]; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
 	{name: "TypeScript type predicate chain", code: `"type T = " + "a is ".repeat(5000000) + "a; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
 	{name: "TypeScript asserts predicate chain", code: `"function f(x): asserts x is " + "x is ".repeat(5000000) + "x {}; 7"`, generate: true, language: "typescript", want: sourceTooDeepMessage},
@@ -215,9 +245,10 @@ func TestStackGuardVectors(t *testing.T) {
 		t.Skip("spawns a child process per vector")
 	}
 	type outcome struct {
-		result *Result
-		output string
-		err    error
+		result  *Result
+		output  string
+		err     error
+		elapsed time.Duration
 	}
 	outcomes := make([]outcome, len(stackVectors))
 	sem := make(chan struct{}, 3)
@@ -232,8 +263,9 @@ func TestStackGuardVectors(t *testing.T) {
 			if v.heapBound {
 				budget = 0
 			}
+			start := time.Now()
 			r, out, err := runStackChild(v, budget)
-			outcomes[i] = outcome{r, out, err}
+			outcomes[i] = outcome{r, out, err, time.Since(start)}
 		}(i, v)
 	}
 	wg.Wait()
@@ -241,6 +273,7 @@ func TestStackGuardVectors(t *testing.T) {
 	for i, v := range stackVectors {
 		o := outcomes[i]
 		t.Run(v.name, func(t *testing.T) {
+			t.Logf("child took %v", o.elapsed.Round(time.Millisecond))
 			if o.err != nil || o.result == nil {
 				tail := o.output
 				if len(tail) > 2000 {
@@ -428,6 +461,11 @@ func TestSourceOperatorTokens(t *testing.T) {
 		{"a+b", 3},
 		{"caf\u00e9 \u00e9t\u00e9", 2},
 		{"\t\n\r ", 0},
+		{"\u4e2d\u6587 x\u0301", 2},
+		// Non-ASCII separators never merge words.
+		{"keyof\u00a0keyof\u00a0T", 5}, {"keyof\u2028keyof", 3}, {"keyof\u2029keyof", 3},
+		{"keyof\ufeffkeyof", 3}, {"keyof\u3000keyof", 3}, {"keyof\u200bkeyof", 3},
+		{"a\u00a0\u00a0b", 4}, {"a\xffb", 3}, {"\u2013\u2014", 2},
 	}
 	for _, tc := range tsCases {
 		if got := typeScriptSourceTokens(tc.src, maxSourceTokens); got != tc.want {
@@ -582,7 +620,9 @@ func TestBuiltinTemplateMatchesWalk(t *testing.T) {
 	if funcs, err := builtinFunctions(other); err != nil || len(funcs) <= len(walked) {
 		t.Fatalf("fallback walk: %d functions, %v", len(funcs), err)
 	}
-	// A builtin replaced before the guard is installed is found by the walk.
+	// A builtin replaced by one of another kind: the template no longer
+	// describes the VM. (A consistency check, not tamper detection: the guard
+	// is only installed on pristine VMs, see newGuardedVM.)
 	changed := goja.New()
 	setupSandbox(changed)
 	if _, err := changed.RunString(`Array.prototype.join = function(){}; Object.defineProperty(Map.prototype, "size", {get: String.prototype.trim.bind("")})`); err != nil {
@@ -687,6 +727,31 @@ func TestStackGuardStringifyMatchesGoja(t *testing.T) {
 		`var o={a:{}}; JSON.stringify(o, function(k,v){ return k === "a" ? o : v })`,
 		`var log=[]; var p=new Proxy({x:{y:1}},{get:function(t,k){ log.push(String(k)); return t[k] }, ownKeys:function(t){ log.push("keys"); return Reflect.ownKeys(t) }}); JSON.stringify({p:p}) + log.join()`,
 		`JSON.stringify([new Proxy([1,[2]], {})])`,
+		// A getter may freeze its own property: the guard's bookkeeping adds no
+		// proxy invariants of its own.
+		`var o={get x(){ Object.defineProperty(this,"x",{value:2,writable:false,configurable:false}); return 1 }}; JSON.stringify(o) + JSON.stringify(o)`,
+		`var a=[0]; Object.defineProperty(a,0,{get:function(){ Object.defineProperty(a,0,{value:2,writable:false,configurable:false}); return 1 }, configurable:true, enumerable:true}); JSON.stringify(a) + JSON.stringify(a)`,
+		`var o={get x(){ Object.defineProperty(this,"x",{get:undefined, configurable:false}); return 1 }}; JSON.stringify(o)`,
+		`var o={a:1, get b(){ Object.defineProperty(o,"c",{value:3, enumerable:true, configurable:false}); Object.freeze(o); return 2 }}; JSON.stringify(o) + JSON.stringify(o)`,
+		`JSON.stringify(Object.freeze({a:{b:Object.freeze([1])}}), null, 1)`,
+		`var o={get x(){ Object.defineProperty(this,"x",{value:2,writable:false,configurable:false}); return 1 }, "\ud800":5}; JSON.stringify(o)`,
+		`var o={b:1}; Object.defineProperty(o,"a",{value:0, enumerable:false}); o[Symbol("s")]=1; o[2]=3; JSON.stringify(o)`,
+		`JSON.stringify(new Uint8Array([1,2])) + JSON.stringify((function(){ return arguments })(1,[2]))`,
+		// Revisits see the object as it is then; objects with the same keys
+		// share a shell but not their values; cycles through every kind.
+		`var s={x:1}; JSON.stringify({a:s, get b(){ s.y=2; delete s.x; return s }, c:[s]})`,
+		`JSON.stringify([{a:1,b:2},{a:3,b:4},{b:5,a:6},{}, {}])`, `JSON.stringify([{1:1,a:2},{a:3,1:4}])`,
+		`var o={}; o.p=new Proxy(o, {}); JSON.stringify(o)`, `var a=[]; a[0]=new Proxy(a, {}); JSON.stringify(a)`,
+		`var o={}; var p=new Proxy({}, {get:function(t,k){ return k === "x" ? o : undefined }, ownKeys:function(){ return ["x"] }, getOwnPropertyDescriptor:function(){ return {value:1, enumerable:true, configurable:true} }}); o.p=p; JSON.stringify(o)`,
+		`var o={"\ud800":1}; o.self=o; JSON.stringify(o)`, `var o={}; o.n=new Number(1); o.n.o=o; JSON.stringify(o)`,
+		`var o={a:{}}; JSON.stringify(o, function(k,v){ return k === "b" ? o : (k === "a" ? {b:1} : v) })`,
+		`var r=Proxy.revocable({}, {}); r.revoke(); JSON.stringify({a:r.proxy})`, `var r=Proxy.revocable([], {}); r.revoke(); JSON.stringify([r.proxy])`,
+		`var log=[]; var h={}; ["get","ownKeys","getOwnPropertyDescriptor","has"].forEach(function(t){ h[t]=function(){ log.push(t + (typeof arguments[1] === "string" ? " " + arguments[1] : "")); return Reflect[t].apply(null, arguments) } }); var p=new Proxy({a:1, b:[1,{c:2}], toJSON:undefined}, h); var q=new Proxy([1,p], h); JSON.stringify({q:q, p:p}, null, 1) + log.join("|")`,
+		`var p=new Proxy({}, {ownKeys:function(){ return ["x","y"] }, getOwnPropertyDescriptor:function(t,k){ return k === "x" ? {value:1, enumerable:true, configurable:true} : undefined }, get:function(t,k){ return k + "!" }}); JSON.stringify(p)`,
+		`var p=new Proxy({}, {ownKeys:function(){ return [1] }}); JSON.stringify(p)`,
+		`var o={}; var p=new Proxy(o, {}); o.self=p; JSON.stringify(p)`,
+		deep1500 + `JSON.stringify(new Proxy({a:o, get b(){ return JSON.stringify(o).length }}, {})).length`,
+		deep1500 + `JSON.stringify(new Proxy([o, 1], {get:function(t,k){ return k === "1" ? JSON.stringify(o).length : t[k] }})).length`,
 	}
 	// One key per level: goja serializes a Go map in Go's random order.
 	input := map[string]interface{}{"nested": map[string]interface{}{"v": []interface{}{1, "two"}}}
@@ -720,6 +785,23 @@ func TestStackGuardParseMatchesGoja(t *testing.T) {
 		`JSON.parse('[1,')`, `JSON.parse('')`, `JSON.parse()`, `JSON.parse('1', null)`, `JSON.parse('{"a":1}', 5).a`,
 		`var n=0; JSON.parse({toString:function(){ n++; return "[1]" }}); n`,
 		`JSON.stringify(JSON.parse("[".repeat(1000) + "]".repeat(1000))).length`,
+		// The reviver walk: order, holders, deletion, replacement, mutation.
+		`var log=[]; var r=JSON.parse('{"a":[1,{"b":2}],"c":{"d":null},"e":"s"}', function(k,v){ log.push(k + "=" + JSON.stringify(v) + "@" + Array.isArray(this)); return v }); log.join("|") + JSON.stringify(r)`,
+		`JSON.stringify(JSON.parse('{"a":1,"b":2,"c":[1,2,3]}', function(k,v){ return k === "b" || k === "1" ? undefined : v }))`,
+		`JSON.stringify(JSON.parse('{"a":1,"b":{"c":2}}', function(k,v){ if (k === "a") { this.b = {z:9}; this.x = 1 } return v }))`,
+		`JSON.stringify(JSON.parse('[1,2,3]', function(k,v){ if (k === "0") { this.length = 1 } return v }))`,
+		`JSON.stringify(JSON.parse('[1,2]', function(k,v){ if (k === "0") { this.push(7) } return v }))`,
+		`JSON.parse('{"a":1}', function(k,v){ return k === "" ? this : v })[""].a`,
+		`JSON.stringify(JSON.parse('{"a":1,"b":2}', function(k,v){ if (k === "a") Object.defineProperty(this,"b",{value:5, configurable:false}); return k === "b" ? 7 : v }))`,
+		`JSON.stringify(JSON.parse('{"a":1,"b":2}', function(k,v){ if (k === "a") Object.freeze(this); return k === "b" ? undefined : v }))`,
+		`JSON.stringify(JSON.parse('{"__proto__":1,"\\ud800":2}', function(k,v){ return typeof v === "number" ? v * 10 : v }))`,
+		`JSON.parse('{"a":{"x":1}}', function(k,v){ if (k === "a") { return new Proxy(v, {}) } return v }); "ok"`,
+		`var log=[]; var p=new Proxy({q:1}, {ownKeys:function(t){ log.push("keys"); return Reflect.ownKeys(t) }, get:function(t,k){ log.push("get " + String(k)); return t[k] }, defineProperty:function(t,k,d){ log.push("def " + k + " " + JSON.stringify(d)); return Reflect.defineProperty(t,k,d) }, deleteProperty:function(t,k){ log.push("del " + k); return delete t[k] }}); JSON.parse('{"a":0}', function(k,v){ if (k === "a") return p; if (k === "q") return undefined; return v }); JSON.parse('{"a":{"b":1}}', function(k,v){ if (k === "a") { this.a = p } return v }); log.join("|")`,
+		`JSON.parse('{"a":1}', function(){ throw new RangeError("rev") })`,
+		`JSON.parse('[1', function(){ return 1 })`, `JSON.parse('{"a":1}', {}).a`, `JSON.parse('7', function(k,v){ return [k, v, typeof this] }).join()`,
+		`var n=0; JSON.parse({toString:function(){ n++; return "[1]" }}, function(k,v){ return v }); n`,
+		`JSON.stringify(JSON.parse('[[[1]]]', new Proxy(function(k,v){ return v }, {})))`,
+		`var o={v:1}; for(var i=0;i<1000;i++) o={n:o}; var p=JSON.parse(JSON.stringify(o), function(k,v){ return v }); var d=0; while(p.n){p=p.n; d++} d`,
 	}
 	run := func(vm *goja.Runtime, expr string) string {
 		v, err := vm.RunString(`(function(){ try { var r = (function(){ return eval(` + strconv.Quote(expr) + `) })(); return typeof r + ":" + String(r) } catch (e) { return "throw:" + e.name + ":" + e.message } })()`)
@@ -781,6 +863,16 @@ func TestStackGuardBuiltinsMatchGoja(t *testing.T) {
 		`var a=[1,[2]]; a.constructor={}; a.constructor[Symbol.species]=function(){ var r=[]; r.length=4294967295; return r }; var r=a.flat(Infinity); r.length + ":" + r[0] + r[1]`,
 		`var a=[1,[2]]; a.constructor={}; a.constructor[Symbol.species]=function(){ return new Uint8Array(4) }; var r=a.flat(Infinity); Array.prototype.join.call(r)`,
 		`var a=[1,[2]]; a.constructor={}; a.constructor[Symbol.species]=function(){ return new Uint8Array(1e7) }; var r=a.flat(Infinity); r.length + ":" + r[0] + r[1]`,
+		// The species result is only written to, never read.
+		`var log=[]; var a=[1,[2,[3]]]; a.constructor={}; a.constructor[Symbol.species]=function(){ var r={}; Object.defineProperty(r,"7",{get:function(){ log.push("read"); return [] }, enumerable:true}); return r }; var r=a.flat(1e9); log.join() + ":" + r[0] + r[1] + r[2]`,
+		`var a=[1,[2]]; a.constructor={}; a.constructor[Symbol.species]=function(){ return Object.freeze([]) }; a.flat()`,
+		`var a=[1]; a.constructor={}; a.constructor[Symbol.species]=5; a.flat()`, `var a=[1]; a.constructor={}; a.constructor[Symbol.species]=null; JSON.stringify(a.flat())`,
+		`var a=[1]; a.constructor=undefined; JSON.stringify(a.flat())`, `var a=[1]; a.constructor=5; JSON.stringify(a.flat())`,
+		`var log=[]; var src=new Proxy([1,[2,,[3]]], {has:function(t,k){ log.push("has " + String(k)); return k in t }, get:function(t,k){ log.push("get " + String(k)); return t[k] }}); JSON.stringify(src.flat(Infinity)) + log.join("|")`,
+		`var a=[1,[2,[3,[4]]]]; var r=a.flat(2); JSON.stringify(r) + Array.isArray(r[2])`,
+		`var a=[1]; for(var i=0;i<900;i++) a=[a,[i]]; a.flat(Infinity).length`,
+		`JSON.stringify([[1,[2]],[3]].flat(Infinity)) + JSON.stringify([].flat()) + JSON.stringify(Array.prototype.flat.call("ab"))`,
+		`var r=Proxy.revocable([], {}); r.revoke(); try { [r.proxy].flat() } catch (e) { e.name }`,
 		// prototype setters
 		`var o={}; var p={x:1}; Object.setPrototypeOf(o,p) === o && o.x`, `var o={}; o.__proto__={y:2}; o.y`,
 		`var o={}; Reflect.setPrototypeOf(o,{z:3}) + ":" + o.z`, `var o={}; Object.setPrototypeOf(o,null); Object.getPrototypeOf(o)`,
@@ -956,5 +1048,47 @@ func TestStackGuardToJS(t *testing.T) {
 	want := `object|2|true|true|2|a,n,added|true|3.5|true|data|true|true|two|{"a":{"b":[true,null]},"n":2,"added":{"x":1}}`
 	if result.Value != want {
 		t.Fatalf("got  %v\nwant %v", result.Value, want)
+	}
+}
+
+// BenchmarkExecuteTrivial is the fixed cost of one execution (VM, sandbox,
+// guard installation).
+func BenchmarkExecuteTrivial(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		if r := Execute(context.Background(), newMockToolCaller(), "1+1", ExecutionOptions{TimeoutMs: 30000}); !r.Ok {
+			b.Fatal(r.Error)
+		}
+	}
+}
+
+// BenchmarkExecuteStringify600KB serializes about 600 KB of nested objects
+// and arrays through the depth-tracking JSON.stringify.
+func BenchmarkExecuteStringify600KB(b *testing.B) {
+	code := `var rows=[]; for(var i=0;i<7500;i++) rows.push({id:i, name:"row"+i, tags:["a","b"], meta:{x:i, y:[i,i+1]}});
+		JSON.stringify({rows:rows}).length`
+	for i := 0; i < b.N; i++ {
+		if r := Execute(context.Background(), newMockToolCaller(), code, ExecutionOptions{TimeoutMs: 60000}); !r.Ok {
+			b.Fatal(r.Error)
+		}
+	}
+}
+
+// BenchmarkGuardedStringify600KB times JSON.stringify alone, about 600 KB of
+// nested objects and arrays, on a guarded VM.
+func BenchmarkGuardedStringify600KB(b *testing.B) {
+	vm := goja.New()
+	if _, err := installStackGuard(vm); err != nil {
+		b.Fatal(err)
+	}
+	if _, err := vm.RunString(`var rows=[]; for(var i=0;i<7500;i++) rows.push({id:i, name:"row"+i, tags:["a","b"], meta:{x:i, y:[i,i+1]}}); var data={rows:rows}`); err != nil {
+		b.Fatal(err)
+	}
+	prog := goja.MustCompile("bench", `JSON.stringify(data).length`, false)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		v, err := vm.RunProgram(prog)
+		if err != nil || v.ToInteger() < 500_000 {
+			b.Fatal(v, err)
+		}
 	}
 }
