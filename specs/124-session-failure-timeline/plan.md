@@ -76,7 +76,15 @@ One pure function in `internal/storage`, `attemptRole(record)`, returns whether 
 
 The first task of PR-1 is a table test that feeds every emitter's row shape through `attemptRole`, so the rule is pinned to what the code writes, not to this description.
 
-To apply "same request id" exactly and without a scan, a fourth bucket holds one entry per attempt (D3, `work_session_attempts`). A row with a request id looks its attempt up there: absent means a new attempt; present means the same attempt, and a row that turns it from success to failure updates the entry and the summary once. A row with no request id is its own attempt and gets no entry. Each entry stores the time of its attempt. An entry is removed with the session's summary (steps 1 and 3c of D4), or by any cleanup step once every row of its attempt is gone and the attempt is more than one hour old. The hour is the guard against a late row of the same call being counted twice; rows of one call are written within seconds of each other. This keeps the attempts bucket proportional to the stored rows. The hour is a grace, not a guarantee: when step 3d has trimmed the last session's rows and the log is still over the byte budget, it removes rowless attempt entries oldest first whatever their age, until the budget is met (FR-034). A late row of a call evicted this way can be counted twice; the hard cap wins over that rare over-count.
+To apply "same request id" exactly and without a scan, a fourth bucket holds one entry per attempt (D3, `work_session_attempts`). A row with a request id looks its attempt up there: absent means a new attempt; present means the same attempt, and a row that turns it from success to failure updates the entry and the summary once. A row with no request id is its own attempt and gets no entry.
+
+An entry may be removed only when no later row of its request can arrive. That is decided by a closed mark, not by age:
+
+- **Closing.** The request handler emits one `attempt.closed` bus event (work-session id, request id) when it returns, after its last row. The bus is first in, first out per subscriber, so the single writer sees it after every row of that request and sets the closed mark on the entry. The synchronous `RecordToolCallRejected` path writes its entry already closed: a pre-dispatch refusal is the only counted row of its request. The step 2 table test also asserts, per emitter, that the close event follows the last row.
+- **Row count.** The entry counts its indexed rows. `SaveActivity` increments it; every cleanup step that deletes a row reads that row anyway and decrements the entry of its request id in the same transaction.
+- **Removal.** Every cleanup pass removes all entries that are closed and have no rows, and an entry goes with its session's summary (steps 1 and 3c of D4). No age is involved and no order is needed: a closed entry with no rows has no further use. A late row cannot be counted twice, because an entry is never removed before its request has closed.
+- **Lost close events.** A close event can be lost with a dropped bus event or a crash. At start every entry is marked closed, since no request survives a restart. A running pass treats an unclosed entry as closed once one hour has passed since the latest row of its request was written. HTTP deadlines can be disabled, so no shorter bound is safe; a request that writes rows more than an hour apart is the one case this can close early, and its entry still has rows then, so it is not removed.
+- **Hard bound (FR-034).** Unclosed entries are the only ones cleanup cannot remove. The writer keeps at most 1,024 of them in total; when one more would be added, the oldest unclosed entry is marked closed. Keys and values are length-bounded (D3: under 512 bytes each), so they hold under 512 KiB, half of the smallest non-zero byte budget (`activity_max_size_mb: 1`). The cap can only cost exactness if a request is still writing rows after 1,024 newer attempts were opened and all of its earlier rows were already trimmed; a test pins the cap and the bound.
 
 ### D3. Storage
 
@@ -84,7 +92,7 @@ Four new buckets. All writes happen in the transaction that writes the activity 
 
 - **`work_sessions`**: key = work-session id; value = JSON summary (Data Model).
 - **`work_session_rows`**: key = `<work-session id>\0<activity key>`; value = one flag byte (attempt, failure, policy block, bodies removed) followed by the server name. Serves the timeline page, failure navigation, reach filtering without loading rows, and whole-session removal.
-- **`work_session_attempts`**: key = `<work-session id>\0<request id>`; value = one outcome byte (success, failure, policy block) and the server name. Makes attempt counting exact (D2).
+- **`work_session_attempts`**: key = `<work-session id>\0<request id>`; key = `<work-session id>\0<request id>` (a request id longer than 128 bytes is stored as its SHA-256); value = one outcome byte (success, failure, policy block), the closed mark, the time of its latest row (8 bytes), the count of indexed rows (4 bytes) and the server name. Makes attempt counting exact (D2).
 - **`upstream_events_by_server`**: key = `<server>\0<activity key>`; value = owner user id or empty. Serves the timeline join.
 
 `Manager.SaveActivity` (`internal/storage/activity.go:55`) is the single entry point: when the record has a work-session id it also writes the index entry and updates the summary. The asynchronous loop and the synchronous `RecordToolCallRejected` both go through it, so neither can skip the summary.
@@ -109,6 +117,7 @@ Rejected: a separate failures bucket. The flag byte in the index is enough, sinc
    - **3b. Rows outside the window.** In the same pass, delete rows that have no work-session id or whose summary is gone or older than the window.
    - **3c. Whole sessions.** If still over, take summaries inside the window by oldest last activity and delete each whole through its index prefix: rows, index entries, summary. Record the shortfall.
    - **3d. Last session.** If one session is all that is left and it is still over, trim it from its oldest end and set `truncated_start`.
+4. **Attempt entries.** After steps 1 to 3, in the same pass, one keys-and-values walk of `work_session_attempts` removes every entry that is closed and has no rows (D2), and closes unclosed entries past the request-lifetime bound. Step 3d repeats this for the last session before it measures again, so the rows it trimmed release their entries in the same pass. What can remain beyond rows is the unclosed entries, capped at 1,024 (D2).
 
 The byte budget counts the activity bucket and the four new buckets (FR-034). The count cap counts activity rows only, as today.
 
@@ -139,7 +148,9 @@ The plan therefore captures the transition inside the state manager, under its l
 | `process_exited` | state leaves Ready with a code in the `MCPX_STDIO_EXIT*` family |
 | `login_required` | code is `MCPX_OAUTH_LOGIN_REQUIRED` or the re-auth code |
 | `connection_restored` | state returns to Ready after a recorded loss |
-| `oauth_refresh_failed` | the existing `oauth.refresh_failed` bus event |
+| `oauth_refresh_failed` | every failed refresh flight (below) |
+
+**OAuth refresh failures.** The existing `oauth.refresh_failed` event is not enough: it is emitted only when the schedule is given up (terminal class, retries exhausted, token expired too long; `internal/oauth/refresh_manager.go:788-838`), and an ordinary failed attempt only reschedules (`:844-846`). The refresh manager therefore reports each failed flight where its outcome is known, before those branches: server, failure class, the time of the failure, whether it is terminal, and in the server edition the credential's owner. It reports once per flight, from the flight leader; waiters on the same flight and readers of a cached terminal outcome report nothing. The runtime publishes it as the same kind of bus event as the state transitions. The existing `oauth.refresh_failed` event keeps its meaning and its consumers. Test: a transient failure followed by a successful refresh gives one event row and no login-required row.
 
 No new process monitoring is added. `process_exited` is a classification of an existing disconnect, not a new detector. Step 7 of PR-1 starts with a test that kills a stdio fixture, refuses a connection and expires an OAuth login, and records which states and codes the observer receives; the table above is corrected from that test before the rows are built. A reconnect storm produces a record on every attempt; the collapser below bounds what is stored.
 
@@ -162,7 +173,7 @@ New routes, registered as `scopeFiltered` in `getRouteScopes`. `/api/v1/sessions
 - Admin: the summary as stored.
 - Scoped caller: not owner (name and prefix, or user id) gives not found. Otherwise the per-server partitions are filtered through `scopeAllowedServers`, and start, end, last activity, status, counts and failure facts are recomputed from what is left. Connection count, profile and the truncated-start marker are omitted. No partition left gives not found.
 
-The timeline applies the same reach to index entries by their stored server name before any row is loaded, then loads rows for the page only and passes each through a row-ownership predicate and `redactForeignIdentity`. The predicate is new, because the existing one cannot serve user principals: `activityIdentityOwner` gives a non-agent caller an owner with no prefix, and `Owns` rejects an empty prefix (`internal/httpapi/scope_attribution.go:72-85`, `internal/storage/activity_models.go:326-335`). For an agent token it is the existing name-and-prefix rule. For a server-edition user it is the row's stored `UserID`. The same predicate decides summary ownership.
+The timeline applies the same reach to index entries by their stored server name before any row is loaded, then loads rows for the page only and passes each request row through a row-ownership predicate and `redactForeignIdentity`. Upstream event rows carry no agent identity and are authorized by their own rule, never by that predicate: the server is in the caller's reach, the event time is inside the projected span (FR-023, FR-048), and the event has no owner or its owner is the caller's user. A scoped agent token therefore sees shared events of its servers and no event about another user's credential. The predicate is new, because the existing one cannot serve user principals: `activityIdentityOwner` gives a non-agent caller an owner with no prefix, and `Owns` rejects an empty prefix (`internal/httpapi/scope_attribution.go:72-85`, `internal/storage/activity_models.go:326-335`). For an agent token it is the existing name-and-prefix rule. For a server-edition user it is the row's stored `UserID`. The same predicate decides summary ownership.
 
 That needs the user id on every row that belongs to a session. Today only the three tool-call builders set it (`internal/runtime/activity_service.go:716`, `:1017`, `:1115`); policy-decision and synchronous rejection rows do not (`:566-587`, `:779-796`), and `ActivityAttribution` has no user field (`internal/runtime/activity_attribution.go:19-38`). `ActivityAttribution` therefore gains `UserID` beside `WorkSessionID` (D1), filled at the emit site from the auth context, and every builder copies it. The summary takes its owner from the first row. Failure index and total come from the stored per-server failure counts in reach.
 
@@ -218,9 +229,9 @@ Both use new `cliclient` methods, the shared formatter and `argsOrHelpJSON`. Wit
 3. Tracker changes: principal with generation, run name field, `Touch`, named-session limit.
 4. Request-level resolution and the attribution field; per-principal cache on the connection.
 5. Storage: buckets, `SaveActivity` transaction, summary update, backfill.
-6. Session-aware cleanup, body stripping, shortfall record, the two config changes.
-7. Upstream events and the collapser.
-8. REST doors, scope projection, route-table entries, swagger.
+6. Session-aware cleanup, body stripping, attempt-entry removal, shortfall record, the two config changes. `session_retention_days` is wired at every point a field needs, including the Web UI settings catalogue beside its siblings (`frontend/src/views/settings/fields.ts:585-587`: number, minimum 1, restart required) with a load, edit and save test (FR-070). Because this PR touches `frontend/src/`, it runs the Playwright sweep.
+7. Upstream events and the collapser: state-manager capture, the per-flight OAuth refresh report, and the new type registered everywhere a type is listed (the storage type constants, `ACTIVITY_TYPE_LABELS` in `frontend/src/utils/activity.ts`, which the System view and the backend/frontend label-parity test read, and the CLI's system types), so the System view shows and filters the rows in this PR (FR-024).
+8. REST doors, scope projection (request rows and event rows), route-table entries, swagger.
 9. Doctor section.
 10. Docs: `docs/features/activity-log.md`, `docs/api/rest-api.md`, `docs/configuration.md`, `docs/features/agent-tokens.md` (one token per agent, run name).
 
@@ -232,13 +243,13 @@ Each PR is merged before the next is opened.
 
 ## Test Plan
 
-- **Unit, storage**: `attemptRole` table; summary arithmetic including per-server partitions; index key order; backfill idempotence with concurrent writes; each cleanup step with a small cap, including the order in 3b to 3d, the age-cap trim and the shortfall record; body stripping keeps every non-body field.
-- **Unit, runtime**: tracker with injected `now` (generation, run name, `Touch`, idle reopen, named-session limit); the collapser with injected clock, including the 120-per-hour bound and SC-007's 24-hour storm.
+- **Unit, storage**: `attemptRole` table; summary arithmetic including per-server partitions; index key order; backfill idempotence with concurrent writes; each cleanup step with a small cap, including the order in 3b to 3d, the age-cap trim and the shortfall record; body stripping keeps every non-body field; attempt entries: a closed entry with no rows is removed in the next pass whatever its age, an unclosed one is kept, an entry with rows is kept, a companion row delivered after all rows were trimmed and the pass ran changes no lifetime count or failure fact, start closes every entry, the 1,024 cap, and the five buckets together at or below the byte budget.
+- **Unit, runtime**: tracker with injected `now` (generation, run name, `Touch`, idle reopen, named-session limit); the collapser with injected clock, including the 120-per-hour bound and SC-007's 24-hour storm; a transient OAuth refresh failure followed by recovery; several waiters on one failed flight give one event.
 - **Unit, server**: resolution for the four surfaces; two tokens on one connection get two sessions; `code_execution` sub-calls inherit; the run header is not forwarded upstream.
-- **HTTP**: the route-table guard; an authorization table for the three doors with admin, two agent tokens, a pinned token and, under `-tags server`, two users; not-found parity for foreign and missing ids; a hidden server's activity changes nothing a scoped caller reads; timeline positions with and without pruned failures; page bound.
+- **HTTP**: the route-table guard; an authorization table for the three doors with admin, two agent tokens, a pinned token and, under `-tags server`, two users; not-found parity for foreign and missing ids; a hidden server's activity changes nothing a scoped caller reads; timeline positions with and without pruned failures; page bound; a scoped token sees a shared upstream event of a server in reach and, under `-tags server`, no event owned by another user.
 - **Benchmarks (SC-006)**: list of 1,000 summaries and one timeline page of a 50,000-row session, each run against logs of two sizes to show the cost does not follow the log.
 - **E2E**: `scripts/test-api-e2e.sh` gains the morning-after scenario of User Story 1 through REST and the CLI.
-- **Web UI**: vitest for the panel and timeline; the Playwright sweep with screenshots of both screens.
+- **Web UI**: vitest for the panel and timeline, the settings field and the `upstream_event` type in the System view; the Playwright sweep with screenshots of both screens.
 - **Race and lint**: `go test -race ./internal/...`, the server-tag run from `CLAUDE.md`, and both `golangci-lint` v2 runs.
 
 ## Constitution Check
