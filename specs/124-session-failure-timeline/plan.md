@@ -76,7 +76,7 @@ One pure function in `internal/storage`, `attemptRole(record)`, returns whether 
 
 The first task of PR-1 is a table test that feeds every emitter's row shape through `attemptRole`, so the rule is pinned to what the code writes, not to this description.
 
-To apply "same request id" exactly and without a scan, a fourth bucket holds one entry per attempt (D3, `work_session_attempts`). A row with a request id looks its attempt up there: absent means a new attempt; present means the same attempt, and a row that turns it from success to failure updates the entry and the summary once. A row with no request id is its own attempt and gets no entry. Entries are removed with the rows of their session.
+To apply "same request id" exactly and without a scan, a fourth bucket holds one entry per attempt (D3, `work_session_attempts`). A row with a request id looks its attempt up there: absent means a new attempt; present means the same attempt, and a row that turns it from success to failure updates the entry and the summary once. A row with no request id is its own attempt and gets no entry. Entries outlive the rows: they are removed only when the session's summary is removed, by the window (step 1) or with the whole session (step 3c). Removing them with single rows would let a late row of the same call be counted a second time.
 
 ### D3. Storage
 
@@ -103,7 +103,7 @@ Rejected: a separate failures bucket. The flag byte in the index is enough, sinc
 `runRetentionCleanup` keeps its three steps, each made session-aware. Every step writes in batches of at most 1,000 rows per transaction (FR-038).
 
 1. **Session window.** Summaries whose last activity is older than `session_retention_days` are deleted with their index entries. Their rows stay (FR-036).
-2. **Age cap.** As today, oldest first. A deleted row that has an index entry takes the entry and its attempt entry with it, and its session's summary gets `truncated_start`. Only the stored counters (`stored_failures`, `stored_blocks`) are reduced; lifetime counts and first and last failure facts are never lowered (FR-013, FR-039). The same rule applies to steps 3c and 3d.
+2. **Age cap.** As today, oldest first. A deleted row that has an index entry takes the entry with it, and its session's summary gets `truncated_start`. Only the stored counters (`stored_failures`, `stored_blocks`) are reduced; lifetime counts and first and last failure facts are never lowered (FR-013, FR-039). The same rule applies to steps 3c and 3d.
 3. **Size and count caps**, one ordered pass from the oldest key:
    - **3a. Bodies.** While over the size budget, rewrite the row without `Arguments` and `Response` and set `BodiesRemoved`. A metadata key remembers how far this has gone, so later passes do not re-read stripped rows.
    - **3b. Rows outside the window.** In the same pass, delete rows that have no work-session id or whose summary is gone or older than the window.
@@ -122,11 +122,15 @@ Rejected: making the size cap soft for sessions inside the window. It breaks the
 
 A new activity type `upstream_event`, written by `ActivityService` so it stays on the single writer.
 
-The supervisor's bus event cannot carry this today: the adapter emits only a level, a title, a message and a `connected` flag derived from the title (`internal/runtime/supervisor/actor_pool.go:62-79`), and `supervisorEventForwarder` passes on the server name alone (`internal/runtime/lifecycle.go:2955-2982`). The supervisor itself does know the diagnostic code and the edge: `classifyAndAttach` (`supervisor.go:45`) sets `status.Diagnostic`, and `shouldNotifyErrorCode` / `notifyErrorCode` (`supervisor.go:1098`, `:1164`) already fire once per changed code.
+Neither existing signal can carry this. The supervisor's bus event holds only a level, a title, a message and a `connected` flag derived from the title (`internal/runtime/supervisor/actor_pool.go:62-79`). The supervisor's error-code edge (`shouldNotifyErrorCode`, `supervisor.go:1070-1098`) is a sampled predicate that by its own comment misses transient failures and recoveries, and its handler reads the connection state after the fact.
 
-So the plan adds one typed supervisor event, emitted where that edge is computed and when a server returns to Ready after a recorded loss. It carries the server name, the previous and the new connection state and the `MCPX_*` code. `supervisorEventForwarder` forwards it as a new runtime bus event, and `ActivityService` turns it into a row. The title-derived events are left as they are.
+The transition itself is observed in one place: the state manager's callback, `managed.Client.onStateChange(oldState, newState, info)` (`internal/upstream/managed/client.go:445`, `:1973`), which today only logs. The plan adds an observer there:
 
-| Kind | Rule on the typed event |
+- The upstream manager exposes one registration point for a transition observer. Each managed client calls it from `onStateChange` with the server name, the old and new state, the time of the transition, and the diagnostic code obtained by classifying the connection's last error with `diagnostics.Classify`.
+- The runtime registers the observer at start and publishes a new bus event. The call must not block the client: it is a non-blocking publish, like the other emitters.
+- `ActivityService` writes the row with the transition's own time as its timestamp, so ordering against calls is the order things happened (SC-005).
+
+| Kind | Rule on the transition |
 |---|---|
 | `connection_lost` | state leaves Ready, any code not listed below |
 | `process_exited` | state leaves Ready with a code in the `MCPX_STDIO_EXIT*` family |
@@ -134,7 +138,7 @@ So the plan adds one typed supervisor event, emitted where that edge is computed
 | `connection_restored` | state returns to Ready after a recorded loss |
 | `oauth_refresh_failed` | the existing `oauth.refresh_failed` bus event |
 
-No new process monitoring is added. `process_exited` is a classification of an existing disconnect, not a new detector. Step 7 of PR-1 starts with a test that kills a stdio fixture, refuses a connection and expires an OAuth login, and records which code and states arrive; the table above is corrected from that test before the rows are built.
+No new process monitoring is added. `process_exited` is a classification of an existing disconnect, not a new detector. Step 7 of PR-1 starts with a test that kills a stdio fixture, refuses a connection and expires an OAuth login, and records which states and codes the callback sees; the table above is corrected from that test before the rows are built. A reconnect storm fires the callback on every attempt; the collapser below bounds what is stored.
 
 The row carries server, kind, time, the `MCPX_*` code and `diagnostics.Get(code).UserMessage`. The raw error string is not copied (FR-021). In the server edition, events about a user's upstream credential carry that user id for access control.
 
@@ -155,7 +159,9 @@ New routes, registered as `scopeFiltered` in `getRouteScopes`. `/api/v1/sessions
 - Admin: the summary as stored.
 - Scoped caller: not owner (name and prefix, or user id) gives not found. Otherwise the per-server partitions are filtered through `scopeAllowedServers`, and start, end, last activity, status, counts and failure facts are recomputed from what is left. Connection count, profile and the truncated-start marker are omitted. No partition left gives not found.
 
-The timeline applies the same reach to index entries by their stored server name before any row is loaded, then loads rows for the page only and passes each through a row-ownership predicate and `redactForeignIdentity`. The predicate is new, because the existing one cannot serve user principals: `activityIdentityOwner` gives a non-agent caller an owner with no prefix, and `Owns` rejects an empty prefix (`internal/httpapi/scope_attribution.go:72-85`, `internal/storage/activity_models.go:326-335`). For an agent token it is the existing name-and-prefix rule. For a server-edition user it is the row's stored `UserID`. The same predicate decides summary ownership. Failure index and total come from the stored per-server failure counts in reach.
+The timeline applies the same reach to index entries by their stored server name before any row is loaded, then loads rows for the page only and passes each through a row-ownership predicate and `redactForeignIdentity`. The predicate is new, because the existing one cannot serve user principals: `activityIdentityOwner` gives a non-agent caller an owner with no prefix, and `Owns` rejects an empty prefix (`internal/httpapi/scope_attribution.go:72-85`, `internal/storage/activity_models.go:326-335`). For an agent token it is the existing name-and-prefix rule. For a server-edition user it is the row's stored `UserID`. The same predicate decides summary ownership.
+
+That needs the user id on every row that belongs to a session. Today only the three tool-call builders set it (`internal/runtime/activity_service.go:716`, `:1017`, `:1115`); policy-decision and synchronous rejection rows do not (`:566-587`, `:779-796`), and `ActivityAttribution` has no user field (`internal/runtime/activity_attribution.go:19-38`). `ActivityAttribution` therefore gains `UserID` beside `WorkSessionID` (D1), filled at the emit site from the auth context, and every builder copies it. The summary takes its owner from the first row. Failure index and total come from the stored per-server failure counts in reach.
 
 The list loads all summaries, projects, filters, sorts and pages in memory, as `GetRecentSessionsFiltered` does for connections. At 1,000 sessions this is one bucket read.
 
