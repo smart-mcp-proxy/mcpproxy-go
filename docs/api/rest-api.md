@@ -1962,6 +1962,48 @@ idle client does not appear until its first tool call.
 
 Get session details.
 
+### Work sessions
+
+A work session is one agent's run of work (see [Activity log](../features/activity-log.md#work-sessions-and-the-failure-timeline)). These doors are separate from `/api/v1/sessions`, which lists MCP connections and is admin-only.
+
+**Authorization.** An administrator sees every session. An agent token sees only its own sessions, and of each only the part that touched servers in its reach: start, end, status, counts and failure facts are recomputed from that part, and `profile`, `connection_count` and `truncated_start_at` are omitted. A session that belongs to another credential, one with nothing in the caller's reach and an unknown id all return the same `404`.
+
+#### GET /api/v1/work-sessions
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `failed` | boolean | Only sessions with at least one failure |
+| `include_blocked` | boolean | With `failed`: count policy blocks as failures (default `true`) |
+| `token` | string | Filter by agent token name |
+| `client` | string | Filter by client id |
+| `profile` | string | Filter by profile (administrators only; matches nothing for a scoped caller) |
+| `run` | string | Filter by run name (`X-MCPProxy-Run`) |
+| `error_class` | string | Filter by the error class of the last failure |
+| `since`, `until` | RFC3339 | Sessions active in the time range |
+| `sort` | string | `last_activity` (default) or `last_failure` |
+| `limit` | integer | 1-100, default 25 |
+| `offset` | integer | Pagination offset |
+
+Each session carries `id`, `token_name`, `client_id`, `client_name`, `surface`, `run_name`, `status` (`active` or `ended`), `started_at`, `last_activity_at`, `ended_at`, `duration_ms`, `attempts`, `failures`, `policy_blocks` (included in `failures`), `stored_failures`, `first_failure_at` and `last_failure` (`at`, `error_class`, `error_code`, `server`, `tool`, `reason`, `policy_block`). `attempts`, `failures` and `policy_blocks` are lifetime counts; `stored_failures` counts the failures whose rows are still in the log.
+
+#### GET /api/v1/work-sessions/{id}
+
+One session, in the same shape.
+
+#### GET /api/v1/work-sessions/{id}/timeline
+
+The session's activity rows and the upstream events of the servers it called, in time order.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `at` | string | Where to position the page: `first_failure` (default), `failure:<n>` (1-based), `row:<activity id>` or `end` |
+| `before`, `after` | integer | Rows before and after the position, 0-250, default 20 |
+| `include_bodies` | boolean | Include argument and response bodies (omitted by default) |
+
+The response has `session`, `rows`, `position` and `total_rows`, `failure_index` and `failure_total` (the stored failures the caller can navigate), `lifetime_failures`, `earlier_failures_not_stored`, `has_before` and `has_after`. Each row has `index`, `kind` (`call`, `internal_call`, `policy_decision`, `prompt`, `upstream_event`), `failed`, `policy_block`, `bodies_removed` and the `activity` record.
+
+When retention has removed some of a session's failures, positions count only the failures still stored, and `earlier_failures_not_stored` is `true` with the lifetime count in `lifetime_failures`. With no stored failure the default position is the earliest stored row.
+
 ### Activity
 
 Track and audit AI agent tool calls. See [Activity Log](../features/activity-log.md) for detailed documentation.

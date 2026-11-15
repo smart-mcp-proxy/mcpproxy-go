@@ -641,6 +641,16 @@ The limit is per process and is not persisted: a restart gives every token a ful
 bucket. Changing a budget keeps the calls a token has already spent; it does not
 refund them.
 
+## One Token per Agent
+
+MCPProxy groups an agent's calls into a *work session* and records, per session, what failed and what led to it ([Activity log](activity-log.md#work-sessions-and-the-failure-timeline)). The session is derived from the credential, so:
+
+- **Give each agent its own token.** Two agents that share one token and report the same client name cannot be told apart, and their calls form one work session.
+- If agents must share a token, have each send a run name in the `X-MCPProxy-Run` header. The name splits that token's work into named sessions; it is a label, not a credential.
+- A regenerated token starts a new work session. Sessions made with the old secret are not the new token's own and read as not found for it.
+
+An agent token can read its own sessions through `GET /api/v1/work-sessions`, narrowed to the servers in its reach.
+
 ## Managing Tokens
 
 ### Token Limit
