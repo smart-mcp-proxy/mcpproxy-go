@@ -671,6 +671,9 @@ func interruptedResult(ie *goja.InterruptedError) *Result {
 	if ie.Value() == errMemoryLimit {
 		return NewErrorResult(NewJsError(ErrorCodeMemoryLimit, "JavaScript execution exceeded its memory budget"))
 	}
+	if ie.Value() == errProtoCycleUnbroken {
+		return NewErrorResult(NewJsError(ErrorCodeRuntimeError, "JavaScript execution stopped: "+errProtoCycleUnbroken.Error()))
+	}
 	return NewErrorResult(NewJsError(ErrorCodeTimeout, "JavaScript execution timed out"))
 }
 

@@ -166,6 +166,17 @@ var stackVectors = []stackVector{
 	{name: "middle trap getter deletes the innermost trap", code: `var target={}; var ih={setPrototypeOf:function(){ return true }}; var p3=new Proxy(target,ih); var p2=new Proxy(p3,{get setPrototypeOf(){ delete ih.setPrototypeOf; return undefined }}); var p1=new Proxy(p2,{}); Reflect.setPrototypeOf(p1,p3); target.missing`, want: "ok"},
 	{name: "handler proxy deletes the inner trap", code: `var target={}; var ih={setPrototypeOf:function(){ return true }}; var inner=new Proxy(target,ih); var outer=new Proxy(inner,new Proxy({},{get:function(t,k){ if(k==="setPrototypeOf") delete ih.setPrototypeOf; return undefined }})); Reflect.setPrototypeOf(outer,inner); target.missing`, want: "ok"},
 	{name: "Object.prototype trap getter deletes the inner trap", code: `var target={}; var ih=Object.create(null); ih.setPrototypeOf=function(){ return true }; var inner=new Proxy(target,ih); Object.defineProperty(Object.prototype,"setPrototypeOf",{get:function(){ delete ih.setPrototypeOf; return undefined }, configurable:true}); var outer=new Proxy(inner,{}); Reflect.setPrototypeOf(outer,inner); target.missing`, want: "ok"},
+	// Script that runs during the change (a trap getter) can build part of
+	// a cycle the forwarded change then completes: checked after the change
+	// too, and rolled back.
+	{name: "trap getter completes a cycle, Reflect", code: `var t={}, proto={}; var bridge=new Proxy(proto,{}); var p=new Proxy(t,{get setPrototypeOf(){ Object.setPrototypeOf(proto,t); return undefined }}); var r=Reflect.setPrototypeOf(p,bridge); t.missing; [r, Object.getPrototypeOf(t)===Object.prototype].join()`, want: "ok"},
+	{name: "trap getter completes a cycle, Object.setPrototypeOf", code: `var t={}, proto={}; var bridge=new Proxy(proto,{}); var p=new Proxy(t,{get setPrototypeOf(){ Object.setPrototypeOf(proto,t); return undefined }}); try { Object.setPrototypeOf(p,bridge) } catch (e) {} t.missing; Object.setPrototypeOf(p,bridge)`, want: cyclicProtoMessage},
+	{name: "trap getter completes a cycle, __proto__", code: `var t={}, proto={}; var bridge=new Proxy(proto,{}); var p=new Proxy(t,{get setPrototypeOf(){ Object.setPrototypeOf(proto,t); return undefined }}); try { p.__proto__=bridge } catch (e) {} t.missing; p.__proto__=bridge`, want: cyclicProtoMessage},
+	{name: "trap getter completes a cycle through a handler link", code: `var t={}, hb={}; var bridge=new Proxy({},hb); var p=new Proxy(t,{get setPrototypeOf(){ Object.setPrototypeOf(hb,t); return undefined }}); Reflect.setPrototypeOf(p,bridge); t.missing; bridge.missing`, want: "ok"},
+	{name: "trap getter completes a deeper cycle", code: `var t={}, a={}, b={}; Object.setPrototypeOf(a,b); var bridge=new Proxy(a,{}); var p=new Proxy(t,{get setPrototypeOf(){ Object.setPrototypeOf(b,t); return undefined }}); Reflect.setPrototypeOf(p,bridge); t.missing; a.missing; b.missing`, want: "ok"},
+	{name: "three-object cycle across two nested trap getters", code: `var x={}, y={}, z={}; var py=new Proxy(y,{get setPrototypeOf(){ Object.setPrototypeOf(z,x); return undefined }}); var px=new Proxy(x,{get setPrototypeOf(){ Reflect.setPrototypeOf(py,new Proxy(z,{})); return undefined }}); Reflect.setPrototypeOf(px,new Proxy(y,{})); x.missing; y.missing; z.missing`, want: "ok"},
+	{name: "builtin handler whose prototype is a trap getter", code: `var target={}; var ih={setPrototypeOf:function(){ return true }}; var inner=new Proxy(target,ih); Object.defineProperty(Object.prototype,"setPrototypeOf",{get:function(){ delete ih.setPrototypeOf; return undefined }, configurable:true}); var outer=new Proxy(inner,Math); Reflect.setPrototypeOf(outer,inner); target.missing`, want: "ok"},
+	{name: "trap getter revokes the proxy it is looked up on", code: `var t={}, proto={}; var bridge=new Proxy(proto,{}); var r=Proxy.revocable(t,{get setPrototypeOf(){ r.revoke(); Object.setPrototypeOf(proto,t); return undefined }}); Reflect.setPrototypeOf(r.proxy,bridge); t.missing`, want: "ok"},
 	{name: "callable proxy as its own apply trap", code: `var h={}; var F=new Proxy(function(){},h); h.apply=F; F()`},
 	{name: "callable proxy as its own apply trap, frozen handler", code: `var h={}; var F=new Proxy(function(){},h); h.apply=F; Object.freeze(h); F()`},
 	{name: "callable proxy as the getter of its own trap", code: `var h={}; var F=new Proxy(function(){},h); Object.defineProperty(h,'apply',{get:F}); F()`},
@@ -791,6 +802,14 @@ func TestStackGuardStringifyMatchesGoja(t *testing.T) {
 		// Shells are keyed by their key list, unambiguously.
 		`JSON.stringify([{"a\u0000b":1}, {a:2, b:3}])`, `JSON.stringify([{a:2, b:3}, {"a\u0000b":1}])`,
 		`JSON.stringify([{"1:a":1, b:2}, {"1":3, "a:b":4}, {"a\u0000":5}, {"a":6, "":7}])`,
+		// A polluted Object.prototype reaches no descriptor or handler the
+		// guard makes.
+		`Object.prototype.get=function(){ return 9 }; JSON.stringify({a:1,b:[1,{c:2}]}, ["a","b","c"])`,
+		`Object.prototype.set=function(){}; JSON.stringify({a:1}, ["a"])`,
+		`Object.prototype.get=function(){ return 9 }; Object.prototype.set=function(){}; JSON.stringify({a:1,b:[1,{c:2}],"\ud800":3}) + JSON.stringify({a:1,b:{c:2}}, function(k,v){ return v })`,
+		`Object.prototype.value=5; Object.prototype.writable=false; Object.prototype.enumerable=false; Object.prototype.configurable=false; JSON.stringify({a:1,b:{a:2}}, ["a","b"]) + JSON.stringify({a:1,b:{a:2}}) + JSON.stringify({a:1}, function(k,v){ return v })`,
+		`Object.prototype.ownKeys=function(){ return ["zz"] }; Object.prototype.has=function(){ return true }; Object.prototype.getOwnPropertyDescriptor=function(){ return {value:7, enumerable:true, configurable:true} }; JSON.stringify({a:1,b:[2,{c:3}]}) + JSON.stringify({a:1,b:{c:3}}, ["a","b","c"]) + JSON.stringify({a:1,b:{c:3}}, function(k,v){ return v }) + JSON.stringify({"\ud800":1, q:[1]})`,
+		`Object.prototype.get=function(t,k){ return k === "x" ? 2 : undefined }; JSON.stringify({p:new Proxy({x:1},{})}) + JSON.stringify({p:new Proxy({x:1},{})}, ["p","x"])`,
 		`var o={}; o.p=new Proxy(o, {}); JSON.stringify(o)`, `var a=[]; a[0]=new Proxy(a, {}); JSON.stringify(a)`,
 		`var o={}; var p=new Proxy({}, {get:function(t,k){ return k === "x" ? o : undefined }, ownKeys:function(){ return ["x"] }, getOwnPropertyDescriptor:function(){ return {value:1, enumerable:true, configurable:true} }}); o.p=p; JSON.stringify(o)`,
 		`var o={"\ud800":1}; o.self=o; JSON.stringify(o)`, `var o={}; o.n=new Number(1); o.n.o=o; JSON.stringify(o)`,
@@ -851,6 +870,9 @@ func TestStackGuardParseMatchesGoja(t *testing.T) {
 		`JSON.parse('[1', function(){ return 1 })`, `JSON.parse('{"a":1}', {}).a`, `JSON.parse('7', function(k,v){ return [k, v, typeof this] }).join()`,
 		`var n=0; JSON.parse({toString:function(){ n++; return "[1]" }}, function(k,v){ return v }); n`,
 		`JSON.stringify(JSON.parse('[[[1]]]', new Proxy(function(k,v){ return v }, {})))`,
+		`Object.prototype.get=function(){}; Object.prototype.set=function(){}; JSON.stringify(JSON.parse('{"a":[1,{"b":2}]}', function(k,v){ return typeof v === "number" ? v+1 : v }))`,
+		`Object.prototype.value=1; Object.prototype.writable=false; Object.prototype.enumerable=false; Object.prototype.configurable=false; JSON.stringify(JSON.parse('{"a":[1,{"b":2}]}', function(k,v){ return typeof v === "number" ? v+1 : v }))`,
+		`Object.prototype.defineProperty=function(){ return false }; Object.prototype.deleteProperty=function(){ return false }; JSON.stringify(JSON.parse('{"a":1,"b":2}', function(k,v){ return k === "b" ? undefined : v }))`,
 		`var o={v:1}; for(var i=0;i<1000;i++) o={n:o}; var p=JSON.parse(JSON.stringify(o), function(k,v){ return v }); var d=0; while(p.n){p=p.n; d++} d`,
 	}
 	run := func(vm *goja.Runtime, expr string) string {
@@ -922,6 +944,8 @@ func TestStackGuardBuiltinsMatchGoja(t *testing.T) {
 		`var a=[1,[2,[3,[4]]]]; var r=a.flat(2); JSON.stringify(r) + Array.isArray(r[2])`,
 		`var a=[1]; for(var i=0;i<900;i++) a=[a,[i]]; a.flat(Infinity).length`,
 		`JSON.stringify([[1,[2]],[3]].flat(Infinity)) + JSON.stringify([].flat()) + JSON.stringify(Array.prototype.flat.call("ab"))`,
+		`Object.prototype.get=function(){}; Object.prototype.set=function(){}; Object.prototype.value=3; Object.prototype.writable=false; JSON.stringify([1,[2,[3]],,4].flat(Infinity))`,
+		`Object.prototype.has=function(){ return false }; Object.prototype.defineProperty=function(){ return false }; var a=[1,[2]]; a.constructor={}; a.constructor[Symbol.species]=function(){ return new Proxy([], {}) }; JSON.stringify(a.flat(Infinity))`,
 		`var r=Proxy.revocable([], {}); r.revoke(); try { [r.proxy].flat() } catch (e) { e.name }`,
 		// prototype setters
 		`var o={}; var p={x:1}; Object.setPrototypeOf(o,p) === o && o.x`, `var o={}; o.__proto__={y:2}; o.y`,

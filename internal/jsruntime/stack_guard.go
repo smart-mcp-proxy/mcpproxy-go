@@ -554,6 +554,17 @@ const protoChainTooLongMessage = "Maximum prototype chain length exceeded"
 // a new object, and a proxy's target and handler are fixed when it is
 // created).
 //
+// The check runs twice. Before the change (protoCycle), against the graph as
+// it is then, which refuses the ordinary case the way goja refuses a cycle of
+// ordinary objects. But script code can run between that check and the
+// change goja makes (a trap looked up through a getter, a handler that is a
+// proxy), and it can change the graph the check saw: link part of a cycle
+// that the change then completes. So after the original builtin returns
+// (normally or not) the one object it can have changed natively, the
+// ordinary object at the end of the receiver's target chain, is checked
+// again against the graph as it now is (breakProtoCycle), and a cycle
+// through it is undone before any script code can run.
+//
 // objIdx is the argument holding the object (-1: this) and the prototype is
 // the argument after it; reflectAPI selects Reflect.setPrototypeOf's answer to a
 // cycle (false instead of a TypeError).
@@ -574,9 +585,115 @@ func (g *nativeGuard) wrapSetPrototypeOf(objIdx int, reflectAPI bool) func(nativ
 			case cycle:
 				panic(g.vm.NewTypeError(cyclicProtoMessage))
 			}
-			return orig(call)
+			// Taken before the call: a getter may revoke a proxy of the chain
+			// while goja still forwards through the target it already read.
+			terminal := forwardTerminal(obj)
+			if terminal == nil {
+				return orig(call)
+			}
+			before := terminal.Prototype()
+			broke := false
+			res := func() goja.Value {
+				defer func() { broke = g.breakProtoCycle(terminal, before) }()
+				return orig(call)
+			}()
+			switch {
+			case broke && reflectAPI:
+				return g.vm.ToValue(false)
+			case broke:
+				panic(g.vm.NewTypeError(cyclicProtoMessage))
+			}
+			return res
 		}
 	}
+}
+
+// forwardTerminal is the ordinary object at the end of objV's chain of proxy
+// targets (objV itself when it is not a proxy): the only object whose
+// prototype a setPrototypeOf on objV can change natively, whatever traps do.
+// It is nil for a primitive, or when the chain ends in a revoked proxy or is
+// too long to follow (protoCycle has refused that already).
+func forwardTerminal(objV goja.Value) *goja.Object {
+	o, ok := objV.(*goja.Object)
+	if !ok {
+		return nil
+	}
+	for n := 0; o != nil; n++ {
+		if n > maxProtoWalk {
+			return nil
+		}
+		s := objectImpl(o)
+		if !s.IsValid() {
+			return nil
+		}
+		if s.Type().Name() != "proxyObject" {
+			return o
+		}
+		o = objectField(s, "target")
+	}
+	return nil
+}
+
+// errProtoCycleUnbroken interrupts an execution when a prototype cycle the
+// guard found could not be undone. It is not expected to happen (the object
+// was just changed, so it is extensible, and the value restored closes no
+// cycle); stopping the script is the fail-closed answer, since a lookup on
+// the cycle would overflow the Go stack.
+var errProtoCycleUnbroken = errors.New("prototype cycle could not be undone")
+
+// breakProtoCycle checks, right after a guarded prototype change returned,
+// whether terminal's prototype now leads back to terminal, and if so undoes
+// the link. No script code runs between goja's change and this check: the
+// change is the last thing the original builtin does on its forwarding path
+// (a proxy returns its target's answer as is, and the builtins return
+// without another call), and the check reads goja's fields directly.
+//
+// Every other change made during the call went through a guarded builtin
+// and was checked when it returned, so before goja's own change the graph
+// held no cycle, and a cycle now must run through terminal's new prototype
+// link. It is set back to before (its prototype when the call started) when
+// that leads to no cycle either, else to null: either way the graph is
+// acyclic again. A walk too large to finish counts as a cycle.
+func (g *nativeGuard) breakProtoCycle(terminal, before *goja.Object) bool {
+	if hit, tooLong := reaches(terminal.Prototype(), terminal); !hit && !tooLong {
+		return false
+	}
+	restore := before
+	if hit, tooLong := reaches(restore, terminal); hit || tooLong {
+		restore = nil
+	}
+	if err := terminal.SetPrototype(restore); err != nil {
+		g.vm.Interrupt(errProtoCycleUnbroken)
+	}
+	return true
+}
+
+// reaches reports whether a property lookup starting at from can recurse
+// natively into target (through prototype, proxy target and handler links).
+func reaches(from, target *goja.Object) (hit, tooLong bool) {
+	if from == nil {
+		return false, false
+	}
+	seen := map[*goja.Object]struct{}{from: {}}
+	queue := []*goja.Object{from}
+	for len(queue) > 0 {
+		o := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		if o == target {
+			return true, false
+		}
+		for _, next := range protoEdges(o) {
+			if _, done := seen[next]; done {
+				continue
+			}
+			if len(seen) >= maxProtoWalk {
+				return false, true
+			}
+			seen[next] = struct{}{}
+			queue = append(queue, next)
+		}
+	}
+	return false, false
 }
 
 // protoCycle reports whether making proto the prototype of obj would close a
@@ -704,7 +821,7 @@ func (g *nativeGuard) setProtoTrap(s reflect.Value) trapLookup {
 		}
 		d, ok := g.reflectGetOwn(goja.FunctionCall{Arguments: []goja.Value{o, name}}).(*goja.Object)
 		if !ok {
-			o = objectField(objectImpl(o), "prototype")
+			o = o.Prototype() // not a proxy: no script runs
 			continue
 		}
 		for _, k := range d.Keys() {
@@ -734,7 +851,10 @@ func protoEdges(o *goja.Object) []*goja.Object {
 		}
 	}
 	if s.Type().Name() != "proxyObject" {
-		add(objectField(s, "prototype"))
+		// Prototype, not the field: a builtin made from a template sets
+		// its prototype field only when first asked. o is not a proxy, so
+		// no script runs.
+		add(o.Prototype())
 		return out
 	}
 	add(objectField(s, "target"))
@@ -1218,9 +1338,9 @@ func (g *nativeGuard) wrapStringify(orig nativeCallFunc) nativeCallFunc {
 				out = holderProxy(obj, true)
 			case listMode:
 				var sub *goja.Object
-				sub = vm.ToValue(vm.NewProxy(vm.NewObject(), propertyListTraps(vm, obj, propertyList, func() {
+				sub = g.propertyListProxy(obj, propertyList, func() {
 					g.depth = base + depths[sub]
-				}))).(*goja.Object)
+				})
 				out = sub
 			default:
 				out = holderProxy(obj, false)
@@ -1367,27 +1487,44 @@ func jsonSerializedDirectly(o *goja.Object) bool {
 	return false
 }
 
-func propertyListTraps(vm *goja.Runtime, obj *goja.Object, list []goja.Value, onGet func()) *goja.ProxyTrapConfig {
-	return &goja.ProxyTrapConfig{
-		OwnKeys: func(*goja.Object) *goja.Object {
+// propertyListProxy is the holder JSON.stringify serializes in place of obj
+// under a property list: it lists exactly the list's keys, each enumerable,
+// and reads each from obj. Its handler and the descriptor it reports have a
+// null prototype, as goja reads both back through property lookups (a Go
+// trap's descriptor would become an object inheriting Object.prototype, so a
+// script's Object.prototype.get would turn it into an invalid descriptor).
+func (g *nativeGuard) propertyListProxy(obj *goja.Object, list []goja.Value, onGet func()) *goja.Object {
+	vm := g.vm
+	h := vm.NewObject()
+	desc := vm.NewObject()
+	for _, o := range []*goja.Object{h, desc} {
+		if err := o.SetPrototype(nil); err != nil {
+			panic(err)
+		}
+	}
+	if err := desc.Set("value", goja.Undefined()); err != nil {
+		panic(err)
+	}
+	for _, f := range []string{"writable", "enumerable", "configurable"} {
+		if err := desc.Set(f, true); err != nil {
+			panic(err)
+		}
+	}
+	for name, fn := range map[string]func(goja.FunctionCall) goja.Value{
+		"ownKeys": func(goja.FunctionCall) goja.Value {
 			return vm.NewArray(toInterfaces(list)...)
 		},
-		GetOwnPropertyDescriptor: func(*goja.Object, string) goja.PropertyDescriptor {
-			return goja.PropertyDescriptor{
-				Value:        goja.Undefined(),
-				Writable:     goja.FLAG_TRUE,
-				Enumerable:   goja.FLAG_TRUE,
-				Configurable: goja.FLAG_TRUE,
-			}
-		},
-		Get: func(_ *goja.Object, property string, _ goja.Value) goja.Value {
+		"getOwnPropertyDescriptor": func(goja.FunctionCall) goja.Value { return desc },
+		"get": func(c goja.FunctionCall) goja.Value {
 			onGet()
-			if v := obj.Get(property); v != nil {
-				return v
-			}
-			return goja.Undefined()
+			return g.reflectGet(goja.FunctionCall{Arguments: []goja.Value{obj, c.Argument(1)}})
 		},
+	} {
+		if err := h.Set(name, fn); err != nil {
+			panic(err)
+		}
 	}
+	return g.newProxy(vm.NewObject(), h)
 }
 
 func toInterfaces(vs []goja.Value) []interface{} {
