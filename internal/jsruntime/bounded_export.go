@@ -3,6 +3,7 @@ package jsruntime
 import (
 	"errors"
 	"fmt"
+	"math/big"
 	"reflect"
 	"sort"
 	"strconv"
@@ -76,7 +77,10 @@ const (
 // script exceptions thrown by getters propagate as from Export.
 func (g *nativeGuard) export(v goja.Value) interface{} {
 	out, err := g.exportMode(v, cyclesKept)
-	if err != nil {
+	switch {
+	case errors.Is(err, errExportTooLarge):
+		panic(g.newRangeError("value is " + errExportTooLarge.Error()))
+	case err != nil:
 		panic(g.newRangeError(stackOverflowMessage))
 	}
 	return out
@@ -159,24 +163,43 @@ type exporter struct {
 	used int64
 }
 
-// charge counts n more bytes of expanded size, when sizes are counted.
+// charge counts n more bytes of expanded size. Every mode counts: the
+// charges made before an allocation (an array's length, a Map's entries) are
+// what keeps a script from making the exporter allocate a slice of any length
+// it likes (new Array(4294967295) is one small object). Where cycles are kept
+// (export), references to an exported object are not counted again: its Go
+// value is shared, and nothing encodes it.
 func (e *exporter) charge(n int64) {
-	if e.size == nil {
-		return
-	}
 	e.used += n
 	if e.used > maxExportSize || n < 0 {
 		panic(exportError{errExportTooLarge})
 	}
 }
 
-// leafSize is a lower bound of the JSON size of a value exported as is.
+// leafSize is a lower bound of the JSON size of a value exported as is, and
+// within a constant factor of the work encoding it takes:
+//
+//   - a string: its bytes and quotes (escaping only adds to that, at most
+//     six bytes per byte);
+//   - a BigInt (*big.Int, also from a BigInt object): the digits of its
+//     decimal text, which json.Marshal writes in full, bounded from below
+//     by its bit length without converting it;
+//   - a typed array ([]uint8 is encoded as base64, the others element by
+//     element) and other Go slices, arrays and maps: a byte per element;
+//   - numbers, booleans, a Date's time.Time, functions, an ArrayBuffer, a
+//     Promise, a goja.Proxy: a byte (each encodes to a few dozen bytes at
+//     most, "{}", or an error).
+//
+// Go-backed values (objectGo*) never reach a script: Go data is handed to it
+// through toJS as plain JS objects.
 func leafSize(out interface{}) int64 {
 	switch t := out.(type) {
 	case nil:
 		return 4
 	case string:
 		return int64(len(t)) + 2
+	case *big.Int:
+		return bigIntDigits(t)
 	}
 	rv := reflect.ValueOf(out)
 	switch rv.Kind() {
@@ -184,6 +207,23 @@ func leafSize(out interface{}) int64 {
 		return int64(rv.Len()) + 2 // a typed array's elements, ...
 	}
 	return 1
+}
+
+// bigIntDigits is a lower bound of the length of x's decimal text: a number
+// of bit length b >= 1 is at least 2^(b-1), so it has at least
+// floor((b-1) * log10(2)) + 1 digits (30102/100000 < log10(2)), plus a sign.
+func bigIntDigits(x *big.Int) int64 {
+	if x == nil {
+		return 4
+	}
+	n := int64(1)
+	if b := int64(x.BitLen()); b > 1 {
+		n += (b - 1) * 30102 / 100000
+	}
+	if x.Sign() < 0 {
+		n++
+	}
+	return n
 }
 
 // value exports v at the given level and returns it with its height.
@@ -327,6 +367,17 @@ func (e *exporter) object(obj *goja.Object, level int) (interface{}, int) {
 		}
 	}
 	return m, below
+}
+
+// exportsAsMap reports whether the exporter turns obj into a
+// map[string]interface{}: an ordinary object, as opposed to an array, a Map
+// or Set, a proxy or a value goja exports as itself.
+func exportsAsMap(obj *goja.Object) bool {
+	switch objectKind(obj) {
+	case "arrayObject", "sparseArrayObject", "argumentsObject", "mapObject", "setObject", "proxyObject":
+		return false
+	}
+	return obj.ExportType() == exportMapType
 }
 
 // ownKeys returns obj's own enumerable string keys as Go strings, the way

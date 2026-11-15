@@ -102,6 +102,11 @@ type nativeGuard struct {
 	reflectHas    nativeCallFunc // the original Reflect.has
 	reflectDefine nativeCallFunc // the original Reflect.defineProperty
 	reflectDelete nativeCallFunc // the original Reflect.deleteProperty
+	reflectGetOwn nativeCallFunc // the original Reflect.getOwnPropertyDescriptor
+
+	// scriptHandlers maps the handler goja holds for every script proxy (the
+	// guard object guardedHandler made) to the script's own handler.
+	scriptHandlers map[*goja.Object]*goja.Object
 
 	// patched is every function object instrumented so far.
 	patched map[*goja.Object]struct{}
@@ -191,7 +196,7 @@ func newGuardedVM() (*goja.Runtime, *nativeGuard, error) {
 func installStackGuard(vm *goja.Runtime) (*nativeGuard, error) {
 	vm.SetMaxCallStackSize(maxCallStackDepth)
 
-	g := &nativeGuard{vm: vm, max: maxNativeDepth, patched: make(map[*goja.Object]struct{})}
+	g := &nativeGuard{vm: vm, max: maxNativeDepth, patched: make(map[*goja.Object]struct{}), scriptHandlers: make(map[*goja.Object]*goja.Object)}
 
 	funcs, err := builtinFunctions(vm)
 	if err != nil {
@@ -234,6 +239,7 @@ func installStackGuard(vm *goja.Runtime) (*nativeGuard, error) {
 		{vm.Get("Reflect").ToObject(vm), "has", &g.reflectHas},
 		{vm.Get("Reflect").ToObject(vm), "defineProperty", &g.reflectDefine},
 		{vm.Get("Reflect").ToObject(vm), "deleteProperty", &g.reflectDelete},
+		{vm.Get("Reflect").ToObject(vm), "getOwnPropertyDescriptor", &g.reflectGetOwn},
 	} {
 		fn, _, ok := nativeFuncFields(c.holder.Get(c.name).ToObject(vm))
 		if !ok || *fn == nil {
@@ -559,7 +565,7 @@ func (g *nativeGuard) wrapSetPrototypeOf(objIdx int, reflectAPI bool) func(nativ
 			if objIdx >= 0 {
 				obj = call.Argument(objIdx)
 			}
-			cycle, tooLong := protoCycle(obj, call.Argument(objIdx+1))
+			cycle, tooLong := g.protoCycle(obj, call.Argument(objIdx+1))
 			switch {
 			case tooLong:
 				panic(g.newRangeError(protoChainTooLongMessage))
@@ -576,9 +582,15 @@ func (g *nativeGuard) wrapSetPrototypeOf(objIdx int, reflectAPI bool) func(nativ
 // protoCycle reports whether making proto the prototype of obj would close a
 // cycle of prototype, proxy target and proxy handler links. The objects whose
 // prototype may change are obj and, when obj is a proxy without a
-// setPrototypeOf trap, the targets it forwards to; a trap only changes
-// prototypes through the guarded builtins again.
-func protoCycle(objV, protoV goja.Value) (cycle, tooLong bool) {
+// setPrototypeOf trap, the targets it forwards to, up to the first ordinary
+// object (the one goja mutates). A proxy whose trap handles the change ends
+// the forwarding: nothing changes natively (a trap only changes prototypes
+// through the guarded builtins again, which check that change), so there is
+// no cycle to refuse and goja runs the trap and its own invariant checks.
+//
+// A forwarding chain or prototype graph too large to walk whole reports
+// tooLong: the check never answers from a truncated set.
+func (g *nativeGuard) protoCycle(objV, protoV goja.Value) (cycle, tooLong bool) {
 	obj, ok := objV.(*goja.Object)
 	if !ok {
 		return false, false
@@ -588,14 +600,23 @@ func protoCycle(objV, protoV goja.Value) (cycle, tooLong bool) {
 		return false, false
 	}
 	changing := map[*goja.Object]struct{}{}
-	for o := obj; o != nil && len(changing) <= maxProtoWalk; {
+	for o := obj; ; {
+		if o == nil {
+			return false, false // a revoked proxy: goja throws, nothing changes
+		}
 		if _, seen := changing[o]; seen {
 			break
+		}
+		if len(changing) >= maxProtoWalk {
+			return false, true
 		}
 		changing[o] = struct{}{}
 		s := objectImpl(o)
 		if !s.IsValid() || s.Type().Name() != "proxyObject" {
 			break
+		}
+		if g.setProtoTrapHandles(s) {
+			return false, false
 		}
 		o = objectField(s, "target")
 	}
@@ -619,6 +640,51 @@ func protoCycle(objV, protoV goja.Value) (cycle, tooLong bool) {
 		}
 	}
 	return false, false
+}
+
+// setProtoTrapHandles reports whether a prototype change on the proxy s is
+// certain not to be forwarded to its target: the proxy is revoked (goja
+// throws), or its script handler has a setPrototypeOf trap (goja calls it,
+// or throws when it is not callable). The answer must be what goja's own
+// lookup will find, so it is only given when the lookup runs no script code:
+// a data property on a chain of ordinary objects. Anything else (an accessor,
+// a proxy on the handler's chain, a handler the guard did not make) reports
+// false, and the change is checked as if forwarded.
+func (g *nativeGuard) setProtoTrapHandles(s reflect.Value) bool {
+	hf, ok := fieldByName(s, "handler")
+	if !ok || hf.Kind() != reflect.Interface {
+		return false
+	}
+	if hf.IsNil() {
+		return true // revoked
+	}
+	hi := hf.Elem()
+	if hi.Kind() != reflect.Pointer || hi.IsNil() || hi.Elem().Kind() != reflect.Struct {
+		return false
+	}
+	h, ok := g.scriptHandlers[objectField(hi.Elem(), "handler")]
+	if !ok {
+		return false
+	}
+	name := g.vm.ToValue("setPrototypeOf")
+	for o, n := h, 0; o != nil; n++ {
+		if n >= maxProtoWalk || isProxy(o) {
+			return false
+		}
+		d, ok := g.reflectGetOwn(goja.FunctionCall{Arguments: []goja.Value{o, name}}).(*goja.Object)
+		if !ok {
+			o = objectField(objectImpl(o), "prototype")
+			continue
+		}
+		for _, k := range d.Keys() {
+			if k == "get" || k == "set" {
+				return false
+			}
+		}
+		v := d.Get("value")
+		return v != nil && !goja.IsUndefined(v) && !goja.IsNull(v)
+	}
+	return false
 }
 
 // protoEdges returns the objects a property lookup on o recurses into
@@ -772,7 +838,7 @@ func (g *nativeGuard) guardedHandler(h *goja.Object) goja.Value {
 		panic(err)
 	}
 	wrappers := map[*goja.Object]goja.Value{}
-	return vm.ToValue(vm.NewProxy(shell, &goja.ProxyTrapConfig{
+	guard := vm.ToValue(vm.NewProxy(shell, &goja.ProxyTrapConfig{
 		Get: func(_ *goja.Object, name string, _ goja.Value) goja.Value {
 			defer g.restore(g.enter())
 			v := h.Get(name)
@@ -799,7 +865,9 @@ func (g *nativeGuard) guardedHandler(h *goja.Object) goja.Value {
 			wrappers[trap] = w
 			return w
 		},
-	}))
+	})).(*goja.Object)
+	g.scriptHandlers[guard] = h
+	return guard
 }
 
 // wrapParse bounds JSON.parse's two recursions. Decoding recurses on the
@@ -1035,7 +1103,7 @@ func (g *nativeGuard) wrapStringify(orig nativeCallFunc) nativeCallFunc {
 				}
 				p = vm.ToValue(vm.NewProxy(arrayShell, traps)).(*goja.Object)
 			case !isProxy(obj) && !hasLossyKeyIn(keys):
-				sig := strings.Join(keys, "\x00")
+				sig := shellSignature(keys)
 				shell, ok := objectShells[sig]
 				if !ok {
 					shell = vm.NewObject()
@@ -1142,6 +1210,19 @@ func (g *nativeGuard) wrapStringify(orig nativeCallFunc) nativeCallFunc {
 
 // hasLossyKeyIn reports whether one of keys does not survive the conversion
 // to a Go string (it holds U+FFFD there).
+// shellSignature names a key list unambiguously: every key is prefixed with
+// its length, so no two different lists (["a\x00b"] and ["a","b"]) share a
+// signature, and with it an object shell.
+func shellSignature(keys []string) string {
+	var b strings.Builder
+	for _, k := range keys {
+		b.WriteString(strconv.Itoa(len(k)))
+		b.WriteByte(':')
+		b.WriteString(k)
+	}
+	return b.String()
+}
+
 func hasLossyKeyIn(keys []string) bool {
 	for _, k := range keys {
 		if strings.ContainsRune(k, utf8.RuneError) {

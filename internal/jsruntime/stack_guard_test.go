@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"os"
 	"os/exec"
 	"reflect"
@@ -144,6 +145,14 @@ var stackVectors = []stackVector{
 	{name: "proxy cycle through Object.create", code: `var p=new Proxy({},{}); var o=Object.create(p); Object.setPrototypeOf(p,o); o.x`, want: cyclicProtoMessage},
 	{name: "proxy cycle Reflect.setPrototypeOf", code: `var p=new Proxy({},{}); var o=Object.create(p); Reflect.setPrototypeOf(p,o); 'x' in o`, want: "ok"},
 	{name: "proxy cycle via revocable", code: `var r=Proxy.revocable({},{}); var o=Object.create(r.proxy); Object.setPrototypeOf(r.proxy,o); o.x`, want: cyclicProtoMessage},
+	// A forwarding chain longer than the walk bound must fail closed: a
+	// truncated set of changing objects hides the target actually mutated.
+	{name: "proxy cycle through a forwarding chain past the walk bound", code: `var base={}; var inner=new Proxy(base,{}); var outer=inner; for(var i=1;i<65538;i++) outer=new Proxy(outer,{}); Object.setPrototypeOf(outer,inner); base.missing`, want: protoChainTooLongMessage},
+	// A setPrototypeOf trap runs instead of the structural check, but what it
+	// forwards to the target is checked again.
+	{name: "proxy cycle through a forwarding setPrototypeOf trap", code: `var t={}; var p=new Proxy(t,{setPrototypeOf:function(t2,v){ return Reflect.setPrototypeOf(t2,v) }}); Object.setPrototypeOf(p,p); p.x`, want: "trap returned falsish"},
+	{name: "proxy cycle through a trap calling Object.setPrototypeOf", code: `var t={}; var p=new Proxy(t,{setPrototypeOf:function(t2,v){ Object.setPrototypeOf(t2,v); return true }}); Object.setPrototypeOf(p,p); p.x`, want: cyclicProtoMessage},
+	{name: "proxy cycle through a trap-less proxy in front of a trap", code: `var t={}; var q=new Proxy(t,{setPrototypeOf:function(t2,v){ return Reflect.setPrototypeOf(t2,v) }}); var p=new Proxy(q,{}); Reflect.setPrototypeOf(p,p); p.x`, want: "ok"},
 	{name: "callable proxy as its own apply trap", code: `var h={}; var F=new Proxy(function(){},h); h.apply=F; F()`},
 	{name: "callable proxy as its own apply trap, frozen handler", code: `var h={}; var F=new Proxy(function(){},h); h.apply=F; Object.freeze(h); F()`},
 	{name: "callable proxy as the getter of its own trap", code: `var h={}; var F=new Proxy(function(){},h); Object.defineProperty(h,'apply',{get:F}); F()`},
@@ -174,6 +183,13 @@ var stackVectors = []stackVector{
 	{name: "shared string as result", code: `var s="x".repeat(1<<20); var a=[]; for(var i=0;i<100000;i++) a.push(s); a`, want: "too large"},
 	{name: "shared typed array as result", code: `var t=new Float64Array(1<<20); var a=[]; for(var i=0;i<100000;i++) a.push(t); a`, want: "too large"},
 	{name: "huge sparse array as result", code: `var a=[]; a.length=4294967295; a`, want: "too large"},
+	// A BigInt is encoded as its full decimal text: charged by its length.
+	{name: "shared BigInt DAG as result", code: `var x={n:1n<<32768n}; for(var i=0;i<20;i++) x={a:x,b:x}; x`, want: "too large"},
+	{name: "shared BigInt object DAG as result", code: `var x={n:Object(1n<<32768n)}; for(var i=0;i<20;i++) x={a:x,b:x}; x`, want: "too large"},
+	{name: "shared BigInt DAG as call_tool args", code: `var x=[-(1n<<32768n)]; for(var i=0;i<20;i++) x=[x,x]; call_tool("s","t",{x:x})`, want: "too large"},
+	// call_tools options: an ignored option is never exported.
+	{name: "huge array in ignored call_tools option", code: `call_tools([], {ignored: new Array(4294967295)}); "done"`, want: "ok"},
+	{name: "huge array as call_tools max_parallel", code: `call_tools([], {max_parallel: new Array(4294967295)})`, want: "too large"},
 	{name: "shared DAG as call_tool args", code: `var x={}; for(var i=0;i<60;i++) x={a:x,b:x}; call_tool("s","t",{x:x})`, want: "too large"},
 	{name: "shared DAG in call_tools args", code: `var x={}; for(var i=0;i<60;i++) x={a:x,b:x}; call_tools([{server:"s",tool:"t",args:{x:x}}])`, want: "too large"},
 	{name: "lazy getters as result, re-entering export", code: `function mk(){return {get n(){ return call_tool("s","t",mk()) }}}; mk()`},
@@ -741,6 +757,9 @@ func TestStackGuardStringifyMatchesGoja(t *testing.T) {
 		// share a shell but not their values; cycles through every kind.
 		`var s={x:1}; JSON.stringify({a:s, get b(){ s.y=2; delete s.x; return s }, c:[s]})`,
 		`JSON.stringify([{a:1,b:2},{a:3,b:4},{b:5,a:6},{}, {}])`, `JSON.stringify([{1:1,a:2},{a:3,1:4}])`,
+		// Shells are keyed by their key list, unambiguously.
+		`JSON.stringify([{"a\u0000b":1}, {a:2, b:3}])`, `JSON.stringify([{a:2, b:3}, {"a\u0000b":1}])`,
+		`JSON.stringify([{"1:a":1, b:2}, {"1":3, "a:b":4}, {"a\u0000":5}, {"a":6, "":7}])`,
 		`var o={}; o.p=new Proxy(o, {}); JSON.stringify(o)`, `var a=[]; a[0]=new Proxy(a, {}); JSON.stringify(a)`,
 		`var o={}; var p=new Proxy({}, {get:function(t,k){ return k === "x" ? o : undefined }, ownKeys:function(){ return ["x"] }, getOwnPropertyDescriptor:function(){ return {value:1, enumerable:true, configurable:true} }}); o.p=p; JSON.stringify(o)`,
 		`var o={"\ud800":1}; o.self=o; JSON.stringify(o)`, `var o={}; o.n=new Number(1); o.n.o=o; JSON.stringify(o)`,
@@ -883,6 +902,23 @@ func TestStackGuardBuiltinsMatchGoja(t *testing.T) {
 		`var p=new Proxy({}, {}); Object.setPrototypeOf(p, {w:4}); p.w`,
 		`var log=[]; var p=new Proxy({}, {setPrototypeOf:function(t,v){ log.push("trap"); return Reflect.setPrototypeOf(t,v) }}); Object.setPrototypeOf(p, {}); log.join()`,
 		`function F(){}; F.prototype = new Proxy({}, {}); var o = new F(); o instanceof F`,
+		// A setPrototypeOf trap handles the change: it runs, and goja's own
+		// invariant checks apply to its answer.
+		`var target={}; var calls=0; var proxy=new Proxy(target, {setPrototypeOf(){ calls++; return true }}); [Reflect.setPrototypeOf(proxy, target), calls].join()`,
+		`var target={}; var calls=0; var proxy=new Proxy(target, {setPrototypeOf(){ calls++; return true }}); [Object.setPrototypeOf(proxy, target) === proxy, calls].join()`,
+		`var target={}; var calls=0; var proxy=new Proxy(target, {setPrototypeOf(){ calls++; return true }}); proxy.__proto__=target; calls`,
+		`var target={}; var proxy=new Proxy(target, {setPrototypeOf(){ return true }}); Object.setPrototypeOf(proxy, proxy) === proxy`,
+		`var target={}; var proxy=new Proxy(target, {setPrototypeOf(){ return false }}); [Reflect.setPrototypeOf(proxy, target)].join()`,
+		`var target={}; var proxy=new Proxy(target, {setPrototypeOf(){ return false }}); Object.setPrototypeOf(proxy, target)`,
+		`var target=Object.preventExtensions({}); var proxy=new Proxy(target, {setPrototypeOf(){ return true }}); Object.setPrototypeOf(proxy, {})`,
+		`var target={}; var proxy=new Proxy(target, {setPrototypeOf:5}); Object.setPrototypeOf(proxy, target)`,
+		`var target={}; var proxy=new Proxy(target, {setPrototypeOf:null}); Reflect.setPrototypeOf(proxy, {}) + ":" + (Object.getPrototypeOf(target) !== Object.prototype)`,
+		`var target={}; var proxy=new Proxy(target, Object.create({setPrototypeOf(){ return true }})); Reflect.setPrototypeOf(proxy, target)`,
+		`var target={}; var calls=0; var inner=new Proxy(target, {setPrototypeOf(){ calls++; return true }}); var outer=new Proxy(inner, {}); [Reflect.setPrototypeOf(outer, target), calls].join()`,
+		`var a={}; var b=Object.create(a); var p=new Proxy(a, {setPrototypeOf(t,v){ return Reflect.setPrototypeOf(t,v) }}); [Reflect.setPrototypeOf(p, b), Reflect.setPrototypeOf(p, {q:1}), p.q].join()`,
+		`var r=Proxy.revocable({}, {}); r.revoke(); Object.setPrototypeOf(r.proxy, {})`, `var r=Proxy.revocable({}, {}); r.revoke(); Reflect.setPrototypeOf(r.proxy, {})`,
+		`var t={}; var p=new Proxy(t, new Proxy({}, {})); [Reflect.setPrototypeOf(p, {q:1}), p.q].join()`,
+		`var t={}; var p=new Proxy(t, {get setPrototypeOf(){ return undefined }}); [Reflect.setPrototypeOf(p, {q:2}), p.q].join()`,
 		// proxies
 		`var h={get:function(t,k,r){ return [this === h, k, r === p, t.v].join() }}; var p=new Proxy({v:7},h); p.q`,
 		`var h=Object.freeze({get:function(t,k){ return k + "!" }}); new Proxy({}, h).abc`,
@@ -1089,6 +1125,30 @@ func BenchmarkGuardedStringify600KB(b *testing.B) {
 		v, err := vm.RunProgram(prog)
 		if err != nil || v.ToInteger() < 500_000 {
 			b.Fatal(v, err)
+		}
+	}
+}
+
+// TestBigIntDigitsLowerBound: the charge for a BigInt never exceeds the
+// length json.Marshal writes, and stays within a digit of it.
+func TestBigIntDigitsLowerBound(t *testing.T) {
+	for _, bits := range []uint{0, 1, 2, 3, 4, 9, 10, 63, 64, 100, 1000, 3321, 3322, 32768, 100000} {
+		for _, neg := range []bool{false, true} {
+			for _, delta := range []int64{-1, 0, 1} {
+				x := new(big.Int).Lsh(big.NewInt(1), bits)
+				x.Add(x, big.NewInt(delta))
+				if neg {
+					x.Neg(x)
+				}
+				b, err := json.Marshal(x)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, want := bigIntDigits(x), int64(len(b))
+				if got > want || got < want-1 {
+					t.Errorf("bigIntDigits(%d bits, neg=%v, %+d) = %d, marshaled %d bytes", bits, neg, delta, got, want)
+				}
+			}
 		}
 	}
 }

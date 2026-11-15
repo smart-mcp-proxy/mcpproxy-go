@@ -1076,20 +1076,30 @@ func parseBatchOptions(guard *nativeGuard, call goja.FunctionCall) (int, error) 
 
 	// Passing undefined/null for a trailing optional argument means "no
 	// options", the way JavaScript callers expect.
-	raw := guard.export(call.Arguments[1])
-	if raw == nil {
+	arg := call.Arguments[1]
+	if arg == nil || goja.IsUndefined(arg) || goja.IsNull(arg) {
 		return 0, nil
 	}
 
-	options, ok := raw.(map[string]interface{})
-	if !ok {
+	// Only max_parallel is read (an own enumerable property, as an export of
+	// the object would name it); the other keys are ignored without being
+	// exported, so an option the script made huge costs nothing here.
+	options, ok := arg.(*goja.Object)
+	if !ok || !exportsAsMap(options) {
 		return 0, fmt.Errorf("call_tools: options must be an object")
 	}
-
-	value, present := options["max_parallel"]
+	names, _ := guard.ownKeys(options)
+	present := false
+	for _, k := range names {
+		if k == "max_parallel" {
+			present = true
+			break
+		}
+	}
 	if !present {
 		return 0, nil
 	}
+	value := guard.export(options.Get("max_parallel"))
 
 	maxParallel, ok := batchOptionInt(value)
 	if !ok {
