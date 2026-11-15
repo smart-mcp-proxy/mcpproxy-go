@@ -1005,6 +1005,16 @@ func (m *Manager) agentTokenOwnerResolver() AgentTokenOwnerResolver {
 	return resolve
 }
 
+// tokenGeneration is a short, collision-resistant id of a secret, taken from
+// its keyed hash. It reveals nothing a holder of the hash did not have.
+func tokenGeneration(hash string) string {
+	const n = 24 // 96 bits of the hex-encoded HMAC
+	if len(hash) <= n {
+		return hash
+	}
+	return hash[:n]
+}
+
 // ValidateAgentToken hashes the raw token and looks it up in storage.
 // Returns the token if found and valid (not expired, not revoked) and its owner
 // is still allowed to authenticate.
@@ -1038,6 +1048,11 @@ func (m *Manager) ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.Age
 			return nil, fmt.Errorf("token not found")
 		}
 	}
+
+	// Spec 124 FR-009: the generation of the secret that authenticated, from
+	// its hash (primary or pending), so two secrets of one credential never
+	// share a work session even when their display prefixes collide.
+	token.MatchedGeneration = tokenGeneration(hash)
 
 	if token.IsRevoked() {
 		return nil, fmt.Errorf("token has been revoked")

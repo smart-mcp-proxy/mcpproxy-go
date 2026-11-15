@@ -145,6 +145,13 @@ type AgentToken struct {
 	// secret it actually used, and the same value before and after finalize.
 	MatchedPrefix string `json:"-"`
 
+	// MatchedGeneration identifies the secret that authenticated this request
+	// with enough entropy to tell two secrets of one credential apart: the
+	// display prefix has four random characters, so a regenerated token can
+	// repeat it. Set by validation from the secret's hash, never stored and
+	// never shown. Empty for a token that did not come from validation.
+	MatchedGeneration string `json:"-"`
+
 	// ConnectedAt is when connect/add minted this credential.
 	ConnectedAt *time.Time `json:"connected_at,omitempty"`
 
@@ -327,20 +334,21 @@ func (t *AgentToken) AuthContext() *AuthContext {
 		return nil
 	}
 	return &AuthContext{
-		Type:           AuthTypeAgent,
-		AgentName:      t.Name,
-		TokenPrefix:    t.authenticatedPrefix(),
-		AllowedServers: t.AllowedServers,
-		Permissions:    t.Permissions,
-		ProfilePin:     t.ProfilePin,
-		Email:          t.OwnerEmail,
-		Provider:       t.OwnerProvider,
-		Role:           t.OwnerRole,
-		CredentialKind: CredentialKindAgentToken,
-		TokenKind:      normalizeKind(t.Kind),
-		ClientID:       t.ClientID,
-		ProfileMode:    t.ProfileMode,
-		RateLimit:      t.RateLimit.clone(),
+		Type:            AuthTypeAgent,
+		AgentName:       t.Name,
+		TokenPrefix:     t.authenticatedPrefix(),
+		TokenGeneration: t.MatchedGeneration,
+		AllowedServers:  t.AllowedServers,
+		Permissions:     t.Permissions,
+		ProfilePin:      t.ProfilePin,
+		Email:           t.OwnerEmail,
+		Provider:        t.OwnerProvider,
+		Role:            t.OwnerRole,
+		CredentialKind:  CredentialKindAgentToken,
+		TokenKind:       normalizeKind(t.Kind),
+		ClientID:        t.ClientID,
+		ProfileMode:     t.ProfileMode,
+		RateLimit:       t.RateLimit.clone(),
 		// UserID carries the owning tenant (server edition). Without it an
 		// agent-token request had no tenant identity at all, so its activity
 		// could not be attributed or scoped. It does NOT confer the user tier:

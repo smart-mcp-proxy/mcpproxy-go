@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -330,4 +331,45 @@ func TestWorkSession_NamedSessionsAreBoundedPerPrincipalPerDay(t *testing.T) {
 
 	advance(24 * time.Hour)
 	assert.NotEqual(t, unnamed, tr.Resolve(over), "the bound is per day")
+}
+
+// Review finding: work sessions are now resolved from any request goroutine,
+// so the runtime's lazily created tracker must be one instance under
+// concurrent first use. Run with -race.
+func TestRuntime_WorkSessionTrackerIsCreatedOnce(t *testing.T) {
+	r := &Runtime{}
+	id := WorkSessionIdentity{Principal: "p", ClientName: "rest"}
+	const n = 32
+	got := make([]string, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			got[i] = r.ResolveWorkSession(id)
+			r.TouchWorkSession(got[i], id)
+		}(i)
+	}
+	wg.Wait()
+	for i := 1; i < n; i++ {
+		assert.Equal(t, got[0], got[i], "one tracker, one session for one identity")
+	}
+}
+
+// The effective identity drops a run name that is over the bound.
+func TestWorkSession_ResolveEffectiveReportsADroppedRunName(t *testing.T) {
+	tr, _ := fixedClock(time.Date(2026, 11, 15, 0, 0, 1, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "p", ClientName: "rest"}
+	unnamed := tr.Resolve(id)
+	for i := 0; i < MaxNamedWorkSessionsPerDay; i++ {
+		n := id
+		n.RunName = "run-" + time.Duration(i).String()
+		_, eff := tr.ResolveEffective(n)
+		require.Equal(t, n.RunName, eff.RunName)
+	}
+	over := id
+	over.RunName = "one-too-many"
+	ws, eff := tr.ResolveEffective(over)
+	assert.Equal(t, unnamed, ws)
+	assert.Empty(t, eff.RunName, "the caller caches and touches under the unnamed identity")
 }

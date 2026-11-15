@@ -172,6 +172,12 @@ func principalFromContext(ctx context.Context) string {
 		if ac.UserID != "" {
 			base = "agent:" + ac.UserID + ":" + ac.AgentName
 		}
+		// The generation is a collision-resistant id of the secret when the
+		// request was authenticated through validation; the 12-character
+		// display prefix has only four random characters and is the fallback.
+		if ac.TokenGeneration != "" {
+			return base + ":" + ac.TokenGeneration
+		}
 		if ac.TokenPrefix != "" {
 			return base + ":" + ac.TokenPrefix
 		}
@@ -216,31 +222,32 @@ func (p *MCPProxyServer) markSessionWorked(ctx context.Context, sessionID string
 	principal := principalFromContext(ctx)
 	runName := p.requestRunName(ctx, principal)
 
-	return p.sessionStore.EnsurePersistedKeyed(sessionID, workSessionKey(principal, runName), func(info *SessionInfo) string {
-		resolve := p.resolveWorkSession()
-		if resolve == nil {
-			return ""
-		}
-		return resolve(runtime.WorkSessionIdentity{
+	return p.sessionStore.EnsurePersistedKeyed(sessionID, workSessionKey(principal, runName), func(info *SessionInfo) (string, string) {
+		id, effective := p.resolveWorkSessionEffective(runtime.WorkSessionIdentity{
 			Principal:     principal,
 			ClientName:    info.ClientName,
 			ClientVersion: info.ClientVersion,
 			WorkspaceRoot: info.Workspace,
 			RunName:       runName,
 		})
+		return id, workSessionKey(principal, effective.RunName)
 	})
 }
 
-// resolveWorkSession is the runtime's work-session tracker, or the stub a test
-// injected in its place. Nil when neither is available.
-func (p *MCPProxyServer) resolveWorkSession() func(runtime.WorkSessionIdentity) string {
+// resolveWorkSessionEffective resolves a work session and returns the identity
+// it was filed under. With a test's stub resolver the identity is returned
+// unchanged.
+func (p *MCPProxyServer) resolveWorkSessionEffective(id runtime.WorkSessionIdentity) (string, runtime.WorkSessionIdentity) {
+	if p.workSessionResolverEffective != nil {
+		return p.workSessionResolverEffective(id)
+	}
 	if p.workSessionResolver != nil {
-		return p.workSessionResolver
+		return p.workSessionResolver(id), id
 	}
 	if p.mainServer == nil || p.mainServer.runtime == nil {
-		return nil
+		return "", id
 	}
-	return p.mainServer.runtime.ResolveWorkSession
+	return p.mainServer.runtime.ResolveWorkSessionEffective(id)
 }
 
 // markWorkIfToolCall attributes a request to a work session when — and only when

@@ -241,7 +241,8 @@ type Runtime struct {
 
 	// workSessions derives a unit of USER WORK from the churn of transport
 	// sessions underneath it (Spec 082).
-	workSessions *WorkSessionTracker
+	workSessions     *WorkSessionTracker
+	workSessionsOnce sync.Once
 
 	// Spec 047: coalesces servers.changed bursts and embeds the server list +
 	// stats payload so SSE subscribers can update without a follow-up
@@ -4242,10 +4243,25 @@ func (r *Runtime) SetWorkSessionResolver(resolver SessionWorkSessionResolver) {
 // ResolveWorkSession derives the work session for an identity, opening a new one
 // when it has been idle past the window. Called once per connection.
 func (r *Runtime) ResolveWorkSession(id WorkSessionIdentity) string {
-	if r.workSessions == nil {
-		r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
-	}
-	return r.workSessions.Resolve(id)
+	return r.workSessionTracker().Resolve(id)
+}
+
+// ResolveWorkSessionEffective is ResolveWorkSession that also returns the
+// identity the session was filed under (see WorkSessionTracker.ResolveEffective).
+func (r *Runtime) ResolveWorkSessionEffective(id WorkSessionIdentity) (string, WorkSessionIdentity) {
+	return r.workSessionTracker().ResolveEffective(id)
+}
+
+// workSessionTracker returns the one tracker of this runtime. Spec 124: work
+// sessions are resolved per request, from any request goroutine, so the lazy
+// creation must be safe for concurrent first use.
+func (r *Runtime) workSessionTracker() *WorkSessionTracker {
+	r.workSessionsOnce.Do(func() {
+		if r.workSessions == nil {
+			r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
+		}
+	})
+	return r.workSessions
 }
 
 // ActivityRetentionState implements management.ActivityRetentionOperations
@@ -4300,19 +4316,13 @@ func (r *Runtime) SetRequestSessionFacts(f RequestSessionFacts) {
 // TouchWorkSession moves the idle clock of a work session that a connection
 // reuses without resolving it again (Spec 124 FR-019).
 func (r *Runtime) TouchWorkSession(workSessionID string, id WorkSessionIdentity) {
-	if r.workSessions == nil {
-		return
-	}
-	r.workSessions.Touch(workSessionID, id)
+	r.workSessionTracker().Touch(workSessionID, id)
 }
 
 // ReapWorkSessions drops work sessions idle past maxIdle, so a long-lived daemon
 // does not accumulate one map entry per identity forever.
 func (r *Runtime) ReapWorkSessions(maxIdle time.Duration) int {
-	if r.workSessions == nil {
-		return 0
-	}
-	return r.workSessions.Reap(maxIdle)
+	return r.workSessionTracker().Reap(maxIdle)
 }
 
 // RecordRealToolCallForActivation marks the first-ever real (upstream) tool

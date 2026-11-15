@@ -548,3 +548,36 @@ func TestClientCredentialRotation_AuthContextCarriesTheMatchedSecretPrefix(t *te
 	require.NoError(t, err)
 	assert.Equal(t, newPrefix, after.AuthContext().TokenPrefix, "the same prefix before and after finalize")
 }
+
+// Spec 124 FR-009 (review): two secrets of one credential authenticate with
+// different generations even if their display prefixes were equal, and the
+// pending secret keeps its generation across finalize.
+func TestValidateAgentToken_SetsACollisionResistantGeneration(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	oldRaw, _ := auth.GenerateClientToken()
+	_, err := mgr.MintClientCredential("cursor", oldRaw, testHMACKey, auth.ProfileModeLocked, "work-readonly", time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	newRaw, _ := auth.GenerateClientToken()
+	_, err = mgr.StageClientCredentialRotation("cursor", newRaw, testHMACKey)
+	require.NoError(t, err)
+
+	oldTok, err := mgr.ValidateAgentToken(oldRaw, testHMACKey)
+	require.NoError(t, err)
+	newTok, err := mgr.ValidateAgentToken(newRaw, testHMACKey)
+	require.NoError(t, err)
+
+	oldGen, newGen := oldTok.AuthContext().TokenGeneration, newTok.AuthContext().TokenGeneration
+	require.NotEmpty(t, oldGen)
+	require.NotEmpty(t, newGen)
+	assert.NotEqual(t, oldGen, newGen)
+	assert.GreaterOrEqual(t, len(newGen), 24, "far more than the four random characters of the display prefix")
+	assert.NotContains(t, newRaw, newGen, "the generation is derived from the keyed hash, not from the secret text")
+
+	_, err = mgr.FinalizeClientCredentialRotation("cursor")
+	require.NoError(t, err)
+	after, err := mgr.ValidateAgentToken(newRaw, testHMACKey)
+	require.NoError(t, err)
+	assert.Equal(t, newGen, after.AuthContext().TokenGeneration, "the same generation before and after finalize")
+}

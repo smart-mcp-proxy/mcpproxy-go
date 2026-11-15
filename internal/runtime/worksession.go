@@ -164,8 +164,19 @@ func (t *WorkSessionTracker) SetIdleWindow(d time.Duration) {
 // Returns "" when we know nothing about the caller: an unattributable record is
 // better left unattributed than grouped into a bucket that means nothing.
 func (t *WorkSessionTracker) Resolve(id WorkSessionIdentity) string {
+	ws, _ := t.ResolveEffective(id)
+	return ws
+}
+
+// ResolveEffective is Resolve that also returns the identity the session was
+// actually filed under. It differs from the one passed in only when the run
+// name was dropped because the principal is over its daily bound of named
+// sessions. A caller that caches the result, or refreshes it with Touch, must
+// use the effective identity: caching under the rejected name would create one
+// alias per invented name and let them bypass the bound.
+func (t *WorkSessionTracker) ResolveEffective(id WorkSessionIdentity) (string, WorkSessionIdentity) {
 	if id.isEmpty() {
-		return ""
+		return "", id
 	}
 
 	t.mu.Lock()
@@ -178,7 +189,7 @@ func (t *WorkSessionTracker) Resolve(id WorkSessionIdentity) string {
 		// Same work, continuing. This is the reconnect case: the transport
 		// session underneath may be brand new, but the work is the same.
 		entry.lastActivity = now
-		return entry.id
+		return entry.id, id
 	}
 
 	if id.RunName != "" && id.CorrelationID == "" {
@@ -187,12 +198,12 @@ func (t *WorkSessionTracker) Resolve(id WorkSessionIdentity) string {
 			// principal's unnamed work instead of opening one more session.
 			id.RunName = ""
 			if id.isEmpty() {
-				return ""
+				return "", id
 			}
 			k = id.key()
 			if entry, ok := t.sessions[k]; ok && now.Sub(entry.lastActivity) <= t.idleWindow {
 				entry.lastActivity = now
-				return entry.id
+				return entry.id, id
 			}
 		}
 	}
@@ -204,7 +215,7 @@ func (t *WorkSessionTracker) Resolve(id WorkSessionIdentity) string {
 		startedAt:    now,
 	}
 	t.sessions[k] = entry
-	return entry.id
+	return entry.id, id
 }
 
 // admitNamedLocked counts one more named work session for the principal today

@@ -26,6 +26,7 @@ func trackerProxy(t *testing.T) (*MCPProxyServer, *SessionStore, *runtime.WorkSe
 	p, store := newWorkSessionProxy(t)
 	tr := runtime.NewWorkSessionTracker(30 * time.Minute)
 	p.workSessionResolver = tr.Resolve
+	p.workSessionResolverEffective = tr.ResolveEffective
 	p.workSessionToucher = tr.Touch
 	return p, store, tr
 }
@@ -203,4 +204,109 @@ func TestActivityAttribution_CarriesTheProjectName(t *testing.T) {
 
 	rest := reqcontext.WithClientSurface(tokenCtx(context.Background(), "alpha", "mcp_agt_aaaa"), "rest")
 	assert.Empty(t, p.activityAttribution(rest, "").ProjectName)
+}
+
+// Review finding: a run name rejected by the daily bound must not be cached
+// or touched under the rejected name. The call joins the credential's unnamed
+// session, and the connection's cache does not grow with invented names.
+func TestRequestWorkSession_RejectedRunNamesCreateNoAliases(t *testing.T) {
+	p, store, _ := trackerProxy(t)
+	store.SetSession("c1", "ide", "1.0", false, false, nil)
+	base := tokenCtx(workSessionCtx("c1"), "alpha", "mcp_agt_aaaa")
+	unnamed := p.markSessionWorked(base, "c1")
+	require.NotEmpty(t, unnamed)
+
+	named := func(i int) context.Context {
+		return reqcontext.WithRunHeader(base, "run-"+time.Duration(i).String())
+	}
+	for i := 0; i < runtime.MaxNamedWorkSessionsPerDay; i++ {
+		require.NotEqual(t, unnamed, p.requestWorkSession(named(i), "c1"))
+	}
+	store.mu.RLock()
+	admitted := len(store.sessions["c1"].workSessionByKey)
+	store.mu.RUnlock()
+
+	for i := runtime.MaxNamedWorkSessionsPerDay; i < runtime.MaxNamedWorkSessionsPerDay+50; i++ {
+		// Twice each: the second call must not find an alias left by the first.
+		assert.Equal(t, unnamed, p.requestWorkSession(named(i), "c1"), "a rejected name joins the unnamed session")
+		assert.Equal(t, unnamed, p.requestWorkSession(named(i), "c1"))
+		assert.Equal(t, unnamed, p.markSessionWorked(named(i), "c1"))
+	}
+	store.mu.RLock()
+	after := len(store.sessions["c1"].workSessionByKey)
+	store.mu.RUnlock()
+	assert.Equal(t, admitted, after, "no cache entry per rejected name")
+}
+
+// Review finding: when the connection record failed to write, the retry may
+// come from another credential. It must resolve its own session and never
+// inherit the first credential's.
+func TestRequestWorkSession_RetryAfterFailedPersistIsPerCredential(t *testing.T) {
+	p, store, _ := trackerProxy(t)
+	store.SetSession("c1", "ide", "1.0", false, false, nil)
+	a := tokenCtx(workSessionCtx("c1"), "alpha", "mcp_agt_aaaa")
+	b := tokenCtx(workSessionCtx("c1"), "beta", "mcp_agt_bbbb")
+
+	wsA := p.markSessionWorked(a, "c1")
+	require.NotEmpty(t, wsA)
+	// What the error path of EnsurePersistedKeyed leaves behind.
+	store.mu.Lock()
+	store.sessions["c1"].persisted = false
+	store.mu.Unlock()
+
+	wsB := p.markSessionWorked(b, "c1")
+	require.NotEmpty(t, wsB)
+	assert.NotEqual(t, wsA, wsB, "the second credential gets its own work session")
+	assert.Equal(t, wsA, p.markSessionWorked(a, "c1"), "the first keeps its own")
+	assert.Equal(t, wsA, store.WorkSessionID("c1"), "the connection record keeps the first id")
+}
+
+// Review finding: every row of one request on a connection that has not been
+// persisted (it only reads prompts) belongs to one work session, even when
+// the roots reply arrives between two rows.
+func TestRequestWorkSession_UnpersistedConnectionPinsOneSessionPerRequest(t *testing.T) {
+	p, store, _ := trackerProxy(t)
+	store.SetSession("c1", "ide", "1.0", false, false, nil)
+	ctx := tokenCtx(workSessionCtx("c1"), "alpha", "mcp_agt_aaaa")
+
+	first := p.requestWorkSession(ctx, "c1")
+	require.NotEmpty(t, first)
+	store.mu.Lock()
+	store.sessions["c1"].Workspace = "file:///repos/late-roots"
+	store.mu.Unlock()
+	assert.Equal(t, first, p.requestWorkSession(ctx, "c1"), "the late workspace does not move the request to another session")
+
+	// The first tool call persists the connection and resolves with the
+	// settled workspace, as it always has (FR-006).
+	worked := p.markSessionWorked(ctx, "c1")
+	require.NotEmpty(t, worked)
+	assert.Equal(t, worked, p.requestWorkSession(ctx, "c1"))
+}
+
+// Review finding: the display prefix has four random characters, so two
+// secrets of one credential can share it. The generation tells them apart.
+func TestPrincipalFromContext_UsesTheCredentialGeneration(t *testing.T) {
+	mk := func(gen string) context.Context {
+		return auth.WithAuthContext(context.Background(), &auth.AuthContext{
+			Type: auth.AuthTypeAgent, AgentName: "ci", TokenPrefix: "mcp_agt_aaaa", TokenGeneration: gen,
+		})
+	}
+	assert.NotEqual(t, principalFromContext(mk("gen-one")), principalFromContext(mk("gen-two")),
+		"the same name and display prefix, two secrets, two principals")
+	assert.Equal(t, "agent:ci:mcp_agt_aaaa", principalFromContext(mk("")), "the prefix is the fallback")
+	assert.NotContains(t, principalFromContext(mk("gen-one")), "mcp_agt_aaaa")
+}
+
+// Review finding: the warning bookkeeping is bounded.
+func TestRunNameWarnedSetIsBounded(t *testing.T) {
+	w := &warnedSet{seen: make(map[string]struct{})}
+	assert.True(t, w.first("p1"))
+	assert.False(t, w.first("p1"))
+	for i := 0; i < maxRunNameWarned*3; i++ {
+		w.first("principal-" + time.Duration(i).String())
+	}
+	w.mu.Lock()
+	n := len(w.seen)
+	w.mu.Unlock()
+	assert.LessOrEqual(t, n, maxRunNameWarned)
 }

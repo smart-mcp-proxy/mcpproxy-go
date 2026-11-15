@@ -21,7 +21,31 @@ import (
 
 // runNameWarned remembers which principals have already been told that their
 // X-MCPProxy-Run header was ignored (FR-004: once per principal per process).
-var runNameWarned sync.Map
+// It is bounded: a principal carries its credential generation, so credential
+// churn would otherwise leave one entry per retired secret forever. When the
+// bound is reached the set is emptied, at the cost of one repeated warning.
+var runNameWarned = &warnedSet{seen: make(map[string]struct{})}
+
+const maxRunNameWarned = 1024
+
+type warnedSet struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// first reports whether this is the first time key is seen.
+func (w *warnedSet) first(key string) bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if _, ok := w.seen[key]; ok {
+		return false
+	}
+	if len(w.seen) >= maxRunNameWarned {
+		w.seen = make(map[string]struct{})
+	}
+	w.seen[key] = struct{}{}
+	return true
+}
 
 // runNameMiddleware copies the X-MCPProxy-Run header onto the request context
 // for MCP over HTTP. The value is stored raw; requestRunName validates it.
@@ -45,7 +69,7 @@ func (p *MCPProxyServer) requestRunName(ctx context.Context, principal string) s
 	if reqcontext.ValidRunName(raw) {
 		return raw
 	}
-	if _, seen := runNameWarned.LoadOrStore(principal, struct{}{}); !seen && p.logger != nil {
+	if runNameWarned.first(principal) && p.logger != nil {
 		p.logger.Warn("Ignoring an invalid "+reqcontext.RunNameHeader+" header: it must be 1 to 128 printable characters",
 			zap.String("principal_kind", principalKind(ctx)))
 	}
@@ -76,10 +100,6 @@ func workSessionKey(principal, runName string) string {
 //     not been persisted) is derived from the request: principal, client name
 //     or surface, run name.
 func (p *MCPProxyServer) requestWorkSession(ctx context.Context, sessionID string) string {
-	resolve := p.resolveWorkSession()
-	if resolve == nil {
-		return ""
-	}
 	principal := principalFromContext(ctx)
 	runName := p.requestRunName(ctx, principal)
 	if sessionID == "" {
@@ -95,16 +115,19 @@ func (p *MCPProxyServer) requestWorkSession(ctx context.Context, sessionID strin
 				WorkspaceRoot: info.Workspace,
 				RunName:       runName,
 			}
-			id := p.sessionStore.WorkSessionForKey(sessionID, workSessionKey(principal, runName), func(*SessionInfo) string {
-				return resolve(identity)
+			// effective is the identity the session is filed under: the run
+			// name is dropped when the credential is over its bound, and the
+			// cache and the idle clock must then use the unnamed identity.
+			effective := identity
+			id := p.sessionStore.WorkSessionForKey(sessionID, workSessionKey(principal, runName), func(*SessionInfo) (string, string) {
+				var resolved string
+				resolved, effective = p.resolveWorkSessionEffective(identity)
+				return resolved, workSessionKey(principal, effective.RunName)
 			})
 			if id != "" {
-				p.touchWorkSession(id, identity)
+				p.touchWorkSession(id, effective)
 				return id
 			}
-			// Not persisted (a prompt read, or a store without storage): the
-			// connection still names the client and the project.
-			return resolve(identity)
 		}
 	}
 
@@ -114,7 +137,8 @@ func (p *MCPProxyServer) requestWorkSession(ctx context.Context, sessionID strin
 	} else {
 		identity.ClientName = reqcontext.ClientSurface(ctx)
 	}
-	return resolve(identity)
+	id, _ := p.resolveWorkSessionEffective(identity)
+	return id
 }
 
 // touchWorkSession moves the idle clock of a reused work session.

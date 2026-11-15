@@ -154,6 +154,11 @@ type MCPProxyServer struct {
 	// have to stand up a whole Runtime to exercise session attribution.
 	workSessionResolver func(runtime.WorkSessionIdentity) string
 
+	// workSessionResolverEffective replaces the runtime's tracker in tests
+	// that need the effective identity (a dropped run name). Nil in
+	// production.
+	workSessionResolverEffective func(runtime.WorkSessionIdentity) (string, runtime.WorkSessionIdentity)
+
 	// workSessionToucher replaces the runtime's idle-clock refresh in tests
 	// (Spec 124 FR-019). Nil in production.
 	workSessionToucher func(string, runtime.WorkSessionIdentity)
