@@ -33,4 +33,4 @@
 
 - The three unchecked items are deliberate and follow this repo's spec style (see specs/123): the Context section cites code locations to prove each gap, and requirements name existing doors (`/api/v1/sessions`, `mcpproxy doctor`) that must keep working. The reader is the maintainer, not a non-technical stakeholder.
 - Three questions are left for the plan (end of spec.md). None changes scope.
-- Not yet done: cross-model review of the spec (opencode `gpt-6.1-sol`), required before `/speckit.plan`.
+- Cross-model review of the spec: opencode `github-copilot/gpt-6.1-sol`, 8 rounds (7 with fixes), final verdict CLEAN on 2026-11-15.
