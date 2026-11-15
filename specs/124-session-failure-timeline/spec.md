@@ -187,7 +187,7 @@ An agent token that may reach two servers reads the session list. It sees its ow
 - **FR-012**: The short reason MUST be at most 200 characters and MUST come from fields the activity row already exposes to the same caller. It MUST NOT contain argument or response bodies.
 - **FR-013**: The summary MUST survive a restart. Its counts and failure facts are lifetime facts of the session and are the record of truth once rows have been trimmed or removed. A summary that is missing at start is rebuilt from the rows that remain and marked as rebuilt; a rebuild MUST NOT lower the counts of an existing summary.
 - **FR-017**: The summary MUST store the credential identity needed to decide ownership the way activity rows do: token name and token prefix (`ActivityIdentityOwner`, `internal/storage/activity_models.go:310-335`), and the owning user in the server edition. The prefix is never returned by any door.
-- **FR-014**: On first start after the upgrade the system MUST build summaries for existing rows that carry a work-session id. The pass MUST be bounded by the activity log's own caps and MUST NOT delay the core from serving requests.
+- **FR-014**: On first start after the upgrade the system MUST build summaries for existing rows that carry a work-session id. The pass MUST be bounded by the activity log's own caps and MUST NOT delay the core from serving requests. Rows written before this feature can share one work-session id across several credentials. Such a session MUST be summarised as owned by no credential: only an administrator can list or open it. Its rows stay readable to each token through the existing activity filters, under the existing ownership rule.
 - **FR-015**: A session's end MUST be recorded once its idle window has closed, at the latest by the next cleanup pass, and when the core stops, so that duration is known for finished sessions. A later row for the same work-session id reopens it.
 - **FR-016**: The summary MUST count calls blocked by policy separately from other failures, so that the list can show and filter them apart.
 
@@ -202,7 +202,7 @@ An agent token that may reach two servers reads the session list. It sees its ow
 
 **Retention**
 
-- **FR-030**: Session summaries MUST be retained by age. A session whose last activity is within the retention window MUST NOT be removed by a count cap. The fixed cap of 100 MUST no longer apply to work-session summaries.
+- **FR-030**: Session summaries MUST be retained by age. There MUST be no cap on the number of work-session summaries: the fixed cap of 100 no longer applies to them. A summary inside the retention window is removed only together with its whole session, when the activity log's own caps force it (FR-037).
 - **FR-031**: The retention window MUST default to 7 days and be configurable in days. It is read at start, like the other retention settings.
 - **FR-032**: When the activity log's size cap forces pruning, the system MUST first remove the stored argument and response bodies of the oldest rows, keeping every other field of the row, and only then remove rows. A row whose bodies were removed MUST say so when read.
 - **FR-037**: When rows must be removed, the order MUST be: rows with no work session and rows of sessions older than the window, oldest first; then whole sessions inside the window, oldest last-activity first.
@@ -226,6 +226,7 @@ An agent token that may reach two servers reads the session list. It sees its ow
   - Admin API key and local socket: every session, every row, every upstream event.
   - Agent token: only sessions it owns (FR-017), and within them only what its current reach allows, where reach is the grant narrowed by the pin (Spec 118). Rows, upstream events, the attempt and failure counts, the first and last failure, the reason, the failure index and the previous/next navigation MUST all be computed over the rows in reach. A session with no row in reach answers as not found.
   - Server-edition user: their own sessions, with the same reach rule.
+  - Inside a session it owns, an agent token MUST still be shown only rows it owns, by the same name-and-prefix rule as the activity log. Session ownership never widens row access.
   - A session the caller may not see MUST answer exactly as an id that does not exist. A caller for whom a door cannot be scoped MUST be refused.
   - Filters by token, client or profile from a scoped caller follow the Spec 108 disclosure rule: a record the caller did not make reads as unattributed.
 - **FR-048**: For a scoped caller, every value a door returns or sorts and filters by MUST be derived only from the part of the session in the caller's reach: start, end, last activity, duration, status, attempt and failure counts, first and last failure, reason, and the synthetic start and end rows. A value that cannot be derived that way (connection count, latest profile, truncated-start marker) MUST be withheld. Activity on a server outside reach MUST NOT change anything the caller can observe.
