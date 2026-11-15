@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -349,4 +350,310 @@ func TestWorkSessionSummary_UnattributedRequestRowMakesItOwnerless(t *testing.T)
 	s, _ := m.GetWorkSessionSummary("ws-admin")
 	assert.False(t, s.Ownerless)
 	assert.Empty(t, s.TokenName)
+}
+
+// ---- Review round 2 ----
+
+// A candidate list that was cut short must not let the pass move on to a more
+// destructive stage: outside rows are used up before any session inside the
+// window is touched.
+func TestRetention_TruncatedCandidatesAreRescannedBeforeSessionsGo(t *testing.T) {
+	old := maxRetentionCandidates
+	maxRetentionCandidates = 5
+	defer func() { maxRetentionCandidates = old }()
+
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	for i := 0; i < 24; i++ {
+		retRow(t, m, "", 5*time.Hour+time.Duration(i)*time.Minute, nil)
+	}
+	for i := 0; i < 3; i++ {
+		retRow(t, m, "ws-a", 2*time.Hour+time.Duration(i)*time.Minute, nil)
+		retRow(t, m, "ws-b", time.Hour+time.Duration(i)*time.Minute, nil)
+	}
+	// 30 rows; cap 12 → target 10: 20 outside rows must go, far more than one
+	// candidate list holds, and both sessions stay whole.
+	p := retPolicy()
+	p.MaxRecords = 12
+	res, err := m.RunActivityRetention(p)
+	require.NoError(t, err)
+	assert.Equal(t, 20, res.RowsOutsideWindow)
+	assert.Zero(t, res.SessionsRemoved)
+	assert.Zero(t, res.RowsTrimmed)
+	assert.Empty(t, res.ShortfallCause)
+	for _, id := range []string{"ws-a", "ws-b"} {
+		refs, _ := m.WorkSessionRowRefs(id)
+		assert.Len(t, refs, 3, id)
+	}
+
+	// The same for bodies: more rows with bodies than one list holds.
+	m2, cleanup2 := setupTestStorageForActivity(t)
+	defer cleanup2()
+	for i := 0; i < 20; i++ {
+		retRow(t, m2, "ws-1", time.Duration(20-i)*time.Minute, func(r *ActivityRecord) { r.Response = strings.Repeat("x", 3000) })
+	}
+	p2 := retPolicy()
+	p2.MaxBytes = 12000
+	res2, err := m2.RunActivityRetention(p2)
+	require.NoError(t, err)
+	assert.Greater(t, res2.BodiesStripped, 5)
+	assert.Zero(t, res2.RowsTrimmed, "bodies were enough; no row had to go")
+	assert.Equal(t, 20, countRows(t, m2))
+}
+
+// The scan reads top-level fields only: a nested value that looks like one of
+// them neither hides a row from a stage nor nominates it wrongly.
+func TestSniffRow_TopLevelOnly(t *testing.T) {
+	enc := func(r *ActivityRecord) []byte {
+		data, err := r.MarshalBinary()
+		require.NoError(t, err)
+		return data
+	}
+	ws, args, resp := sniffRow(enc(&ActivityRecord{Type: ActivityTypeToolCall, WorkSessionID: "ws-real", Response: "body"}))
+	assert.Equal(t, "ws-real", ws)
+	assert.False(t, args)
+	assert.True(t, resp)
+
+	// A row with no session whose arguments name one.
+	ws, args, _ = sniffRow(enc(&ActivityRecord{Type: ActivityTypeToolCall, Arguments: map[string]interface{}{"work_session_id": "ws-live"}}))
+	assert.Empty(t, ws, "the nested key is not the row's work session")
+	assert.True(t, args)
+
+	// A row whose arguments say bodies_removed and whose response is large.
+	_, args, resp = sniffRow(enc(&ActivityRecord{Type: ActivityTypeToolCall, Response: "big", Arguments: map[string]interface{}{"bodies_removed": true}}))
+	assert.True(t, args)
+	assert.True(t, resp, "still a stripping candidate")
+
+	// A response that quotes a whole row, with braces and escaped quotes.
+	tricky := `{"work_session_id":"ws-fake","arguments":{"a":[1,{"b":"}"}]},"x":"\\"}`
+	ws, args, resp = sniffRow(enc(&ActivityRecord{Type: ActivityTypeToolCall, WorkSessionID: "ws-real", Response: tricky}))
+	assert.Equal(t, "ws-real", ws)
+	assert.False(t, args)
+	assert.True(t, resp)
+
+	// A stripped row with nothing left.
+	_, args, resp = sniffRow(enc(&ActivityRecord{Type: ActivityTypeToolCall, WorkSessionID: "ws-1", BodiesRemoved: true}))
+	assert.False(t, args)
+	assert.False(t, resp)
+
+	// Anything unreadable is nominated for the re-check.
+	ws, args, resp = sniffRow([]byte(`not json`))
+	assert.Empty(t, ws)
+	assert.True(t, args && resp)
+}
+
+// A live row for a session that retention is removing cancels the removal:
+// the session stays, truncated and consistent, with its new row.
+func TestRetention_LiveRowCancelsASessionRemoval(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	n := retentionBatch + 200
+	for i := 0; i < n; i++ {
+		retRow(t, m, "ws-1", 3*time.Hour-time.Duration(i)*time.Millisecond, func(r *ActivityRecord) { r.Status = ActivityStatusError })
+	}
+	retRow(t, m, "ws-newer", time.Minute, nil)
+
+	// The first batch of the removal, as removeSession runs it.
+	s0, _ := m.GetWorkSessionSummary("ws-1")
+	require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
+		sums := newTxSummaries(tx)
+		sum := sums.get("ws-1")
+		sum.Removal = removalSession
+		idx := tx.Bucket([]byte(WorkSessionRowsBucket))
+		acts := tx.Bucket([]byte(ActivityRecordsBucket))
+		prefix := workSessionRowPrefix("ws-1")
+		var keys [][]byte
+		c := idx.Cursor()
+		for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix) && len(keys) < retentionBatch; k, _ = c.Next() {
+			keys = append(keys, append([]byte(nil), k[len(prefix):]...))
+		}
+		for _, ak := range keys {
+			if _, _, err := deleteRowTx(tx, sums, ak, append([]byte(nil), acts.Get(ak)...)); err != nil {
+				return err
+			}
+		}
+		_, err := sums.flush()
+		return err
+	}))
+	hidden, _ := m.GetWorkSessionSummary("ws-1")
+	require.Nil(t, hidden)
+
+	// The connection wakes up and writes a row.
+	retRow(t, m, "ws-1", 30*time.Second, nil)
+
+	s, err := m.GetWorkSessionSummary("ws-1")
+	require.NoError(t, err)
+	require.NotNil(t, s, "the session is visible again")
+	assert.Empty(t, s.Removal)
+	tot := s.Totals(nil)
+	assert.Equal(t, s0.Totals(nil).Failures, tot.Failures, "lifetime failures are untouched")
+	assert.Equal(t, 200, tot.StoredFailures, "the stored counter matches the rows that are left")
+	assert.False(t, s.TruncatedStartAt.IsZero())
+	refs, _ := m.WorkSessionRowRefs("ws-1")
+	assert.Len(t, refs, 201)
+
+	// The interrupted removal does not go on, at start or otherwise.
+	resumed, err := m.ResumeSessionRemovals()
+	require.NoError(t, err)
+	assert.Zero(t, resumed)
+	refs, _ = m.WorkSessionRowRefs("ws-1")
+	assert.Len(t, refs, 201)
+}
+
+// The same for an expiry that was dropping the index: the stored counters are
+// counted again from what is left.
+func TestRetention_LiveRowCancelsAnExpiry(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	for i := 0; i < 4; i++ {
+		retRow(t, m, "ws-1", 9*24*time.Hour-time.Duration(i)*time.Minute, func(r *ActivityRecord) { r.Status = ActivityStatusError })
+	}
+	refs, _ := m.WorkSessionRowRefs("ws-1")
+	require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
+		sums := tx.Bucket([]byte(WorkSessionsBucket))
+		s, err := loadSummary(sums, "ws-1")
+		if err != nil {
+			return err
+		}
+		s.Removal = removalSummary
+		if err := storeSummary(sums, s); err != nil {
+			return err
+		}
+		// One batch of the expiry dropped two index entries.
+		idx := tx.Bucket([]byte(WorkSessionRowsBucket))
+		for _, ref := range refs[:2] {
+			if err := idx.Delete(workSessionRowKey("ws-1", ref.ActivityKey)); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+
+	retRow(t, m, "ws-1", time.Minute, nil)
+	s, _ := m.GetWorkSessionSummary("ws-1")
+	require.NotNil(t, s)
+	assert.Equal(t, 4, s.Totals(nil).Failures)
+	assert.Equal(t, 2, s.Totals(nil).StoredFailures, "recounted from the index entries that are left")
+}
+
+// The selection of a session to remove is re-checked in the transaction that
+// starts removing it.
+func TestRetention_StaleSessionSelectionIsRefused(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	retRow(t, m, "ws-a", 3*time.Hour, nil)
+	retRow(t, m, "ws-b", 2*time.Hour, nil)
+	listed, _ := m.GetWorkSessionSummary("ws-a")
+
+	// ws-a gets the newest row of the log after it was listed as the oldest.
+	retRow(t, m, "ws-a", time.Minute, nil)
+
+	ok, err := m.removeSession("ws-a", listed.LastActivityAt, nil)
+	require.NoError(t, err)
+	assert.False(t, ok, "its last activity changed since it was selected")
+	s, _ := m.GetWorkSessionSummary("ws-a")
+	require.NotNil(t, s)
+	assert.Empty(t, s.Removal)
+
+	// Even with the right expectation, the session that holds the newest row
+	// of the log is not removed.
+	ok, err = m.removeSession("ws-a", s.LastActivityAt, nil)
+	require.NoError(t, err)
+	assert.False(t, ok)
+
+	// The pass removes the other one instead, and trims; it never empties.
+	p := retPolicy()
+	p.MaxRecords = 2
+	_, err = m.RunActivityRetention(p)
+	require.NoError(t, err)
+	gone, _ := m.GetWorkSessionSummary("ws-b")
+	assert.Nil(t, gone)
+	kept, _ := m.GetWorkSessionSummary("ws-a")
+	require.NotNil(t, kept)
+}
+
+// Many held decisions of ONE attempt followed by its tool call: all of them
+// are companions, however many transactions it takes to write them.
+func TestWorkSessionBackfill_ManyCompanionsOfOneAttempt(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	n := backfillBatch + 300
+	for i := 0; i < n; i++ {
+		putRawActivity(t, m, wsRow("ws-old", time.Duration(i)*time.Microsecond, func(r *ActivityRecord) {
+			r.Type, r.Status, r.RequestID = ActivityTypePolicyDecision, "blocked", "req-one"
+			r.ID = fmt.Sprintf("dec-%05d", i)
+		}))
+	}
+	putRawActivity(t, m, wsRow("ws-old", time.Second, func(r *ActivityRecord) {
+		r.RequestID, r.Status = "req-one", ActivityStatusError
+	}))
+	indexed, err := m.BackfillWorkSessions(nil)
+	require.NoError(t, err)
+	assert.Equal(t, n+1, indexed)
+	s, _ := m.GetWorkSessionSummary("ws-old")
+	require.NotNil(t, s)
+	assert.Equal(t, 1, s.Totals(nil).Attempts, "one attempt: the tool call")
+	assert.Zero(t, s.Totals(nil).Blocks)
+}
+
+// A server name that contains the index separator is not indexed, so it can
+// never show up in another server's event range.
+func TestUpstreamEventIndex_SeparatorInServerName(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	at := wsBase
+	save := func(server string) {
+		require.NoError(t, m.SaveActivity(&ActivityRecord{
+			Type: ActivityTypeUpstreamEvent, Status: ActivityStatusError, ServerName: server, Timestamp: at,
+		}))
+		at = at.Add(time.Second)
+	}
+	save("a")
+	save("a\x00b")
+	save("ab")
+
+	refs, err := m.UpstreamEventRefs("a", wsBase.Add(-time.Hour), wsBase.Add(time.Hour))
+	require.NoError(t, err)
+	require.Len(t, refs, 1, "only server a's own event")
+	assert.Equal(t, "a", refs[0].Server)
+	assert.False(t, refs[0].Timestamp.IsZero())
+
+	odd, err := m.UpstreamEventRefs("a\x00b", wsBase.Add(-time.Hour), wsBase.Add(time.Hour))
+	require.NoError(t, err)
+	assert.Empty(t, odd)
+	// The row itself is still in the activity log.
+	_, total, err := m.ListActivities(ActivityFilter{Types: []string{string(ActivityTypeUpstreamEvent)}, Limit: 10})
+	require.NoError(t, err)
+	assert.Equal(t, 3, total)
+}
+
+// A summary is rebuilt in bounded reads, and rows indexed while it was being
+// read are folded in when it is published.
+func TestWorkSessionRepair_LargeSessionAndLateRows(t *testing.T) {
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	n := repairChunk*2 + 250
+	for i := 0; i < n; i++ {
+		require.NoError(t, m.SaveActivity(wsRow("ws-big", time.Duration(i)*time.Millisecond, func(r *ActivityRecord) {
+			if i%10 == 0 {
+				r.Status = ActivityStatusError
+			}
+		})))
+	}
+	before, _ := m.GetWorkSessionSummary("ws-big")
+	require.NoError(t, m.db.db.Update(func(tx *bbolt.Tx) error {
+		return tx.Bucket([]byte(WorkSessionsBucket)).Delete([]byte("ws-big"))
+	}))
+
+	rebuilt, err := m.RepairWorkSessionSummaries()
+	require.NoError(t, err)
+	assert.Equal(t, 1, rebuilt)
+	after, _ := m.GetWorkSessionSummary("ws-big")
+	require.NotNil(t, after)
+	assert.True(t, after.Rebuilt)
+	assert.Equal(t, before.Totals(nil).Attempts, after.Totals(nil).Attempts)
+	assert.Equal(t, before.Totals(nil).Failures, after.Totals(nil).Failures)
+	assert.Equal(t, before.Totals(nil).StoredFailures, after.Totals(nil).StoredFailures)
+	assert.Equal(t, before.StartedAt, after.StartedAt)
+	assert.Equal(t, before.LastActivityAt, after.LastActivityAt)
 }

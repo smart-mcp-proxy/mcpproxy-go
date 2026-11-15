@@ -39,12 +39,15 @@ const (
 	// scanChunk bounds the keys one read transaction of the measuring scan
 	// visits, so the scan never pins one snapshot for the whole log.
 	scanChunk = 10000
-	// maxRetentionCandidates bounds each candidate list the scan collects.
-	// A pass that needs more continues in the next pass.
-	maxRetentionCandidates = 50000
 	// retentionShortfallKey holds the RetentionShortfall record (MetaBucket).
 	retentionShortfallKey = "activity_retention_shortfall"
 )
+
+// maxRetentionCandidates bounds each candidate list one scan collects. When a
+// list is cut and the log is still over its caps after the list is used up,
+// the pass reads the log again and goes on with the same stage. A variable so
+// that tests can make the bound small.
+var maxRetentionCandidates = 50000
 
 // Shortfall causes (FR-035).
 const (
@@ -73,6 +76,8 @@ type RetentionResult struct {
 	// ShortfallCause is set when this pass removed or trimmed a session inside
 	// the window.
 	ShortfallCause string
+
+	countCapStarted bool
 }
 
 // RetentionShortfall records that the caps could not hold the whole retention
@@ -116,38 +121,151 @@ type logScan struct {
 	outside [][]byte
 	// newest is the key of the newest row, which is never removed.
 	newest []byte
+	// stripTruncated / outsideTruncated say a candidate list was cut at
+	// maxRetentionCandidates: more such rows exist than were nominated.
+	stripTruncated   bool
+	outsideTruncated bool
 }
 
-var (
-	sniffWorkSession  = []byte(`"work_session_id":"`)
-	sniffArguments    = []byte(`"arguments":{`)
-	sniffResponse     = []byte(`"response":"`)
-	sniffBodiesGone   = []byte(`"bodies_removed":true`)
-	sniffAuthArgument = "_auth_"
-)
+// maxRetentionRescans bounds how often one pass reads the log again because
+// a candidate list was cut. Each rescan handles maxRetentionCandidates more
+// rows, so the bound covers a log far larger than the record cap allows.
+const maxRetentionRescans = 32
 
-// sniffedWorkSessionID reads the work-session id out of a stored row without
-// decoding it. JSON escapes a quote inside a string, so the unescaped pattern
-// is a real key; a nested map with the same key name can only make a row look
-// like it belongs to a session, and the acting step re-checks.
-func sniffedWorkSessionID(v []byte) string {
-	i := bytes.Index(v, sniffWorkSession)
-	if i < 0 {
-		return ""
-	}
-	rest := v[i+len(sniffWorkSession):]
-	j := bytes.IndexByte(rest, '"')
-	if j < 0 {
-		return ""
-	}
-	return string(rest[:j])
-}
+const sniffAuthArgument = "_auth_"
 
-func sniffedHasBodies(v []byte) bool {
-	if bytes.Contains(v, sniffBodiesGone) {
-		return false
+// sniffRow reads three facts out of a stored row without decoding it: its
+// work-session id, and whether it has arguments or a response. It walks the
+// TOP LEVEL of the JSON object only, so a nested value that merely looks like
+// one of these keys (an argument named "work_session_id", a response body
+// that quotes a row) cannot be mistaken for the row's own field.
+//
+// It is a nomination, not a decision: the acting step decodes the row and
+// re-checks. On anything it does not understand it answers conservatively
+// (no session, has bodies), so the row is nominated and the re-check decides.
+func sniffRow(v []byte) (workSession string, hasArguments, hasResponse bool) {
+	conservative := func() (string, bool, bool) { return "", true, true }
+	i, n := 0, len(v)
+	skipSpace := func() {
+		for i < n && (v[i] == ' ' || v[i] == '\n' || v[i] == '\t' || v[i] == '\r') {
+			i++
+		}
 	}
-	return bytes.Contains(v, sniffArguments) || bytes.Contains(v, sniffResponse)
+	// readString consumes a JSON string starting at v[i] == '"' and returns
+	// its raw bytes (escapes are left as they are).
+	readString := func() ([]byte, bool) {
+		if i >= n || v[i] != '"' {
+			return nil, false
+		}
+		i++
+		start := i
+		for i < n {
+			switch v[i] {
+			case '\\':
+				i += 2
+			case '"':
+				out := v[start:i]
+				i++
+				return out, true
+			default:
+				i++
+			}
+		}
+		return nil, false
+	}
+	// skipValue consumes any JSON value starting at v[i].
+	skipValue := func() bool {
+		if i >= n {
+			return false
+		}
+		switch v[i] {
+		case '"':
+			_, ok := readString()
+			return ok
+		case '{', '[':
+			depth := 0
+			for i < n {
+				switch v[i] {
+				case '"':
+					if _, ok := readString(); !ok {
+						return false
+					}
+					continue
+				case '{', '[':
+					depth++
+				case '}', ']':
+					depth--
+					if depth == 0 {
+						i++
+						return true
+					}
+				}
+				i++
+			}
+			return false
+		default:
+			for i < n && v[i] != ',' && v[i] != '}' {
+				i++
+			}
+			return i < n
+		}
+	}
+
+	skipSpace()
+	if i >= n || v[i] != '{' {
+		return conservative()
+	}
+	i++
+	for {
+		skipSpace()
+		if i < n && v[i] == '}' {
+			return workSession, hasArguments, hasResponse
+		}
+		key, ok := readString()
+		if !ok {
+			return conservative()
+		}
+		skipSpace()
+		if i >= n || v[i] != ':' {
+			return conservative()
+		}
+		i++
+		skipSpace()
+		switch string(key) {
+		case "work_session_id":
+			val, ok := readString()
+			if !ok {
+				return conservative()
+			}
+			workSession = string(val)
+		case "response":
+			val, ok := readString()
+			if !ok {
+				return conservative()
+			}
+			hasResponse = len(val) > 0
+		case "arguments":
+			start := i
+			if !skipValue() {
+				return conservative()
+			}
+			// "null" and "{}" are no arguments.
+			hasArguments = i-start > 2 && v[start] == '{'
+		default:
+			if !skipValue() {
+				return conservative()
+			}
+		}
+		skipSpace()
+		if i < n && v[i] == ',' {
+			i++
+			continue
+		}
+		if i < n && v[i] == '}' {
+			return workSession, hasArguments, hasResponse
+		}
+		return conservative()
+	}
 }
 
 // scanLog reads the activity log once, in bounded read transactions, and
@@ -197,12 +315,19 @@ func (m *Manager) scanLog() (logScan, error) {
 				scan.st.rows++
 				scan.st.bytes += int64(len(k) + len(v))
 				scan.newest = append(scan.newest[:0], k...)
-				if len(scan.strip) < maxRetentionCandidates && sniffedHasBodies(v) {
-					scan.strip = append(scan.strip, append([]byte(nil), k...))
+				ws, hasArguments, hasResponse := sniffRow(v)
+				if hasArguments || hasResponse {
+					if len(scan.strip) < maxRetentionCandidates {
+						scan.strip = append(scan.strip, append([]byte(nil), k...))
+					} else {
+						scan.stripTruncated = true
+					}
 				}
-				if len(scan.outside) < maxRetentionCandidates {
-					if ws := sniffedWorkSessionID(v); ws == "" || !live[ws] {
+				if ws == "" || !live[ws] {
+					if len(scan.outside) < maxRetentionCandidates {
 						scan.outside = append(scan.outside, append([]byte(nil), k...))
+					} else {
+						scan.outsideTruncated = true
 					}
 				}
 			}
@@ -346,7 +471,7 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 
 	// 2. Age cap.
 	if p.MaxAge > 0 {
-		n, inWindow, err := m.pruneAged(p.Now.Add(-p.MaxAge))
+		n, inWindow, err := m.pruneAged(p.Now.Add(-p.MaxAge), p)
 		if err != nil {
 			return res, err
 		}
@@ -357,62 +482,88 @@ func (m *Manager) RunActivityRetention(p RetentionPolicy) (RetentionResult, erro
 	}
 
 	// 3. Size and count caps.
+	//
+	// A stage that is less destructive must be used up before the next one
+	// starts. The scan nominates a bounded number of rows per stage, so when a
+	// stage ran out of nominations that were cut short and the log is still
+	// over, the log is read again and the same stage goes on; the pass never
+	// moves on to deleting rows, or whole sessions, while bodies or outside
+	// rows that could have satisfied the cap remain.
 	if p.MaxBytes > 0 || p.MaxRecords > 0 {
-		scan, err := m.scanLog()
-		if err != nil {
-			return res, err
-		}
-		st := scan.st
-		// The count cap prunes down to 90% of itself, and never below one row.
-		countCap, targetRows := p.MaxRecords > 0 && st.rows > p.MaxRecords, 0
-		if countCap {
-			targetRows = int(float64(p.MaxRecords) * 0.9)
-			if targetRows < 1 {
-				targetRows = 1
+		for rescan := 0; ; rescan++ {
+			scan, err := m.scanLog()
+			if err != nil {
+				return res, err
 			}
-		}
-		over := func() bool {
-			return (p.MaxBytes > 0 && st.bytes > p.MaxBytes) || (countCap && st.rows > targetRows)
-		}
-		cause := func() string {
-			if p.MaxBytes > 0 && st.bytes > p.MaxBytes {
-				return ShortfallSizeCap
+			st := scan.st
+			// The count cap prunes down to 90% of itself, and never below
+			// one row.
+			countCap, targetRows := p.MaxRecords > 0 && st.rows > p.MaxRecords, 0
+			if rescan > 0 && p.MaxRecords > 0 {
+				// A pass that already started pruning for the count cap
+				// keeps pruning to its target, not to the cap.
+				countCap = st.rows > int(float64(p.MaxRecords)*0.9) && res.countCapStarted
 			}
-			return ShortfallRecordCap
-		}
+			if countCap {
+				res.countCapStarted = true
+				targetRows = int(float64(p.MaxRecords) * 0.9)
+				if targetRows < 1 {
+					targetRows = 1
+				}
+			}
+			over := func() bool {
+				return (p.MaxBytes > 0 && st.bytes > p.MaxBytes) || (countCap && st.rows > targetRows)
+			}
+			cause := func() string {
+				if p.MaxBytes > 0 && st.bytes > p.MaxBytes {
+					return ShortfallSizeCap
+				}
+				return ShortfallRecordCap
+			}
+			again := func(truncated bool) bool {
+				return truncated && over() && rescan < maxRetentionRescans
+			}
 
-		// 3a. Bodies. Only the size cap is helped by this.
-		if p.MaxBytes > 0 && st.bytes > p.MaxBytes {
-			n, err := m.stripBodies(&st, p.MaxBytes, scan.strip)
-			if err != nil {
-				return res, err
+			// 3a. Bodies. Only the size cap is helped by this.
+			if p.MaxBytes > 0 && st.bytes > p.MaxBytes {
+				n, err := m.stripBodies(&st, p.MaxBytes, scan.strip)
+				if err != nil {
+					return res, err
+				}
+				res.BodiesStripped += n
+				if p.MaxBytes > 0 && st.bytes > p.MaxBytes && scan.stripTruncated && rescan < maxRetentionRescans {
+					continue // more bodies remain than were nominated
+				}
 			}
-			res.BodiesStripped = n
-		}
-		// 3b. Rows outside the window.
-		if over() {
-			n, err := m.pruneOutsideWindow(&st, over, scan.outside, scan.newest)
-			if err != nil {
-				return res, err
+			// 3b. Rows outside the window.
+			if over() {
+				n, err := m.pruneOutsideWindow(&st, over, scan.outside, scan.newest)
+				if err != nil {
+					return res, err
+				}
+				res.RowsOutsideWindow += n
+				if again(scan.outsideTruncated) {
+					continue // more outside rows remain than were nominated
+				}
 			}
-			res.RowsOutsideWindow = n
-		}
-		// 3c. Whole sessions, and 3d. the last one.
-		if over() {
-			c := cause()
-			// Recorded before the first row goes: a pass that is interrupted
-			// midway has still told the operator.
-			if err := m.updateShortfall(p, c); err != nil {
-				return res, err
+			// 3c. Whole sessions, and 3d. the last one.
+			if over() {
+				c := cause()
+				// Recorded before the first row goes: a pass that is
+				// interrupted midway has still told the operator.
+				if err := m.updateShortfall(p, c); err != nil {
+					return res, err
+				}
+				removed, trimmed, err := m.pruneSessions(&st, over)
+				if err != nil {
+					return res, err
+				}
+				res.SessionsRemoved, res.RowsTrimmed = removed, trimmed
+				if removed > 0 || trimmed > 0 {
+					res.ShortfallCause = c
+				}
 			}
-			removed, trimmed, err := m.pruneSessions(&st, over)
-			if err != nil {
-				return res, err
-			}
-			res.SessionsRemoved, res.RowsTrimmed = removed, trimmed
-			if removed > 0 || trimmed > 0 {
-				res.ShortfallCause = c
-			}
+			break
 		}
 	}
 
@@ -483,6 +634,16 @@ func (m *Manager) dropSession(id, mode string, expireBefore time.Time, st *reten
 			acts := tx.Bucket([]byte(ActivityRecordsBucket))
 			sums := tx.Bucket([]byte(WorkSessionsBucket))
 
+			if !first && sums != nil {
+				// A live row cleared the mark: the session is active again
+				// and keeps what is left of its index.
+				if sum, err := loadSummary(sums, id); err != nil {
+					return err
+				} else if sum == nil || sum.Removal == "" {
+					skipped = true
+					return nil
+				}
+			}
 			if first && sums != nil {
 				sum, err := loadSummary(sums, id)
 				if err != nil {
@@ -578,16 +739,79 @@ func (m *Manager) ResumeSessionRemovals() (int, error) {
 		return 0, err
 	}
 	for id, mode := range pending {
-		if _, err := m.dropSession(id, mode, time.Time{}, nil); err != nil {
+		var err error
+		if mode == removalSession {
+			err = m.resumeSessionRemoval(id)
+		} else {
+			_, err = m.dropSession(id, mode, time.Time{}, nil)
+		}
+		if err != nil {
 			return 0, err
 		}
 	}
 	return len(pending), nil
 }
 
+// resumeSessionRemoval finishes an interrupted whole-session removal. The
+// mark is already on the summary, so the selection is not re-checked.
+func (m *Manager) resumeSessionRemoval(id string) error {
+	// removeSession's first transaction sets the mark and re-checks the
+	// selection; on resume the mark is set and the checks do not apply, so
+	// the loop is entered as a continuation.
+	prefix := workSessionRowPrefix(id)
+	for {
+		more := false
+		err := m.db.db.Update(func(tx *bbolt.Tx) error {
+			idx := tx.Bucket([]byte(WorkSessionRowsBucket))
+			acts := tx.Bucket([]byte(ActivityRecordsBucket))
+			sums := newTxSummaries(tx)
+			sum := sums.get(id)
+			if sum == nil || sum.Removal == "" {
+				return nil
+			}
+			var keys [][]byte
+			if idx != nil {
+				c := idx.Cursor()
+				for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+					if len(keys) == retentionBatch {
+						more = true
+						break
+					}
+					keys = append(keys, append([]byte(nil), k[len(prefix):]...))
+				}
+			}
+			for _, ak := range keys {
+				var v []byte
+				if acts != nil {
+					v = acts.Get(ak)
+				}
+				if v == nil {
+					if err := idx.Delete(workSessionRowKey(id, ak)); err != nil {
+						return err
+					}
+					continue
+				}
+				if _, _, err := deleteRowTx(tx, sums, ak, append([]byte(nil), v...)); err != nil {
+					return err
+				}
+			}
+			if _, err := sums.flush(); err != nil {
+				return err
+			}
+			if !more {
+				return sums.bucket.Delete([]byte(id))
+			}
+			return nil
+		})
+		if err != nil || !more {
+			return err
+		}
+	}
+}
+
 // pruneAged deletes rows older than cutoff, oldest first. It reports whether a
 // session that still has a summary lost rows.
-func (m *Manager) pruneAged(cutoff time.Time) (deleted int, inWindow bool, err error) {
+func (m *Manager) pruneAged(cutoff time.Time, p RetentionPolicy) (deleted int, inWindow bool, err error) {
 	cutoffKey := activityKey(cutoff, "")
 	for {
 		batch := 0
@@ -607,6 +831,14 @@ func (m *Manager) pruneAged(cutoff time.Time) (deleted int, inWindow bool, err e
 				_, in, err := deleteRowTx(tx, sums, d.k, d.v)
 				if err != nil {
 					return fmt.Errorf("failed to delete old activity: %w", err)
+				}
+				if in && !inWindow {
+					// Recorded in the transaction that removes the first row
+					// of a session inside the window: a crash after it must
+					// not leave the loss unreported.
+					if err := putShortfallTx(tx, p, ShortfallAgeCap); err != nil {
+						return err
+					}
 				}
 				inWindow = inWindow || in
 				batch++
@@ -800,23 +1032,160 @@ func overAfter(st *retentionState, pending retentionState, over func() bool) boo
 // first, and trims the last remaining one from its oldest end when it alone is
 // still over the caps.
 func (m *Manager) pruneSessions(st *retentionState, over func() bool) (removed, trimmed int, err error) {
-	sums, err := m.ListWorkSessionSummaries()
-	if err != nil {
-		return 0, 0, err
-	}
-	sort.Slice(sums, func(i, j int) bool { return sums[i].LastActivityAt.Before(sums[j].LastActivityAt) })
-
-	for len(sums) > 1 && over() {
-		if _, err := m.dropSession(sums[0].ID, removalSession, time.Time{}, st); err != nil {
+	lastSkipped := ""
+	for over() {
+		// The order is read again for every removal: a session that got a
+		// row since is no longer the one with the oldest last activity.
+		sums, err := m.ListWorkSessionSummaries()
+		if err != nil {
 			return removed, trimmed, err
 		}
-		removed++
-		sums = sums[1:]
+		if len(sums) <= 1 {
+			if len(sums) == 1 {
+				trimmed, err = m.trimSession(sums[0].ID, st, over)
+			}
+			return removed, trimmed, err
+		}
+		sort.Slice(sums, func(i, j int) bool {
+			if !sums[i].LastActivityAt.Equal(sums[j].LastActivityAt) {
+				return sums[i].LastActivityAt.Before(sums[j].LastActivityAt)
+			}
+			return sums[i].ID < sums[j].ID
+		})
+		victim := sums[0]
+		ok, err := m.removeSession(victim.ID, victim.LastActivityAt, st)
+		if err != nil {
+			return removed, trimmed, err
+		}
+		if ok {
+			removed++
+			lastSkipped = ""
+			continue
+		}
+		// The selection went stale between the listing and the removal. It
+		// is made again; a second refusal of the same session ends the stage
+		// rather than spin.
+		if lastSkipped == victim.ID {
+			return removed, trimmed, nil
+		}
+		lastSkipped = victim.ID
 	}
-	if len(sums) == 1 && over() {
-		trimmed, err = m.trimSession(sums[0].ID, st, over)
+	return removed, trimmed, nil
+}
+
+// removeSession removes a whole session inside the window: its rows, its
+// index entries and its summary, in batches.
+//
+// Rows go through deleteRowTx, so the summary's stored counters and truncated
+// start stay true after every batch, and the first batch marks the summary as
+// being removed. That makes every interruption safe:
+//
+//   - a crash leaves a truncated, consistent, marked session, hidden from
+//     readers, and the removal is finished at the next start;
+//   - a live row for the session (a long-lived connection woke up) clears the
+//     mark in indexActivityTx; the next batch sees that and stops, and the
+//     session stays, truncated, with its new row.
+//
+// The first transaction re-checks the selection: the session must still have
+// the last activity it was selected for (expectLast, when set), and must not
+// hold the newest row of the log, which is never removed. It reports false
+// when the session was left alone.
+func (m *Manager) removeSession(id string, expectLast time.Time, st *retentionState) (bool, error) {
+	prefix := workSessionRowPrefix(id)
+	first := true
+	for {
+		more, stopped, skipped := false, false, false
+		err := m.db.db.Update(func(tx *bbolt.Tx) error {
+			idx := tx.Bucket([]byte(WorkSessionRowsBucket))
+			acts := tx.Bucket([]byte(ActivityRecordsBucket))
+			sums := newTxSummaries(tx)
+			sum := sums.get(id)
+			if sum == nil {
+				stopped = true
+				return nil
+			}
+			if first {
+				if !expectLast.IsZero() && !sum.LastActivityAt.Equal(expectLast) {
+					skipped = true
+					return nil
+				}
+				if acts != nil && idx != nil {
+					if newest, _ := acts.Cursor().Last(); newest != nil && idx.Get(workSessionRowKey(id, newest)) != nil {
+						skipped = true
+						return nil
+					}
+				}
+				sum.Removal = removalSession
+			} else if sum.Removal == "" {
+				stopped = true // a live row cancelled the removal
+				return nil
+			}
+
+			var keys [][]byte
+			if idx != nil {
+				c := idx.Cursor()
+				for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
+					if len(keys) == retentionBatch {
+						more = true
+						break
+					}
+					keys = append(keys, append([]byte(nil), k[len(prefix):]...))
+				}
+			}
+			var freed int64
+			rows := 0
+			for _, ak := range keys {
+				var v []byte
+				if acts != nil {
+					v = acts.Get(ak)
+				}
+				if v == nil {
+					ik := workSessionRowKey(id, ak)
+					if iv := idx.Get(ik); iv != nil {
+						freed += int64(len(ik) + len(iv))
+						if err := idx.Delete(ik); err != nil {
+							return err
+						}
+					}
+					continue
+				}
+				f, _, err := deleteRowTx(tx, sums, ak, append([]byte(nil), v...))
+				if err != nil {
+					return err
+				}
+				freed += f
+				rows++
+			}
+			delta, err := sums.flush()
+			if err != nil {
+				return err
+			}
+			if !more {
+				// Nothing of the session is left: the summary goes too.
+				if v := sums.bucket.Get([]byte(id)); v != nil {
+					freed += int64(len(id) + len(v))
+				}
+				if err := sums.bucket.Delete([]byte(id)); err != nil {
+					return err
+				}
+			}
+			if st != nil {
+				st.rows -= rows
+				st.bytes += delta - freed
+			}
+			return nil
+		})
+		if err != nil {
+			return false, err
+		}
+		if skipped {
+			return false, nil
+		}
+		first = false
+		if stopped || !more {
+			return true, nil
+		}
 	}
-	return removed, trimmed, err
 }
 
 // trimSession deletes the oldest rows of one session until the caps hold. The
@@ -888,6 +1257,13 @@ func (m *Manager) trimSession(id string, st *retentionState, over func() bool) (
 // record once no in-window removal has happened for a full window.
 func (m *Manager) updateShortfall(p RetentionPolicy, cause string) error {
 	return m.db.db.Update(func(tx *bbolt.Tx) error {
+		return putShortfallTx(tx, p, cause)
+	})
+}
+
+// putShortfallTx is updateShortfall inside a caller's transaction.
+func putShortfallTx(tx *bbolt.Tx, p RetentionPolicy, cause string) error {
+	{
 		meta, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
 		if err != nil {
 			return err
@@ -913,7 +1289,7 @@ func (m *Manager) updateShortfall(p RetentionPolicy, cause string) error {
 			return err
 		}
 		return meta.Put([]byte(retentionShortfallKey), data)
-	})
+	}
 }
 
 // oldestCompleteSession is the start of the oldest session whose rows have not

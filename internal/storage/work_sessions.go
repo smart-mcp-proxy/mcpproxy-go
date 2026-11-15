@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -563,13 +564,61 @@ func indexActivityTx(tx *bbolt.Tx, r *ActivityRecord, key []byte, role AttemptRo
 	if s == nil {
 		s = &WorkSessionSummary{ID: r.WorkSessionID}
 	}
+	if s.Removal != "" {
+		// Retention was removing this session and a new row has arrived for
+		// it (a long-lived connection woke up). The session lives on: the
+		// mark is cleared, which also stops the removal at its next batch,
+		// and the session is truncated to what is still stored.
+		mode := s.Removal
+		s.Removal = ""
+		if mode == removalSummary {
+			// That mode drops index entries without touching the stored
+			// counters (the summary was about to go), so they are counted
+			// again from what is left.
+			recountStoredFromIndex(rows, s)
+		}
+		prefix := workSessionRowPrefix(s.ID)
+		if k, _ := rows.Cursor().Seek(prefix); k != nil && bytes.HasPrefix(k, prefix) {
+			s.TruncatedStartAt = activityKeyTime(k[len(prefix):])
+		}
+	}
 	s.applyRow(r, role)
 	return storeSummary(sums, s)
 }
 
+// recountStoredFromIndex sets the stored failure and block counters of a
+// summary from the session's remaining index entries.
+func recountStoredFromIndex(rows *bbolt.Bucket, s *WorkSessionSummary) {
+	for _, p := range s.Servers {
+		p.StoredFailures, p.StoredBlocks = 0, 0
+	}
+	prefix := workSessionRowPrefix(s.ID)
+	c := rows.Cursor()
+	for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+		flags, server := parseIndexValue(v)
+		role := flagsRole(flags)
+		p := s.Servers[server]
+		if p == nil || !role.Counted || !role.Failed {
+			continue
+		}
+		p.StoredFailures++
+		if role.Block {
+			p.StoredBlocks++
+		}
+	}
+}
+
+// indexableServerName reports whether a server name can be the left part of
+// an index key. The separator is 0x00, so a name that contains it would make
+// one server's entries match another server's prefix; such a name is not
+// indexed (its event rows are still stored and listed by the activity log).
+func indexableServerName(name string) bool {
+	return name != "" && strings.IndexByte(name, workSessionKeySep) < 0
+}
+
 // indexUpstreamEventTx indexes an upstream event row by its server.
 func indexUpstreamEventTx(tx *bbolt.Tx, r *ActivityRecord, key []byte) error {
-	if r.Type != ActivityTypeUpstreamEvent || r.ServerName == "" {
+	if r.Type != ActivityTypeUpstreamEvent || !indexableServerName(r.ServerName) {
 		return nil
 	}
 	b, err := tx.CreateBucketIfNotExists([]byte(UpstreamEventsByServerBucket))
@@ -691,6 +740,9 @@ func (m *Manager) WalkWorkSessionRefs(workSessionID string, fn func(WorkSessionR
 // is within [from, to], in time order. A zero `to` means "until now".
 func (m *Manager) UpstreamEventRefs(server string, from, to time.Time) ([]WorkSessionRowRef, error) {
 	var refs []WorkSessionRowRef
+	if !indexableServerName(server) {
+		return nil, nil
+	}
 	err := m.db.db.View(func(tx *bbolt.Tx) error {
 		b := tx.Bucket([]byte(UpstreamEventsByServerBucket))
 		if b == nil {
@@ -702,6 +754,11 @@ func (m *Manager) UpstreamEventRefs(server string, from, to time.Time) ([]WorkSe
 		for k, v := c.Seek(start); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
 			ak := append([]byte(nil), k[len(prefix):]...)
 			ts := activityKeyTime(ak)
+			// The suffix must be a whole activity key inside the span. A
+			// malformed one is skipped rather than joined into a timeline.
+			if len(ak) < 22 || ts.IsZero() || ts.Before(from) {
+				continue
+			}
 			if !to.IsZero() && ts.After(to) {
 				break
 			}
@@ -815,46 +872,108 @@ func (m *Manager) RepairWorkSessionSummaries() (int, error) {
 
 	rebuilt := 0
 	for _, id := range missing {
-		err := m.db.db.Update(func(tx *bbolt.Tx) error {
-			sums, err := tx.CreateBucketIfNotExists([]byte(WorkSessionsBucket))
-			if err != nil {
-				return err
-			}
-			if sums.Get([]byte(id)) != nil {
-				return nil // written meanwhile by a live row
-			}
-			rows := tx.Bucket([]byte(WorkSessionRowsBucket))
-			acts := tx.Bucket([]byte(ActivityRecordsBucket))
-			if rows == nil || acts == nil {
-				return nil
-			}
-			s := &WorkSessionSummary{ID: id, Rebuilt: true}
-			prefix := workSessionRowPrefix(id)
-			c := rows.Cursor()
-			for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
-				data := acts.Get(k[len(prefix):])
-				if data == nil {
-					continue
-				}
-				rec := &ActivityRecord{}
-				if err := rec.UnmarshalBinary(data); err != nil {
-					continue
-				}
-				flags, _ := parseIndexValue(v)
-				s.applyRow(rec, flagsRole(flags))
-			}
-			if s.StartedAt.IsZero() {
-				return nil // every row is gone; nothing to summarise
-			}
-			s.EndedAt = s.LastActivityAt
-			rebuilt++
-			return storeSummary(sums, s)
-		})
+		ok, err := m.rebuildSummary(id)
 		if err != nil {
 			return rebuilt, err
 		}
+		if ok {
+			rebuilt++
+		}
 	}
 	return rebuilt, nil
+}
+
+// repairChunk bounds the rows one transaction of a rebuild reads.
+const repairChunk = 1000
+
+// rebuildSummary rebuilds one missing summary from its retained rows. The
+// rows are read in bounded read transactions, so a session of any size never
+// holds the database's single writer; the summary is published in one short
+// write transaction, which also folds in the rows that were indexed after
+// the reading passed them, and gives way to a summary a live row has created
+// meanwhile by merging into the rebuilt one.
+func (m *Manager) rebuildSummary(id string) (bool, error) {
+	s := &WorkSessionSummary{ID: id, Rebuilt: true}
+	prefix := workSessionRowPrefix(id)
+	var last []byte // the last index key folded in
+
+	// fold applies the index entries after `last`, at most `limit` of them
+	// (0 = all), and reports whether it reached the end.
+	fold := func(tx *bbolt.Tx, limit int) bool {
+		rows := tx.Bucket([]byte(WorkSessionRowsBucket))
+		acts := tx.Bucket([]byte(ActivityRecordsBucket))
+		if rows == nil || acts == nil {
+			return true
+		}
+		c := rows.Cursor()
+		var k, v []byte
+		if last == nil {
+			k, v = c.Seek(prefix)
+		} else {
+			k, v = c.Seek(last)
+			if k != nil && bytes.Equal(k, last) {
+				k, v = c.Next()
+			}
+		}
+		n := 0
+		for ; k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			if limit > 0 && n == limit {
+				return false
+			}
+			n++
+			last = append(last[:0], k...)
+			data := acts.Get(k[len(prefix):])
+			if data == nil {
+				continue
+			}
+			rec := &ActivityRecord{}
+			if err := rec.UnmarshalBinary(data); err != nil {
+				continue
+			}
+			flags, _ := parseIndexValue(v)
+			s.applyRow(rec, flagsRole(flags))
+		}
+		return true
+	}
+
+	for {
+		done := false
+		if err := m.db.db.View(func(tx *bbolt.Tx) error {
+			done = fold(tx, repairChunk)
+			return nil
+		}); err != nil {
+			return false, err
+		}
+		if done {
+			break
+		}
+	}
+
+	published := false
+	err := m.db.db.Update(func(tx *bbolt.Tx) error {
+		sums, err := tx.CreateBucketIfNotExists([]byte(WorkSessionsBucket))
+		if err != nil {
+			return err
+		}
+		// Rows indexed since the reading passed them (a short tail).
+		fold(tx, 0)
+		if s.StartedAt.IsZero() {
+			return nil // every row is gone; nothing to summarise
+		}
+		// A live row may have created a summary meanwhile. It holds only the
+		// rows written since, all of which were just folded in above, so the
+		// rebuilt summary replaces it and nothing is lowered.
+		if existing, err := loadSummary(sums, id); err != nil {
+			return err
+		} else if existing != nil && !existing.EndedAt.IsZero() {
+			s.EndedAt = existing.EndedAt
+		} else if existing == nil {
+			s.EndedAt = s.LastActivityAt
+		}
+		published = true
+		return storeSummary(sums, s)
+	})
+	return published, err
 }
 
 // CloseOpenWorkSessionsAtStart gives every summary with no end its last

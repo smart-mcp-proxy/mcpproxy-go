@@ -37,6 +37,24 @@ type backfillPending struct {
 	rec *ActivityRecord
 }
 
+// companionOf reports whether a held blocking decision is the companion of
+// one of the tool_call rows the pass has seen near it.
+func companionOf(calls []backfillCall, rec *ActivityRecord) bool {
+	for _, cl := range calls {
+		if !cl.same(rec) {
+			continue
+		}
+		d := cl.at.Sub(rec.Timestamp)
+		if d < 0 {
+			d = -d
+		}
+		if d <= companionWindow {
+			return true
+		}
+	}
+	return false
+}
+
 // workSessionBackfillDone reports whether the one-time pass has completed.
 func (m *Manager) workSessionBackfillDone() bool {
 	done := false
@@ -63,11 +81,14 @@ func (m *Manager) workSessionBackfillDone() bool {
 // policy_decision is therefore paired by shape: it is the companion of a
 // tool_call row of the same work session, request id, server and tool that
 // lies within companionWindow of it, before or after, and is then not counted.
-// A decision is held back until the pass has read companionWindow past it.
-// Only decision-to-call pairs are matched: two tool_call rows that share a
-// request id (old limiter sheds stamped the transport id) each stay counted.
-// The decided role is stored in the index, so a later rebuild never has to
-// decide again.
+// Every such decision is held back until the pass has read companionWindow
+// past it, and its role is decided when it is written. Only decision-to-call
+// pairs are matched: two tool_call rows that share a request id (old limiter
+// sheds stamped the transport id) each stay counted. The decided role is
+// stored in the index, so a later rebuild never has to decide again.
+//
+// No transaction indexes more than backfillBatch rows, held decisions
+// included (FR-038).
 //
 // stop aborts the pass between batches; the marker is then not written and the
 // next start resumes (already indexed rows are skipped).
@@ -78,6 +99,7 @@ func (m *Manager) BackfillWorkSessions(stop <-chan struct{}) (int, error) {
 
 	var (
 		next    []byte // first key of the next batch; nil = from the start
+		atEnd   bool   // the whole log has been read; only held decisions remain
 		calls   []backfillCall
 		pending []backfillPending
 		indexed int
@@ -102,37 +124,62 @@ func (m *Manager) BackfillWorkSessions(stop <-chan struct{}) (int, error) {
 				return err
 			}
 
+			// writes counts the rows this transaction has indexed, whatever
+			// path indexed them.
+			writes := 0
 			index := func(key []byte, rec *ActivityRecord, role AttemptRole) error {
 				if rows.Get(workSessionRowKey(rec.WorkSessionID, key)) != nil {
 					return nil
 				}
+				writes++
 				indexed++
 				return indexActivityTx(tx, rec, key, role)
 			}
-			// writes counts the rows this transaction has indexed. Both the
-			// rows read and the held decisions settled count against
-			// backfillBatch, so no transaction writes more than that (FR-038).
-			writes := 0
 			// settle writes held decisions the pass has read far enough past
-			// (or any of them at the end) as counted, sole rows, up to the
-			// transaction's budget. It reports whether some are still due.
+			// (or any of them once the log has been read), up to the
+			// transaction's budget. A decision that has a tool_call near it
+			// is its companion and is not counted. It reports whether
+			// decisions that are due could not be written in this
+			// transaction.
 			settle := func(now time.Time, all bool) (bool, error) {
 				kept := pending[:0]
-				remaining := false
+				stillDue := false
 				for _, p := range pending {
 					due := all || now.Sub(p.rec.Timestamp) > companionWindow
-					if due && writes < backfillBatch {
-						writes++
-						if err := index(p.key, p.rec, AttemptRoleOf(p.rec)); err != nil {
-							return false, err
-						}
+					if !due {
+						kept = append(kept, p)
 						continue
 					}
-					remaining = remaining || due
-					kept = append(kept, p)
+					if writes >= backfillBatch {
+						stillDue = true
+						kept = append(kept, p)
+						continue
+					}
+					role := AttemptRoleOf(p.rec)
+					if companionOf(calls, p.rec) {
+						role = AttemptRole{}
+					}
+					if err := index(p.key, p.rec, role); err != nil {
+						return false, err
+					}
 				}
 				pending = kept
-				return remaining, nil
+				return stillDue, nil
+			}
+			finish := func() error {
+				stillDue, err := settle(time.Time{}, true)
+				if err != nil || stillDue {
+					return err // more than one transaction's worth: the next one goes on
+				}
+				meta, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
+				if err != nil {
+					return err
+				}
+				done = true
+				return meta.Put([]byte(workSessionBackfillDoneKey), []byte(time.Now().UTC().Format(time.RFC3339)))
+			}
+			if atEnd {
+				return finish()
 			}
 
 			c := acts.Cursor()
@@ -143,98 +190,65 @@ func (m *Manager) BackfillWorkSessions(stop <-chan struct{}) (int, error) {
 				k, v = c.Seek(next)
 			}
 			read := 0
-			for ; k != nil && read < backfillBatch && writes < backfillBatch; k, v = c.Next() {
+			for ; k != nil && read < backfillBatch; k, v = c.Next() {
+				// The cursor's key and value are valid only until the next
+				// write in this transaction: everything needed later is
+				// decoded or copied now, before any write.
+				key := append([]byte(nil), k...)
 				rec := &ActivityRecord{}
 				if err := rec.UnmarshalBinary(v); err != nil || rec.WorkSessionID == "" {
 					read++
 					continue
 				}
-				key := append([]byte(nil), k...)
 				ts := rec.Timestamp
 
-				// Decisions the pass has moved past are settled before this
-				// row is taken. If the budget ran out first, the row is left
+				// Decisions the pass has moved past are written before this
+				// row is taken. When the budget is used up, this row is left
 				// for the next transaction.
 				stillDue, err := settle(ts, false)
 				if err != nil {
 					return err
 				}
-				if stillDue {
-					break
+				if stillDue || writes >= backfillBatch {
+					next = key
+					return nil
 				}
 				read++
-				writes++
-				// Forget calls the pass has moved past.
+
+				// Calls are remembered for twice the window: a decision is
+				// written one window after it, and its call may lie one
+				// window before it.
 				live := calls[:0]
 				for _, cl := range calls {
-					if ts.Sub(cl.at) <= companionWindow {
+					if ts.Sub(cl.at) <= 2*companionWindow {
 						live = append(live, cl)
 					}
 				}
 				calls = live
 
 				switch {
-				case rec.Type == ActivityTypeToolCall && rec.RequestID != "":
-					// A held decision of this attempt is its companion.
-					kept := pending[:0]
-					for _, p := range pending {
-						if (backfillCall{rec.WorkSessionID, rec.RequestID, rec.ServerName, rec.ToolName, ts}).same(p.rec) {
-							if err := index(p.key, p.rec, AttemptRole{}); err != nil {
-								return err
-							}
-							continue
-						}
-						kept = append(kept, p)
-					}
-					pending = kept
-					calls = append(calls, backfillCall{rec.WorkSessionID, rec.RequestID, rec.ServerName, rec.ToolName, ts})
-					if err := index(key, rec, AttemptRoleOf(rec)); err != nil {
-						return err
-					}
-
 				case rec.Type == ActivityTypePolicyDecision && isBlockingDecision(rec.Status) && !rec.Companion && rec.RequestID != "":
-					if rows.Get(workSessionRowKey(rec.WorkSessionID, key)) != nil {
-						continue // already indexed by a live write
-					}
-					paired := false
-					for _, cl := range calls {
-						if cl.same(rec) {
-							paired = true
-							break
-						}
-					}
-					if paired {
-						if err := index(key, rec, AttemptRole{}); err != nil {
-							return err
-						}
-					} else {
+					if rows.Get(workSessionRowKey(rec.WorkSessionID, key)) == nil {
 						pending = append(pending, backfillPending{key: key, rec: rec})
 					}
-
 				default:
+					if rec.Type == ActivityTypeToolCall && rec.RequestID != "" {
+						calls = append(calls, backfillCall{rec.WorkSessionID, rec.RequestID, rec.ServerName, rec.ToolName, ts})
+					}
 					if err := index(key, rec, AttemptRoleOf(rec)); err != nil {
 						return err
 					}
+				}
+				// The cursor is re-positioned after the write above, so the
+				// next step does not depend on a key read before it.
+				if k, _ = c.Seek(key); k == nil {
+					break
 				}
 			}
 
 			if k == nil {
-				stillDue, err := settle(time.Time{}, true)
-				if err != nil {
-					return err
-				}
-				if stillDue {
-					// More held decisions than one transaction may write: the
-					// next one starts at the end of the log and settles on.
-					next = append([]byte(nil), 0xff)
-					return nil
-				}
-				meta, err := tx.CreateBucketIfNotExists([]byte(MetaBucket))
-				if err != nil {
-					return err
-				}
-				done = true
-				return meta.Put([]byte(workSessionBackfillDoneKey), []byte(time.Now().UTC().Format(time.RFC3339)))
+				atEnd = true
+				return finish()
 			}
 			next = append([]byte(nil), k...)
 			return nil
