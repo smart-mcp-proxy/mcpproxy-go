@@ -583,10 +583,20 @@ func (g *nativeGuard) wrapSetPrototypeOf(objIdx int, reflectAPI bool) func(nativ
 // cycle of prototype, proxy target and proxy handler links. The objects whose
 // prototype may change are obj and, when obj is a proxy without a
 // setPrototypeOf trap, the targets it forwards to, up to the first ordinary
-// object (the one goja mutates). A proxy whose trap handles the change ends
-// the forwarding: nothing changes natively (a trap only changes prototypes
-// through the guarded builtins again, which check that change), so there is
-// no cycle to refuse and goja runs the trap and its own invariant checks.
+// object (the only one goja can mutate: targets are fixed when a proxy is
+// made, so whatever script runs during the operation, nothing outside that
+// chain changes natively).
+//
+// A proxy whose trap handles the change ends the forwarding: nothing changes
+// natively (a trap only changes prototypes through the guarded builtins
+// again, which check that change), so there is no cycle to refuse and goja
+// runs the trap and its own invariant checks. That shortcut is taken only
+// when no script code can run between this check and goja's lookup of that
+// trap: every hop before it must be a proxy whose trap is certainly absent
+// (trapAbsent), found without running script. Once one hop's lookup may run
+// script (a getter, a handler proxy, a handler the guard did not make), that
+// script could add or remove the traps further in, so the rest of the chain
+// is checked as if every proxy forwarded.
 //
 // A forwarding chain or prototype graph too large to walk whole reports
 // tooLong: the check never answers from a truncated set.
@@ -600,6 +610,7 @@ func (g *nativeGuard) protoCycle(objV, protoV goja.Value) (cycle, tooLong bool) 
 		return false, false
 	}
 	changing := map[*goja.Object]struct{}{}
+	certain := true // no hop so far may run script before goja reaches the next
 	for o := obj; ; {
 		if o == nil {
 			return false, false // a revoked proxy: goja throws, nothing changes
@@ -615,8 +626,13 @@ func (g *nativeGuard) protoCycle(objV, protoV goja.Value) (cycle, tooLong bool) 
 		if !s.IsValid() || s.Type().Name() != "proxyObject" {
 			break
 		}
-		if g.setProtoTrapHandles(s) {
-			return false, false
+		switch g.setProtoTrap(s) {
+		case trapHandles:
+			if certain {
+				return false, false
+			}
+		case trapUnknown:
+			certain = false
 		}
 		o = objectField(s, "target")
 	}
@@ -642,34 +658,49 @@ func (g *nativeGuard) protoCycle(objV, protoV goja.Value) (cycle, tooLong bool) 
 	return false, false
 }
 
-// setProtoTrapHandles reports whether a prototype change on the proxy s is
-// certain not to be forwarded to its target: the proxy is revoked (goja
-// throws), or its script handler has a setPrototypeOf trap (goja calls it,
-// or throws when it is not callable). The answer must be what goja's own
-// lookup will find, so it is only given when the lookup runs no script code:
-// a data property on a chain of ordinary objects. Anything else (an accessor,
-// a proxy on the handler's chain, a handler the guard did not make) reports
-// false, and the change is checked as if forwarded.
-func (g *nativeGuard) setProtoTrapHandles(s reflect.Value) bool {
+// trapLookup is what goja will find when it looks up a proxy's
+// setPrototypeOf trap, as far as the guard can know beforehand.
+type trapLookup int
+
+const (
+	// trapUnknown: the lookup may run script code (an accessor, a proxy on
+	// the handler's prototype chain, a handler the guard did not make), so
+	// its result, and anything after it, cannot be known in advance.
+	trapUnknown trapLookup = iota
+	// trapAbsent: no trap, found without running script; goja forwards the
+	// change to the target.
+	trapAbsent
+	// trapHandles: the change is not forwarded, found without running
+	// script: the proxy is revoked (goja throws) or the trap is a data
+	// property that is not undefined or null (goja calls it, or throws when
+	// it is not callable).
+	trapHandles
+)
+
+// setProtoTrap looks up the setPrototypeOf trap of the proxy s the way goja
+// will, without running script code: through the guard's own handler (see
+// guardedHandler), on the script's handler and its prototype chain, reading
+// own property descriptors of ordinary objects only.
+func (g *nativeGuard) setProtoTrap(s reflect.Value) trapLookup {
 	hf, ok := fieldByName(s, "handler")
 	if !ok || hf.Kind() != reflect.Interface {
-		return false
+		return trapUnknown
 	}
 	if hf.IsNil() {
-		return true // revoked
+		return trapHandles // revoked
 	}
 	hi := hf.Elem()
 	if hi.Kind() != reflect.Pointer || hi.IsNil() || hi.Elem().Kind() != reflect.Struct {
-		return false
+		return trapUnknown
 	}
 	h, ok := g.scriptHandlers[objectField(hi.Elem(), "handler")]
 	if !ok {
-		return false
+		return trapUnknown
 	}
 	name := g.vm.ToValue("setPrototypeOf")
 	for o, n := h, 0; o != nil; n++ {
 		if n >= maxProtoWalk || isProxy(o) {
-			return false
+			return trapUnknown
 		}
 		d, ok := g.reflectGetOwn(goja.FunctionCall{Arguments: []goja.Value{o, name}}).(*goja.Object)
 		if !ok {
@@ -678,13 +709,15 @@ func (g *nativeGuard) setProtoTrapHandles(s reflect.Value) bool {
 		}
 		for _, k := range d.Keys() {
 			if k == "get" || k == "set" {
-				return false
+				return trapUnknown
 			}
 		}
-		v := d.Get("value")
-		return v != nil && !goja.IsUndefined(v) && !goja.IsNull(v)
+		if v := d.Get("value"); v != nil && !goja.IsUndefined(v) && !goja.IsNull(v) {
+			return trapHandles
+		}
+		return trapAbsent
 	}
-	return false
+	return trapAbsent
 }
 
 // protoEdges returns the objects a property lookup on o recurses into

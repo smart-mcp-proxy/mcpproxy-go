@@ -78,6 +78,10 @@ type stackVector struct {
 	// run with a 1 GiB budget, so that building their (heavier under -race)
 	// structures cannot hide a missing depth limit behind MEMORY_LIMIT.
 	heapBound bool
+	// defaultBudget runs the vector with the default memory budget, with the
+	// same strict assertions as the others (a heapBound vector may also end
+	// in MEMORY_LIMIT or ok).
+	defaultBudget bool
 	// want, when set, is the error the vector must fail with instead of the
 	// stack overflow RangeError.
 	want string
@@ -153,6 +157,15 @@ var stackVectors = []stackVector{
 	{name: "proxy cycle through a forwarding setPrototypeOf trap", code: `var t={}; var p=new Proxy(t,{setPrototypeOf:function(t2,v){ return Reflect.setPrototypeOf(t2,v) }}); Object.setPrototypeOf(p,p); p.x`, want: "trap returned falsish"},
 	{name: "proxy cycle through a trap calling Object.setPrototypeOf", code: `var t={}; var p=new Proxy(t,{setPrototypeOf:function(t2,v){ Object.setPrototypeOf(t2,v); return true }}); Object.setPrototypeOf(p,p); p.x`, want: cyclicProtoMessage},
 	{name: "proxy cycle through a trap-less proxy in front of a trap", code: `var t={}; var q=new Proxy(t,{setPrototypeOf:function(t2,v){ return Reflect.setPrototypeOf(t2,v) }}); var p=new Proxy(q,{}); Reflect.setPrototypeOf(p,p); p.x`, want: "ok"},
+	// The trap decision for an inner proxy only holds while nothing can run
+	// script before goja looks it up: an outer hop whose trap lookup runs a
+	// getter (on the handler, on its prototype, through a handler proxy)
+	// can delete the inner trap, so the change is checked as forwarded.
+	{name: "outer trap getter deletes the inner trap", code: `var target={}; var ih={setPrototypeOf:function(){ return true }}; var inner=new Proxy(target,ih); var outer=new Proxy(inner,{get setPrototypeOf(){ delete ih.setPrototypeOf; return undefined }}); Reflect.setPrototypeOf(outer,inner); target.missing`, want: "ok"},
+	{name: "outer trap getter on the handler's prototype deletes the inner trap", code: `var target={}; var ih={setPrototypeOf:function(){ return true }}; var inner=new Proxy(target,ih); var outer=new Proxy(inner,Object.create({get setPrototypeOf(){ delete ih.setPrototypeOf; return undefined }})); Object.setPrototypeOf(outer,inner); target.missing`, want: cyclicProtoMessage},
+	{name: "middle trap getter deletes the innermost trap", code: `var target={}; var ih={setPrototypeOf:function(){ return true }}; var p3=new Proxy(target,ih); var p2=new Proxy(p3,{get setPrototypeOf(){ delete ih.setPrototypeOf; return undefined }}); var p1=new Proxy(p2,{}); Reflect.setPrototypeOf(p1,p3); target.missing`, want: "ok"},
+	{name: "handler proxy deletes the inner trap", code: `var target={}; var ih={setPrototypeOf:function(){ return true }}; var inner=new Proxy(target,ih); var outer=new Proxy(inner,new Proxy({},{get:function(t,k){ if(k==="setPrototypeOf") delete ih.setPrototypeOf; return undefined }})); Reflect.setPrototypeOf(outer,inner); target.missing`, want: "ok"},
+	{name: "Object.prototype trap getter deletes the inner trap", code: `var target={}; var ih=Object.create(null); ih.setPrototypeOf=function(){ return true }; var inner=new Proxy(target,ih); Object.defineProperty(Object.prototype,"setPrototypeOf",{get:function(){ delete ih.setPrototypeOf; return undefined }, configurable:true}); var outer=new Proxy(inner,{}); Reflect.setPrototypeOf(outer,inner); target.missing`, want: "ok"},
 	{name: "callable proxy as its own apply trap", code: `var h={}; var F=new Proxy(function(){},h); h.apply=F; F()`},
 	{name: "callable proxy as its own apply trap, frozen handler", code: `var h={}; var F=new Proxy(function(){},h); h.apply=F; Object.freeze(h); F()`},
 	{name: "callable proxy as the getter of its own trap", code: `var h={}; var F=new Proxy(function(){},h); Object.defineProperty(h,'apply',{get:F}); F()`},
@@ -189,7 +202,17 @@ var stackVectors = []stackVector{
 	{name: "shared BigInt DAG as call_tool args", code: `var x=[-(1n<<32768n)]; for(var i=0;i<20;i++) x=[x,x]; call_tool("s","t",{x:x})`, want: "too large"},
 	// call_tools options: an ignored option is never exported.
 	{name: "huge array in ignored call_tools option", code: `call_tools([], {ignored: new Array(4294967295)}); "done"`, want: "ok"},
-	{name: "huge array as call_tools max_parallel", code: `call_tools([], {max_parallel: new Array(4294967295)})`, want: "too large"},
+	{name: "huge array as call_tools max_parallel", code: `var r=call_tools([], {max_parallel: new Array(4294967295)}); if(!r.ok) throw new Error(r.error.message); r`, want: "max_parallel must be an integer"},
+	// Array holes: a length is free to set, but each exported slot is not.
+	// 67108861 elements pass the JSON-size charge; their slots would be 1 GiB.
+	{name: "long sparse array as result", code: `new Array(67108861)`, want: "too large", defaultBudget: true},
+	{name: "long array with one element as result", code: `var a=[]; a[67108860]=1; a`, want: "too large", defaultBudget: true},
+	{name: "long array shared under the JSON bound as result", code: `var a=[]; a.length=1048577; [a]`, want: "too large", defaultBudget: true},
+	{name: "long sparse array as call_tool args", code: `call_tool("s","t",{a:new Array(67108861)})`, want: "too large", defaultBudget: true},
+	{name: "long sparse array in call_tools args", code: `call_tools([{server:"s",tool:"t",args:{a:new Array(67108861)}}])`, want: "too large", defaultBudget: true},
+	{name: "long sparse array as call_tools max_parallel", code: `var r=call_tools([], {max_parallel: new Array(67108861)}); if(!r.ok) throw new Error(r.error.message); r`, want: "max_parallel must be an integer", defaultBudget: true},
+	{name: "long sparse array as call_tools requests", code: `call_tools(new Array(67108861))`, want: "too large", defaultBudget: true},
+	{name: "holes under the bound as result", code: `var a=new Array(500000); a[5]=1; a`, want: "ok", defaultBudget: true},
 	{name: "shared DAG as call_tool args", code: `var x={}; for(var i=0;i<60;i++) x={a:x,b:x}; call_tool("s","t",{x:x})`, want: "too large"},
 	{name: "shared DAG in call_tools args", code: `var x={}; for(var i=0;i<60;i++) x={a:x,b:x}; call_tools([{server:"s",tool:"t",args:{x:x}}])`, want: "too large"},
 	{name: "lazy getters as result, re-entering export", code: `function mk(){return {get n(){ return call_tool("s","t",mk()) }}}; mk()`},
@@ -276,7 +299,7 @@ func TestStackGuardVectors(t *testing.T) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			budget := int64(1 << 30)
-			if v.heapBound {
+			if v.heapBound || v.defaultBudget {
 				budget = 0
 			}
 			start := time.Now()
@@ -1157,6 +1180,78 @@ func TestBigIntDigitsLowerBound(t *testing.T) {
 					t.Errorf("bigIntDigits(%d bits, neg=%v, %+d) = %d, marshaled %d bytes", bits, neg, delta, got, want)
 				}
 			}
+		}
+	}
+}
+
+// TestGoDataReachesScriptsAsPlainObjects: whatever Go types the input and a
+// tool result hold, the script gets plain JS objects and arrays (no
+// Go-backed object), so a JSON.stringify property list applies to them as
+// to any other object.
+func TestGoDataReachesScriptsAsPlainObjects(t *testing.T) {
+	type pair struct{ A, B int }
+	caller := newMockToolCaller()
+	caller.results["s:t"] = map[string]interface{}{"a": 1.0, "b": 2.0, "m": map[string]string{"a": "1", "b": "2"}, "st": pair{1, 2}}
+	input := map[string]interface{}{
+		"a": 1.0, "b": 2.0,
+		"m":   map[string]string{"a": "1", "b": "2"},
+		"mm":  map[string]map[string]int{"x": {"a": 1, "b": 2}},
+		"s":   []string{"x", "y"},
+		"st":  pair{1, 2},
+		"pst": &pair{3, 4},
+		"n":   nil,
+	}
+	code := `var r = call_tool("s","t",{}).result; var b = call_tools([{server:"s",tool:"t"}])[0].result;
+		[JSON.stringify(input, ["a"]), JSON.stringify(input.m, ["a"]), JSON.stringify(input.mm, ["x","a"]),
+		 JSON.stringify(input.st, ["A"]), JSON.stringify(input.pst, ["B"]), JSON.stringify(input.s), Array.isArray(input.s),
+		 JSON.stringify(r, ["a"]), JSON.stringify(r.m, ["b"]), JSON.stringify(r.st, ["A"]), JSON.stringify(b.m, ["a"]),
+		 (input.m.c = 1, JSON.stringify(input.m)), input.n === null].join(" | ")`
+	result := Execute(context.Background(), caller, code, ExecutionOptions{TimeoutMs: 10000, Input: input})
+	if !result.Ok {
+		t.Fatalf("unexpected error: %+v", result.Error)
+	}
+	want := `{"a":1} | {"a":"1"} | {"x":{"a":1}} | {"A":1} | {"B":4} | ["x","y"] | true | {"a":1} | {"b":"2"} | {"A":1} | {"a":"1"} | {"a":"1","b":"2","c":1} | true`
+	if result.Value != want {
+		t.Fatalf("got  %v\nwant %v", result.Value, want)
+	}
+}
+
+// TestSourceGuardMatchesGoja: the Function-like constructors keep goja's
+// order of observable steps (newTarget.prototype before the arguments are
+// converted; conversion stops at a Symbol), results and errors.
+func TestSourceGuardMatchesGoja(t *testing.T) {
+	exprs := []string{
+		`Function(Symbol(), {toString(){ throw new Error("unexpected conversion") }})`,
+		`var log=[]; try { Function({toString(){ log.push("a"); return "a" }}, Symbol(), {toString(){ log.push("body"); return "" }}) } catch (e) { log.push(e.name) } log.join()`,
+		`var log=[]; try { new Function({toString(){ log.push("a"); return "a" }}, Symbol()) } catch (e) { log.push(e.name) } log.join()`,
+		`Function("a", Symbol())`, `Function(Symbol())`, `typeof Function()`, `Function("a", "b", "return a+b")(2, 3)`,
+		`var log=[]; Function({toString(){ log.push("a"); return "a" }}, {toString(){ log.push("b"); return "b" }}, {toString(){ log.push("body"); return "" }}); log.join()`,
+		`var log=[]; var nt=new Proxy(function(){}, {get(t,k){ log.push("get " + String(k)); return t[k] }}); Reflect.construct(Function, [{toString(){ log.push("body"); return "return 1" }}], nt); log.join()`,
+		`var custom={c:1}; var nt=new Proxy(function(){}, {get(t,k){ return k === "prototype" ? custom : t[k] }}); var f=Reflect.construct(Function, ["return 2"], nt); [Object.getPrototypeOf(f) === custom, f(), f.c].join()`,
+		`var nt=new Proxy(function(){}, {get(t,k){ return k === "prototype" ? 5 : t[k] }}); Object.getPrototypeOf(Reflect.construct(Function, ["return 2"], nt)) === Function.prototype`,
+		`var nt=new Proxy(function(){}, {get(t,k){ if (k === "prototype") throw new RangeError("proto"); return t[k] }}); var n=0; try { Reflect.construct(Function, [{toString(){ n++; return "" }}], nt) } catch (e) { e.message + n }`,
+		`class F extends Function { constructor(){ super("return 7") } }; var f=new F(); [f instanceof F, f()].join()`,
+		`var GF=Object.getPrototypeOf(function*(){}).constructor; var custom=Object.create(GF.prototype); var nt=new Proxy(function(){}, {get(t,k){ return k === "prototype" ? custom : t[k] }}); Object.getPrototypeOf(Reflect.construct(GF, ["yield 1"], nt)) === custom`,
+		`var AF=Object.getPrototypeOf(async function(){}).constructor; Object.getPrototypeOf(new AF("return 1")) === AF.prototype`,
+		`Object.getPrototypeOf(Reflect.construct(Function, [""], Function)) === Function.prototype`,
+		`Object.getPrototypeOf(new Function("")) === Function.prototype`,
+	}
+	run := func(vm *goja.Runtime, expr string) string {
+		v, err := vm.RunString(`(function(){ try { var r = (function(){ return eval(` + strconv.Quote(expr) + `) })(); return typeof r + ":" + String(r) } catch (e) { return "throw:" + e.name + ":" + e.message } })()`)
+		if err != nil {
+			return "go error: " + err.Error()
+		}
+		return v.String()
+	}
+	for _, expr := range exprs {
+		plain := goja.New()
+		guarded := goja.New()
+		if _, err := installStackGuard(guarded); err != nil {
+			t.Fatal(err)
+		}
+		want, got := run(plain, expr), run(guarded, expr)
+		if got != want {
+			t.Errorf("%s\n got: %s\nwant: %s", expr, got, want)
 		}
 	}
 }

@@ -44,6 +44,15 @@ import (
 // in practice only through shared references.
 const maxExportSize int64 = 64 << 20
 
+// maxExportHoles bounds, per export, the array slots the exporter allocates
+// for elements that do not exist (holes): an array's length is a number the
+// script sets for free (new Array(67108861) is one small object), but the
+// []interface{} goja's export builds for it is 16 bytes a slot, allocated in
+// one native step that the memory watchdog cannot interrupt. Slots for
+// elements that exist cost about what the script already holds for them.
+// 1M holes is 16 MiB, a sixteenth of the default memory budget.
+const maxExportHoles int64 = 1 << 20
+
 var exportMapType = reflect.TypeOf(map[string]interface{}{})
 
 var (
@@ -161,6 +170,9 @@ type exporter struct {
 	// everything exported so far; see maxExportSize.
 	size map[*goja.Object]int64
 	used int64
+	// holes counts the slots allocated for missing array elements; see
+	// maxExportHoles.
+	holes int64
 }
 
 // charge counts n more bytes of expanded size. Every mode counts: the
@@ -293,6 +305,12 @@ func (e *exporter) object(obj *goja.Object, level int) (interface{}, int) {
 	case "arrayObject", "sparseArrayObject", "argumentsObject":
 		n := internalLength(obj)
 		e.charge(int64(n) + 2) // "[]" and a byte per element, before allocating
+		if missing := int64(n) - int64(existingElements(obj)); missing > 0 {
+			e.holes += missing
+			if e.holes > maxExportHoles {
+				panic(exportError{errExportTooLarge})
+			}
+		}
 		arr := make([]interface{}, n)
 		e.seen[obj] = arr
 		for i := range arr {
@@ -422,6 +440,28 @@ func internalLength(obj *goja.Object) int {
 	return 0
 }
 
+// existingElements is the number of elements an array or arguments object
+// actually stores (its length may be far larger), or 0 when unknown.
+func existingElements(obj *goja.Object) int {
+	s := objectImpl(obj)
+	if !s.IsValid() {
+		return 0
+	}
+	field := "values" // arrayObject: []Value; argumentsObject: its property map
+	if s.Type().Name() == "sparseArrayObject" {
+		field = "items"
+	}
+	f, ok := fieldByName(s, field)
+	if !ok {
+		return 0
+	}
+	switch f.Kind() {
+	case reflect.Slice, reflect.Map:
+		return f.Len()
+	}
+	return 0
+}
+
 // collect runs the original Map/Set forEach over obj and returns what it
 // passed to the callback, two values per entry. No script code runs.
 func (g *nativeGuard) collect(forEach nativeCallFunc, obj *goja.Object) []goja.Value {
@@ -434,12 +474,19 @@ func (g *nativeGuard) collect(forEach nativeCallFunc, obj *goja.Object) []goja.V
 	return out
 }
 
-// toJS converts JSON-shaped Go data (maps, slices, primitives) into plain JS
-// objects and arrays, the way JSON.parse would build them, so the script
-// gets ordinary objects to read and write. Other Go values are wrapped by
-// goja as before. Object keys are added in sorted order.
+// toJS converts Go data into plain JS objects and arrays, the way JSON.parse
+// would build them, so the script gets ordinary objects to read and write.
+// JSON-shaped data (map[string]interface{}, []interface{}, primitives) is
+// converted directly; any other Go value (a typed map or slice, a struct, a
+// pointer, which goja would wrap as a Go-backed object whose writes export
+// natively and which JSON.stringify serializes without the guard's
+// bookkeeping) is first reduced to its JSON shape. Only a value JSON cannot
+// encode is still wrapped by goja. Object keys are added in sorted order.
 func (g *nativeGuard) toJS(v interface{}) goja.Value {
 	switch t := v.(type) {
+	case nil, bool, string, float64, float32, int, int8, int16, int32, int64,
+		uint, uint8, uint16, uint32, uint64, goja.Value:
+		return g.vm.ToValue(v)
 	case map[string]interface{}:
 		obj := g.vm.NewObject()
 		keys := make([]string, 0, len(t))
@@ -460,6 +507,9 @@ func (g *nativeGuard) toJS(v interface{}) goja.Value {
 			items[i] = g.toJS(el)
 		}
 		return g.vm.NewArray(items...)
+	}
+	if plain, err := normalizeToolResult(v); err == nil {
+		return g.toJS(plain)
 	}
 	return g.vm.ToValue(v)
 }

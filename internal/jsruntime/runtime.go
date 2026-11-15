@@ -1099,7 +1099,18 @@ func parseBatchOptions(guard *nativeGuard, call goja.FunctionCall) (int, error) 
 	if !present {
 		return 0, nil
 	}
-	value := guard.export(options.Get("max_parallel"))
+	// A number, or a Number object; anything else is rejected without being
+	// exported (an array of any length would be).
+	var value interface{}
+	switch v := options.Get("max_parallel").(type) {
+	case *goja.Object:
+		if objectKind(v) == "primitiveValueObject" {
+			value = v.Export()
+		}
+	case nil:
+	default:
+		value = v.Export()
+	}
 
 	maxParallel, ok := batchOptionInt(value)
 	if !ok {

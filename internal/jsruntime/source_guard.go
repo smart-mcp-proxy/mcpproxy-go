@@ -183,13 +183,43 @@ func (g *nativeGuard) installSourceGuard() error {
 		if !ok || *call == nil || *construct == nil {
 			return errStackGuardSetup
 		}
-		origCall, origConstruct := *call, *construct
+		origCall := *call
+		// The prototype the constructor gives the new function by default
+		// (ctor.prototype: a non-writable, non-configurable property).
+		defProto, ok := ctor.Get("prototype").(*goja.Object)
+		if !ok {
+			return errStackGuardSetup
+		}
 		*call = func(c goja.FunctionCall) goja.Value {
 			c.Arguments = g.checkFunctionArgs(c.Arguments, toStringOnce)
 			return origCall(c)
 		}
+		// goja's construct resolves newTarget.prototype (which may run script
+		// code) before it converts the arguments. The checked conversion must
+		// run before goja compiles, so the construct is done here in goja's
+		// order: the prototype first (getPrototypeFromCtor), then the
+		// arguments, then the plain call (the constructor with its default
+		// prototype) and the prototype set on the new function, as goja's
+		// functionCtor does.
 		*construct = func(args []goja.Value, newTarget *goja.Object) *goja.Object {
-			return origConstruct(g.checkFunctionArgs(args, toStringOnce), newTarget)
+			proto := defProto
+			if newTarget != nil && newTarget != ctor {
+				if p, isObj := newTarget.Get("prototype").(*goja.Object); isObj {
+					proto = p
+				}
+			}
+			fn, isObj := origCall(goja.FunctionCall{This: goja.Undefined(), Arguments: g.checkFunctionArgs(args, toStringOnce)}).(*goja.Object)
+			if !isObj {
+				panic(g.vm.NewTypeError("Function constructor did not return a function"))
+			}
+			if proto != defProto {
+				// A function object just made, which nothing refers to yet:
+				// no cycle, no trap.
+				if err := fn.SetPrototype(proto); err != nil {
+					panic(err)
+				}
+			}
+			return fn
 		}
 	}
 
@@ -236,15 +266,18 @@ const functionCtorHead = "(async function* anonymous(\n) {\n\n})"
 // checkFunctionArgs converts the arguments of a Function-like constructor to
 // strings once (so a toString cannot answer differently when the constructor
 // converts them again), checks the source they form and returns them as
-// string primitives. A Symbol is passed through for the constructor to
-// reject with its own TypeError.
+// string primitives. goja converts them in the same order (the parameters,
+// then the body: argument order) and stops with a TypeError at the first
+// Symbol, so conversion stops there too: the Symbol and everything after it
+// are passed through unconverted, and the constructor throws at the Symbol
+// before it reads any of the rest (nothing is compiled).
 func (g *nativeGuard) checkFunctionArgs(args []goja.Value, toString nativeCallFunc) []goja.Value {
 	out := make([]goja.Value, len(args))
 	total := sourceOperatorTokens(functionCtorHead, maxSourceTokens)
 	for i, a := range args {
 		if _, isSymbol := a.(*goja.Symbol); isSymbol {
-			out[i] = a
-			continue
+			copy(out[i:], args[i:])
+			return out
 		}
 		s := toString(goja.FunctionCall{This: goja.Undefined(), Arguments: []goja.Value{a}})
 		out[i] = s
