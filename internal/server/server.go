@@ -4717,6 +4717,33 @@ func (s *Server) GetActivity(id string) (*storage.ActivityRecord, error) {
 	return s.runtime.GetActivity(id)
 }
 
+// Work-session reads (Spec 124).
+
+// ListWorkSessionSummaries returns every work-session summary.
+func (s *Server) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary, error) {
+	return s.runtime.ListWorkSessionSummaries()
+}
+
+// GetWorkSessionSummary returns one work-session summary, or nil.
+func (s *Server) GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error) {
+	return s.runtime.GetWorkSessionSummary(id)
+}
+
+// WorkSessionRowRefs returns a work session's index entries in time order.
+func (s *Server) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, error) {
+	return s.runtime.WorkSessionRowRefs(id)
+}
+
+// UpstreamEventRefs returns one server's upstream events in a time span.
+func (s *Server) UpstreamEventRefs(server string, from, to time.Time) ([]storage.WorkSessionRowRef, error) {
+	return s.runtime.UpstreamEventRefs(server, from, to)
+}
+
+// GetActivitiesByKeys loads activity rows by key.
+func (s *Server) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
+	return s.runtime.GetActivitiesByKeys(keys)
+}
+
 // StreamActivities returns a channel that yields activity records matching the filter.
 func (s *Server) StreamActivities(ctx context.Context, filter storage.ActivityFilter) <-chan *storage.ActivityRecord {
 	return s.runtime.StreamActivities(ctx, filter)

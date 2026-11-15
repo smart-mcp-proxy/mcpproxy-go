@@ -71,7 +71,7 @@ components:
           description: 'Background cleanup interval in minutes (default: 60)'
           type: integer
         activity_max_records:
-          description: 'Max records before pruning (default: 100000)'
+          description: 'Max records before pruning (default: 400000)'
           type: integer
         activity_max_response_size:
           description: 'Response truncation limit in bytes (default: 65536)'
@@ -403,6 +403,11 @@ components:
           $ref: '#/components/schemas/config.SensitiveDataDetectionConfig'
         server_concurrency_defaults:
           $ref: '#/components/schemas/config.ConcurrencyDefaults'
+        session_retention_days:
+          description: |-
+            SessionRetentionDays is how long a work session is listed and kept whole
+            in the activity log (Spec 124, default 7). Read at start.
+          type: integer
         telemetry:
           $ref: '#/components/schemas/config.TelemetryConfig'
         tls:
@@ -3867,10 +3872,162 @@ components:
         visible:
           type: integer
       type: object
+    contracts.WorkSession:
+      properties:
+        attempts:
+          description: |-
+            Attempts, Failures and PolicyBlocks are lifetime counts of the session.
+            PolicyBlocks are included in Failures.
+          type: integer
+        client_id:
+          type: string
+        client_name:
+          type: string
+        connection_count:
+          description: Administrators only.
+          type: integer
+        duration_ms:
+          type: integer
+        ended_at:
+          type: string
+        failures:
+          type: integer
+        first_failure_at:
+          type: string
+        id:
+          type: string
+        last_activity_at:
+          type: string
+        last_failure:
+          $ref: '#/components/schemas/contracts.WorkSessionFailure'
+        ownerless:
+          type: boolean
+        policy_blocks:
+          type: integer
+        profile:
+          description: Profile is returned to administrators only.
+          type: string
+        profile_source:
+          type: string
+        rebuilt:
+          type: boolean
+        run_name:
+          type: string
+        started_at:
+          type: string
+        status:
+          description: Status is "active" or "ended".
+          type: string
+        stored_failures:
+          description: |-
+            StoredFailures counts the failures whose rows are still in the log;
+            it is what the timeline can navigate.
+          type: integer
+        surface:
+          type: string
+        token_name:
+          type: string
+        truncated_start_at:
+          type: string
+      type: object
+    contracts.WorkSessionFailure:
+      properties:
+        at:
+          type: string
+        error_class:
+          type: string
+        error_code:
+          type: string
+        policy_block:
+          description: PolicyBlock is true when the failure was a refusal by MCPProxy
+            itself.
+          type: boolean
+        reason:
+          description: |-
+            Reason is at most 200 characters and never contains argument or
+            response bodies.
+          type: string
+        server:
+          type: string
+        tool:
+          type: string
+      type: object
+    contracts.WorkSessionListResponse:
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        sessions:
+          items:
+            $ref: '#/components/schemas/contracts.WorkSession'
+          type: array
+          uniqueItems: false
+        total:
+          type: integer
+      type: object
+    contracts.WorkSessionTimelineResponse:
+      properties:
+        earlier_failures_not_stored:
+          type: boolean
+        failure_index:
+          description: |-
+            FailureIndex is the 1-based number of the failure at or before the
+            position among the stored failures in reach (0 when none), and
+            FailureTotal their count.
+          type: integer
+        failure_total:
+          type: integer
+        has_after:
+          type: boolean
+        has_before:
+          type: boolean
+        lifetime_failures:
+          description: |-
+            LifetimeFailures is the session's lifetime failure count in reach.
+            EarlierFailuresNotStored says some of them are no longer in the log.
+          type: integer
+        position:
+          description: |-
+            Position is the index of the row the page is positioned at; TotalRows
+            is the number of rows in the caller's view.
+          type: integer
+        rows:
+          items:
+            $ref: '#/components/schemas/contracts.WorkSessionTimelineRow'
+          type: array
+          uniqueItems: false
+        session:
+          $ref: '#/components/schemas/contracts.WorkSession'
+        total_rows:
+          type: integer
+      type: object
+    contracts.WorkSessionTimelineRow:
+      properties:
+        activity:
+          $ref: '#/components/schemas/contracts.ActivityRecord'
+        bodies_removed:
+          description: |-
+            BodiesRemoved is true when retention removed the row's argument and
+            response bodies to keep the row.
+          type: boolean
+        failed:
+          description: |-
+            Failed marks the counted row of a failed attempt; PolicyBlock marks a
+            refusal by MCPProxy itself.
+          type: boolean
+        index:
+          description: Index is the row's position in the caller's view of the timeline.
+          type: integer
+        kind:
+          type: string
+        policy_block:
+          type: boolean
+      type: object
     data:
       properties:
         data:
-          $ref: '#/components/schemas/contracts.InfoResponse'
+          $ref: '#/components/schemas/contracts.WorkSessionTimelineResponse'
       type: object
     httpapi.AccessExplanationData:
       properties:
@@ -6184,6 +6341,7 @@ paths:
           - preflight
           - prompt_get
           - profile_change
+          - upstream_event
           type: string
       - description: Filter by server name
         in: query
@@ -11759,6 +11917,200 @@ paths:
       summary: Call a tool
       tags:
       - tools
+  /api/v1/work-sessions:
+    get:
+      description: Lists work sessions (one agent's run of work) with their failure
+        facts. An agent token sees only its own sessions, and only the part of each
+        that touched servers in its reach.
+      parameters:
+      - description: Only sessions with at least one failure
+        in: query
+        name: failed
+        schema:
+          type: boolean
+      - description: 'With failed: count policy blocks as failures (default true)'
+        in: query
+        name: include_blocked
+        schema:
+          type: boolean
+      - description: Filter by agent token name
+        in: query
+        name: token
+        schema:
+          type: string
+      - description: Filter by client id
+        in: query
+        name: client
+        schema:
+          type: string
+      - description: Filter by profile (administrators only)
+        in: query
+        name: profile
+        schema:
+          type: string
+      - description: Filter by run name
+        in: query
+        name: run
+        schema:
+          type: string
+      - description: Filter by the error class of the last failure
+        in: query
+        name: error_class
+        schema:
+          type: string
+      - description: Only sessions active at or after this time (RFC3339)
+        in: query
+        name: since
+        schema:
+          type: string
+      - description: Only sessions active at or before this time (RFC3339)
+        in: query
+        name: until
+        schema:
+          type: string
+      - description: last_activity (default) or last_failure
+        in: query
+        name: sort
+        schema:
+          enum:
+          - last_activity
+          - last_failure
+          type: string
+      - description: Page size (default 25, max 100)
+        in: query
+        name: limit
+        schema:
+          type: integer
+      - description: Page offset
+        in: query
+        name: offset
+        schema:
+          type: integer
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  success:
+                    type: boolean
+                type: object
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad Request
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: List work sessions
+      tags:
+      - activity
+  /api/v1/work-sessions/{id}:
+    get:
+      parameters:
+      - description: Work session id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  success:
+                    type: boolean
+                type: object
+          description: OK
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Not Found
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get one work session
+      tags:
+      - activity
+  /api/v1/work-sessions/{id}/timeline:
+    get:
+      description: Returns the session's activity rows and the upstream events of
+        the servers it called, in time order, positioned at a failure, a row or the
+        end. Bodies are omitted unless include_bodies is set.
+      parameters:
+      - description: Work session id
+        in: path
+        name: id
+        required: true
+        schema:
+          type: string
+      - description: first_failure (default), failure:<n>, row:<activity id> or end
+        in: query
+        name: at
+        schema:
+          type: string
+      - description: Rows before the position (default 20, max 250)
+        in: query
+        name: before
+        schema:
+          type: integer
+      - description: Rows after the position (default 20, max 250)
+        in: query
+        name: after
+        schema:
+          type: integer
+      - description: Include argument and response bodies
+        in: query
+        name: include_bodies
+        schema:
+          type: boolean
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                allOf:
+                - $ref: '#/components/schemas/data'
+                properties:
+                  data:
+                    type: object
+                  success:
+                    type: boolean
+                type: object
+          description: OK
+        "400":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Bad Request
+        "404":
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/contracts.ErrorResponse'
+          description: Not Found
+      security:
+      - ApiKeyAuth: []
+      - ApiKeyQuery: []
+      summary: Get a work session's timeline
+      tags:
+      - activity
   /healthz:
     get:
       description: Get comprehensive health status including all component health

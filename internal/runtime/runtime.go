@@ -4248,6 +4248,33 @@ func (r *Runtime) ResolveWorkSession(id WorkSessionIdentity) string {
 	return r.workSessions.Resolve(id)
 }
 
+// Work-session reads (Spec 124). Thin pass-throughs to storage.
+
+// ListWorkSessionSummaries returns every work-session summary.
+func (r *Runtime) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary, error) {
+	return r.storageManager.ListWorkSessionSummaries()
+}
+
+// GetWorkSessionSummary returns one summary, or nil.
+func (r *Runtime) GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error) {
+	return r.storageManager.GetWorkSessionSummary(id)
+}
+
+// WorkSessionRowRefs returns a session's index entries in time order.
+func (r *Runtime) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, error) {
+	return r.storageManager.WorkSessionRowRefs(id)
+}
+
+// UpstreamEventRefs returns one server's upstream events in a time span.
+func (r *Runtime) UpstreamEventRefs(server string, from, to time.Time) ([]storage.WorkSessionRowRef, error) {
+	return r.storageManager.UpstreamEventRefs(server, from, to)
+}
+
+// GetActivitiesByKeys loads activity rows by key.
+func (r *Runtime) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error) {
+	return r.storageManager.GetActivitiesByKeys(keys)
+}
+
 // RequestSessionFacts returns the work session, owning user and run name of
 // the request in ctx.
 type RequestSessionFacts func(ctx context.Context) (workSessionID, userID, runName string)

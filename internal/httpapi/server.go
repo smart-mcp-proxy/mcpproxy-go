@@ -1235,6 +1235,13 @@ func (s *Server) setupRoutes() {
 		r.Get("/sessions", s.handleGetSessions)
 		r.Get("/sessions/{id}", s.handleGetSessionDetail)
 
+		// Spec 124: work sessions and their failure timeline. Scoped, unlike
+		// /sessions above: the caller sees its own sessions, narrowed to the
+		// servers in its reach.
+		r.Get("/work-sessions", s.handleListWorkSessions)
+		r.Get("/work-sessions/{id}", s.handleGetWorkSession)
+		r.Get("/work-sessions/{id}/timeline", s.handleWorkSessionTimeline)
+
 		// Tool execution
 		r.Post("/tools/call", s.handleCallTool)
 
