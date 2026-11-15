@@ -3942,6 +3942,11 @@ components:
           type: string
         profile_source:
           type: string
+        project_name:
+          description: |-
+            ProjectName is the basename of the client's workspace, when it
+            disclosed one.
+          type: string
         rebuilt:
           type: boolean
         run_name:

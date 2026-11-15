@@ -259,6 +259,11 @@ type ActivityRecord struct {
 	// request (Spec 124 FR-003). A label only, never a credential.
 	RunName string `json:"run_name,omitempty"`
 
+	// ProjectName is the display name of the project the client works in (the
+	// basename of its workspace root), when the client disclosed one. Never
+	// the path (Spec 124 FR-040).
+	ProjectName string `json:"project_name,omitempty"`
+
 	// Companion marks a blocking policy_decision that is NOT the counted row
 	// of its attempt, because a tool_call row records the same attempt
 	// (Spec 124 D2). Set by the emit site.

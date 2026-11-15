@@ -26,8 +26,11 @@ type WorkSession struct {
 	TokenName  string `json:"token_name,omitempty"`
 	ClientID   string `json:"client_id,omitempty"`
 	ClientName string `json:"client_name,omitempty"`
-	Surface    string `json:"surface,omitempty"`
-	RunName    string `json:"run_name,omitempty"`
+	// ProjectName is the basename of the client's workspace, when it
+	// disclosed one.
+	ProjectName string `json:"project_name,omitempty"`
+	Surface     string `json:"surface,omitempty"`
+	RunName     string `json:"run_name,omitempty"`
 	// Profile is returned to administrators only.
 	Profile       string `json:"profile,omitempty"`
 	ProfileSource string `json:"profile_source,omitempty"`

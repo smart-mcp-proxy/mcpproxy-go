@@ -188,3 +188,19 @@ func TestRESTToolCall_RowCarriesAWorkSession(t *testing.T) {
 	assert.NotEmpty(t, found.WorkSessionID, "a REST tool call must belong to a work session")
 	assert.Empty(t, found.SessionID, "there is no MCP connection behind it")
 }
+
+// FR-040: the project of a legacy connection is its workspace basename, never
+// the path; a request with no connection has none.
+func TestActivityAttribution_CarriesTheProjectName(t *testing.T) {
+	p, store, _ := trackerProxy(t)
+	store.SetSession("c1", "ide", "1.0", false, false, nil)
+	store.mu.Lock()
+	store.sessions["c1"].Workspace = "file:///Users/someone/repos/secret-path/my-project"
+	store.mu.Unlock()
+
+	attr := p.activityAttribution(tokenCtx(workSessionCtx("c1"), "alpha", "mcp_agt_aaaa"), "c1")
+	assert.Equal(t, "my-project", attr.ProjectName)
+
+	rest := reqcontext.WithClientSurface(tokenCtx(context.Background(), "alpha", "mcp_agt_aaaa"), "rest")
+	assert.Empty(t, p.activityAttribution(rest, "").ProjectName)
+}

@@ -47,6 +47,8 @@ type ActivityAttribution struct {
 	UserID string
 	// RunName is the validated X-MCPProxy-Run label of the request.
 	RunName string
+	// ProjectName is the basename of the client's workspace root, when known.
+	ProjectName string
 
 	// Companion marks a blocking policy decision emitted next to a tool_call
 	// row of the same attempt (Spec 124 D2); it is not counted again.
@@ -83,6 +85,7 @@ func (a ActivityAttribution) payload() map[string]any {
 	set("_work_session_id", a.WorkSessionID)
 	set("_user_id", a.UserID)
 	set("run_name", a.RunName)
+	set("project_name", a.ProjectName)
 	if a.Companion {
 		out["_companion"] = true
 	}
@@ -110,6 +113,7 @@ func attributionFromPayload(payload map[string]any) ActivityAttribution {
 		WorkSessionID: getStringPayload(m, "_work_session_id"),
 		UserID:        getStringPayload(m, "_user_id"),
 		RunName:       getStringPayload(m, "run_name"),
+		ProjectName:   getStringPayload(m, "project_name"),
 		Companion:     m["_companion"] == true,
 		PolicyRefusal: m["_policy_refusal"] == true,
 	}
@@ -137,6 +141,7 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 		rec.UserID = a.UserID
 	}
 	rec.RunName = a.RunName
+	rec.ProjectName = a.ProjectName
 	rec.Companion = a.Companion && rec.Type == storage.ActivityTypePolicyDecision
 	if a.PolicyRefusal && rec.ErrorClass == "" && rec.Status != storage.ActivityStatusSuccess {
 		rec.ErrorClass = storage.ErrorClassProxyPolicy

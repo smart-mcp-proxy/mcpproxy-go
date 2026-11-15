@@ -94,6 +94,12 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 				attr.Profile = info.Profile
 				attr.ProfileSource = info.ProfileSource
 			}
+			// Spec 124 FR-040: the project of a connection that disclosed its
+			// workspace root. Only the basename; a 2026-07-28 request and a
+			// REST call have none.
+			if attr.ProjectName == "" && !mcpserver.IsModernRequest(ctx) {
+				attr.ProjectName = runtime.WorkspaceName(info.Workspace)
+			}
 		}
 	}
 

@@ -106,6 +106,7 @@ type WorkSessionSummary struct {
 	Ownerless bool `json:"ownerless,omitempty"`
 
 	ClientName    string `json:"client_name,omitempty"`
+	ProjectName   string `json:"project_name,omitempty"`
 	Surface       string `json:"surface,omitempty"`
 	RunName       string `json:"run_name,omitempty"`
 	Profile       string `json:"profile,omitempty"`
@@ -349,6 +350,9 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 	}
 	if r.RunName != "" {
 		s.RunName = r.RunName
+	}
+	if r.ProjectName != "" {
+		s.ProjectName = r.ProjectName
 	}
 	if r.ProfileSource != "" && !ts.Before(s.LastActivityAt) {
 		s.Profile, s.ProfileSource = r.Profile, r.ProfileSource
