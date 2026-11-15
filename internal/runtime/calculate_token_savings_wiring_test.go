@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/config"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
@@ -168,4 +169,43 @@ func TestRuntime_CalculateTokenSavings_RecountsOnSameEpochDefinitionChange(t *te
 	require.NoError(t, err)
 	assert.Greater(t, schema.TotalServerToolListSize, before.TotalServerToolListSize,
 		"an edited input schema on the same connection must be recounted")
+}
+
+// The StateView lags a removal commit: until the supervisor reconciles it still
+// holds the removed server's row and tools. Token savings must not count a
+// server the committed configuration no longer has, nor hand a same-name
+// replacement its predecessor's definitions (the guard GetServerTools applies).
+func TestRuntime_CalculateTokenSavings_SkipsRemovedAndReplacedServers(t *testing.T) {
+	cfgA := explicitServer(&config.ServerConfig{Name: "acme", URL: "http://127.0.0.1:9/a", Protocol: "http", Enabled: true})
+	rt, _ := newSpec116Runtime(t, nil, cfgA)
+	incA, ok := rt.ServerIncarnation("acme")
+	require.True(t, ok)
+	rt.supervisor.StateView().UpdateServer("acme", func(status *stateview.ServerStatus) {
+		status.Connected = true
+		status.Incarnation = incA
+		status.Tools = []stateview.ToolInfo{{Name: "a_tool", Description: "the removed server's definition"}}
+		status.ToolCount = 1
+		status.ToolsDiscovered = true
+	})
+
+	counted, err := rt.CalculateTokenSavings()
+	require.NoError(t, err)
+	require.Positive(t, counted.PerServerToolListSizes["acme"], "control: the committed server is counted")
+
+	// Removal only; the supervisor (not started) leaves the row in the view.
+	_, err = rt.Commit("remove_server", func(tx *CommitTx) error { return tx.RemoveServer("acme") })
+	require.NoError(t, err)
+	removed, err := rt.CalculateTokenSavings()
+	require.NoError(t, err)
+	assert.NotContains(t, removed.PerServerToolListSizes, "acme", "a removed server is not counted")
+	assert.Equal(t, 0, removed.TotalServerToolListSize)
+
+	// Same-name replacement: the view still carries the old incarnation.
+	_, err = rt.Commit("create_server", func(tx *CommitTx) error {
+		return tx.CreateServer(explicitServer(&config.ServerConfig{Name: "acme", URL: "http://127.0.0.1:9/b", Protocol: "http", Enabled: true}))
+	})
+	require.NoError(t, err)
+	replaced, err := rt.CalculateTokenSavings()
+	require.NoError(t, err)
+	assert.NotContains(t, replaced.PerServerToolListSizes, "acme", "a replacement does not inherit the removed server's tools")
 }

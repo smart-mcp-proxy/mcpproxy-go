@@ -2552,6 +2552,13 @@ func (r *Runtime) CalculateTokenSavings() (*contracts.ServerTokenMetrics, error)
 // completed), plus a fingerprint that changes whenever one of those tool sets
 // does.
 //
+// The estimate therefore describes the tool set mcpproxy holds and serves,
+// the same one GET /servers/{id}/tools lists. Two consequences differ from a
+// live tools/list: a quarantined server contributes nothing (its tools are
+// not published to the view and no client can reach them), and a tool set
+// that discovery deliberately retained after a lenient empty result stays
+// counted until an authoritative refresh replaces it.
+//
 // The fingerprint is a digest of exactly what the estimate tokenizes (server
 // name, tool name, description, input schema). A discovery epoch plus a tool
 // count would not do: the epoch is the connection token, so a
@@ -2563,12 +2570,24 @@ func (r *Runtime) tokenSavingsInputs() ([]tokens.ServerToolInfo, string) {
 	if sup == nil || sup.StateView() == nil {
 		return nil, ""
 	}
+	// The committed snapshot is read before the view, as GetServerTools does
+	// (Spec 116 PR2): the view lags a removal commit, so a row may belong to a
+	// server that no longer exists, or to the predecessor of a same-name
+	// replacement. Neither is counted.
+	committed := r.committedSnapshot()
 	snapshot := sup.StateView().Snapshot()
 	names := make([]string, 0, len(snapshot.Servers))
 	for name, status := range snapshot.Servers {
-		if status != nil && status.Connected && status.ToolsDiscovered {
-			names = append(names, name)
+		if status == nil || !status.Connected || !status.ToolsDiscovered {
+			continue
 		}
+		if committed.absent(name) {
+			continue
+		}
+		if inc, ok := r.ServerIncarnation(name); ok && status.Incarnation != inc {
+			continue
+		}
+		names = append(names, name)
 	}
 	sort.Strings(names)
 
