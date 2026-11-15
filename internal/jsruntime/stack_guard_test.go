@@ -29,7 +29,10 @@ const (
 	// a plain VM, builds the source to execute: source too large for an
 	// environment variable, such as a deeply nested script text.
 	stackChildGenEnv = "JSRUNTIME_STACK_GUARD_CHILD_GENERATE"
-	stackChildMarker = "STACK_GUARD_RESULT "
+	// stackChildNoShapeEnv turns the Function-constructor shape check off,
+	// so a vector exercises the prototype post-check alone.
+	stackChildNoShapeEnv = "JSRUNTIME_STACK_GUARD_CHILD_NO_SHAPE"
+	stackChildMarker     = "STACK_GUARD_RESULT "
 )
 
 // TestStackGuardChild is the child half of TestStackGuardVectors.
@@ -39,6 +42,9 @@ func TestStackGuardChild(t *testing.T) {
 		t.Skip("child process only")
 	}
 	budget, _ := strconv.ParseInt(os.Getenv(stackChildBudgetEnv), 10, 64)
+	if os.Getenv(stackChildNoShapeEnv) != "" {
+		functionShapeCheck = false
+	}
 	if os.Getenv(stackChildGenEnv) != "" {
 		v, err := goja.New().RunString(code)
 		if err != nil {
@@ -82,6 +88,9 @@ type stackVector struct {
 	// same strict assertions as the others (a heapBound vector may also end
 	// in MEMORY_LIMIT or ok).
 	defaultBudget bool
+	// noShapeCheck runs the child with the Function-constructor shape check
+	// off (stackChildNoShapeEnv).
+	noShapeCheck bool
 	// want, when set, is the error the vector must fail with instead of the
 	// stack overflow RangeError.
 	want string
@@ -177,6 +186,22 @@ var stackVectors = []stackVector{
 	{name: "three-object cycle across two nested trap getters", code: `var x={}, y={}, z={}; var py=new Proxy(y,{get setPrototypeOf(){ Object.setPrototypeOf(z,x); return undefined }}); var px=new Proxy(x,{get setPrototypeOf(){ Reflect.setPrototypeOf(py,new Proxy(z,{})); return undefined }}); Reflect.setPrototypeOf(px,new Proxy(y,{})); x.missing; y.missing; z.missing`, want: "ok"},
 	{name: "builtin handler whose prototype is a trap getter", code: `var target={}; var ih={setPrototypeOf:function(){ return true }}; var inner=new Proxy(target,ih); Object.defineProperty(Object.prototype,"setPrototypeOf",{get:function(){ delete ih.setPrototypeOf; return undefined }, configurable:true}); var outer=new Proxy(inner,Math); Reflect.setPrototypeOf(outer,inner); target.missing`, want: "ok"},
 	{name: "trap getter revokes the proxy it is looked up on", code: `var t={}, proto={}; var bridge=new Proxy(proto,{}); var r=Proxy.revocable(t,{get setPrototypeOf(){ r.revoke(); Object.setPrototypeOf(proto,t); return undefined }}); Reflect.setPrototypeOf(r.proxy,bridge); t.missing`, want: "ok"},
+	// A Function-constructor body that escapes the function expression runs
+	// script while the function is made and can expose it before its
+	// prototype is set: refused as not a single function, and the prototype
+	// assignment is checked like any other change.
+	{name: "Function body escape, Reflect.construct with newTarget", code: `var target={}; var proto=new Proxy(target,{}); Object.defineProperty(globalThis,"sink",{configurable:true, set:function(v){ Object.setPrototypeOf(target,v) }}); function NT(){} NT.prototype=proto; var f; try { f=Reflect.construct(Function,["}); sink = (function(){"],NT) } catch (e) { target.missing; throw e } f.missing; target.missing`, want: functionShapeMessage},
+	{name: "Function body escape, Reflect.construct with newTarget (post-check alone)", code: `var target={}; var proto=new Proxy(target,{}); Object.defineProperty(globalThis,"sink",{configurable:true, set:function(v){ Object.setPrototypeOf(target,v) }}); function NT(){} NT.prototype=proto; var f; try { f=Reflect.construct(Function,["}); sink = (function(){"],NT) } catch (e) { target.missing; throw e } f.missing; target.missing`, want: cyclicProtoMessage, noShapeCheck: true},
+	{name: "GeneratorFunction body escape with newTarget", code: `var GF=Object.getPrototypeOf(function*(){}).constructor; var target={}; var proto=new Proxy(target,{}); Object.defineProperty(globalThis,"sink",{configurable:true, set:function(v){ Object.setPrototypeOf(target,v) }}); function NT(){} NT.prototype=proto; var f; try { f=Reflect.construct(GF,["}); sink = (function*(){"],NT) } catch (e) { target.missing; throw e } f.missing; target.missing`, want: functionShapeMessage},
+	{name: "GeneratorFunction body escape with newTarget (post-check alone)", code: `var GF=Object.getPrototypeOf(function*(){}).constructor; var target={}; var proto=new Proxy(target,{}); Object.defineProperty(globalThis,"sink",{configurable:true, set:function(v){ Object.setPrototypeOf(target,v) }}); function NT(){} NT.prototype=proto; var f; try { f=Reflect.construct(GF,["}); sink = (function*(){"],NT) } catch (e) { target.missing; throw e } f.missing; target.missing`, want: cyclicProtoMessage, noShapeCheck: true},
+	{name: "AsyncFunction body escape with newTarget", code: `var AF=Object.getPrototypeOf(async function(){}).constructor; var target={}; var proto=new Proxy(target,{}); Object.defineProperty(globalThis,"sink",{configurable:true, set:function(v){ Object.setPrototypeOf(target,v) }}); function NT(){} NT.prototype=proto; var f; try { f=Reflect.construct(AF,["}); sink = (async function(){"],NT) } catch (e) { target.missing; throw e } f.missing; target.missing`, want: functionShapeMessage},
+	{name: "AsyncFunction body escape with newTarget (post-check alone)", code: `var AF=Object.getPrototypeOf(async function(){}).constructor; var target={}; var proto=new Proxy(target,{}); Object.defineProperty(globalThis,"sink",{configurable:true, set:function(v){ Object.setPrototypeOf(target,v) }}); function NT(){} NT.prototype=proto; var f; try { f=Reflect.construct(AF,["}); sink = (async function(){"],NT) } catch (e) { target.missing; throw e } f.missing; target.missing`, want: cyclicProtoMessage, noShapeCheck: true},
+	{name: "class extends Function body escape", code: `var target={}; class X extends Function { constructor(b){ super(b) } } Object.setPrototypeOf(X.prototype,new Proxy(target,{})); Object.defineProperty(globalThis,"sink",{configurable:true, set:function(v){ Object.setPrototypeOf(target,v) }}); var f; try { f=new X("}); sink = (function(){") } catch (e) { target.missing; throw e } f.missing; target.missing`, want: functionShapeMessage},
+	{name: "class extends Function body escape (post-check alone)", code: `var target={}; class X extends Function { constructor(b){ super(b) } } Object.setPrototypeOf(X.prototype,new Proxy(target,{})); Object.defineProperty(globalThis,"sink",{configurable:true, set:function(v){ Object.setPrototypeOf(target,v) }}); var f; try { f=new X("}); sink = (function(){") } catch (e) { target.missing; throw e } f.missing; target.missing`, want: cyclicProtoMessage, noShapeCheck: true},
+	{name: "Function body escape returns an existing object", code: `var target={}; Object.setPrototypeOf(Function.prototype,new Proxy(target,{})); try { Function("}); (target || function(){") } catch (e) {} target.missing; Function("}); (target || function(){")`, want: functionShapeMessage},
+	{name: "Function body escape returns an existing object (post-check alone)", code: `var target={}; Object.setPrototypeOf(Function.prototype,new Proxy(target,{})); try { Function("}); (target || function(){") } catch (e) {} target.missing; Function("}); (target || function(){")`, want: cyclicProtoMessage, noShapeCheck: true},
+	{name: "Function body escape, plain call re-links the escaped function", code: `Object.defineProperty(globalThis,"sink",{configurable:true, set:function(v){ Object.setPrototypeOf(v,null); Object.setPrototypeOf(Function.prototype,new Proxy(v,{})) }}); var f; try { f=Function("}); sink = (function(){") } catch (e) { (function(){}).missing; throw e } (function(){}).missing`, want: functionShapeMessage},
+	{name: "Function body escape, plain call re-links the escaped function (post-check alone)", code: `Object.defineProperty(globalThis,"sink",{configurable:true, set:function(v){ Object.setPrototypeOf(v,null); Object.setPrototypeOf(Function.prototype,new Proxy(v,{})) }}); var f; try { f=Function("}); sink = (function(){") } catch (e) { (function(){}).missing; throw e } (function(){}).missing`, want: cyclicProtoMessage, noShapeCheck: true},
 	{name: "callable proxy as its own apply trap", code: `var h={}; var F=new Proxy(function(){},h); h.apply=F; F()`},
 	{name: "callable proxy as its own apply trap, frozen handler", code: `var h={}; var F=new Proxy(function(){},h); h.apply=F; Object.freeze(h); F()`},
 	{name: "callable proxy as the getter of its own trap", code: `var h={}; var F=new Proxy(function(){},h); Object.defineProperty(h,'apply',{get:F}); F()`},
@@ -371,6 +396,9 @@ func runStackChild(v stackVector, budget int64) (*Result, string, error) {
 		stackChildLangEnv+"="+v.language)
 	if v.generate {
 		cmd.Env = append(cmd.Env, stackChildGenEnv+"=1")
+	}
+	if v.noShapeCheck {
+		cmd.Env = append(cmd.Env, stackChildNoShapeEnv+"=1")
 	}
 	out, err := cmd.CombinedOutput()
 	output := string(out)
@@ -1259,6 +1287,17 @@ func TestSourceGuardMatchesGoja(t *testing.T) {
 		`var AF=Object.getPrototypeOf(async function(){}).constructor; Object.getPrototypeOf(new AF("return 1")) === AF.prototype`,
 		`Object.getPrototypeOf(Reflect.construct(Function, [""], Function)) === Function.prototype`,
 		`Object.getPrototypeOf(new Function("")) === Function.prototype`,
+		// Legitimate parameters and bodies pass the shape check unchanged.
+		`Function("a = 1", "{b, c} = {}", "...rest", "return [a, b, c, rest.length].join()")(undefined, {b:2, c:3}, 4, 5)`,
+		`Function("'use strict'; return typeof this")()`, `Function("return 1 // trailing comment")()`, `Function("return 2 /* open")`,
+		`Function("a /* x */", "b // y", "return a + b")(1, 2)`, `Function("return '})' + \"})\" + /}\\)/.source + ` + "`${'})'}`" + `")()`,
+		`Function("function inner(){ return {a:1} } return inner().a")()`, `Function("return {a:1}")().a`, `Function("")()`, `Function()()`,
+		`Function("a", "b")(1)`, `Function("return arguments.length")(1, 2, 3)`, `Function("<!-- html comment\nreturn 3")()`,
+		`var GF=Object.getPrototypeOf(function*(){}).constructor; GF("a", "yield a; yield* [2, 3]")(1).next().value`,
+		`var AF=Object.getPrototypeOf(async function(){}).constructor; AF("return await 1")() instanceof Promise`,
+		`Function("return 1;;")()`, `Function("return 1\n;")()`, `Function("}")`, `Function("(")`, `Function("a)", "")`, `Function("a) {", "")`,
+		`Function("\ud800")`, `Function("return '\ud800'.length")()`, `Function("a", "/*", "*/ return 1")`,
+		`Function("a = function(){ return 1 }", "return a()")()`,
 	}
 	run := func(vm *goja.Runtime, expr string) string {
 		v, err := vm.RunString(`(function(){ try { var r = (function(){ return eval(` + strconv.Quote(expr) + `) })(); return typeof r + ":" + String(r) } catch (e) { return "throw:" + e.name + ":" + e.message } })()`)
@@ -1275,6 +1314,23 @@ func TestSourceGuardMatchesGoja(t *testing.T) {
 		}
 		want, got := run(plain, expr), run(guarded, expr)
 		if got != want {
+			t.Errorf("%s\n got: %s\nwant: %s", expr, got, want)
+		}
+	}
+	// Arguments that close the function expression are a SyntaxError (as
+	// in the spec), where goja would run what follows.
+	for _, expr := range []string{
+		`Function("}); (function(){")`, `Function("});(function(){")`, `Function("x", "}).call(0, function(){")`,
+		`Function("a) { return 1 }, function(b", "")`, `new Function("}); 1; (function(){")`,
+		`var GF=Object.getPrototypeOf(function*(){}).constructor; GF("}); (function*(){")`,
+		`var AF=Object.getPrototypeOf(async function(){}).constructor; AF("}); (async function(){")`,
+		`class X extends Function { constructor(b){ super(b) } } new X("}); (function(){")`,
+	} {
+		guarded := goja.New()
+		if _, err := installStackGuard(guarded); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := run(guarded, expr), "throw:SyntaxError:"+functionShapeMessage; got != want {
 			t.Errorf("%s\n got: %s\nwant: %s", expr, got, want)
 		}
 	}

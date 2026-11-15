@@ -2,10 +2,13 @@ package jsruntime
 
 import (
 	"fmt"
+	"strings"
 	"unicode"
 	"unicode/utf8"
 
 	"github.com/dop251/goja"
+	"github.com/dop251/goja/ast"
+	"github.com/dop251/goja/parser"
 )
 
 // Source-size limit for everything code_execution compiles.
@@ -144,12 +147,22 @@ func sourceTooLargeResult(err error) *Result {
 
 // functionCtorRoots evaluate to the constructors that compile their
 // arguments; a root goja cannot evaluate (unsupported syntax) is skipped.
-var functionCtorRoots = []string{
-	`Function`,
-	`Object.getPrototypeOf(async function(){}).constructor`,
-	`Object.getPrototypeOf(function*(){}).constructor`,
-	`Object.getPrototypeOf(async function*(){}).constructor`,
+// head is the text goja's functionCtor puts before the parameters.
+var functionCtorRoots = []struct{ expr, head string }{
+	{`Function`, "(function anonymous("},
+	{`Object.getPrototypeOf(async function(){}).constructor`, "(async function anonymous("},
+	{`Object.getPrototypeOf(function*(){}).constructor`, "(function* anonymous("},
+	{`Object.getPrototypeOf(async function*(){}).constructor`, "(async function* anonymous("},
 }
+
+// functionShapeCheck enables the check that a Function-like constructor's
+// arguments form one function expression (checkFunctionShape). Only tests
+// turn it off, to exercise the prototype post-check on its own.
+var functionShapeCheck = true
+
+// functionShapeMessage is the SyntaxError for constructor arguments that do
+// not form a single function.
+const functionShapeMessage = "Function constructor arguments must form a single function: the parameters and the body may not close it"
 
 // installSourceGuard puts checkSourceSize in front of every way a script can
 // make goja compile a string: eval and the Function-like constructors. It
@@ -165,15 +178,28 @@ func (g *nativeGuard) installSourceGuard() error {
 	}
 	toStringOnce := *stringCall
 
-	seen := make(map[*goja.Object]struct{})
-	for _, root := range functionCtorRoots {
-		v, err := vm.RunString(root)
+	syntaxErrorCtor, ok := goja.AssertConstructor(vm.Get("SyntaxError"))
+	if !ok {
+		return errStackGuardSetup
+	}
+	newSyntaxError := func(msg string) *goja.Object {
+		e, err := syntaxErrorCtor(nil, vm.ToValue(msg))
 		if err != nil {
-			if root == functionCtorRoots[0] {
+			panic(err)
+		}
+		return e
+	}
+
+	seen := make(map[*goja.Object]struct{})
+	for i, root := range functionCtorRoots {
+		v, err := vm.RunString(root.expr)
+		if err != nil {
+			if i == 0 {
 				return fmt.Errorf("%w: %v", errStackGuardSetup, err)
 			}
 			continue
 		}
+		head := root.head
 		ctor := v.ToObject(vm)
 		if _, dup := seen[ctor]; dup {
 			continue
@@ -190,9 +216,40 @@ func (g *nativeGuard) installSourceGuard() error {
 		if !ok {
 			return errStackGuardSetup
 		}
+		// checked converts and checks the arguments: their size, and that
+		// they form one function expression, so that compiling them runs no
+		// script code and yields a function nothing else refers to yet.
+		checked := func(args []goja.Value) []goja.Value {
+			out, complete := g.checkFunctionArgs(args, toStringOnce)
+			if complete && functionShapeCheck && !functionShapeOK(head, out) {
+				panic(newSyntaxError(functionShapeMessage))
+			}
+			return out
+		}
+		// made returns what goja's functionCtor returned, after the same
+		// post-check as the prototype setters (breakProtoCycle): functionCtor
+		// sets the prototype of the value its program evaluated to, which
+		// the shape check makes a fresh function, but which is otherwise
+		// whatever the program left (an object it exposed to script first).
+		made := func(v goja.Value) *goja.Object {
+			fn, isObj := v.(*goja.Object)
+			if !isObj {
+				panic(g.vm.NewTypeError("Function constructor did not return a function"))
+			}
+			if isProxy(fn) {
+				// Never a fresh function: only an escaped program returns
+				// one, and its forwarding cannot be checked after the fact.
+				g.vm.Interrupt(errProtoCycleUnbroken)
+				panic(g.vm.NewTypeError(cyclicProtoMessage))
+			}
+			if g.breakProtoCycle(fn, defProto) {
+				panic(g.vm.NewTypeError(cyclicProtoMessage))
+			}
+			return fn
+		}
 		*call = func(c goja.FunctionCall) goja.Value {
-			c.Arguments = g.checkFunctionArgs(c.Arguments, toStringOnce)
-			return origCall(c)
+			c.Arguments = checked(c.Arguments)
+			return made(origCall(c))
 		}
 		// goja's construct resolves newTarget.prototype (which may run script
 		// code) before it converts the arguments. The checked conversion must
@@ -208,15 +265,15 @@ func (g *nativeGuard) installSourceGuard() error {
 					proto = p
 				}
 			}
-			fn, isObj := origCall(goja.FunctionCall{This: goja.Undefined(), Arguments: g.checkFunctionArgs(args, toStringOnce)}).(*goja.Object)
-			if !isObj {
-				panic(g.vm.NewTypeError("Function constructor did not return a function"))
-			}
+			fn := made(origCall(goja.FunctionCall{This: goja.Undefined(), Arguments: checked(args)}))
 			if proto != defProto {
-				// A function object just made, which nothing refers to yet:
-				// no cycle, no trap.
+				// fn is not a proxy (made): no trap runs. It is checked
+				// again after the change, like any prototype change.
 				if err := fn.SetPrototype(proto); err != nil {
 					panic(err)
+				}
+				if g.breakProtoCycle(fn, defProto) {
+					panic(g.vm.NewTypeError(cyclicProtoMessage))
 				}
 			}
 			return fn
@@ -271,13 +328,15 @@ const functionCtorHead = "(async function* anonymous(\n) {\n\n})"
 // Symbol, so conversion stops there too: the Symbol and everything after it
 // are passed through unconverted, and the constructor throws at the Symbol
 // before it reads any of the rest (nothing is compiled).
-func (g *nativeGuard) checkFunctionArgs(args []goja.Value, toString nativeCallFunc) []goja.Value {
-	out := make([]goja.Value, len(args))
+//
+// complete reports that every argument was converted (no Symbol).
+func (g *nativeGuard) checkFunctionArgs(args []goja.Value, toString nativeCallFunc) (out []goja.Value, complete bool) {
+	out = make([]goja.Value, len(args))
 	total := sourceOperatorTokens(functionCtorHead, maxSourceTokens)
 	for i, a := range args {
 		if _, isSymbol := a.(*goja.Symbol); isSymbol {
 			copy(out[i:], args[i:])
-			return out
+			return out, false
 		}
 		s := toString(goja.FunctionCall{This: goja.Undefined(), Arguments: []goja.Value{a}})
 		out[i] = s
@@ -286,5 +345,50 @@ func (g *nativeGuard) checkFunctionArgs(args []goja.Value, toString nativeCallFu
 			panic(g.newRangeError(sourceTooDeepError().Error()))
 		}
 	}
-	return out
+	return out, true
+}
+
+// functionShapeOK reports whether the program goja's functionCtor builds from
+// head and the converted arguments is one function expression and nothing
+// else. The spec parses the parameters and the body on their own (as
+// FormalParameters and FunctionBody), so a body like "}); f(); (function(){"
+// is a SyntaxError; goja compiles the concatenation, which runs that code
+// while the function is made and returns whatever the program evaluated to.
+// A lone function expression runs no code when evaluated (default values
+// run when the function is called).
+//
+// The text is built exactly as functionCtor builds it and parsed with
+// goja's own parser. A source that parser rejects is left to the
+// constructor, which rejects it with its own SyntaxError (goja only differs
+// in writing a lone surrogate as a \u escape instead of U+FFFD, which is
+// valid in the same places).
+func functionShapeOK(head string, args []goja.Value) bool {
+	var sb strings.Builder
+	sb.WriteString(head)
+	if len(args) > 1 {
+		for i, a := range args[:len(args)-1] {
+			if i > 0 {
+				sb.WriteByte(',')
+			}
+			sb.WriteString(a.String())
+		}
+	}
+	sb.WriteString("\n) {\n")
+	if len(args) > 0 {
+		sb.WriteString(args[len(args)-1].String())
+	}
+	sb.WriteString("\n})")
+	prog, err := parser.ParseFile(nil, "<eval>", sb.String(), 0)
+	if err != nil {
+		return true // the constructor reports the SyntaxError itself
+	}
+	if len(prog.Body) != 1 {
+		return false
+	}
+	stmt, ok := prog.Body[0].(*ast.ExpressionStatement)
+	if !ok {
+		return false
+	}
+	_, ok = stmt.Expression.(*ast.FunctionLiteral)
+	return ok
 }
