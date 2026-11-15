@@ -108,6 +108,19 @@ func (p *MCPProxyServer) activityAttribution(ctx context.Context, sessionID stri
 			attr.ClientVersion = version
 		}
 	}
+
+	// Spec 124: the work session, the owning user and the run name are facts
+	// of the request, so they are fixed here, at emit time, with the rest of
+	// the attribution. The activity service has no request to read them from.
+	if attr.WorkSessionID == "" {
+		attr.WorkSessionID = p.requestWorkSession(ctx, sessionID)
+	}
+	if ac := auth.AuthContextFromContext(ctx); ac != nil && attr.UserID == "" {
+		attr.UserID = ac.UserID
+	}
+	if attr.RunName == "" {
+		attr.RunName = p.requestRunName(ctx, principalFromContext(ctx))
+	}
 	return attr
 }
 

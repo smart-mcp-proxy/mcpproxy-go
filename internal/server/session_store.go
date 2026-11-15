@@ -57,6 +57,13 @@ type SessionInfo struct {
 	// record from this connection agrees on which work session it belongs to.
 	workSessionID string
 
+	// workSessionByKey holds the work session of each credential (and run
+	// name) that has used this connection (Spec 124 FR-009). One connection
+	// can carry requests from different tokens, and each credential owns its
+	// own work session. The first key resolved is also workSessionID, which
+	// the connection's durable record carries.
+	workSessionByKey map[string]string
+
 	// persistDone is closed once the durable record exists. Concurrent first
 	// calls wait on it rather than racing ahead to UpdateSessionStats, which
 	// errors if the row is not there yet.
@@ -309,6 +316,15 @@ func (s *SessionStore) SetWorkspace(sessionID, workspaceRoot string) {
 // Returns the work-session id this connection belongs to. It is resolved ONCE
 // per connection and reused, so every record from this connection agrees.
 func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func(*SessionInfo) string) string {
+	return s.EnsurePersistedKeyed(sessionID, "", resolveWorkSession)
+}
+
+// EnsurePersistedKeyed is EnsurePersisted for a request made under one
+// credential key (principal and run name). The connection is persisted once;
+// the work session is resolved once PER KEY, so two tokens that share a
+// connection get two work sessions and each keeps its own for the life of the
+// connection (Spec 124 FR-006, FR-009).
+func (s *SessionStore) EnsurePersistedKeyed(sessionID, key string, resolveWorkSession func(*SessionInfo) string) string {
 	if sessionID == "" {
 		return ""
 	}
@@ -322,7 +338,7 @@ func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func
 
 	revived := s.reopenLocked(info)
 	if info.persisted {
-		workSessionID := info.workSessionID
+		workSessionID := s.workSessionForKeyLocked(info, key, resolveWorkSession)
 		done := info.persistDone
 		s.mu.Unlock()
 		if revived {
@@ -338,6 +354,14 @@ func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func
 	if info.workSessionID == "" && resolveWorkSession != nil {
 		cp := *info
 		info.workSessionID = resolveWorkSession(&cp)
+	}
+	if info.workSessionID != "" {
+		if info.workSessionByKey == nil {
+			info.workSessionByKey = make(map[string]string)
+		}
+		if _, ok := info.workSessionByKey[key]; !ok {
+			info.workSessionByKey[key] = info.workSessionID
+		}
 	}
 
 	record := &storage.SessionRecord{
@@ -387,6 +411,54 @@ func (s *SessionStore) EnsurePersisted(sessionID string, resolveWorkSession func
 	s.mu.Unlock()
 
 	return workSessionID
+}
+
+// workSessionForKeyLocked returns the work session of one credential key on a
+// persisted connection, resolving and caching it the first time the key is
+// seen. Caller holds s.mu.
+func (s *SessionStore) workSessionForKeyLocked(info *SessionInfo, key string, resolve func(*SessionInfo) string) string {
+	if id, ok := info.workSessionByKey[key]; ok {
+		return id
+	}
+	if len(info.workSessionByKey) == 0 && info.workSessionID != "" {
+		// A connection persisted before keys were tracked (or restored by a
+		// test): its one id belongs to whoever asks first.
+		info.workSessionByKey = map[string]string{key: info.workSessionID}
+		return info.workSessionID
+	}
+	if resolve == nil {
+		return info.workSessionID
+	}
+	cp := *info
+	id := resolve(&cp)
+	if id == "" {
+		return ""
+	}
+	if info.workSessionByKey == nil {
+		info.workSessionByKey = make(map[string]string)
+	}
+	info.workSessionByKey[key] = id
+	if info.workSessionID == "" {
+		info.workSessionID = id
+	}
+	return id
+}
+
+// WorkSessionForKey returns the work session of one credential key on a
+// connection that has already been persisted, resolving it on first use. It
+// returns "" for an unknown or not-yet-persisted connection, and the caller
+// then derives the work session from the request alone.
+func (s *SessionStore) WorkSessionForKey(sessionID, key string, resolve func(*SessionInfo) string) string {
+	if sessionID == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	info, ok := s.sessions[sessionID]
+	if !ok || !info.persisted {
+		return ""
+	}
+	return s.workSessionForKeyLocked(info, key, resolve)
 }
 
 // WorkSessionID returns the work session this connection belongs to, if it has

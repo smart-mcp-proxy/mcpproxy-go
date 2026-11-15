@@ -515,3 +515,36 @@ func TestForgetClientCredential_NotFoundAndConflict(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, stored.Revoked, "a grandfathered agent token must not be revoked")
 }
+
+// Spec 124 FR-009: during a staged rotation each secret authenticates with its
+// OWN prefix, and the new secret keeps that prefix across finalize, so a work
+// session keyed on the credential generation neither merges the two secrets
+// nor changes under the new one. The stored record is not altered.
+func TestClientCredentialRotation_AuthContextCarriesTheMatchedSecretPrefix(t *testing.T) {
+	mgr, cleanup := setupTestStorageForAgentTokens(t)
+	defer cleanup()
+
+	oldRaw, _ := auth.GenerateClientToken()
+	_, err := mgr.MintClientCredential("cursor", oldRaw, testHMACKey, auth.ProfileModeLocked, "work-readonly", time.Now().Add(time.Hour))
+	require.NoError(t, err)
+	newRaw, _ := auth.GenerateClientToken()
+	_, err = mgr.StageClientCredentialRotation("cursor", newRaw, testHMACKey)
+	require.NoError(t, err)
+
+	oldTok, err := mgr.ValidateAgentToken(oldRaw, testHMACKey)
+	require.NoError(t, err)
+	newTok, err := mgr.ValidateAgentToken(newRaw, testHMACKey)
+	require.NoError(t, err)
+
+	oldPrefix, newPrefix := auth.TokenPrefix(oldRaw), auth.TokenPrefix(newRaw)
+	require.NotEqual(t, oldPrefix, newPrefix)
+	assert.Equal(t, oldPrefix, oldTok.AuthContext().TokenPrefix)
+	assert.Equal(t, newPrefix, newTok.AuthContext().TokenPrefix, "the pending secret must not borrow the old prefix")
+	assert.Equal(t, oldPrefix, newTok.TokenPrefix, "the stored record is unchanged during the overlap")
+
+	_, err = mgr.FinalizeClientCredentialRotation("cursor")
+	require.NoError(t, err)
+	after, err := mgr.ValidateAgentToken(newRaw, testHMACKey)
+	require.NoError(t, err)
+	assert.Equal(t, newPrefix, after.AuthContext().TokenPrefix, "the same prefix before and after finalize")
+}

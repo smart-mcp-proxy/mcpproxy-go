@@ -49,6 +49,12 @@ type WorkSessionIdentity struct {
 	// Claude Code, Gemini and opencode do; Codex does not.
 	WorkspaceRoot string
 
+	// RunName is the label a caller sent in the X-MCPProxy-Run header (Spec 124
+	// FR-003). It splits one principal's work into named runs. It is its own
+	// key field, after the principal, so it can never join two principals the
+	// way CorrelationID would.
+	RunName string
+
 	// CorrelationID is a client-supplied conversation id. No MCP client offers
 	// one today (Claude Code has a conversation UUID but does not send it), so
 	// this is always empty for now. When a client finally does, it OVERRIDES the
@@ -70,6 +76,7 @@ func (id WorkSessionIdentity) key() string {
 		id.ClientName,
 		id.ClientVersion,
 		id.WorkspaceRoot,
+		id.RunName,
 	}, "\x00")
 }
 
@@ -80,7 +87,8 @@ func (id WorkSessionIdentity) isEmpty() bool {
 	return id.CorrelationID == "" &&
 		id.Principal == "" &&
 		id.ClientName == "" &&
-		id.WorkspaceRoot == ""
+		id.WorkspaceRoot == "" &&
+		id.RunName == ""
 }
 
 // WorkspaceName is the display name of the project — the final path element.
@@ -115,7 +123,17 @@ type WorkSessionTracker struct {
 	sessions   map[string]*workSessionEntry // identity key -> live work session
 	idleWindow time.Duration
 	now        func() time.Time // injectable for tests
+
+	// named counts the named work sessions opened per principal on namedDay
+	// (Spec 124 FR-008). Past MaxNamedWorkSessionsPerDay a principal's run
+	// name is ignored, so a caller cannot mint sessions without bound.
+	named    map[string]int
+	namedDay string
 }
+
+// MaxNamedWorkSessionsPerDay bounds how many run-named work sessions one
+// principal may open in one UTC day (Spec 124 FR-008).
+const MaxNamedWorkSessionsPerDay = 1000
 
 // NewWorkSessionTracker returns a tracker with the given idle window.
 // A zero or negative window falls back to the default.
@@ -163,6 +181,22 @@ func (t *WorkSessionTracker) Resolve(id WorkSessionIdentity) string {
 		return entry.id
 	}
 
+	if id.RunName != "" && id.CorrelationID == "" {
+		if !t.admitNamedLocked(id.Principal, now) {
+			// Over the daily bound: the name is dropped and the call joins the
+			// principal's unnamed work instead of opening one more session.
+			id.RunName = ""
+			if id.isEmpty() {
+				return ""
+			}
+			k = id.key()
+			if entry, ok := t.sessions[k]; ok && now.Sub(entry.lastActivity) <= t.idleWindow {
+				entry.lastActivity = now
+				return entry.id
+			}
+		}
+	}
+
 	// Either never seen, or idle long enough that this is new work.
 	entry := &workSessionEntry{
 		id:           newWorkSessionID(k, now),
@@ -171,6 +205,50 @@ func (t *WorkSessionTracker) Resolve(id WorkSessionIdentity) string {
 	}
 	t.sessions[k] = entry
 	return entry.id
+}
+
+// admitNamedLocked counts one more named work session for the principal today
+// and reports whether it is within the daily bound.
+func (t *WorkSessionTracker) admitNamedLocked(principal string, now time.Time) bool {
+	day := now.UTC().Format("2006-01-02")
+	if t.namedDay != day || t.named == nil {
+		t.namedDay = day
+		t.named = make(map[string]int)
+	}
+	if t.named[principal] >= MaxNamedWorkSessionsPerDay {
+		return false
+	}
+	t.named[principal]++
+	return true
+}
+
+// Touch records activity on a work session that was resolved earlier and is
+// reused without a new Resolve: a legacy MCP connection keeps the id it was
+// given (Spec 124 FR-006), so without this its idle clock would stop at the
+// first call (FR-019).
+//
+// When the entry was reaped or has gone idle, it is reinstated under the same
+// id: the connection will keep stamping that id, and another connection with
+// the same identity must join it, not open a second session beside it. An
+// identity that has since been given a different live session is left alone.
+func (t *WorkSessionTracker) Touch(workSessionID string, id WorkSessionIdentity) {
+	if workSessionID == "" || id.isEmpty() {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	now := t.now()
+	k := id.key()
+	entry, ok := t.sessions[k]
+	switch {
+	case ok && entry.id == workSessionID:
+		entry.lastActivity = now
+	case ok && now.Sub(entry.lastActivity) <= t.idleWindow:
+		// A different, live session owns this identity now.
+	default:
+		t.sessions[k] = &workSessionEntry{id: workSessionID, lastActivity: now, startedAt: now}
+	}
 }
 
 // StartedAt returns when the given work session began, and whether it is known.

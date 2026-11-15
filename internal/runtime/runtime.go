@@ -233,6 +233,12 @@ type Runtime struct {
 	// counter matters — is exactly when that happens.
 	rejectionMetric atomic.Pointer[RejectionMetricSink]
 
+	// requestSessionFacts resolves the work session, owning user and run name
+	// of a request from its context (Spec 124). Installed by the server, which
+	// owns the request-level resolution; used by rows the runtime writes
+	// itself.
+	requestSessionFacts atomic.Pointer[RequestSessionFacts]
+
 	// workSessions derives a unit of USER WORK from the churn of transport
 	// sessions underneath it (Spec 082).
 	workSessions *WorkSessionTracker
@@ -4238,6 +4244,28 @@ func (r *Runtime) ResolveWorkSession(id WorkSessionIdentity) string {
 		r.workSessions = NewWorkSessionTracker(DefaultWorkSessionIdleWindow)
 	}
 	return r.workSessions.Resolve(id)
+}
+
+// RequestSessionFacts returns the work session, owning user and run name of
+// the request in ctx.
+type RequestSessionFacts func(ctx context.Context) (workSessionID, userID, runName string)
+
+// SetRequestSessionFacts installs the request-level session resolver.
+func (r *Runtime) SetRequestSessionFacts(f RequestSessionFacts) {
+	if f == nil {
+		r.requestSessionFacts.Store(nil)
+		return
+	}
+	r.requestSessionFacts.Store(&f)
+}
+
+// TouchWorkSession moves the idle clock of a work session that a connection
+// reuses without resolving it again (Spec 124 FR-019).
+func (r *Runtime) TouchWorkSession(workSessionID string, id WorkSessionIdentity) {
+	if r.workSessions == nil {
+		return
+	}
+	r.workSessions.Touch(workSessionID, id)
 }
 
 // ReapWorkSessions drops work sessions idle past maxIdle, so a long-lived daemon

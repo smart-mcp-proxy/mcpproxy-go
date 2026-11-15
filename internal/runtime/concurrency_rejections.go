@@ -50,6 +50,13 @@ func (r *Runtime) installRejectionObserver() {
 		if rej.Scope == limiter.ScopeToken {
 			attr = ActivityAttribution{TokenName: rej.Token.Name, TokenPrefix: rej.Token.Prefix, ClientID: rej.Token.ClientID}
 		}
+		// Spec 124: a shed is a failed attempt of its work session like any
+		// other. This row is written here, below the dispatch layer, so the
+		// session facts come from the request context through the resolver
+		// the server installed.
+		if facts := r.requestSessionFacts.Load(); facts != nil {
+			attr.WorkSessionID, attr.UserID, attr.RunName = (*facts)(ctx)
+		}
 		r.EmitActivityToolCallRejectedAttributed(
 			rej.Server,
 			rej.Tool,

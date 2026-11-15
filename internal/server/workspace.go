@@ -161,10 +161,21 @@ func principalFromContext(ctx context.Context) string {
 		// user so their work sessions (and the work_session_id stamped onto
 		// their activity records) cannot collapse into one. Personal-edition
 		// tokens have no owner and keep the historical bare form.
+		//
+		// Spec 124 FR-009: the credential's generation, the prefix of the
+		// secret that authenticated, is part of the principal, for agent
+		// tokens and client credentials alike. A token regenerated or
+		// recreated under the same name, and a rotated client credential,
+		// therefore start a new work session even inside the idle window,
+		// and a session never spans two secrets.
+		base := "agent:" + ac.AgentName
 		if ac.UserID != "" {
-			return "agent:" + ac.UserID + ":" + ac.AgentName
+			base = "agent:" + ac.UserID + ":" + ac.AgentName
 		}
-		return "agent:" + ac.AgentName
+		if ac.TokenPrefix != "" {
+			return base + ":" + ac.TokenPrefix
+		}
+		return base
 	case ac.UserID != "":
 		return "user:" + ac.UserID
 	default:
@@ -203,8 +214,9 @@ func (p *MCPProxyServer) markSessionWorked(ctx context.Context, sessionID string
 	p.sessionStore.WorkspaceSettled(sessionID, workspaceSettleWait)
 
 	principal := principalFromContext(ctx)
+	runName := p.requestRunName(ctx, principal)
 
-	return p.sessionStore.EnsurePersisted(sessionID, func(info *SessionInfo) string {
+	return p.sessionStore.EnsurePersistedKeyed(sessionID, workSessionKey(principal, runName), func(info *SessionInfo) string {
 		resolve := p.resolveWorkSession()
 		if resolve == nil {
 			return ""
@@ -214,6 +226,7 @@ func (p *MCPProxyServer) markSessionWorked(ctx context.Context, sessionID string
 			ClientName:    info.ClientName,
 			ClientVersion: info.ClientVersion,
 			WorkspaceRoot: info.Workspace,
+			RunName:       runName,
 		})
 	})
 }

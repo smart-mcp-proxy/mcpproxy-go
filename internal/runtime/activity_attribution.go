@@ -35,6 +35,18 @@ type ActivityAttribution struct {
 	// scoped caller recognises its own policy_decision and prompt_get rows),
 	// never in any API shape, export or SSE frame for another caller.
 	TokenPrefix string
+
+	// WorkSessionID is the work session of the request (Spec 124 D1). It is
+	// resolved at the emit site because only the request knows the credential,
+	// the client of a 2026-07-28 request and the run name. Empty for emitters
+	// that have no request; the activity service then falls back to the
+	// connection's cached id.
+	WorkSessionID string
+	// UserID is the owning user of the calling credential (server edition).
+	// INTERNAL like TokenPrefix: it decides who may read the row.
+	UserID string
+	// RunName is the validated X-MCPProxy-Run label of the request.
+	RunName string
 }
 
 // IsZero reports whether no field is set.
@@ -60,6 +72,9 @@ func (a ActivityAttribution) payload() map[string]any {
 	set("client_version", a.ClientVersion)
 	set("token_name", a.TokenName)
 	set("_token_prefix", a.TokenPrefix)
+	set("_work_session_id", a.WorkSessionID)
+	set("_user_id", a.UserID)
+	set("run_name", a.RunName)
 	return out
 }
 
@@ -78,6 +93,9 @@ func attributionFromPayload(payload map[string]any) ActivityAttribution {
 		ClientVersion: getStringPayload(m, "client_version"),
 		TokenName:     getStringPayload(m, "token_name"),
 		TokenPrefix:   getStringPayload(m, "_token_prefix"),
+		WorkSessionID: getStringPayload(m, "_work_session_id"),
+		UserID:        getStringPayload(m, "_user_id"),
+		RunName:       getStringPayload(m, "run_name"),
 	}
 }
 
@@ -94,6 +112,15 @@ func applyAttribution(rec *storage.ActivityRecord, a ActivityAttribution) {
 	rec.TokenName = a.TokenName
 	rec.ClientName = a.ClientName
 	rec.TokenPrefix = a.TokenPrefix
+	// Spec 124: the request-resolved work session wins over the connection's
+	// cached one, which the builder set before this call.
+	if a.WorkSessionID != "" {
+		rec.WorkSessionID = a.WorkSessionID
+	}
+	if rec.UserID == "" {
+		rec.UserID = a.UserID
+	}
+	rec.RunName = a.RunName
 	if rec.ClientName == "" {
 		if name, ok := rec.Metadata["client_name"].(string); ok {
 			rec.ClientName = name

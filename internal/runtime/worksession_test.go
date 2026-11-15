@@ -228,3 +228,106 @@ func TestWorkSession_ReapDropsOnlyIdleEntries(t *testing.T) {
 	assert.Equal(t, 1, tr.Reap(4*time.Hour), "only the idle entry is dropped")
 	assert.Equal(t, liveID, tr.Resolve(active), "the live work session is untouched")
 }
+
+// Spec 124 FR-003/FR-008: the run name splits one principal's work, and is a
+// field of its own: the same name under two principals is two sessions.
+func TestWorkSession_RunNameSplitsWithinAPrincipalOnly(t *testing.T) {
+	tr, _ := fixedClock(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+	base := WorkSessionIdentity{Principal: "agent:ci:mcp_agt_aaaa", ClientName: "rest"}
+
+	unnamed := tr.Resolve(base)
+	a := base
+	a.RunName = "nightly-1"
+	b := base
+	b.RunName = "nightly-2"
+	other := a
+	other.Principal = "agent:ci:mcp_agt_bbbb"
+
+	ida, idb, ido := tr.Resolve(a), tr.Resolve(b), tr.Resolve(other)
+	assert.NotEqual(t, unnamed, ida)
+	assert.NotEqual(t, ida, idb)
+	assert.NotEqual(t, ida, ido, "a run name must never join two principals")
+	assert.Equal(t, ida, tr.Resolve(a), "the same run stays one session")
+
+	// A run name alone is an identity: an unauthenticated REST script that
+	// names its run is grouped by it.
+	assert.NotEmpty(t, tr.Resolve(WorkSessionIdentity{RunName: "solo"}))
+}
+
+// Spec 124 FR-009: the credential generation is part of the principal, so a
+// regenerated token starts a new session inside the idle window.
+func TestWorkSession_GenerationInPrincipalSplits(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+	old := tr.Resolve(WorkSessionIdentity{Principal: "agent:ci:mcp_agt_old1", ClientName: "c"})
+	advance(time.Minute)
+	regenerated := tr.Resolve(WorkSessionIdentity{Principal: "agent:ci:mcp_agt_new1", ClientName: "c"})
+	assert.NotEqual(t, old, regenerated)
+}
+
+// Spec 124 FR-019: Touch moves the idle clock of a session that is reused
+// without a new Resolve.
+func TestWorkSession_TouchKeepsALongConnectionAlive(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "p", ClientName: "ide"}
+	ws := tr.Resolve(id)
+
+	for i := 0; i < 5; i++ {
+		advance(20 * time.Minute)
+		tr.Touch(ws, id)
+	}
+	assert.Equal(t, ws, tr.Resolve(id), "100 minutes of steady calls is one session")
+}
+
+// A reaped or idle entry is reinstated under the id the connection still
+// stamps, so a second connection joins it.
+func TestWorkSession_TouchReinstatesAReapedEntry(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "p", ClientName: "ide"}
+	ws := tr.Resolve(id)
+
+	advance(3 * time.Hour)
+	require.Equal(t, 1, tr.Reap(time.Hour))
+	tr.Touch(ws, id)
+	assert.Equal(t, ws, tr.Resolve(id))
+}
+
+// Touch never steals an identity that a newer live session owns.
+func TestWorkSession_TouchLeavesANewerLiveSessionAlone(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 15, 10, 0, 0, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "p", ClientName: "ide"}
+	old := tr.Resolve(id)
+	advance(time.Hour)
+	fresh := tr.Resolve(id)
+	require.NotEqual(t, old, fresh)
+
+	tr.Touch(old, id)
+	assert.Equal(t, fresh, tr.Resolve(id))
+}
+
+// Spec 124 FR-008: past the daily bound the name is ignored, the call is not
+// refused, and the count restarts the next day.
+func TestWorkSession_NamedSessionsAreBoundedPerPrincipalPerDay(t *testing.T) {
+	tr, advance := fixedClock(time.Date(2026, 11, 15, 0, 0, 1, 0, time.UTC))
+	id := WorkSessionIdentity{Principal: "agent:ci:mcp_agt_aaaa", ClientName: "rest"}
+	unnamed := tr.Resolve(id)
+
+	seen := map[string]bool{}
+	for i := 0; i < MaxNamedWorkSessionsPerDay; i++ {
+		n := id
+		n.RunName = "run-" + time.Duration(i).String()
+		seen[tr.Resolve(n)] = true
+	}
+	require.Len(t, seen, MaxNamedWorkSessionsPerDay)
+
+	over := id
+	over.RunName = "one-too-many"
+	assert.Equal(t, unnamed, tr.Resolve(over), "the name is ignored past the bound")
+
+	// Another principal is not affected.
+	otherP := over
+	otherP.Principal = "agent:other:mcp_agt_bbbb"
+	assert.NotEqual(t, unnamed, tr.Resolve(otherP))
+
+	advance(24 * time.Hour)
+	assert.NotEqual(t, unnamed, tr.Resolve(over), "the bound is per day")
+}

@@ -249,6 +249,20 @@ type ActivityRecord struct {
 	// unattributed.
 	WorkSessionID string `json:"work_session_id,omitempty"`
 
+	// RunName is the validated X-MCPProxy-Run label the caller sent with the
+	// request (Spec 124 FR-003). A label only, never a credential.
+	RunName string `json:"run_name,omitempty"`
+
+	// Companion marks a blocking policy_decision that is NOT the counted row
+	// of its attempt, because a tool_call row records the same attempt
+	// (Spec 124 D2). Set by the emit site.
+	Companion bool `json:"companion,omitempty"`
+
+	// BodiesRemoved is set when retention stripped Arguments and Response from
+	// this row to stay under the size cap while keeping the row (Spec 124
+	// FR-032).
+	BodiesRemoved bool `json:"bodies_removed,omitempty"`
+
 	// Scope attribution (Spec 108 FR-029): the profile, client and token IN
 	// EFFECT when the call ran, stamped once at write time and never rewritten
 	// (a later reassignment does not touch history). First-class rather than

@@ -154,6 +154,10 @@ type MCPProxyServer struct {
 	// have to stand up a whole Runtime to exercise session attribution.
 	workSessionResolver func(runtime.WorkSessionIdentity) string
 
+	// workSessionToucher replaces the runtime's idle-clock refresh in tests
+	// (Spec 124 FR-019). Nil in production.
+	workSessionToucher func(string, runtime.WorkSessionIdentity)
+
 	// telemetryRegOverride lets tests observe telemetry counters without
 	// standing up a whole Runtime (mirrors workSessionResolver). Nil in
 	// production — telemetryRegistry() then resolves via mainServer.runtime.
@@ -921,6 +925,12 @@ func NewMCPProxyServer(
 	// Initialize routing mode server instances (Spec 031)
 	proxy.initRoutingModeServers()
 	proxy.seedInventoryKey()
+
+	// Spec 124: rows the runtime writes itself (limiter sheds) take their work
+	// session from the request, through the same resolution the dispatch uses.
+	if mainServer != nil && mainServer.runtime != nil {
+		mainServer.runtime.SetRequestSessionFacts(proxy.requestSessionFacts)
+	}
 
 	return proxy
 }

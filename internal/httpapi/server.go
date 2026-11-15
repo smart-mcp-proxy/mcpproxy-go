@@ -849,6 +849,12 @@ func (s *Server) correlationIDMiddleware() func(http.Handler) http.Handler {
 			ctx := reqcontext.WithCorrelationID(r.Context(), correlationID)
 			ctx = reqcontext.WithRequestSource(ctx, reqcontext.SourceRESTAPI)
 
+			// Spec 124 FR-002/FR-003: a REST call has no MCP connection, so
+			// its work session is derived from the request. The surface names
+			// the client, and the optional run name splits the caller's work.
+			ctx = reqcontext.WithClientSurface(ctx, restClientSurface(r))
+			ctx = reqcontext.WithRunHeader(ctx, r.Header.Get(reqcontext.RunNameHeader))
+
 			// Add correlation ID to response headers for client tracking
 			w.Header().Set("X-Correlation-ID", correlationID)
 

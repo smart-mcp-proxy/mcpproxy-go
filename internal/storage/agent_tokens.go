@@ -1029,6 +1029,9 @@ func (m *Manager) ValidateAgentToken(rawToken string, hmacKey []byte) (*auth.Age
 		if claimedKind == auth.KindClient {
 			if pending, perr := m.getAgentTokenByPendingHashLocked(hash); perr == nil && pending != nil {
 				token = pending
+				// Spec 124 FR-009: the request carries the prefix of the
+				// secret it presented, not the old secret's.
+				token.MatchedPrefix = pending.PendingPrefix
 			}
 		}
 		if token == nil {
