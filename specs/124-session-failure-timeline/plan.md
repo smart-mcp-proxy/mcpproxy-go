@@ -76,7 +76,7 @@ One pure function in `internal/storage`, `attemptRole(record)`, returns whether 
 
 The first task of PR-1 is a table test that feeds every emitter's row shape through `attemptRole`, so the rule is pinned to what the code writes, not to this description.
 
-To apply "same request id" exactly and without a scan, a fourth bucket holds one entry per attempt (D3, `work_session_attempts`). A row with a request id looks its attempt up there: absent means a new attempt; present means the same attempt, and a row that turns it from success to failure updates the entry and the summary once. A row with no request id is its own attempt and gets no entry. Entries outlive the rows: they are removed only when the session's summary is removed, by the window (step 1) or with the whole session (step 3c). Removing them with single rows would let a late row of the same call be counted a second time.
+To apply "same request id" exactly and without a scan, a fourth bucket holds one entry per attempt (D3, `work_session_attempts`). A row with a request id looks its attempt up there: absent means a new attempt; present means the same attempt, and a row that turns it from success to failure updates the entry and the summary once. A row with no request id is its own attempt and gets no entry. Each entry stores the time of its attempt. An entry is removed with the session's summary (steps 1 and 3c of D4), or by any cleanup step once every row of its attempt is gone and the attempt is more than one hour old. The hour is the guard against a late row of the same call being counted twice; rows of one call are written within seconds of each other. This keeps the attempts bucket proportional to the stored rows, so step 3d can always bring a single oversized session under the byte budget (FR-034).
 
 ### D3. Storage
 
@@ -124,11 +124,14 @@ A new activity type `upstream_event`, written by `ActivityService` so it stays o
 
 Neither existing signal can carry this. The supervisor's bus event holds only a level, a title, a message and a `connected` flag derived from the title (`internal/runtime/supervisor/actor_pool.go:62-79`). The supervisor's error-code edge (`shouldNotifyErrorCode`, `supervisor.go:1070-1098`) is a sampled predicate that by its own comment misses transient failures and recoveries, and its handler reads the connection state after the fact.
 
-The transition itself is observed in one place: the state manager's callback, `managed.Client.onStateChange(oldState, newState, info)` (`internal/upstream/managed/client.go:445`, `:1973`), which today only logs. The plan adds an observer there:
+The transition itself happens in one place, the state manager (`internal/upstream/types/types.go`). Its existing callback cannot be the source as it is: `ConnectionInfo` has no transition time, and the callback is dispatched synchronously on some paths and in a new goroutine on the error path (`types.go:344-350`, `:385-390`), so a loss can be delivered after the recovery that followed it.
 
-- The upstream manager exposes one registration point for a transition observer. Each managed client calls it from `onStateChange` with the server name, the old and new state, the time of the transition, and the diagnostic code obtained by classifying the connection's last error with `diagnostics.Classify`.
-- The runtime registers the observer at start and publishes a new bus event. The call must not block the client: it is a non-blocking publish, like the other emitters.
-- `ActivityService` writes the row with the transition's own time as its timestamp, so ordering against calls is the order things happened (SC-005).
+The plan therefore captures the transition inside the state manager, under its lock:
+
+- Every state mutation appends a small transition record to an ordered queue while the lock is held: old state, new state, the time taken at that moment, and a copy of the last error. The existing `onStateChange` callback and its dispatch are not changed.
+- One goroutine per state manager drains the queue in order and hands each record to a transition observer. The queue is bounded; when full, the oldest unsent records of the same kind are merged, never the newest dropped, so a final Ready is always delivered.
+- The upstream manager exposes one registration point for the observer. The runtime registers at start, classifies the copied error with `diagnostics.Classify` to get the `MCPX_*` code, and publishes a new bus event without blocking.
+- `ActivityService` writes the row with the captured time as its timestamp, so the order against calls is the order things happened (SC-005), and per server the records arrive in mutation order.
 
 | Kind | Rule on the transition |
 |---|---|
@@ -138,7 +141,7 @@ The transition itself is observed in one place: the state manager's callback, `m
 | `connection_restored` | state returns to Ready after a recorded loss |
 | `oauth_refresh_failed` | the existing `oauth.refresh_failed` bus event |
 
-No new process monitoring is added. `process_exited` is a classification of an existing disconnect, not a new detector. Step 7 of PR-1 starts with a test that kills a stdio fixture, refuses a connection and expires an OAuth login, and records which states and codes the callback sees; the table above is corrected from that test before the rows are built. A reconnect storm fires the callback on every attempt; the collapser below bounds what is stored.
+No new process monitoring is added. `process_exited` is a classification of an existing disconnect, not a new detector. Step 7 of PR-1 starts with a test that kills a stdio fixture, refuses a connection and expires an OAuth login, and records which states and codes the observer receives; the table above is corrected from that test before the rows are built. A reconnect storm produces a record on every attempt; the collapser below bounds what is stored.
 
 The row carries server, kind, time, the `MCPX_*` code and `diagnostics.Get(code).UserMessage`. The raw error string is not copied (FR-021). In the server edition, events about a user's upstream credential carry that user id for access control.
 
