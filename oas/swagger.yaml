@@ -1661,6 +1661,9 @@ components:
           type: string
       type: object
     contracts.ActivityRecord:
+      description: |-
+        Activity is the stored row; absent on a session_start or session_end
+        row.
       properties:
         agent_name:
           description: Agent token name when auth_type is "agent"
@@ -4044,6 +4047,9 @@ components:
       properties:
         activity:
           $ref: '#/components/schemas/contracts.ActivityRecord'
+        at:
+          description: At is the time of the row.
+          type: string
         bodies_removed:
           description: |-
             BodiesRemoved is true when retention removed the row's argument and

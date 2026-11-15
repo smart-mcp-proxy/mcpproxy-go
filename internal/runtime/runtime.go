@@ -4290,6 +4290,11 @@ func (r *Runtime) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, er
 	return r.storageManager.WorkSessionRowRefs(id)
 }
 
+// WalkWorkSessionRefs visits a session's index entries in time order.
+func (r *Runtime) WalkWorkSessionRefs(id string, fn func(storage.WorkSessionRowRef) bool) error {
+	return r.storageManager.WalkWorkSessionRefs(id, fn)
+}
+
 // UpstreamEventRefs returns one server's upstream events in a time span.
 func (r *Runtime) UpstreamEventRefs(server string, from, to time.Time) ([]storage.WorkSessionRowRef, error) {
 	return r.storageManager.UpstreamEventRefs(server, from, to)
@@ -4300,9 +4305,12 @@ func (r *Runtime) GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord,
 	return r.storageManager.GetActivitiesByKeys(keys)
 }
 
-// RequestSessionFacts returns the work session, owning user and run name of
-// the request in ctx.
-type RequestSessionFacts func(ctx context.Context) (workSessionID, userID, runName string)
+// RequestSessionFacts returns the attribution of the request in ctx: its
+// credential, client, profile, work session, owning user and run name. A row
+// the runtime writes itself must carry the same attribution as the rows the
+// dispatch writes for that request, or it would look like another caller's
+// row inside the session.
+type RequestSessionFacts func(ctx context.Context) ActivityAttribution
 
 // SetRequestSessionFacts installs the request-level session resolver.
 func (r *Runtime) SetRequestSessionFacts(f RequestSessionFacts) {

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -34,8 +35,8 @@ func (c *wsController) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary
 func (c *wsController) GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error) {
 	return c.store.GetWorkSessionSummary(id)
 }
-func (c *wsController) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, error) {
-	return c.store.WorkSessionRowRefs(id)
+func (c *wsController) WalkWorkSessionRefs(id string, fn func(storage.WorkSessionRowRef) bool) error {
+	return c.store.WalkWorkSessionRefs(id, fn)
 }
 func (c *wsController) UpstreamEventRefs(server string, from, to time.Time) ([]storage.WorkSessionRowRef, error) {
 	return c.store.UpstreamEventRefs(server, from, to)
@@ -178,7 +179,9 @@ func TestWorkSessions_Authorization(t *testing.T) {
 	assert.Equal(t, f.base.Add(time.Minute), mine.LastActivityAt.UTC(), "beta's and the builtin's later activity is not shown")
 	require.NotNil(t, mine.LastFailure)
 	assert.Equal(t, "alpha", mine.LastFailure.Server)
-	assert.Equal(t, "connection reset", mine.LastFailure.Reason)
+	assert.Equal(t, "The upstream server could not be reached.", mine.LastFailure.Reason,
+		"fixed wording for the error class; the row's free text is never copied into the summary")
+	assert.NotContains(t, agentRec.Body.String(), "connection reset")
 	assert.Empty(t, mine.Profile, "the profile is not part of a scoped view")
 	assert.Zero(t, mine.ConnectionCount)
 	assert.NotContains(t, agentRec.Body.String(), "beta")
@@ -240,13 +243,16 @@ func TestWorkSessionTimeline_ScopedToReach(t *testing.T) {
 
 	// The owned alpha event (another user's credential) is withheld: of the
 	// two alpha events inside the span only the shared one is here.
-	require.Len(t, tl.Rows, 3, "the alpha call, the shared alpha event, the failed alpha call")
-	assert.Equal(t, 3, tl.TotalRows)
-	assert.Equal(t, contracts.TimelineKindCall, tl.Rows[0].Kind)
-	assert.Equal(t, contracts.TimelineKindUpstreamEvent, tl.Rows[1].Kind, "the event sits between the calls around it (SC-005)")
-	assert.Equal(t, contracts.TimelineKindCall, tl.Rows[2].Kind)
-	assert.True(t, tl.Rows[2].Failed)
-	assert.Equal(t, 2, tl.Position, "the default position is the first failure")
+	require.Len(t, tl.Rows, 4, "the session start, the alpha call, the shared alpha event, the failed alpha call")
+	assert.Equal(t, 4, tl.TotalRows)
+	assert.Equal(t, contracts.TimelineKindSessionStart, tl.Rows[0].Kind)
+	assert.Nil(t, tl.Rows[0].Activity, "a boundary row is synthetic")
+	assert.Equal(t, f.base, tl.Rows[0].At.UTC(), "the start is the start of the part in reach")
+	assert.Equal(t, contracts.TimelineKindCall, tl.Rows[1].Kind)
+	assert.Equal(t, contracts.TimelineKindUpstreamEvent, tl.Rows[2].Kind, "the event sits between the calls around it (SC-005)")
+	assert.Equal(t, contracts.TimelineKindCall, tl.Rows[3].Kind)
+	assert.True(t, tl.Rows[3].Failed)
+	assert.Equal(t, 3, tl.Position, "the default position is the first failure")
 	assert.Equal(t, 1, tl.FailureIndex)
 	assert.Equal(t, 1, tl.FailureTotal)
 	assert.Equal(t, 1, tl.LifetimeFailures)
@@ -258,7 +264,8 @@ func TestWorkSessionTimeline_ScopedToReach(t *testing.T) {
 	assert.NotContains(t, body, "beta")
 	assert.NotContains(t, body, wsBetaSecret)
 	assert.NotContains(t, body, "retrieve_tools", "MCPProxy's own tools are not in a scoped activity view")
-	for _, row := range tl.Rows {
+	for _, row := range tl.Rows[1:] {
+		require.NotNil(t, row.Activity)
 		assert.Empty(t, row.Activity.Response, "bodies are omitted by default (FR-044)")
 		assert.Empty(t, row.Activity.Arguments)
 	}
@@ -267,7 +274,7 @@ func TestWorkSessionTimeline_ScopedToReach(t *testing.T) {
 	// Bodies on request.
 	var withBodies contracts.WorkSessionTimelineResponse
 	wsData(t, scopeGet(t, f.srv, "/api/v1/work-sessions/ws-mine/timeline?include_bodies=true", f.token), &withBodies)
-	assert.Equal(t, "alpha response", withBodies.Rows[2].Activity.Response)
+	assert.Equal(t, "alpha response", withBodies.Rows[3].Activity.Response)
 }
 
 // The administrator's timeline: every row and event, and every position form.
@@ -280,16 +287,22 @@ func TestWorkSessionTimeline_PositionsForAnAdministrator(t *testing.T) {
 	}
 
 	all := get("?before=250&after=250")
-	// 4 session rows + alpha shared event + alpha owned event + beta event.
-	require.Equal(t, 7, all.TotalRows)
-	require.Len(t, all.Rows, 7)
+	// The start + 4 session rows + alpha shared event + alpha owned event +
+	// beta event. The session is still active, so it has no end row.
+	require.Equal(t, 8, all.TotalRows)
+	require.Len(t, all.Rows, 8)
+	assert.Equal(t, contracts.TimelineKindSessionStart, all.Rows[0].Kind)
 	for i := 1; i < len(all.Rows); i++ {
-		assert.False(t, all.Rows[i].Activity.Timestamp.Before(all.Rows[i-1].Activity.Timestamp), "rows are in time order")
+		assert.False(t, all.Rows[i].At.Before(all.Rows[i-1].At), "rows are in time order")
 		assert.Equal(t, i, all.Rows[i].Index)
 	}
 	assert.Equal(t, 2, all.FailureTotal)
 	assert.Equal(t, 1, all.FailureIndex)
 	assert.Equal(t, wsFailedAlphaID, all.Rows[all.Position].Activity.ID)
+
+	// before+after+1 is capped at 500 rows (FR-044).
+	wide := get("?before=250&after=250&at=end")
+	assert.LessOrEqual(t, len(wide.Rows), 500)
 
 	second := get("?at=failure:2&before=0&after=0")
 	require.Len(t, second.Rows, 1)
@@ -304,7 +317,7 @@ func TestWorkSessionTimeline_PositionsForAnAdministrator(t *testing.T) {
 
 	end := get("?at=end&before=0&after=0")
 	require.Len(t, end.Rows, 1)
-	assert.Equal(t, 6, end.Position)
+	assert.Equal(t, 7, end.Position)
 	assert.Equal(t, 2, end.FailureIndex, "both failures are at or before the end")
 	assert.False(t, end.HasAfter)
 
@@ -375,4 +388,82 @@ func TestWorkSessions_ListFiltersAndSort(t *testing.T) {
 	var scoped contracts.WorkSessionListResponse
 	wsData(t, scopeGet(t, f.srv, "/api/v1/work-sessions?profile=work-full", f.token), &scoped)
 	assert.Zero(t, scoped.Total)
+}
+
+// An ended session has a synthetic end row, and one page never exceeds 500
+// rows however the context is asked for.
+func TestWorkSessionTimeline_EndRowAndPageCap(t *testing.T) {
+	f := newWSFixture(t)
+	old := f.base.Add(-3 * time.Hour)
+	for i := 0; i < 600; i++ {
+		require.NoError(t, f.store.SaveActivity(&storage.ActivityRecord{
+			Type: storage.ActivityTypeToolCall, Status: storage.ActivityStatusSuccess, ServerName: "alpha", ToolName: "alpha_tool",
+			Timestamp: old.Add(time.Duration(i) * time.Second), WorkSessionID: "ws-long",
+			TokenName: "scoped-ci", TokenPrefix: f.prefix,
+		}))
+	}
+	_, err := f.store.MarkWorkSessionsEnded(time.Now().UTC())
+	require.NoError(t, err)
+
+	var tl contracts.WorkSessionTimelineResponse
+	wsData(t, scopeGet(t, f.srv, "/api/v1/work-sessions/ws-long/timeline?at=end&before=250&after=250", f.token), &tl)
+	assert.Equal(t, 602, tl.TotalRows, "start + 600 rows + end")
+	assert.Equal(t, 601, tl.Position)
+	require.NotEmpty(t, tl.Rows)
+	last := tl.Rows[len(tl.Rows)-1]
+	assert.Equal(t, contracts.TimelineKindSessionEnd, last.Kind)
+	assert.Nil(t, last.Activity)
+	assert.Equal(t, old.Add(599*time.Second), last.At.UTC(), "the end is the last activity in reach")
+	assert.Len(t, tl.Rows, 251, "the 250 rows before the end, and the end")
+
+	// In the middle, with the widest context: capped at 500 rows.
+	var mid contracts.WorkSessionTimelineResponse
+	wsData(t, scopeGet(t, f.srv, "/api/v1/work-sessions/ws-long/timeline?at="+url.QueryEscape("row:"+tl.Rows[0].Activity.ID)+"&before=250&after=250", f.token), &mid)
+	assert.Len(t, mid.Rows, 500)
+	assert.True(t, mid.HasBefore)
+	assert.True(t, mid.HasAfter)
+	assert.Equal(t, mid.Position, mid.Rows[250].Index)
+
+	// A one-row page of the long session.
+	var one contracts.WorkSessionTimelineResponse
+	wsData(t, scopeGet(t, f.srv, "/api/v1/work-sessions/ws-long/timeline?at=end&before=0&after=0", f.token), &one)
+	require.Len(t, one.Rows, 1)
+	assert.Equal(t, contracts.TimelineKindSessionEnd, one.Rows[0].Kind)
+
+	// No failure stored: the default position is the earliest row.
+	var first contracts.WorkSessionTimelineResponse
+	wsData(t, scopeGet(t, f.srv, "/api/v1/work-sessions/ws-long/timeline?before=5&after=2", f.token), &first)
+	assert.Zero(t, first.Position)
+	assert.Zero(t, first.FailureIndex)
+	require.Len(t, first.Rows, 3)
+	assert.Equal(t, contracts.TimelineKindSessionStart, first.Rows[0].Kind)
+}
+
+// A session that holds a request row with no credential is not provably the
+// token's own: it reads as not found for the token, and the row's body is
+// never served to it.
+func TestWorkSessionTimeline_UnattributedRowsAreNotServedToAToken(t *testing.T) {
+	f := newWSFixture(t)
+	const secret = "LEGACY_CALLER_PAYLOAD"
+	// A row written before credentials were stamped on every row, then the
+	// token's own row under the same work-session id.
+	f.row("ws-legacy", "", "", 0, func(r *storage.ActivityRecord) { r.Response = secret })
+	f.row("ws-legacy", "scoped-ci", f.prefix, time.Minute, nil)
+
+	for _, path := range []string{"/api/v1/work-sessions/ws-legacy", "/api/v1/work-sessions/ws-legacy/timeline?include_bodies=true"} {
+		rec := scopeGet(t, f.srv, path, f.token)
+		assert.Equal(t, http.StatusNotFound, rec.Code, path)
+		assert.NotContains(t, rec.Body.String(), secret)
+	}
+	admin := scopeGet(t, f.srv, "/api/v1/work-sessions/ws-legacy/timeline?include_bodies=true", scopeAdminAPIKey)
+	require.Equal(t, http.StatusOK, admin.Code)
+	assert.Contains(t, admin.Body.String(), secret, "an administrator still reads it")
+
+	// The row-level check on its own: a token never owns an unattributed row.
+	reach := newWorkSessionReach(auth.WithAuthContext(context.Background(), &auth.AuthContext{
+		Type: auth.AuthTypeAgent, AgentName: "scoped-ci", TokenPrefix: f.prefix,
+	}))
+	assert.False(t, reach.ownsRow(&storage.ActivityRecord{Type: storage.ActivityTypeToolCall, ServerName: "alpha"}))
+	assert.True(t, reach.ownsRow(&storage.ActivityRecord{Type: storage.ActivityTypeToolCall, TokenName: "scoped-ci", TokenPrefix: f.prefix}))
+	assert.True(t, reach.ownsRow(&storage.ActivityRecord{Type: storage.ActivityTypeUpstreamEvent}), "events are judged by their own rule")
 }

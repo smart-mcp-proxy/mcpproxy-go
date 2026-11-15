@@ -81,8 +81,8 @@ type WorkSessionPartition struct {
 	FirstFailureAt  time.Time `json:"first_failure_at,omitzero"`
 	LastFailureAt   time.Time `json:"last_failure_at,omitzero"`
 
-	// Last failure facts (FR-011). The reason comes from the row's own error
-	// message, never from argument or response bodies (FR-012).
+	// Last failure facts (FR-011). The reason is fixed wording for the error
+	// class, never free text from the row or its bodies (FR-012).
 	LastErrorClass string `json:"last_error_class,omitempty"`
 	LastErrorCode  string `json:"last_error_code,omitempty"`
 	LastTool       string `json:"last_tool,omitempty"`
@@ -140,7 +140,16 @@ type WorkSessionSummary struct {
 	Removal string `json:"removal,omitempty"`
 
 	Servers map[string]*WorkSessionPartition `json:"servers,omitempty"`
+
+	// Unattributed records that a request row with no credential was folded
+	// in while the session had no owner yet, so that a later attributed row
+	// makes the session ownerless instead of claiming it.
+	Unattributed bool `json:"unattributed,omitempty"`
 }
+
+// UnattributedRows reports whether the session holds a request row that
+// carries no credential.
+func (s *WorkSessionSummary) UnattributedRows() bool { return s.Unattributed }
 
 // sortedServers returns the admitted server names in a fixed order, so that
 // every reader breaks a tie between two servers the same way.
@@ -306,14 +315,42 @@ func truncateRunes(s string, n int) string {
 	return string(out)
 }
 
-// failureReason is the short reason of a failed row (FR-012): the row's own
-// error message, or for a policy decision its stated reason. Never a body.
-func failureReason(r *ActivityRecord) string {
-	reason := r.ErrorMessage
+// failureReasonByClass is the fixed wording of a failure of each error class.
+var failureReasonByClass = map[string]string{
+	"network":            "The upstream server could not be reached.",
+	"timeout":            "The call timed out.",
+	"http":               "The upstream server answered with an HTTP error.",
+	"jsonrpc":            "The upstream server answered with a protocol error.",
+	"tool_error":         "The tool reported an error.",
+	"session_terminated": "The upstream session was terminated.",
+	"auth":               "The upstream server refused the credentials.",
+	"proxy_policy":       "MCPProxy refused the call.",
+	"proxy_internal":     "MCPProxy failed to handle the call.",
+	"cancelled":          "The call was cancelled.",
+}
+
+// failureReason is the short reason of a failed row (FR-012). It is built
+// only from closed vocabularies: the error class, the upstream HTTP status
+// and, for a refusal, the block reason key. The row's free-text error message
+// is deliberately NOT used: an upstream error can echo a credential from the
+// request, and the activity doors mask that text per row with the sensitive
+// data detector, which a summary cannot do. The full, masked message stays
+// one click away on the row itself.
+func failureReason(r *ActivityRecord, role AttemptRole) string {
+	class := failureClass(r, role)
+	reason := failureReasonByClass[class]
 	if reason == "" {
-		if v, ok := r.Metadata["reason"].(string); ok {
-			reason = v
+		reason = "The call failed."
+	}
+	if class == ErrorClassProxyPolicy {
+		if key := r.EffectiveBlockReason(); key != "" {
+			reason = "MCPProxy refused the call (" + key + ")."
+		} else if r.Status == ActivityStatusRejected {
+			reason = "MCPProxy refused the call (limit reached)."
 		}
+	}
+	if class == "http" && r.UpstreamHTTPStatus > 0 {
+		reason = fmt.Sprintf("The upstream server answered with HTTP %d.", r.UpstreamHTTPStatus)
 	}
 	return truncateRunes(reason, MaxWorkSessionReasonLen)
 }
@@ -353,9 +390,26 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 	}
 	rowHasIdentity := rowName != "" || rowPrefix != "" || r.UserID != ""
 	summaryHasIdentity := s.TokenName != "" || s.TokenPrefix != "" || s.UserID != ""
+	// requestRow: a row that records what a caller did. Since Spec 124 every
+	// such row of a credential's session carries the credential. One that
+	// carries none while other rows of the session carry one (in either
+	// order) was written by an unknown caller: only rows from before Spec 124
+	// can do that, and the session then belongs to no credential.
+	requestRow := r.Type == ActivityTypeToolCall || r.Type == ActivityTypeInternalToolCall ||
+		r.Type == ActivityTypePolicyDecision || r.Type == ActivityTypePromptGet
 	switch {
 	case !rowHasIdentity:
+		if requestRow {
+			if summaryHasIdentity {
+				s.Ownerless = true
+			}
+			s.Unattributed = true
+		}
 	case !summaryHasIdentity && !s.Ownerless:
+		if s.UnattributedRows() {
+			s.Ownerless = true
+			break
+		}
 		s.TokenName, s.TokenPrefix, s.UserID = rowName, rowPrefix, r.UserID
 	case rowName != s.TokenName || (rowPrefix != "" && s.TokenPrefix != "" && rowPrefix != s.TokenPrefix) ||
 		(r.UserID != "" && s.UserID != "" && r.UserID != s.UserID):
@@ -448,7 +502,7 @@ func (s *WorkSessionSummary) applyRow(r *ActivityRecord, role AttemptRole) {
 		p.LastErrorClass = failureClass(r, role)
 		p.LastErrorCode = failureCode(r)
 		p.LastTool = r.ToolName
-		p.LastReason = failureReason(r)
+		p.LastReason = failureReason(r, role)
 		p.LastFailureBlock = role.Block
 	}
 }
@@ -605,6 +659,32 @@ func (m *Manager) WorkSessionRowRefs(workSessionID string) ([]WorkSessionRowRef,
 		return nil
 	})
 	return refs, err
+}
+
+// WalkWorkSessionRefs calls fn for each index entry of a session, in time
+// order, until fn returns false. Only keys and their small values are read.
+// The ref's ActivityKey is valid only during the call; copy it to keep it.
+func (m *Manager) WalkWorkSessionRefs(workSessionID string, fn func(WorkSessionRowRef) bool) error {
+	return m.db.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte(WorkSessionRowsBucket))
+		if b == nil {
+			return nil
+		}
+		prefix := workSessionRowPrefix(workSessionID)
+		c := b.Cursor()
+		for k, v := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = c.Next() {
+			ak := k[len(prefix):]
+			flags, server := parseIndexValue(v)
+			role := flagsRole(flags)
+			if !fn(WorkSessionRowRef{
+				ActivityKey: ak, Timestamp: activityKeyTime(ak), Server: server,
+				Counted: role.Counted, Failed: role.Failed, Block: role.Block,
+			}) {
+				return nil
+			}
+		}
+		return nil
+	})
 }
 
 // UpstreamEventRefs returns the upstream event rows of one server whose time

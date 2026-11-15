@@ -4734,6 +4734,11 @@ func (s *Server) WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, err
 	return s.runtime.WorkSessionRowRefs(id)
 }
 
+// WalkWorkSessionRefs visits a work session's index entries in time order.
+func (s *Server) WalkWorkSessionRefs(id string, fn func(storage.WorkSessionRowRef) bool) error {
+	return s.runtime.WalkWorkSessionRefs(id, fn)
+}
+
 // UpstreamEventRefs returns one server's upstream events in a time span.
 func (s *Server) UpstreamEventRefs(server string, from, to time.Time) ([]storage.WorkSessionRowRef, error) {
 	return s.runtime.UpstreamEventRefs(server, from, to)

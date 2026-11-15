@@ -1984,7 +1984,7 @@ A work session is one agent's run of work (see [Activity log](../features/activi
 | `limit` | integer | 1-100, default 25 |
 | `offset` | integer | Pagination offset |
 
-Each session carries `id`, `token_name`, `client_id`, `client_name`, `surface`, `run_name`, `status` (`active` or `ended`), `started_at`, `last_activity_at`, `ended_at`, `duration_ms`, `attempts`, `failures`, `policy_blocks` (included in `failures`), `stored_failures`, `first_failure_at` and `last_failure` (`at`, `error_class`, `error_code`, `server`, `tool`, `reason`, `policy_block`). `attempts`, `failures` and `policy_blocks` are lifetime counts; `stored_failures` counts the failures whose rows are still in the log.
+Each session carries `id`, `token_name`, `client_id`, `client_name`, `surface`, `run_name`, `status` (`active` or `ended`), `started_at`, `last_activity_at`, `ended_at`, `duration_ms`, `attempts`, `failures`, `policy_blocks` (included in `failures`), `stored_failures`, `first_failure_at` and `last_failure` (`at`, `error_class`, `error_code`, `server`, `tool`, `reason`, `policy_block`). `reason` is fixed wording for the error class, never the row's own error text, which can echo request data; the full message is on the row in the timeline. `attempts`, `failures` and `policy_blocks` are lifetime counts; `stored_failures` counts the failures whose rows are still in the log.
 
 #### GET /api/v1/work-sessions/{id}
 
@@ -2000,7 +2000,7 @@ The session's activity rows and the upstream events of the servers it called, in
 | `before`, `after` | integer | Rows before and after the position, 0-250, default 20 |
 | `include_bodies` | boolean | Include argument and response bodies (omitted by default) |
 
-The response has `session`, `rows`, `position` and `total_rows`, `failure_index` and `failure_total` (the stored failures the caller can navigate), `lifetime_failures`, `earlier_failures_not_stored`, `has_before` and `has_after`. Each row has `index`, `kind` (`call`, `internal_call`, `policy_decision`, `prompt`, `upstream_event`), `failed`, `policy_block`, `bodies_removed` and the `activity` record.
+The response has `session`, `rows`, `position` and `total_rows`, `failure_index` and `failure_total` (the stored failures the caller can navigate), `lifetime_failures`, `earlier_failures_not_stored`, `has_before` and `has_after`. Each row has `index`, `kind` (`call`, `internal_call`, `policy_decision`, `prompt`, `upstream_event`, `session_start`, `session_end`), `at`, `failed`, `policy_block`, `bodies_removed` and the `activity` record. `session_start` and `session_end` are synthetic rows derived from the session; they carry `at` and no `activity`. A page holds at most 500 rows, the positioned row included.
 
 When retention has removed some of a session's failures, positions count only the failures still stored, and `earlier_failures_not_stored` is `true` with the lifetime count in `lifetime_failures`. With no stored failure the default position is the earliest stored row.
 

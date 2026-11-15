@@ -153,11 +153,9 @@ func (p *MCPProxyServer) touchWorkSession(id string, identity runtime.WorkSessio
 	p.mainServer.runtime.TouchWorkSession(id, identity)
 }
 
-// requestSessionFacts is what the runtime needs to stamp a row it writes on
-// its own (a limiter rejection), from the request context it was handed.
-func (p *MCPProxyServer) requestSessionFacts(ctx context.Context) (workSessionID, userID, runName string) {
-	if ac := auth.AuthContextFromContext(ctx); ac != nil {
-		userID = ac.UserID
-	}
-	return p.requestWorkSession(ctx, ""), userID, p.requestRunName(ctx, principalFromContext(ctx))
+// requestSessionFacts is the attribution the runtime stamps on a row it
+// writes on its own (a limiter rejection), from the request context it was
+// handed: the same attribution the dispatch gives that request's other rows.
+func (p *MCPProxyServer) requestSessionFacts(ctx context.Context) runtime.ActivityAttribution {
+	return p.activityAttribution(ctx, "")
 }

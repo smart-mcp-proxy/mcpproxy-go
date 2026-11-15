@@ -76,7 +76,12 @@ const (
 	TimelineKindPolicyDecision = "policy_decision"
 	TimelineKindPrompt         = "prompt"
 	TimelineKindUpstreamEvent  = "upstream_event"
-	TimelineKindOther          = "other"
+	// TimelineKindSessionStart and TimelineKindSessionEnd are synthetic rows
+	// derived from the session, not stored activity rows. They carry `at` and
+	// no activity.
+	TimelineKindSessionStart = "session_start"
+	TimelineKindSessionEnd   = "session_end"
+	TimelineKindOther        = "other"
 )
 
 // WorkSessionTimelineRow is one row of a session timeline.
@@ -84,14 +89,18 @@ type WorkSessionTimelineRow struct {
 	// Index is the row's position in the caller's view of the timeline.
 	Index int    `json:"index"`
 	Kind  string `json:"kind"`
+	// At is the time of the row.
+	At time.Time `json:"at"`
 	// Failed marks the counted row of a failed attempt; PolicyBlock marks a
 	// refusal by MCPProxy itself.
 	Failed      bool `json:"failed,omitempty"`
 	PolicyBlock bool `json:"policy_block,omitempty"`
 	// BodiesRemoved is true when retention removed the row's argument and
 	// response bodies to keep the row.
-	BodiesRemoved bool           `json:"bodies_removed,omitempty"`
-	Activity      ActivityRecord `json:"activity"`
+	BodiesRemoved bool `json:"bodies_removed,omitempty"`
+	// Activity is the stored row; absent on a session_start or session_end
+	// row.
+	Activity *ActivityRecord `json:"activity,omitempty"`
 }
 
 // WorkSessionTimelineResponse is the body of

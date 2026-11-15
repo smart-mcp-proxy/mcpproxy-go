@@ -55,7 +55,12 @@ func (r *Runtime) installRejectionObserver() {
 		// session facts come from the request context through the resolver
 		// the server installed.
 		if facts := r.requestSessionFacts.Load(); facts != nil {
-			attr.WorkSessionID, attr.UserID, attr.RunName = (*facts)(ctx)
+			full := (*facts)(ctx)
+			if rej.Scope == limiter.ScopeToken {
+				// The limiter names the token it throttled; that wins.
+				full.TokenName, full.TokenPrefix, full.ClientID = attr.TokenName, attr.TokenPrefix, attr.ClientID
+			}
+			attr = full
 		}
 		r.EmitActivityToolCallRejectedAttributed(
 			rej.Server,

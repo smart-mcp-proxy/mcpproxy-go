@@ -30,6 +30,9 @@ const (
 	workSessionListMax     = 100
 	timelineContextDefault = 20
 	timelineContextMax     = 250
+	// timelinePageMax is the most rows one page returns (FR-044), the
+	// positioned row included.
+	timelinePageMax = 500
 	// workSessionIdleWindow mirrors the tracker's idle window: a session with
 	// no activity for this long is over.
 	workSessionIdleWindow = 30 * time.Minute
@@ -43,7 +46,7 @@ const (
 type workSessionController interface {
 	ListWorkSessionSummaries() ([]*storage.WorkSessionSummary, error)
 	GetWorkSessionSummary(id string) (*storage.WorkSessionSummary, error)
-	WorkSessionRowRefs(id string) ([]storage.WorkSessionRowRef, error)
+	WalkWorkSessionRefs(id string, fn func(storage.WorkSessionRowRef) bool) error
 	UpstreamEventRefs(server string, from, to time.Time) ([]storage.WorkSessionRowRef, error)
 	GetActivitiesByKeys(keys [][]byte) ([]*storage.ActivityRecord, error)
 }
@@ -66,8 +69,8 @@ func (noWorkSessions) ListWorkSessionSummaries() ([]*storage.WorkSessionSummary,
 func (noWorkSessions) GetWorkSessionSummary(string) (*storage.WorkSessionSummary, error) {
 	return nil, nil
 }
-func (noWorkSessions) WorkSessionRowRefs(string) ([]storage.WorkSessionRowRef, error) {
-	return nil, nil
+func (noWorkSessions) WalkWorkSessionRefs(string, func(storage.WorkSessionRowRef) bool) error {
+	return nil
 }
 func (noWorkSessions) UpstreamEventRefs(string, time.Time, time.Time) ([]storage.WorkSessionRowRef, error) {
 	return nil, nil
@@ -102,6 +105,22 @@ func (v workSessionReach) owns(s *storage.WorkSessionSummary) bool {
 		return v.ac.TokenPrefix != "" && s.TokenPrefix == v.ac.TokenPrefix && s.TokenName == v.ac.AgentName
 	}
 	return v.ac.UserID != "" && s.UserID == v.ac.UserID
+}
+
+// ownsRow reports whether a request row is the caller's own. An administrator
+// reads every row. Upstream events are not request rows and are judged by
+// their own rule.
+func (v workSessionReach) ownsRow(rec *storage.ActivityRecord) bool {
+	if !v.scoped || rec.Type == storage.ActivityTypeUpstreamEvent {
+		return true
+	}
+	if v.ac == nil {
+		return false
+	}
+	if v.ac.Type == auth.AuthTypeAgent {
+		return callerOwnsActivity(v.ctx, rec)
+	}
+	return v.ac.UserID != "" && rec.UserID == v.ac.UserID
 }
 
 // allows reports whether a server's part of a session is in reach. The empty
@@ -459,22 +478,14 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// The session's own rows, narrowed to the caller's reach by the server
-	// stored in the index, before any row is loaded.
-	rowRefs, err := c.WorkSessionRowRefs(id)
-	if err != nil {
-		s.writeError(w, r, http.StatusInternalServerError, "Failed to read work session")
-		return
-	}
-	refs := make([]storage.WorkSessionRowRef, 0, len(rowRefs))
-	for _, ref := range rowRefs {
-		if reach.allows(ref.Server) {
-			refs = append(refs, ref)
-		}
+	// A page never exceeds timelinePageMax rows, the positioned row included.
+	if before+after+1 > timelinePageMax {
+		after = timelinePageMax - 1 - before
 	}
 
 	// Upstream events of the servers the session called, inside the span the
 	// caller sees (FR-023), and only those the caller may read (FR-025).
+	// Their number is bounded by the collapser (120 an hour per server).
 	spanEnd := now
 	if session.EndedAt != nil {
 		spanEnd = *session.EndedAt
@@ -497,64 +508,60 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 			events = append(events, ev)
 		}
 	}
-	all := storage.MergeTimelineRefs(refs, events)
+	events = storage.MergeTimelineRefs(nil, events)
 
-	// Failures the caller can navigate: counted failed rows still stored.
-	var failures []int
-	for i, ref := range all {
-		if ref.Counted && ref.Failed {
-			failures = append(failures, i)
-		}
-	}
-
-	position := 0
 	at := q.Get("at")
-	switch {
-	case at == "" || at == "first_failure":
-		if len(failures) > 0 {
-			position = failures[0]
-		}
-	case at == "end":
-		if len(all) > 0 {
-			position = len(all) - 1
-		}
-	case strings.HasPrefix(at, "failure:"):
-		n, err := strconv.Atoi(strings.TrimPrefix(at, "failure:"))
-		if err != nil || n < 1 || n > len(failures) {
-			s.writeError(w, r, http.StatusBadRequest, "Invalid at. No such failure in this session")
-			return
-		}
-		position = failures[n-1]
-	case strings.HasPrefix(at, "row:"):
-		want := strings.TrimPrefix(at, "row:")
-		found := false
-		for i, ref := range all {
-			if activityKeyID(ref.ActivityKey) == want {
-				position, found = i, true
-				break
-			}
-		}
-		if !found {
-			s.writeError(w, r, http.StatusBadRequest, "Invalid at. No such row in this session")
-			return
-		}
-	default:
+	col, okAt := newTimelineCollector(at, before, after)
+	if !okAt {
 		s.writeError(w, r, http.StatusBadRequest, "Invalid at. Use first_failure, failure:<n>, row:<activity id> or end")
 		return
 	}
 
-	from := position - before
-	if from < 0 {
-		from = 0
+	// One pass over the session's index, in time order, merging the events
+	// in. Nothing but the page is kept: the pass counts rows and failures and
+	// finds the position, so a page of one row of a very long session costs
+	// index keys, not memory.
+	col.add(timelineEntry{kind: contracts.TimelineKindSessionStart, at: session.StartedAt})
+	nextEvent, scanned := 0, 0
+	walkErr := c.WalkWorkSessionRefs(id, func(ref storage.WorkSessionRowRef) bool {
+		scanned++
+		if scanned%4096 == 0 && ctx.Err() != nil {
+			return false
+		}
+		if !reach.allows(ref.Server) {
+			return true // outside reach: never seen, counted or positioned on
+		}
+		for nextEvent < len(events) && events[nextEvent].Timestamp.Before(ref.Timestamp) {
+			col.add(timelineEntry{ref: events[nextEvent]})
+			nextEvent++
+		}
+		col.add(timelineEntry{ref: ref})
+		return true
+	})
+	if walkErr != nil {
+		s.writeError(w, r, http.StatusInternalServerError, "Failed to read work session")
+		return
 	}
-	to := position + after + 1
-	if to > len(all) {
-		to = len(all)
+	if ctx.Err() != nil {
+		return
 	}
-	page := all[from:to]
-	keys := make([][]byte, len(page))
-	for i, ref := range page {
-		keys[i] = ref.ActivityKey
+	for ; nextEvent < len(events); nextEvent++ {
+		col.add(timelineEntry{ref: events[nextEvent]})
+	}
+	if session.EndedAt != nil {
+		col.add(timelineEntry{kind: contracts.TimelineKindSessionEnd, at: *session.EndedAt})
+	}
+	page, from, position, okPos := col.finish()
+	if !okPos {
+		s.writeError(w, r, http.StatusBadRequest, "Invalid at. No such failure or row in this session")
+		return
+	}
+
+	keys := make([][]byte, 0, len(page))
+	for _, e := range page {
+		if e.kind == "" {
+			keys = append(keys, e.ref.ActivityKey)
+		}
 	}
 	records, err := c.GetActivitiesByKeys(keys)
 	if err != nil {
@@ -563,13 +570,23 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 	}
 
 	rows := make([]contracts.WorkSessionTimelineRow, 0, len(page))
-	for i, rec := range records {
+	next := 0
+	for i, e := range page {
+		if e.kind != "" {
+			rows = append(rows, contracts.WorkSessionTimelineRow{Index: from + i, Kind: e.kind, At: e.at})
+			continue
+		}
+		rec := records[next]
+		next++
 		if rec == nil {
 			continue // removed by retention since the index was read
 		}
-		// Defence in depth: the index said the row is in reach; the row must
-		// agree, and an owned event must be the caller's.
-		if !reach.allows(rec.ServerName) || !viewer.MaySee(rec) {
+		// Defence in depth. The index said the row is in reach; the row must
+		// agree. An owned event must be the caller's. And a scoped caller
+		// reads only request rows it made: the session is its own, but a row
+		// that carries no credential (written before credentials were
+		// stamped on every row) is not provably its own.
+		if !reach.allows(rec.ServerName) || !viewer.MaySee(rec) || !reach.ownsRow(rec) {
 			continue
 		}
 		record := storageToContractActivity(rec)
@@ -581,29 +598,163 @@ func (s *Server) handleWorkSessionTimeline(w http.ResponseWriter, r *http.Reques
 		rows = append(rows, contracts.WorkSessionTimelineRow{
 			Index:         from + i,
 			Kind:          timelineKind(rec.Type),
-			Failed:        page[i].Counted && page[i].Failed,
-			PolicyBlock:   page[i].Block,
+			At:            rec.Timestamp,
+			Failed:        e.ref.Counted && e.ref.Failed,
+			PolicyBlock:   e.ref.Block,
 			BodiesRemoved: rec.BodiesRemoved,
-			Activity:      record,
+			Activity:      &record,
 		})
 	}
 
-	failureIndex := 0
-	for n, idx := range failures {
-		if idx <= position {
-			failureIndex = n + 1
-		}
-	}
 	s.writeSuccess(w, contracts.WorkSessionTimelineResponse{
 		Session:                  session,
 		Rows:                     rows,
 		Position:                 position,
-		TotalRows:                len(all),
-		FailureIndex:             failureIndex,
-		FailureTotal:             len(failures),
+		TotalRows:                col.total,
+		FailureIndex:             col.failuresAtPosition,
+		FailureTotal:             col.failures,
 		LifetimeFailures:         session.Failures,
-		EarlierFailuresNotStored: session.Failures > len(failures),
+		EarlierFailuresNotStored: session.Failures > col.failures,
 		HasBefore:                from > 0,
-		HasAfter:                 to < len(all),
+		HasAfter:                 from+len(page) < col.total,
 	})
+}
+
+// timelineEntry is one row of the merged timeline: a stored row or event
+// (ref), or a synthetic session boundary (kind and at).
+type timelineEntry struct {
+	ref  storage.WorkSessionRowRef
+	kind string
+	at   time.Time
+}
+
+func (e timelineEntry) failed() bool { return e.kind == "" && e.ref.Counted && e.ref.Failed }
+
+// timelineCollector finds the positioned row of a timeline that is fed to it
+// one entry at a time, and keeps only the page around it.
+type timelineCollector struct {
+	before, after int
+	// What the position is.
+	mode      string // "first_failure", "failure", "row", "end"
+	failureNo int
+	rowID     string
+
+	total, failures    int
+	failuresAtPosition int
+	position           int // -1 until found
+
+	// ring holds the last before+1 entries seen: the rows before a position
+	// found later, and the page of "end".
+	ring []timelineEntry
+	// head holds the first after+1 entries: the page when the position falls
+	// back to the first row (first_failure with no failure stored).
+	head []timelineEntry
+	// page is the page once the position is known; pageFrom is the index of
+	// its first entry.
+	page     []timelineEntry
+	pageFrom int
+	wantMore int
+}
+
+func newTimelineCollector(at string, before, after int) (*timelineCollector, bool) {
+	c := &timelineCollector{before: before, after: after, position: -1}
+	switch {
+	case at == "" || at == "first_failure":
+		c.mode = "first_failure"
+	case at == "end":
+		c.mode = "end"
+	case strings.HasPrefix(at, "failure:"):
+		n, err := strconv.Atoi(strings.TrimPrefix(at, "failure:"))
+		if err != nil || n < 1 {
+			return nil, false
+		}
+		c.mode, c.failureNo = "failure", n
+	case strings.HasPrefix(at, "row:") && len(at) > len("row:"):
+		c.mode, c.rowID = "row", strings.TrimPrefix(at, "row:")
+	default:
+		return nil, false
+	}
+	return c, true
+}
+
+func (c *timelineCollector) add(e timelineEntry) {
+	index := c.total
+	c.total++
+	if e.failed() {
+		c.failures++
+	}
+	// Entries handed to the collector may point into a database page; what is
+	// kept is copied.
+	keep := func() timelineEntry {
+		if e.kind == "" {
+			e.ref.ActivityKey = append([]byte(nil), e.ref.ActivityKey...)
+		}
+		return e
+	}
+
+	if c.position >= 0 {
+		if c.wantMore > 0 {
+			c.page = append(c.page, keep())
+			c.wantMore--
+		}
+		return
+	}
+
+	hit := false
+	switch c.mode {
+	case "first_failure":
+		hit = e.failed()
+	case "failure":
+		hit = e.failed() && c.failures == c.failureNo
+	case "row":
+		hit = e.kind == "" && activityKeyID(e.ref.ActivityKey) == c.rowID
+	}
+	if hit {
+		c.position = index
+		c.failuresAtPosition = c.failures
+		c.pageFrom = index - len(c.ring)
+		c.page = append(append([]timelineEntry(nil), c.ring...), keep())
+		c.wantMore = c.after
+		c.ring, c.head = nil, nil
+		return
+	}
+
+	if len(c.head) < c.after+1 {
+		c.head = append(c.head, keep())
+	}
+	// The ring keeps the rows before a position found later. For "end" the
+	// position is the last row itself, so it keeps one more.
+	ringCap := c.before
+	if c.mode == "end" {
+		ringCap = c.before + 1
+	}
+	if ringCap > 0 {
+		if len(c.ring) == ringCap {
+			copy(c.ring, c.ring[1:])
+			c.ring = c.ring[:ringCap-1]
+		}
+		c.ring = append(c.ring, keep())
+	}
+}
+
+// finish returns the page, the index of its first row and the position. ok is
+// false when the requested failure or row is not in the timeline.
+func (c *timelineCollector) finish() (page []timelineEntry, from, position int, ok bool) {
+	if c.position >= 0 {
+		return c.page, c.pageFrom, c.position, true
+	}
+	switch c.mode {
+	case "end":
+		if c.total == 0 {
+			return nil, 0, 0, true
+		}
+		// The ring holds the last before+1 rows; the last of them is the end.
+		c.failuresAtPosition = c.failures
+		return c.ring, c.total - len(c.ring), c.total - 1, true
+	case "first_failure":
+		// No failure is stored: the view opens at the earliest stored row.
+		return c.head, 0, 0, true
+	default:
+		return nil, 0, 0, false
+	}
 }

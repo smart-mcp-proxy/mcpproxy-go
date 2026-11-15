@@ -81,8 +81,9 @@ func TestWorkSessionSummary_WrittenWithTheRow(t *testing.T) {
 	assert.Equal(t, 0, gh.Blocks)
 	assert.Equal(t, "network", gh.LastErrorClass)
 	assert.Equal(t, "create_issue", gh.LastTool)
-	assert.Equal(t, "connection reset by peer", gh.LastReason)
+	assert.Equal(t, "The upstream server could not be reached.", gh.LastReason)
 	assert.NotContains(t, gh.LastReason, "do-not-copy", "the reason never comes from a body")
+	assert.NotContains(t, gh.LastReason, "connection reset", "nor from the row's free-text error")
 
 	lin := s.Servers["linear"]
 	require.NotNil(t, lin)
@@ -90,7 +91,7 @@ func TestWorkSessionSummary_WrittenWithTheRow(t *testing.T) {
 		Attempts: 1, Failures: 1, Blocks: 1, StoredFailures: 1, StoredBlocks: 1,
 		FirstActivityAt: wsBase.Add(3 * time.Second), LastActivityAt: wsBase.Add(3 * time.Second),
 		FirstFailureAt: wsBase.Add(3 * time.Second), LastFailureAt: wsBase.Add(3 * time.Second),
-		LastErrorClass: ErrorClassProxyPolicy, LastTool: "delete_issue", LastReason: "outside profile", LastFailureBlock: true,
+		LastErrorClass: ErrorClassProxyPolicy, LastTool: "delete_issue", LastReason: "MCPProxy refused the call.", LastFailureBlock: true,
 	}, *lin)
 
 	all := s.Totals(nil)
@@ -139,12 +140,12 @@ func TestWorkSessionSummary_ResavedRowIsCountedOnce(t *testing.T) {
 	assert.Equal(t, 1, s.Totals(nil).Failures)
 }
 
-// FR-012: the reason is bounded in characters.
+// FR-012: the reason is bounded in characters, whatever the block reason key.
 func TestWorkSessionSummary_ReasonIsBounded(t *testing.T) {
 	m, cleanup := setupTestStorageForActivity(t)
 	defer cleanup()
 	require.NoError(t, m.SaveActivity(wsRow("ws-1", 0, func(r *ActivityRecord) {
-		r.Status, r.ErrorMessage = ActivityStatusError, strings.Repeat("ж", 500)
+		r.Type, r.Status, r.BlockReason = ActivityTypePolicyDecision, "blocked", strings.Repeat("ж", 500)
 	})))
 	s, err := m.GetWorkSessionSummary("ws-1")
 	require.NoError(t, err)
@@ -311,7 +312,8 @@ func TestWorkSessionRepair_RebuildsAMissingSummary(t *testing.T) {
 	assert.Equal(t, before.TokenName, after.TokenName)
 	assert.Equal(t, before.TokenPrefix, after.TokenPrefix)
 	assert.Equal(t, before.ClientName, after.ClientName)
-	assert.Equal(t, "boom", after.Servers["github"].LastReason)
+	assert.Equal(t, before.Servers["github"].LastReason, after.Servers["github"].LastReason)
+	assert.NotEmpty(t, after.Servers["github"].LastReason)
 	assert.Equal(t, before.Servers["github"].LastFailureAt, after.Servers["github"].LastFailureAt)
 
 	kept, _ := m.GetWorkSessionSummary("ws-keep")

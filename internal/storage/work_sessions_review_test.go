@@ -221,7 +221,7 @@ func TestWorkSessionSummary_LastFailureTieIsDeterministic(t *testing.T) {
 	for _, server := range []string{"zeta", "alpha", "mid"} {
 		s.applyRow(&ActivityRecord{
 			Type: ActivityTypeToolCall, Status: ActivityStatusError, ServerName: server, ToolName: "tool_" + server,
-			ErrorMessage: "reason " + server, Timestamp: at,
+			Metadata: map[string]interface{}{"error_code": server}, Timestamp: at,
 		}, AttemptRole{Counted: true, Failed: true})
 	}
 	for i := 0; i < 50; i++ {
@@ -230,7 +230,7 @@ func TestWorkSessionSummary_LastFailureTieIsDeterministic(t *testing.T) {
 		tot := s.Totals(nil)
 		assert.Equal(t, "alpha", server)
 		assert.Equal(t, "tool_alpha", tot.LastTool)
-		assert.Equal(t, "reason alpha", tot.LastReason)
+		assert.Equal(t, "alpha", tot.LastErrorCode, "the facts are the same server's")
 	}
 	server, _ := s.LastFailureServer(func(n string) bool { return n != "alpha" })
 	assert.Equal(t, "mid", server)
@@ -297,4 +297,56 @@ func TestRetention_ScanNominatesAndStepsRecheck(t *testing.T) {
 	require.NoError(t, err)
 	s, _ := m.GetWorkSessionSummary("ws-live")
 	require.NotNil(t, s, "the session inside the window was not mistaken for an outside one")
+}
+
+// The summary's reason is fixed wording from closed vocabularies. The row's
+// free-text error, which can echo a credential, is never copied into it.
+func TestWorkSessionSummary_ReasonNeverCopiesFreeText(t *testing.T) {
+	secret := "AKIAIOSFODNN7EXAMPLE"
+	cases := []struct {
+		rec  ActivityRecord
+		want string
+	}{
+		{ActivityRecord{Type: ActivityTypeToolCall, Status: ActivityStatusError, ErrorClass: "network", ErrorMessage: "dial failed for key " + secret}, "The upstream server could not be reached."},
+		{ActivityRecord{Type: ActivityTypeToolCall, Status: ActivityStatusError, ErrorClass: "http", UpstreamHTTPStatus: 503, ErrorMessage: secret}, "The upstream server answered with HTTP 503."},
+		{ActivityRecord{Type: ActivityTypeToolCall, Status: ActivityStatusError, ErrorMessage: secret}, "The call failed."},
+		{ActivityRecord{Type: ActivityTypePolicyDecision, Status: "blocked", BlockReason: "profile_scope", Metadata: map[string]interface{}{"reason": "blocked " + secret}}, "MCPProxy refused the call (profile_scope)."},
+		{ActivityRecord{Type: ActivityTypeToolCall, Status: ActivityStatusRejected, ErrorClass: ErrorClassProxyPolicy, ErrorMessage: secret}, "MCPProxy refused the call (limit reached)."},
+	}
+	for _, tc := range cases {
+		rec := tc.rec
+		got := failureReason(&rec, AttemptRoleOf(&rec))
+		assert.Equal(t, tc.want, got)
+		assert.NotContains(t, got, secret)
+	}
+}
+
+// A request row with no credential in a session that has one makes the
+// session ownerless, whichever comes first.
+func TestWorkSessionSummary_UnattributedRequestRowMakesItOwnerless(t *testing.T) {
+	bare := func(r *ActivityRecord) { r.TokenName, r.TokenPrefix = "", "" }
+	for _, order := range []string{"unattributed first", "attributed first"} {
+		m, cleanup := setupTestStorageForActivity(t)
+		if order == "unattributed first" {
+			require.NoError(t, m.SaveActivity(wsRow("ws-1", 0, bare)))
+			require.NoError(t, m.SaveActivity(wsRow("ws-1", time.Second, nil)))
+		} else {
+			require.NoError(t, m.SaveActivity(wsRow("ws-1", 0, nil)))
+			require.NoError(t, m.SaveActivity(wsRow("ws-1", time.Second, bare)))
+		}
+		s, err := m.GetWorkSessionSummary("ws-1")
+		require.NoError(t, err)
+		assert.True(t, s.Ownerless, order)
+		cleanup()
+	}
+
+	// A session with no credential at all (the local admin's) is simply
+	// unowned, not marked ownerless by its own rows.
+	m, cleanup := setupTestStorageForActivity(t)
+	defer cleanup()
+	require.NoError(t, m.SaveActivity(wsRow("ws-admin", 0, bare)))
+	require.NoError(t, m.SaveActivity(wsRow("ws-admin", time.Second, bare)))
+	s, _ := m.GetWorkSessionSummary("ws-admin")
+	assert.False(t, s.Ownerless)
+	assert.Empty(t, s.TokenName)
 }
