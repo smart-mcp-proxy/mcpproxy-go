@@ -7,6 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/smart-mcp-proxy/mcpproxy-go/internal/runtime/stateview"
 	"github.com/smart-mcp-proxy/mcpproxy-go/internal/storage"
 )
 
@@ -79,4 +80,56 @@ func TestRuntime_CalculateTokenSavings_Wiring(t *testing.T) {
 		// bytesPerTokenApprox = 4: 20000 / 4 = 5000.
 		assert.Equal(t, 5000, metrics.AverageQueryResultSize)
 	})
+}
+
+// CalculateTokenSavings reads tool lists from the StateView (no live
+// tools/list per upstream on every usage poll) and reuses its tokenized
+// estimate until a server's tool set changes.
+func TestRuntime_CalculateTokenSavings_UsesStateViewAndCaches(t *testing.T) {
+	rt := newTestRuntime(t)
+	sup := rt.Supervisor()
+	require.NotNil(t, sup)
+	view := sup.StateView()
+	require.NotNil(t, view)
+
+	setTools := func(epoch int64, names ...string) {
+		view.UpdateServer("alpha", func(s *stateview.ServerStatus) {
+			s.Connected = true
+			s.ToolsDiscovered = true
+			s.DiscoveryEpoch = epoch
+			s.Tools = nil
+			for _, n := range names {
+				s.Tools = append(s.Tools, stateview.ToolInfo{
+					Name:        n,
+					Description: "a tool with a reasonably long description so it has tokens",
+					InputSchema: map[string]interface{}{"type": "object"},
+				})
+			}
+		})
+	}
+
+	setTools(1, "one", "two")
+	first, err := rt.CalculateTokenSavings()
+	require.NoError(t, err)
+	require.Positive(t, first.TotalServerToolListSize, "tools in the StateView must be counted")
+	require.Contains(t, first.PerServerToolListSizes, "alpha")
+
+	// Callers mutating the result must not change the cached estimate.
+	first.PerServerToolListSizes["alpha"] = -1
+	again, err := rt.CalculateTokenSavings()
+	require.NoError(t, err)
+	assert.Equal(t, first.TotalServerToolListSize, again.TotalServerToolListSize)
+	assert.Positive(t, again.PerServerToolListSizes["alpha"])
+
+	// A new discovery (new epoch, more tools) invalidates the cache.
+	setTools(2, "one", "two", "three")
+	grown, err := rt.CalculateTokenSavings()
+	require.NoError(t, err)
+	assert.Greater(t, grown.TotalServerToolListSize, first.TotalServerToolListSize)
+
+	// A disconnected server is left out, as before.
+	view.UpdateServer("alpha", func(s *stateview.ServerStatus) { s.Connected = false })
+	gone, err := rt.CalculateTokenSavings()
+	require.NoError(t, err)
+	assert.Equal(t, 0, gone.TotalServerToolListSize)
 }
